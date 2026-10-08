@@ -15,16 +15,22 @@
 //!
 //! SMOKE TIER, honestly: one story, two fiber-hinge columns, synthetic
 //! motions for fragility/CVaR plus one provenance-pinned El Centro diagnostic
-//! fixture. The full-resolution lanes (distributed-plasticity
-//! frames, recorded-motion suites, million-member ground structures,
-//! variational integrators) are recorded successors in the CONTRACT —
-//! named, not pretended.
+//! fixture. FULL TIER ([`building`]): multi-story, multi-bay RC moment frames
+//! of force-based distributed-plasticity fiber members (fs-solid `frame2d`,
+//! corotational), gravity-preloaded, modally damped, with an e-stopped
+//! building fragility and a multi-fidelity (story → building) MLMC. Still
+//! recorded successors: recorded-motion suites, million-member ground
+//! structures, variational integrators — named, not pretended.
 
+pub mod building;
 pub mod cvar;
 pub mod fragility;
 pub mod history;
 pub mod layout;
 
+pub use building::{
+    BuildingFragility, BuildingFrame, BuildingResponse, BuildingSpec, RcMember, building_fragility,
+};
 pub use cvar::{
     CvarDesign, FrameCvarError, cvar_mass_min, ensemble_cvar, try_cvar_mass_min, try_ensemble_cvar,
     try_losses,

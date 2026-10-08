@@ -347,7 +347,11 @@ of uncertain temperature/stiffness/orientation, or experimental validation.
   condensed), `newmark` (average acceleration, uniform base motion,
   Rayleigh damping on the initial stiffness via `Rayleigh::from_modes`) with
   a `DynamicHistory` energy ledger (input, kinetic, damping, internal work)
-  and base shear.
+  and base shear. The `static_load` and `newmark` Newton steps backtrack
+  (step 1, ½, … down to 2⁻⁹) on the free residual norm, because fiber laws
+  are non-smooth: Mander concrete has zero tangent at exactly zero strain, so
+  the first tangent of an unstressed RC section is steel-only and full steps
+  from rest overshoot and cycle.
 - `koiter` [F], feature `koiter-asymptotics` (off by default): FD
   energy expansion along the buckling mode at the critical state →
   a/b coefficients and `Bifurcation` classification, with the

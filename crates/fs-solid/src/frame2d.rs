@@ -769,6 +769,36 @@ impl Frame2d {
             .fold(0.0f64, |m, (_, v)| m.max(v.abs()))
     }
 
+    /// Backtracking line search along `du` on the residual norm returned by
+    /// `residual`: the first step length in 1, ½, … that decreases the norm
+    /// below `rn`, or the smallest tried (2⁻⁹) so Newton can still leave a
+    /// kink. Fiber laws are non-smooth at reversals and at the concrete
+    /// tension cut-off (zero tangent at zero strain), where full Newton steps
+    /// overshoot and cycle.
+    fn line_search(
+        &self,
+        u: &[f64],
+        du: &[f64],
+        rn: f64,
+        residual: impl Fn(&[f64], &Assembled) -> f64,
+    ) -> Result<(Vec<f64>, Assembled), SolidError> {
+        let mut alpha = 1.0f64;
+        let mut last_err = None;
+        for _ in 0..10 {
+            let ut: Vec<f64> = u.iter().zip(du).map(|(a, b)| a + alpha * b).collect();
+            match self.assemble(&ut) {
+                Ok(asm) => {
+                    if residual(&ut, &asm) < rn || alpha <= 1.0 / 512.0 {
+                        return Ok((ut, asm));
+                    }
+                }
+                Err(e) => last_err = Some(e),
+            }
+            alpha *= 0.5;
+        }
+        Err(last_err.unwrap_or(SolidError::NewtonStalled { history: vec![rn] }))
+    }
+
     /// Load-controlled static analysis: apply `load` (one entry per DOF) in
     /// `steps` equal increments of the load factor, Newton at each.
     ///
@@ -794,8 +824,8 @@ impl Frame2d {
             let mut u = self.u.clone();
             let mut history = Vec::new();
             let mut done = None;
-            for it in 0..50 {
-                let (f, k, trials) = self.assemble(&u)?;
+            let (mut f, mut k, mut trials) = self.assemble(&u)?;
+            for it in 0..60 {
                 let r: Vec<f64> = (0..n).map(|d| p[d] - f[d]).collect();
                 let rn = self.free_norm(&r);
                 history.push(rn);
@@ -812,9 +842,13 @@ impl Frame2d {
                     done = Some((it, trials));
                     break;
                 }
-                for d in 0..n {
-                    u[d] += du[d];
-                }
+                let residual = |_: &[f64], a: &Assembled| -> f64 {
+                    let rr: Vec<f64> = (0..n).map(|d| p[d] - a.0[d]).collect();
+                    self.free_norm(&rr)
+                };
+                let (ut, asm) = self.line_search(&u, &du, rn, residual)?;
+                u = ut;
+                (f, k, trials) = asm;
             }
             let Some((iterations, trials)) = done else {
                 return Err(SolidError::NewtonStalled { history });
@@ -1067,7 +1101,7 @@ impl Frame2d {
             let mut u = u0.clone();
             let mut history = Vec::new();
             let mut done = None;
-            for it in 0..40 {
+            let kin = |u: &[f64]| -> (Vec<f64>, Vec<f64>) {
                 let acc: Vec<f64> = (0..n)
                     .map(|d| {
                         (u[d] - u0[d]) / (beta * dt * dt)
@@ -1078,14 +1112,23 @@ impl Frame2d {
                 let vel: Vec<f64> = (0..n)
                     .map(|d| v0[d] + dt * ((1.0 - gamma) * a0[d] + gamma * acc[d]))
                     .collect();
-                let (f, kt, trials) = self.assemble(&u)?;
+                (acc, vel)
+            };
+            let dyn_residual = |u: &[f64], f: &[f64]| -> Vec<f64> {
+                let (acc, vel) = kin(u);
                 let cvel = cv(&vel);
-                let r: Vec<f64> = (0..n)
+                (0..n)
                     .map(|d| p1[d] - m[d] * acc[d] - cvel[d] - f[d])
-                    .collect();
+                    .collect()
+            };
+            let (mut f, mut kt, mut trials) = self.assemble(&u)?;
+            for it in 0..60 {
+                let r = dyn_residual(&u, &f);
                 let rn = self.free_norm(&r);
                 history.push(rn);
+                let (acc, vel) = kin(&u);
                 if rn <= 1e-9 * fref {
+                    let cvel = cv(&vel);
                     done = Some((it, trials, f, acc, vel, cvel));
                     break;
                 }
@@ -1103,12 +1146,15 @@ impl Frame2d {
                         history: history.clone(),
                     })?;
                 if newton_done(rn, 1e-9 * fref, 1e-6 * fref, inf_norm(&du), inf_norm(&u)) {
+                    let cvel = cv(&vel);
                     done = Some((it, trials, f, acc, vel, cvel));
                     break;
                 }
-                for d in 0..n {
-                    u[d] += du[d];
-                }
+                let (ut, asm) = self.line_search(&u, &du, rn, |ut: &[f64], a: &Assembled| {
+                    self.free_norm(&dyn_residual(ut, &a.0))
+                })?;
+                u = ut;
+                (f, kt, trials) = asm;
             }
             let Some((iters, trials, f, acc, vel, cvel)) = done else {
                 return Err(SolidError::NewtonStalled { history });
