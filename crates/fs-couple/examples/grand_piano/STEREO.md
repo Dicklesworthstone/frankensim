@@ -72,3 +72,29 @@ It reads the same completed pressure buffer encoded into the WAV, so it adds
 no observer or mechanical step and allocates no per-mode history. It also
 supports music. Use `--modal-pressure-csv` when signed mode attribution is
 needed; use this smaller export for repeated receiver and PCM comparisons.
+
+`--pressure-basis-json basis.json` optionally exports the prepared microphone
+coordinate map. `bare_from_loaded` is a row-major square matrix with bare-board
+rows and loaded-coordinate columns; a physical bare shape projects as
+`loaded[j] = sum_i(shape[i] * map[i,j])`. Column `j` is exactly pressure trace
+mode `j`. The stored omega-squared values are the split step's loaded diagonal
+reference values; the Hz values are their square roots divided by `2*pi`.
+They are **not** the full coupled string/board instrument's physical poles.
+The bank is read after rendering; export adds no state update or observer.
+
+`basis_id` is BLAKE3 derive-key hashing under the `format` domain, over two
+little-endian u64 dimensions, the row-major map's IEEE-754 little-endian f64
+entries, then the loaded omega-squared entries in column order. It identifies
+these numerical coordinates and reference values, not the whole piano or
+source build. Bind the complete metadata bytes to the render's binary/source
+receipt and declared input controls before comparing arms. Equal bare-board
+frequency logs do not establish equal loaded bases. Without this metadata,
+retain pressure component indices without borrowing bare-board frequency labels.
+
+Every `grand_piano` output requires a fresh path and an existing parent
+directory. Admission resolves parent directories before preparation, so dot
+components and symlinked-parent aliases cannot make two outputs collide.
+Existing files, directories and dangling symlinks refuse. Each publication
+also uses exclusive creation: an entry appearing after admission is preserved
+rather than overwritten. Successful earlier fresh outputs can remain if a
+later write fails; this is not a filesystem transaction.

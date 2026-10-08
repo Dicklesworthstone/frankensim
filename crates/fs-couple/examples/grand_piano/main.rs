@@ -13,6 +13,7 @@ use performance::midi;
 mod felt;
 mod engine;
 mod microphone;
+mod pressure_basis;
 mod audio;
 mod hammer_materials;
 
@@ -34,6 +35,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--bridge-trace-csv paired.csv]
     [--modal-pressure-csv modal.csv]
     [--receiver-pressure-csv receivers.csv]
+    [--pressure-basis-json basis.json]
     [--sample-rate Hz] [--substeps 1..16] [--modes 1..512]
     [--pcm-full-scale-pa positive-Pa]
     [--dump-scale strings.csv] [--dump-board board.csv]
@@ -151,9 +153,14 @@ the signed modal sum reconstructs the pressure, including cancellation. Modes
 are indexed in the loaded basis, not identified as bare-board eigenfrequencies.
 --receiver-pressure-csv writes unquantized total Pa at each physical receiver
 on the WAV clock, for isolated notes or music, without allocating modal traces.
+--pressure-basis-json exports the exact bare-from-loaded microphone map and
+loaded diagonal reference frequencies for that render. Its columns match
+modal pressure indices; these frequencies are not full coupled instrument poles.
 --diagnostic-volume retains the old volume-velocity observer; --observer-gain
 applies only to that diagnostic, not to physical microphone pressure.
 --pcm-full-scale-pa declares the pressure mapped to PCM full scale (default 2 Pa).
+All output paths must be fresh, with existing parent directories. Equivalent
+paths through dot components or symlinked parents refuse before preparation.
 An over-range render refuses before writing a clipped WAV; this option changes
 encoding gain, not the mechanics, microphone position, or acoustic calibration.";
 
@@ -174,6 +181,7 @@ struct Options {
     acoustic_refinement_levels: usize,
     dump_scale: Option<String>, dump_board: Option<String>,
     bridge_trace_csv: Option<String>, modal_pressure_csv: Option<String>, receiver_pressure_csv: Option<String>,
+    pressure_basis_json: Option<String>,
     note: Option<u8>, velocity: Option<f64>, duration: f64,
     sample_rate: u32, substeps: usize, modes: usize, pcm_full_scale_pa: f64, help: bool,
 }
@@ -191,6 +199,7 @@ impl Default for Options {
             microphone: None, microphone_right: None, diagnostic_volume: false,
             acoustic_refinement_levels: 0,
             dump_board: None, bridge_trace_csv: None, modal_pressure_csv: None, receiver_pressure_csv: None,
+            pressure_basis_json: None,
             note: None, velocity: None, duration: 6.0,
             sample_rate: 48_000, substeps: 4, modes: 24, pcm_full_scale_pa: 2.0, help: false }
     }
@@ -252,6 +261,7 @@ impl Options {
                 "--bridge-trace-csv" => options.bridge_trace_csv = Some(value.clone()),
                 "--modal-pressure-csv" => options.modal_pressure_csv = Some(value.clone()),
                 "--receiver-pressure-csv" => options.receiver_pressure_csv = Some(value.clone()),
+                "--pressure-basis-json" => options.pressure_basis_json = Some(value.clone()),
                 "--note" => options.note = Some(value.parse().map_err(|_| invalid())?),
                 "--velocity" => options.velocity = Some(value.parse().map_err(|_| invalid())?),
                 "--duration" => options.duration = value.parse().map_err(|_| invalid())?,
@@ -375,6 +385,10 @@ impl Options {
             && (options.render.is_none() || !geometric || options.diagnostic_volume) {
             return Err("--receiver-pressure-csv requires a geometric pressure render without --diagnostic-volume".into());
         }
+        if options.pressure_basis_json.is_some()
+            && (options.render.is_none() || !geometric || options.diagnostic_volume) {
+            return Err("--pressure-basis-json requires a geometric pressure render without --diagnostic-volume".into());
+        }
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
             options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref(), options.hammer_footprints.as_ref(), options.midi.as_ref(),
@@ -382,13 +396,20 @@ impl Options {
             options.string_stretching.as_ref()];
         let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref(),
             options.dump_geometry.as_ref(), options.dump_obj.as_ref(), options.bridge_trace_csv.as_ref(),
-            options.modal_pressure_csv.as_ref(), options.receiver_pressure_csv.as_ref()];
+            options.modal_pressure_csv.as_ref(), options.receiver_pressure_csv.as_ref(),
+            options.pressure_basis_json.as_ref()];
         for (i, output) in outputs.iter().enumerate() {
             if let Some(path) = output {
                 if path.is_empty() || inputs.iter().flatten().any(|input| input == path)
                     || outputs[..i].iter().flatten().any(|previous| previous == path) {
                     return Err("output paths must be distinct from inputs and each other".into());
                 }
+            }
+        }
+        let mut identities = std::collections::BTreeSet::new();
+        for path in outputs.iter().flatten() {
+            if !identities.insert(fresh_output_identity(path)?) {
+                return Err("output paths resolve to the same file".into());
             }
         }
         Ok(options)
@@ -400,6 +421,36 @@ impl Options {
     fn uses_preset_board(&self) -> bool {
         self.preset.is_some() && self.board_geometry.is_none()
     }
+}
+
+// Resolve the actual parent before preparation; the leaf must not exist,
+// including dangling symlinks. Final create_new admission still owns races.
+fn fresh_output_identity(path: &str) -> Result<std::path::PathBuf, String> {
+    if matches!(path.rsplit(std::path::is_separator).next(), None | Some("" | "." | "..")) {
+        return Err(format!("{path}: output needs a regular-file leaf"));
+    }
+    let output = std::path::Path::new(path);
+    match output.symlink_metadata() {
+        Ok(_) => return Err(format!("{path}: output must be a fresh path")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("{path}: {error}")),
+    }
+    let name = output.file_name().ok_or_else(|| format!("{path}: output needs a filename"))?;
+    let parent = output.parent().filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let parent = parent.canonicalize().map_err(|e| format!("{path}: output parent: {e}"))?;
+    if !parent.is_dir() {
+        return Err(format!("{path}: output parent must be an existing directory"));
+    }
+    Ok(parent.join(name))
+}
+fn fresh_output(path: &str) -> Result<std::fs::File, String> {
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
+        .map_err(|e| format!("{path}: fresh writable output required: {e}"))
+}
+fn write_fresh_output(path: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    fresh_output(path)?.write_all(bytes).map_err(|e| format!("{path}: {e}"))
 }
 
 fn load_scale(text: Option<&str>) -> Result<Vec<geometry::Course>, String> {
@@ -554,7 +605,7 @@ fn bridge_acceleration(velocity: &[f64], sample: usize, rate: u32) -> f64 {
 fn write_bridge_trace(path: &str, velocity: &[f64], pressure: &[f64],
     rate: u32, channels: usize) -> Result<(), String> {
     use std::io::Write;
-    let file = std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
+    let file = fresh_output(path)?;
     let mut out = std::io::BufWriter::new(file);
     writeln!(out, "sample,time_s,bridge_velocity_m_s,bridge_acceleration_m_s2,pressure_left_pa")
         .map_err(|e| format!("{path}: {e}"))?;
@@ -568,7 +619,7 @@ fn write_bridge_trace(path: &str, velocity: &[f64], pressure: &[f64],
 fn write_modal_pressure(path: &str, modal: &[f64], pressure: &[f64],
     rate: u32, channels: usize, modes: usize) -> Result<(), String> {
     use std::io::Write;
-    let file = std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
+    let file = fresh_output(path)?;
     let mut out = std::io::BufWriter::new(file);
     write!(out, "sample,time_s").map_err(|e| format!("{path}: {e}"))?;
     for channel in 0..channels {
@@ -727,7 +778,7 @@ fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: 
     let seconds = f64::from(count) / f64::from(rate);
     check_pcm_headroom(peak, options.pcm_full_scale_pa)?;
     let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav_interleaved(&pressure, rate, channels as u16, options.pcm_full_scale_pa).map_err(|e| e.to_string())?;
-    std::fs::write(path, wav).map_err(|e| format!("{path}: {e}"))?;
+    write_fresh_output(path, &wav)?;
     if let (Some(csv), Some(velocity)) = (&options.bridge_trace_csv, &bridge_velocity) {
         write_bridge_trace(csv, velocity, &pressure, rate, channels)?;
         println!("Modeled vertical bridge motion at key {key}: {csv}; centered output-rate acceleration, left pressure, same sample indices. Pressure includes propagation and anti-alias delay.");
@@ -737,10 +788,16 @@ fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: 
         println!("Loaded-board modal pressure at key {key}: {csv}; signed contributions at each physical receiver on the WAV clock. Basis indices are not bare-board eigenfrequencies.");
     }
     if let Some(csv)=&options.receiver_pressure_csv {
-        let file=std::fs::File::create(csv).map_err(|e|format!("{csv}: {e}"))?;
+        let file=fresh_output(csv)?;
         write_receiver_pressure(&mut std::io::BufWriter::new(file),&pressure,rate,channels)
             .map_err(|e|format!("{csv}: {e}"))?;
         println!("Total receiver pressure: {csv}; unquantized Pa, same frames and channels as WAV, no modal trace allocation.");
+    }
+    if let Some(json) = &options.pressure_basis_json {
+        let file = fresh_output(json)?;
+        pressure_basis::write(&mut std::io::BufWriter::new(file), &stream.instrument().bank)
+            .map_err(|e| format!("{json}: {e}"))?;
+        println!("Loaded pressure basis: {json}; exact projection map and diagonal reference frequencies, not full instrument poles.");
     }
     if stream.microphone().is_some() {
         println!("Computed half-space pressure in Pa; PCM full scale {} Pa, no peak normalization. Infinite baffle; no room/lid scattering, radiation loading or measured-SPL calibration.", options.pcm_full_scale_pa);
@@ -782,8 +839,8 @@ fn run() -> Result<(), String> {
         steinway_d::build_with_rt0425_contacts(options.mesh_divisions)
     } else { steinway_d::build(options.mesh_divisions) }).transpose()?;
     if let Some(preset) = &preset {
-        if let Some(path) = &options.dump_geometry { std::fs::write(path, &preset.geometry).map_err(|e| format!("{path}: {e}"))?; }
-        if let Some(path) = &options.dump_obj { std::fs::write(path, &preset.obj).map_err(|e| format!("{path}: {e}"))?; }
+        if let Some(path) = &options.dump_geometry { write_fresh_output(path, preset.geometry.as_bytes())?; }
+        if let Some(path) = &options.dump_obj { write_fresh_output(path, preset.obj.as_bytes())?; }
         if options.render.is_none() && options.dump_board.is_none() && options.dump_scale.is_none()
             && (options.dump_geometry.is_some() || options.dump_obj.is_some()) {
             println!("Exported source-derived Model D: tapered panel, 17 ribs, maple bridges, cut-off bar and 88 bridge stations. No eigenanalysis was needed.");
@@ -835,11 +892,10 @@ fn run() -> Result<(), String> {
     }
     println!("Source authority belongs to the inputs, not the model name; imported files are not independently certified measurements.");
     if let Some(path) = &options.dump_scale {
-        std::fs::write(path, format!("# Source: {scale_source}; {tuning_source}\n{}", geometry::write_scale(&scale))).map_err(|e| e.to_string())?;
+        write_fresh_output(path, format!("# Source: {scale_source}; {tuning_source}\n{}", geometry::write_scale(&scale)).as_bytes())?;
     }
     if let Some(path) = &options.dump_board {
-        std::fs::write(path, format!("# Source: {board_source}\n{}", write_board_for_scale(&modes, &scale)))
-            .map_err(|e| e.to_string())?;
+        write_fresh_output(path, format!("# Source: {board_source}\n{}", write_board_for_scale(&modes, &scale)).as_bytes())?;
     }
     if let Some(path) = &options.render {
         return render_with_string_material(path, scale, &modes, surface.as_deref(), &options, stretching.as_ref());
@@ -871,6 +927,95 @@ mod render_tests {
     use super::*;
     fn options(args: &[&str]) -> Result<Options, String> {
         Options::parse(&args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+    }
+    fn output_fixture() -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("fs-piano-outputs-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir(dir.join("child")).unwrap();
+        dir
+    }
+    fn export_options(wav: &std::path::Path, csv: &std::path::Path) -> Result<Options, String> {
+        options(&["--preset", "steinway-d", "--render", wav.to_str().unwrap(),
+            "--receiver-pressure-csv", csv.to_str().unwrap()])
+    }
+    #[test]
+    fn pressure_basis_export_requires_physical_render_and_fresh_distinct_paths() {
+        let dir = output_fixture(); let wav = dir.join("piano.wav");
+        let basis = dir.join("basis.json");
+        let common = ["--preset", "steinway-d", "--render", wav.to_str().unwrap()];
+        let args: Vec<_> = common.into_iter().chain(["--pressure-basis-json",
+            basis.to_str().unwrap()]).collect();
+        let accepted = options(&args).unwrap();
+        assert_eq!(accepted.pressure_basis_json.as_deref(), basis.to_str());
+        for invalid in [vec!["--pressure-basis-json", basis.to_str().unwrap()],
+            vec!["--render", wav.to_str().unwrap(), "--pressure-basis-json", basis.to_str().unwrap()],
+            vec!["--preset", "steinway-d", "--render", wav.to_str().unwrap(),
+                "--diagnostic-volume", "--pressure-basis-json", basis.to_str().unwrap()],
+            vec!["--preset", "steinway-d", "--render", wav.to_str().unwrap(),
+                "--pressure-basis-json", wav.to_str().unwrap()]] {
+            assert!(options(&invalid).is_err());
+        }
+        let alias = dir.join("child/../piano.wav");
+        assert!(options(&common.into_iter().chain(["--pressure-basis-json",
+            alias.to_str().unwrap()]).collect::<Vec<_>>()).is_err());
+        write_fresh_output(basis.to_str().unwrap(), b"existing basis").unwrap();
+        assert!(options(&args).is_err());
+        assert_eq!(std::fs::read(basis).unwrap(), b"existing basis");
+        assert!(!wav.exists());
+    }
+    #[test]
+    fn export_paths_refuse_existing_entries_and_dot_aliases_before_preparation() {
+        let dir = output_fixture(); let wav = dir.join("fresh.wav");
+        assert!(export_options(&wav, &dir.join("fresh.csv")).is_ok());
+        for alias in [dir.join("./fresh.wav"), dir.join("child/../fresh.wav")] {
+            assert!(export_options(&wav, &alias).unwrap_err().contains("same file"));
+        }
+        let source = dir.join("events.csv");
+        write_fresh_output(source.to_str().unwrap(), b"source input remains intact").unwrap();
+        let args = ["--preset", "steinway-d", "--render", wav.to_str().unwrap(),
+            "--performance", source.to_str().unwrap(), "--receiver-pressure-csv",
+            dir.join("./events.csv").to_str().unwrap()].map(str::to_owned);
+        assert!(Options::parse(&args).unwrap_err().contains("fresh path"));
+        assert!(export_options(&wav, &dir.join("child")).is_err());
+        assert!(export_options(&wav, &dir.join("missing/pressure.csv")).is_err());
+        assert!(export_options(&wav, &source.join("pressure.csv")).is_err());
+        let trailing = format!("{}{}", dir.join("absent.csv").display(), std::path::MAIN_SEPARATOR);
+        assert!(export_options(&wav, std::path::Path::new(&trailing)).is_err());
+        for leaf in [format!("{trailing}."), format!("{trailing}..") ] {
+            assert!(export_options(&wav, std::path::Path::new(&leaf)).is_err());
+        }
+        assert_eq!(std::fs::read(source).unwrap(), b"source input remains intact");
+        assert!(!wav.exists());
+        // Retain the test's newly created files; never overwrite or delete input.
+    }
+    #[test]
+    fn publication_preserves_an_entry_created_after_option_admission() {
+        let dir = output_fixture(); let wav = dir.join("fresh.wav");
+        assert!(export_options(&wav, &dir.join("fresh.csv")).is_ok());
+        write_fresh_output(wav.to_str().unwrap(), b"first writer").unwrap();
+        assert!(write_fresh_output(wav.to_str().unwrap(), b"second writer").is_err());
+        assert_eq!(std::fs::read(&wav).unwrap(), b"first writer");
+        assert!(fresh_output(wav.to_str().unwrap()).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn export_paths_refuse_symlinked_parents_dangling_links_and_hard_links() {
+        let dir = output_fixture(); let child = dir.join("child"); let link = dir.join("link");
+        std::os::unix::fs::symlink(&child, &link).unwrap();
+        assert!(export_options(&child.join("same.wav"), &link.join("same.wav"))
+            .unwrap_err().contains("same file"));
+        let dangling = dir.join("dangling.csv");
+        std::os::unix::fs::symlink(dir.join("absent.csv"), &dangling).unwrap();
+        assert!(export_options(&dir.join("fresh.wav"), &dangling).is_err());
+        let source = dir.join("events.csv");
+        write_fresh_output(source.to_str().unwrap(), b"hard-linked source").unwrap();
+        let alias = dir.join("hard.csv"); std::fs::hard_link(&source, &alias).unwrap();
+        assert!(export_options(&dir.join("fresh.wav"), &alias).is_err());
+        assert_eq!(std::fs::read(source).unwrap(), b"hard-linked source");
+        assert!(dangling.symlink_metadata().is_ok());
+        assert!(!dir.join("absent.csv").exists());
     }
     #[test]
     fn rt0425_string_damping_requires_the_preset_scale_and_a_render() {

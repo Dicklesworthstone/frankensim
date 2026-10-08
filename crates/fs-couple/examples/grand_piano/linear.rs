@@ -458,6 +458,22 @@ impl Bank {
         Ok(out)
     }
 
+    /// The exact row-major map used by `project_board_shape`, followed by the
+    /// loaded board's diagonal reference omega-squared values. Rows are bare
+    /// coordinates; columns are the pressure trace's loaded coordinates.
+    /// These are split-step reference oscillators, not full instrument poles.
+    pub fn board_pressure_basis(&self) -> Result<(&[f64], &[f64]), String> {
+        let r = self.board_count;
+        let omega2 = self.diagonal_omega2.get(self.modes.len()..)
+            .ok_or("loaded board reference frequencies are absent")?;
+        if !(1..=MAX_BOARD_MODES).contains(&r) || self.board_basis.len() != r*r
+            || omega2.len() != r || self.board_basis.iter().any(|x| !x.is_finite())
+            || omega2.iter().any(|x| !x.is_finite() || *x <= 0.0) {
+            return Err("loaded pressure basis dimensions or values are invalid".into());
+        }
+        Ok((&self.board_basis, omega2))
+    }
+
     pub fn contact_position(&self, contact: usize, q: &[f64]) -> f64 {
         let s = &self.strings[self.contact_strings[contact]];
         let n = self.modes.len();
@@ -671,6 +687,39 @@ mod tests {
         let observed=projected.iter().zip(&b.v[b.modes.len()..]).map(|(g,v)|g*v).sum::<f64>();
         assert_eq!(observed,b.volume_velocity());
         assert!(b.project_board_shape(&[]).is_err());
+    }
+
+    #[test]
+    fn exported_pressure_basis_reproduces_projection_for_register_and_contact_arms() {
+        let scale = super::super::geometry::demonstration_scale().unwrap();
+        let board = super::super::board::demonstration();
+        for key in [60_u8, 69, 84] {
+            let course = *scale.iter().find(|c| c.midi == key).unwrap();
+            for secondary in [None, Some(vec![vec![0.4; board.len()]])] {
+                let b = Bank::new_with_transverse_bridge(&[course], &board,
+                    192_000, 21_600.0, 12, true, secondary.as_deref()).unwrap();
+                let (map, omega2) = b.board_pressure_basis().unwrap();
+                for i in 0..board.len() {
+                    let mut shape = vec![0.0; board.len()]; shape[i] = 1.0;
+                    assert_eq!(b.project_board_shape(&shape).unwrap(),
+                        map[i*board.len()..(i+1)*board.len()]);
+                }
+                assert_eq!(omega2, &b.diagonal_omega2[b.modes.len()..]);
+                assert_ne!(omega2[0], (TAU*board[0].frequency_hz).powi(2));
+            }
+        }
+    }
+
+    #[test]
+    fn pressure_basis_refuses_missing_mismatched_and_nonfinite_coordinates() {
+        let mut b = bank(false);
+        let original = b.board_basis.clone();
+        b.board_basis.pop(); assert!(b.board_pressure_basis().is_err());
+        b.board_basis = original; b.board_basis[0] = f64::NAN;
+        assert!(b.board_pressure_basis().is_err());
+        b.board_basis[0] = 0.0; b.diagonal_omega2.pop();
+        assert!(b.board_pressure_basis().is_err());
+        b.diagonal_omega2.push(-1.0); assert!(b.board_pressure_basis().is_err());
     }
 
     /// The former scalar expansion, independent of the course grouping.
