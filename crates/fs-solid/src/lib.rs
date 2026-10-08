@@ -33,6 +33,7 @@ pub mod contact;
 pub mod continuation;
 pub mod cutfront;
 pub mod fiber;
+pub mod frame2d;
 pub mod hyper2d;
 /// Three-dimensional finite-strain hyperelasticity on linear tetrahedra.
 pub mod hyper3;
@@ -55,6 +56,9 @@ pub use cutfront::{
     BoundaryTraction, CutElasticity, CutSolution, CutStabilizationScaling, DesignBoxEdge, EdgeBand,
 };
 pub use fiber::{Fiber, FiberLaw, Section, SectionState, update_sections_batched};
+pub use frame2d::{
+    DynamicHistory, Frame2d, FrameElement, Geometry, Rayleigh, SectionModel, StaticStep,
+};
 pub use hyper2d::{HyperProblem, NewtonReport, NewtonSettings};
 pub use hyper3::{
     HyperLoadStep, HyperTetError, HyperTetProblem, HyperTetSettings, HyperTetSolution,

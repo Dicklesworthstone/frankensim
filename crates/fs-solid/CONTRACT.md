@@ -332,6 +332,22 @@ of uncertain temperature/stiffness/orientation, or experimental validation.
   integration (a point AT the hinge), per-section Newton with
   residual backtracking, virtual-work tip deflection; pushover and
   cyclic histories with committed, cloneable state (G4).
+- `frame2d` (plan §15.2 step 3): planar frames of force-based
+  distributed-plasticity beam-columns (`Frame2d`, `FrameElement`,
+  `SectionModel::{Elastic, Fiber}`). Basic system `q = [N, Mᵢ, Mⱼ]` with
+  EXACT equilibrium interpolation `D(ξ) = [N, (ξ − 1)Mᵢ + ξMⱼ]`, 3–7
+  Gauss–Lobatto sections, Neuenhofer–Filippou state determination
+  (compatibility correction + section Newton to compatibility AND section
+  equilibrium; sub-incremented `v_c → v` in up to 64 substeps when the
+  direct iteration fails), tangent `K_b = F⁻¹`. `Geometry::Linear` or
+  `Geometry::Corotational` (exact chord rotation, consistent geometric
+  stiffness, chord angle unwrapped against the committed angle). Analyses:
+  `static_load` (load control), `displacement_control` (bordered pushover
+  through softening), `natural_frequencies` (massless DOFs statically
+  condensed), `newmark` (average acceleration, uniform base motion,
+  Rayleigh damping on the initial stiffness via `Rayleigh::from_modes`) with
+  a `DynamicHistory` energy ledger (input, kinetic, damping, internal work)
+  and base shear.
 - `koiter` [F], feature `koiter-asymptotics` (off by default): FD
   energy expansion along the buckling mode at the critical state →
   a/b coefficients and `Bifurcation` classification, with the
@@ -689,7 +705,30 @@ moment-curvature hysteresis + determinism; str-005 batched
 consistency + throughput ledger; str-006 force-based pushover,
 reversal dissipation, G4 bitwise resume.
 
+`tests/frame2d.rs`: a single elastic element reproduces the Euler–Bernoulli
+cantilever tip deflection, rotation and axial shortening to 1e-12; a
+fixed-base portal matches the closed-form lateral stiffness
+`(24EI_c/h³)(6ρ+1)/(6ρ+4)` to 1e-6; the corotational cantilever under tip
+moment `πEI/L` rolls into the exact half circle (tip within 0.5% L, rotation
+π to 1e-9); tip-mass frequency `√(3EI/mL³)` to 1e-6 and its softening
+`ω²/ω₀² ≈ 1 − P/P_cr` at half the Euler load; RC pushover with exact
+`Mᵢ = H·L` equilibrium bounded by an independent section moment envelope and
+base-concentrated curvature; cyclic pushover dissipates energy over closed
+cycles; elastic SDOF Newmark against the exact Duhamel response (< 0.1% of
+peak) with energy balance < 1e-6; a 3-story 2-bay RC fiber frame with gravity
+preload, modal Rayleigh damping and an 8 s synthetic record (energy balance <
+2%); bit-identical replay; malformed-input refusals.
+
 ## No-claim boundaries
+
+- `frame2d` members are planar Euler–Bernoulli (no shear deformation, torsion,
+  warping or out-of-plane buckling); mass is lumped on translational DOFs; no
+  shear failure, bond-slip, joint-panel flexibility, P-Δ of leaning columns,
+  or soil–structure interaction; the corotational formulation is large
+  rotation / small strain. The dense LU global solve is sized for building
+  frames of a few hundred DOFs, not for sparse large models. Fiber-section
+  response inherits fs-material's Mander / Menegotto–Pinto cards and their
+  no-claims.
 
 - `linear3` claims infinitesimal-strain elasticity and work-conjugate thermal
   eigenstrain loading on a fixed, conforming, non-degenerate tetrahedral mesh.
