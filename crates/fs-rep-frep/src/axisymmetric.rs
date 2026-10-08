@@ -1109,7 +1109,7 @@ struct SupportCandidate {
 }
 
 fn same_support_candidate(a: SupportCandidate, b: SupportCandidate) -> bool {
-    a.radius == b.radius && a.axial == b.axial
+    same_point(point(a.radius, a.axial), point(b.radius, b.axial))
 }
 
 fn support_values_tied(a: f64, b: f64) -> bool {
@@ -1266,7 +1266,9 @@ fn tie_tolerance(a: f64, b: f64) -> f64 {
     (ROUNDING_ULPS * a.abs().max(b.abs()).max(f64::MIN_POSITIVE)).max(f64::MIN_POSITIVE)
 }
 fn same_point(a: MeridianPoint, b: MeridianPoint) -> bool {
-    a.radius == b.radius && a.axial == b.axial
+    // Literal joins use the point's component-wise IEEE equality: signed
+    // zeros join, NaNs never join, and even a one-ULP gap remains open.
+    a == b
 }
 
 /// Replace each admitted arc endpoint with a point on one retained canonical
@@ -1353,7 +1355,7 @@ fn validate_profile_with_cx(
         });
     }
     for (index, segment) in segments.iter().copied().enumerate() {
-        if index % 16 == 0 && validation_checkpoint(cx)? {
+        if index % 16 == 0 && validation_checkpoint(cx) {
             return Err(AxisymmetricError::Cancelled);
         }
         let points = match segment {
@@ -1366,10 +1368,10 @@ fn validate_profile_with_cx(
             if !finite_point(point) {
                 return Err(AxisymmetricError::NonFinite {
                     field: "meridian coordinate",
-                    value: if !point.radius.is_finite() {
-                        point.radius
-                    } else {
+                    value: if point.radius.is_finite() {
                         point.axial
+                    } else {
+                        point.radius
                     },
                 });
             }
@@ -1401,7 +1403,7 @@ fn validate_profile_with_cx(
     }
     for first in 0..segments.len() {
         for second in first + 1..segments.len() {
-            if (first * segments.len() + second) % 16 == 0 && validation_checkpoint(cx)? {
+            if (first * segments.len() + second).is_multiple_of(16) && validation_checkpoint(cx) {
                 return Err(AxisymmetricError::Cancelled);
             }
             if adjacent(first, second, segments.len()) {
@@ -1437,8 +1439,8 @@ fn validate_profile_with_cx(
     })
 }
 
-fn validation_checkpoint(cx: Option<&Cx<'_>>) -> Result<bool, AxisymmetricError> {
-    Ok(cx.is_some_and(|context| context.checkpoint().is_err()))
+fn validation_checkpoint(cx: Option<&Cx<'_>>) -> bool {
+    cx.is_some_and(|context| context.checkpoint().is_err())
 }
 
 fn validate_arc(index: usize, segment: MeridianSegment) -> Result<(), AxisymmetricError> {
@@ -1496,7 +1498,7 @@ fn arc_has_interior_axis_tangent(segment: MeridianSegment, tolerance: f64) -> bo
 fn arc_radius(segment: MeridianSegment) -> f64 {
     match segment {
         MeridianSegment::Arc { start, center, .. } => squared_delta(start, center).sqrt(),
-        _ => 0.0,
+        MeridianSegment::Line { .. } => 0.0,
     }
 }
 fn arc_start_angle(segment: MeridianSegment) -> f64 {
@@ -1504,7 +1506,7 @@ fn arc_start_angle(segment: MeridianSegment) -> f64 {
         MeridianSegment::Arc { start, center, .. } => {
             (start.axial - center.axial).atan2(start.radius - center.radius)
         }
-        _ => 0.0,
+        MeridianSegment::Line { .. } => 0.0,
     }
 }
 fn arc_sweep(segment: MeridianSegment) -> f64 {
@@ -1524,7 +1526,7 @@ fn arc_sweep(segment: MeridianSegment) -> f64 {
             };
             if clockwise { -d } else { d }
         }
-        _ => 0.0,
+        MeridianSegment::Line { .. } => 0.0,
     }
 }
 fn arc_contains_angle(segment: MeridianSegment, angle: f64) -> bool {
@@ -1662,7 +1664,9 @@ fn inside_even_odd(segments: &[MeridianSegment], q: MeridianPoint) -> bool {
                     continue;
                 }
                 let a = v.asin();
-                let angles = if a.abs() == core::f64::consts::FRAC_PI_2 {
+                // Deduplicate only the literal asin extremum, never nearby
+                // roots. The compared constant is finite and strictly positive.
+                let angles = if a.abs().to_bits() == core::f64::consts::FRAC_PI_2.to_bits() {
                     [Some(a), None]
                 } else {
                     [Some(a), Some(core::f64::consts::PI - a)]
@@ -2005,6 +2009,11 @@ fn arc_arc_intersection_points(a: MeridianSegment, b: MeridianSegment) -> Vec<Me
 }
 
 fn profile_identity(segments: &[MeridianSegment]) -> AxisymmetricIdentity {
+    AxisymmetricIdentity(fs_obs::fnv1a64(&profile_encoding(segments)))
+}
+
+/// The existing v1 semantic encoding, also used by downstream receipts.
+pub(crate) fn profile_encoding(segments: &[MeridianSegment]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(16 + segments.len() * 57);
     bytes.extend_from_slice(b"fs-rep-frep-axisymmetric-v1");
     bytes.extend_from_slice(&(segments.len() as u64).to_le_bytes());
@@ -2029,7 +2038,7 @@ fn profile_identity(segments: &[MeridianSegment]) -> AxisymmetricIdentity {
             }
         }
     }
-    AxisymmetricIdentity(fs_obs::fnv1a64(&bytes))
+    bytes
 }
 fn append_point(bytes: &mut Vec<u8>, point: MeridianPoint) {
     bytes.extend_from_slice(&point.radius.to_bits().to_le_bytes());
@@ -2041,6 +2050,22 @@ mod tests {
     use super::*;
     use asupersync::types::Budget;
     use fs_exec::{CancelGate, ExecMode, StreamKey};
+
+    #[test]
+    fn g0_literal_points_preserve_signed_zero_nan_and_one_ulp_gaps() {
+        assert!(same_point(point(0.0, -0.0), point(-0.0, 0.0)));
+        assert!(same_point(point(1.0, 2.0), point(1.0, 2.0)));
+        assert!(!same_point(point(f64::NAN, 2.0), point(f64::NAN, 2.0)));
+        assert!(!same_point(point(1.0, f64::NAN), point(1.0, f64::NAN)));
+        assert!(!same_point(
+            point(1.0, 2.0),
+            point(f64::from_bits(1.0_f64.to_bits() + 1), 2.0),
+        ));
+        assert!(!same_point(
+            point(1.0, 2.0),
+            point(1.0, f64::from_bits(2.0_f64.to_bits() + 1)),
+        ));
+    }
 
     #[test]
     fn g0_admitted_fused_query_matches_checked_results_and_refusals() {

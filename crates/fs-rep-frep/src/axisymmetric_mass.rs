@@ -318,27 +318,8 @@ impl AxisymmetricChart {
         }
         let center_axial = first_axial / volume;
         ensure_finite(center_axial, "center axial coordinate")?;
-        let mut centered_r2_z2 = 0.0;
-        let mut centered_r2_z2_abs = 0.0;
-        for (index, segment) in self.segments().iter().copied().enumerate() {
-            if index % POLL_STRIDE == 0 && cx.checkpoint().is_err() {
-                return Err(AxisymmetricMassError::Cancelled);
-            }
-            let term = boundary_integral_centered_axial(segment, 2, 2, center_axial);
-            centered_r2_z2 += term;
-            centered_r2_z2_abs += term.abs();
-            ensure_finite(
-                centered_r2_z2,
-                "centered transverse inertia boundary moment",
-            )?;
-            ensure_finite(
-                centered_r2_z2_abs,
-                "centered transverse inertia absolute boundary moment",
-            )?;
-        }
-        if cx.checkpoint().is_err() {
-            return Err(AxisymmetricMassError::Cancelled);
-        }
+        let (centered_r2_z2, centered_r2_z2_abs) =
+            centered_axial_moments(self.segments(), center_axial, cx)?;
         let mut principal_transverse = density * PI * (0.25 * moments.r4 + centered_r2_z2);
         let principal_axial = origin_axial;
         ensure_finite(principal_transverse, "principal transverse inertia")?;
@@ -413,6 +394,36 @@ impl AxisymmetricChart {
             },
         })
     }
+}
+
+/// Retain the second boundary pass's summation, refusal, and checkpoint order.
+fn centered_axial_moments(
+    segments: &[MeridianSegment],
+    center_axial: f64,
+    cx: &Cx<'_>,
+) -> Result<(f64, f64), AxisymmetricMassError> {
+    let mut centered_r2_z2 = 0.0;
+    let mut centered_r2_z2_abs = 0.0;
+    for (index, segment) in segments.iter().copied().enumerate() {
+        if index % POLL_STRIDE == 0 && cx.checkpoint().is_err() {
+            return Err(AxisymmetricMassError::Cancelled);
+        }
+        let term = boundary_integral_centered_axial(segment, 2, 2, center_axial);
+        centered_r2_z2 += term;
+        centered_r2_z2_abs += term.abs();
+        ensure_finite(
+            centered_r2_z2,
+            "centered transverse inertia boundary moment",
+        )?;
+        ensure_finite(
+            centered_r2_z2_abs,
+            "centered transverse inertia absolute boundary moment",
+        )?;
+    }
+    if cx.checkpoint().is_err() {
+        return Err(AxisymmetricMassError::Cancelled);
+    }
+    Ok((centered_r2_z2, centered_r2_z2_abs))
 }
 
 /// Evaluate `2 pi integral radius ds` over one retained meridian feature.

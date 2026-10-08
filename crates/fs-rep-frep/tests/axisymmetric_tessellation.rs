@@ -1,4 +1,4 @@
-//! Comprehensive test battery for certified axisymmetric tessellation and representation conversion (bead frankensim-b8bxd.4).
+//! Axisymmetric tessellation observations and representation conversion (bead frankensim-b8bxd.4).
 //!
 //! Verifies:
 //! - Analytic sagitta bounds over azimuthal and meridional features;
@@ -175,6 +175,30 @@ fn axt_004_refusals_on_invalid_and_infeasible_budgets() {
         result_nan,
         Err(AxisymmetricTessellationError::InvalidBudget { .. })
     ));
+    with_cx(|cx| {
+        let disc = AxisymmetricChart::squat_disc(
+            2.0,
+            2.0,
+            SquatDiscEdgeTreatment::CircularFillet { radius: 0.5 },
+        )
+        .unwrap();
+        let mut config =
+            AxisymmetricTessellationConfig::new(1e-4, TessellationPurpose::Rendering).unwrap();
+        assert!(tessellate_axisymmetric(&disc, config, cx).is_ok());
+        config.min_arc_subdivisions = 1;
+        config.max_arc_subdivisions = 1;
+        let error = tessellate_axisymmetric(&disc, config, cx).unwrap_err();
+        let AxisymmetricTessellationError::BudgetInfeasible {
+            requested,
+            min_achievable,
+        } = error
+        else {
+            panic!("wrong capped-arc refusal: {error:?}");
+        };
+        let arc_error = 0.5 * (1.0 - core::f64::consts::FRAC_PI_4.cos());
+        assert_eq!(requested.to_bits(), 1e-4_f64.to_bits());
+        assert!(min_achievable >= arc_error && min_achievable > requested);
+    });
 }
 
 #[test]
@@ -195,7 +219,7 @@ fn axt_005_sagitta_enclosure_analytic_checks() {
     let expected_arc = arc_r * (1.0 - (arc_sweep / (2.0 * 4.0)).cos());
     assert!((sagitta.meridian_sagitta - expected_arc).abs() < 1e-12);
 
-    let expected_total = expected_az.hypot(expected_arc);
+    let expected_total = expected_az + expected_arc;
     assert!((sagitta.total_hausdorff_bound - expected_total).abs() < 1e-12);
 }
 
@@ -222,4 +246,372 @@ fn axt_006_deterministic_bit_identical_replay() {
         assert_eq!(p1.y.to_bits(), p2.y.to_bits());
         assert_eq!(p1.z.to_bits(), p2.z.to_bits());
     }
+}
+
+#[test]
+fn axt_007_fixed_resolution_budget_boundary_and_adjacent_values() {
+    with_cx(|cx| {
+        let disc = AxisymmetricChart::squat_disc(
+            2.0,
+            2.0,
+            SquatDiscEdgeTreatment::CircularFillet { radius: 0.5 },
+        )
+        .unwrap();
+        let theta_error = 2.0 * (1.0 - (core::f64::consts::PI / 100.0).cos());
+        let arc_error = 0.5 * (1.0 - core::f64::consts::FRAC_PI_4.cos());
+        let bound = theta_error + arc_error;
+        let mut config = AxisymmetricTessellationConfig {
+            max_hausdorff_error: bound,
+            min_azimuthal_sectors: 100,
+            max_azimuthal_sectors: 100,
+            min_arc_subdivisions: 1,
+            max_arc_subdivisions: 1,
+            purpose: TessellationPurpose::Rendering,
+        };
+        for budget in [bound, bound.next_up()] {
+            config.max_hausdorff_error = budget;
+            let mesh = tessellate_axisymmetric(&disc, config, cx).unwrap();
+            assert_eq!(
+                mesh.receipt.total_hausdorff_bound.to_bits(),
+                bound.to_bits()
+            );
+            assert!(mesh.receipt.total_hausdorff_bound <= budget);
+        }
+        config.max_hausdorff_error = bound.next_down();
+        assert!(matches!(tessellate_axisymmetric(&disc, config, cx),
+            Err(AxisymmetricTessellationError::BudgetInfeasible { min_achievable, .. })
+                if min_achievable.to_bits() == bound.to_bits()));
+
+        // A sharp profile has no meridional error: equality to the evaluated
+        // azimuthal bound must not be rejected as a zero arc allowance.
+        let sharp = AxisymmetricChart::squat_disc(2.0, 2.0, SquatDiscEdgeTreatment::Sharp).unwrap();
+        for budget in [theta_error, theta_error.next_up()] {
+            config.max_hausdorff_error = budget;
+            let mesh = tessellate_axisymmetric(&sharp, config, cx).unwrap();
+            assert_eq!(
+                mesh.receipt.total_hausdorff_bound.to_bits(),
+                theta_error.to_bits()
+            );
+        }
+        config.max_hausdorff_error = theta_error.next_down();
+        assert!(matches!(tessellate_axisymmetric(&sharp, config, cx),
+            Err(AxisymmetricTessellationError::BudgetInfeasible { min_achievable, .. })
+                if min_achievable.to_bits() == theta_error.to_bits()));
+    });
+}
+
+#[test]
+fn axt_008_malformed_limits_and_cancelled_first_error_order() {
+    let disc = AxisymmetricChart::squat_disc(1.0, 0.4, SquatDiscEdgeTreatment::Sharp).unwrap();
+    let gate = CancelGate::new();
+    gate.request();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 8,
+                kernel_id: 42,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        let base =
+            AxisymmetricTessellationConfig::new(0.05, TessellationPurpose::Rendering).unwrap();
+        assert!(matches!(
+            tessellate_axisymmetric(&disc, base, &cx),
+            Err(AxisymmetricTessellationError::Cancelled)
+        ));
+        for config in [
+            AxisymmetricTessellationConfig {
+                min_azimuthal_sectors: 0,
+                ..base
+            },
+            AxisymmetricTessellationConfig {
+                min_azimuthal_sectors: 2,
+                ..base
+            },
+            AxisymmetricTessellationConfig {
+                max_azimuthal_sectors: 7,
+                ..base
+            },
+            AxisymmetricTessellationConfig {
+                min_arc_subdivisions: 0,
+                ..base
+            },
+            AxisymmetricTessellationConfig {
+                max_arc_subdivisions: 1,
+                ..base
+            },
+        ] {
+            assert!(matches!(
+                tessellate_axisymmetric(&disc, config, &cx),
+                Err(AxisymmetricTessellationError::InvalidResolutionLimits { .. })
+            ));
+        }
+        for budget in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let config = AxisymmetricTessellationConfig {
+                max_hausdorff_error: budget,
+                min_arc_subdivisions: 0,
+                ..base
+            };
+            assert!(matches!(
+                tessellate_axisymmetric(&disc, config, &cx),
+                Err(AxisymmetricTessellationError::InvalidBudget { .. })
+            ));
+        }
+    });
+}
+
+#[test]
+fn axt_009_provenance_binds_each_semantic_input_and_is_stable() {
+    with_cx(|cx| {
+        let disc = AxisymmetricChart::squat_disc(1.0, 0.4, SquatDiscEdgeTreatment::Sharp).unwrap();
+        let base =
+            AxisymmetricTessellationConfig::new(0.05, TessellationPurpose::Rendering).unwrap();
+        let original = tessellate_axisymmetric(&disc, base, cx).unwrap();
+        let replay = tessellate_axisymmetric(&disc, base, cx).unwrap();
+        // Independent 232-byte documented-format fixture (provenance_reference.py).
+        assert_eq!(original.receipt.provenance.0, 12_347_313_292_366_907_400);
+        assert_eq!(original.receipt.provenance, replay.receipt.provenance);
+        for config in [
+            AxisymmetricTessellationConfig {
+                max_hausdorff_error: 0.06,
+                ..base
+            },
+            AxisymmetricTessellationConfig {
+                min_azimuthal_sectors: 9,
+                ..base
+            },
+            AxisymmetricTessellationConfig {
+                max_azimuthal_sectors: 4095,
+                ..base
+            },
+            AxisymmetricTessellationConfig {
+                min_arc_subdivisions: 3,
+                ..base
+            },
+            AxisymmetricTessellationConfig {
+                max_arc_subdivisions: 1023,
+                ..base
+            },
+            AxisymmetricTessellationConfig {
+                purpose: TessellationPurpose::Collision,
+                ..base
+            },
+        ] {
+            let mesh = tessellate_axisymmetric(&disc, config, cx).unwrap();
+            assert_ne!(
+                mesh.receipt.provenance, original.receipt.provenance,
+                "{config:?}"
+            );
+            if config.max_hausdorff_error.to_bits() == base.max_hausdorff_error.to_bits()
+                && config.min_azimuthal_sectors == base.min_azimuthal_sectors
+            {
+                assert_eq!(mesh.positions, original.positions);
+                assert_eq!(mesh.normals, original.normals);
+                assert_eq!(mesh.triangles, original.triangles);
+                assert_eq!(mesh.triangle_features, original.triangle_features);
+                assert_eq!(
+                    mesh.receipt.total_hausdorff_bound.to_bits(),
+                    original.receipt.total_hausdorff_bound.to_bits()
+                );
+            }
+        }
+        for changed in [
+            AxisymmetricChart::squat_disc(1.1, 0.4, SquatDiscEdgeTreatment::Sharp).unwrap(),
+            AxisymmetricChart::squat_disc(1.0, 0.5, SquatDiscEdgeTreatment::Sharp).unwrap(),
+            AxisymmetricChart::squat_disc(
+                1.0,
+                0.4,
+                SquatDiscEdgeTreatment::CircularFillet { radius: 0.08 },
+            )
+            .unwrap(),
+        ] {
+            assert_ne!(
+                tessellate_axisymmetric(&changed, base, cx)
+                    .unwrap()
+                    .receipt
+                    .provenance,
+                original.receipt.provenance
+            );
+        }
+    });
+}
+
+#[test]
+fn axt_010_cylinder_faces_point_outward_and_name_their_generating_feature() {
+    with_cx(|cx| {
+        let disc = AxisymmetricChart::squat_disc(2.0, 2.0, SquatDiscEdgeTreatment::Sharp).unwrap();
+        let config =
+            AxisymmetricTessellationConfig::new(0.2, TessellationPurpose::Rendering).unwrap();
+        let mesh = tessellate_axisymmetric(&disc, config, cx).unwrap();
+        assert!(mesh.receipt.is_outward_oriented);
+        assert_eq!((mesh.positions.len(), mesh.triangles.len()), (22, 40));
+        let mut volume = 0.0;
+        let mut seen = [false; 3];
+        for (triangle, &feature) in mesh.triangles.iter().zip(&mesh.triangle_features) {
+            let [a, b, c] = triangle.map(|i| mesh.positions[i as usize]);
+            let nx = (b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y);
+            let ny = (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z);
+            let nz = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+            let expected = if [a, b, c]
+                .iter()
+                .all(|p| p.z.to_bits() == (-1.0_f64).to_bits())
+            {
+                assert!(nz < 0.0);
+                0
+            } else if [a, b, c].iter().all(|p| p.z.to_bits() == 1.0_f64.to_bits()) {
+                assert!(nz > 0.0);
+                2
+            } else {
+                assert!(nx * (a.x + b.x + c.x) + ny * (a.y + b.y + c.y) > 0.0);
+                1
+            };
+            assert_eq!(feature, expected);
+            seen[expected] = true;
+            volume += (a.x * (b.y * c.z - b.z * c.y)
+                + a.y * (b.z * c.x - b.x * c.z)
+                + a.z * (b.x * c.y - b.y * c.x))
+                / 6.0;
+        }
+        assert!(seen.iter().all(|x| *x));
+        // Independent regular-decagon prism volume, opposite the old native loss.
+        let expected = 40.0 * (core::f64::consts::TAU / 10.0).sin();
+        assert!(volume > 0.0 && (volume - expected).abs() < 1e-12);
+    });
+}
+
+#[test]
+fn axt_011_fillets_and_bore_have_outward_faces_and_correct_feature_ids() {
+    with_cx(|cx| {
+        // Known six-feature meridians: bottom, lower fillet, outer wall,
+        // upper fillet, top, then axis closure or bore. Include three sectors
+        // and one arc chord to expose Cartesian-centroid radial contraction.
+        for (bore, fillet, coarse) in [(0.0, 0.5, false), (0.0, 0.05, true), (0.5, 0.5, false)] {
+            let chart = if bore == 0.0 {
+                AxisymmetricChart::squat_disc(
+                    2.0,
+                    2.0,
+                    SquatDiscEdgeTreatment::CircularFillet { radius: fillet },
+                )
+                .unwrap()
+            } else {
+                AxisymmetricChart::annular_disc_outer_fillets(2.0, bore, 2.0, fillet).unwrap()
+            };
+            let mut config = AxisymmetricTessellationConfig::new(
+                if coarse { 2.0 } else { 0.05 },
+                TessellationPurpose::Rendering,
+            )
+            .unwrap();
+            if coarse {
+                config.min_azimuthal_sectors = 3;
+                config.max_azimuthal_sectors = 3;
+                config.min_arc_subdivisions = 1;
+                config.max_arc_subdivisions = 1;
+            }
+            let mesh = tessellate_axisymmetric(&chart, config, cx).unwrap();
+            assert_eq!(mesh.triangles.len(), mesh.triangle_features.len());
+            let mut seen = [false; 6];
+            for (triangle, &feature) in mesh.triangles.iter().zip(&mesh.triangle_features) {
+                let points = triangle.map(|i| mesh.positions[i as usize]);
+                let [a, b, c] = points;
+                let radii = points.map(|p| p.x.hypot(p.y));
+                let nx = (b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y);
+                let ny = (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z);
+                let nz = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+                let x = (a.x + b.x + c.x) / 3.0;
+                let y = (a.y + b.y + c.y) / 3.0;
+                let z = (a.z + b.z + c.z) / 3.0;
+                let radial_alignment = (nx * x + ny * y) / x.hypot(y);
+                let expected = if bore > 0.0 && radii.iter().all(|r| (*r - bore).abs() < 1e-12) {
+                    assert!(radial_alignment < 0.0);
+                    5
+                } else if points.iter().all(|p| (p.z + 1.0).abs() < 1e-12) {
+                    assert!(nz < 0.0);
+                    0
+                } else if points.iter().all(|p| (p.z - 1.0).abs() < 1e-12) {
+                    assert!(nz > 0.0);
+                    4
+                } else if points.iter().all(|p| p.z <= -1.0 + fillet + 1e-12) {
+                    let radial = radii.iter().sum::<f64>() / 3.0 - (2.0 - fillet);
+                    assert!(radial_alignment * radial + nz * (z + 1.0 - fillet) > 0.0);
+                    1
+                } else if points.iter().all(|p| p.z >= 1.0 - fillet - 1e-12) {
+                    let radial = radii.iter().sum::<f64>() / 3.0 - (2.0 - fillet);
+                    assert!(radial_alignment * radial + nz * (z - 1.0 + fillet) > 0.0);
+                    3
+                } else {
+                    assert!(radii.iter().all(|r| (*r - 2.0).abs() < 1e-12));
+                    assert!(radial_alignment > 0.0);
+                    2
+                };
+                assert_eq!(
+                    feature, expected,
+                    "bore={bore}, fillet={fillet}, coarse={coarse}"
+                );
+                seen[expected] = true;
+            }
+            assert!(seen[..5].iter().all(|s| *s));
+            assert_eq!(seen[5], bore > 0.0);
+            if bore == 0.0 {
+                assert!(mesh.receipt.is_watertight && mesh.receipt.is_outward_oriented);
+                assert_eq!(mesh.receipt.euler_characteristic, 2);
+            }
+            // Bore seam closure is an independent existing topology concern;
+            // per-face direction does not assert that its mesh is watertight.
+        }
+    });
+}
+
+#[test]
+fn axt_012_composed_bound_covers_a_true_fillet_point_beyond_mesh_support_plane() {
+    with_cx(|cx| {
+        let chart = AxisymmetricChart::squat_disc(
+            2.0,
+            2.0,
+            SquatDiscEdgeTreatment::CircularFillet { radius: 0.5 },
+        )
+        .unwrap();
+        let config = AxisymmetricTessellationConfig {
+            max_hausdorff_error: 0.01,
+            min_azimuthal_sectors: 45,
+            max_azimuthal_sectors: 45,
+            min_arc_subdivisions: 6,
+            max_arc_subdivisions: 6,
+            purpose: TessellationPurpose::Rendering,
+        };
+        let mesh = tessellate_axisymmetric(&chart, config, cx).unwrap();
+        // This facet is retained in the actual native counterexample. The
+        // complete mesh lies below its outward plane; hence signed distance
+        // beyond that plane is a lower bound on distance to every mesh face.
+        assert!(mesh.triangles.contains(&[226, 227, 272]));
+        let [a, b, c] = [226, 227, 272].map(|i| mesh.positions[i]);
+        let nx = (b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y);
+        let ny = (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z);
+        let nz = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        let length = nx.hypot(ny).hypot(nz);
+        let plane =
+            |p: fs_geom::Point3| (nx * (p.x - a.x) + ny * (p.y - a.y) + nz * (p.z - a.z)) / length;
+        assert!(mesh.positions.iter().all(|p| plane(*p) <= 1e-12));
+        let phi = -core::f64::consts::PI / 24.0;
+        let theta = core::f64::consts::PI / 45.0;
+        let radius = 1.5 + 0.5 * phi.cos();
+        let point = fs_geom::Point3::new(
+            radius * theta.cos(),
+            radius * theta.sin(),
+            -0.5 + 0.5 * phi.sin(),
+        );
+        let distance_lower_observation = plane(point) - 1e-12;
+        let receipt = &mesh.receipt;
+        let obsolete_hypot = receipt
+            .azimuthal_sagitta_bound
+            .hypot(receipt.meridian_sagitta_bound);
+        assert!(distance_lower_observation > obsolete_hypot);
+        assert!(receipt.total_hausdorff_bound >= distance_lower_observation);
+        assert!(receipt.total_hausdorff_bound <= config.max_hausdorff_error);
+    });
 }

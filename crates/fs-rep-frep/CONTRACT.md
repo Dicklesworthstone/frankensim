@@ -225,6 +225,23 @@ the suite unchanged.
   faces are therefore included without a render mesh or caller-entered area.
   The result is deterministic binary64 analytic evaluation with cancellation,
   finite, and positive-area admission, not a directed-rounding certificate.
+- Axisymmetric tessellation rejects zero/inverted resolution ranges (at least
+  three azimuthal sectors and one arc subdivision), non-finite computed bounds,
+  and a capped discretization whose combined bound exceeds the requested budget
+  before publishing a mesh. These binary64 admission checks do not establish
+  directed-rounding certification. Azimuthal and meridional errors compose by
+  addition (triangle inequality); they can align radially, so their hypot is
+  not a Hausdorff bound. Its provenance encodes the retained v1
+  profile bytes, requested budget bits, all four resolution limits, and purpose
+  under the `fs-rep-frep/axisymmetric/tessellation/v1` domain. This is deterministic
+  input binding, not scientific or cryptographic authority. The retained chart
+  fingerprint still uses its unchanged v1 profile encoding; tessellation does
+  not compress that profile into another hash first.
+  Generated faces follow outward CCW-profile winding and identify the feature
+  that appended the interval's destination vertex. Edge consistency is kept
+  separate from outwardness: the outward flag also compares each face cross
+  product with its retained feature's analytic outward normal. These checks
+  remain binary64 observations, not directed-rounding/topology authority.
 - Revolved/extruded fs-cheb profiles ("revolve THIS function") join
   once fs-cheb's profile evaluators land; the node set here is the
   closed-form primitive zoo.

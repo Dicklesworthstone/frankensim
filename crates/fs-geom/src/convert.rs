@@ -29,12 +29,13 @@ pub struct SagittaEnclosure {
     pub azimuthal_sagitta: f64,
     /// Sagitta chord error along profile circular arcs: `r_arc * (1 - cos(Delta_alpha / (2 * N_arc)))`.
     pub meridian_sagitta: f64,
-    /// Total analytic Hausdorff bound: `sqrt(s_theta^2 + s_meridian^2)`.
+    /// Triangle-inequality bound: `s_theta + s_meridian`.
+    /// Binary64 evaluation is not a directed-rounding enclosure.
     pub total_hausdorff_bound: f64,
 }
 
 impl SagittaEnclosure {
-    /// Calculate exact analytic sagitta for an axisymmetric revolution patch.
+    /// Evaluate analytic sagittas for an axisymmetric revolution patch.
     #[must_use]
     pub fn compute(
         max_radius: f64,
@@ -55,7 +56,8 @@ impl SagittaEnclosure {
             0.0
         };
 
-        let total = s_theta.hypot(s_meridian);
+        // Both errors may have a radial component; orthogonality is not given.
+        let total = s_theta + s_meridian;
 
         Self {
             azimuthal_sagitta: s_theta,
