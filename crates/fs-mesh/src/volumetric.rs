@@ -18,7 +18,16 @@ use fs_geom::Point3;
 use fs_ivl::{Sign, orient3d};
 use fs_rep_mesh::{Soup, winding_exact};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fmt;
+use std::fmt::{self, Write as _};
+
+/// Retain quoted, escaped path diagnostics, including non-Unicode paths.
+struct PlcDumpPath<'a>(&'a std::ffi::OsString);
+
+impl fmt::Display for PlcDumpPath<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.0, f)
+    }
+}
 
 /// Facet opposite slot `i`, matching the Delaunay kernel so the remaining
 /// vertex is Positive (interior below the facet).
@@ -620,19 +629,26 @@ impl AdmittedPlc {
             // path can be replayed in a crate test.
             let mut out = String::new();
             for p in &self.vertices {
-                out.push_str(&format!("p {:?} {:?} {:?}\n", p[0], p[1], p[2]));
+                writeln!(out, "p {:?} {:?} {:?}", p[0], p[1], p[2])
+                    .expect("writing to a String cannot fail");
             }
             for region in &self.regions {
-                out.push_str(&format!(
-                    "s {} {:?} {:?} {:?}\n",
+                writeln!(
+                    out,
+                    "s {} {:?} {:?} {:?}",
                     region.id.0, region.seed[0], region.seed[1], region.seed[2]
-                ));
+                )
+                .expect("writing to a String cannot fail");
                 for t in &region.triangles {
-                    out.push_str(&format!("r {} {} {} {}\n", region.id.0, t[0], t[1], t[2]));
+                    writeln!(out, "r {} {} {} {}", region.id.0, t[0], t[1], t[2])
+                        .expect("writing to a String cannot fail");
                 }
             }
             if let Err(err) = std::fs::write(&path, out) {
-                eprintln!("TRACE recovery: PLC dump to {path:?} failed: {err}");
+                eprintln!(
+                    "TRACE recovery: PLC dump to {} failed: {err}",
+                    PlcDumpPath(&path)
+                );
             }
         }
         let points: Vec<Point3> = self
@@ -814,8 +830,7 @@ impl ConstraintRecoveredPlc {
                 &inside,
                 refine_opts,
                 budget,
-                &mut stats,
-                &mut split_points,
+                (&mut stats, &mut split_points),
                 cx,
             )?;
             evidence.rounds += 1;
@@ -824,57 +839,7 @@ impl ConstraintRecoveredPlc {
                 break;
             }
             evidence.steiner_inserted += inserted;
-            // Re-recover the constraints the insertions may have crossed,
-            // then audit, exactly as `recover` did on the fresh Delaunay.
-            let (seg_stats, _) = recover_segments(
-                &mut self.tetra,
-                &self.unique_segments,
-                self.policy.recovery,
-                cx,
-            )?;
-            let facet_loops: Vec<Vec<u32>> = self
-                .unique_facets
-                .iter()
-                .map(|f| vec![f[0], f[1], f[2]])
-                .collect();
-            let (facet_stats, correspondence) = recover_facets_with_points(
-                &mut self.tetra,
-                &facet_loops,
-                &split_points,
-                &self.correspondence.rows,
-                self.policy.recovery,
-                cx,
-            )?;
-            evidence.recovery_steiner += seg_stats.steiner_inserted + facet_stats.steiner_inserted;
-            if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
-                eprintln!(
-                    "TRACE refine round {}: inserted {} (splits so far {}), recovery: segments {}/{} unrecovered {}, facets {}/{} unrecovered {} rounds_used {} steiner {}",
-                    evidence.rounds,
-                    inserted,
-                    split_points.len(),
-                    seg_stats.recovered,
-                    seg_stats.segments_in,
-                    seg_stats.unrecovered,
-                    facet_stats.recovered,
-                    facet_stats.facets_in,
-                    facet_stats.unrecovered,
-                    facet_stats.rounds_used,
-                    facet_stats.steiner_inserted
-                );
-            }
-            if !self.tetra.audit(false).clean() {
-                return Err(VolumetricError::Audit {
-                    reason: "refined complex failed the exact Delaunay audit",
-                });
-            }
-            if seg_stats.unrecovered > 0 || facet_stats.unrecovered > 0 {
-                return Err(VolumetricError::UnrecoveredConstraint {
-                    segments: seg_stats.unrecovered,
-                    facets: facet_stats.unrecovered,
-                });
-            }
-            self.correspondence = correspondence;
-            self.check_tile_surface_closed()?;
+            self.recover_refinement_round(&split_points, &mut evidence, inserted, cx)?;
             let Some(next_inside) = self.inside_tets() else {
                 evidence.stop = "seed-unlocatable";
                 break;
@@ -891,6 +856,65 @@ impl ConstraintRecoveredPlc {
         evidence.encroach_skipped = stats.unrefinable_remaining;
         self.recovery.refinement = evidence;
         Ok(self)
+    }
+
+    /// Re-recover constraints crossed by insertions, then audit the same round.
+    fn recover_refinement_round(
+        &mut self,
+        split_points: &[(u32, u32)],
+        evidence: &mut RefinementEvidence,
+        inserted: u32,
+        cx: &Cx<'_>,
+    ) -> Result<(), VolumetricError> {
+        let (seg_stats, _) = recover_segments(
+            &mut self.tetra,
+            &self.unique_segments,
+            self.policy.recovery,
+            cx,
+        )?;
+        let facet_loops: Vec<Vec<u32>> = self
+            .unique_facets
+            .iter()
+            .map(|f| vec![f[0], f[1], f[2]])
+            .collect();
+        let (facet_stats, correspondence) = recover_facets_with_points(
+            &mut self.tetra,
+            &facet_loops,
+            split_points,
+            &self.correspondence.rows,
+            self.policy.recovery,
+            cx,
+        )?;
+        evidence.recovery_steiner += seg_stats.steiner_inserted + facet_stats.steiner_inserted;
+        if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
+            eprintln!(
+                "TRACE refine round {}: inserted {} (splits so far {}), recovery: segments {}/{} unrecovered {}, facets {}/{} unrecovered {} rounds_used {} steiner {}",
+                evidence.rounds,
+                inserted,
+                split_points.len(),
+                seg_stats.recovered,
+                seg_stats.segments_in,
+                seg_stats.unrecovered,
+                facet_stats.recovered,
+                facet_stats.facets_in,
+                facet_stats.unrecovered,
+                facet_stats.rounds_used,
+                facet_stats.steiner_inserted
+            );
+        }
+        if !self.tetra.audit(false).clean() {
+            return Err(VolumetricError::Audit {
+                reason: "refined complex failed the exact Delaunay audit",
+            });
+        }
+        if seg_stats.unrecovered > 0 || facet_stats.unrecovered > 0 {
+            return Err(VolumetricError::UnrecoveredConstraint {
+                segments: seg_stats.unrecovered,
+                facets: facet_stats.unrecovered,
+            });
+        }
+        self.correspondence = correspondence;
+        self.check_tile_surface_closed()
     }
 }
 
@@ -1128,53 +1152,7 @@ impl LabeledTetComplex {
         'sweeps: loop {
             report.rounds += 1;
             // Bring the face map and classifications to the current tets.
-            for index in 0..snapshot.len().max(self.tets.len()) {
-                let (old, new) = (snapshot.get(index).copied(), self.tets.get(index).copied());
-                if old == new {
-                    continue;
-                }
-                if let Some(old) = old {
-                    for face in tet_sorted_faces(old) {
-                        if let Some(list) = by_face.get_mut(&face) {
-                            list.retain(|&i| i != index);
-                            if list.is_empty() {
-                                by_face.remove(&face);
-                            }
-                        }
-                    }
-                }
-                if let Some(new) = new {
-                    for face in tet_sorted_faces(new) {
-                        let list = by_face.entry(face).or_default();
-                        let at = list.partition_point(|&i| i < index);
-                        list.insert(at, index);
-                    }
-                    if index < flat_of.len() {
-                        flat_of[index] = classify(&self.positions, new);
-                    } else {
-                        flat_of.push(classify(&self.positions, new));
-                    }
-                }
-            }
-            flat_of.truncate(self.tets.len());
-            snapshot.clone_from(&self.tets);
-            debug_assert!(
-                {
-                    let mut rebuilt: BTreeMap<[u32; 3], Vec<usize>> = BTreeMap::new();
-                    for (index, tet) in self.tets.iter().enumerate() {
-                        for face in tet_sorted_faces(*tet) {
-                            rebuilt.entry(face).or_default().push(index);
-                        }
-                    }
-                    rebuilt == by_face
-                        && self
-                            .tets
-                            .iter()
-                            .zip(&flat_of)
-                            .all(|(tet, cached)| classify(&self.positions, *tet) == *cached)
-                },
-                "incremental repair state diverged from a rescan"
-            );
+            self.update_flat_repair_cache(&mut snapshot, &mut flat_of, &mut by_face, &classify);
             // Walls are re-read per sweep: dropping a boundary flat tet moves
             // two wall faces (see `drop_boundary_flat`).
             let walls: BTreeSet<[u32; 3]> =
@@ -1183,21 +1161,7 @@ impl LabeledTetComplex {
             // a fatal tet must not be starved of fresh face maps by the
             // sliver budget (MEASURED: sharing one queue left 53 zero-volume
             // tets on the 128-segment cylinder where priority leaves 1).
-            let mut candidates: Vec<(bool, usize)> = (0..self.tets.len())
-                .filter_map(|index| {
-                    let (flat, zero_volume) = flat_of[index];
-                    if !flat {
-                        return None;
-                    }
-                    let mut key = self.tets[index];
-                    key.sort_unstable();
-                    if gave_up.contains(&key) {
-                        return None;
-                    }
-                    Some((!zero_volume, index))
-                })
-                .collect();
-            candidates.sort_unstable();
+            let candidates = self.flat_repair_candidates(&flat_of, &gave_up);
             let mut committed = false;
             for (is_sliver, flat_index) in candidates {
                 let flat = self.tets[flat_index];
@@ -1234,6 +1198,106 @@ impl LabeledTetComplex {
                 break;
             }
         }
+        self.trace_remaining_flat_tets(largest, &is_flat, &volume);
+        // Outcomes, not events: a census after the loop is what the receipt
+        // discloses, so `unrepaired` is exactly what remains.
+        report.unrepaired = u32::try_from(
+            self.tets
+                .iter()
+                .filter(|tet| is_flat(&self.positions, **tet))
+                .count(),
+        )
+        .expect("tet count fits u32");
+        report.repaired = report.found.saturating_sub(report.unrepaired);
+        self.flat_repair = report;
+        report
+    }
+
+    fn update_flat_repair_cache(
+        &self,
+        snapshot: &mut Vec<[u32; 4]>,
+        flat_of: &mut Vec<(bool, bool)>,
+        by_face: &mut BTreeMap<[u32; 3], Vec<usize>>,
+        classify: &impl Fn(&[[f64; 3]], [u32; 4]) -> (bool, bool),
+    ) {
+        for index in 0..snapshot.len().max(self.tets.len()) {
+            let (old, new) = (snapshot.get(index).copied(), self.tets.get(index).copied());
+            if old == new {
+                continue;
+            }
+            if let Some(old) = old {
+                for face in tet_sorted_faces(old) {
+                    if let Some(list) = by_face.get_mut(&face) {
+                        list.retain(|&i| i != index);
+                        if list.is_empty() {
+                            by_face.remove(&face);
+                        }
+                    }
+                }
+            }
+            if let Some(new) = new {
+                for face in tet_sorted_faces(new) {
+                    let list = by_face.entry(face).or_default();
+                    let at = list.partition_point(|&i| i < index);
+                    list.insert(at, index);
+                }
+                if index < flat_of.len() {
+                    flat_of[index] = classify(&self.positions, new);
+                } else {
+                    flat_of.push(classify(&self.positions, new));
+                }
+            }
+        }
+        flat_of.truncate(self.tets.len());
+        snapshot.clone_from(&self.tets);
+        debug_assert!(
+            {
+                let mut rebuilt: BTreeMap<[u32; 3], Vec<usize>> = BTreeMap::new();
+                for (index, tet) in self.tets.iter().enumerate() {
+                    for face in tet_sorted_faces(*tet) {
+                        rebuilt.entry(face).or_default().push(index);
+                    }
+                }
+                rebuilt == *by_face
+                    && self
+                        .tets
+                        .iter()
+                        .zip(flat_of.iter())
+                        .all(|(tet, cached)| classify(&self.positions, *tet) == *cached)
+            },
+            "incremental repair state diverged from a rescan"
+        );
+    }
+
+    fn flat_repair_candidates(
+        &self,
+        flat_of: &[(bool, bool)],
+        gave_up: &BTreeSet<[u32; 4]>,
+    ) -> Vec<(bool, usize)> {
+        let mut candidates: Vec<(bool, usize)> = (0..self.tets.len())
+            .filter_map(|index| {
+                let (flat, zero_volume) = flat_of[index];
+                if !flat {
+                    return None;
+                }
+                let mut key = self.tets[index];
+                key.sort_unstable();
+                if gave_up.contains(&key) {
+                    return None;
+                }
+                Some((!zero_volume, index))
+            })
+            .collect();
+        candidates.sort_unstable();
+        candidates
+    }
+
+    fn trace_remaining_flat_tets(
+        &self,
+        largest: f64,
+        is_flat: &impl Fn(&[[f64; 3]], [u32; 4]) -> bool,
+        volume: &impl Fn(&[[f64; 3]], [u32; 4]) -> f64,
+    ) {
         if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
             let walls: BTreeSet<[u32; 3]> =
                 self.source_faces.iter().map(|(face, _)| *face).collect();
@@ -1253,18 +1317,6 @@ impl LabeledTetComplex {
                 );
             }
         }
-        // Outcomes, not events: a census after the loop is what the receipt
-        // discloses, so `unrepaired` is exactly what remains.
-        report.unrepaired = u32::try_from(
-            self.tets
-                .iter()
-                .filter(|tet| is_flat(&self.positions, **tet))
-                .count(),
-        )
-        .expect("tet count fits u32");
-        report.repaired = report.found.saturating_sub(report.unrepaired);
-        self.flat_repair = report;
-        report
     }
 
     /// Drop a flat tet that sits IN the boundary. A boundary quad of a body
@@ -1479,77 +1531,11 @@ impl LabeledTetComplex {
         largest: f64,
     ) -> bool {
         let [u, v] = edge;
-        let [b, d] = others;
-        let sorted = |x: u32, y: u32, z: u32| {
-            let mut key = [x, y, z];
-            key.sort_unstable();
-            key
-        };
-        let other_tet = |face: [u32; 3], not: usize| -> Option<usize> {
-            by_face
-                .get(&face)?
-                .iter()
-                .copied()
-                .find(|&index| index != not)
-        };
-        // Walk the ring from the flat tet across face (u, v, b) until the tet
-        // that carries face (u, v, d) hands back to the flat tet.
-        let mut ring: Vec<usize> = Vec::new();
-        let mut polygon: Vec<u32> = vec![b];
-        let mut current = flat_index;
-        let mut apex = b;
-        for _ in 0..64 {
-            let face = sorted(u, v, apex);
-            if walls.contains(&face) {
-                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
-                    eprintln!(
-                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 1: if walls.contains(&face)"
-                    );
-                }
-                return false;
-            }
-            let Some(next) = other_tet(face, current) else {
-                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
-                    eprintln!(
-                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 2: let Some(next) = other_tet(face, current) else"
-                    );
-                }
-                return false;
-            };
-            if next == flat_index {
-                break;
-            }
-            if self.region_of_tet[next] != region {
-                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
-                    eprintln!(
-                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 3: if self.region_of_tet[next] != region"
-                    );
-                }
-                return false;
-            }
-            let tet = self.tets[next];
-            let Some(next_apex) = tet.iter().copied().find(|&w| w != u && w != v && w != apex)
-            else {
-                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
-                    eprintln!(
-                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 4: else"
-                    );
-                }
-                return false;
-            };
-            ring.push(next);
-            polygon.push(next_apex);
-            current = next;
-            apex = next_apex;
-        }
-        if ring.is_empty() || *polygon.last().expect("polygon has b") != d {
-            if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
-                eprintln!(
-                    "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 5: if ring.is_empty() || *polygon.last().expect('polygon has b') != d"
-                );
-            }
+        let Some((ring, polygon)) =
+            self.flat_edge_ring(flat_index, edge, others, region, by_face, walls)
+        else {
             return false;
-        }
+        };
         // The removed set is the ring AND the flat tet: their union is the
         // polyhedron the fan re-tiles, so conservation must include the flat
         // tet's own volume (zero for a true flat, 1e-6 of the largest for an
@@ -1577,12 +1563,11 @@ impl LabeledTetComplex {
                 let j = (pivot + k + 1) % m;
                 let tri = [polygon[pivot], polygon[i], polygon[j]];
                 for &apex_end in &[u, v] {
-                    match oriented([tri[0], tri[1], tri[2], apex_end]) {
-                        Some(tet) => new_tets.push(tet),
-                        None => {
-                            ok = false;
-                            break;
-                        }
+                    if let Some(tet) = oriented([tri[0], tri[1], tri[2], apex_end]) {
+                        new_tets.push(tet);
+                    } else {
+                        ok = false;
+                        break;
                     }
                 }
                 if !ok {
@@ -1614,32 +1599,7 @@ impl LabeledTetComplex {
                 continue;
             }
             // Commit: overwrite ring tets in place, drop the rest and the flat tet.
-            let mut targets: Vec<usize> = ring.clone();
-            targets.push(flat_index);
-            targets.sort_unstable();
-            let mut new_iter = new_tets.into_iter();
-            let mut leftover: Vec<usize> = Vec::new();
-            for &index in &targets {
-                match new_iter.next() {
-                    Some(tet) => {
-                        self.tets[index] = tet;
-                        self.region_of_tet[index] = region;
-                    }
-                    None => leftover.push(index),
-                }
-            }
-            for tet in new_iter {
-                self.tets.push(tet);
-                self.region_of_tet.push(region);
-            }
-            // Remove leftover slots from the back so earlier indices stay valid.
-            for &index in leftover.iter().rev() {
-                let last = self.tets.len() - 1;
-                self.tets.swap(index, last);
-                self.region_of_tet.swap(index, last);
-                self.tets.pop();
-                self.region_of_tet.pop();
-            }
+            self.commit_flat_edge_fan(flat_index, &ring, region, new_tets);
             return true;
         }
         if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
@@ -1668,6 +1628,124 @@ impl LabeledTetComplex {
             );
         }
         false
+    }
+
+    fn flat_edge_ring(
+        &self,
+        flat_index: usize,
+        edge: [u32; 2],
+        others: [u32; 2],
+        region: RegionId,
+        by_face: &BTreeMap<[u32; 3], Vec<usize>>,
+        walls: &BTreeSet<[u32; 3]>,
+    ) -> Option<(Vec<usize>, Vec<u32>)> {
+        let [u, v] = edge;
+        let [b, d] = others;
+        let sorted = |x: u32, y: u32, z: u32| {
+            let mut key = [x, y, z];
+            key.sort_unstable();
+            key
+        };
+        let other_tet = |face: [u32; 3], not: usize| -> Option<usize> {
+            by_face
+                .get(&face)?
+                .iter()
+                .copied()
+                .find(|&index| index != not)
+        };
+        // Walk from face (u, v, b) until the ring hands back to the flat tet.
+        let mut ring: Vec<usize> = Vec::new();
+        let mut polygon: Vec<u32> = vec![b];
+        let mut current = flat_index;
+        let mut apex = b;
+        for _ in 0..64 {
+            let face = sorted(u, v, apex);
+            if walls.contains(&face) {
+                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                    eprintln!(
+                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 1: if walls.contains(&face)"
+                    );
+                }
+                return None;
+            }
+            let Some(next) = other_tet(face, current) else {
+                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                    eprintln!(
+                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 2: let Some(next) = other_tet(face, current) else"
+                    );
+                }
+                return None;
+            };
+            if next == flat_index {
+                break;
+            }
+            if self.region_of_tet[next] != region {
+                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                    eprintln!(
+                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 3: if self.region_of_tet[next] != region"
+                    );
+                }
+                return None;
+            }
+            let tet = self.tets[next];
+            let Some(next_apex) = tet.iter().copied().find(|&w| w != u && w != v && w != apex)
+            else {
+                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                    eprintln!(
+                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 4: else"
+                    );
+                }
+                return None;
+            };
+            ring.push(next);
+            polygon.push(next_apex);
+            current = next;
+            apex = next_apex;
+        }
+        if ring.is_empty() || *polygon.last().expect("polygon has b") != d {
+            if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                eprintln!(
+                    "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 5: if ring.is_empty() || *polygon.last().expect('polygon has b') != d"
+                );
+            }
+            return None;
+        }
+        Some((ring, polygon))
+    }
+
+    fn commit_flat_edge_fan(
+        &mut self,
+        flat_index: usize,
+        ring: &[usize],
+        region: RegionId,
+        new_tets: Vec<[u32; 4]>,
+    ) {
+        let mut targets: Vec<usize> = ring.to_vec();
+        targets.push(flat_index);
+        targets.sort_unstable();
+        let mut new_iter = new_tets.into_iter();
+        let mut leftover: Vec<usize> = Vec::new();
+        for &index in &targets {
+            match new_iter.next() {
+                Some(tet) => {
+                    self.tets[index] = tet;
+                    self.region_of_tet[index] = region;
+                }
+                None => leftover.push(index),
+            }
+        }
+        for tet in new_iter {
+            self.tets.push(tet);
+            self.region_of_tet.push(region);
+        }
+        // Remove leftover slots from the back so earlier indices stay valid.
+        for &index in leftover.iter().rev() {
+            let last = self.tets.len() - 1;
+            self.tets.swap(index, last);
+            self.region_of_tet.swap(index, last);
+            self.tets.pop();
+            self.region_of_tet.pop();
+        }
     }
 
     /// One uniform 1→8 refinement (the h-ladder control): every tet split
@@ -1863,6 +1941,29 @@ impl LabeledTetComplex {
             *producer_vol.entry(region).or_insert(0.0) += tet_volume_triple(&self.positions, *tet);
             *auditor_vol.entry(region).or_insert(0.0) += tet_volume_homog(&self.positions, *tet);
         }
+        let witness = self.audit_volume_conservation(
+            regions,
+            &soups,
+            &producer_vol,
+            &auditor_vol,
+            discarded_cavity_volume,
+            discarded_exterior_volume,
+        )?;
+        Ok(AuditedLabeledTetComplex {
+            labeled: self,
+            witness,
+        })
+    }
+
+    fn audit_volume_conservation(
+        &self,
+        regions: &[RegionSpec],
+        soups: &BTreeMap<RegionId, Soup>,
+        producer_vol: &BTreeMap<RegionId, f64>,
+        auditor_vol: &BTreeMap<RegionId, f64>,
+        discarded_cavity_volume: f64,
+        discarded_exterior_volume: f64,
+    ) -> Result<VolumeConservationWitness, VolumetricError> {
         let mut per_region_surface = Vec::new();
         let mut exact = true;
         let mut per_region_producer = Vec::new();
@@ -1895,7 +1996,7 @@ impl LabeledTetComplex {
             per_region_producer.push((region.id, prod));
             per_region_auditor.push((region.id, aud));
         }
-        let witness = VolumeConservationWitness {
+        Ok(VolumeConservationWitness {
             method: if exact {
                 VolumeMethod::ExactDyadic
             } else {
@@ -1908,10 +2009,6 @@ impl LabeledTetComplex {
             per_region_surface,
             excluded_cavity: discarded_cavity_volume,
             excluded_exterior: discarded_exterior_volume,
-        };
-        Ok(AuditedLabeledTetComplex {
-            labeled: self,
-            witness,
         })
     }
 }
@@ -2110,78 +2207,95 @@ fn perturbed_points(
     if moves.is_empty() {
         return None;
     }
-    let input = |i: u32| positions[i as usize];
     let mut out = positions.clone();
     let mut moved = 0usize;
     for (&v, &(direction, step)) in &moves {
         let p = positions[v as usize];
-        // Constraint of this Steiner vertex: a chord of an input segment
-        // (move along it), else a wall tile's plane (move within it), else
-        // free.
-        let chord = unique_segments
-            .iter()
-            .copied()
-            .find(|&[a, b]| crate::recovery::chord_parameter(p, input(a), input(b)).is_some());
-        let tile = labeled
-            .source_faces
-            .iter()
-            .find(|(face, _)| face.contains(&v))
-            .map(|(face, _)| *face);
-        let mut d = direction;
-        let target = if let Some([a, b]) = chord {
-            let axis = sub3(input(b), input(a));
-            let along = dot3(d, axis) / dot3(axis, axis);
-            d = [along * axis[0], along * axis[1], along * axis[2]];
-            let len = dot3(d, d).sqrt();
-            if len == 0.0 {
-                continue;
-            }
-            let q = [
-                p[0] + step * d[0] / len,
-                p[1] + step * d[1] / len,
-                p[2] + step * d[2] / len,
-            ];
-            crate::recovery::snap_point_to_line(q, input(a), input(b))
-        } else if let Some(face) = tile {
-            let (a, b, c) = (
-                positions[face[0] as usize],
-                positions[face[1] as usize],
-                positions[face[2] as usize],
-            );
-            let n = cross3(sub3(b, a), sub3(c, a));
-            let nn = dot3(n, n);
-            if nn == 0.0 {
-                continue;
-            }
-            let off = dot3(d, n) / nn;
-            d = [d[0] - off * n[0], d[1] - off * n[1], d[2] - off * n[2]];
-            let len = dot3(d, d).sqrt();
-            if len == 0.0 {
-                continue;
-            }
-            let q = [
-                p[0] + step * d[0] / len,
-                p[1] + step * d[1] / len,
-                p[2] + step * d[2] / len,
-            ];
-            crate::recovery::snap_point_to_plane(q, a, n)
-        } else {
-            let len = dot3(d, d).sqrt();
-            if len == 0.0 {
-                continue;
-            }
-            [
-                p[0] + step * d[0] / len,
-                p[1] + step * d[1] / len,
-                p[2] + step * d[2] / len,
-            ]
+        let Some(target) = perturbation_target(labeled, v, direction, step, unique_segments) else {
+            continue;
         };
-        if target != p {
+        if target
+            .iter()
+            .zip(&p)
+            .any(|(a, b)| a.partial_cmp(b) != Some(core::cmp::Ordering::Equal))
+        {
             out[v as usize] = target;
             moved += 1;
         }
     }
     (moved > 0).then_some(out)
+}
+
+/// Move along an input chord, within a wall plane, or freely, in that order.
+fn perturbation_target(
+    labeled: &LabeledTetComplex,
+    v: u32,
+    direction: [f64; 3],
+    step: f64,
+    unique_segments: &[[u32; 2]],
+) -> Option<[f64; 3]> {
+    let positions = &labeled.positions;
+    let input = |i: u32| positions[i as usize];
+    let p = positions[v as usize];
+    let chord = unique_segments
+        .iter()
+        .copied()
+        .find(|&[a, b]| crate::recovery::chord_parameter(p, input(a), input(b)).is_some());
+    let tile = labeled
+        .source_faces
+        .iter()
+        .find(|(face, _)| face.contains(&v))
+        .map(|(face, _)| *face);
+    let mut d = direction;
+    let target = if let Some([a, b]) = chord {
+        let axis = sub3(input(b), input(a));
+        let along = dot3(d, axis) / dot3(axis, axis);
+        d = [along * axis[0], along * axis[1], along * axis[2]];
+        let len = dot3(d, d).sqrt();
+        if len == 0.0 {
+            return None;
+        }
+        let q = [
+            p[0] + step * d[0] / len,
+            p[1] + step * d[1] / len,
+            p[2] + step * d[2] / len,
+        ];
+        crate::recovery::snap_point_to_line(q, input(a), input(b))
+    } else if let Some(face) = tile {
+        let (a, b, c) = (
+            positions[face[0] as usize],
+            positions[face[1] as usize],
+            positions[face[2] as usize],
+        );
+        let n = cross3(sub3(b, a), sub3(c, a));
+        let nn = dot3(n, n);
+        if nn == 0.0 {
+            return None;
+        }
+        let off = dot3(d, n) / nn;
+        d = [d[0] - off * n[0], d[1] - off * n[1], d[2] - off * n[2]];
+        let len = dot3(d, d).sqrt();
+        if len == 0.0 {
+            return None;
+        }
+        let q = [
+            p[0] + step * d[0] / len,
+            p[1] + step * d[1] / len,
+            p[2] + step * d[2] / len,
+        ];
+        crate::recovery::snap_point_to_plane(q, a, n)
+    } else {
+        let len = dot3(d, d).sqrt();
+        if len == 0.0 {
+            return None;
+        }
+        [
+            p[0] + step * d[0] / len,
+            p[1] + step * d[1] / len,
+            p[2] + step * d[2] / len,
+        ]
+    };
+    Some(target)
 }
 
 fn discarded_volumes(recovered: &ConstraintRecoveredPlc) -> (f64, f64) {

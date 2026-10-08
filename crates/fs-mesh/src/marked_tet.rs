@@ -20,10 +20,13 @@ const PAIRS: [(usize, usize); 6] = [(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)];
 fn edge(a:u32,b:u32)->Edge { if a < b { [a,b] } else { [b,a] } }
 fn edges(t:[u32;4])->[Edge;6] { PAIRS.map(|(a,b)|edge(t[a],t[b])) }
 fn check(cx:&Cx<'_>)->Result<(),Error> { cx.checkpoint().map_err(|_|Error::Cancelled) }
+fn point_equal(a:[f64;3],b:[f64;3])->bool {
+    a.into_iter().zip(b).all(|(a,b)|a.partial_cmp(&b)==Some(std::cmp::Ordering::Equal))
+}
 fn point_order(a:[f64;3],b:[f64;3])->std::cmp::Ordering {
     for (a,b) in a.into_iter().zip(b) {
         // Coordinate equality admits signed zero; use the same equality here.
-        if a != b { return a.total_cmp(&b); }
+        if a.partial_cmp(&b)!=Some(std::cmp::Ordering::Equal) { return a.total_cmp(&b); }
     }
     std::cmp::Ordering::Equal
 }
@@ -48,7 +51,7 @@ fn longest(p:&[[f64;3]],t:[u32;4])->Result<Edge,Error> {
     let mut best=es[0]; let mut length=-1.0;
     for (d,e) in differences.into_iter().zip(es) {
         let n=d.into_iter().map(|x|(x/scale)*(x/scale)).sum::<f64>();
-        if n>length || (n==length && e<best) { best=e; length=n; }
+        if n>length || (n.partial_cmp(&length)==Some(std::cmp::Ordering::Equal) && e<best) { best=e; length=n; }
     }
     Ok(best)
 }
@@ -121,7 +124,7 @@ impl MarkedTetRefinement {
             }
         }
         let vertices=positions.len().checked_add(selected.len())
-            .filter(|&n|n<=limits.max_vertices && n<=u32::MAX as usize).ok_or(Error::OutputLimit)?;
+            .filter(|&n|n<=limits.max_vertices && u32::try_from(n).is_ok()).ok_or(Error::OutputLimit)?;
         let mut selected:Vec<_>=selected.into_iter().collect();
         selected.sort_by(|&a,&b| {
             let aa=endpoints(positions,a); let bb=endpoints(positions,b);
@@ -142,7 +145,7 @@ impl MarkedTetRefinement {
             let m=result.positions.len() as u32;
             let midpoint=std::array::from_fn(|axis|
                 f64::midpoint(positions[e[0] as usize][axis],positions[e[1] as usize][axis]));
-            if midpoint==positions[e[0] as usize] || midpoint==positions[e[1] as usize] {
+            if point_equal(midpoint,positions[e[0] as usize]) || point_equal(midpoint,positions[e[1] as usize]) {
                 return Err(Error::UnrepresentableSplit);
             }
             result.positions.push(midpoint); result.midpoint_parents.push(e);

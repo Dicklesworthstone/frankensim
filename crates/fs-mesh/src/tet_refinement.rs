@@ -58,6 +58,9 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), TetRefinementError> {
     cx.checkpoint().map_err(|_| TetRefinementError::Cancelled)
 }
 fn edge(a: u32, b: u32) -> [u32; 2] { if a < b { [a,b] } else { [b,a] } }
+fn point_equal(a: [f64;3], b: [f64;3]) -> bool {
+    a.into_iter().zip(b).all(|(a,b)|a.partial_cmp(&b)==Some(std::cmp::Ordering::Equal))
+}
 
 impl TetRefinement {
     /// Refine an admitted array mesh with the existing shortest-diagonal kernel.
@@ -105,11 +108,11 @@ impl TetRefinement {
             // to that order cannot silently transfer fields to the wrong node.
             for (a,b) in [(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)] {
                 let key = edge(cell[a],cell[b]);
-                if !edges.contains_key(&key) {
+                if let std::collections::btree_map::Entry::Vacant(entry) = edges.entry(key) {
                     let index = positions.len().checked_add(midpoint_parents.len())
                         .filter(|&n| n < limits.max_vertices && n < u32::MAX as usize)
                         .ok_or(TetRefinementError::OutputLimit)?;
-                    edges.insert(key,index as u32);
+                    entry.insert(index as u32);
                     midpoint_parents.push(key);
                 }
             }
@@ -134,7 +137,8 @@ impl TetRefinement {
             let midpoint: [f64;3] = std::array::from_fn(|axis|
                 f64::midpoint(positions[a as usize][axis],positions[b as usize][axis]));
             let actual = split.positions[positions.len()+i];
-            if actual != midpoint || actual == positions[a as usize] || actual == positions[b as usize] {
+            if !point_equal(actual,midpoint) || point_equal(actual,positions[a as usize])
+                || point_equal(actual,positions[b as usize]) {
                 return Err(TetRefinementError::UnrepresentableSplit);
             }
         }

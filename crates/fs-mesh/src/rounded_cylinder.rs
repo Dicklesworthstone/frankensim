@@ -186,20 +186,8 @@ pub fn rounded_cylinder_tet_mesh(
     check_budget("vertices", vertex_count, spec.maximum_vertices)?;
     check_budget("tetrahedra", tetrahedron_count, spec.maximum_tetrahedra)?;
 
-    let mut nodes_m = Vec::with_capacity(vertex_count);
-    for level in 0..levels {
-        cx.checkpoint()
-            .map_err(|_| RoundedCylinderMeshError::Cancelled)?;
-        let eta = -1.0 + 2.0 * level as f64 / axial as f64;
-        nodes_m.push([0.0, 0.0, eta * 0.5 * spec.thickness_m]);
-        for &radius in radial.iter().skip(1) {
-            let z = eta * half_height(spec, radius);
-            for sector in 0..azimuthal {
-                let theta = core::f64::consts::TAU * sector as f64 / azimuthal as f64;
-                nodes_m.push([radius * theta.cos(), radius * theta.sin(), z]);
-            }
-        }
-    }
+    let nodes_m =
+        rounded_cylinder_nodes(spec, &radial, levels, axial, azimuthal, vertex_count, cx)?;
 
     let node = |level: usize, ring: usize, sector: usize| -> usize {
         let offset = level * nodes_per_level;
@@ -269,6 +257,32 @@ pub fn rounded_cylinder_tet_mesh(
         maximum_meridian_chord_error_m,
         maximum_azimuthal_chord_error_m,
     })
+}
+
+fn rounded_cylinder_nodes(
+    spec: RoundedCylinderMeshSpec,
+    radial: &[f64],
+    levels: usize,
+    axial: usize,
+    azimuthal: usize,
+    vertex_count: usize,
+    cx: &Cx<'_>,
+) -> Result<Vec<[f64; 3]>, RoundedCylinderMeshError> {
+    let mut nodes_m = Vec::with_capacity(vertex_count);
+    for level in 0..levels {
+        cx.checkpoint()
+            .map_err(|_| RoundedCylinderMeshError::Cancelled)?;
+        let eta = -1.0 + 2.0 * level as f64 / axial as f64;
+        nodes_m.push([0.0, 0.0, eta * 0.5 * spec.thickness_m]);
+        for &radius in radial.iter().skip(1) {
+            let z = eta * half_height(spec, radius);
+            for sector in 0..azimuthal {
+                let theta = core::f64::consts::TAU * sector as f64 / azimuthal as f64;
+                nodes_m.push([radius * theta.cos(), radius * theta.sin(), z]);
+            }
+        }
+    }
+    Ok(nodes_m)
 }
 
 fn validate(spec: RoundedCylinderMeshSpec) -> Result<(), RoundedCylinderMeshError> {

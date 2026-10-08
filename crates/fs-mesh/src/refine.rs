@@ -351,10 +351,10 @@ pub(crate) fn refine_constrained_round(
     inside: &std::collections::BTreeSet<u32>,
     opts: RefineOptions,
     budget: u32,
-    stats: &mut RefineStats,
-    split_points: &mut Vec<(u32, u32)>,
+    outputs: (&mut RefineStats, &mut Vec<(u32, u32)>),
     cx: &Cx<'_>,
 ) -> Result<u32, MeshError> {
+    let (stats, split_points) = outputs;
     let canon = |t: [u32; 4]| {
         let mut s = t;
         s.sort_unstable();

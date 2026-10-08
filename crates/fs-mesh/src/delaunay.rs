@@ -707,43 +707,7 @@ pub fn delaunay(points: &[Point3], cx: &Cx<'_>) -> Result<Tetrahedralization, Me
                     }
                 }
             }
-            // First local-Delaunay violation: which insertion broke the mesh.
-            let mut violations = 0usize;
-            let mut first = String::new();
-            for (ti, tet) in mesh.tets.iter().enumerate() {
-                if !mesh.alive[ti] || tet[3] == GHOST {
-                    continue;
-                }
-                let q: [[f64; 3]; 4] = core::array::from_fn(|k| mesh.points[tet[k] as usize]);
-                if orient3d(q[0], q[1], q[2], q[3]) != Sign::Positive {
-                    violations += 1;
-                    if first.is_empty() {
-                        first = format!("tet {ti} {:?} not positively oriented", tet);
-                    }
-                }
-                for slot in 0..4 {
-                    let n = mesh.adj[ti][slot];
-                    if n == GHOST || !mesh.alive[n as usize] || mesh.tets[n as usize][3] == GHOST {
-                        continue;
-                    }
-                    let apex = mesh.tets[n as usize]
-                        .iter()
-                        .copied()
-                        .find(|v| !tet.contains(v))
-                        .expect("neighbour has an apex");
-                    if insphere(q[0], q[1], q[2], q[3], mesh.points[apex as usize])
-                        == Sign::Positive
-                    {
-                        violations += 1;
-                        if first.is_empty() {
-                            first = format!(
-                                "apex {apex} strictly inside tet {ti} {:?} (neighbour {n})",
-                                tet
-                            );
-                        }
-                    }
-                }
-            }
+            let (violations, first) = local_delaunay_violations(&mesh);
             if violations > 0 {
                 eprintln!(
                     "TRACE delaunay: after inserting {i} (#{inserted}, accepted {accepted}): {violations} local-Delaunay violations; first: {first}; this insertion growth_repairs +{} cavity {}",
@@ -776,6 +740,42 @@ pub fn delaunay(points: &[Point3], cx: &Cx<'_>) -> Result<Tetrahedralization, Me
         mesh,
         steiner_from: points.len() as u32,
     })
+}
+
+/// First local-Delaunay violation: which insertion broke the mesh.
+fn local_delaunay_violations(mesh: &Mesh) -> (usize, String) {
+    let mut violations = 0usize;
+    let mut first = String::new();
+    for (ti, tet) in mesh.tets.iter().enumerate() {
+        if !mesh.alive[ti] || tet[3] == GHOST {
+            continue;
+        }
+        let q: [[f64; 3]; 4] = core::array::from_fn(|k| mesh.points[tet[k] as usize]);
+        if orient3d(q[0], q[1], q[2], q[3]) != Sign::Positive {
+            violations += 1;
+            if first.is_empty() {
+                first = format!("tet {ti} {tet:?} not positively oriented");
+            }
+        }
+        for slot in 0..4 {
+            let n = mesh.adj[ti][slot];
+            if n == GHOST || !mesh.alive[n as usize] || mesh.tets[n as usize][3] == GHOST {
+                continue;
+            }
+            let apex = mesh.tets[n as usize]
+                .iter()
+                .copied()
+                .find(|v| !tet.contains(v))
+                .expect("neighbour has an apex");
+            if insphere(q[0], q[1], q[2], q[3], mesh.points[apex as usize]) == Sign::Positive {
+                violations += 1;
+                if first.is_empty() {
+                    first = format!("apex {apex} strictly inside tet {ti} {tet:?} (neighbour {n})");
+                }
+            }
+        }
+    }
+    (violations, first)
 }
 
 /// First 4 points (in BRIO order) that span 3D, by exact tests.
