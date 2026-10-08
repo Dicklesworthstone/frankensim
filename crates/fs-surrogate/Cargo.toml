@@ -5,7 +5,7 @@ edition.workspace = true
 license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Learned accelerators with guarantees (fs-surrogate): classical reduced-order models permitted ONLY inside certified validity bands — ML proposes, certified numerics disposes. A POD reduced-order model (method of snapshots), distribution-free conformal prediction bands with empirical coverage, and the certify-or-escalate policy that uses the surrogate only when its band is narrow enough for the decision."
+description = "Learned accelerators with guarantees (fs-surrogate): classical reduced-order models permitted ONLY inside certified validity bands — ML proposes, certified numerics disposes. POD, exact DMD and polynomial EDMD (Koopman) models with complex spectra and conformal forecast bands, POD-Galerkin+DEIM hyper-reduced ROMs, distribution-free conformal prediction bands with empirical coverage, and the certify-or-escalate policy that uses the surrogate only when its band is narrow enough for the decision."
 
 [package.metadata.frankensim]
 layer = "L4"

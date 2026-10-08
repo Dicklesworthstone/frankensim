@@ -12,12 +12,25 @@
 //!   from calibration residuals, with empirical `(1−α)` coverage;
 //! - [`certify_or_escalate`] — the mechanical policy: inside the validity domain
 //!   AND the band narrow enough for the decision → USE the surrogate; otherwise
-//!   ESCALATE to a certified solve.
+//!   ESCALATE to a certified solve;
+//! - [`koopman`] — exact DMD and polynomial-dictionary EDMD (finite-section
+//!   Koopman) models with complex spectra (growth rates/frequencies) and
+//!   per-horizon conformal forecast bands;
+//! - [`deim`] — POD-Galerkin reduced models with DEIM hyper-reduction of
+//!   pointwise nonlinearities (`m ≪ n` sampled evaluations online) and the
+//!   `‖(PᵀU)⁻¹‖₂` interpolation-error constant.
 //!
 //! The default core is deterministic and dependency-free (including an
 //! in-house symmetric eigensolver). Optional features integrate the bounded
 //! abstraction ladder and graph-aware escalation routing without changing the
 //! default API.
+
+pub mod deim;
+pub mod koopman;
+mod linalg;
+
+pub use deim::{Deim, GalerkinDeimRom, deim};
+pub use koopman::{Dmd, DmdRank, Edmd, ForecastBands, Forecaster, dmd, edmd, forecast_bands};
 
 #[cfg(feature = "abstraction-ladder")]
 pub mod ladder;

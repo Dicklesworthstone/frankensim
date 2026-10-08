@@ -31,6 +31,26 @@ execution, memory admission, and live task cancellation. The independent
   at least as tight as the tolerance; every unbounded or malformed policy state
   returns `Escalate`.
 - Root `SurrogateError` — `NoSnapshots` / `DimMismatch` / `BadThreshold`.
+- `koopman` module (plan §9.7): `dmd(snapshots, dt, DmdRank) -> Dmd` — exact
+  DMD (`Ã = UᵀYVΣ⁻¹` on the rank-`r` POD subspace of `X`), with `step`,
+  `eigenvalues` (complex, Hessenberg + Francis double-shift QR),
+  `continuous_spectrum` (`(ln|λ|, arg λ)/dt`), `spectral_radius`,
+  `fit_residual`; `edmd(pairs, degree, ridge, dt) -> Edmd` — extended DMD over
+  all monomials of total degree `≤ degree` (ridge-regularized Gram solve),
+  state read back from the linear monomials, re-lifted every step;
+  `Forecaster` (implemented by both); `forecast_bands(model, calibration,
+  horizon, alpha, simultaneous) -> ForecastBands` — per-horizon split-conformal
+  bands on `‖x̂_h − x_h‖₂` over independent calibration trajectories,
+  Bonferroni-simultaneous on request (infinite when the calibration set is too
+  small for the level, so certify-or-escalate escalates).
+- `deim` module (plan §9.7): `deim(nonlinear_snapshots, energy, max_rank) ->
+  Deim` — uncentred POD basis + Chaturantabut–Sorensen greedy rows (no repeats;
+  the basis is truncated where a mode's residual vanishes), `reconstruct`,
+  `interpolation_error`, `error_constant = ‖(PᵀU)⁻¹‖₂`, and the a-priori
+  `error_bound(g) = ‖(PᵀU)⁻¹‖₂‖(I − UUᵀ)g‖₂`; `GalerkinDeimRom::new(snapshots,
+  …, l_apply, b, phi)` — affine POD-Galerkin ROM of `ẋ = Lx + b + φ(x)` with
+  pointwise `φ`, reduced operators precomputed once, online RHS costing
+  `O(r² + rm)` plus `m` evaluations of `φ`, RK4 `integrate`, `project`/`lift`.
 - `escalation` module (bead `frankensim-extreal-program-f85xj.10.3`; [F],
   behind `graph-escalation`) — compatibility-preserving graph routing for the
   `Escalate` branch. `plan_graph_escalation` accepts the current model, exact
@@ -234,6 +254,17 @@ only when trustworthy; malformed/unbounded policy inputs fail closed while the
 finite inclusive tolerance boundary remains admissible; the policy reduces cost
 vs all-high-fidelity; determinism.
 
+`tests/rom.rs` (5 cases): exact DMD recovers an embedded linear spectrum
+(damped rotation 0.95e^{±0.3i}, 0.8, 0.6 in ℝ⁴⁰) to 1e-9 with its continuous
+growth/frequency; degree-2 EDMD is EXACT on the Koopman-invariant system
+`x⁺ = λx, y⁺ = μy + cx²` and its spectrum contains `λ, μ, λ²`; on the nonlinear
+stall-softening pitch model, cubic EDMD halves the linear model's forecast
+error and simultaneous 90% conformal bands cover ≥ 0.85 of 200 fresh
+trajectories, wired to certify-or-escalate; a POD-Galerkin+DEIM Allen–Cahn ROM
+(n = 200, ≤ 16 modes, ≤ 16 sample rows) tracks the full model on an UNSEEN
+initial condition within 1% relative error over 500 RK4 steps, and the DEIM
+a-priori bound holds on every training snapshot; DEIM replay is bit-identical.
+
 `tests/ladder.rs` (feature-gated): f64 RB estimator containment on the
 elliptic fixture, bounded descent, Estimated-only payload authority,
 deterministic replay, structured hostile-input refusals, representable
@@ -255,13 +286,21 @@ and prediction-versus-actual calibration identity.
 
 ## No-claim boundaries
 
-- v0 is the CLASSICAL ROM core (POD via method of snapshots) + the conformal /
-  certify-or-escalate guardrail. NEURAL OPERATORS (Fourier neural operators,
-  DeepONets via FrankenTorch), DEIM nonlinear-term interpolation, BALANCED
-  TRUNCATION for LTI subsystems, and KOOPMAN/DMD are the fuller deliverable,
-  staged.
-- The eigensolver is a small dense Jacobi for the snapshot correlation matrix;
-  the production path is fs-la randomized/TSQR SVD over large snapshot matrices.
+- The classical ROM core is POD, exact DMD, polynomial EDMD, and
+  POD-Galerkin+DEIM with the conformal / certify-or-escalate guardrail. NEURAL
+  OPERATORS (Fourier neural operators, DeepONets via FrankenTorch) are staged;
+  BALANCED TRUNCATION for LTI subsystems lives in fs-wing's ROM scheduler, not
+  here.
+- DMD/EDMD spectra describe the FITTED operator. Monomial dictionaries are not
+  Koopman-invariant in general, so EDMD spectra can carry spurious
+  (polluted) eigenvalues; no spectral claim is made for nonlinear systems —
+  only forecasts and their conformal bands are claims. DEIM's a-priori bound
+  needs the projection error of the true nonlinear term, so online ROM error is
+  a measured/conformally banded quantity, not a guarantee; only pointwise
+  nonlinearities are hyper-reduced (stencil maps staged).
+- The eigensolvers are small dense Jacobi / Francis QR; POD picks the smaller of
+  the snapshot and spatial Gram matrices. The production path for large
+  snapshot matrices is fs-la randomized/TSQR SVD.
 - The conformal band is SPLIT-conformal (exchangeable data); the anytime-valid
   e-value formulation with online recalibration under drift is the
   conformal-hardening follow-on.
