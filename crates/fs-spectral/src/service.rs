@@ -184,7 +184,7 @@ impl DenseSymOp {
         }
         for i in 0..n {
             for j in (i + 1)..n {
-                if a[i * n + j] != a[j * n + i] {
+                if a[i * n + j].partial_cmp(&a[j * n + i]) != Some(std::cmp::Ordering::Equal) {
                     return Err(ServiceError::InvalidQuery {
                         what: "dense operator is not exactly symmetric",
                     });
@@ -201,8 +201,7 @@ impl SymmetricOp for DenseSymOp {
     }
 
     fn apply(&self, x: &[f64], y: &mut [f64]) {
-        for i in 0..self.n {
-            let row = &self.a[i * self.n..(i + 1) * self.n];
+        for (i, row) in self.a.chunks_exact(self.n).enumerate() {
             let mut acc = 0.0f64;
             for (aij, xj) in row.iter().zip(x) {
                 acc = aij.mul_add(*xj, acc);
@@ -604,28 +603,14 @@ impl EigenService {
                 return Err(ServiceError::NonFiniteOperator);
             }
         }
-        if pairs.iter().any(|p| {
-            !p.value.is_finite()
-                || !p.residual.is_finite()
-                || p.residual < 0.0
-                || p.vector.is_empty()
-                || p.vector.iter().any(|x| !x.is_finite())
-        }) {
+        if Self::has_invalid_pair(&pairs) {
             self.state = snapshot;
             return Err(ServiceError::NonFiniteOperator);
         }
-        let mut estimates = Vec::with_capacity(pairs.len());
-        for p in pairs {
-            let estimate = match CertifiedEigenvalue::from_residual(p.value, p.residual, p.vector) {
-                Ok(estimate) => estimate,
-                Err(_) => {
-                    self.state = snapshot;
-                    return Err(ServiceError::NonFiniteOperator);
-                }
-            };
-            estimates.push(estimate);
-        }
-        estimates.sort_by(|a, b| a.value.total_cmp(&b.value));
+        let Ok(estimates) = Self::residual_estimates(pairs) else {
+            self.state = snapshot;
+            return Err(ServiceError::NonFiniteOperator);
+        };
         // A request can arrive during the final backend application or Ritz
         // extraction. Poll once more immediately before committing the state;
         // otherwise a one-step tick could acknowledge success after a request.
@@ -633,15 +618,27 @@ impl EigenService {
             self.state = snapshot;
             return Err(ServiceError::Cancelled);
         }
-        self.ticks = match self.ticks.checked_add(1) {
-            Some(ticks) => ticks,
-            None => {
-                self.state = snapshot;
-                return Err(ServiceError::InvalidQuery {
-                    what: "service tick counter overflow",
-                });
-            }
+        let Some(ticks) = self.ticks.checked_add(1) else {
+            self.state = snapshot;
+            return Err(ServiceError::InvalidQuery {
+                what: "service tick counter overflow",
+            });
         };
+        self.ticks = ticks;
+        Ok(self.progress(estimates))
+    }
+
+    fn has_invalid_pair(pairs: &[EigenPair]) -> bool {
+        pairs.iter().any(|p| {
+            !p.value.is_finite()
+                || !p.residual.is_finite()
+                || p.residual < 0.0
+                || p.vector.is_empty()
+                || p.vector.iter().any(|x| !x.is_finite())
+        })
+    }
+
+    fn progress(&self, estimates: Vec<CertifiedEigenvalue>) -> EigenProgress {
         // The backends return exactly the wanted extremal pairs, so
         // convergence is: enough of them, and every one within
         // tolerance.
@@ -651,12 +648,25 @@ impl EigenService {
             BackendState::Lanczos(state) => state.exhausted(),
             BackendState::Lobpcg(_) => false,
         };
-        Ok(EigenProgress {
+        EigenProgress {
             pairs: estimates,
             converged,
             subspace_exhausted,
             ticks: self.ticks,
-        })
+        }
+    }
+
+    fn residual_estimates(pairs: Vec<EigenPair>) -> Result<Vec<CertifiedEigenvalue>, ServiceError> {
+        let mut estimates = Vec::with_capacity(pairs.len());
+        for p in pairs {
+            let Ok(estimate) = CertifiedEigenvalue::from_residual(p.value, p.residual, p.vector)
+            else {
+                return Err(ServiceError::NonFiniteOperator);
+            };
+            estimates.push(estimate);
+        }
+        estimates.sort_by(|a, b| a.value.total_cmp(&b.value));
+        Ok(estimates)
     }
 
     /// Drive `tick` until convergence, subspace exhaustion, or the

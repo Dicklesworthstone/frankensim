@@ -358,7 +358,7 @@ impl AdmittedSpectralWitnessV1 {
     /// foreign configuration visible (bead sj31i.52.9).
     pub fn from_authority(
         authority: &AdmittedSpectralAuthorityV1,
-        promotion: SpectralPromotionWitnessV1,
+        promotion: &SpectralPromotionWitnessV1,
         expected_root: PromotionRootCharter,
     ) -> Result<Self, SpectralPromotionBindingErrorV1> {
         if authority.receipt() != promotion.subject() {
@@ -2984,8 +2984,8 @@ pub fn structure_proposition_receipt(
     scalar_field: SpectralScalarFieldV1,
     class: SpectralProblemClassV1,
     scaling: SpectralScalingContextV1,
-    domain: SpectralMetricV1,
-    codomain: SpectralMetricV1,
+    domain: &SpectralMetricV1,
+    codomain: &SpectralMetricV1,
     property: StructurePropertyV1,
     support: StructureSupportV1,
     disposition: WitnessDispositionV1,
@@ -3006,7 +3006,7 @@ pub fn structure_proposition_receipt(
     let scaling = scaling_bytes(scaling);
     push_u32(&mut payload, scaling.len() as u32);
     payload.extend_from_slice(&scaling);
-    push_space_signature(&mut payload, &domain, &codomain);
+    push_space_signature(&mut payload, domain, codomain);
     push_structure_property(&mut payload, property);
     push_structure_support(&mut payload, support);
     payload.push(disposition.tag());
@@ -3028,8 +3028,8 @@ pub fn regularity_proposition_receipt(
     scalar_field: SpectralScalarFieldV1,
     class: SpectralProblemClassV1,
     scaling: SpectralScalingContextV1,
-    domain: SpectralMetricV1,
-    codomain: SpectralMetricV1,
+    domain: &SpectralMetricV1,
+    codomain: &SpectralMetricV1,
     regularity: RegularityClassV1,
     disposition: WitnessDispositionV1,
 ) -> Result<IdentityReceipt<SpectralPropositionId>, CanonicalError> {
@@ -3042,7 +3042,7 @@ pub fn regularity_proposition_receipt(
     let scaling = scaling_bytes(scaling);
     push_u32(&mut payload, scaling.len() as u32);
     payload.extend_from_slice(&scaling);
-    push_space_signature(&mut payload, &domain, &codomain);
+    push_space_signature(&mut payload, domain, codomain);
     payload.push(regularity.tag());
     if let RegularityClassV1::RegularPolynomial { grade }
     | RegularityClassV1::InvertiblePolynomialLeadingCoefficient { grade } = regularity
@@ -3100,8 +3100,8 @@ fn nullspace_proposition_payload(
     scalar_field: SpectralScalarFieldV1,
     class: SpectralProblemClassV1,
     scaling: SpectralScalingContextV1,
-    domain: SpectralMetricV1,
-    codomain: SpectralMetricV1,
+    domain: &SpectralMetricV1,
+    codomain: &SpectralMetricV1,
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(144);
     payload.extend_from_slice(subject.as_bytes());
@@ -3112,7 +3112,7 @@ fn nullspace_proposition_payload(
     let scaling = scaling_bytes(scaling);
     push_u32(&mut payload, scaling.len() as u32);
     payload.extend_from_slice(&scaling);
-    push_space_signature(&mut payload, &domain, &codomain);
+    push_space_signature(&mut payload, domain, codomain);
     payload
 }
 
@@ -3128,8 +3128,8 @@ pub fn gauge_proposition_receipt(
     scalar_field: SpectralScalarFieldV1,
     class: SpectralProblemClassV1,
     scaling: SpectralScalingContextV1,
-    domain: SpectralMetricV1,
-    codomain: SpectralMetricV1,
+    domain: &SpectralMetricV1,
+    codomain: &SpectralMetricV1,
     proposition: GaugePropositionV1,
 ) -> Result<IdentityReceipt<SpectralPropositionId>, CanonicalError> {
     let mut payload =
@@ -3161,13 +3161,12 @@ pub fn zero_padding_proposition_receipt(
     scalar_field: SpectralScalarFieldV1,
     class: SpectralProblemClassV1,
     scaling: SpectralScalingContextV1,
-    domain: SpectralMetricV1,
-    codomain: SpectralMetricV1,
+    metrics: (&SpectralMetricV1, &SpectralMetricV1),
     gauge: GaugeContextV1,
     proposition: ZeroPaddingPropositionV1,
 ) -> Result<IdentityReceipt<SpectralPropositionId>, CanonicalError> {
     let mut payload =
-        nullspace_proposition_payload(subject, scalar_field, class, scaling, domain, codomain);
+        nullspace_proposition_payload(subject, scalar_field, class, scaling, metrics.0, metrics.1);
     push_gauge_context(&mut payload, gauge);
     payload.push(proposition.tag());
     match proposition {
@@ -4102,8 +4101,8 @@ pub fn validate_problem(
                 spec.scalar_field,
                 spec.class,
                 spec.scaling,
-                spec.spaces.domain.clone(),
-                spec.spaces.codomain.clone(),
+                &spec.spaces.domain,
+                &spec.spaces.codomain,
                 GaugePropositionV1::None,
             ),
             &mut issues,
@@ -4130,8 +4129,8 @@ pub fn validate_problem(
                     spec.scalar_field,
                     spec.class,
                     spec.scaling,
-                    spec.spaces.domain.clone(),
-                    spec.spaces.codomain.clone(),
+                    &spec.spaces.domain,
+                    &spec.spaces.codomain,
                     GaugePropositionV1::Fixed {
                         nullity: *nullity,
                         gauge: *gauge,
@@ -4157,8 +4156,8 @@ pub fn validate_problem(
                     spec.scalar_field,
                     spec.class,
                     spec.scaling,
-                    spec.spaces.domain.clone(),
-                    spec.spaces.codomain.clone(),
+                    &spec.spaces.domain,
+                    &spec.spaces.codomain,
                     GaugePropositionV1::Quotiented {
                         nullity: *nullity,
                         quotient: *quotient,
@@ -4177,8 +4176,7 @@ pub fn validate_problem(
                 spec.scalar_field,
                 spec.class,
                 spec.scaling,
-                spec.spaces.domain.clone(),
-                spec.spaces.codomain.clone(),
+                (&spec.spaces.domain, &spec.spaces.codomain),
                 spec.spaces.gauge.context(),
                 ZeroPaddingPropositionV1::NonePresent,
             ),
@@ -4204,8 +4202,7 @@ pub fn validate_problem(
                     spec.scalar_field,
                     spec.class,
                     spec.scaling,
-                    spec.spaces.domain.clone(),
-                    spec.spaces.codomain.clone(),
+                    (&spec.spaces.domain, &spec.spaces.codomain),
                     spec.spaces.gauge.context(),
                     ZeroPaddingPropositionV1::ExplicitlyPadded { count: *count },
                 ),
@@ -4232,8 +4229,7 @@ pub fn validate_problem(
                     spec.scalar_field,
                     spec.class,
                     spec.scaling,
-                    spec.spaces.domain.clone(),
-                    spec.spaces.codomain.clone(),
+                    (&spec.spaces.domain, &spec.spaces.codomain),
                     spec.spaces.gauge.context(),
                     ZeroPaddingPropositionV1::Omitted { count: *count },
                 ),
@@ -4457,8 +4453,8 @@ pub fn validate_problem(
                 spec.scalar_field,
                 spec.class,
                 spec.scaling,
-                spec.spaces.domain.clone(),
-                spec.spaces.codomain.clone(),
+                &spec.spaces.domain,
+                &spec.spaces.codomain,
                 claim.class,
                 claim.disposition,
             ),
@@ -4496,8 +4492,8 @@ pub fn validate_problem(
                 spec.scalar_field,
                 spec.class,
                 spec.scaling,
-                spec.spaces.domain.clone(),
-                spec.spaces.codomain.clone(),
+                &spec.spaces.domain,
+                &spec.spaces.codomain,
                 claim.property,
                 claim.support,
                 claim.disposition,

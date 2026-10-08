@@ -1962,7 +1962,7 @@ fn implication_sort_key(implication: &BridgeImplicationV1) -> ([u8; 32], [u8; 32
     )
 }
 
-fn push_id<I: DigestBytes>(out: &mut Vec<u8>, id: I) {
+fn push_id<I: DigestBytes + Copy>(out: &mut Vec<u8>, id: I) {
     out.extend_from_slice(id.digest_bytes());
 }
 

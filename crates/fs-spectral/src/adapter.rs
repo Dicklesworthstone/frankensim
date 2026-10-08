@@ -904,59 +904,7 @@ pub fn validate_adapter_v1(
     }
 
     let mut issues = Vec::new();
-    if spec.schema_version != SPECTRAL_ADAPTER_SCHEMA_VERSION_V1 {
-        issues.push(SpectralAdapterIssueV1::UnsupportedSchemaVersion {
-            found: spec.schema_version,
-            supported: SPECTRAL_ADAPTER_SCHEMA_VERSION_V1,
-        });
-    }
-    if spec.target_problem != target.problem_id() {
-        issues.push(SpectralAdapterIssueV1::TargetProblemMismatch);
-    }
-    let target_domain = target.spec().spaces().domain();
-    let target_codomain = target.spec().spaces().codomain();
-    for (field, source, target_dimension) in [
-        (
-            "state",
-            spec.source.state_dimension,
-            target_domain.dimension(),
-        ),
-        (
-            "dual",
-            spec.source.dual_dimension,
-            target_codomain.dimension(),
-        ),
-    ] {
-        if source == 0 || source != target_dimension {
-            issues.push(SpectralAdapterIssueV1::DimensionMismatch {
-                field,
-                source,
-                target: target_dimension,
-            });
-        }
-    }
-    if !operator_class_matches(spec.source.operator_class, target) {
-        issues.push(SpectralAdapterIssueV1::OperatorClassMismatch);
-    }
-    if spec.source.metric_norm.target_domain_metric != target_domain.id()
-        || spec.source.metric_norm.target_codomain_metric != target_codomain.id()
-    {
-        issues.push(SpectralAdapterIssueV1::MetricMismatch);
-    }
-    if spec.source.units.target_scaling != target.spec().scaling().id() {
-        issues.push(SpectralAdapterIssueV1::ScalingMismatch);
-    }
-    match spec.source.frame.kind {
-        FrameMapKindV1::Identity
-            if spec.source.frame.source_frame != spec.source.frame.target_frame =>
-        {
-            issues.push(SpectralAdapterIssueV1::FrameMismatch);
-        }
-        FrameMapKindV1::Lossy | FrameMapKindV1::Unknown => {
-            issues.push(SpectralAdapterIssueV1::InadmissibleFrameMap);
-        }
-        FrameMapKindV1::Identity | FrameMapKindV1::ExactTransform => {}
-    }
+    validate_source_identity(&spec, target, &mut issues);
 
     check_binding(
         spec.source.constraints,
@@ -1030,6 +978,91 @@ pub fn validate_adapter_v1(
     {
         issues.push(SpectralAdapterIssueV1::StructureNotRetained);
     }
+    validate_fidelity_and_qois(&spec, &mut issues);
+    if !issues.is_empty() {
+        return Err(SpectralAdapterReportV1::new(issues));
+    }
+
+    spec.qois.sort_by_key(qoi_bytes);
+    let receipt = match adapter_receipt(&spec) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            return Err(SpectralAdapterReportV1::new(vec![
+                SpectralAdapterIssueV1::Identity(error),
+            ]));
+        }
+    };
+    Ok(ValidatedSpectralAdapterV1 {
+        canonical_qois: spec.qois.clone(),
+        spec,
+        receipt,
+    })
+}
+
+fn validate_source_identity(
+    spec: &SpectralAdapterSpecV1,
+    target: &ValidatedSpectralProblemV1,
+    issues: &mut Vec<SpectralAdapterIssueV1>,
+) {
+    if spec.schema_version != SPECTRAL_ADAPTER_SCHEMA_VERSION_V1 {
+        issues.push(SpectralAdapterIssueV1::UnsupportedSchemaVersion {
+            found: spec.schema_version,
+            supported: SPECTRAL_ADAPTER_SCHEMA_VERSION_V1,
+        });
+    }
+    if spec.target_problem != target.problem_id() {
+        issues.push(SpectralAdapterIssueV1::TargetProblemMismatch);
+    }
+    let target_domain = target.spec().spaces().domain();
+    let target_codomain = target.spec().spaces().codomain();
+    for (field, source, target_dimension) in [
+        (
+            "state",
+            spec.source.state_dimension,
+            target_domain.dimension(),
+        ),
+        (
+            "dual",
+            spec.source.dual_dimension,
+            target_codomain.dimension(),
+        ),
+    ] {
+        if source == 0 || source != target_dimension {
+            issues.push(SpectralAdapterIssueV1::DimensionMismatch {
+                field,
+                source,
+                target: target_dimension,
+            });
+        }
+    }
+    if !operator_class_matches(spec.source.operator_class, target) {
+        issues.push(SpectralAdapterIssueV1::OperatorClassMismatch);
+    }
+    if spec.source.metric_norm.target_domain_metric != target_domain.id()
+        || spec.source.metric_norm.target_codomain_metric != target_codomain.id()
+    {
+        issues.push(SpectralAdapterIssueV1::MetricMismatch);
+    }
+    if spec.source.units.target_scaling != target.spec().scaling().id() {
+        issues.push(SpectralAdapterIssueV1::ScalingMismatch);
+    }
+    match spec.source.frame.kind {
+        FrameMapKindV1::Identity
+            if spec.source.frame.source_frame != spec.source.frame.target_frame =>
+        {
+            issues.push(SpectralAdapterIssueV1::FrameMismatch);
+        }
+        FrameMapKindV1::Lossy | FrameMapKindV1::Unknown => {
+            issues.push(SpectralAdapterIssueV1::InadmissibleFrameMap);
+        }
+        FrameMapKindV1::Identity | FrameMapKindV1::ExactTransform => {}
+    }
+}
+
+fn validate_fidelity_and_qois(
+    spec: &SpectralAdapterSpecV1,
+    issues: &mut Vec<SpectralAdapterIssueV1>,
+) {
     if matches!(
         spec.fidelity,
         AdapterFidelityV1::Lossy { .. } | AdapterFidelityV1::Ambiguous
@@ -1064,24 +1097,6 @@ pub fn validate_adapter_v1(
             break;
         }
     }
-    if !issues.is_empty() {
-        return Err(SpectralAdapterReportV1::new(issues));
-    }
-
-    spec.qois.sort_by_key(qoi_bytes);
-    let receipt = match adapter_receipt(&spec) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            return Err(SpectralAdapterReportV1::new(vec![
-                SpectralAdapterIssueV1::Identity(error),
-            ]));
-        }
-    };
-    Ok(ValidatedSpectralAdapterV1 {
-        canonical_qois: spec.qois.clone(),
-        spec,
-        receipt,
-    })
 }
 
 fn operator_class_matches(

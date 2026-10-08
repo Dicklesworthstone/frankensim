@@ -1592,10 +1592,10 @@ impl SpectralTruthV1 {
 fn validate_truth_witness(
     witness: &AdmittedSpectralWitnessV1,
     problem: SpectralProblemId,
-    proposition: SpectralTruthPropositionV1,
+    proposition: &SpectralTruthPropositionV1,
     issues: &mut Vec<SpectralTruthErrorV1>,
 ) {
-    match truth_proposition_receipt(problem, &proposition) {
+    match truth_proposition_receipt(problem, proposition) {
         Ok(expected) if witness.proposition() != expected.id() => {
             issues.push(SpectralTruthErrorV1::WitnessPropositionMismatch {
                 expected: expected.id(),
@@ -1638,7 +1638,7 @@ fn validate_multiplicity_witness(
     validate_truth_witness(
         witness,
         problem,
-        SpectralTruthPropositionV1::Multiplicity {
+        &SpectralTruthPropositionV1::Multiplicity {
             cluster,
             enclosure,
             kind,
@@ -1676,13 +1676,13 @@ fn cluster_exists(clusters: &[SpectralClusterV1], id: SpectralClusterIdV1) -> bo
 fn projective_clusters(clusters: &[SpectralClusterV1]) -> Vec<SpectralClusterV1> {
     clusters
         .iter()
-        .cloned()
         .filter(|cluster| {
             matches!(
                 cluster.localization.enclosure,
                 SpectralEnclosureV1::ProjectiveInfinity
             )
         })
+        .cloned()
         .collect()
 }
 
@@ -1730,7 +1730,7 @@ fn validate_cluster_evidence(
             (authority, Some(witness)) => validate_truth_witness(
                 witness,
                 problem,
-                SpectralTruthPropositionV1::ClusterLocalization {
+                &SpectralTruthPropositionV1::ClusterLocalization {
                     cluster: cluster.id,
                     authority,
                     enclosure: cluster.localization.enclosure,
@@ -1758,7 +1758,7 @@ fn validate_cluster_evidence(
             InternalClusterStateV1::ProvenDegenerate { witness } => validate_truth_witness(
                 witness,
                 problem,
-                SpectralTruthPropositionV1::InternalDegeneracy {
+                &SpectralTruthPropositionV1::InternalDegeneracy {
                     cluster: cluster.id,
                     enclosure: cluster.localization.enclosure,
                     algebraic: cluster.algebraic_multiplicity.statement(),
@@ -1773,7 +1773,7 @@ fn validate_cluster_evidence(
             } => validate_truth_witness(
                 witness,
                 problem,
-                SpectralTruthPropositionV1::InternalResolution {
+                &SpectralTruthPropositionV1::InternalResolution {
                     cluster: cluster.id,
                     enclosure: cluster.localization.enclosure,
                     algebraic: cluster.algebraic_multiplicity.statement(),
@@ -1932,7 +1932,7 @@ pub fn validate_truth_v1(
         SpectralResultAuthorityV1::Estimated { witness } => validate_truth_witness(
             witness,
             problem_id,
-            SpectralTruthPropositionV1::ResultEstimate {
+            &SpectralTruthPropositionV1::ResultEstimate {
                 result_set: result_set_id,
             },
             &mut issues,
@@ -1948,7 +1948,7 @@ pub fn validate_truth_v1(
             validate_truth_witness(
                 witness,
                 problem_id,
-                SpectralTruthPropositionV1::ResultResidualBound {
+                &SpectralTruthPropositionV1::ResultResidualBound {
                     result_set: result_set_id,
                     upper: *upper,
                     norm: *norm,
@@ -1959,7 +1959,7 @@ pub fn validate_truth_v1(
         SpectralResultAuthorityV1::CertifiedEnclosure { witness } => validate_truth_witness(
             witness,
             problem_id,
-            SpectralTruthPropositionV1::ResultCertifiedEnclosure {
+            &SpectralTruthPropositionV1::ResultCertifiedEnclosure {
                 result_set: result_set_id,
             },
             &mut issues,
@@ -2102,7 +2102,7 @@ pub fn validate_truth_v1(
             validate_truth_witness(
                 witness,
                 problem_id,
-                SpectralTruthPropositionV1::PartialCoverage {
+                &SpectralTruthPropositionV1::PartialCoverage {
                     result_set: result_set_id,
                     returned_algebraic: *returned_algebraic,
                     status: *status,
@@ -2136,7 +2136,7 @@ pub fn validate_truth_v1(
             validate_truth_witness(
                 witness,
                 problem_id,
-                SpectralTruthPropositionV1::RegionCompleteness {
+                &SpectralTruthPropositionV1::RegionCompleteness {
                     result_set: result_set_id,
                     algebraic_cardinality: *algebraic_cardinality,
                 },
@@ -2181,7 +2181,7 @@ pub fn validate_truth_v1(
             validate_truth_witness(
                 witness,
                 problem_id,
-                SpectralTruthPropositionV1::FullCompleteness {
+                &SpectralTruthPropositionV1::FullCompleteness {
                     result_set: result_set_id,
                     finite_algebraic: *finite_algebraic,
                     infinity: infinity.statement(),
@@ -2376,7 +2376,7 @@ fn validate_full_accounting(
             validate_truth_witness(
                 witness,
                 problem_id,
-                SpectralTruthPropositionV1::IncludedInfinity {
+                &SpectralTruthPropositionV1::IncludedInfinity {
                     result_set: result_set_id,
                     algebraic: *algebraic,
                     cluster: *cluster,
@@ -2403,7 +2403,7 @@ fn validate_full_accounting(
             validate_truth_witness(
                 witness,
                 problem_id,
-                SpectralTruthPropositionV1::ExcludedInfinity {
+                &SpectralTruthPropositionV1::ExcludedInfinity {
                     result_set: result_set_id,
                     algebraic: *algebraic,
                 },
@@ -2440,7 +2440,7 @@ fn validate_boundary_evidence(
                 } => validate_truth_witness(
                     witness,
                     problem_id,
-                    SpectralTruthPropositionV1::PartialBoundarySeparated {
+                    &SpectralTruthPropositionV1::PartialBoundarySeparated {
                         result_set: result_set_id,
                         lower: *lower,
                         norm: *norm,
@@ -2454,7 +2454,7 @@ fn validate_boundary_evidence(
                     validate_truth_witness(
                         witness,
                         problem_id,
-                        SpectralTruthPropositionV1::PartialBoundaryClusterClosed {
+                        &SpectralTruthPropositionV1::PartialBoundaryClusterClosed {
                             result_set: result_set_id,
                             cluster: *cluster,
                         },
@@ -2476,7 +2476,7 @@ fn validate_boundary_evidence(
                 } => validate_truth_witness(
                     witness,
                     problem_id,
-                    SpectralTruthPropositionV1::RegionBoundarySeparated {
+                    &SpectralTruthPropositionV1::RegionBoundarySeparated {
                         result_set: result_set_id,
                         lower: *lower,
                         norm: *norm,
@@ -2490,7 +2490,7 @@ fn validate_boundary_evidence(
                 } => validate_truth_witness(
                     witness,
                     problem_id,
-                    SpectralTruthPropositionV1::RegionBoundaryIntersections {
+                    &SpectralTruthPropositionV1::RegionBoundaryIntersections {
                         result_set: result_set_id,
                         included: included.clone(),
                         excluded_algebraic: *excluded_algebraic,

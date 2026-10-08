@@ -666,7 +666,7 @@ fn admitted_witness(receipt: IdentityReceipt<SpectralPropositionId>) -> Admitted
         )
         .unwrap();
     let charter = root.charter();
-    AdmittedSpectralWitnessV1::from_authority(&admitted, promotion, charter).unwrap()
+    AdmittedSpectralWitnessV1::from_authority(&admitted, &promotion, charter).unwrap()
 }
 
 fn structured_problem(seed: u8) -> ValidatedSpectralProblemV1 {
@@ -685,8 +685,8 @@ fn structured_problem(seed: u8) -> ValidatedSpectralProblemV1 {
         SpectralScalarFieldV1::Real,
         class,
         scaling,
-        metric.clone(),
-        metric.clone(),
+        &metric,
+        &metric,
         StructurePropertyV1::SelfAdjoint,
         support,
         WitnessDispositionV1::Witnessed,

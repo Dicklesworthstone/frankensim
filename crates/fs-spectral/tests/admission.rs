@@ -281,7 +281,7 @@ fn admit_receipt(
 ) -> AdmittedSpectralWitnessV1 {
     let (admitted, promotion, charter) =
         policy_relative_and_promotion(receipt, exact_authority(receipt, seed));
-    AdmittedSpectralWitnessV1::from_authority(&admitted, promotion, charter).unwrap()
+    AdmittedSpectralWitnessV1::from_authority(&admitted, &promotion, charter).unwrap()
 }
 
 /// An untrusted caller-controlled verifier/admitter pair that accepts every
@@ -417,8 +417,8 @@ fn structure_claim_with_seed(
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain.clone(),
-        axes.codomain.clone(),
+        &axes.domain,
+        &axes.codomain,
         property,
         support,
         disposition,
@@ -466,8 +466,8 @@ fn regularity_claim(
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain.clone(),
-        axes.codomain.clone(),
+        &axes.domain,
+        &axes.codomain,
         class,
         disposition,
     )
@@ -596,8 +596,8 @@ fn authority_typestate_checks_subject_preimage_anchor_verifier_and_policy() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain.clone(),
-        axes.codomain.clone(),
+        &axes.domain,
+        &axes.codomain,
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
     )
@@ -674,8 +674,8 @@ fn configured_root_refuses_permit_all_bindings_outside_its_configuration() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain.clone(),
-        axes.codomain.clone(),
+        &axes.domain,
+        &axes.codomain,
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
     )
@@ -776,23 +776,23 @@ fn favorable_witness_pairing_refuses_every_mismatched_promotion_axis() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain.clone(),
-        axes.codomain.clone(),
+        &axes.domain,
+        &axes.codomain,
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
     )
     .unwrap();
     let authority = exact_authority(receipt, 42);
     let (admitted, promotion, pinned) = policy_relative_and_promotion(receipt, authority);
-    AdmittedSpectralWitnessV1::from_authority(&admitted, promotion, pinned).unwrap();
+    AdmittedSpectralWitnessV1::from_authority(&admitted, &promotion, pinned).unwrap();
 
     let other_receipt = regularity_proposition_receipt(
         axes.subject,
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain.clone(),
-        axes.codomain.clone(),
+        &axes.domain,
+        &axes.codomain,
         RegularityClassV1::RegularPencil,
         WitnessDispositionV1::Witnessed,
     )
@@ -800,13 +800,13 @@ fn favorable_witness_pairing_refuses_every_mismatched_promotion_axis() {
     let (_, other_subject, _) =
         policy_relative_and_promotion(other_receipt, exact_authority(other_receipt, 42));
     assert_eq!(
-        AdmittedSpectralWitnessV1::from_authority(&admitted, other_subject, pinned),
+        AdmittedSpectralWitnessV1::from_authority(&admitted, &other_subject, pinned),
         Err(SpectralPromotionBindingErrorV1::Subject)
     );
 
     let (_, other_anchor, _) = policy_relative_and_promotion(receipt, exact_authority(receipt, 43));
     assert_eq!(
-        AdmittedSpectralWitnessV1::from_authority(&admitted, other_anchor, pinned),
+        AdmittedSpectralWitnessV1::from_authority(&admitted, &other_anchor, pinned),
         Err(SpectralPromotionBindingErrorV1::Anchor)
     );
 
@@ -816,7 +816,7 @@ fn favorable_witness_pairing_refuses_every_mismatched_promotion_axis() {
     };
     let (_, other_verifier, _) = policy_relative_and_promotion(receipt, foreign_verifier);
     assert_eq!(
-        AdmittedSpectralWitnessV1::from_authority(&admitted, other_verifier, pinned),
+        AdmittedSpectralWitnessV1::from_authority(&admitted, &other_verifier, pinned),
         Err(SpectralPromotionBindingErrorV1::Verifier)
     );
 
@@ -826,7 +826,7 @@ fn favorable_witness_pairing_refuses_every_mismatched_promotion_axis() {
     };
     let (_, other_policy, _) = policy_relative_and_promotion(receipt, foreign_policy);
     assert_eq!(
-        AdmittedSpectralWitnessV1::from_authority(&admitted, other_policy, pinned),
+        AdmittedSpectralWitnessV1::from_authority(&admitted, &other_policy, pinned),
         Err(SpectralPromotionBindingErrorV1::KeyPolicy)
     );
 
@@ -848,7 +848,7 @@ fn favorable_witness_pairing_refuses_every_mismatched_promotion_axis() {
         )
         .unwrap();
     assert_eq!(
-        AdmittedSpectralWitnessV1::from_authority(&admitted, wrong_context, pinned),
+        AdmittedSpectralWitnessV1::from_authority(&admitted, &wrong_context, pinned),
         Err(SpectralPromotionBindingErrorV1::Context)
     );
 }
@@ -1546,8 +1546,8 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain.clone(),
-        axes.codomain.clone(),
+        &axes.domain,
+        &axes.codomain,
         GaugePropositionV1::Fixed {
             nullity: 1,
             gauge: fixed_gauge,
@@ -1630,8 +1630,8 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain.clone(),
-            axes.codomain.clone(),
+            &axes.domain,
+            &axes.codomain,
             GaugePropositionV1::Quotiented {
                 nullity: 1,
                 quotient: quotient_a,
@@ -1696,8 +1696,8 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain.clone(),
-            axes.codomain.clone(),
+            &axes.domain,
+            &axes.codomain,
             GaugePropositionV1::Quotiented {
                 nullity: 1,
                 quotient: quotient_b,
@@ -1750,8 +1750,7 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain.clone(),
-            axes.codomain.clone(),
+            (&axes.domain, &axes.codomain),
             GaugeContextV1::Quotiented {
                 nullity: 1,
                 quotient: quotient_a,
@@ -1822,8 +1821,8 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain.clone(),
-            axes.codomain.clone(),
+            &axes.domain,
+            &axes.codomain,
             GaugePropositionV1::Quotiented {
                 nullity: large_nullity,
                 quotient: large_quotient,
@@ -1838,8 +1837,7 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain.clone(),
-            axes.codomain.clone(),
+            (&axes.domain, &axes.codomain),
             GaugeContextV1::Quotiented {
                 nullity: large_nullity,
                 quotient: large_quotient,
@@ -2169,8 +2167,8 @@ fn gap_interpretation_requires_explicit_gauge_and_zero_serialization_semantics()
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain.clone(),
-            axes.codomain.clone(),
+            &axes.domain,
+            &axes.codomain,
             GaugePropositionV1::None,
         )
         .unwrap(),
@@ -2182,8 +2180,7 @@ fn gap_interpretation_requires_explicit_gauge_and_zero_serialization_semantics()
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain.clone(),
-            axes.codomain.clone(),
+            (&axes.domain, &axes.codomain),
             GaugeContextV1::CertifiedNone,
             ZeroPaddingPropositionV1::NonePresent,
         )
@@ -2224,8 +2221,8 @@ fn gap_interpretation_requires_explicit_gauge_and_zero_serialization_semantics()
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain.clone(),
-            axes.codomain.clone(),
+            &axes.domain,
+            &axes.codomain,
             GaugePropositionV1::Fixed {
                 nullity: 1,
                 gauge: fixed_gauge,
@@ -2240,8 +2237,7 @@ fn gap_interpretation_requires_explicit_gauge_and_zero_serialization_semantics()
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain.clone(),
-            axes.codomain.clone(),
+            (&axes.domain, &axes.codomain),
             GaugeContextV1::Fixed {
                 nullity: 1,
                 gauge: fixed_gauge,
@@ -2591,8 +2587,8 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain.clone(),
-        axes.codomain.clone(),
+        &axes.domain,
+        &axes.codomain,
         RegularityClassV1::RegularDescriptor,
         WitnessDispositionV1::Witnessed,
     )
@@ -2627,7 +2623,7 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         WitnessDispositionV1::Witnessed,
         AdmittedSpectralWitnessV1::from_authority(
             &admitted,
-            reobserved_promotion,
+            &reobserved_promotion,
             observation_root.charter(),
         )
         .unwrap(),
@@ -2665,7 +2661,7 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         WitnessDispositionV1::Witnessed,
         AdmittedSpectralWitnessV1::from_authority(
             &admitted,
-            length_promotion,
+            &length_promotion,
             length_root.charter(),
         )
         .unwrap(),
@@ -2704,7 +2700,7 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         WitnessDispositionV1::Witnessed,
         AdmittedSpectralWitnessV1::from_authority(
             &admitted,
-            policy_promotion,
+            &policy_promotion,
             policy_root.charter(),
         )
         .unwrap(),
@@ -4131,8 +4127,8 @@ fn truth_resource_caps_precede_sorting_hashing_and_reference_scans() {
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain.clone(),
-            axes.codomain.clone(),
+            &axes.domain,
+            &axes.codomain,
             RegularityClassV1::FiniteDimensional,
             WitnessDispositionV1::Witnessed,
         )
@@ -5147,8 +5143,8 @@ fn real_spectrum_truth_and_total_cardinality_do_not_depend_on_ordering() {
             polynomial_axes.scalar,
             polynomial_axes.class,
             polynomial_axes.scaling,
-            polynomial_axes.domain.clone(),
-            polynomial_axes.codomain.clone(),
+            &polynomial_axes.domain,
+            &polynomial_axes.codomain,
             GaugePropositionV1::Quotiented {
                 nullity: 3,
                 quotient,
@@ -6389,8 +6385,8 @@ fn self_configured_root_witnesses_fail_the_pinned_charter() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain.clone(),
-        axes.codomain.clone(),
+        &axes.domain,
+        &axes.codomain,
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
     )
@@ -6437,12 +6433,16 @@ fn self_configured_root_witnesses_fail_the_pinned_charter() {
 
     // Every identity axis matches between the pair; only the charter differs.
     assert_eq!(
-        AdmittedSpectralWitnessV1::from_authority(&rogue_admitted, rogue_witness.clone(), pinned),
+        AdmittedSpectralWitnessV1::from_authority(&rogue_admitted, &rogue_witness, pinned),
         Err(SpectralPromotionBindingErrorV1::RootCharter)
     );
     // The pair passes when the consumer pins the ROGUE charter — proving the
     // refusal above is exactly the provenance discrimination, not an
     // incidental binding mismatch.
-    AdmittedSpectralWitnessV1::from_authority(&rogue_admitted, rogue_witness, rogue_root.charter())
-        .expect("identity axes all match within the rogue pair");
+    AdmittedSpectralWitnessV1::from_authority(
+        &rogue_admitted,
+        &rogue_witness,
+        rogue_root.charter(),
+    )
+    .expect("identity axes all match within the rogue pair");
 }
