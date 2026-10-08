@@ -41,12 +41,19 @@ at every joint.
   on fs-lbm internals); the report carries its MODEL-FORM HONESTY
   label. Two full flow-throughs (one was MEASURED unsettled:
   steadiness 1.1e-3 → 5.5e-6 after two).
-- `certify::{certify, CertifyReport, LdSurrogate}` — the 2-state
-  pitch model (stiffness from the BEM lift slope, damping from
-  thickness), closed-form Lyapunov P from AᵀP + PA = −I verified by
-  fs-sos; the CERTIFIED ROA proxy = P-ellipsoid area under the pitch
-  saturation bound, 0.0 WHEN UNCERTIFIED (never pretended); the L/D
-  surrogate carries a split-conformal band, coverage GATED.
+- `certify::{certify, CertifyReport, LdSurrogate, pitch_dynamics,
+  STALL_ANGLE}` — the 2-state NONLINEAR pitch model
+  `θ̈ = −kθ(1 − θ²/θ_s²) − dθ̇` (stiffness from the BEM lift slope,
+  damping from thickness and flapping, cubic stall softening so the
+  post-stall trims at ±θ_s are saddles and the basin is finite);
+  `V = xᵀPx` from the Lyapunov equation of the linearization; the
+  region of attraction `{xᵀPx ≤ c}` is PROVED by fs-sos (SOS
+  S-procedure identity verified with interval arithmetic + interval
+  Cholesky) with the level searched from the analytic saddle ceiling
+  `c < θ_s²/(P⁻¹)₁₁`; `roa_volume` is the certified ellipse area, 0.0
+  WHEN UNCERTIFIED (never pretended); the linearization is
+  cross-checked by `AᵀP + PA ≺ 0`; the L/D surrogate carries a
+  split-conformal band, coverage GATED.
 - `atlas::{build_atlas, Atlas, AtlasRow}` — NSGA-II over (−L/D,
   −ROA, −maneuver, inlet violation); every row carries its stability
   certificate, surrogate prediction, and gene lineage; hypervolume +
@@ -103,8 +110,12 @@ None.
 - **orn-003** refine: LBM control-volume lift agrees with the panel
   sign; steadiness 5.5e-6 after two flow-throughs; honesty label
   present.
-- **orn-004** certify: Lyapunov certificate verified; certified ROA
-  0.66; conformal coverage 0.97 on 60 fresh candidates (target 0.90).
+- **orn-004** certify: SOS region of attraction verified; certified
+  ROA area positive; conformal coverage ≥ 0.85 on 60 fresh candidates
+  (target 0.90).
+- **orn-004b** basin: for three candidates, 48 RK4 trajectories started
+  on the certified ellipse boundary all return to trim, the ellipse
+  stays inside |θ| < θ_s, and a start at 1.2 θ_s departs.
 - **orn-005** atlas: 24 certified rows, hypervolume 56.4, knee
   attached, adjoint polish L/D 7.64 → 9.41; roa>0 ⇔ certified on
   every row.

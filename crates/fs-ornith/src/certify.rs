@@ -1,82 +1,159 @@
-//! Stage 4: TRIM AND CERTIFY. A 2-state pitch model per candidate
-//! (θ̈ = −k(c)·θ − d(c)·θ̇, stiffness from the BEM lift slope,
-//! damping from thickness — the smoke reduced model; Koopman/DMD
-//! reduced models with per-trim conformal e-bands are the recorded
-//! successor). Stability is not a vibe: fs-sos certifies the Lyapunov
-//! matrix (A ᵀP + PA ≺ 0), and the CERTIFIED region-of-attraction
-//! proxy is the volume of the P-ellipsoid level set under the trim
-//! saturation bound. The screening surrogate carries a DISTRIBUTION-
-//! FREE conformal band (fs-surrogate) — certify-or-escalate, gated on
-//! coverage.
+//! Stage 4: TRIM AND CERTIFY. A 2-state nonlinear pitch model per
+//! candidate,
+//!
+//! ```text
+//! θ̈ = −k(c)·θ·(1 − θ²/θ_s²) − d(c)·θ̇
+//! ```
+//!
+//! with the restoring stiffness from the BEM lift slope, damping from
+//! thickness and flapping (the smoke reduced model), and the cubic STALL
+//! SOFTENING that makes the region of attraction genuinely finite: past
+//! the stall angle `θ_s` the restoring moment reverses, the trims at
+//! `θ = ±θ_s` are saddles, and their stable manifolds bound the basin.
+//! (Koopman/DMD reduced models with per-trim conformal e-bands are the
+//! recorded successor.)
+//!
+//! Stability is not a vibe: fs-sos PROVES a region of attraction — an
+//! SOS Lyapunov/S-procedure certificate, verified with interval
+//! arithmetic and interval Cholesky, that `V̇ ≤ −ε‖x‖²` on the ellipse
+//! `{xᵀPx ≤ c}` — and the reported ROA volume is that ellipse's area. A
+//! candidate whose certificate does not verify gets volume 0, never a
+//! pretended basin. The linearization is cross-checked by the classic
+//! `AᵀP + PA ≺ 0` Lyapunov test. The screening surrogate carries a
+//! DISTRIBUTION-FREE conformal band (fs-surrogate) — certify-or-escalate,
+//! gated on coverage.
 
 use crate::param::OrnithCandidate;
 use crate::screen::lift_to_drag;
-use fs_sos::lyapunov_certifies_stability;
+use fs_sos::{
+    MPoly, RoaOptions, SdpSettings, certify_roa_with, lyapunov_certifies_stability, solve_lyapunov,
+};
 use fs_surrogate::{ConformalBand, conformal_band};
+
+/// Stall angle of the cubic pitch-softening model (rad).
+pub const STALL_ANGLE: f64 = 0.35;
 
 /// The stability certificate row.
 #[derive(Debug, Clone)]
 pub struct CertifyReport {
-    /// Pitch dynamics matrix (companion form).
+    /// Pitch dynamics linearization at trim (companion form).
     pub a: [[f64; 2]; 2],
-    /// The certified Lyapunov matrix (when certified).
+    /// The Lyapunov matrix of the certified quadratic `V = xᵀPx`.
     pub p: [[f64; 2]; 2],
-    /// SOS/Lyapunov certificate verified.
+    /// SOS region-of-attraction certificate verified (and the
+    /// linearization's Lyapunov inequality holds).
     pub certified: bool,
-    /// Certified ROA proxy volume (P-ellipsoid area at the saturation
-    /// level; 0.0 when uncertified — never pretended).
+    /// The proved sublevel `c` of `{xᵀPx ≤ c}` (0.0 when uncertified).
+    pub level: f64,
+    /// Area of the certified ellipse in the (θ, θ̇) plane (0.0 when
+    /// uncertified — never pretended).
     pub roa_volume: f64,
+    /// Number of SOS feasibility solves the certificate took.
+    pub sos_solves: usize,
     /// Maneuver proxy: control authority over pitch stiffness.
     pub maneuver: f64,
 }
 
-/// The candidate's pitch model: stiffness from the lift slope at trim,
-/// damping from section thickness (thicker = more damped, the smoke
-/// law).
+/// The candidate's pitch stiffness and damping: stiffness from the lift
+/// slope at trim, damping from section thickness and flapping (thicker =
+/// more damped, the smoke law).
 #[must_use]
-pub fn pitch_model(c: &OrnithCandidate) -> [[f64; 2]; 2] {
+pub fn pitch_coefficients(c: &OrnithCandidate) -> (f64, f64) {
     let foil = c.section(crate::screen::PANELS);
     let dcl = fs_bem::panel2d::dcl_dalpha_adjoint(&foil, c.alpha)
         .expect("ornith candidate must satisfy the bounded adjoint contract");
     let k = 0.4 * dcl; // restoring stiffness ∝ lift slope
     let d = 8.0 * c.thickness + 0.4 * c.flap_amp; // damping
+    (k, d)
+}
+
+/// The candidate's linearized pitch matrix at trim.
+#[must_use]
+pub fn pitch_model(c: &OrnithCandidate) -> [[f64; 2]; 2] {
+    let (k, d) = pitch_coefficients(c);
     [[0.0, 1.0], [-k, -d]]
+}
+
+/// The nonlinear pitch vector field `(θ̇, −kθ + (k/θ_s²)θ³ − dθ̇)` in the
+/// state `x = (θ, θ̇)`; its float coefficients DEFINE the model the
+/// certificate is about.
+#[must_use]
+pub fn pitch_dynamics(c: &OrnithCandidate) -> Vec<MPoly> {
+    let (k, d) = pitch_coefficients(c);
+    pitch_field(k, d)
+}
+
+/// The pitch vector field for given stiffness and damping.
+fn pitch_field(k: f64, d: f64) -> Vec<MPoly> {
+    let th = MPoly::var(2, 0);
+    let om = MPoly::var(2, 1);
+    let k3 = k / (STALL_ANGLE * STALL_ANGLE);
+    vec![
+        om.clone(),
+        th.scale(-k).add(&th.pow(3).scale(k3)).sub(&om.scale(d)),
+    ]
 }
 
 /// Certify one candidate's trim state.
 #[must_use]
 pub fn certify(c: &OrnithCandidate) -> CertifyReport {
-    let a = pitch_model(c);
-    // Candidate Lyapunov matrix from the (2×2) Lyapunov equation with
-    // Q = I, solved in closed form for the companion structure.
-    let (k, d) = (-a[1][0], -a[1][1]);
-    // For A = [[0,1],[−k,−d]], P = [[p11,p12],[p12,p22]] solving
-    // AᵀP + PA = −I in closed form:
-    //   −2k·p12 = −1            → p12 = 1/(2k)
-    //   2(p12 − d·p22) = −1     → p22 = (p12 + 1/2)/d
-    //   p11 = d·p12 + k·p22     (off-diagonal stationarity)
-    let p12 = 1.0 / (2.0 * k);
-    let p22 = (p12 + 0.5) / d;
-    let p11 = d.mul_add(p12, k * p22);
-    let p = [[p11, p12], [p12, p22]];
-    let certified = k > 0.0 && d > 0.0 && lyapunov_certifies_stability(a, p);
-    // ROA proxy: the ellipsoid {xᵀPx ≤ c*} inside the pitch saturation
-    // |θ| ≤ 0.35 rad: c* = 0.35²/ (P⁻¹)₁₁-normalized bound; area =
-    // π·c*/√det P.
-    let roa_volume = if certified {
-        let det = p11.mul_add(p22, -(p12 * p12));
-        let cstar = 0.35 * 0.35 * det / p22; // sup |θ| on the ellipse
-        std::f64::consts::PI * cstar / fs_math::det::sqrt(det)
-    } else {
-        0.0
-    };
+    // One BEM adjoint solve feeds both the linearization and the field.
+    let (k, d) = pitch_coefficients(c);
+    let a = [[0.0, 1.0], [-k, -d]];
     let maneuver = c.flap_amp * c.flap_freq / (k + 0.2);
-    CertifyReport {
-        a,
-        p,
-        certified,
-        roa_volume,
-        maneuver,
+    let roa = if k > 0.0 && d > 0.0 {
+        // V = xᵀPx from the Lyapunov equation of the linearization (Q = I).
+        // The post-stall saddles (±θ_s, 0) are equilibria, so no certified
+        // ellipse can reach them: max θ on {xᵀPx ≤ c} is √(c·(P⁻¹)₁₁), giving
+        // the strict ceiling c < θ_s²/(P⁻¹)₁₁. Starting the level search there
+        // avoids paying for SDPs that must fail.
+        let a_flat = [a[0][0], a[0][1], a[1][0], a[1][1]];
+        solve_lyapunov(&a_flat, &[1.0, 0.0, 0.0, 1.0], 2).and_then(|p| {
+            let det = p[0].mul_add(p[3], -(p[1] * p[2]));
+            let pinv11 = p[3] / det;
+            let ceiling = STALL_ANGLE * STALL_ANGLE / pinv11;
+            let opts = RoaOptions {
+                level_cap: ceiling,
+                relative_tolerance: 1e-2,
+                sdp: SdpSettings {
+                    max_iter: 60,
+                    ..SdpSettings::default()
+                },
+                ..RoaOptions::default()
+            };
+            (det > 0.0 && ceiling.is_finite() && ceiling > 0.0)
+                .then(|| certify_roa_with(&pitch_field(k, d), &p, 1e-3, &opts).ok())
+                .flatten()
+        })
+    } else {
+        None
+    };
+    match roa {
+        Some(r) => {
+            let p = [
+                [r.lyapunov[0], r.lyapunov[1]],
+                [r.lyapunov[2], r.lyapunov[3]],
+            ];
+            let certified = lyapunov_certifies_stability(a, p);
+            CertifyReport {
+                a,
+                p,
+                certified,
+                level: if certified { r.level } else { 0.0 },
+                roa_volume: if certified { r.volume } else { 0.0 },
+                sos_solves: r.sos_solves,
+                maneuver,
+            }
+        }
+        None => CertifyReport {
+            a,
+            p: [[0.0; 2]; 2],
+            certified: false,
+            level: 0.0,
+            roa_volume: 0.0,
+            sos_solves: 0,
+            maneuver,
+        },
     }
 }
 
