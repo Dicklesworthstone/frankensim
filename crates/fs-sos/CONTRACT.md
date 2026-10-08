@@ -6,8 +6,9 @@ soundly scoped polynomial lower bounds.
 ## Purpose and layer
 
 Layer L4 (ASCENT). Production code is safe Rust and depends on `fs-ivl` for
-exact expansion arithmetic and `fs-math` for error-free products. The PSD path
-uses an in-house Jacobi eigensolver. `fs-obs` is test-only evidence plumbing.
+exact expansion arithmetic and outward-rounded intervals and `fs-math` for
+error-free products. The PSD path uses an in-house Jacobi eigensolver; the SDP
+engine is in-house (no BLAS/LAPACK). `fs-obs` is test-only evidence plumbing.
 
 ## Public types and semantics
 
@@ -32,6 +33,39 @@ uses an in-house Jacobi eigensolver. `fs-obs` is test-only evidence plumbing.
 - `lyapunov_certifies_stability(A, P)` verifies the fixed two-dimensional
   quadratic Lyapunov inequalities for a supplied `P`.
 
+### Multivariate proof-carrying layer (plan §9.8)
+
+- `MPoly` / `IPoly`: multivariate polynomials with `f64` / interval
+  coefficients (BTreeMap-ordered, exact zeros dropped, tiny coefficients never
+  trimmed). `lie_derivative(V, f)` encloses `∇V·f` from exact float inputs.
+- `sdp::solve`: primal–dual interior point (HKM direction, Mehrotra
+  predictor–corrector) for block SDPs with exactly-handled free variables.
+  Statuses: `Optimal`, `NearOptimal` (stalled within `tol_inaccurate`),
+  heuristic `PrimalInfeasible`/`DualInfeasible`, `MaxIterations`, `Stalled`,
+  `NumericalFailure`. Its output is UNTRUSTED.
+- `SosProgram`: scalar / free-polynomial / SOS decisions and polynomial
+  identities `constant + Σ multiplier·decision ≡ 0` (interval constants and
+  multipliers), lowered to the block SDP. `solve_centered` pins scalars and
+  maximizes a uniform Gram margin `t` (`Q ⪰ tI`, `t ≤ t_cap`).
+- `verify(program, values) -> Certificate`: the only path to a claim. One SOS
+  term with a constant nonzero point multiplier per identity is the slack; all
+  other values are taken exactly; the residual is enclosed with intervals and
+  absorbed into designated slack-Gram entries; positive definiteness of every
+  Gram matrix is proved by the interval Cholesky method (Alefeld–Mayer 1993:
+  feasibility of interval Cholesky ⇒ every symmetric member is PD).
+- `minimize(p, constraints, opts) -> GlobalBound`: Lasserre/Putinar
+  relaxation; `lower` is PROVED (backed-off γ re-solved centred and verified),
+  `upper` is the interval-enclosed `p` at a feasible point extracted from the
+  moments (Henrion–Lasserre column-echelon extraction, mean/eigenvector
+  fallbacks, Newton polish when unconstrained). Unconstrained bases are pruned
+  by coordinate/degree half-Newton-polytope tests plus iterative diagonal
+  consistency (both sound).
+- `certify_roa(f, opts) / certify_roa_with(f, P, ε, opts) -> RoaCertificate`:
+  `V = xᵀPx` (default: Lyapunov equation of `Df(0)` with `Q = I`), `P ≻ 0`
+  proved by interval Cholesky, and the S-procedure identity
+  `−V̇ − ε‖x‖² − s·(c − V) = σ₀` proved by `verify` at each reported level;
+  bisection only reports verified levels.
+
 ## Invariants
 
 - A value returned by `certified_bound_global` is sound for every real `x`.
@@ -43,6 +77,14 @@ uses an in-house Jacobi eigensolver. `fs-obs` is test-only evidence plumbing.
   global bound of `2` and is covered by a bit-complete replay receipt.
 - PSD and Lyapunov decisions are made from the symmetric quadratic form, so an
   asymmetric matrix cannot forge a certificate through ignored entries.
+- A `Certificate` from `verify` implies: every identity holds exactly for real
+  polynomials whose coefficients are the given floats (non-slack decisions)
+  and some member of the enclosed slack Gram matrix, and every Gram matrix is
+  positive definite. No SDP output is ever trusted without it.
+- `GlobalBound::lower ≤ min p ≤ GlobalBound::upper` whenever both are present.
+- `RoaCertificate::level` was verified: `V̇ ≤ −ε‖x‖² < 0` on
+  `{xᵀPx ≤ level} \ {0}`, an ellipsoid, hence an inner estimate of the region
+  of attraction of the polynomial model.
 
 ## Error model
 
@@ -64,7 +106,8 @@ paths.
 
 ## Cancellation behavior
 
-None. Current operations are finite, synchronous functions without `Cx`.
+None. Operations are finite, synchronous functions without `Cx`; the SDP has an
+iteration cap and ROA bisection a step cap, so every call terminates.
 
 ## Unsafe boundary
 
@@ -81,6 +124,15 @@ None.
   radius-scoped bounds, the historical tolerance-forgery counterexample,
   invalid quadratic input, symmetric-form PSD behavior, Lyapunov verification,
   and deterministic repetition.
+- `tests/multivariate.rs`: certified enclosures against a dense-grid oracle
+  (nonconvex quartic) and the literature six-hump-camel minimum (G2, both
+  minimizers extracted); the Motzkin falsifier (never SOS: must refuse, never
+  claim); a Putinar disk bound (−√2); inflated-bound and forged-Gram
+  falsifiers; bit-identical replay (G5); ROA soundness on `ẋ = −x + x³`
+  (proved level strictly below the exact 0.5 boundary) and on the reversed
+  Van der Pol oscillator, where RK4 trajectories from 64 boundary points of
+  the certified ellipsoid all converge and `V̇ < 0` there, while the set stays
+  inside the limit cycle; unstable/non-equilibrium refusals.
 - `tests/quadratic_study_replay.rs` is a G5 exact-dyadic production fixture. It
   binds the complete `certify_quadratic` result and derived public verdicts,
   checks retained schema-v1 fixture/result roots, requires byte-identical
@@ -95,12 +147,21 @@ None.
   authentication; the current replay root is a non-cryptographic house digest.
 - `certify_quadratic` is not claimed expansion-exact for every floating input,
   and `verify(p, tol)` is never a global theorem merely because it passes.
-- General univariate or multivariate certificate search, Lasserre/moment
-  relaxations, Burer-Monteiro SDP optimization, and Positivstellensatz
-  machinery are staged. The crate currently checks supplied certificates and
-  constructs only quadratics.
+- The SDP engine is a dense second-order interior-point method sized for
+  low-dimensional programs (Gram blocks up to a few hundred, Schur systems up
+  to roughly a thousand rows). Burer–Monteiro low-rank first-order solving for
+  scale, sparse Schur assembly, and chordal decomposition are staged.
+- SDP infeasibility statuses are divergence heuristics, not verified Farkas
+  certificates; a refusal from `minimize`/`certify_roa` asserts nothing about
+  the problem.
+- `minimize` uses a caller-fixed relaxation order and makes no claim of
+  finite convergence; a large gap means raise the order. The upper bound's
+  extraction is heuristic (its VALUE is enclosed, its tightness is not).
+- `certify_roa` fixes a quadratic `V`; V–s alternation, polynomial Lyapunov
+  functions, and rational/exact-arithmetic certificates are staged. The
+  theorem is about the supplied polynomial model only.
 - `lyapunov_certifies_stability` verifies a supplied two-dimensional `P`; it
-  does not search for `P` or certify nonlinear regions of attraction.
+  does not search for `P` (use `solve_lyapunov`/`certify_roa`).
 - Under `docs/CERTIFICATE_REGIMES.md`, this is only a local-stability route
   inside the stated model, equilibrium, parameter domain, and Lyapunov
   assumptions. It cannot be widened into global attraction, long-horizon

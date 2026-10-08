@@ -5,7 +5,7 @@ edition.workspace = true
 license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Proof-carrying optimization (fs-sos): sum-of-squares decomposition diagnostics, exact-global and radius-scoped certified value bounds, quadratic certificate construction, PSD feasibility, and linear Lyapunov verification."
+description = "Proof-carrying optimization (fs-sos): multivariate SOS programs on an in-house primal-dual SDP solver, interval-Cholesky verified certificates, certified Lasserre global-minimum enclosures with moment extraction, and SOS Lyapunov region-of-attraction certificates."
 
 [package.metadata.frankensim]
 layer = "L4"

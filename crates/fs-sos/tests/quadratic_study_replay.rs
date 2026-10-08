@@ -614,7 +614,7 @@ fn exact_one_bit_delta(
     repaired.squares[mutation.square][mutation.coefficient] = mutation.before;
     &repaired == reference
         && (mutation.before ^ mutation.after) == 1_u64 << mutation.mantissa_bit
-        && (mutation.before ^ mutation.after).count_ones() == 1
+        && (mutation.before ^ mutation.after).is_power_of_two()
 }
 
 fn seeded_corruption(reference: &StudyRun) -> SeededCorruption {

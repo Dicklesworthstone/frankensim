@@ -71,6 +71,22 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   `ensemble_cvar` exposes the monotonicity probe. These smoke-tier
   orchestrators generate their own finite, non-empty loss sets and treat a
   canonical risk-algebra refusal as an internal programmer-contract defect.
+- `building::BuildingFrame::new(BuildingSpec)` (FULL TIER): a `stories ×
+  bays` RC moment frame on fs-solid `Frame2d` (corotational), every column
+  and beam one force-based element of Gauss–Lobatto fiber sections. Floor
+  mass is lumped equally at the floor's nodes and applied as a gravity
+  preload; periods come from the gravity-loaded tangent, and Rayleigh
+  damping is fitted to modes 1 and `stories`. A degenerate spec is
+  `SolidError::InvalidInput`; preload or modal failure propagates.
+  `run(ag, dt)` returns the per-story peak inter-story drift ratios, the
+  roof history, the peak base shear, the internal work and the Newmark
+  energy-balance error.
+- `building::building_fragility(ensemble, spec, story, limit, alpha,
+  margin)`: e-stopped confidence sequence on `P(peak inter-story drift
+  ratio > limit)` (stop once the radius is `≤ margin`, after ≥ 8 members),
+  plus a two-level multi-fidelity MLMC on the peak drift ratio: level 0 is
+  the smoke-tier story model, level 1 the building-minus-story correction
+  on the same motion (telescoping, so unbiased for the building).
 
 ## Invariants
 
@@ -160,7 +176,7 @@ at ANY member count leaves a valid interval.
 
 ## Feature flags
 
-None (the smoke tier ships enabled; heavier tiers will gate).
+None (the smoke and full building tiers both ship enabled).
 
 ## Conformance tests
 
@@ -176,12 +192,23 @@ refusals at the realization boundary; frame-008 pinned El Centro record,
 provenance/license lint, checked diagnostic response, and diagnostic-only
 OpenSees displacement rounding envelope.
 
+`tests/building.rs` (full tier): building-001 modal band and separation of
+the gravity-loaded 3-story, 2-bay frame, energy-ledger closure and
+inelastic work under a strong record, and metamorphic stiffening (stiffer
+columns → shorter T1 and smaller peak drift); building-002 the e-stopped
+building fragility covering the fixed-N exceedance frequency of the full
+64-member suite, and a finite two-level MLMC; building-003 bitwise replay
+and degenerate-spec refusal.
+
 ## No-claim boundaries
 
 - SMOKE TIER geometry: one story, two identical fiber-hinge columns.
-  Distributed-plasticity frames (fs-solid `ForceBasedElement`
-  columns), multi-story assemblies, and joint modeling are recorded
-  successors.
+- FULL TIER (`building`): planar, rigid joints, fixed bases, no shear
+  failure, bond-slip or joint-panel flexibility; floor mass lumped at the
+  beam–column nodes. Concrete fibers carry no tension, so beams enter the
+  modal analysis cracked under gravity. The fragility is of the model under
+  synthetic Kanai–Tajimi motions, not of a real building. Joint modeling is
+  a recorded successor.
 - One source- and license-pinned Peknold El Centro NS record now exercises the
   checked integrator, but it is a diagnostic fixture, not a recorded-motion
   suite or spectral-matching lane. The OpenSees Example 3 peak roof displacement

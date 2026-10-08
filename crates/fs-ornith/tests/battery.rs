@@ -143,10 +143,71 @@ fn orn_004_certified_stability_and_conformal() {
         "orn-004-certify",
         cert.certified && cert.roa_volume > 0.0 && cov >= 0.85,
         &format!(
-            "Lyapunov certificate verified (A=[[0,1],[{:.3},{:.3}]]); certified ROA volume {:.4}; conformal coverage {cov:.2} on 60 fresh candidates (target 0.90 - slack for finite calibration)",
-            cert.a[1][0], cert.a[1][1], cert.roa_volume
+            "SOS region of attraction verified (A=[[0,1],[{:.3},{:.3}]], level {:.4} after {} SOS solves); certified ROA area {:.4}; conformal coverage {cov:.2} on 60 fresh candidates (target 0.90 - slack for finite calibration)",
+            cert.a[1][0], cert.a[1][1], cert.level, cert.sos_solves, cert.roa_volume
         ),
     );
+}
+
+/// orn-004b: the certified basin is REAL. Independent RK4 trajectories of
+/// the nonlinear pitch model started on the boundary of the certified
+/// ellipse all return to trim, the ellipse stays inside the post-stall
+/// saddles (|θ| < θ_s), and a start just past the stall saddle departs —
+/// so the certificate is neither vacuous nor oversized.
+#[test]
+fn orn_004b_certified_basin_survives_independent_simulation() {
+    use fs_ornith::certify::{STALL_ANGLE, pitch_dynamics};
+    for genes in [
+        [0.5; 5],
+        [0.1, 0.9, 0.3, 0.2, 0.7],
+        [0.9, 0.1, 0.6, 0.8, 0.2],
+    ] {
+        let c = OrnithCandidate::from_genes(&genes);
+        let cert = certify(&c);
+        assert!(cert.certified, "candidate {genes:?} not certified");
+        let f = pitch_dynamics(&c);
+        let eval = |s: &[f64; 2]| -> [f64; 2] { [f[0].eval(s), f[1].eval(s)] };
+        let run = |mut s: [f64; 2]| -> bool {
+            let dt = 2e-3;
+            for _ in 0..20_000 {
+                let k1 = eval(&s);
+                let k2 = eval(&[s[0] + 0.5 * dt * k1[0], s[1] + 0.5 * dt * k1[1]]);
+                let k3 = eval(&[s[0] + 0.5 * dt * k2[0], s[1] + 0.5 * dt * k2[1]]);
+                let k4 = eval(&[s[0] + dt * k3[0], s[1] + dt * k3[1]]);
+                for i in 0..2 {
+                    s[i] += dt / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]);
+                }
+                if !(s[0].abs() < 10.0) {
+                    return false;
+                }
+            }
+            s[0].hypot(s[1]) < 1e-3
+        };
+        let p = cert.p;
+        let v = |s: [f64; 2]| {
+            p[0][0] * s[0] * s[0] + 2.0 * p[0][1] * s[0] * s[1] + p[1][1] * s[1] * s[1]
+        };
+        let mut max_theta = 0.0f64;
+        for k in 0..48 {
+            let th = 2.0 * std::f64::consts::PI * f64::from(k) / 48.0;
+            let dir = [th.cos(), th.sin()];
+            let r = (cert.level / v(dir)).sqrt() * (1.0 - 1e-9);
+            let s0 = [dir[0] * r, dir[1] * r];
+            max_theta = max_theta.max(s0[0].abs());
+            assert!(
+                run(s0),
+                "{genes:?}: trajectory from the certified boundary at {s0:?} escaped"
+            );
+        }
+        let departs = !run([1.2 * STALL_ANGLE, 0.0]);
+        verdict(
+            "orn-004b-basin",
+            max_theta < STALL_ANGLE && departs,
+            &format!(
+                "{genes:?}: 48 boundary starts converge; certified |theta| <= {max_theta:.4} < stall {STALL_ANGLE}; start at 1.2 stall departs = {departs}"
+            ),
+        );
+    }
 }
 
 /// orn-005: the PARETO ATLAS — the front is nonempty, every row
