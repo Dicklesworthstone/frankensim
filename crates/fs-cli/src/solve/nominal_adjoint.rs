@@ -10,6 +10,9 @@
 //! controls through the complete lift, without changing legacy report bytes.
 //! `temperature-max-contact-boundary-adjoint` requests BOTH control families
 //! from that same solve/dual; it does not request two independent analyses.
+//! `temperature-volume-mean-adjoint` instead differentiates the spatial volume
+//! mean over that same declared requirement region, including both control
+//! families. The maximum requirement and its uncertainty budget are unchanged.
 //!
 //! Reuse production adjoints, contact operators and complete boundary feedback.
 //! Only contractions of native input laws live here; no perturbed primal or
@@ -36,6 +39,7 @@ mod nonlinear_solid;
 mod prescribed_controls;
 mod radiative_feedback;
 mod surface_power;
+mod volume_mean;
 
 const OUTPUT: &str = "temperature-max-adjoint";
 const COMBINED_OUTPUT: &str = "temperature-max-contact-boundary-adjoint";
@@ -96,9 +100,16 @@ pub(super) fn requested(spec: &ProjectSpec) -> Result<bool, SolveRefusal> {
     let rows = spec.outputs.as_deref().unwrap_or(&[]);
     let mut found = false;
     for row in rows.iter().filter(|row| row.name == OUTPUT || row.name == contact_controls::OUTPUT
-        || row.name == prescribed_controls::OUTPUT || row.name == COMBINED_OUTPUT) {
+        || row.name == prescribed_controls::OUTPUT || row.name == COMBINED_OUTPUT
+        || row.name == volume_mean::OUTPUT) {
         if found || row.kind != "report" {
-            return Err(bad("choose exactly one report: temperature-max-adjoint, temperature-max-contact-adjoint, temperature-max-boundary-adjoint or temperature-max-contact-boundary-adjoint"));
+            return Err(bad("choose exactly one report: temperature-max-adjoint, temperature-max-contact-adjoint, temperature-max-boundary-adjoint, temperature-max-contact-boundary-adjoint or temperature-volume-mean-adjoint"));
+        }
+        if row.name == volume_mean::OUTPUT && crate::SOLVE_DRIVER_VERSION < 48 {
+            return Err(bad("the volume-mean adjoint requires solve driver 48 so older cached reports cannot substitute for this objective"));
+        }
+        if row.name == volume_mean::OUTPUT && row.region.is_some() {
+            return Err(bad("the volume-mean adjoint uses the existing temperature-max requirement region; :region on an output is a surface selector, not a volume selector"));
         }
         found = true;
     }
@@ -129,9 +140,12 @@ pub(super) fn extract(
     admit_state_laws(spec)?;
     let combined = spec.outputs.as_deref().unwrap_or(&[]).iter()
         .any(|row| row.name == COMBINED_OUTPUT);
-    let contact_requested = combined || contact_controls::requested(spec);
-    let boundary_requested = combined || prescribed_controls::requested(spec);
-    let output = if combined { COMBINED_OUTPUT }
+    let volume_mean_requested = spec.outputs.as_deref().unwrap_or(&[]).iter()
+        .any(|row| row.name == volume_mean::OUTPUT);
+    let contact_requested = volume_mean_requested || combined || contact_controls::requested(spec);
+    let boundary_requested = volume_mean_requested || combined || prescribed_controls::requested(spec);
+    let output = if volume_mean_requested { volume_mean::OUTPUT }
+        else if combined { COMBINED_OUTPUT }
         else if contact_requested { contact_controls::OUTPUT }
         else if boundary_requested { prescribed_controls::OUTPUT } else { OUTPUT };
     let region = temperature_maximum_region(spec).ok_or_else(|| bad("missing maximum region"))?;
@@ -163,29 +177,44 @@ pub(super) fn extract(
         || parameter_count > MAX_PARAMETERS {
         return Err(bad("nominal adjoint exceeds declared memory or 256-parameter work envelope"));
     }
-    let (vertices, _) = trace_qoi_region_vertices(&solved.labels, &solved.mesh.complex().tets,
-        n, region_id, work).map_err(|error| {
-            if work.is_requested() { conduction_error("cli-solve-cancelled",
-                "nominal region trace interrupted", "resume the accepted pipeline prefix") }
-            else { bad(format!("nominal region trace refused: {error:?}")) }
-        })?;
     let temperature = &solved.solution.temperature;
-    let mut selected = *vertices.first().ok_or_else(|| bad("empty maximum region"))?;
-    for (i, &v) in vertices.iter().enumerate() {
-        if i % 512 == 0 { poll(cx)?; }
-        finite(temperature[v])?;
-        if temperature[v] > temperature[selected]
-            || (temperature[v] == temperature[selected] && v < selected) { selected = v; }
-    }
-    let mut tied = 0;
-    let mut second = None::<f64>;
-    for (i, &v) in vertices.iter().enumerate() {
-        if i % 512 == 0 { poll(cx)?; }
-        if temperature[v] == temperature[selected] { tied += 1; }
-        if v != selected { second = Some(second.map_or(temperature[v], |x| x.max(temperature[v]))); }
-    }
-    let mut weights = zeros(n)?;
-    weights[selected] = 1.0;
+    let (weights, functional_fields) = if volume_mean_requested {
+        let goal = volume_mean::prepare(cx, &solved.mesh, &solved.labels, region_id, temperature)?;
+        let fields = format!(concat!("\"functional\":\"region-volume-mean-temperature\",\"region\":{},",
+            "\"selected_vertex\":null,\"value_k\":{},\"tied_maximum_vertices\":null,\"runner_up_gap_k\":null,",
+            "\"region_volume_m3\":{},\"region_elements\":{},\"region_label\":{},"),
+            json_string(region), number(goal.value_k)?, number(goal.volume_m3)?, goal.elements, region_id);
+        (goal.weights, fields)
+    } else {
+        let (vertices, _) = trace_qoi_region_vertices(&solved.labels, &solved.mesh.complex().tets,
+            n, region_id, work).map_err(|error| {
+                if work.is_requested() { conduction_error("cli-solve-cancelled",
+                    "nominal region trace interrupted", "resume the accepted pipeline prefix") }
+                else { bad(format!("nominal region trace refused: {error:?}")) }
+            })?;
+        let mut selected = *vertices.first().ok_or_else(|| bad("empty maximum region"))?;
+        for (i, &v) in vertices.iter().enumerate() {
+            if i % 512 == 0 { poll(cx)?; }
+            finite(temperature[v])?;
+            if temperature[v] > temperature[selected]
+                || (temperature[v] == temperature[selected] && v < selected) { selected = v; }
+        }
+        let mut tied = 0;
+        let mut second = None::<f64>;
+        for (i, &v) in vertices.iter().enumerate() {
+            if i % 512 == 0 { poll(cx)?; }
+            if temperature[v] == temperature[selected] { tied += 1; }
+            if v != selected { second = Some(second.map_or(temperature[v], |x| x.max(temperature[v]))); }
+        }
+        let mut weights = zeros(n)?;
+        weights[selected] = 1.0;
+        let gap = second.map(|value| number(temperature[selected] - value)).transpose()?
+            .unwrap_or_else(|| "null".into());
+        let fields = format!(concat!("\"functional\":\"selected-nodal-temperature\",\"region\":{},\"selected_vertex\":{},",
+            "\"value_k\":{},\"tied_maximum_vertices\":{},\"runner_up_gap_k\":{},"),
+            json_string(region), selected, number(temperature[selected])?, tied, gap);
+        (weights, fields)
+    };
     let problem = ConductionProblem { mesh: &solved.mesh, boundary: &data.boundary,
         material: &data.fallback, element_materials: Some(&data.materials), source: &data.source };
     let config = LinearGoalAnalysisConfig {
@@ -317,9 +346,13 @@ pub(super) fn extract(
     if boundary_requested {
         prescribed_controls::append(cx, spec, solved, &weights, &lambda, &mut rows, &mut missing, count(32))?;
     }
-    let gap = second.map(|value| number(temperature[selected] - value)).transpose()?
-        .unwrap_or_else(|| "null".into());
-    let scope = if combined { format!("{} {} {}",
+    let scope = if volume_mean_requested { format!("{} {} {}",
+            SCOPE.replace("Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh.", volume_mean::SCOPE)
+                .replace("Not a unique maximum derivative at a tie, a continuum/shape derivative", "Not a continuum/shape derivative")
+                .replace(" and Dirichlet-temperature derivatives", ""),
+            contact_controls::SCOPE,
+            prescribed_controls::SCOPE.replace("direct selected-node objective term", "direct volume-mean objective weights on prescribed nodes")) }
+        else if combined { format!("{} {} {}",
             SCOPE.replace(" and Dirichlet-temperature derivatives", ""),
             contact_controls::SCOPE, prescribed_controls::SCOPE) }
         else if contact_requested { format!("{SCOPE} {}", contact_controls::SCOPE) }
@@ -328,11 +361,10 @@ pub(super) fn extract(
         else { SCOPE.to_string() };
     poll(cx)?;
     Ok(format!(concat!("{{\"schema\":\"frankensim.cli.nominal-adjoint.v1\",\"output\":{},",
-        "\"functional\":\"selected-nodal-temperature\",\"region\":{},\"selected_vertex\":{},",
-        "\"value_k\":{},\"tied_maximum_vertices\":{},\"runner_up_gap_k\":{},\"mode\":{},",
+        "{}\"mode\":{},",
         "\"true_relative_residual\":{},\"dual_iterations\":{},\"stability_iterations\":{},\"response_iterations\":{},",
         "\"parameters\":[{}],\"unsupported\":[{}],\"authority\":\"Estimated\",\"scope\":{}}}"),
-        json_string(output), json_string(region), selected, number(temperature[selected])?, tied, gap, json_string(mode),
+        json_string(output), functional_fields, json_string(mode),
         number(residual)?, dual_iterations,
         stability_iterations.map_or_else(|| "null".into(), |n| n.to_string()),
         response_iterations.map_or_else(|| "null".into(), |n| n.to_string()),
@@ -507,6 +539,34 @@ mod admission_tests {
             assert!(requested(&duplicate).is_err(), "{other}");
         }
         spec.outputs.as_mut().unwrap().last_mut().unwrap().kind = "scalar".into();
+        assert!(requested(&spec).is_err());
+    }
+
+    #[test]
+    fn volume_mean_is_one_explicit_objective_not_an_alias_of_the_maximum() {
+        let mut spec = fs_project::parse_sexpr_migrating(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../examples/contact-pair/contact-pair.fsim"
+        ))).unwrap().decoded.spec;
+        let request = fs_project::spec::OutputRequest {
+            name: volume_mean::OUTPUT.into(), kind: "report".into(), region: None,
+        };
+        spec.outputs.get_or_insert_with(Vec::new).push(request.clone());
+        assert!(requested(&spec).unwrap());
+        for other in [OUTPUT, contact_controls::OUTPUT, prescribed_controls::OUTPUT,
+            COMBINED_OUTPUT, volume_mean::OUTPUT] {
+            let mut duplicate = spec.clone();
+            duplicate.outputs.as_mut().unwrap().push(fs_project::spec::OutputRequest {
+                name: other.into(), ..request.clone()
+            });
+            assert!(requested(&duplicate).is_err(), "{other}");
+        }
+        let mut wrong = spec.clone();
+        wrong.outputs.as_mut().unwrap().last_mut().unwrap().kind = "scalar".into();
+        assert!(requested(&wrong).is_err());
+        wrong = spec.clone();
+        wrong.outputs.as_mut().unwrap().last_mut().unwrap().region = Some("hot".into());
+        assert!(requested(&wrong).is_err(), "output region syntax cannot silently change this volume goal");
+        spec.requirements = None;
         assert!(requested(&spec).is_err());
     }
 }

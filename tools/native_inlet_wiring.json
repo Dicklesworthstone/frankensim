@@ -1,64 +1,10 @@
 {
   "crates/fs-cli/src/solve.rs": {
-    "git_blob": "5940ba5e41bff80ab2408bdc116d3d622791eec1",
+    "git_blob": "ee1793f382f8f7a3b6b5830ee8cb65a9036f62",
     "edits": [
       {
-        "old": "use crate::import::{explicits, json_string};\n",
-        "new": "use crate::import::{explicits, json_string};\n\nmod input_propagation;\nmod joint_parameters;\n"
-      },
-      {
-        "old": "pub const SOLVE_DRIVER_VERSION: u32 = 44;\n",
-        "new": "/// Version 45 preserves independent radiative reservoirs in ambient sweeps\n/// and retains refused joint input corners as unmeasured rather than zero.\n/// Version 46 propagates declared manufactured-joint resistance bands jointly\n/// with conductivity tolerances; unexecuted corner designs remain unmeasured.\n/// Version 47 evaluates every declared boundary/model-form corner, including\n/// stronger coefficients and cold-side deviations; unknown interaction is null.\npub const SOLVE_DRIVER_VERSION: u32 = 47;\n"
-      },
-      {
-        "old": "/// Set every inlet, fluid-reference and radiative-reservoir temperature to\n/// `temperature_k`: all of them are the declared ambient.\nfn with_inlet_temperature(spec: &ProjectSpec, temperature_k: f64) -> ProjectSpec {\n    let mut perturbed = spec.clone();\n    if let Some(setup) = perturbed.cooling.as_mut().and_then(|cooling| cooling.conduction.as_mut()) {\n        if let Some(radiation) = setup.radiation.as_mut() {\n            for surface in &mut radiation.surfaces {\n                surface.reservoir_temperature.value = temperature_k;\n            }\n        }\n        for boundary in &mut setup.boundaries {\n            match &mut boundary.condition {\n                ThermalBoundaryCondition::Convection { reference_temperature, .. } => {\n                    reference_temperature.value = temperature_k;\n                }\n                ThermalBoundaryCondition::AirflowConvection { inlet_temperature, .. } => {\n                    inlet_temperature.value = temperature_k;\n                }\n                ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. } => {\n                    ambient_temperature.value = temperature_k;\n                }\n                _ => {}\n            }\n        }\n    }\n    perturbed\n}\n",
-        "new": "/// Vary only fluid temperatures under the declared ambient envelope.\n/// A radiative reservoir is independently declared, even when numerically equal\n/// to the nominal fluid ambient; no thermal or probabilistic coupling is inferred.\nfn with_inlet_temperature(spec: &ProjectSpec, temperature_k: f64) -> ProjectSpec {\n    input_propagation::with_fluid_temperature(spec, temperature_k)\n}\n"
-      },
-      {
-        "old": "    let mut interaction_excess_k = 0.0;\n    if let (Some(bc), Some(mf), Some(rel), Some(&(temperature, factor, _))) = (\n        boundary.half_width(),\n        model_form.half_width(),\n        allowance,\n        boundary_points.iter().max_by(|a, b| a.2.total_cmp(&b.2)),\n    ) {\n        let project = with_fan_pressure_scale(&with_inlet_temperature(&base, temperature), factor);\n        if let Ok((_, joint)) = vertex(\"joint worst corner\".to_string(), &project, 1.0 - rel)? {\n            interaction_excess_k = ((joint - nominal).abs() - (bc + mf)).max(0.0);\n        }\n    }\n    let boundary = match boundary {\n        PropagatedTerm::Measured { half_width_k, method, detail, vertices } if interaction_excess_k > 0.0 => {\n            PropagatedTerm::Measured {\n                half_width_k: half_width_k + interaction_excess_k,\n                method,\n                detail: format!(\"{detail}; includes {interaction_excess_k} K joint-corner interaction excess\"),\n                vertices,\n            }\n        }\n        other => other,\n    };\n",
-        "new": "    let (boundary, interaction_excess_k) = if let (Some(_), Some(mf), Some(rel)) = (\n        boundary.half_width(), model_form.half_width(), allowance,\n    ) {\n        input_propagation::account_joint_design(\n            boundary, mf, nominal, &boundary_points, rel, input_propagation::MAX_CORNERS,\n            |label, temperature, factor, scale| {\n                let project = with_fan_pressure_scale(&with_inlet_temperature(&base, temperature), factor);\n                vertex(label, &project, scale)\n            },\n        )?\n    } else {\n        // Missing individual evidence does not establish zero interaction.\n        // The existing JSON projection represents this unknown as null.\n        (boundary, f64::NAN)\n    };\n"
-      },
-      {
-        "old": "the boundary vertices move inlet, fluid-reference and declared radiative-reservoir temperatures together",
-        "new": "the boundary vertices move only fluid inlet/reference temperatures; independently declared radiative reservoirs stay fixed and require explicitly declared study inputs to vary"
-      },
-      {
-        "old": "monotone response per input is assumed, one joint corner is checked",
-        "new": "monotone response per input is assumed; every distinct ambient/fan-pressure endpoint is crossed with both common coefficient extremes when the individual terms are measurable; all joint results are retained and any refused corner leaves the boundary contribution unmeasured; unavailable interaction is null, not zero"
-      },
-      {
-        "old": "inlet, fluid-reference and radiative-reservoir temperature over the declared ambient envelope [{lo}, {hi}] K crossed with the declared fan-curve pressure tolerance of {tolerance} (0 when none is declared)",
-        "new": "fluid inlet/reference temperature over the declared ambient envelope [{lo}, {hi}] K crossed with the declared fan-curve pressure tolerance of {tolerance} (0 when none is declared); independently declared radiative reservoirs remain fixed"
-      },
-      {
-        "old": "    // Geometry: every declared surface-offset band moved outward and then\n",
-        "new": "    // Extend declared-parameter propagation without changing the original\n    // conductivity-only path or inventing distributions from joint tolerances.\n    let parameters = joint_parameters::propagate(&base, cards, nominal, parameters, work,\n        |label, project, side| vertex_with(label, project, 1.0, side))?;\n\n    // Geometry: every declared surface-offset band moved outward and then\n"
-      },
-      {
-        "old": "declared material conductivity tolerances move together to each bound for the Parameters term",
-        "new": "declared material conductivity tolerances move together to each bound for the Parameters term; when manufactured-joint bands are declared, all independent contact resistance extrema (including interior source knots) are crossed with those common conductivity extremes; unprovided material uncertainties and parameter/ambient interactions are not bounded"
-      },
-      {
-        "old": "    // Joint worst corner: the hottest boundary vertex with the weaker\n    // coefficient. Excess over the summed half-widths is an interaction the\n    // per-source vertices missed; it is charged to the boundary term.\n",
-        "new": "    // Complete boundary/model-form corner design, with at most eight distinct\n    // re-solves. Stronger convection can amplify either heating or cooling.\n    // Charge excess over the separate widths once; do not publish a subset.\n"
-      }
-    ]
-  },
-  "crates/fs-cli/tests/native_uncertainty/nominal_adjoint/radiative_feedback.rs": {
-    "git_blob": "0aabb141166c8b7345b0c0ddb391b2e47f446994",
-    "edits": [
-      {
-        "old": "#[path = \"boundary_temperatures.rs\"]\nmod boundary_temperatures;\n",
-        "new": "#[path = \"boundary_temperatures.rs\"]\nmod boundary_temperatures;\n\n#[path = \"ambient_envelope.rs\"]\nmod ambient_envelope;\n"
-      }
-    ]
-  },
-  "crates/fs-cli/src/study_uncertainty/model/adjoint/contact/tests.rs": {
-    "git_blob": "f461afc1198ff18aefeaddbc4fb88d5f54cddb35",
-    "edits": [
-      {
-        "old": "#[path = \"mixed.rs\"]\nmod mixed;",
-        "new": "#[path = \"mixed.rs\"]\nmod mixed;\n\n#[path = \"bands.rs\"]\nmod bands;"
+        "old": "pub const SOLVE_DRIVER_VERSION: u32 = 47;\n",
+        "new": "/// Version 48 adds the explicit regional volume-mean thermal adjoint; older\n/// runs that ignored that report name cannot substitute for its results.\npub const SOLVE_DRIVER_VERSION: u32 = 48;\n"
       }
     ]
   }
