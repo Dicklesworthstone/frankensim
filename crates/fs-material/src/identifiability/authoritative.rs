@@ -22,7 +22,25 @@
 //! and observation operators can jointly break symmetries that no single case
 //! can resolve.
 
-use super::*;
+use super::{
+    ArtifactHeader, ArtifactId, ArtifactKind, ArtifactRef, BTreeMap, BTreeSet, BlindReleaseReceipt,
+    CalibrationSplit, CanonicalReader, CanonicalWriter, ConstitutiveModelCard, ContentHash,
+    ContextBinding, ContextOfUse, CoordinateId, CoordinateTransform, CovarianceMatrix, DataLineage,
+    Dims, ExperimentArtifact, FrameBinding, GaugeClassId, IdentifiabilityError,
+    InitialStateBinding, InitialStatePolicy, MATDB_SCHEMA_VERSION,
+    MAX_IDENTIFIABILITY_CANONICAL_BYTES, MAX_IDENTIFIABILITY_ITEMS, MaterialCard,
+    MaterialModelBinding, ObservationChannelId, ObservationId, ParameterCoordinate,
+    ParameterDomain, ParameterPrior, ParameterRoleId, ProtocolBinding, QoiId, QuantitySpec,
+    SpecimenBinding, UnitId, VV_SCHEMA_VERSION, canonical_f64, checked_add_dims,
+    checked_derivative_dims, decode_artifact_id, decode_coordinate, decode_frame, decode_header,
+    decode_initial_state, decode_observation_row_id, decode_parameter_domain, decode_prior,
+    decode_protocol, decode_qoi_id, decode_specimen, encode_artifact_id, encode_coordinate,
+    encode_frame, encode_header, encode_initial_state, encode_observation_row_id,
+    encode_parameter_domain, encode_prior, encode_protocol, encode_qoi_id, encode_specimen,
+    hash_domain, hash_is_nonzero, matrix_get, same_f64, validate_header_profile, validate_reason,
+    validate_token,
+};
+use core::fmt;
 use fs_evidence::vv::{ExperimentOrigin, MAX_VV_MATRIX_DIMENSION, ObservationLocatorIdentity};
 
 /// Umbrella API generation for the authority-separated I10.1 module. Identity
@@ -696,7 +714,7 @@ pub enum AuthorityDisposition {
     /// Acceptance delegated to a typed external trust receipt.
     ExternalTrustReceipt {
         /// Typed receipt binding the delegated producer authority.
-        trust_receipt: TrustReceiptRef,
+        trust_receipt: Box<TrustReceiptRef>,
     },
     /// Byte identity never established; admission rejects this disposition.
     Unverified {
@@ -1227,6 +1245,38 @@ impl fmt::Debug for StudyParameter {
     }
 }
 
+fn validate_parameter_influence_coverage(
+    treatment: &ParameterTreatment,
+    influence_coverage: &InfluenceCoverage,
+) -> Result<(), IdentifiabilityError> {
+    let free = matches!(
+        treatment,
+        ParameterTreatment::Estimated
+            | ParameterTreatment::Profiled
+            | ParameterTreatment::Marginalized
+    );
+    match influence_coverage {
+        InfluenceCoverage::IntentionallyAbsent { reason } if free => {
+            validate_reason(reason, "intentionally absent influence reason")
+        }
+        InfluenceCoverage::NotApplicable { reason } if !free => {
+            validate_reason(reason, "not-applicable influence reason")
+        }
+        InfluenceCoverage::Declared => Ok(()),
+        InfluenceCoverage::IntentionallyAbsent { .. } => {
+            Err(IdentifiabilityError::InvalidNumeric {
+                field: "parameter influence coverage",
+                detail: "only free inference parameters may carry an influence no-claim"
+                    .to_string(),
+            })
+        }
+        InfluenceCoverage::NotApplicable { .. } => Err(IdentifiabilityError::InvalidNumeric {
+            field: "parameter influence coverage",
+            detail: "free inference parameters cannot mark influence not applicable".to_string(),
+        }),
+    }
+}
+
 impl StudyParameter {
     #[allow(clippy::too_many_arguments)]
     /// Validate and construct a study parameter, enforcing finite domain
@@ -1260,7 +1310,7 @@ impl StudyParameter {
             PriorPolicy::Distribution(distribution) => distribution.validate_against(domain)?,
             PriorPolicy::Absent { reason } => validate_reason(reason, "prior absence reason")?,
             PriorPolicy::NotApplicable { reason } => {
-                validate_reason(reason, "prior not-applicable reason")?
+                validate_reason(reason, "prior not-applicable reason")?;
             }
         }
         match &treatment {
@@ -1314,35 +1364,7 @@ impl StudyParameter {
                 detail: "marginalization requires an explicit probability measure".to_string(),
             });
         }
-        let free = matches!(
-            &treatment,
-            ParameterTreatment::Estimated
-                | ParameterTreatment::Profiled
-                | ParameterTreatment::Marginalized
-        );
-        match &influence_coverage {
-            InfluenceCoverage::IntentionallyAbsent { reason } if free => {
-                validate_reason(reason, "intentionally absent influence reason")?;
-            }
-            InfluenceCoverage::NotApplicable { reason } if !free => {
-                validate_reason(reason, "not-applicable influence reason")?;
-            }
-            InfluenceCoverage::Declared => {}
-            InfluenceCoverage::IntentionallyAbsent { .. } => {
-                return Err(IdentifiabilityError::InvalidNumeric {
-                    field: "parameter influence coverage",
-                    detail: "only free inference parameters may carry an influence no-claim"
-                        .to_string(),
-                });
-            }
-            InfluenceCoverage::NotApplicable { .. } => {
-                return Err(IdentifiabilityError::InvalidNumeric {
-                    field: "parameter influence coverage",
-                    detail: "free inference parameters cannot mark influence not applicable"
-                        .to_string(),
-                });
-            }
-        }
+        validate_parameter_influence_coverage(&treatment, &influence_coverage)?;
         Ok(Self {
             role,
             quantity,
@@ -1461,6 +1483,7 @@ impl AffineConstraintTerm {
     }
 }
 
+/// Comparison relation for an affine joint constraint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstraintRelation {
     /// Weighted sum must equal the right-hand side.
@@ -1471,6 +1494,7 @@ pub enum ConstraintRelation {
     GreaterOrEqual,
 }
 
+/// Declared codimension of an external constraint manifold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstraintCodimension {
     /// Whole-number codimension checked numerically.
@@ -1534,6 +1558,7 @@ pub enum JointConstraintKind {
     },
 }
 
+/// One named cross-parameter constraint in the admissible domain.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JointConstraint {
     /// Unique constraint token within the problem document.
@@ -1630,6 +1655,7 @@ impl OpaqueDomainMembershipClaim {
     }
 }
 
+/// Exact finite witness that the declared admissible domain is nonempty.
 #[derive(Clone, PartialEq)]
 pub struct AdmissibleDomainWitness {
     /// One exact finite witness point per parameter role.
@@ -1869,6 +1895,7 @@ impl MarginalNoiseSpec {
     }
 }
 
+/// Declared missing-data semantics for an observation channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MissingnessAssumption {
     /// Data are complete under an admitted assumption source.
@@ -2028,13 +2055,13 @@ impl StudyObservation {
         if let MissingnessAssumption::Unknown { reason } = &missingness {
             validate_reason(reason, "unknown missingness reason")?;
         }
-        if let ObservationRows::Retrospective(rows) = &rows {
-            if rows.is_empty() || rows.len() > MAX_IDENTIFIABILITY_ITEMS {
-                return Err(IdentifiabilityError::Cardinality {
-                    field: "observation rows",
-                    detail: "retrospective channels need bounded nonempty raw-row sets".to_string(),
-                });
-            }
+        if let ObservationRows::Retrospective(rows) = &rows
+            && (rows.is_empty() || rows.len() > MAX_IDENTIFIABILITY_ITEMS)
+        {
+            return Err(IdentifiabilityError::Cardinality {
+                field: "observation rows",
+                detail: "retrospective channels need bounded nonempty raw-row sets".to_string(),
+            });
         }
         Ok(Self {
             id,
@@ -2270,6 +2297,7 @@ impl fmt::Debug for DiscrepancyInapplicability {
     }
 }
 
+/// Per-observation model-discrepancy declaration.
 #[derive(Clone, PartialEq, Eq)]
 pub enum StudyDiscrepancy {
     /// Discrepancy acknowledged present but not characterized.
@@ -2558,6 +2586,128 @@ impl fmt::Debug for StudyCaseDocument {
     }
 }
 
+fn collect_case_observations(
+    observations: Vec<StudyObservation>,
+) -> Result<BTreeMap<ObservationChannelId, StudyObservation>, IdentifiabilityError> {
+    if observations.is_empty() || observations.len() > MAX_IDENTIFIABILITY_ITEMS {
+        return Err(IdentifiabilityError::Cardinality {
+            field: "case observations",
+            detail: "each case needs bounded nonempty observations".to_string(),
+        });
+    }
+    let mut observation_map = BTreeMap::new();
+    for observation in observations {
+        let channel = observation.id.clone();
+        if observation_map
+            .insert(channel.clone(), observation)
+            .is_some()
+        {
+            return Err(IdentifiabilityError::Duplicate {
+                field: "case observation",
+                id: channel.to_string(),
+            });
+        }
+    }
+    Ok(observation_map)
+}
+
+fn collect_case_discrepancies(
+    discrepancies: Vec<(ObservationChannelId, StudyDiscrepancy)>,
+    observations: &BTreeMap<ObservationChannelId, StudyObservation>,
+) -> Result<BTreeMap<ObservationChannelId, StudyDiscrepancy>, IdentifiabilityError> {
+    let mut discrepancy_map = BTreeMap::new();
+    for (channel, discrepancy) in discrepancies {
+        if !observations.contains_key(&channel) {
+            return Err(IdentifiabilityError::UnknownReference {
+                field: "discrepancy observation",
+                id: channel.to_string(),
+            });
+        }
+        if discrepancy_map
+            .insert(channel.clone(), discrepancy)
+            .is_some()
+        {
+            return Err(IdentifiabilityError::Duplicate {
+                field: "discrepancy observation",
+                id: channel.to_string(),
+            });
+        }
+    }
+    if discrepancy_map.len() != observations.len() {
+        return Err(IdentifiabilityError::Cardinality {
+            field: "case discrepancies",
+            detail: "every observation needs explicit discrepancy semantics".to_string(),
+        });
+    }
+    Ok(discrepancy_map)
+}
+
+fn normalize_observation_sharing(
+    observation_sharing: &mut Vec<ObservationSharingGroup>,
+    observations: &BTreeMap<ObservationChannelId, StudyObservation>,
+) -> Result<(), IdentifiabilityError> {
+    observation_sharing.sort_by(|left, right| {
+        (
+            &left.rows,
+            &left.channels,
+            &left.joint_likelihood,
+            &left.justification,
+        )
+            .cmp(&(
+                &right.rows,
+                &right.channels,
+                &right.joint_likelihood,
+                &right.justification,
+            ))
+    });
+    if observation_sharing.len() > MAX_IDENTIFIABILITY_ITEMS {
+        return Err(IdentifiabilityError::Cardinality {
+            field: "observation-sharing groups",
+            detail: "too many within-case sharing groups".to_string(),
+        });
+    }
+    let mut row_consumers = BTreeMap::<ObservationId, BTreeSet<ObservationChannelId>>::new();
+    for (channel, observation) in observations {
+        if let ObservationRows::Retrospective(rows) = &observation.rows {
+            for row in rows {
+                row_consumers
+                    .entry(row.clone())
+                    .or_default()
+                    .insert(channel.clone());
+            }
+        }
+    }
+    let mut declared_rows = BTreeSet::new();
+    for group in observation_sharing {
+        for channel in &group.channels {
+            if !observations.contains_key(channel) {
+                return Err(IdentifiabilityError::UnknownReference {
+                    field: "observation-sharing channel",
+                    id: channel.to_string(),
+                });
+            }
+        }
+        for row in &group.rows {
+            if !declared_rows.insert(row.clone()) {
+                return Err(IdentifiabilityError::Duplicate {
+                    field: "observation-sharing row",
+                    id: row.as_str().to_string(),
+                });
+            }
+            if row_consumers.get(row) != Some(&group.channels) {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "observation-sharing consumers",
+                    detail: format!(
+                        "row {} is not consumed by exactly the declared channel set",
+                        row.as_str()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 impl StudyCaseDocument {
     #[allow(clippy::too_many_arguments)]
     /// Validate and construct a case document, enforcing bounded nonempty
@@ -2579,108 +2729,9 @@ impl StudyCaseDocument {
         if let CasePurpose::Complementary { reason } = &purpose {
             validate_reason(reason, "complementary case reason")?;
         }
-        if observations.is_empty() || observations.len() > MAX_IDENTIFIABILITY_ITEMS {
-            return Err(IdentifiabilityError::Cardinality {
-                field: "case observations",
-                detail: "each case needs bounded nonempty observations".to_string(),
-            });
-        }
-        let mut observation_map = BTreeMap::new();
-        for observation in observations {
-            let channel = observation.id.clone();
-            if observation_map
-                .insert(channel.clone(), observation)
-                .is_some()
-            {
-                return Err(IdentifiabilityError::Duplicate {
-                    field: "case observation",
-                    id: channel.to_string(),
-                });
-            }
-        }
-        let mut discrepancy_map = BTreeMap::new();
-        for (channel, discrepancy) in discrepancies {
-            if !observation_map.contains_key(&channel) {
-                return Err(IdentifiabilityError::UnknownReference {
-                    field: "discrepancy observation",
-                    id: channel.to_string(),
-                });
-            }
-            if discrepancy_map
-                .insert(channel.clone(), discrepancy)
-                .is_some()
-            {
-                return Err(IdentifiabilityError::Duplicate {
-                    field: "discrepancy observation",
-                    id: channel.to_string(),
-                });
-            }
-        }
-        if discrepancy_map.len() != observation_map.len() {
-            return Err(IdentifiabilityError::Cardinality {
-                field: "case discrepancies",
-                detail: "every observation needs explicit discrepancy semantics".to_string(),
-            });
-        }
-        observation_sharing.sort_by(|left, right| {
-            (
-                &left.rows,
-                &left.channels,
-                &left.joint_likelihood,
-                &left.justification,
-            )
-                .cmp(&(
-                    &right.rows,
-                    &right.channels,
-                    &right.joint_likelihood,
-                    &right.justification,
-                ))
-        });
-        if observation_sharing.len() > MAX_IDENTIFIABILITY_ITEMS {
-            return Err(IdentifiabilityError::Cardinality {
-                field: "observation-sharing groups",
-                detail: "too many within-case sharing groups".to_string(),
-            });
-        }
-        let mut row_consumers = BTreeMap::<ObservationId, BTreeSet<ObservationChannelId>>::new();
-        for (channel, observation) in &observation_map {
-            if let ObservationRows::Retrospective(rows) = &observation.rows {
-                for row in rows {
-                    row_consumers
-                        .entry(row.clone())
-                        .or_default()
-                        .insert(channel.clone());
-                }
-            }
-        }
-        let mut declared_rows = BTreeSet::new();
-        for group in &observation_sharing {
-            for channel in &group.channels {
-                if !observation_map.contains_key(channel) {
-                    return Err(IdentifiabilityError::UnknownReference {
-                        field: "observation-sharing channel",
-                        id: channel.to_string(),
-                    });
-                }
-            }
-            for row in &group.rows {
-                if !declared_rows.insert(row.clone()) {
-                    return Err(IdentifiabilityError::Duplicate {
-                        field: "observation-sharing row",
-                        id: row.as_str().to_string(),
-                    });
-                }
-                if row_consumers.get(row) != Some(&group.channels) {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "observation-sharing consumers",
-                        detail: format!(
-                            "row {} is not consumed by exactly the declared channel set",
-                            row.as_str()
-                        ),
-                    });
-                }
-            }
-        }
+        let observation_map = collect_case_observations(observations)?;
+        let discrepancy_map = collect_case_discrepancies(discrepancies, &observation_map)?;
+        normalize_observation_sharing(&mut observation_sharing, &observation_map)?;
         Ok(Self {
             id,
             purpose,
@@ -2822,6 +2873,7 @@ pub enum InfluenceRepresentation {
     },
 }
 
+/// Declared path by which one parameter influences one observable functional.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InfluenceDeclaration {
     /// Influence identifier token.
@@ -2893,6 +2945,7 @@ pub enum GaugeDiscreteSize {
     },
 }
 
+/// Finite or explicitly profiled dimension of a continuous gauge action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeContinuousDimension {
     /// Finite-dimensional continuous symmetry.
@@ -2914,6 +2967,7 @@ impl GaugeContinuousDimension {
     }
 }
 
+/// Algebraic classification of a gauge action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeAlgebra {
     /// Purely continuous acting algebra.
@@ -2954,6 +3008,7 @@ pub enum GaugeDiscreteOrbitCardinality {
     },
 }
 
+/// Principal-orbit dimensions for a regular gauge action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegularGaugeOrbit {
     /// Continuous dimension swept by principal orbits.
@@ -3189,7 +3244,7 @@ fn regular_orbit_support_compatible(
     !((has_continuous_orbit && support.local_obstruction_parameters.is_empty())
         || (finite_discrete_only && !support.local_obstruction_parameters.is_empty())
         || ((has_continuous_orbit || has_nontrivial_discrete_orbit)
-            != !support.global_obstruction_parameters.is_empty()))
+            == support.global_obstruction_parameters.is_empty()))
 }
 
 fn gauge_algebra_source_keys(algebra: &GaugeAlgebra) -> BTreeSet<SourceKey> {
@@ -3294,6 +3349,7 @@ pub enum GaugeInformationRegime {
     },
 }
 
+/// Scalar field over which a gauge statement applies.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GaugeScalarDomain {
     /// Ordinary real-valued parameters.
@@ -3310,6 +3366,7 @@ pub enum GaugeScalarDomain {
     },
 }
 
+/// Parameter-domain locus covered by a gauge statement.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GaugeLocus {
     /// Gauge applies over the whole parameter domain.
@@ -3321,6 +3378,7 @@ pub enum GaugeLocus {
     },
 }
 
+/// Canonical-bit representation of a probability threshold in `(0, 1]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GaugeProbabilityThreshold(u64);
 
@@ -3343,6 +3401,7 @@ impl GaugeProbabilityThreshold {
     }
 }
 
+/// Quantifier under which a gauge statement is asserted.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GaugeQuantifierScope {
     /// Invariance asserted at one realization point.
@@ -3369,6 +3428,7 @@ pub enum GaugeQuantifierScope {
     },
 }
 
+/// Product of information, scalar, locus, and quantifier applicability axes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GaugeApplicabilityAxes {
     /// Information regime in which the gauge applies.
@@ -3428,6 +3488,7 @@ impl GaugeExtentSupport {
     }
 }
 
+/// Per-case support domain of a gauge-validity cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GaugeCellDomain {
     /// Per-case moved-support records keyed by case.
@@ -3692,6 +3753,28 @@ pub enum GaugeCompositionKind {
     Generated,
 }
 
+/// Coherent declared inputs used to construct one gauge composition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GaugeCompositionInputs {
+    /// Composition identifier token.
+    pub id: GaugeCompositionId,
+    /// Constituent gauge classes, with at least two members.
+    pub members: BTreeSet<GaugeClassId>,
+    /// Composition-semantics classification.
+    pub kind: GaugeCompositionKind,
+    /// Source naming order, commutation, or composition law.
+    pub law: SourceKey,
+    /// Algebra of the composed action.
+    pub effective_algebra: GaugeAlgebra,
+    /// Orbit geometry of the composed action.
+    pub effective_orbit_geometry: GaugeOrbitGeometry,
+    /// Epistemic posture of the composition.
+    pub status: GaugeStatus,
+    /// Exact validity cells for the composition.
+    pub validity: GaugeValidityScope,
+}
+
+/// Exact declaration for a composed set of overlapping gauge actions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GaugeCompositionDeclaration {
     /// Composition identifier token.
@@ -3715,16 +3798,17 @@ pub struct GaugeCompositionDeclaration {
 impl GaugeCompositionDeclaration {
     /// Validate and construct a composition with at least two members and an
     /// explicit infinite-dimensional profile where applicable.
-    pub fn try_new(
-        id: GaugeCompositionId,
-        members: BTreeSet<GaugeClassId>,
-        kind: GaugeCompositionKind,
-        law: SourceKey,
-        effective_algebra: GaugeAlgebra,
-        effective_orbit_geometry: GaugeOrbitGeometry,
-        status: GaugeStatus,
-        validity: GaugeValidityScope,
-    ) -> Result<Self, IdentifiabilityError> {
+    pub fn try_new(inputs: GaugeCompositionInputs) -> Result<Self, IdentifiabilityError> {
+        let GaugeCompositionInputs {
+            id,
+            members,
+            kind,
+            law,
+            effective_algebra,
+            effective_orbit_geometry,
+            status,
+            validity,
+        } = inputs;
         if members.len() < 2 || members.len() > MAX_IDENTIFIABILITY_ITEMS {
             return Err(IdentifiabilityError::Cardinality {
                 field: "gauge composition members",
@@ -3800,111 +3884,156 @@ impl GaugeCompositionDeclaration {
     }
 }
 
-fn validate_independent_product_invariants(
-    composition: &GaugeCompositionDeclaration,
-    gauges: &BTreeMap<GaugeClassId, GaugeDeclaration>,
+#[derive(Default)]
+struct OptionalFiniteInfiniteTotal {
+    finite: u64,
+    infinite: bool,
+    present: bool,
+}
+
+#[derive(Default)]
+struct FiniteInfiniteTotal {
+    finite: u64,
+    infinite: bool,
+}
+
+#[derive(Default)]
+struct IndependentProductTotals {
+    group_continuous: OptionalFiniteInfiniteTotal,
+    group_discrete: OptionalFiniteInfiniteTotal,
+    orbit_continuous: FiniteInfiniteTotal,
+    orbit_discrete: FiniteInfiniteTotal,
+    any_stratified_orbit: bool,
+}
+
+fn accumulate_independent_group_totals(
+    gauge: &GaugeDeclaration,
+    totals: &mut IndependentProductTotals,
 ) -> Result<(), IdentifiabilityError> {
-    if !matches!(&composition.kind, GaugeCompositionKind::IndependentProduct) {
-        return Ok(());
-    }
-
-    let mut finite_group_dimension = 0_u64;
-    let mut infinite_group_dimension = false;
-    let mut finite_group_order = 1_u64;
-    let mut infinite_component_group = false;
-    let mut has_continuous_group = false;
-    let mut has_discrete_group = false;
-
-    let mut finite_orbit_dimension = 0_u64;
-    let mut infinite_orbit_dimension = false;
-    let mut finite_orbit_cardinality = 1_u64;
-    let mut infinite_discrete_orbit = false;
-    let mut any_stratified_orbit = false;
-
-    for member in &composition.members {
-        let gauge = gauges
-            .get(member)
-            .expect("composition member existence is checked before product invariants");
-        let (continuous, discrete) = match &gauge.algebra {
-            GaugeAlgebra::Continuous { group_dimension } => {
-                has_continuous_group = true;
-                (Some(group_dimension), None)
+    let (continuous, discrete) = match &gauge.algebra {
+        GaugeAlgebra::Continuous { group_dimension } => {
+            totals.group_continuous.present = true;
+            (Some(group_dimension), None)
+        }
+        GaugeAlgebra::Discrete { size } => {
+            totals.group_discrete.present = true;
+            (None, Some(size))
+        }
+        GaugeAlgebra::Mixed {
+            continuous_group_dimension,
+            component_group,
+        } => {
+            totals.group_continuous.present = true;
+            totals.group_discrete.present = true;
+            (Some(continuous_group_dimension), Some(component_group))
+        }
+    };
+    if let Some(continuous) = continuous {
+        match continuous {
+            GaugeContinuousDimension::Finite { dimension } => {
+                totals.group_continuous.finite = totals
+                    .group_continuous
+                    .finite
+                    .checked_add(*dimension)
+                    .ok_or(IdentifiabilityError::Cardinality {
+                        field: "independent-product group dimension",
+                        detail: "finite direct-product dimension exceeds u64".to_string(),
+                    })?;
             }
-            GaugeAlgebra::Discrete { size } => {
-                has_discrete_group = true;
-                (None, Some(size))
-            }
-            GaugeAlgebra::Mixed {
-                continuous_group_dimension,
-                component_group,
-            } => {
-                has_continuous_group = true;
-                has_discrete_group = true;
-                (Some(continuous_group_dimension), Some(component_group))
-            }
-        };
-        if let Some(continuous) = continuous {
-            match continuous {
-                GaugeContinuousDimension::Finite { dimension } => {
-                    finite_group_dimension = finite_group_dimension.checked_add(*dimension).ok_or(
-                        IdentifiabilityError::Cardinality {
-                            field: "independent-product group dimension",
-                            detail: "finite direct-product dimension exceeds u64".to_string(),
-                        },
-                    )?;
-                }
-                GaugeContinuousDimension::InfiniteDimensional { .. } => {
-                    infinite_group_dimension = true;
-                }
+            GaugeContinuousDimension::InfiniteDimensional { .. } => {
+                totals.group_continuous.infinite = true;
             }
         }
-        if let Some(discrete) = discrete {
-            match discrete {
-                GaugeDiscreteSize::Finite { order } => {
-                    finite_group_order = finite_group_order.checked_mul(*order).ok_or(
+    }
+    if let Some(discrete) = discrete {
+        match discrete {
+            GaugeDiscreteSize::Finite { order } => {
+                totals.group_discrete.finite =
+                    totals.group_discrete.finite.checked_mul(*order).ok_or(
                         IdentifiabilityError::Cardinality {
                             field: "independent-product group order",
                             detail: "finite direct-product order exceeds u64".to_string(),
                         },
                     )?;
-                }
-                GaugeDiscreteSize::CountablyInfinite { .. } => {
-                    infinite_component_group = true;
-                }
+            }
+            GaugeDiscreteSize::CountablyInfinite { .. } => {
+                totals.group_discrete.infinite = true;
             }
         }
-
-        let principal = principal_gauge_orbit(&gauge.orbit_geometry);
-        match &principal.continuous_orbit_dimension {
-            GaugeContinuousDimension::Finite { dimension } => {
-                finite_orbit_dimension = finite_orbit_dimension.checked_add(*dimension).ok_or(
-                    IdentifiabilityError::Cardinality {
-                        field: "independent-product orbit dimension",
-                        detail: "finite direct-product orbit dimension exceeds u64".to_string(),
-                    },
-                )?;
-            }
-            GaugeContinuousDimension::InfiniteDimensional { .. } => {
-                infinite_orbit_dimension = true;
-            }
-        }
-        match &principal.discrete_orbit_cardinality {
-            GaugeDiscreteOrbitCardinality::Finite { cardinality } => {
-                finite_orbit_cardinality = finite_orbit_cardinality
-                    .checked_mul(*cardinality)
-                    .ok_or(IdentifiabilityError::Cardinality {
-                        field: "independent-product orbit cardinality",
-                        detail: "finite direct-product orbit cardinality exceeds u64".to_string(),
-                    })?;
-            }
-            GaugeDiscreteOrbitCardinality::CountablyInfinite { .. } => {
-                infinite_discrete_orbit = true;
-            }
-        }
-        any_stratified_orbit |=
-            matches!(&gauge.orbit_geometry, GaugeOrbitGeometry::Stratified { .. });
     }
+    Ok(())
+}
 
+fn accumulate_independent_orbit_totals(
+    gauge: &GaugeDeclaration,
+    totals: &mut IndependentProductTotals,
+) -> Result<(), IdentifiabilityError> {
+    let principal = principal_gauge_orbit(&gauge.orbit_geometry);
+    match &principal.continuous_orbit_dimension {
+        GaugeContinuousDimension::Finite { dimension } => {
+            totals.orbit_continuous.finite = totals
+                .orbit_continuous
+                .finite
+                .checked_add(*dimension)
+                .ok_or(IdentifiabilityError::Cardinality {
+                    field: "independent-product orbit dimension",
+                    detail: "finite direct-product orbit dimension exceeds u64".to_string(),
+                })?;
+        }
+        GaugeContinuousDimension::InfiniteDimensional { .. } => {
+            totals.orbit_continuous.infinite = true;
+        }
+    }
+    match &principal.discrete_orbit_cardinality {
+        GaugeDiscreteOrbitCardinality::Finite { cardinality } => {
+            totals.orbit_discrete.finite = totals
+                .orbit_discrete
+                .finite
+                .checked_mul(*cardinality)
+                .ok_or(IdentifiabilityError::Cardinality {
+                field: "independent-product orbit cardinality",
+                detail: "finite direct-product orbit cardinality exceeds u64".to_string(),
+            })?;
+        }
+        GaugeDiscreteOrbitCardinality::CountablyInfinite { .. } => {
+            totals.orbit_discrete.infinite = true;
+        }
+    }
+    totals.any_stratified_orbit |=
+        matches!(&gauge.orbit_geometry, GaugeOrbitGeometry::Stratified { .. });
+    Ok(())
+}
+
+fn collect_independent_product_totals(
+    composition: &GaugeCompositionDeclaration,
+    gauges: &BTreeMap<GaugeClassId, GaugeDeclaration>,
+) -> Result<IndependentProductTotals, IdentifiabilityError> {
+    let mut totals = IndependentProductTotals {
+        group_discrete: OptionalFiniteInfiniteTotal {
+            finite: 1,
+            ..OptionalFiniteInfiniteTotal::default()
+        },
+        orbit_discrete: FiniteInfiniteTotal {
+            finite: 1,
+            ..FiniteInfiniteTotal::default()
+        },
+        ..IndependentProductTotals::default()
+    };
+
+    for member in &composition.members {
+        let gauge = gauges
+            .get(member)
+            .expect("composition member existence is checked before product invariants");
+        accumulate_independent_group_totals(gauge, &mut totals)?;
+        accumulate_independent_orbit_totals(gauge, &mut totals)?;
+    }
+    Ok(totals)
+}
+
+fn independent_product_totals_match(
+    composition: &GaugeCompositionDeclaration,
+    totals: &IndependentProductTotals,
+) -> bool {
     let effective_continuous = match &composition.effective_algebra {
         GaugeAlgebra::Continuous { group_dimension }
         | GaugeAlgebra::Mixed {
@@ -3921,23 +4050,23 @@ fn validate_independent_product_invariants(
         } => Some(size),
         GaugeAlgebra::Continuous { .. } => None,
     };
-    let continuous_matches = if has_continuous_group {
+    let continuous_matches = if totals.group_continuous.present {
         effective_continuous.is_some_and(|dimension| {
-            if infinite_group_dimension {
+            if totals.group_continuous.infinite {
                 matches!(dimension, GaugeContinuousDimension::InfiniteDimensional { .. })
             } else {
-                matches!(dimension, GaugeContinuousDimension::Finite { dimension } if *dimension == finite_group_dimension)
+                matches!(dimension, GaugeContinuousDimension::Finite { dimension } if *dimension == totals.group_continuous.finite)
             }
         })
     } else {
         effective_continuous.is_none()
     };
-    let discrete_matches = if has_discrete_group {
+    let discrete_matches = if totals.group_discrete.present {
         effective_discrete.is_some_and(|size| {
-            if infinite_component_group {
+            if totals.group_discrete.infinite {
                 matches!(size, GaugeDiscreteSize::CountablyInfinite { .. })
             } else {
-                matches!(size, GaugeDiscreteSize::Finite { order } if *order == finite_group_order)
+                matches!(size, GaugeDiscreteSize::Finite { order } if *order == totals.group_discrete.finite)
             }
         })
     } else {
@@ -3945,7 +4074,7 @@ fn validate_independent_product_invariants(
     };
 
     let effective_principal = principal_gauge_orbit(&composition.effective_orbit_geometry);
-    let orbit_dimension_matches = if infinite_orbit_dimension {
+    let orbit_dimension_matches = if totals.orbit_continuous.infinite {
         matches!(
             &effective_principal.continuous_orbit_dimension,
             GaugeContinuousDimension::InfiniteDimensional { .. }
@@ -3953,10 +4082,10 @@ fn validate_independent_product_invariants(
     } else {
         matches!(
             &effective_principal.continuous_orbit_dimension,
-            GaugeContinuousDimension::Finite { dimension } if *dimension == finite_orbit_dimension
+            GaugeContinuousDimension::Finite { dimension } if *dimension == totals.orbit_continuous.finite
         )
     };
-    let orbit_cardinality_matches = if infinite_discrete_orbit {
+    let orbit_cardinality_matches = if totals.orbit_discrete.infinite {
         matches!(
             &effective_principal.discrete_orbit_cardinality,
             GaugeDiscreteOrbitCardinality::CountablyInfinite { .. }
@@ -3964,21 +4093,31 @@ fn validate_independent_product_invariants(
     } else {
         matches!(
             &effective_principal.discrete_orbit_cardinality,
-            GaugeDiscreteOrbitCardinality::Finite { cardinality } if *cardinality == finite_orbit_cardinality
+            GaugeDiscreteOrbitCardinality::Finite { cardinality } if *cardinality == totals.orbit_discrete.finite
         )
     };
-    let stratification_matches = any_stratified_orbit
+    let stratification_matches = totals.any_stratified_orbit
         == matches!(
             &composition.effective_orbit_geometry,
             GaugeOrbitGeometry::Stratified { .. }
         );
 
-    if !(continuous_matches
+    continuous_matches
         && discrete_matches
         && orbit_dimension_matches
         && orbit_cardinality_matches
-        && stratification_matches)
-    {
+        && stratification_matches
+}
+
+fn validate_independent_product_invariants(
+    composition: &GaugeCompositionDeclaration,
+    gauges: &BTreeMap<GaugeClassId, GaugeDeclaration>,
+) -> Result<(), IdentifiabilityError> {
+    if !matches!(&composition.kind, GaugeCompositionKind::IndependentProduct) {
+        return Ok(());
+    }
+    let totals = collect_independent_product_totals(composition, gauges)?;
+    if !independent_product_totals_match(composition, &totals) {
         return Err(IdentifiabilityError::InvalidText {
             field: "independent-product gauge invariants",
             detail: format!(
@@ -4075,6 +4214,7 @@ impl GaugeSlicePlan {
     }
 }
 
+/// Structural plan for quotienting a gauge action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeQuotientPlan {
     /// Principal-bundle quotient with a regular section atlas.
@@ -4111,6 +4251,7 @@ pub enum GaugeQuotientPlan {
     },
 }
 
+/// Continuous quotient-or-slice step within a gauge reduction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContinuousGaugeReductionPlan {
     /// Reduce the full continuous factor at once.
@@ -4157,6 +4298,7 @@ pub enum GaugeReductionStageRelation {
     },
 }
 
+/// Position and predecessor relation of a reduction in a staged plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeReductionStage {
     /// First reduction, composed from nothing.
@@ -4168,7 +4310,7 @@ pub enum GaugeReductionStage {
         /// Composition-law source with exact ordering semantics.
         composition_law: SourceRef,
         /// Structural relation from predecessors to this stage.
-        relation: GaugeReductionStageRelation,
+        relation: Box<GaugeReductionStageRelation>,
     },
 }
 
@@ -4188,12 +4330,13 @@ pub enum GaugeMeasureSemantics {
         /// Probability measure after reduction.
         reduced_measure: SourceRef,
         /// Change-of-measure source between the measures.
-        transport: SourceRef,
+        transport: Box<SourceRef>,
         /// Jacobian-or-disintegration proof source.
-        jacobian_or_disintegration: SourceRef,
+        jacobian_or_disintegration: Box<SourceRef>,
     },
 }
 
+/// Execution-time policy for retaining, quotienting, or slicing a gauge action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeReductionPlan {
     /// Action retained unreduced, with a bounded reason.
@@ -4214,7 +4357,7 @@ pub enum GaugeReductionPlan {
     /// Reduce continuously while retaining an explicit discrete residual.
     ContinuousReductionWithDiscreteResidual {
         /// Underlying continuous quotient or slice step.
-        reduction: ContinuousGaugeReductionPlan,
+        reduction: Box<ContinuousGaugeReductionPlan>,
         /// Certificate identifying the normal subgroup factored out.
         normal_subgroup: SourceRef,
         /// Law relating factors back to the original action.
@@ -4451,7 +4594,7 @@ fn gauge_reduction_sources(
             residual_quotient_action,
             compatibility,
         } => {
-            match reduction {
+            match reduction.as_ref() {
                 ContinuousGaugeReductionPlan::Quotient { quotient } => {
                     sources.extend(gauge_quotient_sources(quotient)?);
                 }
@@ -4499,7 +4642,7 @@ fn gauge_reduction_stage_sources(
         });
     }
     let mut sources = vec![composition_law];
-    match relation {
+    match relation.as_ref() {
         GaugeReductionStageRelation::NormalSubgroupTower {
             normality,
             induced_residual_action,
@@ -4718,17 +4861,22 @@ fn validate_gauge_reduction_dag(
 }
 
 fn reduction_uses_regular_atlas(plan: &GaugeReductionPlan) -> bool {
-    matches!(
-        plan,
+    match plan {
         GaugeReductionPlan::Quotient {
-            quotient: GaugeQuotientPlan::RegularAtlas { .. }
-        } | GaugeReductionPlan::ContinuousReductionWithDiscreteResidual {
-            reduction: ContinuousGaugeReductionPlan::Quotient {
-                quotient: GaugeQuotientPlan::RegularAtlas { .. }
-            },
-            ..
+            quotient: GaugeQuotientPlan::RegularAtlas { .. },
+        } => true,
+        GaugeReductionPlan::ContinuousReductionWithDiscreteResidual { reduction, .. } => {
+            matches!(
+                reduction.as_ref(),
+                ContinuousGaugeReductionPlan::Quotient {
+                    quotient: GaugeQuotientPlan::RegularAtlas { .. }
+                }
+            )
         }
-    )
+        GaugeReductionPlan::Unreduced { .. }
+        | GaugeReductionPlan::Quotient { .. }
+        | GaugeReductionPlan::Slice { .. } => false,
+    }
 }
 
 /// Explicit sharing group for cases that intentionally reuse observations or
@@ -4784,6 +4932,7 @@ impl DataSharingGroup {
     }
 }
 
+/// Cross-case policy for disjoint or intentionally shared observations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataReusePolicy {
     /// Every case consumes disjoint observations and sources.
@@ -4809,6 +4958,34 @@ fn sharing_group_membership(policy: &DataReusePolicy, case: &CaseId) -> Option<u
             groups.iter().position(|group| group.cases.contains(case))
         }
     }
+}
+
+fn admit_shared_owner_sets<K: Ord>(
+    owners: &BTreeMap<K, BTreeSet<CaseId>>,
+    policy: &DataReusePolicy,
+    sharing_participation: &mut BTreeSet<CaseId>,
+) -> Result<(), IdentifiabilityError> {
+    for cases in owners.values().filter(|cases| cases.len() > 1) {
+        let mut memberships = cases
+            .iter()
+            .map(|case| sharing_group_membership(policy, case));
+        let first = memberships.next().expect("owner set is nonempty");
+        if first.is_none() || memberships.any(|membership| membership != first) {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "data reuse policy",
+                detail: format!(
+                    "cases {} share admitted provenance without one exact joint sharing group",
+                    cases
+                        .iter()
+                        .map(CaseId::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            });
+        }
+        sharing_participation.extend(cases.iter().cloned());
+    }
+    Ok(())
 }
 
 fn normalize_joint_noise(noise: JointNoiseModel) -> Result<JointNoiseModel, IdentifiabilityError> {
@@ -4854,29 +5031,28 @@ fn normalize_joint_noise(noise: JointNoiseModel) -> Result<JointNoiseModel, Iden
     })
 }
 
-fn problem_source_reachability(
-    context_source: &SourceKey,
-    material_source: &SourceKey,
-    model_source: &SourceKey,
-    graph_source: &SourceKey,
-    joint_prior: Option<&SourceKey>,
+#[derive(Clone, Copy)]
+struct ProblemSourceReachability<'a> {
+    context_source: &'a SourceKey,
+    material_source: &'a SourceKey,
+    model_source: &'a SourceKey,
+    graph_source: &'a SourceKey,
+    joint_prior: Option<&'a SourceKey>,
+    parameters: &'a BTreeMap<ParameterRoleId, StudyParameter>,
+    constraints: &'a BTreeMap<ConstraintId, JointConstraint>,
+    admissible_domain: &'a AdmissibleDomainWitness,
+    cases: &'a BTreeMap<CaseId, StudyCaseDocument>,
+    influences: &'a BTreeMap<InfluenceId, InfluenceDeclaration>,
+    gauges: &'a BTreeMap<GaugeClassId, GaugeDeclaration>,
+    gauge_compositions: &'a BTreeMap<GaugeCompositionId, GaugeCompositionDeclaration>,
+    joint_noise: &'a JointNoiseModel,
+    data_reuse: &'a DataReusePolicy,
+}
+
+fn add_parameter_source_keys(
+    used: &mut BTreeSet<SourceKey>,
     parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
-    constraints: &BTreeMap<ConstraintId, JointConstraint>,
-    admissible_domain: &AdmissibleDomainWitness,
-    cases: &BTreeMap<CaseId, StudyCaseDocument>,
-    influences: &BTreeMap<InfluenceId, InfluenceDeclaration>,
-    gauges: &BTreeMap<GaugeClassId, GaugeDeclaration>,
-    gauge_compositions: &BTreeMap<GaugeCompositionId, GaugeCompositionDeclaration>,
-    joint_noise: &JointNoiseModel,
-    data_reuse: &DataReusePolicy,
-) -> BTreeSet<SourceKey> {
-    let mut used = BTreeSet::from([
-        context_source.clone(),
-        material_source.clone(),
-        model_source.clone(),
-        graph_source.clone(),
-    ]);
-    used.extend(joint_prior.cloned());
+) {
     for parameter in parameters.values() {
         match &parameter.treatment {
             ParameterTreatment::Conditioned(value) => {
@@ -4915,27 +5091,12 @@ fn problem_source_reachability(
             _ => {}
         }
     }
-    for constraint in constraints.values() {
-        match &constraint.kind {
-            JointConstraintKind::ExternalManifold {
-                definition,
-                codimension,
-                ..
-            } => {
-                used.insert(definition.clone());
-                if let ConstraintCodimension::InfiniteDimensional { profile } = codimension {
-                    used.insert(profile.clone());
-                }
-            }
-            JointConstraintKind::StochasticCoupling { distribution, .. } => {
-                used.insert(distribution.clone());
-            }
-            _ => {}
-        }
-    }
-    if let Some(claim) = &admissible_domain.opaque_membership_claim {
-        used.insert(claim.source.clone());
-    }
+}
+
+fn add_case_source_keys(
+    used: &mut BTreeSet<SourceKey>,
+    cases: &BTreeMap<CaseId, StudyCaseDocument>,
+) {
     for case in cases.values() {
         used.insert(case.forward_model.clone());
         used.extend([
@@ -5028,20 +5189,13 @@ fn problem_source_reachability(
             used.insert(group.joint_likelihood.clone());
         }
     }
-    for influence in influences.values() {
-        match &influence.representation {
-            InfluenceRepresentation::StateMediated { state_path } => {
-                used.insert(state_path.clone());
-            }
-            InfluenceRepresentation::Composite { operator, .. } => {
-                used.insert(operator.clone());
-            }
-            InfluenceRepresentation::ExternalDefinition { definition } => {
-                used.insert(definition.clone());
-            }
-            InfluenceRepresentation::Direct => {}
-        }
-    }
+}
+
+fn add_gauge_source_keys(
+    used: &mut BTreeSet<SourceKey>,
+    gauges: &BTreeMap<GaugeClassId, GaugeDeclaration>,
+    gauge_compositions: &BTreeMap<GaugeCompositionId, GaugeCompositionDeclaration>,
+) {
     for gauge in gauges.values() {
         used.insert(gauge.action.clone());
         used.insert(match &gauge.status {
@@ -5068,6 +5222,70 @@ fn problem_source_reachability(
             used.extend(gauge_applicability_source_keys(axes));
         }
     }
+}
+
+fn problem_source_reachability(input: ProblemSourceReachability<'_>) -> BTreeSet<SourceKey> {
+    let ProblemSourceReachability {
+        context_source,
+        material_source,
+        model_source,
+        graph_source,
+        joint_prior,
+        parameters,
+        constraints,
+        admissible_domain,
+        cases,
+        influences,
+        gauges,
+        gauge_compositions,
+        joint_noise,
+        data_reuse,
+    } = input;
+    let mut used = BTreeSet::from([
+        context_source.clone(),
+        material_source.clone(),
+        model_source.clone(),
+        graph_source.clone(),
+    ]);
+    used.extend(joint_prior.cloned());
+    add_parameter_source_keys(&mut used, parameters);
+    for constraint in constraints.values() {
+        match &constraint.kind {
+            JointConstraintKind::ExternalManifold {
+                definition,
+                codimension,
+                ..
+            } => {
+                used.insert(definition.clone());
+                if let ConstraintCodimension::InfiniteDimensional { profile } = codimension {
+                    used.insert(profile.clone());
+                }
+            }
+            JointConstraintKind::StochasticCoupling { distribution, .. } => {
+                used.insert(distribution.clone());
+            }
+            _ => {}
+        }
+    }
+    if let Some(claim) = &admissible_domain.opaque_membership_claim {
+        used.insert(claim.source.clone());
+    }
+    add_case_source_keys(&mut used, cases);
+    for influence in influences.values() {
+        match &influence.representation {
+            InfluenceRepresentation::StateMediated { state_path } => {
+                used.insert(state_path.clone());
+            }
+            InfluenceRepresentation::Composite { operator, .. } => {
+                used.insert(operator.clone());
+            }
+            InfluenceRepresentation::ExternalDefinition { definition } => {
+                used.insert(definition.clone());
+            }
+            InfluenceRepresentation::Direct => {}
+        }
+    }
+    add_gauge_source_keys(&mut used, gauges, gauge_compositions);
     match joint_noise {
         JointNoiseModel::Independent { assumption } => {
             used.insert(assumption.clone());
@@ -5076,7 +5294,7 @@ fn problem_source_reachability(
         | JointNoiseModel::ExternalKernel { model } => {
             used.insert(model.clone());
         }
-        _ => {}
+        JointNoiseModel::Unknown { .. } => {}
     }
     if let DataReusePolicy::Shared { groups } = data_reuse {
         for group in groups {
@@ -5182,6 +5400,47 @@ impl StructuralItemBudget {
     }
 }
 
+fn add_case_structural_items(
+    budget: &mut StructuralItemBudget,
+    case: &StudyCaseDocument,
+) -> Result<(), IdentifiabilityError> {
+    budget.add(case.observations.len(), "case observations")?;
+    budget.add(case.discrepancies.len(), "case discrepancies")?;
+    budget.add(case.observation_sharing.len(), "observation sharing groups")?;
+    for observation in case.observations.values() {
+        if let ObservationRows::Retrospective(rows) = &observation.rows {
+            budget.add(rows.len(), "observation rows")?;
+        }
+    }
+    for discrepancy in case.discrepancies.values() {
+        if let StudyDiscrepancy::Modeled { parameters, .. } = discrepancy {
+            budget.add(parameters.len(), "modeled discrepancy parameters")?;
+        }
+    }
+    for group in &case.observation_sharing {
+        budget.add(group.channels.len(), "observation-sharing channels")?;
+        budget.add(group.rows.len(), "observation-sharing rows")?;
+    }
+    Ok(())
+}
+
+fn add_parameter_structural_items(
+    budget: &mut StructuralItemBudget,
+    parameter: &StudyParameter,
+) -> Result<(), IdentifiabilityError> {
+    if let ParameterTreatment::Derived { parents, .. } = &parameter.treatment {
+        budget.add(parents.len(), "derived parameter parents")?;
+    }
+    let scoped_cases = match &parameter.scope {
+        ParameterScopeBinding::Cases(cases)
+        | ParameterScopeBinding::MaterialLot { cases, .. }
+        | ParameterScopeBinding::Field { cases, .. }
+        | ParameterScopeBinding::Hierarchical { cases, .. } => cases.len(),
+        ParameterScopeBinding::Global | ParameterScopeBinding::Specimen { .. } => 0,
+    };
+    budget.add(scoped_cases, "parameter case scope")
+}
+
 fn validate_problem_structural_budget(
     document: &IdentifiabilityProblemDocument,
 ) -> Result<(), IdentifiabilityError> {
@@ -5193,17 +5452,7 @@ fn validate_problem_structural_budget(
     budget.add(document.sources.len(), "problem sources")?;
     budget.add(document.parameters.len(), "problem parameters")?;
     for parameter in document.parameters.values() {
-        if let ParameterTreatment::Derived { parents, .. } = &parameter.treatment {
-            budget.add(parents.len(), "derived parameter parents")?;
-        }
-        let scoped_cases = match &parameter.scope {
-            ParameterScopeBinding::Cases(cases)
-            | ParameterScopeBinding::MaterialLot { cases, .. }
-            | ParameterScopeBinding::Field { cases, .. }
-            | ParameterScopeBinding::Hierarchical { cases, .. } => cases.len(),
-            ParameterScopeBinding::Global | ParameterScopeBinding::Specimen { .. } => 0,
-        };
-        budget.add(scoped_cases, "parameter case scope")?;
+        add_parameter_structural_items(&mut budget, parameter)?;
     }
     budget.add(document.constraints.len(), "problem constraints")?;
     for constraint in document.constraints.values() {
@@ -5222,23 +5471,7 @@ fn validate_problem_structural_budget(
     )?;
     budget.add(document.cases.len(), "problem cases")?;
     for case in document.cases.values() {
-        budget.add(case.observations.len(), "case observations")?;
-        budget.add(case.discrepancies.len(), "case discrepancies")?;
-        budget.add(case.observation_sharing.len(), "observation sharing groups")?;
-        for observation in case.observations.values() {
-            if let ObservationRows::Retrospective(rows) = &observation.rows {
-                budget.add(rows.len(), "observation rows")?;
-            }
-        }
-        for discrepancy in case.discrepancies.values() {
-            if let StudyDiscrepancy::Modeled { parameters, .. } = discrepancy {
-                budget.add(parameters.len(), "modeled discrepancy parameters")?;
-            }
-        }
-        for group in &case.observation_sharing {
-            budget.add(group.channels.len(), "observation-sharing channels")?;
-            budget.add(group.rows.len(), "observation-sharing rows")?;
-        }
+        add_case_structural_items(&mut budget, case)?;
     }
     budget.add(document.influences.len(), "problem influences")?;
     for influence in document.influences.values() {
@@ -5516,14 +5749,6 @@ fn insert_unique<K: Ord + Clone + fmt::Display, V>(
     Ok(result)
 }
 
-fn validate_source_key(
-    sources: &BTreeMap<SourceKey, SourceRef>,
-    key: &SourceKey,
-    field: &'static str,
-) -> Result<(), IdentifiabilityError> {
-    require_source(sources, key, field).map(|_| ())
-}
-
 fn validate_derived_parameter_dag(
     parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
 ) -> Result<(), IdentifiabilityError> {
@@ -5634,236 +5859,272 @@ fn transitive_influence_ids(
     Ok(closure)
 }
 
+fn require_constraint_members(
+    members: &BTreeSet<ParameterRoleId>,
+    minimum: usize,
+    parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
+) -> Result<(), IdentifiabilityError> {
+    if members.len() < minimum || members.len() > MAX_IDENTIFIABILITY_ITEMS {
+        return Err(IdentifiabilityError::Cardinality {
+            field: "joint constraint members",
+            detail: format!(
+                "this joint-constraint variant needs at least {minimum} bounded member{}",
+                if minimum == 1 { "" } else { "s" }
+            ),
+        });
+    }
+    for member in members {
+        if !parameters.contains_key(member) {
+            return Err(IdentifiabilityError::UnknownReference {
+                field: "joint constraint member",
+                id: member.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_affine_constraint(
+    terms: &[AffineConstraintTerm],
+    relation: ConstraintRelation,
+    rhs_si: f64,
+    residual_quantity: QuantitySpec,
+    parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
+) -> Result<(), IdentifiabilityError> {
+    if terms.is_empty() || terms.len() > MAX_IDENTIFIABILITY_ITEMS || !rhs_si.is_finite() {
+        return Err(IdentifiabilityError::InvalidNumeric {
+            field: "affine joint constraint",
+            detail: "requires at least one bounded term and a finite RHS".to_string(),
+        });
+    }
+    if relation == ConstraintRelation::Equal && terms.iter().all(|term| term.coefficient == 0.0) {
+        return Err(IdentifiabilityError::InvalidNumeric {
+            field: "affine equality rank",
+            detail: "an all-zero affine equality has rank zero and cannot supply the declared codimension"
+                .to_string(),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    let mut minimum = 0.0;
+    let mut maximum = 0.0;
+    for term in terms {
+        let parameter = parameters.get(&term.parameter).ok_or_else(|| {
+            IdentifiabilityError::UnknownReference {
+                field: "affine constraint member",
+                id: term.parameter.to_string(),
+            }
+        })?;
+        if !seen.insert(term.parameter.clone()) {
+            return Err(IdentifiabilityError::Duplicate {
+                field: "affine constraint member",
+                id: term.parameter.to_string(),
+            });
+        }
+        let product = checked_add_dims(parameter.quantity.dims(), term.coefficient_quantity.dims())
+            .ok_or_else(|| IdentifiabilityError::InvalidNumeric {
+                field: "affine constraint units",
+                detail: "dimension exponent overflow".to_string(),
+            })?;
+        if product != residual_quantity.dims() {
+            return Err(IdentifiabilityError::InvalidNumeric {
+                field: "affine constraint units",
+                detail: format!(
+                    "coefficient times {} does not have the residual dimensions",
+                    term.parameter
+                ),
+            });
+        }
+        let endpoints = [
+            term.coefficient * parameter.domain.lo,
+            term.coefficient * parameter.domain.hi,
+        ];
+        minimum += endpoints[0].min(endpoints[1]);
+        maximum += endpoints[0].max(endpoints[1]);
+    }
+    let feasible = match relation {
+        ConstraintRelation::Equal => rhs_si >= minimum && rhs_si <= maximum,
+        ConstraintRelation::LessOrEqual => minimum <= rhs_si,
+        ConstraintRelation::GreaterOrEqual => maximum >= rhs_si,
+    };
+    if !minimum.is_finite() || !maximum.is_finite() || !feasible {
+        return Err(IdentifiabilityError::InvalidNumeric {
+            field: "affine constraint feasibility",
+            detail: "affine constraint has no witness in the Cartesian domain enclosure"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_simplex_constraint(
+    members: &BTreeSet<ParameterRoleId>,
+    total_si: f64,
+    quantity: QuantitySpec,
+    parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
+) -> Result<(), IdentifiabilityError> {
+    require_constraint_members(members, 1, parameters)?;
+    if !total_si.is_finite()
+        || members
+            .iter()
+            .any(|role| parameters[role].quantity != quantity)
+    {
+        return Err(IdentifiabilityError::InvalidNumeric {
+            field: "simplex constraint",
+            detail: "members require one exact quantity and a finite total".to_string(),
+        });
+    }
+    let minimum = members
+        .iter()
+        .map(|role| parameters[role].domain.lo)
+        .sum::<f64>();
+    let maximum = members
+        .iter()
+        .map(|role| parameters[role].domain.hi)
+        .sum::<f64>();
+    if members.iter().any(|role| parameters[role].domain.lo < 0.0)
+        || !minimum.is_finite()
+        || !maximum.is_finite()
+        || total_si < minimum
+        || total_si > maximum
+    {
+        return Err(IdentifiabilityError::InvalidNumeric {
+            field: "simplex constraint feasibility",
+            detail: "simplex members must be nonnegative and their total attainable".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_ordered_constraint(
+    id: &ConstraintId,
+    members: &[ParameterRoleId],
+    strict: bool,
+    parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
+) -> Result<(), IdentifiabilityError> {
+    let member_set = members.iter().cloned().collect::<BTreeSet<_>>();
+    require_constraint_members(&member_set, 2, parameters)?;
+    if member_set.len() != members.len() {
+        return Err(IdentifiabilityError::Duplicate {
+            field: "ordered constraint member",
+            id: id.to_string(),
+        });
+    }
+    let first = parameters[&members[0]].quantity;
+    if members
+        .iter()
+        .any(|role| parameters[role].quantity != first)
+    {
+        return Err(IdentifiabilityError::InvalidNumeric {
+            field: "ordered constraint units",
+            detail: "ordered members need one exact quantity".to_string(),
+        });
+    }
+    let mut prefix_infimum = parameters[&members[0]].domain.lo;
+    for role in members.iter().skip(1) {
+        let domain = parameters[role].domain;
+        let feasible = if strict {
+            prefix_infimum < domain.hi
+        } else {
+            prefix_infimum <= domain.hi
+        };
+        if !feasible {
+            return Err(IdentifiabilityError::InvalidNumeric {
+                field: "ordered constraint feasibility",
+                detail: format!(
+                    "ordered member {role} has no {} witness after the preceding domain prefix",
+                    if strict { "strict" } else { "non-strict" }
+                ),
+            });
+        }
+        prefix_infimum = prefix_infimum.max(domain.lo);
+    }
+    Ok(())
+}
+
+fn validate_external_manifold_constraint(
+    members: &BTreeSet<ParameterRoleId>,
+    definition: &SourceKey,
+    codimension: &ConstraintCodimension,
+    parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
+    sources: &BTreeMap<SourceKey, SourceRef>,
+) -> Result<(), IdentifiabilityError> {
+    require_constraint_members(members, 1, parameters)?;
+    require_source_kind(
+        sources,
+        definition,
+        SourceKind::ExternalManifold,
+        "external manifold",
+    )?;
+    match codimension {
+        ConstraintCodimension::Finite { codimension: 0 } => {
+            Err(IdentifiabilityError::InvalidNumeric {
+                field: "external manifold codimension",
+                detail: "finite codimension must be positive".to_string(),
+            })
+        }
+        ConstraintCodimension::Finite { codimension }
+            if usize::try_from(*codimension)
+                .map_or(true, |codimension| codimension > members.len()) =>
+        {
+            Err(IdentifiabilityError::InvalidNumeric {
+                field: "external manifold codimension",
+                detail: "finite codimension cannot exceed the finite scalar carrier dimension"
+                    .to_string(),
+            })
+        }
+        ConstraintCodimension::InfiniteDimensional { profile } => {
+            require_source_kind(
+                sources,
+                profile,
+                SourceKind::ExternalManifold,
+                "external manifold infinite-dimensional profile",
+            )?;
+            Err(IdentifiabilityError::InvalidText {
+                field: "external manifold infinite-dimensional carrier",
+                detail: "infinite-dimensional codimension is reserved for the typed function-space carrier model; finite scalar parameter members cannot realize it"
+                    .to_string(),
+            })
+        }
+        ConstraintCodimension::Finite { .. } => Ok(()),
+    }
+}
+
 fn validate_joint_constraint(
     constraint: &JointConstraint,
     parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
     sources: &BTreeMap<SourceKey, SourceRef>,
 ) -> Result<(), IdentifiabilityError> {
-    let require_members = |members: &BTreeSet<ParameterRoleId>, minimum: usize| {
-        if members.len() < minimum || members.len() > MAX_IDENTIFIABILITY_ITEMS {
-            return Err(IdentifiabilityError::Cardinality {
-                field: "joint constraint members",
-                detail: format!(
-                    "this joint-constraint variant needs at least {minimum} bounded member{}",
-                    if minimum == 1 { "" } else { "s" }
-                ),
-            });
-        }
-        for member in members {
-            if !parameters.contains_key(member) {
-                return Err(IdentifiabilityError::UnknownReference {
-                    field: "joint constraint member",
-                    id: member.to_string(),
-                });
-            }
-        }
-        Ok(())
-    };
     match &constraint.kind {
         JointConstraintKind::Affine {
             terms,
             relation,
             rhs_si,
             residual_quantity,
-        } => {
-            if terms.is_empty() || terms.len() > MAX_IDENTIFIABILITY_ITEMS || !rhs_si.is_finite() {
-                return Err(IdentifiabilityError::InvalidNumeric {
-                    field: "affine joint constraint",
-                    detail: "requires at least one bounded term and a finite RHS".to_string(),
-                });
-            }
-            if matches!(relation, ConstraintRelation::Equal)
-                && terms.iter().all(|term| term.coefficient == 0.0)
-            {
-                return Err(IdentifiabilityError::InvalidNumeric {
-                    field: "affine equality rank",
-                    detail: "an all-zero affine equality has rank zero and cannot supply the declared codimension"
-                        .to_string(),
-                });
-            }
-            let mut seen = BTreeSet::new();
-            let mut minimum = 0.0;
-            let mut maximum = 0.0;
-            for term in terms {
-                let parameter = parameters.get(&term.parameter).ok_or_else(|| {
-                    IdentifiabilityError::UnknownReference {
-                        field: "affine constraint member",
-                        id: term.parameter.to_string(),
-                    }
-                })?;
-                if !seen.insert(term.parameter.clone()) {
-                    return Err(IdentifiabilityError::Duplicate {
-                        field: "affine constraint member",
-                        id: term.parameter.to_string(),
-                    });
-                }
-                let product =
-                    checked_add_dims(parameter.quantity.dims(), term.coefficient_quantity.dims())
-                        .ok_or_else(|| IdentifiabilityError::InvalidNumeric {
-                        field: "affine constraint units",
-                        detail: "dimension exponent overflow".to_string(),
-                    })?;
-                if product != residual_quantity.dims() {
-                    return Err(IdentifiabilityError::InvalidNumeric {
-                        field: "affine constraint units",
-                        detail: format!(
-                            "coefficient times {} does not have the residual dimensions",
-                            term.parameter
-                        ),
-                    });
-                }
-                let endpoints = [
-                    term.coefficient * parameter.domain.lo,
-                    term.coefficient * parameter.domain.hi,
-                ];
-                minimum += endpoints[0].min(endpoints[1]);
-                maximum += endpoints[0].max(endpoints[1]);
-            }
-            let feasible = match relation {
-                ConstraintRelation::Equal => *rhs_si >= minimum && *rhs_si <= maximum,
-                ConstraintRelation::LessOrEqual => minimum <= *rhs_si,
-                ConstraintRelation::GreaterOrEqual => maximum >= *rhs_si,
-            };
-            if !minimum.is_finite() || !maximum.is_finite() || !feasible {
-                return Err(IdentifiabilityError::InvalidNumeric {
-                    field: "affine constraint feasibility",
-                    detail: "affine constraint has no witness in the Cartesian domain enclosure"
-                        .to_string(),
-                });
-            }
-        }
+        } => validate_affine_constraint(terms, *relation, *rhs_si, *residual_quantity, parameters)?,
         JointConstraintKind::Simplex {
             members,
             total_si,
             quantity,
-        } => {
-            require_members(members, 1)?;
-            if !total_si.is_finite()
-                || members
-                    .iter()
-                    .any(|role| parameters[role].quantity != *quantity)
-            {
-                return Err(IdentifiabilityError::InvalidNumeric {
-                    field: "simplex constraint",
-                    detail: "members require one exact quantity and a finite total".to_string(),
-                });
-            }
-            let minimum = members
-                .iter()
-                .map(|role| parameters[role].domain.lo)
-                .sum::<f64>();
-            let maximum = members
-                .iter()
-                .map(|role| parameters[role].domain.hi)
-                .sum::<f64>();
-            if members.iter().any(|role| parameters[role].domain.lo < 0.0)
-                || !minimum.is_finite()
-                || !maximum.is_finite()
-                || *total_si < minimum
-                || *total_si > maximum
-            {
-                return Err(IdentifiabilityError::InvalidNumeric {
-                    field: "simplex constraint feasibility",
-                    detail: "simplex members must be nonnegative and their total attainable"
-                        .to_string(),
-                });
-            }
-        }
+        } => validate_simplex_constraint(members, *total_si, *quantity, parameters)?,
         JointConstraintKind::Ordered { members, strict } => {
-            let member_set = members.iter().cloned().collect::<BTreeSet<_>>();
-            require_members(&member_set, 2)?;
-            if member_set.len() != members.len() {
-                return Err(IdentifiabilityError::Duplicate {
-                    field: "ordered constraint member",
-                    id: constraint.id.to_string(),
-                });
-            }
-            let first = parameters[&members[0]].quantity;
-            if members
-                .iter()
-                .any(|role| parameters[role].quantity != first)
-            {
-                return Err(IdentifiabilityError::InvalidNumeric {
-                    field: "ordered constraint units",
-                    detail: "ordered members need one exact quantity".to_string(),
-                });
-            }
-            // Greedily track the infimum of the smallest feasible prefix.
-            // For a strict chain, an interval whose upper endpoint equals the
-            // prefix infimum has no room for the required positive separation;
-            // any positive gap contains enough real points for this finite
-            // chain, without inventing a machine-epsilon semantics.
-            let mut prefix_infimum = parameters[&members[0]].domain.lo;
-            for role in members.iter().skip(1) {
-                let domain = parameters[role].domain;
-                let feasible = if *strict {
-                    prefix_infimum < domain.hi
-                } else {
-                    prefix_infimum <= domain.hi
-                };
-                if !feasible {
-                    return Err(IdentifiabilityError::InvalidNumeric {
-                        field: "ordered constraint feasibility",
-                        detail: format!(
-                            "ordered member {role} has no {} witness after the preceding domain prefix",
-                            if *strict { "strict" } else { "non-strict" }
-                        ),
-                    });
-                }
-                prefix_infimum = prefix_infimum.max(domain.lo);
-            }
+            validate_ordered_constraint(&constraint.id, members, *strict, parameters)?;
         }
         JointConstraintKind::ExternalManifold {
             members,
             definition,
             codimension,
-        } => {
-            require_members(members, 1)?;
-            require_source_kind(
-                sources,
-                definition,
-                SourceKind::ExternalManifold,
-                "external manifold",
-            )?;
-            match codimension {
-                ConstraintCodimension::Finite { codimension: 0 } => {
-                    return Err(IdentifiabilityError::InvalidNumeric {
-                        field: "external manifold codimension",
-                        detail: "finite codimension must be positive".to_string(),
-                    });
-                }
-                ConstraintCodimension::Finite { codimension }
-                    if usize::try_from(*codimension)
-                        .map_or(true, |codimension| codimension > members.len()) =>
-                {
-                    return Err(IdentifiabilityError::InvalidNumeric {
-                        field: "external manifold codimension",
-                        detail:
-                            "finite codimension cannot exceed the finite scalar carrier dimension"
-                                .to_string(),
-                    });
-                }
-                ConstraintCodimension::InfiniteDimensional { profile } => {
-                    require_source_kind(
-                        sources,
-                        profile,
-                        SourceKind::ExternalManifold,
-                        "external manifold infinite-dimensional profile",
-                    )?;
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "external manifold infinite-dimensional carrier",
-                        detail: "infinite-dimensional codimension is reserved for the typed function-space carrier model; finite scalar parameter members cannot realize it"
-                            .to_string(),
-                    });
-                }
-                ConstraintCodimension::Finite { .. } => {}
-            }
-        }
+        } => validate_external_manifold_constraint(
+            members,
+            definition,
+            codimension,
+            parameters,
+            sources,
+        )?,
         JointConstraintKind::StochasticCoupling {
             members,
             distribution,
         } => {
-            require_members(members, 2)?;
+            require_constraint_members(members, 2, parameters)?;
             require_source_kind(
                 sources,
                 distribution,
@@ -5887,36 +6148,10 @@ fn joint_constraint_support(constraint: &JointConstraint) -> BTreeSet<ParameterR
     }
 }
 
-/// Codimension that follows from an internally understood equality geometry.
-/// Inequalities, order cones, and stochastic couplings deliberately return
-/// `None`: a [`GaugeSlicePlan`] may use them only through its exact external
-/// transversality/coverage declaration.
-fn intrinsic_constraint_codimension(constraint: &JointConstraint) -> Option<u64> {
-    match &constraint.kind {
-        JointConstraintKind::Affine {
-            relation: ConstraintRelation::Equal,
-            ..
-        }
-        | JointConstraintKind::Simplex { .. } => Some(1),
-        JointConstraintKind::ExternalManifold {
-            codimension: ConstraintCodimension::Finite { codimension },
-            ..
-        } => Some(*codimension),
-        JointConstraintKind::ExternalManifold {
-            codimension: ConstraintCodimension::InfiniteDimensional { .. },
-            ..
-        } => None,
-        JointConstraintKind::Affine { .. }
-        | JointConstraintKind::Ordered { .. }
-        | JointConstraintKind::StochasticCoupling { .. } => None,
-    }
-}
-
-fn validate_gauge_slice(
+fn gauge_action_carrier_and_geometry<'a>(
     action: &GaugeActionReference,
-    slice: &GaugeSlicePlan,
-    problem: &IdentifiabilityProblemDocument,
-) -> Result<(), IdentifiabilityError> {
+    problem: &'a IdentifiabilityProblemDocument,
+) -> Result<(BTreeSet<ParameterRoleId>, &'a GaugeOrbitGeometry), IdentifiabilityError> {
     let (carrier, geometry) = match action {
         GaugeActionReference::Single(id) => {
             let gauge =
@@ -5963,6 +6198,15 @@ fn validate_gauge_slice(
             )
         }
     };
+    Ok((carrier, geometry))
+}
+
+fn validate_gauge_slice(
+    action: &GaugeActionReference,
+    slice: &GaugeSlicePlan,
+    problem: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    let (carrier, geometry) = gauge_action_carrier_and_geometry(action, problem)?;
     if !slice.support.is_subset(&carrier) {
         return Err(IdentifiabilityError::InvalidText {
             field: "execution gauge slice support",
@@ -6157,11 +6401,9 @@ pub fn admissible_domain_membership_certificate_preimage(
     Ok(*admissible_domain_witness_binding(witness, parameters, constraints, sources)?.as_bytes())
 }
 
-fn validate_admissible_domain_witness(
+fn validate_witness_parameter_values(
     witness: &AdmissibleDomainWitness,
     parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
-    constraints: &BTreeMap<ConstraintId, JointConstraint>,
-    sources: &BTreeMap<SourceKey, SourceRef>,
 ) -> Result<(), IdentifiabilityError> {
     let expected_roles = parameters.keys().cloned().collect::<BTreeSet<_>>();
     let witnessed_roles = witness.values.keys().cloned().collect::<BTreeSet<_>>();
@@ -6197,7 +6439,15 @@ fn validate_admissible_domain_witness(
             });
         }
     }
+    Ok(())
+}
 
+fn validate_opaque_membership_claim(
+    witness: &AdmissibleDomainWitness,
+    parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
+    constraints: &BTreeMap<ConstraintId, JointConstraint>,
+    sources: &BTreeMap<SourceKey, SourceRef>,
+) -> Result<(), IdentifiabilityError> {
     let needs_opaque_membership = constraints.values().any(|constraint| {
         matches!(
             &constraint.kind,
@@ -6254,7 +6504,14 @@ fn validate_admissible_domain_witness(
             });
         }
     }
+    Ok(())
+}
 
+fn validate_witness_constraints(
+    witness: &AdmissibleDomainWitness,
+    parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
+    constraints: &BTreeMap<ConstraintId, JointConstraint>,
+) -> Result<(), IdentifiabilityError> {
     for (id, constraint) in constraints {
         let feasible = match &constraint.kind {
             JointConstraintKind::Affine {
@@ -6308,6 +6565,17 @@ fn validate_admissible_domain_witness(
     Ok(())
 }
 
+fn validate_admissible_domain_witness(
+    witness: &AdmissibleDomainWitness,
+    parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
+    constraints: &BTreeMap<ConstraintId, JointConstraint>,
+    sources: &BTreeMap<SourceKey, SourceRef>,
+) -> Result<(), IdentifiabilityError> {
+    validate_witness_parameter_values(witness, parameters)?;
+    validate_opaque_membership_claim(witness, parameters, constraints, sources)?;
+    validate_witness_constraints(witness, parameters, constraints)
+}
+
 fn declared_parameter_cases(scope: &ParameterScopeBinding) -> Option<&BTreeSet<CaseId>> {
     match scope {
         ParameterScopeBinding::Global | ParameterScopeBinding::Specimen { .. } => None,
@@ -6359,6 +6627,1874 @@ fn parameter_applicable_cases(
     }
 }
 
+struct ProblemDocumentInputs {
+    context_source: SourceKey,
+    material_source: SourceKey,
+    model_source: SourceKey,
+    graph_source: SourceKey,
+    joint_prior: Option<SourceKey>,
+    sources: Vec<SourceRef>,
+    parameters: Vec<StudyParameter>,
+    constraints: Vec<JointConstraint>,
+    admissible_domain: AdmissibleDomainWitness,
+    cases: Vec<StudyCaseDocument>,
+    influences: Vec<InfluenceDeclaration>,
+    gauges: Vec<GaugeDeclaration>,
+    gauge_compositions: Vec<GaugeCompositionDeclaration>,
+    joint_noise: JointNoiseModel,
+    data_reuse: DataReusePolicy,
+}
+
+fn normalize_problem_sources(
+    sources: Vec<SourceRef>,
+    context_source: &SourceKey,
+    material_source: &SourceKey,
+    model_source: &SourceKey,
+    graph_source: &SourceKey,
+    joint_prior: Option<&SourceKey>,
+) -> Result<BTreeMap<SourceKey, SourceRef>, IdentifiabilityError> {
+    let sources = insert_unique(sources, "source registry", |source| &source.key)?;
+    for (key, kind, field) in [
+        (context_source, SourceKind::ContextOfUse, "context source"),
+        (material_source, SourceKind::MaterialCard, "material source"),
+        (
+            model_source,
+            SourceKind::ConstitutiveModelCard,
+            "model source",
+        ),
+        (graph_source, SourceKind::ConstitutiveGraph, "graph source"),
+    ] {
+        require_source_kind(&sources, key, kind, field)?;
+    }
+    if let Some(joint_prior) = joint_prior {
+        require_source_kind(
+            &sources,
+            joint_prior,
+            SourceKind::ProbabilityMeasure,
+            "problem joint prior",
+        )?;
+    }
+    Ok(sources)
+}
+
+fn normalize_problem_parameters(
+    parameters: Vec<StudyParameter>,
+) -> Result<BTreeMap<ParameterRoleId, StudyParameter>, IdentifiabilityError> {
+    let parameters = insert_unique(parameters, "study parameters", |parameter| &parameter.role)?;
+    if !parameters.values().any(|parameter| {
+        matches!(
+            &parameter.treatment,
+            ParameterTreatment::Estimated
+                | ParameterTreatment::Profiled
+                | ParameterTreatment::Marginalized
+        )
+    }) {
+        return Err(IdentifiabilityError::Cardinality {
+            field: "inferential parameter targets",
+            detail: "an identifiability problem needs at least one free inferential target"
+                .to_string(),
+        });
+    }
+    validate_derived_parameter_dag(&parameters)?;
+    Ok(parameters)
+}
+
+fn normalize_problem_constraints(
+    mut constraints: Vec<JointConstraint>,
+    mut admissible_domain: AdmissibleDomainWitness,
+    parameters: &BTreeMap<ParameterRoleId, StudyParameter>,
+    sources: &BTreeMap<SourceKey, SourceRef>,
+) -> Result<
+    (
+        BTreeMap<ConstraintId, JointConstraint>,
+        AdmissibleDomainWitness,
+    ),
+    IdentifiabilityError,
+> {
+    for constraint in &mut constraints {
+        if let JointConstraintKind::Affine { terms, .. } = &mut constraint.kind {
+            terms.sort_by(|left, right| left.parameter.cmp(&right.parameter));
+        }
+    }
+    let constraints = if constraints.is_empty() {
+        BTreeMap::new()
+    } else {
+        insert_unique(constraints, "joint constraints", |constraint| {
+            &constraint.id
+        })?
+    };
+    for constraint in constraints.values() {
+        validate_joint_constraint(constraint, parameters, sources)?;
+    }
+    if admissible_domain.opaque_membership_claim.is_some() {
+        let binding = admissible_domain_witness_binding(
+            &admissible_domain,
+            parameters,
+            &constraints,
+            sources,
+        )?;
+        admissible_domain.bind_opaque_membership(binding)?;
+    }
+    validate_admissible_domain_witness(&admissible_domain, parameters, &constraints, sources)?;
+    Ok((constraints, admissible_domain))
+}
+
+struct NormalizedProblemCollections {
+    cases: BTreeMap<CaseId, StudyCaseDocument>,
+    influences: BTreeMap<InfluenceId, InfluenceDeclaration>,
+    gauges: BTreeMap<GaugeClassId, GaugeDeclaration>,
+    gauge_compositions: BTreeMap<GaugeCompositionId, GaugeCompositionDeclaration>,
+    joint_noise: JointNoiseModel,
+    data_reuse: DataReusePolicy,
+}
+
+fn normalize_problem_collections(
+    cases: Vec<StudyCaseDocument>,
+    mut influences: Vec<InfluenceDeclaration>,
+    gauges: Vec<GaugeDeclaration>,
+    gauge_compositions: Vec<GaugeCompositionDeclaration>,
+    joint_noise: JointNoiseModel,
+    mut data_reuse: DataReusePolicy,
+) -> Result<NormalizedProblemCollections, IdentifiabilityError> {
+    let cases = insert_unique(cases, "study cases", |case| &case.id)?;
+    for influence in &mut influences {
+        if let DistributionFunctional::Correlation { left, right } = &mut influence.functional
+            && right < left
+        {
+            core::mem::swap(left, right);
+        }
+    }
+    let influences = if influences.is_empty() {
+        BTreeMap::new()
+    } else {
+        insert_unique(influences, "influence declarations", |influence| {
+            &influence.id
+        })?
+    };
+    let gauges = if gauges.is_empty() {
+        BTreeMap::new()
+    } else {
+        insert_unique(gauges, "gauge declarations", |gauge| &gauge.id)?
+    };
+    let gauge_compositions = if gauge_compositions.is_empty() {
+        BTreeMap::new()
+    } else {
+        insert_unique(
+            gauge_compositions,
+            "gauge composition declarations",
+            |composition| &composition.id,
+        )?
+    };
+    let joint_noise = normalize_joint_noise(joint_noise)?;
+    if let DataReusePolicy::Shared { groups } = &mut data_reuse {
+        groups.sort_by(|left, right| {
+            (&left.cases, &left.joint_likelihood, &left.justification).cmp(&(
+                &right.cases,
+                &right.joint_likelihood,
+                &right.justification,
+            ))
+        });
+    }
+    Ok(NormalizedProblemCollections {
+        cases,
+        influences,
+        gauges,
+        gauge_compositions,
+        joint_noise,
+        data_reuse,
+    })
+}
+
+fn normalize_problem_document(
+    inputs: ProblemDocumentInputs,
+) -> Result<IdentifiabilityProblemDocument, IdentifiabilityError> {
+    let ProblemDocumentInputs {
+        context_source,
+        material_source,
+        model_source,
+        graph_source,
+        joint_prior,
+        sources,
+        parameters,
+        constraints,
+        admissible_domain,
+        cases,
+        influences,
+        gauges,
+        gauge_compositions,
+        joint_noise,
+        data_reuse,
+    } = inputs;
+    let sources = normalize_problem_sources(
+        sources,
+        &context_source,
+        &material_source,
+        &model_source,
+        &graph_source,
+        joint_prior.as_ref(),
+    )?;
+    let parameters = normalize_problem_parameters(parameters)?;
+    let (constraints, admissible_domain) =
+        normalize_problem_constraints(constraints, admissible_domain, &parameters, &sources)?;
+    let NormalizedProblemCollections {
+        cases,
+        influences,
+        gauges,
+        gauge_compositions,
+        joint_noise,
+        data_reuse,
+    } = normalize_problem_collections(
+        cases,
+        influences,
+        gauges,
+        gauge_compositions,
+        joint_noise,
+        data_reuse,
+    )?;
+    Ok(IdentifiabilityProblemDocument {
+        schema_version: IDENTIFIABILITY_PROBLEM_IDENTITY_VERSION,
+        context_source,
+        material_source,
+        model_source,
+        graph_source,
+        joint_prior,
+        sources,
+        parameters,
+        constraints,
+        admissible_domain,
+        cases,
+        influences,
+        gauges,
+        gauge_compositions,
+        joint_noise,
+        data_reuse,
+    })
+}
+
+fn validate_problem_parameter(
+    parameter: &StudyParameter,
+    sources: &BTreeMap<SourceKey, SourceRef>,
+    cases: &BTreeMap<CaseId, StudyCaseDocument>,
+) -> Result<(), IdentifiabilityError> {
+    validate_declared_parameter_cases(parameter, cases)?;
+    match &parameter.owner {
+        ParameterOwnerBinding::ConstitutiveModel => {}
+        ParameterOwnerBinding::InitialState { state_path } => require_source_kind(
+            sources,
+            state_path,
+            SourceKind::Assumption,
+            "initial-state owner",
+        )?,
+        ParameterOwnerBinding::Instrument { metrology, .. } => require_source_kind(
+            sources,
+            metrology,
+            SourceKind::Metrology,
+            "instrument owner",
+        )?,
+        ParameterOwnerBinding::Discrepancy { family } => require_source_kind(
+            sources,
+            family,
+            SourceKind::Discrepancy,
+            "discrepancy owner",
+        )?,
+        ParameterOwnerBinding::ControlledInput { protocol } => require_source_kind(
+            sources,
+            protocol,
+            SourceKind::Protocol,
+            "controlled-input owner",
+        )?,
+        ParameterOwnerBinding::Population { hierarchy } => {
+            require_source_kind(sources, hierarchy, SourceKind::Prior, "population owner")?;
+        }
+    }
+    match &parameter.scope {
+        ParameterScopeBinding::Global
+        | ParameterScopeBinding::Cases(_)
+        | ParameterScopeBinding::MaterialLot { .. } => {}
+        ParameterScopeBinding::Specimen { case, specimen } => {
+            let case_doc =
+                cases
+                    .get(case)
+                    .ok_or_else(|| IdentifiabilityError::UnknownReference {
+                        field: "parameter specimen case",
+                        id: case.to_string(),
+                    })?;
+            if case_doc.specimen.id() != specimen {
+                return Err(IdentifiabilityError::UnknownReference {
+                    field: "parameter specimen",
+                    id: specimen.as_str().to_string(),
+                });
+            }
+        }
+        ParameterScopeBinding::Field { support, .. } => {
+            require_source_kind_in(
+                sources,
+                support,
+                &[SourceKind::Geometry, SourceKind::ExternalManifold],
+                "field support",
+            )?;
+            return Err(IdentifiabilityError::InvalidText {
+                field: "field parameter carrier",
+                detail: format!(
+                    "parameter {} declares Field scope, but v3 has no typed function-space carrier/discretization/reconstruction/measure contract; scalar conditioned, derived, and free actions are all rejected rather than silently treating a field as a constant scalar",
+                    parameter.role
+                ),
+            });
+        }
+        ParameterScopeBinding::Hierarchical {
+            level, hierarchy, ..
+        } => {
+            if *level == 0 {
+                return Err(IdentifiabilityError::InvalidNumeric {
+                    field: "hierarchical level",
+                    detail: "level zero is reserved for the global population".to_string(),
+                });
+            }
+            require_source_kind(sources, hierarchy, SourceKind::Prior, "hierarchy source")?;
+        }
+    }
+    match &parameter.treatment {
+        ParameterTreatment::Conditioned(value) => require_source_kind_in(
+            sources,
+            &value.source,
+            &[SourceKind::EvidenceReceipt, SourceKind::Metrology],
+            "conditioned value source",
+        )?,
+        ParameterTreatment::Derived { definition, .. } => require_source_kind(
+            sources,
+            definition,
+            SourceKind::Constraint,
+            "derived parameter definition",
+        )?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_case_row_sharing(
+    case_id: &CaseId,
+    case: &StudyCaseDocument,
+) -> Result<(), IdentifiabilityError> {
+    let mut row_consumers = BTreeMap::<ObservationId, usize>::new();
+    for observation in case.observations.values() {
+        if let ObservationRows::Retrospective(rows) = &observation.rows {
+            for row in rows {
+                *row_consumers.entry(row.clone()).or_default() += 1;
+            }
+        }
+    }
+    let repeated_rows = row_consumers
+        .into_iter()
+        .filter_map(|(row, consumers)| (consumers > 1).then_some(row))
+        .collect::<BTreeSet<_>>();
+    let declared_shared_rows = case
+        .observation_sharing
+        .iter()
+        .flat_map(|group| group.rows.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    if repeated_rows != declared_shared_rows {
+        return Err(IdentifiabilityError::InvalidText {
+            field: "observation-sharing coverage",
+            detail: format!("case {case_id} must declare every and only multiply consumed raw row"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_case_physics_bindings(
+    case_id: &CaseId,
+    case: &StudyCaseDocument,
+    sources: &BTreeMap<SourceKey, SourceRef>,
+) -> Result<(), IdentifiabilityError> {
+    if case.protocol.state_schema_version != initial_state_schema_version(case.initial_state) {
+        return Err(IdentifiabilityError::VersionMismatch {
+            field: "case initial-state/protocol schema",
+            expected: case.protocol.state_schema_version,
+            actual: initial_state_schema_version(case.initial_state),
+        });
+    }
+    for (source, kind, artifact, domain, field) in [
+        (
+            &case.physics_sources.frame_transform,
+            SourceKind::Geometry,
+            case.specimen.frame().transform(),
+            FRAME_TRANSFORM_SOURCE_DOMAIN,
+            "case frame-transform source",
+        ),
+        (
+            &case.physics_sources.specimen_geometry,
+            SourceKind::Geometry,
+            case.specimen.geometry(),
+            SPECIMEN_GEOMETRY_SOURCE_DOMAIN,
+            "case specimen-geometry source",
+        ),
+        (
+            &case.physics_sources.specimen_process,
+            SourceKind::Process,
+            case.specimen.process(),
+            SPECIMEN_PROCESS_SOURCE_DOMAIN,
+            "case specimen-process source",
+        ),
+        (
+            &case.physics_sources.specimen_preparation,
+            SourceKind::Process,
+            case.specimen.preparation(),
+            SPECIMEN_PREPARATION_SOURCE_DOMAIN,
+            "case specimen-preparation source",
+        ),
+        (
+            &case.physics_sources.load_path,
+            SourceKind::Protocol,
+            case.protocol.load_path(),
+            LOAD_PATH_SOURCE_DOMAIN,
+            "case load-path source",
+        ),
+        (
+            &case.physics_sources.environment_path,
+            SourceKind::Protocol,
+            case.protocol.environment_path(),
+            ENVIRONMENT_PATH_SOURCE_DOMAIN,
+            "case environment-path source",
+        ),
+        (
+            &case.physics_sources.time_grid,
+            SourceKind::Protocol,
+            case.protocol.time_grid(),
+            TIME_GRID_SOURCE_DOMAIN,
+            "case time-grid source",
+        ),
+    ] {
+        require_case_physics_source(sources, source, kind, artifact, domain, field)?;
+    }
+    match (case.initial_state, &case.physics_sources.initial_state) {
+        (InitialStateBinding::Zero { .. }, None) => {}
+        (InitialStateBinding::Explicit { artifact, .. }, Some(source)) => {
+            require_case_physics_source(
+                sources,
+                source,
+                SourceKind::Assumption,
+                artifact,
+                INITIAL_STATE_SOURCE_DOMAIN,
+                "case initial-state source",
+            )?;
+        }
+        (InitialStateBinding::Zero { .. }, Some(_)) => {
+            return Err(IdentifiabilityError::SourceMismatch {
+                field: "zero initial-state source",
+            });
+        }
+        (InitialStateBinding::Explicit { .. }, None) => {
+            return Err(IdentifiabilityError::UnknownReference {
+                field: "case initial-state source",
+                id: case_id.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_case_data_declaration(
+    case_id: &CaseId,
+    case: &StudyCaseDocument,
+    sources: &BTreeMap<SourceKey, SourceRef>,
+) -> Result<(), IdentifiabilityError> {
+    require_source_kind(
+        sources,
+        &case.forward_model,
+        SourceKind::ForwardModel,
+        "case forward model",
+    )?;
+    for group in &case.observation_sharing {
+        require_source_kind_in(
+            sources,
+            &group.joint_likelihood,
+            &[SourceKind::Likelihood, SourceKind::ParameterizedLikelihood],
+            "observation-sharing joint likelihood",
+        )?;
+    }
+    match &case.data {
+        CaseDataDeclaration::Prospective => {
+            if matches!(&case.purpose, CasePurpose::BlindFalsification) {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "blind-falsification case data",
+                    detail: format!(
+                        "case {case_id} must bind retrospective blind rows and a release"
+                    ),
+                });
+            }
+            if case
+                .observations
+                .values()
+                .any(|observation| !matches!(&observation.rows, ObservationRows::Prospective))
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "prospective observation rows",
+                    detail: format!("case {case_id} contains retrospective row IDs"),
+                });
+            }
+        }
+        CaseDataDeclaration::Retrospective {
+            experiment,
+            split,
+            parser,
+            preprocessing,
+            parser_version,
+            ..
+        } => {
+            if matches!(&case.purpose, CasePurpose::ProspectiveDesign) {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "prospective-design case data",
+                    detail: format!(
+                        "case {case_id} is ProspectiveDesign but binds retrospective data"
+                    ),
+                });
+            }
+            require_source_kind(
+                sources,
+                experiment,
+                SourceKind::ExperimentArtifact,
+                "case experiment",
+            )?;
+            require_source_kind(sources, split, SourceKind::CalibrationSplit, "case split")?;
+            require_source_kind(sources, parser, SourceKind::Parser, "case parser")?;
+            let parser_source = require_source(sources, parser, "case parser")?;
+            require_source_kind(
+                sources,
+                preprocessing,
+                SourceKind::Preprocessing,
+                "case preprocessing",
+            )?;
+            if *parser_version == 0
+                || case.observations.values().any(|observation| {
+                    !matches!(&observation.rows, ObservationRows::Retrospective(_))
+                })
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "retrospective case",
+                    detail: format!("case {case_id} needs a positive parser version and raw rows"),
+                });
+            }
+            if parser_source.contract_version != *parser_version {
+                return Err(IdentifiabilityError::VersionMismatch {
+                    field: "case parser source contract",
+                    expected: *parser_version,
+                    actual: parser_source.contract_version,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_problem_observation(
+    case: &StudyCaseDocument,
+    channel: &ObservationChannelId,
+    observation: &StudyObservation,
+    sources: &BTreeMap<SourceKey, SourceRef>,
+) -> Result<(), IdentifiabilityError> {
+    if &observation.frame != case.specimen.frame() {
+        return Err(IdentifiabilityError::SourceMismatch {
+            field: "observation/specimen frame",
+        });
+    }
+    if observation.protocol_version != case.protocol.version {
+        return Err(IdentifiabilityError::VersionMismatch {
+            field: "case observation protocol version",
+            expected: case.protocol.version,
+            actual: observation.protocol_version,
+        });
+    }
+    if observation.refinement_version != case.protocol.refinement_version {
+        return Err(IdentifiabilityError::VersionMismatch {
+            field: "case observation refinement version",
+            expected: case.protocol.refinement_version,
+            actual: observation.refinement_version,
+        });
+    }
+    if observation.clock != case.protocol.clock {
+        return Err(IdentifiabilityError::InvalidText {
+            field: "case observation protocol clock",
+            detail: format!(
+                "observation {channel} names clock {}, but protocol {} names {}",
+                observation.clock, case.protocol.id, case.protocol.clock
+            ),
+        });
+    }
+    require_source_kind(
+        sources,
+        &observation.unit_definition,
+        SourceKind::UnitDefinition,
+        "observation unit definition",
+    )?;
+    require_source_kind(
+        sources,
+        &observation.operator,
+        SourceKind::ObservationOperator,
+        "observation operator",
+    )?;
+    let operator_source = require_source(sources, &observation.operator, "observation operator")?;
+    require_source_kind(
+        sources,
+        &observation.aggregation,
+        SourceKind::ObservationOperator,
+        "observation aggregation",
+    )?;
+    let aggregation_source =
+        require_source(sources, &observation.aggregation, "observation aggregation")?;
+    for (field, source) in [
+        ("observation operator source contract", operator_source),
+        (
+            "observation aggregation source contract",
+            aggregation_source,
+        ),
+    ] {
+        if source.contract_version != observation.operator_version {
+            return Err(IdentifiabilityError::VersionMismatch {
+                field,
+                expected: observation.operator_version,
+                actual: source.contract_version,
+            });
+        }
+    }
+    require_source_kind(
+        sources,
+        &observation.sensor,
+        SourceKind::Metrology,
+        "observation sensor",
+    )?;
+    validate_observation_uncertainty(observation, sources)
+}
+
+fn validate_observation_uncertainty(
+    observation: &StudyObservation,
+    sources: &BTreeMap<SourceKey, SourceRef>,
+) -> Result<(), IdentifiabilityError> {
+    if let MarginalNoiseSpec::Empirical {
+        distribution,
+        finite_variance_model,
+        ..
+    } = &observation.noise
+    {
+        require_source_kind_in(
+            sources,
+            distribution,
+            &[
+                SourceKind::Likelihood,
+                SourceKind::ParameterizedLikelihood,
+                SourceKind::EvidenceReceipt,
+            ],
+            "empirical noise",
+        )?;
+        require_source_kind(
+            sources,
+            finite_variance_model,
+            SourceKind::EvidenceReceipt,
+            "empirical finite-variance model",
+        )?;
+    }
+    match &observation.missingness {
+        MissingnessAssumption::Complete { assumption } => require_source_kind(
+            sources,
+            assumption,
+            SourceKind::Assumption,
+            "completeness assumption",
+        )?,
+        MissingnessAssumption::Modeled { mechanism } => require_source_kind_in(
+            sources,
+            mechanism,
+            &[SourceKind::Likelihood, SourceKind::ParameterizedLikelihood],
+            "missingness mechanism",
+        )?,
+        MissingnessAssumption::Unknown { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_synthetic_discrepancy(
+    case: &StudyCaseDocument,
+    generator: &SourceKey,
+    producer: &ArtifactId,
+    production_binding: &SourceKey,
+    assumption: &SourceKey,
+    sources: &BTreeMap<SourceKey, SourceRef>,
+) -> Result<(), IdentifiabilityError> {
+    if !matches!(&case.data, CaseDataDeclaration::Retrospective { .. })
+        || generator != &case.forward_model
+    {
+        return Err(IdentifiabilityError::SourceMismatch {
+            field: "declared-synthetic self-model discrepancy",
+        });
+    }
+    require_source_kind(
+        sources,
+        generator,
+        SourceKind::ForwardModel,
+        "declared-synthetic generator",
+    )?;
+    require_source_kind(
+        sources,
+        production_binding,
+        SourceKind::ForwardModelProductionBinding,
+        "declared-synthetic producer/forward-model binding",
+    )?;
+    let binding_source = &sources[production_binding];
+    let binding_preimage =
+        forward_model_production_binding_preimage(producer, &sources[generator])?;
+    if binding_source.content_hash_domain != FORWARD_MODEL_PRODUCTION_BINDING_DOMAIN
+        || binding_source.contract_version != FORWARD_MODEL_PRODUCTION_BINDING_VERSION
+        || binding_source.expected_hash
+            != hash_domain(FORWARD_MODEL_PRODUCTION_BINDING_DOMAIN, &binding_preimage)
+    {
+        return Err(IdentifiabilityError::SourceMismatch {
+            field: "declared-synthetic producer/forward-model production binding",
+        });
+    }
+    require_source_kind(
+        sources,
+        assumption,
+        SourceKind::Assumption,
+        "declared-synthetic no-discrepancy assumption",
+    )
+}
+
+fn validate_modeled_discrepancy(
+    case_id: &CaseId,
+    family: &SourceKey,
+    discrepancy_parameters: &BTreeSet<ParameterRoleId>,
+    support: &SourceKey,
+    confounding_guard: &SourceKey,
+    document: &IdentifiabilityProblemDocument,
+    modeled_parameters: &mut BTreeSet<ParameterRoleId>,
+) -> Result<(), IdentifiabilityError> {
+    require_source_kind(
+        &document.sources,
+        family,
+        SourceKind::Discrepancy,
+        "modeled discrepancy family",
+    )?;
+    require_source_kind_in(
+        &document.sources,
+        support,
+        &[SourceKind::Geometry, SourceKind::ExternalManifold],
+        "modeled discrepancy support",
+    )?;
+    require_source_kind(
+        &document.sources,
+        confounding_guard,
+        SourceKind::Constraint,
+        "modeled discrepancy confounding guard",
+    )?;
+    if discrepancy_parameters.is_empty() {
+        return Err(IdentifiabilityError::Cardinality {
+            field: "discrepancy parameters",
+            detail: "modeled discrepancy needs explicit parameter roles".to_string(),
+        });
+    }
+    for role in discrepancy_parameters {
+        let parameter = document.parameters.get(role).ok_or_else(|| {
+            IdentifiabilityError::UnknownReference {
+                field: "discrepancy parameter",
+                id: role.to_string(),
+            }
+        })?;
+        if !matches!(
+            &parameter.owner,
+            ParameterOwnerBinding::Discrepancy {
+                family: owner_family
+            } if owner_family == family
+        ) {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "discrepancy parameter owner",
+                detail: format!("parameter {role} is not owned by modeled family {family}"),
+            });
+        }
+        if !parameter_active_in_cases(parameter, &BTreeSet::from([case_id.clone()])) {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "discrepancy parameter/case scope",
+                detail: format!(
+                    "modeled discrepancy in case {case_id} uses parameter {role} outside its exact applicability"
+                ),
+            });
+        }
+        modeled_parameters.insert(role.clone());
+    }
+    Ok(())
+}
+
+fn validate_problem_discrepancy(
+    case_id: &CaseId,
+    channel: &ObservationChannelId,
+    case: &StudyCaseDocument,
+    discrepancy: &StudyDiscrepancy,
+    document: &IdentifiabilityProblemDocument,
+    modeled_parameters: &mut BTreeSet<ParameterRoleId>,
+) -> Result<(), IdentifiabilityError> {
+    match discrepancy {
+        StudyDiscrepancy::Uncharacterized { reason } => {
+            validate_reason(reason, "discrepancy reason")?;
+        }
+        StudyDiscrepancy::NotApplicable { basis } => match basis {
+            DiscrepancyInapplicability::PhysicalApplicability { assumption } => {
+                if !matches!(&case.data, CaseDataDeclaration::Retrospective { .. }) {
+                    return Err(IdentifiabilityError::InvalidText {
+                        field: "physical discrepancy applicability",
+                        detail: format!(
+                            "case {case_id} channel {channel} is not a retrospective physical observation"
+                        ),
+                    });
+                }
+                require_source_kind(
+                    &document.sources,
+                    assumption,
+                    SourceKind::Assumption,
+                    "physical discrepancy applicability assumption",
+                )?;
+            }
+            DiscrepancyInapplicability::DeclaredSyntheticSelfModel {
+                generator,
+                producer,
+                production_binding,
+                assumption,
+            } => validate_synthetic_discrepancy(
+                case,
+                generator,
+                producer,
+                production_binding,
+                assumption,
+                &document.sources,
+            )?,
+            DiscrepancyInapplicability::ProspectiveDesign { assumption } => {
+                if !matches!(&case.data, CaseDataDeclaration::Prospective)
+                    || !matches!(&case.purpose, CasePurpose::ProspectiveDesign)
+                {
+                    return Err(IdentifiabilityError::InvalidText {
+                        field: "prospective discrepancy applicability",
+                        detail: format!(
+                            "case {case_id} channel {channel} must be an exact prospective-design case"
+                        ),
+                    });
+                }
+                require_source_kind(
+                    &document.sources,
+                    assumption,
+                    SourceKind::Assumption,
+                    "prospective discrepancy applicability assumption",
+                )?;
+            }
+        },
+        StudyDiscrepancy::AssumedZero { assumption } => require_source_kind(
+            &document.sources,
+            assumption,
+            SourceKind::Assumption,
+            "zero-discrepancy assumption",
+        )?,
+        StudyDiscrepancy::Modeled {
+            family,
+            parameters,
+            support,
+            confounding_guard,
+        } => validate_modeled_discrepancy(
+            case_id,
+            family,
+            parameters,
+            support,
+            confounding_guard,
+            document,
+            modeled_parameters,
+        )?,
+    }
+    Ok(())
+}
+
+struct ProblemCaseObservations<'a> {
+    observations: BTreeMap<ObservationKey, &'a StudyObservation>,
+    modeled_discrepancy_parameters: BTreeSet<ParameterRoleId>,
+}
+
+fn collect_problem_case_observations(
+    document: &IdentifiabilityProblemDocument,
+) -> Result<ProblemCaseObservations<'_>, IdentifiabilityError> {
+    let mut all_observations = BTreeMap::new();
+    let mut modeled_discrepancy_parameters = BTreeSet::new();
+    for (case_id, case) in &document.cases {
+        validate_case_row_sharing(case_id, case)?;
+        validate_case_physics_bindings(case_id, case, &document.sources)?;
+        validate_case_data_declaration(case_id, case, &document.sources)?;
+        for (channel, observation) in &case.observations {
+            validate_problem_observation(case, channel, observation, &document.sources)?;
+            all_observations.insert(
+                ObservationKey::new(case_id.clone(), channel.clone()),
+                observation,
+            );
+        }
+        for (channel, discrepancy) in &case.discrepancies {
+            validate_problem_discrepancy(
+                case_id,
+                channel,
+                case,
+                discrepancy,
+                document,
+                &mut modeled_discrepancy_parameters,
+            )?;
+        }
+    }
+    Ok(ProblemCaseObservations {
+        observations: all_observations,
+        modeled_discrepancy_parameters,
+    })
+}
+
+fn validate_problem_parameter_case_bindings(
+    document: &IdentifiabilityProblemDocument,
+    modeled_discrepancy_parameters: &BTreeSet<ParameterRoleId>,
+) -> Result<(), IdentifiabilityError> {
+    for parameter in document.parameters.values() {
+        if matches!(&parameter.owner, ParameterOwnerBinding::Discrepancy { .. })
+            && !modeled_discrepancy_parameters.contains(&parameter.role)
+        {
+            return Err(IdentifiabilityError::UnknownReference {
+                field: "modeled discrepancy parameter",
+                id: parameter.role.to_string(),
+            });
+        }
+        let applicable = parameter_applicable_cases(parameter, &document.cases);
+        let owner_is_bound_in_case = |case: &StudyCaseDocument| match &parameter.owner {
+            ParameterOwnerBinding::ConstitutiveModel | ParameterOwnerBinding::Population { .. } => {
+                true
+            }
+            ParameterOwnerBinding::InitialState { state_path } => {
+                case.physics_sources.initial_state.as_ref() == Some(state_path)
+            }
+            ParameterOwnerBinding::Instrument {
+                instrument,
+                acquisition_channel,
+                metrology,
+            } => case.observations.values().any(|observation| {
+                &observation.instrument == instrument
+                    && &observation.acquisition_channel == acquisition_channel
+                    && &observation.sensor == metrology
+            }),
+            ParameterOwnerBinding::Discrepancy { family } => {
+                case.discrepancies.values().any(|discrepancy| {
+                    matches!(
+                        discrepancy,
+                        StudyDiscrepancy::Modeled {
+                            family: candidate,
+                            parameters,
+                            ..
+                        } if candidate == family && parameters.contains(&parameter.role)
+                    )
+                })
+            }
+            ParameterOwnerBinding::ControlledInput { protocol } => [
+                &case.physics_sources.load_path,
+                &case.physics_sources.environment_path,
+                &case.physics_sources.time_grid,
+            ]
+            .contains(&protocol),
+        };
+        if let Some(case_id) = applicable
+            .iter()
+            .find(|case_id| !owner_is_bound_in_case(&document.cases[*case_id]))
+        {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "parameter owner/case binding",
+                detail: format!(
+                    "parameter {} owner is not physically bound in applicable case {case_id}",
+                    parameter.role
+                ),
+            });
+        }
+        if let ParameterOwnerBinding::Population { hierarchy } = &parameter.owner
+            && let ParameterScopeBinding::Hierarchical {
+                hierarchy: scoped_hierarchy,
+                ..
+            } = &parameter.scope
+            && hierarchy != scoped_hierarchy
+        {
+            return Err(IdentifiabilityError::SourceMismatch {
+                field: "population owner/hierarchical scope",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_influence_functional(
+    influence: &InfluenceDeclaration,
+    parameter: &StudyParameter,
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    if let DistributionFunctional::Correlation { left, right } = &influence.functional {
+        let left_observation = observation_for(&document.cases, left)?;
+        let right_observation = observation_for(&document.cases, right)?;
+        if !left_observation.noise.finite_standard_deviation()
+            || !right_observation.noise.finite_standard_deviation()
+        {
+            return Err(IdentifiabilityError::Covariance {
+                detail: "Pearson-correlation influence requires two finite-second-moment marginals"
+                    .to_string(),
+            });
+        }
+    }
+    for key in functional_observations(&influence.functional) {
+        let observation = observation_for(&document.cases, key)?;
+        if !parameter_active_in_cases(parameter, &BTreeSet::from([key.case.clone()])) {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "influence parameter/case scope",
+                detail: format!(
+                    "influence {} targets case {} outside parameter {} applicability",
+                    influence.id, key.case, influence.parameter
+                ),
+            });
+        }
+        match &influence.functional {
+            DistributionFunctional::Correlation { left, right } if left == right => {
+                return Err(IdentifiabilityError::InvalidNumeric {
+                    field: "correlation functional",
+                    detail: "self-correlation is a constant, not an identifiability route"
+                        .to_string(),
+                });
+            }
+            DistributionFunctional::MissingnessLogit { .. }
+                if !matches!(
+                    &observation.missingness,
+                    MissingnessAssumption::Modeled { mechanism }
+                        if document.sources[mechanism].kind == SourceKind::ParameterizedLikelihood
+                ) =>
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "missingness functional",
+                    detail: "MissingnessLogit influence needs a modeled mechanism with exact ParameterizedLikelihood semantics"
+                        .to_string(),
+                });
+            }
+            DistributionFunctional::LogScale { .. }
+                if !matches!(
+                    &observation.noise,
+                    MarginalNoiseSpec::Empirical { distribution, .. }
+                        if document.sources[distribution].kind == SourceKind::ParameterizedLikelihood
+                ) =>
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "log-scale functional",
+                    detail: "LogScale influence needs an exact parameterized marginal likelihood; fixed Gaussian/Student-t/bounded parameters are not influence routes"
+                        .to_string(),
+                });
+            }
+            DistributionFunctional::CensoringLogit { .. } => {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "censoring functional",
+                    detail: if observation.saturation.is_none() {
+                        "CensoringLogit influence requires saturation and an exact parameterized censoring law; saturation is absent"
+                    } else {
+                        "CensoringLogit influence requires an exact parameterized censoring-law source; a fixed saturation interval alone is insufficient"
+                    }
+                    .to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_influence_representation(
+    influence: &InfluenceDeclaration,
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    match &influence.representation {
+        InfluenceRepresentation::Direct => {}
+        InfluenceRepresentation::StateMediated { state_path } => require_source_kind(
+            &document.sources,
+            state_path,
+            SourceKind::Assumption,
+            "state-mediated influence",
+        )?,
+        InfluenceRepresentation::Composite { operator, inputs } => {
+            require_source_kind(
+                &document.sources,
+                operator,
+                SourceKind::InfluenceComposition,
+                "composite influence operator",
+            )?;
+            if inputs.is_empty() || inputs.contains(&influence.id) {
+                return Err(IdentifiabilityError::InvalidNumeric {
+                    field: "composite influence inputs",
+                    detail: format!("influence {} has empty or self input", influence.id),
+                });
+            }
+            for input in inputs {
+                let input_declaration = document.influences.get(input).ok_or_else(|| {
+                    IdentifiabilityError::UnknownReference {
+                        field: "composite influence input",
+                        id: input.to_string(),
+                    }
+                })?;
+                if input_declaration.parameter != influence.parameter {
+                    return Err(IdentifiabilityError::InvalidText {
+                        field: "composite influence parameter",
+                        detail: format!(
+                            "composite influence {} targets parameter {} but input {} targets {}; cross-parameter chain rules require a dedicated typed composition schema",
+                            influence.id,
+                            influence.parameter,
+                            input_declaration.id,
+                            input_declaration.parameter
+                        ),
+                    });
+                }
+            }
+        }
+        InfluenceRepresentation::ExternalDefinition { definition } => require_source_kind(
+            &document.sources,
+            definition,
+            SourceKind::Constraint,
+            "external influence definition",
+        )?,
+    }
+    Ok(())
+}
+
+fn validate_problem_influences(
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    let mut influenced_parameters = BTreeSet::new();
+    for influence in document.influences.values() {
+        let parameter = document
+            .parameters
+            .get(&influence.parameter)
+            .ok_or_else(|| IdentifiabilityError::UnknownReference {
+                field: "influence parameter",
+                id: influence.parameter.to_string(),
+            })?;
+        validate_influence_functional(influence, parameter, document)?;
+        validate_influence_representation(influence, document)?;
+        influenced_parameters.insert(influence.parameter.clone());
+    }
+    for parameter in document.parameters.values() {
+        let free = matches!(
+            &parameter.treatment,
+            ParameterTreatment::Estimated
+                | ParameterTreatment::Profiled
+                | ParameterTreatment::Marginalized
+        );
+        match (&parameter.influence_coverage, free) {
+            (InfluenceCoverage::Declared, _)
+                if !influenced_parameters.contains(&parameter.role) =>
+            {
+                return Err(IdentifiabilityError::DisconnectedEstimatedParameter {
+                    parameter: parameter.role.clone(),
+                });
+            }
+            (InfluenceCoverage::IntentionallyAbsent { .. }, true)
+                if influenced_parameters.contains(&parameter.role) =>
+            {
+                return Err(IdentifiabilityError::InvalidNumeric {
+                    field: "parameter influence coverage",
+                    detail: format!(
+                        "parameter {} both declares and denies influence routes",
+                        parameter.role
+                    ),
+                });
+            }
+            (InfluenceCoverage::NotApplicable { .. }, false)
+                if influenced_parameters.contains(&parameter.role) =>
+            {
+                return Err(IdentifiabilityError::InvalidNumeric {
+                    field: "parameter influence coverage",
+                    detail: format!(
+                        "parameter {} marks influence not applicable but owns a route",
+                        parameter.role
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_influence_dag(
+    influences: &BTreeMap<InfluenceId, InfluenceDeclaration>,
+) -> Result<(), IdentifiabilityError> {
+    let mut incoming = influences
+        .keys()
+        .cloned()
+        .map(|id| (id, 0_usize))
+        .collect::<BTreeMap<_, _>>();
+    let mut dependents = BTreeMap::<InfluenceId, BTreeSet<InfluenceId>>::new();
+    for (id, influence) in influences {
+        if let InfluenceRepresentation::Composite { inputs, .. } = &influence.representation {
+            incoming.insert(id.clone(), inputs.len());
+            for input in inputs {
+                dependents
+                    .entry(input.clone())
+                    .or_default()
+                    .insert(id.clone());
+            }
+        }
+    }
+    let mut ready = incoming
+        .iter()
+        .filter_map(|(id, degree)| (*degree == 0).then_some(id.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut visited = 0_usize;
+    while let Some(id) = ready.pop_first() {
+        visited += 1;
+        if let Some(children) = dependents.get(&id) {
+            for child in children {
+                let degree = incoming.get_mut(child).expect("known composite child");
+                *degree -= 1;
+                if *degree == 0 {
+                    ready.insert(child.clone());
+                }
+            }
+        }
+    }
+    if visited != influences.len() {
+        let id = incoming
+            .iter()
+            .find_map(|(id, degree)| (*degree > 0).then_some(id))
+            .expect("an unvisited influence has positive indegree");
+        return Err(IdentifiabilityError::InvalidNumeric {
+            field: "composite influence graph",
+            detail: format!("cycle reaches influence {id}"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_gauge_cells(
+    gauge: &GaugeDeclaration,
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    for (axes, cell) in &gauge.validity.cells {
+        for (case, extent_support) in &cell.case_obstruction_support {
+            if !document.cases.contains_key(case) {
+                return Err(IdentifiabilityError::UnknownReference {
+                    field: "gauge invariant case",
+                    id: case.to_string(),
+                });
+            }
+            if !extent_support
+                .global_obstruction_parameters
+                .is_subset(&gauge.members)
+                || !extent_support
+                    .local_obstruction_parameters
+                    .is_subset(&extent_support.global_obstruction_parameters)
+            {
+                return Err(IdentifiabilityError::InvalidGauge {
+                    gauge: gauge.id.clone(),
+                    detail: "local obstruction support must be a subset of global obstruction support, and both must stay inside gauge members"
+                        .to_string(),
+                });
+            }
+            if !regular_orbit_support_compatible(&gauge.orbit_geometry, extent_support) {
+                return Err(IdentifiabilityError::InvalidGauge {
+                    gauge: gauge.id.clone(),
+                    detail: "regular orbit geometry and local/global obstruction support disagree; positive-dimensional regular orbits obstruct locally and globally, finite discrete proper/local-covering regular orbits obstruct only globally, every nontrivial regular orbit obstructs globally, and singular/nonproper exceptions require Stratified profile authority"
+                        .to_string(),
+                });
+            }
+            if let Some(member) =
+                extent_support
+                    .global_obstruction_parameters
+                    .iter()
+                    .find(|member| {
+                        document.parameters.get(*member).is_none_or(|parameter| {
+                            !parameter_active_in_cases(parameter, &BTreeSet::from([case.clone()]))
+                        })
+                    })
+            {
+                return Err(IdentifiabilityError::InvalidGauge {
+                    gauge: gauge.id.clone(),
+                    detail: format!(
+                        "cell-local obstruction parameter {member} is inactive in case {case}"
+                    ),
+                });
+            }
+        }
+        validate_gauge_applicability_sources(axes, &document.sources)?;
+    }
+    Ok(())
+}
+
+fn validate_problem_gauges(
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    for gauge in document.gauges.values() {
+        validate_gauge_cells(gauge, document)?;
+        let gauge_cases = gauge
+            .validity
+            .cells
+            .values()
+            .flat_map(|cell| cell.case_obstruction_support.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for member in &gauge.members {
+            let parameter = document.parameters.get(member).ok_or_else(|| {
+                IdentifiabilityError::UnknownReference {
+                    field: "gauge member",
+                    id: member.to_string(),
+                }
+            })?;
+            if !matches!(
+                &parameter.treatment,
+                ParameterTreatment::Estimated
+                    | ParameterTreatment::Profiled
+                    | ParameterTreatment::Marginalized
+            ) {
+                return Err(IdentifiabilityError::InvalidGauge {
+                    gauge: gauge.id.clone(),
+                    detail: format!(
+                        "gauge member {member} must be a free inferential coordinate; conditioned and derived coordinates need an explicit induced-action schema"
+                    ),
+                });
+            }
+            if !parameter_active_in_cases(parameter, &gauge_cases) {
+                return Err(IdentifiabilityError::InvalidGauge {
+                    gauge: gauge.id.clone(),
+                    detail: format!(
+                        "gauge member {member} is inactive throughout the declared invariant cases"
+                    ),
+                });
+            }
+        }
+        require_source_kind(
+            &document.sources,
+            &gauge.action,
+            SourceKind::GaugeAction,
+            "gauge action",
+        )?;
+        match &gauge.status {
+            GaugeStatus::Candidate { rationale } => require_source_kind(
+                &document.sources,
+                rationale,
+                SourceKind::GaugeHypothesis,
+                "gauge candidate rationale",
+            )?,
+            GaugeStatus::Assumed { assumption } => require_source_kind(
+                &document.sources,
+                assumption,
+                SourceKind::Assumption,
+                "assumed gauge authority",
+            )?,
+        }
+        validate_gauge_algebra_orbit_sources(
+            &gauge.algebra,
+            &gauge.orbit_geometry,
+            &document.sources,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_composition_members(
+    composition: &GaugeCompositionDeclaration,
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(BTreeSet<ParameterRoleId>, bool), IdentifiabilityError> {
+    let mut support = BTreeSet::new();
+    let mut all_assumed = matches!(&composition.status, GaugeStatus::Assumed { .. });
+    for member in &composition.members {
+        let gauge =
+            document
+                .gauges
+                .get(member)
+                .ok_or_else(|| IdentifiabilityError::UnknownReference {
+                    field: "gauge composition member",
+                    id: member.to_string(),
+                })?;
+        if composition.validity.cells.iter().any(|(axes, cell)| {
+            gauge.validity.cells.get(axes).is_none_or(|member_cell| {
+                !cell
+                    .case_obstruction_support
+                    .keys()
+                    .all(|case| member_cell.case_obstruction_support.contains_key(case))
+            })
+        }) {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "gauge composition validity",
+                detail: format!(
+                    "composition {} exceeds member {member} validity scope",
+                    composition.law
+                ),
+            });
+        }
+        support.extend(gauge.members.iter().cloned());
+        all_assumed &= matches!(&gauge.status, GaugeStatus::Assumed { .. });
+    }
+    if matches!(&composition.status, GaugeStatus::Assumed { .. }) && !all_assumed {
+        return Err(IdentifiabilityError::InvalidText {
+            field: "assumed gauge composition status",
+            detail: format!(
+                "composition {} cannot be Assumed while any member action remains Candidate",
+                composition.id
+            ),
+        });
+    }
+    Ok((support, all_assumed))
+}
+
+fn validate_composition_cells(
+    composition: &GaugeCompositionDeclaration,
+    support: &BTreeSet<ParameterRoleId>,
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    for (axes, cell) in &composition.validity.cells {
+        for (case, extent_support) in &cell.case_obstruction_support {
+            let member_local = composition
+                .members
+                .iter()
+                .flat_map(|member| {
+                    document.gauges[member].validity.cells[axes].case_obstruction_support[case]
+                        .local_obstruction_parameters
+                        .iter()
+                        .cloned()
+                })
+                .collect::<BTreeSet<_>>();
+            let member_global = composition
+                .members
+                .iter()
+                .flat_map(|member| {
+                    document.gauges[member].validity.cells[axes].case_obstruction_support[case]
+                        .global_obstruction_parameters
+                        .iter()
+                        .cloned()
+                })
+                .collect::<BTreeSet<_>>();
+            if !extent_support
+                .global_obstruction_parameters
+                .is_subset(support)
+                || !extent_support
+                    .local_obstruction_parameters
+                    .is_subset(&extent_support.global_obstruction_parameters)
+                || match &composition.kind {
+                    GaugeCompositionKind::IndependentProduct => {
+                        extent_support.local_obstruction_parameters != member_local
+                            || extent_support.global_obstruction_parameters != member_global
+                    }
+                    GaugeCompositionKind::Generated => {
+                        !member_local.is_subset(&extent_support.local_obstruction_parameters)
+                            || !member_global
+                                .is_subset(&extent_support.global_obstruction_parameters)
+                    }
+                }
+                || !regular_orbit_support_compatible(
+                    &composition.effective_orbit_geometry,
+                    extent_support,
+                )
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "gauge composition moved support",
+                    detail: format!(
+                        "composition {} has invalid effective moved support in case {case}",
+                        composition.law
+                    ),
+                });
+            }
+            if let Some(member) =
+                extent_support
+                    .global_obstruction_parameters
+                    .iter()
+                    .find(|member| {
+                        document.parameters.get(*member).is_none_or(|parameter| {
+                            !parameter_active_in_cases(parameter, &BTreeSet::from([case.clone()]))
+                        })
+                    })
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "gauge composition moved support",
+                    detail: format!(
+                        "composition {} moves case-inactive parameter {member}",
+                        composition.law
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_problem_gauge_compositions(
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    for composition in document.gauge_compositions.values() {
+        require_source_kind(
+            &document.sources,
+            &composition.law,
+            SourceKind::GaugeComposition,
+            "gauge composition law",
+        )?;
+        match &composition.status {
+            GaugeStatus::Candidate { rationale } => require_source_kind(
+                &document.sources,
+                rationale,
+                SourceKind::GaugeHypothesis,
+                "gauge composition candidate rationale",
+            )?,
+            GaugeStatus::Assumed { assumption } => require_source_kind(
+                &document.sources,
+                assumption,
+                SourceKind::Assumption,
+                "assumed gauge composition authority",
+            )?,
+        }
+        for (axes, cell) in &composition.validity.cells {
+            for case in cell.case_obstruction_support.keys() {
+                if !document.cases.contains_key(case) {
+                    return Err(IdentifiabilityError::UnknownReference {
+                        field: "gauge composition invariant case",
+                        id: case.to_string(),
+                    });
+                }
+            }
+            validate_gauge_applicability_sources(axes, &document.sources)?;
+        }
+        let (support, all_assumed) = validate_composition_members(composition, document)?;
+        validate_composition_cells(composition, &support, document)?;
+        validate_gauge_algebra_orbit_sources(
+            &composition.effective_algebra,
+            &composition.effective_orbit_geometry,
+            &document.sources,
+        )?;
+        let principal = principal_gauge_orbit(&composition.effective_orbit_geometry);
+        if !gauge_algebra_orbit_compatible(
+            &composition.effective_algebra,
+            principal,
+            all_assumed
+                && matches!(
+                    &composition.effective_orbit_geometry,
+                    GaugeOrbitGeometry::Regular { .. }
+                ),
+        ) {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "gauge composition geometry",
+                detail: format!(
+                    "composition {} has incompatible effective principal-orbit invariants",
+                    composition.law
+                ),
+            });
+        }
+        validate_independent_product_invariants(composition, &document.gauges)?;
+    }
+    Ok(())
+}
+
+fn validate_assumed_gauge_composition_coverage(
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    for case in document.cases.keys() {
+        let axes_set = document
+            .gauges
+            .values()
+            .flat_map(|gauge| {
+                gauge
+                    .validity
+                    .cells
+                    .iter()
+                    .filter(|(_, cell)| cell.case_obstruction_support.contains_key(case))
+                    .map(|(axes, _)| axes.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        for axes in axes_set {
+            let active_assumed =
+                document
+                    .gauges
+                    .values()
+                    .filter(|gauge| {
+                        matches!(&gauge.status, GaugeStatus::Assumed { .. })
+                            && gauge.validity.cells.get(&axes).is_some_and(|cell| {
+                                cell.case_obstruction_support.contains_key(case)
+                            })
+                    })
+                    .map(|gauge| gauge.id.clone())
+                    .collect::<BTreeSet<_>>();
+            if active_assumed.len() < 2 {
+                continue;
+            }
+            let matching =
+                document
+                    .gauge_compositions
+                    .values()
+                    .filter(|composition| {
+                        composition.members == active_assumed
+                            && matches!(&composition.status, GaugeStatus::Assumed { .. })
+                            && composition.validity.cells.get(&axes).is_some_and(|cell| {
+                                cell.case_obstruction_support.contains_key(case)
+                            })
+                    })
+                    .count();
+            if matching != 1 {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "assumed gauge composition",
+                    detail: format!(
+                        "simultaneously active assumed gauge system {active_assumed:?} needs exactly one exact assumed composition declaration, found {matching}"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_problem_joint_noise(
+    document: &IdentifiabilityProblemDocument,
+    all_observations: &BTreeMap<ObservationKey, &StudyObservation>,
+) -> Result<(), IdentifiabilityError> {
+    match &document.joint_noise {
+        JointNoiseModel::Independent { assumption } => require_source_kind(
+            &document.sources,
+            assumption,
+            SourceKind::Assumption,
+            "independent-noise assumption",
+        )?,
+        JointNoiseModel::DenseCorrelation {
+            order,
+            correlation,
+            model,
+        } => {
+            require_source_kind(
+                &document.sources,
+                model,
+                SourceKind::Likelihood,
+                "dense correlation model",
+            )?;
+            let unique = order.iter().cloned().collect::<BTreeSet<_>>();
+            let all = all_observations.keys().cloned().collect::<BTreeSet<_>>();
+            if order.len() != all.len()
+                || unique != all
+                || correlation.dimension() != order.len()
+                || order
+                    .iter()
+                    .any(|key| !all_observations[key].noise.finite_standard_deviation())
+            {
+                return Err(IdentifiabilityError::Covariance {
+                    detail: "dense correlation needs every composite channel exactly once and finite marginal standard deviations"
+                        .to_string(),
+                });
+            }
+            for (index, _) in order.iter().enumerate() {
+                if !same_f64(matrix_get(correlation, index, index), 1.0) {
+                    return Err(IdentifiabilityError::Covariance {
+                        detail: format!("correlation diagonal {index} is not exactly one"),
+                    });
+                }
+            }
+        }
+        JointNoiseModel::ExternalKernel { model } => require_source_kind_in(
+            &document.sources,
+            model,
+            &[SourceKind::Likelihood, SourceKind::ParameterizedLikelihood],
+            "external noise kernel",
+        )?,
+        JointNoiseModel::Unknown { reason } => {
+            validate_reason(reason, "unknown joint noise reason")?;
+        }
+    }
+    if document.influences.values().any(|influence| {
+        matches!(
+            &influence.functional,
+            DistributionFunctional::Correlation { .. }
+        )
+    }) {
+        let parameterized = matches!(
+            &document.joint_noise,
+            JointNoiseModel::ExternalKernel { model }
+                if document.sources[model].kind == SourceKind::ParameterizedLikelihood
+        );
+        if !parameterized {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "correlation influence/joint likelihood",
+                detail: "correlation influence requires an ExternalKernel whose source has ParameterizedLikelihood semantics; Independent fixes correlation to zero, DenseCorrelation stores a fixed matrix, and a generic/unknown kernel does not declare parameter dependence"
+                    .to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_sharing_likelihoods(
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    let declared = document
+        .cases
+        .values()
+        .flat_map(|case| {
+            case.observation_sharing
+                .iter()
+                .map(|group| group.joint_likelihood.clone())
+        })
+        .chain(match &document.data_reuse {
+            DataReusePolicy::Disjoint => Vec::new(),
+            DataReusePolicy::Shared { groups } => groups
+                .iter()
+                .map(|group| group.joint_likelihood.clone())
+                .collect(),
+        })
+        .collect::<BTreeSet<_>>();
+    if !declared.is_empty() {
+        let global_model = match &document.joint_noise {
+            JointNoiseModel::DenseCorrelation { model, .. }
+            | JointNoiseModel::ExternalKernel { model } => model,
+            JointNoiseModel::Independent { .. } | JointNoiseModel::Unknown { .. } => {
+                return Err(IdentifiabilityError::Covariance {
+                    detail: "shared raw data requires one explicit global joint-likelihood model"
+                        .to_string(),
+                });
+            }
+        };
+        if declared != BTreeSet::from([global_model.clone()]) {
+            return Err(IdentifiabilityError::Covariance {
+                detail:
+                    "every sharing declaration must name the exact global joint-likelihood model"
+                        .to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_shared_data_reuse(
+    groups: &[DataSharingGroup],
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    if groups.is_empty() || groups.len() > MAX_IDENTIFIABILITY_ITEMS {
+        return Err(IdentifiabilityError::Cardinality {
+            field: "data sharing groups",
+            detail: "Shared policy needs bounded nonempty groups".to_string(),
+        });
+    }
+    let mut membership = BTreeMap::<CaseId, usize>::new();
+    let mut shared_hash_owners = BTreeMap::<ContentHash, usize>::new();
+    for (index, group) in groups.iter().enumerate() {
+        require_source_kind_in(
+            &document.sources,
+            &group.joint_likelihood,
+            &[SourceKind::Likelihood, SourceKind::ParameterizedLikelihood],
+            "sharing-group likelihood",
+        )?;
+        for case_id in &group.cases {
+            if membership.insert(case_id.clone(), index).is_some() {
+                return Err(IdentifiabilityError::Duplicate {
+                    field: "data sharing group membership",
+                    id: case_id.to_string(),
+                });
+            }
+            let case = document.cases.get(case_id).ok_or_else(|| {
+                IdentifiabilityError::UnknownReference {
+                    field: "data sharing case",
+                    id: case_id.to_string(),
+                }
+            })?;
+            let experiment = retrospective_experiment(case).ok_or_else(|| {
+                IdentifiabilityError::InvalidText {
+                    field: "data sharing case",
+                    detail: format!("prospective case {case_id} cannot share raw data"),
+                }
+            })?;
+            let hash = document.sources[experiment].expected_hash;
+            if let Some(other) = shared_hash_owners.insert(hash, index)
+                && other != index
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "data reuse policy",
+                    detail: format!("sharing groups {other} and {index} reuse one experiment"),
+                });
+            }
+        }
+    }
+    validate_ungrouped_data_reuse(document, &membership, &shared_hash_owners)
+}
+
+fn validate_ungrouped_data_reuse(
+    document: &IdentifiabilityProblemDocument,
+    membership: &BTreeMap<CaseId, usize>,
+    shared_hash_owners: &BTreeMap<ContentHash, usize>,
+) -> Result<(), IdentifiabilityError> {
+    let mut ungrouped = BTreeMap::<ContentHash, CaseId>::new();
+    for (case_id, case) in &document.cases {
+        if membership.contains_key(case_id) {
+            continue;
+        }
+        if let Some(experiment) = retrospective_experiment(case) {
+            let hash = document.sources[experiment].expected_hash;
+            if shared_hash_owners.contains_key(&hash) {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "data reuse policy",
+                    detail: format!(
+                        "ungrouped case {case_id} reuses an experiment owned by a sharing group"
+                    ),
+                });
+            }
+            if let Some(other) = ungrouped.insert(hash, case_id.clone()) {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "data reuse policy",
+                    detail: format!("ungrouped cases {other} and {case_id} reuse one experiment"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_problem_data_reuse(
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    match &document.data_reuse {
+        DataReusePolicy::Disjoint => {
+            let mut seen = BTreeMap::<ContentHash, CaseId>::new();
+            for (case_id, case) in &document.cases {
+                if let Some(experiment) = retrospective_experiment(case) {
+                    let hash = document.sources[experiment].expected_hash;
+                    if let Some(other) = seen.insert(hash, case_id.clone()) {
+                        return Err(IdentifiabilityError::InvalidText {
+                            field: "data reuse policy",
+                            detail: format!(
+                                "cases {other} and {case_id} reuse one experiment under Disjoint"
+                            ),
+                        });
+                    }
+                }
+            }
+            Ok(())
+        }
+        DataReusePolicy::Shared { groups } => validate_shared_data_reuse(groups, document),
+    }
+}
+
+fn validate_problem_source_closure(
+    document: &IdentifiabilityProblemDocument,
+) -> Result<(), IdentifiabilityError> {
+    let reachable = problem_source_reachability(ProblemSourceReachability {
+        context_source: &document.context_source,
+        material_source: &document.material_source,
+        model_source: &document.model_source,
+        graph_source: &document.graph_source,
+        joint_prior: document.joint_prior.as_ref(),
+        parameters: &document.parameters,
+        constraints: &document.constraints,
+        admissible_domain: &document.admissible_domain,
+        cases: &document.cases,
+        influences: &document.influences,
+        gauges: &document.gauges,
+        gauge_compositions: &document.gauge_compositions,
+        joint_noise: &document.joint_noise,
+        data_reuse: &document.data_reuse,
+    });
+    let registered = document.sources.keys().cloned().collect::<BTreeSet<_>>();
+    if reachable != registered {
+        let detail = registered.difference(&reachable).next().map_or_else(
+            || "a referenced source is absent from the registry".to_string(),
+            |unused| format!("source {unused} is registered but unreachable"),
+        );
+        return Err(IdentifiabilityError::InvalidText {
+            field: "source registry closure",
+            detail,
+        });
+    }
+    Ok(())
+}
+
 impl IdentifiabilityProblemDocument {
     /// Validate and canonicalize a multi-case physical question.  This is
     /// structural admission only; [`Self::from_canonical_bytes`] returns the
@@ -6372,1579 +8508,16 @@ impl IdentifiabilityProblemDocument {
         joint_prior: Option<SourceKey>,
         sources: Vec<SourceRef>,
         parameters: Vec<StudyParameter>,
-        mut constraints: Vec<JointConstraint>,
-        mut admissible_domain: AdmissibleDomainWitness,
+        constraints: Vec<JointConstraint>,
+        admissible_domain: AdmissibleDomainWitness,
         cases: Vec<StudyCaseDocument>,
-        mut influences: Vec<InfluenceDeclaration>,
+        influences: Vec<InfluenceDeclaration>,
         gauges: Vec<GaugeDeclaration>,
         gauge_compositions: Vec<GaugeCompositionDeclaration>,
         joint_noise: JointNoiseModel,
-        mut data_reuse: DataReusePolicy,
+        data_reuse: DataReusePolicy,
     ) -> Result<Self, IdentifiabilityError> {
-        let sources = insert_unique(sources, "source registry", |source| &source.key)?;
-        require_source_kind(
-            &sources,
-            &context_source,
-            SourceKind::ContextOfUse,
-            "context source",
-        )?;
-        require_source_kind(
-            &sources,
-            &material_source,
-            SourceKind::MaterialCard,
-            "material source",
-        )?;
-        require_source_kind(
-            &sources,
-            &model_source,
-            SourceKind::ConstitutiveModelCard,
-            "model source",
-        )?;
-        require_source_kind(
-            &sources,
-            &graph_source,
-            SourceKind::ConstitutiveGraph,
-            "graph source",
-        )?;
-        if let Some(joint_prior) = &joint_prior {
-            require_source_kind(
-                &sources,
-                joint_prior,
-                SourceKind::ProbabilityMeasure,
-                "problem joint prior",
-            )?;
-        }
-        let parameters =
-            insert_unique(parameters, "study parameters", |parameter| &parameter.role)?;
-        if !parameters.values().any(|parameter| {
-            matches!(
-                &parameter.treatment,
-                ParameterTreatment::Estimated
-                    | ParameterTreatment::Profiled
-                    | ParameterTreatment::Marginalized
-            )
-        }) {
-            return Err(IdentifiabilityError::Cardinality {
-                field: "inferential parameter targets",
-                detail: "an identifiability problem needs at least one free inferential target"
-                    .to_string(),
-            });
-        }
-        validate_derived_parameter_dag(&parameters)?;
-        for constraint in &mut constraints {
-            if let JointConstraintKind::Affine { terms, .. } = &mut constraint.kind {
-                terms.sort_by(|left, right| left.parameter.cmp(&right.parameter));
-            }
-        }
-        let constraints = if constraints.is_empty() {
-            BTreeMap::new()
-        } else {
-            insert_unique(constraints, "joint constraints", |constraint| {
-                &constraint.id
-            })?
-        };
-        for constraint in constraints.values() {
-            validate_joint_constraint(constraint, &parameters, &sources)?;
-        }
-        if admissible_domain.opaque_membership_claim.is_some() {
-            let binding = admissible_domain_witness_binding(
-                &admissible_domain,
-                &parameters,
-                &constraints,
-                &sources,
-            )?;
-            admissible_domain.bind_opaque_membership(binding)?;
-        }
-        validate_admissible_domain_witness(
-            &admissible_domain,
-            &parameters,
-            &constraints,
-            &sources,
-        )?;
-        let cases = insert_unique(cases, "study cases", |case| &case.id)?;
-        for influence in &mut influences {
-            if let DistributionFunctional::Correlation { left, right } = &mut influence.functional
-                && right < left
-            {
-                core::mem::swap(left, right);
-            }
-        }
-        let influences = if influences.is_empty() {
-            BTreeMap::new()
-        } else {
-            insert_unique(influences, "influence declarations", |influence| {
-                &influence.id
-            })?
-        };
-        let gauges = if gauges.is_empty() {
-            BTreeMap::new()
-        } else {
-            insert_unique(gauges, "gauge declarations", |gauge| &gauge.id)?
-        };
-        let gauge_compositions = if gauge_compositions.is_empty() {
-            BTreeMap::new()
-        } else {
-            insert_unique(
-                gauge_compositions,
-                "gauge composition declarations",
-                |composition| &composition.id,
-            )?
-        };
-        let joint_noise = normalize_joint_noise(joint_noise)?;
-        if let DataReusePolicy::Shared { groups } = &mut data_reuse {
-            groups.sort_by(|left, right| {
-                (&left.cases, &left.joint_likelihood, &left.justification).cmp(&(
-                    &right.cases,
-                    &right.joint_likelihood,
-                    &right.justification,
-                ))
-            });
-        }
-
-        for parameter in parameters.values() {
-            validate_declared_parameter_cases(parameter, &cases)?;
-            match &parameter.owner {
-                ParameterOwnerBinding::ConstitutiveModel => {}
-                ParameterOwnerBinding::InitialState { state_path } => require_source_kind(
-                    &sources,
-                    state_path,
-                    SourceKind::Assumption,
-                    "initial-state owner",
-                )?,
-                ParameterOwnerBinding::Instrument { metrology, .. } => require_source_kind(
-                    &sources,
-                    metrology,
-                    SourceKind::Metrology,
-                    "instrument owner",
-                )?,
-                ParameterOwnerBinding::Discrepancy { family } => require_source_kind(
-                    &sources,
-                    family,
-                    SourceKind::Discrepancy,
-                    "discrepancy owner",
-                )?,
-                ParameterOwnerBinding::ControlledInput { protocol } => require_source_kind(
-                    &sources,
-                    protocol,
-                    SourceKind::Protocol,
-                    "controlled-input owner",
-                )?,
-                ParameterOwnerBinding::Population { hierarchy } => {
-                    require_source_kind(&sources, hierarchy, SourceKind::Prior, "population owner")?
-                }
-            }
-            match &parameter.scope {
-                ParameterScopeBinding::Global
-                | ParameterScopeBinding::Cases(_)
-                | ParameterScopeBinding::MaterialLot { .. } => {}
-                ParameterScopeBinding::Specimen { case, specimen } => {
-                    let case_doc =
-                        cases
-                            .get(case)
-                            .ok_or_else(|| IdentifiabilityError::UnknownReference {
-                                field: "parameter specimen case",
-                                id: case.to_string(),
-                            })?;
-                    if case_doc.specimen.id() != specimen {
-                        return Err(IdentifiabilityError::UnknownReference {
-                            field: "parameter specimen",
-                            id: specimen.as_str().to_string(),
-                        });
-                    }
-                }
-                ParameterScopeBinding::Field { support, .. } => {
-                    require_source_kind_in(
-                        &sources,
-                        support,
-                        &[SourceKind::Geometry, SourceKind::ExternalManifold],
-                        "field support",
-                    )?;
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "field parameter carrier",
-                        detail: format!(
-                            "parameter {} declares Field scope, but v3 has no typed function-space carrier/discretization/reconstruction/measure contract; scalar conditioned, derived, and free actions are all rejected rather than silently treating a field as a constant scalar",
-                            parameter.role
-                        ),
-                    });
-                }
-                ParameterScopeBinding::Hierarchical {
-                    level, hierarchy, ..
-                } => {
-                    if *level == 0 {
-                        return Err(IdentifiabilityError::InvalidNumeric {
-                            field: "hierarchical level",
-                            detail: "level zero is reserved for the global population".to_string(),
-                        });
-                    }
-                    require_source_kind(
-                        &sources,
-                        hierarchy,
-                        SourceKind::Prior,
-                        "hierarchy source",
-                    )?;
-                }
-            }
-            match &parameter.treatment {
-                ParameterTreatment::Conditioned(value) => require_source_kind_in(
-                    &sources,
-                    &value.source,
-                    &[SourceKind::EvidenceReceipt, SourceKind::Metrology],
-                    "conditioned value source",
-                )?,
-                ParameterTreatment::Derived { definition, .. } => require_source_kind(
-                    &sources,
-                    definition,
-                    SourceKind::Constraint,
-                    "derived parameter definition",
-                )?,
-                _ => {}
-            }
-        }
-
-        let mut all_observations = BTreeMap::new();
-        let mut modeled_discrepancy_parameters = BTreeSet::new();
-        for (case_id, case) in &cases {
-            let mut row_consumers = BTreeMap::<ObservationId, usize>::new();
-            for observation in case.observations.values() {
-                if let ObservationRows::Retrospective(rows) = &observation.rows {
-                    for row in rows {
-                        *row_consumers.entry(row.clone()).or_default() += 1;
-                    }
-                }
-            }
-            let repeated_rows = row_consumers
-                .into_iter()
-                .filter_map(|(row, consumers)| (consumers > 1).then_some(row))
-                .collect::<BTreeSet<_>>();
-            let declared_shared_rows = case
-                .observation_sharing
-                .iter()
-                .flat_map(|group| group.rows.iter().cloned())
-                .collect::<BTreeSet<_>>();
-            if repeated_rows != declared_shared_rows {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "observation-sharing coverage",
-                    detail: format!(
-                        "case {case_id} must declare every and only multiply consumed raw row"
-                    ),
-                });
-            }
-            if case.protocol.state_schema_version
-                != initial_state_schema_version(case.initial_state)
-            {
-                return Err(IdentifiabilityError::VersionMismatch {
-                    field: "case initial-state/protocol schema",
-                    expected: case.protocol.state_schema_version,
-                    actual: initial_state_schema_version(case.initial_state),
-                });
-            }
-            require_case_physics_source(
-                &sources,
-                &case.physics_sources.frame_transform,
-                SourceKind::Geometry,
-                case.specimen.frame().transform(),
-                FRAME_TRANSFORM_SOURCE_DOMAIN,
-                "case frame-transform source",
-            )?;
-            require_case_physics_source(
-                &sources,
-                &case.physics_sources.specimen_geometry,
-                SourceKind::Geometry,
-                case.specimen.geometry(),
-                SPECIMEN_GEOMETRY_SOURCE_DOMAIN,
-                "case specimen-geometry source",
-            )?;
-            require_case_physics_source(
-                &sources,
-                &case.physics_sources.specimen_process,
-                SourceKind::Process,
-                case.specimen.process(),
-                SPECIMEN_PROCESS_SOURCE_DOMAIN,
-                "case specimen-process source",
-            )?;
-            require_case_physics_source(
-                &sources,
-                &case.physics_sources.specimen_preparation,
-                SourceKind::Process,
-                case.specimen.preparation(),
-                SPECIMEN_PREPARATION_SOURCE_DOMAIN,
-                "case specimen-preparation source",
-            )?;
-            require_case_physics_source(
-                &sources,
-                &case.physics_sources.load_path,
-                SourceKind::Protocol,
-                case.protocol.load_path(),
-                LOAD_PATH_SOURCE_DOMAIN,
-                "case load-path source",
-            )?;
-            require_case_physics_source(
-                &sources,
-                &case.physics_sources.environment_path,
-                SourceKind::Protocol,
-                case.protocol.environment_path(),
-                ENVIRONMENT_PATH_SOURCE_DOMAIN,
-                "case environment-path source",
-            )?;
-            require_case_physics_source(
-                &sources,
-                &case.physics_sources.time_grid,
-                SourceKind::Protocol,
-                case.protocol.time_grid(),
-                TIME_GRID_SOURCE_DOMAIN,
-                "case time-grid source",
-            )?;
-            match (case.initial_state, &case.physics_sources.initial_state) {
-                (InitialStateBinding::Zero { .. }, None) => {}
-                (InitialStateBinding::Explicit { artifact, .. }, Some(source)) => {
-                    require_case_physics_source(
-                        &sources,
-                        source,
-                        SourceKind::Assumption,
-                        artifact,
-                        INITIAL_STATE_SOURCE_DOMAIN,
-                        "case initial-state source",
-                    )?;
-                }
-                (InitialStateBinding::Zero { .. }, Some(_)) => {
-                    return Err(IdentifiabilityError::SourceMismatch {
-                        field: "zero initial-state source",
-                    });
-                }
-                (InitialStateBinding::Explicit { .. }, None) => {
-                    return Err(IdentifiabilityError::UnknownReference {
-                        field: "case initial-state source",
-                        id: case_id.to_string(),
-                    });
-                }
-            }
-            require_source_kind(
-                &sources,
-                &case.forward_model,
-                SourceKind::ForwardModel,
-                "case forward model",
-            )?;
-            for group in &case.observation_sharing {
-                require_source_kind_in(
-                    &sources,
-                    &group.joint_likelihood,
-                    &[SourceKind::Likelihood, SourceKind::ParameterizedLikelihood],
-                    "observation-sharing joint likelihood",
-                )?;
-            }
-            match &case.data {
-                CaseDataDeclaration::Prospective => {
-                    if matches!(&case.purpose, CasePurpose::BlindFalsification) {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "blind-falsification case data",
-                            detail: format!(
-                                "case {case_id} must bind retrospective blind rows and a release"
-                            ),
-                        });
-                    }
-                    if case.observations.values().any(|observation| {
-                        !matches!(&observation.rows, ObservationRows::Prospective)
-                    }) {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "prospective observation rows",
-                            detail: format!("case {case_id} contains retrospective row IDs"),
-                        });
-                    }
-                }
-                CaseDataDeclaration::Retrospective {
-                    experiment,
-                    split,
-                    parser,
-                    preprocessing,
-                    parser_version,
-                    ..
-                } => {
-                    if matches!(&case.purpose, CasePurpose::ProspectiveDesign) {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "prospective-design case data",
-                            detail: format!(
-                                "case {case_id} is ProspectiveDesign but binds retrospective data"
-                            ),
-                        });
-                    }
-                    require_source_kind(
-                        &sources,
-                        experiment,
-                        SourceKind::ExperimentArtifact,
-                        "case experiment",
-                    )?;
-                    require_source_kind(
-                        &sources,
-                        split,
-                        SourceKind::CalibrationSplit,
-                        "case split",
-                    )?;
-                    require_source_kind(&sources, parser, SourceKind::Parser, "case parser")?;
-                    let parser_source = require_source(&sources, parser, "case parser")?;
-                    require_source_kind(
-                        &sources,
-                        preprocessing,
-                        SourceKind::Preprocessing,
-                        "case preprocessing",
-                    )?;
-                    if *parser_version == 0
-                        || case.observations.values().any(|observation| {
-                            !matches!(&observation.rows, ObservationRows::Retrospective(_))
-                        })
-                    {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "retrospective case",
-                            detail: format!(
-                                "case {case_id} needs a positive parser version and raw rows"
-                            ),
-                        });
-                    }
-                    if parser_source.contract_version != *parser_version {
-                        return Err(IdentifiabilityError::VersionMismatch {
-                            field: "case parser source contract",
-                            expected: *parser_version,
-                            actual: parser_source.contract_version,
-                        });
-                    }
-                }
-            }
-            for (channel, observation) in &case.observations {
-                if &observation.frame != case.specimen.frame() {
-                    return Err(IdentifiabilityError::SourceMismatch {
-                        field: "observation/specimen frame",
-                    });
-                }
-                if observation.protocol_version != case.protocol.version {
-                    return Err(IdentifiabilityError::VersionMismatch {
-                        field: "case observation protocol version",
-                        expected: case.protocol.version,
-                        actual: observation.protocol_version,
-                    });
-                }
-                if observation.refinement_version != case.protocol.refinement_version {
-                    return Err(IdentifiabilityError::VersionMismatch {
-                        field: "case observation refinement version",
-                        expected: case.protocol.refinement_version,
-                        actual: observation.refinement_version,
-                    });
-                }
-                if observation.clock != case.protocol.clock {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "case observation protocol clock",
-                        detail: format!(
-                            "observation {channel} names clock {}, but protocol {} names {}",
-                            observation.clock, case.protocol.id, case.protocol.clock
-                        ),
-                    });
-                }
-                require_source_kind(
-                    &sources,
-                    &observation.unit_definition,
-                    SourceKind::UnitDefinition,
-                    "observation unit definition",
-                )?;
-                require_source_kind(
-                    &sources,
-                    &observation.operator,
-                    SourceKind::ObservationOperator,
-                    "observation operator",
-                )?;
-                let operator_source =
-                    require_source(&sources, &observation.operator, "observation operator")?;
-                require_source_kind(
-                    &sources,
-                    &observation.aggregation,
-                    SourceKind::ObservationOperator,
-                    "observation aggregation",
-                )?;
-                let aggregation_source = require_source(
-                    &sources,
-                    &observation.aggregation,
-                    "observation aggregation",
-                )?;
-                for (field, source) in [
-                    ("observation operator source contract", operator_source),
-                    (
-                        "observation aggregation source contract",
-                        aggregation_source,
-                    ),
-                ] {
-                    if source.contract_version != observation.operator_version {
-                        return Err(IdentifiabilityError::VersionMismatch {
-                            field,
-                            expected: observation.operator_version,
-                            actual: source.contract_version,
-                        });
-                    }
-                }
-                require_source_kind(
-                    &sources,
-                    &observation.sensor,
-                    SourceKind::Metrology,
-                    "observation sensor",
-                )?;
-                if let MarginalNoiseSpec::Empirical {
-                    distribution,
-                    finite_variance_model,
-                    ..
-                } = &observation.noise
-                {
-                    require_source_kind_in(
-                        &sources,
-                        distribution,
-                        &[
-                            SourceKind::Likelihood,
-                            SourceKind::ParameterizedLikelihood,
-                            SourceKind::EvidenceReceipt,
-                        ],
-                        "empirical noise",
-                    )?;
-                    require_source_kind(
-                        &sources,
-                        finite_variance_model,
-                        SourceKind::EvidenceReceipt,
-                        "empirical finite-variance model",
-                    )?;
-                }
-                match &observation.missingness {
-                    MissingnessAssumption::Complete { assumption } => require_source_kind(
-                        &sources,
-                        assumption,
-                        SourceKind::Assumption,
-                        "completeness assumption",
-                    )?,
-                    MissingnessAssumption::Modeled { mechanism } => require_source_kind_in(
-                        &sources,
-                        mechanism,
-                        &[SourceKind::Likelihood, SourceKind::ParameterizedLikelihood],
-                        "missingness mechanism",
-                    )?,
-                    MissingnessAssumption::Unknown { .. } => {}
-                }
-                let key = ObservationKey::new(case_id.clone(), channel.clone());
-                all_observations.insert(key, observation);
-            }
-            for (channel, discrepancy) in &case.discrepancies {
-                match discrepancy {
-                    StudyDiscrepancy::Uncharacterized { reason } => {
-                        validate_reason(reason, "discrepancy reason")?
-                    }
-                    StudyDiscrepancy::NotApplicable { basis } => match basis {
-                        DiscrepancyInapplicability::PhysicalApplicability { assumption } => {
-                            if !matches!(&case.data, CaseDataDeclaration::Retrospective { .. }) {
-                                return Err(IdentifiabilityError::InvalidText {
-                                    field: "physical discrepancy applicability",
-                                    detail: format!(
-                                        "case {case_id} channel {channel} is not a retrospective physical observation"
-                                    ),
-                                });
-                            }
-                            require_source_kind(
-                                &sources,
-                                assumption,
-                                SourceKind::Assumption,
-                                "physical discrepancy applicability assumption",
-                            )?;
-                        }
-                        DiscrepancyInapplicability::DeclaredSyntheticSelfModel {
-                            generator,
-                            producer,
-                            production_binding,
-                            assumption,
-                        } => {
-                            if !matches!(&case.data, CaseDataDeclaration::Retrospective { .. })
-                                || generator != &case.forward_model
-                            {
-                                return Err(IdentifiabilityError::SourceMismatch {
-                                    field: "declared-synthetic self-model discrepancy",
-                                });
-                            }
-                            require_source_kind(
-                                &sources,
-                                generator,
-                                SourceKind::ForwardModel,
-                                "declared-synthetic generator",
-                            )?;
-                            require_source_kind(
-                                &sources,
-                                production_binding,
-                                SourceKind::ForwardModelProductionBinding,
-                                "declared-synthetic producer/forward-model binding",
-                            )?;
-                            let binding_source = &sources[production_binding];
-                            let binding_preimage = forward_model_production_binding_preimage(
-                                producer,
-                                &sources[generator],
-                            )?;
-                            if binding_source.content_hash_domain
-                                != FORWARD_MODEL_PRODUCTION_BINDING_DOMAIN
-                                || binding_source.contract_version
-                                    != FORWARD_MODEL_PRODUCTION_BINDING_VERSION
-                                || binding_source.expected_hash
-                                    != hash_domain(
-                                        FORWARD_MODEL_PRODUCTION_BINDING_DOMAIN,
-                                        &binding_preimage,
-                                    )
-                            {
-                                return Err(IdentifiabilityError::SourceMismatch {
-                                    field: "declared-synthetic producer/forward-model production binding",
-                                });
-                            }
-                            require_source_kind(
-                                &sources,
-                                assumption,
-                                SourceKind::Assumption,
-                                "declared-synthetic no-discrepancy assumption",
-                            )?;
-                        }
-                        DiscrepancyInapplicability::ProspectiveDesign { assumption } => {
-                            if !matches!(&case.data, CaseDataDeclaration::Prospective)
-                                || !matches!(&case.purpose, CasePurpose::ProspectiveDesign)
-                            {
-                                return Err(IdentifiabilityError::InvalidText {
-                                    field: "prospective discrepancy applicability",
-                                    detail: format!(
-                                        "case {case_id} channel {channel} must be an exact prospective-design case"
-                                    ),
-                                });
-                            }
-                            require_source_kind(
-                                &sources,
-                                assumption,
-                                SourceKind::Assumption,
-                                "prospective discrepancy applicability assumption",
-                            )?;
-                        }
-                    },
-                    StudyDiscrepancy::AssumedZero { assumption } => require_source_kind(
-                        &sources,
-                        assumption,
-                        SourceKind::Assumption,
-                        "zero-discrepancy assumption",
-                    )?,
-                    StudyDiscrepancy::Modeled {
-                        family,
-                        parameters: discrepancy_parameters,
-                        support,
-                        confounding_guard,
-                    } => {
-                        require_source_kind(
-                            &sources,
-                            family,
-                            SourceKind::Discrepancy,
-                            "modeled discrepancy family",
-                        )?;
-                        require_source_kind_in(
-                            &sources,
-                            support,
-                            &[SourceKind::Geometry, SourceKind::ExternalManifold],
-                            "modeled discrepancy support",
-                        )?;
-                        require_source_kind(
-                            &sources,
-                            confounding_guard,
-                            SourceKind::Constraint,
-                            "modeled discrepancy confounding guard",
-                        )?;
-                        if discrepancy_parameters.is_empty() {
-                            return Err(IdentifiabilityError::Cardinality {
-                                field: "discrepancy parameters",
-                                detail: "modeled discrepancy needs explicit parameter roles"
-                                    .to_string(),
-                            });
-                        }
-                        for role in discrepancy_parameters {
-                            let parameter = parameters.get(role).ok_or_else(|| {
-                                IdentifiabilityError::UnknownReference {
-                                    field: "discrepancy parameter",
-                                    id: role.to_string(),
-                                }
-                            })?;
-                            if !matches!(
-                                &parameter.owner,
-                                ParameterOwnerBinding::Discrepancy {
-                                    family: owner_family
-                                } if owner_family == family
-                            ) {
-                                return Err(IdentifiabilityError::InvalidText {
-                                    field: "discrepancy parameter owner",
-                                    detail: format!(
-                                        "parameter {role} is not owned by modeled family {family}"
-                                    ),
-                                });
-                            }
-                            if !parameter_active_in_cases(
-                                parameter,
-                                &BTreeSet::from([case_id.clone()]),
-                            ) {
-                                return Err(IdentifiabilityError::InvalidText {
-                                    field: "discrepancy parameter/case scope",
-                                    detail: format!(
-                                        "modeled discrepancy in case {case_id} uses parameter {role} outside its exact applicability"
-                                    ),
-                                });
-                            }
-                            modeled_discrepancy_parameters.insert(role.clone());
-                        }
-                    }
-                }
-            }
-        }
-        for parameter in parameters.values() {
-            if matches!(&parameter.owner, ParameterOwnerBinding::Discrepancy { .. })
-                && !modeled_discrepancy_parameters.contains(&parameter.role)
-            {
-                return Err(IdentifiabilityError::UnknownReference {
-                    field: "modeled discrepancy parameter",
-                    id: parameter.role.to_string(),
-                });
-            }
-            let applicable = parameter_applicable_cases(parameter, &cases);
-            let owner_is_bound_in_case = |case: &StudyCaseDocument| match &parameter.owner {
-                ParameterOwnerBinding::ConstitutiveModel
-                | ParameterOwnerBinding::Population { .. } => true,
-                ParameterOwnerBinding::InitialState { state_path } => {
-                    case.physics_sources.initial_state.as_ref() == Some(state_path)
-                }
-                ParameterOwnerBinding::Instrument {
-                    instrument,
-                    acquisition_channel,
-                    metrology,
-                } => case.observations.values().any(|observation| {
-                    &observation.instrument == instrument
-                        && &observation.acquisition_channel == acquisition_channel
-                        && &observation.sensor == metrology
-                }),
-                ParameterOwnerBinding::Discrepancy { family } => {
-                    case.discrepancies.values().any(|discrepancy| {
-                        matches!(
-                            discrepancy,
-                            StudyDiscrepancy::Modeled {
-                                family: candidate,
-                                parameters,
-                                ..
-                            } if candidate == family && parameters.contains(&parameter.role)
-                        )
-                    })
-                }
-                ParameterOwnerBinding::ControlledInput { protocol } => [
-                    &case.physics_sources.load_path,
-                    &case.physics_sources.environment_path,
-                    &case.physics_sources.time_grid,
-                ]
-                .contains(&protocol),
-            };
-            if let Some(case_id) = applicable
-                .iter()
-                .find(|case_id| !owner_is_bound_in_case(&cases[*case_id]))
-            {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "parameter owner/case binding",
-                    detail: format!(
-                        "parameter {} owner is not physically bound in applicable case {case_id}",
-                        parameter.role
-                    ),
-                });
-            }
-            if let ParameterOwnerBinding::Population { hierarchy } = &parameter.owner
-                && let ParameterScopeBinding::Hierarchical {
-                    hierarchy: scoped_hierarchy,
-                    ..
-                } = &parameter.scope
-                && hierarchy != scoped_hierarchy
-            {
-                return Err(IdentifiabilityError::SourceMismatch {
-                    field: "population owner/hierarchical scope",
-                });
-            }
-        }
-
-        let mut influenced_parameters = BTreeSet::new();
-        for influence in influences.values() {
-            let parameter = parameters.get(&influence.parameter).ok_or_else(|| {
-                IdentifiabilityError::UnknownReference {
-                    field: "influence parameter",
-                    id: influence.parameter.to_string(),
-                }
-            })?;
-            if let DistributionFunctional::Correlation { left, right } = &influence.functional {
-                let left_observation = observation_for(&cases, left)?;
-                let right_observation = observation_for(&cases, right)?;
-                if !left_observation.noise.finite_standard_deviation()
-                    || !right_observation.noise.finite_standard_deviation()
-                {
-                    return Err(IdentifiabilityError::Covariance {
-                        detail: "Pearson-correlation influence requires two finite-second-moment marginals"
-                            .to_string(),
-                    });
-                }
-            }
-            for key in functional_observations(&influence.functional) {
-                let observation = observation_for(&cases, key)?;
-                if !parameter_active_in_cases(parameter, &BTreeSet::from([key.case.clone()])) {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "influence parameter/case scope",
-                        detail: format!(
-                            "influence {} targets case {} outside parameter {} applicability",
-                            influence.id, key.case, influence.parameter
-                        ),
-                    });
-                }
-                match &influence.functional {
-                    DistributionFunctional::Correlation { left, right } if left == right => {
-                        return Err(IdentifiabilityError::InvalidNumeric {
-                            field: "correlation functional",
-                            detail: "self-correlation is a constant, not an identifiability route"
-                                .to_string(),
-                        });
-                    }
-                    DistributionFunctional::MissingnessLogit { .. }
-                        if !matches!(
-                            &observation.missingness,
-                            MissingnessAssumption::Modeled { mechanism }
-                                if sources[mechanism].kind == SourceKind::ParameterizedLikelihood
-                        ) =>
-                    {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "missingness functional",
-                            detail: "MissingnessLogit influence needs a modeled mechanism with exact ParameterizedLikelihood semantics"
-                                .to_string(),
-                        });
-                    }
-                    DistributionFunctional::LogScale { .. }
-                        if !matches!(
-                            &observation.noise,
-                            MarginalNoiseSpec::Empirical { distribution, .. }
-                                if sources[distribution].kind == SourceKind::ParameterizedLikelihood
-                        ) =>
-                    {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "log-scale functional",
-                            detail: "LogScale influence needs an exact parameterized marginal likelihood; fixed Gaussian/Student-t/bounded parameters are not influence routes"
-                                .to_string(),
-                        });
-                    }
-                    DistributionFunctional::CensoringLogit { .. } => {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "censoring functional",
-                            detail: if observation.saturation.is_none() {
-                                "CensoringLogit influence requires saturation and an exact parameterized censoring law; saturation is absent"
-                            } else {
-                                "CensoringLogit influence requires an exact parameterized censoring-law source; a fixed saturation interval alone is insufficient"
-                            }
-                            .to_string(),
-                        });
-                    }
-                    _ => {}
-                }
-            }
-            match &influence.representation {
-                InfluenceRepresentation::Direct => {}
-                InfluenceRepresentation::StateMediated { state_path } => require_source_kind(
-                    &sources,
-                    state_path,
-                    SourceKind::Assumption,
-                    "state-mediated influence",
-                )?,
-                InfluenceRepresentation::Composite { operator, inputs } => {
-                    require_source_kind(
-                        &sources,
-                        operator,
-                        SourceKind::InfluenceComposition,
-                        "composite influence operator",
-                    )?;
-                    if inputs.is_empty() || inputs.contains(&influence.id) {
-                        return Err(IdentifiabilityError::InvalidNumeric {
-                            field: "composite influence inputs",
-                            detail: format!("influence {} has empty or self input", influence.id),
-                        });
-                    }
-                    for input in inputs {
-                        let input_declaration = influences.get(input).ok_or_else(|| {
-                            IdentifiabilityError::UnknownReference {
-                                field: "composite influence input",
-                                id: input.to_string(),
-                            }
-                        })?;
-                        if input_declaration.parameter != influence.parameter {
-                            return Err(IdentifiabilityError::InvalidText {
-                                field: "composite influence parameter",
-                                detail: format!(
-                                    "composite influence {} targets parameter {} but input {} targets {}; cross-parameter chain rules require a dedicated typed composition schema",
-                                    influence.id,
-                                    influence.parameter,
-                                    input_declaration.id,
-                                    input_declaration.parameter
-                                ),
-                            });
-                        }
-                    }
-                }
-                InfluenceRepresentation::ExternalDefinition { definition } => {
-                    require_source_kind(
-                        &sources,
-                        definition,
-                        SourceKind::Constraint,
-                        "external influence definition",
-                    )?;
-                }
-            }
-            influenced_parameters.insert(influence.parameter.clone());
-        }
-        for parameter in parameters.values() {
-            let free = matches!(
-                &parameter.treatment,
-                ParameterTreatment::Estimated
-                    | ParameterTreatment::Profiled
-                    | ParameterTreatment::Marginalized
-            );
-            match (&parameter.influence_coverage, free) {
-                (InfluenceCoverage::Declared, _)
-                    if !influenced_parameters.contains(&parameter.role) =>
-                {
-                    return Err(IdentifiabilityError::DisconnectedEstimatedParameter {
-                        parameter: parameter.role.clone(),
-                    });
-                }
-                (InfluenceCoverage::IntentionallyAbsent { .. }, true)
-                    if influenced_parameters.contains(&parameter.role) =>
-                {
-                    return Err(IdentifiabilityError::InvalidNumeric {
-                        field: "parameter influence coverage",
-                        detail: format!(
-                            "parameter {} both declares and denies influence routes",
-                            parameter.role
-                        ),
-                    });
-                }
-                (InfluenceCoverage::NotApplicable { .. }, false)
-                    if influenced_parameters.contains(&parameter.role) =>
-                {
-                    return Err(IdentifiabilityError::InvalidNumeric {
-                        field: "parameter influence coverage",
-                        detail: format!(
-                            "parameter {} marks influence not applicable but owns a route",
-                            parameter.role
-                        ),
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        // Composite influence declarations form a DAG; use an iterative
-        // topological pass so an adversarial but bounded chain cannot consume
-        // the process stack.
-        let mut incoming = influences
-            .keys()
-            .cloned()
-            .map(|id| (id, 0_usize))
-            .collect::<BTreeMap<_, _>>();
-        let mut dependents = BTreeMap::<InfluenceId, BTreeSet<InfluenceId>>::new();
-        for (id, influence) in &influences {
-            if let InfluenceRepresentation::Composite { inputs, .. } = &influence.representation {
-                incoming.insert(id.clone(), inputs.len());
-                for input in inputs {
-                    dependents
-                        .entry(input.clone())
-                        .or_default()
-                        .insert(id.clone());
-                }
-            }
-        }
-        let mut ready = incoming
-            .iter()
-            .filter_map(|(id, degree)| (*degree == 0).then_some(id.clone()))
-            .collect::<BTreeSet<_>>();
-        let mut visited = 0_usize;
-        while let Some(id) = ready.pop_first() {
-            visited += 1;
-            if let Some(children) = dependents.get(&id) {
-                for child in children {
-                    let degree = incoming.get_mut(child).expect("known composite child");
-                    *degree -= 1;
-                    if *degree == 0 {
-                        ready.insert(child.clone());
-                    }
-                }
-            }
-        }
-        if visited != influences.len() {
-            let id = incoming
-                .iter()
-                .find_map(|(id, degree)| (*degree > 0).then_some(id))
-                .expect("an unvisited influence has positive indegree");
-            return Err(IdentifiabilityError::InvalidNumeric {
-                field: "composite influence graph",
-                detail: format!("cycle reaches influence {id}"),
-            });
-        }
-
-        for gauge in gauges.values() {
-            for (axes, cell) in &gauge.validity.cells {
-                for (case, extent_support) in &cell.case_obstruction_support {
-                    if !cases.contains_key(case) {
-                        return Err(IdentifiabilityError::UnknownReference {
-                            field: "gauge invariant case",
-                            id: case.to_string(),
-                        });
-                    }
-                    if !extent_support
-                        .global_obstruction_parameters
-                        .is_subset(&gauge.members)
-                        || !extent_support
-                            .local_obstruction_parameters
-                            .is_subset(&extent_support.global_obstruction_parameters)
-                    {
-                        return Err(IdentifiabilityError::InvalidGauge {
-                            gauge: gauge.id.clone(),
-                            detail: "local obstruction support must be a subset of global obstruction support, and both must stay inside gauge members"
-                                .to_string(),
-                        });
-                    }
-                    if !regular_orbit_support_compatible(&gauge.orbit_geometry, extent_support) {
-                        return Err(IdentifiabilityError::InvalidGauge {
-                            gauge: gauge.id.clone(),
-                            detail: "regular orbit geometry and local/global obstruction support disagree; positive-dimensional regular orbits obstruct locally and globally, finite discrete proper/local-covering regular orbits obstruct only globally, every nontrivial regular orbit obstructs globally, and singular/nonproper exceptions require Stratified profile authority"
-                                .to_string(),
-                        });
-                    }
-                    if let Some(member) =
-                        extent_support
-                            .global_obstruction_parameters
-                            .iter()
-                            .find(|member| {
-                                parameters.get(*member).is_none_or(|parameter| {
-                                    !parameter_active_in_cases(
-                                        parameter,
-                                        &BTreeSet::from([case.clone()]),
-                                    )
-                                })
-                            })
-                    {
-                        return Err(IdentifiabilityError::InvalidGauge {
-                            gauge: gauge.id.clone(),
-                            detail: format!(
-                                "cell-local obstruction parameter {member} is inactive in case {case}"
-                            ),
-                        });
-                    }
-                }
-                validate_gauge_applicability_sources(axes, &sources)?;
-            }
-            let gauge_cases = gauge
-                .validity
-                .cells
-                .values()
-                .flat_map(|cell| cell.case_obstruction_support.keys())
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            for member in &gauge.members {
-                let parameter = parameters.get(member).ok_or_else(|| {
-                    IdentifiabilityError::UnknownReference {
-                        field: "gauge member",
-                        id: member.to_string(),
-                    }
-                })?;
-                if !matches!(
-                    &parameter.treatment,
-                    ParameterTreatment::Estimated
-                        | ParameterTreatment::Profiled
-                        | ParameterTreatment::Marginalized
-                ) {
-                    return Err(IdentifiabilityError::InvalidGauge {
-                        gauge: gauge.id.clone(),
-                        detail: format!(
-                            "gauge member {member} must be a free inferential coordinate; conditioned and derived coordinates need an explicit induced-action schema"
-                        ),
-                    });
-                }
-                if !parameter_active_in_cases(parameter, &gauge_cases) {
-                    return Err(IdentifiabilityError::InvalidGauge {
-                        gauge: gauge.id.clone(),
-                        detail: format!(
-                            "gauge member {member} is inactive throughout the declared invariant cases"
-                        ),
-                    });
-                }
-            }
-            require_source_kind(
-                &sources,
-                &gauge.action,
-                SourceKind::GaugeAction,
-                "gauge action",
-            )?;
-            match &gauge.status {
-                GaugeStatus::Candidate { rationale } => require_source_kind(
-                    &sources,
-                    rationale,
-                    SourceKind::GaugeHypothesis,
-                    "gauge candidate rationale",
-                )?,
-                GaugeStatus::Assumed { assumption } => require_source_kind(
-                    &sources,
-                    assumption,
-                    SourceKind::Assumption,
-                    "assumed gauge authority",
-                )?,
-            }
-            validate_gauge_algebra_orbit_sources(&gauge.algebra, &gauge.orbit_geometry, &sources)?;
-        }
-
-        for composition in gauge_compositions.values() {
-            require_source_kind(
-                &sources,
-                &composition.law,
-                SourceKind::GaugeComposition,
-                "gauge composition law",
-            )?;
-            match &composition.status {
-                GaugeStatus::Candidate { rationale } => require_source_kind(
-                    &sources,
-                    rationale,
-                    SourceKind::GaugeHypothesis,
-                    "gauge composition candidate rationale",
-                )?,
-                GaugeStatus::Assumed { assumption } => require_source_kind(
-                    &sources,
-                    assumption,
-                    SourceKind::Assumption,
-                    "assumed gauge composition authority",
-                )?,
-            }
-            for (axes, cell) in &composition.validity.cells {
-                for case in cell.case_obstruction_support.keys() {
-                    if !cases.contains_key(case) {
-                        return Err(IdentifiabilityError::UnknownReference {
-                            field: "gauge composition invariant case",
-                            id: case.to_string(),
-                        });
-                    }
-                }
-                validate_gauge_applicability_sources(axes, &sources)?;
-            }
-            let mut support = BTreeSet::new();
-            let mut all_assumed = matches!(&composition.status, GaugeStatus::Assumed { .. });
-            for member in &composition.members {
-                let gauge =
-                    gauges
-                        .get(member)
-                        .ok_or_else(|| IdentifiabilityError::UnknownReference {
-                            field: "gauge composition member",
-                            id: member.to_string(),
-                        })?;
-                if composition.validity.cells.iter().any(|(axes, cell)| {
-                    gauge.validity.cells.get(axes).is_none_or(|member_cell| {
-                        !cell
-                            .case_obstruction_support
-                            .keys()
-                            .all(|case| member_cell.case_obstruction_support.contains_key(case))
-                    })
-                }) {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "gauge composition validity",
-                        detail: format!(
-                            "composition {} exceeds member {member} validity scope",
-                            composition.law
-                        ),
-                    });
-                }
-                support.extend(gauge.members.iter().cloned());
-                all_assumed &= matches!(&gauge.status, GaugeStatus::Assumed { .. });
-            }
-            if matches!(&composition.status, GaugeStatus::Assumed { .. }) && !all_assumed {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "assumed gauge composition status",
-                    detail: format!(
-                        "composition {} cannot be Assumed while any member action remains Candidate",
-                        composition.id
-                    ),
-                });
-            }
-            for (axes, cell) in &composition.validity.cells {
-                for (case, extent_support) in &cell.case_obstruction_support {
-                    // A generated/noncommuting action may obstruct coordinates
-                    // absent from every member action's point-local support.
-                    // Its exact composition law is authoritative for that
-                    // effective support; the only structural bound is the
-                    // union of all coordinates the member actions may move.
-                    let member_local = composition
-                        .members
-                        .iter()
-                        .flat_map(|member| {
-                            gauges[member].validity.cells[axes].case_obstruction_support[case]
-                                .local_obstruction_parameters
-                                .iter()
-                                .cloned()
-                        })
-                        .collect::<BTreeSet<_>>();
-                    let member_global = composition
-                        .members
-                        .iter()
-                        .flat_map(|member| {
-                            gauges[member].validity.cells[axes].case_obstruction_support[case]
-                                .global_obstruction_parameters
-                                .iter()
-                                .cloned()
-                        })
-                        .collect::<BTreeSet<_>>();
-                    if !extent_support
-                        .global_obstruction_parameters
-                        .is_subset(&support)
-                        || !extent_support
-                            .local_obstruction_parameters
-                            .is_subset(&extent_support.global_obstruction_parameters)
-                        || match &composition.kind {
-                            GaugeCompositionKind::IndependentProduct => {
-                                extent_support.local_obstruction_parameters != member_local
-                                    || extent_support.global_obstruction_parameters != member_global
-                            }
-                            GaugeCompositionKind::Generated => {
-                                !member_local
-                                    .is_subset(&extent_support.local_obstruction_parameters)
-                                    || !member_global
-                                        .is_subset(&extent_support.global_obstruction_parameters)
-                            }
-                        }
-                        || !regular_orbit_support_compatible(
-                            &composition.effective_orbit_geometry,
-                            extent_support,
-                        )
-                    {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "gauge composition moved support",
-                            detail: format!(
-                                "composition {} has invalid effective moved support in case {case}",
-                                composition.law
-                            ),
-                        });
-                    }
-                    if let Some(member) =
-                        extent_support
-                            .global_obstruction_parameters
-                            .iter()
-                            .find(|member| {
-                                parameters.get(*member).is_none_or(|parameter| {
-                                    !parameter_active_in_cases(
-                                        parameter,
-                                        &BTreeSet::from([case.clone()]),
-                                    )
-                                })
-                            })
-                    {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "gauge composition moved support",
-                            detail: format!(
-                                "composition {} moves case-inactive parameter {member}",
-                                composition.law
-                            ),
-                        });
-                    }
-                }
-            }
-            validate_gauge_algebra_orbit_sources(
-                &composition.effective_algebra,
-                &composition.effective_orbit_geometry,
-                &sources,
-            )?;
-            let principal = principal_gauge_orbit(&composition.effective_orbit_geometry);
-            if !gauge_algebra_orbit_compatible(
-                &composition.effective_algebra,
-                principal,
-                all_assumed
-                    && matches!(
-                        &composition.effective_orbit_geometry,
-                        GaugeOrbitGeometry::Regular { .. }
-                    ),
-            ) {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "gauge composition geometry",
-                    detail: format!(
-                        "composition {} has incompatible effective principal-orbit invariants",
-                        composition.law
-                    ),
-                });
-            }
-            validate_independent_product_invariants(composition, &gauges)?;
-        }
-
-        for case in cases.keys() {
-            let axes_set = gauges
-                .values()
-                .flat_map(|gauge| {
-                    gauge
-                        .validity
-                        .cells
-                        .iter()
-                        .filter(|(_, cell)| cell.case_obstruction_support.contains_key(case))
-                        .map(|(axes, _)| axes.clone())
-                })
-                .collect::<BTreeSet<_>>();
-            for axes in axes_set {
-                let active_assumed = gauges
-                    .values()
-                    .filter(|gauge| {
-                        matches!(&gauge.status, GaugeStatus::Assumed { .. })
-                            && gauge.validity.cells.get(&axes).is_some_and(|cell| {
-                                cell.case_obstruction_support.contains_key(case)
-                            })
-                    })
-                    .map(|gauge| gauge.id.clone())
-                    .collect::<BTreeSet<_>>();
-                if active_assumed.len() < 2 {
-                    continue;
-                }
-                let matching = gauge_compositions
-                    .values()
-                    .filter(|composition| {
-                        composition.members == active_assumed
-                            && matches!(&composition.status, GaugeStatus::Assumed { .. })
-                            && composition.validity.cells.get(&axes).is_some_and(|cell| {
-                                cell.case_obstruction_support.contains_key(case)
-                            })
-                    })
-                    .count();
-                if matching != 1 {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "assumed gauge composition",
-                        detail: format!(
-                            "simultaneously active assumed gauge system {:?} needs exactly one exact assumed composition declaration, found {matching}",
-                            active_assumed
-                        ),
-                    });
-                }
-            }
-        }
-
-        match &joint_noise {
-            JointNoiseModel::Independent { assumption } => require_source_kind(
-                &sources,
-                assumption,
-                SourceKind::Assumption,
-                "independent-noise assumption",
-            )?,
-            JointNoiseModel::DenseCorrelation {
-                order,
-                correlation,
-                model,
-            } => {
-                require_source_kind(
-                    &sources,
-                    model,
-                    SourceKind::Likelihood,
-                    "dense correlation model",
-                )?;
-                let unique = order.iter().cloned().collect::<BTreeSet<_>>();
-                let all = all_observations.keys().cloned().collect::<BTreeSet<_>>();
-                if order.len() != all.len()
-                    || unique != all
-                    || correlation.dimension() != order.len()
-                    || order
-                        .iter()
-                        .any(|key| !all_observations[key].noise.finite_standard_deviation())
-                {
-                    return Err(IdentifiabilityError::Covariance {
-                        detail: "dense correlation needs every composite channel exactly once and finite marginal standard deviations"
-                            .to_string(),
-                    });
-                }
-                for index in 0..order.len() {
-                    if !same_f64(matrix_get(correlation, index, index), 1.0) {
-                        return Err(IdentifiabilityError::Covariance {
-                            detail: format!("correlation diagonal {index} is not exactly one"),
-                        });
-                    }
-                }
-            }
-            JointNoiseModel::ExternalKernel { model } => require_source_kind_in(
-                &sources,
-                model,
-                &[SourceKind::Likelihood, SourceKind::ParameterizedLikelihood],
-                "external noise kernel",
-            )?,
-            JointNoiseModel::Unknown { reason } => {
-                validate_reason(reason, "unknown joint noise reason")?
-            }
-        }
-
-        if influences.values().any(|influence| {
-            matches!(
-                &influence.functional,
-                DistributionFunctional::Correlation { .. }
-            )
-        }) {
-            let parameterized = matches!(
-                &joint_noise,
-                JointNoiseModel::ExternalKernel { model }
-                    if sources[model].kind == SourceKind::ParameterizedLikelihood
-            );
-            if !parameterized {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "correlation influence/joint likelihood",
-                    detail: "correlation influence requires an ExternalKernel whose source has ParameterizedLikelihood semantics; Independent fixes correlation to zero, DenseCorrelation stores a fixed matrix, and a generic/unknown kernel does not declare parameter dependence"
-                        .to_string(),
-                });
-            }
-        }
-
-        let declared_sharing_likelihoods = cases
-            .values()
-            .flat_map(|case| {
-                case.observation_sharing
-                    .iter()
-                    .map(|group| group.joint_likelihood.clone())
-            })
-            .chain(match &data_reuse {
-                DataReusePolicy::Disjoint => Vec::new(),
-                DataReusePolicy::Shared { groups } => groups
-                    .iter()
-                    .map(|group| group.joint_likelihood.clone())
-                    .collect(),
-            })
-            .collect::<BTreeSet<_>>();
-        if !declared_sharing_likelihoods.is_empty() {
-            let global_model = match &joint_noise {
-                JointNoiseModel::DenseCorrelation { model, .. }
-                | JointNoiseModel::ExternalKernel { model } => model,
-                JointNoiseModel::Independent { .. } | JointNoiseModel::Unknown { .. } => {
-                    return Err(IdentifiabilityError::Covariance {
-                        detail:
-                            "shared raw data requires one explicit global joint-likelihood model"
-                                .to_string(),
-                    });
-                }
-            };
-            if declared_sharing_likelihoods != BTreeSet::from([global_model.clone()]) {
-                return Err(IdentifiabilityError::Covariance {
-                    detail: "every sharing declaration must name the exact global joint-likelihood model"
-                        .to_string(),
-                });
-            }
-        }
-
-        match &data_reuse {
-            DataReusePolicy::Disjoint => {
-                let mut seen = BTreeMap::<ContentHash, CaseId>::new();
-                for (case_id, case) in &cases {
-                    if let Some(experiment) = retrospective_experiment(case) {
-                        let hash = sources[experiment].expected_hash;
-                        if let Some(other) = seen.insert(hash, case_id.clone()) {
-                            return Err(IdentifiabilityError::InvalidText {
-                                field: "data reuse policy",
-                                detail: format!(
-                                    "cases {other} and {case_id} reuse one experiment under Disjoint"
-                                ),
-                            });
-                        }
-                    }
-                }
-            }
-            DataReusePolicy::Shared { groups } => {
-                if groups.is_empty() || groups.len() > MAX_IDENTIFIABILITY_ITEMS {
-                    return Err(IdentifiabilityError::Cardinality {
-                        field: "data sharing groups",
-                        detail: "Shared policy needs bounded nonempty groups".to_string(),
-                    });
-                }
-                let mut membership = BTreeMap::<CaseId, usize>::new();
-                let mut shared_hash_owners = BTreeMap::<ContentHash, usize>::new();
-                for (index, group) in groups.iter().enumerate() {
-                    require_source_kind_in(
-                        &sources,
-                        &group.joint_likelihood,
-                        &[SourceKind::Likelihood, SourceKind::ParameterizedLikelihood],
-                        "sharing-group likelihood",
-                    )?;
-                    for case_id in &group.cases {
-                        if membership.insert(case_id.clone(), index).is_some() {
-                            return Err(IdentifiabilityError::Duplicate {
-                                field: "data sharing group membership",
-                                id: case_id.to_string(),
-                            });
-                        }
-                        let case = cases.get(case_id).ok_or_else(|| {
-                            IdentifiabilityError::UnknownReference {
-                                field: "data sharing case",
-                                id: case_id.to_string(),
-                            }
-                        })?;
-                        let experiment = retrospective_experiment(case).ok_or_else(|| {
-                            IdentifiabilityError::InvalidText {
-                                field: "data sharing case",
-                                detail: format!("prospective case {case_id} cannot share raw data"),
-                            }
-                        })?;
-                        let hash = sources[experiment].expected_hash;
-                        if let Some(other) = shared_hash_owners.insert(hash, index)
-                            && other != index
-                        {
-                            return Err(IdentifiabilityError::InvalidText {
-                                field: "data reuse policy",
-                                detail: format!(
-                                    "sharing groups {other} and {index} reuse one experiment"
-                                ),
-                            });
-                        }
-                    }
-                }
-                let mut ungrouped = BTreeMap::<ContentHash, CaseId>::new();
-                for (case_id, case) in &cases {
-                    if membership.contains_key(case_id) {
-                        continue;
-                    }
-                    if let Some(experiment) = retrospective_experiment(case) {
-                        let hash = sources[experiment].expected_hash;
-                        if shared_hash_owners.contains_key(&hash) {
-                            return Err(IdentifiabilityError::InvalidText {
-                                field: "data reuse policy",
-                                detail: format!(
-                                    "ungrouped case {case_id} reuses an experiment owned by a sharing group"
-                                ),
-                            });
-                        }
-                        if let Some(other) = ungrouped.insert(hash, case_id.clone()) {
-                            return Err(IdentifiabilityError::InvalidText {
-                                field: "data reuse policy",
-                                detail: format!(
-                                    "ungrouped cases {other} and {case_id} reuse one experiment"
-                                ),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        let reachable = problem_source_reachability(
-            &context_source,
-            &material_source,
-            &model_source,
-            &graph_source,
-            joint_prior.as_ref(),
-            &parameters,
-            &constraints,
-            &admissible_domain,
-            &cases,
-            &influences,
-            &gauges,
-            &gauge_compositions,
-            &joint_noise,
-            &data_reuse,
-        );
-        let registered = sources.keys().cloned().collect::<BTreeSet<_>>();
-        if reachable != registered {
-            let detail = registered.difference(&reachable).next().map_or_else(
-                || "a referenced source is absent from the registry".to_string(),
-                |unused| format!("source {unused} is registered but unreachable"),
-            );
-            return Err(IdentifiabilityError::InvalidText {
-                field: "source registry closure",
-                detail,
-            });
-        }
-
-        let document = Self {
-            schema_version: IDENTIFIABILITY_PROBLEM_IDENTITY_VERSION,
+        let document = normalize_problem_document(ProblemDocumentInputs {
             context_source,
             material_source,
             model_source,
@@ -7960,10 +8533,25 @@ impl IdentifiabilityProblemDocument {
             gauge_compositions,
             joint_noise,
             data_reuse,
-        };
+        })?;
+        for parameter in document.parameters.values() {
+            validate_problem_parameter(parameter, &document.sources, &document.cases)?;
+        }
+        let ProblemCaseObservations {
+            observations,
+            modeled_discrepancy_parameters,
+        } = collect_problem_case_observations(&document)?;
+        validate_problem_parameter_case_bindings(&document, &modeled_discrepancy_parameters)?;
+        validate_problem_influences(&document)?;
+        validate_influence_dag(&document.influences)?;
+        validate_problem_gauges(&document)?;
+        validate_problem_gauge_compositions(&document)?;
+        validate_assumed_gauge_composition_coverage(&document)?;
+        validate_problem_joint_noise(&document, &observations)?;
+        validate_sharing_likelihoods(&document)?;
+        validate_problem_data_reuse(&document)?;
+        validate_problem_source_closure(&document)?;
         validate_problem_structural_budget(&document)?;
-        // Construction itself enforces the canonical byte budget; callers do
-        // not need to discover an oversized identity only when hashing later.
         let _ = encode_problem(&document)?;
         Ok(document)
     }
@@ -8405,14 +8993,13 @@ fn validate_authority_subject_with_artifact(
         reference.contract_version,
         authority,
     )?;
-    if let AuthorityDisposition::ExternalTrustReceipt { trust_receipt } = authority {
-        if let Some(declared) = trust_receipt.subject_artifact.as_ref()
-            && Some(declared) != subject_artifact
-        {
-            return Err(IdentifiabilityError::SourceMismatch {
-                field: "trust receipt subject artifact/source resolution",
-            });
-        }
+    if let AuthorityDisposition::ExternalTrustReceipt { trust_receipt } = authority
+        && let Some(declared) = trust_receipt.subject_artifact.as_ref()
+        && Some(declared) != subject_artifact
+    {
+        return Err(IdentifiabilityError::SourceMismatch {
+            field: "trust receipt subject artifact/source resolution",
+        });
     }
     Ok(())
 }
@@ -8443,11 +9030,10 @@ fn validate_authority_subject_fields(
 }
 
 fn concrete_authority_for(
-    bundle: &ProblemSourceBundle<'_>,
+    concrete_authority: &BTreeMap<SourceKey, AuthorityDisposition>,
     key: &SourceKey,
 ) -> AuthorityDisposition {
-    bundle
-        .concrete_authority
+    concrete_authority
         .get(key)
         .cloned()
         .unwrap_or(AuthorityDisposition::ContentVerified)
@@ -8633,6 +9219,534 @@ fn problem_identity_hash(
     )))
 }
 
+fn validate_model_parameter_binding(
+    document: &IdentifiabilityProblemDocument,
+    model: &MaterialModelBinding,
+) -> Result<(), IdentifiabilityError> {
+    for (role, roster) in &model.parameter_roster {
+        let parameter = document.parameters.get(role).ok_or_else(|| {
+            IdentifiabilityError::UnknownReference {
+                field: "model-card parameter declaration",
+                id: role.to_string(),
+            }
+        })?;
+        if !matches!(&parameter.owner, ParameterOwnerBinding::ConstitutiveModel)
+            || parameter.quantity != roster.quantity
+            || roster.nominal() < parameter.domain.lo
+            || roster.nominal() > parameter.domain.hi
+        {
+            return Err(IdentifiabilityError::InvalidNumeric {
+                field: "model-card parameter binding",
+                detail: format!(
+                    "parameter {role} must match owner, exact quantity, and nominal domain"
+                ),
+            });
+        }
+    }
+    for parameter in document.parameters.values() {
+        if matches!(&parameter.owner, ParameterOwnerBinding::ConstitutiveModel)
+            && !model.parameter_roster.contains_key(&parameter.role)
+        {
+            return Err(IdentifiabilityError::UnknownReference {
+                field: "constitutive-model parameter",
+                id: parameter.role.to_string(),
+            });
+        }
+    }
+    if matches!(
+        model.initial_state_policy,
+        InitialStatePolicy::ZeroInternalState
+    ) && document
+        .parameters
+        .values()
+        .any(|parameter| matches!(&parameter.owner, ParameterOwnerBinding::InitialState { .. }))
+    {
+        return Err(IdentifiabilityError::InitialStatePolicy {
+            detail: "zero-internal-state model cannot expose inferential initial-state parameters"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn collect_blind_releases<'a>(
+    document: &IdentifiabilityProblemDocument,
+    case_sources: &'a BTreeMap<CaseId, CaseSourceBundle<'a>>,
+) -> Result<BTreeMap<SourceKey, &'a BlindReleaseReceipt>, IdentifiabilityError> {
+    let mut blind_releases = BTreeMap::new();
+    for (case_id, case) in &document.cases {
+        let CaseDataDeclaration::Retrospective { split, .. } = &case.data else {
+            continue;
+        };
+        let sources =
+            case_sources
+                .get(case_id)
+                .ok_or_else(|| IdentifiabilityError::UnknownReference {
+                    field: "retrospective case source bundle",
+                    id: case_id.to_string(),
+                })?;
+        match (&case.purpose, sources.blind_release) {
+            (CasePurpose::BlindFalsification, Some(release)) => {
+                if let Some(existing) = blind_releases.insert(split.clone(), release)
+                    && existing != release
+                {
+                    return Err(IdentifiabilityError::SourceMismatch {
+                        field: "shared split blind release",
+                    });
+                }
+            }
+            (CasePurpose::BlindFalsification, None) => {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "blind release",
+                    detail: format!(
+                        "blind-falsification case {case_id} requires an authority release"
+                    ),
+                });
+            }
+            (_, Some(_)) => {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "blind release",
+                    detail: format!(
+                        "non-blind case {case_id} must not receive blind-release authority"
+                    ),
+                });
+            }
+            (_, None) => {}
+        }
+    }
+    Ok(blind_releases)
+}
+
+struct CaseAdmissionState<'a> {
+    document: &'a IdentifiabilityProblemDocument,
+    concrete_authority: &'a BTreeMap<SourceKey, AuthorityDisposition>,
+    blind_releases: &'a BTreeMap<SourceKey, &'a BlindReleaseReceipt>,
+    resolutions: &'a mut BTreeMap<SourceKey, SourceResolution>,
+    concrete_keys: &'a mut BTreeSet<SourceKey>,
+}
+
+fn resolve_retrospective_lineage(
+    case_id: &CaseId,
+    case: &StudyCaseDocument,
+    case_sources: &CaseSourceBundle<'_>,
+    state: &mut CaseAdmissionState<'_>,
+) -> Result<(DataLineage, ContentHash), IdentifiabilityError> {
+    let CaseDataDeclaration::Retrospective {
+        experiment,
+        split,
+        parser,
+        preprocessing,
+        parser_version,
+        split_grouping,
+    } = &case.data
+    else {
+        unreachable!("retrospective lineage is called only for retrospective cases");
+    };
+    validate_discrepancy_origin(case_id, case, case_sources.experiment)?;
+    let experiment_hash =
+        case_sources
+            .experiment
+            .content_hash()
+            .map_err(|error| IdentifiabilityError::Vv {
+                detail: error.to_string(),
+            })?;
+    let split_hash =
+        case_sources
+            .split
+            .content_hash()
+            .map_err(|error| IdentifiabilityError::Vv {
+                detail: error.to_string(),
+            })?;
+    let experiment_resolution = concrete_resolution(
+        &state.document.sources[experiment],
+        SourceKind::ExperimentArtifact,
+        experiment_hash,
+        None,
+        concrete_authority_for(state.concrete_authority, experiment),
+    )?;
+    state.concrete_keys.insert(experiment.clone());
+    insert_exact_resolution(
+        state.resolutions,
+        experiment,
+        experiment_resolution,
+        "shared experiment source resolution",
+    )?;
+
+    let release_authority = state
+        .blind_releases
+        .get(split)
+        .map(|release| {
+            Ok(AuthorityDisposition::ExternalTrustReceipt {
+                trust_receipt: Box::new(TrustReceiptRef::blind_release(
+                    &state.document.sources[split],
+                    release.split().id().clone(),
+                    release.authority_receipt_hash(),
+                )?),
+            })
+        })
+        .transpose()?;
+    if let (Some(required), Some(declared)) = (
+        release_authority.as_ref(),
+        state.concrete_authority.get(split),
+    ) && required != declared
+    {
+        return Err(IdentifiabilityError::SourceMismatch {
+            field: "blind release/concrete source authority",
+        });
+    }
+    let split_authority = release_authority
+        .unwrap_or_else(|| concrete_authority_for(state.concrete_authority, split));
+    let split_resolution = concrete_resolution(
+        &state.document.sources[split],
+        SourceKind::CalibrationSplit,
+        split_hash,
+        Some(case_sources.split.id()),
+        split_authority,
+    )?;
+    state.concrete_keys.insert(split.clone());
+    insert_exact_resolution(
+        state.resolutions,
+        split,
+        split_resolution,
+        "shared split source resolution",
+    )?;
+    let lineage = DataLineage::from_vv(
+        case_sources.experiment,
+        case_sources.split,
+        state.document.sources[parser].expected_hash,
+        *parser_version,
+        state.document.sources[preprocessing].expected_hash,
+        split_grouping.clone(),
+    )?;
+    Ok((lineage, split_hash))
+}
+
+fn validate_retrospective_observation_bindings(
+    document: &IdentifiabilityProblemDocument,
+    case: &StudyCaseDocument,
+    case_sources: &CaseSourceBundle<'_>,
+    lineage: &DataLineage,
+) -> Result<(), IdentifiabilityError> {
+    for observation in case.observations.values() {
+        if !lineage.qois().contains(&observation.qoi) {
+            return Err(IdentifiabilityError::UnknownReference {
+                field: "experiment observation QoI",
+                id: observation.qoi.as_str().to_string(),
+            });
+        }
+        let instrument = case_sources
+            .experiment
+            .instrument_calibration(&observation.instrument)
+            .ok_or_else(|| IdentifiabilityError::UnknownReference {
+                field: "experiment observation instrument",
+                id: observation.instrument.as_str().to_string(),
+            })?;
+        if document.sources[&observation.sensor].expected_hash != instrument.certificate_hash() {
+            return Err(IdentifiabilityError::SourceMismatch {
+                field: "observation sensor/instrument calibration",
+            });
+        }
+        if !case_sources.experiment.contains_clock(&observation.clock) {
+            return Err(IdentifiabilityError::UnknownReference {
+                field: "experiment observation clock",
+                id: observation.clock.as_str().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_retrospective_rows(
+    case_id: &CaseId,
+    case: &StudyCaseDocument,
+    case_sources: &CaseSourceBundle<'_>,
+    lineage: &DataLineage,
+    split_hash: ContentHash,
+    blind_releases: &BTreeMap<SourceKey, &BlindReleaseReceipt>,
+) -> Result<(), IdentifiabilityError> {
+    let CaseDataDeclaration::Retrospective { split, .. } = &case.data else {
+        unreachable!("retrospective rows are checked only for retrospective cases");
+    };
+    let allowed_rows: BTreeSet<ObservationId> = match &case.purpose {
+        CasePurpose::Calibration
+        | CasePurpose::SymmetryBreaking
+        | CasePurpose::Complementary { .. } => lineage.calibration_ids.clone(),
+        CasePurpose::ValidationOnly => lineage.validation_ids.clone(),
+        CasePurpose::BlindFalsification => lineage.blind_sources.keys().cloned().collect(),
+        CasePurpose::ProspectiveDesign => BTreeSet::new(),
+    };
+    let declared_rows = case
+        .observations
+        .values()
+        .filter_map(|observation| match &observation.rows {
+            ObservationRows::Retrospective(rows) => Some(rows.iter().cloned()),
+            ObservationRows::Prospective => None,
+        })
+        .flatten()
+        .collect::<BTreeSet<_>>();
+    for observation in case.observations.values() {
+        let ObservationRows::Retrospective(rows) = &observation.rows else {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "retrospective observation rows",
+                detail: format!(
+                    "case {case_id} contains a prospective observation after structural admission"
+                ),
+            });
+        };
+        if !rows.is_subset(&lineage.observation_ids) {
+            return Err(IdentifiabilityError::UnknownReference {
+                field: "observation raw row",
+                id: observation.id.to_string(),
+            });
+        }
+        if !rows.is_subset(&allowed_rows) {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "case-purpose data partition",
+                detail: format!(
+                    "observation {} consumes rows outside the partition authorized by case {case_id} purpose",
+                    observation.id
+                ),
+            });
+        }
+        for row in rows {
+            let binding = case_sources.experiment.manifest().row(row).ok_or_else(|| {
+                IdentifiabilityError::UnknownReference {
+                    field: "experiment manifest row binding",
+                    id: row.as_str().to_string(),
+                }
+            })?;
+            if binding.qoi() != &observation.qoi
+                || binding.instrument() != &observation.instrument
+                || binding.acquisition_channel() != &observation.acquisition_channel
+                || binding.clock() != &observation.clock
+            {
+                return Err(IdentifiabilityError::SourceMismatch {
+                    field: "observation/manifest row binding",
+                });
+            }
+        }
+    }
+    if matches!(&case.purpose, CasePurpose::BlindFalsification) {
+        let release = blind_releases
+            .get(split)
+            .expect("blind release pre-scan established exact presence");
+        let split_reference = ArtifactRef::new(
+            ArtifactKind::CalibrationSplit,
+            case_sources.split.id().clone(),
+            split_hash,
+        );
+        case_sources
+            .split
+            .blind_selection(
+                split_reference,
+                declared_rows.iter().cloned().collect(),
+                (**release).clone(),
+            )
+            .map_err(|error| IdentifiabilityError::Vv {
+                detail: error.to_string(),
+            })?;
+    }
+    Ok(())
+}
+
+fn admit_case_data<'a>(
+    document: &IdentifiabilityProblemDocument,
+    context: &ContextBinding,
+    model: &MaterialModelBinding,
+    case_sources: &'a BTreeMap<CaseId, CaseSourceBundle<'a>>,
+    state: &mut CaseAdmissionState<'a>,
+) -> Result<BTreeMap<CaseId, DataLineage>, IdentifiabilityError> {
+    let mut data = BTreeMap::new();
+    for (case_id, case) in &document.cases {
+        case.initial_state.validate_against(model)?;
+        if case.protocol.state_schema_version != model.state_schema_version {
+            return Err(IdentifiabilityError::VersionMismatch {
+                field: "case protocol/model state schema",
+                expected: model.state_schema_version,
+                actual: case.protocol.state_schema_version,
+            });
+        }
+        for observation in case.observations.values() {
+            if context.qoi_units.get(&observation.qoi) != Some(&observation.unit) {
+                return Err(IdentifiabilityError::UnknownReference {
+                    field: "context QoI/unit",
+                    id: observation.qoi.as_str().to_string(),
+                });
+            }
+        }
+        match &case.data {
+            CaseDataDeclaration::Prospective => {
+                if case_sources.contains_key(case_id) {
+                    return Err(IdentifiabilityError::InvalidText {
+                        field: "prospective case source bundle",
+                        detail: format!(
+                            "prospective case {case_id} must not receive experiment data"
+                        ),
+                    });
+                }
+            }
+            CaseDataDeclaration::Retrospective { .. } => {
+                let sources = case_sources.get(case_id).ok_or_else(|| {
+                    IdentifiabilityError::UnknownReference {
+                        field: "retrospective case source bundle",
+                        id: case_id.to_string(),
+                    }
+                })?;
+                let (lineage, split_hash) =
+                    resolve_retrospective_lineage(case_id, case, sources, state)?;
+                validate_retrospective_observation_bindings(document, case, sources, &lineage)?;
+                validate_retrospective_rows(
+                    case_id,
+                    case,
+                    sources,
+                    &lineage,
+                    split_hash,
+                    state.blind_releases,
+                )?;
+                data.insert(case_id.clone(), lineage);
+            }
+        }
+    }
+    if case_sources.len() != data.len() {
+        return Err(IdentifiabilityError::Cardinality {
+            field: "case source bundles",
+            detail: "source bundle contains an unknown or prospective case".to_string(),
+        });
+    }
+    Ok(data)
+}
+
+fn validate_admitted_data_reuse(
+    data: &BTreeMap<CaseId, DataLineage>,
+    policy: &DataReusePolicy,
+) -> Result<(), IdentifiabilityError> {
+    let mut source_bytes_owners = BTreeMap::<ContentHash, BTreeSet<CaseId>>::new();
+    let mut manifest_owners = BTreeMap::<ContentHash, BTreeSet<CaseId>>::new();
+    let mut row_locator_owners = BTreeMap::<ObservationLocatorIdentity, BTreeSet<CaseId>>::new();
+    for (case_id, lineage) in data {
+        source_bytes_owners
+            .entry(lineage.source_bytes())
+            .or_default()
+            .insert(case_id.clone());
+        manifest_owners
+            .entry(lineage.raw_manifest())
+            .or_default()
+            .insert(case_id.clone());
+        for row in lineage.row_bindings().values() {
+            row_locator_owners
+                .entry(row.source_ref().locator_identity())
+                .or_default()
+                .insert(case_id.clone());
+        }
+    }
+    let mut sharing_participation = BTreeSet::<CaseId>::new();
+    admit_shared_owner_sets(&source_bytes_owners, policy, &mut sharing_participation)?;
+    admit_shared_owner_sets(&manifest_owners, policy, &mut sharing_participation)?;
+    admit_shared_owner_sets(&row_locator_owners, policy, &mut sharing_participation)?;
+    if let DataReusePolicy::Shared { groups } = policy {
+        for group in groups {
+            for case_id in &group.cases {
+                if !sharing_participation.contains(case_id) {
+                    return Err(IdentifiabilityError::InvalidText {
+                        field: "data sharing group",
+                        detail: format!(
+                            "case {case_id} declares raw-data sharing but overlaps no peer by admitted bytes, manifest, or row source"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn close_problem_source_resolutions(
+    document: &IdentifiabilityProblemDocument,
+    opaque: &SourceResolutionSet,
+    concrete_authority: &BTreeMap<SourceKey, AuthorityDisposition>,
+    concrete_keys: &BTreeSet<SourceKey>,
+    resolutions: &mut BTreeMap<SourceKey, SourceResolution>,
+) -> Result<(), IdentifiabilityError> {
+    for (key, reference) in &document.sources {
+        if concrete_keys.contains(key) {
+            if opaque.entries.contains_key(key) {
+                return Err(IdentifiabilityError::Duplicate {
+                    field: "concrete/opaque source resolution",
+                    id: key.to_string(),
+                });
+            }
+            continue;
+        }
+        let resolution =
+            opaque
+                .entries
+                .get(key)
+                .ok_or_else(|| IdentifiabilityError::UnknownReference {
+                    field: "opaque source resolution",
+                    id: key.to_string(),
+                })?;
+        admit_opaque_resolution(reference, resolution)?;
+        resolutions.insert(key.clone(), resolution.clone());
+    }
+    if opaque.entries.len() != document.sources.len() - concrete_keys.len()
+        || resolutions.len() != document.sources.len()
+    {
+        return Err(IdentifiabilityError::Cardinality {
+            field: "source resolution closure",
+            detail: "resolution set has missing or extra source keys".to_string(),
+        });
+    }
+    if let Some(key) = concrete_authority
+        .keys()
+        .find(|key| !concrete_keys.contains(*key))
+    {
+        return Err(IdentifiabilityError::UnknownReference {
+            field: "concrete source authority",
+            id: key.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn admit_primary_sources(
+    document: &IdentifiabilityProblemDocument,
+    context: &ContextBinding,
+    material: &MaterialCard,
+    model_card: &ConstitutiveModelCard,
+    concrete_authority: &BTreeMap<SourceKey, AuthorityDisposition>,
+) -> Result<(BTreeMap<SourceKey, SourceResolution>, BTreeSet<SourceKey>), IdentifiabilityError> {
+    let mut resolutions = BTreeMap::new();
+    let mut concrete_keys = BTreeSet::new();
+    for (reference, kind, hash) in [
+        (
+            &document.sources[&document.context_source],
+            SourceKind::ContextOfUse,
+            context.reference.hash(),
+        ),
+        (
+            &document.sources[&document.material_source],
+            SourceKind::MaterialCard,
+            material.content_hash(),
+        ),
+        (
+            &document.sources[&document.model_source],
+            SourceKind::ConstitutiveModelCard,
+            model_card.content_hash(),
+        ),
+    ] {
+        let resolution = concrete_resolution(
+            reference,
+            kind,
+            hash,
+            None,
+            concrete_authority_for(concrete_authority, &reference.key),
+        )?;
+        concrete_keys.insert(reference.key.clone());
+        resolutions.insert(reference.key.clone(), resolution);
+    }
+    Ok((resolutions, concrete_keys))
+}
+
 impl AdmittedIdentifiabilityProblem {
     /// Resolve exact concrete sources, require a closed authority set for every
     /// opaque reference, re-derive V&V bindings/lineage, and only then mint
@@ -8641,500 +9755,60 @@ impl AdmittedIdentifiabilityProblem {
         document: IdentifiabilityProblemDocument,
         bundle: ProblemSourceBundle<'_>,
     ) -> Result<Self, IdentifiabilityError> {
-        if bundle.cases.len() > MAX_IDENTIFIABILITY_ITEMS {
+        let ProblemSourceBundle {
+            context: context_source,
+            material,
+            model: model_card,
+            cases,
+            opaque,
+            concrete_authority,
+        } = bundle;
+        if cases.len() > MAX_IDENTIFIABILITY_ITEMS {
             return Err(IdentifiabilityError::Cardinality {
                 field: "retrospective case source bundles",
                 detail: "too many concrete case source bundles".to_string(),
             });
         }
-        if bundle.concrete_authority.len() > MAX_IDENTIFIABILITY_ITEMS {
+        if concrete_authority.len() > MAX_IDENTIFIABILITY_ITEMS {
             return Err(IdentifiabilityError::Cardinality {
                 field: "concrete source authority",
                 detail: "too many concrete source authority entries".to_string(),
             });
         }
-        let context = ContextBinding::from_vv(bundle.context)?;
+        let context = ContextBinding::from_vv(context_source)?;
         let graph_hash = document.sources[&document.graph_source].expected_hash;
-        let model = MaterialModelBinding::from_cards(bundle.material, bundle.model, graph_hash)?;
-        let mut resolutions = BTreeMap::new();
-        let mut concrete_keys = BTreeSet::new();
-
-        let context_ref = &document.sources[&document.context_source];
-        let context_resolution = concrete_resolution(
-            context_ref,
-            SourceKind::ContextOfUse,
-            context.reference.hash(),
-            None,
-            concrete_authority_for(&bundle, &context_ref.key),
+        let model = MaterialModelBinding::from_cards(material, model_card, graph_hash)?;
+        let (mut resolutions, mut concrete_keys) = admit_primary_sources(
+            &document,
+            &context,
+            material,
+            model_card,
+            &concrete_authority,
         )?;
-        concrete_keys.insert(context_ref.key.clone());
-        resolutions.insert(context_ref.key.clone(), context_resolution);
 
-        let material_ref = &document.sources[&document.material_source];
-        let material_resolution = concrete_resolution(
-            material_ref,
-            SourceKind::MaterialCard,
-            bundle.material.content_hash(),
-            None,
-            concrete_authority_for(&bundle, &material_ref.key),
+        validate_model_parameter_binding(&document, &model)?;
+        let blind_releases = collect_blind_releases(&document, &cases)?;
+        let data = admit_case_data(
+            &document,
+            &context,
+            &model,
+            &cases,
+            &mut CaseAdmissionState {
+                document: &document,
+                concrete_authority: &concrete_authority,
+                blind_releases: &blind_releases,
+                resolutions: &mut resolutions,
+                concrete_keys: &mut concrete_keys,
+            },
         )?;
-        concrete_keys.insert(material_ref.key.clone());
-        resolutions.insert(material_ref.key.clone(), material_resolution);
-
-        let model_ref = &document.sources[&document.model_source];
-        let model_resolution = concrete_resolution(
-            model_ref,
-            SourceKind::ConstitutiveModelCard,
-            bundle.model.content_hash(),
-            None,
-            concrete_authority_for(&bundle, &model_ref.key),
+        validate_admitted_data_reuse(&data, &document.data_reuse)?;
+        close_problem_source_resolutions(
+            &document,
+            &opaque,
+            &concrete_authority,
+            &concrete_keys,
+            &mut resolutions,
         )?;
-        concrete_keys.insert(model_ref.key.clone());
-        resolutions.insert(model_ref.key.clone(), model_resolution);
-
-        // The physical parameter roster is closed against the exact model card.
-        for (role, roster) in &model.parameter_roster {
-            let parameter = document.parameters.get(role).ok_or_else(|| {
-                IdentifiabilityError::UnknownReference {
-                    field: "model-card parameter declaration",
-                    id: role.to_string(),
-                }
-            })?;
-            if !matches!(&parameter.owner, ParameterOwnerBinding::ConstitutiveModel)
-                || parameter.quantity != roster.quantity
-                || roster.nominal() < parameter.domain.lo
-                || roster.nominal() > parameter.domain.hi
-            {
-                return Err(IdentifiabilityError::InvalidNumeric {
-                    field: "model-card parameter binding",
-                    detail: format!(
-                        "parameter {role} must match owner, exact quantity, and nominal domain"
-                    ),
-                });
-            }
-        }
-        for parameter in document.parameters.values() {
-            if matches!(&parameter.owner, ParameterOwnerBinding::ConstitutiveModel)
-                && !model.parameter_roster.contains_key(&parameter.role)
-            {
-                return Err(IdentifiabilityError::UnknownReference {
-                    field: "constitutive-model parameter",
-                    id: parameter.role.to_string(),
-                });
-            }
-        }
-        if matches!(
-            model.initial_state_policy,
-            InitialStatePolicy::ZeroInternalState
-        ) && document
-            .parameters
-            .values()
-            .any(|parameter| matches!(&parameter.owner, ParameterOwnerBinding::InitialState { .. }))
-        {
-            return Err(IdentifiabilityError::InitialStatePolicy {
-                detail:
-                    "zero-internal-state model cannot expose inferential initial-state parameters"
-                        .to_string(),
-            });
-        }
-
-        // A blind release is authority over a split, not an observation-local
-        // annotation. Pre-scan by split key so shared uses cannot acquire
-        // order-dependent or contradictory authority dispositions.
-        let mut blind_releases = BTreeMap::<SourceKey, &BlindReleaseReceipt>::new();
-        for (case_id, case) in &document.cases {
-            let CaseDataDeclaration::Retrospective { split, .. } = &case.data else {
-                continue;
-            };
-            let case_sources = bundle.cases.get(case_id).ok_or_else(|| {
-                IdentifiabilityError::UnknownReference {
-                    field: "retrospective case source bundle",
-                    id: case_id.to_string(),
-                }
-            })?;
-            match (&case.purpose, case_sources.blind_release) {
-                (CasePurpose::BlindFalsification, Some(release)) => {
-                    if let Some(existing) = blind_releases.insert(split.clone(), release)
-                        && existing != release
-                    {
-                        return Err(IdentifiabilityError::SourceMismatch {
-                            field: "shared split blind release",
-                        });
-                    }
-                }
-                (CasePurpose::BlindFalsification, None) => {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "blind release",
-                        detail: format!(
-                            "blind-falsification case {case_id} requires an authority release"
-                        ),
-                    });
-                }
-                (_, Some(_)) => {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "blind release",
-                        detail: format!(
-                            "non-blind case {case_id} must not receive blind-release authority"
-                        ),
-                    });
-                }
-                (_, None) => {}
-            }
-        }
-
-        let mut data = BTreeMap::new();
-        for (case_id, case) in &document.cases {
-            case.initial_state.validate_against(&model)?;
-            if case.protocol.state_schema_version != model.state_schema_version {
-                return Err(IdentifiabilityError::VersionMismatch {
-                    field: "case protocol/model state schema",
-                    expected: model.state_schema_version,
-                    actual: case.protocol.state_schema_version,
-                });
-            }
-            for observation in case.observations.values() {
-                if context.qoi_units.get(&observation.qoi) != Some(&observation.unit) {
-                    return Err(IdentifiabilityError::UnknownReference {
-                        field: "context QoI/unit",
-                        id: observation.qoi.as_str().to_string(),
-                    });
-                }
-            }
-            match &case.data {
-                CaseDataDeclaration::Prospective => {
-                    if bundle.cases.contains_key(case_id) {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "prospective case source bundle",
-                            detail: format!(
-                                "prospective case {case_id} must not receive experiment data"
-                            ),
-                        });
-                    }
-                }
-                CaseDataDeclaration::Retrospective {
-                    experiment,
-                    split,
-                    parser,
-                    preprocessing,
-                    parser_version,
-                    split_grouping,
-                } => {
-                    let case_sources = bundle.cases.get(case_id).ok_or_else(|| {
-                        IdentifiabilityError::UnknownReference {
-                            field: "retrospective case source bundle",
-                            id: case_id.to_string(),
-                        }
-                    })?;
-                    validate_discrepancy_origin(case_id, case, case_sources.experiment)?;
-                    let experiment_hash =
-                        case_sources.experiment.content_hash().map_err(|error| {
-                            IdentifiabilityError::Vv {
-                                detail: error.to_string(),
-                            }
-                        })?;
-                    let split_hash = case_sources.split.content_hash().map_err(|error| {
-                        IdentifiabilityError::Vv {
-                            detail: error.to_string(),
-                        }
-                    })?;
-                    let experiment_resolution = concrete_resolution(
-                        &document.sources[experiment],
-                        SourceKind::ExperimentArtifact,
-                        experiment_hash,
-                        None,
-                        concrete_authority_for(&bundle, experiment),
-                    )?;
-                    concrete_keys.insert(experiment.clone());
-                    insert_exact_resolution(
-                        &mut resolutions,
-                        experiment,
-                        experiment_resolution,
-                        "shared experiment source resolution",
-                    )?;
-
-                    let release_authority = blind_releases
-                        .get(split)
-                        .map(|release| {
-                            Ok(AuthorityDisposition::ExternalTrustReceipt {
-                                trust_receipt: TrustReceiptRef::blind_release(
-                                    &document.sources[split],
-                                    release.split().id().clone(),
-                                    release.authority_receipt_hash(),
-                                )?,
-                            })
-                        })
-                        .transpose()?;
-                    if let (Some(required), Some(declared)) = (
-                        release_authority.as_ref(),
-                        bundle.concrete_authority.get(split),
-                    ) && required != declared
-                    {
-                        return Err(IdentifiabilityError::SourceMismatch {
-                            field: "blind release/concrete source authority",
-                        });
-                    }
-                    let split_authority =
-                        release_authority.unwrap_or_else(|| concrete_authority_for(&bundle, split));
-                    let split_resolution = concrete_resolution(
-                        &document.sources[split],
-                        SourceKind::CalibrationSplit,
-                        split_hash,
-                        Some(case_sources.split.id()),
-                        split_authority,
-                    )?;
-                    concrete_keys.insert(split.clone());
-                    insert_exact_resolution(
-                        &mut resolutions,
-                        split,
-                        split_resolution,
-                        "shared split source resolution",
-                    )?;
-                    let parser_hash = document.sources[parser].expected_hash;
-                    let preprocessing_hash = document.sources[preprocessing].expected_hash;
-                    let lineage = DataLineage::from_vv(
-                        case_sources.experiment,
-                        case_sources.split,
-                        parser_hash,
-                        *parser_version,
-                        preprocessing_hash,
-                        split_grouping.clone(),
-                    )?;
-                    for observation in case.observations.values() {
-                        if !lineage.qois().contains(&observation.qoi) {
-                            return Err(IdentifiabilityError::UnknownReference {
-                                field: "experiment observation QoI",
-                                id: observation.qoi.as_str().to_string(),
-                            });
-                        }
-                        let instrument = case_sources
-                            .experiment
-                            .instrument_calibration(&observation.instrument)
-                            .ok_or_else(|| IdentifiabilityError::UnknownReference {
-                                field: "experiment observation instrument",
-                                id: observation.instrument.as_str().to_string(),
-                            })?;
-                        if document.sources[&observation.sensor].expected_hash
-                            != instrument.certificate_hash()
-                        {
-                            return Err(IdentifiabilityError::SourceMismatch {
-                                field: "observation sensor/instrument calibration",
-                            });
-                        }
-                        if !case_sources.experiment.contains_clock(&observation.clock) {
-                            return Err(IdentifiabilityError::UnknownReference {
-                                field: "experiment observation clock",
-                                id: observation.clock.as_str().to_string(),
-                            });
-                        }
-                    }
-                    let allowed_rows: BTreeSet<ObservationId> = match &case.purpose {
-                        CasePurpose::Calibration
-                        | CasePurpose::SymmetryBreaking
-                        | CasePurpose::Complementary { .. } => lineage.calibration_ids.clone(),
-                        CasePurpose::ValidationOnly => lineage.validation_ids.clone(),
-                        CasePurpose::BlindFalsification => {
-                            lineage.blind_sources.keys().cloned().collect()
-                        }
-                        CasePurpose::ProspectiveDesign => BTreeSet::new(),
-                    };
-                    let declared_rows = case
-                        .observations
-                        .values()
-                        .filter_map(|observation| match &observation.rows {
-                            ObservationRows::Retrospective(rows) => Some(rows.iter().cloned()),
-                            ObservationRows::Prospective => None,
-                        })
-                        .flatten()
-                        .collect::<BTreeSet<_>>();
-                    for observation in case.observations.values() {
-                        let ObservationRows::Retrospective(rows) = &observation.rows else {
-                            return Err(IdentifiabilityError::InvalidText {
-                                field: "retrospective observation rows",
-                                detail: format!(
-                                    "case {case_id} contains a prospective observation after structural admission"
-                                ),
-                            });
-                        };
-                        if !rows.is_subset(&lineage.observation_ids) {
-                            return Err(IdentifiabilityError::UnknownReference {
-                                field: "observation raw row",
-                                id: observation.id.to_string(),
-                            });
-                        }
-                        if !rows.is_subset(&allowed_rows) {
-                            return Err(IdentifiabilityError::InvalidText {
-                                field: "case-purpose data partition",
-                                detail: format!(
-                                    "observation {} consumes rows outside the partition authorized by case {case_id} purpose",
-                                    observation.id
-                                ),
-                            });
-                        }
-                        for row in rows {
-                            let binding =
-                                case_sources.experiment.manifest().row(row).ok_or_else(|| {
-                                    IdentifiabilityError::UnknownReference {
-                                        field: "experiment manifest row binding",
-                                        id: row.as_str().to_string(),
-                                    }
-                                })?;
-                            if binding.qoi() != &observation.qoi
-                                || binding.instrument() != &observation.instrument
-                                || binding.acquisition_channel() != &observation.acquisition_channel
-                                || binding.clock() != &observation.clock
-                            {
-                                return Err(IdentifiabilityError::SourceMismatch {
-                                    field: "observation/manifest row binding",
-                                });
-                            }
-                        }
-                    }
-                    if matches!(&case.purpose, CasePurpose::BlindFalsification) {
-                        let release = blind_releases
-                            .get(split)
-                            .expect("blind release pre-scan established exact presence");
-                        let split_reference = ArtifactRef::new(
-                            ArtifactKind::CalibrationSplit,
-                            case_sources.split.id().clone(),
-                            split_hash,
-                        );
-                        case_sources
-                            .split
-                            .blind_selection(
-                                split_reference,
-                                declared_rows.iter().cloned().collect(),
-                                (**release).clone(),
-                            )
-                            .map_err(|error| IdentifiabilityError::Vv {
-                                detail: error.to_string(),
-                            })?;
-                    }
-                    data.insert(case_id.clone(), lineage);
-                }
-            }
-        }
-        if bundle.cases.len() != data.len() {
-            return Err(IdentifiabilityError::Cardinality {
-                field: "case source bundles",
-                detail: "source bundle contains an unknown or prospective case".to_string(),
-            });
-        }
-
-        let mut source_bytes_owners = BTreeMap::<ContentHash, BTreeSet<CaseId>>::new();
-        let mut manifest_owners = BTreeMap::<ContentHash, BTreeSet<CaseId>>::new();
-        let mut row_locator_owners =
-            BTreeMap::<ObservationLocatorIdentity, BTreeSet<CaseId>>::new();
-        for (case_id, lineage) in &data {
-            source_bytes_owners
-                .entry(lineage.source_bytes())
-                .or_default()
-                .insert(case_id.clone());
-            manifest_owners
-                .entry(lineage.raw_manifest())
-                .or_default()
-                .insert(case_id.clone());
-            for row in lineage.row_bindings().values() {
-                row_locator_owners
-                    .entry(row.source_ref().locator_identity())
-                    .or_default()
-                    .insert(case_id.clone());
-            }
-        }
-        fn admit_shared_owner_sets<K: Ord>(
-            owners: &BTreeMap<K, BTreeSet<CaseId>>,
-            policy: &DataReusePolicy,
-            sharing_participation: &mut BTreeSet<CaseId>,
-        ) -> Result<(), IdentifiabilityError> {
-            for cases in owners.values().filter(|cases| cases.len() > 1) {
-                let mut memberships = cases
-                    .iter()
-                    .map(|case| sharing_group_membership(policy, case));
-                let first = memberships.next().expect("owner set is nonempty");
-                if first.is_none() || memberships.any(|membership| membership != first) {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "data reuse policy",
-                        detail: format!(
-                            "cases {} share admitted provenance without one exact joint sharing group",
-                            cases
-                                .iter()
-                                .map(CaseId::as_str)
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        ),
-                    });
-                }
-                sharing_participation.extend(cases.iter().cloned());
-            }
-            Ok(())
-        }
-        let mut sharing_participation = BTreeSet::<CaseId>::new();
-        admit_shared_owner_sets(
-            &source_bytes_owners,
-            &document.data_reuse,
-            &mut sharing_participation,
-        )?;
-        admit_shared_owner_sets(
-            &manifest_owners,
-            &document.data_reuse,
-            &mut sharing_participation,
-        )?;
-        admit_shared_owner_sets(
-            &row_locator_owners,
-            &document.data_reuse,
-            &mut sharing_participation,
-        )?;
-        if let DataReusePolicy::Shared { groups } = &document.data_reuse {
-            for group in groups {
-                for case_id in &group.cases {
-                    if !sharing_participation.contains(case_id) {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "data sharing group",
-                            detail: format!(
-                                "case {case_id} declares raw-data sharing but overlaps no peer by admitted bytes, manifest, or row source"
-                            ),
-                        });
-                    }
-                }
-            }
-        }
-
-        for (key, reference) in &document.sources {
-            if concrete_keys.contains(key) {
-                if bundle.opaque.entries.contains_key(key) {
-                    return Err(IdentifiabilityError::Duplicate {
-                        field: "concrete/opaque source resolution",
-                        id: key.to_string(),
-                    });
-                }
-                continue;
-            }
-            let resolution = bundle.opaque.entries.get(key).ok_or_else(|| {
-                IdentifiabilityError::UnknownReference {
-                    field: "opaque source resolution",
-                    id: key.to_string(),
-                }
-            })?;
-            admit_opaque_resolution(reference, resolution)?;
-            resolutions.insert(key.clone(), resolution.clone());
-        }
-        if bundle.opaque.entries.len() != document.sources.len() - concrete_keys.len()
-            || resolutions.len() != document.sources.len()
-        {
-            return Err(IdentifiabilityError::Cardinality {
-                field: "source resolution closure",
-                detail: "resolution set has missing or extra source keys".to_string(),
-            });
-        }
-        if let Some(key) = bundle
-            .concrete_authority
-            .keys()
-            .find(|key| !concrete_keys.contains(*key))
-        {
-            return Err(IdentifiabilityError::UnknownReference {
-                field: "concrete source authority",
-                id: key.to_string(),
-            });
-        }
 
         let problem_id = problem_identity_hash(&document)?;
         let source_admission = SourceAdmissionRecord {
@@ -9231,6 +9905,7 @@ pub enum ParameterExecutionAction {
     Derived,
 }
 
+/// Identifiability axis requested from an execution plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RequestedClaimAxis {
     /// Structural-uniqueness axis projection.
@@ -9245,6 +9920,7 @@ pub enum RequestedClaimAxis {
     Practical,
 }
 
+/// Arithmetic family authorized for numerical identifiability work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArithmeticPolicy {
     /// Arithmetic exact over symbolic rationals.
@@ -9359,6 +10035,7 @@ impl ClaimRequest {
     }
 }
 
+/// Exact tolerances and budgets governing a numerical identifiability method.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IdentifiabilityNumericalPolicy {
     /// Positive finite threshold treating singular values as zero.
@@ -9522,17 +10199,14 @@ fn add_reduction_structural_items(
         budget.add(predecessors.len(), "gauge reduction predecessors")?;
     }
     let slice = match &binding.plan {
-        GaugeReductionPlan::Slice { slice }
-        | GaugeReductionPlan::ContinuousReductionWithDiscreteResidual {
-            reduction: ContinuousGaugeReductionPlan::Slice { slice },
-            ..
-        } => Some(slice),
-        GaugeReductionPlan::Unreduced { .. }
-        | GaugeReductionPlan::Quotient { .. }
-        | GaugeReductionPlan::ContinuousReductionWithDiscreteResidual {
-            reduction: ContinuousGaugeReductionPlan::Quotient { .. },
-            ..
-        } => None,
+        GaugeReductionPlan::Slice { slice } => Some(slice),
+        GaugeReductionPlan::ContinuousReductionWithDiscreteResidual { reduction, .. } => {
+            match reduction.as_ref() {
+                ContinuousGaugeReductionPlan::Slice { slice } => Some(slice),
+                ContinuousGaugeReductionPlan::Quotient { .. } => None,
+            }
+        }
+        GaugeReductionPlan::Unreduced { .. } | GaugeReductionPlan::Quotient { .. } => None,
     };
     if let Some(slice) = slice {
         budget.add(slice.support.len(), "gauge slice support")?;
@@ -9614,6 +10288,449 @@ fn validate_coordinate_for_parameter(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct ExecutionSourceInputs<'a> {
+    analyzer: &'a SourceRef,
+    build: &'a SourceRef,
+    derivative_provider: Option<&'a SourceRef>,
+    numerical: &'a IdentifiabilityNumericalPolicy,
+    initialization: &'a SourceRef,
+    stopping: &'a SourceRef,
+    determinism_contract: &'a SourceRef,
+}
+
+fn collect_execution_base_sources(
+    inputs: ExecutionSourceInputs<'_>,
+) -> Result<BTreeMap<SourceKey, SourceRef>, IdentifiabilityError> {
+    let mut execution_sources = BTreeMap::new();
+    for (source, kind, field) in [
+        (inputs.analyzer, SourceKind::Analyzer, "analyzer"),
+        (inputs.build, SourceKind::Build, "build"),
+        (
+            inputs.initialization,
+            SourceKind::Assumption,
+            "initialization",
+        ),
+        (inputs.stopping, SourceKind::Assumption, "stopping policy"),
+        (
+            inputs.determinism_contract,
+            SourceKind::Assumption,
+            "determinism contract",
+        ),
+    ] {
+        if source.kind != kind {
+            return Err(IdentifiabilityError::InvalidText {
+                field,
+                detail: format!("source {} has wrong kind", source.key),
+            });
+        }
+        bind_source_reference(&mut execution_sources, source, "execution source alias")?;
+    }
+    if let Some(provider) = inputs.derivative_provider {
+        if provider.kind != SourceKind::DerivativeProvider {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "derivative provider",
+                detail: "source has wrong kind".to_string(),
+            });
+        }
+        bind_source_reference(&mut execution_sources, provider, "execution source alias")?;
+    }
+    bind_source_reference(
+        &mut execution_sources,
+        inputs.numerical.nondimensionalization(),
+        "execution source alias",
+    )?;
+    Ok(execution_sources)
+}
+
+fn collect_execution_claim_requests(
+    claim_requests: Vec<ClaimRequest>,
+    problem: &IdentifiabilityProblemDocument,
+    execution_sources: &mut BTreeMap<SourceKey, SourceRef>,
+) -> Result<BTreeMap<ClaimId, ClaimRequest>, IdentifiabilityError> {
+    let claim_requests = insert_unique(claim_requests, "claim requests", |request| {
+        request.claim.id()
+    })?;
+    for request in claim_requests.values() {
+        validate_claim_compatibility(&request.claim, problem)?;
+        for source in validate_claim_sources(&request.claim, problem)? {
+            bind_source_reference(execution_sources, source, "execution claim source alias")?;
+        }
+        for source in [
+            request.error_policy.metric(),
+            request.error_policy.nondimensionalization(),
+        ] {
+            bind_source_reference(
+                execution_sources,
+                source,
+                "execution claim policy source alias",
+            )?;
+        }
+    }
+    Ok(claim_requests)
+}
+
+fn collect_execution_actions(
+    actions: Vec<(ParameterRoleId, ParameterExecutionAction)>,
+    problem: &IdentifiabilityProblemDocument,
+    execution_sources: &mut BTreeMap<SourceKey, SourceRef>,
+) -> Result<BTreeMap<ParameterRoleId, ParameterExecutionAction>, IdentifiabilityError> {
+    let mut action_map = BTreeMap::new();
+    for (role, action) in actions {
+        if action_map.insert(role.clone(), action).is_some() {
+            return Err(IdentifiabilityError::Duplicate {
+                field: "execution parameter action",
+                id: role.to_string(),
+            });
+        }
+    }
+    if action_map.len() != problem.parameters.len() {
+        return Err(IdentifiabilityError::Cardinality {
+            field: "execution parameter actions",
+            detail: "every physical parameter needs exactly one explicit action".to_string(),
+        });
+    }
+    let mut coordinate_ids = BTreeSet::new();
+    for (role, parameter) in &problem.parameters {
+        let action =
+            action_map
+                .get(role)
+                .ok_or_else(|| IdentifiabilityError::UnknownReference {
+                    field: "execution parameter action",
+                    id: role.to_string(),
+                })?;
+        if matches!(&parameter.scope, ParameterScopeBinding::Field { .. })
+            && matches!(
+                action,
+                ParameterExecutionAction::Optimize { .. }
+                    | ParameterExecutionAction::Profile { .. }
+                    | ParameterExecutionAction::Marginalize { .. }
+            )
+        {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "field parameter execution carrier",
+                detail: format!(
+                    "field-valued parameter {role} cannot be scalarized through ParameterCoordinate; a model-space/discretization/reconstruction-bound function-space coordinate is required"
+                ),
+            });
+        }
+        validate_execution_action(
+            role,
+            parameter,
+            action,
+            execution_sources,
+            &mut coordinate_ids,
+        )?;
+    }
+    Ok(action_map)
+}
+
+fn validate_execution_action(
+    role: &ParameterRoleId,
+    parameter: &StudyParameter,
+    action: &ParameterExecutionAction,
+    execution_sources: &mut BTreeMap<SourceKey, SourceRef>,
+    coordinate_ids: &mut BTreeSet<CoordinateId>,
+) -> Result<(), IdentifiabilityError> {
+    match (&parameter.treatment, action) {
+        (ParameterTreatment::Estimated, ParameterExecutionAction::Optimize { coordinate })
+        | (ParameterTreatment::Profiled, ParameterExecutionAction::Profile { coordinate }) => {
+            validate_coordinate_for_parameter(parameter, coordinate)?;
+        }
+        (
+            ParameterTreatment::Marginalized,
+            ParameterExecutionAction::Marginalize {
+                coordinate,
+                integrator,
+                measure_transport,
+            },
+        ) => {
+            validate_coordinate_for_parameter(parameter, coordinate)?;
+            if integrator.kind != SourceKind::Analyzer {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "marginalization integrator",
+                    detail: "integrator source must have Analyzer kind".to_string(),
+                });
+            }
+            if measure_transport.kind != SourceKind::MeasureTransport {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "marginalization measure transport",
+                    detail: "marginalized coordinates need exact change-of-variables, Jacobian, truncation, and normalization semantics"
+                        .to_string(),
+                });
+            }
+            bind_source_reference(execution_sources, integrator, "execution source alias")?;
+            bind_source_reference(
+                execution_sources,
+                measure_transport,
+                "execution marginal measure source alias",
+            )?;
+        }
+        (ParameterTreatment::Conditioned(_), ParameterExecutionAction::Conditioned)
+        | (ParameterTreatment::Derived { .. }, ParameterExecutionAction::Derived) => {}
+        _ => {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "execution parameter treatment",
+                detail: format!("action for {role} contradicts physical treatment"),
+            });
+        }
+    }
+    let coordinate = match action {
+        ParameterExecutionAction::Optimize { coordinate }
+        | ParameterExecutionAction::Profile { coordinate }
+        | ParameterExecutionAction::Marginalize { coordinate, .. } => Some(coordinate),
+        ParameterExecutionAction::Conditioned | ParameterExecutionAction::Derived => None,
+    };
+    if let Some(coordinate) = coordinate
+        && !coordinate_ids.insert(coordinate.id().clone())
+    {
+        return Err(IdentifiabilityError::Duplicate {
+            field: "execution scalar coordinate",
+            id: coordinate.id().to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_execution_constraint_carriers(
+    problem: &IdentifiabilityProblemDocument,
+    actions: &BTreeMap<ParameterRoleId, ParameterExecutionAction>,
+) -> Result<(), IdentifiabilityError> {
+    for constraint in problem.constraints.values() {
+        let unsupported = joint_constraint_support(constraint)
+            .into_iter()
+            .find(|role| {
+                matches!(
+                    actions.get(role),
+                    Some(
+                        ParameterExecutionAction::Optimize { .. }
+                            | ParameterExecutionAction::Profile { .. }
+                            | ParameterExecutionAction::Marginalize { .. }
+                    )
+                )
+            });
+        if let Some(role) = unsupported {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "joint-constraint execution carrier",
+                detail: format!(
+                    "constraint {} contains free parameter {role}, but v3 has no identity-bearing joint chart/retraction/projection/constrained-solver or coupled-measure plan; independent scalar actions are rejected",
+                    constraint.id
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_gauge_reduction_claim(
+    binding: &GaugeReductionBinding,
+    claim_id: &ClaimId,
+    request: &ClaimRequest,
+    problem: &IdentifiabilityProblemDocument,
+    reduced_action_claims: &mut BTreeSet<(GaugeActionReference, ClaimId)>,
+) -> Result<(), IdentifiabilityError> {
+    let cases = claim_case_set(&request.claim, problem)?;
+    let view = gauge_action_view(&binding.action, &request.claim, &cases, problem)?;
+    let (action_status, action_geometry) =
+        gauge_action_status_and_geometry(&binding.action, problem)?;
+    if matches!(action_status, GaugeStatus::Candidate { .. })
+        && !matches!(&binding.plan, GaugeReductionPlan::Unreduced { .. })
+    {
+        return Err(IdentifiabilityError::InvalidText {
+            field: "candidate gauge reduction",
+            detail: format!(
+                "reduction {} cannot quotient or slice a Candidate action as though it were established; retain it Unreduced until hypothesis evidence changes the physical declaration",
+                binding.id
+            ),
+        });
+    }
+    if matches!(action_geometry, GaugeOrbitGeometry::Stratified { .. })
+        && reduction_uses_regular_atlas(&binding.plan)
+    {
+        return Err(IdentifiabilityError::InvalidText {
+            field: "stratified gauge quotient",
+            detail: format!(
+                "reduction {} cannot use a regular principal-bundle atlas for stratified orbit geometry",
+                binding.id
+            ),
+        });
+    }
+    if !reduced_action_claims.insert((binding.action.clone(), claim_id.clone())) {
+        return Err(IdentifiabilityError::Duplicate {
+            field: "gauge reduction action/claim cell",
+            id: format!("{}:{}", binding.id, claim_id),
+        });
+    }
+    let measure_required = matches!(
+        &request.claim.information,
+        InformationRegime::PosteriorUnderDeclaredPrior { .. }
+    ) || view.carrier.iter().any(|role| {
+        matches!(
+            &problem.parameters[role].treatment,
+            ParameterTreatment::Marginalized
+        )
+    });
+    let reduced = !matches!(&binding.plan, GaugeReductionPlan::Unreduced { .. });
+    if reduced
+        && measure_required
+        && !matches!(&binding.measure, GaugeMeasureSemantics::Pushforward { .. })
+    {
+        return Err(IdentifiabilityError::InvalidText {
+            field: "gauge reduction measure semantics",
+            detail: format!(
+                "reduction {} touches a posterior or marginalized claim cell and needs exact pushforward/Jacobian-or-disintegration semantics",
+                binding.id
+            ),
+        });
+    }
+    if !reduced && matches!(&binding.measure, GaugeMeasureSemantics::Pushforward { .. }) {
+        return Err(IdentifiabilityError::InvalidText {
+            field: "unreduced gauge measure semantics",
+            detail: format!(
+                "unreduced binding {} cannot claim a quotient pushforward",
+                binding.id
+            ),
+        });
+    }
+    if matches!(
+        &binding.plan,
+        GaugeReductionPlan::ContinuousReductionWithDiscreteResidual { .. }
+    ) && view.orbit_kind != EffectiveGaugeOrbitKind::Mixed
+    {
+        return Err(IdentifiabilityError::InvalidText {
+            field: "continuous reduction with discrete residual",
+            detail: "this reduction is available only for an exact mixed effective orbit"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_gauge_reduction_plan(
+    binding: &GaugeReductionBinding,
+    problem: &IdentifiabilityProblemDocument,
+    execution_sources: &mut BTreeMap<SourceKey, SourceRef>,
+) -> Result<(), IdentifiabilityError> {
+    match &binding.plan {
+        GaugeReductionPlan::Slice { slice } => {
+            validate_gauge_slice(&binding.action, slice, problem)?;
+        }
+        GaugeReductionPlan::ContinuousReductionWithDiscreteResidual { reduction, .. } => {
+            match reduction.as_ref() {
+                ContinuousGaugeReductionPlan::Slice { slice } => {
+                    validate_gauge_slice(&binding.action, slice, problem)?;
+                }
+                ContinuousGaugeReductionPlan::Quotient { .. } => {}
+            }
+        }
+        GaugeReductionPlan::Unreduced { .. } | GaugeReductionPlan::Quotient { .. } => {}
+    }
+    for source in gauge_reduction_sources(&binding.plan)? {
+        bind_source_reference(
+            execution_sources,
+            source,
+            "execution gauge reduction source alias",
+        )?;
+    }
+    for source in gauge_reduction_stage_sources(&binding.stage)? {
+        bind_source_reference(
+            execution_sources,
+            source,
+            "execution gauge stage source alias",
+        )?;
+    }
+    for source in gauge_measure_sources(&binding.measure)? {
+        bind_source_reference(
+            execution_sources,
+            source,
+            "execution gauge measure source alias",
+        )?;
+    }
+    Ok(())
+}
+
+fn collect_execution_gauge_reductions(
+    gauge_reductions: Vec<GaugeReductionBinding>,
+    problem: &IdentifiabilityProblemDocument,
+    claim_requests: &BTreeMap<ClaimId, ClaimRequest>,
+    execution_sources: &mut BTreeMap<SourceKey, SourceRef>,
+) -> Result<BTreeMap<GaugeReductionId, GaugeReductionBinding>, IdentifiabilityError> {
+    let mut gauge_reduction_map = BTreeMap::new();
+    let mut reduced_action_claims = BTreeSet::new();
+    for binding in gauge_reductions {
+        if gauge_reduction_map.contains_key(&binding.id) {
+            return Err(IdentifiabilityError::Duplicate {
+                field: "execution gauge reduction",
+                id: binding.id.to_string(),
+            });
+        }
+        for claim_id in &binding.claims {
+            let request = claim_requests.get(claim_id).ok_or_else(|| {
+                IdentifiabilityError::UnknownReference {
+                    field: "gauge reduction claim",
+                    id: claim_id.to_string(),
+                }
+            })?;
+            validate_gauge_reduction_claim(
+                &binding,
+                claim_id,
+                request,
+                problem,
+                &mut reduced_action_claims,
+            )?;
+        }
+        validate_gauge_reduction_plan(&binding, problem, execution_sources)?;
+        gauge_reduction_map.insert(binding.id.clone(), binding);
+    }
+    validate_gauge_reduction_dag(&gauge_reduction_map)?;
+    Ok(gauge_reduction_map)
+}
+
+fn validate_gauge_reduction_coverage(
+    claim_requests: &BTreeMap<ClaimId, ClaimRequest>,
+    gauge_reductions: &BTreeMap<GaugeReductionId, GaugeReductionBinding>,
+) -> Result<(), IdentifiabilityError> {
+    for (claim_id, request) in claim_requests {
+        if let Some(action) = claim_gauge_action(&request.claim) {
+            let coverage = gauge_reductions
+                .values()
+                .filter(|binding| &binding.action == action && binding.claims.contains(claim_id))
+                .count();
+            if coverage != 1 {
+                return Err(IdentifiabilityError::Cardinality {
+                    field: "gauge reduction coverage",
+                    detail: format!(
+                        "claim {claim_id} action target needs exactly one explicit reduced-or-unreduced plan, found {coverage}"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_execution_source_authority(
+    execution_sources: &BTreeMap<SourceKey, SourceRef>,
+    source_authority: &SourceResolutionSet,
+    problem: &AdmittedIdentifiabilityProblem,
+) -> Result<(), IdentifiabilityError> {
+    validate_source_authority_closure(
+        execution_sources,
+        source_authority,
+        "execution source authority",
+    )?;
+    for (key, resolution) in &source_authority.entries {
+        if let Some(problem_resolution) = problem.source_admission.resolutions.get(key)
+            && problem_resolution != resolution
+        {
+            return Err(IdentifiabilityError::SourceMismatch {
+                field: "execution/problem source authority",
+            });
+        }
+    }
+    Ok(())
+}
+
 impl IdentifiabilityExecutionPlan {
     #[allow(clippy::too_many_arguments)]
     /// Construct and validate an execution plan, enforcing capabilities,
@@ -9659,360 +10776,31 @@ impl IdentifiabilityExecutionPlan {
                 detail: "gauge reduction input exceeds the canonical collection bound".to_string(),
             });
         }
-        let mut execution_sources = BTreeMap::new();
-        for (source, kind, field) in [
-            (&analyzer, SourceKind::Analyzer, "analyzer"),
-            (&build, SourceKind::Build, "build"),
-            (&initialization, SourceKind::Assumption, "initialization"),
-            (&stopping, SourceKind::Assumption, "stopping policy"),
-            (
-                &determinism_contract,
-                SourceKind::Assumption,
-                "determinism contract",
-            ),
-        ] {
-            if source.kind != kind {
-                return Err(IdentifiabilityError::InvalidText {
-                    field,
-                    detail: format!("source {} has wrong kind", source.key),
-                });
-            }
-            bind_source_reference(&mut execution_sources, source, "execution source alias")?;
-        }
-        if let Some(provider) = &derivative_provider {
-            if provider.kind != SourceKind::DerivativeProvider {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "derivative provider",
-                    detail: "source has wrong kind".to_string(),
-                });
-            }
-            bind_source_reference(&mut execution_sources, provider, "execution source alias")?;
-        }
-        bind_source_reference(
-            &mut execution_sources,
-            numerical.nondimensionalization(),
-            "execution source alias",
-        )?;
-        let claim_requests = insert_unique(claim_requests, "claim requests", |request| {
-            request.claim.id()
+        let mut execution_sources = collect_execution_base_sources(ExecutionSourceInputs {
+            analyzer: &analyzer,
+            build: &build,
+            derivative_provider: derivative_provider.as_ref(),
+            numerical: &numerical,
+            initialization: &initialization,
+            stopping: &stopping,
+            determinism_contract: &determinism_contract,
         })?;
-        for request in claim_requests.values() {
-            validate_claim_compatibility(&request.claim, &problem.document)?;
-            for source in validate_claim_sources(&request.claim, &problem.document)? {
-                bind_source_reference(
-                    &mut execution_sources,
-                    source,
-                    "execution claim source alias",
-                )?;
-            }
-            for source in [
-                request.error_policy.metric(),
-                request.error_policy.nondimensionalization(),
-            ] {
-                bind_source_reference(
-                    &mut execution_sources,
-                    source,
-                    "execution claim policy source alias",
-                )?;
-            }
-        }
-        let mut action_map = BTreeMap::new();
-        for (role, action) in actions {
-            if action_map.insert(role.clone(), action).is_some() {
-                return Err(IdentifiabilityError::Duplicate {
-                    field: "execution parameter action",
-                    id: role.to_string(),
-                });
-            }
-        }
-        if action_map.len() != problem.document.parameters.len() {
-            return Err(IdentifiabilityError::Cardinality {
-                field: "execution parameter actions",
-                detail: "every physical parameter needs exactly one explicit action".to_string(),
-            });
-        }
-        let mut coordinate_ids = BTreeSet::new();
-        for (role, parameter) in &problem.document.parameters {
-            let action =
-                action_map
-                    .get(role)
-                    .ok_or_else(|| IdentifiabilityError::UnknownReference {
-                        field: "execution parameter action",
-                        id: role.to_string(),
-                    })?;
-            if matches!(&parameter.scope, ParameterScopeBinding::Field { .. })
-                && matches!(
-                    action,
-                    ParameterExecutionAction::Optimize { .. }
-                        | ParameterExecutionAction::Profile { .. }
-                        | ParameterExecutionAction::Marginalize { .. }
-                )
-            {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "field parameter execution carrier",
-                    detail: format!(
-                        "field-valued parameter {role} cannot be scalarized through ParameterCoordinate; a model-space/discretization/reconstruction-bound function-space coordinate is required"
-                    ),
-                });
-            }
-            match (&parameter.treatment, action) {
-                (
-                    ParameterTreatment::Estimated,
-                    ParameterExecutionAction::Optimize { coordinate },
-                )
-                | (
-                    ParameterTreatment::Profiled,
-                    ParameterExecutionAction::Profile { coordinate },
-                ) => {
-                    validate_coordinate_for_parameter(parameter, coordinate)?;
-                }
-                (
-                    ParameterTreatment::Marginalized,
-                    ParameterExecutionAction::Marginalize {
-                        coordinate,
-                        integrator,
-                        measure_transport,
-                    },
-                ) => {
-                    validate_coordinate_for_parameter(parameter, coordinate)?;
-                    if integrator.kind != SourceKind::Analyzer {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "marginalization integrator",
-                            detail: "integrator source must have Analyzer kind".to_string(),
-                        });
-                    }
-                    if measure_transport.kind != SourceKind::MeasureTransport {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "marginalization measure transport",
-                            detail: "marginalized coordinates need exact change-of-variables, Jacobian, truncation, and normalization semantics"
-                                .to_string(),
-                        });
-                    }
-                    bind_source_reference(
-                        &mut execution_sources,
-                        integrator,
-                        "execution source alias",
-                    )?;
-                    bind_source_reference(
-                        &mut execution_sources,
-                        measure_transport,
-                        "execution marginal measure source alias",
-                    )?;
-                }
-                (ParameterTreatment::Conditioned(_), ParameterExecutionAction::Conditioned)
-                | (ParameterTreatment::Derived { .. }, ParameterExecutionAction::Derived) => {}
-                _ => {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "execution parameter treatment",
-                        detail: format!("action for {role} contradicts physical treatment"),
-                    });
-                }
-            }
-            let coordinate = match action {
-                ParameterExecutionAction::Optimize { coordinate }
-                | ParameterExecutionAction::Profile { coordinate }
-                | ParameterExecutionAction::Marginalize { coordinate, .. } => Some(coordinate),
-                ParameterExecutionAction::Conditioned | ParameterExecutionAction::Derived => None,
-            };
-            if let Some(coordinate) = coordinate
-                && !coordinate_ids.insert(coordinate.id().clone())
-            {
-                return Err(IdentifiabilityError::Duplicate {
-                    field: "execution scalar coordinate",
-                    id: coordinate.id().to_string(),
-                });
-            }
-        }
-        for constraint in problem.document.constraints.values() {
-            let unsupported = joint_constraint_support(constraint)
-                .into_iter()
-                .find(|role| {
-                    matches!(
-                        action_map.get(role),
-                        Some(
-                            ParameterExecutionAction::Optimize { .. }
-                                | ParameterExecutionAction::Profile { .. }
-                                | ParameterExecutionAction::Marginalize { .. }
-                        )
-                    )
-                });
-            if let Some(role) = unsupported {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "joint-constraint execution carrier",
-                    detail: format!(
-                        "constraint {} contains free parameter {role}, but v3 has no identity-bearing joint chart/retraction/projection/constrained-solver or coupled-measure plan; independent scalar actions are rejected",
-                        constraint.id
-                    ),
-                });
-            }
-        }
-        let mut gauge_reduction_map = BTreeMap::new();
-        let mut reduced_action_claims = BTreeSet::new();
-        for binding in gauge_reductions {
-            if gauge_reduction_map.contains_key(&binding.id) {
-                return Err(IdentifiabilityError::Duplicate {
-                    field: "execution gauge reduction",
-                    id: binding.id.to_string(),
-                });
-            }
-            for claim_id in &binding.claims {
-                let request = claim_requests.get(claim_id).ok_or_else(|| {
-                    IdentifiabilityError::UnknownReference {
-                        field: "gauge reduction claim",
-                        id: claim_id.to_string(),
-                    }
-                })?;
-                let cases = claim_case_set(&request.claim, &problem.document)?;
-                let view =
-                    gauge_action_view(&binding.action, &request.claim, &cases, &problem.document)?;
-                let (action_status, action_geometry) =
-                    gauge_action_status_and_geometry(&binding.action, &problem.document)?;
-                if matches!(action_status, GaugeStatus::Candidate { .. })
-                    && !matches!(&binding.plan, GaugeReductionPlan::Unreduced { .. })
-                {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "candidate gauge reduction",
-                        detail: format!(
-                            "reduction {} cannot quotient or slice a Candidate action as though it were established; retain it Unreduced until hypothesis evidence changes the physical declaration",
-                            binding.id
-                        ),
-                    });
-                }
-                if matches!(action_geometry, GaugeOrbitGeometry::Stratified { .. })
-                    && reduction_uses_regular_atlas(&binding.plan)
-                {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "stratified gauge quotient",
-                        detail: format!(
-                            "reduction {} cannot use a regular principal-bundle atlas for stratified orbit geometry",
-                            binding.id
-                        ),
-                    });
-                }
-                if !reduced_action_claims.insert((binding.action.clone(), claim_id.clone())) {
-                    return Err(IdentifiabilityError::Duplicate {
-                        field: "gauge reduction action/claim cell",
-                        id: format!("{}:{}", binding.id, claim_id),
-                    });
-                }
-                let measure_required = matches!(
-                    &request.claim.information,
-                    InformationRegime::PosteriorUnderDeclaredPrior { .. }
-                ) || view.carrier.iter().any(|role| {
-                    matches!(
-                        &problem.document.parameters[role].treatment,
-                        ParameterTreatment::Marginalized
-                    )
-                });
-                let reduced = !matches!(&binding.plan, GaugeReductionPlan::Unreduced { .. });
-                if reduced
-                    && measure_required
-                    && !matches!(&binding.measure, GaugeMeasureSemantics::Pushforward { .. })
-                {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "gauge reduction measure semantics",
-                        detail: format!(
-                            "reduction {} touches a posterior or marginalized claim cell and needs exact pushforward/Jacobian-or-disintegration semantics",
-                            binding.id
-                        ),
-                    });
-                }
-                if !reduced && matches!(&binding.measure, GaugeMeasureSemantics::Pushforward { .. })
-                {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "unreduced gauge measure semantics",
-                        detail: format!(
-                            "unreduced binding {} cannot claim a quotient pushforward",
-                            binding.id
-                        ),
-                    });
-                }
-                if matches!(
-                    &binding.plan,
-                    GaugeReductionPlan::ContinuousReductionWithDiscreteResidual { .. }
-                ) && view.orbit_kind != EffectiveGaugeOrbitKind::Mixed
-                {
-                    return Err(IdentifiabilityError::InvalidText {
-                        field: "continuous reduction with discrete residual",
-                        detail:
-                            "this reduction is available only for an exact mixed effective orbit"
-                                .to_string(),
-                    });
-                }
-            }
-            match &binding.plan {
-                GaugeReductionPlan::Slice { slice } => {
-                    validate_gauge_slice(&binding.action, slice, &problem.document)?;
-                }
-                GaugeReductionPlan::ContinuousReductionWithDiscreteResidual {
-                    reduction: ContinuousGaugeReductionPlan::Slice { slice },
-                    ..
-                } => {
-                    validate_gauge_slice(&binding.action, slice, &problem.document)?;
-                }
-                GaugeReductionPlan::Unreduced { .. }
-                | GaugeReductionPlan::Quotient { .. }
-                | GaugeReductionPlan::ContinuousReductionWithDiscreteResidual {
-                    reduction: ContinuousGaugeReductionPlan::Quotient { .. },
-                    ..
-                } => {}
-            }
-            for source in gauge_reduction_sources(&binding.plan)? {
-                bind_source_reference(
-                    &mut execution_sources,
-                    source,
-                    "execution gauge reduction source alias",
-                )?;
-            }
-            for source in gauge_reduction_stage_sources(&binding.stage)? {
-                bind_source_reference(
-                    &mut execution_sources,
-                    source,
-                    "execution gauge stage source alias",
-                )?;
-            }
-            for source in gauge_measure_sources(&binding.measure)? {
-                bind_source_reference(
-                    &mut execution_sources,
-                    source,
-                    "execution gauge measure source alias",
-                )?;
-            }
-            gauge_reduction_map.insert(binding.id.clone(), binding);
-        }
-        validate_gauge_reduction_dag(&gauge_reduction_map)?;
-        for (claim_id, request) in &claim_requests {
-            if let Some(action) = claim_gauge_action(&request.claim) {
-                let coverage = gauge_reduction_map
-                    .values()
-                    .filter(|binding| {
-                        &binding.action == action && binding.claims.contains(claim_id)
-                    })
-                    .count();
-                if coverage != 1 {
-                    return Err(IdentifiabilityError::Cardinality {
-                        field: "gauge reduction coverage",
-                        detail: format!(
-                            "claim {claim_id} action target needs exactly one explicit reduced-or-unreduced plan, found {coverage}"
-                        ),
-                    });
-                }
-            }
-        }
-        validate_source_authority_closure(
-            &execution_sources,
-            &source_authority,
-            "execution source authority",
+        let claim_requests = collect_execution_claim_requests(
+            claim_requests,
+            &problem.document,
+            &mut execution_sources,
         )?;
-        for (key, resolution) in &source_authority.entries {
-            if let Some(problem_resolution) = problem.source_admission.resolutions.get(key)
-                && problem_resolution != resolution
-            {
-                return Err(IdentifiabilityError::SourceMismatch {
-                    field: "execution/problem source authority",
-                });
-            }
-        }
+        let action_map =
+            collect_execution_actions(actions, &problem.document, &mut execution_sources)?;
+        validate_execution_constraint_carriers(&problem.document, &action_map)?;
+        let gauge_reduction_map = collect_execution_gauge_reductions(
+            gauge_reductions,
+            &problem.document,
+            &claim_requests,
+            &mut execution_sources,
+        )?;
+        validate_gauge_reduction_coverage(&claim_requests, &gauge_reduction_map)?;
+        validate_execution_source_authority(&execution_sources, &source_authority, problem)?;
         let plan = Self {
             schema_version: IDENTIFIABILITY_EXECUTION_IDENTITY_VERSION,
             header,
@@ -10218,6 +11006,7 @@ pub enum GaugeActionReference {
     Composition(GaugeCompositionId),
 }
 
+/// Declared upper bound on finite fiber cardinality.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FiberCardinalityBound {
     /// Uniform whole-number cardinality bound.
@@ -10226,6 +11015,7 @@ pub enum FiberCardinalityBound {
     SymbolicProfile(SourceRef),
 }
 
+/// Declared lower bound on positive-dimensional fibers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FiberDimensionLowerBound {
     /// Positive continuous dimension at least this large.
@@ -10240,6 +11030,7 @@ pub enum FiberDimensionLowerBound {
     },
 }
 
+/// Product-typed description of the inverse image of an observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FiberStructure {
     /// Fiber is a single point.
@@ -10336,6 +11127,7 @@ pub enum ClaimQuantifier {
     },
 }
 
+/// Physical subject to which an identifiability claim applies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimSubject {
     /// Single physical parameter.
@@ -10357,6 +11149,7 @@ pub enum ClaimSubject {
     WholeProblem,
 }
 
+/// Campaign, case, or stratified scope of an identifiability claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimScope {
     /// Scope spans every case in the campaign.
@@ -10491,6 +11284,7 @@ pub enum GaugeResolutionDisposition {
     ConsistentWithClaimedFiber,
 }
 
+/// Evidence that one gauge action was retained or resolved consistently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GaugeResolutionEvidence {
     /// Gauge action this evidence resolves.
@@ -10533,6 +11327,7 @@ impl GaugeResolutionEvidence {
     }
 }
 
+/// Typed epistemic disposition assigned to one requested claim.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClaimAssessment {
     /// Positive result certified by a specific method and metric.
@@ -10648,8 +11443,8 @@ fn validate_assessment_structural_budget(
 fn classify_identifiability_problem_identity_fields(
     document: &IdentifiabilityProblemDocument,
     source_ref: &SourceRef,
-    source_kind: &SourceKind,
-    parameter_purpose: &ParameterPurpose,
+    source_kind: SourceKind,
+    parameter_purpose: ParameterPurpose,
     conditioned_value: &ConditionedValue,
     parameter_treatment: &ParameterTreatment,
     prior_policy: &PriorPolicy,
@@ -10658,7 +11453,7 @@ fn classify_identifiability_problem_identity_fields(
     parameter_scope: &ParameterScopeBinding,
     parameter: &StudyParameter,
     affine_term: &AffineConstraintTerm,
-    constraint_relation: &ConstraintRelation,
+    constraint_relation: ConstraintRelation,
     constraint_kind: &JointConstraintKind,
     constraint: &JointConstraint,
     opaque_membership: &OpaqueDomainMembershipClaim,
@@ -10690,7 +11485,7 @@ fn classify_identifiability_problem_identity_fields(
     gauge_information: &GaugeInformationRegime,
     gauge_scalar_domain: &GaugeScalarDomain,
     gauge_locus: &GaugeLocus,
-    gauge_probability: &GaugeProbabilityThreshold,
+    gauge_probability: GaugeProbabilityThreshold,
     gauge_quantifier: &GaugeQuantifierScope,
     gauge_axes: &GaugeApplicabilityAxes,
     gauge_extent: &GaugeExtentSupport,
@@ -11496,7 +12291,7 @@ fn classify_identifiability_problem_tuple_schema(
 fn classify_identifiability_source_admission_identity_fields(
     admission: &SourceAdmissionRecord,
     resolution: &SourceResolution,
-    source_kind: &SourceKind,
+    source_kind: SourceKind,
     authority: &AuthorityDisposition,
     trust_receipt: &TrustReceiptRef,
     trust_authentication: &TrustAuthentication,
@@ -11632,7 +12427,7 @@ fn classify_identifiability_source_admission_identity_fields(
 fn classify_identifiability_execution_identity_fields(
     plan: &IdentifiabilityExecutionPlan,
     source_ref: &SourceRef,
-    source_kind: &SourceKind,
+    source_kind: SourceKind,
     resolution_set: &SourceResolutionSet,
     resolution: &SourceResolution,
     authority: &AuthorityDisposition,
@@ -11640,12 +12435,12 @@ fn classify_identifiability_execution_identity_fields(
     trust_authentication: &TrustAuthentication,
     verification: &SourceVerification,
     action: &ParameterExecutionAction,
-    arithmetic: &ArithmeticPolicy,
+    arithmetic: ArithmeticPolicy,
     error_policy: &DimensionlessErrorPolicy,
     claim_request: &ClaimRequest,
     numerical_policy: &IdentifiabilityNumericalPolicy,
     information: &InformationRegime,
-    extent: &IdentifiabilityExtent,
+    extent: IdentifiabilityExtent,
     scalar_domain: &ScalarDomain,
     gauge_action_reference: &GaugeActionReference,
     fiber_cardinality_bound: &FiberCardinalityBound,
@@ -12179,7 +12974,7 @@ fn classify_identifiability_claim_tuple_schema(subject: &ClaimSubject, scope: &C
 fn classify_identifiability_assessment_identity_fields(
     assessment: &IdentifiabilityAssessment,
     source_ref: &SourceRef,
-    source_kind: &SourceKind,
+    source_kind: SourceKind,
     resolution_set: &SourceResolutionSet,
     resolution: &SourceResolution,
     authority: &AuthorityDisposition,
@@ -12187,7 +12982,7 @@ fn classify_identifiability_assessment_identity_fields(
     trust_authentication: &TrustAuthentication,
     verification: &SourceVerification,
     information: &InformationRegime,
-    extent: &IdentifiabilityExtent,
+    extent: IdentifiabilityExtent,
     scalar_domain: &ScalarDomain,
     gauge_action_reference: &GaugeActionReference,
     fiber_cardinality_bound: &FiberCardinalityBound,
@@ -12534,7 +13329,7 @@ pub const IDENTIFIABILITY_PROBLEM_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder=problem_identity_hash",
     "encoder_helpers=IdentifiabilityProblemDocument::canonical_bytes,encode_problem",
     "schema_constants=IDENTIFIABILITY_PROBLEM_IDENTITY_VERSION,IDENTIFIABILITY_PROBLEM_IDENTITY_DOMAIN,PROBLEM_MAGIC,CASE_PHYSICS_SOURCE_CONTRACT_VERSION,FRAME_TRANSFORM_SOURCE_DOMAIN,SPECIMEN_GEOMETRY_SOURCE_DOMAIN,SPECIMEN_PROCESS_SOURCE_DOMAIN,SPECIMEN_PREPARATION_SOURCE_DOMAIN,LOAD_PATH_SOURCE_DOMAIN,ENVIRONMENT_PATH_SOURCE_DOMAIN,TIME_GRID_SOURCE_DOMAIN,INITIAL_STATE_SOURCE_DOMAIN,ADMISSIBLE_DOMAIN_MEMBERSHIP_SOURCE_VERSION,ADMISSIBLE_DOMAIN_MEMBERSHIP_SOURCE_DOMAIN,ADMISSIBLE_DOMAIN_WITNESS_BINDING_DOMAIN,FORWARD_MODEL_PRODUCTION_BINDING_VERSION,FORWARD_MODEL_PRODUCTION_BINDING_DOMAIN,MAX_IDENTIFIABILITY_STRUCTURAL_ITEMS,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_ID_BYTES,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_TEXT_BYTES,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_ITEMS,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_CANONICAL_BYTES,crates/fs-evidence/src/vv/model.rs#MAX_VV_MATRIX_DIMENSION,crates/fs-qty/src/semantic.rs#QUANTITY_SPEC_ENCODING_VERSION,crates/fs-qty/src/semantic.rs#QUANTITY_SPEC_ENCODED_LEN",
-    "schema_functions=IdentifiabilityProblemDocument::try_new,classify_identifiability_problem_identity_fields,validate_problem_structural_budget,insert_unique,require_source,require_source_kind,require_source_kind_in,validate_source_key,validate_derived_parameter_dag,validate_joint_constraint,normalize_joint_noise,initial_state_schema_version,observation_for,parameter_applicable_cases,parameter_active_in_cases,retrospective_experiment,forward_model_production_binding_preimage,validate_gauge_applicability_sources,validate_gauge_algebra_orbit_sources,validate_independent_product_invariants,gauge_algebra_orbit_compatible,regular_orbit_support_compatible,principal_gauge_orbit,gauge_algebra_source_keys,gauge_orbit_source_keys,infinite_dimensional_profile_is_explicit,continuous_orbit_dimension_compatible,GaugeDeclaration::try_new,GaugeCompositionDeclaration::try_new,GaugeValidityScope::try_new,GaugeCellDomain::try_new,GaugeExtentSupport::try_new,GaugeProbabilityThreshold::try_new,decode_problem,check_problem_identity_version,classify_identifiability_problem_tuple_schema,problem_source_reachability,require_case_physics_source,parameter_membership_source_keys,admissible_domain_witness_binding,admissible_domain_membership_certificate_preimage,validate_admissible_domain_witness,declared_parameter_cases,validate_declared_parameter_cases,functional_observations,transitive_influence_ids,sharing_group_membership,encode_source_key,decode_source_key,encode_case_id,decode_case_id,encode_role,decode_role,encode_channel,decode_channel,encode_source_kind,decode_source_kind,encode_source_ref,decode_source_ref,encode_observation_key,decode_observation_key,encode_parameter_treatment,decode_parameter_treatment,encode_prior_policy,decode_prior_policy,encode_owner,decode_owner,encode_scope,decode_scope,encode_study_parameter,decode_study_parameter,encode_constraint,decode_constraint,encode_admissible_domain_witness,decode_admissible_domain_witness,encode_marginal_noise,decode_marginal_noise,encode_missingness,decode_missingness,encode_study_observation,decode_study_observation,encode_discrepancy,decode_discrepancy,encode_case_physics_sources,decode_case_physics_sources,encode_observation_sharing_group,decode_observation_sharing_group,encode_case,decode_case,encode_functional,decode_functional,encode_influence,decode_influence,encode_gauge_information_regime,decode_gauge_information_regime,encode_gauge_continuous_dimension,decode_gauge_continuous_dimension,encode_gauge_discrete_size,decode_gauge_discrete_size,encode_gauge_algebra,decode_gauge_algebra,encode_gauge_discrete_orbit,decode_gauge_discrete_orbit,encode_regular_gauge_orbit,decode_regular_gauge_orbit,encode_gauge_orbit_geometry,decode_gauge_orbit_geometry,encode_gauge_status,decode_gauge_status,encode_gauge_axes,decode_gauge_axes,encode_gauge_validity_scope,decode_gauge_validity_scope,encode_gauge,decode_gauge,encode_gauge_composition,decode_gauge_composition,encode_joint_noise,decode_joint_noise,encode_data_reuse,decode_data_reuse,crates/fs-material/src/identifiability.rs#same_f64,crates/fs-material/src/identifiability.rs#matrix_get,crates/fs-material/src/identifiability.rs#checked_add_dims,crates/fs-material/src/identifiability.rs#ParameterDomain::try_new,crates/fs-material/src/identifiability.rs#ParameterDomain::is_degenerate,crates/fs-material/src/identifiability.rs#ParameterPrior::validate_against,crates/fs-material/src/identifiability.rs#encode_parameter_domain,crates/fs-material/src/identifiability.rs#decode_parameter_domain,crates/fs-material/src/identifiability.rs#encode_prior,crates/fs-material/src/identifiability.rs#decode_prior,crates/fs-material/src/identifiability.rs#encode_initial_state,crates/fs-material/src/identifiability.rs#decode_initial_state,crates/fs-material/src/identifiability.rs#encode_frame,crates/fs-material/src/identifiability.rs#decode_frame,crates/fs-material/src/identifiability.rs#encode_specimen,crates/fs-material/src/identifiability.rs#decode_specimen,crates/fs-material/src/identifiability.rs#encode_protocol,crates/fs-material/src/identifiability.rs#decode_protocol,crates/fs-material/src/identifiability.rs#encode_artifact_id,crates/fs-material/src/identifiability.rs#decode_artifact_id,crates/fs-material/src/identifiability.rs#encode_qoi_id,crates/fs-material/src/identifiability.rs#decode_qoi_id,crates/fs-material/src/identifiability.rs#encode_observation_row_id,crates/fs-material/src/identifiability.rs#decode_observation_row_id,crates/fs-material/src/identifiability.rs#FrameBinding::try_new,crates/fs-material/src/identifiability.rs#SpecimenBinding::try_new,crates/fs-material/src/identifiability.rs#ProtocolBinding::try_new,crates/fs-material/src/identifiability.rs#canonical_f64,crates/fs-material/src/identifiability.rs#validate_token,crates/fs-material/src/identifiability.rs#validate_reason,crates/fs-material/src/identifiability.rs#CanonicalWriter::new,crates/fs-material/src/identifiability.rs#CanonicalWriter::raw,crates/fs-material/src/identifiability.rs#CanonicalWriter::byte,crates/fs-material/src/identifiability.rs#CanonicalWriter::u32,crates/fs-material/src/identifiability.rs#CanonicalWriter::u64,crates/fs-material/src/identifiability.rs#CanonicalWriter::f64,crates/fs-material/src/identifiability.rs#CanonicalWriter::count,crates/fs-material/src/identifiability.rs#CanonicalWriter::text,crates/fs-material/src/identifiability.rs#CanonicalWriter::hash,crates/fs-material/src/identifiability.rs#CanonicalWriter::quantity,crates/fs-material/src/identifiability.rs#CanonicalWriter::finish,crates/fs-material/src/identifiability.rs#CanonicalReader::new,crates/fs-material/src/identifiability.rs#CanonicalReader::take,crates/fs-material/src/identifiability.rs#CanonicalReader::byte,crates/fs-material/src/identifiability.rs#CanonicalReader::u32,crates/fs-material/src/identifiability.rs#CanonicalReader::u64,crates/fs-material/src/identifiability.rs#CanonicalReader::f64,crates/fs-material/src/identifiability.rs#CanonicalReader::length,crates/fs-material/src/identifiability.rs#CanonicalReader::count,crates/fs-material/src/identifiability.rs#CanonicalReader::text,crates/fs-material/src/identifiability.rs#CanonicalReader::token,crates/fs-material/src/identifiability.rs#CanonicalReader::reason,crates/fs-material/src/identifiability.rs#CanonicalReader::hash,crates/fs-material/src/identifiability.rs#CanonicalReader::quantity,crates/fs-material/src/identifiability.rs#CanonicalReader::expect_byte,crates/fs-material/src/identifiability.rs#CanonicalReader::finish,crates/fs-evidence/src/vv/model.rs#CovarianceMatrix::try_new,crates/fs-evidence/src/vv/model.rs#CovarianceMatrix::get,crates/fs-evidence/src/vv/model.rs#CovarianceMatrix::is_positive_semidefinite,crates/fs-evidence/src/vv/model.rs#CovarianceMatrix::dimension,crates/fs-evidence/src/vv/model.rs#CovarianceMatrix::lower_triangle,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-qty/src/semantic.rs#QuantitySpec::canonical_bytes,crates/fs-qty/src/semantic.rs#QuantitySpec::from_canonical_bytes",
+    "schema_functions=IdentifiabilityProblemDocument::try_new,normalize_problem_document,normalize_problem_sources,normalize_problem_parameters,normalize_problem_constraints,normalize_problem_collections,validate_problem_parameter,validate_case_row_sharing,validate_case_physics_bindings,validate_case_data_declaration,validate_problem_observation,validate_observation_uncertainty,validate_synthetic_discrepancy,validate_modeled_discrepancy,validate_problem_discrepancy,collect_problem_case_observations,validate_problem_parameter_case_bindings,validate_influence_functional,validate_influence_representation,validate_problem_influences,validate_influence_dag,validate_gauge_cells,validate_problem_gauges,validate_composition_members,validate_composition_cells,validate_problem_gauge_compositions,validate_assumed_gauge_composition_coverage,validate_problem_joint_noise,validate_sharing_likelihoods,validate_shared_data_reuse,validate_ungrouped_data_reuse,validate_problem_data_reuse,validate_problem_source_closure,classify_identifiability_problem_identity_fields,validate_problem_structural_budget,add_case_structural_items,add_parameter_structural_items,StudyParameter::try_new,validate_parameter_influence_coverage,StudyCaseDocument::try_new,collect_case_observations,collect_case_discrepancies,normalize_observation_sharing,insert_unique,require_source,require_source_kind,require_source_kind_in,validate_derived_parameter_dag,validate_joint_constraint,require_constraint_members,validate_affine_constraint,validate_simplex_constraint,validate_ordered_constraint,validate_external_manifold_constraint,normalize_joint_noise,initial_state_schema_version,observation_for,parameter_applicable_cases,parameter_active_in_cases,retrospective_experiment,forward_model_production_binding_preimage,validate_gauge_applicability_sources,validate_gauge_algebra_orbit_sources,validate_independent_product_invariants,collect_independent_product_totals,accumulate_independent_group_totals,accumulate_independent_orbit_totals,independent_product_totals_match,gauge_algebra_orbit_compatible,regular_orbit_support_compatible,principal_gauge_orbit,gauge_algebra_source_keys,gauge_orbit_source_keys,infinite_dimensional_profile_is_explicit,continuous_orbit_dimension_compatible,GaugeDeclaration::try_new,GaugeCompositionDeclaration::try_new,GaugeValidityScope::try_new,GaugeCellDomain::try_new,GaugeExtentSupport::try_new,GaugeProbabilityThreshold::try_new,decode_problem,check_problem_identity_version,classify_identifiability_problem_tuple_schema,problem_source_reachability,add_parameter_source_keys,add_case_source_keys,add_gauge_source_keys,require_case_physics_source,parameter_membership_source_keys,admissible_domain_witness_binding,admissible_domain_membership_certificate_preimage,validate_admissible_domain_witness,validate_witness_parameter_values,validate_opaque_membership_claim,validate_witness_constraints,declared_parameter_cases,validate_declared_parameter_cases,functional_observations,transitive_influence_ids,sharing_group_membership,encode_source_key,decode_source_key,encode_case_id,decode_case_id,encode_role,decode_role,encode_channel,decode_channel,encode_source_kind,decode_source_kind,encode_source_ref,decode_source_ref,encode_observation_key,decode_observation_key,encode_parameter_treatment,decode_parameter_treatment,encode_prior_policy,decode_prior_policy,encode_owner,decode_owner,encode_scope,decode_scope,encode_study_parameter,decode_study_parameter,encode_constraint,decode_constraint,encode_admissible_domain_witness,decode_admissible_domain_witness,encode_marginal_noise,decode_marginal_noise,encode_missingness,decode_missingness,encode_study_observation,decode_study_observation,encode_discrepancy,decode_discrepancy,encode_case_physics_sources,decode_case_physics_sources,encode_observation_sharing_group,decode_observation_sharing_group,encode_case,decode_case,encode_functional,decode_functional,encode_influence,decode_influence,encode_gauge_information_regime,decode_gauge_information_regime,encode_gauge_continuous_dimension,decode_gauge_continuous_dimension,encode_gauge_discrete_size,decode_gauge_discrete_size,encode_gauge_algebra,decode_gauge_algebra,encode_gauge_discrete_orbit,decode_gauge_discrete_orbit,encode_regular_gauge_orbit,decode_regular_gauge_orbit,encode_gauge_status,decode_gauge_status,encode_gauge_axes,decode_gauge_axes,encode_gauge_validity_scope,decode_gauge_validity_scope,encode_gauge,decode_gauge,encode_gauge_composition,decode_gauge_composition,encode_joint_noise,decode_joint_noise,encode_data_reuse,decode_data_reuse,crates/fs-material/src/identifiability.rs#same_f64,crates/fs-material/src/identifiability.rs#matrix_get,crates/fs-material/src/identifiability.rs#checked_add_dims,crates/fs-material/src/identifiability.rs#ParameterDomain::try_new,crates/fs-material/src/identifiability.rs#ParameterDomain::is_degenerate,crates/fs-material/src/identifiability.rs#ParameterPrior::validate_against,crates/fs-material/src/identifiability.rs#encode_parameter_domain,crates/fs-material/src/identifiability.rs#decode_parameter_domain,crates/fs-material/src/identifiability.rs#encode_prior,crates/fs-material/src/identifiability.rs#decode_prior,crates/fs-material/src/identifiability.rs#encode_initial_state,crates/fs-material/src/identifiability.rs#decode_initial_state,crates/fs-material/src/identifiability.rs#encode_frame,crates/fs-material/src/identifiability.rs#decode_frame,crates/fs-material/src/identifiability.rs#encode_specimen,crates/fs-material/src/identifiability.rs#decode_specimen,crates/fs-material/src/identifiability.rs#encode_protocol,crates/fs-material/src/identifiability.rs#decode_protocol,crates/fs-material/src/identifiability.rs#encode_artifact_id,crates/fs-material/src/identifiability.rs#decode_artifact_id,crates/fs-material/src/identifiability.rs#encode_qoi_id,crates/fs-material/src/identifiability.rs#decode_qoi_id,crates/fs-material/src/identifiability.rs#encode_observation_row_id,crates/fs-material/src/identifiability.rs#decode_observation_row_id,crates/fs-material/src/identifiability.rs#FrameBinding::try_new,crates/fs-material/src/identifiability.rs#SpecimenBinding::try_new,crates/fs-material/src/identifiability.rs#ProtocolBinding::try_new,crates/fs-material/src/identifiability.rs#canonical_f64,crates/fs-material/src/identifiability.rs#validate_token,crates/fs-material/src/identifiability.rs#validate_reason,crates/fs-material/src/identifiability.rs#CanonicalWriter::new,crates/fs-material/src/identifiability.rs#CanonicalWriter::raw,crates/fs-material/src/identifiability.rs#CanonicalWriter::byte,crates/fs-material/src/identifiability.rs#CanonicalWriter::u32,crates/fs-material/src/identifiability.rs#CanonicalWriter::u64,crates/fs-material/src/identifiability.rs#CanonicalWriter::f64,crates/fs-material/src/identifiability.rs#CanonicalWriter::count,crates/fs-material/src/identifiability.rs#CanonicalWriter::text,crates/fs-material/src/identifiability.rs#CanonicalWriter::hash,crates/fs-material/src/identifiability.rs#CanonicalWriter::quantity,crates/fs-material/src/identifiability.rs#CanonicalWriter::finish,crates/fs-material/src/identifiability.rs#CanonicalReader::new,crates/fs-material/src/identifiability.rs#CanonicalReader::take,crates/fs-material/src/identifiability.rs#CanonicalReader::byte,crates/fs-material/src/identifiability.rs#CanonicalReader::u32,crates/fs-material/src/identifiability.rs#CanonicalReader::u64,crates/fs-material/src/identifiability.rs#CanonicalReader::f64,crates/fs-material/src/identifiability.rs#CanonicalReader::length,crates/fs-material/src/identifiability.rs#CanonicalReader::count,crates/fs-material/src/identifiability.rs#CanonicalReader::text,crates/fs-material/src/identifiability.rs#CanonicalReader::token,crates/fs-material/src/identifiability.rs#CanonicalReader::reason,crates/fs-material/src/identifiability.rs#CanonicalReader::hash,crates/fs-material/src/identifiability.rs#CanonicalReader::quantity,crates/fs-material/src/identifiability.rs#CanonicalReader::expect_byte,crates/fs-material/src/identifiability.rs#CanonicalReader::finish,crates/fs-evidence/src/vv/model.rs#CovarianceMatrix::try_new,crates/fs-evidence/src/vv/model.rs#CovarianceMatrix::get,crates/fs-evidence/src/vv/model.rs#CovarianceMatrix::is_positive_semidefinite,crates/fs-evidence/src/vv/model.rs#CovarianceMatrix::dimension,crates/fs-evidence/src/vv/model.rs#CovarianceMatrix::lower_triangle,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-qty/src/semantic.rs#QuantitySpec::canonical_bytes,crates/fs-qty/src/semantic.rs#QuantitySpec::from_canonical_bytes",
     "schema_dependencies=none",
     "digest=blake3-256-domain-separated",
     "encoding=canonical-transport-exact-bits",
@@ -12565,7 +13360,7 @@ pub const IDENTIFIABILITY_SOURCE_ADMISSION_IDENTITY_SCHEMA_DECLARATION: &[&str] 
     "encoder=source_admission_identity_hash",
     "encoder_helpers=AdmittedIdentifiabilityProblem::source_admission_canonical_bytes,encode_source_admission,encode_resolution_entry",
     "schema_constants=IDENTIFIABILITY_SOURCE_ADMISSION_IDENTITY_VERSION,IDENTIFIABILITY_SOURCE_ADMISSION_IDENTITY_DOMAIN,SOURCE_ADMISSION_MAGIC,BLIND_RELEASE_TRUST_RECEIPT_VERSION,BLIND_RELEASE_TRUST_RECEIPT_DOMAIN,VV_ARTIFACT_SOURCE_DOMAIN,MATERIAL_CARD_SOURCE_DOMAIN,CONSTITUTIVE_MODEL_CARD_SOURCE_DOMAIN,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_ID_BYTES,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_TEXT_BYTES,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_ITEMS,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_CANONICAL_BYTES,crates/fs-evidence/src/vv/model.rs#VV_SCHEMA_VERSION,crates/fs-evidence/src/vv/model.rs#VV_RULESET_VERSION,crates/fs-evidence/src/vv/model.rs#VV_ARTIFACT_FAMILY,crates/fs-evidence/src/vv/model.rs#MAX_VV_ID_BYTES,crates/fs-evidence/src/vv/model.rs#MAX_VV_TEXT_BYTES,crates/fs-evidence/src/vv/model.rs#MAX_VV_ITEMS,crates/fs-evidence/src/vv/model.rs#MAX_VV_MATRIX_DIMENSION,crates/fs-evidence/src/vv/codec.rs#MAGIC,crates/fs-evidence/src/vv/codec.rs#CANONICAL_RULE,crates/fs-evidence/src/vv/codec.rs#ROOT_ARTIFACT,crates/fs-evidence/src/vv/codec.rs#MAX_VV_CANONICAL_BYTES,crates/fs-evidence/src/vv/codec.rs#MAX_VV_STRING_BYTES,crates/fs-evidence/src/vv/codec.rs#MAX_VV_COLLECTION_ITEMS,crates/fs-evidence/src/vv/codec.rs#MAX_VV_TOTAL_COLLECTION_ITEMS,crates/fs-matdb/src/cards.rs#MATDB_SCHEMA_VERSION,crates/fs-matdb/src/cards.rs#MODEL_HASH_DOMAIN,crates/fs-matdb/src/cards.rs#MATERIAL_HASH_DOMAIN,crates/fs-matdb/src/cards.rs#CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION,crates/fs-matdb/src/cards.rs#CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN",
-    "schema_functions=AdmittedIdentifiabilityProblem::resolve_and_admit,SourceResolution::verify,SourceResolution::unresolved,SourceResolutionSet::try_new,ProblemSourceBundle::with_concrete_authority,TrustReceiptRef::try_new,TrustReceiptRef::try_new_with_subject_artifact,TrustReceiptRef::blind_release,concrete_resolution,validate_authority_disposition,validate_authority_subject,validate_authority_subject_with_artifact,validate_authority_subject_fields,concrete_authority_for,insert_exact_resolution,admit_opaque_resolution,bind_source_reference,validate_source_authority_closure,sharing_group_membership,check_source_admission_identity_version,encode_source_key,encode_source_kind,encode_trust_receipt_ref,decode_trust_receipt_ref,encode_resolution_verification,crates/fs-material/src/identifiability.rs#hash_is_nonzero,crates/fs-material/src/identifiability.rs#canonical_f64,crates/fs-material/src/identifiability.rs#validate_token,crates/fs-material/src/identifiability.rs#validate_reason,crates/fs-material/src/identifiability.rs#ContextBinding::from_vv,crates/fs-material/src/identifiability.rs#ContextBinding::validate_structural,crates/fs-material/src/identifiability.rs#MaterialModelBinding::from_cards,crates/fs-material/src/identifiability.rs#MaterialModelBinding::validate_structural,crates/fs-material/src/identifiability.rs#ModelParameterBinding::nominal,crates/fs-material/src/identifiability.rs#InitialStateBinding::validate_against,crates/fs-material/src/identifiability.rs#DataLineage::from_vv,crates/fs-material/src/identifiability.rs#DataLineage::validate_structural,crates/fs-material/src/identifiability.rs#DataLineage::qois,crates/fs-material/src/identifiability.rs#DataLineage::row_bindings,crates/fs-material/src/identifiability.rs#DataLineage::source_bytes,crates/fs-material/src/identifiability.rs#DataLineage::raw_manifest,crates/fs-material/src/identifiability.rs#CanonicalWriter::new,crates/fs-material/src/identifiability.rs#CanonicalWriter::raw,crates/fs-material/src/identifiability.rs#CanonicalWriter::byte,crates/fs-material/src/identifiability.rs#CanonicalWriter::u32,crates/fs-material/src/identifiability.rs#CanonicalWriter::u64,crates/fs-material/src/identifiability.rs#CanonicalWriter::count,crates/fs-material/src/identifiability.rs#CanonicalWriter::text,crates/fs-material/src/identifiability.rs#CanonicalWriter::hash,crates/fs-material/src/identifiability.rs#CanonicalWriter::finish,crates/fs-matdb/src/cards.rs#ConstitutiveModelCard::validate,crates/fs-matdb/src/cards.rs#ConstitutiveModelCard::content_hash,crates/fs-matdb/src/cards.rs#ConstitutiveModelCard::canonical_parameters_hash,crates/fs-matdb/src/cards.rs#ConstitutiveModelCard::canonical_parameters_hash_with_schema,crates/fs-matdb/src/cards.rs#MaterialCard::content_hash,crates/fs-matdb/src/cards.rs#MaterialCard::models,crates/fs-matdb/src/cards.rs#MaterialCard::schema_version,crates/fs-matdb/src/lib.rs#dims_bytes,crates/fs-matdb/src/lib.rs#Provenance::validate,crates/fs-evidence/src/vv/model.rs#ContextOfUse::try_new,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::try_new,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::validate,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::try_new,crates/fs-evidence/src/vv/model.rs#ObservationManifest::try_new,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::dataset_source_bytes_hash,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::locator_domain,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::locator_contract_version,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::locator_hash,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::extraction_receipt_hash,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::locator_identity,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::source_ref,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::locator_hash,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::qoi,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::instrument,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::acquisition_channel,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::clock,crates/fs-evidence/src/vv/model.rs#ObservationManifest::row,crates/fs-evidence/src/vv/model.rs#ObservationManifest::rows,crates/fs-evidence/src/vv/model.rs#ObservationManifest::locator_hash_of,crates/fs-evidence/src/vv/model.rs#ObservationManifest::source_ref_of,crates/fs-evidence/src/vv/model.rs#ObservationManifest::canonical_hash,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::try_new,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::id,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::qois,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::observation_ids,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::manifest,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::instrument_calibration,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::contains_clock,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::instruments,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::clocks,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::authenticity,crates/fs-evidence/src/vv/model.rs#DataAuthenticity::source_bytes_hash,crates/fs-evidence/src/vv/model.rs#DataAuthenticity::custody_receipt_hash,crates/fs-evidence/src/vv/model.rs#InstrumentCalibration::instrument_id,crates/fs-evidence/src/vv/model.rs#InstrumentCalibration::certificate_hash,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::try_new,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::id,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::experiment,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::preregistration_hash,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::calibration_ids,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::validation_ids,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::blind_sources,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::blind_commitment,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::blind_selection,crates/fs-evidence/src/vv/model.rs#BlindReleaseReceipt::authority_receipt_hash,crates/fs-evidence/src/vv/model.rs#ArtifactRef::new,crates/fs-evidence/src/vv/model.rs#ClockSynchronization::contains_clock,crates/fs-evidence/src/vv/codec.rs#canonical_artifact_bytes,crates/fs-evidence/src/vv/codec.rs#content_hash_for,crates/fs-evidence/src/vv/codec.rs#encode_context,crates/fs-evidence/src/vv/codec.rs#decode_context,crates/fs-evidence/src/vv/codec.rs#encode_observation_source_ref,crates/fs-evidence/src/vv/codec.rs#decode_observation_source_ref,crates/fs-evidence/src/vv/codec.rs#encode_observation_manifest,crates/fs-evidence/src/vv/codec.rs#decode_observation_manifest,crates/fs-evidence/src/vv/codec.rs#encode_experiment,crates/fs-evidence/src/vv/codec.rs#decode_experiment,crates/fs-evidence/src/vv/codec.rs#encode_calibration_split,crates/fs-evidence/src/vv/codec.rs#decode_calibration_split,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_functions=AdmittedIdentifiabilityProblem::resolve_and_admit,validate_model_parameter_binding,collect_blind_releases,resolve_retrospective_lineage,validate_retrospective_observation_bindings,validate_retrospective_rows,admit_case_data,validate_admitted_data_reuse,close_problem_source_resolutions,admit_primary_sources,SourceResolution::verify,SourceResolution::unresolved,SourceResolutionSet::try_new,ProblemSourceBundle::with_concrete_authority,TrustReceiptRef::try_new,TrustReceiptRef::try_new_with_subject_artifact,TrustReceiptRef::blind_release,concrete_resolution,validate_authority_disposition,validate_authority_subject,validate_authority_subject_with_artifact,validate_authority_subject_fields,concrete_authority_for,insert_exact_resolution,admit_opaque_resolution,bind_source_reference,validate_source_authority_closure,sharing_group_membership,admit_shared_owner_sets,check_source_admission_identity_version,encode_source_key,encode_source_kind,encode_trust_receipt_ref,decode_trust_receipt_ref,encode_resolution_verification,crates/fs-material/src/identifiability.rs#hash_is_nonzero,crates/fs-material/src/identifiability.rs#canonical_f64,crates/fs-material/src/identifiability.rs#validate_token,crates/fs-material/src/identifiability.rs#validate_reason,crates/fs-material/src/identifiability.rs#ContextBinding::from_vv,crates/fs-material/src/identifiability.rs#MaterialModelBinding::from_cards,crates/fs-material/src/identifiability.rs#ModelParameterBinding::nominal,crates/fs-material/src/identifiability.rs#InitialStateBinding::validate_against,crates/fs-material/src/identifiability.rs#DataLineage::from_vv,crates/fs-material/src/identifiability.rs#DataLineage::validate_structural,crates/fs-material/src/identifiability.rs#DataLineage::qois,crates/fs-material/src/identifiability.rs#DataLineage::row_bindings,crates/fs-material/src/identifiability.rs#DataLineage::source_bytes,crates/fs-material/src/identifiability.rs#DataLineage::raw_manifest,crates/fs-material/src/identifiability.rs#CanonicalWriter::new,crates/fs-material/src/identifiability.rs#CanonicalWriter::raw,crates/fs-material/src/identifiability.rs#CanonicalWriter::byte,crates/fs-material/src/identifiability.rs#CanonicalWriter::u32,crates/fs-material/src/identifiability.rs#CanonicalWriter::u64,crates/fs-material/src/identifiability.rs#CanonicalWriter::count,crates/fs-material/src/identifiability.rs#CanonicalWriter::text,crates/fs-material/src/identifiability.rs#CanonicalWriter::hash,crates/fs-material/src/identifiability.rs#CanonicalWriter::finish,crates/fs-matdb/src/cards.rs#ConstitutiveModelCard::validate,crates/fs-matdb/src/cards.rs#ConstitutiveModelCard::content_hash,crates/fs-matdb/src/cards.rs#ConstitutiveModelCard::canonical_parameters_hash,crates/fs-matdb/src/cards.rs#ConstitutiveModelCard::canonical_parameters_hash_with_schema,crates/fs-matdb/src/cards.rs#MaterialCard::content_hash,crates/fs-matdb/src/cards.rs#MaterialCard::models,crates/fs-matdb/src/cards.rs#MaterialCard::schema_version,crates/fs-matdb/src/lib.rs#dims_bytes,crates/fs-matdb/src/lib.rs#Provenance::validate,crates/fs-evidence/src/vv/model.rs#ContextOfUse::try_new,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::try_new,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::validate,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::try_new,crates/fs-evidence/src/vv/model.rs#ObservationManifest::try_new,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::dataset_source_bytes_hash,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::locator_domain,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::locator_contract_version,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::locator_hash,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::extraction_receipt_hash,crates/fs-evidence/src/vv/model.rs#ObservationSourceRef::locator_identity,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::source_ref,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::locator_hash,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::qoi,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::instrument,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::acquisition_channel,crates/fs-evidence/src/vv/model.rs#ObservationManifestRow::clock,crates/fs-evidence/src/vv/model.rs#ObservationManifest::row,crates/fs-evidence/src/vv/model.rs#ObservationManifest::rows,crates/fs-evidence/src/vv/model.rs#ObservationManifest::locator_hash_of,crates/fs-evidence/src/vv/model.rs#ObservationManifest::source_ref_of,crates/fs-evidence/src/vv/model.rs#ObservationManifest::canonical_hash,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::try_new,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::id,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::qois,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::observation_ids,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::manifest,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::instrument_calibration,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::contains_clock,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::instruments,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::clocks,crates/fs-evidence/src/vv/model.rs#ExperimentArtifact::authenticity,crates/fs-evidence/src/vv/model.rs#DataAuthenticity::source_bytes_hash,crates/fs-evidence/src/vv/model.rs#DataAuthenticity::custody_receipt_hash,crates/fs-evidence/src/vv/model.rs#InstrumentCalibration::instrument_id,crates/fs-evidence/src/vv/model.rs#InstrumentCalibration::certificate_hash,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::try_new,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::id,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::experiment,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::preregistration_hash,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::calibration_ids,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::validation_ids,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::blind_sources,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::blind_commitment,crates/fs-evidence/src/vv/model.rs#CalibrationSplit::blind_selection,crates/fs-evidence/src/vv/model.rs#BlindReleaseReceipt::authority_receipt_hash,crates/fs-evidence/src/vv/model.rs#ArtifactRef::new,crates/fs-evidence/src/vv/model.rs#ClockSynchronization::contains_clock,crates/fs-evidence/src/vv/codec.rs#canonical_artifact_bytes,crates/fs-evidence/src/vv/codec.rs#content_hash_for,crates/fs-evidence/src/vv/codec.rs#encode_context,crates/fs-evidence/src/vv/codec.rs#decode_context,crates/fs-evidence/src/vv/codec.rs#encode_observation_source_ref,crates/fs-evidence/src/vv/codec.rs#decode_observation_source_ref,crates/fs-evidence/src/vv/codec.rs#encode_observation_manifest,crates/fs-evidence/src/vv/codec.rs#decode_observation_manifest,crates/fs-evidence/src/vv/codec.rs#encode_experiment,crates/fs-evidence/src/vv/codec.rs#decode_experiment,crates/fs-evidence/src/vv/codec.rs#encode_calibration_split,crates/fs-evidence/src/vv/codec.rs#decode_calibration_split,crates/fs-blake3/src/lib.rs#hash_domain",
     "schema_dependencies=fs-evidence:observation-manifest,fs-evidence:vv-artifact,fs-evidence:vv-blind-holdout,fs-material:identifiability-problem,fs-matdb:canonical-parameter-block",
     "digest=blake3-256-domain-separated",
     "encoding=typed-binary",
@@ -12596,7 +13391,7 @@ pub const IDENTIFIABILITY_EXECUTION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder=execution_identity_hash",
     "encoder_helpers=encode_execution_identity,encode_execution_with_header_mode",
     "schema_constants=IDENTIFIABILITY_EXECUTION_IDENTITY_VERSION,IDENTIFIABILITY_EXECUTION_IDENTITY_DOMAIN,EXECUTION_MAGIC,MAX_IDENTIFIABILITY_STRUCTURAL_ITEMS,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_ID_BYTES,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_TEXT_BYTES,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_ITEMS,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_CANONICAL_BYTES,crates/fs-qty/src/semantic.rs#QUANTITY_SPEC_ENCODING_VERSION,crates/fs-qty/src/semantic.rs#QUANTITY_SPEC_ENCODED_LEN",
-    "schema_functions=IdentifiabilityExecutionPlan::try_new,IdentifiabilityExecutionPlan::canonical_bytes,IdentifiabilityExecutionPlan::from_canonical_bytes,DimensionlessErrorPolicy::try_new,IdentifiabilityNumericalPolicy::try_new,classify_identifiability_execution_identity_fields,validate_execution_structural_budget,validate_gauge_reduction_dag,gauge_reduction_sources,gauge_reduction_stage_sources,gauge_measure_sources,gauge_reduction_precedes,validate_gauge_slice,reduction_uses_regular_atlas,gauge_action_view,gauge_cell_for_claim,gauge_axes_match_claim,claim_gauge_action,gauge_action_status_and_geometry,gauge_action_orbit_profile,classify_identifiability_claim_tuple_schema,required_axes,validate_claim_source_kind,validate_claim_sources,is_free_inferential_parameter,claim_case_set,claim_subject_parameters,validate_claim_compatibility,validate_coordinate_for_parameter,bind_source_reference,validate_source_authority_closure,admit_opaque_resolution,encode_execution,decode_execution,check_execution_identity_version,encode_execution_action,decode_execution_action,encode_gauge_action_reference,decode_gauge_action_reference,encode_gauge_slice,decode_gauge_slice,encode_gauge_quotient,decode_gauge_quotient,encode_continuous_gauge_reduction,decode_continuous_gauge_reduction,encode_gauge_reduction_stage,decode_gauge_reduction_stage,encode_gauge_measure_semantics,decode_gauge_measure_semantics,encode_gauge_reduction_binding,decode_gauge_reduction_binding,encode_dimensionless_error_policy,decode_dimensionless_error_policy,encode_claim_request,decode_claim_request,encode_claim,decode_claim,encode_source_ref,decode_source_ref,encode_source_kind,decode_source_kind,encode_source_key,decode_source_key,encode_case_id,decode_case_id,encode_role,decode_role,encode_channel,decode_channel,encode_observation_key,decode_observation_key,encode_resolution_entry,encode_resolution_set,decode_resolution_set,encode_resolution_verification,decode_resolution_verification,crates/fs-material/src/identifiability.rs#encode_coordinate,crates/fs-material/src/identifiability.rs#decode_coordinate,crates/fs-material/src/identifiability.rs#ParameterCoordinate::try_new,crates/fs-material/src/identifiability.rs#ParameterCoordinate::id,crates/fs-material/src/identifiability.rs#CoordinateTransform::validate,crates/fs-material/src/identifiability.rs#CoordinateTransform::map,crates/fs-material/src/identifiability.rs#CoordinateTransform::mapped_domain,crates/fs-material/src/identifiability.rs#ParameterDomain::try_new,crates/fs-material/src/identifiability.rs#checked_add_dims,crates/fs-material/src/identifiability.rs#same_f64,crates/fs-material/src/identifiability.rs#validate_header_profile,crates/fs-material/src/identifiability.rs#encode_header,crates/fs-material/src/identifiability.rs#decode_header,crates/fs-material/src/identifiability.rs#canonical_f64,crates/fs-material/src/identifiability.rs#validate_token,crates/fs-material/src/identifiability.rs#validate_reason,crates/fs-material/src/identifiability.rs#CanonicalWriter::new,crates/fs-material/src/identifiability.rs#CanonicalWriter::raw,crates/fs-material/src/identifiability.rs#CanonicalWriter::byte,crates/fs-material/src/identifiability.rs#CanonicalWriter::u32,crates/fs-material/src/identifiability.rs#CanonicalWriter::u64,crates/fs-material/src/identifiability.rs#CanonicalWriter::f64,crates/fs-material/src/identifiability.rs#CanonicalWriter::count,crates/fs-material/src/identifiability.rs#CanonicalWriter::text,crates/fs-material/src/identifiability.rs#CanonicalWriter::hash,crates/fs-material/src/identifiability.rs#CanonicalWriter::quantity,crates/fs-material/src/identifiability.rs#CanonicalWriter::finish,crates/fs-material/src/identifiability.rs#CanonicalReader::new,crates/fs-material/src/identifiability.rs#CanonicalReader::take,crates/fs-material/src/identifiability.rs#CanonicalReader::byte,crates/fs-material/src/identifiability.rs#CanonicalReader::u32,crates/fs-material/src/identifiability.rs#CanonicalReader::u64,crates/fs-material/src/identifiability.rs#CanonicalReader::f64,crates/fs-material/src/identifiability.rs#CanonicalReader::length,crates/fs-material/src/identifiability.rs#CanonicalReader::count,crates/fs-material/src/identifiability.rs#CanonicalReader::text,crates/fs-material/src/identifiability.rs#CanonicalReader::token,crates/fs-material/src/identifiability.rs#CanonicalReader::reason,crates/fs-material/src/identifiability.rs#CanonicalReader::hash,crates/fs-material/src/identifiability.rs#CanonicalReader::quantity,crates/fs-material/src/identifiability.rs#CanonicalReader::expect_byte,crates/fs-material/src/identifiability.rs#CanonicalReader::finish,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-qty/src/semantic.rs#QuantitySpec::canonical_bytes,crates/fs-qty/src/semantic.rs#QuantitySpec::from_canonical_bytes",
+    "schema_functions=IdentifiabilityExecutionPlan::try_new,collect_execution_base_sources,collect_execution_claim_requests,collect_execution_actions,validate_execution_action,validate_execution_constraint_carriers,collect_execution_gauge_reductions,validate_gauge_reduction_claim,validate_gauge_reduction_plan,validate_gauge_reduction_coverage,validate_execution_source_authority,IdentifiabilityExecutionPlan::canonical_bytes,IdentifiabilityExecutionPlan::from_canonical_bytes,DimensionlessErrorPolicy::try_new,IdentifiabilityNumericalPolicy::try_new,classify_identifiability_execution_identity_fields,validate_execution_structural_budget,validate_gauge_reduction_dag,gauge_reduction_sources,gauge_reduction_stage_sources,gauge_measure_sources,gauge_reduction_precedes,validate_gauge_slice,gauge_action_carrier_and_geometry,reduction_uses_regular_atlas,gauge_action_view,gauge_cell_for_claim,gauge_axes_match_claim,claim_gauge_action,gauge_action_status_and_geometry,gauge_action_orbit_profile,classify_identifiability_claim_tuple_schema,required_axes,validate_claim_source_kind,collect_claim_information_source,collect_claim_shape_sources,collect_claim_scope_sources,validate_claim_sources,is_free_inferential_parameter,claim_case_set,claim_subject_parameters,validate_claim_compatibility,validate_claim_information,validate_claim_fiber_shape,validate_claim_orbit_fiber,action_supports_claim_subject,validate_coordinate_for_parameter,bind_source_reference,validate_source_authority_closure,admit_opaque_resolution,encode_execution,decode_execution,decode_execution_collections,check_execution_identity_version,encode_execution_action,decode_execution_action,encode_gauge_action_reference,decode_gauge_action_reference,encode_gauge_slice,decode_gauge_slice,encode_gauge_quotient,decode_gauge_quotient,encode_continuous_gauge_reduction,decode_continuous_gauge_reduction,encode_gauge_reduction_stage,decode_gauge_reduction_stage,encode_gauge_measure_semantics,decode_gauge_measure_semantics,encode_gauge_reduction_binding,decode_gauge_reduction_binding,encode_dimensionless_error_policy,decode_dimensionless_error_policy,encode_claim_request,decode_claim_request,encode_claim,encode_claim_information_and_fiber,encode_claim_quantifier_and_domain,encode_claim_subject_and_scope,decode_claim,decode_claim_information_and_extent,decode_claim_fiber,decode_claim_quantifier_and_domain,decode_claim_subject,decode_claim_scope,encode_source_ref,decode_source_ref,encode_source_kind,decode_source_kind,encode_source_key,decode_source_key,encode_case_id,decode_case_id,encode_role,decode_role,encode_channel,decode_channel,encode_observation_key,decode_observation_key,encode_resolution_entry,encode_resolution_set,decode_resolution_set,encode_resolution_verification,decode_resolution_verification,crates/fs-material/src/identifiability.rs#encode_coordinate,crates/fs-material/src/identifiability.rs#decode_coordinate,crates/fs-material/src/identifiability.rs#ParameterCoordinate::try_new,crates/fs-material/src/identifiability.rs#ParameterCoordinate::id,crates/fs-material/src/identifiability.rs#CoordinateTransform::validate,crates/fs-material/src/identifiability.rs#CoordinateTransform::map,crates/fs-material/src/identifiability.rs#CoordinateTransform::mapped_domain,crates/fs-material/src/identifiability.rs#ParameterDomain::try_new,crates/fs-material/src/identifiability.rs#checked_add_dims,crates/fs-material/src/identifiability.rs#same_f64,crates/fs-material/src/identifiability.rs#validate_header_profile,crates/fs-material/src/identifiability.rs#encode_header,crates/fs-material/src/identifiability.rs#decode_header,crates/fs-material/src/identifiability.rs#canonical_f64,crates/fs-material/src/identifiability.rs#validate_token,crates/fs-material/src/identifiability.rs#validate_reason,crates/fs-material/src/identifiability.rs#CanonicalWriter::new,crates/fs-material/src/identifiability.rs#CanonicalWriter::raw,crates/fs-material/src/identifiability.rs#CanonicalWriter::byte,crates/fs-material/src/identifiability.rs#CanonicalWriter::u32,crates/fs-material/src/identifiability.rs#CanonicalWriter::u64,crates/fs-material/src/identifiability.rs#CanonicalWriter::f64,crates/fs-material/src/identifiability.rs#CanonicalWriter::count,crates/fs-material/src/identifiability.rs#CanonicalWriter::text,crates/fs-material/src/identifiability.rs#CanonicalWriter::hash,crates/fs-material/src/identifiability.rs#CanonicalWriter::quantity,crates/fs-material/src/identifiability.rs#CanonicalWriter::finish,crates/fs-material/src/identifiability.rs#CanonicalReader::new,crates/fs-material/src/identifiability.rs#CanonicalReader::take,crates/fs-material/src/identifiability.rs#CanonicalReader::byte,crates/fs-material/src/identifiability.rs#CanonicalReader::u32,crates/fs-material/src/identifiability.rs#CanonicalReader::u64,crates/fs-material/src/identifiability.rs#CanonicalReader::f64,crates/fs-material/src/identifiability.rs#CanonicalReader::length,crates/fs-material/src/identifiability.rs#CanonicalReader::count,crates/fs-material/src/identifiability.rs#CanonicalReader::text,crates/fs-material/src/identifiability.rs#CanonicalReader::token,crates/fs-material/src/identifiability.rs#CanonicalReader::reason,crates/fs-material/src/identifiability.rs#CanonicalReader::hash,crates/fs-material/src/identifiability.rs#CanonicalReader::quantity,crates/fs-material/src/identifiability.rs#CanonicalReader::expect_byte,crates/fs-material/src/identifiability.rs#CanonicalReader::finish,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-qty/src/semantic.rs#QuantitySpec::canonical_bytes,crates/fs-qty/src/semantic.rs#QuantitySpec::from_canonical_bytes",
     "schema_dependencies=fs-material:identifiability-problem,fs-material:identifiability-source-admission",
     "digest=blake3-256-domain-separated",
     "encoding=typed-binary",
@@ -12627,7 +13422,7 @@ pub const IDENTIFIABILITY_ASSESSMENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder=assessment_identity_hash",
     "encoder_helpers=encode_assessment_identity,encode_assessment_with_header_mode",
     "schema_constants=IDENTIFIABILITY_ASSESSMENT_IDENTITY_VERSION,IDENTIFIABILITY_ASSESSMENT_IDENTITY_DOMAIN,ASSESSMENT_MAGIC,MAX_IDENTIFIABILITY_STRUCTURAL_ITEMS,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_ID_BYTES,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_TEXT_BYTES,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_ITEMS,crates/fs-material/src/identifiability.rs#MAX_IDENTIFIABILITY_CANONICAL_BYTES",
-    "schema_functions=IdentifiabilityAssessment::try_new,IdentifiabilityAssessment::canonical_bytes,IdentifiabilityAssessment::from_canonical_bytes,classify_identifiability_assessment_identity_fields,validate_assessment_structural_budget,validate_positive_claim_influence_routes,validate_decisive_practical_claim_closure,relevant_gauge_obstructions,matching_gauge_cell,disposition_is_valid,claim_extent_obstruction,effective_gauge_orbit_kind,gauge_axes_match_claim,claim_gauge_action,classify_identifiability_claim_tuple_schema,validate_claim_source_kind,validate_claim_sources,is_free_inferential_parameter,claim_case_set,claim_subject_parameters,validate_claim_compatibility,functional_observations,require_source_kind_in,admit_opaque_resolution,bind_source_reference,validate_source_authority_closure,encode_assessment,decode_assessment,check_assessment_identity_version,encode_claim,decode_claim,encode_claim_assessment,decode_claim_assessment,decode_optional_source_ref,encode_source_ref,decode_source_ref,encode_source_kind,decode_source_kind,encode_source_key,decode_source_key,encode_role,decode_role,encode_case_id,decode_case_id,encode_channel,decode_channel,encode_observation_key,decode_observation_key,encode_resolution_entry,encode_resolution_set,decode_resolution_set,encode_resolution_verification,decode_resolution_verification,crates/fs-material/src/identifiability.rs#validate_header_profile,crates/fs-material/src/identifiability.rs#encode_header,crates/fs-material/src/identifiability.rs#decode_header,crates/fs-material/src/identifiability.rs#canonical_f64,crates/fs-material/src/identifiability.rs#validate_token,crates/fs-material/src/identifiability.rs#validate_reason,crates/fs-material/src/identifiability.rs#CanonicalWriter::new,crates/fs-material/src/identifiability.rs#CanonicalWriter::raw,crates/fs-material/src/identifiability.rs#CanonicalWriter::byte,crates/fs-material/src/identifiability.rs#CanonicalWriter::u32,crates/fs-material/src/identifiability.rs#CanonicalWriter::u64,crates/fs-material/src/identifiability.rs#CanonicalWriter::f64,crates/fs-material/src/identifiability.rs#CanonicalWriter::count,crates/fs-material/src/identifiability.rs#CanonicalWriter::text,crates/fs-material/src/identifiability.rs#CanonicalWriter::hash,crates/fs-material/src/identifiability.rs#CanonicalWriter::finish,crates/fs-material/src/identifiability.rs#CanonicalReader::new,crates/fs-material/src/identifiability.rs#CanonicalReader::take,crates/fs-material/src/identifiability.rs#CanonicalReader::byte,crates/fs-material/src/identifiability.rs#CanonicalReader::u32,crates/fs-material/src/identifiability.rs#CanonicalReader::u64,crates/fs-material/src/identifiability.rs#CanonicalReader::f64,crates/fs-material/src/identifiability.rs#CanonicalReader::length,crates/fs-material/src/identifiability.rs#CanonicalReader::count,crates/fs-material/src/identifiability.rs#CanonicalReader::text,crates/fs-material/src/identifiability.rs#CanonicalReader::token,crates/fs-material/src/identifiability.rs#CanonicalReader::reason,crates/fs-material/src/identifiability.rs#CanonicalReader::hash,crates/fs-material/src/identifiability.rs#CanonicalReader::finish,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_functions=IdentifiabilityAssessment::try_new,normalize_assessment_evidence,bind_assessment_source,validate_decisive_claim_evidence,bind_decisive_claim_sources,validate_established_claim_assessment,validate_refuted_claim_assessment,validate_inconclusive_claim_assessment,validate_claim_assessment,validate_assessment_source_authority,IdentifiabilityAssessment::canonical_bytes,IdentifiabilityAssessment::from_canonical_bytes,classify_identifiability_assessment_identity_fields,validate_assessment_structural_budget,validate_positive_claim_influence_routes,validate_decisive_practical_claim_closure,relevant_gauge_obstructions,matching_gauge_cell,disposition_is_valid,claim_extent_obstruction,effective_gauge_orbit_kind,gauge_axes_match_claim,claim_gauge_action,classify_identifiability_claim_tuple_schema,validate_claim_source_kind,collect_claim_information_source,collect_claim_shape_sources,collect_claim_scope_sources,validate_claim_sources,is_free_inferential_parameter,claim_case_set,claim_subject_parameters,validate_claim_compatibility,validate_claim_information,validate_claim_fiber_shape,validate_claim_orbit_fiber,action_supports_claim_subject,functional_observations,require_source_kind_in,admit_opaque_resolution,bind_source_reference,validate_source_authority_closure,encode_assessment,decode_assessment,check_assessment_identity_version,encode_claim,encode_claim_information_and_fiber,encode_claim_quantifier_and_domain,encode_claim_subject_and_scope,decode_claim,decode_claim_information_and_extent,decode_claim_fiber,decode_claim_quantifier_and_domain,decode_claim_subject,decode_claim_scope,encode_claim_assessment,decode_claim_assessment,decode_optional_source_ref,encode_source_ref,decode_source_ref,encode_source_kind,decode_source_kind,encode_source_key,decode_source_key,encode_role,decode_role,encode_case_id,decode_case_id,encode_channel,decode_channel,encode_observation_key,decode_observation_key,encode_resolution_entry,encode_resolution_set,decode_resolution_set,encode_resolution_verification,decode_resolution_verification,crates/fs-material/src/identifiability.rs#validate_header_profile,crates/fs-material/src/identifiability.rs#encode_header,crates/fs-material/src/identifiability.rs#decode_header,crates/fs-material/src/identifiability.rs#canonical_f64,crates/fs-material/src/identifiability.rs#validate_token,crates/fs-material/src/identifiability.rs#validate_reason,crates/fs-material/src/identifiability.rs#CanonicalWriter::new,crates/fs-material/src/identifiability.rs#CanonicalWriter::raw,crates/fs-material/src/identifiability.rs#CanonicalWriter::byte,crates/fs-material/src/identifiability.rs#CanonicalWriter::u32,crates/fs-material/src/identifiability.rs#CanonicalWriter::u64,crates/fs-material/src/identifiability.rs#CanonicalWriter::f64,crates/fs-material/src/identifiability.rs#CanonicalWriter::count,crates/fs-material/src/identifiability.rs#CanonicalWriter::text,crates/fs-material/src/identifiability.rs#CanonicalWriter::hash,crates/fs-material/src/identifiability.rs#CanonicalWriter::finish,crates/fs-material/src/identifiability.rs#CanonicalReader::new,crates/fs-material/src/identifiability.rs#CanonicalReader::take,crates/fs-material/src/identifiability.rs#CanonicalReader::byte,crates/fs-material/src/identifiability.rs#CanonicalReader::u32,crates/fs-material/src/identifiability.rs#CanonicalReader::u64,crates/fs-material/src/identifiability.rs#CanonicalReader::f64,crates/fs-material/src/identifiability.rs#CanonicalReader::length,crates/fs-material/src/identifiability.rs#CanonicalReader::count,crates/fs-material/src/identifiability.rs#CanonicalReader::text,crates/fs-material/src/identifiability.rs#CanonicalReader::token,crates/fs-material/src/identifiability.rs#CanonicalReader::reason,crates/fs-material/src/identifiability.rs#CanonicalReader::hash,crates/fs-material/src/identifiability.rs#CanonicalReader::finish,crates/fs-blake3/src/lib.rs#hash_domain",
     "schema_dependencies=fs-material:identifiability-problem,fs-material:identifiability-execution",
     "digest=blake3-256-domain-separated",
     "encoding=typed-binary",
@@ -12684,11 +13479,11 @@ fn validate_claim_source_kind(
     Ok(())
 }
 
-fn validate_claim_sources<'a>(
+fn collect_claim_information_source<'a>(
     claim: &'a TypedIdentifiabilityClaim,
     problem: &IdentifiabilityProblemDocument,
-) -> Result<Vec<&'a SourceRef>, IdentifiabilityError> {
-    let mut sources = Vec::new();
+    sources: &mut Vec<&'a SourceRef>,
+) -> Result<(), IdentifiabilityError> {
     match &claim.information {
         InformationRegime::PosteriorUnderDeclaredPrior { joint_prior } => {
             validate_claim_source_kind(
@@ -12713,6 +13508,13 @@ fn validate_claim_sources<'a>(
         | InformationRegime::ExactInputOutputMap
         | InformationRegime::NoisyFiniteData => {}
     }
+    Ok(())
+}
+
+fn collect_claim_shape_sources<'a>(
+    claim: &'a TypedIdentifiabilityClaim,
+    sources: &mut Vec<&'a SourceRef>,
+) -> Result<(), IdentifiabilityError> {
     match &claim.scalar_domain {
         ScalarDomain::Real => {}
         ScalarDomain::Complex { extension } => {
@@ -12786,6 +13588,14 @@ fn validate_claim_sources<'a>(
         | FiberStructure::OrbitQuotientUnique { .. }
         | FiberStructure::PositiveDimensional { .. } => {}
     }
+    Ok(())
+}
+
+fn collect_claim_scope_sources<'a>(
+    claim: &'a TypedIdentifiabilityClaim,
+    problem: &IdentifiabilityProblemDocument,
+    sources: &mut Vec<&'a SourceRef>,
+) -> Result<(), IdentifiabilityError> {
     if let ClaimSubject::DerivedFunctional { definition, .. } = &claim.subject {
         validate_claim_source_kind(
             definition,
@@ -12846,6 +13656,17 @@ fn validate_claim_sources<'a>(
         }
         sources.push(definition);
     }
+    Ok(())
+}
+
+fn validate_claim_sources<'a>(
+    claim: &'a TypedIdentifiabilityClaim,
+    problem: &IdentifiabilityProblemDocument,
+) -> Result<Vec<&'a SourceRef>, IdentifiabilityError> {
+    let mut sources = Vec::new();
+    collect_claim_information_source(claim, problem, &mut sources)?;
+    collect_claim_shape_sources(claim, &mut sources)?;
+    collect_claim_scope_sources(claim, problem, &mut sources)?;
     Ok(sources)
 }
 
@@ -13299,7 +14120,7 @@ fn action_supports_claim_subject(
     parameters: &BTreeSet<ParameterRoleId>,
 ) -> bool {
     match &claim.subject {
-        ClaimSubject::Parameter(_) | ClaimSubject::ParameterSet(_) => {
+        ClaimSubject::Parameter(_) | ClaimSubject::ParameterSet(_) | ClaimSubject::WholeProblem => {
             !view.obstruction.is_empty() && view.obstruction.is_subset(parameters)
         }
         // An induced action or descent on a composite observable is a theorem
@@ -13310,10 +14131,179 @@ fn action_supports_claim_subject(
         ClaimSubject::GaugeAction(subject_action) => {
             subject_action == action && !view.obstruction.is_empty()
         }
-        ClaimSubject::WholeProblem => {
-            !view.obstruction.is_empty() && view.obstruction.is_subset(parameters)
-        }
     }
+}
+
+fn validate_claim_information(
+    claim: &TypedIdentifiabilityClaim,
+    problem: &IdentifiabilityProblemDocument,
+    cases: &BTreeSet<CaseId>,
+) -> Result<(), IdentifiabilityError> {
+    match &claim.information {
+        InformationRegime::NoisyFiniteData => {
+            if cases
+                .iter()
+                .any(|case| matches!(&problem.cases[case].data, CaseDataDeclaration::Prospective))
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "finite-data claim scope",
+                    detail:
+                        "NoisyFiniteData claims require retrospective data in every claimed case"
+                            .to_string(),
+                });
+            }
+        }
+        InformationRegime::PosteriorUnderDeclaredPrior { .. } => {
+            if cases
+                .iter()
+                .any(|case| matches!(&problem.cases[case].data, CaseDataDeclaration::Prospective))
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "posterior claim scope",
+                    detail: "PosteriorUnderDeclaredPrior denotes an observed posterior and requires retrospective admitted data in every claimed case; planned prior-predictive questions need a distinct non-decisive regime"
+                        .to_string(),
+                });
+            }
+            let free = problem
+                .parameters
+                .iter()
+                .filter(|(_, parameter)| {
+                    is_free_inferential_parameter(parameter)
+                        && parameter_active_in_cases(parameter, cases)
+                })
+                .map(|(role, _)| role)
+                .collect::<Vec<_>>();
+            if free.is_empty()
+                || free.iter().any(|role| {
+                    !matches!(
+                        &problem.parameters[*role].prior,
+                        PriorPolicy::Distribution(_)
+                    )
+                })
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "posterior claim prior",
+                    detail:
+                        "every free parameter in a posterior claim needs an explicit declared prior"
+                            .to_string(),
+                });
+            }
+        }
+        InformationRegime::StructuralExactModel | InformationRegime::ExactInputOutputMap => {}
+    }
+    Ok(())
+}
+
+fn validate_claim_fiber_shape(fiber: &FiberStructure) -> Result<(), IdentifiabilityError> {
+    match fiber {
+        // Requests are propositions, not theorem assertions. Even an unlikely
+        // raw Unique request remains preregisterable; only a positive
+        // assessment must dispose every exact applicable obstruction.
+        FiberStructure::FiniteToOne {
+            maximum_cardinality: Some(FiberCardinalityBound::UniformU64(0 | 1)),
+        } => Err(IdentifiabilityError::InvalidNumeric {
+            field: "finite-to-one cardinality",
+            detail: "a known maximum below two is canonically represented as Unique".to_string(),
+        }),
+        FiberStructure::PositiveDimensional {
+            lower_bound:
+                FiberDimensionLowerBound::Finite {
+                    minimum_dimension: 0,
+                },
+        } => Err(IdentifiabilityError::InvalidNumeric {
+            field: "positive-dimensional fiber",
+            detail: "minimum dimension must be positive".to_string(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+fn validate_claim_orbit_fiber(
+    claim: &TypedIdentifiabilityClaim,
+    problem: &IdentifiabilityProblemDocument,
+    cases: &BTreeSet<CaseId>,
+    parameters: &BTreeSet<ParameterRoleId>,
+) -> Result<(), IdentifiabilityError> {
+    match &claim.fiber {
+        FiberStructure::DiscreteOrbit { action } => {
+            let view = gauge_action_view(action, claim, cases, problem)?;
+            if !action_supports_claim_subject(action, &view, claim, parameters)
+                || view.orbit_kind != EffectiveGaugeOrbitKind::Discrete
+            {
+                return Err(IdentifiabilityError::InvalidNumeric {
+                    field: "discrete-orbit fiber",
+                    detail: "claim support must lie in the exact action carrier and the effective regular orbit—not merely the acting group—must be purely discrete"
+                        .to_string(),
+                });
+            }
+        }
+        FiberStructure::MixedOrbit { action } => {
+            let view = gauge_action_view(action, claim, cases, problem)?;
+            if !action_supports_claim_subject(action, &view, claim, parameters)
+                || view.orbit_kind != EffectiveGaugeOrbitKind::Mixed
+            {
+                return Err(IdentifiabilityError::InvalidNumeric {
+                    field: "mixed-orbit fiber",
+                    detail: "claim support must lie in the exact action carrier and the effective regular orbit must have both continuous and discrete components"
+                        .to_string(),
+                });
+            }
+        }
+        FiberStructure::OrbitQuotientUnique { action } => {
+            let view = gauge_action_view(action, claim, cases, problem)?;
+            if !action_supports_claim_subject(action, &view, claim, parameters)
+                || matches!(view.orbit_kind, EffectiveGaugeOrbitKind::Trivial)
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "orbit-quotient fiber",
+                    detail: "claim support must lie in a nontrivial exact action carrier"
+                        .to_string(),
+                });
+            }
+        }
+        FiberStructure::GeneralizedQuotientUnique {
+            action,
+            equivalence,
+        } => {
+            let view = gauge_action_view(action, claim, cases, problem)?;
+            if !action_supports_claim_subject(action, &view, claim, parameters)
+                || equivalence.kind != SourceKind::GaugeQuotientProfile
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "generalized-quotient fiber",
+                    detail: "generalized quotient needs an exact action carrier and exact orbit-closure/invariant/groupoid/stack equivalence profile"
+                        .to_string(),
+                });
+            }
+        }
+        FiberStructure::StratifiedOrbit {
+            action,
+            orbit_type_profile,
+        } => {
+            let view = gauge_action_view(action, claim, cases, problem)?;
+            let profile_matches = gauge_action_orbit_profile(action, problem)
+                .is_some_and(|key| problem.sources.get(key) == Some(orbit_type_profile));
+            if !action_supports_claim_subject(action, &view, claim, parameters)
+                || view.orbit_kind != EffectiveGaugeOrbitKind::Stratified
+                || !profile_matches
+            {
+                return Err(IdentifiabilityError::InvalidText {
+                    field: "stratified-orbit fiber",
+                    detail: "stratified orbit claims require the exact action, exact applicability cell, and exact problem-bound orbit-type profile"
+                        .to_string(),
+                });
+            }
+        }
+        FiberStructure::Stratified { strata } => validate_claim_source_kind(
+            strata,
+            &[SourceKind::Stratification],
+            "claim fiber stratification",
+        )?,
+        FiberStructure::Unique
+        | FiberStructure::FiniteToOne { .. }
+        | FiberStructure::PositiveDimensional { .. } => {}
+    }
+    Ok(())
 }
 
 fn validate_claim_compatibility(
@@ -13351,166 +14341,9 @@ fn validate_claim_compatibility(
         }
     }
 
-    match &claim.information {
-        InformationRegime::NoisyFiniteData => {
-            if cases
-                .iter()
-                .any(|case| matches!(&problem.cases[case].data, CaseDataDeclaration::Prospective))
-            {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "finite-data claim scope",
-                    detail:
-                        "NoisyFiniteData claims require retrospective data in every claimed case"
-                            .to_string(),
-                });
-            }
-        }
-        InformationRegime::PosteriorUnderDeclaredPrior { .. } => {
-            if cases
-                .iter()
-                .any(|case| matches!(&problem.cases[case].data, CaseDataDeclaration::Prospective))
-            {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "posterior claim scope",
-                    detail: "PosteriorUnderDeclaredPrior denotes an observed posterior and requires retrospective admitted data in every claimed case; planned prior-predictive questions need a distinct non-decisive regime"
-                        .to_string(),
-                });
-            }
-            let free = problem
-                .parameters
-                .iter()
-                .filter(|(_, parameter)| {
-                    is_free_inferential_parameter(parameter)
-                        && parameter_active_in_cases(parameter, &cases)
-                })
-                .map(|(role, _)| role)
-                .collect::<Vec<_>>();
-            if free.is_empty()
-                || free.iter().any(|role| {
-                    !matches!(
-                        &problem.parameters[*role].prior,
-                        PriorPolicy::Distribution(_)
-                    )
-                })
-            {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "posterior claim prior",
-                    detail:
-                        "every free parameter in a posterior claim needs an explicit declared prior"
-                            .to_string(),
-                });
-            }
-        }
-        InformationRegime::StructuralExactModel | InformationRegime::ExactInputOutputMap => {}
-    }
-
-    match &claim.fiber {
-        // Requests are propositions, not theorem assertions. Even an unlikely
-        // raw Unique request remains preregisterable; only a positive
-        // assessment must dispose every exact applicable obstruction.
-        FiberStructure::Unique => {}
-        FiberStructure::FiniteToOne {
-            maximum_cardinality,
-        } => {
-            if matches!(
-                maximum_cardinality,
-                Some(FiberCardinalityBound::UniformU64(0 | 1))
-            ) {
-                return Err(IdentifiabilityError::InvalidNumeric {
-                    field: "finite-to-one cardinality",
-                    detail: "a known maximum below two is canonically represented as Unique"
-                        .to_string(),
-                });
-            }
-        }
-        FiberStructure::PositiveDimensional {
-            lower_bound:
-                FiberDimensionLowerBound::Finite {
-                    minimum_dimension: 0,
-                },
-        } => {
-            return Err(IdentifiabilityError::InvalidNumeric {
-                field: "positive-dimensional fiber",
-                detail: "minimum dimension must be positive".to_string(),
-            });
-        }
-        FiberStructure::PositiveDimensional { .. } => {}
-        FiberStructure::DiscreteOrbit { action } => {
-            let view = gauge_action_view(action, claim, &cases, problem)?;
-            if !action_supports_claim_subject(action, &view, claim, &parameters)
-                || view.orbit_kind != EffectiveGaugeOrbitKind::Discrete
-            {
-                return Err(IdentifiabilityError::InvalidNumeric {
-                    field: "discrete-orbit fiber",
-                    detail: "claim support must lie in the exact action carrier and the effective regular orbit—not merely the acting group—must be purely discrete"
-                        .to_string(),
-                });
-            }
-        }
-        FiberStructure::MixedOrbit { action } => {
-            let view = gauge_action_view(action, claim, &cases, problem)?;
-            if !action_supports_claim_subject(action, &view, claim, &parameters)
-                || view.orbit_kind != EffectiveGaugeOrbitKind::Mixed
-            {
-                return Err(IdentifiabilityError::InvalidNumeric {
-                    field: "mixed-orbit fiber",
-                    detail: "claim support must lie in the exact action carrier and the effective regular orbit must have both continuous and discrete components"
-                        .to_string(),
-                });
-            }
-        }
-        FiberStructure::OrbitQuotientUnique { action } => {
-            let view = gauge_action_view(action, claim, &cases, problem)?;
-            if !action_supports_claim_subject(action, &view, claim, &parameters)
-                || matches!(view.orbit_kind, EffectiveGaugeOrbitKind::Trivial)
-            {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "orbit-quotient fiber",
-                    detail: "claim support must lie in a nontrivial exact action carrier"
-                        .to_string(),
-                });
-            }
-        }
-        FiberStructure::GeneralizedQuotientUnique {
-            action,
-            equivalence,
-        } => {
-            let view = gauge_action_view(action, claim, &cases, problem)?;
-            if !action_supports_claim_subject(action, &view, claim, &parameters)
-                || equivalence.kind != SourceKind::GaugeQuotientProfile
-            {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "generalized-quotient fiber",
-                    detail: "generalized quotient needs an exact action carrier and exact orbit-closure/invariant/groupoid/stack equivalence profile"
-                        .to_string(),
-                });
-            }
-        }
-        FiberStructure::StratifiedOrbit {
-            action,
-            orbit_type_profile,
-        } => {
-            let view = gauge_action_view(action, claim, &cases, problem)?;
-            let profile_matches = gauge_action_orbit_profile(action, problem)
-                .is_some_and(|key| problem.sources.get(key) == Some(orbit_type_profile));
-            if !action_supports_claim_subject(action, &view, claim, &parameters)
-                || view.orbit_kind != EffectiveGaugeOrbitKind::Stratified
-                || !profile_matches
-            {
-                return Err(IdentifiabilityError::InvalidText {
-                    field: "stratified-orbit fiber",
-                    detail: "stratified orbit claims require the exact action, exact applicability cell, and exact problem-bound orbit-type profile"
-                        .to_string(),
-                });
-            }
-        }
-        FiberStructure::Stratified { strata } => validate_claim_source_kind(
-            strata,
-            &[SourceKind::Stratification],
-            "claim fiber stratification",
-        )?,
-    }
-    Ok(())
+    validate_claim_information(claim, problem, &cases)?;
+    validate_claim_fiber_shape(&claim.fiber)?;
+    validate_claim_orbit_fiber(claim, problem, &cases, &parameters)
 }
 
 struct RelevantGaugeObstruction {
@@ -13653,23 +14486,26 @@ fn disposition_is_valid(
         GaugeResolutionDisposition::ConsistentWithClaimedFiber => {
             let exact_action = claim_gauge_action(claim) == Some(&obstruction.action);
             let action_consistent = exact_action
-                && match (&claim.fiber, obstruction.orbit_kind) {
-                    (FiberStructure::DiscreteOrbit { .. }, EffectiveGaugeOrbitKind::Discrete)
-                    | (FiberStructure::MixedOrbit { .. }, EffectiveGaugeOrbitKind::Mixed)
-                    | (
+                && matches!(
+                    (&claim.fiber, obstruction.orbit_kind),
+                    (
+                        FiberStructure::DiscreteOrbit { .. },
+                        EffectiveGaugeOrbitKind::Discrete
+                    ) | (
+                        FiberStructure::MixedOrbit { .. },
+                        EffectiveGaugeOrbitKind::Mixed
+                    ) | (
                         FiberStructure::StratifiedOrbit { .. },
                         EffectiveGaugeOrbitKind::Stratified,
-                    ) => true,
-                    (
+                    ) | (
                         FiberStructure::OrbitQuotientUnique { .. }
-                        | FiberStructure::GeneralizedQuotientUnique { .. },
+                            | FiberStructure::GeneralizedQuotientUnique { .. },
                         EffectiveGaugeOrbitKind::Continuous
-                        | EffectiveGaugeOrbitKind::Discrete
-                        | EffectiveGaugeOrbitKind::Mixed
-                        | EffectiveGaugeOrbitKind::Stratified,
-                    ) => true,
-                    _ => false,
-                };
+                            | EffectiveGaugeOrbitKind::Discrete
+                            | EffectiveGaugeOrbitKind::Mixed
+                            | EffectiveGaugeOrbitKind::Stratified,
+                    )
+                );
             if action_consistent {
                 return true;
             }
@@ -13689,8 +14525,8 @@ fn disposition_is_valid(
                         (
                             GaugeDiscreteOrbitCardinality::Finite { .. },
                             Some(FiberCardinalityBound::SymbolicProfile(_)),
-                        ) => false,
-                        (GaugeDiscreteOrbitCardinality::CountablyInfinite { .. }, _) => false,
+                        )
+                        | (GaugeDiscreteOrbitCardinality::CountablyInfinite { .. }, _) => false,
                     }
                 }
                 FiberStructure::PositiveDimensional { lower_bound } => {
@@ -13704,11 +14540,8 @@ fn disposition_is_valid(
                             FiberDimensionLowerBound::Finite { .. },
                         ) => true,
                         (
-                            GaugeContinuousDimension::InfiniteDimensional { .. },
-                            FiberDimensionLowerBound::InfiniteDimensional { .. },
-                        ) => false,
-                        (
-                            GaugeContinuousDimension::Finite { .. },
+                            GaugeContinuousDimension::InfiniteDimensional { .. }
+                            | GaugeContinuousDimension::Finite { .. },
                             FiberDimensionLowerBound::InfiniteDimensional { .. },
                         ) => false,
                     }
@@ -13803,6 +14636,350 @@ fn validate_decisive_practical_claim_closure(
     Ok(())
 }
 
+fn normalize_assessment_evidence(
+    evidence: Vec<(ClaimId, ClaimAssessment)>,
+) -> Result<BTreeMap<ClaimId, ClaimAssessment>, IdentifiabilityError> {
+    let mut evidence_map = BTreeMap::new();
+    for (id, mut conclusion) in evidence {
+        match &mut conclusion {
+            ClaimAssessment::ClaimedEstablished {
+                certified_error_bound,
+                ..
+            }
+            | ClaimAssessment::ClaimedRefuted {
+                certified_error_bound,
+                ..
+            } => {
+                *certified_error_bound = canonical_f64(*certified_error_bound);
+            }
+            ClaimAssessment::ClaimedInconclusive { .. } | ClaimAssessment::NotAssessed { .. } => {}
+        }
+        if evidence_map.insert(id.clone(), conclusion).is_some() {
+            return Err(IdentifiabilityError::Duplicate {
+                field: "claim assessment",
+                id: id.to_string(),
+            });
+        }
+    }
+    Ok(evidence_map)
+}
+
+fn bind_assessment_source(
+    referenced_sources: &mut BTreeMap<SourceKey, SourceRef>,
+    source: &SourceRef,
+) -> Result<(), IdentifiabilityError> {
+    if let Some(prior) = referenced_sources.insert(source.key.clone(), source.clone())
+        && &prior != source
+    {
+        return Err(IdentifiabilityError::SourceMismatch {
+            field: "assessment source alias",
+        });
+    }
+    Ok(())
+}
+
+struct AssessmentValidation<'a> {
+    claim: &'a TypedIdentifiabilityClaim,
+    problem: &'a IdentifiabilityProblemDocument,
+    execution: &'a IdentifiabilityExecutionPlan,
+    request: &'a ClaimRequest,
+    referenced_sources: &'a mut BTreeMap<SourceKey, SourceRef>,
+}
+
+fn validate_decisive_claim_evidence(
+    validation: &AssessmentValidation<'_>,
+    method: &SourceRef,
+    receipt: &SourceRef,
+    metric: &SourceRef,
+    nondimensionalization: &SourceRef,
+    certified_error_bound: f64,
+    invalid_evidence_detail: &'static str,
+) -> Result<(), IdentifiabilityError> {
+    if method.kind != SourceKind::Analyzer
+        || receipt.kind != SourceKind::EvidenceReceipt
+        || !certified_error_bound.is_finite()
+        || certified_error_bound < 0.0
+    {
+        return Err(IdentifiabilityError::InvalidNumeric {
+            field: "claim evidence",
+            detail: invalid_evidence_detail.to_string(),
+        });
+    }
+    if method != &validation.execution.analyzer {
+        return Err(IdentifiabilityError::SourceMismatch {
+            field: "claim analyzer/execution analyzer",
+        });
+    }
+    if metric != validation.request.error_policy.metric()
+        || nondimensionalization != validation.request.error_policy.nondimensionalization()
+    {
+        return Err(IdentifiabilityError::SourceMismatch {
+            field: "claim evidence/error policy",
+        });
+    }
+    if certified_error_bound > validation.request.error_policy.maximum_certified_error() {
+        return Err(IdentifiabilityError::InvalidNumeric {
+            field: "certified claim error",
+            detail: format!(
+                "certified error {certified_error_bound:e} exceeds preregistered maximum {:e}",
+                validation.request.error_policy.maximum_certified_error()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn bind_decisive_claim_sources(
+    referenced_sources: &mut BTreeMap<SourceKey, SourceRef>,
+    method: &SourceRef,
+    receipt: &SourceRef,
+    metric: &SourceRef,
+    nondimensionalization: &SourceRef,
+) -> Result<(), IdentifiabilityError> {
+    bind_assessment_source(referenced_sources, method)?;
+    bind_assessment_source(referenced_sources, receipt)?;
+    bind_assessment_source(referenced_sources, metric)?;
+    bind_assessment_source(referenced_sources, nondimensionalization)
+}
+
+fn validate_established_claim_assessment(
+    validation: &mut AssessmentValidation<'_>,
+    method: &SourceRef,
+    receipt: &SourceRef,
+    metric: &SourceRef,
+    nondimensionalization: &SourceRef,
+    certified_error_bound: f64,
+    gauge_resolutions: &BTreeMap<GaugeActionReference, GaugeResolutionEvidence>,
+) -> Result<(), IdentifiabilityError> {
+    validate_positive_claim_influence_routes(validation.claim, validation.problem)?;
+    validate_decisive_practical_claim_closure(validation.claim, validation.problem)?;
+    validate_decisive_claim_evidence(
+        validation,
+        method,
+        receipt,
+        metric,
+        nondimensionalization,
+        certified_error_bound,
+        "established claims need analyzer, receipt, and finite nonnegative certified error",
+    )?;
+    let relevant = relevant_gauge_obstructions(validation.claim, validation.problem)?;
+    let expected = relevant
+        .iter()
+        .map(|obstruction| obstruction.action.clone())
+        .collect::<BTreeSet<_>>();
+    let actual = gauge_resolutions.keys().cloned().collect::<BTreeSet<_>>();
+    if actual != expected
+        || gauge_resolutions
+            .iter()
+            .any(|(action, resolution)| action != &resolution.action)
+    {
+        return Err(IdentifiabilityError::Cardinality {
+            field: "positive-claim gauge resolutions",
+            detail: "positive assessment must resolve every and only exact applicable single/product/composition obstruction once"
+                .to_string(),
+        });
+    }
+    for resolution in gauge_resolutions.values() {
+        if resolution.method.kind != SourceKind::Analyzer
+            || &resolution.method != validation.execution.analyzer()
+            || resolution.receipt.kind != SourceKind::EvidenceReceipt
+        {
+            return Err(IdentifiabilityError::SourceMismatch {
+                field: "gauge resolution evidence/execution analyzer",
+            });
+        }
+        let obstruction = relevant
+            .iter()
+            .find(|obstruction| obstruction.action == resolution.action)
+            .expect("exact gauge resolution set checked");
+        if !disposition_is_valid(validation.claim, obstruction, &resolution.disposition) {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "gauge resolution disposition",
+                detail: format!(
+                    "disposition {:?} is incompatible with the target status, exact claim cell, subject projection, or claimed fiber",
+                    resolution.disposition
+                ),
+            });
+        }
+        bind_assessment_source(validation.referenced_sources, &resolution.method)?;
+        bind_assessment_source(validation.referenced_sources, &resolution.receipt)?;
+    }
+    bind_decisive_claim_sources(
+        validation.referenced_sources,
+        method,
+        receipt,
+        metric,
+        nondimensionalization,
+    )
+}
+
+fn validate_refuted_claim_assessment(
+    validation: &mut AssessmentValidation<'_>,
+    method: &SourceRef,
+    receipt: &SourceRef,
+    metric: &SourceRef,
+    nondimensionalization: &SourceRef,
+    certified_error_bound: f64,
+) -> Result<(), IdentifiabilityError> {
+    validate_decisive_practical_claim_closure(validation.claim, validation.problem)?;
+    validate_decisive_claim_evidence(
+        validation,
+        method,
+        receipt,
+        metric,
+        nondimensionalization,
+        certified_error_bound,
+        "refuted claims need analyzer, receipt, and finite nonnegative certified error",
+    )?;
+    bind_decisive_claim_sources(
+        validation.referenced_sources,
+        method,
+        receipt,
+        metric,
+        nondimensionalization,
+    )
+}
+
+fn validate_inconclusive_claim_assessment(
+    validation: &mut AssessmentValidation<'_>,
+    method: Option<&SourceRef>,
+    receipt: Option<&SourceRef>,
+    reason: &str,
+) -> Result<(), IdentifiabilityError> {
+    validate_reason(reason, "inconclusive claim reason")?;
+    if method.is_some() != receipt.is_some() {
+        return Err(IdentifiabilityError::InvalidText {
+            field: "inconclusive evidence pair",
+            detail: "inconclusive evidence must bind method and receipt together, or omit both"
+                .to_string(),
+        });
+    }
+    if let Some(method) = method {
+        if method.kind != SourceKind::Analyzer {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "inconclusive method",
+                detail: "method source must have Analyzer kind".to_string(),
+            });
+        }
+        if method != &validation.execution.analyzer {
+            return Err(IdentifiabilityError::SourceMismatch {
+                field: "inconclusive analyzer/execution analyzer",
+            });
+        }
+        bind_assessment_source(validation.referenced_sources, method)?;
+    }
+    if let Some(receipt) = receipt {
+        if receipt.kind != SourceKind::EvidenceReceipt {
+            return Err(IdentifiabilityError::InvalidText {
+                field: "inconclusive receipt",
+                detail: "receipt source must have EvidenceReceipt kind".to_string(),
+            });
+        }
+        bind_assessment_source(validation.referenced_sources, receipt)?;
+    }
+    Ok(())
+}
+
+fn validate_claim_assessment(
+    claim: &TypedIdentifiabilityClaim,
+    problem: &IdentifiabilityProblemDocument,
+    execution: &IdentifiabilityExecutionPlan,
+    request: &ClaimRequest,
+    conclusion: &ClaimAssessment,
+    referenced_sources: &mut BTreeMap<SourceKey, SourceRef>,
+) -> Result<(), IdentifiabilityError> {
+    let mut validation = AssessmentValidation {
+        claim,
+        problem,
+        execution,
+        request,
+        referenced_sources,
+    };
+    match conclusion {
+        ClaimAssessment::ClaimedEstablished {
+            method,
+            receipt,
+            metric,
+            nondimensionalization,
+            certified_error_bound,
+            gauge_resolutions,
+        } => validate_established_claim_assessment(
+            &mut validation,
+            method,
+            receipt,
+            metric,
+            nondimensionalization,
+            *certified_error_bound,
+            gauge_resolutions,
+        ),
+        ClaimAssessment::ClaimedRefuted {
+            method,
+            receipt,
+            metric,
+            nondimensionalization,
+            certified_error_bound,
+        } => validate_refuted_claim_assessment(
+            &mut validation,
+            method,
+            receipt,
+            metric,
+            nondimensionalization,
+            *certified_error_bound,
+        ),
+        ClaimAssessment::ClaimedInconclusive {
+            method,
+            receipt,
+            reason,
+        } => validate_inconclusive_claim_assessment(
+            &mut validation,
+            method.as_ref(),
+            receipt.as_ref(),
+            reason,
+        ),
+        ClaimAssessment::NotAssessed { reason } => {
+            validate_reason(reason, "not-assessed claim reason")
+        }
+    }
+}
+
+fn validate_assessment_source_authority(
+    referenced_sources: &BTreeMap<SourceKey, SourceRef>,
+    source_authority: &SourceResolutionSet,
+    execution: &IdentifiabilityExecutionPlan,
+    problem: &AdmittedIdentifiabilityProblem,
+) -> Result<(), IdentifiabilityError> {
+    if source_authority.entries.len() != referenced_sources.len() {
+        return Err(IdentifiabilityError::Cardinality {
+            field: "assessment source authority",
+            detail: "every claim/method/receipt source needs exactly one resolution".to_string(),
+        });
+    }
+    for (key, reference) in referenced_sources {
+        let resolution = source_authority.entries.get(key).ok_or_else(|| {
+            IdentifiabilityError::UnknownReference {
+                field: "assessment source authority",
+                id: key.to_string(),
+            }
+        })?;
+        admit_opaque_resolution(reference, resolution)?;
+        if let Some(execution_resolution) = execution.source_authority.entries.get(key)
+            && execution_resolution != resolution
+        {
+            return Err(IdentifiabilityError::SourceMismatch {
+                field: "assessment/execution source authority",
+            });
+        }
+        if let Some(problem_resolution) = problem.source_resolutions().get(key)
+            && problem_resolution != resolution
+        {
+            return Err(IdentifiabilityError::SourceMismatch {
+                field: "assessment/problem source authority",
+            });
+        }
+    }
+    Ok(())
+}
+
 impl IdentifiabilityAssessment {
     /// Construct and validate an assessment, enforcing capability, identity
     /// chaining to problem and execution, one evidence record per claim, and
@@ -13852,29 +15029,7 @@ impl IdentifiabilityAssessment {
             });
         }
         let claims = insert_unique(claims, "identifiability claims", |claim| &claim.id)?;
-        let mut evidence_map = BTreeMap::new();
-        for (id, mut conclusion) in evidence {
-            match &mut conclusion {
-                ClaimAssessment::ClaimedEstablished {
-                    certified_error_bound,
-                    ..
-                }
-                | ClaimAssessment::ClaimedRefuted {
-                    certified_error_bound,
-                    ..
-                } => {
-                    *certified_error_bound = canonical_f64(*certified_error_bound);
-                }
-                ClaimAssessment::ClaimedInconclusive { .. }
-                | ClaimAssessment::NotAssessed { .. } => {}
-            }
-            if evidence_map.insert(id.clone(), conclusion).is_some() {
-                return Err(IdentifiabilityError::Duplicate {
-                    field: "claim assessment",
-                    id: id.to_string(),
-                });
-            }
-        }
+        let evidence_map = normalize_assessment_evidence(evidence)?;
         let claim_ids = claims.keys().cloned().collect::<BTreeSet<_>>();
         let evidence_ids = evidence_map.keys().cloned().collect::<BTreeSet<_>>();
         if evidence_ids != claim_ids {
@@ -13894,229 +15049,26 @@ impl IdentifiabilityAssessment {
             });
         }
         let mut referenced_sources = BTreeMap::<SourceKey, SourceRef>::new();
-        let mut bind_source = |source: &SourceRef| -> Result<(), IdentifiabilityError> {
-            if let Some(prior) = referenced_sources.insert(source.key.clone(), source.clone()) {
-                if &prior != source {
-                    return Err(IdentifiabilityError::SourceMismatch {
-                        field: "assessment source alias",
-                    });
-                }
-            }
-            Ok(())
-        };
         for (id, claim) in &claims {
             validate_claim_compatibility(claim, &problem.document)?;
             for source in validate_claim_sources(claim, &problem.document)? {
-                bind_source(source)?;
+                bind_assessment_source(&mut referenced_sources, source)?;
             }
-            let request = &execution.claim_requests[id];
-            match &evidence_map[id] {
-                ClaimAssessment::ClaimedEstablished {
-                    method,
-                    receipt,
-                    metric,
-                    nondimensionalization,
-                    certified_error_bound,
-                    gauge_resolutions,
-                } => {
-                    validate_positive_claim_influence_routes(claim, &problem.document)?;
-                    validate_decisive_practical_claim_closure(claim, &problem.document)?;
-                    if method.kind != SourceKind::Analyzer
-                        || receipt.kind != SourceKind::EvidenceReceipt
-                        || !certified_error_bound.is_finite()
-                        || *certified_error_bound < 0.0
-                    {
-                        return Err(IdentifiabilityError::InvalidNumeric {
-                            field: "claim evidence",
-                            detail: "established claims need analyzer, receipt, and finite nonnegative certified error"
-                                .to_string(),
-                        });
-                    }
-                    if method != &execution.analyzer {
-                        return Err(IdentifiabilityError::SourceMismatch {
-                            field: "claim analyzer/execution analyzer",
-                        });
-                    }
-                    if metric != request.error_policy.metric()
-                        || nondimensionalization != request.error_policy.nondimensionalization()
-                    {
-                        return Err(IdentifiabilityError::SourceMismatch {
-                            field: "claim evidence/error policy",
-                        });
-                    }
-                    if *certified_error_bound > request.error_policy.maximum_certified_error() {
-                        return Err(IdentifiabilityError::InvalidNumeric {
-                            field: "certified claim error",
-                            detail: format!(
-                                "certified error {certified_error_bound:e} exceeds preregistered maximum {:e}",
-                                request.error_policy.maximum_certified_error()
-                            ),
-                        });
-                    }
-                    let relevant = relevant_gauge_obstructions(claim, &problem.document)?;
-                    let expected = relevant
-                        .iter()
-                        .map(|obstruction| obstruction.action.clone())
-                        .collect::<BTreeSet<_>>();
-                    let actual = gauge_resolutions.keys().cloned().collect::<BTreeSet<_>>();
-                    if actual != expected
-                        || gauge_resolutions
-                            .iter()
-                            .any(|(action, resolution)| action != &resolution.action)
-                    {
-                        return Err(IdentifiabilityError::Cardinality {
-                            field: "positive-claim gauge resolutions",
-                            detail: "positive assessment must resolve every and only exact applicable single/product/composition obstruction once"
-                                .to_string(),
-                        });
-                    }
-                    for resolution in gauge_resolutions.values() {
-                        if resolution.method.kind != SourceKind::Analyzer
-                            || &resolution.method != execution.analyzer()
-                            || resolution.receipt.kind != SourceKind::EvidenceReceipt
-                        {
-                            return Err(IdentifiabilityError::SourceMismatch {
-                                field: "gauge resolution evidence/execution analyzer",
-                            });
-                        }
-                        let obstruction = relevant
-                            .iter()
-                            .find(|obstruction| obstruction.action == resolution.action)
-                            .expect("exact gauge resolution set checked");
-                        if !disposition_is_valid(claim, obstruction, &resolution.disposition) {
-                            return Err(IdentifiabilityError::InvalidText {
-                                field: "gauge resolution disposition",
-                                detail: format!(
-                                    "disposition {:?} is incompatible with the target status, exact claim cell, subject projection, or claimed fiber",
-                                    resolution.disposition
-                                ),
-                            });
-                        }
-                        bind_source(&resolution.method)?;
-                        bind_source(&resolution.receipt)?;
-                    }
-                    bind_source(method)?;
-                    bind_source(receipt)?;
-                    bind_source(metric)?;
-                    bind_source(nondimensionalization)?;
-                }
-                ClaimAssessment::ClaimedRefuted {
-                    method,
-                    receipt,
-                    metric,
-                    nondimensionalization,
-                    certified_error_bound,
-                } => {
-                    validate_decisive_practical_claim_closure(claim, &problem.document)?;
-                    if method.kind != SourceKind::Analyzer
-                        || receipt.kind != SourceKind::EvidenceReceipt
-                        || !certified_error_bound.is_finite()
-                        || *certified_error_bound < 0.0
-                    {
-                        return Err(IdentifiabilityError::InvalidNumeric {
-                            field: "claim evidence",
-                            detail: "refuted claims need analyzer, receipt, and finite nonnegative certified error"
-                            .to_string(),
-                        });
-                    }
-                    if method != &execution.analyzer {
-                        return Err(IdentifiabilityError::SourceMismatch {
-                            field: "claim analyzer/execution analyzer",
-                        });
-                    }
-                    if metric != request.error_policy.metric()
-                        || nondimensionalization != request.error_policy.nondimensionalization()
-                    {
-                        return Err(IdentifiabilityError::SourceMismatch {
-                            field: "claim evidence/error policy",
-                        });
-                    }
-                    if *certified_error_bound > request.error_policy.maximum_certified_error() {
-                        return Err(IdentifiabilityError::InvalidNumeric {
-                            field: "certified claim error",
-                            detail: format!(
-                                "certified error {certified_error_bound:e} exceeds preregistered maximum {:e}",
-                                request.error_policy.maximum_certified_error()
-                            ),
-                        });
-                    }
-                    bind_source(method)?;
-                    bind_source(receipt)?;
-                    bind_source(metric)?;
-                    bind_source(nondimensionalization)?;
-                }
-                ClaimAssessment::ClaimedInconclusive {
-                    method,
-                    receipt,
-                    reason,
-                } => {
-                    validate_reason(reason, "inconclusive claim reason")?;
-                    if method.is_some() != receipt.is_some() {
-                        return Err(IdentifiabilityError::InvalidText {
-                            field: "inconclusive evidence pair",
-                            detail: "inconclusive evidence must bind method and receipt together, or omit both"
-                                .to_string(),
-                        });
-                    }
-                    if let Some(method) = method {
-                        if method.kind != SourceKind::Analyzer {
-                            return Err(IdentifiabilityError::InvalidText {
-                                field: "inconclusive method",
-                                detail: "method source must have Analyzer kind".to_string(),
-                            });
-                        }
-                        if method != &execution.analyzer {
-                            return Err(IdentifiabilityError::SourceMismatch {
-                                field: "inconclusive analyzer/execution analyzer",
-                            });
-                        }
-                        bind_source(method)?;
-                    }
-                    if let Some(receipt) = receipt {
-                        if receipt.kind != SourceKind::EvidenceReceipt {
-                            return Err(IdentifiabilityError::InvalidText {
-                                field: "inconclusive receipt",
-                                detail: "receipt source must have EvidenceReceipt kind".to_string(),
-                            });
-                        }
-                        bind_source(receipt)?;
-                    }
-                }
-                ClaimAssessment::NotAssessed { reason } => {
-                    validate_reason(reason, "not-assessed claim reason")?
-                }
-            }
+            validate_claim_assessment(
+                claim,
+                &problem.document,
+                execution,
+                &execution.claim_requests[id],
+                &evidence_map[id],
+                &mut referenced_sources,
+            )?;
         }
-        if source_authority.entries.len() != referenced_sources.len() {
-            return Err(IdentifiabilityError::Cardinality {
-                field: "assessment source authority",
-                detail: "every claim/method/receipt source needs exactly one resolution"
-                    .to_string(),
-            });
-        }
-        for (key, reference) in &referenced_sources {
-            let resolution = source_authority.entries.get(key).ok_or_else(|| {
-                IdentifiabilityError::UnknownReference {
-                    field: "assessment source authority",
-                    id: key.to_string(),
-                }
-            })?;
-            admit_opaque_resolution(reference, resolution)?;
-            if let Some(execution_resolution) = execution.source_authority.entries.get(key)
-                && execution_resolution != resolution
-            {
-                return Err(IdentifiabilityError::SourceMismatch {
-                    field: "assessment/execution source authority",
-                });
-            }
-            if let Some(problem_resolution) = problem.source_resolutions().get(key)
-                && problem_resolution != resolution
-            {
-                return Err(IdentifiabilityError::SourceMismatch {
-                    field: "assessment/problem source authority",
-                });
-            }
-        }
+        validate_assessment_source_authority(
+            &referenced_sources,
+            &source_authority,
+            execution,
+            problem,
+        )?;
         let assessment = Self {
             schema_version: IDENTIFIABILITY_ASSESSMENT_IDENTITY_VERSION,
             header,
@@ -14560,7 +15512,7 @@ fn decode_resolution_set(
         let authority = match reader.byte("source authority")? {
             0 => AuthorityDisposition::ContentVerified,
             1 => AuthorityDisposition::ExternalTrustReceipt {
-                trust_receipt: decode_trust_receipt_ref(reader)?,
+                trust_receipt: Box::new(decode_trust_receipt_ref(reader)?),
             },
             2 => AuthorityDisposition::Unverified {
                 reason: reader.reason("unverified source reason")?,
@@ -16493,16 +17445,16 @@ fn decode_gauge_composition(
             });
         }
     };
-    GaugeCompositionDeclaration::try_new(
+    GaugeCompositionDeclaration::try_new(GaugeCompositionInputs {
         id,
         members,
         kind,
-        decode_source_key(reader)?,
-        decode_gauge_algebra(reader)?,
-        decode_gauge_orbit_geometry(reader)?,
-        decode_gauge_status(reader)?,
-        decode_gauge_validity_scope(reader)?,
-    )
+        law: decode_source_key(reader)?,
+        effective_algebra: decode_gauge_algebra(reader)?,
+        effective_orbit_geometry: decode_gauge_orbit_geometry(reader)?,
+        status: decode_gauge_status(reader)?,
+        validity: decode_gauge_validity_scope(reader)?,
+    })
 }
 
 fn encode_gauge_action_reference(
@@ -16749,7 +17701,7 @@ fn encode_gauge_reduction_stage(
                 writer.text(predecessor.as_str(), "gauge reduction id")?;
             }
             encode_source_ref(writer, composition_law)?;
-            match relation {
+            match relation.as_ref() {
                 GaugeReductionStageRelation::NormalSubgroupTower {
                     normality,
                     induced_residual_action,
@@ -16828,7 +17780,7 @@ fn decode_gauge_reduction_stage(
             Ok(GaugeReductionStage::After {
                 predecessors,
                 composition_law,
-                relation,
+                relation: Box::new(relation),
             })
         }
         tag => Err(IdentifiabilityError::Canonical {
@@ -16873,8 +17825,8 @@ fn decode_gauge_measure_semantics(
         1 => Ok(GaugeMeasureSemantics::Pushforward {
             source_measure: decode_source_ref(reader)?,
             reduced_measure: decode_source_ref(reader)?,
-            transport: decode_source_ref(reader)?,
-            jacobian_or_disintegration: decode_source_ref(reader)?,
+            transport: Box::new(decode_source_ref(reader)?),
+            jacobian_or_disintegration: Box::new(decode_source_ref(reader)?),
         }),
         tag => Err(IdentifiabilityError::Canonical {
             at: reader.at.saturating_sub(1),
@@ -16953,7 +17905,7 @@ fn decode_gauge_reduction_binding(
             slice: decode_gauge_slice(reader)?,
         },
         3 => GaugeReductionPlan::ContinuousReductionWithDiscreteResidual {
-            reduction: decode_continuous_gauge_reduction(reader)?,
+            reduction: Box::new(decode_continuous_gauge_reduction(reader)?),
             normal_subgroup: decode_source_ref(reader)?,
             factor_extension: decode_source_ref(reader)?,
             residual_quotient_action: decode_source_ref(reader)?,
@@ -17507,6 +18459,40 @@ fn execution_identity_hash(
     )))
 }
 
+struct DecodedExecutionCollections {
+    claim_requests: Vec<ClaimRequest>,
+    actions: Vec<(ParameterRoleId, ParameterExecutionAction)>,
+    gauge_reductions: Vec<GaugeReductionBinding>,
+}
+
+fn decode_execution_collections(
+    reader: &mut CanonicalReader<'_>,
+) -> Result<DecodedExecutionCollections, IdentifiabilityError> {
+    let request_count = reader.count("claim requests")?;
+    preflight_collection_bytes(reader, request_count, 1, "claim requests")?;
+    let mut claim_requests = Vec::with_capacity(request_count);
+    for _ in 0..request_count {
+        claim_requests.push(decode_claim_request(reader)?);
+    }
+    let action_count = reader.count("parameter actions")?;
+    preflight_collection_bytes(reader, action_count, 1, "parameter actions")?;
+    let mut actions = Vec::with_capacity(action_count);
+    for _ in 0..action_count {
+        actions.push((decode_role(reader)?, decode_execution_action(reader)?));
+    }
+    let gauge_reduction_count = reader.count("gauge reductions")?;
+    preflight_collection_bytes(reader, gauge_reduction_count, 1, "gauge reductions")?;
+    let mut gauge_reductions = Vec::with_capacity(gauge_reduction_count);
+    for _ in 0..gauge_reduction_count {
+        gauge_reductions.push(decode_gauge_reduction_binding(reader)?);
+    }
+    Ok(DecodedExecutionCollections {
+        claim_requests,
+        actions,
+        gauge_reductions,
+    })
+}
+
 fn decode_execution(
     bytes: &[u8],
     problem: &AdmittedIdentifiabilityProblem,
@@ -17540,27 +18526,11 @@ fn decode_execution(
             });
         }
     };
-    let request_count = reader.count("claim requests")?;
-    preflight_collection_bytes(&reader, request_count, 1, "claim requests")?;
-    let mut claim_requests = Vec::with_capacity(request_count);
-    for _ in 0..request_count {
-        claim_requests.push(decode_claim_request(&mut reader)?);
-    }
-    let action_count = reader.count("parameter actions")?;
-    preflight_collection_bytes(&reader, action_count, 1, "parameter actions")?;
-    let mut actions = Vec::with_capacity(action_count);
-    for _ in 0..action_count {
-        actions.push((
-            decode_role(&mut reader)?,
-            decode_execution_action(&mut reader)?,
-        ));
-    }
-    let gauge_reduction_count = reader.count("gauge reductions")?;
-    preflight_collection_bytes(&reader, gauge_reduction_count, 1, "gauge reductions")?;
-    let mut gauge_reductions = Vec::with_capacity(gauge_reduction_count);
-    for _ in 0..gauge_reduction_count {
-        gauge_reductions.push(decode_gauge_reduction_binding(&mut reader)?);
-    }
+    let DecodedExecutionCollections {
+        claim_requests,
+        actions,
+        gauge_reductions,
+    } = decode_execution_collections(&mut reader)?;
     let rank_tolerance = reader.f64("rank tolerance")?;
     let singular_value_floor = reader.f64("singular-value floor")?;
     let maximum_condition_number = reader.f64("maximum condition number")?;
@@ -17618,11 +18588,10 @@ fn decode_execution(
     Ok(plan)
 }
 
-fn encode_claim(
+fn encode_claim_information_and_fiber(
     writer: &mut CanonicalWriter,
     claim: &TypedIdentifiabilityClaim,
 ) -> Result<(), IdentifiabilityError> {
-    writer.text(claim.id.as_str(), "claim id")?;
     match &claim.information {
         InformationRegime::StructuralExactModel => writer.byte(0),
         InformationRegime::ExactInputOutputMap => writer.byte(1),
@@ -17700,6 +18669,13 @@ fn encode_claim(
             encode_source_ref(writer, orbit_type_profile)?;
         }
     }
+    Ok(())
+}
+
+fn encode_claim_quantifier_and_domain(
+    writer: &mut CanonicalWriter,
+    claim: &TypedIdentifiabilityClaim,
+) -> Result<(), IdentifiabilityError> {
     match &claim.quantifier {
         ClaimQuantifier::AtRealization { realization } => {
             writer.byte(0);
@@ -17733,6 +18709,13 @@ fn encode_claim(
             encode_source_ref(writer, stratification)?;
         }
     }
+    Ok(())
+}
+
+fn encode_claim_subject_and_scope(
+    writer: &mut CanonicalWriter,
+    claim: &TypedIdentifiabilityClaim,
+) -> Result<(), IdentifiabilityError> {
     match &claim.subject {
         ClaimSubject::Parameter(role) => {
             writer.byte(0);
@@ -17787,10 +18770,19 @@ fn encode_claim(
     Ok(())
 }
 
-fn decode_claim(
+fn encode_claim(
+    writer: &mut CanonicalWriter,
+    claim: &TypedIdentifiabilityClaim,
+) -> Result<(), IdentifiabilityError> {
+    writer.text(claim.id.as_str(), "claim id")?;
+    encode_claim_information_and_fiber(writer, claim)?;
+    encode_claim_quantifier_and_domain(writer, claim)?;
+    encode_claim_subject_and_scope(writer, claim)
+}
+
+fn decode_claim_information_and_extent(
     reader: &mut CanonicalReader<'_>,
-) -> Result<TypedIdentifiabilityClaim, IdentifiabilityError> {
-    let id = ClaimId::try_new(reader.token("claim id")?)?;
+) -> Result<(InformationRegime, IdentifiabilityExtent), IdentifiabilityError> {
     let information = match reader.byte("claim information regime")? {
         0 => InformationRegime::StructuralExactModel,
         1 => InformationRegime::ExactInputOutputMap,
@@ -17815,6 +18807,12 @@ fn decode_claim(
             });
         }
     };
+    Ok((information, extent))
+}
+
+fn decode_claim_fiber(
+    reader: &mut CanonicalReader<'_>,
+) -> Result<FiberStructure, IdentifiabilityError> {
     let fiber = match reader.byte("claim fiber structure")? {
         0 => FiberStructure::Unique,
         1 => {
@@ -17880,6 +18878,12 @@ fn decode_claim(
             });
         }
     };
+    Ok(fiber)
+}
+
+fn decode_claim_quantifier_and_domain(
+    reader: &mut CanonicalReader<'_>,
+) -> Result<(ClaimQuantifier, ScalarDomain), IdentifiabilityError> {
     let quantifier = match reader.byte("claim quantifier")? {
         0 => ClaimQuantifier::AtRealization {
             realization: decode_source_ref(reader)?,
@@ -17916,6 +18920,12 @@ fn decode_claim(
             });
         }
     };
+    Ok((quantifier, scalar_domain))
+}
+
+fn decode_claim_subject(
+    reader: &mut CanonicalReader<'_>,
+) -> Result<ClaimSubject, IdentifiabilityError> {
     let subject = match reader.byte("claim subject")? {
         0 => ClaimSubject::Parameter(decode_role(reader)?),
         1 => ClaimSubject::ParameterSet(decode_role_set(reader, "claim parameter set")?),
@@ -17933,6 +18943,12 @@ fn decode_claim(
             });
         }
     };
+    Ok(subject)
+}
+
+fn decode_claim_scope(
+    reader: &mut CanonicalReader<'_>,
+) -> Result<ClaimScope, IdentifiabilityError> {
     let scope = match reader.byte("claim scope")? {
         0 => ClaimScope::WholeCampaign,
         1 => {
@@ -17971,6 +18987,18 @@ fn decode_claim(
             });
         }
     };
+    Ok(scope)
+}
+
+fn decode_claim(
+    reader: &mut CanonicalReader<'_>,
+) -> Result<TypedIdentifiabilityClaim, IdentifiabilityError> {
+    let id = ClaimId::try_new(reader.token("claim id")?)?;
+    let (information, extent) = decode_claim_information_and_extent(reader)?;
+    let fiber = decode_claim_fiber(reader)?;
+    let (quantifier, scalar_domain) = decode_claim_quantifier_and_domain(reader)?;
+    let subject = decode_claim_subject(reader)?;
+    let scope = decode_claim_scope(reader)?;
     Ok(TypedIdentifiabilityClaim::new(
         id,
         information,

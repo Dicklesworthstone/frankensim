@@ -14,8 +14,8 @@ use core::fmt;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
-    ClaimSelection, MaterialCard, PropertyKey, PropertyUsageReceipt, PropertyValue, QueryPoint,
-    SelectionPolicy,
+    ClaimSelection, ClaimSet, MaterialCard, PropertyKey, PropertyUsageReceipt, PropertyValue,
+    QueryPoint, SelectionPolicy,
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec};
@@ -148,95 +148,9 @@ impl ResolvedHeatCapacityCurve {
                 ));
             }
         }
-        let absolute = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::AbsoluteTemperature,
-            ValueForm::Static,
-        ));
-        let mut endpoints = [0.0; 2];
-        for (index, point) in [query.lower, query.upper].iter().enumerate() {
-            let t = point
-                .axes()
-                .get(query.temperature_axis)
-                .copied()
-                .ok_or_else(|| invalid("source query lacks the temperature coordinate"))?;
-            if !t.is_finite()
-                || t <= 0.0
-                || point
-                    .axis_quantities()
-                    .get(query.temperature_axis)
-                    .is_some_and(|q| {
-                        *q != absolute && *q != QuantitySpec::dimensional(Dims([0, 0, 0, 1, 0, 0]))
-                    })
-            {
-                return Err(invalid(
-                    "source temperature must be positive absolute kelvin",
-                ));
-            }
-            endpoints[index] = t;
-        }
-        if endpoints[0] >= endpoints[1]
-            || query.lower.axis_quantities() != query.upper.axis_quantities()
-            || !query
-                .lower
-                .axes()
-                .iter()
-                .filter(|(axis, _)| axis.as_str() != query.temperature_axis)
-                .eq(query
-                    .upper
-                    .axes()
-                    .iter()
-                    .filter(|(axis, _)| axis.as_str() != query.temperature_axis))
-        {
-            return Err(invalid(
-                "source temperatures must increase with fixed non-temperature context and descriptors",
-            ));
-        }
+        let endpoints = heat_capacity_source_endpoints(query)?;
         let claims = card.claims();
-        let mut temperatures = endpoints.to_vec();
-        for key in keys {
-            let support = claims
-                .query_envelope_typed(
-                    key,
-                    query.lower,
-                    query.upper,
-                    ClaimSelection::Policy(query.selection),
-                )
-                .map_err(|error| PhaseStateError::SourceQuery {
-                    property: key.name().to_owned(),
-                    reason: format!("continuous support required: {error:?}"),
-                })?;
-            let claim = claims
-                .claim(support.lower.receipt.selected)
-                .expect("envelope selected an immutable claim");
-            if let PropertyValue::Curve {
-                abscissa, knots, ..
-            } = &claim.value
-                && abscissa == query.temperature_axis
-            {
-                for &(t, _) in knots {
-                    if t > endpoints[0] && t < endpoints[1] {
-                        if temperatures.len() == MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
-                            temperatures.sort_by(f64::total_cmp);
-                            temperatures.dedup();
-                            if temperatures
-                                .binary_search_by(|value| value.total_cmp(&t))
-                                .is_ok()
-                            {
-                                continue;
-                            }
-                            if temperatures.len() == MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
-                                return Err(invalid(
-                                    "combined source temperature grid exceeds the knot budget",
-                                ));
-                            }
-                        }
-                        temperatures.push(t);
-                    }
-                }
-            }
-        }
-        temperatures.sort_by(f64::total_cmp);
-        temperatures.dedup();
+        let temperatures = heat_capacity_source_temperatures(claims, query, endpoints)?;
         let mut knots = Vec::with_capacity(temperatures.len());
         let mut receipts = Vec::with_capacity(2 * temperatures.len());
         for temperature in temperatures {
@@ -294,6 +208,109 @@ impl ResolvedHeatCapacityCurve {
     pub fn receipts(&self) -> &[PropertyUsageReceipt] {
         &self.receipts
     }
+}
+
+fn heat_capacity_source_endpoints(
+    query: HeatCapacitySourceQuery<'_>,
+) -> Result<[f64; 2], PhaseStateError> {
+    let invalid = |what| PhaseStateError::InvalidCurve { what };
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    let mut endpoints = [0.0; 2];
+    for (index, point) in [query.lower, query.upper].iter().enumerate() {
+        let t = point
+            .axes()
+            .get(query.temperature_axis)
+            .copied()
+            .ok_or_else(|| invalid("source query lacks the temperature coordinate"))?;
+        if !t.is_finite()
+            || t <= 0.0
+            || point
+                .axis_quantities()
+                .get(query.temperature_axis)
+                .is_some_and(|q| {
+                    *q != absolute && *q != QuantitySpec::dimensional(Dims([0, 0, 0, 1, 0, 0]))
+                })
+        {
+            return Err(invalid(
+                "source temperature must be positive absolute kelvin",
+            ));
+        }
+        endpoints[index] = t;
+    }
+    if endpoints[0] >= endpoints[1]
+        || query.lower.axis_quantities() != query.upper.axis_quantities()
+        || !query
+            .lower
+            .axes()
+            .iter()
+            .filter(|(axis, _)| axis.as_str() != query.temperature_axis)
+            .eq(query
+                .upper
+                .axes()
+                .iter()
+                .filter(|(axis, _)| axis.as_str() != query.temperature_axis))
+    {
+        return Err(invalid(
+            "source temperatures must increase with fixed non-temperature context and descriptors",
+        ));
+    }
+    Ok(endpoints)
+}
+
+fn heat_capacity_source_temperatures(
+    claims: &ClaimSet,
+    query: HeatCapacitySourceQuery<'_>,
+    endpoints: [f64; 2],
+) -> Result<Vec<f64>, PhaseStateError> {
+    let mut temperatures = endpoints.to_vec();
+    for key in [query.heat_capacity, query.density] {
+        let support = claims
+            .query_envelope_typed(
+                key,
+                query.lower,
+                query.upper,
+                ClaimSelection::Policy(query.selection),
+            )
+            .map_err(|error| PhaseStateError::SourceQuery {
+                property: key.name().to_owned(),
+                reason: format!("continuous support required: {error:?}"),
+            })?;
+        let claim = claims
+            .claim(support.lower.receipt.selected)
+            .expect("envelope selected an immutable claim");
+        if let PropertyValue::Curve {
+            abscissa, knots, ..
+        } = &claim.value
+            && abscissa == query.temperature_axis
+        {
+            for &(t, _) in knots {
+                if t > endpoints[0] && t < endpoints[1] {
+                    if temperatures.len() == MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
+                        temperatures.sort_by(f64::total_cmp);
+                        temperatures.dedup();
+                        if temperatures
+                            .binary_search_by(|value| value.total_cmp(&t))
+                            .is_ok()
+                        {
+                            continue;
+                        }
+                        if temperatures.len() == MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
+                            return Err(PhaseStateError::InvalidCurve {
+                                what: "combined source temperature grid exceeds the knot budget",
+                            });
+                        }
+                    }
+                    temperatures.push(t);
+                }
+            }
+        }
+    }
+    temperatures.sort_by(f64::total_cmp);
+    temperatures.dedup();
+    Ok(temperatures)
 }
 
 /// Coarse phase topology selected from an equilibrium mass fraction.
@@ -417,7 +434,10 @@ impl EquilibriumEnthalpyPhaseCurve {
     ) -> Result<Self, PhaseStateError> {
         validate_curve_common(material_card_identity, &knots)?;
         if knots[0].liquid_mass_fraction != 0.0
-            || knots[knots.len() - 1].liquid_mass_fraction != 1.0
+            || knots[knots.len() - 1]
+                .liquid_mass_fraction
+                .partial_cmp(&1.0)
+                != Some(core::cmp::Ordering::Equal)
         {
             return Err(PhaseStateError::InvalidCurve {
                 what: "the curve must begin fully solid and end fully liquid",
@@ -449,10 +469,10 @@ impl EquilibriumEnthalpyPhaseCurve {
     ) -> Result<Self, PhaseStateError> {
         validate_curve_common(material_card_identity, &knots)?;
         let liquid_mass_fraction = single_phase_fraction(phase)?;
-        if knots
-            .iter()
-            .any(|knot| knot.liquid_mass_fraction != liquid_mass_fraction)
-        {
+        if knots.iter().any(|knot| {
+            knot.liquid_mass_fraction.partial_cmp(&liquid_mass_fraction)
+                != Some(core::cmp::Ordering::Equal)
+        }) {
             return Err(PhaseStateError::InvalidCurve {
                 what: "every single-phase knot must carry the declared phase fraction",
             });
@@ -485,101 +505,12 @@ impl EquilibriumEnthalpyPhaseCurve {
         maximum_interpolation_error_j_kg: f64,
     ) -> Result<Self, PhaseStateError> {
         let liquid_mass_fraction = single_phase_fraction(phase)?;
-        if material_card_identity == ContentHash([0; 32]) {
-            return Err(PhaseStateError::InvalidCurve {
-                what: "material-card identity must not be zero",
-            });
-        }
-        if !reference_specific_enthalpy_j_kg.is_finite() {
-            return Err(PhaseStateError::InvalidCurve {
-                what: "reference specific enthalpy must be finite",
-            });
-        }
-        if !(maximum_interpolation_error_j_kg.is_finite() && maximum_interpolation_error_j_kg > 0.0)
-        {
-            return Err(PhaseStateError::InvalidCurve {
-                what: "maximum interpolation error must be finite and positive",
-            });
-        }
-        if knots.len() < 2 {
-            return Err(PhaseStateError::InvalidCurve {
-                what: "a heat-capacity chart needs at least two knots",
-            });
-        }
-        if knots.len() > MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
-            return Err(PhaseStateError::InvalidCurve {
-                what: "heat-capacity source knot count exceeds the generated-knot budget",
-            });
-        }
-        let mut generated_count = 1_usize;
-        let mut enthalpy = reference_specific_enthalpy_j_kg;
-        for knot in knots {
-            if !(knot.temperature_k.is_finite()
-                && knot.temperature_k > 0.0
-                && knot.specific_heat_capacity_j_kg_k.is_finite()
-                && knot.specific_heat_capacity_j_kg_k > 0.0
-                && knot.bulk_density_kg_m3.is_finite()
-                && knot.bulk_density_kg_m3 > 0.0)
-            {
-                return Err(PhaseStateError::InvalidCurve {
-                    what: "heat-capacity knots need finite positive temperature, heat capacity, and density",
-                });
-            }
-        }
-        for pair in knots.windows(2) {
-            let delta_temperature = pair[1].temperature_k - pair[0].temperature_k;
-            if !(delta_temperature.is_finite() && delta_temperature > 0.0) {
-                return Err(PhaseStateError::InvalidCurve {
-                    what: "heat-capacity temperatures must be strictly increasing",
-                });
-            }
-            let curvature_error = (pair[1].specific_heat_capacity_j_kg_k
-                - pair[0].specific_heat_capacity_j_kg_k)
-                .abs()
-                * delta_temperature
-                / 8.0;
-            if !curvature_error.is_finite() {
-                return Err(PhaseStateError::InvalidCurve {
-                    what: "heat-capacity interpolation error is not finite",
-                });
-            }
-            let subdivisions = if curvature_error <= maximum_interpolation_error_j_kg {
-                1
-            } else {
-                let required = (curvature_error / maximum_interpolation_error_j_kg)
-                    .sqrt()
-                    .ceil();
-                if !(required.is_finite() && required <= MAX_HEAT_CAPACITY_ENTHALPY_KNOTS as f64) {
-                    return Err(PhaseStateError::InvalidCurve {
-                        what: "heat-capacity interpolation exceeds the generated-knot budget",
-                    });
-                }
-                required as usize
-            };
-            generated_count =
-                generated_count
-                    .checked_add(subdivisions)
-                    .ok_or(PhaseStateError::InvalidCurve {
-                        what: "heat-capacity interpolation exceeds the generated-knot budget",
-                    })?;
-            if generated_count > MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
-                return Err(PhaseStateError::InvalidCurve {
-                    what: "heat-capacity interpolation exceeds the generated-knot budget",
-                });
-            }
-            let enthalpy_gain = (0.5 * pair[0].specific_heat_capacity_j_kg_k
-                + 0.5 * pair[1].specific_heat_capacity_j_kg_k)
-                * delta_temperature;
-            let next_enthalpy = enthalpy + enthalpy_gain;
-            if !(enthalpy_gain.is_finite() && next_enthalpy.is_finite() && next_enthalpy > enthalpy)
-            {
-                return Err(PhaseStateError::InvalidCurve {
-                    what: "heat-capacity integration produced non-finite or collapsed enthalpy",
-                });
-            }
-            enthalpy = next_enthalpy;
-        }
-
+        let generated_count = heat_capacity_generated_knot_count(
+            material_card_identity,
+            reference_specific_enthalpy_j_kg,
+            knots,
+            maximum_interpolation_error_j_kg,
+        )?;
         let mut generated = Vec::with_capacity(generated_count);
         generated.push(EnthalpyPhaseKnot {
             specific_enthalpy_j_kg: reference_specific_enthalpy_j_kg,
@@ -738,6 +669,10 @@ impl EquilibriumEnthalpyPhaseCurve {
 
     /// Resolve equilibrium temperature, density, and phase fractions from
     /// specific enthalpy without extrapolation.
+    ///
+    /// # Errors
+    /// Refuses nonfinite or out-of-domain enthalpy and an interpolated density
+    /// whose specific-volume calculation is not finite and positive.
     pub fn state_at_specific_enthalpy(
         &self,
         specific_enthalpy_j_kg: f64,
@@ -759,39 +694,38 @@ impl EquilibriumEnthalpyPhaseCurve {
                 .partial_cmp(&specific_enthalpy_j_kg)
                 .expect("admitted enthalpy knots and query are finite")
         }) {
-            Ok(index) => self.state_from_values(specific_enthalpy_j_kg, self.knots[index]),
+            Ok(index) => Ok(self.state_from_values(specific_enthalpy_j_kg, self.knots[index])),
             Err(upper_index) => {
                 let lower_knot = self.knots[upper_index - 1];
                 let upper_knot = self.knots[upper_index];
                 let alpha = (specific_enthalpy_j_kg - lower_knot.specific_enthalpy_j_kg)
                     / (upper_knot.specific_enthalpy_j_kg - lower_knot.specific_enthalpy_j_kg);
-                self.state_from_values(
+                let values = EnthalpyPhaseKnot {
                     specific_enthalpy_j_kg,
-                    EnthalpyPhaseKnot {
-                        specific_enthalpy_j_kg,
-                        temperature_k: lerp(
-                            lower_knot.temperature_k,
-                            upper_knot.temperature_k,
-                            alpha,
-                        ),
-                        liquid_mass_fraction: lerp(
-                            lower_knot.liquid_mass_fraction,
-                            upper_knot.liquid_mass_fraction,
-                            alpha,
-                        ),
-                        // Density is mass per volume, so interpolation on a
-                        // mass-specific enthalpy coordinate is performed in
-                        // specific volume and inverted. Linear density would
-                        // violate additive mixture volume through a two-phase
-                        // interval.
-                        bulk_density_kg_m3: lerp(
-                            lower_knot.bulk_density_kg_m3.recip(),
-                            upper_knot.bulk_density_kg_m3.recip(),
-                            alpha,
-                        )
-                        .recip(),
-                    },
-                )
+                    temperature_k: lerp(lower_knot.temperature_k, upper_knot.temperature_k, alpha),
+                    liquid_mass_fraction: lerp(
+                        lower_knot.liquid_mass_fraction,
+                        upper_knot.liquid_mass_fraction,
+                        alpha,
+                    ),
+                    // Density is mass per volume, so interpolation on a
+                    // mass-specific enthalpy coordinate is performed in
+                    // specific volume and inverted. Linear density would
+                    // violate additive mixture volume through a two-phase
+                    // interval.
+                    bulk_density_kg_m3: lerp(
+                        lower_knot.bulk_density_kg_m3.recip(),
+                        upper_knot.bulk_density_kg_m3.recip(),
+                        alpha,
+                    )
+                    .recip(),
+                };
+                if !(values.bulk_density_kg_m3.is_finite() && values.bulk_density_kg_m3 > 0.0) {
+                    return Err(PhaseStateError::InvalidCurve {
+                        what: "interpolated bulk density is not finite and positive",
+                    });
+                }
+                Ok(self.state_from_values(specific_enthalpy_j_kg, values))
             }
         }
     }
@@ -821,12 +755,12 @@ impl EquilibriumEnthalpyPhaseCurve {
         &self,
         specific_enthalpy_j_kg: f64,
         values: EnthalpyPhaseKnot,
-    ) -> Result<EquilibriumPhaseState, PhaseStateError> {
+    ) -> EquilibriumPhaseState {
         let liquid_mass_fraction = values.liquid_mass_fraction.clamp(0.0, 1.0);
         let solid_mass_fraction = 1.0 - liquid_mass_fraction;
         let phase = if liquid_mass_fraction == 0.0 {
             SolidLiquidPhase::Solid
-        } else if liquid_mass_fraction == 1.0 {
+        } else if liquid_mass_fraction.partial_cmp(&1.0) == Some(core::cmp::Ordering::Equal) {
             SolidLiquidPhase::Liquid
         } else {
             SolidLiquidPhase::SolidLiquid
@@ -847,7 +781,7 @@ impl EquilibriumEnthalpyPhaseCurve {
             SolidLiquidPhase::SolidLiquid => 1,
             SolidLiquidPhase::Liquid => 2,
         }]);
-        Ok(EquilibriumPhaseState {
+        EquilibriumPhaseState {
             specific_enthalpy_j_kg,
             temperature_k: values.temperature_k,
             solid_mass_fraction,
@@ -857,8 +791,108 @@ impl EquilibriumEnthalpyPhaseCurve {
             material_card_identity: self.material_card_identity,
             phase_curve_identity: self.identity,
             identity: hasher.finalize(),
-        })
+        }
     }
+}
+
+fn heat_capacity_generated_knot_count(
+    material_card_identity: ContentHash,
+    reference_specific_enthalpy_j_kg: f64,
+    knots: &[HeatCapacityKnot],
+    maximum_interpolation_error_j_kg: f64,
+) -> Result<usize, PhaseStateError> {
+    if material_card_identity == ContentHash([0; 32]) {
+        return Err(PhaseStateError::InvalidCurve {
+            what: "material-card identity must not be zero",
+        });
+    }
+    if !reference_specific_enthalpy_j_kg.is_finite() {
+        return Err(PhaseStateError::InvalidCurve {
+            what: "reference specific enthalpy must be finite",
+        });
+    }
+    if !(maximum_interpolation_error_j_kg.is_finite() && maximum_interpolation_error_j_kg > 0.0) {
+        return Err(PhaseStateError::InvalidCurve {
+            what: "maximum interpolation error must be finite and positive",
+        });
+    }
+    if knots.len() < 2 {
+        return Err(PhaseStateError::InvalidCurve {
+            what: "a heat-capacity chart needs at least two knots",
+        });
+    }
+    if knots.len() > MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
+        return Err(PhaseStateError::InvalidCurve {
+            what: "heat-capacity source knot count exceeds the generated-knot budget",
+        });
+    }
+    let mut generated_count = 1_usize;
+    let mut enthalpy = reference_specific_enthalpy_j_kg;
+    for knot in knots {
+        if !(knot.temperature_k.is_finite()
+            && knot.temperature_k > 0.0
+            && knot.specific_heat_capacity_j_kg_k.is_finite()
+            && knot.specific_heat_capacity_j_kg_k > 0.0
+            && knot.bulk_density_kg_m3.is_finite()
+            && knot.bulk_density_kg_m3 > 0.0)
+        {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "heat-capacity knots need finite positive temperature, heat capacity, and density",
+            });
+        }
+    }
+    for pair in knots.windows(2) {
+        let delta_temperature = pair[1].temperature_k - pair[0].temperature_k;
+        if !(delta_temperature.is_finite() && delta_temperature > 0.0) {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "heat-capacity temperatures must be strictly increasing",
+            });
+        }
+        let curvature_error =
+            (pair[1].specific_heat_capacity_j_kg_k - pair[0].specific_heat_capacity_j_kg_k).abs()
+                * delta_temperature
+                / 8.0;
+        if !curvature_error.is_finite() {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "heat-capacity interpolation error is not finite",
+            });
+        }
+        let subdivisions = if curvature_error <= maximum_interpolation_error_j_kg {
+            1
+        } else {
+            let required = (curvature_error / maximum_interpolation_error_j_kg)
+                .sqrt()
+                .ceil();
+            if !(required.is_finite() && required <= MAX_HEAT_CAPACITY_ENTHALPY_KNOTS as f64) {
+                return Err(PhaseStateError::InvalidCurve {
+                    what: "heat-capacity interpolation exceeds the generated-knot budget",
+                });
+            }
+            required as usize
+        };
+        generated_count =
+            generated_count
+                .checked_add(subdivisions)
+                .ok_or(PhaseStateError::InvalidCurve {
+                    what: "heat-capacity interpolation exceeds the generated-knot budget",
+                })?;
+        if generated_count > MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "heat-capacity interpolation exceeds the generated-knot budget",
+            });
+        }
+        let enthalpy_gain = (0.5 * pair[0].specific_heat_capacity_j_kg_k
+            + 0.5 * pair[1].specific_heat_capacity_j_kg_k)
+            * delta_temperature;
+        let next_enthalpy = enthalpy + enthalpy_gain;
+        if !(enthalpy_gain.is_finite() && next_enthalpy.is_finite() && next_enthalpy > enthalpy) {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "heat-capacity integration produced non-finite or collapsed enthalpy",
+            });
+        }
+        enthalpy = next_enthalpy;
+    }
+    Ok(generated_count)
 }
 
 fn validate_curve_common(
@@ -1091,6 +1125,39 @@ mod tests {
                 bulk_density_kg_m3: 900.0,
             },
         ]
+    }
+
+    #[test]
+    fn phase_state_refuses_nonrepresentable_density_between_finite_source_knots() {
+        let tiny = f64::from_bits(1);
+        for (lower_density, upper_density) in [(tiny, 1.0), (1.0, tiny), (tiny, tiny)] {
+            let mut knots = single_phase_knots(0.0);
+            knots[0].bulk_density_kg_m3 = lower_density;
+            knots[1].bulk_density_kg_m3 = upper_density;
+            let midpoint =
+                0.5 * (knots[0].specific_enthalpy_j_kg + knots[1].specific_enthalpy_j_kg);
+            let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+                ContentHash([0x59; 32]),
+                SolidLiquidPhase::Solid,
+                knots,
+            )
+            .expect("finite positive source knots remain admissible");
+            for knot in curve.knots() {
+                let exact = curve
+                    .state_at_specific_enthalpy(knot.specific_enthalpy_j_kg)
+                    .expect("exact source-knot density is representable");
+                assert_eq!(
+                    exact.bulk_density_kg_m3().to_bits(),
+                    knot.bulk_density_kg_m3.to_bits()
+                );
+            }
+            assert_eq!(
+                curve.state_at_specific_enthalpy(midpoint),
+                Err(PhaseStateError::InvalidCurve {
+                    what: "interpolated bulk density is not finite and positive",
+                })
+            );
+        }
     }
 
     fn heat_capacity_knots(first_cp: f64, second_cp: f64) -> [HeatCapacityKnot; 2] {

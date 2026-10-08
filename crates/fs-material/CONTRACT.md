@@ -1065,13 +1065,13 @@ asupersync tile programs and finalize receipts only after drain.
 
 ## Historical single-case identifiability prototype (non-authoritative)
 
-The following retained description documents the initial single-case draft for
-design archaeology. Its `StudySpecId`/`PhysicalStudyId` wrappers are
-crate-private, and its prototype integration test is compile-disabled. Both are
-non-authoritative: they are not the current I10.1 public contract and cannot
-mint current authority.
+The following description documents the initial single-case draft for design
+archaeology. Its implementation and `StudySpecId`/`PhysicalStudyId` wrappers
+live only in repository history; its obsolete prototype integration test remains
+explicitly compile-disabled. None of these historical materials are the current
+I10.1 public contract or can mint current authority.
 
-The retained `identifiability.rs` prototype owned the admitted *subject* of
+The removed `identifiability.rs` prototype owned the admitted *subject* of
 later structural, local, generic, global, and practical identifiability
 analysis. Its job was to make an inverse problem closed, replayable, and
 impossible to silently widen; it did not itself prove an identifiability
@@ -1081,7 +1081,7 @@ Ambition tags: closed law/experiment schema and canonical identities [S];
 downstream symbolic, numerical, algebraic, and sheaf-theoretic evidence [F/M]
 remains external and is carried only through explicit receipts.
 
-### Retained prototype types and semantics
+### Historical prototype types and semantics
 
 - `MaterialModelBinding::from_cards` binds the complete immutable
   `MaterialCard`, its exact member `ConstitutiveModelCard`, the narrow canonical

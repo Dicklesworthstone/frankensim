@@ -255,6 +255,7 @@ impl ScalarPropertyRequirement {
         self.elastic_component
     }
 
+    /// Exact symmetric strain coordinate requested by the consumer.
     #[must_use]
     pub const fn strain_component(&self) -> Option<StrainTensorComponent> {
         self.strain_component
@@ -405,7 +406,7 @@ impl ResolvedScalarProperty {
         for (axis, _) in &receipt.query_point {
             let quantity = receipt.axis_quantities.get(axis).copied();
             let semantic = quantity.and_then(QuantitySpec::semantic_type);
-            let convention = match semantic.map(|ty| ty.kind()) {
+            let convention = match semantic.map(SemanticType::kind) {
                 Some(QuantityKind::Frequency(convention)) => {
                     if semantic.is_some_and(|ty| ty.form() != ValueForm::Static) {
                         return Err(MaterialStatePointError::InvalidDerived {
@@ -627,7 +628,7 @@ pub fn resolve_material_state_point(
     selection: MaterialPropertySelection,
 ) -> Result<ResolvedMaterialStatePoint, MaterialStatePointError> {
     let (query_point, properties) =
-        resolve_scalar_property_set(card.claims(), point, requirements, &selection)?;
+        resolve_scalar_property_set(card.claims(), point, requirements, selection)?;
     let card_identity = card.content_hash();
     let identity = resolved_identity(
         MATERIAL_STATE_POINT_IDENTITY_DOMAIN,
@@ -659,7 +660,7 @@ pub fn resolve_interface_state_point(
     selection: MaterialPropertySelection,
 ) -> Result<ResolvedInterfaceStatePoint, MaterialStatePointError> {
     let (query_point, properties) =
-        resolve_scalar_property_set(card.claims(), point, requirements, &selection)?;
+        resolve_scalar_property_set(card.claims(), point, requirements, selection)?;
     let card_identity = card.content_hash();
     let identity = resolved_identity(
         INTERFACE_STATE_POINT_IDENTITY_DOMAIN,
@@ -680,102 +681,35 @@ pub fn resolve_interface_state_point(
     })
 }
 
+type ResolvedScalarPropertySet = (Vec<(String, f64)>, Vec<ResolvedScalarProperty>);
+
+enum ScalarQuerySelection {
+    Policy(SelectionPolicy),
+    Pinned(Vec<ClaimId>),
+}
+
 fn resolve_scalar_property_set(
     claims: &ClaimSet,
     point: &QueryPoint,
     requirements: &[ScalarPropertyRequirement],
-    selection: &MaterialPropertySelection,
-) -> Result<(Vec<(String, f64)>, Vec<ResolvedScalarProperty>), MaterialStatePointError> {
+    selection: MaterialPropertySelection,
+) -> Result<ResolvedScalarPropertySet, MaterialStatePointError> {
     if requirements.is_empty() || requirements.len() > MAX_MATERIAL_STATE_PROPERTIES {
         return Err(MaterialStatePointError::RequirementCount {
             observed: requirements.len(),
             maximum: MAX_MATERIAL_STATE_PROPERTIES,
         });
     }
-    let mut queries = Vec::with_capacity(requirements.len());
-    for requirement in requirements {
-        let mut key = PropertyKey::with_quantity(&requirement.name, requirement.quantity);
-        let context_error = |source| MaterialStatePointError::Query {
-            property: requirement.name.clone(),
-            source,
-        };
-        if let Some(context) = requirement.hardness_test() {
-            key = key
-                .with_hardness_test(context.clone())
-                .map_err(context_error)?;
-        }
-        if let Some(component) = requirement.elastic_component() {
-            key = key
-                .with_elastic_component(component)
-                .map_err(context_error)?;
-        }
-        if let Some(component) = requirement.strain_component() {
-            key = key
-                .with_strain_component(component)
-                .map_err(context_error)?;
-        }
-        if let Some(component) = requirement.stress_component() {
-            key = key
-                .with_stress_component(component)
-                .map_err(context_error)?;
-        }
-        if queries.iter().any(|(_, prior)| *prior == key) {
-            return Err(MaterialStatePointError::DuplicateRequirement {
-                property: requirement.name.clone(),
-            });
-        }
-        queries.push((requirement.clone(), key));
-    }
-    queries.sort_by(|(left, _), (right, _)| left.name.cmp(&right.name));
-
-    let pins = match selection {
-        MaterialPropertySelection::SingleClaimOnly
-        | MaterialPropertySelection::PreferObservationBacked => None,
-        MaterialPropertySelection::PinnedByProperty(offered) => {
-            if offered.len() != queries.len() {
-                return Err(MaterialStatePointError::InvalidSelectionPlan);
-            }
-            let mut used = vec![false; offered.len()];
-            let mut pins = Vec::with_capacity(queries.len());
-            for (requirement, key) in &queries {
-                let repeated_name = queries
-                    .iter()
-                    .filter(|(other, _)| other.name == requirement.name)
-                    .count()
-                    > 1;
-                let mut matches = offered.iter().enumerate().filter(|(index, (name, id))| {
-                    !used[*index]
-                        && *name == requirement.name
-                        && (!repeated_name
-                            || claims.claim(*id).is_some_and(|claim| claim.key == *key))
-                });
-                let Some((index, (_, claim))) = matches.next() else {
-                    return Err(MaterialStatePointError::InvalidSelectionPlan);
-                };
-                if matches.next().is_some() {
-                    return Err(MaterialStatePointError::InvalidSelectionPlan);
-                }
-                used[index] = true;
-                pins.push(*claim);
-            }
-            Some(pins)
-        }
-    };
+    let queries = scalar_property_queries(requirements)?;
+    let selection = scalar_query_selection(claims, &queries, selection)?;
 
     let mut properties = Vec::with_capacity(requirements.len());
     for (index, (requirement, key)) in queries.into_iter().enumerate() {
-        let answer = match selection {
-            MaterialPropertySelection::SingleClaimOnly => {
-                claims.query_typed(&key, point, SelectionPolicy::SingleClaimOnly)
+        let answer = match &selection {
+            ScalarQuerySelection::Policy(policy) => claims.query_typed(&key, point, *policy),
+            ScalarQuerySelection::Pinned(pins) => {
+                claims.query_pinned_typed(&key, point, pins[index])
             }
-            MaterialPropertySelection::PreferObservationBacked => {
-                claims.query_typed(&key, point, SelectionPolicy::PreferObservationBacked)
-            }
-            MaterialPropertySelection::PinnedByProperty(_) => claims.query_pinned_typed(
-                &key,
-                point,
-                pins.as_ref().expect("pin plan was admitted")[index],
-            ),
         }
         .map_err(|source| match source {
             MatDbError::QuantityMismatch {
@@ -841,6 +775,93 @@ fn resolve_scalar_property_set(
         .map(|(axis, value)| (axis.clone(), *value))
         .collect::<Vec<_>>();
     Ok((query_point, properties))
+}
+
+fn scalar_property_queries(
+    requirements: &[ScalarPropertyRequirement],
+) -> Result<Vec<(ScalarPropertyRequirement, PropertyKey)>, MaterialStatePointError> {
+    let mut queries = Vec::with_capacity(requirements.len());
+    for requirement in requirements {
+        let mut key = PropertyKey::with_quantity(&requirement.name, requirement.quantity);
+        let context_error = |source| MaterialStatePointError::Query {
+            property: requirement.name.clone(),
+            source,
+        };
+        if let Some(context) = requirement.hardness_test() {
+            key = key
+                .with_hardness_test(context.clone())
+                .map_err(context_error)?;
+        }
+        if let Some(component) = requirement.elastic_component() {
+            key = key
+                .with_elastic_component(component)
+                .map_err(context_error)?;
+        }
+        if let Some(component) = requirement.strain_component() {
+            key = key
+                .with_strain_component(component)
+                .map_err(context_error)?;
+        }
+        if let Some(component) = requirement.stress_component() {
+            key = key
+                .with_stress_component(component)
+                .map_err(context_error)?;
+        }
+        if queries.iter().any(|(_, prior)| *prior == key) {
+            return Err(MaterialStatePointError::DuplicateRequirement {
+                property: requirement.name.clone(),
+            });
+        }
+        queries.push((requirement.clone(), key));
+    }
+    queries.sort_by(|(left, _), (right, _)| left.name.cmp(&right.name));
+
+    Ok(queries)
+}
+
+fn scalar_query_selection(
+    claims: &ClaimSet,
+    queries: &[(ScalarPropertyRequirement, PropertyKey)],
+    selection: MaterialPropertySelection,
+) -> Result<ScalarQuerySelection, MaterialStatePointError> {
+    let selected = match selection {
+        MaterialPropertySelection::SingleClaimOnly => {
+            ScalarQuerySelection::Policy(SelectionPolicy::SingleClaimOnly)
+        }
+        MaterialPropertySelection::PreferObservationBacked => {
+            ScalarQuerySelection::Policy(SelectionPolicy::PreferObservationBacked)
+        }
+        MaterialPropertySelection::PinnedByProperty(offered) => {
+            if offered.len() != queries.len() {
+                return Err(MaterialStatePointError::InvalidSelectionPlan);
+            }
+            let mut used = vec![false; offered.len()];
+            let mut pins = Vec::with_capacity(queries.len());
+            for (requirement, key) in queries {
+                let repeated_name = queries
+                    .iter()
+                    .filter(|(other, _)| other.name == requirement.name)
+                    .count()
+                    > 1;
+                let mut matches = offered.iter().enumerate().filter(|(index, (name, id))| {
+                    !used[*index]
+                        && *name == requirement.name
+                        && (!repeated_name
+                            || claims.claim(*id).is_some_and(|claim| claim.key == *key))
+                });
+                let Some((index, (_, claim))) = matches.next() else {
+                    return Err(MaterialStatePointError::InvalidSelectionPlan);
+                };
+                if matches.next().is_some() {
+                    return Err(MaterialStatePointError::InvalidSelectionPlan);
+                }
+                used[index] = true;
+                pins.push(*claim);
+            }
+            ScalarQuerySelection::Pinned(pins)
+        }
+    };
+    Ok(selected)
 }
 
 /// The three scalar properties needed by isotropic linear elasticity.
@@ -1118,7 +1139,50 @@ pub fn resolve_isotropic_thermoelastic_state_point_with_requirements(
             quantity: "thermoelastic positive absolute T coordinate",
         },
     )?;
-    let mut requirements = [
+    let mut requirements = thermoelastic_requirements(card)?;
+    for extra in additional {
+        if requirements
+            .iter()
+            .any(|required| required.name == extra.name)
+        {
+            return Err(MaterialStatePointError::InvalidRequirement {
+                property: extra.name.clone(),
+                reason: "auxiliary thermoelastic property must have a distinct name; required properties cannot be shadowed",
+            });
+        }
+        requirements.push(extra.clone());
+    }
+    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    let value = |name: &str| {
+        resolved
+            .property(name)
+            .expect("canonical thermoelastic requirement was resolved")
+            .value_si()
+    };
+    let law = crate::visco::ThermoelasticZener {
+        e: value(YOUNG_MODULUS_PROPERTY),
+        rho: value(DENSITY_PROPERTY),
+        alpha_t: value(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY),
+        cp: value(SPECIFIC_HEAT_CAPACITY_PROPERTY),
+        conductivity: value(THERMAL_CONDUCTIVITY_PROPERTY),
+        t0: temperature,
+    };
+    if !law.relaxation_strength().is_finite() {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "thermoelastic relaxation strength",
+        });
+    }
+    Ok(IsotropicThermoelasticStatePoint {
+        poisson_ratio: value(POISSON_RATIO_PROPERTY),
+        resolved,
+        law,
+    })
+}
+
+fn thermoelastic_requirements(
+    card: &MaterialCard,
+) -> Result<Vec<ScalarPropertyRequirement>, MaterialStatePointError> {
+    [
         (
             DENSITY_PROPERTY,
             Density::DIMS,
@@ -1176,44 +1240,7 @@ pub fn resolve_isotropic_thermoelastic_state_point_with_requirements(
             ScalarPropertyRequirement::try_new(name, dims, domain)
         }
     })
-    .collect::<Result<Vec<_>, _>>()?;
-    for extra in additional {
-        if requirements
-            .iter()
-            .any(|required| required.name == extra.name)
-        {
-            return Err(MaterialStatePointError::InvalidRequirement {
-                property: extra.name.clone(),
-                reason: "auxiliary thermoelastic property must have a distinct name; required properties cannot be shadowed",
-            });
-        }
-        requirements.push(extra.clone());
-    }
-    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
-    let value = |name: &str| {
-        resolved
-            .property(name)
-            .expect("canonical thermoelastic requirement was resolved")
-            .value_si()
-    };
-    let law = crate::visco::ThermoelasticZener {
-        e: value(YOUNG_MODULUS_PROPERTY),
-        rho: value(DENSITY_PROPERTY),
-        alpha_t: value(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY),
-        cp: value(SPECIFIC_HEAT_CAPACITY_PROPERTY),
-        conductivity: value(THERMAL_CONDUCTIVITY_PROPERTY),
-        t0: temperature,
-    };
-    if !law.relaxation_strength().is_finite() {
-        return Err(MaterialStatePointError::InvalidDerived {
-            quantity: "thermoelastic relaxation strength",
-        });
-    }
-    Ok(IsotropicThermoelasticStatePoint {
-        poisson_ratio: value(POISSON_RATIO_PROPERTY),
-        resolved,
-        law,
-    })
+    .collect()
 }
 
 /// Total isotropic free linear strain integrated over one temperature path.
@@ -1613,6 +1640,7 @@ pub struct StrainTensorStatePoint {
 }
 
 impl StrainTensorStatePoint {
+    /// Complete component evidence and source receipts at the queried point.
     #[must_use]
     pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
         &self.resolved
@@ -1624,11 +1652,13 @@ impl StrainTensorStatePoint {
         &self.strain
     }
 
+    /// Declared source order, frame and strain-shear convention.
     #[must_use]
     pub const fn basis(&self) -> StrainTensorBasis {
         self.descriptor.basis()
     }
 
+    /// Source-declared identity shared by all six strain components.
     #[must_use]
     pub const fn source_tensor_identity(&self) -> ContentHash {
         self.descriptor.source_tensor()
@@ -1773,6 +1803,7 @@ pub struct JointStrainTensorStatePoint {
 }
 
 impl JointStrainTensorStatePoint {
+    /// Six nominal source strain coordinates and their scalar evidence.
     #[must_use]
     pub const fn nominal(&self) -> &StrainTensorStatePoint {
         &self.nominal
@@ -1785,6 +1816,7 @@ impl JointStrainTensorStatePoint {
         &self.joint
     }
 
+    /// Identity binding the nominal strain state and its joint source receipt.
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity

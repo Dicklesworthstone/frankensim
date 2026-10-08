@@ -1517,6 +1517,32 @@ fn blind_release_bound_to_another_split_refuses() {
         hash("wrong-split-release-authority"),
     )
     .expect("structurally valid wrong-split receipt");
+    let split_ref = ArtifactRef::new(
+        ArtifactKind::CalibrationSplit,
+        data.1.id().clone(),
+        data.1.content_hash().expect("actual split hash"),
+    );
+    data.1
+        .blind_selection(
+            split_ref.clone(),
+            vec![observation("blind-a")],
+            blind_release_for(&data.1, "matching-release-authority"),
+        )
+        .expect("the unchanged split admits its matching release");
+    let vv_error = data
+        .1
+        .blind_selection(
+            split_ref,
+            vec![observation("blind-a")],
+            wrong_release.clone(),
+        )
+        .expect_err("the independent V&V owner rejects a foreign split");
+    assert_eq!(vv_error.violations().len(), 1);
+    assert_eq!(
+        vv_error.violations()[0].rule(),
+        VvRule::SplitBlindHoldoutSealed
+    );
+    assert_eq!(vv_error.violations()[0].field(), "selection.blind_release");
     let case = case_fixture(
         "a",
         CasePurpose::BlindFalsification,
@@ -1532,7 +1558,15 @@ fn blind_release_bound_to_another_split_refuses() {
         BundleMode::Exact,
     )
     .expect_err("release for another split must refuse");
-    assert!(matches!(&error, IdentifiabilityError::Vv { .. }));
+    assert!(
+        matches!(
+            &error,
+            IdentifiabilityError::SourceMismatch {
+                field: "trust receipt subject artifact/source resolution",
+            }
+        ),
+        "{error:?}"
+    );
     log(
         "blind-release-split-binding",
         "pass",
@@ -1554,6 +1588,32 @@ fn blind_release_with_wrong_split_id_refuses() {
         hash("wrong-split-id-release-authority"),
     )
     .expect("structurally valid wrong-id receipt");
+    let split_ref = ArtifactRef::new(
+        ArtifactKind::CalibrationSplit,
+        data.1.id().clone(),
+        data.1.content_hash().expect("actual split hash"),
+    );
+    data.1
+        .blind_selection(
+            split_ref.clone(),
+            vec![observation("blind-a")],
+            blind_release_for(&data.1, "matching-id-release-authority"),
+        )
+        .expect("the unchanged split admits its matching release");
+    let vv_error = data
+        .1
+        .blind_selection(
+            split_ref,
+            vec![observation("blind-a")],
+            wrong_release.clone(),
+        )
+        .expect_err("the independent V&V owner rejects a foreign id");
+    assert_eq!(vv_error.violations().len(), 1);
+    assert_eq!(
+        vv_error.violations()[0].rule(),
+        VvRule::SplitBlindHoldoutSealed
+    );
+    assert_eq!(vv_error.violations()[0].field(), "selection.blind_release");
     let case = case_fixture(
         "a",
         CasePurpose::BlindFalsification,
@@ -1569,7 +1629,15 @@ fn blind_release_with_wrong_split_id_refuses() {
         BundleMode::Exact,
     )
     .expect_err("right hash under another split id must refuse");
-    assert!(matches!(&error, IdentifiabilityError::Vv { .. }));
+    assert!(
+        matches!(
+            &error,
+            IdentifiabilityError::SourceMismatch {
+                field: "trust receipt subject artifact/source resolution",
+            }
+        ),
+        "{error:?}"
+    );
     log(
         "blind-release-split-id-binding",
         "pass",
@@ -1751,12 +1819,14 @@ fn blind_release_authority_must_agree_with_explicit_concrete_authority() {
             .expect("split source hashes"),
     );
     let matching = AuthorityDisposition::ExternalTrustReceipt {
-        trust_receipt: TrustReceiptRef::blind_release(
-            &matching_split_source,
-            matching_case.split.id().clone(),
-            hash("blind-release-authority-a"),
-        )
-        .expect("matching trust receipt fixture"),
+        trust_receipt: Box::new(
+            TrustReceiptRef::blind_release(
+                &matching_split_source,
+                matching_case.split.id().clone(),
+                hash("blind-release-authority-a"),
+            )
+            .expect("matching trust receipt fixture"),
+        ),
     };
     admit_with_concrete_authority(
         matching_fixture,
@@ -1776,12 +1846,14 @@ fn blind_release_authority_must_agree_with_explicit_concrete_authority() {
             .expect("split source hashes"),
     );
     let conflicting = AuthorityDisposition::ExternalTrustReceipt {
-        trust_receipt: TrustReceiptRef::blind_release(
-            &conflicting_split_source,
-            conflicting_case.split.id().clone(),
-            hash("different-explicit-split-authority"),
-        )
-        .expect("conflicting trust receipt fixture"),
+        trust_receipt: Box::new(
+            TrustReceiptRef::blind_release(
+                &conflicting_split_source,
+                conflicting_case.split.id().clone(),
+                hash("different-explicit-split-authority"),
+            )
+            .expect("conflicting trust receipt fixture"),
+        ),
     };
     let error = admit_with_concrete_authority(
         conflicting_fixture,
@@ -2356,11 +2428,13 @@ fn one_raw_row_reused_across_channels_refuses_independent_noise() {
         ordinary_data("a"),
     )
     .with_duplicate_row_channel();
-    let error = admit(
-        problem_fixture(vec![case], DataReusePolicy::Disjoint),
-        BundleMode::Exact,
-    )
-    .expect_err("one raw row reused across channels needs explicit dependence");
+    let Err(error) = try_problem_fixture_with_global_likelihood(
+        vec![case],
+        DataReusePolicy::Disjoint,
+        "joint-likelihood",
+    ) else {
+        panic!("one raw row reused across channels needs explicit dependence")
+    };
     assert!(matches!(
         &error,
         IdentifiabilityError::InvalidText {

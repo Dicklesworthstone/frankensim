@@ -99,16 +99,18 @@ fn source_key(value: &str) -> SourceKey {
 
 fn external_trust(label: &str, subject: &SourceRef) -> AuthorityDisposition {
     AuthorityDisposition::ExternalTrustReceipt {
-        trust_receipt: TrustReceiptRef::try_new(
-            source(
-                "fixture-trust-receipt",
-                SourceKind::EvidenceReceipt,
-                hash(label),
-            ),
-            subject.clone(),
-            TrustAuthentication::Unauthenticated,
-        )
-        .expect("typed external trust receipt fixture"),
+        trust_receipt: Box::new(
+            TrustReceiptRef::try_new(
+                source(
+                    "fixture-trust-receipt",
+                    SourceKind::EvidenceReceipt,
+                    hash(label),
+                ),
+                subject.clone(),
+                TrustAuthentication::Unauthenticated,
+            )
+            .expect("typed external trust receipt fixture"),
+        ),
     }
 }
 
@@ -494,6 +496,9 @@ struct ProblemOptions {
     case_physics_mutation: u8,
     modeled_discrepancy_case: u8,
     composite_influence_chain: bool,
+    cross_parameter_composite: bool,
+    unnecessary_opaque_membership: bool,
+    wrong_sensor_certificate: bool,
     gauge_case: u8,
     yield_influence_case_b: bool,
     joint_prior_choice: u8,
@@ -790,6 +795,24 @@ fn retrospective_origin_fixture_with_options(
                 .expect("typed split-a source"),
             "split-b" => SourceRef::calibration_split(source.key().clone(), &split_b)
                 .expect("typed split-b source"),
+            "sensor-a" | "sensor-b" if !options.wrong_sensor_certificate => {
+                let instrument = artifact(if source.key().as_str() == "sensor-a" {
+                    "instrument-a"
+                } else {
+                    "instrument-b"
+                });
+                SourceRef::try_new(
+                    source.key().clone(),
+                    source.kind(),
+                    experiment
+                        .instrument_calibration(&instrument)
+                        .expect("experiment instrument calibration")
+                        .certificate_hash(),
+                    source.content_hash_domain(),
+                    source.contract_version(),
+                )
+                .expect("exact retrospective sensor certificate")
+            }
             _ => source.clone(),
         };
     }
@@ -1440,6 +1463,14 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
         ));
         influences.extend([
             InfluenceDeclaration::new(
+                InfluenceId::try_new("yield-to-tangent").expect("influence id"),
+                role("yield_stress"),
+                DistributionFunctional::Location {
+                    observation: ObservationKey::new(case_id("b"), channel("tangent")),
+                },
+                InfluenceRepresentation::Direct,
+            ),
+            InfluenceDeclaration::new(
                 InfluenceId::try_new("composite-middle").expect("influence id"),
                 role("yield_stress"),
                 DistributionFunctional::Location {
@@ -1447,9 +1478,14 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
                 },
                 InfluenceRepresentation::Composite {
                     operator: source_key("composite-influence-operator"),
-                    inputs: BTreeSet::from([
-                        InfluenceId::try_new("hardening-to-tangent").expect("influence id")
-                    ]),
+                    inputs: BTreeSet::from([InfluenceId::try_new(
+                        if options.cross_parameter_composite {
+                            "hardening-to-tangent"
+                        } else {
+                            "yield-to-tangent"
+                        },
+                    )
+                    .expect("influence id")]),
                 },
             ),
             InfluenceDeclaration::new(
@@ -1468,6 +1504,21 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
         ]);
     }
     let mut constraints = Vec::new();
+    if options.gauge_case == 10 && !options.unnecessary_opaque_membership {
+        sources.push(source(
+            "fixture-domain-manifold",
+            SourceKind::ExternalManifold,
+            hash("fixture-domain-manifold"),
+        ));
+        constraints.push(JointConstraint::new(
+            ConstraintId::try_new("fixture-domain-manifold").expect("constraint id"),
+            JointConstraintKind::ExternalManifold {
+                members: BTreeSet::from([role("yield_stress"), role("hardening_modulus")]),
+                definition: source_key("fixture-domain-manifold"),
+                codimension: ConstraintCodimension::Finite { codimension: 1 },
+            },
+        ));
+    }
     if options.valid_constraint {
         constraints.push(JointConstraint::new(
             ConstraintId::try_new("stress-balance").expect("constraint id"),
@@ -1727,24 +1778,24 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
             1
         };
         gauge_compositions.push(
-            GaugeCompositionDeclaration::try_new(
-                GaugeCompositionId::try_new("gauge-system").expect("composition id"),
-                BTreeSet::from([
+            GaugeCompositionDeclaration::try_new(GaugeCompositionInputs {
+                id: GaugeCompositionId::try_new("gauge-system").expect("composition id"),
+                members: BTreeSet::from([
                     GaugeClassId::try_new("gauge-0").expect("gauge id"),
                     GaugeClassId::try_new("gauge-1").expect("gauge id"),
                 ]),
-                if options.independent_gauge_composition {
+                kind: if options.independent_gauge_composition {
                     GaugeCompositionKind::IndependentProduct
                 } else {
                     GaugeCompositionKind::Generated
                 },
-                source_key("gauge-composition-law"),
-                GaugeAlgebra::Continuous {
+                law: source_key("gauge-composition-law"),
+                effective_algebra: GaugeAlgebra::Continuous {
                     group_dimension: GaugeContinuousDimension::Finite {
                         dimension: effective_dimension,
                     },
                 },
-                GaugeOrbitGeometry::Regular {
+                effective_orbit_geometry: GaugeOrbitGeometry::Regular {
                     principal: RegularGaugeOrbit::new(
                         GaugeContinuousDimension::Finite {
                             dimension: effective_dimension,
@@ -1753,14 +1804,14 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
                     ),
                     stabilizer_profile: None,
                 },
-                GaugeStatus::Assumed {
+                status: GaugeStatus::Assumed {
                     assumption: source_key("fixture-gauge-assumption"),
                 },
-                gauge_validity_fixture(
+                validity: gauge_validity_fixture(
                     &BTreeSet::from([role("yield_stress"), role("hardening_modulus")]),
                     true,
                 ),
-            )
+            })
             .expect("declared gauge composition fixture"),
         );
     }
@@ -2029,6 +2080,14 @@ fn opaque_source_preimage(
             .expect("reachable production-binding source")
     } else if source.kind() == SourceKind::ConstitutiveGraph {
         b"constitutive-graph".to_vec()
+    } else if source.kind() == SourceKind::Metrology
+        && source.expected_hash() == hash("calibration-a")
+    {
+        b"calibration-a".to_vec()
+    } else if source.kind() == SourceKind::Metrology
+        && source.expected_hash() == hash("calibration-b")
+    {
+        b"calibration-b".to_vec()
     } else {
         source.key().as_str().as_bytes().to_vec()
     }
@@ -2334,8 +2393,11 @@ fn default_claim(problem: &AdmittedIdentifiabilityProblem) -> TypedIdentifiabili
         .sources()
         .get(&source_key("claim-strata"))
     {
-        FiberStructure::Stratified {
-            strata: strata.clone(),
+        FiberStructure::StratifiedOrbit {
+            action: GaugeActionReference::Single(
+                GaugeClassId::try_new("claim-domain-gauge").expect("gauge id"),
+            ),
+            orbit_type_profile: strata.clone(),
         }
     } else if problem
         .document()
@@ -2351,6 +2413,11 @@ fn default_claim(problem: &AdmittedIdentifiabilityProblem) -> TypedIdentifiabili
     } else {
         FiberStructure::Unique
     };
+    let subject = if matches!(&fiber, FiberStructure::StratifiedOrbit { .. }) {
+        ClaimSubject::ParameterSet(BTreeSet::from([claimed_role, role("hardening_modulus")]))
+    } else {
+        ClaimSubject::Parameter(claimed_role)
+    };
     TypedIdentifiabilityClaim::new(
         ClaimId::try_new("yield-structural-global").expect("claim id"),
         InformationRegime::StructuralExactModel,
@@ -2358,7 +2425,7 @@ fn default_claim(problem: &AdmittedIdentifiabilityProblem) -> TypedIdentifiabili
         fiber,
         fixture_claim_quantifier(problem),
         ScalarDomain::Real,
-        ClaimSubject::Parameter(claimed_role),
+        subject,
         ClaimScope::WholeCampaign,
     )
 }
@@ -2422,6 +2489,12 @@ fn claim_sources(claim: &TypedIdentifiabilityClaim) -> Vec<SourceRef> {
     if let FiberStructure::Stratified { strata } = claim.fiber() {
         sources.push(strata.clone());
     }
+    if let FiberStructure::StratifiedOrbit {
+        orbit_type_profile, ..
+    } = claim.fiber()
+    {
+        sources.push(orbit_type_profile.clone());
+    }
     if let ClaimSubject::DerivedFunctional { definition, .. } = claim.subject() {
         sources.push(definition.clone());
     }
@@ -2478,14 +2551,35 @@ fn execution(
     tolerance: f64,
     wrong_action: bool,
 ) -> Result<IdentifiabilityExecutionPlan, IdentifiabilityError> {
+    let request = default_claim_request(problem);
+    let reductions = match request.claim().fiber() {
+        FiberStructure::StratifiedOrbit { action, .. } => vec![
+            GaugeReductionBinding::try_new(
+                GaugeReductionId::try_new("claim-domain-unreduced").expect("reduction id"),
+                action.clone(),
+                BTreeSet::from([request.claim().id().clone()]),
+                GaugeReductionPlan::Unreduced {
+                    reason: "the exact stratified action is retained in the original coordinates"
+                        .to_string(),
+                },
+                GaugeReductionStage::Root,
+                GaugeMeasureSemantics::NotApplicable {
+                    reason: "unreduced structural analysis performs no measure transport"
+                        .to_string(),
+                },
+            )
+            .expect("explicit unreduced stratified action"),
+        ],
+        _ => Vec::new(),
+    };
     execution_with_claim_requests_and_authority(
         problem,
         affine,
         seed,
         tolerance,
         wrong_action,
-        vec![default_claim_request(problem)],
-        Vec::new(),
+        vec![request],
+        reductions,
         false,
     )
 }
@@ -2607,7 +2701,7 @@ fn gauge_reduction_authority_sources(binding: &GaugeReductionBinding) -> Vec<Sou
     } = binding.stage()
     {
         sources.push(composition_law.clone());
-        match relation {
+        match relation.as_ref() {
             GaugeReductionStageRelation::NormalSubgroupTower {
                 normality,
                 induced_residual_action,
@@ -2635,8 +2729,8 @@ fn gauge_reduction_authority_sources(binding: &GaugeReductionBinding) -> Vec<Sou
         sources.extend([
             source_measure.clone(),
             reduced_measure.clone(),
-            transport.clone(),
-            jacobian_or_disintegration.clone(),
+            transport.as_ref().clone(),
+            jacobian_or_disintegration.as_ref().clone(),
         ]);
     }
     sources
@@ -2907,6 +3001,9 @@ fn assessment_result_with_claim_source_authority(
     let claim_id = claim.id().clone();
     let authority_key = match claim.fiber() {
         FiberStructure::Stratified { strata } => strata.key().clone(),
+        FiberStructure::StratifiedOrbit {
+            orbit_type_profile, ..
+        } => orbit_type_profile.key().clone(),
         _ => match claim.quantifier() {
             ClaimQuantifier::ForAll { domain } => domain.key().clone(),
             _ => unreachable!("default claim uses universal quantification"),
@@ -2937,6 +3034,18 @@ fn assessment_result_with_claim_source_authority(
         false,
         Some((&authority_key, claim_source_authority)),
     );
+    let gauge_resolutions = match claim.fiber() {
+        FiberStructure::StratifiedOrbit { action, .. } => BTreeMap::from([(
+            action.clone(),
+            GaugeResolutionEvidence::new(
+                action.clone(),
+                GaugeResolutionDisposition::ConsistentWithClaimedFiber,
+                method.clone(),
+                receipt.clone(),
+            ),
+        )]),
+        _ => BTreeMap::new(),
+    };
     IdentifiabilityAssessment::try_new(
         header("assessment-1", "identifiability.assess"),
         problem,
@@ -2950,7 +3059,7 @@ fn assessment_result_with_claim_source_authority(
                 metric: request.error_policy().metric().clone(),
                 nondimensionalization: request.error_policy().nondimensionalization().clone(),
                 certified_error_bound: 5.0e-9,
-                gauge_resolutions: BTreeMap::new(),
+                gauge_resolutions,
             },
         )],
         source_authority,
@@ -3764,6 +3873,122 @@ fn influence_endpoints_must_lie_inside_parameter_applicability() {
 }
 
 #[test]
+fn retrospective_sensor_reference_must_match_the_instrument_certificate() {
+    let fixture = retrospective_origin_fixture_with_options(
+        ExperimentOrigin::Physical {
+            apparatus_id: artifact("sensor-apparatus"),
+            facility_id: artifact("sensor-facility"),
+        },
+        CasePurpose::Calibration,
+        DiscrepancyOriginFixture::Uncharacterized,
+        ProblemOptions {
+            wrong_sensor_certificate: true,
+            ..ProblemOptions::default()
+        },
+    );
+    assert!(matches!(
+        admit_retrospective_origin_fixture(&fixture),
+        Err(IdentifiabilityError::SourceMismatch {
+            field: "observation sensor/instrument calibration",
+        })
+    ));
+}
+
+#[test]
+fn locally_evaluable_domain_refuses_an_unnecessary_opaque_certificate() {
+    assert!(matches!(
+        problem_fixture(ProblemOptions {
+            gauge_case: 10,
+            unnecessary_opaque_membership: true,
+            ..ProblemOptions::default()
+        })
+        .document,
+        Err(IdentifiabilityError::InvalidText {
+            field: "admissible-domain opaque membership claim coverage",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn fixed_gaussian_log_scale_is_not_a_parameterized_influence_route() {
+    assert!(matches!(
+        problem_fixture(ProblemOptions {
+            yield_log_scale: true,
+            ..ProblemOptions::default()
+        })
+        .document,
+        Err(IdentifiabilityError::InvalidText {
+            field: "log-scale functional",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn composite_influence_refuses_cross_parameter_chain_rules() {
+    assert!(matches!(
+        problem_fixture(ProblemOptions {
+            composite_influence_chain: true,
+            cross_parameter_composite: true,
+            ..ProblemOptions::default()
+        })
+        .document,
+        Err(IdentifiabilityError::InvalidText {
+            field: "composite influence parameter",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn orbit_claims_refuse_partial_subjects_and_mistyped_profiles() {
+    let problem = admit_fixture(problem_fixture(ProblemOptions {
+        gauge_case: 4,
+        ..ProblemOptions::default()
+    }));
+    let partial = structural_claim(
+        &problem,
+        "partial-orbit-carrier",
+        FiberStructure::OrbitQuotientUnique {
+            action: GaugeActionReference::Single(
+                GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
+            ),
+        },
+        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimScope::WholeCampaign,
+    );
+    assert!(matches!(
+        execution_for_claim(&problem, false, 17, 1.0e-10, false, partial),
+        Err(IdentifiabilityError::InvalidText {
+            field: "orbit-quotient fiber",
+            ..
+        })
+    ));
+
+    let stratified = admit_fixture(problem_fixture(ProblemOptions {
+        claim_strata_in_problem: true,
+        ..ProblemOptions::default()
+    }));
+    let mistyped = structural_claim(
+        &stratified,
+        "orbit-profile-is-not-generic-stratification",
+        FiberStructure::Stratified {
+            strata: stratified.document().sources()[&source_key("claim-strata")].clone(),
+        },
+        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimScope::WholeCampaign,
+    );
+    assert!(matches!(
+        execution_for_claim(&stratified, false, 17, 1.0e-10, false, mistyped),
+        Err(IdentifiabilityError::InvalidText {
+            field: "claim fiber stratification",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn influence_claim_scope_closes_over_the_transitive_composite_dag() {
     let problem = admit_fixture(problem_fixture(ProblemOptions {
         composite_influence_chain: true,
@@ -4569,16 +4794,16 @@ fn gauge_pushforward(prefix: &str) -> GaugeMeasureSemantics {
             SourceKind::ProbabilityMeasure,
             hash(&format!("{prefix}-reduced-measure")),
         ),
-        transport: source(
+        transport: Box::new(source(
             &format!("{prefix}-pushforward"),
             SourceKind::GaugeMeasureTransport,
             hash(&format!("{prefix}-pushforward")),
-        ),
-        jacobian_or_disintegration: source(
+        )),
+        jacobian_or_disintegration: Box::new(source(
             &format!("{prefix}-jacobian"),
             SourceKind::GaugeMeasureTransport,
             hash(&format!("{prefix}-jacobian")),
-        ),
+        )),
     }
 }
 
@@ -4619,7 +4844,10 @@ fn gauge_slices_are_execution_plans_with_exact_support_codimension_and_coverage(
                 GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
             ),
         },
-        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimSubject::ParameterSet(BTreeSet::from([
+            role("yield_stress"),
+            role("hardening_modulus"),
+        ])),
         ClaimScope::WholeCampaign,
     );
     let valid_slice = gauge_slice_plan(
@@ -4734,7 +4962,10 @@ fn gauge_slices_are_execution_plans_with_exact_support_codimension_and_coverage(
                 GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
             ),
         },
-        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimSubject::ParameterSet(BTreeSet::from([
+            role("yield_stress"),
+            role("hardening_modulus"),
+        ])),
         ClaimScope::WholeCampaign,
     );
     let orbit_profile =
@@ -4782,7 +5013,10 @@ fn orbit_fibers_distinguish_pure_discrete_mixed_residual_and_full_quotients() {
                 GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
             ),
         },
-        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimSubject::ParameterSet(BTreeSet::from([
+            role("yield_stress"),
+            role("hardening_modulus"),
+        ])),
         ClaimScope::WholeCampaign,
     );
     assert!(matches!(
@@ -4829,7 +5063,10 @@ fn orbit_fibers_distinguish_pure_discrete_mixed_residual_and_full_quotients() {
                 GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
             ),
         },
-        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimSubject::ParameterSet(BTreeSet::from([
+            role("yield_stress"),
+            role("hardening_modulus"),
+        ])),
         ClaimScope::WholeCampaign,
     );
     assert!(matches!(
@@ -4860,7 +5097,10 @@ fn orbit_fibers_distinguish_pure_discrete_mixed_residual_and_full_quotients() {
                 GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
             ),
         },
-        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimSubject::ParameterSet(BTreeSet::from([
+            role("yield_stress"),
+            role("hardening_modulus"),
+        ])),
         ClaimScope::WholeCampaign,
     );
     let unreduced_execution = execution_for_claim_with_gauge_reductions(
@@ -4881,9 +5121,9 @@ fn orbit_fibers_distinguish_pure_discrete_mixed_residual_and_full_quotients() {
     )
     .expect("mixed orbit admits only after explicit unreduced coverage");
     let mixed_residual_plan = GaugeReductionPlan::ContinuousReductionWithDiscreteResidual {
-        reduction: ContinuousGaugeReductionPlan::Quotient {
+        reduction: Box::new(ContinuousGaugeReductionPlan::Quotient {
             quotient: regular_quotient("mixed-residual"),
-        },
+        }),
         normal_subgroup: source(
             "mixed-residual-normal-subgroup",
             SourceKind::GaugeSubgroupCertificate,
@@ -4940,7 +5180,10 @@ fn orbit_fibers_distinguish_pure_discrete_mixed_residual_and_full_quotients() {
                 GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
             ),
         },
-        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimSubject::ParameterSet(BTreeSet::from([
+            role("yield_stress"),
+            role("hardening_modulus"),
+        ])),
         ClaimScope::WholeCampaign,
     );
     execution_for_claim_with_gauge_reductions(
@@ -5293,12 +5536,14 @@ fn external_trust_receipts_bind_exact_source_and_typed_subject_artifact() {
     );
 
     let correct_blind_authority = AuthorityDisposition::ExternalTrustReceipt {
-        trust_receipt: TrustReceiptRef::blind_release(
-            &split_source,
-            fixture.split_a.id().clone(),
-            hash("correct-subject-artifact-receipt"),
-        )
-        .expect("exact blind-release subject artifact"),
+        trust_receipt: Box::new(
+            TrustReceiptRef::blind_release(
+                &split_source,
+                fixture.split_a.id().clone(),
+                hash("correct-subject-artifact-receipt"),
+            )
+            .expect("exact blind-release subject artifact"),
+        ),
     };
     let correct_blind_bundle = ProblemSourceBundle::new(
         &fixture.problem.context,
@@ -5375,7 +5620,9 @@ fn external_trust_receipts_bind_exact_source_and_typed_subject_artifact() {
         )
         .with_concrete_authority(vec![(
             split_key.clone(),
-            AuthorityDisposition::ExternalTrustReceipt { trust_receipt },
+            AuthorityDisposition::ExternalTrustReceipt {
+                trust_receipt: Box::new(trust_receipt),
+            },
         )])
         .expect("bounded issuer-policy authority envelope");
         AdmittedIdentifiabilityProblem::resolve_and_admit(document.clone(), bundle)
@@ -5411,12 +5658,14 @@ fn external_trust_receipts_bind_exact_source_and_typed_subject_artifact() {
     );
 
     let wrong_subject_artifact = AuthorityDisposition::ExternalTrustReceipt {
-        trust_receipt: TrustReceiptRef::blind_release(
-            &document.sources()[&split_key],
-            artifact("not-the-resolved-split"),
-            hash("wrong-subject-artifact-receipt"),
-        )
-        .expect("structurally typed blind-release receipt"),
+        trust_receipt: Box::new(
+            TrustReceiptRef::blind_release(
+                &document.sources()[&split_key],
+                artifact("not-the-resolved-split"),
+                hash("wrong-subject-artifact-receipt"),
+            )
+            .expect("structurally typed blind-release receipt"),
+        ),
     };
     let opaque = opaque_resolutions(&document);
     let bundle = ProblemSourceBundle::new(
@@ -5799,7 +6048,7 @@ fn identifiability_problem_identity_bindings_have_exact_mutation_evidence() {
         (
             "influences",
             problem_fixture(ProblemOptions {
-                yield_log_scale: true,
+                yield_influence_case_b: true,
                 ..ProblemOptions::default()
             })
             .document
@@ -6216,7 +6465,10 @@ fn identifiability_execution_identity_bindings_have_exact_mutation_evidence() {
         FiberStructure::OrbitQuotientUnique {
             action: action.clone(),
         },
-        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimSubject::ParameterSet(BTreeSet::from([
+            role("yield_stress"),
+            role("hardening_modulus"),
+        ])),
         ClaimScope::WholeCampaign,
     );
     let unreduced = |reason: &str| {
@@ -6865,7 +7117,7 @@ fn assessment_authority_must_agree_with_problem_and_execution_on_transitive_over
             .expect("default claim request")
             .claim()
             .fiber(),
-        FiberStructure::Stratified { .. }
+        FiberStructure::StratifiedOrbit { .. }
     ));
     let overlap_key = source_key("claim-strata");
     assert_eq!(

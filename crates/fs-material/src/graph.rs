@@ -19,7 +19,7 @@
 //! validated `ConstitutiveModelCard`s — fs-material CONSUMES the card
 //! metadata, never redefines it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use fs_matdb::{ConstitutiveModelCard, LawId};
@@ -474,7 +474,7 @@ pub fn admit_node(node_id: &str, node: &dyn LawNode) -> Result<(), GraphError> {
             "an executable node needs at least one output port",
         ));
     }
-    let mut seen = BTreeMap::new();
+    let mut seen = BTreeSet::new();
     for (direction, ports) in [
         ("input", &declaration.inputs),
         ("output", &declaration.outputs),
@@ -484,7 +484,7 @@ pub fn admit_node(node_id: &str, node: &dyn LawNode) -> Result<(), GraphError> {
             if port.name.trim().is_empty() {
                 return Err(incomplete("a port has a blank name"));
             }
-            if seen.insert(port.name.clone(), ()).is_some() {
+            if !seen.insert(port.name.clone()) {
                 return Err(match direction {
                     "input" => incomplete("duplicate input port name"),
                     _ => incomplete("duplicate output port name"),
@@ -497,7 +497,7 @@ pub fn admit_node(node_id: &str, node: &dyn LawNode) -> Result<(), GraphError> {
         if slot.trim().is_empty() {
             return Err(incomplete("a state slot has a blank name"));
         }
-        if seen.insert(slot.clone(), ()).is_some() {
+        if !seen.insert(slot.clone()) {
             return Err(incomplete("duplicate state slot name"));
         }
     }

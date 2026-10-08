@@ -12,9 +12,11 @@
 //!
 //! Formula (ISO 9613-1:1993 / Bass–Sutherland–Zuckerwar):
 //!
-//! `α [Np/m] = f² { 1.84e-11 (T/T₀)^{1/2} (p₀/p)
+//! ```text
+//! α [Np/m] = f² { 1.84e-11 (T/T₀)^{1/2} (p₀/p)
 //!   + (T/T₀)^{-5/2} [ 0.01275 e^{-2239.1/T} / (f_{rO} + f²/f_{rO})
-//!                   + 0.1068 e^{-3352/T} / (f_{rN} + f²/f_{rN}) ] }`
+//!                   + 0.1068 e^{-3352/T} / (f_{rN} + f²/f_{rN}) ] }
+//! ```
 //!
 //! with molar humidity `h` (%) from relative humidity and the ISO
 //! saturation-vapour fit, and relaxation frequencies `f_{rO}`, `f_{rN}`
@@ -57,6 +59,8 @@ pub enum Spreading {
 /// outside the ISO evaluation window (`T` in [200, 400] K — the
 /// standard's meteorological band — `p` in (0, 2e5] Pa, humidity in
 /// `[0, 1]`, `ω > 0`).
+/// [`MaterialError::State`] when those inputs exceed the calculation's finite
+/// representable range. No silent absorption or unit-conversion fallback is used.
 pub fn iso9613_absorption_neper_per_m(
     temperature_k: f64,
     pressure_pa: f64,
@@ -73,7 +77,7 @@ pub fn iso9613_absorption_neper_per_m(
             what: format!("ISO 9613 pressure {pressure_pa} Pa outside (0, 2e5] Pa"),
         });
     }
-    if !(relative_humidity >= 0.0 && relative_humidity <= 1.0 && relative_humidity.is_finite()) {
+    if !((0.0..=1.0).contains(&relative_humidity) && relative_humidity.is_finite()) {
         return Err(MaterialError::Parameters {
             what: format!(
                 "relative humidity {relative_humidity} must be an explicit fraction in [0, 1]"
@@ -110,7 +114,17 @@ pub fn iso9613_absorption_neper_per_m(
     let x_n = 0.1068 * det::exp(-3352.0 / t) / (fr_n + f2 / fr_n);
     let classical = 1.84e-11 * det::exp(0.5 * det::ln(t_over_t0)) / p_over_p0;
     let molecular = det::exp(-2.5 * det::ln(t_over_t0)) * (x_o + x_n);
-    Ok(f2 * (classical + molecular))
+    finite_absorption(f2 * (classical + molecular), "Np/m")
+}
+
+fn finite_absorption(value: f64, unit: &str) -> Result<f64, MaterialError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(MaterialError::State {
+            what: format!("ISO 9613 absorption is not finite and nonnegative in {unit}"),
+        })
+    }
 }
 
 /// Same as [`iso9613_absorption_neper_per_m`] but taking `(T, p)` from
@@ -130,7 +144,8 @@ pub fn iso9613_absorption(
 /// ISO 9613-1 absorption [dB/km] — the unit of the published tables.
 ///
 /// # Errors
-/// Forwards [`iso9613_absorption_neper_per_m`].
+/// Forwards [`iso9613_absorption_neper_per_m`] and refuses an unrepresentable
+/// dB/km conversion with [`MaterialError::State`].
 pub fn iso9613_absorption_db_per_km(
     temperature_k: f64,
     pressure_pa: f64,
@@ -138,7 +153,7 @@ pub fn iso9613_absorption_db_per_km(
     omega: f64,
 ) -> Result<f64, MaterialError> {
     let np = iso9613_absorption_neper_per_m(temperature_k, pressure_pa, relative_humidity, omega)?;
-    Ok(np * NP_TO_DB * 1000.0)
+    finite_absorption(np * NP_TO_DB * 1000.0, "dB/km")
 }
 
 /// Free-field amplitude factor `e^{-α r} / r^n` for a compact source.
@@ -147,8 +162,10 @@ pub fn iso9613_absorption_db_per_km(
 /// `range_m` must be positive. `alpha` is [Np/m].
 #[must_use]
 pub fn range_factor(range_m: f64, alpha_np_per_m: f64, spreading: Spreading) -> f64 {
-    if !(range_m > 0.0 && range_m.is_finite())
-        || !(alpha_np_per_m >= 0.0 && alpha_np_per_m.is_finite())
+    if !(range_m > 0.0
+        && range_m.is_finite()
+        && alpha_np_per_m >= 0.0
+        && alpha_np_per_m.is_finite())
     {
         return 0.0;
     }
@@ -242,5 +259,33 @@ mod tests {
         let a = iso9613_absorption_neper_per_m(293.15, 101_325.0, 0.37, 4.2e3).expect("a");
         let b = iso9613_absorption_neper_per_m(293.15, 101_325.0, 0.37, 4.2e3).expect("b");
         assert_eq!(a.to_bits(), b.to_bits());
+    }
+
+    #[test]
+    fn finite_admitted_inputs_cannot_return_nonfinite_absorption() {
+        for (pressure, humidity, omega) in [
+            (101_325.0, 0.5, f64::MAX),
+            (f64::MIN_POSITIVE, 0.5, 1_000.0),
+        ] {
+            let error = iso9613_absorption_neper_per_m(293.15, pressure, humidity, omega)
+                .expect_err("unrepresentable absorption must refuse");
+            assert!(matches!(error, MaterialError::State { .. }));
+        }
+        // Positive subnormal frequency may underflow to representable zero;
+        // this guard must not reject finite nonnegative attenuation.
+        let tiny = iso9613_absorption_neper_per_m(293.15, 101_325.0, 0.5, f64::from_bits(1))
+            .expect("representable underflow");
+        assert_eq!(tiny.to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn db_conversion_cannot_promote_finite_absorption_to_infinity() {
+        let np = iso9613_absorption_neper_per_m(293.15, 1e-300, 0.0, 1e7)
+            .expect("finite base absorption");
+        assert!(np.is_finite() && np > 0.0);
+        assert!(matches!(
+            iso9613_absorption_db_per_km(293.15, 1e-300, 0.0, 1e7),
+            Err(MaterialError::State { .. })
+        ));
     }
 }

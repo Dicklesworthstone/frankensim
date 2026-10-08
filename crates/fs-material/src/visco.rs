@@ -679,12 +679,11 @@ fn nnls(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
             for (k, &j) in idx.iter().enumerate() {
                 x[j] += alpha * (z[k] - x[j]);
             }
-            if drop_j != usize::MAX {
-                passive[drop_j] = false;
-                x[drop_j] = 0.0;
-            } else {
+            if drop_j == usize::MAX {
                 break;
             }
+            passive[drop_j] = false;
+            x[drop_j] = 0.0;
         }
     }
     x
@@ -826,70 +825,15 @@ pub fn fit_fractional_zener(
         logit(init.alpha.min(1.0 - 1e-9)),
         det::ln(init.tau),
     ];
-    let unpack = |theta: &[f64; 4]| -> (f64, f64, f64, f64) {
-        let e0 = det::exp(theta[0]);
-        let e_inf = e0 + det::exp(theta[1]);
-        let alpha = 1.0 / (1.0 + det::exp(-theta[2]));
-        let tau = det::exp(theta[3]);
-        (e0, e_inf, alpha, tau)
-    };
-
     // Relative residual 2-norm and (residuals, Jacobian) at θ.
     let m = samples.len() * 2;
-    let eval = |theta: &[f64; 4], jac: Option<&mut Vec<f64>>| -> (Vec<f64>, f64) {
-        let (e0, e_inf, alpha, tau) = unpack(theta);
-        // Chain rule of the transform: rows are raw params, cols are θ.
-        let dalpha = alpha * (1.0 - alpha);
-        let chain = [
-            [e0, 0.0, 0.0, 0.0],
-            [e0, e_inf - e0, 0.0, 0.0],
-            [0.0, 0.0, dalpha, 0.0],
-            [0.0, 0.0, 0.0, tau],
-        ];
-        let mut r = Vec::with_capacity(m);
-        let mut jrows = jac;
-        if let Some(j) = jrows.as_deref_mut() {
-            j.clear();
-            j.reserve(m * 4);
-        }
-        let mut sq = 0.0f64;
-        for &(w, ep_d, epp_d) in samples {
-            let mag = det::sqrt(ep_d * ep_d + epp_d * epp_d);
-            let (ep, epp) = FractionalZener::modulus_parts(e0, e_inf, alpha, tau, w);
-            let r0 = (ep - ep_d) / mag;
-            let r1 = (epp - epp_d) / mag;
-            sq += r0 * r0 + r1 * r1;
-            r.push(r0);
-            r.push(r1);
-            if let Some(j) = jrows.as_deref_mut() {
-                let probe = FractionalZener {
-                    e0,
-                    e_inf,
-                    alpha,
-                    tau,
-                };
-                let ((_, gp), (_, gl)) = probe.modulus_gradients(w);
-                for grad in [gp, gl] {
-                    for c in 0..4 {
-                        let mut acc = 0.0;
-                        for (raw, chain_row) in chain.iter().enumerate() {
-                            acc += grad[raw] * chain_row[c];
-                        }
-                        j.push(acc / mag);
-                    }
-                }
-            }
-        }
-        (r, det::sqrt(sq / m as f64))
-    };
-
     let mut jac = Vec::new();
-    let (mut residuals, mut norm) = eval(&theta, Some(&mut jac));
+    let (mut residuals, mut norm) = zener_fit_residuals(samples, &theta, Some(&mut jac), m);
     let mut history = vec![norm];
     let mut lambda = 1e-3f64;
     for _iteration in 0..max_iters {
         if norm < 1e-12 {
-            let (e0, e_inf, alpha, tau) = unpack(&theta);
+            let (e0, e_inf, alpha, tau) = unpack_zener_fit_parameters(&theta);
             let model = FractionalZener::new(e0, e_inf, alpha, tau)?;
             return Ok(ZenerFit {
                 model,
@@ -918,7 +862,7 @@ pub fn fit_fractional_zener(
             theta[2] + delta[2],
             theta[3] + delta[3],
         ];
-        let (cand_res, cand_norm) = eval(&candidate, None);
+        let (cand_res, cand_norm) = zener_fit_residuals(samples, &candidate, None, m);
         if cand_norm < norm {
             theta = candidate;
             lambda = (lambda * 0.5).max(1e-12);
@@ -928,7 +872,7 @@ pub fn fit_fractional_zener(
                     + delta[2] * delta[2]
                     + delta[3] * delta[3],
             );
-            let (_, refreshed_norm) = eval(&theta, Some(&mut jac));
+            let (_, refreshed_norm) = zener_fit_residuals(samples, &theta, Some(&mut jac), m);
             residuals = cand_res;
             norm = refreshed_norm;
             history.push(norm);
@@ -945,7 +889,7 @@ pub fn fit_fractional_zener(
         }
     }
     if norm <= tol_rel {
-        let (e0, e_inf, alpha, tau) = unpack(&theta);
+        let (e0, e_inf, alpha, tau) = unpack_zener_fit_parameters(&theta);
         let model = FractionalZener::new(e0, e_inf, alpha, tau)?;
         return Ok(ZenerFit {
             model,
@@ -956,6 +900,66 @@ pub fn fit_fractional_zener(
         residual: norm,
         iterations: history.len() - 1,
     })
+}
+
+fn unpack_zener_fit_parameters(theta: &[f64; 4]) -> (f64, f64, f64, f64) {
+    let e0 = det::exp(theta[0]);
+    let e_inf = e0 + det::exp(theta[1]);
+    let alpha = 1.0 / (1.0 + det::exp(-theta[2]));
+    let tau = det::exp(theta[3]);
+    (e0, e_inf, alpha, tau)
+}
+
+fn zener_fit_residuals(
+    samples: &[(f64, f64, f64)],
+    theta: &[f64; 4],
+    jac: Option<&mut Vec<f64>>,
+    m: usize,
+) -> (Vec<f64>, f64) {
+    let (e0, e_inf, alpha, tau) = unpack_zener_fit_parameters(theta);
+    // Chain rule of the transform: rows are raw params, cols are θ.
+    let dalpha = alpha * (1.0 - alpha);
+    let chain = [
+        [e0, 0.0, 0.0, 0.0],
+        [e0, e_inf - e0, 0.0, 0.0],
+        [0.0, 0.0, dalpha, 0.0],
+        [0.0, 0.0, 0.0, tau],
+    ];
+    let mut r = Vec::with_capacity(m);
+    let mut jrows = jac;
+    if let Some(j) = jrows.as_deref_mut() {
+        j.clear();
+        j.reserve(m * 4);
+    }
+    let mut sq = 0.0f64;
+    for &(w, ep_d, epp_d) in samples {
+        let mag = det::sqrt(ep_d * ep_d + epp_d * epp_d);
+        let (ep, epp) = FractionalZener::modulus_parts(e0, e_inf, alpha, tau, w);
+        let r0 = (ep - ep_d) / mag;
+        let r1 = (epp - epp_d) / mag;
+        sq += r0 * r0 + r1 * r1;
+        r.push(r0);
+        r.push(r1);
+        if let Some(j) = jrows.as_deref_mut() {
+            let probe = FractionalZener {
+                e0,
+                e_inf,
+                alpha,
+                tau,
+            };
+            let ((_, gp), (_, gl)) = probe.modulus_gradients(w);
+            for grad in [gp, gl] {
+                for c in 0..4 {
+                    let mut acc = 0.0;
+                    for (raw, chain_row) in chain.iter().enumerate() {
+                        acc += grad[raw] * chain_row[c];
+                    }
+                    j.push(acc / mag);
+                }
+            }
+        }
+    }
+    (r, det::sqrt(sq / m as f64))
 }
 
 /// Dense 4×4 solve by Gaussian elimination with partial pivoting

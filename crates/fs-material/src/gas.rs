@@ -145,7 +145,7 @@ impl GasSpec {
         GasSpec {
             molar_mass: 18.01528e-3,
             gamma: 33.590 / (33.590 - R_USSA_1976),
-            sutherland_beta: 2.4186073348106757e-6,
+            sutherland_beta: 2.418_607_334_810_676e-6,
             sutherland_s: 1064.0,
             conductivity: ConductivityModel::Eucken,
         }
@@ -505,7 +505,7 @@ impl GasState {
     /// [`Self::stokes_kirchhoff_absorption`] on top.
     ///
     /// # Errors
-    /// Forwards the ISO meteorological-window refusals.
+    /// Forwards ISO meteorological-window and finite-evaluation refusals.
     pub fn iso9613_absorption(
         &self,
         relative_humidity: f64,
@@ -537,40 +537,7 @@ pub(crate) fn mix_moist_air(
             what: format!("relative humidity {relative_humidity} outside [0, 1]"),
         });
     }
-    for (name, state) in [("dry-air", dry), ("water-vapor", vapor)] {
-        if state.water_mole_fraction != 0.0 {
-            return Err(MaterialError::Parameters {
-                what: format!("{name} component must be dry (water_mole_fraction = 0)"),
-            });
-        }
-        if [
-            state.temperature,
-            state.pressure,
-            state.density,
-            state.sound_speed,
-            state.dynamic_viscosity,
-            state.thermal_conductivity,
-            state.gamma,
-            state.specific_gas_constant,
-            state.specific_heat_cp,
-            state.prandtl,
-            state.characteristic_impedance,
-        ]
-        .into_iter()
-        .any(|value| !value.is_finite() || value <= 0.0)
-            || state.gamma <= 1.0
-        {
-            return Err(MaterialError::Parameters {
-                what: format!("{name} component must have finite positive gas properties"),
-            });
-        }
-    }
-    if dry.temperature != vapor.temperature || dry.pressure != vapor.pressure {
-        return Err(MaterialError::Parameters {
-            what: "dry-air and water-vapor components must have identical temperature and pressure"
-                .into(),
-        });
-    }
+    validate_moist_air_components(&dry, &vapor)?;
     if relative_humidity == 0.0 {
         return Ok(dry);
     }
@@ -658,6 +625,46 @@ pub(crate) fn mix_moist_air(
         });
     }
     Ok(state)
+}
+
+fn validate_moist_air_components(dry: &GasState, vapor: &GasState) -> Result<(), MaterialError> {
+    for (name, state) in [("dry-air", dry), ("water-vapor", vapor)] {
+        if state.water_mole_fraction != 0.0 {
+            return Err(MaterialError::Parameters {
+                what: format!("{name} component must be dry (water_mole_fraction = 0)"),
+            });
+        }
+        if [
+            state.temperature,
+            state.pressure,
+            state.density,
+            state.sound_speed,
+            state.dynamic_viscosity,
+            state.thermal_conductivity,
+            state.gamma,
+            state.specific_gas_constant,
+            state.specific_heat_cp,
+            state.prandtl,
+            state.characteristic_impedance,
+        ]
+        .into_iter()
+        .any(|value| !value.is_finite() || value <= 0.0)
+            || state.gamma <= 1.0
+        {
+            return Err(MaterialError::Parameters {
+                what: format!("{name} component must have finite positive gas properties"),
+            });
+        }
+    }
+    if dry.temperature.partial_cmp(&vapor.temperature) != Some(core::cmp::Ordering::Equal)
+        || dry.pressure.partial_cmp(&vapor.pressure) != Some(core::cmp::Ordering::Equal)
+    {
+        return Err(MaterialError::Parameters {
+            what: "dry-air and water-vapor components must have identical temperature and pressure"
+                .into(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

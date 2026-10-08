@@ -447,7 +447,9 @@ impl WoolFelt {
             && p > 1.0
             && q >= p
             && q.is_finite()
-            && (crush_fraction > 0.0 || (crush_fraction == 0.0 && q == p))
+            && (crush_fraction > 0.0
+                || (crush_fraction == 0.0
+                    && q.partial_cmp(&p) == Some(core::cmp::Ordering::Equal)))
             && crush_fraction < 1.0
             && eps_densify > eps_ref)
         {
