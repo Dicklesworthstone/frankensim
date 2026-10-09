@@ -1,10 +1,73 @@
 {
   "crates/fs-cli/src/solve.rs": {
-    "git_blob": "ee1793f382f8f7a3b6b5830ee8cb65a9036f62",
+    "git_blob": "cc039a07e779de2b5840a135644d1debdd7d928d",
     "edits": [
       {
-        "old": "pub const SOLVE_DRIVER_VERSION: u32 = 47;\n",
-        "new": "/// Version 48 adds the explicit regional volume-mean thermal adjoint; older\n/// runs that ignored that report name cannot substitute for its results.\npub const SOLVE_DRIVER_VERSION: u32 = 48;\n"
+        "old": "pub const SOLVE_DRIVER_VERSION: u32 = 47;",
+        "new": "/// Version 48 includes complete natural-convection coefficient feedback in\n/// adaptive goals and admits only independently residual-checked comparisons.\npub const SOLVE_DRIVER_VERSION: u32 = 48;"
+      },
+      {
+        "old": "    radiation_patches: Vec<fs_conduction::AmbientRadiationPatch>,",
+        "new": "    radiation_patches: Vec<fs_conduction::AmbientRadiationPatch>,\n    /// Original natural laws, pressure and feedback budget on this mesh.\n    natural_goal: Option<natural::adaptive::NaturalGoal>,"
+      },
+      {
+        "old": "    let (dual, coupled_adjoint) = if data.air_paths.is_empty() {",
+        "new": "    let (dual, coupled_adjoint) = if let Some(natural) = &data.natural_goal {\n        if !data.air_paths.is_empty() || data.radiating_boundary.is_some() {\n            return Err(conduction_error(\n                \"cli-solve-conduction-natural-adaptive\",\n                \"natural adaptive goals cannot freeze simultaneous airflow or radiation feedback\",\n                \"use base or ladder fidelity for combined laws\",\n            ));\n        }\n        (natural.compare(cx, problem, data.interfaces.as_ref(), data.linear,\n            &fine.solution.temperature, approximate, &weights)?, None)\n    } else if data.air_paths.is_empty() {"
+      },
+      {
+        "old": "            let mut htc = natural::initial_coefficients(&natural_laws, pressure_pa)?;\n            let mut iterations = 0usize;",
+        "new": "            let mut htc = natural::initial_coefficients(&natural_laws, pressure_pa)?;\n            // The goal owner checks the COMPLETE physical residual, not only\n            // the last frozen Robin solve. Leave room below its stricter gate.\n            let natural_tolerance = if adaptive_requested {\n                let goal_tolerance = spec.solver.as_ref().map_or(\n                    fs_conduction::LinearConfig::default().tolerance,\n                    |solver| (solver.tolerance_rel * 1e-2).max(1e-13),\n                );\n                natural::TOLERANCE_REL.min(goal_tolerance * 0.1)\n            } else { natural::TOLERANCE_REL };\n            let mut iterations = 0usize;"
+      },
+      {
+        "old": "                if worst <= natural::TOLERANCE_REL {",
+        "new": "                if worst <= natural_tolerance {"
+      },
+      {
+        "old": "                radiating_boundary, radiation_patches,\n            })",
+        "new": "                radiating_boundary, radiation_patches,\n                natural_goal: if adaptive_requested && !natural_laws.is_empty() {\n                    Some(natural::adaptive::NaturalGoal::new(natural_laws,\n                        spec.envelope.as_ref().map_or(101_325.0, |e| e.pressure.value),\n                        memory_bytes)?)\n                } else { None },\n            })"
+      },
+      {
+        "old": "\\\"uses_nonlinear_jacobian\\\":{},\\\"coupled_adjoint\\\":{},\\\"algebraic_balance\\\":{},",
+        "new": "\\\"uses_nonlinear_jacobian\\\":{},\\\"natural_coefficient_feedback\\\":{},\\\"coupled_adjoint\\\":{},\\\"algebraic_balance\\\":{},"
+      },
+      {
+        "old": "            probe.uses_nonlinear_jacobian,\n            coupled,",
+        "new": "            probe.uses_nonlinear_jacobian,\n            fine.adjoint_data.as_ref().is_some_and(|data| data.natural_goal.is_some()),\n            coupled,"
+      },
+      {
+        "old": "the actual residual/Jacobian retains fixed contact, nonlinear conductivity, and independent-branch air feedback at fixed mass flows and coefficients, with explicit linearization and maximum remainders;",
+        "new": "the actual residual/Jacobian retains fixed contact, nonlinear conductivity, complete admitted natural-convection coefficient feedback, and independent-branch air feedback at fixed mass flows and coefficients, with explicit linearization and maximum remainders;"
+      }
+    ]
+  },
+  "crates/fs-cli/src/solve/natural.rs": {
+    "git_blob": "04025a955618fb0dae5d7e44e287a07f5fffd953",
+    "edits": [
+      {
+        "old": "use crate::import::json_string;\n",
+        "new": "use crate::import::json_string;\n\npub(super) mod adaptive;\n"
+      },
+      {
+        "old": "/// The existing enriched-goal comparison differentiates the solid/air model,\n/// not h(T_wall). Reject that fidelity before meshing instead of publishing a\n/// convergence test for a frozen coefficient. Base and ladder remain usable.\npub(super) fn admit_fidelity(\n    spec: &fs_project::ProjectSpec,\n    setup: &ConductionSetup,\n) -> Result<(), SolveRefusal> {\n    if spec.solver.as_ref().is_some_and(|solver|\n        solver.fidelity == super::SOLVER_FIDELITY_ADAPTIVE)\n        && setup.boundaries.iter().any(|row|\n            matches!(row.condition, ThermalBoundaryCondition::NaturalConvection { .. }))\n    {\n        return Err(conduction_error(\n            \"cli-solve-conduction-natural-adaptive\",\n            \"adaptive goals do not yet include natural-convection coefficient feedback\",\n            \"use base or ladder fidelity; a frozen-coefficient enriched adjoint cannot measure this model's goal error\",\n        ));\n    }\n    Ok(())\n}",
+        "new": "/// Admit only natural cards whose full coefficient tangent is implemented.\n/// Base and ladder keep their original card surface. Radiation retains its\n/// separate capability gate; no combined-law derivative is inferred here.\npub(super) fn admit_fidelity(\n    spec: &fs_project::ProjectSpec,\n    setup: &ConductionSetup,\n) -> Result<(), SolveRefusal> {\n    if !spec.solver.as_ref().is_some_and(|solver|\n        solver.fidelity == super::SOLVER_FIDELITY_ADAPTIVE)\n    {\n        return Ok(());\n    }\n    let laws = natural_laws(setup)?;\n    if laws.len() > 64 || laws.iter().any(|law|\n        law.card != CorrelationId::ChurchillChuVerticalPlate)\n    {\n        return Err(conduction_error(\n            \"cli-solve-conduction-natural-adaptive\",\n            \"adaptive natural goals require at most 64 differentiated Churchill-Chu vertical-plate laws\",\n            \"use supported vertical-plate laws or select base or ladder fidelity\",\n        ));\n    }\n    Ok(())\n}"
+      }
+    ]
+  },
+  "crates/fs-cli/src/solve/natural/discrepancy_tests.rs": {
+    "git_blob": "7e8f5b19eb5de5cbc274324a6793bd81012c00cc",
+    "edits": [
+      {
+        "old": "    assert_eq!(admit_fidelity(&spec, setup).unwrap_err().code,\n        \"cli-solve-conduction-natural-adaptive\");",
+        "new": "    assert!(admit_fidelity(&spec, setup).is_ok(),\n        \"the admitted vertical-plate law now has a complete enriched-goal tangent\");"
+      }
+    ]
+  },
+  "crates/fs-cli/tests/native_nonlinear_adjoint.rs": {
+    "git_blob": "1f4dda4343ddc227e7568e361416f0f096d0b474",
+    "edits": [
+      {
+        "old": "#[path = \"native_nonlinear_adjoint/material_controls.rs\"]\nmod material_controls;",
+        "new": "#[path = \"native_nonlinear_adjoint/material_controls.rs\"]\nmod material_controls;\n#[path = \"native_nonlinear_adjoint/adaptive_natural.rs\"]\nmod adaptive_natural;"
       }
     ]
   }
