@@ -664,7 +664,10 @@ impl MeshIndex {
             self.by_x.insert(at, entry);
         }
         self.points_seen = tetra.mesh.points.len();
-        debug_assert!(self.matches(&MeshIndex::build(tetra)), "incremental mesh index diverged");
+        debug_assert!(
+            self.matches(&MeshIndex::build(tetra)),
+            "incremental mesh index diverged"
+        );
     }
 
     /// Equality as the consumers read the index (debug cross-check).
@@ -1162,8 +1165,9 @@ fn ear_clip(proj: &[[f64; 2]], loop_verts: &[u32]) -> Option<Vec<[u32; 3]>> {
 /// lies on the facet boundary. Vertex membership is by provenance and
 /// the crate's segment tolerance (see the classifier below); a vertex
 /// that is not recognised simply does not count, which can only delay
-/// recognition, never fake it. Non-triangular loops return `None` and
-/// keep the sub-triangle path.
+/// recognition, never fake it. Simple polygonal loops additionally require
+/// exact projected containment of each face and edge; vertices alone cannot
+/// distinguish a tile from a triangle that bridges a non-convex notch.
 /// A vertex IN the facet's plane and STRICTLY inside its triangle, by the
 /// same relative tolerance the segment classifier uses (1e-12 of the facet
 /// scale). Constrained refinement inserts facet split points that no facet
@@ -1446,7 +1450,7 @@ fn coplanar_face_candidates(
     candidates
 }
 
-fn coplanar_tiling(
+fn triangular_coplanar_tiling(
     points: &[[f64; 3]],
     index: &MeshIndex,
     loop_verts: &[u32],
@@ -1575,6 +1579,253 @@ fn coplanar_tiling(
     // tets. Either side is a tiling of a conformed facet; a hull layer has
     // real tets on one side only, so both are tried.
     tiling_on_plane_side(points, &corner_points, &tiles, required, trace)
+}
+
+/// Exact closed-segment membership in the facet's drop-axis projection.
+fn on_segment_2d(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> bool {
+    orient2d(a, b, p) == Sign::Zero
+        && (0..2).all(|k| p[k] >= a[k].min(b[k]) && p[k] <= a[k].max(b[k]))
+}
+
+fn segments_intersect_2d(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
+    let opposite = |x, y| {
+        matches!(
+            (x, y),
+            (Sign::Positive, Sign::Negative) | (Sign::Negative, Sign::Positive)
+        )
+    };
+    (opposite(orient2d(a, b, c), orient2d(a, b, d))
+        && opposite(orient2d(c, d, a), orient2d(c, d, b)))
+        || on_segment_2d(a, c, d)
+        || on_segment_2d(b, c, d)
+        || on_segment_2d(c, a, b)
+        || on_segment_2d(d, a, b)
+}
+
+/// Ear clipping and the polygon tiling route share the same SIMPLE-loop
+/// precondition. Crossing edges, repeated vertices, and a backtracking
+/// collinear edge refuse; ordinary collinear boundary subdivisions remain legal.
+fn simple_polygon(proj: &[[f64; 2]], cx: &Cx<'_>) -> Result<bool, MeshError> {
+    if proj.len() < 3 || proj.iter().flatten().any(|x| !x.is_finite()) {
+        return Ok(false);
+    }
+    let n = proj.len();
+    let mut non_collinear = false;
+    for i in 0..n {
+        cx.checkpoint()?;
+        let (a, b, c) = (proj[i], proj[(i + 1) % n], proj[(i + 2) % n]);
+        if a == b {
+            return Ok(false);
+        }
+        if orient2d(a, b, c) == Sign::Zero {
+            if on_segment_2d(c, a, b) || on_segment_2d(a, b, c) {
+                return Ok(false);
+            }
+        } else {
+            non_collinear = true;
+        }
+        for j in (i + 1)..n {
+            if j % 64 == 0 {
+                cx.checkpoint()?;
+            }
+            if j == i + 1 || (i == 0 && j == n - 1) {
+                continue;
+            }
+            if segments_intersect_2d(a, b, proj[j], proj[(j + 1) % n]) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(non_collinear)
+}
+
+/// Half-open ray crossing avoids counting a polygon vertex twice. Exact
+/// orientation decides crossings without divisions or a slope tolerance.
+fn in_polygon(proj: &[[f64; 2]], p: [f64; 2], cx: &Cx<'_>) -> Result<bool, MeshError> {
+    if p.iter().any(|x| !x.is_finite()) {
+        return Ok(false);
+    }
+    let mut inside = false;
+    for i in 0..proj.len() {
+        if i % 64 == 0 {
+            cx.checkpoint()?;
+        }
+        let (a, b) = (proj[i], proj[(i + 1) % proj.len()]);
+        let side = orient2d(a, b, p);
+        if side == Sign::Zero && on_segment_2d(p, a, b) {
+            return Ok(true);
+        }
+        if (a[1] <= p[1] && p[1] < b[1] && side == Sign::Positive)
+            || (b[1] <= p[1] && p[1] < a[1] && side == Sign::Negative)
+        {
+            inside = !inside;
+        }
+    }
+    Ok(inside)
+}
+
+/// The general-loop path keeps the same measured plane/chord tolerance as
+/// triangular recovery. Projected membership and boundary intersections use
+/// exact predicates, without adding a looser tolerance for non-convex notches.
+#[allow(clippy::too_many_lines)] // one polygon's plane, edge and sheet coverage checks
+fn polygon_coplanar_tiling(
+    points: &[[f64; 3]],
+    index: &MeshIndex,
+    loop_verts: &[u32],
+    required: &BTreeSet<[u32; 2]>,
+    trace: bool,
+    cx: &Cx<'_>,
+) -> Result<Option<Vec<[u32; 3]>>, MeshError> {
+    cx.checkpoint()?;
+    let normal = newell_normal(points, loop_verts);
+    let (u, v) = plane_axes(normal);
+    let project = |i: u32| [points[i as usize][u], points[i as usize][v]];
+    let proj: Vec<_> = loop_verts.iter().map(|&i| project(i)).collect();
+    let origin = points[loop_verts[0] as usize];
+    let mut lo = origin;
+    let mut hi = origin;
+    for &i in loop_verts {
+        for k in 0..3 {
+            lo[k] = lo[k].min(points[i as usize][k]);
+            hi[k] = hi[k].max(points[i as usize][k]);
+        }
+    }
+    let scale = (0..3).map(|k| hi[k] - lo[k]).fold(0.0f64, f64::max);
+    let norm2: f64 = normal.iter().map(|x| x * x).sum();
+    let tolerance2 = 1e-24 * norm2 * scale * scale;
+    if norm2 == 0.0 || !norm2.is_finite() || !tolerance2.is_finite() {
+        return Ok(None);
+    }
+    let Some(i) =
+        (1..loop_verts.len() - 1).find(|&i| orient2d(proj[0], proj[i], proj[i + 1]) != Sign::Zero)
+    else {
+        return Ok(None);
+    };
+    let corners = [
+        origin,
+        points[loop_verts[i] as usize],
+        points[loop_verts[i + 1] as usize],
+    ];
+
+    // Retain the boundary-edge memberships themselves, rather than a bit
+    // mask: a polygon is not limited to eight edges, and a loop corner belongs
+    // to both incident chains. Interior points need actual containment even
+    // when they came from an earlier triangulation's provenance.
+    let mut members = BTreeMap::<u32, Vec<usize>>::new();
+    let pad = 1e-12 * scale;
+    for &(_, id) in index.in_x_range(lo[0] - pad, hi[0] + pad) {
+        cx.checkpoint()?;
+        let p = points[id as usize];
+        if (1..3).any(|k| p[k] < lo[k] - pad || p[k] > hi[k] + pad) {
+            continue;
+        }
+        let mut boundary = Vec::new();
+        for k in 0..loop_verts.len() {
+            if k % 64 == 0 {
+                cx.checkpoint()?;
+            }
+            let (a, b) = (loop_verts[k], loop_verts[(k + 1) % loop_verts.len()]);
+            if id == a || id == b || on_chord(points, id, a, b) {
+                boundary.push(k);
+            }
+        }
+        let h: f64 = (0..3).map(|k| normal[k] * (p[k] - origin[k])).sum();
+        if !boundary.is_empty()
+            || (h.is_finite() && h * h <= tolerance2 && in_polygon(&proj, project(id), cx)?)
+        {
+            members.insert(id, boundary);
+        }
+    }
+    let mut candidates = BTreeSet::new();
+    for &id in members.keys() {
+        cx.checkpoint()?;
+        if let Some(incident) = index.vertex_faces.get(&id) {
+            for (k, face) in incident.iter().enumerate() {
+                if k % 64 == 0 {
+                    cx.checkpoint()?;
+                }
+                if face.iter().all(|v| members.contains_key(v)) {
+                    candidates.insert(*face);
+                }
+            }
+        }
+    }
+    let mut tiles = Vec::new();
+    'faces: for face in candidates {
+        cx.checkpoint()?;
+        let xy = face.map(project);
+        let orientation = orient2d(xy[0], xy[1], xy[2]);
+        if orientation == Sign::Zero {
+            continue;
+        }
+        for (x, y) in [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])] {
+            let shared_boundary = members[&x].iter().any(|k| members[&y].contains(k));
+            if shared_boundary {
+                if !required.contains(&sorted2(x, y)) {
+                    continue 'faces;
+                }
+                continue;
+            }
+            let (px, py) = (project(x), project(y));
+            let midpoint = [f64::midpoint(px[0], py[0]), f64::midpoint(px[1], py[1])];
+            if !in_polygon(&proj, midpoint, cx)? {
+                continue 'faces;
+            }
+            for k in 0..loop_verts.len() {
+                if k % 64 == 0 {
+                    cx.checkpoint()?;
+                }
+                let a = loop_verts[k];
+                // A boundary vertex inside a face edge is an unclosed
+                // T-junction, even when a notch tip merely touches the edge.
+                if a != x && a != y && on_chord(points, a, x, y) {
+                    continue 'faces;
+                }
+                if !members[&x].contains(&k)
+                    && !members[&y].contains(&k)
+                    && segments_intersect_2d(px, py, proj[k], proj[(k + 1) % proj.len()])
+                {
+                    continue 'faces;
+                }
+            }
+        }
+        // A triangle cannot contain a reflex boundary vertex in its strict
+        // interior: that would cover part of the complement of the polygon.
+        for (k, &p) in proj.iter().enumerate() {
+            if k % 64 == 0 {
+                cx.checkpoint()?;
+            }
+            if (0..3).all(|j| orient2d(xy[j], xy[(j + 1) % 3], p) == orientation) {
+                continue 'faces;
+            }
+        }
+        tiles.push((face, index.faces[&face]));
+    }
+    // Take an actual incident-tet side before testing boundary closure. A
+    // disconnected collection of flat-tet faces can have no free edges while
+    // double-covering an interior patch; edge counts alone would retain it.
+    Ok(tiling_on_plane_side(
+        points, &corners, &tiles, required, trace,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coplanar_tiling(
+    points: &[[f64; 3]],
+    index: &MeshIndex,
+    loop_verts: &[u32],
+    interior: &BTreeSet<u32>,
+    required: &BTreeSet<[u32; 2]>,
+    trace: bool,
+    cx: &Cx<'_>,
+) -> Result<Option<Vec<[u32; 3]>>, MeshError> {
+    if loop_verts.len() == 3 {
+        Ok(triangular_coplanar_tiling(
+            points, index, loop_verts, interior, required, trace,
+        ))
+    } else {
+        polygon_coplanar_tiling(points, index, loop_verts, required, trace, cx)
+    }
 }
 
 /// Recover every SIMPLE planar PLC facet (vertex loop into the
@@ -1751,7 +2002,8 @@ pub fn recover_facets_with_points(
         index: &MeshIndex,
         loop_verts: &[u32],
         work: &FacetWork,
-    ) -> Option<Vec<[u32; 3]>> {
+        cx: &Cx<'_>,
+    ) -> Result<Option<Vec<[u32; 3]>>, MeshError> {
         let required = required_boundary(points, Some(index), loop_verts);
         let own: Vec<[u32; 3]> = work
             .tris
@@ -1770,9 +2022,17 @@ pub fn recover_facets_with_points(
         if own.iter().all(|k| index.faces.contains_key(k))
             && free_edges(&own).as_ref() == Some(&required)
         {
-            return Some(own);
+            return Ok(Some(own));
         }
-        coplanar_tiling(points, index, loop_verts, &work.interior, &required, false)
+        coplanar_tiling(
+            points,
+            index,
+            loop_verts,
+            &work.interior,
+            &required,
+            false,
+            cx,
+        )
     }
 
     let mut stats = FacetRecoveryStats {
@@ -1803,6 +2063,10 @@ pub fn recover_facets_with_points(
         // A loop that is not a simple non-degenerate polygon is counted
         // `unrecovered`, never faked.
         let proj = project_facet(&tetra.mesh.points, loop_verts);
+        if loop_verts.len() > 3 && !simple_polygon(&proj, cx)? {
+            work.push(None);
+            continue;
+        }
         let tris: Vec<[u32; 3]> = if is_convex(&proj) {
             (1..loop_verts.len() - 1)
                 .map(|i| [loop_verts[0], loop_verts[i], loop_verts[i + 1]])
@@ -1899,18 +2163,13 @@ pub fn recover_facets_with_points(
     'passes: loop {
         cx.checkpoint()?;
         let mut index = MeshIndex::build(tetra);
-        let pending: Vec<usize> = work
-            .iter()
-            .enumerate()
-            .filter_map(|(fid, w)| {
-                let w = w.as_ref()?;
-                if w.failed || satisfied(&tetra.mesh.points, &index, &facets[fid], w).is_some() {
-                    None
-                } else {
-                    Some(fid)
-                }
-            })
-            .collect();
+        let mut pending = Vec::new();
+        for (fid, w) in work.iter().enumerate() {
+            let Some(w) = w.as_ref() else { continue };
+            if !w.failed && satisfied(&tetra.mesh.points, &index, &facets[fid], w, cx)?.is_none() {
+                pending.push(fid);
+            }
+        }
         if pending.is_empty() {
             break;
         }
@@ -1918,7 +2177,7 @@ pub fn recover_facets_with_points(
             let detail: Vec<String> = pending
                 .iter()
                 .take(6)
-                .map(|&fid| {
+                .map(|&fid| -> Result<String, MeshError> {
                     let w = work[fid].as_ref().expect("pending facet has work");
                     let missing = w
                         .tris
@@ -1929,7 +2188,7 @@ pub fn recover_facets_with_points(
                             !index.faces.contains_key(&k)
                         })
                         .count();
-                    format!(
+                    Ok(format!(
                         "f{fid}(r{} tris{} miss{} int{} pts{} tile:{})",
                         w.rounds,
                         w.tris.len(),
@@ -1945,12 +2204,13 @@ pub fn recover_facets_with_points(
                             &facets[fid],
                             &w.interior,
                             &required_boundary(&tetra.mesh.points, Some(&index), &facets[fid]),
-                            false
-                        )
+                            false,
+                            cx,
+                        )?
                         .map_or("none", |_| "found")
-                    )
+                    ))
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             eprintln!(
                 "TRACE recovery pass: pending {} steiner {} (constraint {} interior {}) :: {}",
                 pending.len(),
@@ -1991,7 +2251,7 @@ pub fn recover_facets_with_points(
                 index.apply(tetra, &mut deltas);
                 mesh_dirty = false;
             }
-            if satisfied(&tetra.mesh.points, &index, loop_verts, w).is_some() {
+            if satisfied(&tetra.mesh.points, &index, loop_verts, w, cx)?.is_some() {
                 continue; // a neighbour's round conformed it meanwhile
             }
             if w.rounds >= opts.max_depth {
@@ -2022,8 +2282,9 @@ pub fn recover_facets_with_points(
                             loop_verts,
                             &w.interior,
                             &required_boundary(&tetra.mesh.points, Some(&index), loop_verts),
-                            false
-                        )
+                            false,
+                            cx,
+                        )?
                         .map_or("none", |_| "found")
                     );
                 }
@@ -2245,7 +2506,9 @@ pub fn recover_facets_with_points(
         let fid32 = u32::try_from(fid).expect("facet count fits u32");
         let rows = work[fid]
             .as_ref()
-            .and_then(|w| satisfied(&tetra.mesh.points, &index, loop_verts, w));
+            .map(|w| satisfied(&tetra.mesh.points, &index, loop_verts, w, cx))
+            .transpose()?
+            .flatten();
         if let Some(rows) = rows {
             for k in rows {
                 table.rows.push((k, fid32));
@@ -2288,7 +2551,8 @@ pub fn recover_facets_with_points(
                         &w.interior,
                         &required_boundary(&tetra.mesh.points, Some(&index), loop_verts),
                         true,
-                    );
+                        cx,
+                    )?;
                 }
             }
         }
@@ -2298,9 +2562,221 @@ pub fn recover_facets_with_points(
 
 #[cfg(test)]
 mod tests {
-    use super::{ear_clip, is_convex, project_facet, sheet_on_side};
-    use crate::delaunay::GHOST;
+    use super::{
+        MeshIndex, coplanar_tiling, ear_clip, in_polygon, is_convex, project_facet,
+        required_boundary, sheet_on_side, simple_polygon,
+    };
+    use crate::delaunay::{GHOST, MeshError};
+    use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
     use fs_ivl::Sign;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
+        let gate = CancelGate::new_clock_free();
+        fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {
+            f(
+                &Cx::new(
+                    &gate,
+                    arena,
+                    StreamKey {
+                        seed: 46,
+                        kernel_id: 21,
+                        tile: 0,
+                        iteration: 0,
+                    },
+                    Budget::INFINITE,
+                    ExecMode::Deterministic,
+                ),
+                &gate,
+            )
+        })
+    }
+
+    /// An independently supplied coplanar face set, indexed exactly as the
+    /// production mesh. The tests choose face diagonals, not the ear clipper.
+    fn face_index(points: &[[f64; 3]], tiles: &[([u32; 3], [u32; 2])]) -> MeshIndex {
+        let mut faces = BTreeMap::new();
+        let mut vertex_faces = BTreeMap::<_, Vec<_>>::new();
+        for &(mut face, apexes) in tiles {
+            face.sort_unstable();
+            faces.insert(face, apexes);
+            for v in face {
+                vertex_faces.entry(v).or_default().push(face);
+            }
+        }
+        let mut by_x: Vec<_> = points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p[0], u32::try_from(i).unwrap()))
+            .collect();
+        by_x.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        MeshIndex {
+            faces,
+            vertex_faces,
+            by_x,
+            points_seen: points.len(),
+        }
+    }
+
+    /// G0/G3: notch-bridging triangles have their vertices on the loop too.
+    /// They must be excluded so the real six tiles still close the U-shaped
+    /// boundary, in either winding and on a general-position supporting plane.
+    #[test]
+    fn polygon_tiling_excludes_notch_bridges_in_both_windings() {
+        with_cx(|cx, _| {
+            let original = vec![
+                [0., 0., 0.],
+                [3., 0., 0.],
+                [3., 3., 0.],
+                [2., 3., 0.],
+                [2., 1., 0.],
+                [1., 1., 0.],
+                [1., 3., 0.],
+                [0., 3., 0.],
+                [0., 0., 2.],
+                [0., 0., -2.],
+            ];
+            let mut expected = vec![
+                [0, 1, 5],
+                [1, 4, 5],
+                [0, 5, 7],
+                [5, 6, 7],
+                [1, 2, 4],
+                [2, 3, 4],
+            ];
+            expected.sort_unstable();
+            let mut tiles: Vec<_> = expected.iter().map(|&face| (face, [8, 9])).collect();
+            // These two faces cover the excluded notch. All of their vertices
+            // pass point containment, which is not enough to admit a face.
+            tiles.extend([([4, 5, 6], [8, 9]), ([3, 4, 6], [8, 9])]);
+            let transforms: [fn([f64; 3]) -> [f64; 3]; 3] = [
+                |p| p,
+                |[x, y, z]| [z + 2., x - 4., y + 1.],
+                |[x, y, z]| [0.6 * x + 0.8 * z, y, -0.8 * x + 0.6 * z],
+            ];
+            for transform in transforms {
+                let points: Vec<_> = original.iter().copied().map(transform).collect();
+                let index = face_index(&points, &tiles);
+                for reverse in [false, true] {
+                    let mut boundary: Vec<_> = (0..8).collect();
+                    if reverse {
+                        boundary.reverse();
+                    }
+                    let required = required_boundary(&points, Some(&index), &boundary);
+                    let actual = coplanar_tiling(
+                        &points,
+                        &index,
+                        &boundary,
+                        &BTreeSet::new(),
+                        &required,
+                        false,
+                        cx,
+                    )
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(
+                        actual, expected,
+                        "notch faces must not displace the real tiling"
+                    );
+                }
+            }
+        });
+    }
+
+    /// G0: choose one of two co-circular diagonal sheets, require every
+    /// boundary sub-edge, and never accept an incomplete patch.
+    #[test]
+    fn polygon_tiling_requires_one_complete_sheet_and_all_boundary_vertices() {
+        with_cx(|cx, _| {
+            let mut points = vec![
+                [0., 0., 0.],
+                [1., 0., 0.],
+                [1., 1., 0.],
+                [0., 1., 0.],
+                [0., 0., 1.],
+                [0., 0., -1.],
+            ];
+            let tiles = [
+                ([0, 1, 2], [4, 3]),
+                ([0, 2, 3], [4, 1]),
+                ([0, 1, 3], [2, 5]),
+                ([1, 2, 3], [0, 5]),
+            ];
+            let boundary = [0, 1, 2, 3];
+            let recover = |points: &[[f64; 3]], tiles: &[([u32; 3], [u32; 2])]| {
+                let index = face_index(points, tiles);
+                let required = required_boundary(points, Some(&index), &boundary);
+                coplanar_tiling(
+                    points,
+                    &index,
+                    &boundary,
+                    &BTreeSet::new(),
+                    &required,
+                    false,
+                    cx,
+                )
+                .unwrap()
+            };
+            assert_eq!(recover(&points, &tiles), Some(vec![[0, 1, 2], [0, 2, 3]]));
+            assert!(
+                recover(&points, &[tiles[1], tiles[3]]).is_none(),
+                "both sheets have a gap"
+            );
+            points.push([0.5, 0., 0.]);
+            assert!(
+                recover(&points, &tiles).is_none(),
+                "no sheet can skip boundary vertex 6"
+            );
+            let split = [
+                ([0, 2, 6], [4, 5]),
+                ([1, 2, 6], [4, 5]),
+                ([0, 2, 3], [4, 5]),
+            ];
+            assert_eq!(
+                recover(&points, &split),
+                Some(vec![[0, 2, 3], [0, 2, 6], [1, 2, 6]])
+            );
+        });
+    }
+
+    /// G0/G4: exact crossing works with more than eight edges and near notch
+    /// tips; self intersections and cancellation cannot become a recovered loop.
+    #[test]
+    fn polygon_membership_admission_and_cancellation() {
+        with_cx(|cx, gate| {
+            let comb = [
+                [0., 0.],
+                [5., 0.],
+                [5., 3.],
+                [4., 3.],
+                [4., 1.],
+                [3., 1.],
+                [3., 3.],
+                [2., 3.],
+                [2., 1.],
+                [1., 1.],
+                [1., 3.],
+                [0., 3.],
+            ];
+            assert!(simple_polygon(&comb, cx).unwrap());
+            assert!(in_polygon(&comb, [2.5, 2.], cx).unwrap());
+            assert!(!in_polygon(&comb, [1.5, 2.], cx).unwrap());
+            assert!(in_polygon(&comb, [1., 1.], cx).unwrap());
+            assert!(in_polygon(&comb, [1.5, 1.0_f64.next_down()], cx).unwrap());
+            assert!(!in_polygon(&comb, [1.5, 1.0_f64.next_up()], cx).unwrap());
+            assert!(!simple_polygon(&[[0., 0.], [2., 2.], [0., 2.], [2., 0.]], cx).unwrap());
+            assert!(!simple_polygon(&[[0., 0.], [2., 0.], [1., 0.], [1., 1.]], cx).unwrap());
+            gate.request();
+            assert!(matches!(
+                in_polygon(&comb, [2.5, 2.], cx),
+                Err(MeshError::Cancelled)
+            ));
+            assert!(matches!(
+                simple_polygon(&comb, cx),
+                Err(MeshError::Cancelled)
+            ));
+        });
+    }
 
     /// The sheet on one side of a facet's plane is the boundary of that
     /// side's tets: a square carrying both triangulations (a zero-volume

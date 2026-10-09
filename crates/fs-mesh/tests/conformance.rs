@@ -1831,6 +1831,73 @@ fn tmesh_016_non_convex_facet_recovery() {
     });
 }
 
+/// G0/G3/G5 (q61wp.46): a quadrilateral already tiled by the real Delaunay
+/// mesh must recover without spending a Steiner point, whichever corner the
+/// caller starts at. Alternating the start forces both possible fan diagonals;
+/// the old triangular-only tiling recognizer refused one at a zero round cap.
+#[test]
+fn tmesh_021_polygon_tiling_uses_existing_diagonals_without_refinement() {
+    with_cx(|cx| {
+        let square = [
+            Point3::new(0., 0., 0.),
+            Point3::new(1., 0., 0.),
+            Point3::new(1., 1., 0.),
+            Point3::new(0., 1., 0.),
+            Point3::new(0.5, 0.5, 1.),
+        ];
+        let no_refinement = RecoveryOptions {
+            max_depth: 0,
+            max_steiner: 0,
+        };
+        for axis in 0..3 {
+            let points: Vec<_> = square
+                .iter()
+                .map(|p| match axis {
+                    0 => *p,
+                    1 => Point3::new(p.z + 2., p.x - 4., p.y + 1.),
+                    _ => Point3::new(p.y + 1., p.z - 2., p.x + 4.),
+                })
+                .collect();
+            let mut mesh = delaunay(&points, cx).expect("square pyramid meshes");
+            let before = mesh.tets();
+            let expected_face_count = 2;
+            for start in 0..4 {
+                for reverse in [false, true] {
+                    let mut boundary: Vec<u32> = (0..4).map(|i| (i + start) % 4).collect();
+                    if reverse {
+                        boundary.reverse();
+                    }
+                    let (stats, table) =
+                        fs_mesh::recover_facets(&mut mesh, &[boundary], no_refinement, cx)
+                            .expect("zero-refinement recovery");
+                    assert_eq!(
+                        stats.recovered, 1,
+                        "axis {axis}, start {start}, reverse {reverse}"
+                    );
+                    assert_eq!(stats.unrecovered, 0);
+                    assert_eq!(stats.steiner_inserted, 0);
+                    assert_eq!(stats.rounds_used, 0);
+                    assert_eq!(table.rows.len(), expected_face_count);
+                    assert!(
+                        table
+                            .rows
+                            .iter()
+                            .all(|(face, parent)| *parent == 0 && face.iter().all(|v| *v < 4))
+                    );
+                    assert_eq!(mesh.tets(), before, "recognition must not change the mesh");
+                }
+            }
+            assert!(mesh.audit(true).clean());
+        }
+        verdict(
+            "tmesh-021-existing-polygon-tiling",
+            true,
+            "all four loop starts, both windings, and three supporting planes recover the existing two-face square without mesh mutation or Steiner spend",
+            FIXED_INPUT_SEED,
+        );
+    });
+}
+
 /// 3-4-5 rotation so an axis-aligned diaphragm becomes a general-position
 /// plane. Coordinates stay dyadic enough that Delaunay still builds.
 fn rotate_general_position(p: Point3) -> Point3 {

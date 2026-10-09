@@ -238,6 +238,25 @@ half-edge round-trips, closed-manifold audits).
     mesh, not a relabelling of the same one. Consumers that need a
     permutation-invariant statement must state it on geometry (region
     identity, coordinates), never on face or slot indices.
+    Simple polygonal facets also accept the mesh's existing coplanar tiling.
+    Exact `orient2d` half-open ray crossings in the dominant-axis projection
+    classify the polygon, and each candidate face must keep its edges inside:
+    notch crossings, boundary-vertex skips, and strictly enclosed reflex
+    vertices reject the face. Boundary membership retains the same measured
+    `1e-12` chord/plane tolerance; it has no fixed edge-count bitmask. One
+    incident-tet side sheet must have exactly the current boundary chains as
+    its free edges, excluding gaps and extraneous coplanar double covers.
+    Simple-loop admission rejects self crossings, repeated vertices, and
+    backtracking edges with exact projected predicates. These scans poll
+    cancellation before publishing correspondence. The triangular path and
+    successful existing fan/ear-clipped paths keep their original ordering.
+    `tmesh-021` recovers every cyclic start and both windings of an already
+    tiled quadrilateral with zero refinement budget on three supporting planes;
+    internal recovery tests cover a U-shaped notch, general-position rotation,
+    both diagonal sheets, boundary subdivision, incomplete cover, more than
+    eight edges, and cancellation. Facets with inner hole loops still require
+    a future multi-loop input/triangulation route; a repeated-vertex bridge is
+    not an admitted substitute.
 15. Every public remesh call validates its two floating-point policy controls
     before geometry-dependent work. Exact endpoints admit; the adjacent
     representable value outside either interval refuses with stable field,
@@ -665,9 +684,10 @@ assertions.
 
 - Weighted exact insphere predicate (the Edelsbrunner weight-pump
   exudation variant; the perturbation flavor ships).
-- INTERIOR FACET recovery now ships in CONFORMING form for CONVEX
-  planar facets (`recover_facets`, tmesh-015): batched longest-edge
-  midpoint bisection of the fan triangulation (one-split-per-round was
+- INTERIOR FACET recovery ships in CONFORMING form for SIMPLE convex and
+  non-convex planar facets (`recover_facets`, tmesh-015/016/021): existing
+  coplanar tilings or batched longest-edge midpoint bisection of the fan/ear
+  triangulation (one-split-per-round was
   MEASURED to starve at the rounds cap; batching finished the fixture
   in 7 rounds), twin adoption via the shared coordinate-bits index,
   a facet correspondence table re-verified against the finished mesh,
