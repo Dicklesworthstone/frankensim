@@ -204,7 +204,16 @@ so converged and stalled are distinguishable outcomes.
   chart/conductivity corners refuse through the owning conduction API.
   `tests/enthalpy_calibration.rs` checks complete history gradients against
   forward-only differences and recovers both synthetic pulse amplitudes while
-  the final field retains solid, latent and liquid regions. The example uses
+  the final field retains solid, latent and liquid regions. Explicit
+  `--ambient-radiation` mode adds a declared gray surface and convection at the
+  heated face. Observation generation, every candidate forward trajectory and
+  the reverse sweep use that same law. Radiative endpoint linearizations retain
+  the complete temperature/enthalpy feedback in the existing tape, including
+  its mean-dependent rank-one contribution; a frozen surface coefficient is
+  not used for gradients. The two heater pulses are recovered under the known
+  surface/environment declaration, and the complete history gradient is checked
+  against forward differences. Emissivity and reservoir temperature are fixed
+  inputs in this example, not fitted or experimentally inferred. The example uses
   same-model synthetic observations and a small full-storage trajectory;
   it makes no experimental-validation, general-identifiability, global-optimum
   or checkpoint-scaling claim. The added conduction/material dependencies are

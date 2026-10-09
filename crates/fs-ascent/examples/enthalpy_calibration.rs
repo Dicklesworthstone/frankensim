@@ -1,6 +1,7 @@
 //! Recover two heater-pulse amplitudes from spatial temperature histories.
 //!
 //! `cargo run -p fs-ascent --example enthalpy_calibration`
+//! `cargo run -p fs-ascent --example enthalpy_calibration -- --ambient-radiation`
 //!
 //! The same fixed tetrahedral slab resolves sensible and latent heat in every
 //! trial. The source is spatially localized; the phase front is computed.
@@ -9,19 +10,27 @@
 //! Synthetic observations demonstrate inverse computation, not experimental
 //! validation or general identifiability. Chart, mass, mesh and time grid are
 //! fixed. This small example retains at most 24 endpoint linearizations.
+//! The explicit radiation mode includes the same ambient gray surface law in
+//! observation generation, every candidate trajectory, and the physical adjoint.
 
 use fs_ascent::sqp::SqpSample;
 use fs_ascent::{SqpRunReport, SqpState};
 use fs_blake3::ContentHash;
-use fs_conduction::fixtures::box_grid;
+use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::transient::enthalpy::{
     EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyStepConfig,
 };
 use fs_conduction::{
-    ConductionMesh, ConductionProblem, ConductivityModel, LinearConfig, ScalarField,
-    ThermalBoundary, ThermalBoundaryBuilder,
+    AmbientRadiationConfig, AmbientRadiationPatch, ConductionMesh, ConductionProblem,
+    ConductivityModel, EMISSIVITY_DIMS, LinearConfig, SURFACE_EMISSIVITY_PROPERTY, ScalarField,
+    SurfaceEmissivity, ThermalBc, ThermalBoundary, ThermalBoundaryBuilder,
 };
+use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_matdb::{
+    ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+    PropertyValue, Provenance, SelectionPolicy, UncertaintyModel,
+};
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 use fs_solver::NewtonKrylovConfig;
 use std::error::Error;
@@ -35,6 +44,10 @@ const CELLS: usize = 6;
 const STEPS: usize = 24;
 const DT: f64 = 0.05;
 const INITIAL_H: f64 = -0.17;
+const SURFACE: &str = "radiating-heater-face";
+const EMISSIVITY: f64 = 0.04;
+const AMBIENT_K: f64 = 299.0;
+const CONVECTION_W_M2_K: f64 = 0.01;
 
 /// One cross-section-mean temperature at an accepted endpoint.
 #[derive(Debug, Clone)]
@@ -51,6 +64,7 @@ pub struct EnthalpyCalibration {
     material: ConductivityModel,
     boundary: ThermalBoundary,
     source_profile: Vec<f64>,
+    radiation: Option<AmbientRadiationPatch>,
     pub observations: Vec<Observation>,
 }
 
@@ -85,14 +99,80 @@ fn sensor(temperature: &[f64], plane: usize) -> f64 {
     temperature[4 * plane..4 * plane + 4].iter().sum::<f64>() / 4.0
 }
 
+fn radiation_config() -> AmbientRadiationConfig {
+    AmbientRadiationConfig {
+        max_iterations: 48,
+        relaxation: 1.0,
+        ..AmbientRadiationConfig::default()
+    }
+}
+
+/// Explicit numerical surface declaration; this is not measured material data.
+fn radiation_patch() -> Result<AmbientRadiationPatch, Box<dyn Error>> {
+    let mut claims = ClaimSet::new();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS),
+        value: PropertyValue::Scalar {
+            value: EMISSIVITY,
+            dims: EMISSIVITY_DIMS,
+        },
+        validity: ValidityDomain::unconstrained().with("T", 295.0, 310.0),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::ConstantWithinValidity,
+        observations: Vec::new(),
+        provenance: Provenance {
+            source: "declared synthetic radiative heater calibration".into(),
+            license: "internal-example-use".into(),
+            artifact: None,
+        },
+    })?;
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic gray surface".into(),
+            phase: "declared fixed surface law".into(),
+            process: "numerical calibration example".into(),
+            revision: 0,
+        },
+        claims,
+        Vec::new(),
+    )?;
+    let emissivity =
+        SurfaceEmissivity::from_card(SURFACE, &card, 300.0, SelectionPolicy::SingleClaimOnly)?;
+    Ok(AmbientRadiationPatch::new(SURFACE, emissivity, AMBIENT_K)?)
+}
+
 impl EnthalpyCalibration {
     /// Build the fixed experiment and generate declared same-model observations.
     pub fn synthetic(cx: &Cx<'_>) -> Result<Self, Box<dyn Error>> {
+        Self::build_synthetic(cx, None)
+    }
+
+    /// Add known ambient radiation and convection at the heated slab face.
+    /// Both pulse amplitudes remain unknown; surface/environment data are fixed.
+    pub fn synthetic_with_ambient_radiation(cx: &Cx<'_>) -> Result<Self, Box<dyn Error>> {
+        Self::build_synthetic(cx, Some(radiation_patch()?))
+    }
+
+    fn build_synthetic(
+        cx: &Cx<'_>,
+        radiation: Option<AmbientRadiationPatch>,
+    ) -> Result<Self, Box<dyn Error>> {
         let (complex, positions) = box_grid([CELLS, 1, 1], [1.0, 0.2, 0.2]);
         let mesh = ConductionMesh::new(complex, positions)?;
-        let boundary = ThermalBoundaryBuilder::new(&mesh)
-            .adiabatic_remainder()
-            .finish()?;
+        let boundary = if radiation.is_some() {
+            ThermalBoundaryBuilder::new(&mesh)
+                .region(
+                    SURFACE,
+                    |face| on_box_face(face.centroid[0], 0.0),
+                    ThermalBc::robin(CONVECTION_W_M2_K, AMBIENT_K)?,
+                )?
+                .adiabatic_remainder()
+                .finish()?
+        } else {
+            ThermalBoundaryBuilder::new(&mesh)
+                .adiabatic_remainder()
+                .finish()?
+        };
         let knots = [
             (-5.0, 295.0, 0.0),
             (0.0, 300.0, 0.0),
@@ -123,6 +203,7 @@ impl EnthalpyCalibration {
             curve,
             boundary,
             source_profile,
+            radiation,
             material: ConductivityModel::isotropic_declared(0.02)?,
             observations: Vec::new(),
         };
@@ -207,7 +288,22 @@ impl EnthalpyCalibration {
         let mut temperatures = Vec::with_capacity(STEPS);
         for step in 0..STEPS {
             let source = self.source(point, step)?;
-            let next = integrator.advance(cx, self.problem(&source), None, &h, DT, config())?;
+            let next = if let Some(patch) = &self.radiation {
+                integrator
+                    .advance_with_ambient_radiation(
+                        cx,
+                        self.problem(&source),
+                        None,
+                        &h,
+                        DT,
+                        config(),
+                        std::slice::from_ref(patch),
+                        radiation_config(),
+                    )?
+                    .conduction
+            } else {
+                integrator.advance(cx, self.problem(&source), None, &h, DT, config())?
+            };
             h = next.specific_enthalpy_j_kg;
             temperatures.push(next.temperature);
         }
@@ -241,8 +337,23 @@ impl EnthalpyCalibration {
         let mut max_step_energy_residual_j = 0.0_f64;
         for step in 0..STEPS {
             let source = self.source(point, step)?;
-            let next =
-                integrator.linearize_step(cx, self.problem(&source), None, &h, DT, config())?;
+            let next = if let Some(patch) = &self.radiation {
+                integrator
+                    .linearize_step_with_ambient_radiation(
+                        cx,
+                        self.problem(&source),
+                        None,
+                        &h,
+                        DT,
+                        config(),
+                        std::slice::from_ref(patch),
+                        radiation_config(),
+                        2 * n,
+                    )?
+                    .into_transport()
+            } else {
+                integrator.linearize_step(cx, self.problem(&source), None, &h, DT, config())?
+            };
             max_step_energy_residual_j =
                 max_step_energy_residual_j.max(next.primal().energy_residual_j.abs());
             h.clone_from(&next.primal().specific_enthalpy_j_kg);
@@ -336,6 +447,12 @@ pub fn fit(
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    let radiation = match arguments.as_slice() {
+        [] => false,
+        [flag] if flag == "--ambient-radiation" => true,
+        _ => return Err("usage: enthalpy_calibration [--ambient-radiation]".into()),
+    };
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
@@ -351,7 +468,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        let experiment = EnthalpyCalibration::synthetic(&cx)?;
+        let experiment = if radiation {
+            EnthalpyCalibration::synthetic_with_ambient_radiation(&cx)?
+        } else {
+            EnthalpyCalibration::synthetic(&cx)?
+        };
         let initial = experiment.forward_loss(&cx, &START)?;
         let (state, report) = fit(&cx, &experiment)?;
         let final_state = experiment.evaluate(&cx, state.point())?;
@@ -359,6 +480,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             "spatial_enthalpy_calibration: vertices=28, steps={STEPS}, observations={}",
             experiment.observations.len()
         );
+        if radiation {
+            println!(
+                "declared_ambient_radiation: emissivity={EMISSIVITY}; reservoir_K={AMBIENT_K}; convection_W_m2_K={CONVECTION_W_M2_K}; fixed_surface={SURFACE}"
+            );
+        }
         println!(
             "stop={:?}; iterations={}; evaluations={}",
             report.stop,
