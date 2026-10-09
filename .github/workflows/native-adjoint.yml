@@ -143,6 +143,9 @@ jobs:
       - name: Compare bound contact controls with physical FEM re-solves
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-conduction --test contact_controls -- --test-threads=1
+      - name: Test complete mean-coefficient FEM feedback
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-conduction --lib mean_feedback -- --test-threads=1
       - name: Compare native contact adjoints with real card and physics re-solves
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-cli --test native_contact_adjoint -- --test-threads=1
@@ -154,9 +157,6 @@ jobs:
       - name: Compare native inlet adjoints and resumed uncertainty studies
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-cli --test native_air_inlet_adjoint -- --test-threads=1
-      - name: Test complete mean-coefficient FEM feedback
-        if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-conduction --lib mean_feedback -- --test-threads=1
       - name: Compare conductivity controls with heterogeneous nonlinear FEM re-solves
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-conduction --lib material_controls -- --test-threads=1

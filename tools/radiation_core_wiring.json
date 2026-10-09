@@ -1,17 +1,31 @@
 {
-  "crates/fs-conduction/src/radiation.rs": {
-    "git_blob": "b606570c8ea4651544ab3b5cae2fb212c3fd39bb",
-    "edits": [{"old": "    AmbientRadiationReport, AmbientRadiationSolution, solve_with_ambient_radiation,\n};", "new": "    AmbientRadiationReport, AmbientRadiationSolution, solve_with_ambient_radiation,\n    AmbientRadiationGradient, pullback_ambient_radiation,\n};"}]
-  },
-  "crates/fs-conduction/src/radiation/ambient.rs": {
-    "git_blob": "53832b49b07e204756126d08ff72e44b1a10aa77",
+  "crates/fs-conduction/src/adjoint/robin/nonlinear/mean_feedback_goal.rs": {
+    "git_blob": "e735f02cccf5b104533b7e3043fa9aa9a98299bf",
     "edits": [
-      {"old": "//! inner solve. No derivative of this radiative fixed point is provided.", "new": "//! inner solve. The companion `pullback_ambient_radiation` reconstructs the\n//! complete fixed-point tangent on an unchanged, residual-checked field."},
-      {"old": "use std::collections::BTreeSet;\n", "new": "use std::collections::BTreeSet;\n\nmod adjoint;\npub use adjoint::{AmbientRadiationGradient, pullback_ambient_radiation};\n"}
+      {
+        "old": "use super::super::goal::DiscreteGoalComparison;",
+        "new": "use super::super::goal::DiscreteGoalComparison;\n\nmod radiation;"
+      },
+      {
+        "old": "    pub fn compare_mean_robin_goal_at(\n        cx: &Cx<'_>,\n        problem: ConductionProblem<'_>,\n        interfaces: Option<&ThermalInterfaces>,\n        linear: LinearConfig,\n        reference_temperature: &[f64],\n        approximate_temperature: &[f64],\n        regions: &[&str],\n        reference_points: &[[f64; 4]],\n        approximate_values: &[[f64; 2]],\n        nodal_weights: &[f64],\n        max_feedback_entries: usize,\n    ) -> Result<DiscreteGoalComparison, ConductionError> {\n",
+        "new": "    pub fn compare_mean_robin_goal_at(\n        cx: &Cx<'_>,\n        problem: ConductionProblem<'_>,\n        interfaces: Option<&ThermalInterfaces>,\n        linear: LinearConfig,\n        reference_temperature: &[f64],\n        approximate_temperature: &[f64],\n        regions: &[&str],\n        reference_points: &[[f64; 4]],\n        approximate_values: &[[f64; 2]],\n        nodal_weights: &[f64],\n        max_feedback_entries: usize,\n    ) -> Result<DiscreteGoalComparison, ConductionError> {\n        Self::compare_mean_robin_goal_inner(\n            cx, problem, interfaces, linear, reference_temperature, approximate_temperature,\n            regions, reference_points, approximate_values, None, nodal_weights, max_feedback_entries,\n        )\n    }\n\n    /// Include reference feedback between different mean-temperature regions.\n    /// `reference_feedback[i*m+j]` is the additional derivative of reference i\n    /// with respect to mean j, in K/K. Its diagonal adds to the local slopes;\n    /// never supply a derivative twice. Both fields retain their OWN actual\n    /// law values. This is the same estimated two-field comparison as\n    /// `compare_mean_robin_goal_at`, with the complete coupled transpose and\n    /// four retained factor vectors per region instead of two. Every physical\n    /// residual, material-domain, prescribed-value and Krylov gate still applies.\n    #[allow(clippy::too_many_arguments)]\n    pub fn compare_mean_robin_goal_with_reference_feedback_at(\n        cx: &Cx<'_>,\n        problem: ConductionProblem<'_>,\n        interfaces: Option<&ThermalInterfaces>,\n        linear: LinearConfig,\n        reference_temperature: &[f64],\n        approximate_temperature: &[f64],\n        regions: &[&str],\n        reference_points: &[[f64; 4]],\n        approximate_values: &[[f64; 2]],\n        reference_feedback: &[f64],\n        nodal_weights: &[f64],\n        max_feedback_entries: usize,\n    ) -> Result<DiscreteGoalComparison, ConductionError> {\n        Self::compare_mean_robin_goal_inner(\n            cx, problem, interfaces, linear, reference_temperature, approximate_temperature,\n            regions, reference_points, approximate_values, Some(reference_feedback), nodal_weights, max_feedback_entries,\n        )\n    }\n\n    #[allow(clippy::too_many_arguments)]\n    fn compare_mean_robin_goal_inner(\n        cx: &Cx<'_>,\n        problem: ConductionProblem<'_>,\n        interfaces: Option<&ThermalInterfaces>,\n        linear: LinearConfig,\n        reference_temperature: &[f64],\n        approximate_temperature: &[f64],\n        regions: &[&str],\n        reference_points: &[[f64; 4]],\n        approximate_values: &[[f64; 2]],\n        reference_feedback: Option<&[f64]>,\n        nodal_weights: &[f64],\n        max_feedback_entries: usize,\n    ) -> Result<DiscreteGoalComparison, ConductionError> {\n"
+      },
+      {
+        "old": "        let n = problem.mesh.vertex_count();\n        if regions.len() > 64",
+        "new": "        let n = problem.mesh.vertex_count();\n        let factors = if reference_feedback.is_some() { 4 } else { 2 };\n        if regions.len() > 64"
+      },
+      {
+        "old": "            || n.checked_mul(2).and_then(|v| v.checked_mul(regions.len()))",
+        "new": "            || n.checked_mul(factors).and_then(|v| v.checked_mul(regions.len()))"
+      },
+      {
+        "old": "        for field in [reference_temperature, approximate_temperature, nodal_weights] {",
+        "new": "        if let Some(feedback) = reference_feedback {\n            vector(cx, feedback, regions.len()*regions.len())?;\n        }\n        for field in [reference_temperature, approximate_temperature, nodal_weights] {"
+      },
+      {
+        "old": "        let gradient = Self::pullback_mean_robin(cx, reference_problem, interfaces, linear,\n            reference_temperature, regions, &slopes, &reference_slopes, nodal_weights,\n            max_feedback_entries)?;",
+        "new": "        let gradient = if let Some(feedback) = reference_feedback {\n            Self::pullback_mean_robin_with_reference_feedback(cx, reference_problem,\n                interfaces, linear, reference_temperature, regions, &slopes,\n                &reference_slopes, feedback, nodal_weights, max_feedback_entries)?\n        } else {\n            Self::pullback_mean_robin(cx, reference_problem, interfaces, linear,\n                reference_temperature, regions, &slopes, &reference_slopes, nodal_weights,\n                max_feedback_entries)?\n        };"
+      }
     ]
-  },
-  "crates/fs-conduction/tests/ambient_radiation.rs": {
-    "git_blob": "4c29148bc366458100f5452b6a94e300590a7310",
-    "edits": [{"old": "mod support;\n", "new": "mod support;\n#[path = \"ambient_radiation/adjoint.rs\"]\nmod adjoint;\n"}]
   }
 }
