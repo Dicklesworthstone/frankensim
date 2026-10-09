@@ -10,6 +10,8 @@ use super::super::{
 };
 use super::super::goal::DiscreteGoalComparison;
 
+mod radiation;
+
 impl RobinResponse {
     /// Compare two full fields under the same area-mean-dependent Robin laws.
     ///
@@ -54,15 +56,69 @@ impl RobinResponse {
         nodal_weights: &[f64],
         max_feedback_entries: usize,
     ) -> Result<DiscreteGoalComparison, ConductionError> {
+        Self::compare_mean_robin_goal_inner(
+            cx, problem, interfaces, linear, reference_temperature, approximate_temperature,
+            regions, reference_points, approximate_values, None, nodal_weights, max_feedback_entries,
+        )
+    }
+
+    /// Include reference feedback between different mean-temperature regions.
+    /// `reference_feedback[i*m+j]` is the additional derivative of reference i
+    /// with respect to mean j, in K/K. Its diagonal adds to the local slopes;
+    /// never supply a derivative twice. Both fields retain their OWN actual
+    /// law values. This is the same estimated two-field comparison as
+    /// `compare_mean_robin_goal_at`, with the complete coupled transpose and
+    /// four retained factor vectors per region instead of two. Every physical
+    /// residual, material-domain, prescribed-value and Krylov gate still applies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compare_mean_robin_goal_with_reference_feedback_at(
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        linear: LinearConfig,
+        reference_temperature: &[f64],
+        approximate_temperature: &[f64],
+        regions: &[&str],
+        reference_points: &[[f64; 4]],
+        approximate_values: &[[f64; 2]],
+        reference_feedback: &[f64],
+        nodal_weights: &[f64],
+        max_feedback_entries: usize,
+    ) -> Result<DiscreteGoalComparison, ConductionError> {
+        Self::compare_mean_robin_goal_inner(
+            cx, problem, interfaces, linear, reference_temperature, approximate_temperature,
+            regions, reference_points, approximate_values, Some(reference_feedback), nodal_weights, max_feedback_entries,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compare_mean_robin_goal_inner(
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        linear: LinearConfig,
+        reference_temperature: &[f64],
+        approximate_temperature: &[f64],
+        regions: &[&str],
+        reference_points: &[[f64; 4]],
+        approximate_values: &[[f64; 2]],
+        reference_feedback: Option<&[f64]>,
+        nodal_weights: &[f64],
+        max_feedback_entries: usize,
+    ) -> Result<DiscreteGoalComparison, ConductionError> {
         poll(cx, 0)?;
         admit_linear(linear)?;
         let n = problem.mesh.vertex_count();
+        let factors = if reference_feedback.is_some() { 4 } else { 2 };
         if regions.len() > 64 || regions.len() != reference_points.len()
             || regions.len() != approximate_values.len()
-            || n.checked_mul(2).and_then(|v| v.checked_mul(regions.len()))
+            || n.checked_mul(factors).and_then(|v| v.checked_mul(regions.len()))
                 .is_none_or(|v| v > max_feedback_entries)
         {
             return Err(invalid("mean-Robin goal needs matching law rows within the 64-region and factor-entry budgets"));
+        }
+        if let Some(feedback) = reference_feedback {
+            vector(cx, feedback, regions.len()*regions.len())?;
         }
         for field in [reference_temperature, approximate_temperature, nodal_weights] {
             vector(cx, field, n)?;
@@ -115,9 +171,15 @@ impl RobinResponse {
             crate::assemble::residual(&approximate_system, &dofs, approximate_temperature);
         // Use the already verified complete, nonsymmetric adjoint path. The
         // fixed-state partial and mean feedback are not counted a second time.
-        let gradient = Self::pullback_mean_robin(cx, reference_problem, interfaces, linear,
-            reference_temperature, regions, &slopes, &reference_slopes, nodal_weights,
-            max_feedback_entries)?;
+        let gradient = if let Some(feedback) = reference_feedback {
+            Self::pullback_mean_robin_with_reference_feedback(cx, reference_problem,
+                interfaces, linear, reference_temperature, regions, &slopes,
+                &reference_slopes, feedback, nodal_weights, max_feedback_entries)?
+        } else {
+            Self::pullback_mean_robin(cx, reference_problem, interfaces, linear,
+                reference_temperature, regions, &slopes, &reference_slopes, nodal_weights,
+                max_feedback_entries)?
+        };
         let mut nodal_contributions = vec![0.0; n];
         let mut signed_residual_change = 0.0;
         for (i, &v) in dofs.free().iter().enumerate() {
