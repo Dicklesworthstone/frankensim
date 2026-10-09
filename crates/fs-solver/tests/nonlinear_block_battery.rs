@@ -1312,3 +1312,65 @@ fn zero_rhs_checkpoint_reports_true_zero_without_running_callbacks() {
         assert!(state.history.is_empty());
     }
 }
+
+#[test]
+fn controlled_solvers_latch_one_shot_mutable_cancellation_predicates() {
+    let gate = CancelGate::new();
+    let probe = CallbackProbe::new(&gate, 2, false);
+    let operator = DenseSquare::new(3, &[4.0, 1.0, 0.0, -1.0, 3.0, 1.0, 0.0, 2.0, 5.0]);
+    let observed_op = Observed {
+        inner: &operator,
+        probe: &probe,
+    };
+    let observed_pc = Observed {
+        inner: &CyclingDiagonal,
+        probe: &probe,
+    };
+    let rhs = [1.0, -2.0, 3.0];
+    let mut state = FgmresState::new(&rhs, 2);
+    let mut delivered = false;
+    let outcome = state.run_controlled(&observed_op, &observed_pc, &rhs, 1e-12, 4, &mut || {
+        let request = gate.is_requested() && !delivered;
+        delivered |= request;
+        request
+    });
+    assert!(delivered);
+    assert_eq!(outcome.progress, SolverRunProgress::Paused);
+    assert_eq!(probe.calls.get(), 2);
+    assert_eq!(state.x, vec![0.0; 3]);
+    assert_eq!(state.iters, 0);
+    assert!(state.history.is_empty());
+    assert!(
+        state
+            .run_controlled(&operator, &CyclingDiagonal, &rhs, 1e-12, 20, &mut || false)
+            .report
+            .converged
+    );
+
+    let gate = CancelGate::new();
+    let probe = CallbackProbe::new(&gate, 2, false);
+    let observed = Observed {
+        inner: &SquareRootTwo,
+        probe: &probe,
+    };
+    let mut state =
+        NewtonKrylovState::new(&SquareRootTwo, vec![1.5], NewtonKrylovConfig::default()).unwrap();
+    let mut delivered = false;
+    let outcome = state.run_controlled(&observed, 10, &mut || {
+        let request = gate.is_requested() && !delivered;
+        delivered |= request;
+        request
+    });
+    assert!(delivered);
+    assert_eq!(outcome.progress, SolverRunProgress::Paused);
+    assert_eq!(probe.calls.get(), 2);
+    assert_eq!(state.x, vec![1.5]);
+    assert_eq!(state.iterations, 0);
+    assert!(state.history.is_empty());
+    assert!(
+        state
+            .run_controlled(&SquareRootTwo, 10, &mut || false)
+            .report
+            .converged
+    );
+}

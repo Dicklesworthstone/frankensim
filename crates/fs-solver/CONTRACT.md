@@ -72,6 +72,9 @@ diagnoses, never timeout mysteries).
   the outcome of new work. `SolverCallbackCounts` reports every numerical
   callback actually invoked, including discarded work. These per-invocation
   counts are not a work budget or a cumulative checkpoint counter.
+  Their `run_controlled` counterparts accept a borrowed `FnMut() -> bool`
+  cancellation predicate. Cx methods delegate to that same implementation;
+  a `true` predicate result stays latched for the entire invocation.
 - `LinearSystemVerifier` → `VerifiedLinearSystem` →
   `admit_linear_solver` — injected verification grammar and local
   decision receipt. CG requires symmetric positive-definite evidence
@@ -276,8 +279,9 @@ Iteration-granular: every state is complete between `run` calls, so
 drivers interrupt by not continuing — request → drain (finish the
 current iteration) → finalize (state is the checkpoint).
 
-The explicit `run_cancellable` entry points for FGMRES and Newton poll
-the supplied `fs-exec::Cx` before and after each numerical callback, at
+The explicit `run_cancellable`/`run_controlled` entry points for FGMRES and
+Newton poll the supplied `fs-exec::Cx` or cancellation predicate before and
+after each numerical callback, at
 Arnoldi columns/orthogonalization rows, and between line-search trials.
 They stage one restart cycle or outer Newton attempt, publishing only
 after a final cancellation check. Cancellation or an unwinding callback
@@ -286,6 +290,10 @@ iteration counters; earlier completed work survives. Resume under a fresh
 context and identical pure inputs repeats only the interrupted unit and
 preserves the numerical trajectory. Counts of spent callbacks are returned
 even when their outputs were discarded.
+Predicates may retain mutable state; once one returns `true`, no further
+predicate or numerical callback is invoked during that solve. Predicates
+must be bounded and nonpanicking; their failures are not numerical callback
+faults and are not caught.
 
 Individual callbacks and vector reductions are not preemptible. The
 constructor's initial residual evaluation remains outside the Cx entry
@@ -368,6 +376,8 @@ rejected trust steps), require no following callback or partial publication,
 and compare resumed numerical results and histories with uninterrupted
 runs. Pre-cancelled entry, dimension refusal, callback accounting, and an
 unwritten-residual false-zero regression are covered.
+One-shot mutable predicates additionally prove cancellation remains latched
+through staging rollback in both public predicate-driven entry points.
 
 ## No-claim boundaries
 

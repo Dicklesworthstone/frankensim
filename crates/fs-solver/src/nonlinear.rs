@@ -8,7 +8,7 @@
 use crate::{LinearOp, SolveReport, StallDiagnosis, dot, norm2};
 use fs_exec::Cx;
 use fs_sparse::precond::Precond;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -71,16 +71,16 @@ pub struct CancellableSolveReport<R> {
     pub callbacks: SolverCallbackCounts,
 }
 
-struct RunControl<'a, 's> {
-    cx: Option<&'a Cx<'s>>,
+struct RunControl<'a> {
+    cancelled: Option<RefCell<&'a mut dyn FnMut() -> bool>>,
     progress: Cell<SolverRunProgress>,
     callbacks: Cell<SolverCallbackCounts>,
 }
 
-impl<'a, 's> RunControl<'a, 's> {
-    fn new(cx: Option<&'a Cx<'s>>) -> Self {
+impl<'a> RunControl<'a> {
+    fn new(cancelled: Option<&'a mut dyn FnMut() -> bool>) -> Self {
         Self {
-            cx,
+            cancelled: cancelled.map(RefCell::new),
             progress: Cell::new(SolverRunProgress::Complete),
             callbacks: Cell::new(SolverCallbackCounts::default()),
         }
@@ -90,7 +90,11 @@ impl<'a, 's> RunControl<'a, 's> {
         if self.progress.get() != SolverRunProgress::Complete {
             return false;
         }
-        if self.cx.is_some_and(|cx| cx.checkpoint().is_err()) {
+        if self
+            .cancelled
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.borrow_mut()())
+        {
             self.progress.set(SolverRunProgress::Paused);
             return false;
         }
@@ -109,10 +113,10 @@ impl<'a, 's> RunControl<'a, 's> {
             SolverCallback::Jacobian => counts.jacobian += 1,
         }
         self.callbacks.set(counts);
-        // Ordinary `run` keeps its historical unwind behavior. The Cx entry
-        // points contain numerical callback unwinds and never publish their
+        // Ordinary `run` keeps its historical unwind behavior. The controlled
+        // entry points contain numerical callback unwinds and never publish their
         // partially written vectors. They cannot undo external side effects.
-        if self.cx.is_some() {
+        if self.cancelled.is_some() {
             if catch_unwind(AssertUnwindSafe(callback)).is_err() {
                 self.progress.set(SolverRunProgress::CallbackPanicked(role));
                 return false;
@@ -619,7 +623,7 @@ impl FgmresState {
         tolerance: f64,
         max_cycles: usize,
     ) -> SolveReport {
-        self.run_controlled(
+        self.run_cycles(
             operator,
             preconditioner,
             rhs,
@@ -648,7 +652,36 @@ impl FgmresState {
         max_cycles: usize,
         cx: &Cx<'_>,
     ) -> CancellableSolveReport<SolveReport> {
-        let control = RunControl::new(Some(cx));
+        self.run_controlled(
+            operator,
+            preconditioner,
+            rhs,
+            tolerance,
+            max_cycles,
+            &mut || cx.checkpoint().is_err(),
+        )
+    }
+
+    /// Predicate-driven form of [`Self::run_cancellable`]. `true` requests
+    /// cancellation and is latched for this invocation, even if a later poll
+    /// would return `false`. The predicate is checked at the same callback and
+    /// numerical boundaries as a Cx; it must be bounded and must not panic.
+    /// Retrying the discarded cycle uses a fresh invocation of the predicate.
+    pub fn run_controlled<A, P, Cancel>(
+        &mut self,
+        operator: &A,
+        preconditioner: &P,
+        rhs: &[f64],
+        tolerance: f64,
+        max_cycles: usize,
+        cancelled: &mut Cancel,
+    ) -> CancellableSolveReport<SolveReport>
+    where
+        A: LinearOp,
+        P: FlexiblePreconditioner,
+        Cancel: FnMut() -> bool,
+    {
+        let control = RunControl::new(Some(cancelled));
         let mut report = self.report(tolerance, false);
         if !control.poll() {
             return control.finish(report);
@@ -666,7 +699,7 @@ impl FgmresState {
                 break;
             }
             let mut staged = self.clone();
-            let candidate = staged.run_controlled(
+            let candidate = staged.run_cycles(
                 operator,
                 preconditioner,
                 rhs,
@@ -688,14 +721,14 @@ impl FgmresState {
     }
 
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-    fn run_controlled<A: LinearOp, P: FlexiblePreconditioner>(
+    fn run_cycles<A: LinearOp, P: FlexiblePreconditioner>(
         &mut self,
         operator: &A,
         preconditioner: &P,
         rhs: &[f64],
         tolerance: f64,
         max_cycles: usize,
-        control: &RunControl<'_, '_>,
+        control: &RunControl<'_>,
         operator_role: SolverCallback,
     ) -> SolveReport {
         let n = operator.n();
@@ -1279,7 +1312,24 @@ impl NewtonKrylovState {
         max_iterations: usize,
         cx: &Cx<'_>,
     ) -> CancellableSolveReport<NewtonReport> {
-        let control = RunControl::new(Some(cx));
+        self.run_controlled(problem, max_iterations, &mut || cx.checkpoint().is_err())
+    }
+
+    /// Predicate-driven form of [`Self::run_cancellable`], using identical
+    /// callback boundaries and atomic outer-attempt publication. `true` is
+    /// latched as cancellation for this invocation. The predicate must be
+    /// bounded and must not panic; it may retain mutable caller-owned state.
+    pub fn run_controlled<P, Cancel>(
+        &mut self,
+        problem: &P,
+        max_iterations: usize,
+        cancelled: &mut Cancel,
+    ) -> CancellableSolveReport<NewtonReport>
+    where
+        P: NonlinearProblem,
+        Cancel: FnMut() -> bool,
+    {
+        let control = RunControl::new(Some(cancelled));
         if !control.poll() {
             return control.finish(self.report());
         }
@@ -1341,7 +1391,7 @@ impl NewtonKrylovState {
     }
 
     #[allow(clippy::too_many_lines)] // One atomic outer attempt and its receipt.
-    fn step<P: NonlinearProblem>(&mut self, problem: &P, control: &RunControl<'_, '_>) {
+    fn step<P: NonlinearProblem>(&mut self, problem: &P, control: &RunControl<'_>) {
         let residual_before = self.residual_norm();
         if !residual_before.is_finite() {
             self.terminal = Some(NewtonStallDiagnosis::NonFinite);
@@ -1365,7 +1415,7 @@ impl NewtonKrylovState {
             outer_iteration: self.iterations,
         };
         let mut linear = FgmresState::new(&rhs, self.config.linear_restart);
-        let linear_report = linear.run_controlled(
+        let linear_report = linear.run_cycles(
             &jacobian,
             &preconditioner,
             &rhs,
@@ -1640,7 +1690,7 @@ fn evaluate_residual<P: NonlinearProblem>(
     problem: &P,
     state: &[f64],
     iteration: usize,
-    control: &RunControl<'_, '_>,
+    control: &RunControl<'_>,
 ) -> Result<Option<(Vec<f64>, f64)>, NewtonError> {
     for (index, value) in state.iter().copied().enumerate() {
         if !value.is_finite() {
