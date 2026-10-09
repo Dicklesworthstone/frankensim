@@ -29,6 +29,8 @@
 pub mod adjoint;
 /// Explicit heterogeneous phase charts and frozen reference densities.
 pub mod heterogeneous;
+/// Implicit ambient radiation with immutable enthalpy history and joule gates.
+pub mod radiation;
 
 use std::{cell::RefCell, fmt};
 
@@ -36,7 +38,7 @@ use fs_exec::Cx;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, PhaseStateError};
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, NewtonStallDiagnosis,
-    NonlinearProblem,
+    NonlinearProblem, SolverCallback, SolverRunProgress,
 };
 use fs_sparse::Csr;
 
@@ -100,6 +102,8 @@ pub enum EnthalpyError {
     Newton(NewtonError),
     /// Shared Newton/Krylov work or globalization failed to converge.
     NotConverged(NewtonReport),
+    /// A nonlinear callback unwound; the incomplete Newton attempt was discarded.
+    SolverCallbackPanicked(SolverCallback),
     /// Independently integrated input did not balance the published storage.
     EnergyBalance {
         /// Actual storage minus net external input, joules.
@@ -139,6 +143,12 @@ impl fmt::Display for EnthalpyError {
                 "enthalpy Newton refused after {} attempts: {:?}; residual {} J",
                 report.iterations, report.diagnosis, report.residual_norm
             ),
+            Self::SolverCallbackPanicked(callback) => {
+                write!(
+                    formatter,
+                    "enthalpy Newton {callback:?} callback panicked; step discarded"
+                )
+            }
             Self::EnergyBalance {
                 residual_j,
                 tolerance_j,
@@ -316,24 +326,7 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         dt_s: f64,
         config: EnthalpyStepConfig,
     ) -> Result<EnthalpyStepSolution, EnthalpyError> {
-        poll(cx, 0)?;
-        if !std::ptr::eq(self.mesh, problem.mesh) || old_specific_h.len() != self.masses.len() {
-            return Err(EnthalpyError::InvalidInput(
-                "reference mass and history must match the exact transport mesh",
-            ));
-        }
-        if problem
-            .boundary
-            .conditions()
-            .iter()
-            .any(|bc| matches!(bc, ThermalBc::Dirichlet { .. }))
-        {
-            return Err(EnthalpyError::UnsupportedDirichlet);
-        }
-        validate_work(self.masses.len(), dt_s, config)?;
-        for condition in problem.boundary.conditions() {
-            condition.validate(self.masses.len())?;
-        }
+        self.admit_step(cx, problem, old_specific_h, dt_s, config)?;
         let context = StepContext {
             storage: self,
             cx,
@@ -352,13 +345,34 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
                     return Err(stage.take_failure().unwrap_or(EnthalpyError::Newton(error)));
                 }
             };
+        poll(cx, 0)?;
         for attempt in 0..config.max_newton_iterations {
             poll(cx, attempt)?;
-            let report = newton.run(&stage, 1);
+            let progress = newton.run_cancellable(&stage, 1, cx);
+            match progress.progress {
+                SolverRunProgress::Complete => {}
+                SolverRunProgress::Paused => {
+                    return Err(ConductionError::Cancelled {
+                        stage: "spatial-enthalpy-solver",
+                        at: attempt,
+                    }
+                    .into());
+                }
+                SolverRunProgress::CallbackPanicked(callback) => {
+                    return Err(EnthalpyError::SolverCallbackPanicked(callback));
+                }
+                SolverRunProgress::DimensionMismatch { expected, actual } => {
+                    return Err(EnthalpyError::Newton(NewtonError::Dimension {
+                        problem: actual,
+                        state: expected,
+                    }));
+                }
+            }
             if let Some(error) = stage.fatal.take() {
                 return Err(error);
             }
             poll(cx, attempt)?;
+            let report = progress.report;
             if report.converged {
                 return context.finish(newton.x, report, config.energy_tolerance_j);
             }
@@ -374,6 +388,35 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
             stage = context.stage(&newton.x)?;
         }
         unreachable!("positive Newton attempt budget admitted above")
+    }
+
+    fn admit_step(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+    ) -> Result<(), EnthalpyError> {
+        poll(cx, 0)?;
+        if !std::ptr::eq(self.mesh, problem.mesh) || old_specific_h.len() != self.masses.len() {
+            return Err(EnthalpyError::InvalidInput(
+                "reference mass and history must match the exact transport mesh",
+            ));
+        }
+        if problem
+            .boundary
+            .conditions()
+            .iter()
+            .any(|bc| matches!(bc, ThermalBc::Dirichlet { .. }))
+        {
+            return Err(EnthalpyError::UnsupportedDirichlet);
+        }
+        validate_work(self.masses.len(), dt_s, config)?;
+        for condition in problem.boundary.conditions() {
+            condition.validate(self.masses.len())?;
+        }
+        Ok(())
     }
 }
 

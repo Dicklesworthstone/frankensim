@@ -41,6 +41,7 @@ pub use ambient::{
     AmbientRadiationReport, AmbientRadiationSolution, solve_with_ambient_radiation,
     AmbientRadiationGradient, pullback_ambient_radiation,
 };
+pub(crate) use ambient::{AmbientRadiationTrial, solve_ambient_radiation_with};
 
 /// CODATA exact SI value after the 2019 kelvin redefinition, W/(m² K⁴).
 pub const STEFAN_BOLTZMANN_W_M2_K4: f64 = 5.670_374_419e-8;

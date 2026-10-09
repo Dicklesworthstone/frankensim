@@ -963,7 +963,8 @@ authority.
   reference density. All Dirichlet rows refuse explicitly: a temperature on a
   latent plateau does not determine enthalpy. Geometry and energetic internal
   variables are frozen; there is no material motion, expansion, pressure work,
-  remapping, phase kinetics, vaporization, or implicit radiation law in this API.
+  remapping, phase kinetics or vaporization. The basic `advance` entry point
+  has no implicit radiation law; the separate radiative entry point follows.
   `tests/enthalpy_transport.rs` compares constant-Cp stepping with the existing
   temperature solver, latent heating with independent energy formulas and the
   exact uniform lumped limit, a nonlinear-conductivity endpoint with independent
@@ -980,6 +981,34 @@ authority.
   80 axial cells, checking improving front, molten-length and temperature
   discrepancies plus energy closure. This finite comparison does not establish
   a formal spatial or temporal order, or validate liquid-flow physics.
+- `EnthalpyBackwardEuler::advance_with_ambient_radiation` and its heterogeneous
+  phase-assignment facade add implicit gray ambient radiation to this same
+  reference-mass step. The existing steady ambient-patch iterator is shared:
+  unique uniform Robin traces use `epsilon sigma A (T_mean^4-T_ambient^4)` with
+  the secant applied through the existing pointwise P1 Robin operator. Initial
+  and trial area-mean surface temperatures must lie in the emissivity claim's
+  support. Convection and radiation retain distinct heat reports, including
+  negative radiative heat from hotter reservoirs. Every inner enthalpy solve
+  starts from the same immutable history; an outer radiation iteration never
+  advances physical time or adds latent heat twice. Heterogeneous conductivity,
+  declared phase charts and constant finite contact remain in the inner solve.
+  Raw patch-temperature and per-patch watt gates are followed by a reassembled
+  endpoint residual in joules and a direct storage-minus-net-input audit using
+  the nonlinear radiative heat. The residual target is the original Newton
+  `max(atol,rtol*||R(h_old)||)` for the complete radiative initial residual;
+  inner solves use one quarter of this target. The original absolute energy
+  tolerance is never widened to accommodate the patch-watt tolerance.
+  Cancellation, chart-domain failure, exhausted radiative/Newton work, or
+  failed physical residual/energy closure publishes no endpoint. Spatial
+  Newton iterations now also poll through the shared cancellable Krylov and
+  globalization callbacks; a callback panic has a typed refusal and discards
+  the incomplete attempt. `tests/enthalpy_radiation.rs` independently checks
+  the mean and three spatial P1 modes on a regular tetrahedron against scalar
+  backward-Euler algebra, both reservoir heat directions, unsmoothed latent
+  phase exchange, deterministic replay and admission/closure refusals.
+  This is a fixed-step estimated discretization, not pointwise `T(x)^4`
+  quadrature, an enclosure/view-factor model, an adaptive transient frontend,
+  a radiative enthalpy adjoint, or experimentally validated heat transfer.
 - `transient::enthalpy::adjoint` supplies discrete endpoint derivatives for
   this same spatial enthalpy balance. `linearize_step` solves a real endpoint;
   `linearize_accepted` rechecks a supplied endpoint's original Newton target,

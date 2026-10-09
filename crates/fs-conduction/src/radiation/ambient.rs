@@ -146,7 +146,7 @@ impl Default for AmbientRadiationConfig {
 }
 
 impl AmbientRadiationConfig {
-    fn validate(self) -> Result<(), ConductionError> {
+    pub(crate) fn validate(self) -> Result<(), ConductionError> {
         if self.max_iterations == 0
             || !(self.temperature_tolerance_k.is_finite() && self.temperature_tolerance_k > 0.0)
             || !(self.balance_tolerance_w.is_finite() && self.balance_tolerance_w >= 0.0)
@@ -241,6 +241,24 @@ pub struct AmbientRadiationSolution {
     pub radiation: AmbientRadiationReport,
 }
 
+/// One response to a frozen radiative secant. The shared outer iteration owns
+/// patch admission and heat accounting; its caller owns the physical solve.
+pub(crate) struct AmbientRadiationTrial<S> {
+    pub solution: S,
+    pub robin_fluxes: Vec<RobinFlux>,
+    pub robin_out_w: f64,
+    pub solid_iterations: usize,
+    pub krylov_iterations: usize,
+}
+
+pub(crate) struct AmbientRadiationOutcome<S> {
+    pub solution: S,
+    pub combined_boundary: ThermalBoundary,
+    pub convective_robin_fluxes: Vec<RobinFlux>,
+    pub convective_out_w: f64,
+    pub radiation: AmbientRadiationReport,
+}
+
 struct BoundPatch<'a> {
     patch: &'a AmbientRadiationPatch,
     region: usize,
@@ -264,6 +282,59 @@ pub fn solve_with_ambient_radiation(
     conduction_config: SolveConfig,
     config: AmbientRadiationConfig,
 ) -> Result<AmbientRadiationSolution, ConductionError> {
+    let mut next_config = conduction_config.clone();
+    let result = solve_ambient_radiation_with(
+        cx,
+        problem,
+        patches,
+        config,
+        |combined_problem| {
+            let final_solve_config = next_config.clone();
+            let conduction = run_conduction(cx, combined_problem, interfaces, next_config.clone())?;
+            if conduction.report.final_residual > conduction.report.residual_threshold {
+                return Err(radiation_error(
+                    "ambient-coupling",
+                    "inner solid stopped without satisfying its residual gate",
+                    "tighten the solid stop rule and disable premature step-only convergence",
+                ));
+            }
+            let mut krylov_iterations = 0;
+            for solve in &conduction.report.linear {
+                krylov_iterations = count(krylov_iterations, solve.iterations)?;
+            }
+            let dofs = DofMap::new(problem.boundary, problem.mesh.vertex_count())?;
+            next_config = conduction_config.clone();
+            next_config.initial = InitialGuess::Free(dofs.gather(&conduction.temperature));
+            Ok(AmbientRadiationTrial {
+                robin_fluxes: conduction.report.robin_fluxes.clone(),
+                robin_out_w: conduction.report.energy.robin_out_w,
+                solid_iterations: conduction.report.iterations,
+                krylov_iterations,
+                solution: (conduction, final_solve_config),
+            })
+        },
+        |_, _, _| Ok(true),
+    )?;
+    Ok(AmbientRadiationSolution {
+        conduction: result.solution.0,
+        final_solve_config: result.solution.1,
+        combined_boundary: result.combined_boundary,
+        convective_robin_fluxes: result.convective_robin_fluxes,
+        convective_out_w: result.convective_out_w,
+        radiation: result.radiation,
+    })
+}
+
+/// Shared secant iteration. `accept` may impose a stronger coupled residual
+/// or storage balance after the common temperature and patch-watt gates pass.
+pub(crate) fn solve_ambient_radiation_with<S, E: From<ConductionError>>(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    patches: &[AmbientRadiationPatch],
+    config: AmbientRadiationConfig,
+    mut solve: impl FnMut(ConductionProblem<'_>) -> Result<AmbientRadiationTrial<S>, E>,
+    mut accept: impl FnMut(&mut S, &[AmbientRadiationPatchReport], f64) -> Result<bool, E>,
+) -> Result<AmbientRadiationOutcome<S>, E> {
     poll(cx, 0)?;
     config.validate()?;
     if patches.is_empty() {
@@ -271,7 +342,8 @@ pub fn solve_with_ambient_radiation(
             "ambient-coupling",
             "no radiation patches were declared",
             "use the ordinary conduction solve when radiation is absent",
-        ));
+        )
+        .into());
     }
     let mut bound = Vec::with_capacity(patches.len());
     let mut names = BTreeSet::new();
@@ -282,7 +354,8 @@ pub fn solve_with_ambient_radiation(
                 patch.region(),
                 "duplicate ambient patch",
                 "declare one radiation owner per boundary region",
-            ));
+            )
+            .into());
         }
         let region = problem
             .boundary
@@ -305,7 +378,7 @@ pub fn solve_with_ambient_radiation(
                 patch.region(),
                 "ambient patch is not a uniform Robin boundary",
                 "bind the patch to uniform convection; prescribed, flux and nodal Robin rows are unsupported",
-            ));
+            ).into());
         };
         require_temperature(patch.region(), "convective reference", *reference)?;
         let mut area = 0.0;
@@ -320,7 +393,8 @@ pub fn solve_with_ambient_radiation(
                 patch.region(),
                 "ambient patch owns no boundary area",
                 "bind radiation to a nonempty exterior trace",
-            ));
+            )
+            .into());
         }
         bound.push(BoundPatch {
             patch,
@@ -329,12 +403,10 @@ pub fn solve_with_ambient_radiation(
             convective_reference: *reference,
         });
     }
-    let dofs = DofMap::new(problem.boundary, problem.mesh.vertex_count())?;
     let mut driving: Vec<f64> = patches
         .iter()
         .map(|patch| patch.emissivity.temperature_k())
         .collect();
-    let mut next_config = conduction_config.clone();
     let mut solid_iterations = 0_usize;
     let mut krylov_iterations = 0_usize;
     let mut last_change = f64::INFINITY;
@@ -361,21 +433,11 @@ pub fn solve_with_ambient_radiation(
             boundary: &combined_boundary,
             ..problem
         };
-        let final_solve_config = next_config.clone();
-        let conduction = run_conduction(cx, combined_problem, interfaces, next_config)?;
+        let mut trial = solve(combined_problem)?;
         poll(cx, iteration)?;
-        if conduction.report.final_residual > conduction.report.residual_threshold {
-            return Err(radiation_error(
-                "ambient-coupling",
-                "inner solid stopped without satisfying its residual gate",
-                "tighten the solid stop rule and disable premature step-only convergence",
-            ));
-        }
-        solid_iterations = count(solid_iterations, conduction.report.iterations)?;
-        for solve in &conduction.report.linear {
-            krylov_iterations = count(krylov_iterations, solve.iterations)?;
-        }
-        let mut convective_robin_fluxes = conduction.report.robin_fluxes.clone();
+        solid_iterations = count(solid_iterations, trial.solid_iterations)?;
+        krylov_iterations = count(krylov_iterations, trial.krylov_iterations)?;
+        let mut convective_robin_fluxes = trial.robin_fluxes;
         let mut rows = Vec::with_capacity(bound.len());
         let mut temperature_converged = true;
         let mut heat_converged = true;
@@ -422,7 +484,8 @@ pub fn solve_with_ambient_radiation(
                     patch.patch.region(),
                     format!("combined Robin heat split differs by {split_error} W"),
                     "use resolvable heat tolerances or report the boundary decomposition defect",
-                ));
+                )
+                .into());
             }
             let change = finite(mean - driving[index], "patch temperature update")?.abs();
             let mismatch =
@@ -460,12 +523,12 @@ pub fn solve_with_ambient_radiation(
             convective_out_w = finite(convective_out_w + flux.heat_rate_w, "convective total")?;
         }
         let decomposition_residual_w = finite(
-            conduction.report.energy.robin_out_w - convective_out_w - applied_radiation_out_w,
+            trial.robin_out_w - convective_out_w - applied_radiation_out_w,
             "boundary heat decomposition",
         )?;
         if decomposition_residual_w.abs()
             > config.heat_tolerance(
-                conduction.report.energy.robin_out_w,
+                trial.robin_out_w,
                 convective_out_w.abs() + applied_radiation_out_w.abs(),
             )?
         {
@@ -473,14 +536,17 @@ pub fn solve_with_ambient_radiation(
                 "ambient-coupling",
                 "whole-boundary heat decomposition failed",
                 "use resolvable heat tolerances or report the boundary decomposition defect",
-            ));
+            )
+            .into());
         }
-        if temperature_converged && heat_converged {
+        if temperature_converged
+            && heat_converged
+            && accept(&mut trial.solution, &rows, convective_out_w)?
+        {
             poll(cx, iteration)?;
-            return Ok(AmbientRadiationSolution {
-                conduction,
+            return Ok(AmbientRadiationOutcome {
+                solution: trial.solution,
                 combined_boundary,
-                final_solve_config,
                 convective_robin_fluxes,
                 convective_out_w,
                 radiation: AmbientRadiationReport {
@@ -506,15 +572,14 @@ pub fn solve_with_ambient_radiation(
                 "relaxed patch temperature",
             )?;
         }
-        next_config = conduction_config.clone();
-        next_config.initial = InitialGuess::Free(dofs.gather(&conduction.temperature));
     }
     Err(ConductionError::AmbientRadiationNotConverged {
         iterations: config.max_iterations,
         temperature_change_k: last_change,
         temperature_tolerance_k: config.temperature_tolerance_k,
         heat_mismatch_w: last_mismatch,
-    })
+    }
+    .into())
 }
 
 fn finite(value: f64, what: &str) -> Result<f64, ConductionError> {

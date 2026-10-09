@@ -294,6 +294,33 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         self.inner
             .advance(cx, problem, interfaces, old_specific_h, dt_s, config)
     }
+
+    /// Add implicit ambient radiation while retaining each vertex's declared
+    /// phase chart and immutable reference mass. The shared driver checks the
+    /// complete endpoint residual and nonlinear radiative energy balance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        patches: &[crate::AmbientRadiationPatch],
+        radiation_config: crate::AmbientRadiationConfig,
+    ) -> Result<super::radiation::EnthalpyRadiationStepSolution, EnthalpyError> {
+        self.inner.advance_with_ambient_radiation(
+            cx,
+            problem,
+            interfaces,
+            old_specific_h,
+            dt_s,
+            config,
+            patches,
+            radiation_config,
+        )
+    }
 }
 
 /// Physical history/source and frozen-reference-density pullbacks of one step.
