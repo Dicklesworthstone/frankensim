@@ -6,8 +6,131 @@
 //! named Krylov method.
 
 use crate::{LinearOp, SolveReport, StallDiagnosis, dot, norm2};
+use fs_exec::Cx;
 use fs_sparse::precond::Precond;
+use std::cell::Cell;
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+/// Numerical callback whose unwind interrupted a cancellable solve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolverCallback {
+    /// A linear operator action in FGMRES.
+    Operator,
+    /// A flexible inverse-preconditioner action.
+    Preconditioner,
+    /// A nonlinear residual evaluation.
+    Residual,
+    /// A nonlinear Jacobian action.
+    Jacobian,
+}
+
+/// Why a cancellable invocation returned. Inspect this before interpreting
+/// convergence in the accompanying last-committed-state report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolverRunProgress {
+    /// The requested work finished, converged, or reached a numerical stall.
+    Complete,
+    /// Cancellation discarded the unfinished restart cycle or Newton attempt.
+    Paused,
+    /// A numerical callback unwound; the unfinished work was discarded.
+    CallbackPanicked(SolverCallback),
+    /// The supplied operator/problem no longer matches the retained state.
+    DimensionMismatch {
+        /// Dimension retained in the checkpoint.
+        expected: usize,
+        /// Dimension supplied for this invocation.
+        actual: usize,
+    },
+}
+
+/// Callback invocations actually spent in one cancellable run, including
+/// discarded work and the callback that panicked or requested cancellation.
+/// These are operational counts, not a budget or committed-iteration count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SolverCallbackCounts {
+    /// Linear operator applications.
+    pub operator: usize,
+    /// Preconditioner applications.
+    pub preconditioner: usize,
+    /// Nonlinear residual evaluations.
+    pub residual: usize,
+    /// Nonlinear Jacobian applications (including the inner Krylov solve).
+    pub jacobian: usize,
+}
+
+/// Cancellable invocation result with a report for the last committed state.
+/// No numerical state from an interrupted attempt is published in `report`.
+#[derive(Debug, Clone)]
+pub struct CancellableSolveReport<R> {
+    /// Completion, cancellation, or callback-fault attribution.
+    pub progress: SolverRunProgress,
+    /// Ordinary numerical report for the retained checkpoint.
+    pub report: R,
+    /// Work spent in this invocation; resume starts a new accounting interval.
+    pub callbacks: SolverCallbackCounts,
+}
+
+struct RunControl<'a, 's> {
+    cx: Option<&'a Cx<'s>>,
+    progress: Cell<SolverRunProgress>,
+    callbacks: Cell<SolverCallbackCounts>,
+}
+
+impl<'a, 's> RunControl<'a, 's> {
+    fn new(cx: Option<&'a Cx<'s>>) -> Self {
+        Self {
+            cx,
+            progress: Cell::new(SolverRunProgress::Complete),
+            callbacks: Cell::new(SolverCallbackCounts::default()),
+        }
+    }
+
+    fn poll(&self) -> bool {
+        if self.progress.get() != SolverRunProgress::Complete {
+            return false;
+        }
+        if self.cx.is_some_and(|cx| cx.checkpoint().is_err()) {
+            self.progress.set(SolverRunProgress::Paused);
+            return false;
+        }
+        true
+    }
+
+    fn invoke(&self, role: SolverCallback, callback: impl FnOnce()) -> bool {
+        if !self.poll() {
+            return false;
+        }
+        let mut counts = self.callbacks.get();
+        match role {
+            SolverCallback::Operator => counts.operator += 1,
+            SolverCallback::Preconditioner => counts.preconditioner += 1,
+            SolverCallback::Residual => counts.residual += 1,
+            SolverCallback::Jacobian => counts.jacobian += 1,
+        }
+        self.callbacks.set(counts);
+        // Ordinary `run` keeps its historical unwind behavior. The Cx entry
+        // points contain numerical callback unwinds and never publish their
+        // partially written vectors. They cannot undo external side effects.
+        if self.cx.is_some() {
+            if catch_unwind(AssertUnwindSafe(callback)).is_err() {
+                self.progress.set(SolverRunProgress::CallbackPanicked(role));
+                return false;
+            }
+        } else {
+            callback();
+        }
+        self.poll()
+    }
+
+    fn finish<R>(&self, report: R) -> CancellableSolveReport<R> {
+        CancellableSolveReport {
+            progress: self.progress.get(),
+            report,
+            callbacks: self.callbacks.get(),
+        }
+    }
+}
 
 /// Symmetry conclusion from an injected linear-system verifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,7 +578,8 @@ pub struct FgmresState {
 }
 
 impl FgmresState {
-    /// Start from the zero vector.
+    /// Start from the zero vector. An exactly zero source has zero residual
+    /// even before the first cycle (including no-work and paused reports).
     #[must_use]
     pub fn new(rhs: &[f64], restart: usize) -> Self {
         assert!(restart >= 1, "FGMRES restart length must be positive");
@@ -463,7 +587,11 @@ impl FgmresState {
             x: vec![0.0; rhs.len()],
             restart,
             bnorm: norm2(rhs).max(f64::MIN_POSITIVE),
-            rel: 1.0,
+            rel: if rhs.iter().all(|&value| value == 0.0) {
+                0.0
+            } else {
+                1.0
+            },
             iters: 0,
             history: Vec::new(),
         }
@@ -483,7 +611,6 @@ impl FgmresState {
     }
 
     /// Run up to `max_cycles` additional restart cycles.
-    #[allow(clippy::too_many_lines)] // The Arnoldi/Givens cycle is one invariant.
     pub fn run<A: LinearOp, P: FlexiblePreconditioner>(
         &mut self,
         operator: &A,
@@ -492,13 +619,95 @@ impl FgmresState {
         tolerance: f64,
         max_cycles: usize,
     ) -> SolveReport {
+        self.run_controlled(
+            operator,
+            preconditioner,
+            rhs,
+            tolerance,
+            max_cycles,
+            &RunControl::new(None),
+            SolverCallback::Operator,
+        )
+    }
+
+    /// Run with cancellation checks before/after every operator and
+    /// preconditioner callback and at Arnoldi-column boundaries. A cancelled
+    /// or panicking cycle publishes no iterate, residual, iteration count or
+    /// history. Earlier completed cycles remain committed. Resume with a fresh
+    /// context and the same pure inputs restarts only the unfinished cycle.
+    ///
+    /// Callbacks and individual vector reductions are not preemptible. Spent
+    /// callbacks are reported separately, including work that must be repeated
+    /// on resume. Panics are contained only when built with unwind support.
+    pub fn run_cancellable<A: LinearOp, P: FlexiblePreconditioner>(
+        &mut self,
+        operator: &A,
+        preconditioner: &P,
+        rhs: &[f64],
+        tolerance: f64,
+        max_cycles: usize,
+        cx: &Cx<'_>,
+    ) -> CancellableSolveReport<SolveReport> {
+        let control = RunControl::new(Some(cx));
+        let mut report = self.report(tolerance, false);
+        if !control.poll() {
+            return control.finish(report);
+        }
+        let n = operator.n();
+        if n != self.x.len() || rhs.len() != n {
+            control.progress.set(SolverRunProgress::DimensionMismatch {
+                expected: self.x.len(),
+                actual: if n != self.x.len() { n } else { rhs.len() },
+            });
+            return control.finish(report);
+        }
+        for _ in 0..max_cycles {
+            if !control.poll() {
+                break;
+            }
+            let mut staged = self.clone();
+            let candidate = staged.run_controlled(
+                operator,
+                preconditioner,
+                rhs,
+                tolerance,
+                1,
+                &control,
+                SolverCallback::Operator,
+            );
+            if !control.poll() {
+                break;
+            }
+            *self = staged;
+            report = candidate;
+            if report.converged || report.diagnosis == Some(StallDiagnosis::Breakdown) {
+                break;
+            }
+        }
+        control.finish(report)
+    }
+
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    fn run_controlled<A: LinearOp, P: FlexiblePreconditioner>(
+        &mut self,
+        operator: &A,
+        preconditioner: &P,
+        rhs: &[f64],
+        tolerance: f64,
+        max_cycles: usize,
+        control: &RunControl<'_, '_>,
+        operator_role: SolverCallback,
+    ) -> SolveReport {
         let n = operator.n();
         assert_eq!(rhs.len(), n, "FGMRES rhs length mismatch");
         assert_eq!(self.x.len(), n, "FGMRES checkpoint dimension mismatch");
         let mut broken = false;
         let mut applied = vec![0.0; n];
         for _ in 0..max_cycles {
-            operator.apply(&self.x, &mut applied);
+            applied.fill(f64::NAN);
+            if !control.invoke(operator_role, || operator.apply(&self.x, &mut applied)) {
+                break;
+            }
             let mut residual: Vec<f64> = rhs
                 .iter()
                 .zip(&applied)
@@ -527,20 +736,32 @@ impl FgmresState {
             g[0] = beta;
             let mut columns = 0usize;
             for column in 0..m {
-                let mut z = vec![0.0; n];
-                preconditioner.apply(self.iters, &basis[column], &mut z);
+                let mut z = vec![f64::NAN; n];
+                if !control.invoke(SolverCallback::Preconditioner, || {
+                    preconditioner.apply(self.iters, &basis[column], &mut z);
+                }) {
+                    break;
+                }
                 if z.iter().any(|value| !value.is_finite()) {
                     broken = true;
                     break;
                 }
-                let mut w = vec![0.0; n];
-                operator.apply(&z, &mut w);
+                let mut w = vec![f64::NAN; n];
+                if !control.invoke(operator_role, || operator.apply(&z, &mut w)) {
+                    break;
+                }
                 for (row, vector) in basis.iter().enumerate() {
+                    if !control.poll() {
+                        break;
+                    }
                     let coefficient = dot(vector, &w);
                     h[row * m + column] = coefficient;
                     for (value, basis_value) in w.iter_mut().zip(vector) {
                         *value = coefficient.mul_add(-basis_value, *value);
                     }
+                }
+                if !control.poll() {
+                    break;
                 }
                 let next_norm = norm2(&w);
                 h[(column + 1) * m + column] = next_norm;
@@ -579,11 +800,14 @@ impl FgmresState {
                 }
                 basis.push(w);
             }
-            if broken || columns == 0 {
+            if !control.poll() || broken || columns == 0 {
                 break;
             }
             let mut coefficients = vec![0.0; columns];
             for row in (0..columns).rev() {
+                if !control.poll() {
+                    break;
+                }
                 let mut value = g[row];
                 for column in (row + 1)..columns {
                     value = h[row * m + column].mul_add(-coefficients[column], value);
@@ -595,7 +819,7 @@ impl FgmresState {
                 }
                 coefficients[row] = value / diagonal;
             }
-            if broken {
+            if !control.poll() || broken {
                 break;
             }
             for (coefficient, vector) in coefficients.iter().zip(&preconditioned_basis) {
@@ -603,7 +827,10 @@ impl FgmresState {
                     *value = coefficient.mul_add(*direction, *value);
                 }
             }
-            operator.apply(&self.x, &mut applied);
+            applied.fill(f64::NAN);
+            if !control.invoke(operator_role, || operator.apply(&self.x, &mut applied)) {
+                break;
+            }
             let true_residual: Vec<f64> = rhs
                 .iter()
                 .zip(&applied)
@@ -615,6 +842,10 @@ impl FgmresState {
                 break;
             }
         }
+        self.report(tolerance, broken)
+    }
+
+    fn report(&self, tolerance: f64, broken: bool) -> SolveReport {
         SolveReport::from_claim_with_diagnosis(
             self.iters,
             self.residual_claim(),
@@ -982,7 +1213,8 @@ impl NewtonKrylovState {
                 state: x.len(),
             });
         }
-        let (residual, residual_norm) = evaluate_residual(problem, &x, 0)?;
+        let (residual, residual_norm) = evaluate_residual(problem, &x, 0, &RunControl::new(None))?
+            .expect("ordinary Newton construction cannot pause");
         let trust_radius = match config.globalization {
             Globalization::LineSearch(_) => 0.0,
             Globalization::TrustRegion(trust) => trust.initial_radius,
@@ -1020,13 +1252,57 @@ impl NewtonKrylovState {
             self.x.len(),
             "Newton checkpoint/problem dimension mismatch"
         );
+        let control = RunControl::new(None);
         for _ in 0..max_iterations {
             if self.is_converged() || self.terminal.is_some() {
                 break;
             }
-            self.step(problem);
+            self.step(problem, &control);
         }
         self.report()
+    }
+
+    /// Run with an explicit cancellation context. Polls before/after residual,
+    /// Jacobian and preconditioner callbacks, within inner FGMRES, and between
+    /// line-search trials. Each outer attempt is staged; cancellation or an
+    /// unwinding callback discards its point, radius, forcing history and
+    /// numerical counters. Earlier completed attempts remain committed.
+    ///
+    /// Resume with a fresh context and the identical pure problem to reproduce
+    /// the uninterrupted numerical trajectory. The interrupted attempt is
+    /// recomputed; `callbacks` includes its already-spent work. This method
+    /// does not make the initial evaluation in [`Self::new`] cancellable, nor
+    /// preempt individual callbacks or enforce evaluation/time/memory budgets.
+    pub fn run_cancellable<P: NonlinearProblem>(
+        &mut self,
+        problem: &P,
+        max_iterations: usize,
+        cx: &Cx<'_>,
+    ) -> CancellableSolveReport<NewtonReport> {
+        let control = RunControl::new(Some(cx));
+        if !control.poll() {
+            return control.finish(self.report());
+        }
+        let dimension = problem.dimension();
+        if dimension != self.x.len() {
+            control.progress.set(SolverRunProgress::DimensionMismatch {
+                expected: self.x.len(),
+                actual: dimension,
+            });
+            return control.finish(self.report());
+        }
+        for _ in 0..max_iterations {
+            if !control.poll() || self.is_converged() || self.terminal.is_some() {
+                break;
+            }
+            let mut staged = self.clone();
+            staged.step(problem, &control);
+            if !control.poll() {
+                break;
+            }
+            *self = staged;
+        }
+        control.finish(self.report())
     }
 
     fn target(&self) -> f64 {
@@ -1065,7 +1341,7 @@ impl NewtonKrylovState {
     }
 
     #[allow(clippy::too_many_lines)] // One atomic outer attempt and its receipt.
-    fn step<P: NonlinearProblem>(&mut self, problem: &P) {
+    fn step<P: NonlinearProblem>(&mut self, problem: &P, control: &RunControl<'_, '_>) {
         let residual_before = self.residual_norm();
         if !residual_before.is_finite() {
             self.terminal = Some(NewtonStallDiagnosis::NonFinite);
@@ -1089,13 +1365,18 @@ impl NewtonKrylovState {
             outer_iteration: self.iterations,
         };
         let mut linear = FgmresState::new(&rhs, self.config.linear_restart);
-        let linear_report = linear.run(
+        let linear_report = linear.run_controlled(
             &jacobian,
             &preconditioner,
             &rhs,
             forcing,
             self.config.max_linear_cycles,
+            control,
+            SolverCallback::Jacobian,
         );
+        if !control.poll() {
+            return;
+        }
         if !linear_report.converged {
             self.terminal = Some(NewtonStallDiagnosis::LinearSolveFailed(
                 linear_report
@@ -1118,10 +1399,14 @@ impl NewtonKrylovState {
                 let mut accepted = None;
                 let mut saw_finite_trial = false;
                 while step_length >= line.minimum_step {
+                    if !control.poll() {
+                        return;
+                    }
                     last_step_length = step_length;
                     let trial_x = stepped(&self.x, &direction, step_length);
-                    match evaluate_residual(problem, &trial_x, iteration + 1) {
-                        Ok((trial_residual, trial_norm)) => {
+                    match evaluate_residual(problem, &trial_x, iteration + 1, control) {
+                        Ok(None) => return,
+                        Ok(Some((trial_residual, trial_norm))) => {
                             saw_finite_trial = true;
                             if trial_norm <= (1.0 - line.armijo * step_length) * residual_before {
                                 accepted = Some((trial_x, trial_residual, trial_norm));
@@ -1177,8 +1462,9 @@ impl NewtonKrylovState {
                 };
                 let trial_x = stepped(&self.x, &direction, step_length);
                 let (trial_residual, trial_norm) =
-                    match evaluate_residual(problem, &trial_x, iteration + 1) {
-                        Ok(evaluated) => evaluated,
+                    match evaluate_residual(problem, &trial_x, iteration + 1, control) {
+                        Ok(None) => return,
+                        Ok(Some(evaluated)) => evaluated,
                         Err(_) => {
                             self.record_nonfinite_attempt(
                                 iteration,
@@ -1191,10 +1477,14 @@ impl NewtonKrylovState {
                             return;
                         }
                     };
-                let mut jacobian_step = vec![0.0; direction.len()];
+                let mut jacobian_step = vec![f64::NAN; direction.len()];
                 let scaled_direction: Vec<f64> =
                     direction.iter().map(|value| step_length * value).collect();
-                problem.jacobian_apply(&self.x, &scaled_direction, &mut jacobian_step);
+                if !control.invoke(SolverCallback::Jacobian, || {
+                    problem.jacobian_apply(&self.x, &scaled_direction, &mut jacobian_step);
+                }) {
+                    return;
+                }
                 if finite_norm(&jacobian_step).is_none() {
                     self.record_nonfinite_attempt(
                         iteration,
@@ -1350,7 +1640,8 @@ fn evaluate_residual<P: NonlinearProblem>(
     problem: &P,
     state: &[f64],
     iteration: usize,
-) -> Result<(Vec<f64>, f64), NewtonError> {
+    control: &RunControl<'_, '_>,
+) -> Result<Option<(Vec<f64>, f64)>, NewtonError> {
     for (index, value) in state.iter().copied().enumerate() {
         if !value.is_finite() {
             return Err(NewtonError::NonFiniteState {
@@ -1360,8 +1651,12 @@ fn evaluate_residual<P: NonlinearProblem>(
             });
         }
     }
-    let mut residual = vec![0.0; problem.dimension()];
-    problem.residual(state, &mut residual);
+    let mut residual = vec![f64::NAN; problem.dimension()];
+    if !control.invoke(SolverCallback::Residual, || {
+        problem.residual(state, &mut residual);
+    }) {
+        return Ok(None);
+    }
     for (index, value) in residual.iter().copied().enumerate() {
         if !value.is_finite() {
             return Err(NewtonError::NonFiniteResidual {
@@ -1374,7 +1669,7 @@ fn evaluate_residual<P: NonlinearProblem>(
     let Some(residual_norm) = finite_norm(&residual) else {
         return Err(NewtonError::NonFiniteResidualNorm { iteration });
     };
-    Ok((residual, residual_norm))
+    Ok(Some((residual, residual_norm)))
 }
 
 fn finite_norm(values: &[f64]) -> Option<f64> {

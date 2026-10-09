@@ -4,7 +4,7 @@
 
 Layer: **currently L3 FLUX** because the historical p-MG and Stokes
 fixtures import `fs-feec` (L3); the other dependencies are `fs-la`,
-`fs-sparse`, and `fs-spectral` (L1) plus `fs-tilelang` and `fs-math`
+`fs-sparse`, and `fs-spectral` (L1) plus `fs-exec`, `fs-tilelang`, and `fs-math`
 (L0). The generic nonlinear, block-operator, verification/admission,
 and flexible-Krylov modules deliberately contain no `fs-feec` types
 and form the lower-layer solver spine. Moving the package metadata to
@@ -63,6 +63,15 @@ diagnoses, never timeout mysteries).
   preconditioner is selected by logical iteration, so varying
   preconditioners are explicit and checkpoint/replay at restart
   boundaries remains bitwise deterministic.
+- `FgmresState::run_cancellable` and
+  `NewtonKrylovState::run_cancellable` — Cx-aware entry points returning
+  `CancellableSolveReport<R>`. `SolverRunProgress` distinguishes completed
+  work from a cancellation pause, numerical callback panic, or changed
+  dimension. The ordinary numerical report describes only the last
+  committed checkpoint; callers must inspect progress before treating it as
+  the outcome of new work. `SolverCallbackCounts` reports every numerical
+  callback actually invoked, including discarded work. These per-invocation
+  counts are not a work budget or a cumulative checkpoint counter.
 - `LinearSystemVerifier` → `VerifiedLinearSystem` →
   `admit_linear_solver` — injected verification grammar and local
   decision receipt. CG requires symmetric positive-definite evidence
@@ -82,6 +91,8 @@ diagnoses, never timeout mysteries).
   variable actions receive outer-attempt and inner-column indices, with
   inner indices continuing across FGMRES restart cycles. An incomplete or
   nonfinite output refuses the linear solve before accepting a new point.
+  Residual, Jacobian and FGMRES operator output buffers are also poisoned
+  before callbacks, so unwritten entries cannot stand in for zero.
   Convergence remains checked against the original Jacobian and residual.
 - `spectral_service` — re-export of the one workspace `fs-spectral`
   authority. This is an ownership seam, not a claim that the generic
@@ -263,11 +274,26 @@ Newton at their documented checkpoint boundaries.
 
 Iteration-granular: every state is complete between `run` calls, so
 drivers interrupt by not continuing — request → drain (finish the
-current iteration) → finalize (state is the checkpoint). fs-exec Cx
-wiring lands with the drivers (workspace discipline).
-Newton drains its active inner solve/globalization decision before an
-outer checkpoint; FGMRES drains the active restart cycle. Neither new
-state yet accepts a `Cx` directly.
+current iteration) → finalize (state is the checkpoint).
+
+The explicit `run_cancellable` entry points for FGMRES and Newton poll
+the supplied `fs-exec::Cx` before and after each numerical callback, at
+Arnoldi columns/orthogonalization rows, and between line-search trials.
+They stage one restart cycle or outer Newton attempt, publishing only
+after a final cancellation check. Cancellation or an unwinding callback
+discards that attempt's point, radius, residual, history, and committed
+iteration counters; earlier completed work survives. Resume under a fresh
+context and identical pure inputs repeats only the interrupted unit and
+preserves the numerical trajectory. Counts of spent callbacks are returned
+even when their outputs were discarded.
+
+Individual callbacks and vector reductions are not preemptible. The
+constructor's initial residual evaluation remains outside the Cx entry
+point. Callback panic containment requires `panic=unwind`, does not suppress
+the caller's panic hook, and does not undo external side effects. These
+APIs enforce no evaluation, wall-time, or memory budget; callback counts
+must be accumulated by a caller that budgets retries. Checkpoint staging
+clones the retained vectors and history; no performance claim is made.
 
 ## Unsafe boundary
 
@@ -325,7 +351,7 @@ single-patch case is an EXACT solve and is gated as not-slower rather
 than rewarding the trivial minimum), plus the m = 6 window-sharing
 spot-check. `tests/diag_probe.rs`: the diagnosis-calibration
 regression (singular-system CG diverges — must never read Plateau).
-`tests/nonlinear_block_battery.rs` (G0/G1/G3/G5): 2x2 and 3x3 block
+`tests/nonlinear_block_battery.rs` (G0/G1/G3/G4/G5): 2x2 and 3x3 block
 primal/transpose equivalence, real-equivalent complex algebra, an
 exact manufactured Schur saddle solve, verifier/admission refusals,
 non-collinear iteration-varying diagonal FGMRES preconditioners that
@@ -336,6 +362,12 @@ a nonsymmetric nonlinear problem with six orders of Jacobian scaling,
 both globalizations under a one-column inner budget, variable logical keys
 across restart and outer clone/resume, identity-default equality, and
 incomplete/nonfinite callback refusal preserving the accepted state.
+The Cx cases cancel or panic at every callback of two FGMRES cycles and
+representative Newton attempts (backtracking, accepted trust steps, and
+rejected trust steps), require no following callback or partial publication,
+and compare resumed numerical results and histories with uninterrupted
+runs. Pre-cancelled entry, dimension refusal, callback accounting, and an
+unwritten-residual false-zero regression are covered.
 
 ## No-claim boundaries
 

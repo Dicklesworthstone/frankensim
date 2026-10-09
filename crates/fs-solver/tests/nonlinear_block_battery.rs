@@ -1,17 +1,19 @@
-//! G0/G1/G3/G5 battery for block composition, solver admission, FGMRES replay, and
+//! G0/G1/G3/G4/G5 battery for block composition, solver admission, FGMRES replay, and
 //! Newton--Krylov globalization. Each case emits one deterministic JSON-line
 //! summary; assertion messages retain the exact failing iteration/decision.
 
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_solver::{
     BlockError, BlockOperator2, BlockOperator3, BlockSchur2, DefinitenessEvidence, FgmresState,
     FlexiblePreconditioner, Globalization, GlobalizationDecision, LineSearchConfig, LinearOp,
     LinearSolverKind, LinearSystemFinding, LinearSystemVerifier, LinearVerificationError,
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonStallDiagnosis, NonlinearProblem,
     NullspaceEvidence, PreconditionerClass, RealEquivalentComplexOp, RectLinearOp, SchurSolveSign,
-    SolverAdmissionError, SourceCompatibility, SquareBlock, SymmetryEvidence, TrustRegionConfig,
-    ZeroBlock, admit_linear_solver, verify_linear_system,
+    SolverAdmissionError, SolverCallback, SolverRunProgress, SourceCompatibility, SquareBlock,
+    SymmetryEvidence, TrustRegionConfig, ZeroBlock, admit_linear_solver, verify_linear_system,
 };
 use fs_sparse::precond::Precond;
+use std::cell::Cell;
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -928,5 +930,385 @@ fn newton_default_preconditioner_matches_explicit_identity() {
         assert!(expected.converged);
         assert_eq!(expected, explicit.run(&ExplicitIdentity, 20));
         assert_eq!(bit_pattern(&default.x), bit_pattern(&explicit.x));
+    }
+}
+
+fn with_cx<R>(gate: &CancelGate, run: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            gate,
+            arena,
+            StreamKey {
+                seed: 0,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        run(&cx)
+    })
+}
+
+struct CallbackProbe<'a> {
+    gate: &'a CancelGate,
+    stop_at: usize,
+    panic: bool,
+    calls: Cell<usize>,
+    last_role: Cell<SolverCallback>,
+}
+
+impl<'a> CallbackProbe<'a> {
+    fn new(gate: &'a CancelGate, stop_at: usize, panic: bool) -> Self {
+        Self {
+            gate,
+            stop_at,
+            panic,
+            calls: Cell::new(0),
+            last_role: Cell::new(SolverCallback::Operator),
+        }
+    }
+
+    fn observe(&self, role: SolverCallback) {
+        assert!(!self.gate.is_requested(), "callback ran after cancellation");
+        self.last_role.set(role);
+        self.calls.set(self.calls.get() + 1);
+        if self.calls.get() == self.stop_at {
+            assert!(!self.panic, "injected {role:?} callback panic");
+            self.gate.request();
+        }
+    }
+}
+
+struct Observed<'a, P> {
+    inner: &'a P,
+    probe: &'a CallbackProbe<'a>,
+}
+
+impl<P: LinearOp> LinearOp for Observed<'_, P> {
+    fn n(&self) -> usize {
+        self.inner.n()
+    }
+
+    fn apply(&self, x: &[f64], output: &mut [f64]) {
+        self.inner.apply(x, output);
+        self.probe.observe(SolverCallback::Operator);
+    }
+}
+
+impl<P: FlexiblePreconditioner> FlexiblePreconditioner for Observed<'_, P> {
+    fn apply(&self, iteration: usize, residual: &[f64], output: &mut [f64]) {
+        self.inner.apply(iteration, residual, output);
+        self.probe.observe(SolverCallback::Preconditioner);
+    }
+}
+
+impl<P: NonlinearProblem> NonlinearProblem for Observed<'_, P> {
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
+    }
+
+    fn residual(&self, x: &[f64], output: &mut [f64]) {
+        self.inner.residual(x, output);
+        self.probe.observe(SolverCallback::Residual);
+    }
+
+    fn jacobian_apply(&self, x: &[f64], direction: &[f64], output: &mut [f64]) {
+        self.inner.jacobian_apply(x, direction, output);
+        self.probe.observe(SolverCallback::Jacobian);
+    }
+
+    fn preconditioner_apply(
+        &self,
+        x: &[f64],
+        outer: usize,
+        inner: usize,
+        residual: &[f64],
+        output: &mut [f64],
+    ) {
+        self.inner
+            .preconditioner_apply(x, outer, inner, residual, output);
+        self.probe.observe(SolverCallback::Preconditioner);
+    }
+}
+
+#[test]
+fn fgmres_cx_interrupts_each_callback_and_replays_from_committed_cycle() {
+    let operator = DenseSquare::new(3, &[4.0, 1.0, 0.0, -1.0, 3.0, 1.0, 0.0, 2.0, 5.0]);
+    let rhs = [1.0, -2.0, 3.0];
+    let initial = FgmresState::new(&rhs, 2);
+    let mut first_cycle = initial.clone();
+    let first = with_cx(&CancelGate::new(), |cx| {
+        first_cycle.run_cancellable(&operator, &CyclingDiagonal, &rhs, 1e-12, 1, cx)
+    });
+    assert_eq!(first.progress, SolverRunProgress::Complete);
+    assert!(!first.report.converged);
+    let calls_per_cycle = first.callbacks.operator + first.callbacks.preconditioner;
+    assert!(
+        calls_per_cycle > 4,
+        "fixture must reach a second Arnoldi column"
+    );
+    let mut expected = initial.clone();
+    assert!(
+        expected
+            .run(&operator, &CyclingDiagonal, &rhs, 1e-12, 20)
+            .converged
+    );
+
+    for panic in [false, true] {
+        for stop_at in 1..=2 * calls_per_cycle {
+            let gate = CancelGate::new();
+            let probe = CallbackProbe::new(&gate, stop_at, panic);
+            let observed_op = Observed {
+                inner: &operator,
+                probe: &probe,
+            };
+            let observed_pc = Observed {
+                inner: &CyclingDiagonal,
+                probe: &probe,
+            };
+            let mut state = initial.clone();
+            let result = with_cx(&gate, |cx| {
+                state.run_cancellable(&observed_op, &observed_pc, &rhs, 1e-12, 2, cx)
+            });
+            assert_eq!(
+                result.progress,
+                if panic {
+                    SolverRunProgress::CallbackPanicked(probe.last_role.get())
+                } else {
+                    SolverRunProgress::Paused
+                }
+            );
+            assert_eq!(probe.calls.get(), stop_at);
+            assert_eq!(
+                result.callbacks.operator + result.callbacks.preconditioner,
+                stop_at
+            );
+            let checkpoint = if stop_at <= calls_per_cycle {
+                &initial
+            } else {
+                &first_cycle
+            };
+            assert_eq!(bit_pattern(&state.x), bit_pattern(&checkpoint.x));
+            assert_eq!(state.iters, checkpoint.iters);
+            assert_eq!(
+                bit_pattern(&state.history),
+                bit_pattern(&checkpoint.history)
+            );
+            assert_eq!(
+                state.rel_residual().to_bits(),
+                checkpoint.rel_residual().to_bits()
+            );
+            assert!(!result.report.converged);
+            assert_eq!(
+                result.report.euclidean_rel_residual().unwrap().to_bits(),
+                state.rel_residual().to_bits()
+            );
+            with_cx(&CancelGate::new(), |cx| {
+                let resumed =
+                    state.run_cancellable(&operator, &CyclingDiagonal, &rhs, 1e-12, 20, cx);
+                assert_eq!(resumed.progress, SolverRunProgress::Complete);
+                assert!(resumed.report.converged);
+            });
+            assert_eq!(bit_pattern(&state.x), bit_pattern(&expected.x));
+            assert_eq!(bit_pattern(&state.history), bit_pattern(&expected.history));
+            assert_eq!(state.iters, expected.iters);
+        }
+    }
+}
+
+fn check_newton_interrupted_attempt<P: NonlinearProblem>(
+    problem: &P,
+    x: Vec<f64>,
+    config: NewtonKrylovConfig,
+) {
+    let initial = NewtonKrylovState::new(problem, x, config).unwrap();
+    let mut first_step = initial.clone();
+    let first = with_cx(&CancelGate::new(), |cx| {
+        first_step.run_cancellable(problem, 1, cx)
+    });
+    assert_eq!(first.progress, SolverRunProgress::Complete);
+    assert_eq!(first_step.iterations, 1);
+    let total_callbacks =
+        first.callbacks.preconditioner + first.callbacks.residual + first.callbacks.jacobian;
+    assert!(first.callbacks.residual > 0 && first.callbacks.jacobian > 0);
+    let mut expected = initial.clone();
+    let expected_report = expected.run(problem, 20);
+    for panic in [false, true] {
+        for stop_at in 1..=total_callbacks {
+            let gate = CancelGate::new();
+            let probe = CallbackProbe::new(&gate, stop_at, panic);
+            let observed = Observed {
+                inner: problem,
+                probe: &probe,
+            };
+            let mut state = initial.clone();
+            let result = with_cx(&gate, |cx| state.run_cancellable(&observed, 1, cx));
+            assert_eq!(
+                result.progress,
+                if panic {
+                    SolverRunProgress::CallbackPanicked(probe.last_role.get())
+                } else {
+                    SolverRunProgress::Paused
+                }
+            );
+            assert_eq!(probe.calls.get(), stop_at);
+            assert_eq!(
+                result.callbacks.operator, 0,
+                "Jacobian actions must keep their role"
+            );
+            assert_eq!(
+                result.callbacks.preconditioner
+                    + result.callbacks.residual
+                    + result.callbacks.jacobian,
+                stop_at
+            );
+            assert_eq!(bit_pattern(&state.x), bit_pattern(&initial.x));
+            assert_eq!(
+                state.residual_norm().to_bits(),
+                initial.residual_norm().to_bits()
+            );
+            assert_eq!(state.iterations, 0);
+            assert!(state.history.is_empty());
+            assert!(!result.report.converged);
+            let resumed = with_cx(&CancelGate::new(), |cx| {
+                state.run_cancellable(problem, 20, cx)
+            });
+            assert_eq!(resumed.progress, SolverRunProgress::Complete);
+            assert_eq!(
+                resumed.report, expected_report,
+                "forcing/radius/checkpoint changed after interruption"
+            );
+            assert_eq!(bit_pattern(&state.x), bit_pattern(&expected.x));
+        }
+    }
+}
+
+#[test]
+fn newton_cx_cancels_inner_krylov_backtracking_and_trust_model_atomically() {
+    check_newton_interrupted_attempt(&SquareRootTwo, vec![0.1], NewtonKrylovConfig::default());
+    let trust = NewtonKrylovConfig {
+        globalization: Globalization::TrustRegion(TrustRegionConfig {
+            initial_radius: 0.05,
+            ..TrustRegionConfig::default()
+        }),
+        ..NewtonKrylovConfig::default()
+    };
+    check_newton_interrupted_attempt(&SaturatingDiffusion, vec![4.0, -3.0], trust);
+    // The first trial is rejected, so replay also checks radius shrinkage.
+    check_newton_interrupted_attempt(
+        &NoRealRoot,
+        vec![0.1],
+        NewtonKrylovConfig {
+            globalization: Globalization::TrustRegion(TrustRegionConfig::default()),
+            ..NewtonKrylovConfig::default()
+        },
+    );
+}
+
+#[test]
+fn cancelled_entry_and_changed_dimensions_spend_no_numerical_callbacks() {
+    let gate = CancelGate::new();
+    gate.request();
+    let probe = CallbackProbe::new(&gate, usize::MAX, false);
+    let observed = Observed {
+        inner: &SquareRootTwo,
+        probe: &probe,
+    };
+    let mut state =
+        NewtonKrylovState::new(&SquareRootTwo, vec![1.5], NewtonKrylovConfig::default()).unwrap();
+    let result = with_cx(&gate, |cx| state.run_cancellable(&observed, 10, cx));
+    assert_eq!(result.progress, SolverRunProgress::Paused);
+    assert_eq!(probe.calls.get(), 0);
+    assert_eq!(result.callbacks, fs_solver::SolverCallbackCounts::default());
+    assert_eq!(state.iterations, 0);
+    let mismatch = with_cx(&CancelGate::new(), |cx| {
+        state.run_cancellable(&SaturatingDiffusion, 10, cx)
+    });
+    assert_eq!(
+        mismatch.progress,
+        SolverRunProgress::DimensionMismatch {
+            expected: 1,
+            actual: 2
+        }
+    );
+    assert_eq!(
+        mismatch.callbacks,
+        fs_solver::SolverCallbackCounts::default()
+    );
+
+    let mut linear = FgmresState::new(&[1.0], 2);
+    let operator = DenseSquare::new(1, &[1.0]);
+    let observed_op = Observed {
+        inner: &operator,
+        probe: &probe,
+    };
+    let observed_pc = Observed {
+        inner: &CyclingDiagonal,
+        probe: &probe,
+    };
+    let result = with_cx(&gate, |cx| {
+        linear.run_cancellable(&observed_op, &observed_pc, &[1.0], 1e-12, 10, cx)
+    });
+    assert_eq!(result.progress, SolverRunProgress::Paused);
+    assert_eq!(probe.calls.get(), 0);
+    assert_eq!(result.callbacks, fs_solver::SolverCallbackCounts::default());
+}
+
+#[test]
+fn unwritten_nonlinear_residual_cannot_be_interpreted_as_zero() {
+    struct PartialResidual;
+    impl NonlinearProblem for PartialResidual {
+        fn dimension(&self) -> usize {
+            2
+        }
+        fn residual(&self, _: &[f64], output: &mut [f64]) {
+            output[0] = 0.0;
+        }
+        fn jacobian_apply(&self, _: &[f64], _: &[f64], _: &mut [f64]) {
+            panic!("invalid residual reached Newton solve");
+        }
+    }
+    assert!(matches!(
+        NewtonKrylovState::new(
+            &PartialResidual,
+            vec![0.0; 2],
+            NewtonKrylovConfig::default()
+        ),
+        Err(NewtonError::NonFiniteResidual { index: 1, .. })
+    ));
+}
+
+#[test]
+fn zero_rhs_checkpoint_reports_true_zero_without_running_callbacks() {
+    let rhs = [0.0, -0.0, 0.0];
+    let operator = DenseSquare::new(3, &[4.0, 1.0, 0.0, -1.0, 3.0, 1.0, 0.0, 2.0, 5.0]);
+    for cancelled in [false, true] {
+        let gate = CancelGate::new();
+        if cancelled {
+            gate.request();
+        }
+        let mut state = FgmresState::new(&rhs, 2);
+        let result = with_cx(&gate, |cx| {
+            state.run_cancellable(&operator, &CyclingDiagonal, &rhs, 1e-12, 0, cx)
+        });
+        assert_eq!(
+            result.progress,
+            if cancelled {
+                SolverRunProgress::Paused
+            } else {
+                SolverRunProgress::Complete
+            }
+        );
+        assert_eq!(result.report.euclidean_rel_residual(), Some(0.0));
+        assert!(
+            result.report.converged_euclidean(),
+            "the retained zero state already solves the zero-source system"
+        );
+        assert_eq!(result.callbacks, fs_solver::SolverCallbackCounts::default());
+        assert_eq!(state.iters, 0);
+        assert!(state.history.is_empty());
     }
 }

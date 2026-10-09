@@ -7,8 +7,8 @@
 //!   checkpoint, and split runs are bitwise-equal to straight runs
 //!   (the fs-time `AdaptiveState` pattern, tested the same way).
 //! - CANCELLABLE: iteration granularity — every state is complete
-//!   between iterations, so drivers interrupt by simply not calling
-//!   `step` again (fs-exec Cx wiring is driver scope).
+//!   between iterations. FGMRES and Newton additionally accept a Cx,
+//!   poll numerical callbacks, and discard interrupted staged work.
 //! - DETERMINISTIC: all inner products go through the fixed-shape
 //!   chunked reduction (fs-tilelang's combiner — shape depends on
 //!   length only, never on threads or tiers).
@@ -44,13 +44,14 @@ pub use krylov::{
 };
 pub use mixed::{CsrF32, MixedReport, mixed_cg_refine};
 pub use nonlinear::{
-    AdmittedLinearSolver, DefinitenessEvidence, FgmresState, FlexiblePreconditioner, Globalization,
-    GlobalizationDecision, LineSearchConfig, LinearSolverKind, LinearSystemFinding,
-    LinearSystemVerifier, LinearVerificationError, NewtonError, NewtonIteration,
-    NewtonKrylovConfig, NewtonKrylovState, NewtonReport, NewtonStallDiagnosis, NonlinearProblem,
-    NullspaceEvidence, PreconditionerClass, SolverAdmissionError, SourceCompatibility,
-    SymmetryEvidence, TrustRegionConfig, VerifiedLinearSystem, admit_linear_solver,
-    verify_linear_system,
+    AdmittedLinearSolver, CancellableSolveReport, DefinitenessEvidence, FgmresState,
+    FlexiblePreconditioner, Globalization, GlobalizationDecision, LineSearchConfig,
+    LinearSolverKind, LinearSystemFinding, LinearSystemVerifier, LinearVerificationError,
+    NewtonError, NewtonIteration, NewtonKrylovConfig, NewtonKrylovState, NewtonReport,
+    NewtonStallDiagnosis, NonlinearProblem, NullspaceEvidence, PreconditionerClass,
+    SolverAdmissionError, SolverCallback, SolverCallbackCounts, SolverRunProgress,
+    SourceCompatibility, SymmetryEvidence, TrustRegionConfig, VerifiedLinearSystem,
+    admit_linear_solver, verify_linear_system,
 };
 pub use op::{CsrOp, LinearOp};
 pub use pmg::{MaskedTensorOp, PMultigrid};

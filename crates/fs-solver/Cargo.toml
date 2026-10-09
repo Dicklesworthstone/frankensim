@@ -11,6 +11,7 @@ description = "Solver stack: resumable matrix-free Krylov and Newton-Krylov meth
 layer = "L3"
 
 [dependencies]
+fs-exec = { path = "../fs-exec" }
 fs-feec = { path = "../fs-feec" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
@@ -19,6 +20,7 @@ fs-sparse = { path = "../fs-sparse" }
 fs-tilelang = { path = "../fs-tilelang" }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
 fs-opdsl = { path = "../fs-opdsl" }
 fs-propcheck = { path = "../fs-propcheck" }
 fs-rand = { path = "../fs-rand" }
