@@ -6,6 +6,8 @@
 //! `J_h^T=M+dt*diag(T'(h))*J_T^T`: column scaling in the primal becomes
 //! row scaling in the transpose. The shared bounded FGMRES solver sees this
 //! explicit transpose action and the exact diagonal Jacobi inverse.
+//! The ambient-radiation binder can retain physical rank-one feedback terms;
+//! these participate in both actions, Jacobi and all history/source pullbacks.
 //!
 //! Geometry, reference masses, chart, conductivity laws, boundary data,
 //! interfaces and time step are frozen. Source derivatives describe the P1
@@ -18,7 +20,9 @@
 use std::{cell::RefCell, fmt};
 
 use fs_exec::Cx;
-use fs_solver::{FgmresState, FlexiblePreconditioner, LinearOp, NewtonKrylovState, norm2};
+use fs_solver::{
+    FgmresState, FlexiblePreconditioner, LinearOp, NewtonKrylovState, SolverRunProgress, norm2,
+};
 use fs_sparse::Csr;
 
 use super::{
@@ -147,7 +151,8 @@ pub struct EnthalpyStepGradient {
     pub iterations: usize,
 }
 
-/// An accepted, rechecked endpoint with an owned sparse physical tangent.
+/// An accepted, rechecked endpoint with an owned sparse physical tangent and
+/// optional retained mean-radiation feedback factors.
 /// Only the immutable mesh is borrowed; step-local source/boundary fields may
 /// be dropped. A caller can retain a bounded vector of these for a small
 /// full-storage reverse sweep without retaining any Newton/Krylov iteration.
@@ -160,6 +165,15 @@ pub struct EnthalpyStepLinearization<'m> {
     masses: Vec<f64>,
     inverse_diagonal: Vec<f64>,
     dt: f64,
+    // Only the physical ambient-radiation binder installs these updates.
+    // They are in residual-joule/enthalpy coordinates, after chart scaling.
+    feedback: Vec<EnthalpyFeedback>,
+}
+
+#[derive(Debug)]
+struct EnthalpyFeedback {
+    left: Vec<f64>,
+    right: Vec<f64>,
 }
 
 impl<'m> EnthalpyBackwardEuler<'m, '_> {
@@ -197,6 +211,25 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         config: EnthalpyStepConfig,
         accepted: EnthalpyStepSolution,
     ) -> Result<EnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        self.linearize_accepted_with_target(
+            cx, problem, interfaces, old_h, dt_s, config, accepted, None,
+        )
+    }
+
+    // The radiative binder supplies the original complete nonlinear initial
+    // residual target, not a target derived from a frozen endpoint secant.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn linearize_accepted_with_target(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        accepted: EnthalpyStepSolution,
+        physical_target: Option<f64>,
+    ) -> Result<EnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
         poll(cx, 0)?;
         let n = self.masses.len();
         if !std::ptr::eq(self.mesh, problem.mesh)
@@ -230,9 +263,16 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         let stage = context.stage(&accepted.specific_enthalpy_j_kg)?;
         let initial = NewtonKrylovState::new(&stage, old_h.to_vec(), config.newton)
             .map_err(|error| stage.take_failure().unwrap_or(EnthalpyError::Newton(error)))?;
-        let tolerance_j = finite(config.newton.absolute_tolerance.max(
-            config.newton.relative_tolerance * initial.residual_norm().max(f64::MIN_POSITIVE),
-        ))?;
+        let tolerance_j = finite(physical_target.unwrap_or_else(|| {
+            config.newton.absolute_tolerance.max(
+                config.newton.relative_tolerance * initial.residual_norm().max(f64::MIN_POSITIVE),
+            )
+        }))?;
+        if tolerance_j < 0.0 {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "negative physical residual target",
+            ));
+        }
         drop(initial);
         let mut residual = vec![0.0; n];
         context.residual(&accepted.specific_enthalpy_j_kg, &mut residual)?;
@@ -280,11 +320,40 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             masses: self.masses.clone(),
             inverse_diagonal,
             dt: dt_s,
+            feedback: Vec::new(),
         })
     }
 }
 
 impl EnthalpyStepLinearization<'_> {
+    /// Attach one physical boundary feedback term. Entry admission is owned by
+    /// the radiative binder; no external caller may modify the checked tangent.
+    pub(super) fn add_radiation_feedback(
+        &mut self,
+        cx: &Cx<'_>,
+        left: Vec<f64>,
+        right: Vec<f64>,
+    ) -> Result<(), EnthalpyAdjointError> {
+        let n = self.masses.len();
+        vector(cx, &left, n)?;
+        vector(cx, &right, n)?;
+        for i in 0..n {
+            if i % ASSEMBLY_TILE == 0 {
+                poll(cx, i)?;
+            }
+            let diagonal = finite(1.0 / self.inverse_diagonal[i] + left[i] * right[i])?;
+            if diagonal == 0.0 {
+                return Err(EnthalpyAdjointError::InvalidInput(
+                    "nonzero radiative enthalpy Jacobian diagonal required for Jacobi",
+                ));
+            }
+            self.inverse_diagonal[i] = finite(1.0 / diagonal)?;
+        }
+        self.feedback.push(EnthalpyFeedback { left, right });
+        poll(cx, n)?;
+        Ok(())
+    }
+
     /// Physically rechecked endpoint and independently integrated energy audit.
     #[must_use]
     pub const fn primal(&self) -> &EnthalpyStepSolution {
@@ -319,7 +388,7 @@ impl EnthalpyStepLinearization<'_> {
         self.action(cx, direction, false)
     }
 
-    /// Apply its explicit sparse transpose, including the correct slope side.
+    /// Apply its sparse/feedback transpose, including the correct slope side.
     pub fn apply_jacobian_transpose(
         &self,
         cx: &Cx<'_>,
@@ -372,6 +441,26 @@ impl EnthalpyStepLinearization<'_> {
             }
             *value = finite(self.masses[row].mul_add(x[row], *value))?;
         }
+        for update in &self.feedback {
+            let (left, right) = if transpose {
+                (&update.right, &update.left)
+            } else {
+                (&update.left, &update.right)
+            };
+            let mut contraction = 0.0;
+            for (i, (&weight, &value)) in right.iter().zip(x).enumerate() {
+                if i % ASSEMBLY_TILE == 0 {
+                    poll(cx, i)?;
+                }
+                contraction = finite(weight.mul_add(value, contraction))?;
+            }
+            for (i, (value, &weight)) in y.iter_mut().zip(left).enumerate() {
+                if i % ASSEMBLY_TILE == 0 {
+                    poll(cx, i)?;
+                }
+                *value = finite(weight.mul_add(contraction, *value))?;
+            }
+        }
         poll(cx, x.len())?;
         Ok(())
     }
@@ -410,7 +499,32 @@ impl EnthalpyStepLinearization<'_> {
                 poll(cx, state.iters)?;
                 let before = state.iters;
                 state.restart = restart.min(config.max_iterations - before);
-                state.run(&operator, &operator, &normalized, config.tolerance, 1);
+                let progress = state.run_cancellable(
+                    &operator,
+                    &operator,
+                    &normalized,
+                    config.tolerance,
+                    1,
+                    cx,
+                );
+                match progress.progress {
+                    SolverRunProgress::Complete => {}
+                    SolverRunProgress::Paused => {
+                        return Err(ConductionError::Cancelled {
+                            stage: "spatial-enthalpy-adjoint",
+                            at: state.iters,
+                        }
+                        .into());
+                    }
+                    SolverRunProgress::CallbackPanicked(callback) => {
+                        return Err(EnthalpyError::SolverCallbackPanicked(callback).into());
+                    }
+                    SolverRunProgress::DimensionMismatch { .. } => {
+                        return Err(EnthalpyAdjointError::InvalidInput(
+                            "enthalpy transpose dimension changed",
+                        ));
+                    }
+                }
                 if let Some(error) = failure.take() {
                     return Err(error);
                 }

@@ -31,6 +31,7 @@ pub mod adjoint;
 pub mod heterogeneous;
 /// Implicit ambient radiation with immutable enthalpy history and joule gates.
 pub mod radiation;
+pub use radiation::adjoint::{EnthalpyRadiationStepGradient, EnthalpyRadiationStepLinearization};
 
 use std::{cell::RefCell, fmt};
 

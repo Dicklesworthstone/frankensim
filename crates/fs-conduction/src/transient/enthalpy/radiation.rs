@@ -3,11 +3,15 @@
 //! The shared ambient-patch driver solves the same backward-Euler history on
 //! every radiative trial. Its area-mean law is epsilon sigma A (T_mean^4-Ta^4),
 //! applied through the existing pointwise Robin trace. This is not quadrature
-//! of T(x)^4, enclosure exchange, or an enthalpy-radiation adjoint.
+//! of T(x)^4 or enclosure exchange. [`adjoint`] differentiates the same
+//! physical endpoint, including the mean-dependent radiative feedback.
 //!
 //! Acceptance additionally reassembles the boundary at the returned endpoint,
 //! checks the full nodal residual in joules, and closes stored energy against
 //! nonlinear radiative heat. Small relaxed updates alone never accept a step.
+
+/// Physical implicit-function derivatives of the accepted radiative step.
+pub mod adjoint;
 
 use std::collections::BTreeSet;
 
@@ -84,33 +88,16 @@ impl EnthalpyBackwardEuler<'_, '_> {
             .ok_or(EnthalpyError::InvalidInput(
                 "radiative Newton work budget overflow",
             ))?;
-        let context = StepContext {
-            storage: self,
+        let target = initial_residual_tolerance_j(
+            self,
             cx,
             problem,
             interfaces,
-            old: old_h,
-            dt: dt_s,
-        };
-        let old_temperature = context.temperatures(old_h)?;
-        let initial_boundary = boundary_at_temperature(cx, problem, patches, &old_temperature)?;
-        let initial_context = StepContext {
-            problem: ConductionProblem {
-                boundary: &initial_boundary,
-                ..problem
-            },
-            ..context
-        };
-        // The shared constructor validates all original Newton controls and
-        // measures the complete physical initial residual without advancing it.
-        let stage = initial_context.stage(old_h)?;
-        let initial = NewtonKrylovState::new(&stage, old_h.to_vec(), step_config.newton)
-            .map_err(|error| stage.take_failure().unwrap_or(EnthalpyError::Newton(error)))?;
-        let target = finite(step_config.newton.absolute_tolerance.max(
-            step_config.newton.relative_tolerance * initial.residual_norm().max(f64::MIN_POSITIVE),
-        ))?;
-        drop(initial);
-        drop(stage);
+            old_h,
+            dt_s,
+            step_config,
+            patches,
+        )?;
         let result = solve_ambient_radiation_with(
             cx,
             problem,
@@ -198,6 +185,46 @@ impl EnthalpyBackwardEuler<'_, '_> {
             physical_energy_residual_j: result.solution.2,
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn initial_residual_tolerance_j(
+    storage: &EnthalpyBackwardEuler<'_, '_>,
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    interfaces: Option<&ThermalInterfaces>,
+    old_h: &[f64],
+    dt_s: f64,
+    step_config: EnthalpyStepConfig,
+    patches: &[AmbientRadiationPatch],
+) -> Result<f64, EnthalpyError> {
+    let context = StepContext {
+        storage,
+        cx,
+        problem,
+        interfaces,
+        old: old_h,
+        dt: dt_s,
+    };
+    let old_temperature = context.temperatures(old_h)?;
+    let initial_boundary = boundary_at_temperature(cx, problem, patches, &old_temperature)?;
+    let initial_context = StepContext {
+        problem: ConductionProblem {
+            boundary: &initial_boundary,
+            ..problem
+        },
+        ..context
+    };
+    // The shared constructor validates all original Newton controls and
+    // measures the complete physical initial residual without advancing it.
+    let stage = initial_context.stage(old_h)?;
+    let initial = NewtonKrylovState::new(&stage, old_h.to_vec(), step_config.newton)
+        .map_err(|error| stage.take_failure().unwrap_or(EnthalpyError::Newton(error)))?;
+    let target = finite(step_config.newton.absolute_tolerance.max(
+        step_config.newton.relative_tolerance * initial.residual_norm().max(f64::MIN_POSITIVE),
+    ))?;
+    poll(cx, old_h.len())?;
+    Ok(target)
 }
 
 /// Evaluate the nonlinear boundary on a complete physical field. The actual

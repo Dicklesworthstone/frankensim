@@ -321,6 +321,63 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             radiation_config,
         )
     }
+
+    /// Bind total ambient-radiation derivatives while retaining each vertex's
+    /// phase chart and reference mass. Reference densities remain fixed here;
+    /// the returned controls are history, source, dt, reservoir and emissivity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_step_with_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        patches: &[crate::AmbientRadiationPatch],
+        radiation_config: crate::AmbientRadiationConfig,
+        max_feedback_entries: usize,
+    ) -> Result<super::EnthalpyRadiationStepLinearization<'m>, EnthalpyAdjointError> {
+        self.inner.linearize_step_with_ambient_radiation(
+            cx,
+            problem,
+            interfaces,
+            old_specific_h,
+            dt_s,
+            config,
+            patches,
+            radiation_config,
+            max_feedback_entries,
+        )
+    }
+
+    /// Recheck the physical radiative endpoint before binding its derivatives.
+    /// Original convection data and heterogeneous reference masses are fixed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_accepted_with_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        patches: &[crate::AmbientRadiationPatch],
+        accepted: EnthalpyStepSolution,
+        max_feedback_entries: usize,
+    ) -> Result<super::EnthalpyRadiationStepLinearization<'m>, EnthalpyAdjointError> {
+        self.inner.linearize_accepted_with_ambient_radiation(
+            cx,
+            problem,
+            interfaces,
+            old_specific_h,
+            dt_s,
+            config,
+            patches,
+            accepted,
+            max_feedback_entries,
+        )
+    }
 }
 
 /// Physical history/source and frozen-reference-density pullbacks of one step.

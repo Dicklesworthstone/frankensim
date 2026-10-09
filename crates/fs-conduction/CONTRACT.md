@@ -1008,7 +1008,7 @@ authority.
   phase exchange, deterministic replay and admission/closure refusals.
   This is a fixed-step estimated discretization, not pointwise `T(x)^4`
   quadrature, an enclosure/view-factor model, an adaptive transient frontend,
-  a radiative enthalpy adjoint, or experimentally validated heat transfer.
+  or experimentally validated heat transfer.
 - `transient::enthalpy::adjoint` supplies discrete endpoint derivatives for
   this same spatial enthalpy balance. `linearize_step` solves a real endpoint;
   `linearize_accepted` rechecks a supplied endpoint's original Newton target,
@@ -1038,6 +1038,38 @@ authority.
   localized heater pulses from temperature histories using the existing SQP
   optimizer. The example's synthetic observations and numerical recovery are
   separate from experimental material validation.
+- `linearize_step_with_ambient_radiation` and
+  `linearize_accepted_with_ambient_radiation` bind total physical derivatives
+  of that same radiative enthalpy endpoint, including through the heterogeneous
+  phase-assignment facade. Original convection and reference densities remain
+  fixed. The accepted binder reconstructs chart-resolved temperatures, the
+  nonlinear radiative boundary and the complete original initial-residual
+  target; it rechecks both nodal joule residual and independently integrated
+  physical energy before publishing a linearization. Public primal telemetry
+  is not evidence of acceptance. For patch surface mass `B`, mean weights `w`,
+  reservoir `a` and secant `s`, the tangent includes
+  `dt * (ds/dT_mean) * B(T-a) * (w^T diag(dT/dh))` in addition to the existing
+  conductivity/Robin tangent. This includes conductivity's `k'(T)`, the
+  correct enthalpy column scaling and both the radiative coefficient and
+  reference-temperature feedback. The genuine transpose retains this rank-one
+  term; neither forward iterations nor a frozen secant are differentiated.
+  `EnthalpyRadiationStepGradient` returns history and P1 source-density
+  pullbacks plus dt, per-patch black-reservoir temperature and absolute
+  emissivity controls. The dt control holds endpoint source/boundary data
+  fixed; time-dependent schedules must supply their own data derivatives.
+  `into_transport` retains all radiative state feedback for existing history
+  tapes. At most 64 patches and an explicit `2 * vertices * patches` scalar
+  factor-entry cap bound retained feedback; no dense global tangent is formed.
+  Cancellable FGMRES, true transpose-residual verification, original primal
+  gates, phase/material smoothness and emissivity-support neighborhoods precede
+  any gradient publication. Plateau interiors are admitted; chart corners and
+  unsupported two-sided neighborhoods refuse. No phase-chart, density,
+  geometry, convection or conductivity-parameter derivative is inferred.
+  `tests/enthalpy_radiation.rs` compares all supported controls against actual
+  perturbed nonlinear steps with mixed sensible/latent slopes and nonconstant
+  conductivity for both hot and cold reservoirs. It also checks transpose
+  identities, true returned dual residuals, exact latent-interior controls,
+  facade/tape parity and tampered-primal/budget/cancellation refusals.
 - The Biot-gated `LumpedEnthalpyBody` admits equilibrium solid-liquid phase
   change and latent heat on a caller-supplied, bounded specific-enthalpy curve.
   It couples constant internal power with convection and surface radiation and

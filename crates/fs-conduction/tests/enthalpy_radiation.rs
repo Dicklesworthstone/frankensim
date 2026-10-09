@@ -1,5 +1,7 @@
 //! Independent P1/scalar balances for implicit spatial radiation and latent heat.
 
+#[path = "enthalpy_radiation/adjoint.rs"]
+mod adjoint;
 mod support;
 
 use fs_blake3::ContentHash;
@@ -72,12 +74,20 @@ fn phase_curve(latent: bool) -> EquilibriumEnthalpyPhaseCurve {
 }
 
 fn patch(ambient: f64, maximum_k: f64) -> AmbientRadiationPatch {
+    patch_with_emissivity(ambient, maximum_k, EPSILON)
+}
+
+fn patch_with_emissivity(
+    ambient: f64,
+    maximum_k: f64,
+    emissivity_value: f64,
+) -> AmbientRadiationPatch {
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {
             key: PropertyKey::new(SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS),
             value: PropertyValue::Scalar {
-                value: EPSILON,
+                value: emissivity_value,
                 dims: EMISSIVITY_DIMS,
             },
             validity: ValidityDomain::unconstrained().with("T", 240.0, maximum_k),
