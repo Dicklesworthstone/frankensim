@@ -116,6 +116,7 @@ impl Trace {
 }
 
 fn refined(schedule: &Schedule) -> Result<Schedule> {
+    if schedule.enthalpy.is_some() {return Err(bad("enthalpy does not support time-convergence studies"));}
     let mut intervals = Vec::with_capacity(schedule.intervals.len());
     let mut total_steps = 0_usize;
     for interval in &schedule.intervals {
@@ -128,7 +129,7 @@ fn refined(schedule: &Schedule) -> Result<Schedule> {
     Ok(Schedule { initial: schedule.initial.clone(), capacities: schedule.capacities.clone(), intervals,
         limit: schedule.limit, total_steps, max_step_s: schedule.max_step_s, max_steps: schedule.max_steps,
         adaptive: None, nonlinear: schedule.nonlinear, adjoint: None, time_convergence: None,
-        fan_speed_design: None, power_design: None, repeat: schedule.repeat })
+        fan_speed_design: None, power_design: None, repeat: schedule.repeat, enthalpy: None })
 }
 
 /// Admit representable endpoint times BEFORE any solve on the proposed grid.

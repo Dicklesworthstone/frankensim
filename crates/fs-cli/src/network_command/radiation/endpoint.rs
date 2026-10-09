@@ -22,6 +22,20 @@ pub(in crate::network_command) struct EndpointHeat {
     enclosure_report: Option<String>,
 }
 
+impl EndpointHeat {
+    /// Preserve the complete physical producer's accepted patch heat, instead
+    /// of reconstructing or substituting a temperature-capacity step report.
+    pub(in crate::network_command) fn from_enthalpy(report: &fs_conduction::AmbientRadiationReport) -> Result<Self> {
+        Ok(Self {outward_w:report.nonlinear_radiation_out_w,applied_w:report.applied_radiation_out_w,
+            max_mismatch_w:report.max_heat_mismatch_w,enclosure_report:None,
+            rows:report.patches.iter().map(|row|Ok(PatchHeat {
+                surface:row.patch.region().to_string(),mean_k:row.mean_surface_temperature_k,
+                secant_h:row.patch.secant_coefficient_w_m2_k(row.mean_surface_temperature_k).map_err(producer)?,applied_w:row.applied_heat_w,
+                nonlinear_w:row.nonlinear_heat_w,
+            })).collect::<Result<Vec<_>>>()?})
+    }
+}
+
 impl Policy {
     /// Iterate only radiation at fixed air references. No trial temperature is
     /// returned as the previous physical state for another radiation iteration.
