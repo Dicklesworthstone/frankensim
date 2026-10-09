@@ -21,6 +21,7 @@ moonshot-integral-topology = ["terminal-relative"]
 [dependencies]
 fs-blake3 = { path = "../fs-blake3", optional = true }
 fs-couple = { path = "../fs-couple", optional = true }
+fs-ivl = { path = "../fs-ivl" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }

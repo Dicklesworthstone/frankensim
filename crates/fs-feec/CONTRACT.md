@@ -55,6 +55,73 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   `hodge::hodge_diagonal_barycentric` (uniform volume shares over
   primal measures: positive on EVERY valid mesh, low-order —
   monotonicity-first). Tradeoffs stated at the definition.
+- `weighted::{CellWeight, WeightedMass, WeightedStar, weighted_mass_matrix}`
+  adds piecewise-constant material weights on tetrahedra: positive scalar
+  weights for degrees 0–3 and symmetric positive-definite Cartesian tensors
+  for the vector proxies of degrees 1 and 2. The Galerkin-star entry point
+  `hodge::weighted_galerkin_star` uses the same implementation. Coefficient
+  jumps are integrated per element before shared degrees of freedom are
+  summed. The ordinary and weighted paths share one closed-form Whitney
+  element rule; the ordinary path retains its previous arithmetic order.
+- `weighted2::{CellWeight2, weighted_mass_matrix_2d}` supplies scalar degrees
+  0–2 and SPD 2×2 tensor degree-1 pairings on `TriComplex2`. Canonical edge
+  orientation follows the complex. Planar thickness and the affine radial
+  factor of the axisymmetric measure enter exact barycentric moments;
+  centroid-scaled planar mass is not used for an axisymmetric cell. Top forms
+  are normalized by the oriented embedded area, not the thickness/radial
+  volume. The topology stays two-dimensional.
+- `WeightedMass` retains coefficient dimensions and matrix-entry dimensions
+  `coefficient_dims * metre^(3-2k)` for both tetrahedra and the physically
+  weighted `Metric2` pairings. `output_dims` checks propagation to a dual
+  result. Rows are test functionals dual to the primal trial basis, not a new
+  primal cochain degree. Tensor frames are the stored Cartesian/meridian
+  coordinates; transforming material axes into that frame is the caller's
+  responsibility.
+- `WeightedAssemblyLimits` bounds cells, degrees of freedom, and staged
+  triplets before allocation, including orphan-vertex row-storage costs.
+  `WeightedError` reports invalid coefficients/geometry, SI exponent or size
+  overflow, exhausted bounds, allocation refusal, nonrepresentable entries,
+  and cancellation. Coefficient tensors must be exactly symmetric; positive
+  definiteness is admitted only when normalized outward-interval Schur
+  pivots are strictly positive. Nonpositive and inconclusive cases refuse;
+  there is no tolerance symmetrization or negative-eigenvalue clipping.
+  Tensor magnitudes are factored outside element integration to avoid an
+  overflowing Gram product when the final entry is representable.
+
+### Weighted-operator execution and scope
+
+Each weighted element is a bounded numerical tile. The caller-provided
+cancellation callback is also polled during coefficient/geometry validation,
+heap-sort sifts, duplicate accumulation, and canonical CSR publication. A
+scoped caller supplies `&mut || cx.checkpoint().is_err()`. Allocations are
+fallible and all result storage stays private until a final checkpoint
+succeeds. There are no worker tasks to drain. The elementary upper triangle
+is mirrored so the returned matrix is bitwise symmetric. Contributions are
+reduced in deterministic input-cell order; arbitrary cell permutations can
+change floating-point rounding and do not carry a bitwise equivalence claim.
+
+The tests in `tests/weighted.rs` and `tests/weighted2.rs` cover independent
+constant-field volume/area energies, anisotropy, coefficient jumps, units,
+orientation and coordinate scaling, positivity/refusal boundaries, resource
+limits, and cancellation with deterministic retry (G0/G3/G4). The 3-D battery
+also solves an anisotropic manufactured diffusion problem through the actual
+`d0^T M1 d0` composition and checks second-order refinement (G1).
+
+This is the piecewise-constant, lowest-order bulk-operator slice of
+`frankensim-ext-feec-weighted-operators-vxth`. It does not close that bead's
+high-order, nonlinear/quadrature-point, constitutive-history, or full
+formulation proof lanes. Incidence is unchanged, so its exact algebraic
+sequence remains unchanged; no new claim about PDE stability, eigenmodes,
+boundary/gauge treatment, commuting projection bounds, or continuum error
+follows. No cylindrical connection terms or complete axisymmetric vector PDE
+are supplied. Geometry arrays on the legacy tetrahedral path remain
+caller-supplied and are checked for finite metrics/topology correspondence,
+not independently certified against an embedding. Isolated degrees of
+freedom can have zero rows; material positivity does not certify positive
+definiteness of an arbitrary global constrained/unconstrained problem.
+
+## Additional public types and semantics
+
 - `betti::{integer_rank, betti_numbers}` — exact i128 fraction-free
   (Bareiss) rank of the incidence operators; rank–nullity Betti
   bookkeeping. Fixture-scale certifier: overflow is a checked panic,

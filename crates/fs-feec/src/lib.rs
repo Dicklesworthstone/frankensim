@@ -29,6 +29,8 @@ pub mod hodge;
 pub mod integral_topology;
 #[cfg(feature = "terminal-relative")]
 pub mod terminal_relative;
+pub mod weighted;
+pub mod weighted2;
 pub mod whitney;
 
 pub use assembly::{incidence_to_csr, stiffness};
@@ -44,7 +46,12 @@ pub use highorder::vecfam::{
     DgSpace, Family, VecSpace, build_element, curl_matrix, dg_cell_dofs, div_matrix, grad_matrix,
     nedelec_entity_dofs, rt_entity_dofs, tri_quad3d,
 };
-pub use hodge::{galerkin_star, hodge_diagonal_barycentric};
+pub use hodge::{galerkin_star, hodge_diagonal_barycentric, weighted_galerkin_star};
+pub use weighted::{
+    CellWeight, WeightedAssemblyLimits, WeightedError, WeightedMass, WeightedStar,
+    weighted_mass_matrix,
+};
+pub use weighted2::{CellWeight2, weighted_mass_matrix_2d};
 pub use whitney::{
     ElementGeometry, deram0, deram1, deram2, deram3, element_geometry, mass_matrix, sort_parity,
 };

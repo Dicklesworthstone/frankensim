@@ -20,6 +20,9 @@ use crate::whitney::ElementGeometry;
 use fs_rep_mesh::TetComplex;
 use fs_sparse::Csr;
 
+/// Material-weighted Galerkin star, sharing the checked Whitney mass path.
+pub use crate::weighted::weighted_mass_matrix as weighted_galerkin_star;
+
 /// Galerkin Hodge star: the P₁Λᵏ Whitney mass matrix.
 #[must_use]
 pub fn galerkin_star(complex: &TetComplex, geo: &ElementGeometry, degree: u8) -> Csr {

@@ -122,84 +122,120 @@ pub fn mass_matrix(complex: &TetComplex, geo: &ElementGeometry, degree: u8) -> C
     );
     let n = crate::cochain::cell_count(complex, degree);
     let mut coo = Coo::new(n, n);
+    for m in 0..complex.tets.len() {
+        element_mass_entries(complex, geo, degree, m, None, &mut |row, col, value| {
+            coo.push(row, col, value);
+            Ok::<(), core::convert::Infallible>(())
+        })
+        .expect("infallible unweighted assembly");
+    }
+    coo.assemble()
+}
+
+/// One shared closed-form Whitney element rule. The ordinary mass matrix
+/// keeps its original operation order; a weighted vector pairing substitutes
+/// the material bilinear form for the Euclidean dot product.
+pub(crate) fn element_mass_entries<E>(
+    complex: &TetComplex,
+    geo: &ElementGeometry,
+    degree: u8,
+    m: usize,
+    tensor: Option<&[[f64; 3]; 3]>,
+    emit: &mut impl FnMut(usize, usize, f64) -> Result<(), E>,
+) -> Result<(), E> {
+    let pairing = |a, b| match tensor {
+        None => dot(a, b),
+        Some(tensor) => dot(a, tensor.map(|row| dot(row, b))),
+    };
     // ∫ λ_p λ_q dV = V/20·(1 + δ_pq) — the only scalar integral needed.
-    for (m, &tet) in complex.tets.iter().enumerate() {
-        let vol = geo.vol_signed[m].abs();
-        let s = |p: usize, q: usize| -> f64 { if p == q { vol / 10.0 } else { vol / 20.0 } };
-        match degree {
-            0 => {
-                for a in 0..4 {
-                    for b in 0..4 {
-                        coo.push(tet[a] as usize, tet[b] as usize, s(a, b));
-                    }
+    let tet = complex.tets[m];
+    let vol = geo.vol_signed[m].abs();
+    let s = |p: usize, q: usize| -> f64 { if p == q { vol / 10.0 } else { vol / 20.0 } };
+    match degree {
+        0 => {
+            for a in 0..4 {
+                for b in 0..4 {
+                    emit(tet[a] as usize, tet[b] as usize, s(a, b))?;
                 }
             }
-            1 => {
-                // Global-sorted edge (u, v): w = λ_u ∇λ_v − λ_v ∇λ_u.
-                let mut locals = [(0usize, 0usize, 0usize); 6];
+        }
+        1 => {
+            // Global-sorted edge (u, v): w = λ_u ∇λ_v − λ_v ∇λ_u.
+            let mut locals = [(0usize, 0usize, 0usize); 6];
+            let mut c = 0;
+            for p in 0..4 {
+                for q in (p + 1)..4 {
+                    let (gu, gv) = if tet[p] < tet[q] { (p, q) } else { (q, p) };
+                    locals[c] = (edge_id(complex, tet[p], tet[q]), gu, gv);
+                    c += 1;
+                }
+            }
+            let mut weighted_gram = [[0.0; 4]; 4];
+            let gr = if tensor.is_some() {
+                for a in 0..4 {
+                    for b in a..4 {
+                        let value = pairing(geo.grads[m][a], geo.grads[m][b]);
+                        weighted_gram[a][b] = value;
+                        weighted_gram[b][a] = value;
+                    }
+                }
+                &weighted_gram
+            } else {
+                &geo.gram[m]
+            };
+            for &(e, a, b) in &locals {
+                for &(f, cc, d) in &locals {
+                    let val = s(a, cc).mul_add(
+                        gr[b][d],
+                        s(b, d).mul_add(gr[a][cc], -s(a, d) * gr[b][cc] - s(b, cc) * gr[a][d]),
+                    );
+                    emit(e, f, val)?;
+                }
+            }
+        }
+        2 => {
+            // Face [a, b, c] sorted: w = 2(λ_a u_a + λ_b u_b + λ_c u_c),
+            // u_a = ∇λ_b × ∇λ_c (cyclic in the sorted order).
+            let g = &geo.grads[m];
+            let mut faces = [(0usize, [0usize; 3], [[0.0; 3]; 3]); 4];
+            for omit in 0..4 {
+                let mut tri = [0u32; 3];
                 let mut c = 0;
-                for p in 0..4 {
-                    for q in (p + 1)..4 {
-                        let (gu, gv) = if tet[p] < tet[q] { (p, q) } else { (q, p) };
-                        locals[c] = (edge_id(complex, tet[p], tet[q]), gu, gv);
+                for (i, &v) in tet.iter().enumerate() {
+                    if i != omit {
+                        tri[c] = v;
                         c += 1;
                     }
                 }
-                let gr = &geo.gram[m];
-                for &(e, a, b) in &locals {
-                    for &(f, cc, d) in &locals {
-                        let val = s(a, cc).mul_add(
-                            gr[b][d],
-                            s(b, d).mul_add(gr[a][cc], -s(a, d) * gr[b][cc] - s(b, cc) * gr[a][d]),
-                        );
-                        coo.push(e, f, val);
-                    }
-                }
+                tri.sort_unstable();
+                let la = local_of(tet, tri[0]);
+                let lb = local_of(tet, tri[1]);
+                let lc = local_of(tet, tri[2]);
+                let u = [
+                    cross(g[lb], g[lc]),
+                    cross(g[lc], g[la]),
+                    cross(g[la], g[lb]),
+                ];
+                faces[omit] = (face_id(complex, tri), [la, lb, lc], u);
             }
-            2 => {
-                // Face [a, b, c] sorted: w = 2(λ_a u_a + λ_b u_b + λ_c u_c),
-                // u_a = ∇λ_b × ∇λ_c (cyclic in the sorted order).
-                let g = &geo.grads[m];
-                let mut faces = Vec::with_capacity(4);
-                for omit in 0..4 {
-                    let mut tri = [0u32; 3];
-                    let mut c = 0;
-                    for (i, &v) in tet.iter().enumerate() {
-                        if i != omit {
-                            tri[c] = v;
-                            c += 1;
+            for (fi, li, ui) in &faces {
+                for (fj, lj, uj) in &faces {
+                    let mut val = 0.0f64;
+                    for p in 0..3 {
+                        for q in 0..3 {
+                            val = (4.0 * s(li[p], lj[q])).mul_add(pairing(ui[p], uj[q]), val);
                         }
                     }
-                    tri.sort_unstable();
-                    let la = local_of(tet, tri[0]);
-                    let lb = local_of(tet, tri[1]);
-                    let lc = local_of(tet, tri[2]);
-                    let u = [
-                        cross(g[lb], g[lc]),
-                        cross(g[lc], g[la]),
-                        cross(g[la], g[lb]),
-                    ];
-                    faces.push((face_id(complex, tri), [la, lb, lc], u));
-                }
-                for (fi, li, ui) in &faces {
-                    for (fj, lj, uj) in &faces {
-                        let mut val = 0.0f64;
-                        for p in 0..3 {
-                            for q in 0..3 {
-                                val = (4.0 * s(li[p], lj[q])).mul_add(dot(ui[p], uj[q]), val);
-                            }
-                        }
-                        coo.push(*fi, *fj, val);
-                    }
+                    emit(*fi, *fj, val)?;
                 }
             }
-            3 => {
-                coo.push(m, m, 1.0 / vol);
-            }
-            _ => panic!("mass_matrix degree must be 0..=3"),
         }
+        3 => {
+            emit(m, m, 1.0 / vol)?;
+        }
+        _ => panic!("mass_matrix degree must be 0..=3"),
     }
-    coo.assemble()
+    Ok(())
 }
 
 /// De-Rham map, degree 0: vertex point values.
