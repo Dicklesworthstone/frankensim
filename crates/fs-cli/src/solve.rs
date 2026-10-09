@@ -180,7 +180,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// with conductivity tolerances; unexecuted corner designs remain unmeasured.
 /// Version 47 evaluates every declared boundary/model-form corner, including
 /// stronger coefficients and cold-side deviations; unknown interaction is null.
-pub const SOLVE_DRIVER_VERSION: u32 = 47;
+/// Version 48 includes complete natural-convection coefficient feedback in
+/// adaptive goals and admits only independently residual-checked comparisons.
+pub const SOLVE_DRIVER_VERSION: u32 = 48;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1402,6 +1404,8 @@ struct RungAdjointData {
     radiating_boundary: Option<fs_conduction::ThermalBoundary>,
     /// Exact card-backed constitutive laws from the accepted radiation producer.
     radiation_patches: Vec<fs_conduction::AmbientRadiationPatch>,
+    /// Original natural laws, pressure and feedback budget on this mesh.
+    natural_goal: Option<natural::adaptive::NaturalGoal>,
 }
 
 /// A two-space observation of the actual nodal maximum. Absolute nodal dual
@@ -1533,7 +1537,17 @@ fn adaptive_probe(
         element_materials: Some(&data.materials),
         source: &data.source,
     };
-    let (dual, coupled_adjoint) = if data.air_paths.is_empty() {
+    let (dual, coupled_adjoint) = if let Some(natural) = &data.natural_goal {
+        if !data.air_paths.is_empty() || data.radiating_boundary.is_some() {
+            return Err(conduction_error(
+                "cli-solve-conduction-natural-adaptive",
+                "natural adaptive goals cannot freeze simultaneous airflow or radiation feedback",
+                "use base or ladder fidelity for combined laws",
+            ));
+        }
+        (natural.compare(cx, problem, data.interfaces.as_ref(), data.linear,
+            &fine.solution.temperature, approximate, &weights)?, None)
+    } else if data.air_paths.is_empty() {
         (fs_conduction::adjoint::compare_discrete_goal(
             cx, problem, data.interfaces.as_ref(), data.linear,
             &fine.solution.temperature, approximate, &weights,
@@ -1775,7 +1789,7 @@ fn adaptive_study(
              \"signed_linear_change_k\":{},\"linearization_remainder_k\":{},\"maximum_remainder_k\":{},\
              \"estimated_change_k\":{},\"measured_change_k\":{},\"tolerance_k\":{},\
              \"primal_residual\":{},\"dual_residual\":{},\"dual_iterations\":{},\
-             \"uses_nonlinear_jacobian\":{},\"coupled_adjoint\":{},\"algebraic_balance\":{},\"marked_cells\":{},\
+             \"uses_nonlinear_jacobian\":{},\"natural_coefficient_feedback\":{},\"coupled_adjoint\":{},\"algebraic_balance\":{},\"marked_cells\":{},\
              \"absolute_contribution_sum_k\":{}}}",
             history.len(),
             complex.tets().len(),
@@ -1801,6 +1815,7 @@ fn adaptive_study(
             number(probe.dual_residual)?,
             probe.dual_iterations,
             probe.uses_nonlinear_jacobian,
+            fine.adjoint_data.as_ref().is_some_and(|data| data.natural_goal.is_some()),
             coupled,
             balanced.receipt,
             marks.len(),
@@ -1906,7 +1921,7 @@ fn adaptive_study(
         achieved.as_deref().unwrap_or("null"),
         history.join(","),
         json_string(
-            "same-model nodal-maximum comparison against a globally enriched mesh; the actual residual/Jacobian retains fixed contact, nonlinear conductivity, and independent-branch air feedback at fixed mass flows and coefficients, with explicit linearization and maximum remainders; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
+            "same-model nodal-maximum comparison against a globally enriched mesh; the actual residual/Jacobian retains fixed contact, nonlinear conductivity, complete admitted natural-convection coefficient feedback, and independent-branch air feedback at fixed mass flows and coefficients, with explicit linearization and maximum remainders; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
         ),
     );
     // The published mesh was just compared with its uniform ratio-2
@@ -6699,6 +6714,15 @@ fn conduction_solve_receipt(
             // difference; Picard on the card until every h settles.
             let pressure_pa = spec.envelope.as_ref().map_or(101_325.0, |e| e.pressure.value);
             let mut htc = natural::initial_coefficients(&natural_laws, pressure_pa)?;
+            // The goal owner checks the COMPLETE physical residual, not only
+            // the last frozen Robin solve. Leave room below its stricter gate.
+            let natural_tolerance = if adaptive_requested {
+                let goal_tolerance = spec.solver.as_ref().map_or(
+                    fs_conduction::LinearConfig::default().tolerance,
+                    |solver| (solver.tolerance_rel * 1e-2).max(1e-13),
+                );
+                natural::TOLERANCE_REL.min(goal_tolerance * 0.1)
+            } else { natural::TOLERANCE_REL };
             let mut iterations = 0usize;
             loop {
                 iterations += 1;
@@ -6737,7 +6761,7 @@ fn conduction_solve_receipt(
                         heat_rate_w: flux.heat_rate_w,
                     });
                 }
-                if worst <= natural::TOLERANCE_REL {
+                if worst <= natural_tolerance {
                     natural_fragment = Some(natural::receipt_fragment(&converged, iterations)?);
                     break (solution, None, derived, Vec::new());
                 }
@@ -6925,6 +6949,11 @@ fn conduction_solve_receipt(
             Some(RungAdjointData {
                 boundary, interfaces, source, materials: element_materials, fallback, linear, air_paths,
                 radiating_boundary, radiation_patches,
+                natural_goal: if adaptive_requested && !natural_laws.is_empty() {
+                    Some(natural::adaptive::NaturalGoal::new(natural_laws,
+                        spec.envelope.as_ref().map_or(101_325.0, |e| e.pressure.value),
+                        memory_bytes)?)
+                } else { None },
             })
         } else { None };
         adaptive_deadline(deadline)?;

@@ -23,6 +23,8 @@ use super::conjugate::{
 use super::{SolveRefusal, canonical_f64, conduction_error};
 use crate::import::json_string;
 
+pub(super) mod adaptive;
+
 /// Relative change in every coefficient that ends the fixed point.
 pub(super) const TOLERANCE_REL: f64 = 1e-10;
 /// Fixed-point iteration budget (the map contracts by about 1/4 per step).
@@ -271,22 +273,26 @@ pub(super) fn receipt_fragment(converged: &[Converged], iterations: usize) -> Re
     ))
 }
 
-/// The existing enriched-goal comparison differentiates the solid/air model,
-/// not h(T_wall). Reject that fidelity before meshing instead of publishing a
-/// convergence test for a frozen coefficient. Base and ladder remain usable.
+/// Admit only natural cards whose full coefficient tangent is implemented.
+/// Base and ladder keep their original card surface. Radiation retains its
+/// separate capability gate; no combined-law derivative is inferred here.
 pub(super) fn admit_fidelity(
     spec: &fs_project::ProjectSpec,
     setup: &ConductionSetup,
 ) -> Result<(), SolveRefusal> {
-    if spec.solver.as_ref().is_some_and(|solver|
+    if !spec.solver.as_ref().is_some_and(|solver|
         solver.fidelity == super::SOLVER_FIDELITY_ADAPTIVE)
-        && setup.boundaries.iter().any(|row|
-            matches!(row.condition, ThermalBoundaryCondition::NaturalConvection { .. }))
+    {
+        return Ok(());
+    }
+    let laws = natural_laws(setup)?;
+    if laws.len() > 64 || laws.iter().any(|law|
+        law.card != CorrelationId::ChurchillChuVerticalPlate)
     {
         return Err(conduction_error(
             "cli-solve-conduction-natural-adaptive",
-            "adaptive goals do not yet include natural-convection coefficient feedback",
-            "use base or ladder fidelity; a frozen-coefficient enriched adjoint cannot measure this model's goal error",
+            "adaptive natural goals require at most 64 differentiated Churchill-Chu vertical-plate laws",
+            "use supported vertical-plate laws or select base or ladder fidelity",
         ));
     }
     Ok(())

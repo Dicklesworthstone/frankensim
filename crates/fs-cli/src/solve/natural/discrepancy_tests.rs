@@ -93,8 +93,8 @@ fn adaptive_admission_cannot_freeze_the_law() {
     assert!(admit_fidelity(&spec, spec.cooling.as_ref().unwrap().conduction.as_ref().unwrap()).is_ok());
     spec.solver.as_mut().unwrap().fidelity = "adaptive".into();
     let setup = spec.cooling.as_ref().unwrap().conduction.as_ref().unwrap();
-    assert_eq!(admit_fidelity(&spec, setup).unwrap_err().code,
-        "cli-solve-conduction-natural-adaptive");
+    assert!(admit_fidelity(&spec, setup).is_ok(),
+        "the admitted vertical-plate law now has a complete enriched-goal tangent");
     let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     let mut cold = setup.boundaries[0].clone();
     cold.target = "cold-support".into();

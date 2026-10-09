@@ -11,6 +11,8 @@ use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMateria
 
 #[path = "native_nonlinear_adjoint/material_controls.rs"]
 mod material_controls;
+#[path = "native_nonlinear_adjoint/adaptive_natural.rs"]
+mod adaptive_natural;
 
 fn scratch() -> PathBuf {
     for ordinal in 0..10000 {
