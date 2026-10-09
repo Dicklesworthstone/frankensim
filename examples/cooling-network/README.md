@@ -30,6 +30,12 @@ project, and this command does not perform CAD import, create a ledger, or claim
 a package/report workflow. Existing `fs_cli::run`/`run_os` library verbs are
 unchanged; `cooling-network` is dispatched by the `frankensim` binary.
 
+Fixed transient schedules can also use explicit total enthalpy and equilibrium
+latent heat through `transient.enthalpy`. The
+[phase-pulse example](enthalpy-phase-pulse.json) evolves nodal enthalpy and liquid
+fraction with convection and ambient radiation, while retaining the declared
+reference mass. See [the enthalpy request and output contract](TRANSIENT_COOLING.md#fixed-density-total-enthalpy-and-latent-heat).
+
 Every vertex, tetrahedron, surface, coefficient, heat source, hydraulic connection
 and source temperature comes from the request. Supply a conforming,
 non-overlapping tetrahedral mesh. Admission checks indices, repeated cells, face

@@ -103,6 +103,84 @@ transient gradient, adaptive time stepping or durable checkpoint is supplied.
 A final nodal field may be declared as another request's initial state; its
 local timeline starts at zero again.
 
+## Fixed-density total enthalpy and latent heat
+
+`transient.enthalpy` selects the spatial total-enthalpy owner instead of the
+temperature/capacity formulation above:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/enthalpy-phase-pulse.json
+cargo test -p fs-cli --test cooling_enthalpy
+```
+
+The complete [phase-pulse request](enthalpy-phase-pulse.json) declares one
+equilibrium phase chart for the solid. Each chart knot gives
+`specific_enthalpy_j_kg`, positive `temperature_k` and
+`liquid_mass_fraction` in `[0,1]`. The existing material owner validates the
+2–4096 knots and evaluates the piecewise-linear enthalpy relation. Equal
+temperatures over a positive enthalpy interval retain an exact latent plateau;
+no apparent heat capacity or extra latent-energy source is added.
+
+Inside `enthalpy`, provide positive `reference_density_kg_m3`, a nonempty
+`source`, a 64-hex `material_card_identity`, and exactly one initial state:
+`initial_specific_enthalpy_j_kg` or nodal
+`initial_specific_enthalpies_j_kg`. The identity is a caller declaration,
+not proof that a measured material card was resolved. The example says so
+explicitly. Omit the temperature initializers, volumetric-capacity fields and
+`transient.nonlinear`; mixing storage formulations refuses. Conductivity
+declarations and supported finite thermal contacts remain independent inputs.
+
+The required `enthalpy.newton` object declares `max_iterations`,
+`residual_rtol`, `residual_atol_j`, `linear_restart`, `max_linear_cycles`,
+`armijo_c`, `shrink` and `max_backtracks`. `linear_restart` is capped at the
+smaller of the solid vertex count and 256 to bound Krylov workspace. The worst-case product
+`max_iterations * linear_restart * max_linear_cycles` must fit
+`budgets.linear_iterations`. Existing interval, step-count and wall-time
+budgets apply. The endpoint residual is
+`M_ref (h_new-h_old) + dt [A(T(h_new)) T(h_new)-b]` in joules, with lumped
+reference masses `rho_ref * V / 4` per tetrahedron vertex. Its target is
+`max(residual_atol_j, residual_rtol * norm(R(h_old)))`; it also must pass the
+independent physical energy gate. All air-reference and radiation trials
+reuse the same previously accepted enthalpy. Only a complete accepted endpoint
+advances time or enters the accumulated energy account.
+
+Ambient radiation uses the existing optional `radiation.surfaces` declaration.
+It can remove heat or add heat from a hotter reservoir. The air network receives
+only convection. Radiation has its own watt and joule fields, so the window
+balance is `stored_change = input - air_gain - radiative_loss`.
+
+The final result adds `solid_specific_enthalpies_j_kg` and
+`solid_liquid_mass_fractions` beside `solid_temperatures_k`.
+`transient.scheme` becomes `backward-euler-total-enthalpy`;
+`transient.enthalpy` retains the declared chart identity/source/reference
+density, initial and final total reference enthalpy, and solver controls/work.
+Each history row also reports the minimum and maximum specific enthalpy and
+reference-mass-weighted mean liquid fraction. Full nodal enthalpy history is
+not retained. A new fixed schedule can start from the returned final nodal
+enthalpies; temperature alone cannot reconstruct a state on a latent plateau.
+
+The synthetic example stays at 350 K while its enthalpy and liquid fraction
+change. A 0.4-second pulse supplies 400 J, followed by 0.4 seconds without
+internal heating. Independent tetrahedral/heat-exchanger algebra gives
+49.5595805903 W of convection throughout. With a 300 K black reservoir,
+radiation removes 741.247808319 W and the final mean liquid fraction is about
+0.43020623. Changing only that reservoir to 400 K gives a radiative loss of
+−1137.02718109 W and a final mean liquid fraction of about 0.88099222; air
+convection stays the same. The binary tests compare individual nodal enthalpies,
+every accepted endpoint summary, air outlet temperature and accumulated energy
+with these independent formulas, and compare a split/restarted trajectory with
+the uninterrupted run. These are numerical references, not measured material
+or hardware validation.
+
+This opt-in CLI mode supports fixed schedules and fixed reference density with
+one declared equilibrium chart. Adaptive/repeated schedules, design searches,
+CLI adjoints, time/mesh studies, recirculation and enclosure radiation explicitly refuse.
+The library's enthalpy adjoints are separate APIs; the existing temperature
+trajectory adjoint cannot be substituted for them. Geometry, mass and energetic
+internal variables are frozen. There is no fluid storage, phase advection,
+melting-driven motion or certified inter-step peak.
+
 ## Pulse example
 
 The example applies 20 W to a localized component for 30 seconds, then removes

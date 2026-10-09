@@ -108,6 +108,57 @@ maximum with a smaller nominal margin, both verdicts `indeterminate`, and five
 of seven stages changed (`import-verify` and `assign` differ only by binding
 keys); a merely renamed project shows the hash change and a bit-identical QoI.
 
+### Cooling-network total-enthalpy transient
+
+The experimental `cooling-network <request.json>` binary command admits an
+opt-in `transient.enthalpy` storage model in its existing
+`frankensim.cooling-network.v1` request. It calls the production
+`EnthalpyBackwardEuler` owner, including its ambient-radiation endpoint when
+requested, and the existing quasi-steady mixed-air coupling. This command
+remains a nominal estimate outside the native `.fsim`/ledger workflow.
+
+The enthalpy object requires one fixed reference density, 2–4096 equilibrium
+chart knots, caller-declared material identity/source, explicit Newton/Krylov/
+backtracking budgets and one uniform or nodal specific-enthalpy initial state.
+It excludes the temperature/capacity initializers and `transient.nonlinear`.
+The material owner validates the chart; temperature and phase are evaluated
+from accepted specific enthalpy, including unsmoothed latent plateaus. The
+declared identity does not mint a source or material-resolution receipt.
+Storage is `sum_i m_ref_i h_i`, with tetrahedral reference mass lumped at the
+vertices. Phase change never changes that reference mass or adds latent heat
+again. Existing conductivity assignments and supported contacts remain in the
+spatial operator.
+
+Every air-reference and radiative iteration holds the same accepted `h_old`
+fixed. Physical time advances only after the full implicit residual, solid
+energy, coupling heat and complete endpoint energy gates pass. Radiation uses
+the actual endpoint patch mean and remains separate from the air convection
+load. Accepted input, air gain, radiation loss and storage enter the window
+once. Exhausted work, chart-domain errors or cancellation publish no partial
+trajectory. The Newton worst-case inner-column product must fit the existing
+linear budget, and `linear_restart <= min(solid vertex count, 256)` also bounds
+Krylov workspace; fixed step-count and wall budgets cover the complete invocation.
+
+The final JSON includes `solid_specific_enthalpies_j_kg`,
+`solid_liquid_mass_fractions`, existing final temperatures and the scheme
+`backward-euler-total-enthalpy`. `transient.enthalpy` retains initial/final
+total reference enthalpy and the chart/source/density/control/work declarations.
+Each accepted history row also carries specific-enthalpy extrema and a
+reference-mass-weighted mean liquid fraction. A new schedule may restart from
+the returned nodal enthalpy; no temperature-to-enthalpy inverse is inferred on
+a plateau. Full nodal history is not stored.
+
+This first CLI consumer admits fixed schedules and one fixed-density chart.
+Adaptive/repeated schedules, design/adjoint consumers, time/mesh studies, recirculation and
+enclosure radiation explicitly refuse. No moving geometry, phase advection,
+fluid storage, phase kinetics or inter-step peak/error certificate is claimed.
+`tests/cooling_enthalpy.rs` exercises the real binary with independent analytic
+nodal/whole-window latent storage, hot/cold reservoir and unchanged air-load
+references, endpoint summaries, deterministic replay, restart parity and
+unsupported/data/budget/cancellation refusals. The fixture is synthetic:
+`examples/cooling-network/enthalpy-phase-pulse.json`; its request and numerical
+reference are documented in `examples/cooling-network/TRANSIENT_COOLING.md`.
+
 ### Material discovery
 
 `frankensim [--json] discover <request.json> <pack>...` reads the five existing

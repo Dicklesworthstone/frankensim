@@ -156,6 +156,16 @@ impl Request {
         if get(&root, "schema")?.as_str() != Some(SCHEMA) || get(&root, "units")?.as_str() != Some("SI") {
             return Err(bad("expected schema frankensim.cooling-network.v1 and units SI"));
         }
+        if root.get("transient").and_then(|schedule|schedule.get("enthalpy")).is_some() {
+            for key in ["design", "fan_speed_design", "mesh_convergence", "recirculation"] {
+                if root.get(key).is_some() {
+                    return Err(bad(format!("transient.enthalpy does not admit {key}")));
+                }
+            }
+            if root.get("radiation").and_then(|policy|policy.get("enclosure")).is_some() {
+                return Err(bad("transient.enthalpy supports ambient radiation, not radiation.enclosure"));
+            }
+        }
         let seed = string(get(&root, "seed")?, "seed")?.parse::<u64>().map_err(|_| bad("seed must be a decimal u64 string"))?;
         let b = object(get(&root, "budgets")?, &["graph_sweeps", "coupling_iterations", "linear_iterations", "derivative_iterations", "wall_seconds"], "budgets")?;
         let t = object(get(&root, "tolerances")?, &["flow_m3_s", "heat_w", "temperature_k", "linear_relative", "relaxation"], "tolerances")?;
@@ -290,9 +300,11 @@ impl Request {
             .map(|value|mesh_convergence::Study::parse(value,&root)).transpose()?;
         let recirculation = root.get("recirculation")
             .map(|value| recirculation::Policy::parse_request(value, &inlets, &root)).transpose()?;
-        Ok(Self { seed, graph, boundaries, inlets, region_paths, air, mesh, surfaces,
+        let request = Self { seed, graph, boundaries, inlets, region_paths, air, mesh, surfaces,
             conductivity, source, adiabatic, solid_data, contacts, fan, fan_speed_design, transient,
-            mesh_convergence, radiation, recirculation, objective, gradient, limits, design })
+            mesh_convergence, radiation, recirculation, objective, gradient, limits, design };
+        if let Some(schedule) = &request.transient { schedule.admit_enthalpy(&request)?; }
+        Ok(request)
     }
 
     fn flow(&self, cx: &Cx<'_>) -> Result<GraphSolution> {

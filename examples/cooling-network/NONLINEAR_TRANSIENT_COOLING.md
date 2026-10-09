@@ -101,8 +101,10 @@ loose nonlinear tolerance that must still fail the energy gate. The CLI tests
 exercise real cooling commands, contacts, replay and adaptive trial accounting.
 Their presence does not assert successful execution on a particular checkout.
 
-Heat capacity and contact resistance remain temperature independent. There is
-no enthalpy/phase-change model, fluid storage, temperature-dependent air
+Heat capacity and contact resistance remain temperature independent in this
+temperature-based path. The separate explicit
+[total-enthalpy mode](TRANSIENT_COOLING.md#fixed-density-total-enthalpy-and-latent-heat)
+handles fixed-density equilibrium latent heat. Neither path adds fluid storage, temperature-dependent air
 properties, transient adjoint, continuous-time peak bound or experimental
 validation. The existing UQ command still accepts steady base requests only.
 The linear theta-method APIs retain their existing constant-conductivity scope;

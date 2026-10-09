@@ -16,6 +16,7 @@ mod nonlinear;
 mod adjoint;
 mod design_sensitivity;
 mod time_convergence;
+mod enthalpy;
 use workload::Workload;
 
 use super::*;
@@ -45,12 +46,14 @@ pub(super) struct Schedule {
     fan_speed_design: Option<sizing::Config>,
     power_design: Option<sizing::Config>,
     repeat: Option<repeat::Config>,
+    enthalpy: Option<enthalpy::Config>,
 }
 
 impl Schedule {
     pub(super) fn parse(value: &J, vertices: usize, elements: usize, fan: Option<&fan_drive::FanDrive>) -> Result<Self> {
         object(value, &["initial_temperature_k", "initial_temperatures_k", "volumetric_heat_capacity_j_m3_k",
-            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "nonlinear", "adjoint", "time_convergence", "fan_speed_design", "power_design", "repeat"], "transient")?;
+            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "nonlinear", "adjoint", "time_convergence", "fan_speed_design", "power_design", "repeat", "enthalpy"], "transient")?;
+        let enthalpy = value.get("enthalpy").map(|policy| enthalpy::Config::parse(policy,value,vertices)).transpose()?;
         let nonlinear = value.get("nonlinear").map(nonlinear::Config::parse).transpose()?;
         let adjoint = value.get("adjoint").map(adjoint::Config::parse).transpose()?;
         if adjoint.is_some() {
@@ -64,7 +67,7 @@ impl Schedule {
                 }
             }
         }
-        let initial = match (value.get("initial_temperature_k"), value.get("initial_temperatures_k")) {
+        let initial = if let Some(policy) = &enthalpy { policy.initial_temperatures()? } else { match (value.get("initial_temperature_k"), value.get("initial_temperatures_k")) {
             (Some(t),None) => vec![positive(t,"initial_temperature_k")?;vertices],
             (None,Some(ts)) => {
                 let values = array(ts,"initial_temperatures_k",vertices)?;
@@ -72,8 +75,8 @@ impl Schedule {
                 values.iter().map(|t| positive(t,"initial temperature")).collect::<Result<Vec<_>>>()?
             }
             _ => return Err(bad("choose one uniform or nodal initial temperature")),
-        };
-        let capacities = match (value.get("volumetric_heat_capacity_j_m3_k"), value.get("element_heat_capacities_j_m3_k")) {
+        }};
+        let capacities = if enthalpy.is_some() { Vec::new() } else { match (value.get("volumetric_heat_capacity_j_m3_k"), value.get("element_heat_capacities_j_m3_k")) {
             (Some(c),None) => vec![VolumetricHeatCapacity::declared(positive(c,"volumetric heat capacity")?).map_err(producer)?;elements],
             (None,Some(cs)) => {
                 let values = array(cs,"element heat capacities",elements)?;
@@ -81,7 +84,7 @@ impl Schedule {
                 values.iter().map(|c| VolumetricHeatCapacity::declared(positive(c,"element heat capacity")?).map_err(producer)).collect::<Result<Vec<_>>>()?
             }
             _ => return Err(bad("choose one uniform or per-element volumetric heat capacity")),
-        };
+        }};
         let max_dt = positive(get(value,"max_step_s")?,"max_step_s")?;
         let max_steps = count(get(value,"max_steps")?,"max_steps",10_000)?;
         let time_convergence = value.get("time_convergence")
@@ -140,11 +143,16 @@ impl Schedule {
         }
         let repeat = value.get("repeat").map(|v| repeat::Config::parse(v, total_steps, adaptive.is_some())).transpose()?;
         let schedule = Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,
-            adaptive,nonlinear,adjoint,time_convergence,fan_speed_design,power_design,repeat};
+            adaptive,nonlinear,adjoint,time_convergence,fan_speed_design,power_design,repeat,enthalpy};
         for design in [&schedule.fan_speed_design,&schedule.power_design].into_iter().flatten() {
             design.validate(&schedule,fan)?;
         }
         Ok(schedule)
+    }
+
+    pub(super) fn admit_enthalpy(&self, request: &Request) -> Result<()> {
+        if let Some(policy) = &self.enthalpy { policy.admit(request,self)?; }
+        Ok(())
     }
 }
 
@@ -244,6 +252,9 @@ struct Trajectory {
 }
 
 pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<String> {
+    if let Some(policy)=&schedule.enthalpy {
+        return enthalpy::solve(request,cx,schedule,policy);
+    }
     if let Some(config)=schedule.time_convergence {
         return time_convergence::solve(request,cx,schedule,config);
     }

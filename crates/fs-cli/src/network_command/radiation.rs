@@ -27,6 +27,7 @@ use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
 mod endpoint;
 mod sensitivity;
 mod enclosure;
+pub(super) use endpoint::EndpointHeat;
 
 #[derive(Debug)]
 struct Patch {
@@ -80,6 +81,19 @@ fn finite(value: f64, stage: &str) -> Result<f64> {
 }
 
 impl Policy {
+    /// Existing surface declarations for the physical total-enthalpy producer.
+    pub(super) fn enthalpy_controls(&self, request: &Request)
+        -> Result<(Vec<AmbientRadiationPatch>, AmbientRadiationConfig)> {
+        if self.enclosure.is_some() {
+            return Err(bad("transient.enthalpy supports ambient radiation, not radiation.enclosure"));
+        }
+        Ok((self.patches.values().map(Patch::model).collect::<Result<Vec<_>>>()?,
+            AmbientRadiationConfig {max_iterations:self.max_iterations,
+                temperature_tolerance_k:self.tolerance_k,
+                balance_tolerance_w:request.limits.heat/(self.patches.len() as f64+1.0),
+                balance_relative_tolerance:0.0,relaxation:self.relaxation}))
+    }
+
     pub(super) fn parse(value: &J, _root: &J, surfaces: &[Surface]) -> Result<Self> {
         object(value, &["max_iterations", "temperature_tolerance_k", "relaxation", "surfaces", "enclosure"], "radiation")?;
         let max_iterations = count(get(value, "max_iterations")?, "radiation.max_iterations", 1000)?;
