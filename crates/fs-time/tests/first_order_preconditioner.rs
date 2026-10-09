@@ -18,6 +18,7 @@ enum Policy {
     Identity,
     NonFinite,
     Unwritten,
+    Panicked,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +36,8 @@ struct Model {
     nonlinear: bool,
     calls: RefCell<Vec<Call>>,
     tangent: Cell<(f64, [f64; 2])>,
+    tangent_calls: Cell<usize>,
+    residual_calls: Cell<usize>,
 }
 
 impl Model {
@@ -44,6 +47,8 @@ impl Model {
             nonlinear,
             calls: RefCell::new(Vec::new()),
             tangent: Cell::new((f64::NAN, [f64::NAN; 2])),
+            tangent_calls: Cell::new(0),
+            residual_calls: Cell::new(0),
         }
     }
     fn jacobian(&self, u: &[f64]) -> [f64; 4] {
@@ -68,12 +73,14 @@ impl FirstOrderProblem for Model {
         apply(MASS, input, out);
     }
     fn internal_force(&self, _: f64, u: &[f64], out: &mut [f64]) {
+        self.residual_calls.set(self.residual_calls.get() + 1);
         apply(OPERATOR, u, out);
         if self.nonlinear {
             out[1] += 120.0 * u[1].powi(3);
         }
     }
     fn tangent_apply(&self, time: f64, u: &[f64], input: &[f64], out: &mut [f64]) {
+        self.tangent_calls.set(self.tangent_calls.get() + 1);
         self.tangent.set((time, [u[0], u[1]]));
         apply(self.jacobian(u), input, out);
     }
@@ -99,6 +106,7 @@ impl FirstOrderProblem for Model {
             Policy::Identity => out.copy_from_slice(residual),
             Policy::NonFinite => out.fill(f64::NAN),
             Policy::Unwritten => out[0] = residual[0],
+            Policy::Panicked => panic!("injected implicit preconditioner failure"),
             Policy::Exact => {
                 let tangent = self.jacobian(u);
                 let a: [f64; 4] =
@@ -291,4 +299,55 @@ fn explicit_identity_and_the_omitted_default_preserve_state_and_history_bits() {
         }
         assert!(model.calls.borrow().iter().any(|call| call.inner > 0));
     }
+}
+
+#[test]
+fn callback_cancellation_stops_inner_work_and_retries_the_same_first_order_step() {
+    let model = Model::new(Policy::Exact, true);
+    let method = method(0.35, 1, 1);
+    let mut checkpoint = initial();
+    method.step(&mut checkpoint, &model, &FORCING).unwrap();
+    let mut expected = checkpoint.clone();
+    method.step(&mut expected, &model, &FORCING).unwrap();
+
+    // A request raised by the first Jacobian action, first preconditioner,
+    // or first line-search residual must be seen before the next action.
+    for phase in 0..3 {
+        let mut state = checkpoint.clone();
+        let tangent_before = model.tangent_calls.get();
+        let residual_before = model.residual_calls.get();
+        let preconditioner_before = model.calls.borrow().len();
+        let error = method
+            .step_controlled(&mut state, &model, &FORCING, &mut || match phase {
+                0 => model.tangent_calls.get() > tangent_before,
+                1 => model.calls.borrow().len() > preconditioner_before,
+                _ => model.residual_calls.get() > residual_before + 1,
+            })
+            .unwrap_err();
+        assert_eq!(error, TimeSolveError::Cancelled);
+        same_state(&state, &checkpoint);
+        let preconditioners = model.calls.borrow().len() - preconditioner_before;
+        let tangents = model.tangent_calls.get() - tangent_before;
+        let residuals = model.residual_calls.get() - residual_before;
+        match phase {
+            0 => assert_eq!((preconditioners, tangents, residuals), (0, 1, 1)),
+            1 => assert_eq!((preconditioners, tangents, residuals), (1, 1, 1)),
+            _ => assert_eq!((preconditioners, tangents, residuals), (1, 3, 2)),
+        }
+        method.step(&mut state, &model, &FORCING).unwrap();
+        same_state(&state, &expected);
+    }
+
+    let mut state = checkpoint.clone();
+    model.policy.set(Policy::Panicked);
+    assert_eq!(
+        method.step(&mut state, &model, &FORCING),
+        Err(TimeSolveError::SolverCallbackPanicked(
+            fs_solver::SolverCallback::Preconditioner
+        ))
+    );
+    same_state(&state, &checkpoint);
+    model.policy.set(Policy::Exact);
+    method.step(&mut state, &model, &FORCING).unwrap();
+    same_state(&state, &expected);
 }

@@ -6,7 +6,8 @@
 
 use fs_la::factor::{Lu, lu};
 use fs_solver::{
-    LinearOp, NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, NonlinearProblem,
+    CancellableSolveReport, LinearOp, NewtonError, NewtonKrylovConfig, NewtonKrylovState,
+    NewtonReport, NonlinearProblem, SolverCallback, SolverRunProgress,
 };
 use std::fmt;
 
@@ -247,6 +248,8 @@ pub enum TimeSolveError {
     NewtonSetup(NewtonError),
     /// The configured nonlinear budget ended without an accepted solution.
     NotConverged(NewtonReport),
+    /// A numerical callback unwound during Newton; the entire step was discarded.
+    SolverCallbackPanicked(SolverCallback),
 }
 
 impl fmt::Display for TimeSolveError {
@@ -291,11 +294,34 @@ impl fmt::Display for TimeSolveError {
                 "implicit time step did not converge after {} Newton attempts: {:?}",
                 report.iterations, report.diagnosis
             ),
+            Self::SolverCallbackPanicked(callback) => write!(
+                f,
+                "generalized-alpha Newton {callback:?} callback panicked; step discarded"
+            ),
         }
     }
 }
 
 impl core::error::Error for TimeSolveError {}
+
+fn completed_newton(
+    outcome: CancellableSolveReport<NewtonReport>,
+) -> Result<NewtonReport, TimeSolveError> {
+    match outcome.progress {
+        SolverRunProgress::Complete => Ok(outcome.report),
+        SolverRunProgress::Paused => Err(TimeSolveError::Cancelled),
+        SolverRunProgress::CallbackPanicked(callback) => {
+            Err(TimeSolveError::SolverCallbackPanicked(callback))
+        }
+        SolverRunProgress::DimensionMismatch { expected, actual } => {
+            Err(TimeSolveError::Dimension {
+                role: "Newton problem",
+                expected,
+                actual,
+            })
+        }
+    }
+}
 
 fn checked_time_advance(t: f64, h: f64) -> Result<f64, TimeSolveError> {
     let next_t = t + h;
@@ -512,9 +538,10 @@ impl OperatorGeneralizedAlpha {
         self.step_controlled(state, problem, forcing, &mut || false)
     }
 
-    /// Advance with cancellation checks before setup, between bounded Newton
-    /// attempts and before publication. One attempt includes the configured
-    /// inner Krylov/globalization work; callbacks must bound their own work.
+    /// Advance with cancellation checks before setup, before/after Newton
+    /// residual, Jacobian and preconditioner callbacks, within inner Krylov
+    /// and backtracking work, and before publication. Individual callbacks
+    /// must bound their own work.
     /// Cancellation leaves displacement, velocity, acceleration and history
     /// unchanged, including when a previous step has already been accepted.
     pub fn step_controlled<P, Cancel>(
@@ -575,7 +602,7 @@ impl OperatorGeneralizedAlpha {
                 break;
             }
             structural_poll(cancelled)?;
-            report = newton.run(&residual, 1);
+            report = completed_newton(newton.run_controlled(&residual, 1, cancelled))?;
             structural_poll(cancelled)?;
         }
         if !report.converged {
@@ -983,10 +1010,11 @@ impl OperatorFirstOrderGeneralizedAlpha {
         self.step_controlled(state, problem, forcing, &mut || false)
     }
 
-    /// Advance with cooperative cancellation before setup, between bounded
-    /// Newton attempts, and before publication. One attempt includes the
-    /// configured inner Krylov/globalization work; callbacks must bound their
-    /// own work. Cancellation leaves all state and history unchanged.
+    /// Advance with cooperative cancellation before setup, before/after
+    /// Newton residual, Jacobian and preconditioner callbacks, within inner
+    /// Krylov and backtracking work, and before publication. Individual
+    /// callbacks must bound their work. Cancellation leaves all state and
+    /// history unchanged.
     pub fn step_controlled<P, Cancel>(
         &self,
         state: &mut FirstOrderState,
@@ -1050,7 +1078,7 @@ impl OperatorFirstOrderGeneralizedAlpha {
                 break;
             }
             first_order_poll(cancelled)?;
-            report = newton.run(&residual, 1);
+            report = completed_newton(newton.run_controlled(&residual, 1, cancelled))?;
             first_order_poll(cancelled)?;
         }
         if !report.converged {

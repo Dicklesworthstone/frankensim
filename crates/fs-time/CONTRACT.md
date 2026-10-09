@@ -371,11 +371,27 @@ Arnoldi iterations. Long callbacks must bound their own work; this does not
 claim interruption within an operator or one Krylov cycle. Cancelled forward
 attempts leave the entire `ImexState` unchanged and are retryable.
 Both `OperatorFirstOrderGeneralizedAlpha::step_controlled` and structural
-`OperatorGeneralizedAlpha::step_controlled` poll before setup, between bounded
-Newton attempts and before publication. Their `step_vjp` methods also poll
-between adjoint restart cycles and around final derivative callbacks.
-Cancelled attempts preserve the entire input state/history; one Newton
-attempt or provider callback must finish before its cancellation is observed.
+`OperatorGeneralizedAlpha::step_controlled` pass their existing mutable
+cancellation predicate into the shared Newton solver. They poll before
+setup, before/after each Newton residual, Jacobian and preconditioner
+callback, inside Arnoldi and backtracking, and before publication. A true
+predicate result interrupts the current Newton attempt without continuing
+its remaining numerical callbacks. Numerical callback unwinds become
+`TimeSolveError::SolverCallbackPanicked`; cancellation still returns
+`TimeSolveError::Cancelled`. Both preserve the entire input state/history,
+including an already accepted prefix, and successful retry follows the
+same numerical trajectory. The first- and second-order preconditioner
+batteries cancel from real Jacobian, preconditioner, and trial-residual
+callbacks and verify callback counts, complete rollback, and bitwise retry.
+
+An individual shared residual/Jacobian callback may compose several model
+actions and must finish before its cancellation is observed; vector
+reductions are also not preempted. The constructor's initial residual
+remains bounded by the caller's setup checks, outside numerical callback
+panic containment. Predicates must be bounded and nonpanicking. The
+`step_vjp` methods retain their separate checks between adjoint restart
+cycles and around final derivative callbacks; reverse FGMRES is not yet
+interruptible inside a restart cycle through this driver.
 Long trajectories are resumable by cloning `SecondOrderState`,
 `FirstOrderState`, `ImexState`, or `AdaptiveState` between calls; split runs
 continue bitwise when the same operators, forcing, preconditioner policy, and

@@ -56,10 +56,11 @@ struct Call {
 
 struct Model {
     parameter: f64,
-    // 0: exact inverse; 1: identity; 2: NaN; 3: incomplete output.
+    // 0: exact inverse; 1: identity; 2: NaN; 3: incomplete output; 4: panic.
     policy: Cell<u8>,
     calls: RefCell<Vec<Call>>,
     tangent_points: RefCell<Vec<[f64; 2]>>,
+    residual_calls: Cell<usize>,
 }
 
 impl Model {
@@ -69,6 +70,7 @@ impl Model {
             policy: Cell::new(0),
             calls: RefCell::new(Vec::new()),
             tangent_points: RefCell::new(Vec::new()),
+            residual_calls: Cell::new(0),
         }
     }
 
@@ -100,6 +102,7 @@ impl SecondOrderProblem for Model {
         multiply(DAMPING, x, out);
     }
     fn internal_force(&self, q: &[f64], out: &mut [f64]) {
+        self.residual_calls.set(self.residual_calls.get() + 1);
         multiply(self.stiffness(), q, out);
     }
     fn tangent_apply(&self, q: &[f64], x: &[f64], out: &mut [f64]) {
@@ -125,6 +128,7 @@ impl SecondOrderProblem for Model {
             1 => output.copy_from_slice(residual),
             2 => output.fill(f64::NAN),
             3 => output[0] = residual[0],
+            4 => panic!("injected structural preconditioner failure"),
             _ => solve(self.effective(weights), residual, output),
         }
     }
@@ -302,6 +306,77 @@ fn preconditioner_faults_and_cancellation_preserve_an_existing_structural_checkp
         Err(TimeSolveError::Cancelled)
     );
     assert_eq!(state, checkpoint);
+}
+
+fn same_state_bits(actual: &SecondOrderState, expected: &SecondOrderState) {
+    assert_eq!(actual, expected);
+    assert_eq!(actual.t.to_bits(), expected.t.to_bits());
+    assert_eq!(
+        actual
+            .q
+            .iter()
+            .chain(&actual.v)
+            .chain(&actual.a)
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        expected
+            .q
+            .iter()
+            .chain(&expected.v)
+            .chain(&expected.a)
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn callback_cancellation_stops_inner_work_and_retries_the_same_structural_step() {
+    let model = Model::new(0.7);
+    let method = method();
+    let mut checkpoint = initial();
+    method.step(&mut checkpoint, &model, &[0.5, 1.4e4]).unwrap();
+    let forcing = [0.7, 1.5e4];
+    let mut expected = checkpoint.clone();
+    method.step(&mut expected, &model, &forcing).unwrap();
+
+    for phase in 0..3 {
+        let mut state = checkpoint.clone();
+        let tangent_before = model.tangent_points.borrow().len();
+        let residual_before = model.residual_calls.get();
+        let preconditioner_before = model.calls.borrow().len();
+        let error = method
+            .step_controlled(&mut state, &model, &forcing, &mut || match phase {
+                0 => model.tangent_points.borrow().len() > tangent_before,
+                1 => model.calls.borrow().len() > preconditioner_before,
+                _ => model.residual_calls.get() > residual_before + 1,
+            })
+            .unwrap_err();
+        assert_eq!(error, TimeSolveError::Cancelled);
+        same_state_bits(&state, &checkpoint);
+        let preconditioners = model.calls.borrow().len() - preconditioner_before;
+        let tangents = model.tangent_points.borrow().len() - tangent_before;
+        let residuals = model.residual_calls.get() - residual_before;
+        match phase {
+            0 => assert_eq!((preconditioners, tangents, residuals), (0, 1, 1)),
+            1 => assert_eq!((preconditioners, tangents, residuals), (1, 1, 1)),
+            _ => assert_eq!((preconditioners, tangents, residuals), (1, 3, 2)),
+        }
+        method.step(&mut state, &model, &forcing).unwrap();
+        same_state_bits(&state, &expected);
+    }
+
+    let mut state = checkpoint.clone();
+    model.policy.set(4);
+    assert_eq!(
+        method.step(&mut state, &model, &forcing),
+        Err(TimeSolveError::SolverCallbackPanicked(
+            fs_solver::SolverCallback::Preconditioner
+        ))
+    );
+    same_state_bits(&state, &checkpoint);
+    model.policy.set(0);
+    method.step(&mut state, &model, &forcing).unwrap();
+    same_state_bits(&state, &expected);
 }
 
 fn objective(state: &SecondOrderState, parameter: f64) -> f64 {
