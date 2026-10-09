@@ -11,6 +11,7 @@ use crate::assemble::{assemble_jacobian_with_optional_interfaces, element_temper
     reduce_matrix_and_lift};
 
 mod mean_feedback;
+mod mean_feedback_goal;
 mod material_controls;
 mod prescribed;
 
