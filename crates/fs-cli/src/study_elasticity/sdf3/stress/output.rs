@@ -201,10 +201,25 @@ pub(super) fn persist(
         state.optimizer_work.multiplier_updates,
         state.optimizer_work.rejected_trials
     );
-    let measure = format!(
-        "{{\"kind\":\"normalized-volume-and-load-weighted-qp-von-mises\",\"stress_limit_pa\":{:.17e},\"relaxation_power\":{},\"aggregation_power\":{},\"maximum_stress_is_constrained\":false}}",
-        options.stress_limit, options.stress.relaxation_power, options.stress.aggregation_power
-    );
+    let (measure, measure_title, measure_scope) = match spec.stress_measure {
+        StressMeasure3::NormalizedAverage => (
+            format!(
+                "{{\"kind\":\"normalized-volume-and-load-weighted-qp-von-mises\",\"stress_limit_pa\":{:.17e},\"relaxation_power\":{},\"aggregation_power\":{},\"maximum_stress_is_constrained\":false}}",
+                options.stress_limit, options.stress.relaxation_power, options.stress.aggregation_power,
+            ),
+            "normalized qp von Mises aggregate",
+            "This is not a cap on the sampled or continuum maximum stress.",
+        ),
+        StressMeasure3::SampledPeakBound => (
+            format!(
+                "{{\"kind\":\"unweighted-sampled-peak-bound\",\"stress_limit_pa\":{:.17e},\"relaxation_power\":{},\"aggregation_power\":{},\"relative_feasibility_tolerance\":{},\"stress_components\":[\"qp-relaxed\",\"physical-simp\"],\"all_declared_cases_including_zero_weight\":true,\"load_weights_affect_constraint\":false,\"quadrature_weights_affect_constraint\":false,\"sampled_maximum_stress_is_constrained\":true,\"continuum_maximum_stress_is_constrained\":false,\"maximum_stress_is_constrained\":false,\"bound_scope\":\"retained bulk samples only, within the declared feasibility tolerance; no interval or continuum certificate\",\"conservatism\":\"M <= aggregate <= (2*N)^(1/p)*M in exact arithmetic; N is stress_points over all cases\"}}",
+                options.stress_limit, options.stress.relaxation_power, options.stress.aggregation_power,
+                options.optimizer.tolerance,
+            ),
+            "unweighted sampled-peak bound of relaxed and physical von Mises stress",
+            "Every declared case contributes, even at zero weight. The bound applies only to retained bulk samples, within the declared feasibility tolerance. Conservatism depends on the sample count; continuum maximum stress is not bounded.",
+        ),
+    };
     let summary = format!(
         "{{\"driver\":{STRESS3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"objective\":\"volume-fraction\",\"objective_unit\":\"1\",\"final_volume_fraction\":{final_volume},\"iterations_completed\":{},\"target_iterations\":{},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{selected},\"last_accepted\":{last},\"stress_measure\":{measure},\"gradient_check\":{gradient},\"optimizer_work\":{optimizer},\"work\":{work},\"stop\":{stop},\"resume_supported\":{resumable},\"resume_mode\":{:?},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         spec.id.to_hex(),
@@ -215,7 +230,7 @@ pub(super) fn persist(
         quoted(SCOPE)
     );
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>3-D minimum-volume stress study</title><body><h1>3-D minimum-volume stress study</h1><p>Status: {}. Estimated numerical evidence.</p><p>Selected design: {selection}; aggregate-feasible: {feasible}; projected material fraction: {final_volume}.</p><p>Constraint: normalized qp von Mises aggregate ≤ {:.8e} Pa, q = {}, p = {}. This is not a cap on the sampled or continuum maximum stress.</p><p>{SCOPE}</p><table><tr><th>Update</th><th>Material fraction</th><th>Stress aggregate Pa</th><th>Relative violation</th><th>Feasible</th></tr>{table}</table></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>3-D minimum-volume stress study</title><body><h1>3-D minimum-volume stress study</h1><p>Status: {}. Estimated numerical evidence.</p><p>Selected design: {selection}; aggregate-feasible: {feasible}; projected material fraction: {final_volume}.</p><p>Constraint: {measure_title} ≤ {:.8e} Pa, q = {}, p = {}. {measure_scope}</p><p>{SCOPE}</p><table><tr><th>Update</th><th>Material fraction</th><th>Stress aggregate Pa</th><th>Relative violation</th><th>Feasible</th></tr>{table}</table></body></html>",
         state.status,
         options.stress_limit,
         options.stress.relaxation_power,
