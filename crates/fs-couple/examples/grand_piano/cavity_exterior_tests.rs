@@ -1,11 +1,11 @@
 //! One geometry-derived cavity through the existing BEM/stereo playback path.
 use super::*;
 
-fn card() -> &'static str {
+pub(super) fn card() -> &'static str {
     "frankensim-piano-cavity-si-v1\nsource,estimated,authored sealed acoustic integration fixture\ninterface-origin-m,0,0,0\ndimensions-m,0.1,0.1,0.03\nmodes,3\ndamping-ratio,0.03\ngas,dry-air-ussa1976,293.15,101325\n"
 }
 
-fn inputs()->(String,Vec<geometry::Course>,String,Specification) {
+pub(super) fn inputs()->(String,Vec<geometry::Course>,String,Specification) {
     let (board,courses,_,_)=tests::small_source_inputs();
     // The small asymmetric physical patch couples the first x/y pressure
     // modes. The exterior is one closed enclosure, with only its top moving.

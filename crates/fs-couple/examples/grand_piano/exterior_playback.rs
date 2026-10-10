@@ -145,10 +145,10 @@ impl Options {
         if options.midi.is_some() || options.performance.is_some() || options.note.is_some()
             || options.velocity.is_some() || options.hammers.is_some()
             || options.hammer_footprints.is_some() || options.dampers.is_some()
-            || options.string_stretching.is_some() || options.cavity.is_some()
+            || options.string_stretching.is_some()
             || options.rt0425_hammer_stiffness
             || options.rt0425_hammer_dissipation {
-            return Err("response/admittance accept resolution, board inertia/reduction, rigid assembly, string polarization and intrinsic string damping; cavity, hammer, pedal, score and nonlinear-extension controls require playback".into());
+            return Err("harmonic controls accept resolution, board inertia/reduction, rigid assembly, string polarization, intrinsic string damping and cavity; hammer, pedal, score and nonlinear-extension controls require playback".into());
         }
         Ok(())
     }

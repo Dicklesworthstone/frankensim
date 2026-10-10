@@ -111,13 +111,14 @@ impl<'a> LoadingSweep<'a> {
 /// Unit peak bridge force; every other course is a passive, undamped-by-key
 /// string termination, never removed from the mechanical system. The one-way
 /// comparison retains the same air transfer but omits its mechanical reaction.
-/// Input/wood/string/radiation powers apply to the COUPLED columns only.
+/// Input/wood/string/radiation/cavity powers apply to the COUPLED columns only.
 /// Completion is atomic at the string level: no partial CSV on a failed sweep.
 pub fn sweep(boundary:&Boundary,model:&BridgeResponse,spec:&Specification,drive:u8)->Result<String,String> {
     model.bridge_row(drive)?;
     if boundary.weights.len()!=model.bank().board_count {return Err("radiation and string bank bases differ".into());}
     let omega=spec.omega();let prepared=LoadingSweep::new(boundary,spec,&omega)?;
-    let mut out=format!("# radiation-loaded bridge admittance; exp(-i omega t); unit peak force 1 N at key {drive}\n# acoustic source: {}\n# all {} scale courses and {} retained string coordinates; no hammer or key-damper contact\n# bridge values: m/s/N; receiver values: Pa/N; power columns: cycle-average W for 1 N peak\n# one_way columns use the SAME air transfer on mechanics without radiation reaction; not vacuum sound\n# no fitted transfer, time-domain radiation feedback, full-band convergence or measured Steinway claim\nfrequency_hz,observable,index,real,imag,one_way_real,one_way_imag,input_w,wood_w,string_w,radiation_w,power_defect_w,backward_error,panels_per_wavelength,condition_lower_bound\n",
+    let cavity_column=if model.has_cavity() {",cavity_w"} else {""};
+    let mut out=format!("# radiation-loaded bridge admittance; exp(-i omega t); unit peak force 1 N at key {drive}\n# acoustic source: {}\n# all {} scale courses and {} retained string coordinates; no hammer or key-damper contact\n# bridge values: m/s/N; receiver values: Pa/N; power columns: cycle-average W for 1 N peak\n# one_way columns use the SAME air transfer on mechanics without exterior radiation reaction; a selected internal cavity remains in both solutions\n# no fitted transfer, time-domain radiation feedback, full-band convergence or measured Steinway claim\nfrequency_hz,observable,index,real,imag,one_way_real,one_way_imag,input_w,wood_w,string_w,radiation_w,power_defect_w,backward_error,panels_per_wavelength,condition_lower_bound{cavity_column}\n",
         spec.source,model.keys().len(),model.bank().modes.len());
     for w in omega {
         let hz=w/TAU;let field=prepared.sample(w)?;
@@ -125,9 +126,11 @@ pub fn sweep(boundary:&Boundary,model:&BridgeResponse,spec:&Specification,drive:
         let unreacted=model.solve(hz,drive,C64::ONE,None)?;
         let pressure=field.pressure(&loaded,w)?;let reference=field.pressure(&unreacted,w)?;
         let mut row=|kind:&str,index:usize,value:C64,one_way:C64| {
-            writeln!(out,"{hz:.17e},{kind},{index},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
+            write!(out,"{hz:.17e},{kind},{index},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
                 value.re,value.im,one_way.re,one_way.im,loaded.input_w,loaded.board_loss_w,loaded.string_loss_w,
                 loaded.radiation_w,loaded.power_defect_w,loaded.backward_error,field.minimum_ppw,field.condition_lower_bound).unwrap();
+            if model.has_cavity() {write!(out,",{:.17e}",loaded.cavity_loss_w).unwrap();}
+            writeln!(out).unwrap();
         };
         for ((&key,&v),&base) in model.keys().iter().zip(&loaded.bridge_velocity).zip(&unreacted.bridge_velocity) {
             row("bridge",usize::from(key),v,base);

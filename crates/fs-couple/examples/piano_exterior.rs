@@ -72,6 +72,13 @@ Its applied bridge force and reported bridge velocity remain in the primary
 hammer direction; secondary strings react through the same board. The response
 command is pressure per supplied modal acceleration, so intrinsic damping does
 not turn that acoustic transfer into a force-driven structural response.
+Admittance also accepts --cavity, preserving the same geometry-derived air
+compression, standing-wave inertia and explicit momentum loss as playback.
+All acoustic coordinates remain in the coupled solve, including at lossless
+fixed-wall resonances and coincident string resonances. Selected sweeps append
+a cavity_w power column; one_way columns still retain the selected cavity and
+omit only exterior radiation reaction. The prescribed-motion response command
+rejects --cavity because it has no mechanical force/reaction solve.
 Mass equilibration is an opt-in numerical solve for a flat geometric board;
 it leaves geometry, materials, mode cap and original residual admission unchanged.
 --consistent-board-mass selects consistent P1 panel inertia. --edge-cubic-board-mass
@@ -286,6 +293,9 @@ fn board_reduction_report(board:&board_geometry::PreparedBoard)->String {
     out
 }
 fn response(scene:&Scene)->Result<String,String> {
+    if scene.piano.has_cavity() {
+        return Err("prescribed-motion response has no cavity reaction; use admittance or rendering".into());
+    }
     let samples=scene.boundary.sample(&scene.spec)?;
     let mut csv=format!("# finite exterior BEM, exp(-i omega t), Pa per unit mass-normalized modal acceleration\n# source: {}\n# structure: {}\n# retained string coordinates={}, two transverse directions={}; acoustic motion-to-pressure map, not force-driven structural response\n# panels={}, components={}, min_panels_per_wavelength={}, condition_lower_bound_max={}\n# rigid scatterers, one-way acoustics; no radiation loading, flexible cabinet, room or above-band claim\nfrequency_hz,receiver,input,real_pa_per_acceleration,imag_pa_per_acceleration\n",
         scene.spec.source,scene.board.provenance,scene.piano.bank.modes.len(),scene.piano.bank.has_secondary_polarization(),
@@ -334,6 +344,9 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
     if !damping && options.rt0425_string_damping {
         return Err("--lossless-structure excludes --rt0425-string-damping".into());
     }
+    if obj.is_none() && options.cavity.is_some() {
+        return Err("a sealed cavity requires a supplied outer enclosure OBJ; bare board-skin exposes the interior board face".into());
+    }
     if obj.is_none() {spec.require_board_skin()?;}
     let rigid=options.rigid_assembly.as_deref().map(Assembly::load).transpose()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
@@ -342,23 +355,29 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
     // Its projection must use the SAME retained motion as played preparation.
     let polarization=options.string_polarization.as_deref().map(|path|
         string_polarization::Specification::load(path,courses)).transpose()?;
+    let cavity=options.cavity.as_deref().map(cavity::Specification::load).transpose()?;
     let source_ports=polarization.as_ref().map(|frames|frames.source_ports(courses)).transpose()?;
     let board=prepare_board_motion_with_source_ports(board_text,&keys,spec.board_band_hz,
         options,source_ports.as_deref())?;
     let projected=polarization.as_ref().map(|frames|
         frames.project(courses,&board.modes,board.motion.as_ref())).transpose()?;
+    let cavity=cavity.as_ref().map(|cavity|cavity.project(&board)).transpose()?;
     let mut model=bridge_response::BridgeResponse::new_with_string_damping(courses,&board.modes,
         RATE*options.substeps as u32,0.45*f64::from(RATE),options.modes,damping,
         projected.as_ref().map(|frames|frames.secondary().0),options.rt0425_string_damping)?;
     if let Some(c)=board.physical_damping.as_deref() {model.configure_bare_board_damping(c)?;}
+    if let Some(cavity)=&cavity {model.configure_cavity(&cavity.loaded(model.bank())?)?;}
     let (bare,description)=section_skin::boundary(obj,board_text,spec,
         board.motion.as_ref().ok_or("missing harmonic surface motion")?,continuous)?;
+    if model.has_cavity() {validate_cavity_boundary(&bare)?;}
     let (bare,description)=if let Some(rigid)=&rigid {
         (rigid.attach(bare)?,format!("{description}; {}",rigid.report()))
     } else {(bare,description)};
     let boundary=bare.loaded(model.bank())?;
     let csv=exterior_loading::sweep(&boundary,&model,spec,drive)?;
-    Ok(format!("{}# acoustic geometry: {description}\n# structure: {}\n# structural loss: {}; radiation loading remains in the coupled columns\n# intrinsic string loss: {}\n# two transverse directions={}; bridge force and reported velocity use the primary hammer direction\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
+    let cavity_report=cavity.as_ref().map_or_else(String::new,|cavity|
+        format!("# {}; retained in both coupled and one-way columns\n",cavity.report()));
+    Ok(format!("{}{cavity_report}# acoustic geometry: {description}\n# structure: {}\n# structural loss: {}; radiation loading remains in the coupled columns\n# intrinsic string loss: {}\n# two transverse directions={}; bridge force and reported velocity use the primary hammer direction\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
         board_reduction_report(&board),board.provenance,if damping {"physical wood damping and selected intrinsic string law"}else{"explicitly disabled by --lossless-structure"},
         if !damping {"disabled"}else if options.rt0425_string_damping {"RT-0425 per-key R_u and eta_u"}else{"estimated common law"},
         model.bank().has_secondary_polarization(),
@@ -418,7 +437,13 @@ fn run(args:&[String])->Result<(),String> {
         }
         [command,board,strings,obj,spec,output,tail @ ..] if command=="response" || command=="render" || command=="render-loaded"=>{
             let (frames,options)=match command.as_str() {
-                "response"=>(None,playback::Options::harmonic(tail)?),
+                "response"=>{
+                    let options=playback::Options::harmonic(tail)?;
+                    if options.cavity.is_some() {
+                        return Err("prescribed-motion response has no cavity reaction; use admittance or rendering".into());
+                    }
+                    (None,options)
+                },
                 "render"|"render-loaded" if !tail.is_empty()=>
                     (Some(mesh_render::frames(&tail[0])?),playback::Options::parse(&tail[1..])?),
                 _=>return Err(USAGE.into()),
@@ -669,6 +694,10 @@ mod tests {
         assert!(admittance(&board,&courses,&obj,&spec,60).is_err());
     }
 }
+
+#[cfg(test)]
+#[path="grand_piano/cavity_admittance_tests.rs"]
+mod cavity_admittance_tests;
 
 #[cfg(test)]
 #[path="grand_piano/cavity_exterior_tests.rs"]

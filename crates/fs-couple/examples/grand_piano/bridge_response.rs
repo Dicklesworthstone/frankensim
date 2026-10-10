@@ -4,8 +4,10 @@
 //! The same endpoint inertia completion and reciprocal cross-potential are
 //! retained. Regular string coordinates are eliminated into a board-sized Schur
 //! complement. Near fixed-interface poles stay in a bounded, pivoted border;
-//! the full recovered equation and power balance are audited in both cases.
+//! all selected cavity inertias join that same border without pole division.
+//! The full recovered equation and power balance are audited in both cases.
 use super::{geometry::Course, linear::{Bank, BoardMode, MAX_BOARD_MODES},steinway_scale};
+use fs_couple::render::plate::impact::cavity::CavityCoupling;
 use fs_la::eigen_complex::lu_complex;
 use fs_material::visco::GeneralizedMaxwell;
 use fs_math::c64::C64;
@@ -13,6 +15,8 @@ use std::f64::consts::{PI, TAU};
 
 /// Numerical border capacity, not a physical string or retained-mode cutoff.
 const MAX_RETAINED_STRING_POLES: usize = 128;
+// The piano cavity card retains uniform compression and at most seven inertias.
+const MAX_CAVITY_INERTIAS: usize = 7;
 
 fn finite(z:C64)->bool {z.re.is_finite() && z.im.is_finite()}
 fn product(row:&[f64],x:&[C64])->C64 {
@@ -30,12 +34,16 @@ pub struct BridgeResponse {
     string_c: Vec<f64>,
     keys: Vec<u8>,
     band_hz: f64,
+    cavity: Option<CavityCoupling>,
 }
 #[derive(Debug)]
 pub struct Response {
     /// Loaded mass-normalized generalized displacements [m sqrt(kg)].
     pub board_displacement: Vec<C64>,
     pub string_displacement: Vec<C64>,
+    /// Canonical acoustic displacements z in the supplied positive-frequency
+    /// mode order. Uniform compression has no independent inertia or entry.
+    pub cavity_displacement: Vec<C64>,
     /// Primary-plane bridge velocities, in the original scale order [m/s].
     pub bridge_velocity: Vec<C64>,
     /// Cycle-average powers [W]; amplitudes are peak phasors.
@@ -43,6 +51,8 @@ pub struct Response {
     pub board_loss_w: f64,
     pub string_loss_w: f64,
     pub radiation_w: f64,
+    /// Explicit acoustic momentum-drag loss, separate from exterior radiation.
+    pub cavity_loss_w: f64,
     pub power_defect_w: f64,
     /// Normwise backward error of the FULL recovered block equation.
     pub backward_error: f64,
@@ -111,7 +121,8 @@ impl BridgeResponse {
         }
         if next_mode!=bank.modes.len() || endpoint_k.iter().chain(&board_c).chain(&string_c)
             .any(|v|!v.is_finite()) {return Err("nonfinite or incomplete harmonic bank".into());}
-        Ok(Self {bank,endpoint_k,board_c,string_c,keys:courses.iter().map(|c|c.midi).collect(),band_hz})
+        Ok(Self {bank,endpoint_k,board_c,string_c,keys:courses.iter().map(|c|c.midi).collect(),band_hz,
+            cavity:None})
     }
     /// Install the same cold bare-board damping replacement as playback.
     /// Bank owns symmetry/PSD admission and Phi^T C Phi; harmonic power uses
@@ -121,7 +132,23 @@ impl BridgeResponse {
         self.board_c=loaded;
         Ok(())
     }
+    /// Select the same geometry-derived cavity in this bank's loaded board
+    /// basis. The owner admits the complete volume-spring operator, including
+    /// uniform compression and explicit acoustic momentum drag. Every actual
+    /// standing-wave inertia remains in the harmonic solve at all frequencies.
+    /// A repeated selection or a failed admission changes no existing model.
+    pub fn configure_cavity(&mut self,model:&CavityCoupling)->Result<(),String> {
+        if self.cavity.is_some() || model.structural_modes()!=self.bank.board_count
+            || model.total_modes()-model.structural_modes()>MAX_CAVITY_INERTIAS {
+            return Err("harmonic cavity needs one complete loaded board basis and at most seven acoustic inertias".into());
+        }
+        // The continuous operator does not depend on a time-step frequency
+        // partition. This finite probe validates its owner without pole division.
+        model.dynamic_stiffness(1.0).map_err(|e|e.to_string())?;
+        self.cavity=Some(model.clone());Ok(())
+    }
     pub fn bank(&self)->&Bank {&self.bank}
+    pub fn has_cavity(&self)->bool {self.cavity.is_some()}
     pub fn keys(&self)->&[u8] {&self.keys}
     /// Work-conjugate row of the original hammer-plane bridge force/velocity.
     /// Secondary strings react through the board without becoming extra drives.
@@ -132,7 +159,8 @@ impl BridgeResponse {
             .ok_or_else(||"course has no physical bridge port".into())
     }
     /// Z is a row-major force/velocity radiation impedance in the SAME loaded
-    /// board coordinates. None is vacuum, not a fallback after a failed solve.
+    /// board coordinates. None removes the exterior load; a selected internal
+    /// cavity retains its own compression and acoustic inertia.
     /// The applied force is at one physical bridge station and is never divided
     /// by the number of unison strings. Strings and duplexes respond passively.
     pub fn solve(&self,hz:f64,key:u8,force_n:C64,z:Option<&[C64]>)->Result<Response,String> {
@@ -143,12 +171,17 @@ impl BridgeResponse {
             return Err("invalid harmonic frequency, force or complete radiation matrix".into());
         }
         let g=self.bridge_row(key)?;let w=TAU*hz;let iw=C64::new(0.,-w);
+        let cavity=self.cavity.as_ref().map(|c|c.dynamic_stiffness(w)
+            .map_err(|e|e.to_string())).transpose()?;
+        let cavity_size=self.cavity.as_ref().map_or(r,CavityCoupling::total_modes);
+        let acoustic=cavity_size-r;
         let force:Vec<C64>=g.iter().map(|v|force_n.scale(*v)).collect();
         let mut matrix=vec![C64::ZERO;r*r];
         for i in 0..r {for j in 0..r {
             matrix[i*r+j]=C64::new(self.endpoint_k[i*r+j]-if i==j {w*w}else{0.},
                 -w*self.board_c[i*r+j]);
             if let Some(z)=z {matrix[i*r+j]=matrix[i*r+j]+iw*z[i*r+j];}
+            if let Some(cavity)=&cavity {matrix[i*r+j]=matrix[i*r+j]+cavity[i*cavity_size+j];}
         }}
         let mut divisors=Vec::with_capacity(n);let mut poles=Vec::new();
         for (k,mode) in self.bank.modes.iter().enumerate() {
@@ -184,13 +217,14 @@ impl BridgeResponse {
             }}
         }
         if matrix.iter().any(|v|!finite(*v)) {return Err("harmonic Schur overflow".into());}
-        let (q,pole_displacements)=if poles.is_empty() {
+        let (q,pole_displacements,cavity_displacement)=if poles.is_empty() && acoustic==0 {
             // Preserve the original operation order away from string poles.
             let lu=lu_complex(&matrix,r).map_err(|_|"singular radiation-loaded bridge equation")?;
-            let mut q=force.clone();lu.solve(&mut q);(q,Vec::new())
-        } else {self.solve_pole_border(&matrix,&force,&divisors,&poles)?};
-        if q.iter().chain(&pole_displacements).any(|v|!finite(*v)) {
-            return Err("nonfinite harmonic board/string response".into());
+            let mut q=force.clone();lu.solve(&mut q);(q,Vec::new(),Vec::new())
+        } else {self.solve_pole_border(&matrix,&force,&divisors,&poles,
+            cavity.as_deref().map(|c|(c,cavity_size)))?};
+        if q.iter().chain(&pole_displacements).chain(&cavity_displacement).any(|v|!finite(*v)) {
+            return Err("nonfinite harmonic board/string/cavity response".into());
         }
         let mut strings=vec![C64::ZERO;n];
         let mut reconstructed=vec![C64::ZERO;r];let mut row_norm=vec![0.;r];
@@ -213,6 +247,26 @@ impl BridgeResponse {
                 }
             }
         }
+        let mut cavity_loss_w=0.0;
+        if let Some(cavity)=&cavity {
+            // Recover the owner's complete cavity equation, including every
+            // acoustic row and its reciprocal reaction on the actual board.
+            for i in 0..cavity_size {
+                let mut reaction=C64::ZERO;let mut norm=0.0;
+                for (j,&displacement) in q.iter().chain(&cavity_displacement).enumerate() {
+                    let entry=cavity[i*cavity_size+j];
+                    reaction=reaction+entry*displacement;norm+=entry.abs();
+                }
+                if i<r {
+                    reconstructed[i]=reconstructed[i]+reaction;row_norm[i]+=norm;
+                } else {
+                    worst_residual=worst_residual.max(reaction.abs());
+                    operator_norm=operator_norm.max(norm);
+                    cavity_loss_w+=-0.5*w*cavity[i*cavity_size+i].im
+                        *cavity_displacement[i-r].abs().powi(2);
+                }
+            }
+        }
         let mut board_loss_w=0.;let mut radiation_w=0.;
         for i in 0..r {
             let mut loss=C64::ZERO;let mut radiation=C64::ZERO;
@@ -231,32 +285,37 @@ impl BridgeResponse {
         let bridge_velocity:Vec<_>=self.keys.iter().map(|k|
             self.bridge_row(*k).map(|g|iw*product(g,&q))).collect::<Result<_,_>>()?;
         let input_w=0.5*(force_n.conj()*iw*product(g,&q)).re;
-        let power_defect_w=input_w-board_loss_w-string_loss_w-radiation_w;
-        let maximum_q=q.iter().chain(&strings).map(|v|v.abs()).fold(0.0_f64,f64::max);
+        let mut power_defect_w=input_w-board_loss_w-string_loss_w-radiation_w;
+        if cavity.is_some() {power_defect_w-=cavity_loss_w;}
+        let maximum_q=q.iter().chain(&strings).chain(&cavity_displacement)
+            .map(|v|v.abs()).fold(0.0_f64,f64::max);
         let maximum_force=force.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
         let scale=operator_norm*maximum_q+maximum_force;
         if !scale.is_finite() {return Err("harmonic residual scale overflow".into());}
         let backward_error=if scale==0. {worst_residual}else{worst_residual/scale};
-        let power_scale=input_w.abs()+board_loss_w.abs()+string_loss_w.abs()+radiation_w.abs();
+        let mut power_scale=input_w.abs()+board_loss_w.abs()+string_loss_w.abs()+radiation_w.abs();
+        if cavity.is_some() {power_scale+=cavity_loss_w.abs();}
         let tolerance=1e-10+1e-7*power_scale;
         if !backward_error.is_finite() || backward_error>1e-9
-            || [input_w,board_loss_w,string_loss_w,radiation_w,power_defect_w].iter().any(|v|!v.is_finite())
+            || [input_w,board_loss_w,string_loss_w,radiation_w,cavity_loss_w,power_defect_w].iter().any(|v|!v.is_finite())
             || radiation_w < -tolerance || board_loss_w < -tolerance || string_loss_w < -tolerance
+            || cavity_loss_w < -tolerance
             || power_defect_w.abs()>tolerance {
-            return Err(format!("bridge response failed full-equation/power admission: backward={backward_error}, defect={power_defect_w} W, radiation={radiation_w} W"));
+            return Err(format!("bridge response failed full-equation/power admission: backward={backward_error}, defect={power_defect_w} W, radiation={radiation_w} W, cavity={cavity_loss_w} W"));
         }
-        Ok(Response {board_displacement:q,string_displacement:strings,bridge_velocity,input_w,
-            board_loss_w,string_loss_w,radiation_w,power_defect_w,backward_error,
+        Ok(Response {board_displacement:q,string_displacement:strings,cavity_displacement,bridge_velocity,input_w,
+            board_loss_w,string_loss_w,radiation_w,cavity_loss_w,power_defect_w,backward_error,
             retained_string_poles:poles.len()})
     }
 
-    /// [board, retained string coordinates]. Regular strings are already
+    /// [board, retained string coordinates, all acoustic inertias]. Regular strings are already
     /// eliminated. The exact symmetric cross-potential stays on BOTH sides;
     /// supplied radiation retains its original entries (including reciprocity
     /// or lack of it). No pseudoinverse, pole shift or artificial loss.
     fn solve_pole_border(&self, board:&[C64], force:&[C64], divisors:&[C64],
-        poles:&[usize])->Result<(Vec<C64>,Vec<C64>),String> {
-        let r=self.bank.board_count;let size=r+poles.len();
+        poles:&[usize], cavity:Option<(&[C64],usize)>)->Result<(Vec<C64>,Vec<C64>,Vec<C64>),String> {
+        let r=self.bank.board_count;let air_start=r+poles.len();
+        let acoustic=cavity.map_or(0,|(_,n)|n-r);let size=air_start+acoustic;
         let mut matrix=vec![C64::ZERO;size*size];let mut rhs=vec![C64::ZERO;size];
         for i in 0..r {matrix[i*size..i*size+r].copy_from_slice(&board[i*r..(i+1)*r]);}
         rhs[..r].copy_from_slice(force);
@@ -268,16 +327,30 @@ impl BridgeResponse {
                 matrix[i*size+row]=cross;matrix[row*size+i]=cross;
             }
         }
-        if matrix.iter().any(|v|!finite(*v)) {return Err("harmonic string-pole border overflow".into());}
-        let lu=lu_complex(&matrix,size).map_err(|_|"singular coupled bridge/string-pole equation")?;
+        if let Some((cavity,n))=cavity {
+            for a in 0..acoustic {
+                let source=r+a;let row=air_start+a;
+                for j in 0..r {
+                    matrix[row*size+j]=cavity[source*n+j];
+                    matrix[j*size+row]=cavity[j*n+source];
+                }
+                for b in 0..acoustic {matrix[row*size+air_start+b]=cavity[source*n+r+b];}
+            }
+        }
+        if matrix.iter().any(|v|!finite(*v)) {return Err("harmonic string/cavity border overflow".into());}
+        let lu=lu_complex(&matrix,size).map_err(|_|"singular coupled bridge/string/cavity equation")?;
         lu.solve(&mut rhs);
-        Ok((rhs[..r].to_vec(),rhs[r..].to_vec()))
+        Ok((rhs[..r].to_vec(),rhs[r..air_start].to_vec(),rhs[air_start..].to_vec()))
     }
 }
 
 #[cfg(test)]
 #[path="bridge_pole_tests.rs"]
 mod pole_tests;
+
+#[cfg(test)]
+#[path="bridge_cavity_tests.rs"]
+mod cavity_tests;
 
 #[cfg(test)]
 #[path="harmonic_controls_tests.rs"]

@@ -82,6 +82,39 @@ in the retained geometric basis and then transformed by the string-loaded
 bank's actual board basis. Full physical board damping remains intact. No
 additional independent board solve or diagonal damping approximation is used.
 
+## Force-driven harmonic response
+
+The same card is accepted by `piano_exterior admittance`:
+
+```sh
+cargo run --release -p fs-couple --example piano_exterior -- \
+  admittance panel.fsb strings.csv enclosure.obj acoustics.fspe 69 mobility.csv \
+  --cavity enclosure.fspc
+```
+
+It changes the physical bridge mobility and receiver pressure per unit bridge
+force. The frequency-domain model uses the same cavity springs, acoustic
+inertia, momentum drag and loaded board projection as playback. Its existing
+pivoted solve retains every acoustic inertia alongside string coordinates
+that need explicit treatment near their own resonances. This avoids dividing
+by zero at an undamped fixed-wall cavity frequency; coincident cavity/string
+resonances receive the same complete coupled solve. A singular full physical
+system still refuses instead of moving a pole or adding artificial damping.
+
+Selected sweeps append a `cavity_w` column to the existing CSV. It reports
+cycle-average acoustic momentum dissipation for the applied 1 N peak bridge
+force. The reported work defect includes wood, string, exterior radiation and
+cavity losses once each. Sweeps without a cavity retain the original column
+layout. The `one_way` comparison omits exterior radiation reaction while
+retaining the selected interior cavity; it does not silently change the
+enclosure between the two comparisons.
+
+`--lossless-structure` removes wood and intrinsic string losses, leaving the
+card's explicit cavity drag and exterior radiation intact. Set the card's
+`damping-ratio` to zero for a lossless cavity. The `response` command prescribes
+modal acceleration and has no mechanical reaction solve, so it rejects
+`--cavity`; use `admittance` or a render to observe cavity loading.
+
 ## Stored energy, reaction and numerical scope
 
 For each pressure mode, the existing cavity owner supplies frequency `ω_j`,
