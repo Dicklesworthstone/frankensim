@@ -83,8 +83,10 @@ or a radiation correction. The example declares the clear-span disk area for A.
 This finite-step port coupling is not the exact exponential of the complete
 coupled system and is not bit-identical to Gonzalez. Both require time-refinement
 checks against the same physical equations. The image explicitly refuses
-nonlinear shells and felt memory. Bilateral volume/damper ports still span at
-most two bodies, while a normal-contact row can include every retained body.
+nonlinear shells and felt memory. Volume springs, viscous dampers and normal
+contacts retain their complete signed rows across every participating body.
+One cavity remains one scalar volume coordinate, and one damper retains its
+full reciprocal resistance, including all cross terms between bodies.
 In particular, `drum-modal` supports a flexible stick's rigid rotation and
 elastic shaft acting together on a drumhead, including two independently
 flexible sticks in the joint contact solve. The original body order, component
@@ -99,6 +101,8 @@ subject to the original owners' mode, contact and work limits.
 `ImpactBody`, `Obstacle` and `VolumeSpring` data plus explicit owner budgets.
 It retains initial vibration, reports complete energy and contact residuals,
 and supports transactional cancellation and lifetime-budget extension.
+`CoupledModalSystem::new_with_columns` also exposes this full bilateral
+composition directly; the existing two-attachment constructor remains available.
 
 The existing `ImpactPressureRenderer<'a, M = ImpactSystem>` now accepts both
 images through `ImpactSource`. Its source-specific diagnostic type prevents a

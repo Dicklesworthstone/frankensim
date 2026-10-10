@@ -2,6 +2,7 @@
 use fs_couple::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeBudget};
 use fs_couple::render::plate::impact::{BodyPotential, ImpactBody, ImpactConfig, ImpactSystem, VolumeSpring};
 use fs_couple::render::plate::impact::linear::{LinearImpactConfig, LinearImpactSystem, VolumeConnection};
+use fs_couple::render::plate::impact::damping::ViscousDamper;
 use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,
     contact::ModalContactConfig, contact::multiple::MultiContactConfig};
 use fs_dcontact::Obstacle;
@@ -68,6 +69,99 @@ fn volume_coordinate_scale_preserves_physical_energy_and_two_way_motion() {
         for other in &a[1..] {for (x,y) in a[0].state().iter().zip(other.state()) {assert!((x-y).abs()<1e-10);}}
     }
     assert!(receiver_peak>1e-5,"unstruck second head must receive cavity work");
+}
+
+#[test]
+fn shared_volume_and_damper_keep_all_body_cross_terms_and_separate_budgets() {
+    let gate = CancelGate::new_clock_free();
+    let weights = [1.0, -2.0, 0.5];
+    let mut q = [2e-4, -1e-4, 3e-4];
+    let mut v = [0.08, -0.03, 0.05];
+    let bodies = q.iter().zip(&v).map(|(&q,&v)| body(0.0,q,v)).collect();
+    let mut limits = config(96000,512);
+    // The individual energies are 0.0032, 0.00045 and 0.00125 J. Flattening
+    // these bodies would wrongly reject their combined 0.0049 J at admission.
+    limits.component.maximum_total_energy_j = 0.0035;
+    let area = 0.02;
+    let stiffness = 3200.0;
+    let damping = 3.0;
+    let volume = VolumeConnection { reference_area_m2: area,
+        spring: VolumeSpring { bulk_modulus_pa: 80000.0, volume_m3: 0.01,
+            areas: weights.iter().map(|b| area*b).collect() } };
+    let damper = ViscousDamper { weights: weights.to_vec(), damping_n_s_m: damping };
+    let mut system = LinearImpactSystem::new_with_dampers(bodies,vec![],vec![volume],
+        vec![damper],limits,&gate).unwrap();
+    let initial = system.frame().stored_energy_j;
+    let dt = system.sample_period_s();
+    let norm = weights.iter().map(|b| b*b).sum::<f64>();
+    let denominator = 1.0 + 0.5*damping*norm*dt + 0.25*stiffness*norm*dt*dt;
+    let mut loss = 0.0;
+    for _ in 0..512 {
+        // Independent scalar midpoint solution: x=b^T q has inverse mass
+        // b^T b. All modal momentum changes lie along b; its orthogonal
+        // complement is unchanged. Pairwise springs or diagonalized damping
+        // would both violate this exact three-body solution.
+        let x = weights.iter().zip(&q).map(|(b,q)| b*q).sum::<f64>();
+        let speed = weights.iter().zip(&v).map(|(b,v)| b*v).sum::<f64>();
+        let next_speed = ((1.0-0.5*damping*norm*dt-0.25*stiffness*norm*dt*dt)*speed
+            - stiffness*norm*dt*x)/denominator;
+        for i in 0..3 {
+            let next_v = v[i] + weights[i]*(next_speed-speed)/norm;
+            q[i] += 0.5*dt*(v[i]+next_v);
+            v[i] = next_v;
+        }
+        let frame = system.step(&[0.0;3],&gate).unwrap();
+        assert_eq!(frame.supplied_work_j,0.0);
+        loss += frame.dissipated_energy_j;
+        for i in 0..3 {
+            assert!((system.state()[2*i]-q[i]).abs()<1e-13);
+            assert!((system.state()[2*i+1]-v[i]).abs()<1e-12);
+        }
+        let x = weights.iter().zip(&q).map(|(b,q)| b*q).sum::<f64>();
+        let energy = 0.5*v.iter().map(|v| v*v).sum::<f64>() + 0.5*stiffness*x*x;
+        assert!((frame.stored_energy_j-energy).abs()<1e-13);
+        assert!((frame.stored_energy_j+loss-initial).abs()<1e-12);
+    }
+    assert!(loss>1e-5,"the complete physical damper must dissipate energy");
+    assert!((2.0*system.state()[1]+system.state()[3]-0.13).abs()<1e-12);
+    assert!((-0.5*system.state()[1]+system.state()[5]-0.01).abs()<1e-12);
+}
+
+#[test]
+fn multi_body_volume_and_damper_share_the_joint_flexible_contact_solve() {
+    let gate = CancelGate::new_clock_free();
+    let parts = vec![body(0.0,-0.0002,0.8),body(1200.0,0.0,0.0),
+        body(2300.0,0.0,0.0),body(3100.0,0.0,0.0)];
+    let grouped = ImpactBody {
+        potential: BodyPotential::Linear(vec![0.0,1200.0,2300.0,3100.0]),
+        initial: parts.iter().flat_map(|b| b.initial.iter().copied()).collect(),
+        damping_per_s: parts.iter().flat_map(|b| b.damping_per_s.iter().copied()).collect(),
+    };
+    let make = |bodies| LinearImpactSystem::new_with_dampers(bodies,
+        vec![Obstacle::new(vec![1.0,-1.0,0.4,0.0, 1.0,0.3,0.0,-0.7],2,4,
+            vec![0.0;2],vec![1.0;2],1e7,1.5,"manufactured flexible cavity assembly".into()).unwrap()],
+        vec![VolumeConnection { reference_area_m2:0.02,
+            spring:VolumeSpring {bulk_modulus_pa:1.4e5,volume_m3:0.02,
+                areas:vec![0.0002,0.01,-0.008,0.004]} }],
+        vec![ViscousDamper {weights:vec![0.2,1.0,-0.5,0.7],damping_n_s_m:20.0}],
+        config(192000,512),&gate).unwrap();
+    let mut split = make(parts);
+    let mut grouped = make(vec![grouped]);
+    let initial = split.frame().stored_energy_j;
+    let mut loss = 0.0;
+    let mut peaks = [0.0_f64;3];
+    for _ in 0..512 {
+        let frame = split.step(&[0.0;4],&gate).unwrap();
+        grouped.step(&[0.0;4],&gate).unwrap();
+        for (a,b) in split.state().iter().zip(grouped.state()) { assert!((a-b).abs()<1e-12); }
+        for (i,peak) in peaks.iter_mut().enumerate() { *peak=peak.max(split.state()[2*i+3].abs()); }
+        loss += frame.dissipated_energy_j;
+        assert!(frame.balance_residual_j.abs()<1e-9);
+        assert!((frame.stored_energy_j+loss-initial).abs()<1e-9);
+    }
+    assert_eq!(split.contact_count(),2);
+    assert!(peaks.iter().all(|p| *p>1e-4),"every elastic body must receive work: {peaks:?}");
+    assert!(loss>0.0);
 }
 
 #[test]
@@ -199,9 +293,9 @@ fn malformed_or_unsupported_input_is_not_repaired_or_silently_dropped() {
     let gate=CancelGate::new_clock_free();
     let mut drag=body(0.,0.,0.);drag.damping_per_s[0]=-1.0;
     assert!(LinearImpactSystem::new(vec![drag],vec![],vec![],config(192000,1),&gate).is_err());
-    let (bodies,_,mut volume)=physical_input(); volume.areas[0]=0.01;
+    let (bodies,_,mut volume)=physical_input(); volume.areas.pop();
     assert!(LinearImpactSystem::new(bodies.clone(),vec![],vec![VolumeConnection {spring:volume,
-        reference_area_m2:0.02}],config(192000,1),&gate).is_err(),"a three-body volume is unsupported, not reduced to two");
+        reference_area_m2:0.02}],config(192000,1),&gate).is_err(),"a volume must declare every original coordinate");
     let raw=Obstacle::from_raw_parts(vec![1.0],1,vec![],vec![],1e7,1.5,"malformed".into());
     assert!(LinearImpactSystem::new(bodies.clone(),vec![raw],vec![],config(192000,1),&gate).is_err());
     let zero=Obstacle::new(vec![0.;3],1,3,vec![0.],vec![1.],1e7,1.5,"no moving body".into()).unwrap();

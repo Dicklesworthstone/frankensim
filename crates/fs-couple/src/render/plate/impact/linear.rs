@@ -11,8 +11,8 @@
 //! nor bit-identical to the Gonzalez reference. Compare by time refinement.
 //! Nonlinear shells and felt are not silently linearized. Normal contacts keep
 //! complete signed rows across every original body, including flexible shafts.
-//! Bilateral volume/damper ports remain limited to two bodies. This image has
-//! no pressure observer or inferred loss.
+//! Volume springs and viscous dampers likewise retain one complete signed
+//! coordinate across all bodies. This image has no pressure observer or inferred loss.
 //! The underlying contact path still allocates; no hard-real-time claim follows.
 
 /// Geometry-derived tensioned filaments with reciprocal distributed contact.
@@ -23,7 +23,7 @@ use crate::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
 use crate::render::schedule::force::coupled::{
-    CoupledModalSystem, ModalAttachment, ModalConnection, ModalCouplingConfig,
+    CoupledModalSystem, ModalColumnConnection, ModalCouplingConfig,
     ModalCouplingError,
     contact::{ContactModalSystem, ModalContactConfig},
     contact::multiple::{MultiContactConfig, MultiContactModalSystem, MAX_NORMAL_CONTACTS},
@@ -126,52 +126,14 @@ fn owner(error: ModalCouplingError) -> ImpactError {
     }
 }
 
-/// Express a complete signed column as the original owner's two attachments.
-/// Negating the second attachment preserves the ORIGINAL column, including a
-/// single body's arbitrary modal signs. There is no point-wise normalization.
-fn attachments(
-    column: &[f64], counts: &[usize],
-) -> Result<(ModalAttachment, ModalAttachment), ImpactError> {
-    if column.iter().any(|v| !v.is_finite()) {
-        return Err(invalid("linear impact port contains nonfinite participation"));
-    }
-    let mut active = Vec::with_capacity(2);
-    let mut offset = 0;
-    for (component, &n) in counts.iter().enumerate() {
-        let row = &column[offset..offset+n];
-        if row.iter().any(|b| *b != 0.0) {
-            if active.len() == 2 {
-                return Err(invalid("this linear image admits at most two bodies in each volume/damper port"));
-            }
-            active.push(ModalAttachment { component, shapes: row.to_vec() });
-        }
-        offset += n;
-    }
-    match active.len() {
-        0 => Ok((ModalAttachment { component: 0, shapes: vec![0.0; counts[0]] },
-                 ModalAttachment { component: 0, shapes: vec![0.0; counts[0]] })),
-        1 => {
-            let left = active.remove(0);
-            let right = ModalAttachment { component: left.component, shapes: vec![0.0; left.shapes.len()] };
-            Ok((left, right))
-        }
-        _ => {
-            let left = active.remove(0);
-            let mut right = active.remove(0);
-            for b in &mut right.shapes { *b = -*b; }
-            Ok((left, right))
-        }
-    }
-}
-
 impl LinearImpactSystem {
     /// Compile the same physical bodies/obstacles/volumes into existing owners.
     /// No body eigenbasis is changed. Volume coordinate scaling cancels between
-    /// stiffness and attachments. Distributed obstacle rows become jointly
+    /// stiffness and the complete signed column. Distributed obstacle rows become jointly
     /// solved contact points, with original weights, gaps and constitutive data.
     ///
     /// # Errors
-    /// Refuses nonlinear bodies, unsupported multi-body bilateral ports, malformed data
+    /// Refuses nonlinear bodies, malformed data
     /// and every downstream owner budget. Nonzero free-coordinate drag consumes
     /// one bilateral connection per coordinate; it is never silently dropped.
     /// Felt is deliberately absent from this signature: no history is discarded.
@@ -183,7 +145,8 @@ impl LinearImpactSystem {
     }
 
     /// Compile spatial drag into the existing simultaneous bilateral port solve.
-    /// A port spans at most two original body components. Diagonal drag on a
+    /// A port may span every original body component without losing its cross
+    /// terms or changing the component budgets. Diagonal drag on a
     /// zero-frequency coordinate is also lowered to a grounded viscous link.
     /// Its reaction is solved simultaneously with all volume/contact reactions,
     /// not split or evaluated on the previous velocity. This retains the free
@@ -269,14 +232,12 @@ impl LinearImpactSystem {
             if column.iter().zip(&v.areas).any(|(&c,&a)| a != 0.0 && c == 0.0) {
                 return Err(invalid("volume reference-area participation underflow"));
             }
-            let (left, right) = attachments(&column, &counts)?;
-            links.push(ModalConnection { left, right, stiffness_n_m: stiffness,
+            links.push(ModalColumnConnection { column, stiffness_n_m: stiffness,
                 damping_n_s_m: 0.0, rest_extension_m: 0.0 });
         }
         for damper in dampers {
             if damper.damping_n_s_m == 0.0 { continue; }
-            let (left, right) = attachments(&damper.weights, &counts)?;
-            links.push(ModalConnection { left, right, stiffness_n_m: 0.0,
+            links.push(ModalColumnConnection { column: damper.weights, stiffness_n_m: 0.0,
                 damping_n_s_m: damper.damping_n_s_m, rest_extension_m: 0.0 });
         }
         for (component, mode, drag) in free_drag {
@@ -285,15 +246,14 @@ impl LinearImpactSystem {
             // so c*b*b^T is exactly the supplied diagonal resistance [1/s].
             // This changes units only: no physical mass or coordinate is added.
             // The same b maps velocity and reaction, dissipating drag*p^2.
-            let mut shapes = vec![0.0; counts[component]];
-            shapes[mode] = 1.0;
-            links.push(ModalConnection {
-                left: ModalAttachment { component, shapes },
-                right: ModalAttachment { component, shapes: vec![0.0; counts[component]] },
+            let mut column = vec![0.0; count];
+            column[counts[..component].iter().sum::<usize>() + mode] = 1.0;
+            links.push(ModalColumnConnection {
+                column,
                 stiffness_n_m: 0.0, damping_n_s_m: drag, rest_extension_m: 0.0,
             });
         }
-        let network = CoupledModalSystem::new(models, links, config.coupling, gate).map_err(owner)?;
+        let network = CoupledModalSystem::new_with_columns(models, links, config.coupling, gate).map_err(owner)?;
         let mut points = Vec::with_capacity(point_count);
         for ob in contacts {
             // Re-admit raw-parts escape values before reading individual rows.

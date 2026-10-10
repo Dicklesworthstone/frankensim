@@ -48,6 +48,31 @@ pub struct ModalConnection {
     pub rest_extension_m: f64,
 }
 
+/// One bilateral spring/dashpot on a complete signed modal coordinate.
+/// Its extension is `column^T q - rest_extension_m`; the SAME column maps
+/// its scalar reaction back to every participating body. Thus a shared cavity
+/// or distributed damper retains all cross terms without merging components
+/// or replacing one physical port with pairwise connections.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModalColumnConnection {
+    /// Displacement/force participation [1/sqrt(kg)], in original component
+    /// order followed by each component's mode order. Include exact zeros for
+    /// unattached modes. The column is not normalized or regrouped.
+    pub column: Vec<f64>,
+    /// Nonnegative spring stiffness [N/m]. Zero leaves only the dashpot.
+    pub stiffness_n_m: f64,
+    /// Nonnegative viscous resistance [N s/m]. Zero is an elastic connection.
+    pub damping_n_s_m: f64,
+    /// Stress-free displacement of the complete signed coordinate [m].
+    pub rest_extension_m: f64,
+}
+
+struct ConnectionLaw {
+    stiffness_n_m: f64,
+    damping_n_s_m: f64,
+    rest_extension_m: f64,
+}
+
 /// Explicit numerical and work admission for a fixed coupled configuration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModalCouplingConfig {
@@ -138,7 +163,8 @@ pub struct CoupledModalFrame {
     pub energy_tolerance_j: f64,
     /// Independently recomputed connection equation residual.
     pub solve_relative_residual: f64,
-    /// Signed force on the LEFT side of each connection [N].
+    /// Signed scalar force multiplying each connection's signed column [N].
+    /// For a pair connection this is the force on its LEFT attachment.
     pub connection_forces_n: Vec<f64>,
 }
 
@@ -151,7 +177,7 @@ pub struct CoupledModalSystem {
     candidates: Vec<ModalAcousticTimeModel>,
     workspaces: Vec<ModalAcousticWorkspace>,
     offsets: Vec<usize>,
-    connections: Vec<ModalConnection>,
+    connections: Vec<ConnectionLaw>,
     columns: Vec<Vec<f64>>,
     roots: Vec<f64>,
     spring_over_root: Vec<f64>,
@@ -180,36 +206,10 @@ impl CoupledModalSystem {
         config: ModalCouplingConfig,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        poll(Some(gate))?;
-        validate_config(config)?;
-        if models.is_empty() || models.len() > config.max_modes || connections.len() > config.max_connections {
-            return Err(invalid("component/connection count exceeds its nonempty admission"));
-        }
-        let dt = models[0].sample_period_s();
-        let mut offsets = vec![0_usize];
-        let mut count = 0_usize;
-        for model in &models {
-            if model.sample_period_s().to_bits() != dt.to_bits() {
-                return Err(invalid("every component must use the same sample clock"));
-            }
-            count = count.checked_add(model.modes().len()).ok_or_else(|| invalid("mode count overflow"))?;
-            if count > config.max_modes { return Err(invalid("total modal count exceeds max_modes")); }
-            offsets.push(count);
-        }
-        let links = connections.len();
-        let terms = count.checked_mul(links + 1).and_then(|n| n.checked_mul(links + 1))
-            .ok_or_else(|| invalid("connection setup work overflow"))?;
-        if terms > config.max_setup_terms { return Err(invalid("connection setup work exceeds max_setup_terms")); }
-        let mut columns = Vec::with_capacity(links);
-        let mut roots = Vec::with_capacity(links);
-        let mut spring_over_root = Vec::with_capacity(links);
-        for link in &connections {
+        let (offsets, count, _) = connection_layout(&models, connections.len(), config, gate)?;
+        let mut complete = Vec::with_capacity(connections.len());
+        for link in connections {
             poll(Some(gate))?;
-            if !link.stiffness_n_m.is_finite() || link.stiffness_n_m < 0.0
-                || !link.damping_n_s_m.is_finite() || link.damping_n_s_m < 0.0
-                || !link.rest_extension_m.is_finite() {
-                return Err(invalid("connection stiffness/damping must be finite nonnegative; rest must be finite"));
-            }
             let mut column = vec![0.0; count];
             for (attachment, sign) in [(&link.left, 1.0), (&link.right, -1.0)] {
                 let model = models.get(attachment.component).ok_or_else(|| invalid("attachment names an unknown component"))?;
@@ -221,6 +221,41 @@ impl CoupledModalSystem {
                     column[index] = finite(column[index] + sign * shape)?;
                 }
             }
+            complete.push(ModalColumnConnection {
+                column, stiffness_n_m: link.stiffness_n_m,
+                damping_n_s_m: link.damping_n_s_m, rest_extension_m: link.rest_extension_m,
+            });
+        }
+        Self::new_with_columns(models, complete, config, gate)
+    }
+
+    /// Prepare simultaneous bilateral reactions on complete signed columns.
+    /// Each column describes ONE physical displacement coordinate, even when
+    /// several original bodies participate. Component states, damping, pressure
+    /// transfers and individual budgets retain their original ownership.
+    /// The same admission and finite-step solve as [`Self::new`] apply.
+    pub fn new_with_columns(
+        models: Vec<ModalAcousticTimeModel>,
+        connections: Vec<ModalColumnConnection>,
+        config: ModalCouplingConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        let (offsets, count, dt) = connection_layout(&models, connections.len(), config, gate)?;
+        let links = connections.len();
+        let mut columns = Vec::with_capacity(links);
+        let mut laws = Vec::with_capacity(links);
+        let mut roots = Vec::with_capacity(links);
+        let mut spring_over_root = Vec::with_capacity(links);
+        for link in connections {
+            poll(Some(gate))?;
+            if !link.stiffness_n_m.is_finite() || link.stiffness_n_m < 0.0
+                || !link.damping_n_s_m.is_finite() || link.damping_n_s_m < 0.0
+                || !link.rest_extension_m.is_finite() {
+                return Err(invalid("connection stiffness/damping must be finite nonnegative; rest must be finite"));
+            }
+            if link.column.len() != count || link.column.iter().any(|b| !b.is_finite()) {
+                return Err(invalid("connection column must match every original mode with finite signed participation"));
+            }
             let h = finite(0.5 * link.stiffness_n_m + link.damping_n_s_m / dt)?;
             if h == 0.0 && (link.stiffness_n_m > 0.0 || link.damping_n_s_m > 0.0) {
                 return Err(invalid("positive connection coefficient is not representable"));
@@ -228,8 +263,11 @@ impl CoupledModalSystem {
             let root = h.sqrt();
             spring_over_root.push(if root == 0.0 { 0.0 } else { finite(link.stiffness_n_m / root)? });
             roots.push(root);
-            columns.push(column);
+            columns.push(link.column);
+            laws.push(ConnectionLaw { stiffness_n_m: link.stiffness_n_m,
+                damping_n_s_m: link.damping_n_s_m, rest_extension_m: link.rest_extension_m });
         }
+        let connections = laws;
         let mut compliance = Vec::with_capacity(count);
         let mut upper_squared = 0.0_f64;
         for model in &models {
@@ -442,6 +480,32 @@ impl CoupledModalSystem {
         Ok(relative)
     }
 
+}
+
+fn connection_layout(
+    models: &[ModalAcousticTimeModel], links: usize,
+    config: ModalCouplingConfig, gate: &CancelGate,
+) -> Result<(Vec<usize>, usize, f64), ModalCouplingError> {
+    poll(Some(gate))?;
+    validate_config(config)?;
+    if models.is_empty() || models.len() > config.max_modes || links > config.max_connections {
+        return Err(invalid("component/connection count exceeds its nonempty admission"));
+    }
+    let dt = models[0].sample_period_s();
+    let mut offsets = vec![0_usize];
+    let mut count = 0_usize;
+    for model in models {
+        if model.sample_period_s().to_bits() != dt.to_bits() {
+            return Err(invalid("every component must use the same sample clock"));
+        }
+        count = count.checked_add(model.modes().len()).ok_or_else(|| invalid("mode count overflow"))?;
+        if count > config.max_modes { return Err(invalid("total modal count exceeds max_modes")); }
+        offsets.push(count);
+    }
+    let terms = count.checked_mul(links + 1).and_then(|n| n.checked_mul(links + 1))
+        .ok_or_else(|| invalid("connection setup work overflow"))?;
+    if terms > config.max_setup_terms { return Err(invalid("connection setup work exceeds max_setup_terms")); }
+    Ok((offsets, count, dt))
 }
 
 fn validate_config(c: ModalCouplingConfig) -> Result<(), ModalCouplingError> {
