@@ -602,6 +602,53 @@ fn triangle_is_near(x: [f64; 3], centroid: [f64; 3], triangle: [[f64; 3]; 3]) ->
     norm(sub(x, centroid)) <= 4.0 * radius
 }
 
+/// Green rows at a well-separated receiver. Integrate the complete smooth
+/// kernels here: subtracting an exact static potential at a very distant
+/// receiver would needlessly introduce cancellation in its edge formula.
+fn triangle_far_pressure_influence(
+    k: f64,
+    x: [f64; 3],
+    triangle: [[f64; 3]; 3],
+    normal: [f64; 3],
+) -> (C64, C64) {
+    let [a, b, c] = triangle;
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let double_area = norm(cross(ab, ac));
+    let (mut single, mut double) = (C64::ZERO, C64::ZERO);
+    for (&u, &wu) in GL4_X.iter().zip(&GL4_W) {
+        for (&v, &wv) in GL4_X.iter().zip(&GL4_W) {
+            let y = affine3(a, ab, u, ac, (1.0 - u) * v);
+            let weight = wu * wv * (1.0 - u) * double_area;
+            let delta = sub(x, y);
+            let r = norm(delta);
+            let g = green(k, r);
+            let derivative = (g * C64::new(-1.0 / r, k)).scale(-dot(normal, delta) / r);
+            single = single + g.scale(weight);
+            double = double + derivative.scale(weight);
+        }
+    }
+    (single, double)
+}
+
+/// Integral of exp(-i k direction.y) over one triangle. Pressure and normal
+/// velocity are constant on a panel, but this directional phase is not.
+fn triangle_far_phase(k: f64, direction: [f64; 3], triangle: [[f64; 3]; 3]) -> C64 {
+    let [a, b, c] = triangle;
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let double_area = norm(cross(ab, ac));
+    let mut integral = C64::ZERO;
+    for (&u, &wu) in GL4_X.iter().zip(&GL4_W) {
+        for (&v, &wv) in GL4_X.iter().zip(&GL4_W) {
+            let y = affine3(a, ab, u, ac, (1.0 - u) * v);
+            let weight = wu * wv * (1.0 - u) * double_area;
+            integral = integral + expik(-k * dot(direction, y)).scale(weight);
+        }
+    }
+    integral
+}
+
 fn characteristic_panel_size(surface: &SpherePanels) -> f64 {
     let mut max_area = 0.0f64;
     for &a in surface.areas() {
@@ -870,7 +917,9 @@ fn evaluate_radiated_power(
 
 /// Evaluate complex acoustic pressure [Pa] at finite exterior points [m].
 /// `p(x) = SUM_j [dG(x,y_j)/dn_y p_j - G(x,y_j) q_j] A_j`, with
-/// `q_j = i omega rho v_j`; output order matches `points` order.
+/// `q_j = i omega rho v_j`; output order matches `points` order. This entry
+/// point retains the original centroid rule even when triangles are present.
+/// See [`exterior_pressure_at_points_integrated`] for triangle integration.
 /// Its discrete solid-angle guard is not a topology certificate.
 ///
 /// # Errors
@@ -881,6 +930,38 @@ pub fn exterior_pressure_at_points(
     solution: &RadiationSolution,
     medium: Medium,
     points: &[[f64; 3]],
+) -> Result<Vec<C64>, HelmholtzError> {
+    exterior_pressure_at_points_impl(surface, solution, medium, points, false)
+}
+
+/// Evaluate the same finite Green representation using retained triangles:
+/// `p(x) = SUM_j INT_j [dG(x,y)/dn_y p_j - G(x,y) q_j] dS_y`.
+/// Well-separated triangles use 4x4 Gauss integration; nearby triangles use
+/// the static-subtracted 8x8 rule. Centroid-only surfaces keep their original
+/// point-panel rule. Propagation and spreading are already included once.
+///
+/// This fixed quadrature is not an error certificate. [`crate::near_field`]
+/// supplies the separately controlled close observer. Surface, solution and
+/// receiver admission are identical to [`exterior_pressure_at_points`].
+///
+/// # Errors
+/// The same malformed/cross-wired solution and point refusals as
+/// [`exterior_pressure_at_points`].
+pub fn exterior_pressure_at_points_integrated(
+    surface: &SpherePanels,
+    solution: &RadiationSolution,
+    medium: Medium,
+    points: &[[f64; 3]],
+) -> Result<Vec<C64>, HelmholtzError> {
+    exterior_pressure_at_points_impl(surface, solution, medium, points, true)
+}
+
+fn exterior_pressure_at_points_impl(
+    surface: &SpherePanels,
+    solution: &RadiationSolution,
+    medium: Medium,
+    points: &[[f64; 3]],
+    integrate_triangles: bool,
 ) -> Result<Vec<C64>, HelmholtzError> {
     let n = surface.centroids().len();
     if solution.pressure.len() != n || solution.velocity.len() != n {
@@ -920,6 +1001,11 @@ pub fn exterior_pressure_at_points(
     let k = solution.k;
     let omega_rho = k * medium.sound_speed * medium.density;
     let four_pi = 4.0 * core::f64::consts::PI;
+    let triangles = if integrate_triangles {
+        surface.triangles()
+    } else {
+        None
+    };
     let mut pressure = Vec::with_capacity(points.len());
     for &x in points {
         if x.iter().any(|coordinate| !coordinate.is_finite()) {
@@ -939,10 +1025,20 @@ pub fn exterior_pressure_at_points(
             }
             let normal_projection = dot(surface.normals()[j], d);
             solid_angle += normal_projection * surface.areas()[j] / (four_pi * r * r * r);
-            let dgdny = green_dr(k, r).scale(-normal_projection / r);
             let q = solution.velocity[j] * C64::new(0.0, omega_rho);
-            value =
-                value + (dgdny * solution.pressure[j] - green(k, r) * q).scale(surface.areas()[j]);
+            if let Some(triangles) = triangles {
+                let (single, double) = if triangle_is_near(x, surface.centroids()[j], triangles[j])
+                {
+                    triangle_weak_influence(k, x, triangles[j], surface.normals()[j])
+                } else {
+                    triangle_far_pressure_influence(k, x, triangles[j], surface.normals()[j])
+                };
+                value = value + (double * solution.pressure[j] - single * q);
+            } else {
+                let dgdny = green_dr(k, r).scale(-normal_projection / r);
+                value = value
+                    + (dgdny * solution.pressure[j] - green(k, r) * q).scale(surface.areas()[j]);
+            }
         }
         if !solid_angle.is_finite()
             || solid_angle.abs() >= 0.5
@@ -1118,6 +1214,8 @@ fn assemble_dense_with_static(
 /// Far-field directivity amplitude `F(direction)`: the radiated pressure
 /// behaves as `p -> F * e^{ikr}/r` for large r, with
 /// `F = (1/4 pi) SUM_j [(-ik dir.n_j) p_j - q_j] e^{-ik dir.y_j} A_j`.
+/// This entry point retains the original centroid phase even when triangles
+/// are present. See [`far_field_integrated`] for triangle integration.
 #[must_use]
 pub fn far_field(
     surface: &SpherePanels,
@@ -1125,11 +1223,41 @@ pub fn far_field(
     medium: Medium,
     directions: &[[f64; 3]],
 ) -> Vec<C64> {
+    far_field_impl(surface, solution, medium, directions, false)
+}
+
+/// Far-field amplitude with the same traces and convention as [`far_field`],
+/// integrating `exp(-i k direction.y)` over every retained triangle with a
+/// 4x4 Gauss rule. Centroid-only surfaces keep the original point-panel rule.
+/// The result still requires `exp(i k r)/r` exactly once to obtain pressure;
+/// this does not replace a far-field receiver by a finite or near receiver.
+#[must_use]
+pub fn far_field_integrated(
+    surface: &SpherePanels,
+    solution: &RadiationSolution,
+    medium: Medium,
+    directions: &[[f64; 3]],
+) -> Vec<C64> {
+    far_field_impl(surface, solution, medium, directions, true)
+}
+
+fn far_field_impl(
+    surface: &SpherePanels,
+    solution: &RadiationSolution,
+    medium: Medium,
+    directions: &[[f64; 3]],
+    integrate_triangles: bool,
+) -> Vec<C64> {
     let k = solution.k;
     let omega_rho = k * medium.sound_speed * medium.density;
     let centroids = surface.centroids();
     let normals = surface.normals();
     let areas = surface.areas();
+    let triangles = if integrate_triangles {
+        surface.triangles()
+    } else {
+        None
+    };
     directions
         .iter()
         .map(|&dir| {
@@ -1137,10 +1265,14 @@ pub fn far_field(
             let d = [dir[0] / len, dir[1] / len, dir[2] / len];
             let mut f = C64::ZERO;
             for j in 0..centroids.len() {
-                let phase = expik(-k * dot(d, centroids[j]));
                 let qj = solution.velocity[j] * C64::new(0.0, omega_rho);
                 let term = solution.pressure[j] * C64::new(0.0, -k * dot(d, normals[j])) - qj;
-                f = f + (term * phase).scale(areas[j]);
+                let contribution = if let Some(triangles) = triangles {
+                    term * triangle_far_phase(k, d, triangles[j])
+                } else {
+                    (term * expik(-k * dot(d, centroids[j]))).scale(areas[j])
+                };
+                f = f + contribution;
             }
             f.scale(1.0 / (4.0 * core::f64::consts::PI))
         })
@@ -2002,6 +2134,103 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn far_panel_phase_matches_the_analytic_rectangular_aperture() {
+        // Independent Fourier integral over a rectangle: area times two sinc
+        // factors, with the physical translation phase. Sampling only the two
+        // triangle centroids loses more than 2% at the admitted-band scale.
+        let a = 0.025;
+        let b = 0.020;
+        let z = 0.011;
+        let triangles = [
+            [[-a, -b, z], [a, -b, z], [a, b, z]],
+            [[-a, -b, z], [a, b, z], [-a, b, z]],
+        ];
+        let raw_direction = [1.5, 0.7, 1.5];
+        let direction = raw_direction.map(|v| v / norm(raw_direction));
+        let sinc = |x: f64| if x == 0.0 { 1.0 } else { det::sin(x) / x };
+        for k in [0.0, 1.0, 30.0] {
+            let expected = expik(-k * direction[2] * z)
+                .scale(4.0 * a * b * sinc(k * direction[0] * a) * sinc(k * direction[1] * b));
+            let actual = triangles.iter().fold(C64::ZERO, |sum, &triangle| {
+                sum + triangle_far_phase(k, direction, triangle)
+            });
+            assert!(
+                (actual - expected).abs() < 1.0e-7 * expected.abs(),
+                "k={k}: integrated={actual:?}, rectangle={expected:?}"
+            );
+            if k == 30.0 {
+                let centroid = triangles.iter().fold(C64::ZERO, |sum, triangle| {
+                    let point = core::array::from_fn(|axis| {
+                        (triangle[0][axis] + triangle[1][axis] + triangle[2][axis]) / 3.0
+                    });
+                    sum + expik(-k * dot(direction, point)).scale(2.0 * a * b)
+                });
+                assert!((centroid - expected).abs() > 0.02 * expected.abs());
+            }
+        }
+    }
+
+    #[test]
+    fn default_finite_microphone_preserves_a_thin_plate_bending_transfer() {
+        // The default percussion microphone compared with the independent,
+        // adaptive Green-row owner. Its source solution and position are held
+        // fixed: this checks observation quadrature, not another boundary solve.
+        let surface = thin_box_surface();
+        let medium = Medium {
+            density: 1.2,
+            sound_speed: 343.0,
+        };
+        let k = core::f64::consts::TAU * 1640.0 / medium.sound_speed;
+        let velocity: Vec<_> = surface
+            .centroids()
+            .iter()
+            .zip(surface.normals())
+            .map(|(p, normal)| {
+                C64::from_re(
+                    normal[2]
+                        * det::sin(3.0 * core::f64::consts::PI * (p[0] / 0.30 + 0.5))
+                        * det::sin(2.0 * core::f64::consts::PI * (p[1] / 0.24 + 0.5)),
+                )
+            })
+            .collect();
+        let solution = solve_radiation(&surface, k, medium, &velocity, Formulation::PlainCbie)
+            .expect("thin-plate boundary solution");
+        let points = [[0.08, 0.05, 0.35]];
+        let geometry = crate::near_field::Geometry::new(&surface, &points, 1.0e-4)
+            .expect("default microphone is outside the closed plate");
+        let reference = geometry
+            .prepare(
+                k,
+                medium,
+                crate::near_field::Options {
+                    relative_tolerance: 1.0e-9,
+                    ..crate::near_field::Options::default()
+                },
+            )
+            .expect("independent adaptive observer")
+            .evaluate(&solution)
+            .expect("same boundary trace")
+            .pressure[0];
+        let actual = exterior_pressure_at_points_integrated(&surface, &solution, medium, &points)
+            .expect("default finite-point observer")[0];
+        assert!(
+            (actual - reference).abs() < 1.0e-6 * reference.abs(),
+            "finite microphone: {actual:?}, adaptive reference: {reference:?}"
+        );
+        // Explicit centroid consumers retain their original numerical arm.
+        // The discrepancy is material here, so accidentally routing both APIs
+        // to the same rule cannot pass this comparison.
+        let centroid = exterior_pressure_at_points(&surface, &solution, medium, &points)
+            .expect("legacy centroid observer")[0];
+        assert!((centroid - reference).abs() > 0.02 * reference.abs());
+        let directions = [[1.5, 0.7, 1.5]];
+        let integrated_far = far_field_integrated(&surface, &solution, medium, &directions)[0];
+        let centroid_far = far_field(&surface, &solution, medium, &directions)[0];
+        assert!(integrated_far.re.is_finite() && integrated_far.im.is_finite());
+        assert!((integrated_far - centroid_far).abs() > 0.02 * integrated_far.abs());
     }
 
     #[test]

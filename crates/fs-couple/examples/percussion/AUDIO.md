@@ -1,14 +1,15 @@
 # Geometry to radiated pressure: an offline percussion reference
 
 The example now composes the existing mechanical and exterior-acoustic owners.
-The triangle quadrature, whole-band formulation, and reusable geometry
-preparation described below have **not yet passed a native regression or WAV run**. The current build attempt
-exhausted available disk space during dependency compilation, before either
-`fs-bem` or the percussion tests ran. Independent quadrature checks verify the
-new static triangle formulas; they do not establish that a complete source bake
-passes the numerical-power and filter gates. No new native WAV, listening result
-or real-time benchmark is claimed. A failed solve/fit aborts export. This is not
-yet a full-band or calibrated instrument.
+The boundary and observer triangle quadrature, whole-band formulation, and
+reusable geometry preparation described below have **not yet passed a native
+regression or WAV run**. The current build attempt exhausted available disk
+space during dependency compilation, before either `fs-bem` or the percussion
+tests ran. Independent quadrature checks verify the new static triangle formulas
+and reduced transfer witnesses; they do not establish that a complete source
+bake passes the numerical-power and filter gates. No new native WAV, listening
+result or real-time benchmark is claimed. A failed solve/fit aborts export.
+This is not yet a full-band or calibrated instrument.
 
 ## Commands
 
@@ -111,6 +112,12 @@ a full spherical-harmonic bank. `fs-vfit` owns fitting, stability and Tustin
 realization. Negative-time BEM responses are conjugated and physical frequencies
 are warped before fitting; omitting either changes the transfer's phase.
 
+The percussion receiver explicitly calls `far_field_integrated`: the source
+phase is integrated over each retained triangle with a 4-by-4 Gauss rule.
+This preserves spatial moments of bending motion that a centroid sample loses.
+The public centroid observer remains available to existing callers with that
+numerical contract; the boundary solution and normalization are unchanged.
+
 The origin-referenced far field can contain a geometric advance from the near
 side of a finite source. It is delayed by the enclosing radius divided by sound
 speed before fitting. The existing propagation line then applies only the
@@ -120,13 +127,20 @@ line uses its existing two-tap fractional interpolation, not an exact all-band
 delay. The ten-source-radius admission is a screening rule, not a near-field
 error certificate.
 
-The separate `*-mic` commands use `fs-bem::helmholtz::exterior_pressure_at_points`
+The separate `*-mic` commands use
+`fs-bem::helmholtz::exterior_pressure_at_points_integrated`
 at an actual finite position. Its Green representation retains near-field
 terms as well as outgoing waves; the sound is not approximated by taking a
 far-field direction and dividing by distance. The default microphone is
 `[0.08, 0.05, 0.35]` metres in the geometry frame, with x/y in the head plane
 and z upward. An optional complete x/y/z triple follows frame count and
 full-scale. For the drum, the heads are at z = +/- depth/2.
+
+Finite observation integrates complete Green kernels with a 4-by-4 rule for
+well-separated triangles, and exact static terms plus 8-by-8 regular remainders
+for near triangles. These fixed rules have no per-request error certificate.
+The explicit adaptive near-field receiver retains its own integration and
+diagnostics; this does not change its admission or work budget.
 
 This owner already returns physical pressure INCLUDING spreading and travel.
 Only a lower-bound travel delay `(range-enclosing_radius)/c` is peeled before
@@ -205,6 +219,16 @@ relative error at four microphone ranges. At k*r=0.2 its pressure magnitude is
 5.099 times the far-field approximation, so the distinction is load-bearing.
 That independent calculation is not execution of the Rust BEM or its new tests.
 
+Two further Rust regressions compare triangle far-field phase against an
+analytic rectangular-aperture integral and default finite pressure against
+independently adaptive Green rows for the same thin-plate boundary trace.
+An independent 192-triangle, 1 mm plate calculation at 1640 Hz found about
+4.4% far-transfer error and up to 3.2% default finite-microphone error from
+centroid observation. The new 4-by-4 rule agreed with an 8-by-8 reference to
+below 2.3e-8 relative error across sixteen bending fields at those observers.
+This reduced calculation establishes a material observer discrepancy; it does
+not validate the native cymbal or drum WAV path.
+
 The focused native checks still required for the current quadrature repair are:
 
 ```sh
@@ -216,7 +240,7 @@ cargo run --release -p fs-couple --example percussion -- splash-wav 480 20 > spl
 The short splash request retains the full default source basis and 40–1640 Hz
 acoustic preparation while allowing the far-field propagation delay to elapse.
 It has not been run successfully in this session. In particular, correcting the
-near-face kernels does not prove that every weakly radiating elastic mode passes
+triangle kernels does not prove that every weakly radiating elastic mode passes
 the existing power gate; far-panel discretization and fit error remain subject
 to those unchanged checks. The small vented-snare regression explicitly verifies
 that its coarse boundary refuses the default 1640 Hz band, then requests a

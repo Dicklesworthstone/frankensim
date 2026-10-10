@@ -12,7 +12,9 @@
 //! modeled. Fit error is checked only in the declared 40..1640 Hz band. Neither
 //! that check nor successful WAV export certifies a full-band physical instrument.
 use super::{Error, Experiment};
-use fs_bem::helmholtz::{Formulation, Medium, RadiationSolution, exterior_pressure_at_points, far_field, solve_radiation_batch};
+use fs_bem::helmholtz::{Formulation, Medium, RadiationSolution,
+    exterior_pressure_at_points_integrated as exterior_pressure_at_points,
+    far_field_integrated as far_field, solve_radiation_batch};
 use fs_bem::panel3d::SpherePanels;
 use fs_couple::pcm_wav::decimate::Decimator;
 use fs_exec::CancelGate;

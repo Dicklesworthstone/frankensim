@@ -82,15 +82,25 @@ everywhere: this is screening, not a viscous truth source.
   resonance).
 - `radiation_impedance_matrix` — one factorization, n unit-velocity
   solves; feeds the vibroacoustic-coupling bead.
-- `far_field` — sampled directivity amplitudes (monopole uniform to
-  0.00%, dipole cos-theta correlation 1.0000 measured).
+- `far_field` — centroid-rule sampled directivity amplitudes (monopole
+  uniform to 0.00%, dipole cos-theta correlation 1.0000 measured).
+  `far_field_integrated` integrates the retained triangles' spatial phase
+  with a 4x4 Gauss rule; centroid-only surfaces retain the original rule.
+  Both return `F` with the same `p -> F e^{ikr}/r` convention.
 - `FarFieldTable` / `tabulate_far_field` — solver-neutral
   `(ω, direction) → F` samples with `p → F e^{ikr}/r`. Downstream
   observers (fs-couple) consume the table; they do not take a
   production dependency on this crate.
 - `exterior_pressure_at_points` — deterministic batched finite-distance
-  pressure via `SUM (dG/dn_y p - G i omega rho v) A`; mismatched source
+  centroid pressure via `SUM (dG/dn_y p - G i omega rho v) A`; mismatched source
   surface or medium and invalid/non-exterior points are refused.
+  `exterior_pressure_at_points_integrated` shares this admission and integrates
+  retained triangles: exact static terms plus 8x8 regular remainders near a
+  panel, or 4x4 complete Green kernels for well-separated points. The latter
+  avoids cancellation in static edge formulas at large receiver distances.
+  Centroid-only surfaces retain the original rule. Percussion's default far
+  and finite receivers explicitly select these integrated entry points;
+  existing centroid consumers and the adaptive `near_field` owner are unchanged.
 - `directivity_sh_table` / `DirectivityTable` — far field projected
   onto orthonormal complex spherical harmonics (Condon–Shortley,
   `Y_{l,-m} = (-1)^m conj(Y_lm)`) up to `l_max <= MAX_SH_DEGREE = 64`
@@ -261,15 +271,20 @@ NASA marks it as U.S. Government work with public use permitted.
    separation with the peak found by a coarse-then-refined scan).
 7. Pulsating-sphere finite pressure matches within 8% at `ka = 1` and
    converges to the direct far field (2% remainder).
+8. Integrated observer regressions compare the triangle phase to an analytic
+   rectangular-aperture Fourier integral and the default percussion finite
+   microphone to independently adaptive Green rows for a thin-plate bending
+   field. The same trace exposes the material difference from the preserved
+   centroid observers. Fixed observer quadrature is not an error certificate.
 
 ## No-claim boundaries
 
 - 3D LIFTING surfaces (Kutta strips, wake SHEETS) and the fs-vpm
   pairing for flapping gaits — the 2D shedding loop ships; 3D is the
   flagship successor.
-- Exact panel-integral far fields (centroid monopoles ship for
-  off-diagonal rows; analytic quadrilateral/triangle integrals are
-  follow-up under the same operator surface).
+- Closed-form Helmholtz panel-integral far fields. Explicit integrated
+  observers use fixed Gaussian rules; legacy observers retain centroid rules.
+  Neither constitutes a bound on pressure error for arbitrary boundary traces.
 - Induced-drag decomposition and force/moment beyond lift (Cp
   machinery exists; the Trefftz-plane analysis is successor scope).
 - Elastostatic BEM (staged later per the bead, noted not promised).
@@ -298,7 +313,10 @@ NASA marks it as U.S. Government work with public use permitted.
   no half-space or impedance boundary conditions, no Bessel-backed
   piston closed form (small-ka series only until the duct bead's special
   functions land). Finite-point admission is a non-certifying discrete
-  solid-angle guard and retains centroid-panel error.
+  solid-angle guard. The legacy finite observer retains centroid-panel error;
+  its explicit integrated variant still has fixed-quadrature and boundary
+  discretization error. Use the separate `near_field` owner when adaptive
+  integration and retained quadrature diagnostics are required.
 
 ## radiation_bake (bead zolja)
 
