@@ -186,7 +186,7 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// enclosures without promoting the distinct maximum-temperature decision.
 /// Version 50 executes declared finite-time storage with nested backward-Euler
 /// grids and retains final-time evidence without steady-solution certificates.
-pub const SOLVE_DRIVER_VERSION: u32 = 54;
+pub const SOLVE_DRIVER_VERSION: u32 = 55;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -6790,13 +6790,20 @@ fn conduction_solve_receipt(
             // This initial boundary supplies each card-derived coefficient.
             // The transient owner replaces its references in every counted
             // air/solid response while retaining one physical old field.
-            let initial_derived = airflow_path.as_ref().map_or_else(BTreeMap::new, |path| {
+            let mut initial_derived = airflow_path.as_ref().map_or_else(BTreeMap::new, |path| {
                 let inlets: BTreeMap<_, _> = laws.iter()
                     .map(|law| (law.target.as_str(), law.inlet_temperature_k)).collect();
                 path.segments.iter().map(|segment| {
                     (segment.target.clone(), (segment.htc_w_m2_k, inlets[segment.target.as_str()]))
                 }).collect()
             });
+            let pressure_pa = spec.envelope.as_ref().map_or(101_325.0, |e| e.pressure.value);
+            if !natural_laws.is_empty() {
+                let coefficients = natural::initial_coefficients(&natural_laws, pressure_pa)?;
+                initial_derived.extend(natural_laws.iter().map(|law| {
+                    (law.target.clone(), (coefficients[&law.target], law.ambient_k))
+                }));
+            }
             let boundary = conduction_boundary(
                 setup, &mesh, labeled, &surfaces, &regions, &interface_faces,
                 &initial_derived, &surface_heat_inputs,
@@ -6814,10 +6821,12 @@ fn conduction_solve_receipt(
             };
             let time = transient::solve(
                 &cx, spec, problem, interfaces.as_ref(), &labels, &region_ids,
-                radiation.as_ref(), airflow_path.as_ref(), linear, deadline,
+                radiation.as_ref(), airflow_path.as_ref(), &natural_laws,
+                pressure_pa, linear, deadline,
             )?;
             transient_energy_w = Some((time.endpoint_storage_w, time.endpoint_energy_residual_w));
             transient_fragment = Some(time.receipt);
+            natural_fragment = time.natural_receipt;
             // The temporal estimate belongs to the retained time comparison.
             // Spatial error remains unknown, so it cannot fill Discretization.
             let _ = time.temporal_half_width_k;

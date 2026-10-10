@@ -27,19 +27,21 @@ use fs_project::{ConductionTransient, ProjectSpec, ThermalBoundaryCondition};
 
 use super::{
     SolveRefusal, canonical_f64, conduction_error, json_string, ladder_functional,
-    ladder_target_region, conjugate as airflow, radiation,
+    ladder_target_region, conjugate as airflow, natural as buoyancy, radiation,
 };
 
 mod conjugate;
+mod natural;
 mod workload;
 use workload::{TimeGrids, Workload};
 
-pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. Declared ambient radiation uses the shared area-mean gray-patch model with an independent endpoint residual and energy gate; every coupling trial retains the same physical history. Declared airflow uses quasi-steady branch transport at the retained flow-network operating point, with solid storage and a separate full coupled energy gate. No airflow storage, time-varying fan dynamics, natural convection, enclosure radiation, latent heat or transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
+pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. Declared ambient radiation uses the shared area-mean gray-patch model with an independent endpoint residual and energy gate; every coupling trial retains the same physical history. Declared airflow uses quasi-steady branch transport at the retained flow-network operating point, with solid storage and a separate full coupled energy gate. Declared natural convection evaluates its admitted card at each endpoint and checks the full physical free residual and energy balance; exact equilibrium and out-of-domain Rayleigh states remain refused. No airflow storage, time-varying fan dynamics, enclosure radiation, latent heat or transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
 
 pub(super) struct NativeTransientResult {
     pub(super) solution: radiation::SolidSolution,
     pub(super) receipt: String,
     pub(super) conjugate_receipt: Option<String>,
+    pub(super) natural_receipt: Option<String>,
     pub(super) derived_boundary: BTreeMap<String, (f64, f64)>,
     /// An assumed-first-order temporal estimate for the published fine QoI.
     /// Exact floating-point agreement does not establish zero temporal error.
@@ -54,7 +56,7 @@ fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error(
         "cli-solve-conduction-transient",
         message,
-        "use explicit regional capacities and admitted conductivity curves with prescribed thermal laws; inspect the time/work/energy declaration",
+        "use explicit regional capacities and admitted material and convection laws; inspect the time/work/energy declaration",
     )
 }
 
@@ -129,15 +131,15 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
         .as_ref()
         .and_then(|cooling| cooling.conduction.as_ref())
         .ok_or_else(|| bad("transient conduction has no spatial declaration"))?;
-    if setup.boundaries.iter().any(|row| {
-        matches!(
-            row.condition,
-            ThermalBoundaryCondition::NaturalConvection { .. }
-        )
-    })
-    {
-        return Err(bad(
-            "native transient cooling admits prescribed Dirichlet/Neumann/Robin boundaries, quasi-steady airflow, matching contact and declared ambient radiation; natural convection needs its transient producer",
+    let has_airflow = setup.boundaries.iter().any(|row|
+        matches!(row.condition, ThermalBoundaryCondition::AirflowConvection { .. }));
+    let has_natural = setup.boundaries.iter().any(|row|
+        matches!(row.condition, ThermalBoundaryCondition::NaturalConvection { .. }));
+    if has_airflow && has_natural {
+        return Err(conduction_error(
+            "cli-solve-conduction-natural-with-airflow",
+            "a project mixing natural-convection and airflow-convection laws is not yet supported",
+            "declare one convection regime per project",
         ));
     }
     if spec
@@ -179,6 +181,10 @@ struct GridResult {
     airflow: Option<AirflowEndpoint>,
     airflow_iterations: usize,
     airflow_solid_solves: usize,
+    natural: Option<NaturalEndpoint>,
+    natural_iterations: usize,
+    natural_solid_solves: usize,
+    natural_endpoint_evaluations: usize,
     coupled_net_input_j: f64,
     maximum_coupled_energy_residual_j: f64,
 }
@@ -188,6 +194,14 @@ struct GridResult {
 struct AirflowEndpoint {
     outcome: airflow::ConjugateOutcome,
     applied_references: BTreeMap<String, f64>,
+    boundary: fs_conduction::ThermalBoundary,
+}
+
+/// The final physical natural law is retained beside the coefficients the
+/// counted solid response actually used.
+struct NaturalEndpoint {
+    receipt: String,
+    applied_coefficients: BTreeMap<String, f64>,
     boundary: fs_conduction::ThermalBoundary,
 }
 
@@ -258,6 +272,31 @@ fn airflow_row(
     ))
 }
 
+fn natural_row(solved: &natural::NaturalStep) -> Result<String, SolveRefusal> {
+    let coefficients = |values: &BTreeMap<String, f64>| {
+        values.iter().map(|(target, value)| {
+            Ok(format!("{}:{}", json_string(target), number(*value)?))
+        }).collect::<Result<Vec<_>, SolveRefusal>>().map(|rows| rows.join(","))
+    };
+    let fluxes = solved.physical_convective_robin_fluxes.iter().map(|flux| {
+        Ok(format!(
+            "{{\"region\":{},\"area_m2\":{},\"heat_rate_w\":{}}}",
+            json_string(&flux.region), number(flux.area_m2)?, number(flux.heat_rate_w)?,
+        ))
+    }).collect::<Result<Vec<_>, SolveRefusal>>()?;
+    Ok(format!(
+        "{{\"iterations\":{},\"solid_solves\":{},\"krylov_iterations\":{},\"nonlinear_iterations\":{},\"nonlinear_backtracks\":{},\"radiation_trials\":{},\"endpoint_evaluations\":{},\"applied_coefficients_w_m2_k\":{{{}}},\"physical_coefficients_w_m2_k\":{{{}}},\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},\"physical_energy_residual_j\":{},\"physical_dirichlet_in_w\":{},\"physical_convective_out_w\":{},\"physical_radiative_out_w\":{},\"physical_convective_robin_fluxes\":[{}],\"exchange\":{}}}",
+        solved.iterations, solved.solid_solves, solved.krylov_iterations,
+        solved.nonlinear_updates, solved.nonlinear_backtracks, solved.radiation_trials,
+        solved.endpoint_evaluations, coefficients(&solved.applied_coefficients)?,
+        coefficients(&solved.physical_coefficients)?,
+        number(solved.physical_residual_norm_j)?, number(solved.physical_residual_tolerance_j)?,
+        number(solved.physical_energy_residual_j)?, number(solved.physical_dirichlet_in_w)?,
+        number(solved.physical_convective_out_w)?, number(solved.physical_radiative_out_w)?,
+        fluxes.join(","), solved.receipt,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn march(
     cx: &Cx<'_>,
@@ -271,6 +310,8 @@ fn march(
     nonlinear: Option<NonlinearStepConfig>,
     radiation: Option<&radiation::LoweredRadiation>,
     airflow: Option<&airflow::ConjugatePath>,
+    natural: &[buoyancy::NaturalLaw],
+    pressure_pa: f64,
     labels: &[u32],
     goal_region: Option<u32>,
     deadline: Option<(Instant, f64)>,
@@ -293,6 +334,10 @@ fn march(
     let mut last_airflow = None;
     let mut airflow_iterations = 0;
     let mut airflow_solid_solves = 0;
+    let mut last_natural = None;
+    let mut natural_iterations = 0;
+    let mut natural_solid_solves = 0;
+    let mut natural_endpoint_evaluations = 0;
     let mut coupled_net_input_j = 0.0;
     let mut maximum_coupled_energy_residual_j = 0.0_f64;
     for (index, &end) in ends_s.iter().enumerate() {
@@ -317,6 +362,7 @@ fn march(
         };
         let mut radiative_row = "null".to_string();
         let mut conjugate_row = "null".to_string();
+        let mut natural_evidence = "null".to_string();
         let (endpoint, nonlinear_evidence, krylov_iterations) = if let Some(path) = airflow {
             let solved = conjugate::advance(
                 cx, engine, step_problem, interfaces, &old, dt, config,
@@ -341,6 +387,33 @@ fn march(
             last_airflow = Some(AirflowEndpoint {
                 outcome: solved.outcome,
                 applied_references: solved.applied_references,
+                boundary: solved.applied_boundary,
+            });
+            (solved.endpoint, solved.nonlinear_evidence, solved.krylov_iterations)
+        } else if !natural.is_empty() {
+            let solved = natural::advance(
+                cx, engine, step_problem, interfaces, &old, dt, config,
+                nonlinear, radiation, natural, pressure_pa, deadline,
+            )?;
+            natural_evidence = natural_row(&solved)?;
+            natural_iterations += solved.iterations;
+            natural_solid_solves += solved.solid_solves;
+            natural_endpoint_evaluations += solved.endpoint_evaluations;
+            nonlinear_updates += solved.nonlinear_updates;
+            nonlinear_backtracks += solved.nonlinear_backtracks;
+            radiation_trials += solved.radiation_trials;
+            maximum_physical_energy_residual_j = maximum_physical_energy_residual_j
+                .max(solved.maximum_physical_energy_residual_j);
+            maximum_coupled_energy_residual_j = maximum_coupled_energy_residual_j
+                .max(solved.physical_energy_residual_j.abs());
+            coupled_net_input_j += dt * (solved.endpoint.source_w
+                + solved.physical_dirichlet_in_w - solved.endpoint.neumann_out_w
+                - solved.physical_convective_out_w - solved.physical_radiative_out_w);
+            radiative_row = solved.radiation_evidence;
+            last_radiation = solved.radiation;
+            last_natural = Some(NaturalEndpoint {
+                receipt: solved.receipt,
+                applied_coefficients: solved.applied_coefficients,
                 boundary: solved.applied_boundary,
             });
             (solved.endpoint, solved.nonlinear_evidence, solved.krylov_iterations)
@@ -418,13 +491,20 @@ fn march(
         stored_j += endpoint.stored_energy_change_j;
         net_input_j += dt * net_w;
         maximum_energy_residual_j = maximum_energy_residual_j.max(endpoint.energy_residual_j.abs());
-        rows.push(format!("{{\"step\":{ordinal},\"time_s\":{},\"dt_s\":{},\"final_region_max_k\":{},\"stored_energy_change_j\":{},\"net_input_w\":{},\"source_w\":{},\"energy_residual_j\":{},\"relative_residual\":{},\"krylov_iterations\":{},\"nonlinear\":{nonlinear_evidence},\"radiation\":{radiative_row},\"conjugate\":{conjugate_row}}}",
+        rows.push(format!("{{\"step\":{ordinal},\"time_s\":{},\"dt_s\":{},\"final_region_max_k\":{},\"stored_energy_change_j\":{},\"net_input_w\":{},\"source_w\":{},\"energy_residual_j\":{},\"relative_residual\":{},\"krylov_iterations\":{},\"nonlinear\":{nonlinear_evidence},\"radiation\":{radiative_row},\"conjugate\":{conjugate_row},\"natural\":{natural_evidence}}}",
             number(end)?, number(dt)?, number(qoi)?, number(endpoint.stored_energy_change_j)?,
             number(net_w)?, number(endpoint.source_w)?, number(endpoint.energy_residual_j)?, number(endpoint.relative_residual)?,
             krylov_iterations));
         evidence.push(LinearSolveEvidence {
             nonlinear_iteration: ordinal - 1,
-            method: match (nonlinear.is_some(), radiation.is_some(), airflow.is_some()) {
+            method: if !natural.is_empty() {
+                match (nonlinear.is_some(), radiation.is_some()) {
+                    (true, true) => "fgmres-backward-euler-newton-radiation-natural",
+                    (true, false) => "fgmres-backward-euler-newton-natural",
+                    (false, true) => "pcg-backward-euler-radiation-natural",
+                    (false, false) => "pcg-backward-euler-natural",
+                }
+            } else { match (nonlinear.is_some(), radiation.is_some(), airflow.is_some()) {
                 (true, true, true) => "fgmres-backward-euler-newton-radiation-airflow",
                 (true, false, true) => "fgmres-backward-euler-newton-airflow",
                 (false, true, true) => "pcg-backward-euler-radiation-airflow",
@@ -433,7 +513,7 @@ fn march(
                 (true, false, false) => "fgmres-backward-euler-newton",
                 (false, true, false) => "pcg-backward-euler-radiation",
                 (false, false, false) => "pcg-backward-euler",
-            },
+            } },
             iterations: krylov_iterations,
             reported: ResidualClaim::TrueEuclidean(endpoint.relative_residual),
             true_relative_residual: endpoint.relative_residual,
@@ -462,6 +542,10 @@ fn march(
         airflow: last_airflow,
         airflow_iterations,
         airflow_solid_solves,
+        natural: last_natural,
+        natural_iterations,
+        natural_solid_solves,
+        natural_endpoint_evaluations,
         coupled_net_input_j,
         maximum_coupled_energy_residual_j,
     })
@@ -478,6 +562,8 @@ pub(super) fn solve(
     region_ids: &BTreeMap<String, u32>,
     radiation: Option<&radiation::LoweredRadiation>,
     airflow: Option<&airflow::ConjugatePath>,
+    natural: &[buoyancy::NaturalLaw],
+    pressure_pa: f64,
     linear: LinearConfig,
     deadline: Option<(Instant, f64)>,
 ) -> Result<NativeTransientResult, SolveRefusal> {
@@ -510,6 +596,17 @@ pub(super) fn solve(
             "the transient airflow declaration has no matching flow-network and wetted-area lowering",
         ));
     }
+    let natural_requested = !natural.is_empty();
+    if natural_requested
+        != spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
+            .is_some_and(|setup| setup.boundaries.iter().any(|row| {
+                matches!(row.condition, ThermalBoundaryCondition::NaturalConvection { .. })
+            }))
+    {
+        return Err(bad(
+            "the transient natural-convection declaration has no matching card lowering",
+        ));
+    }
     let grids = TimeGrids::new(policy)?;
     let coarse_steps = grids.coarse.len();
     let fine_steps = grids.fine.len();
@@ -538,11 +635,16 @@ pub(super) fn solve(
                 .and_then(|bytes| bytes.checked_add(row_bytes)),
             None => Some(row_bytes),
         })
+        .and_then(|row_bytes| if natural_requested {
+            natural.len().checked_mul(4096)
+                .and_then(|bytes| bytes.checked_add(4096))
+                .and_then(|bytes| bytes.checked_add(row_bytes))
+        } else { Some(row_bytes) })
         .ok_or_else(|| bad("transient coupling row estimate overflows"))?;
     let bytes = problem
         .mesh
         .vertex_count()
-        .checked_mul(128)
+        .checked_mul(if natural_requested { 192 } else { 128 })
         .and_then(|n| {
             problem
                 .mesh
@@ -629,12 +731,18 @@ pub(super) fn solve(
             "transient final-time error comparison needs the declared temperature-maximum requirement region",
         ));
     }
-    // Airflow bounds interface evaluations, radiation bounds their repeated
-    // solid responses, and the linear allowance includes all corrections in
-    // one response. Check complete endpoint and both-grid products before work.
+    // Either convection owner bounds interface evaluations, radiation bounds
+    // repeated solid responses, and the linear allowance includes all
+    // corrections in one response. Check complete both-grid products first.
     let airflow_factor = airflow.map_or(1, |_| airflow::exchange_config(false).max_iterations);
+    let natural_factor = if natural_requested { buoyancy::MAX_ITERATIONS } else { 1 };
     let radiation_factor = radiation.map_or(1, |lowering| lowering.config.max_iterations);
-    let max_solid_solves_per_step = airflow_factor.checked_mul(radiation_factor)
+    let max_endpoint_evaluations_per_step = if natural_requested {
+        natural_factor.checked_mul(2)
+            .ok_or_else(|| bad("natural endpoint evaluation allowance overflows"))?
+    } else { 0 };
+    let max_solid_solves_per_step = airflow_factor.checked_mul(natural_factor)
+        .and_then(|factor| factor.checked_mul(radiation_factor))
         .ok_or_else(|| bad("coupled solid response allowance overflows"))?;
     let max_krylov_per_step = linear
         .max_iterations
@@ -648,6 +756,7 @@ pub(super) fn solve(
     })?;
     let max_backtracks_per_update = nonlinear.map_or(0, |config| config.line_search.max_backtracks);
     if max_solid_solves_per_step.checked_mul(total_steps).is_none()
+        || max_endpoint_evaluations_per_step.checked_mul(total_steps).is_none()
         || max_krylov_per_step.checked_mul(total_steps).is_none()
         || max_updates_per_step
             .checked_mul(total_steps)
@@ -670,6 +779,8 @@ pub(super) fn solve(
         nonlinear,
         radiation,
         airflow,
+        natural,
+        pressure_pa,
         labels,
         goal_region,
         deadline,
@@ -686,6 +797,8 @@ pub(super) fn solve(
         nonlinear,
         radiation,
         airflow,
+        natural,
+        pressure_pa,
         labels,
         goal_region,
         deadline,
@@ -734,7 +847,7 @@ pub(super) fn solve(
     let radiation_trials = coarse.radiation_trials + fine.radiation_trials;
     let radiation_receipt = if let Some(lowering) = radiation {
         format!(
-            "{{\"method\":\"implicit-area-mean-gray-radiation\",\"max_trials_per_step\":{},\"max_trials_per_airflow_iteration\":{},\"max_krylov_iterations_per_solid_solve\":{},\"max_krylov_iterations_per_step\":{max_krylov_per_step},\"coarse_trials\":{},\"fine_trials\":{},\"total_trials\":{radiation_trials},\"maximum_physical_energy_residual_j\":{},\"history\":\"unchanged-physical-old-temperature-in-every-trial\",\"nonlinear_detail\":\"per-step nonlinear rows describe the final inner solve; radiation rows include that evaluation's trials; trajectory counters include every airflow evaluation\"}}",
+            "{{\"method\":\"implicit-area-mean-gray-radiation\",\"max_trials_per_step\":{},\"max_trials_per_coupling_iteration\":{},\"max_krylov_iterations_per_solid_solve\":{},\"max_krylov_iterations_per_step\":{max_krylov_per_step},\"coarse_trials\":{},\"fine_trials\":{},\"total_trials\":{radiation_trials},\"maximum_physical_energy_residual_j\":{},\"history\":\"unchanged-physical-old-temperature-in-every-trial\",\"nonlinear_detail\":\"per-step nonlinear rows describe the final inner solve; radiation rows include that evaluation's trials; trajectory counters include every outer convection evaluation\"}}",
             max_solid_solves_per_step, lowering.config.max_iterations, linear.max_iterations,
             coarse.radiation_trials, fine.radiation_trials,
             number(coarse.maximum_physical_energy_residual_j
@@ -758,6 +871,23 @@ pub(super) fn solve(
     } else {
         "null".to_string()
     };
+    let natural_receipt = if natural_requested {
+        let total_iterations = coarse.natural_iterations + fine.natural_iterations;
+        let total_solid_solves = coarse.natural_solid_solves + fine.natural_solid_solves;
+        let total_endpoint_evaluations =
+            coarse.natural_endpoint_evaluations + fine.natural_endpoint_evaluations;
+        format!(
+            "{{\"method\":\"implicit-area-mean-natural-convection\",\"max_iterations_per_step\":{natural_factor},\"max_solid_solves_per_step\":{max_solid_solves_per_step},\"max_krylov_iterations_per_step\":{max_krylov_per_step},\"max_endpoint_evaluations_per_step\":{max_endpoint_evaluations_per_step},\"coarse_iterations\":{},\"fine_iterations\":{},\"total_iterations\":{total_iterations},\"coarse_solid_solves\":{},\"fine_solid_solves\":{},\"total_solid_solves\":{total_solid_solves},\"total_endpoint_evaluations\":{total_endpoint_evaluations},\"maximum_physical_energy_residual_j\":{},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{}}},\"history\":\"unchanged-physical-old-temperature-in-every-natural-and-radiation-trial\",\"endpoint\":\"last-counted-solid-response-with-independent-full-physical-residual-and-energy-gates\",\"equilibrium\":\"existing-card-domain-no-zero-delta-limiting-law\"}}",
+            coarse.natural_iterations, fine.natural_iterations,
+            coarse.natural_solid_solves, fine.natural_solid_solves,
+            number(coarse.maximum_coupled_energy_residual_j
+                .max(fine.maximum_coupled_energy_residual_j))?,
+            number(fine.stored_j)?, number(fine.coupled_net_input_j)?,
+            number(fine.stored_j - fine.coupled_net_input_j)?,
+        )
+    } else {
+        "null".to_string()
+    };
     let workload_receipt = workload
         .as_ref()
         .map_or("null", |history| history.receipt.as_str());
@@ -771,7 +901,7 @@ pub(super) fn solve(
         }
     };
     let receipt = format!(
-        "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"radiation\":{radiation_receipt},\"conjugate\":{airflow_receipt},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"radiation\":{radiation_receipt},\"conjugate\":{airflow_receipt},\"natural\":{natural_receipt},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         number(policy.initial_temperature.value)?,
         number(policy.horizon.value)?,
         policy.max_steps,
@@ -798,7 +928,7 @@ pub(super) fn solve(
         number(fine.maximum_energy_residual_j)?,
         json_string(NO_CLAIM)
     );
-    let (conjugate_receipt, derived_boundary) = match (airflow, fine.airflow.as_ref()) {
+    let (conjugate_receipt, mut derived_boundary) = match (airflow, fine.airflow.as_ref()) {
         (Some(path), Some(accepted)) => {
             let derived = path.segments.iter().map(|segment| {
                 let reference = accepted.applied_references.get(&segment.target)
@@ -811,6 +941,20 @@ pub(super) fn solve(
         }
         (None, None) => (None, BTreeMap::new()),
         _ => return Err(bad("the final transient endpoint has inconsistent airflow evidence")),
+    };
+    let natural_receipt = match (natural_requested, fine.natural.as_ref()) {
+        (true, Some(accepted)) => {
+            for law in natural {
+                let coefficient = accepted.applied_coefficients.get(&law.target)
+                    .copied().ok_or_else(|| bad(
+                        "the final natural endpoint lost an applied Robin coefficient",
+                    ))?;
+                derived_boundary.insert(law.target.clone(), (coefficient, law.ambient_k));
+            }
+            Some(accepted.receipt.clone())
+        }
+        (false, None) => None,
+        _ => return Err(bad("the final transient endpoint has inconsistent natural evidence")),
     };
     let endpoint = fine.endpoint;
     let endpoint_dt = fine.endpoint_dt_s;
@@ -845,8 +989,9 @@ pub(super) fn solve(
     let report = ConductionReport {
         iterations: if nonlinear.is_some() {
             nonlinear_updates
-        } else if airflow.is_some() {
+        } else if airflow.is_some() || natural_requested {
             coarse.airflow_solid_solves + fine.airflow_solid_solves
+                + coarse.natural_solid_solves + fine.natural_solid_solves
         } else if radiation.is_some() {
             radiation_trials
         } else {
@@ -874,7 +1019,9 @@ pub(super) fn solve(
         interface_fluxes: endpoint.contact_fluxes,
         robin_fluxes: endpoint.robin_fluxes,
         free_dofs: DofMap::new(
-            fine.airflow.as_ref().map_or(problem.boundary, |accepted| &accepted.boundary),
+            fine.airflow.as_ref().map(|accepted| &accepted.boundary)
+                .or_else(|| fine.natural.as_ref().map(|accepted| &accepted.boundary))
+                .unwrap_or(problem.boundary),
             problem.mesh.vertex_count(),
         ).map_err(lower)?.n(),
         elements: problem.mesh.element_count(),
@@ -895,6 +1042,7 @@ pub(super) fn solve(
         solution,
         receipt,
         conjugate_receipt,
+        natural_receipt,
         derived_boundary,
         temporal_half_width_k,
         endpoint_storage_w,
