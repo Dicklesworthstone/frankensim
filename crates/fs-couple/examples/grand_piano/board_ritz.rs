@@ -11,7 +11,9 @@ use std::f64::consts::TAU;
 pub const MAX_SOURCE_MODES: usize = 512;
 pub const MAX_RITZ_MODES: usize = 128;
 pub const MAX_SAMPLE_FREQUENCIES: usize = 16;
-const MAX_PORTS: usize = 88;
+/// At most two supplied transverse directions for each of the 88 keys.
+/// Doubling the port count does not increase the admitted scalar-work budget.
+const MAX_PORTS: usize = 176;
 /// Conservative source-coordinate visits in snapshot orthogonalization,
 /// residual measurement and projected-matrix construction, checked before
 /// allocating snapshots. This is a work admission bound, not a timing claim.
@@ -102,7 +104,7 @@ pub fn bridge_basis(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
         || damping.iter().any(|x| !x.is_finite() || *x < 0.0)
         || !(1..=MAX_PORTS).contains(&ports.len())
         || ports.iter().any(|p| p.len() != n || p.iter().any(|x| !x.is_finite())) {
-        return Err("Ritz reduction needs 1..=512 ascending positive source modes, matching nonnegative damping, 1..=88 finite bridge vectors and an admitted low-mode count".into());
+        return Err("Ritz reduction needs 1..=512 ascending positive source modes, matching nonnegative damping, 1..=176 finite bridge vectors and an admitted low-mode count".into());
     }
     let target = options.max_modes.min(n);
     let extra = target-options.keep_low_modes;
@@ -333,6 +335,10 @@ mod tests {
             &RitzOptions::parse("128,128,0.1").unwrap()).unwrap();
         assert_eq!(full.columns.len(),128);assert_eq!(full.snapshot_count,0);
         assert_eq!(full.max_relative_snapshot_error,0.);
+        let both_directions=bridge_basis(&[1.],&[0.1],&vec![vec![1.];MAX_PORTS],
+            &RitzOptions::parse("1,0,0.1").unwrap()).unwrap();
+        assert_eq!(both_directions.columns.len(),1);
+        assert_eq!(both_directions.snapshot_count,3*MAX_PORTS);
     }
 
     #[test]
@@ -348,7 +354,7 @@ mod tests {
         }
         assert!(bridge_basis(&[-1.],&[0.1],&ports,&options).is_err());
         assert!(bridge_basis(&lambda,&[0.1],&[],&options).is_err());
-        assert!(bridge_basis(&lambda,&[0.1],&vec![vec![1.];89],&options).is_err());
+        assert!(bridge_basis(&lambda,&[0.1],&vec![vec![1.];MAX_PORTS+1],&options).is_err());
         assert!(bridge_basis(&lambda,&[0.1],&[vec![0.]],&options).is_err());
     }
 }

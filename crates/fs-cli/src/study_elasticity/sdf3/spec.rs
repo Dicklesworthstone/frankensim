@@ -3,7 +3,7 @@ use super::*;
 use fs_ascent::projected_al::ProjectedAlOptions;
 use fs_ir::ast::{Node, NodeKind};
 use fs_topopt::sdf3::design::StressDesignOptions3;
-use fs_topopt::sdf3::stress::StressOptions3;
+use fs_topopt::sdf3::stress::{StressMeasure3, StressOptions3};
 
 #[path = "spec/csg.rs"]
 mod csg;
@@ -47,6 +47,8 @@ pub(super) struct Spec {
     /// A fixed-background minimum-volume problem; adaptive controls apply only
     /// to the compliance mode when this is absent.
     pub stress: Option<StressDesignOptions3>,
+    /// Explicit functional; included in canonical optimizer type and identity.
+    pub stress_measure: StressMeasure3,
 }
 
 fn invalid(message: impl Into<String>) -> Failure {
@@ -219,6 +221,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
     let objective_words = if stress_mode { ["volume-fraction", "minimize", "1"] }
         else { ["compliance", "minimize", "J"] };
     for (value, expected) in objective.iter().zip(objective_words) { word(value, expected)?; }
+    let mut stress_measure = StressMeasure3::NormalizedAverage;
     let (density, volume, radius, updates, move_limit, marking, max_marks, schedule, stress) =
         if stress_mode {
             let opt = fields(&items[12], "optimizer", &[
@@ -226,7 +229,14 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
                 "stress-limit-pa", "relaxation-power", "aggregation-power", "max-stress-points",
                 "max-evaluations", "max-backtracks", "tolerance", "penal", "beta",
             ])?;
-            word(opt[0], "stress-limited-simp")?;
+            stress_measure = match &opt[0].kind {
+                NodeKind::Symbol(s) | NodeKind::Str(s) => match s.as_str() {
+                    "stress-limited-simp" => StressMeasure3::NormalizedAverage,
+                    "sampled-peak-limited-simp" => StressMeasure3::SampledPeakBound,
+                    _ => return Err(invalid("expected stress-limited-simp or sampled-peak-limited-simp")),
+                },
+                _ => return Err(invalid("stress optimizer type must name its functional")),
+            };
             let options = StressDesignOptions3 {
                 stress: StressOptions3 {
                     relaxation_power: scalar(opt[6])?,
@@ -295,7 +305,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         max_level: u32::try_from(count(physics[2])?).map_err(|_| invalid("maximum-level overflow"))?,
         leaves: count(physics[3])?, youngs: scalar(physics[4])?, poisson: scalar(physics[5])?,
         loads, surfaces, density, volume, radius, updates, move_limit, marking, max_marks,
-        schedule, regions: Vec::new(), solver, stress,
+        schedule, regions: Vec::new(), solver, stress, stress_measure,
     };
     // Validate the physical frame and grid envelope before deriving any indices.
     spec.validate()?;
@@ -337,12 +347,17 @@ impl Spec {
             return Err(invalid("unsupported finite graph-domain or isotropic material parameters"));
         }
         if self.surfaces.len() != self.loads.len() { return Err(invalid("surface and body load families must align")); }
+        let peak = self.stress.is_some()
+            && self.stress_measure == StressMeasure3::SampledPeakBound;
+        if !self.loads.iter().any(|(_, w)| *w > 0.0) {
+            return Err(invalid("at least one positive load-family weight is required"));
+        }
         for ((f, w), surface) in self.loads.iter().zip(&self.surfaces) {
-            if !(0.0 < *w && *w <= 1.0)
+            if !(0.0 <= *w && *w <= 1.0) || (!peak && *w == 0.0)
                 || f.iter().any(|v| !v.is_finite() || v.abs() > 1e12)
                 || (f.iter().all(|v| *v == 0.0) && surface.is_none())
             {
-                return Err(invalid("each case requires a nonzero reference load and weight in (0,1]"));
+                return Err(invalid("each case needs a nonzero reference load and weight in (0,1]; only sampled-peak-limited-simp admits zero weights, and still constrains those cases"));
             }
             if let Some(surface) = surface { surface.validate(self.level)?; }
         }

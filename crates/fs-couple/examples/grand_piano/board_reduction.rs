@@ -4,11 +4,11 @@
 
 use super::{
     BoardGeometry, ReductionReport, cubic_triangle_shape, local_shape_displacement,
-    nodal_displacement, ritz,
+    nodal_displacement, motion::SourceBridgeFrame, ritz,
 };
 use fs_math::det;
 use fs_modal::{ModePair, SliceReport};
-use fs_plate::PlateModel;
+use fs_plate::{PlateModel, ShellMesh};
 use std::f64::consts::TAU;
 
 pub(crate) struct ReducedBoard {
@@ -57,6 +57,7 @@ pub(super) fn project(
     keys: &[u8],
     edge_cubic_mass: bool,
     options: &ritz::RitzOptions,
+    frames: Option<&[SourceBridgeFrame]>,
 ) -> Result<ReducedBoard, String> {
     // Port construction indexes physical DOFs; the complete certificate and
     // mass-orthogonality checks follow in the shared modal projection.
@@ -79,8 +80,69 @@ pub(super) fn project(
             }
         }).collect::<Vec<f64>>());
     }
+    if let Some(frames)=frames {
+        // Only source force projection needs this small geometry carrier;
+        // never allocate a runtime MotionSurface for the 512-mode source.
+        let shell=ShellMesh::new(mesh.nodes.iter().map(|&(x,y)|[x,y,0.]).collect(),
+            mesh.tris.clone()).map_err(|e|e.to_string())?;
+        append_secondary_ports(keys,frames,&shell,edge_cubic_mass,source,&mut ports,
+            |phi,node| {
+                let at=|c:usize|model.dof_map[3*node+c].map_or(0.,|i|phi[i]);
+                [0.,0.,at(0),at(2),-at(1),0.]
+            })?;
+    }
     project_modal(model.free, geometry.damping_ratio, source, &ports, options,
         |x, y| model.m.spmv(x, y))
+}
+
+pub(crate) fn validate_frames(keys:&[u8],frames:&[SourceBridgeFrame])->Result<(),String> {
+    if frames.len()!=keys.len() || frames.iter().zip(keys).any(|(frame,key)|frame.midi!=*key) {
+        return Err("source bridge frames must match the complete admitted key order".into());
+    }
+    for frame in frames {
+        if frame.primary.triangle!=frame.secondary.triangle
+            || frame.primary.weights!=frame.secondary.weights
+            || frame.primary.arm_m!=frame.secondary.arm_m {
+            return Err("the two source bridge directions must share one physical site and arm".into());
+        }
+        let product:f64=frame.primary.direction.iter().zip(frame.secondary.direction)
+            .map(|(a,b)|a*b).sum();
+        if !product.is_finite() || product.abs()>1e-10 {
+            return Err("source bridge directions must be orthogonal".into());
+        }
+    }
+    Ok(())
+}
+
+/// Validate each supplied primary in the complete source basis, then append
+/// its actual secondary force. The caller supplies its own nodal DOF map;
+/// the site interpolation is shared with final runtime motion projection.
+pub(crate) fn append_secondary_ports(
+    keys:&[u8],frames:&[SourceBridgeFrame],mesh:&ShellMesh,edge_cubic:bool,
+    source:&SliceReport,ports:&mut Vec<Vec<f64>>,
+    nodal:impl Fn(&[f64],usize)->[f64;6],
+)->Result<(),String> {
+    validate_frames(keys,frames)?;
+    if ports.len()!=keys.len() || ports.iter().any(|row|row.len()!=source.modes.len()) {
+        return Err("source bridge coefficient count differs from the certified modal slice".into());
+    }
+    for (course,frame) in frames.iter().enumerate() {
+        let primary=frame.primary.prepare(mesh,edge_cubic)?;
+        let secondary=frame.secondary.prepare(mesh,edge_cubic)?;
+        let mut lateral=Vec::with_capacity(source.modes.len());
+        for (i,pair) in source.modes.iter().enumerate() {
+            let (value,scale)=primary.project_nodal(primary.nodes().map(|node|nodal(&pair.phi,node)))?;
+            let expected=ports[course][i];
+            if !expected.is_finite()
+                || (value-expected).abs()>1e-10*scale.max(expected.abs()).max(f64::MIN_POSITIVE) {
+                return Err(format!("string polarization key {}, source mode {i}: supplied hammer-plane projection does not match the existing bridge site/basis",frame.midi));
+            }
+            let (value,_)=secondary.project_nodal(secondary.nodes().map(|node|nodal(&pair.phi,node)))?;
+            lateral.push(value);
+        }
+        ports.push(lateral);
+    }
+    Ok(())
 }
 
 /// Project one already solved FE slice, independent of plate/shell DOF layout.
@@ -182,6 +244,51 @@ pub(crate) fn project_modal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secondary_source_force_keeps_lateral_motion_and_bad_dropped_primary_refuses() {
+        // G0: two uncoupled physical source coordinates at a known shell node.
+        // The primary force cannot see lateral translation, but its supplied
+        // orthogonal force must retain that mode in the response basis.
+        let mesh=ShellMesh::new(vec![[0.,0.,0.],[1.,0.,0.],[0.,1.,0.]],vec![[0,1,2]]).unwrap();
+        let mut vertical=vec![0.;18];vertical[2]=1.;
+        let mut lateral=vec![0.;18];lateral[0]=1.;
+        let source=SliceReport {window:(0.,10.),below_low:0,below_high:2,expected:2,
+            modes:vec![ModePair {lambda:1.,phi:vertical,residual:0.,interval:(1.,1.)},
+                ModePair {lambda:9.,phi:lateral,residual:0.,interval:(9.,9.)}],
+            stats:fs_modal::SliceStats {shift:0.,factorizations:0,lanczos_iters:0,
+                restarts:0,factor_nnz_l:0,factor_peak_bytes:0,pivots_delayed:0}};
+        let primary=super::super::motion::SourceBridgePort {triangle:0,weights:[1.,0.,0.],
+            arm_m:[0.;3],direction:[0.,0.,1.]};
+        let frame=SourceBridgeFrame {midi:69,primary,
+            secondary:super::super::motion::SourceBridgePort {direction:[1.,0.,0.],..primary}};
+        let original=vec![vec![1.,0.]];
+        let mut ports=original.clone();
+        let nodal=|phi:&[f64],node:usize|std::array::from_fn(|c|phi[6*node+c]);
+        append_secondary_ports(&[69],&[frame],&mesh,false,&source,&mut ports,nodal).unwrap();
+        assert_eq!(ports,vec![vec![1.,0.],vec![0.,1.]]);
+        let options=ritz::RitzOptions {max_modes:2,keep_low_modes:0,sample_hz:vec![0.3]};
+        let reduce=|ports:&[Vec<f64>]|project_modal(18,0.01,&source,ports,&options,
+            |x,y|y.copy_from_slice(x)).unwrap();
+        let one=reduce(&original);let both=reduce(&ports);
+        assert_eq!(one.modes.len(),1);assert_eq!(both.modes.len(),2);
+        assert!(one.modes.iter().all(|mode|mode.phi[0]==0.));
+        assert!(both.modes.iter().any(|mode|mode.phi[0].abs()>0.9));
+        assert!(both.report.max_relative_snapshot_error<1e-12);
+
+        // Now the second source mode is rotation about y. A false x arm
+        // leaves the retained vertical mode unchanged but changes this tail's
+        // primary displacement; validating only the reduced basis would hide it.
+        let mut rotated=source.clone();rotated.modes[1].phi.fill(0.);
+        rotated.modes[1].phi[4]=1.;
+        let mut wrong=frame;wrong.primary.arm_m[0]=0.02;wrong.secondary.arm_m[0]=0.02;
+        let error=append_secondary_ports(&[69],&[wrong],&mesh,false,&rotated,
+            &mut original.clone(),nodal).unwrap_err();
+        assert!(error.contains("source mode 1"),"{error}");
+        let error=append_secondary_ports(&[70],&[frame],&mesh,false,&source,
+            &mut original.clone(),nodal).unwrap_err();
+        assert!(error.contains("key order"),"{error}");
+    }
 
     #[test]
     fn complete_source_validation_cannot_hide_bad_unselected_modes_above_runtime_rank() {

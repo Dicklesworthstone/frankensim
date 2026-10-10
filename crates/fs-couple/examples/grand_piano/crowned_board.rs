@@ -14,7 +14,7 @@
 //! See Mamou-Mani et al., JASA 123 (2008), doi:10.1121/1.2836787 for the
 //! distinction between initial crown and a downbearing/prestress calculation.
 use super::board_geometry::{BoardGeometry, PreparedBoard, SurfaceSample,
-    motion::MotionSurface, reduction, ritz};
+    motion::{MotionSurface, SourceBridgeFrame}, reduction, ritz};
 use super::linear::{BoardMode, MAX_BOARD_MODES};
 use fs_plate::{PlateSection, ShellMesh, ShellModel, ShellSupport};
 use fs_plate::shell::stiffened::{BeamSection, ShellBeam, assemble_stiffened_shell};
@@ -211,13 +211,19 @@ impl CrownedBoard {
     /// arms follow the same nodal transformation as the acoustic motion.
     pub fn prepare_reduced(&self,keys:&[u8],upper_hz:f64,retain_motion:bool,
         options:&ritz::RitzOptions)->Result<PreparedBoard,String> {
-        self.prepare_inner_with_reduction(keys,upper_hz,retain_motion,Some(options))
+        self.prepare_reduced_with_ports(keys,upper_hz,retain_motion,options,None)
+    }
+    /// Target both supplied transverse forces in the source equilibrium
+    /// shell, including modes that are invisible in the primary direction.
+    pub fn prepare_reduced_with_ports(&self,keys:&[u8],upper_hz:f64,retain_motion:bool,
+        options:&ritz::RitzOptions,frames:Option<&[SourceBridgeFrame]>)->Result<PreparedBoard,String> {
+        self.prepare_inner_with_reduction(keys,upper_hz,retain_motion,Some(options),frames)
     }
     fn prepare_inner(&self,keys:&[u8],upper_hz:f64,retain_motion:bool)->Result<PreparedBoard,String> {
-        self.prepare_inner_with_reduction(keys,upper_hz,retain_motion,None)
+        self.prepare_inner_with_reduction(keys,upper_hz,retain_motion,None,None)
     }
     fn prepare_inner_with_reduction(&self,keys:&[u8],upper_hz:f64,retain_motion:bool,
-        reduction_options:Option<&ritz::RitzOptions>)->Result<PreparedBoard,String> {
+        reduction_options:Option<&ritz::RitzOptions>,source_frames:Option<&[SourceBridgeFrame]>)->Result<PreparedBoard,String> {
         if !upper_hz.is_finite() || upper_hz<=0. || upper_hz>80_000. || keys.is_empty() {
             return Err("invalid crowned soundboard frequency/key budget".into());
         }
@@ -233,6 +239,7 @@ impl CrownedBoard {
                 return Err(format!("missing or duplicated crowned bridge key {key}"));
             }
         }
+        if let Some(frames)=source_frames {reduction::validate_frames(keys,frames)?;}
         let (model,acoustic_mesh,equilibrium)=downbearing::prepare(self)?;
         let report=fs_plate::modes_shell(&model,(0.,(TAU*upper_hz).powi(2)),&fs_plate::SliceOptions::default())
             .map_err(|e|e.to_string())?;
@@ -246,12 +253,16 @@ impl CrownedBoard {
             if report.modes.iter().any(|pair|pair.phi.len()!=model.free) {
                 return Err("invalid source crowned eigenvector dimension".into());
             }
-            let ports:Vec<Vec<f64>>=keys.iter().map(|key| {
+            let mut ports:Vec<Vec<f64>>=keys.iter().map(|key| {
                 let site=self.sites.iter().find(|site|site.key==*key)
                     .expect("every requested crowned bridge was admitted above");
                 report.modes.iter().map(|pair|
                     bridge_displacement(&model,&pair.phi,self.mesh.tris[site.tri],site)).collect()
             }).collect();
+            if let Some(frames)=source_frames {
+                reduction::append_secondary_ports(keys,frames,&acoustic_mesh,false,&report,&mut ports,
+                    |phi,node|std::array::from_fn(|c|model.dof_map[6*node+c].map_or(0.,|d|phi[d])))?;
+            }
             reduction::project_modal(model.free,self.damping,&report,&ports,options,
                 |x,y|model.m.spmv(x,y))
         }).transpose()?;
@@ -309,6 +320,9 @@ impl CrownedBoard {
         let (physical_damping,reduction)=if let Some(value)=reduced {
             provenance.push_str(&format!("; explicit bridge-driven Ritz projection: {} source modes, {} retained, {} unchanged low modes; mixed tail intervals certify the projected equilibrium pencil only",
                 value.report.source_modes,modes.len(),value.report.protected_low_modes));
+            if source_frames.is_some() {
+                provenance.push_str("; Ritz targets include both supplied transverse bridge directions");
+            }
             (Some(value.physical_damping),Some(value.report))
         } else {(None,None)};
         Ok(PreparedBoard {modes,surface,motion,area_m2:surface_area,mass_kg:self.mass_kg,

@@ -1426,12 +1426,13 @@ conduction `radiation` object retains the complete final fine endpoint and
 card/source evidence; `transient.radiation` aggregates both grids' work and
 maximum physical energy residual. Linear work caps each solid response
 (including all Newton corrections); the radiation cap bounds repeated
-responses per airflow evaluation (or endpoint without airflow). The checked
-product of air, radiation and linear caps is the disclosed full endpoint
-Krylov allowance. Per-step nonlinear details describe the final inner solve,
-while radiation and trajectory counters include all trials. Driver semantics
-version 54 includes native quasi-steady airflow transients and keeps this
-behavior separate from older retained solves.
+responses per outer airflow or natural-convection evaluation (or endpoint
+without either). The checked product of outer convection, radiation and
+linear caps is the disclosed full endpoint Krylov allowance. Per-step
+nonlinear details describe the final inner solve, while radiation and
+trajectory counters include all trials. Driver semantics version 55 includes
+native natural-convection transients and keeps this behavior separate from
+older retained solves.
 
 `data/reference-project/cooling-radiative-pulse.fsim` combines a declared
 startup pulse with ambient radiation using the native validate/import/solve
@@ -1457,10 +1458,37 @@ actual-air coupled energy residual and every nested numerical work count.
 `transient.conjugate` retains trajectory totals and the full product of the
 airflow, radiation and solid-response work caps; `conduction.conjugate`
 retains the final fine endpoint. Airflow is quasi-steady at the fixed retained
-operating point, with no air storage or fan dynamics. Natural convection
-remains unadmitted with native storage. The complete fan-cooled pulse input
-is `examples/heatsink-fan/heatsink-fan-pulse.fsim`; its sourced capacity and
-fan curve are explicitly synthetic.
+operating point, with no air storage or fan dynamics. The complete fan-cooled
+pulse input is `examples/heatsink-fan/heatsink-fan-pulse.fsim`; its sourced
+capacity and fan curve are explicitly synthetic.
+
+Native `natural-convection` also composes with heat storage, endpoint k(T),
+matching contact, scheduled power and ambient radiation. It reuses the
+existing Churchill–Chu card and signed area-mean wall law. The initial
+coefficient guess permits powered startup from ambient; each solved
+candidate must satisfy the actual law and its Rayleigh domain. Exact
+equilibrium and out-of-domain Rayleigh numbers retain the owner's named
+refusals. Natural and airflow-convection boundaries in the same transient
+remain explicitly unadmitted.
+
+Every natural trial holds the accepted old field fixed. Acceptance requires
+relative h convergence at 1e-10, the full physical free residual and the
+original physical joule energy gate. The free-residual target is frozen
+after the first physical candidate; later inner solves reserve room for the
+outer law discrepancy. The natural loop has at most 80 evaluations. The
+checked work admission includes all nested radiation/Newton/Krylov responses
+and at most 160 direct endpoint audits. A successful endpoint performs
+2*iterations-1 direct audits and retains its last counted solid response;
+no post-convergence re-solve is hidden.
+
+Per-step `natural` evidence separates applied and actual coefficients,
+convective fluxes, physical residual/threshold, prescribed storage reaction,
+radiation, energy and work. The common final energy retains the applied
+operator; `conduction.natural` retains the final physical card receipt.
+`transient.natural` retains both grids' work, maximum accepted physical
+energy residual and fine integrated heat balance.
+`data/reference-project/cooling-passive-pulse.fsim` is the complete synthetic
+passive pulse input. Its final-time temperature scope remains explicit.
 
 Optional `power-schedules` supply absolute delivered watts for named volume
 regions, replacing their static `power` rows without applying duty factors

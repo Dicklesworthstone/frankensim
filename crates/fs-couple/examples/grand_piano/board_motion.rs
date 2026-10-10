@@ -21,6 +21,107 @@ pub const EDGE_CUBIC_QUADRATURE: [([f64; 3], f64); 4] = [
     ([0.2, 0.2, 0.6], 25. / 48.),
 ];
 
+/// A supplied physical force/displacement probe, independent of a modal basis.
+/// Preparing the map once permits projecting a certified source slice before
+/// reduction without allocating an oversized runtime `MotionSurface`.
+#[derive(Clone, Copy, Debug)]
+pub struct SourceBridgePort {
+    pub triangle: usize,
+    pub weights: [f64; 3],
+    pub arm_m: [f64; 3],
+    pub direction: [f64; 3],
+}
+
+/// The two admitted transverse directions of one source string course.
+/// The primary must match the geometric board's existing bridge coefficient
+/// in every source mode before that mode can be removed by reduction.
+#[derive(Clone, Copy, Debug)]
+pub struct SourceBridgeFrame {
+    pub midi: u8,
+    pub primary: SourceBridgePort,
+    pub secondary: SourceBridgePort,
+}
+
+/// One structural site's exact linear map, shared by source force snapshots
+/// and the final runtime motion surface. It only needs three nodal states.
+pub struct SiteProjection {
+    nodes: [usize; 3],
+    port: SourceBridgePort,
+    cubic: Option<([f64; 9], [[f64; 9]; 2])>,
+}
+
+impl SourceBridgePort {
+    pub fn prepare(&self, mesh: &ShellMesh, edge_cubic: bool) -> Result<SiteProjection, String> {
+        let &nodes = mesh.tris.get(self.triangle)
+            .ok_or("motion projection has no such structural facet")?;
+        if self.weights.iter().chain(&self.arm_m).chain(&self.direction).any(|v| !v.is_finite())
+            || self.weights.iter().any(|b| *b < -1e-10 || *b > 1. + 1e-10)
+            || (self.weights.iter().sum::<f64>() - 1.).abs() > 1e-8
+            || (dot(self.direction, self.direction) - 1.).abs() > 1e-8 {
+            return Err("motion projection requires in-triangle weights, a finite SI arm and a unit direction".into());
+        }
+        let cubic = if edge_cubic {
+            let [Some(a), Some(b), Some(c)] = nodes.map(|node| mesh.nodes.get(node)) else {
+                return Err("motion projection has an invalid structural node".into());
+            };
+            if a.iter().chain(b).chain(c).any(|v| !v.is_finite()) || a[2] != b[2] || a[2] != c[2] {
+                return Err("edge-cubic motion requires a finite flat XY facet".into());
+            }
+            let x = [a[0], b[0], c[0]]; let y = [a[1], b[1], c[1]];
+            Some((fs_plate::edge_cubic_transverse_shape(&x, &y, self.weights),
+                fs_plate::edge_cubic_transverse_gradient_shape(&x, &y, self.weights)))
+        } else { None };
+        Ok(SiteProjection { nodes, port: *self, cubic })
+    }
+}
+
+impl SiteProjection {
+    pub fn nodes(&self) -> [usize; 3] { self.nodes }
+
+    /// Project physical `(u_x,u_y,u_z,theta_x,theta_y,theta_z)` at the three
+    /// nodes returned by `nodes()`. The second result bounds absolute terms
+    /// for primary-port consistency checks without a unit-sized floor.
+    pub fn project_nodal(&self, nodal: [[f64; 6]; 3]) -> Result<(f64, f64), String> {
+        if nodal.iter().flatten().any(|v| !v.is_finite()) {
+            return Err("motion projection contains a nonfinite nodal coordinate".into());
+        }
+        let SourceBridgePort { weights: barycentric, arm_m, direction, .. } = self.port;
+        let (value, scale) = if let Some((shape, gradient)) = &self.cubic {
+            if nodal.iter().any(|q| q[0] != 0. || q[1] != 0. || q[5] != 0.) {
+                return Err("edge-cubic motion cannot discard in-plane or drilling coordinates".into());
+            }
+            let dofs: [f64; 9] = std::array::from_fn(|i| {
+                let q = nodal[i / 3]; match i % 3 { 0 => q[2], 1 => -q[4], _ => q[3] }
+            });
+            let sample = |row: &[f64; 9]| row.iter().zip(dofs).map(|(a, b)| a * b).sum::<f64>();
+            let w = sample(shape); let theta = [sample(&gradient[1]), -sample(&gradient[0]), 0.];
+            let rotation = cross(theta, arm_m);
+            let value = dot(direction, [rotation[0], rotation[1], w + rotation[2]]);
+            let dx_scale = (direction[2] * arm_m[0]).abs() + (direction[0] * arm_m[2]).abs();
+            let dy_scale = (direction[2] * arm_m[1]).abs() + (direction[1] * arm_m[2]).abs();
+            let scale = (0..9).map(|i| dofs[i].abs() * (direction[2].abs() * shape[i].abs()
+                + dx_scale * gradient[0][i].abs() + dy_scale * gradient[1][i].abs())).sum();
+            (value, scale)
+        } else {
+            let mut value = 0.; let mut scale = 0.;
+            // Preserve the original P1 projection's value arithmetic.
+            for (i, q) in nodal.into_iter().enumerate() {
+                let rotation = cross([q[3], q[4], q[5]], arm_m);
+                let u = std::array::from_fn(|c| q[c] + rotation[c]);
+                value += barycentric[i] * dot(direction, u);
+                let rotation_scale = [(q[4] * arm_m[2]).abs() + (q[5] * arm_m[1]).abs(),
+                    (q[5] * arm_m[0]).abs() + (q[3] * arm_m[2]).abs(),
+                    (q[3] * arm_m[1]).abs() + (q[4] * arm_m[0]).abs()];
+                scale += barycentric[i].abs() * (0..3).map(|c|
+                    direction[c].abs() * (q[c].abs() + rotation_scale[c])).sum::<f64>();
+            }
+            (value, scale)
+        };
+        if !value.is_finite() || !scale.is_finite() { return Err("skin motion projection overflow".into()); }
+        Ok((value, scale))
+    }
+}
+
 #[derive(Debug)]
 pub struct MotionSurface {
     pub mesh: ShellMesh,
@@ -123,66 +224,15 @@ impl MotionSurface {
     /// Both mechanics and skin pressure must use this same linear map.
     pub fn project_at(&self,element:usize,barycentric:[f64;3],arm_m:[f64;3],direction:[f64;3])
         ->Result<(Vec<f64>,Vec<f64>),String> {
-        let &tri=self.mesh.tris.get(element).ok_or("motion projection has no such structural facet")?;
-        if barycentric.iter().chain(&arm_m).chain(&direction).any(|v|!v.is_finite())
-            || barycentric.iter().any(|b|*b < -1e-10 || *b > 1.+1e-10)
-            || (barycentric.iter().sum::<f64>()-1.).abs()>1e-8
-            || (dot(direction,direction)-1.).abs()>1e-8 {
-            return Err("motion projection requires in-triangle weights, a finite SI arm and a unit direction".into());
-        }
-        let cubic=if self.edge_cubic {
-            let [Some(a),Some(b),Some(c)]=tri.map(|node|self.mesh.nodes.get(node)) else {
-                return Err("motion projection has an invalid structural node".into());
-            };
-            if a.iter().chain(b).chain(c).any(|v|!v.is_finite()) || a[2]!=b[2] || a[2]!=c[2] {
-                return Err("edge-cubic motion requires a finite flat XY facet".into());
-            }
-            let x=[a[0],b[0],c[0]];let y=[a[1],b[1],c[1]];
-            Some((fs_plate::edge_cubic_transverse_shape(&x,&y,barycentric),
-                fs_plate::edge_cubic_transverse_gradient_shape(&x,&y,barycentric)))
-        } else {None};
+        let projection=SourceBridgePort {triangle:element,weights:barycentric,arm_m,direction}
+            .prepare(&self.mesh,self.edge_cubic)?;
         let mut result=Vec::with_capacity(self.shapes.len());
         let mut scales=Vec::with_capacity(self.shapes.len());
         for mode in &self.shapes {
-            let [Some(a),Some(b),Some(c)]=tri.map(|node|mode.get(node)) else {
+            let [Some(a),Some(b),Some(c)]=projection.nodes().map(|node|mode.get(node)) else {
                 return Err("motion projection is missing a retained nodal coordinate".into());
             };
-            let nodal=[*a,*b,*c];
-            if nodal.iter().flatten().any(|v|!v.is_finite()) {
-                return Err("motion projection contains a nonfinite nodal coordinate".into());
-            }
-            let (value,scale)=if let Some((shape,gradient))=&cubic {
-                if nodal.iter().any(|q|q[0]!=0. || q[1]!=0. || q[5]!=0.) {
-                    return Err("edge-cubic motion cannot discard in-plane or drilling coordinates".into());
-                }
-                let dofs:[f64;9]=std::array::from_fn(|i| {
-                    let q=nodal[i/3];match i%3 {0=>q[2],1=>-q[4],_=>q[3]}
-                });
-                let sample=|row:&[f64;9]|row.iter().zip(dofs).map(|(a,b)|a*b).sum::<f64>();
-                let w=sample(shape);let theta=[sample(&gradient[1]),-sample(&gradient[0]),0.];
-                let rotation=cross(theta,arm_m);
-                let value=dot(direction,[rotation[0],rotation[1],w+rotation[2]]);
-                let dx_scale=(direction[2]*arm_m[0]).abs()+(direction[0]*arm_m[2]).abs();
-                let dy_scale=(direction[2]*arm_m[1]).abs()+(direction[1]*arm_m[2]).abs();
-                let scale=(0..9).map(|i|dofs[i].abs()*(direction[2].abs()*shape[i].abs()
-                    +dx_scale*gradient[0][i].abs()+dy_scale*gradient[1][i].abs())).sum();
-                (value,scale)
-            } else {
-                let mut value=0.;let mut scale=0.;
-                // Preserve the original P1 projection's value arithmetic.
-                for (i,q) in nodal.into_iter().enumerate() {
-                    let rotation=cross([q[3],q[4],q[5]],arm_m);
-                    let u=std::array::from_fn(|c|q[c]+rotation[c]);
-                    value+=barycentric[i]*dot(direction,u);
-                    let rotation_scale=[(q[4]*arm_m[2]).abs()+(q[5]*arm_m[1]).abs(),
-                        (q[5]*arm_m[0]).abs()+(q[3]*arm_m[2]).abs(),
-                        (q[3]*arm_m[1]).abs()+(q[4]*arm_m[0]).abs()];
-                    scale+=barycentric[i].abs()*(0..3).map(|c|
-                        direction[c].abs()*(q[c].abs()+rotation_scale[c])).sum::<f64>();
-                }
-                (value,scale)
-            };
-            if !value.is_finite() || !scale.is_finite() {return Err("skin motion projection overflow".into());}
+            let (value,scale)=projection.project_nodal([*a,*b,*c])?;
             result.push(value);scales.push(scale);
         }
         Ok((result,scales))
@@ -258,6 +308,47 @@ mod tests {
         let q=vec![[0.;6],[0.,0.,1.,0.,-3.,0.],[0.;6]];
         let small=q.iter().map(|a|a.map(|v|v*1e-12)).collect();
         MotionSurface::new_edge_cubic(mesh,vec![q,small]).unwrap()
+    }
+    #[test]
+    fn source_site_map_commutes_with_modal_reduction_and_preserves_force_work() {
+        for edge_cubic in [false, true] {
+            let motion = if edge_cubic {
+                let mut motion = cubic_mode();
+                motion.shapes[1] = vec![[0.; 6], [0.,0.,-0.3,0.4,1.2,0.],
+                    [0.,0.,0.2,-0.5,0.7,0.]];
+                motion
+            } else {
+                let mesh = ShellMesh::new(vec![[0.,0.,0.], [1.,0.,0.03], [0.,1.,0.02]],
+                    vec![[0,1,2]]).unwrap();
+                MotionSurface::new(mesh, vec![
+                    vec![[1.,2.,3.,4.,5.,6.]; 3],
+                    vec![[-0.2,0.3,0.7,-0.8,0.4,0.9]; 3],
+                ]).unwrap()
+            };
+            for direction in [[0.,0.,1.], [0.6,0.8,0.], [0.,0.6,0.8]] {
+                let port = SourceBridgePort { triangle: 0, weights: [0.17,0.29,0.54],
+                    arm_m: [0.014,-0.009,0.02], direction };
+                let projection = port.prepare(&motion.mesh, edge_cubic).unwrap();
+                let (runtime, scales) = motion.project_at(port.triangle, port.weights,
+                    port.arm_m, port.direction).unwrap();
+                let mut source = Vec::new();
+                for (i, mode) in motion.shapes.iter().enumerate() {
+                    let (value, scale) = projection.project_nodal(projection.nodes().map(|node| mode[node])).unwrap();
+                    assert_eq!(value.to_bits(), runtime[i].to_bits());
+                    assert_eq!(scale.to_bits(), scales[i].to_bits());
+                    source.push(value);
+                }
+                let coordinates = [0.31,-0.27];
+                let mixed = projection.nodes().map(|node| std::array::from_fn(|c|
+                    motion.shapes.iter().zip(coordinates).map(|(mode,q)| mode[node][c]*q).sum()));
+                let (displacement, scale) = projection.project_nodal(mixed).unwrap();
+                let modal: f64 = source.iter().zip(coordinates).map(|(b,q)| b*q).sum();
+                assert!((displacement-modal).abs() < 1e-14*scale.max(modal.abs()));
+                let force = 0.42;
+                let modal_work: f64 = source.iter().zip(coordinates).map(|(b,q)| (force*b)*q).sum();
+                assert!((force*displacement-modal_work).abs() < 1e-14*scale.max(modal.abs()));
+            }
+        }
     }
     #[test]
     fn cubic_motion_uses_analytic_rotations_and_the_actual_attachment_arm() {

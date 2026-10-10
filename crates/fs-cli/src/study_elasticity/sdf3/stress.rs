@@ -6,14 +6,14 @@ use fs_ascent::projected_al::{
 };
 use fs_topopt::pipeline::LoadCase;
 use fs_topopt::sdf3::design::{StressDesignCheckpoint3, StressDesignIteration3, StressDesignOptions3, StressDesignStudy3};
-use fs_topopt::sdf3::stress::{StressError3, StressEvaluation3};
+use fs_topopt::sdf3::stress::{StressError3, StressEvaluation3, StressMeasure3};
 
 #[path = "stress/output.rs"]
 mod output;
 #[path = "stress/resume.rs"]
 mod resume;
 
-const SCOPE: &str = "Estimated fixed-background 3-D linear-elastic SIMP minimum-volume design. The constraint is a normalized volume-and-load-weighted qp von Mises aggregate in Pa; it is not a limit on sampled or continuum maximum stress. Independent body, reference-pressure and traction cases remain separate. The initial stress and volume adjoints pass bounded directional finite differences before optimization. Authored solid and zero-density regions are enforced in the physical map before every solve and pullback, including endpoint restoration; the raw density floor continues to guard optimizable material against ersatz stress foldback. Accepted augmented-Lagrangian steps can be infeasible; the least-volume accepted feasible design is retained separately and selected for export when available. KKT residuals describe the last accepted iterate, not an earlier exported incumbent. Only numerical convergence with a feasible current iterate reports completed. Every accepted update is durable before further optimization. Cross-process resume restores the complete accepted optimizer state under the same source and executable, rebuilding geometry and re-solving the accepted and distinct feasible incumbent endpoints against the original allowances. Earlier optimizer steps are not replayed. Failed restoration and work after a process crash cannot be durably charged; previous checkpoints remain intact. Report and package export all retained results without another solve. No continuum safety, global optimum, manufacturing, adaptivity or physical-validation claim is made. Memory is an admission envelope, not measured RSS. Wall time and cancellation are cooperative; quadrature, solver, stress-cell and optimizer boundaries poll, while individual kernels and ledger I/O are indivisible.";
+const SCOPE: &str = "Estimated fixed-background 3-D linear-elastic SIMP minimum-volume design. The stress_measure declaration identifies the constrained functional in Pa: the original normalized average or an explicitly selected unweighted sampled-peak bound of both relaxed and physical stresses. Only the latter bounds retained numerical samples, including every declared case; neither bounds continuum maximum stress. Independent body, reference-pressure and traction cases remain separate. The initial stress and volume adjoints pass bounded directional finite differences before optimization. Authored solid and zero-density regions are enforced in the physical map before every solve and pullback, including endpoint restoration; the raw density floor continues to guard optimizable material against ersatz stress foldback. Accepted augmented-Lagrangian steps can be infeasible; the least-volume accepted feasible design is retained separately and selected for export when available. KKT residuals describe the last accepted iterate, not an earlier exported incumbent. Only numerical convergence with a feasible current iterate reports completed. Every accepted update is durable before further optimization. Cross-process resume restores the complete accepted optimizer state under the same source and executable, rebuilding geometry and re-solving the accepted and distinct feasible incumbent endpoints against the original allowances. Earlier optimizer steps are not replayed. Failed restoration and work after a process crash cannot be durably charged; previous checkpoints remain intact. Report and package export all retained results without another solve. No continuum safety, global optimum, manufacturing, adaptivity or physical-validation claim is made. Memory is an admission envelope, not measured RSS. Wall time and cancellation are cooperative; quadrature, solver, stress-cell and optimizer boundaries poll, while individual kernels and ledger I/O are indivisible.";
 const EVALUATION_CAP: &str = "stress evaluation allowance exhausted";
 type StressResult<T> = std::result::Result<T, ProjectedAlError<StressError3>>;
 
@@ -101,6 +101,7 @@ fn gradient_gate(
     loads: &[LoadCase<'_>],
     rho: &[f64],
     options: StressDesignOptions3,
+    measure: StressMeasure3,
     audit: &mut Audit,
     control: &mut SolveControl<'_>,
 ) -> StressResult<()> {
@@ -111,7 +112,7 @@ fn gradient_gate(
         }
         audit.evaluations += 1;
         study
-            .evaluate_stress(point, loads, options.stress, control)
+            .evaluate_stress_with_measure(point, loads, options.stress, measure, control)
             .map_err(ProjectedAlError::Evaluation)
     };
     let baseline = evaluate(rho)?;
@@ -376,6 +377,7 @@ fn compute_observed(
             &loads,
             &raw,
             options,
+            spec.stress_measure,
             &mut state.audit,
             &mut control,
         ) {
@@ -392,11 +394,11 @@ fn compute_observed(
         // fails before a complete optimizer session can be returned.
         state.optimizer_work.evaluations = 1;
         let initialized = match recovery {
-            None => StressDesignStudy3::new(
-                &mut study, &loads, &raw, remaining_options, &mut control,
+            None => StressDesignStudy3::new_with_measure(
+                &mut study, &loads, &raw, remaining_options, spec.stress_measure, &mut control,
             ),
-            Some(recovery) => StressDesignStudy3::restore(
-                &mut study, &loads, recovery.checkpoint.clone(), remaining_options, &mut control,
+            Some(recovery) => StressDesignStudy3::restore_with_measure(
+                &mut study, &loads, recovery.checkpoint.clone(), remaining_options, spec.stress_measure, &mut control,
             ),
         };
         let mut design = match initialized {
@@ -467,3 +469,7 @@ pub(super) fn resume(ledger: &Ledger, old: &Loaded, cap: Option<usize>, gate: &C
 #[cfg(test)]
 #[path = "stress/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "stress/peak_tests.rs"]
+mod peak_tests;

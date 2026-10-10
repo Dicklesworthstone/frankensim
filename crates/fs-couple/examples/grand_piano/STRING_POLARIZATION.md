@@ -96,6 +96,17 @@ field and refuse flat-board mass selections. Rayleigh acoustic refinement
 does not change the structural interpolation sites or modes and currently
 requires P1 motion.
 
+With explicit `--board-reduction`, both supplied transverse force directions
+participate in selecting the reduced board basis. Preparation projects them
+from the complete certified source slice before reduction, using the same
+site, physical arm and interpolation law as the final motion surface. The
+primary compatibility check also runs on **all source modes**, including any
+that will be discarded. A source mode driven only by lateral force can
+therefore enter the reduced space without weakening that consistency check.
+This applies to flat boards and the actual equilibrium of crowned/preloaded
+shells in both piano frontends. See [BOARD_REDUCTION.md](BOARD_REDUCTION.md) for
+the explicit source and runtime budgets and the scope of projection error.
+
 ## Played behavior and limits
 
 The original hammer/felt solver drives the primary direction only. Each key

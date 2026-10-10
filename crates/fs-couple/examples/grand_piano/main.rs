@@ -133,7 +133,8 @@ The explicit frequency band ordinarily admits at most 128 board modes.
 --board-reduction explicitly permits up to 512 source modes on a flat or crowned board,
 then retains at most max_modes (1..128), including keep_low_modes exact low
 modes. Static and damped responses at 1..16 increasing target frequencies guide
-the remaining basis at every admitted primary bridge. Targets must lie within
+the remaining basis at every admitted primary bridge and both directions of
+each supplied --string-polarization frame. Targets must lie within
 --board-band-hz; that source band is never widened implicitly. Full projected
 wood damping, bridge motion and the radiating field stay in the same basis.
 For supplied downbearing, reduction uses the solved equilibrium tangent modes.
@@ -627,18 +628,27 @@ fn prepare_geometric_board_with_reduction(text: &str, keys: &[u8], band_hz: f64,
     equilibrate_mass: bool, consistent_mass: bool, edge_cubic_mass: bool,
     acoustic_refinement_levels: usize, retain_motion: bool,
     reduction: Option<&board_geometry::ritz::RitzOptions>) -> Result<board_geometry::PreparedBoard, String> {
+    prepare_geometric_board_with_source_ports(text, keys, band_hz, equilibrate_mass,
+        consistent_mass, edge_cubic_mass, acoustic_refinement_levels, retain_motion, reduction, None)
+}
+#[allow(clippy::too_many_arguments)]
+fn prepare_geometric_board_with_source_ports(text: &str, keys: &[u8], band_hz: f64,
+    equilibrate_mass: bool, consistent_mass: bool, edge_cubic_mass: bool,
+    acoustic_refinement_levels: usize, retain_motion: bool,
+    reduction: Option<&board_geometry::ritz::RitzOptions>,
+    frames: Option<&[board_geometry::motion::SourceBridgeFrame]>) -> Result<board_geometry::PreparedBoard, String> {
     if let Some(reduction) = reduction {
         if crowned_board::is_crowned(text) {
             if equilibrate_mass || consistent_mass || edge_cubic_mass || acoustic_refinement_levels != 0 {
                 return Err("flat-board mass controls require a flat geometric board".into());
             }
             return crowned_board::CrownedBoard::read(text)?
-                .prepare_reduced(keys, band_hz, retain_motion, reduction);
+                .prepare_reduced_with_ports(keys, band_hz, retain_motion, reduction, frames);
         }
         return board_geometry::BoardGeometry::read(text)?
             .with_acoustic_refinement(acoustic_refinement_levels)?
-            .prepare_reduced(keys, band_hz, retain_motion, equilibrate_mass,
-                consistent_mass, edge_cubic_mass, reduction);
+            .prepare_reduced_with_ports(keys, band_hz, retain_motion, equilibrate_mass,
+                consistent_mass, edge_cubic_mass, reduction, frames);
     }
     if crowned_board::is_crowned(text) {
         if equilibrate_mass || consistent_mass || edge_cubic_mass || acoustic_refinement_levels != 0 {
@@ -972,10 +982,11 @@ fn run() -> Result<(), String> {
     };
     let (modes, board_source, surface, polarization, physical_damping) = if let Some(text) = &geometry_text {
         let start = std::time::Instant::now();
-        let prepared = prepare_geometric_board_with_reduction(text, &scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
+        let source_ports = polarization.as_ref().map(|spec| spec.source_ports(&scale)).transpose()?;
+        let prepared = prepare_geometric_board_with_source_ports(text, &scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
             options.board_band_hz, options.equilibrate_board_mass, options.consistent_board_mass,
             options.edge_cubic_board_mass, options.acoustic_refinement_levels, polarization.is_some(),
-            options.board_reduction.as_ref())?;
+            options.board_reduction.as_ref(), source_ports.as_deref())?;
         let projected = polarization.as_ref().map(|spec|
             spec.project(&scale, &prepared.modes, prepared.motion.as_ref())).transpose()?;
         let model_name = if crowned_board::is_crowned(text) { "Crowned shell" } else { "Flat plate" };

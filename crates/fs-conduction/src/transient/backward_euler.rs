@@ -21,6 +21,8 @@ mod adjoint;
 pub use adjoint::StepLinearization;
 mod radiation;
 pub use radiation::RadiationStepSolution;
+mod endpoint;
+pub use endpoint::EndpointEvaluation;
 
 use fs_exec::Cx;
 use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, checked_cg, norm2};
