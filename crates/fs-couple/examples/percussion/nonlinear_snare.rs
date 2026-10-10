@@ -1,4 +1,4 @@
-//! Select physical nonlinearity explicitly; never erase supplied head or wire laws.
+//! Select the numerical owner without changing supplied head or wire laws.
 use super::Error;
 
 pub fn option(args:&mut Vec<String>)->Result<bool,Error> {
@@ -19,18 +19,18 @@ pub fn admit_prepared_command(prepared:bool,nonlinear:bool,command:&str)->Result
     admit_command(nonlinear,command)?;
     if prepared && !(matches!(command,"splash"|"splash-wav"|"splash-mic"|
         "drum"|"drum-wav"|"drum-mic"|"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic")
-        || nonlinear && snare(command)) {
-        return Err("nonlinear preparation requires splash, drum, drum-stretch, or snare with nonlinear material/contact, flexible shafts or moving supports".into());
+        || snare(command)) {
+        return Err("nonlinear preparation requires splash, drum, drum-stretch, or snare; drum-modal keeps its explicitly selected modal owner".into());
     }
     Ok(())
 }
-pub fn admit_image(linear_prepared:bool,wires:bool,nonlinear:bool)->Result<(),Error> {
+pub fn admit_image(linear_prepared:bool,nonlinear:bool)->Result<(),Error> {
     if nonlinear && linear_prepared {
         return Err("nonlinear head/wire material, felt contact and moving supports require coupled nonlinear-capable mechanics".into());
     }
-    if wires && !linear_prepared && !nonlinear {
-        return Err("a fully linear snare keeps its prepared modal image; select nonlinear material/contact, flexible shafts or moving supports explicitly".into());
-    }
+    // The joint contact owner also admits linear body potentials. In particular,
+    // analytic/substepped integration and radiation memory must not force a
+    // caller to invent head stretching, material memory or flexible hardware.
     Ok(())
 }
 

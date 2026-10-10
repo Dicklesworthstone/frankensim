@@ -4,8 +4,9 @@ Add `--head-stretching` to any `snare` or `snare-off` command, including its
 `-wav` and `-mic` forms. Both heads then use the existing geometry-derived,
 statically relaxed von Karman membrane potential. All 20 strands, 160 wire
 coordinates and 240 distributed wire/head contacts remain in the same physical
-state. The wires' existing nonzero Hunt–Crossley loss is retained. Omitting the
-flag keeps the original linear-head prepared modal/contact image unchanged.
+state. The wires' existing nonzero Hunt–Crossley loss is retained. With no other
+physics or numerical-image option, omitting the flag keeps the original
+linear-head prepared modal/contact image.
 
 ```sh
 # Nonlinear-head mechanical onset with all wires and spatial enclosed air.
@@ -28,9 +29,20 @@ energy, membrane-slope or fit tolerance is relaxed to manufacture an output.
 Newton image. `--analytic-newton` additionally selects exact storage and
 contact-loss derivatives. Without either option, the allocating nonlinear
 reference uses the same contact-loss equation. These numerical choices do not
-replace the nonlinear heads with a linear model. On ordinary snare commands
-without `--head-stretching`, nonlinear preparation continues to refuse rather
-than silently changing their physical model.
+replace the nonlinear heads with a linear model. On ordinary snare commands,
+these options also select the joint solver with the supplied LINEAR head and
+wire potentials. No artificial stretching, material history or flexible shaft
+is required to request that numerical image. `--impact-substeps` alone selects
+its prepared finite-difference image before adding internal step recovery.
+`--radiation-feedback` selects the same joint owner so it can retain reciprocal
+acoustic memory; see [RADIATION_FEEDBACK.md](RADIATION_FEEDBACK.md).
+
+For example, `snare 4096 --analytic-newton --impact-substeps 8 511` uses the
+unchanged linear heads, full wire bank, wire-contact loss and enclosed air.
+Adding `--head-stretching` changes the head potential explicitly. The different
+modal and Gonzalez time discretizations need time-refinement comparison; they
+are not claimed bit-identical trajectories. The explicit `drum-modal` family
+continues to select its own modal owner and refuses nonlinear preparation.
 
 ## Contact loss inside the actual mechanical equation
 

@@ -101,6 +101,76 @@ fn acoustic_reaction_composes_with_real_stick_head_cavity_and_material_memory() 
     assert!(crate::head_relaxation::observation(&loaded.system).stored_energy_j>0.);
     assert!((energy(&loaded.system)+loss-initial).abs()<1e-6);
 }
+
+#[test]
+fn linear_snare_keeps_all_wires_and_accepts_joint_acoustic_memory_without_head_stretching() {
+    let drum=crate::drum_spec::Spec{radial_intervals:2,azimuths:8,..crate::drum_spec::Spec::reference()};
+    let make=|wires,prepared|crate::drum_with_cavity_loss(256,MECHANICAL_DT,true,prepared,
+        Some(wires),false,crate::Stroke{speed_m_s:0.,position_m:Some([0.06,0.01])},
+        true,None,Some(drum.clone()),
+        Some(crate::Stroke{speed_m_s:0.,position_m:Some([-0.05,0.02])}),&[],20.).unwrap();
+    let wires=crate::snare::SnareSet::reference(false);
+    let reference=make(wires,false);let modal=make(wires,true);
+    assert!(matches!(&reference.system,Mechanics::Reference(_)));
+    assert!(matches!(&modal.system,Mechanics::Prepared(_)));
+    assert_eq!(reference.system.state(),modal.system.state());
+    assert_eq!(reference.force,modal.force);
+    assert_eq!(reference.observer_a,modal.observer_a);
+    assert_eq!(reference.observer_b,modal.observer_b);
+    assert_eq!(reference.acoustics.as_ref().unwrap().state_modes,
+        modal.acoustics.as_ref().unwrap().state_modes);
+    let second=reference.second_stick.unwrap();
+    let air=reference.air.as_ref().unwrap();
+    assert_eq!(air.coupling.structural_modes(),second.coordinate+1+160);
+    assert!(air.coupling.total_modes()>air.coupling.structural_modes());
+    for head in [1,2] {assert!(reference.system.membrane_observation(head).is_none());}
+    admit_instrument(&reference).unwrap();
+    // A declared passive test load isolates composition from the separate BEM
+    // and fit regressions. Every original body and both source/head ranges stay.
+    let sources=reference.acoustics.as_ref().unwrap().state_modes.clone();
+    let model=Model{ports:sources.len(),poles:vec![Pole{omega:1200.,zeta:0.2,
+        coupling:sources.iter().enumerate().map(|(i,_)|if i%2==0{150.}else{-90.}).collect()}]};
+    let prefix=reference.system.state().to_vec();
+    let Mechanics::Reference(system)=reference.system else {unreachable!()};
+    let loaded=system.with_radiation_load(&model,&sources,1).unwrap();
+    assert_eq!(&loaded.state()[..prefix.len()],prefix);
+    assert_eq!(loaded.state().len(),prefix.len()+2);
+    assert_eq!(loaded.radiation_observation().unwrap().poles,1);
+
+    // A smaller bank with declared interference exercises actual wire/head/air
+    // work. This initial contact energy is not a manufactured drive waveform.
+    let wires=crate::snare::SnareSet{strands:2,modes_per_strand:2,contact_cells:4,
+        clearance_m:-2e-6,..wires};
+    let mut reference=make(wires,false);let mut loaded=make(wires,false);
+    let sources=loaded.acoustics.as_ref().unwrap().state_modes.clone();
+    assert_eq!(sources.len(),model.ports);
+    let Mechanics::Reference(system)=loaded.system else {unreachable!()};
+    loaded.system=Mechanics::Reference(system.with_radiation_load(&model,&sources,1).unwrap());
+    let initial=energy(&loaded.system);
+    let bounds=||fs_couple::render::plate::impact::ImpactSubstepConfig{max_depth:4,max_attempts:31};
+    loaded.system=loaded.system.into_analytic_nonlinear().unwrap().with_impact_substeps(bounds()).unwrap();
+    reference.system=reference.system.into_analytic_nonlinear().unwrap().with_impact_substeps(bounds()).unwrap();
+    let gate=CancelGate::new_clock_free();let cancel=CancelGate::new_clock_free();cancel.request();
+    let before=loaded.system.state().to_vec();
+    assert!(loaded.system.step(&loaded.force,&cancel).is_err());
+    assert_eq!(loaded.system.state(),before);
+    let (mut loss,mut changed,mut pressure)=(0.,0.0_f64,0.0_f64);
+    for tick in 1..=256 {
+        let frame=loaded.system.step(&loaded.force,&gate).unwrap();
+        reference.system.step(&reference.force,&gate).unwrap();
+        assert_eq!(frame.time_s,tick as f64*MECHANICAL_DT);
+        assert!(frame.balance_residual_j.abs()<1e-7);
+        loss+=frame.dissipated_energy_j;
+        for (a,b) in loaded.system.state().iter().zip(reference.system.state()) {
+            changed=changed.max((a-b).abs());
+        }
+        pressure=pressure.max(loaded.air.as_ref().unwrap().uniform_pressure(loaded.system.state()).unwrap().abs());
+    }
+    assert!(changed>0. && pressure>0. && loss>0.);
+    assert!(observation(&loaded.system).unwrap().stored_energy_j>0.);
+    for head in [1,2] {assert!(loaded.system.membrane_observation(head).is_none());}
+    assert!((energy(&loaded.system)+loss-initial).abs()<1e-6);
+}
 #[test]
 fn feedback_admission_never_hides_a_different_model_or_consumes_playing_time() {
     let mut args=vec!["hihat-mic".into(),"pair.fshh".into(),"--radiation-feedback".into()];

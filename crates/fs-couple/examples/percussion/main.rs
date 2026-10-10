@@ -268,7 +268,7 @@ fn drum_with_shafts(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<sn
     cavity::validate_drag(drag_per_s)?;
     if drag_per_s!=0.0 && !distributed_cavity {return Err("acoustic drag requires distributed cavity inertia".into());}
     if neck.is_some() && (!distributed_cavity || audio && !prescribed_vent) {return Err("vented audio requires explicit --prescribed-vent-radiation; fully coupled radiation loading is not implemented".into());}
-    nonlinear_snare::admit_image(prepared,snares.is_some(),
+    nonlinear_snare::admit_image(prepared,
         stretching || relaxation.is_some() || mallets.enabled() || mute.is_some()
             || (!prepared && shafts.enabled()) || snares.is_some_and(|s|s.stretching.is_some() || s.carrier.is_some()))?;
     let extra_modes=match snares {Some(spec)=>spec.mode_count()?,None=>0};
@@ -480,9 +480,12 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     let has_carrier=carrier.is_some();
     let carrier_body=3+usize::from(second.is_some());
     let nonlinear_wires=selected_snare.is_some_and(|s|s.stretching.is_some());
+    // A requested numerical image or reciprocal acoustic load needs the joint
+    // owner even when the supplied head and wire potentials are both linear.
+    // Selection must not require changing their constitutive laws or hardware.
     let nonlinear_instrument=head_stretching || nonlinear_wires || has_carrier
         || ((head_relaxation.is_some() || mallets.enabled() || compliant_mute.is_some()
-            || ((prepared_nonlinear || radiation_feedback) && shafts.enabled())) && selected_snare.is_some());
+            || prepared_nonlinear || radiation_feedback) && selected_snare.is_some());
     nonlinear_snare::admit_command(head_stretching,&args[0])?;
     nonlinear_snare::admit_prepared_command(prepared_nonlinear,nonlinear_instrument,&args[0])?;
     if let Some(spec)=&compliant_mute {spec.admit_command(&args[0])?;}

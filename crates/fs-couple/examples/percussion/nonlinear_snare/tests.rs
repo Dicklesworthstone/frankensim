@@ -38,13 +38,14 @@ fn nonlinear_snare_selection_is_explicit_and_composes_with_existing_front_doors(
     assert!(!option(&mut args).unwrap());assert!(option(&mut vec!["--head-stretching".into();2]).is_err());
     for command in ["snare","snare-off","snare-wav","snare-off-wav","snare-mic","snare-off-mic"] {
         admit_command(true,command).unwrap();admit_prepared_command(true,true,command).unwrap();
-        assert!(admit_prepared_command(true,false,command).is_err());
+        admit_prepared_command(true,false,command).unwrap();
         cavity::admit_command(true,command).unwrap();
         if command.ends_with("-mic") {acoustics::stereo::admit_command(Some([0.3,0.0,0.5]),command).unwrap();}
     }
     for command in ["drum-modal","splash","drum-stretch","unknown"] {assert!(admit_command(true,command).is_err());}
-    assert!(admit_image(true,true,true).is_err());assert!(admit_image(false,true,false).is_err());
-    admit_image(false,true,true).unwrap();admit_image(true,true,false).unwrap();
+    assert!(admit_prepared_command(true,false,"drum-modal-mic").is_err());
+    assert!(admit_image(true,true).is_err());
+    admit_image(false,false).unwrap();admit_image(false,true).unwrap();admit_image(true,false).unwrap();
 }
 
 #[test]

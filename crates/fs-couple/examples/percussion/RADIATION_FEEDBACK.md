@@ -23,11 +23,24 @@ pressure render labelled as a load.
 
 The option accepts the nonlinear-capable `splash`, `drum`, `drum-stretch`,
 `snare`, `snare-off`, and `hihat` pressure command families (`-wav`/`-mic`).
-An ordinary linear-only `drum-modal` or snare image cannot retain this memory
-and refuses. Snare playback must explicitly select its nonlinear-capable image,
-for example `--head-stretching`. No strands are removed to make the load fit.
+On a snare, `--radiation-feedback` selects the joint contact/memory owner even
+when both heads and the wires use linear potentials. Their constitutive laws,
+tensions, damping and complete wire bank remain as supplied; head stretching or
+flexible hardware is not a prerequisite. Analytic stepping and impact substeps
+can be selected independently. The explicitly named `drum-modal` image still
+refuses this memory; use the `drum` pressure family for the loaded experiment.
 CSV commands and vented drums refuse: the latter need separation of existing
 neck end corrections from exterior loading to avoid double-counted inertance.
+
+```sh
+# Linear head and wire potentials, complete snare contacts, reciprocal air load.
+cargo run --release -p fs-couple --example percussion -- \
+  snare-mic 4800 20 --cavity-modes --radiation-feedback \
+  --analytic-newton --impact-substeps 8 511 > loaded-linear-snare.wav
+```
+
+This invocation remains subject to the complete acoustic power, fit and work
+gates below. It has not been established by a completed native WAV render.
 
 ## One geometry solve for reaction and microphones
 
