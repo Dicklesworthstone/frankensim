@@ -52,13 +52,32 @@ requires `3*N <= max-steps <= 10000`. Capacities and every other input are part
 of canonical project and run identity. Existing v10 projects migrate with
 storage absent, so they retain their steady behavior.
 
-This product slice supports fixed scalar conductivity, fixed capacity,
-Dirichlet/Neumann/Robin boundaries and matching finite contact. Initial
+This product slice supports fixed capacity, constant or temperature-dependent
+conductivity from the bound material card, Dirichlet/Neumann/Robin boundaries
+and matching finite contact. A temperature-dependent curve is evaluated at
+each trial endpoint, including its actual conductivity derivative in the
+Newton/FGMRES tangent; the solver never substitutes conductivity at the old
+temperature. Each step starts from unchanged physical history until its
+nonlinear residual and energy balance both pass. Initial
 temperature may differ from prescribed boundary temperature; the first step
 includes the discrete boundary storage reaction. An insulated heated body is
 admitted because positive heat capacity anchors its finite-time equation.
+
+For temperature-dependent conductivity, `solver.tolerance-rel` controls the
+relative nonlinear residual against that endpoint's initial residual. The
+absolute residual floor is 1% of the declared energy tolerance divided by the
+square root of the vertex count. The existing numerical policy limits each
+endpoint to 32 Newton updates and 24 backtracks per update; the same linear
+iteration budget covers all of that endpoint's Newton corrections. These
+controls, actual updates, backtracks and joule residuals are retained in the
+`transient.nonlinear` object and each time-step row. An exhausted numerical
+budget or material-validity boundary refuses the unfinished stage. Constant
+conductivity retains the linear path and records `nonlinear: null`.
+
 Time-dependent workloads, radiation, natural or coupled airflow convection,
 spatial ladder/adaptive studies and steady adjoint requests are not admitted
-together with this declaration. Stage cancellation retains the preceding
+together with this declaration. Heat capacity remains temperature independent;
+latent heat and phase changes require a different storage law. Stage
+cancellation retains the preceding
 completed pipeline stages; an unfinished conduction stage restarts from its
 declared initial state.

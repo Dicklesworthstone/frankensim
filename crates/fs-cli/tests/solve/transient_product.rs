@@ -8,7 +8,7 @@ use fs_project::{ConductionTransient, TransientRegionCapacity};
 mod json;
 use json::JsonValue as J;
 
-fn declaration(spec: &mut ProjectSpec, capacity: f64, horizon: f64) {
+pub(super) fn declaration(spec: &mut ProjectSpec, capacity: f64, horizon: f64) {
     let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     setup.transient = Some(ConductionTransient {
         initial_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
@@ -209,6 +209,215 @@ fn g1_native_transient_robin_warming_reports_actual_nested_time_difference() {
     let final_transient = receipt_number_field(&qoi, "value");
     assert!(final_transient > 293.15);
     assert!(final_transient < receipt_number_field(&steady_qoi, "value"));
+}
+
+fn driven_face_project(bytes: &[u8]) -> ProjectSpec {
+    let mut spec = conduction_fixture_project(7, bytes);
+    declaration(&mut spec, 15.0, 0.5);
+    spec.power.as_mut().unwrap()[0].watts.value = 0.0;
+    let binding = &mut spec.materials.as_mut().unwrap()[0];
+    binding.temp_lo.value = 280.0;
+    binding.temp_hi.value = 360.0;
+    spec.envelope.as_mut().unwrap().ambient_lo.value = 300.0;
+    spec.envelope.as_mut().unwrap().ambient_hi.value = 300.0;
+    spec.assignments.as_mut().unwrap()[0].allow_overlap = true;
+    spec.assembly.as_mut().unwrap().push(EntityDecl::Surface {
+        parent: "enclosure".to_string(),
+        name: "driven-face".to_string(),
+        display: "Prescribed thermal reservoir".to_string(),
+        expect_id: None,
+    });
+    spec.assignments.as_mut().unwrap().push(GeometryAssignment {
+        artifact: "enclosure".to_string(),
+        target: "driven-face".to_string(),
+        length_unit: "m".to_string(),
+        selector: MeshSelector::HalfSpace {
+            normal: [1.0, 1.0, 1.0],
+            offset: 1.0,
+            side: HalfSpaceSide::AtLeast,
+            tolerance: 0.0,
+        },
+        allow_overlap: true,
+    });
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.transient.as_mut().unwrap().initial_temperature.value = 300.0;
+    setup.adiabatic_remainder = true;
+    setup.boundaries = vec![ThermalBoundary {
+        target: "driven-face".to_string(),
+        condition: ThermalBoundaryCondition::FixedTemperature {
+            temperature: QtyAny::new(330.0, fs_project::spec::dims::TEMPERATURE),
+        },
+    }];
+    spec
+}
+
+fn transient_conductivity_cards(kind: &str) -> CardPackSet {
+    let (property, interpolation) = match kind {
+        "nonlinear" | "constant-curve" => (
+            fs_matdb::PropertyValue::Curve {
+                abscissa: "T".to_string(),
+                abscissa_dims: fs_project::spec::dims::TEMPERATURE,
+                knots: if kind == "nonlinear" {
+                    vec![(280.0, 1.6), (360.0, 3.2)]
+                } else {
+                    vec![(280.0, 2.0), (360.0, 2.0)]
+                },
+                dims: CONDUCTIVITY_DIMS,
+            },
+            fs_matdb::InterpolationPolicy::LinearInside,
+        ),
+        "constant-scalar" => (
+            fs_matdb::PropertyValue::Scalar {
+                value: 2.0,
+                dims: CONDUCTIVITY_DIMS,
+            },
+            fs_matdb::InterpolationPolicy::ConstantWithinValidity,
+        ),
+        _ => panic!("unknown conductivity fixture"),
+    };
+    CardPackSet::admit(vec![raw_pack(
+        CardPackKind::Material,
+        "fixtures/transient-conductivity.fsmcdpk",
+        material_pack_bytes_with_property("AA6061", kind, 280.0, 360.0, property, interpolation),
+    )])
+    .unwrap()
+}
+
+#[test]
+fn g1_native_transient_nonlinear_driven_face_matches_the_discrete_physical_balance() {
+    let mut fields = Vec::new();
+    for kind in [
+        "nonlinear",
+        "constant-curve",
+        "constant-scalar",
+        "nonlinear",
+    ] {
+        let bytes = tetra_stl();
+        let mut spec = driven_face_project(&bytes);
+        let cards = transient_conductivity_cards(kind);
+        rebind_to(&mut spec, &cards);
+        let decoded = decode(&spec);
+        assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
+        let ledger = Ledger::open(":memory:").unwrap();
+        import_fixture(&ledger, &spec, bytes);
+        let (run, qoi, conduction, solution) =
+            run_conjugate_to_completion(&ledger, &decoded, &cards);
+        let field = J::parse(&solution).unwrap();
+        let mut values: Vec<_> = field
+            .get("temperature")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_f64().unwrap())
+            .collect();
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(
+            values.len(),
+            4,
+            "the analytic oracle requires the imported unit tetra"
+        );
+
+        // Unit tetra: each row-sum capacity is C=15/24=0.625 J/K.
+        // Three driven vertices are 330 K. The remaining scalar equation is
+        // C*(T-new - T-old) + dt*k((T-new+3*330)/4)/2*(T-new-330)=0.
+        // This reference uses no production assembly, matrix or nonlinear solve.
+        let mut expected = 300.0;
+        for _ in 0..2 {
+            let (mut low, mut high) = (expected, 330.0);
+            for _ in 0..80 {
+                let value = 0.5 * (low + high);
+                let k = if kind == "nonlinear" {
+                    0.02 * ((value + 3.0 * 330.0) / 4.0) - 4.0
+                } else {
+                    2.0
+                };
+                let residual = 0.625 * (value - expected) + 0.25 * 0.5 * k * (value - 330.0);
+                if residual > 0.0 {
+                    high = value;
+                } else {
+                    low = value;
+                }
+            }
+            expected = 0.5 * (low + high);
+        }
+        close(values[0], expected, 2e-7);
+        for &fixed in &values[1..] {
+            close(fixed, 330.0, 0.0);
+        }
+        close(receipt_number_field(&qoi, "value"), 330.0, 0.0);
+        let receipt = J::parse(&conduction).unwrap();
+        let time = receipt.get("transient").unwrap();
+        close(n(time, "total_steps"), 3.0, 0.0);
+        let energy = time.get("energy").unwrap();
+        close(
+            n(energy, "stored_change_j"),
+            0.625 * (expected - 300.0 + 90.0),
+            2e-7,
+        );
+        assert!(n(energy, "maximum_step_residual_j") <= 1e-6);
+        if kind == "nonlinear" {
+            let controls = time.get("nonlinear").unwrap();
+            assert_eq!(controls.str_field("method"), Some("newton-fgmres"));
+            assert!(n(controls, "total_updates") > 3.0);
+            let mut updates = 0.0;
+            for grid in ["coarse", "fine"] {
+                for step in time.get(grid).unwrap().as_array().unwrap() {
+                    let nonlinear = step.get("nonlinear").unwrap();
+                    assert!(n(nonlinear, "residual_j") <= n(nonlinear, "threshold_j"));
+                    assert!(n(nonlinear, "updates") <= n(controls, "max_updates_per_step"));
+                    assert!(
+                        n(step, "krylov_iterations")
+                            <= n(controls, "max_krylov_iterations_per_step")
+                    );
+                    updates += n(nonlinear, "updates");
+                }
+            }
+            close(n(controls, "total_updates"), updates, 0.0);
+            assert!(conduction.contains("fgmres-backward-euler-newton"));
+        } else {
+            assert!(matches!(time.get("nonlinear"), Some(J::Null)));
+            assert!(conduction.contains("pcg-backward-euler"));
+        }
+        fields.push((run, conduction, solution, values));
+    }
+    assert_eq!(
+        fields[0], fields[3],
+        "nonlinear state and work replay exactly"
+    );
+    assert!(
+        (fields[0].3[0] - fields[1].3[0]).abs() > 1.0,
+        "freezing conductivity at the initial temperature changes the physical answer"
+    );
+    for (&curve, &scalar) in fields[1].3.iter().zip(&fields[2].3) {
+        close(curve, scalar, 2e-10);
+    }
+}
+
+#[test]
+fn g0_native_transient_nonlinear_domain_failure_publishes_no_endpoint() {
+    let bytes = tetra_stl();
+    let mut spec = driven_face_project(&bytes);
+    spec.power.as_mut().unwrap()[0].watts.value = 1e6;
+    let cards = transient_conductivity_cards("nonlinear");
+    rebind_to(&mut spec, &cards);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let error = run_solve(
+        &ledger,
+        &CancelGate::new_clock_free(),
+        &mut benign_clock(),
+        &decode(&spec),
+        &cards,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "cli-solve-conduction-transient", "{error:?}");
+    assert_eq!(error.stage, Some("conduction"));
+    assert_eq!(
+        stage_receipt_hashes(&ledger, error.run.as_ref().unwrap()).len(),
+        4
+    );
 }
 
 #[test]

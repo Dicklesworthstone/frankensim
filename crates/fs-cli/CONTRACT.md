@@ -1314,6 +1314,12 @@ field, thermal QoIs and requirement margin describe the fine final-time
 state. Temporal comparison is separate from the unknown spatial error, and
 no steady algebraic/roundoff certificate or steady input-propagation solve
 is attached. See the retained step/storage receipts for energy and work.
+Bound temperature-dependent conductivity selects the shared endpoint
+Newton/FGMRES solve with its full k′(T) tangent. Each accepted endpoint retains
+nonlinear work and the joule residual/threshold; material-domain and iteration
+failures publish no partial field. Capacity remains constant and no
+enthalpy/phase law is inferred. The native driven-face test checks an
+independently derived transient balance and a frozen-conductivity twin.
 
 Runtime dependencies remain Franken-only.
 

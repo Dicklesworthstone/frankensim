@@ -186,7 +186,7 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// enclosures without promoting the distinct maximum-temperature decision.
 /// Version 50 executes declared finite-time storage with nested backward-Euler
 /// grids and retains final-time evidence without steady-solution certificates.
-pub const SOLVE_DRIVER_VERSION: u32 = 50;
+pub const SOLVE_DRIVER_VERSION: u32 = 51;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
