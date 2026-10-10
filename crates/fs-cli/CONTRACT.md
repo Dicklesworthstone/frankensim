@@ -1356,6 +1356,37 @@ failures publish no partial field. Capacity remains constant and no
 enthalpy/phase law is inferred. The native driven-face test checks an
 independently derived transient balance and a frozen-conductivity twin.
 
+The same native declaration also admits ambient gray radiation on its
+prescribed Robin patches, using the existing sourced emissivity cards and
+`conduction.radiation` controls. Every coupling trial holds the accepted
+physical old temperature fixed. Acceptance checks the actual endpoint
+area-mean radiation law, full discrete implicit residual and physical
+storage-minus-input energy balance; the fixed-node reaction includes its
+storage jump. Temperature-dependent conductivity remains evaluated at the
+endpoint with its full tangent. Material-domain escape, exhausted coupling
+work or cancellation publishes no partial trajectory. Wall-time checks are
+cooperative between numerical operations; no intra-kernel wall-time guarantee
+is claimed.
+
+Each step's `radiation` object distinguishes frozen-secant applied radiation
+from actual nonlinear radiation, and reports the physical residual norm,
+threshold, energy residual and prescribed-temperature reaction. Existing step
+and common energy fields retain their applied-operator balance. The top-level
+conduction `radiation` object retains the complete final fine endpoint and
+card/source evidence; `transient.radiation` aggregates both grids' work and
+maximum physical energy residual. Linear work caps each solid response
+(including all Newton corrections); the radiation cap bounds repeated
+responses per endpoint. Their checked product is the disclosed full endpoint
+Krylov allowance. Per-step nonlinear details describe the final inner solve,
+while radiation and trajectory counters include all trials. Driver semantics
+version 53 keeps this behavior separate from older retained solves.
+
+`data/reference-project/cooling-radiative-pulse.fsim` combines a declared
+startup pulse with ambient radiation using the native validate/import/solve
+workflow. The model remains area-mean patch radiation to a fixed reservoir;
+enclosure exchange, latent storage, coupled air storage, transient adjoints
+and continuous-time peak guarantees are not inferred.
+
 Optional `power-schedules` supply absolute delivered watts for named volume
 regions, replacing their static `power` rows without applying duty factors
 again. Every schedule covers the full horizon with explicit switch times.

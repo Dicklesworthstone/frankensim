@@ -10,7 +10,16 @@ use json::JsonValue as J;
 
 const SIGMA: f64 = 5.670_374_419e-8;
 
-fn emissivity_cards(base: &CardPackSet, value: f64) -> (CardPackSet, String) {
+pub(super) fn emissivity_cards(base: &CardPackSet, value: f64) -> (CardPackSet, String) {
+    emissivity_cards_with_domain(base, value, 200.0, 450.0)
+}
+
+pub(super) fn emissivity_cards_with_domain(
+    base: &CardPackSet,
+    value: f64,
+    lower_k: f64,
+    upper_k: f64,
+) -> (CardPackSet, String) {
     use fs_matdb::{
         ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack,
         ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance,
@@ -41,7 +50,7 @@ fn emissivity_cards(base: &CardPackSet, value: f64) -> (CardPackSet, String) {
                 value,
                 dims: fs_qty::Dims::NONE,
             },
-            validity: fs_evidence::ValidityDomain::unconstrained().with("T", 200.0, 450.0),
+            validity: fs_evidence::ValidityDomain::unconstrained().with("T", lower_k, upper_k),
             uncertainty: UncertaintyModel::Unstated,
             interpolation: InterpolationPolicy::ConstantWithinValidity,
             observations: vec![observation],
@@ -86,7 +95,7 @@ fn emissivity_cards(base: &CardPackSet, value: f64) -> (CardPackSet, String) {
     (CardPackSet::admit(raw).unwrap(), identity)
 }
 
-fn declare(spec: &mut ProjectSpec, card: &str, target: &str, reservoir: f64) {
+pub(super) fn declare(spec: &mut ProjectSpec, card: &str, target: &str, reservoir: f64) {
     spec.cooling
         .as_mut()
         .unwrap()

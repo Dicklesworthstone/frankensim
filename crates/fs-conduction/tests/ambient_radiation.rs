@@ -3,6 +3,8 @@
 mod support;
 #[path = "ambient_radiation/adjoint.rs"]
 mod adjoint;
+#[path = "ambient_radiation/transient.rs"]
+mod transient;
 
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::{

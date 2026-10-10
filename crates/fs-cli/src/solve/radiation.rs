@@ -18,8 +18,8 @@ use crate::cards::CardPackSet;
 use crate::import::json_string;
 
 pub(super) struct LoweredRadiation {
-    patches: Vec<AmbientRadiationPatch>,
-    config: AmbientRadiationConfig,
+    pub(super) patches: Vec<AmbientRadiationPatch>,
+    pub(super) config: AmbientRadiationConfig,
     surfaces: Vec<SurfaceSource>,
 }
 
@@ -148,6 +148,25 @@ impl SolidSolution {
             convective_out: None,
             radiation: None,
             combined_boundary: None,
+        }
+    }
+
+    /// Retain the exact accepted radiative endpoint and its original convection
+    /// split. A transient producer supplies the same physical boundary evidence
+    /// as the steady producer; storage stays in its separate time receipt.
+    pub(super) fn from_radiative_endpoint(
+        conduction: ConductionSolution,
+        combined_boundary: fs_conduction::ThermalBoundary,
+        convective_robin_fluxes: Vec<RobinFlux>,
+        convective_out_w: f64,
+        radiation: AmbientRadiationReport,
+    ) -> Self {
+        Self {
+            conduction,
+            convective_fluxes: Some(convective_robin_fluxes),
+            convective_out: Some(convective_out_w),
+            radiation: Some(radiation),
+            combined_boundary: Some(combined_boundary),
         }
     }
 
@@ -364,13 +383,13 @@ pub(super) fn solve(
             config,
             radiation.config,
         )?;
-        Ok(SolidSolution {
-            conduction: solved.conduction,
-            convective_fluxes: Some(solved.convective_robin_fluxes),
-            convective_out: Some(solved.convective_out_w),
-            radiation: Some(solved.radiation),
-            combined_boundary: Some(solved.combined_boundary),
-        })
+        Ok(SolidSolution::from_radiative_endpoint(
+            solved.conduction,
+            solved.combined_boundary,
+            solved.convective_robin_fluxes,
+            solved.convective_out_w,
+            solved.radiation,
+        ))
     } else {
         let conduction = match interfaces {
             Some(interfaces) => {

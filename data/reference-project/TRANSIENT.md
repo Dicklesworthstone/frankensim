@@ -56,8 +56,8 @@ projects migrate with storage absent, so they retain their steady behavior;
 v11 transient projects migrate with their existing static power unchanged.
 
 This product slice supports fixed capacity, constant or temperature-dependent
-conductivity from the bound material card, Dirichlet/Neumann/Robin boundaries
-and matching finite contact. A temperature-dependent curve is evaluated at
+conductivity from the bound material card, Dirichlet/Neumann/Robin boundaries,
+matching finite contact and declared ambient radiation. A temperature-dependent curve is evaluated at
 each trial endpoint, including its actual conductivity derivative in the
 Newton/FGMRES tangent; the solver never substitutes conductivity at the old
 temperature. Each step starts from unchanged physical history until its
@@ -70,16 +70,18 @@ For temperature-dependent conductivity, `solver.tolerance-rel` controls the
 relative nonlinear residual against that endpoint's initial residual. The
 absolute residual floor is 1% of the declared energy tolerance divided by the
 square root of the vertex count. The existing numerical policy limits each
-endpoint to 32 Newton updates and 24 backtracks per update; the same linear
-iteration budget covers all of that endpoint's Newton corrections. These
-controls, actual updates, backtracks and joule residuals are retained in the
-`transient.nonlinear` object and each time-step row. An exhausted numerical
-budget or material-validity boundary refuses the unfinished stage. Constant
-conductivity retains the linear path and records `nonlinear: null`.
+solid response to 32 Newton updates and 24 backtracks per update; the same
+linear iteration budget covers all Newton corrections within that response.
+Without radiation there is one response per endpoint. Radiation's separate
+outer-iteration cap bounds repeated responses, and the receipt discloses the
+resulting complete endpoint work allowance. These controls, actual updates,
+backtracks and joule residuals are retained in the `transient.nonlinear`
+object and each time-step row. An exhausted numerical budget or
+material-validity boundary refuses the unfinished stage. Constant conductivity
+uses the linear solid response and records `nonlinear: null`.
 
-Radiation, natural or coupled airflow convection, spatial ladder/adaptive
-studies and steady adjoint requests are not admitted
-together with this declaration. Heat capacity remains temperature independent;
+Natural or coupled airflow convection, spatial ladder/adaptive studies and
+steady adjoint requests are not admitted together with this declaration. Heat capacity remains temperature independent;
 latent heat and phase changes require a different storage law. Stage
 cancellation retains the preceding
 completed pipeline stages; an unfinished conduction stage restarts from its
@@ -121,3 +123,55 @@ and integrated scheduled input in joules.
 in the same validate/import/solve commands above with a fresh `pulsed.db`.
 The reported temperature limit still applies at the final time, which can be
 lower than the temperature reached during the pulse.
+
+## Ambient radiation during a pulse
+
+`cooling-radiative-pulse.fsim` adds the existing sourced 0.85 gray-emissivity
+surface card to the complete pulse example. The surface exchanges radiation
+with a 293.15 K reservoir alongside its prescribed convection. Supply both
+immutable material packs:
+
+```bash
+frankensim --json validate data/reference-project/cooling-radiative-pulse.fsim
+frankensim --json import data/reference-project/cooling-radiative-pulse.fsim \
+  data/reference-project/plate.stl radiative-pulse.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-radiative-pulse.fsim \
+  radiative-pulse.db --materials data/reference-project/aa6061.fsmcdpk \
+  --materials data/reference-project/gray-surface.fsmcdpk
+```
+
+The declaration uses the existing `:radiation (radiation ...)` block inside
+`conduction`; no new emissivity or radiation schema is needed. The shared
+gray-patch law uses the actual area-mean endpoint temperature and a fixed
+reservoir. The same accepted old temperature is held fixed through every
+radiative trial and every inner conductivity correction. Only a complete
+endpoint can advance physical time.
+
+A small radiation temperature change alone cannot accept a step. The patch
+heat mismatch, actual implicit residual and physical energy balance must all
+pass their declared gates. The inner solid residual tolerance is tightened
+to reserve room for the radiative coupling error. Actual surface temperatures
+must remain within the emissivity card's validity domain, including when
+the reservoir supplies heat to the solid.
+
+The `radiation` object in each time-step row retains applied radiation watts,
+nonlinear radiation watts, convection watts, physical joule residual and its
+threshold, physical energy residual, and the prescribed-temperature reaction
+with boundary storage. Existing step `net_input_w` and `energy_residual_j`
+retain the frozen-secant operator's balance; the explicitly named physical
+fields check the full nonlinear endpoint. Their distinction prevents a
+frozen radiative coefficient from being reported as an exact nonlinear law.
+
+`transient.radiation` reports coarse, fine and total radiative trial counts,
+the maximum physical energy residual and the complete per-endpoint Krylov
+allowance. A solid response shares one linear budget across all of its Newton
+corrections; at most `radiation.max-iterations` responses occur per endpoint.
+The original complete `conduction.radiation` receipt describes the final fine
+endpoint and retains the immutable surface-card evidence. Numerical
+cancellation remains cooperative; wall-time checks occur between numerical
+operations and do not promise an intra-kernel deadline.
+
+This example and its capacity are synthetic. The result is an Estimated
+final-time temperature with a coarse/fine temporal comparison, without a
+continuous-time peak, enclosure-radiation, phase-change or transient-adjoint
+claim.

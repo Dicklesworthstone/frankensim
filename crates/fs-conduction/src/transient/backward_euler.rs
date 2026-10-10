@@ -19,6 +19,8 @@ mod nonlinear;
 pub use nonlinear::{NonlinearStepConfig, NonlinearStepSolution};
 mod adjoint;
 pub use adjoint::StepLinearization;
+mod radiation;
+pub use radiation::RadiationStepSolution;
 
 use fs_exec::Cx;
 use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, checked_cg, norm2};
