@@ -229,7 +229,7 @@ impl ConjugatePath {
     }
 }
 
-fn exchange_config(adaptive: bool) -> ConjugateConfig {
+pub(super) fn exchange_config(adaptive: bool) -> ConjugateConfig {
     let mut config = ConjugateConfig {
         relaxation: Relaxation::Fixed { omega: CONJUGATE_STARTUP_OMEGA },
         ..ConjugateConfig::default()
@@ -476,6 +476,7 @@ pub(super) struct ConjugateOutcome {
     pub solution: ConjugateBranchesSolution,
     pub balance_tolerance_w: f64,
     decomposition_residual_w: Option<f64>,
+    config: ConjugateConfig,
 }
 
 /// One common solid callback per iteration, with every branch's Robin rows.
@@ -485,11 +486,23 @@ pub(super) fn run_exchange(
     cx: &Cx<'_>,
     path: &ConjugatePath,
     adaptive: bool,
+    solid: impl FnMut(
+        &Cx<'_>, &BTreeMap<String, f64>,
+    ) -> Result<Vec<SolidRegionState>, SolveRefusal>,
+) -> Result<ConjugateOutcome, SolveRefusal> {
+    run_exchange_with_config(cx, path, exchange_config(adaptive), solid)
+}
+
+/// Retain the same branch-local heat gates and IQN-ILS exchange while allowing
+/// the transient producer to tighten reference convergence for its joule gate.
+pub(super) fn run_exchange_with_config(
+    cx: &Cx<'_>,
+    path: &ConjugatePath,
+    config: ConjugateConfig,
     mut solid: impl FnMut(
         &Cx<'_>, &BTreeMap<String, f64>,
     ) -> Result<Vec<SolidRegionState>, SolveRefusal>,
 ) -> Result<ConjugateOutcome, SolveRefusal> {
-    let config = exchange_config(adaptive);
     let mut stashed: Option<SolveRefusal> = None;
     let targets: Vec<String> = path.segments.iter().map(|s| s.target.clone()).collect();
     let air_paths = path.air_paths();
@@ -540,14 +553,13 @@ pub(super) fn run_exchange(
     // Signed heat cancellation must not make this threshold spuriously tiny.
     // The solver already enforced each branch's OWN region-level watt gate.
     let balance_tolerance_w = finite_total(
-        solution.branches.iter().map(branch_balance_tolerance),
+        solution.branches.iter().map(|branch| branch_balance_tolerance(branch, &config)),
         "aggregate balance tolerance",
     )?;
-    Ok(ConjugateOutcome { solution, balance_tolerance_w, decomposition_residual_w: None })
+    Ok(ConjugateOutcome { solution, balance_tolerance_w, decomposition_residual_w: None, config })
 }
 
-fn branch_balance_tolerance(solution: &ConjugateSolution) -> f64 {
-    let config = ConjugateConfig::default();
+fn branch_balance_tolerance(solution: &ConjugateSolution, config: &ConjugateConfig) -> f64 {
     let scale = solution.balance.solid_total_w.abs().max(solution.balance.air_total_w.abs());
     config.balance_tolerance_w.max(config.balance_relative_tolerance * scale)
 }
@@ -640,7 +652,7 @@ pub(super) fn receipt_fragment(
     let mut fragments = Vec::with_capacity(path.branches.len());
     for (branch, solution) in path.branches.iter().zip(&outcome.solution.branches) {
         fragments.push(branch_receipt_fragment(
-            branch, solution, branch_balance_tolerance(solution), None, BRANCHES_NO_CLAIM,
+            branch, solution, branch_balance_tolerance(solution, &outcome.config), None, BRANCHES_NO_CLAIM,
         )?);
     }
     let solid_total = finite_total(outcome.solution.branches.iter().map(|b| b.balance.solid_total_w), "solid_total_w")?;

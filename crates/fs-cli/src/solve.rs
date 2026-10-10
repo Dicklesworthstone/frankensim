@@ -186,7 +186,7 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// enclosures without promoting the distinct maximum-temperature decision.
 /// Version 50 executes declared finite-time storage with nested backward-Euler
 /// grids and retains final-time evidence without steady-solution certificates.
-pub const SOLVE_DRIVER_VERSION: u32 = 53;
+pub const SOLVE_DRIVER_VERSION: u32 = 54;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -6739,13 +6739,67 @@ fn conduction_solve_receipt(
                 "declare one convection regime per project",
             ));
         }
+        let airflow_path = if laws.is_empty() {
+            None
+        } else {
+            let handoff = flow_override.or(context.flow_network.as_ref()).ok_or_else(|| {
+                conduction_error(
+                    "cli-solve-conduction-airflow-no-flow-network",
+                    "an airflow-convection law is declared but the flow-network stage handed off no operating point",
+                    "resume from or rerun the flow-network producer before the conduction stage",
+                )
+            })?;
+            // Area pass: lower the partition once with placeholder rows
+            // (unit coefficient at the inlet) purely to read each target's
+            // retained exterior area; nothing is solved against them.
+            let placeholder: BTreeMap<String, (f64, f64)> = laws
+                .iter()
+                .map(|law| (law.target.clone(), (1.0, law.inlet_temperature_k)))
+                .collect();
+            let placeholder_lowering = conduction_boundary(
+                setup,
+                &mesh,
+                labeled,
+                &surfaces,
+                &regions,
+                &interface_faces,
+                &placeholder,
+                &surface_heat_inputs,
+            )?;
+            let areas = match &perturbed {
+                None => placeholder_lowering.target_area_m2,
+                Some(moved) => perturbed_target_areas(
+                    moved,
+                    &placeholder_lowering.boundary,
+                    &placeholder_lowering.target_area_m2,
+                ),
+            };
+            let path = conjugate::derive_air_path(
+                &laws,
+                &handoff.operating,
+                handoff.air_density_kg_m3,
+                |target| areas.get(target).copied(),
+                htc_scale,
+            )?;
+            Some(path)
+        };
         let mut natural_fragment = None;
         let mut transient_fragment = None;
         let mut transient_energy_w = None;
         let (solid, conjugate_fragment, derived_boundary, air_paths) = if transient_requested {
+            // This initial boundary supplies each card-derived coefficient.
+            // The transient owner replaces its references in every counted
+            // air/solid response while retaining one physical old field.
+            let initial_derived = airflow_path.as_ref().map_or_else(BTreeMap::new, |path| {
+                let inlets: BTreeMap<_, _> = laws.iter()
+                    .map(|law| (law.target.as_str(), law.inlet_temperature_k)).collect();
+                path.segments.iter().map(|segment| {
+                    (segment.target.clone(), (segment.htc_w_m2_k, inlets[segment.target.as_str()]))
+                }).collect()
+            });
             let boundary = conduction_boundary(
                 setup, &mesh, labeled, &surfaces, &regions, &interface_faces,
-                &BTreeMap::new(), &surface_heat_inputs,
+                &initial_derived, &surface_heat_inputs,
             )?.boundary;
             let interfaces = lower_thermal_interfaces(
                 spec, cards, &mesh, &boundary, &interface_resolution,
@@ -6760,14 +6814,15 @@ fn conduction_solve_receipt(
             };
             let time = transient::solve(
                 &cx, spec, problem, interfaces.as_ref(), &labels, &region_ids,
-                radiation.as_ref(), linear, deadline,
+                radiation.as_ref(), airflow_path.as_ref(), linear, deadline,
             )?;
             transient_energy_w = Some((time.endpoint_storage_w, time.endpoint_energy_residual_w));
             transient_fragment = Some(time.receipt);
             // The temporal estimate belongs to the retained time comparison.
             // Spatial error remains unknown, so it cannot fill Discretization.
             let _ = time.temporal_half_width_k;
-            (time.solution, None, BTreeMap::new(), Vec::new())
+            (time.solution, time.conjugate_receipt, time.derived_boundary,
+                airflow_path.as_ref().map_or_else(Vec::new, conjugate::ConjugatePath::air_paths))
         } else if laws.is_empty()
             && !natural_laws.is_empty()
         {
@@ -6840,46 +6895,8 @@ fn conduction_solve_receipt(
         } else if laws.is_empty() {
             (solve_once(&BTreeMap::new())?, None, BTreeMap::new(), Vec::new())
         } else {
-            let handoff = flow_override.or(context.flow_network.as_ref()).ok_or_else(|| {
-                conduction_error(
-                    "cli-solve-conduction-airflow-no-flow-network",
-                    "an airflow-convection law is declared but the flow-network stage handed off no operating point",
-                    "resume from or rerun the flow-network producer before the conduction stage",
-                )
-            })?;
-            // Area pass: lower the partition once with placeholder rows
-            // (unit coefficient at the inlet) purely to read each target's
-            // retained exterior area; nothing is solved against them.
-            let placeholder: BTreeMap<String, (f64, f64)> = laws
-                .iter()
-                .map(|law| (law.target.clone(), (1.0, law.inlet_temperature_k)))
-                .collect();
-            let placeholder_lowering = conduction_boundary(
-                setup,
-                &mesh,
-                labeled,
-                &surfaces,
-                &regions,
-                &interface_faces,
-                &placeholder,
-                &surface_heat_inputs,
-            )?;
-            let areas = match &perturbed {
-                None => placeholder_lowering.target_area_m2,
-                Some(moved) => perturbed_target_areas(
-                    moved,
-                    &placeholder_lowering.boundary,
-                    &placeholder_lowering.target_area_m2,
-                ),
-            };
-            let path = conjugate::derive_air_path(
-                &laws,
-                &handoff.operating,
-                handoff.air_density_kg_m3,
-                |target| areas.get(target).copied(),
-                htc_scale,
-            )?;
-            let coefficients = conjugate::derived_coefficients(&path);
+            let path = airflow_path.as_ref().expect("declared airflow was lowered");
+            let coefficients = conjugate::derived_coefficients(path);
             let path_targets: BTreeSet<&str> = path
                 .segments
                 .iter()
@@ -6907,7 +6924,7 @@ fn conduction_solve_receipt(
                     })
                     .collect::<Result<Vec<_>, SolveRefusal>>()
             };
-            let outcome = conjugate::run_exchange(&cx, &path, adaptive_requested, |_, references| {
+            let outcome = conjugate::run_exchange(&cx, path, adaptive_requested, |_, references| {
                 let derived: BTreeMap<String, (f64, f64)> = references
                     .iter()
                     .map(|(target, reference)| {
@@ -6939,7 +6956,7 @@ fn conduction_solve_receipt(
                 solution.convective_out_w(),
                 off_path_w,
             )?;
-            let fragment = conjugate::receipt_fragment(&path, &outcome)?;
+            let fragment = conjugate::receipt_fragment(path, &outcome)?;
             (solution, Some(fragment), converged, path.air_paths())
         };
         let radiation_fragment = solid.radiation_receipt(radiation.as_ref())?;

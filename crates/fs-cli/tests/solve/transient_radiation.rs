@@ -44,7 +44,7 @@ fn area_m2() -> f64 {
     8.0 * 3.0_f64.sqrt()
 }
 
-fn regular_tetra_stl() -> Vec<u8> {
+pub(super) fn regular_tetra_stl() -> Vec<u8> {
     // Integer coordinates survive the STL importer's f32 conversion exactly.
     // Edge length is sqrt(8), total area 8*sqrt(3), volume 8/3.
     let p = [

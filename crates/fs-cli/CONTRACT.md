@@ -1426,16 +1426,41 @@ conduction `radiation` object retains the complete final fine endpoint and
 card/source evidence; `transient.radiation` aggregates both grids' work and
 maximum physical energy residual. Linear work caps each solid response
 (including all Newton corrections); the radiation cap bounds repeated
-responses per endpoint. Their checked product is the disclosed full endpoint
+responses per airflow evaluation (or endpoint without airflow). The checked
+product of air, radiation and linear caps is the disclosed full endpoint
 Krylov allowance. Per-step nonlinear details describe the final inner solve,
 while radiation and trajectory counters include all trials. Driver semantics
-version 53 keeps this behavior separate from older retained solves.
+version 54 includes native quasi-steady airflow transients and keeps this
+behavior separate from older retained solves.
 
 `data/reference-project/cooling-radiative-pulse.fsim` combines a declared
 startup pulse with ambient radiation using the native validate/import/solve
 workflow. The model remains area-mean patch radiation to a fixed reservoir;
 enclosure exchange, latent storage, coupled air storage, transient adjoints
 and continuous-time peak guarantees are not inferred.
+
+Native `airflow-convection` declarations also compose with this solid
+trajectory. Existing flow-network operating points, wetted-area lowering,
+convection cards and branch-major IQN-ILS exchange are reused. Every air trial
+holds the accepted old solid field fixed, including all inner radiation and
+conductivity corrections. The endpoint is the last counted solid response
+at its retained applied references; the updated air reference does not
+trigger another solve. Each branch's own heat gate remains independent.
+The raw reference tolerance is additionally bounded by one percent of the
+declared energy tolerance divided by `dt * sum(hA)`. An independent endpoint
+joule gate replaces on-path Robin heat with actual air enthalpy gain and
+retains off-path convection, nonlinear radiation, physical prescribed
+reaction and storage. Radiation is excluded from the air budget.
+
+Per-step `conjugate` evidence retains the applied references, exchange receipt,
+actual-air coupled energy residual and every nested numerical work count.
+`transient.conjugate` retains trajectory totals and the full product of the
+airflow, radiation and solid-response work caps; `conduction.conjugate`
+retains the final fine endpoint. Airflow is quasi-steady at the fixed retained
+operating point, with no air storage or fan dynamics. Natural convection
+remains unadmitted with native storage. The complete fan-cooled pulse input
+is `examples/heatsink-fan/heatsink-fan-pulse.fsim`; its sourced capacity and
+fan curve are explicitly synthetic.
 
 Optional `power-schedules` supply absolute delivered watts for named volume
 regions, replacing their static `power` rows without applying duty factors

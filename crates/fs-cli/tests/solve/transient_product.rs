@@ -423,14 +423,18 @@ fn g0_native_transient_nonlinear_domain_failure_publishes_no_endpoint() {
 
 #[test]
 fn g0_native_transient_refuses_steady_only_combinations_before_a_field_is_published() {
-    for variant in ["airflow", "ladder", "adjoint"] {
+    for variant in ["natural-convection", "ladder", "adjoint"] {
         let bytes = tetra_stl();
-        let mut spec = if variant == "airflow" {
-            conjugate_fixture_project(7, &bytes, "convection.gnielinski")
-        } else {
-            conduction_fixture_project(7, &bytes)
-        };
+        let mut spec = conduction_fixture_project(7, &bytes);
         declaration(&mut spec, 1000.0, 2.0);
+        if variant == "natural-convection" {
+            spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0]
+                .condition = ThermalBoundaryCondition::NaturalConvection {
+                characteristic_length: QtyAny::new(0.1, fs_project::spec::dims::LENGTH),
+                ambient_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+                correlation: "convection.churchill-chu-vertical-plate".to_string(),
+            };
+        }
         if variant == "ladder" {
             spec.solver.as_mut().unwrap().fidelity = "ladder".to_string();
         }
