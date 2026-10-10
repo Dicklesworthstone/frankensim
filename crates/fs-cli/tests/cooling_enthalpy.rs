@@ -12,6 +12,9 @@ mod adaptive;
 #[path = "cooling_enthalpy/repeat.rs"]
 mod repeat;
 
+#[path = "cooling_enthalpy/phase_conductivity.rs"]
+mod phase_conductivity;
+
 use json::JsonValue as J;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};

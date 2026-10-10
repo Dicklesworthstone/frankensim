@@ -6,6 +6,7 @@ mod cycles;
 
 use super::*;
 use fs_blake3::ContentHash;
+use fs_conduction::material::LiquidMassFractionConductivity;
 use fs_conduction::transient::enthalpy::{
     EnthalpyBudget, EnthalpyStepConfig, EnthalpyStepSolution,
     heterogeneous::{HeterogeneousEnthalpyBackwardEuler, ReferenceEnthalpyMaterial},
@@ -33,6 +34,16 @@ struct Material {
     source: String,
     density: f64,
     phase: String,
+    phase_conductivity: Option<PhaseConductivity>,
+}
+
+/// Declared phenomenological multiplier of the existing base conductivity.
+/// Its coordinate is the element mean nodal liquid MASS fraction; no volume
+/// fraction or micromechanical mixture law is inferred by this adapter.
+#[derive(Debug, Clone)]
+struct PhaseConductivity {
+    model: LiquidMassFractionConductivity,
+    source: String,
 }
 
 impl Config {
@@ -60,6 +71,7 @@ impl Config {
                 "reference_density_kg_m3",
                 "knots",
                 "phase",
+                "phase_conductivity",
                 "materials",
                 "element_materials",
                 "initial_specific_enthalpy_j_kg",
@@ -76,6 +88,7 @@ impl Config {
                 "reference_density_kg_m3",
                 "knots",
                 "phase",
+                "phase_conductivity",
             ] {
                 if value.get(key).is_some() {
                     return Err(bad(
@@ -95,6 +108,7 @@ impl Config {
                         "reference_density_kg_m3",
                         "knots",
                         "phase",
+                        "phase_conductivity",
                     ],
                     "enthalpy material",
                 )?;
@@ -294,7 +308,7 @@ impl Config {
                 reference_density_kg_m3: row.density,
             })
             .collect::<Vec<_>>();
-        Prepared::new(
+        let prepared = Prepared::new(
             cx,
             mesh,
             &materials,
@@ -304,7 +318,31 @@ impl Config {
                 max_elements: 100_000,
             },
         )
-        .map_err(producer)
+        .map_err(producer)?;
+        if self
+            .materials
+            .iter()
+            .any(|row| row.phase_conductivity.is_some())
+        {
+            let identity = LiquidMassFractionConductivity::declared(1.0, 1.0).map_err(producer)?;
+            let mut element_laws = Vec::with_capacity(self.element_material_ids.len());
+            for (element, &material) in self.element_material_ids.iter().enumerate() {
+                if element % 512 == 0 {
+                    poll(cx)?;
+                }
+                element_laws.push(
+                    self.materials[material]
+                        .phase_conductivity
+                        .as_ref()
+                        .map_or(identity, |declaration| declaration.model),
+                );
+            }
+            prepared
+                .with_phase_conductivity(cx, element_laws)
+                .map_err(producer)
+        } else {
+            Ok(prepared)
+        }
     }
 
     pub(super) fn admit(&self, request: &Request, schedule: &Schedule) -> Result<()> {
@@ -409,23 +447,71 @@ impl Material {
             _ => return Err(bad("enthalpy phase must be solid-liquid, solid or liquid")),
         }
         .map_err(producer)?;
+        let phase_conductivity = value
+            .get("phase_conductivity")
+            .map(PhaseConductivity::parse)
+            .transpose()?;
         Ok(Self {
             name,
             curve,
             source,
             density,
             phase,
+            phase_conductivity,
         })
     }
 
     fn fields(&self) -> Result<String> {
-        Ok(format!(
+        let mut fields = format!(
             "\"material_card_identity\":{},\"chart_identity\":{},\"source\":{},\"reference_density_kg_m3\":{},\"phase\":{}",
             quote(&self.curve.material_card_identity().to_hex()),
             quote(&self.curve.identity().to_hex()),
             quote(&self.source),
             num(self.density)?,
             quote(&self.phase)
+        );
+        if let Some(declaration) = &self.phase_conductivity {
+            fields.push_str(",\"phase_conductivity\":");
+            fields.push_str(&declaration.fields()?);
+        }
+        Ok(fields)
+    }
+}
+
+impl PhaseConductivity {
+    fn parse(value: &J) -> Result<Self> {
+        object(
+            value,
+            &["law", "solid_multiplier", "liquid_multiplier", "source"],
+            "enthalpy.phase_conductivity",
+        )?;
+        let law = string(get(value, "law")?, "phase_conductivity.law")?;
+        if law != "linear-liquid-mass-fraction" {
+            return Err(bad(
+                "phase_conductivity.law must be linear-liquid-mass-fraction",
+            ));
+        }
+        let model = LiquidMassFractionConductivity::declared(
+            positive(
+                get(value, "solid_multiplier")?,
+                "phase_conductivity.solid_multiplier",
+            )?,
+            positive(
+                get(value, "liquid_multiplier")?,
+                "phase_conductivity.liquid_multiplier",
+            )?,
+        )
+        .map_err(producer)?;
+        let source = string(get(value, "source")?, "phase_conductivity.source")?;
+        Ok(Self { model, source })
+    }
+
+    fn fields(&self) -> Result<String> {
+        Ok(format!(
+            "{{\"law\":\"linear-liquid-mass-fraction\",\"solid_multiplier\":{},\"liquid_multiplier\":{},\"source\":{}}}",
+            num(self.model.solid_multiplier())?,
+            num(self.model.liquid_multiplier())?,
+            quote(&self.source),
         ))
     }
 }

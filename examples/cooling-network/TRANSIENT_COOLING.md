@@ -154,6 +154,53 @@ separate interface vertices and an explicit `solid.contacts` declaration for
 different enthalpy charts; undeclared mixtures refuse. Shared vertices within
 one storage material remain valid.
 
+### Conductivity changes during melting
+
+The optional `phase_conductivity` field belongs to the uniform enthalpy material
+or to each named record in `enthalpy.materials`:
+
+```json
+"phase_conductivity": {
+  "law": "linear-liquid-mass-fraction",
+  "solid_multiplier": 0.5,
+  "liquid_multiplier": 4,
+  "source": "Synthetic phase response; caller-declared phenomenological law"
+}
+```
+
+The positive endpoint multipliers scale the existing conductivity tensor:
+`K_eff = [s_s + (s_l-s_s) f_bar] K_base(T_bar)`. Both means use the element's
+four nodal states. Here `f_bar` is liquid **mass** fraction, not volume
+fraction; the declaration supplies the relationship rather than inferring a
+micromechanical mixture rule. The base tensor retains its temperature
+dependence, orientation and independent `solid.element_materials` assignment.
+Omitted phase laws have multiplier one. Convection, radiation and contact
+conductances retain their own transfer laws.
+
+This closes a gap left by temperature-only conductivity: on an isothermal
+latent plateau, melting can now change heat transport while temperature
+remains constant. The exact Newton and adjoint matrices include this direct
+fraction derivative, in addition to the base tensor's temperature derivative.
+A latent node can therefore affect neighboring temperatures through transport.
+The same law is retained through adaptive trials, repeated cycles, workload
+and fan sizing, and the supported fixed-grid adjoints. Gradients hold the
+declared multiplier values fixed; fraction-slope corners with a variable
+multiplier refuse a classical two-sided derivative.
+
+The complete [phase-dependent conductivity example](enthalpy-phase-conductivity.json)
+combines a temperature-dependent base conductivity with a mixed sensible/latent
+initial field and coupled airflow. Its chart and multipliers are synthetic;
+the example supplies no measured material calibration or predicted reference
+temperature. The supplied declaration and source appear in the output material
+fields. Run it with:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/enthalpy-phase-conductivity.json
+```
+
+### Enthalpy solve and reporting
+
 The required `enthalpy.newton` object declares `max_iterations`,
 `residual_rtol`, `residual_atol_j`, `linear_restart`, `max_linear_cycles`,
 `armijo_c`, `shrink` and `max_backtracks`. `linear_restart` is capped at the
@@ -161,7 +208,7 @@ smaller of the solid vertex count and 256 to bound Krylov workspace. The worst-c
 `max_iterations * linear_restart * max_linear_cycles` must fit
 `budgets.linear_iterations`. Existing interval, step-count and wall-time
 budgets apply. The endpoint residual is
-`M_ref (h_new-h_old) + dt [A(T(h_new)) T(h_new)-b]` in joules, with lumped
+`M_ref (h_new-h_old) + dt [A(T(h_new),f(h_new)) T(h_new)-b]` in joules, with lumped
 reference masses `rho_ref * V / 4` per tetrahedron vertex. Its target is
 `max(residual_atol_j, residual_rtol * norm(R(h_old)))`; it also must pass the
 independent physical energy gate. All air-reference and radiation trials

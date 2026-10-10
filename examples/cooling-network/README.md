@@ -37,6 +37,11 @@ fraction with convection and ambient radiation, while retaining the declared
 reference mass. The [adaptive enthalpy pulse](enthalpy-adaptive-pulse.json)
 checks both nodal temperature and specific enthalpy before accepting two coupled
 half steps, including latent energy hidden by a flat temperature.
+The [phase-dependent conductivity example](enthalpy-phase-conductivity.json)
+lets melting change the existing conductivity tensor through an explicit
+liquid-mass-fraction law, including when temperature stays on a latent plateau.
+It combines that response with the base material's temperature dependence and
+retains the direct fraction derivative in Newton and supported adjoints.
 See [the enthalpy request and output contract](TRANSIENT_COOLING.md#fixed-density-total-enthalpy-and-latent-heat)
 and [adaptive controls](TRANSIENT_COOLING.md#adaptive-total-enthalpy-timesteps).
 The [two-material contact example](enthalpy-contact-materials.json) assigns

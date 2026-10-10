@@ -143,6 +143,28 @@ vertices. Phase change never changes that reference mass or adds latent heat
 again. Existing conductivity assignments and supported contacts remain in the
 spatial operator.
 
+Each uniform or named enthalpy material may also declare `phase_conductivity`
+with `law: "linear-liquid-mass-fraction"`, finite positive `solid_multiplier`
+and `liquid_multiplier`, and a nonempty `source`. At each nonlinear trial,
+each element uses `K_eff = [s_s + (s_l-s_s) f_bar] K_base(T_bar)`, where
+`f_bar` and `T_bar` are arithmetic means of its nodal liquid **mass** fractions
+and temperatures. The multiplier follows enthalpy material assignments;
+the base tensor still follows the independent conductivity assignments,
+including their temperature dependence and anisotropy. This caller-declared
+phenomenological law does not infer a volume-fraction mixture or material
+calibration. An omitted law has unit multiplier. Robin, radiation and contact
+transfer laws are not multiplied.
+
+Newton and endpoint adjoints include both `dT/dh` and the direct `df/dh`
+conductivity term. Latent enthalpy can therefore affect neighboring
+temperatures even when its local `dT/dh` is zero. Fixed/adaptive forward
+trajectories, repetition, sizing and supported fixed-grid adjoints use the
+same prepared law. The multipliers remain fixed control data; no derivative
+with respect to their values is reported. A fraction-slope corner used by a
+variable multiplier refuses a classical endpoint derivative, as a
+temperature-slope corner already does. The supplied law and source are
+retained beside the corresponding output material/chart fields.
+
 Every air-reference and radiative iteration holds the same accepted `h_old`
 fixed. Physical time advances only after the full implicit residual, solid
 energy, coupling heat and complete endpoint energy gates pass. Radiation uses
