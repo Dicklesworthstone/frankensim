@@ -278,7 +278,7 @@ fn tighter_relative(
 
 /// Evaluate the same mean-temperature law on a complete physical endpoint.
 /// The existing Robin assembler still owns its pointwise trace and outward sign.
-fn boundary_at_temperature(
+pub(super) fn boundary_at_temperature(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
     patches: &[AmbientRadiationPatch],
