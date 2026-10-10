@@ -261,15 +261,16 @@ fn drum_with_shafts(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<sn
         return Err("prescribed vent radiation requires an audio observer and a distributed-cavity neck".into());
     }
     if let Some(spec)=mute {
-        spec.admit_command("drum")?;
-        if prepared || snares.is_some() {return Err("compliant drum pad needs the nonlinear contact/felt owner".into());}
+        spec.admit_command(if snares.is_some(){"snare"}else{"drum"})?;
+        if prepared {return Err("compliant head pad needs the nonlinear contact/felt owner".into());}
     }
     muffling::admit_command(mufflers,"drum")?;
     cavity::validate_drag(drag_per_s)?;
     if drag_per_s!=0.0 && !distributed_cavity {return Err("acoustic drag requires distributed cavity inertia".into());}
     if neck.is_some() && (!distributed_cavity || audio && !prescribed_vent) {return Err("vented audio requires explicit --prescribed-vent-radiation; fully coupled radiation loading is not implemented".into());}
     nonlinear_snare::admit_image(prepared,snares.is_some(),
-        stretching || relaxation.is_some() || mallets.enabled() || snares.is_some_and(|s|s.stretching.is_some() || s.carrier.is_some()))?;
+        stretching || relaxation.is_some() || mallets.enabled() || mute.is_some()
+            || (!prepared && shafts.enabled()) || snares.is_some_and(|s|s.stretching.is_some() || s.carrier.is_some()))?;
     let extra_modes=match snares {Some(spec)=>spec.mode_count()?,None=>0};
     // One declaration supplies BOTH head pencils, the air volume and the
     // closed exterior. No independently retuned oscillator or stock drum mesh.
@@ -480,7 +481,8 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     let carrier_body=3+usize::from(second.is_some());
     let nonlinear_wires=selected_snare.is_some_and(|s|s.stretching.is_some());
     let nonlinear_instrument=head_stretching || nonlinear_wires || has_carrier
-        || ((head_relaxation.is_some() || mallets.enabled() || shafts.enabled()) && selected_snare.is_some());
+        || ((head_relaxation.is_some() || mallets.enabled() || compliant_mute.is_some()
+            || ((prepared_nonlinear || radiation_feedback) && shafts.enabled())) && selected_snare.is_some());
     nonlinear_snare::admit_command(head_stretching,&args[0])?;
     nonlinear_snare::admit_prepared_command(prepared_nonlinear,nonlinear_instrument,&args[0])?;
     if let Some(spec)=&compliant_mute {spec.admit_command(&args[0])?;}
@@ -520,8 +522,8 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
         "drum"|"drum-wav"|"drum-mic"=>drum_with_shafts(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts)?,
         "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_shafts(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts)?,
         "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_shafts(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts)?,
-        "snare"|"snare-wav"|"snare-mic"=>drum_with_shafts(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts)?,
-        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_shafts(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts)?,
+        "snare"|"snare-wav"|"snare-mic"=>drum_with_shafts(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts)?,
+        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_shafts(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts)?,
         _=>return Err("unknown experiment".into()),
     };
     let receivers=match microphone_spec {

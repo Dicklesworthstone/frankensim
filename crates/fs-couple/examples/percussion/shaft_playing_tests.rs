@@ -158,6 +158,46 @@ fn full_snare_carrier_and_cavity_precede_no_hidden_direct_shaft_pressure() {
 }
 
 #[test]
+fn linear_snare_with_flexible_sticks_retains_both_execution_images_and_all_wires() {
+    let shafts=selection();let full_wires=snare::SnareSet::reference(false);
+    let build=|wires,linear,audio| drum_with_shafts(256,2e-6,audio,linear,Some(wires),false,
+        first(),true,None,Some(drum()),Some(second()),&[],25.0,None,false,None,
+        &mallets::Selection::default(),&shafts).unwrap();
+    let full=build(full_wires,true,true);
+    let Mechanics::Prepared(system)=&full.system else {panic!("pure linear shafts retain the modal image")};
+    assert_eq!(system.contact_count(),242);
+    let first_wire=full.second_stick.unwrap().coordinate+1;
+    let first_shaft=full.flexible_sticks[0].as_ref().unwrap();
+    assert_eq!(first_shaft.elastic_start(),first_wire+full_wires.mode_count().unwrap());
+    assert!(system.state()[2*first_wire..2*first_shaft.elastic_start()].iter().all(|v|*v==0.0));
+    assert!(full.acoustics.as_ref().unwrap().state_modes().iter().all(|i|*i<first_wire-1));
+
+    // The same small physical snare can explicitly use analytic nonlinear
+    // preparation/substeps without inventing head or wire stretching. A shaft
+    // alone used to select that path at the CLI and then fail lower admission.
+    let wires=snare::SnareSet {strands:2,modes_per_strand:2,contact_cells:4,
+        clearance_m:-2e-6,..full_wires};
+    for linear in [true,false] {
+        let mut e=build(wires,linear,false);
+        assert!(e.system.membrane_observation(1).is_none());
+        assert!(e.system.membrane_observation(2).is_none());
+        let initial=if let Mechanics::Prepared(s)=&e.system {s.frame().stored_energy_j}
+            else {energy(&e.system)};
+        if !linear {e=prepared(e);}
+        let gate=CancelGate::new_clock_free();let mut loss=0.0;let mut bending=[0.0_f64;2];
+        for _ in 0..256 {
+            let frame=e.system.step(&e.force,&gate).unwrap();
+            assert_eq!(frame.supplied_work_j,0.0);loss+=frame.dissipated_energy_j;
+            assert!((frame.stored_energy_j+loss-initial).abs()<1e-6);
+            for (i,p) in e.flexible_sticks.iter().enumerate() {
+                bending[i]=bending[i].max(p.as_ref().unwrap().observe(e.system.state()).unwrap().flexural_energy_j);
+            }
+        }
+        assert!(bending.iter().all(|v|*v>1e-12),"both tips must react through their shaft bodies: {bending:?}");
+    }
+}
+
+#[test]
 fn mute_jaws_and_opposite_hand_mallet_keep_their_own_inertia_and_history() {
     let s=Selection{first:None,second:Some(shaft())};
     let selected=mallets::Selection{first:Some(mallets::Spec::parse(include_str!("estimated-felt-mallet.fsmallet")).unwrap()),second:None};

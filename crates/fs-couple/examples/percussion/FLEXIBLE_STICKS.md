@@ -141,10 +141,13 @@ Its normal contacts retain the complete signed rigid/shaft/head row, so both
 flexible sticks receive bending reactions through the same joint solve. G1/G3
 regressions compare identical diagonal mechanics split across bodies or grouped
 in one basis, and exercise actual two-stick drum impacts and energy balance.
-For snare commands, selecting a shaft enables the nonlinear-capable composition
-so that `--analytic-newton` and impact substeps can be used without discarding
-the wires or their contact loss. This does not enable head or wire stretching
-unless separately requested.
+For snare commands with linear heads/wires and hard tips, selecting a shaft
+keeps the prepared modal composition by default. The full signed contact rows
+retain every wire and both shaft bodies. Explicit `--prepared-nonlinear`,
+`--analytic-newton`, impact substeps or radiation feedback select the nonlinear-capable
+composition without discarding wires or contact loss. Felt mallets/mutes, hereditary head
+material, head/wire stretching and a moving carrier also select that owner.
+Choosing an execution image does not enable head or wire stretching.
 
 CSV tip motion now includes shaft flexure rather than just the rigid launch
 coordinate. Selected shafts also report hand motion and elastic kinetic plus

@@ -27,6 +27,13 @@ cargo run --release -p fs-couple --example percussion -- \
   --cavity-modes --cavity-drag-per-s 20 \
   --compliant-mute crates/fs-couple/examples/percussion/estimated-drum-mute.fsm \
   > played-mute.csv
+
+# A batter-head pad on the complete snare; head stretching is independently optional.
+cargo run --release -p fs-couple --example percussion -- \
+  snare 4096 --analytic-newton --impact-substeps 8 511 \
+  --cavity-modes --cavity-drag-per-s 20 \
+  --compliant-mute crates/fs-couple/examples/percussion/estimated-drum-mute.fsm \
+  > muted-snare.csv
 ```
 
 The supplied geometry, masses, gaps, pad laws and playing forces are **editable
@@ -59,7 +66,9 @@ There is no automatic spatial-resolution or contact-patch convergence claim.
 
 One or two `jaw` rows provide independently translating effective masses and
 pads. A shell can have `above`, `below`, or both. A drumhead permits exactly one
-exterior jaw: `batter` with `above`, or `resonant` with `below`. Interior jaw/air
+exterior jaw: `batter` with `above`, or `resonant` with `below`. On a snare,
+only the batter-side jaw is admitted, including `snare-off`: collision between
+a resonant-side jaw and the wire bank is not represented. Interior jaw/air
 displacement is not modelled and cannot be silently omitted. The example's
 surface-motion axis is downward; jaw displacement, velocity and player force
 are **positive inward on either side**. The pad face conforms to the declared
@@ -87,14 +96,16 @@ unknown fields, duplicates, invalid cards and files above 64 KiB refuse.
 
 All sites on one jaw share exactly one inertia. Equal-and-opposite contact
 reactions enter the existing nonlinear impact solve with the shell/heads,
-sticks, stand, and enclosed air. Stored pad recovery energy, jaw kinetic energy,
+sticks, snare wires/carrier, stand, and enclosed air. Stored pad recovery energy, jaw kinetic energy,
 viscous work and felt conditioning loss participate in its energy balance.
 The original resonator addresses do not move. Existing contacts, mufflers,
 stand pads, swept-volume rows and radiating modes have exact zeros on the
-new jaw coordinates. Gas inertia is appended before private Kelvin state.
+new jaw coordinates. Snare jaws follow the complete original wire/carrier bank;
+selected shaft flexure and gas inertia follow the jaws, before private Kelvin state.
 
 The same one-clock force staging accepts up to four distinct physical inputs:
-two sticks plus two jaws. Existing independent stick force files, supplied
+two sticks plus two cymbal jaws, or two sticks, a snare carrier and one head pad.
+Existing independent stick force files, supplied
 shell/drum cards, spatial mufflers, analytic Newton, internal substeps and
 mono/stereo observers compose. A refused mechanical tick consumes none of
 these force programs; internal recovery rolls back all jaw/site histories too.
@@ -106,10 +117,13 @@ The latter is an **endpoint constitutive observation**, not the discrete
 step-average reaction. `player_work_j` is the current tick's total external
 work over all sticks/jaws, not just the stick work or a cumulative sum.
 
-This image is nonlinear even for linearly reduced drumheads. `drum-modal` and
-snare commands refuse it instead of converting their different, larger contact
-solver or truncating wires. Vented exterior audio remains unsupported. Jaw
-radiation and acoustic occlusion/scattering by the mute are omitted: existing
+This image has nonlinear felt contact even for linearly reduced drumheads.
+`snare[-off][-wav|-mic] --compliant-mute` selects the nonlinear-capable mechanics
+with the full supplied wire bank and its contact losses. Head/wire stretching
+and material memory remain separate physical selections; no extra head law is
+needed to admit the pad. `drum-modal` still refuses felt history. Vented audio
+requires the existing explicit prescribed-vent radiation path. Jaw radiation
+and acoustic occlusion/scattering by the mute are omitted: existing
 one-way BEM observes the resulting instrument motion on the same boundary.
 There is no friction, hand skeleton, rotation, adhesive force, manufacturing
 calibration, or full-band cymbal/skin fidelity claim. Those require separate
@@ -121,3 +135,8 @@ Focused native checks:
 cargo test --release -p fs-couple --lib render::plate::impact::compliant
 cargo test --release -p fs-couple --example percussion compliant_mute -- --test-threads=1
 ```
+
+The snare regression retains all twenty strands during construction and uses
+a smaller, explicitly preloaded bank for pad/head/wire energy-exchange checks.
+The new snare checks have been syntax-checked, but native execution remains
+unverified: the shared build exhausted disk and memory before compiling these tests.

@@ -94,9 +94,13 @@ impl Spec {
     pub fn jaw_count(&self) -> usize {self.jaws.len()}
     pub fn admit_command(&self, command: &str) -> Result<(),Error> {
         let shell=matches!(command,"splash"|"splash-wav"|"splash-mic");
-        let drum=matches!(command,"drum"|"drum-wav"|"drum-mic"|"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic");
+        let snare=matches!(command,"snare"|"snare-wav"|"snare-mic"|"snare-off"|"snare-off-wav"|"snare-off-mic");
+        let drum=snare || matches!(command,"drum"|"drum-wav"|"drum-mic"|"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic");
         if !(shell || drum) || (self.surface==Surface::Shell)!=shell {
-            return Err("compliant mute requires the matching nonlinear splash or drum image, not modal/snare conversion".into());
+            return Err("compliant mute requires the matching nonlinear-capable splash, drum or snare image".into());
+        }
+        if snare && self.surface!=Surface::Batter {
+            return Err("snare mutes must approach the batter head; resonant-side jaw/wire collision is not represented".into());
         }
         if !shell && (self.jaws.len()!=1 || self.jaws[0].side!=
             if self.surface==Surface::Batter {PadSide::Negative}else{PadSide::Positive}) {

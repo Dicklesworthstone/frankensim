@@ -31,8 +31,15 @@ fn complete_cards_force_programs_and_exterior_sides_are_admitted_before_geometry
     assert_eq!(spec.jaw_count(),2);assert_eq!(spec.sites.len(),2);
     for command in ["splash","splash-wav","splash-mic"] {spec.admit_command(command).unwrap();}
     for command in ["drum","snare","drum-modal","unknown"] {assert!(spec.admit_command(command).is_err());}
-    Spec::parse(&text("batter",false,0.001)).unwrap().admit_command("drum-stretch-mic").unwrap();
-    Spec::parse(&text("resonant",false,0.001)).unwrap().admit_command("drum-wav").unwrap();
+    let batter=Spec::parse(&text("batter",false,0.001)).unwrap();
+    let resonant=Spec::parse(&text("resonant",false,0.001)).unwrap();
+    batter.admit_command("drum-stretch-mic").unwrap();
+    resonant.admit_command("drum-wav").unwrap();
+    for command in ["snare","snare-wav","snare-mic","snare-off","snare-off-wav","snare-off-mic"] {
+        batter.admit_command(command).unwrap();
+        assert!(resonant.admit_command(command).is_err(),"jaw/wire collision is not represented");
+    }
+    assert!(batter.admit_command("drum-modal").is_err());
     for bad in [source.replace("surface,shell","surface,shell\nsurface,shell"),
         source.replace("0.025,0.1","0,0.1"),source.replace("site,0.06,0.01,0.0001","site,NaN,0.01,0.0001"),
         source.replace("force,above,0,0","force,above,0,1"),
@@ -158,6 +165,69 @@ fn exterior_head_pad_keeps_cavity_pressure_and_private_material_coordinates_reci
     }
     assert!(pressure>0.0);assert!(felt(&e.system,0).is_some());
     assert!(e.system.membrane_observation(1).unwrap().stretching_energy_j>0.0);
+}
+
+#[test]
+fn snare_batter_mute_keeps_the_wire_bank_and_drives_the_same_coupled_heads() {
+    let dt=2e-6;let ticks=256;
+    let spec=Spec::parse(&text("batter",false,ticks as f64*dt)).unwrap();
+    let build=|wires,audio| drum_with_compliant_mute(ticks,dt,audio,false,Some(wires),false,
+        rest([0.06,0.01]),true,None,
+        Some(crate::drum_spec::Spec {radial_intervals:2,azimuths:8,..crate::drum_spec::Spec::reference()}),
+        Some(rest([-0.05,0.02])),&[],20.0,Some(&spec)).unwrap();
+
+    // The ordinary twenty-strand instrument needs no artificial head stretching
+    // to admit a felt pad. All 160 wire coordinates precede the new jaw.
+    let full_wires=crate::snare::SnareSet::reference(false);
+    let full=build(full_wires,true);
+    assert!(matches!(&full.system,Mechanics::Reference(_)));
+    assert!(full.system.membrane_observation(1).is_none());
+    assert!(full.system.membrane_observation(2).is_none());
+    let first_wire=full.second_stick.unwrap().coordinate+1;
+    let jaw=full.mute.as_ref().unwrap().ports[0];
+    assert_eq!(jaw.coordinate,first_wire+160);
+    assert_eq!(jaw.coordinate,first_wire+full_wires.mode_count().unwrap());
+    assert_eq!(full.mute.as_ref().unwrap().first_pad,0);
+    assert!(full.system.state()[2*first_wire..2*jaw.coordinate].iter().all(|v|*v==0.0));
+    let air=full.air.as_ref().unwrap();
+    assert_eq!(air.coupling.structural_modes(),jaw.coordinate+1);
+    assert_eq!(full.system.state().len(),2*air.coupling.total_modes()+2);
+    assert!(full.acoustics.as_ref().unwrap().state_modes().iter().all(|i|*i<first_wire-1));
+    assert!(full.observer_a[first_wire..].iter().all(|v|*v==0.0));
+    assert!(full.pressure.as_ref().unwrap().areas[first_wire..].iter().all(|v|*v==0.0));
+    let mut displaced=full.system.state().to_vec();
+    displaced[2*jaw.coordinate]=0.001/jaw.inverse_sqrt_mass;
+    assert_eq!(air.uniform_pressure(&displaced).unwrap(),0.0);
+    assert_eq!(air.points(&displaced).unwrap(),(0.0,0.0));
+
+    // A smaller physical bank resolves reciprocal pad/head/wire motion in this
+    // short integration window. Its explicit initial interference contributes
+    // to initial contact storage; the energy ledger must retain that preload.
+    let wires=crate::snare::SnareSet {strands:2,modes_per_strand:2,contact_cells:4,
+        clearance_m:-2e-6,..full_wires};
+    let mut e=build(wires,false);
+    let first_wire=e.second_stick.unwrap().coordinate+1;
+    let o=e.mute.as_ref().unwrap();let jaw=o.ports[0];
+    let inputs=spec.into_inputs(o).unwrap();
+    let Mechanics::Reference(initial)=&e.system else {panic!("felt-capable snare owner")};
+    let energy=initial.stored_energy_j();
+    e=prepare(e);e.system=e.system.with_stick_drives(inputs,dt,ticks,e.force.len()).unwrap();
+    let gate=CancelGate::new_clock_free();
+    let (mut net,mut pad_force,mut wire_motion,mut pressure)=(0.0,0.0_f64,0.0_f64,0.0_f64);
+    for tick in 1..=ticks {
+        let f=e.system.step(&e.force,&gate).unwrap();
+        net+=f.supplied_work_j-f.dissipated_energy_j;
+        assert_eq!(f.time_s,tick as f64*dt);
+        assert!((f.stored_energy_j-energy-net).abs()<1e-6);
+        pad_force=pad_force.max(felt(&e.system,0).unwrap().1);
+        for i in first_wire..jaw.coordinate {wire_motion=wire_motion.max(e.system.state()[2*i+1].abs());}
+        pressure=pressure.max(e.air.as_ref().unwrap().uniform_pressure(e.system.state()).unwrap().abs());
+    }
+    assert!(pad_force>0.0,"the force-driven jaw must contact the batter head");
+    assert!(wire_motion>0.0,"the retained resonant-head contacts must react on the wires");
+    assert!(pressure>0.0,"both heads remain coupled through the same cavity gas");
+    assert!(e.system.membrane_observation(1).is_none());
+    assert!(e.system.membrane_observation(2).is_none());
 }
 
 #[test]

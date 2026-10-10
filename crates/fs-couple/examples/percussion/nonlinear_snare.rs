@@ -15,21 +15,21 @@ pub fn admit_command(stretching:bool,command:&str)->Result<(),Error> {
     }
     Ok(())
 }
-pub fn admit_prepared_command(prepared:bool,stretching:bool,command:&str)->Result<(),Error> {
-    admit_command(stretching,command)?;
+pub fn admit_prepared_command(prepared:bool,nonlinear:bool,command:&str)->Result<(),Error> {
+    admit_command(nonlinear,command)?;
     if prepared && !(matches!(command,"splash"|"splash-wav"|"splash-mic"|
         "drum"|"drum-wav"|"drum-mic"|"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic")
-        || stretching && snare(command)) {
-        return Err("nonlinear preparation requires splash, drum, drum-stretch, or snare with head/wire stretching or a moving carrier; no silent conversion of linear modal mechanics".into());
+        || nonlinear && snare(command)) {
+        return Err("nonlinear preparation requires splash, drum, drum-stretch, or snare with nonlinear material/contact, flexible shafts or moving supports".into());
     }
     Ok(())
 }
-pub fn admit_image(linear_prepared:bool,wires:bool,stretching:bool)->Result<(),Error> {
-    if stretching && linear_prepared {
-        return Err("stretching heads/wires and moving supports require coupled nonlinear-capable mechanics, not the linear modal image".into());
+pub fn admit_image(linear_prepared:bool,wires:bool,nonlinear:bool)->Result<(),Error> {
+    if nonlinear && linear_prepared {
+        return Err("nonlinear head/wire material, felt contact and moving supports require coupled nonlinear-capable mechanics".into());
     }
-    if wires && !linear_prepared && !stretching {
-        return Err("a fully linear snare keeps its original prepared modal image; select head/wire stretching or a carrier explicitly".into());
+    if wires && !linear_prepared && !nonlinear {
+        return Err("a fully linear snare keeps its prepared modal image; select nonlinear material/contact, flexible shafts or moving supports explicitly".into());
     }
     Ok(())
 }
