@@ -35,6 +35,7 @@ piano_exterior render BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTIC
 piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
     [--modes 1..512] [--substeps 1..16] [--rigid-assembly ASSEMBLY.fspr]
     [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
+    [--board-reduction max_modes,keep_low_modes,Hz,...]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
     [--rt0425-hammer-stiffness] [--rt0425-hammer-dissipation]
     [--rt0425-string-damping]
@@ -55,8 +56,8 @@ implemented per-string K_H and published R_H contact laws, not output EQ.
 The RT-0425 string flag requires the steinway-d scale and projects published
 per-key R_u and eta_u onto the existing reduced string modes; it is opt-in.
 response and admittance also accept --modes/--substeps, --rigid-assembly,
---equilibrate-board-mass, either flat-board mass option, --string-polarization
-and --rt0425-string-damping after the output path. Admittance retains both
+--equilibrate-board-mass, either flat-board mass option, --board-reduction,
+--string-polarization and --rt0425-string-damping after the output path. Admittance retains both
 transverse string directions and the selected intrinsic loss law from playback.
 Its applied bridge force and reported bridge velocity remain in the primary
 hammer direction; secondary strings react through the same board. The response
@@ -68,13 +69,22 @@ it leaves geometry, materials, mode cap and original residual admission unchange
 selects the existing cubic transverse field for inertia, bridge coupling and
 acoustic surface motion, including its analytic physical rotations. Both retain
 the same eigensolve throughout playback and can compose with string polarization.
+--board-reduction admits up to 512 certified source modes within the supplied
+FSPE board-band-hz, then retains at most 128 coordinates using primary bridge
+static/harmonic response directions and the requested exact low modes. Its
+1..16 increasing target frequencies must lie inside that source band. Full
+projected wood damping and the transformed bridge/acoustic motion are shared
+by playback and admittance. Set max_modes <=32 for render-loaded, whose passive
+radiation fit keeps its existing independent budget. Snapshot displacement
+projection error is not a transfer, acoustic or mesh-convergence certificate.
+See grand_piano/BOARD_REDUCTION.md for the explicit format and scope.
 These flat-board options refuse crowned shells; higher-band convergence remains
 an independent requirement. The optional FSB stiffener-mass row accepts lumped,
 consistent-hermite or consistent-eccentric. The last adds supplied bending rotary
 and offset centroid inertia to Hermite translation; no torsional polar inertia is inferred.
 admittance alone accepts --lossless-structure to remove the existing wood and
 string material damping for a declared conservative-structure comparison.
-It retains the complete complex radiation load and all original modes. Near
+It retains the complete complex radiation load and all selected coordinates. Near
 fixed-interface string poles use a bounded coupled solve, not fabricated loss.
 This option is not accepted by response, render or render-loaded.
 It also excludes --rt0425-string-damping, which explicitly selects a lossy law.
@@ -183,12 +193,19 @@ fn prepare_board_motion(board_text:&str,keys:&[u8],band_hz:f64,options:&playback
     ->Result<board_geometry::PreparedBoard,String> {
     options.validate()?;
     if crowned_board::is_crowned(board_text) {
+        if options.board_reduction.is_some() {
+            return Err("--board-reduction currently requires a flat geometric board".into());
+        }
         if options.equilibrate_board_mass || options.consistent_board_mass || options.edge_cubic_board_mass {
             return Err("flat-board mass controls require a flat geometric board".into());
         }
         crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(keys,band_hz)
     } else {
         let geometry=board_geometry::BoardGeometry::read(board_text)?;
+        if let Some(reduction)=&options.board_reduction {
+            return geometry.prepare_reduced(keys,band_hz,true,options.equilibrate_board_mass,
+                options.consistent_board_mass,options.edge_cubic_board_mass,reduction);
+        }
         if options.edge_cubic_board_mass {
             geometry.prepare_with_motion_edge_cubic_transverse_mass(keys,band_hz,options.equilibrate_board_mass)
         } else if options.consistent_board_mass {
@@ -205,7 +222,8 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
     let rigid=options.rigid_assembly.as_deref().map(Assembly::load).transpose()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     let board=prepare_board_motion(board_text,&keys,spec.board_band_hz,options)?;
-    let piano=controls.instrument_with_motion(courses,&board.modes,board.motion.as_ref(),options)?;
+    let mut piano=controls.instrument_with_motion(courses,&board.modes,board.motion.as_ref(),options)?;
+    if let Some(c)=board.physical_damping.as_deref() {piano.configure_bare_board_damping(c)?;}
     let (bare,description)=section_skin::boundary(obj,board_text,&spec,
         board.motion.as_ref().ok_or("missing full-vector structural motion")?,continuous)?;
     let bare=if let Some(rigid)=&rigid {
@@ -216,6 +234,22 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
     let boundary=bare.loaded(&piano.bank)?;
     spec.source.push_str(&format!("; {description}"));
     Ok(Scene {piano,board,boundary,spec})
+}
+/// Preserve the source FE certificates separately from the reduced pencil.
+/// These comments describe the prepared basis, not an acoustic error estimate.
+fn board_reduction_report(board:&board_geometry::PreparedBoard)->String {
+    let Some(report)=&board.reduction else {return String::new();};
+    let mut out=format!("# soundboard reduction: source_modes={}, retained_modes={}, protected_low_modes={}; primary bridge static/harmonic targets={:?} Hz\n# nonzero_snapshots={}, maximum_relative_displacement_projection_error={:.17e}; no transfer, acoustic or mesh-convergence certificate\n",
+        report.source_modes,board.modes.len(),report.protected_low_modes,report.sample_hz,
+        report.snapshot_count,report.max_relative_snapshot_error);
+    for (i,(lo,hi)) in report.source_frequency_intervals_hz.iter().enumerate() {
+        writeln!(out,"# source FE mode {i}: [{lo:.17e},{hi:.17e}] Hz").unwrap();
+    }
+    for (i,(lo,hi)) in board.frequency_intervals_hz.iter().enumerate() {
+        let scope=if i<report.protected_low_modes {"source FE"}else{"projected-pencil Ritz"};
+        writeln!(out,"# retained board mode {i} ({scope}): [{lo:.17e},{hi:.17e}] Hz").unwrap();
+    }
+    out
 }
 fn response(scene:&Scene)->Result<String,String> {
     let samples=scene.boundary.sample(&scene.spec)?;
@@ -228,7 +262,7 @@ fn response(scene:&Scene)->Result<String,String> {
             writeln!(csv,"{:.17e},{receiver},{input},{:.17e},{:.17e}",w/std::f64::consts::TAU,row[f].re,row[f].im).unwrap();
         }
     }}
-    Ok(csv)
+    Ok(format!("{}{csv}",board_reduction_report(&scene.board)))
 }
 /// Only admittance admits the explicit conservative-structure comparison.
 /// Preserve option/value boundaries: a flag cannot repair a missing value.
@@ -277,9 +311,10 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
     let board=prepare_board_motion(board_text,&keys,spec.board_band_hz,options)?;
     let projected=polarization.as_ref().map(|frames|
         frames.project(courses,&board.modes,board.motion.as_ref())).transpose()?;
-    let model=bridge_response::BridgeResponse::new_with_string_damping(courses,&board.modes,
+    let mut model=bridge_response::BridgeResponse::new_with_string_damping(courses,&board.modes,
         RATE*options.substeps as u32,0.45*f64::from(RATE),options.modes,damping,
         projected.as_ref().map(|frames|frames.secondary().0),options.rt0425_string_damping)?;
+    if let Some(c)=board.physical_damping.as_deref() {model.configure_bare_board_damping(c)?;}
     let (bare,description)=section_skin::boundary(obj,board_text,spec,
         board.motion.as_ref().ok_or("missing harmonic surface motion")?,continuous)?;
     let (bare,description)=if let Some(rigid)=&rigid {
@@ -287,8 +322,8 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
     } else {(bare,description)};
     let boundary=bare.loaded(model.bank())?;
     let csv=exterior_loading::sweep(&boundary,&model,spec,drive)?;
-    Ok(format!("# acoustic geometry: {description}\n# structure: {}\n# structural loss: {}; radiation loading remains in the coupled columns\n# intrinsic string loss: {}\n# two transverse directions={}; bridge force and reported velocity use the primary hammer direction\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
-        board.provenance,if damping {"physical wood damping and selected intrinsic string law"}else{"explicitly disabled by --lossless-structure"},
+    Ok(format!("{}# acoustic geometry: {description}\n# structure: {}\n# structural loss: {}; radiation loading remains in the coupled columns\n# intrinsic string loss: {}\n# two transverse directions={}; bridge force and reported velocity use the primary hammer direction\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
+        board_reduction_report(&board),board.provenance,if damping {"physical wood damping and selected intrinsic string law"}else{"explicitly disabled by --lossless-structure"},
         if !damping {"disabled"}else if options.rt0425_string_damping {"RT-0425 per-key R_u and eta_u"}else{"estimated common law"},
         model.bank().has_secondary_polarization(),
         board.modes.len(),model.bank().modes.len(),model.bank().omitted_duplex_modes,csv))
@@ -375,6 +410,7 @@ fn run(args:&[String])->Result<(),String> {
                 let audio=exterior_audio::render(&mut scene.piano,score.performance,n,&baked,scene.spec.full_scale_pa)?;
                 publish(output,&audio.wav)?;
                 let physical_report=options.report(&scene.piano);
+                print!("{}",board_reduction_report(&scene.board));
                 println!("{}\n{score_report}\n{physical_report}\n{load_report}\nAcoustic source: {}. Structural source: {}.\nBand {:?} Hz; {} panels, {} closed components, minimum panels/wavelength={}, conditioning lower bound={}. Written {output}.",
                     audio.report,scene.spec.source,scene.board.provenance,scene.spec.band_hz,
                     scene.boundary.surface.areas().len(),scene.boundary.components,samples.minimum_ppw,samples.maximum_condition_lower_bound);
@@ -613,3 +649,7 @@ mod rigid_assembly_render_tests;
 #[cfg(test)]
 #[path="grand_piano/harmonic_controls_render_tests.rs"]
 mod harmonic_controls_render_tests;
+
+#[cfg(test)]
+#[path="grand_piano/board_reduction_exterior_tests.rs"]
+mod board_reduction_exterior_tests;

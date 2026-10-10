@@ -272,7 +272,7 @@ impl CrownedBoard {
         } else {None};
         Ok(PreparedBoard {modes,surface,motion,area_m2:surface_area,mass_kg:self.mass_kg,
             provenance:format!("{}; 3-D CST/DKT crowned shell, {} eccentric rectangular beam segments; reference max |z|={} m; projected flat-baffle radiation; {}",self.source,self.beams.len(),self.max_height_m,equilibrium),
-            frequency_intervals_hz:intervals,free_dofs:model.free})
+            frequency_intervals_hz:intervals,physical_damping:None,reduction:None,free_dofs:model.free})
     }
 }
 fn nodal(model:&ShellModel,phi:&[f64],node:usize,start:usize)->[f64;3] {

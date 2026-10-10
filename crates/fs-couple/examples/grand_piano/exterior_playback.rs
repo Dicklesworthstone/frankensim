@@ -29,6 +29,7 @@ pub struct Options {
     pub equilibrate_board_mass: bool,
     pub consistent_board_mass: bool,
     pub edge_cubic_board_mass: bool,
+    pub board_reduction: Option<super::board_geometry::ritz::RitzOptions>,
     pub rt0425_hammer_stiffness: bool,
     pub rt0425_hammer_dissipation: bool,
     pub rt0425_string_damping: bool,
@@ -41,6 +42,7 @@ impl Default for Options {
             hammer_footprints: None, dampers: None, string_stretching: None, string_polarization: None,
             rigid_assembly: None,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
+            board_reduction: None,
             rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false, rt0425_string_damping: false }
     }
@@ -90,7 +92,7 @@ impl Options {
                 continue;
             }
             if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers", "--string-stretching", "--string-polarization", "--rigid-assembly",
-                "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity"].contains(&flag.as_str()) {
+                "--board-reduction", "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity"].contains(&flag.as_str()) {
                 return Err(format!("unknown exterior playback option {flag}"));
             }
             let value = args.next().filter(|v| !v.is_empty() && !v.starts_with("--"))
@@ -105,6 +107,7 @@ impl Options {
                 "--string-stretching" => result.string_stretching = Some(value.clone()),
                 "--string-polarization" => result.string_polarization = Some(value.clone()),
                 "--rigid-assembly" => result.rigid_assembly = Some(value.clone()),
+                "--board-reduction" => result.board_reduction = Some(super::board_geometry::ritz::RitzOptions::parse(value)?),
                 "--performance" => result.performance = Some(value.clone()),
                 "--midi" => {
                     if result.midi.replace(value.clone()).is_some() { return Err("duplicate MIDI score".into()); }
@@ -143,7 +146,7 @@ impl Options {
             || options.string_stretching.is_some()
             || options.rt0425_hammer_stiffness
             || options.rt0425_hammer_dissipation {
-            return Err("response/admittance accept resolution, board inertia, rigid assembly, string polarization and intrinsic string damping; hammer, pedal, score and nonlinear-extension controls require playback".into());
+            return Err("response/admittance accept resolution, board inertia/reduction, rigid assembly, string polarization and intrinsic string damping; hammer, pedal, score and nonlinear-extension controls require playback".into());
         }
         Ok(())
     }

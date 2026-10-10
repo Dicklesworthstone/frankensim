@@ -25,6 +25,10 @@ use std::f64::consts::TAU;
 
 #[path = "board_motion.rs"]
 pub mod motion;
+#[path = "board_ritz.rs"]
+pub mod ritz;
+#[path = "board_reduction.rs"]
+mod reduction;
 
 pub const HEADER: &str = "frankensim-board-geometry-si-v1";
 // Use the SAME retention budget as modal import, bridge mechanics and radiation.
@@ -64,6 +68,20 @@ pub struct SurfaceSample {
     pub mode_shape: Vec<f64>,
 }
 
+/// Audit of the explicit bridge-driven projection within one certified FE slice.
+/// Snapshot errors measure Euclidean projection in source-modal coordinates;
+/// they do not certify transfer accuracy, omitted higher modes or mesh convergence.
+#[derive(Clone, Debug)]
+pub struct ReductionReport {
+    pub source_modes: usize,
+    pub protected_low_modes: usize,
+    pub source_frequency_intervals_hz: Vec<(f64, f64)>,
+    /// Positive harmonic samples in Hz; static bridge responses are implicit.
+    pub sample_hz: Vec<f64>,
+    pub snapshot_count: usize,
+    pub max_relative_snapshot_error: f64,
+}
+
 #[derive(Debug)]
 pub struct PreparedBoard {
     pub surface: Vec<SurfaceSample>,
@@ -75,8 +93,15 @@ pub struct PreparedBoard {
     pub area_m2: f64,
     /// Panel + stiffener physical mass, INCLUDING fixed boundary nodes.
     pub mass_kg: f64,
-    /// Eigenvalue certificate converted to frequency intervals [Hz].
+    /// Eigenvalue certificate converted to frequency intervals [Hz]. For an
+    /// explicit reduction, the protected prefix retains its FE certificates;
+    /// mixed tail intervals certify only the projected stiffness/mass pencil.
     pub frequency_intervals_hz: Vec<(f64, f64)>,
+    /// Full row-major viscous C in the returned mass-normalized board basis.
+    /// Present only for explicit reduction; consumers must retain its
+    /// off-diagonal terms, not rebuild it from per-mode damping ratios.
+    pub physical_damping: Option<Vec<f64>>,
+    pub reduction: Option<ReductionReport>,
     pub free_dofs: usize,
 }
 
@@ -321,6 +346,24 @@ impl BoardGeometry {
     ) -> Result<PreparedBoard, String> {
         self.prepare_inner(keys, upper_hz, true, mass_equilibrated, false, true)
     }
+    /// Explicit bridge-driven reduction of a complete source slice of at most
+    /// 512 modes to at most 128 runtime coordinates. Preserve the requested
+    /// low eigenpairs exactly and share the reduced nodal fields with every
+    /// mechanical/acoustic projection. Source certificates remain in the report.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_reduced(
+        &self,
+        keys: &[u8],
+        upper_hz: f64,
+        retain_motion: bool,
+        mass_equilibrated: bool,
+        consistent_mass: bool,
+        edge_cubic_mass: bool,
+        options: &ritz::RitzOptions,
+    ) -> Result<PreparedBoard, String> {
+        self.prepare_inner_with_reduction(keys, upper_hz, retain_motion, mass_equilibrated,
+            consistent_mass, edge_cubic_mass, Some(options))
+    }
     fn prepare_inner(
         &self,
         keys: &[u8],
@@ -330,6 +373,20 @@ impl BoardGeometry {
         consistent_transverse_mass: bool,
         edge_cubic_transverse_mass: bool,
     ) -> Result<PreparedBoard, String> {
+        self.prepare_inner_with_reduction(keys, upper_hz, retain_motion, mass_equilibrated,
+            consistent_transverse_mass, edge_cubic_transverse_mass, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_inner_with_reduction(
+        &self,
+        keys: &[u8],
+        upper_hz: f64,
+        retain_motion: bool,
+        mass_equilibrated: bool,
+        consistent_transverse_mass: bool,
+        edge_cubic_transverse_mass: bool,
+        reduction_options: Option<&ritz::RitzOptions>,
+    ) -> Result<PreparedBoard, String> {
         if consistent_transverse_mass && edge_cubic_transverse_mass {
             return Err("choose one transverse panel mass law".into());
         }
@@ -338,6 +395,12 @@ impl BoardGeometry {
         }
         if !upper_hz.is_finite() || upper_hz <= 0.0 || upper_hz > 80_000.0 {
             return Err("invalid soundboard frequency ceiling".into());
+        }
+        if let Some(options) = reduction_options {
+            options.validate()?;
+            if options.sample_hz.iter().any(|hz| *hz > upper_hz) {
+                return Err("board reduction target frequencies must lie within the explicit source board band".into());
+            }
         }
         let mut seen = BTreeSet::new();
         for &key in keys {
@@ -367,9 +430,17 @@ impl BoardGeometry {
         let report = fs_plate::modes(&model, (0.0, (TAU * upper_hz).powi(2)), &modal_options)
             .map_err(|e| e.to_string())?;
         if report.below_low != 0 { return Err("unstable soundboard has negative stiffness eigenvalues".into()); }
-        if report.modes.is_empty() || report.modes.len() > MAX_BOARD_MODES {
+        if reduction_options.is_some() {
+            if report.modes.is_empty() || report.modes.len() > ritz::MAX_SOURCE_MODES {
+                return Err(format!("certified band contains {} modes; explicit reduction admits a complete source slice of 1..={}", report.modes.len(), ritz::MAX_SOURCE_MODES));
+            }
+        } else if report.modes.is_empty() || report.modes.len() > MAX_BOARD_MODES {
             return Err(format!("certified band contains {} modes; runtime admits 1..={MAX_BOARD_MODES}; choose a narrower explicit band", report.modes.len()));
         }
+        let reduced = reduction_options.map(|options|
+            reduction::project(self, &model, &report, keys, edge_cubic_transverse_mass, options))
+            .transpose()?;
+        let pairs = reduced.as_ref().map_or(report.modes.as_slice(), |value| value.modes.as_slice());
         let mesh = &self.chart.mesh;
         let mut volume_weights = vec![0.0; mesh.nodes.len()];
         let mut cubic_volume_shape = vec![0.0; model.free];
@@ -388,10 +459,10 @@ impl BoardGeometry {
                 for &node in tri { volume_weights[node] += area / 3.0; }
             }
         }
-        let mut modes = Vec::with_capacity(report.modes.len());
-        let mut intervals = Vec::with_capacity(report.modes.len());
+        let mut modes = Vec::with_capacity(pairs.len());
+        let mut intervals = Vec::with_capacity(pairs.len());
         let mut m_phi = vec![0.0; model.free];
-        for (mode_id, pair) in report.modes.iter().enumerate() {
+        for (mode_id, pair) in pairs.iter().enumerate() {
             if pair.phi.len() != model.free || pair.phi.iter().any(|x| !x.is_finite())
                 || !pair.lambda.is_finite() || pair.lambda <= 0.0
                 || !pair.interval.0.is_finite() || pair.interval.0 <= 0.0
@@ -403,7 +474,7 @@ impl BoardGeometry {
             if !norm.is_finite() || (norm - 1.0).abs() > 1e-7 {
                 return Err("soundboard eigenvector is not mass normalized".into());
             }
-            for other in &report.modes[..mode_id] {
+            for other in &pairs[..mode_id] {
                 let product = other.phi.iter().zip(&m_phi).map(|(a, b)| a * b).sum::<f64>();
                 if !product.is_finite() || product.abs() > 1e-7 {
                     return Err("soundboard modes are not mass orthogonal".into());
@@ -430,7 +501,11 @@ impl BoardGeometry {
             }
             modes.push(BoardMode {
                 frequency_hz: det::sqrt(pair.lambda) / TAU,
-                damping_ratio: self.damping_ratio, bridge, volume,
+                damping_ratio: reduced.as_ref().map_or(self.damping_ratio, |value| {
+                    if mode_id < value.report.protected_low_modes { self.damping_ratio }
+                    else { value.physical_damping[mode_id * pairs.len() + mode_id]
+                        / (2.0 * det::sqrt(pair.lambda)) }
+                }), bridge, volume,
             });
             intervals.push((det::sqrt(pair.interval.0) / TAU, det::sqrt(pair.interval.1) / TAU));
         }
@@ -449,7 +524,7 @@ impl BoardGeometry {
                 }
                 let cubic_shape=edge_cubic_transverse_mass
                     .then(||cubic_triangle_shape(mesh,*tri,weights));
-                let shape = report.modes.iter().map(|pair| {
+                let shape = pairs.iter().map(|pair| {
                     if let Some(coefficients)=&cubic_shape {
                         local_shape_displacement(&model,&pair.phi,*tri,coefficients)
                     } else {
@@ -463,7 +538,7 @@ impl BoardGeometry {
         let motion = if retain_motion {
             let geometry=fs_plate::ShellMesh::new(mesh.nodes.iter().map(|&(x,y)|[x,y,0.]).collect(),mesh.tris.clone())
                 .map_err(|e|e.to_string())?;
-            let shapes=report.modes.iter().map(|pair| (0..mesh.nodes.len()).map(|node| {
+            let shapes=pairs.iter().map(|pair| (0..mesh.nodes.len()).map(|node| {
                 let at=|c:usize|model.dof_map[3*node+c].map_or(0.,|i|pair.phi[i]);
                 // DKT coordinates are slopes, NOT physical axial rotations.
                 [0.,0.,at(0),at(2),-at(1),0.]
@@ -508,9 +583,15 @@ impl BoardGeometry {
             provenance.push_str(&format!("; P1 acoustic-only refinement level {} ({} surface samples)",
                 self.acoustic_refinement_levels, surface.len()));
         }
+        let (physical_damping, reduction) = if let Some(value) = reduced {
+            provenance.push_str(&format!("; explicit bridge-driven Ritz projection: {} source modes, {} retained, {} unchanged low modes; mixed tail intervals certify the projected pencil only",
+                value.report.source_modes, modes.len(), value.report.protected_low_modes));
+            (Some(value.physical_damping), Some(value.report))
+        } else { (None, None) };
         Ok(PreparedBoard {
             modes, surface, motion, provenance, area_m2: mesh.total_area(),
-            mass_kg: mass, frequency_intervals_hz: intervals, free_dofs: model.free,
+            mass_kg: mass, frequency_intervals_hz: intervals, physical_damping, reduction,
+            free_dofs: model.free,
         })
     }
 
@@ -840,6 +921,96 @@ mod tests {
             let (b,_)=linear.project_at(site.triangle,site.weights,[0.,0.,0.009],[1.,0.,0.]).unwrap();
             assert!(a.iter().zip(b).any(|(a,b)|(a-b).abs()>1e-10),
                 "cubic interior rotations must not fall back to interpolated nodal rotations");
+        }
+    }
+
+    #[test]
+    fn bridge_ritz_preparation_preserves_sampled_transfer_and_one_physical_motion_basis() {
+        use fs_la::eigen_complex::lu_complex;
+        use fs_math::c64::C64;
+        let text = format!("{}bridge,70,9,0.3,0.2,0.5\n", fixture());
+        let geometry = BoardGeometry::read(&text).unwrap();
+        let keys = [69, 70];
+        for cubic in [false, true] {
+            let source = geometry.prepare_inner(&keys, 20_000.0, true, true, false, cubic).unwrap();
+            assert!(source.physical_damping.is_none() && source.reduction.is_none());
+            assert!(source.modes.len() > 12, "fixture must exercise a reduced tail");
+            let options = ritz::RitzOptions {
+                max_modes: source.modes.len(), keep_low_modes: 2, sample_hz: vec![90.0, 700.0],
+            };
+            let prepared = geometry.prepare_reduced(
+                &keys, 20_000.0, true, true, false, cubic, &options).unwrap();
+            let audit = prepared.reduction.as_ref().unwrap();
+            let r = prepared.modes.len();
+            assert!(r < source.modes.len());
+            assert_eq!(audit.source_modes, source.modes.len());
+            assert_eq!(audit.protected_low_modes, 2);
+            assert_eq!(audit.source_frequency_intervals_hz, source.frequency_intervals_hz);
+            assert_eq!(audit.sample_hz, options.sample_hz);
+            assert!(audit.max_relative_snapshot_error < 1e-8);
+            assert_eq!(source.mass_kg, prepared.mass_kg);
+            assert_eq!(source.area_m2, prepared.area_m2);
+            for i in 0..2 {
+                assert_eq!(source.modes[i].frequency_hz, prepared.modes[i].frequency_hz);
+                assert_eq!(source.modes[i].damping_ratio, prepared.modes[i].damping_ratio);
+                assert_eq!(source.modes[i].bridge, prepared.modes[i].bridge);
+                assert_eq!(source.modes[i].volume, prepared.modes[i].volume);
+                assert_eq!(source.frequency_intervals_hz[i], prepared.frequency_intervals_hz[i]);
+                assert_eq!(source.motion.as_ref().unwrap().shapes[i],
+                    prepared.motion.as_ref().unwrap().shapes[i]);
+            }
+            let c = prepared.physical_damping.as_ref().unwrap();
+            assert_eq!(c.len(), r * r);
+            // Independent full source-modal transfer versus the actual reduced
+            // K - omega^2 I - i omega C equation, including its dense damping.
+            for hz in [0.0, 90.0, 700.0] {
+                let omega = TAU * hz;
+                let matrix: Vec<_> = (0..r * r).map(|at| {
+                    let (i, j) = (at / r, at % r);
+                    C64::new(if i == j {
+                        (TAU * prepared.modes[i].frequency_hz).powi(2) - omega * omega
+                    } else { 0.0 }, -omega * c[at])
+                }).collect();
+                for &drive in &keys {
+                    let mut q: Vec<_> = prepared.modes.iter()
+                        .map(|mode| C64::new(mode.bridge[usize::from(drive - 21)], 0.0)).collect();
+                    lu_complex(&matrix, r).unwrap().solve(&mut q);
+                    for &receive in &keys {
+                        let exact = source.modes.iter().fold(C64::ZERO, |sum, mode| {
+                            let natural = TAU * mode.frequency_hz;
+                            sum + C64::new(mode.bridge[usize::from(drive - 21)]
+                                * mode.bridge[usize::from(receive - 21)], 0.0)
+                                / C64::new(natural * natural - omega * omega,
+                                    -2.0 * mode.damping_ratio * natural * omega)
+                        });
+                        let actual = prepared.modes.iter().zip(&q).fold(C64::ZERO,
+                            |sum, (mode, q)| sum + q.scale(mode.bridge[usize::from(receive - 21)]));
+                        assert!((actual - exact).abs() <= 5e-8 * exact.abs().max(1e-20),
+                            "cubic={cubic}, hz={hz}, drive={drive}, receive={receive}");
+                    }
+                }
+            }
+            let motion = prepared.motion.as_ref().unwrap();
+            assert_eq!(motion.is_edge_cubic(), cubic);
+            for site in &geometry.bridge_sites {
+                let (shape, scale) = motion.project_at(site.triangle, site.weights,
+                    [0.0; 3], [0.0, 0.0, 1.0]).unwrap();
+                for (i, mode) in prepared.modes.iter().enumerate() {
+                    assert!((shape[i] - mode.bridge[usize::from(site.midi - 21)]).abs()
+                        <= 1e-10 * scale[i].max(f64::MIN_POSITIVE));
+                }
+            }
+            for point in &prepared.surface {
+                let shape = motion.normal_weights(point.position_m, [0.0, 0.0, 1.0], 0.0).unwrap();
+                for (a, b) in shape.iter().zip(&point.mode_shape) {
+                    assert!((a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0));
+                }
+            }
+            for (i, mode) in prepared.modes.iter().enumerate() {
+                let integrated: f64 = prepared.surface.iter()
+                    .map(|point| point.area_m2 * point.mode_shape[i]).sum();
+                assert!((integrated - mode.volume).abs() < 1e-10);
+            }
         }
     }
 
