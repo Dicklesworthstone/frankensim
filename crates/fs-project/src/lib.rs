@@ -20,6 +20,7 @@ pub mod interface_state;
 pub mod migration;
 pub mod spec;
 pub mod study;
+mod transient;
 pub mod uncertainty;
 pub mod wire;
 
@@ -46,7 +47,10 @@ pub const STUDY_FSIM_VERSION: u32 = 1;
 /// Version 11 adds explicit finite-time conduction, sourced regional heat
 /// capacities and combined coarse/fine time-work limits. Older projects remain
 /// steady after a receipted schema rewrite; no heat storage is inferred.
-pub const FSIM_VERSION: u32 = 11;
+/// Version 12 adds optional sourced regional delivered-power schedules, with
+/// every switch represented on both time grids. Older transient projects keep
+/// their static power and migrate without inventing a workload history.
+pub const FSIM_VERSION: u32 = 12;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,
@@ -80,7 +84,8 @@ pub use spec::{
     OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface,
     RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
     RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary,
-    ThermalBoundaryCondition, ThermalLimit, TransientRegionCapacity, UnitsDoctrine, Vent, Versions,
+    ThermalBoundaryCondition, ThermalLimit, TransientPowerStep, TransientRegionCapacity,
+    TransientRegionPower, UnitsDoctrine, Vent, Versions,
     requirement_source_reviews,
 };
 pub use study::{

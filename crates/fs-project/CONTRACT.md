@@ -187,7 +187,7 @@ bindings; it runs no solves and admits no scenarios itself.
   Migration from v9 is an envelope rewrite; a pre-v10 payload declaring one is
   refused.
 - Wire: `lower`/`recognize` map `ProjectSpec` to and from the `fs_ir::Node`
-  envelope `(fsim-project :version 11 ...)`. `print_sexpr`/`parse_sexpr` and
+  envelope `(fsim-project :version 12 ...)`. `print_sexpr`/`parse_sexpr` and
   `print_json`/`parse_json` are the two spellings; `parse_sexpr_lenient`
   accepts noncanonical bytes and omitted defaultable fields, issuing a
   `CanonicalizationReceipt` (both hashes, `verifies()`) and `DefaultReceipt`s.
@@ -213,7 +213,20 @@ bindings; it runs no solves and admits no scenarios itself.
   exercise both spellings, physical/source/work refusals, identity changes and
   this migration boundary. Capacity declarations remain engineering data, not
   material-card receipts or inferred probability distributions.
-- `FSIM_VERSION = 11`. Readers refuse other versions
+- Optional `ConductionTransient.power_schedules` (schema v12) supplies sourced
+  piecewise-constant delivered watts for seeded volume regions. Each schedule
+  replaces that region's static `watts * duty`; no duty is applied twice and
+  unscheduled regions retain their static power. Surface schedules, repeated
+  regions, missing sources, negative/nonfinite watts, wrong units, unordered
+  endpoints and a final endpoint unequal to the horizon refuse. The shared
+  `coarse_step_ends_s()` method aligns every regional switch, partitions each
+  segment by `ceil(duration / max_step)`, and checks the combined coarse/fine
+  cap before allocating an oversized grid. It requires a representable midpoint
+  in every interval, so a short pulse is retained or refused, never skipped.
+  Empty schedules retain the original uniform coarse grid. Both wire spellings
+  bind all delivered watts, sources and switch times. Migration from v11 keeps
+  static power unchanged; a pre-v12 payload carrying a schedule refuses.
+- `FSIM_VERSION = 12`. Readers refuse other versions
   (`fsim-unsupported-version`); `migrate_envelope` is the only path from an
   older envelope, applies a registered `MigrationRule`, and returns a
   `ProjectMigrationReceipt` (old/new hashes + rule, `verifies()`). The

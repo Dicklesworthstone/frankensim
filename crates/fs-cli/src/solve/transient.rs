@@ -29,7 +29,10 @@ use super::{
     ladder_target_region,
 };
 
-pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. No airflow storage, changing workload, natural convection, radiation, latent heat or transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
+mod workload;
+use workload::{TimeGrids, Workload};
+
+pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. No airflow storage, natural convection, radiation, latent heat or transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
 
 pub(super) struct NativeTransientResult {
     pub(super) solution: ConductionSolution,
@@ -154,19 +157,13 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
             "steady nominal adjoints cannot differentiate a transient trajectory",
         ));
     }
-    let coarse = (transient.horizon.value / transient.max_step.value)
-        .ceil()
-        .max(1.0);
-    if !(coarse.is_finite() && coarse >= 1.0 && coarse <= f64::from(transient.max_steps / 3)) {
-        return Err(bad(
-            "coarse plus nested fine time grids exceed the declared step cap",
-        ));
-    }
+    TimeGrids::new(transient)?;
     Ok(())
 }
 
 struct GridResult {
     endpoint: StepSolution,
+    endpoint_dt_s: f64,
     rows: String,
     linear: Vec<LinearSolveEvidence>,
     stored_j: f64,
@@ -183,13 +180,15 @@ fn march(
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
     policy: &ConductionTransient,
-    steps: usize,
+    ends_s: &[f64],
+    workload: Option<&Workload<'_>>,
     linear: LinearConfig,
     nonlinear: Option<NonlinearStepConfig>,
     labels: &[u32],
     goal_region: Option<u32>,
     deadline: Option<(Instant, f64)>,
 ) -> Result<GridResult, SolveRefusal> {
+    let steps = ends_s.len();
     let mut old = vec![policy.initial_temperature.value; problem.mesh.vertex_count()];
     let mut rows = Vec::with_capacity(steps);
     let mut evidence = Vec::with_capacity(steps);
@@ -200,13 +199,10 @@ fn march(
     let mut maximum_energy_residual_j = 0.0_f64;
     let mut nonlinear_updates = 0;
     let mut nonlinear_backtracks = 0;
-    for ordinal in 1..=steps {
+    let mut endpoint_dt_s = 0.0;
+    for (index, &end) in ends_s.iter().enumerate() {
+        let ordinal = index + 1;
         poll(cx, deadline)?;
-        let end = if ordinal == steps {
-            policy.horizon.value
-        } else {
-            policy.horizon.value * (ordinal as f64 / steps as f64)
-        };
         let dt = end - time;
         if !(end.is_finite() && dt.is_finite() && dt > 0.0) {
             return Err(bad(
@@ -217,9 +213,24 @@ fn march(
             linear,
             energy_tolerance_j: policy.energy_tolerance.value,
         };
+        let source = workload
+            .map(|history| history.source(cx, problem.mesh, labels, time, deadline))
+            .transpose()?;
+        let step_problem = ConductionProblem {
+            source: source.as_ref().unwrap_or(problem.source),
+            ..problem
+        };
         let (endpoint, nonlinear_row) = if let Some(nonlinear) = nonlinear {
             let solved = engine
-                .advance_nonlinear_prescribed(cx, problem, interfaces, &old, dt, config, nonlinear)
+                .advance_nonlinear_prescribed(
+                    cx,
+                    step_problem,
+                    interfaces,
+                    &old,
+                    dt,
+                    config,
+                    nonlinear,
+                )
                 .map_err(lower)?;
             nonlinear_updates += solved.nonlinear_iterations;
             nonlinear_backtracks += solved.backtracks;
@@ -234,7 +245,7 @@ fn march(
             (solved.step, row)
         } else {
             let endpoint = engine
-                .advance_prescribed(cx, problem, interfaces, &old, dt, config)
+                .advance_prescribed(cx, step_problem, interfaces, &old, dt, config)
                 .map_err(lower)?;
             (endpoint, "null".to_string())
         };
@@ -273,9 +284,9 @@ fn march(
         stored_j += endpoint.stored_energy_change_j;
         net_input_j += dt * net_w;
         maximum_energy_residual_j = maximum_energy_residual_j.max(endpoint.energy_residual_j.abs());
-        rows.push(format!("{{\"step\":{ordinal},\"time_s\":{},\"dt_s\":{},\"final_region_max_k\":{},\"stored_energy_change_j\":{},\"net_input_w\":{},\"energy_residual_j\":{},\"relative_residual\":{},\"krylov_iterations\":{},\"nonlinear\":{nonlinear_row}}}",
+        rows.push(format!("{{\"step\":{ordinal},\"time_s\":{},\"dt_s\":{},\"final_region_max_k\":{},\"stored_energy_change_j\":{},\"net_input_w\":{},\"source_w\":{},\"energy_residual_j\":{},\"relative_residual\":{},\"krylov_iterations\":{},\"nonlinear\":{nonlinear_row}}}",
             number(end)?, number(dt)?, number(qoi)?, number(endpoint.stored_energy_change_j)?,
-            number(net_w)?, number(endpoint.energy_residual_j)?, number(endpoint.relative_residual)?,
+            number(net_w)?, number(endpoint.source_w)?, number(endpoint.energy_residual_j)?, number(endpoint.relative_residual)?,
             endpoint.krylov_iterations));
         evidence.push(LinearSolveEvidence {
             nonlinear_iteration: ordinal - 1,
@@ -291,12 +302,14 @@ fn march(
             stall: None,
         });
         old.clone_from(&endpoint.temperature);
+        endpoint_dt_s = dt;
         last = Some(endpoint);
         time = end;
     }
     poll(cx, deadline)?;
     Ok(GridResult {
         endpoint: last.ok_or_else(|| bad("the transient grid has no steps"))?,
+        endpoint_dt_s,
         rows: rows.join(","),
         linear: evidence,
         stored_j,
@@ -327,12 +340,9 @@ pub(super) fn solve(
             "transient regional capacities do not match the retained mesh labels",
         ));
     }
-    let coarse_steps = (policy.horizon.value / policy.max_step.value)
-        .ceil()
-        .max(1.0) as usize;
-    let fine_steps = coarse_steps
-        .checked_mul(2)
-        .ok_or_else(|| bad("transient step count overflow"))?;
+    let grids = TimeGrids::new(policy)?;
+    let coarse_steps = grids.coarse.len();
+    let fine_steps = grids.fine.len();
     let total_steps = coarse_steps
         .checked_add(fine_steps)
         .ok_or_else(|| bad("transient step count overflow"))?;
@@ -435,13 +445,15 @@ pub(super) fn solve(
         ));
     }
     let engine = BackwardEuler::per_element(cx, problem.mesh, &capacities).map_err(lower)?;
+    let workload = Workload::bind(cx, spec, policy, problem.mesh, labels, region_ids, deadline)?;
     let coarse = march(
         cx,
         &engine,
         problem,
         interfaces,
         policy,
-        coarse_steps,
+        &grids.coarse,
+        workload.as_ref(),
         linear,
         nonlinear,
         labels,
@@ -454,7 +466,8 @@ pub(super) fn solve(
         problem,
         interfaces,
         policy,
-        fine_steps,
+        &grids.fine,
+        workload.as_ref(),
         linear,
         nonlinear,
         labels,
@@ -502,13 +515,25 @@ pub(super) fn solve(
     } else {
         "null".to_string()
     };
+    let workload_receipt = workload
+        .as_ref()
+        .map_or("null", |history| history.receipt.as_str());
+    let coarse_max_step = number(TimeGrids::largest_step(&grids.coarse))?;
+    let fine_max_step = number(TimeGrids::largest_step(&grids.fine))?;
+    let uniform_step = |steps: usize| {
+        if workload.is_none() {
+            number(policy.horizon.value / steps as f64)
+        } else {
+            Ok("null".to_string())
+        }
+    };
     let receipt = format!(
-        "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         number(policy.initial_temperature.value)?,
         number(policy.horizon.value)?,
         policy.max_steps,
-        number(policy.horizon.value / coarse_steps as f64)?,
-        number(policy.horizon.value / fine_steps as f64)?,
+        uniform_step(coarse_steps)?,
+        uniform_step(fine_steps)?,
         number(policy.energy_tolerance.value)?,
         capacity_rows.join(","),
         coarse.rows,
@@ -531,8 +556,7 @@ pub(super) fn solve(
         json_string(NO_CLAIM)
     );
     let endpoint = fine.endpoint;
-    let endpoint_dt =
-        policy.horizon.value - policy.horizon.value * ((fine_steps - 1) as f64 / fine_steps as f64);
+    let endpoint_dt = fine.endpoint_dt_s;
     let endpoint_storage_w = endpoint.stored_energy_change_j / endpoint_dt;
     let endpoint_energy_residual_w = endpoint.energy_residual_j / endpoint_dt;
     let net_w =

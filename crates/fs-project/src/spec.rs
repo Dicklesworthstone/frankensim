@@ -733,6 +733,29 @@ pub struct TransientRegionCapacity {
     pub source: String,
 }
 
+/// One constant delivered-power interval, ending at the declared physical time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransientPowerStep {
+    /// Strictly increasing endpoint in seconds; the final endpoint is the horizon.
+    pub until: QtyAny,
+    /// Absolute nonnegative power in watts during this interval. No duty factor
+    /// is applied to this value.
+    pub watts: QtyAny,
+}
+
+/// A sourced piecewise-constant power history for one seeded volume (schema v12).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransientRegionPower {
+    /// Named conduction region. Surface power schedules are not admitted.
+    pub region: String,
+    /// Nonempty engineering basis or source for this workload.
+    pub source: String,
+    /// Nonempty intervals covering physical time zero through the horizon.
+    /// These absolute watts replace the static power rows for this region;
+    /// unscheduled regions retain their static watts multiplied by duty.
+    pub steps: Vec<TransientPowerStep>,
+}
+
 /// Fixed-horizon backward-Euler cooling (schema v11).
 ///
 /// The producer executes a grid bounded by `max_step`, then its nested half
@@ -753,6 +776,9 @@ pub struct ConductionTransient {
     pub energy_tolerance: QtyAny,
     /// Exactly one explicitly sourced capacity per conduction region.
     pub capacities: Vec<TransientRegionCapacity>,
+    /// Optional sourced power histories (schema v12). Empty preserves the
+    /// static workload. Every switch is a coarse and fine time-grid boundary.
+    pub power_schedules: Vec<TransientRegionPower>,
 }
 
 /// Explicit inputs required to lower project geometry into a conduction
@@ -1992,16 +2018,8 @@ impl ProjectSpec {
                 ));
             }
         }
-        let steps = (transient.horizon.value / transient.max_step.value).ceil().max(1.0);
-        if !(3..=10_000).contains(&transient.max_steps)
-            || !steps.is_finite()
-            || steps > f64::from(transient.max_steps / 3)
-        {
-            out.push(violation(
-                "project-conduction-transient-steps",
-                "transient.max-steps must cover the coarse grid and its nested half grid, within 3..=10000 steps",
-                "set max-steps to at least 3 * ceil(horizon / max-step), or reduce the physical horizon",
-            ));
+        if let Err(finding) = transient.coarse_step_ends_s() {
+            out.push(finding);
         }
         let regions: BTreeSet<_> = conduction.regions.iter().map(|row| row.region.as_str()).collect();
         let mut seen = BTreeSet::new();
@@ -2031,6 +2049,25 @@ impl ProjectSpec {
                 "transient capacity declarations do not exactly cover conduction regions",
                 "declare one sourced heat capacity for every region",
             ));
+        }
+        let mut scheduled = BTreeSet::new();
+        for schedule in &transient.power_schedules {
+            if !regions.contains(schedule.region.as_str())
+                || !scheduled.insert(schedule.region.as_str())
+            {
+                out.push(violation(
+                    "project-conduction-transient-power-region",
+                    format!("power schedule region `{}` is unknown, unseeded or repeated", schedule.region),
+                    "declare at most one schedule per seeded conduction region; surface schedules are not admitted",
+                ));
+            }
+            if schedule.source.trim().is_empty() {
+                out.push(violation(
+                    "project-conduction-transient-power-source",
+                    format!("power schedule for `{}` has no source", schedule.region),
+                    "provide the engineering basis or source of the delivered-power history",
+                ));
+            }
         }
     }
 

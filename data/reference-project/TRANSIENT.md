@@ -47,10 +47,13 @@ For another native project, add `:transient (transient ...)` inside its
 `conduction` declaration, providing an initial absolute temperature, horizon,
 maximum coarse step, combined step cap, energy tolerance and one sourced
 volumetric capacity per conduction region. All quantities use coherent SI.
-The horizon and maximum step imply `N = ceil(horizon / max-step)`; admission
-requires `3*N <= max-steps <= 10000`. Capacities and every other input are part
-of canonical project and run identity. Existing v10 projects migrate with
-storage absent, so they retain their steady behavior.
+For static power, the horizon and maximum step imply
+`N = ceil(horizon / max-step)`; admission requires
+`3*N <= max-steps <= 10000`. With scheduled power, the same limit applies to
+the sum of the step counts between successive switches. Capacities and every
+other input are part of canonical project and run identity. Existing v10
+projects migrate with storage absent, so they retain their steady behavior;
+v11 transient projects migrate with their existing static power unchanged.
 
 This product slice supports fixed capacity, constant or temperature-dependent
 conductivity from the bound material card, Dirichlet/Neumann/Robin boundaries
@@ -74,10 +77,47 @@ controls, actual updates, backtracks and joule residuals are retained in the
 budget or material-validity boundary refuses the unfinished stage. Constant
 conductivity retains the linear path and records `nonlinear: null`.
 
-Time-dependent workloads, radiation, natural or coupled airflow convection,
-spatial ladder/adaptive studies and steady adjoint requests are not admitted
+Radiation, natural or coupled airflow convection, spatial ladder/adaptive
+studies and steady adjoint requests are not admitted
 together with this declaration. Heat capacity remains temperature independent;
 latent heat and phase changes require a different storage law. Stage
 cancellation retains the preceding
 completed pipeline stages; an unfinished conduction stage restarts from its
 declared initial state.
+
+## Pulse and duty-cycle heating
+
+Schema v12 admits optional `:power-schedules` inside the transient declaration.
+For example, this schedule deposits 5 J through a 20 W pulse, then switches
+the solid off for the rest of the two-second window:
+
+```lisp
+:power-schedules
+(power-schedules
+  (schedule :region "solid" :source "declared 20 W startup pulse"
+    :steps (steps
+      (step :until 0.25s :watts 20.0kg·m^2·s^-3)
+      (step :until 2.0s :watts 0.0kg·m^2·s^-3))))
+```
+
+Each `watts` value is the absolute delivered power from the preceding switch
+(or time zero) until `until`. It replaces all static delivered power for that
+volume region; the static row's duty factor is not applied a second time.
+Unscheduled volume regions and surface heat inputs retain their static values.
+Every schedule needs a source, strictly increasing positive times and an exact
+final time equal to the transient horizon. Negative power and surface schedules
+are refused.
+
+Both time grids land on every switch, including short pulses between their
+old uniform sampling points. For the example above with `max-step = 0.5 s`,
+the two segments need `ceil(0.25/0.5) + ceil(1.75/0.5) = 5` coarse steps and
+10 fine steps, so declare at least `max-steps = 15`. Actual step lengths and
+source watts are retained. For schedules the uniform `coarse_step_s` and
+`fine_step_s` fields are null; the `*_max_step_s` fields and each row's `dt_s`
+describe the grid. The `workload` object includes the full sourced schedule
+and integrated scheduled input in joules.
+
+`cooling-pulsed.fsim` is the complete runnable project for this pulse. Use it
+in the same validate/import/solve commands above with a fresh `pulsed.db`.
+The reported temperature limit still applies at the final time, which can be
+lower than the temperature reached during the pulse.

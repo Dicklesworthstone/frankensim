@@ -16,6 +16,7 @@ pub(super) fn declaration(spec: &mut ProjectSpec, capacity: f64, horizon: f64) {
         max_step: QtyAny::new(0.5, fs_project::spec::dims::TIME),
         max_steps: 600,
         energy_tolerance: QtyAny::new(1e-6, fs_project::spec::dims::ENERGY),
+        power_schedules: Vec::new(),
         capacities: setup
             .regions
             .iter()

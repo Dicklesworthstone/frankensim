@@ -21,7 +21,7 @@
       "version_kind": "integer-const",
       "version_constant": "FSIM_VERSION",
       "version_location": "crates/fs-project/src/lib.rs",
-      "current_version": "11",
+      "current_version": "12",
       "lockstep": [],
       "surface": [
         "the canonical .fsim envelope and its canonical-hash construction",
@@ -38,7 +38,8 @@
         "the optional assembly `(surface ...)` entity admitted at bead q61wp.52 (schema v8): a named exterior boundary patch of a part selected by a geometry assignment; a `power` row naming a surface is uniform heat input through it, and its faces take precedence over the enclosing region's thermal boundary rows",
         "the optional cooling `(fan-efficiency :total :half-width :source :source-id)` citation and the optional output `:region` (a declared surface) admitted at bead q61wp.83 (schema v9); the interval must lie inside (0, 1] with a non-empty citation, and a pre-v9 document declaring either refuses migration",
         "the `(natural-convection :target :characteristic-length :ambient-temperature :correlation)` thermal boundary law admitted 2026-10-01 (schema v10): a card-derived buoyant Robin coefficient solved by fixed point at the mean wall-to-ambient difference; the ambient must lie inside the envelope, and a pre-v10 document declaring one refuses migration",
-        "optional conduction `:transient (transient ...)` admitted at bead q61wp.49 (schema v11): explicit initial temperature, horizon, maximum step, combined coarse/fine step cap, per-step energy tolerance, and one sourced volumetric heat capacity per named region; pre-v11 payloads declaring heat storage refuse migration"
+        "optional conduction `:transient (transient ...)` admitted at bead q61wp.49 (schema v11): explicit initial temperature, horizon, maximum step, combined coarse/fine step cap, per-step energy tolerance, and one sourced volumetric heat capacity per named region; pre-v11 payloads declaring heat storage refuse migration",
+        "optional transient `:power-schedules (power-schedules ...)` (schema v12): sourced absolute delivered watts for seeded volume regions on increasing intervals ending exactly at the horizon; each schedule replaces static region power without applying duty twice, every switch is represented on the bounded coarse/fine grids, and pre-v12 payloads declaring schedules refuse migration"
       ],
       "minor_bump": "may add optional fields with receipted defaults and may add new structural findings; must keep every prior document loadable and its canonical hash stable",
       "major_bump": "may remove or retype fields, or change canonical-hash construction; requires a migration path and a new deprecation horizon",
@@ -82,6 +83,10 @@
         },
         {
           "test": "v9_envelopes_migrate_to_v10_and_refuse_a_pre_v10_natural_law",
+          "location": "crates/fs-project/tests/project.rs"
+        },
+        {
+          "test": "g0_v11_migration_preserves_static_transients_and_refuses_hidden_workloads",
           "location": "crates/fs-project/tests/project.rs"
         }
       ],

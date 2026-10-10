@@ -29,7 +29,8 @@ use crate::spec::{
     OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface,
     RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
     SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary, ThermalBoundaryCondition,
-    ThermalLimit, TransientRegionCapacity, UnitsDoctrine, Vent, Versions,
+    ThermalLimit, TransientPowerStep, TransientRegionCapacity, TransientRegionPower,
+    UnitsDoctrine, Vent, Versions,
 };
 
 /// Domain for canonical `.fsim` byte hashing.
@@ -709,13 +710,27 @@ fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
                 kw("source"), text(&row.source)]));
         }
         declaration.push(kw("transient"));
-        declaration.push(list(vec![sym("transient"),
+        let mut time = vec![sym("transient"),
             kw("initial-temperature"), qty(transient.initial_temperature)?,
             kw("horizon"), qty(transient.horizon)?,
             kw("max-step"), qty(transient.max_step)?,
             kw("max-steps"), int(i64::from(transient.max_steps)),
             kw("energy-tolerance"), qty(transient.energy_tolerance)?,
-            kw("capacities"), list(capacities)]));
+            kw("capacities"), list(capacities)];
+        if !transient.power_schedules.is_empty() {
+            let mut schedules = vec![sym("power-schedules")];
+            for schedule in &transient.power_schedules {
+                let mut steps = vec![sym("steps")];
+                for step in &schedule.steps {
+                    steps.push(list(vec![sym("step"), kw("until"), qty(step.until)?,
+                        kw("watts"), qty(step.watts)?]));
+                }
+                schedules.push(list(vec![sym("schedule"), kw("region"), text(&schedule.region),
+                    kw("source"), text(&schedule.source), kw("steps"), list(steps)]));
+            }
+            time.extend([kw("power-schedules"), list(schedules)]);
+        }
+        declaration.push(list(time));
     }
     Ok(list(declaration))
 }
@@ -2765,7 +2780,7 @@ fn read_transient(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionTra
         return None;
     };
     let pairs = read_pairs(body, "transient", &["initial-temperature", "horizon", "max-step",
-        "max-steps", "energy-tolerance", "capacities"], out);
+        "max-steps", "energy-tolerance", "capacities", "power-schedules"], out);
     let max_steps = match field(&pairs, "max-steps") {
         Some(Node { kind: NodeKind::Int(value), .. }) => u32::try_from(*value).unwrap_or_default(),
         _ => 0,
@@ -2804,7 +2819,63 @@ fn read_transient(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionTra
         max_steps,
         energy_tolerance: expect_qty(field(&pairs, "energy-tolerance"), "transient.energy-tolerance", out),
         capacities,
+        power_schedules: field(&pairs, "power-schedules")
+            .map_or_else(Vec::new, |node| read_transient_power_schedules(node, out)),
     })
+}
+
+fn read_transient_power_schedules(node: &Node, out: &mut Vec<Violation>) -> Vec<TransientRegionPower> {
+    let Some(("power-schedules", schedules)) = section_name(node) else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: "transient.power-schedules must be a `(power-schedules ...)` list".to_string(),
+            fix: "declare sourced regional schedules or omit power-schedules for static power".to_string(),
+        });
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    for schedule in schedules {
+        let Some(("schedule", body)) = section_name(schedule) else {
+            out.push(Violation {
+                code: "project-malformed-clause",
+                what: "transient.power-schedules rows must be `(schedule ...)` declarations".to_string(),
+                fix: "declare region, source and steps".to_string(),
+            });
+            continue;
+        };
+        let fields = read_pairs(body, "transient.power-schedule", &["region", "source", "steps"], out);
+        let mut steps = Vec::new();
+        match field(&fields, "steps").and_then(section_name) {
+            Some(("steps", rows)) => {
+                for step in rows {
+                    let Some(("step", body)) = section_name(step) else {
+                        out.push(Violation {
+                            code: "project-malformed-clause",
+                            what: "power schedule steps must be `(step ...)` declarations".to_string(),
+                            fix: "declare each interval's until time and delivered watts".to_string(),
+                        });
+                        continue;
+                    };
+                    let fields = read_pairs(body, "transient.power-step", &["until", "watts"], out);
+                    steps.push(TransientPowerStep {
+                        until: expect_qty(field(&fields, "until"), "transient.power-step.until", out),
+                        watts: expect_qty(field(&fields, "watts"), "transient.power-step.watts", out),
+                    });
+                }
+            }
+            _ => out.push(Violation {
+                code: "project-malformed-clause",
+                what: "each power schedule requires a `(steps ...)` list".to_string(),
+                fix: "declare positive-duration intervals ending exactly at the horizon".to_string(),
+            }),
+        }
+        result.push(TransientRegionPower {
+            region: expect_str(field(&fields, "region"), "transient.power-schedule.region", out),
+            source: expect_str(field(&fields, "source"), "transient.power-schedule.source", out),
+            steps,
+        });
+    }
+    result
 }
 
 fn read_radiation(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionRadiation> {

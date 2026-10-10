@@ -2230,6 +2230,7 @@ fn transient_project() -> ProjectSpec {
             volumetric_heat_capacity: QtyAny::new(2e6, fs_project::spec::dims::VOLUMETRIC_HEAT_CAPACITY),
             source: "manufactured constant capacity for numerical verification".to_string(),
         }).collect(),
+        power_schedules: Vec::new(),
     });
     spec
 }
@@ -2288,4 +2289,131 @@ fn g0_v10_migration_preserves_natural_convection_and_never_invents_transient_sto
     assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
     let hidden_storage = down(&print_sexpr(&transient_project()).unwrap());
     assert_eq!(parse_sexpr_migrating(&hidden_storage).unwrap_err().code, "fsim-migration-payload");
+}
+
+fn power_schedule(region: &str, intervals: &[(f64, f64)]) -> fs_project::TransientRegionPower {
+    fs_project::TransientRegionPower {
+        region: region.to_string(),
+        source: "sourced workload oracle".to_string(),
+        steps: intervals.iter().map(|&(until, watts)| fs_project::TransientPowerStep {
+            until: QtyAny::new(until, fs_project::spec::dims::TIME),
+            watts: QtyAny::new(watts, fs_project::spec::dims::POWER),
+        }).collect(),
+    }
+}
+
+fn scheduled_transient_project() -> ProjectSpec {
+    let mut project = transient_project();
+    let time = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap();
+    time.horizon.value = 2.0;
+    time.max_step.value = 0.5;
+    time.max_steps = 18;
+    time.power_schedules = vec![
+        power_schedule("cpu", &[(0.25, 10.0), (1.25, 0.0), (2.0, 20.0)]),
+        power_schedule("sink-base", &[(0.5, 5.0), (2.0, 0.0)]),
+    ];
+    project
+}
+
+#[test]
+fn g0_transient_power_round_trips_with_every_regional_switch_on_the_time_grid() {
+    let project = scheduled_transient_project();
+    assert!(project.validate().is_empty(), "{:?}", project.validate());
+    let time = project.cooling.as_ref().unwrap().conduction.as_ref().unwrap()
+        .transient.as_ref().unwrap();
+    assert_eq!(time.coarse_step_ends_s().unwrap(),
+        vec![0.25, 0.5, 0.875, 1.25, 1.625, 2.0]);
+    let sexpr = print_sexpr(&project).unwrap();
+    assert!(sexpr.contains(":power-schedules (power-schedules (schedule :region \"cpu\""));
+    let decoded = parse_sexpr(&sexpr).unwrap();
+    assert_eq!(decoded.spec, project);
+    let json = parse_json(&print_json(&project).unwrap()).unwrap();
+    assert_eq!(json.spec, project);
+    assert_eq!(json.hash(), decoded.hash());
+    let mut changed = project.clone();
+    changed.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap().power_schedules[0].steps[0].watts.value = 11.0;
+    assert_ne!(canonical_hash(print_sexpr(&changed).unwrap().as_bytes()), decoded.hash());
+
+    let static_project = transient_project();
+    let static_time = static_project.cooling.as_ref().unwrap().conduction.as_ref().unwrap()
+        .transient.as_ref().unwrap();
+    let expected: Vec<_> = (1..=10).map(|ordinal| {
+        if ordinal == 10 { 10.0 } else { 10.0 * (ordinal as f64 / 10.0) }
+    }).collect();
+    assert_eq!(static_time.coarse_step_ends_s().unwrap(), expected);
+    assert!(!print_sexpr(&static_project).unwrap().contains("power-schedules"));
+}
+
+#[test]
+fn g0_transient_power_refuses_invalid_workloads_and_counts_event_aligned_work() {
+    for (variant, expected) in [
+        ("unseeded region", "project-conduction-transient-power-region"),
+        ("duplicate region", "project-conduction-transient-power-region"),
+        ("missing source", "project-conduction-transient-power-source"),
+        ("empty intervals", "project-conduction-transient-power-step"),
+        ("repeated endpoint", "project-conduction-transient-power-step"),
+        ("wrong time units", "project-conduction-transient-power-step"),
+        ("negative power", "project-conduction-transient-power-step"),
+        ("nonfinite power", "project-conduction-transient-power-step"),
+        ("wrong power units", "project-conduction-transient-power-step"),
+        ("uncovered tail", "project-conduction-transient-power-horizon"),
+        ("combined cap", "project-conduction-transient-steps"),
+        ("tiny time step", "project-conduction-transient-steps"),
+    ] {
+        let mut project = scheduled_transient_project();
+        let time = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .transient.as_mut().unwrap();
+        match variant {
+            "unseeded region" => time.power_schedules[0].region = "board".to_string(),
+            "duplicate region" => time.power_schedules[1].region = "cpu".to_string(),
+            "missing source" => time.power_schedules[0].source.clear(),
+            "empty intervals" => time.power_schedules[0].steps.clear(),
+            "repeated endpoint" => time.power_schedules[0].steps[1].until.value = 0.25,
+            "wrong time units" => time.power_schedules[0].steps[0].until.dims = fs_project::spec::dims::LENGTH,
+            "negative power" => time.power_schedules[0].steps[0].watts.value = -1.0,
+            "nonfinite power" => time.power_schedules[0].steps[0].watts.value = f64::INFINITY,
+            "wrong power units" => time.power_schedules[0].steps[0].watts.dims = fs_project::spec::dims::ENERGY,
+            "uncovered tail" => time.power_schedules[0].steps[2].until.value = 1.75,
+            "combined cap" => time.max_steps = 17,
+            "tiny time step" => time.max_step.value = f64::MIN_POSITIVE,
+            _ => unreachable!(),
+        }
+        assert!(project.validate().iter().any(|row| row.code == expected),
+            "{variant}: {:?}", project.validate());
+    }
+}
+
+#[test]
+fn g0_transient_power_never_discards_an_unrepresentably_short_pulse() {
+    let mut project = scheduled_transient_project();
+    let time = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap();
+    let after_one = f64::from_bits(1.0_f64.to_bits() + 1);
+    time.power_schedules = vec![power_schedule("cpu", &[(1.0, 0.0), (after_one, 10.0), (2.0, 0.0)])];
+    assert_eq!(time.coarse_step_ends_s().unwrap_err().code,
+        "project-conduction-transient-time-resolution");
+    time.power_schedules.clear();
+    time.horizon.value = f64::from_bits(1);
+    assert_eq!(time.coarse_step_ends_s().unwrap_err().code,
+        "project-conduction-transient-time-resolution");
+}
+
+#[test]
+fn g0_v11_migration_preserves_static_transients_and_refuses_hidden_workloads() {
+    let historical = transient_project();
+    let current = print_sexpr(&historical).unwrap();
+    let down = |text: &str| text
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 11", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 11", 1);
+    let old = down(&current);
+    let migrated = parse_sexpr_migrating(&old).unwrap();
+    assert_eq!(migrated.decoded.spec, historical);
+    let receipt = migrated.migration.unwrap();
+    assert_eq!((receipt.source_version, receipt.target_version), (11, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "transient-power-schedules-v12");
+    assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
+    let hidden = down(&print_sexpr(&scheduled_transient_project()).unwrap());
+    assert_eq!(parse_sexpr_migrating(&hidden).unwrap_err().code, "fsim-migration-payload");
 }

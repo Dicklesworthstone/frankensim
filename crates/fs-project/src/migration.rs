@@ -72,6 +72,9 @@ pub enum MigrationRule {
     /// Version 10 gains optional explicit finite-time conduction. Historical
     /// projects remain steady; no heat capacity or initial state is inferred.
     TransientConductionV11,
+    /// Version 11 gains optional regional delivered-power histories. Historical
+    /// transient projects retain their static power rows and duty factors.
+    TransientPowerSchedulesV12,
 }
 
 impl MigrationRule {
@@ -96,6 +99,7 @@ impl MigrationRule {
             MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10 => "fan-efficiency-v9-then-natural-convection-v10",
             MigrationRule::NaturalConvectionV10 => "natural-convection-v10",
             MigrationRule::TransientConductionV11 => "transient-conduction-v11",
+            MigrationRule::TransientPowerSchedulesV12 => "transient-power-schedules-v12",
         }
     }
 
@@ -114,6 +118,7 @@ impl MigrationRule {
             MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10 => 8,
             MigrationRule::NaturalConvectionV10 => 9,
             MigrationRule::TransientConductionV11 => 10,
+            MigrationRule::TransientPowerSchedulesV12 => 11,
         }
     }
 }
@@ -224,6 +229,7 @@ pub fn migrate_envelope(
         8 => MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10,
         9 => MigrationRule::NaturalConvectionV10,
         10 => MigrationRule::TransientConductionV11,
+        11 => MigrationRule::TransientPowerSchedulesV12,
         v if v == FSIM_VERSION => {
             return Err(ProjectError {
                 code: "fsim-migration-not-needed",
@@ -264,7 +270,8 @@ pub fn migrate_envelope(
         | MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10
         | MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10
         | MigrationRule::NaturalConvectionV10
-        | MigrationRule::TransientConductionV11 => {
+        | MigrationRule::TransientConductionV11
+        | MigrationRule::TransientPowerSchedulesV12 => {
             // The document's internal `versions.schema` field must move with
             // the envelope: the validator admits only the current schema.
             // The rewrite is exactly these two byte strings, never a
@@ -329,6 +336,19 @@ pub fn migrate_envelope(
             code: "fsim-migration-payload",
             detail: format!("schema version {declared_version} predates transient conduction but its payload declares it"),
             hint: "declare heat storage and time controls in a current-version project; migration preserves historical intent".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 12
+        && decoded.spec.cooling.as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|setup| setup.transient.as_ref())
+            .is_some_and(|transient| !transient.power_schedules.is_empty())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates transient power schedules but its payload declares one"),
+            hint: "declare delivered-power histories in a current-version project; migration preserves historical static power".to_string(),
         });
     }
     if declared_version > 0

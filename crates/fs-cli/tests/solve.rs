@@ -39,6 +39,9 @@ mod radiation_product;
 #[path = "solve/transient_product.rs"]
 mod transient_product;
 
+#[path = "solve/transient_workload.rs"]
+mod transient_workload;
+
 const REFERENCE_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {

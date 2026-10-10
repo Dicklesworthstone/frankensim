@@ -427,6 +427,7 @@ fn g0_bounded_scalar_and_feedback_models_cannot_publish_a_frozen_mean_bound() {
         max_step: fs_qty::QtyAny::new(0.5, fs_project::spec::dims::TIME),
         max_steps: 12,
         energy_tolerance: fs_qty::QtyAny::new(1e-7, fs_qty::Dims([2, 1, -2, 0, 0, 0])),
+        power_schedules: Vec::new(),
         capacities: vec![fs_project::spec::TransientRegionCapacity {
             region: "air".into(),
             volumetric_heat_capacity: fs_qty::QtyAny::new(

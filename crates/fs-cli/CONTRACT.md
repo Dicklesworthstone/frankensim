@@ -1341,7 +1341,7 @@ does not independently authenticate or reverify the continuum producer.
 Builds without the feature explicitly refuse this output request.
 
 Native transient conduction is available without a feature flag through the
-schema-v11 `conduction.transient` declaration. The runnable input and commands
+schema-v12 `conduction.transient` declaration. The runnable input and commands
 are in `data/reference-project/cooling-transient.fsim` and `TRANSIENT.md`.
 Both backward-Euler grids start from the declared initial temperature; their
 combined step cap includes the coarse and nested fine solves. The ordinary
@@ -1355,6 +1355,18 @@ nonlinear work and the joule residual/threshold; material-domain and iteration
 failures publish no partial field. Capacity remains constant and no
 enthalpy/phase law is inferred. The native driven-face test checks an
 independently derived transient balance and a frozen-conductivity twin.
+
+Optional `power-schedules` supply absolute delivered watts for named volume
+regions, replacing their static `power` rows without applying duty factors
+again. Every schedule covers the full horizon with explicit switch times.
+The coarse grid lands on the union of all switches; the fine grid bisects
+each coarse interval. Both count against the same total step allowance.
+Short pulses are therefore integrated even when both former uniform grids
+would miss them. The workload receipt retains declarations and integrated
+scheduled input, while each numerical step records its actual source watts.
+Unscheduled regional and surface heat inputs stay static. Final-time QoIs
+and the separate temporal estimate keep their existing scope; no peak between
+time nodes or probabilistic workload model is inferred.
 
 Runtime dependencies remain Franken-only.
 
