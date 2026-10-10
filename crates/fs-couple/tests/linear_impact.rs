@@ -113,6 +113,65 @@ fn distributed_contacts_are_solved_together_without_direct_receiver_drive() {
     assert!(peak>1e-4);
 }
 
+/// G1/G3: a contact row is physical geometry, independent of how the same
+/// diagonal modes are partitioned into rigid, shaft and resonator bodies.
+#[test]
+fn flexible_contact_rows_preserve_all_bodies_and_joint_reactions() {
+    let gate = CancelGate::new_clock_free();
+    for points in [1, 2] {
+        let parts = vec![body(0.0,-0.0002,0.8),body(1200.0,0.0,0.0),body(2300.0,0.0,0.0)];
+        let grouped = ImpactBody {
+            potential: BodyPotential::Linear(vec![0.0,1200.0,2300.0]),
+            initial: parts.iter().flat_map(|b| b.initial.iter().copied()).collect(),
+            damping_per_s: parts.iter().flat_map(|b| b.damping_per_s.iter().copied()).collect(),
+        };
+        let rows = [1.0,-1.0,0.4, 1.0,0.3,-0.7];
+        let contact = || Obstacle::new(rows[..3*points].to_vec(),points,3,vec![0.0;points],
+            vec![1.0;points],1e7,1.5,"manufactured rigid/shaft/head contact".into()).unwrap();
+        let mut split = LinearImpactSystem::new(parts,vec![contact()],vec![],config(192000,512),&gate).unwrap();
+        let mut single = LinearImpactSystem::new(vec![grouped],vec![contact()],vec![],config(192000,512),&gate).unwrap();
+        assert_eq!(split.contact_count(),points);
+        let initial = split.frame().stored_energy_j;
+        let mut loss = 0.0;
+        let mut peaks = [0.0_f64;2];
+        for tick in 0..512 {
+            if tick == 100 {
+                let state = split.state().to_vec(); let frame = *split.frame();
+                let stopped = CancelGate::new_clock_free(); stopped.request();
+                assert!(split.step(&[0.0;3],&stopped).is_err());
+                assert!(split.step(&[0.0,f64::NAN,0.0],&gate).is_err());
+                assert_eq!(split.state(),state); assert_eq!(*split.frame(),frame);
+            }
+            let a = split.step(&[0.0;3],&gate).unwrap();
+            let b = single.step(&[0.0;3],&gate).unwrap();
+            assert_eq!(a.sample,b.sample);
+            assert_eq!(a.supplied_work_j,0.0);
+            assert!(a.balance_residual_j.abs()<1e-9);
+            loss += a.dissipated_energy_j;
+            for (x,y) in split.state().iter().zip(single.state()) {assert!((x-y).abs()<1e-12);}
+            for (i,peak) in peaks.iter_mut().enumerate() {*peak=peak.max(split.state()[2*i+3].abs());}
+        }
+        assert!(peaks.iter().all(|v| *v>1e-4),"contact must excite both elastic bodies: {peaks:?}");
+        assert!((split.frame().stored_energy_j+loss-initial).abs()<1e-9);
+    }
+}
+
+#[test]
+fn multi_body_contact_keeps_the_original_component_energy_budgets() {
+    let gate=CancelGate::new_clock_free();
+    let mut limits=config(192000,1);
+    limits.component.maximum_total_energy_j=0.006;
+    let contact=Obstacle::new(vec![1.0,-1.0,0.4],1,3,vec![0.0],vec![1.0],
+        1e7,1.5,"separately budgeted rigid/shaft/head contact".into()).unwrap();
+    let mut system=LinearImpactSystem::new(
+        vec![body(0.0,0.0,0.1),body(1200.0,0.0,0.1),body(2300.0,0.0,0.1)],
+        vec![contact],vec![],limits,&gate).unwrap();
+    // Each body has 0.005 J. Combining their modes into a single component
+    // would wrongly reject the same admitted physical state at 0.015 J.
+    assert!((system.frame().stored_energy_j-0.015).abs()<1e-16);
+    system.step(&[0.0;3],&gate).unwrap();
+}
+
 #[test]
 fn input_refusal_cancellation_and_budget_extension_keep_the_complete_state() {
     let gate=CancelGate::new_clock_free(); let mut actual=model(192000,5); let mut baseline=model(192000,9);
@@ -145,6 +204,6 @@ fn malformed_or_unsupported_input_is_not_repaired_or_silently_dropped() {
         reference_area_m2:0.02}],config(192000,1),&gate).is_err(),"a three-body volume is unsupported, not reduced to two");
     let raw=Obstacle::from_raw_parts(vec![1.0],1,vec![],vec![],1e7,1.5,"malformed".into());
     assert!(LinearImpactSystem::new(bodies.clone(),vec![raw],vec![],config(192000,1),&gate).is_err());
-    let all=Obstacle::new(vec![1.,-1.,-1.],1,3,vec![0.],vec![1.],1e7,1.5,"three bodies".into()).unwrap();
-    assert!(LinearImpactSystem::new(bodies,vec![all],vec![],config(192000,1),&gate).is_err());
+    let zero=Obstacle::new(vec![0.;3],1,3,vec![0.],vec![1.],1e7,1.5,"no moving body".into()).unwrap();
+    assert!(LinearImpactSystem::new(bodies,vec![zero],vec![],config(192000,1),&gate).is_err());
 }

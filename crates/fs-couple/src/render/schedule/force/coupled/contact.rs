@@ -1,10 +1,12 @@
-//! A two-body unilateral contact on the existing spring-connected modal network.
+//! A unilateral contact on the existing spring-connected modal network.
 //!
 //! Relative closure is x = left^T q_left - right^T q_right. The supplied
 //! fs-dcontact obstacle has one unit opening coordinate, Phi=[-1], so its
 //! opening is -x and penetration is x-gap. Its existing discrete potential
 //! gradient and nonadhesive Hunt-Crossley rule supply a NONNEGATIVE normal
 //! reaction R, applied as -B R to both bodies, not a prescribed force history.
+//! The impact compiler can also supply B directly across multiple components;
+//! the same closure and reciprocal reaction retain every participating mode.
 //!
 //! For this fixed linear network, x1 = x_free - S R, where S is the network's
 //! exact held-force displacement response INCLUDING bilateral connections.
@@ -42,6 +44,42 @@ pub struct ModalContact {
     /// stiffness, exponent, loss coefficient and provenance are used verbatim.
     /// Both Obstacle::new and Obstacle::from_receipt are supported.
     pub law: Obstacle,
+}
+
+// The impact compiler already has a signed closure row in the complete modal
+// basis. A flexible striker spans its rigid body, its elastic body and the
+// struck surface; reducing that row to a pair would discard physical motion.
+// Pair geometry remains available to the existing tangential-contact adapters.
+enum ContactSpec {
+    Pair(ModalContact),
+    Column { weights: Vec<f64>, law: Obstacle },
+}
+impl ContactSpec {
+    fn law(&self) -> &Obstacle {
+        match self { Self::Pair(contact) => &contact.law, Self::Column { law, .. } => law }
+    }
+    fn pair(&self) -> Result<&ModalContact, ModalCouplingError> {
+        match self {
+            Self::Pair(contact) => Ok(contact),
+            Self::Column { .. } => Err(invalid("pair-based friction needs explicit left/right component attachments")),
+        }
+    }
+    fn take_column(&mut self, network: &CoupledModalSystem, config: ModalContactConfig)
+        -> Result<Vec<f64>, ModalCouplingError>
+    {
+        match self {
+            Self::Pair(contact) => contact_column(network, contact, config),
+            Self::Column { weights, law } => {
+                validate_contact_law(law, config)?;
+                if weights.len() != network.mode_count() || weights.iter().any(|b| !b.is_finite()) {
+                    return Err(invalid("contact row must match the complete finite mass-normalized basis"));
+                }
+                // Move the admitted row into the solver, without retaining a
+                // second dense copy for every contact in a flexible assembly.
+                Ok(std::mem::take(weights))
+            }
+        }
+    }
 }
 
 /// Explicit per-step nonlinear work and physical limits, not clipping targets.
@@ -102,7 +140,7 @@ pub struct ContactModalFrame {
 /// it does NOT silently solve a contact-loaded static equilibrium.
 pub struct ContactModalSystem {
     network: CoupledModalSystem,
-    contact: ModalContact,
+    contact: ContactSpec,
     config: ModalContactConfig,
     column: Vec<f64>,
     compliance_m_per_n: f64,
@@ -129,13 +167,30 @@ impl ContactModalSystem {
         config: ModalContactConfig,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
+        Self::new_inner(network, ContactSpec::Pair(contact), config, gate)
+    }
+
+    /// Compile a full signed normal-contact row without regrouping components
+    /// or changing their individual state/energy budgets. Its transpose applies
+    /// the same reaction to every participating body in the existing solve.
+    pub(crate) fn new_with_column(
+        network: CoupledModalSystem, weights: Vec<f64>, law: Obstacle,
+        config: ModalContactConfig, gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        Self::new_inner(network, ContactSpec::Column { weights, law }, config, gate)
+    }
+
+    fn new_inner(
+        network: CoupledModalSystem, mut contact: ContactSpec,
+        config: ModalContactConfig, gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
         poll(Some(gate))?;
         if network.samples_rendered() != 0 {
             return Err(invalid("contact admission requires a sample-zero network; no mid-run energy insertion"));
         }
-        let column = contact_column(&network, &contact, config)?;
+        let column = contact.take_column(&network, config)?;
         let compliance_m_per_n = effective_compliance(&network, &column, gate)?;
-        let storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.law.clone()])
+        let storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.law().clone()])
             .map_err(ModalCouplingError::ContactLaw)?;
         let system = Self { forces: vec![0.0; network.mode_count()], network, contact,
             config, column, compliance_m_per_n, storage, last: None };
@@ -143,7 +198,7 @@ impl ContactModalSystem {
         system.check_penetration(x)?;
         limit("total initial energy including contact", system.total_energy_j()?, system.network.config.maximum_total_energy_j)?;
         // Validates the shared discrete-law evaluation at the actual starting state.
-        SlitContactStep::new(&system.contact.law, -x).map_err(ModalCouplingError::ContactLaw)?;
+        SlitContactStep::new(system.contact.law(), -x).map_err(ModalCouplingError::ContactLaw)?;
         poll(Some(gate))?;
         Ok(system)
     }
@@ -162,7 +217,7 @@ impl ContactModalSystem {
     pub fn samples_rendered(&self) -> u64 { self.network.samples_rendered() }
     /// Supplied obstacle, with its unmodified provenance and physical coefficients.
     #[must_use]
-    pub fn contact_law(&self) -> &Obstacle { &self.contact.law }
+    pub fn contact_law(&self) -> &Obstacle { self.contact.law() }
     /// Last complete contact-inclusive diagnostic, absent before the first sample.
     #[must_use]
     pub const fn last_frame(&self) -> Option<&ContactModalFrame> { self.last.as_ref() }
@@ -202,7 +257,7 @@ impl ContactModalSystem {
                 index += 1;
             }
         }
-        let law = SlitContactStep::new(&self.contact.law, -x0).map_err(ModalCouplingError::ContactLaw)?;
+        let law = SlitContactStep::new(self.contact.law(), -x0).map_err(ModalCouplingError::ContactLaw)?;
         let (reaction, iterations) = solve_contact(&law, x0, x_free, self.compliance_m_per_n,
             self.network.dt, self.config, gate)?;
         self.forces.copy_from_slice(external);
@@ -241,7 +296,7 @@ impl ContactModalSystem {
             network_energy_j, contact_energy_j, external_work_j, network_dissipation_j,
             contact_dissipation_j, energy_residual_j: residual, energy_tolerance_j: tolerance,
             normal_force_n: reaction, constitutive_residual_n, force_tolerance_n,
-            penetration_before_m: (x0-self.contact.law.gaps()[0]).max(0.0),
+            penetration_before_m: (x0-self.contact.law().gaps()[0]).max(0.0),
             penetration_after_m, iterations,
         };
         poll(gate)?;
@@ -255,15 +310,15 @@ impl ContactModalSystem {
         Ok(value)
     }
     fn check_penetration(&self, closure: f64) -> Result<f64, ModalCouplingError> {
-        let penetration = finite(closure-self.contact.law.gaps()[0])?.max(0.0);
+        let penetration = finite(closure-self.contact.law().gaps()[0])?.max(0.0);
         limit("contact penetration", penetration, self.config.maximum_penetration_m)?;
         Ok(penetration)
     }
 }
 
 // Shared single/multiple-contact admission: obstacle, limits and signed basis.
-pub(super) fn contact_column(network: &CoupledModalSystem, contact: &ModalContact, config: ModalContactConfig)
-    -> Result<Vec<f64>, ModalCouplingError>
+fn validate_contact_law(law: &Obstacle, config: ModalContactConfig)
+    -> Result<(), ModalCouplingError>
 {
     if !(1..=128).contains(&config.max_iterations)
         || [config.maximum_force_n, config.maximum_penetration_m,
@@ -272,7 +327,6 @@ pub(super) fn contact_column(network: &CoupledModalSystem, contact: &ModalContac
         || config.force_relative_tolerance >= 1.0 {
         return Err(invalid("contact requires explicit positive finite force, penetration, iteration and residual budgets"));
     }
-    let law = &contact.law;
     if law.n_points() != 1 || law.collocation() != [-1.0]
         || law.gaps().len() != 1 || law.weights().len() != 1
         || !law.gaps()[0].is_finite() || !law.weights()[0].is_finite() || law.weights()[0] < 0.0
@@ -282,6 +336,13 @@ pub(super) fn contact_column(network: &CoupledModalSystem, contact: &ModalContac
         || law.provenance().trim().is_empty() {
         return Err(invalid("contact requires a finite provenance-labelled one-point unit-opening obstacle"));
     }
+    Ok(())
+}
+
+pub(super) fn contact_column(network: &CoupledModalSystem, contact: &ModalContact, config: ModalContactConfig)
+    -> Result<Vec<f64>, ModalCouplingError>
+{
+    validate_contact_law(&contact.law, config)?;
     let mut column = vec![0.0; network.mode_count()];
     for (attachment, sign) in [(&contact.left, 1.0), (&contact.right, -1.0)] {
         let model = network.models.get(attachment.component)

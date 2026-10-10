@@ -140,9 +140,10 @@ impl RegularizedSet {
                 spec.coefficient, spec.coefficient, spec.regularization_speed_m_s,
             ).map_err(invalid)?;
             let mut column = vec![0.0; n];
+            let pair = normal.contact.pair()?;
             for (attachment, shapes, sign) in [
-                (&normal.contact.left, &spec.left_shapes, 1.0),
-                (&normal.contact.right, &spec.right_shapes, -1.0),
+                (&pair.left, &spec.left_shapes, 1.0),
+                (&pair.right, &spec.right_shapes, -1.0),
             ] {
                 if shapes.len() != attachment.shapes.len() || shapes.iter().any(|x| !x.is_finite()) {
                     return Err(invalid("tangential shapes must match the normal pair's finite modal bases"));

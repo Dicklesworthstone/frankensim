@@ -95,7 +95,7 @@ pub struct MultiContactFrame {
 }
 
 struct ContactPoint {
-    contact: ModalContact,
+    contact: ContactSpec,
     config: ModalContactConfig,
     column: Vec<f64>,
     storage: ContactStorage,
@@ -107,7 +107,7 @@ impl ContactPoint {
         Ok(value)
     }
     fn penetration(&self, x: f64) -> Result<f64, ModalCouplingError> {
-        let value = finite(x - self.contact.law.gaps()[0])?.max(0.0);
+        let value = finite(x - self.contact.law().gaps()[0])?.max(0.0);
         limit("contact penetration", value, self.config.maximum_penetration_m)?;
         Ok(value)
     }
@@ -142,9 +142,29 @@ impl MultiContactModalSystem {
         config: MultiContactConfig,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
+        Self::new_inner(network, contacts.into_iter().map(|(contact, limits)|
+            (ContactSpec::Pair(contact), limits)), config, gate)
+    }
+
+    /// Preserve complete signed closure rows from the impact compiler. Every
+    /// cross-contact compliance still uses all original network components.
+    pub(crate) fn new_with_columns(
+        network: CoupledModalSystem,
+        contacts: Vec<(Vec<f64>, Obstacle, ModalContactConfig)>,
+        config: MultiContactConfig, gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        Self::new_inner(network, contacts.into_iter().map(|(weights, law, limits)|
+            (ContactSpec::Column { weights, law }, limits)), config, gate)
+    }
+
+    fn new_inner(
+        network: CoupledModalSystem,
+        contacts: impl ExactSizeIterator<Item = (ContactSpec, ModalContactConfig)>,
+        config: MultiContactConfig, gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
         poll(Some(gate))?;
         if network.samples_rendered() != 0 || !(1..=MAX_NORMAL_CONTACTS).contains(&config.max_contacts)
-            || contacts.is_empty() || contacts.len() > config.max_contacts
+            || contacts.len() == 0 || contacts.len() > config.max_contacts
             || !(1..=128).contains(&config.max_sweeps) {
             return Err(invalid("multiple contacts require a sample-zero network and bounded nonempty contact/sweep counts"));
         }
@@ -160,13 +180,13 @@ impl MultiContactModalSystem {
         }
         let mut points = Vec::with_capacity(p);
         let mut laws = Vec::with_capacity(p);
-        for (contact, c) in contacts {
+        for (mut contact, c) in contacts {
             poll(Some(gate))?;
-            let column = contact_column(&network, &contact, c)?;
-            let storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.law.clone()])
+            let column = contact.take_column(&network, c)?;
+            let storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.law().clone()])
                 .map_err(ModalCouplingError::ContactLaw)?;
             let x = extension(&network.models, &column, 0.0)?;
-            laws.push(SlitContactStep::new(&contact.law, -x).map_err(ModalCouplingError::ContactLaw)?);
+            laws.push(SlitContactStep::new(contact.law(), -x).map_err(ModalCouplingError::ContactLaw)?);
             let point = ContactPoint { contact, config: c, column, storage };
             point.penetration(x)?;
             points.push(point);
@@ -204,7 +224,7 @@ impl MultiContactModalSystem {
     pub fn contact_count(&self) -> usize { self.points.len() }
     /// Supplied obstacle and source label; no material inference is performed.
     #[must_use]
-    pub fn contact_law(&self, index: usize) -> Option<&Obstacle> { self.points.get(index).map(|p| &p.contact.law) }
+    pub fn contact_law(&self, index: usize) -> Option<&Obstacle> { self.points.get(index).map(|p| p.contact.law()) }
     /// Shared mechanical period [s].
     #[must_use]
     pub fn sample_period_s(&self) -> f64 { self.network.sample_period_s() }
@@ -253,7 +273,7 @@ impl MultiContactModalSystem {
             poll(gate)?;
             self.old_x[i] = dot(&self.points[i].column, &self.network.old_q)?;
             self.free_x[i] = dot(&self.points[i].column, &self.free_q)?;
-            laws[i] = SlitContactStep::new(&self.points[i].contact.law, -self.old_x[i])
+            laws[i] = SlitContactStep::new(self.points[i].contact.law(), -self.old_x[i])
                 .map_err(ModalCouplingError::ContactLaw)?;
         }
         // Scratch guesses restart deterministically after every failed/cancelled

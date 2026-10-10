@@ -9,8 +9,10 @@
 //! The admitted Hamiltonian, damping and contact coefficients are unchanged.
 //! Finite-step coupling is not the exact exponential of the coupled continuum,
 //! nor bit-identical to the Gonzalez reference. Compare by time refinement.
-//! Nonlinear shells, felt, and more than two bodies in a single port are not
-//! silently linearized. This image has no pressure observer or inferred loss.
+//! Nonlinear shells and felt are not silently linearized. Normal contacts keep
+//! complete signed rows across every original body, including flexible shafts.
+//! Bilateral volume/damper ports remain limited to two bodies. This image has
+//! no pressure observer or inferred loss.
 //! The underlying contact path still allocates; no hard-real-time claim follows.
 
 /// Geometry-derived tensioned filaments with reciprocal distributed contact.
@@ -23,7 +25,7 @@ use crate::modal_acoustic_time::{
 use crate::render::schedule::force::coupled::{
     CoupledModalSystem, ModalAttachment, ModalConnection, ModalCouplingConfig,
     ModalCouplingError,
-    contact::{ContactModalSystem, ModalContact, ModalContactConfig},
+    contact::{ContactModalSystem, ModalContactConfig},
     contact::multiple::{MultiContactConfig, MultiContactModalSystem, MAX_NORMAL_CONTACTS},
 };
 use fs_dcontact::Obstacle;
@@ -139,7 +141,7 @@ fn attachments(
         let row = &column[offset..offset+n];
         if row.iter().any(|b| *b != 0.0) {
             if active.len() == 2 {
-                return Err(invalid("this linear image admits at most two bodies in each volume/contact port"));
+                return Err(invalid("this linear image admits at most two bodies in each volume/damper port"));
             }
             active.push(ModalAttachment { component, shapes: row.to_vec() });
         }
@@ -169,7 +171,7 @@ impl LinearImpactSystem {
     /// solved contact points, with original weights, gaps and constitutive data.
     ///
     /// # Errors
-    /// Refuses nonlinear bodies, unsupported multi-body ports, malformed data
+    /// Refuses nonlinear bodies, unsupported multi-body bilateral ports, malformed data
     /// and every downstream owner budget. Nonzero free-coordinate drag consumes
     /// one bilateral connection per coordinate; it is never silently dropped.
     /// Felt is deliberately absent from this signature: no history is discarded.
@@ -304,21 +306,20 @@ impl LinearImpactSystem {
                 if column.iter().all(|b| *b == 0.0) {
                     return Err(invalid("contact requires a moving attachment in this condensed image"));
                 }
-                let (left, right) = attachments(column, &counts)?;
                 let law = Obstacle::new(vec![-1.0], 1, 1, vec![ob.gaps()[point]],
                     vec![ob.weights()[point]], ob.stiffness(), ob.alpha(), ob.provenance().to_string())
                     .and_then(|law| law.with_internal_loss(ob.internal_loss()))
                     .map_err(|e| ImpactError::Owner(e.to_string()))?;
-                points.push((ModalContact { left, right, law }, config.contact));
+                points.push((column.to_vec(), law, config.contact));
             }
         }
         let prepared = match points.len() {
             0 => Prepared::Bilateral(network),
             1 => {
-                let (contact, limits) = points.remove(0);
-                Prepared::Single(ContactModalSystem::new(network, contact, limits, gate).map_err(owner)?)
+                let (column, law, limits) = points.remove(0);
+                Prepared::Single(ContactModalSystem::new_with_column(network, column, law, limits, gate).map_err(owner)?)
             }
-            _ => Prepared::Multiple(MultiContactModalSystem::new(network, points, config.multiple, gate).map_err(owner)?),
+            _ => Prepared::Multiple(MultiContactModalSystem::new_with_columns(network, points, config.multiple, gate).map_err(owner)?),
         };
         let initial_energy = prepared.energy().map_err(owner)?;
         let mut result = Self { prepared, state: vec![0.0; 2*count], config, contacts: point_count,

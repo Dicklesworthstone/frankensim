@@ -191,10 +191,11 @@ impl CoulombSet {
                 .evaluate(&spec.interface, 1.0, at_rest)
                 .map_err(|_| invalid("fs-tribo refused the declared dry Coulomb law/interface"))?.static_limit;
             let mut columns = [vec![0.0; n], vec![0.0; n]];
+            let pair = normal.contact.pair()?;
             for axis in 0..2 {
                 for (attachment, shapes, sign) in [
-                    (&normal.contact.left, &spec.left_shapes[axis], 1.0),
-                    (&normal.contact.right, &spec.right_shapes[axis], -1.0),
+                    (&pair.left, &spec.left_shapes[axis], 1.0),
+                    (&pair.right, &spec.right_shapes[axis], -1.0),
                 ] {
                     if shapes.len() != attachment.shapes.len() || shapes.iter().any(|x| !x.is_finite()) {
                         return Err(invalid("Coulomb tangent maps must match the normal pair's finite modal bases"));

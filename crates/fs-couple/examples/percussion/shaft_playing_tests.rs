@@ -182,7 +182,7 @@ fn mute_jaws_and_opposite_hand_mallet_keep_their_own_inertia_and_history() {
 #[test]
 fn linear_modal_image_retains_the_selected_elastic_shaft_bodies() {
     let s=selection();
-    let e=drum_with_shafts(4,2e-6,true,true,None,false,first(),false,None,Some(drum()),
+    let mut e=drum_with_shafts(256,2e-6,true,true,None,false,first(),false,None,Some(drum()),
         Some(second()),&[],0.0,None,false,None,&mallets::Selection::default(),&s).unwrap();
     let Mechanics::Prepared(system)=&e.system else {panic!("explicit modal image must remain modal")};
     assert_eq!(system.contact_count(),2);
@@ -191,4 +191,18 @@ fn linear_modal_image_retains_the_selected_elastic_shaft_bodies() {
         assert!(p.elastic_modes()>0);assert_eq!(p.observe(system.state()).unwrap().flexural_energy_j,0.0);
         assert!(e.acoustics.as_ref().unwrap().state_modes().iter().all(|i|*i<p.elastic_start()));
     }
+    let initial=system.frame().stored_energy_j;
+    let gate=CancelGate::new_clock_free();
+    let mut bending=[0.0_f64;2];let mut loss=0.0;
+    for _ in 0..256 {
+        let frame=e.system.step(&e.force,&gate).unwrap();
+        assert_eq!(frame.supplied_work_j,0.0);loss+=frame.dissipated_energy_j;
+        assert!(frame.balance_residual_j.abs()<1e-7);
+        for (i,p) in e.flexible_sticks.iter().enumerate() {
+            bending[i]=bending[i].max(p.as_ref().unwrap().observe(e.system.state()).unwrap().flexural_energy_j);
+        }
+    }
+    assert!(bending.iter().all(|v|*v>1e-12),"both flexible sticks must receive their contact reactions: {bending:?}");
+    let Mechanics::Prepared(system)=&e.system else {panic!()};
+    assert!((system.frame().stored_energy_j+loss-initial).abs()<1e-6);
 }

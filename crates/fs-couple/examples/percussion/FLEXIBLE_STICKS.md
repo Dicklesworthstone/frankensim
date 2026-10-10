@@ -137,6 +137,10 @@ applies force and moment through that loaded basis. A v1 effective-mass mallet
 still refuses on the same shaft to prevent double-counting inertia.
 Opposite-hand mallets and moving mutes retain their existing limits. `drum-modal` keeps
 its declared linear modal realization with the actual elastic shaft bodies.
+Its normal contacts retain the complete signed rigid/shaft/head row, so both
+flexible sticks receive bending reactions through the same joint solve. G1/G3
+regressions compare identical diagonal mechanics split across bodies or grouped
+in one basis, and exercise actual two-stick drum impacts and energy balance.
 For snare commands, selecting a shaft enables the nonlinear-capable composition
 so that `--analytic-newton` and impact substeps can be used without discarding
 the wires or their contact loss. This does not enable head or wire stretching

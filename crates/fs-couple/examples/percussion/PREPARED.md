@@ -82,12 +82,16 @@ or a radiation correction. The example declares the clear-span disk area for A.
 
 This finite-step port coupling is not the exact exponential of the complete
 coupled system and is not bit-identical to Gonzalez. Both require time-refinement
-checks against the same physical equations. The new image explicitly refuses
-nonlinear shells, felt memory, free-coordinate drag and single ports spanning
-more than two bodies; it does not silently erase them or fall back to a cheaper
-model. Many independent two-body ports and distributed joint contacts are legal
-within the original owners' work limits. A broader shell/air/hardware model needs
-its appropriate image, not more relaxation of these admissions.
+checks against the same physical equations. The image explicitly refuses
+nonlinear shells and felt memory. Bilateral volume/damper ports still span at
+most two bodies, while a normal-contact row can include every retained body.
+In particular, `drum-modal` supports a flexible stick's rigid rotation and
+elastic shaft acting together on a drumhead, including two independently
+flexible sticks in the joint contact solve. The original body order, component
+budgets and reciprocal signed forces are retained; modes are not regrouped or
+discarded to fit a two-body attachment. Free-coordinate drag uses grounded
+viscous links within the existing connection budget. All compositions remain
+subject to the original owners' mode, contact and work limits.
 
 ## Public composition
 
