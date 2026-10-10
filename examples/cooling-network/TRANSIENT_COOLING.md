@@ -218,9 +218,16 @@ solid/liquid diffusion cases with an independent four-node linear solve.
 This opt-in CLI mode supports fixed schedules and fixed reference density with
 uniform or explicitly assigned equilibrium charts, including single-phase
 charts. Geometry, mass and energetic internal variables are frozen. Adaptive
-and repeated schedules, steady design, time/mesh studies, recirculation and
+stepping, steady design, time/mesh studies, recirculation and
 enclosure radiation explicitly refuse. There is no fluid storage, phase
 advection, melting-driven motion or certified inter-step peak.
+
+Repeated fixed-step duty cycles carry the accepted nodal enthalpy into the next
+cycle, including latent energy invisible in a temperature plateau. The
+[repeated enthalpy pulse](enthalpy-repeated-pulse.json) runs three cycles and
+retains a single history adjoint through the entire experiment. See
+[repeated enthalpy state and periodic stopping](REPEATED_COOLING.md#enthalpy-and-phase-change-duty-cycles)
+for the two-field stopping criterion and cumulative output.
 
 ### Enthalpy history gradients and workload/fan sizing
 
@@ -232,6 +239,11 @@ feedback. It carries the enthalpy derivative directly between steps, including
 through latent-plateau interiors where temperature alone cannot carry the
 stored-state sensitivity. It supports the same explicit single-phase and
 heterogeneous chart assignments as the forward solve.
+With a fixed `repeat.cycles` count, the objective covers every cycle and the
+adjoint carries h sensitivity across all cycle boundaries. Interval controls
+apply to every occurrence, while initial-h derivatives refer to the original
+state only. `max_checkpoint_bytes` must admit the complete repeated tape.
+Variable periodic stopping and cycle controllers are not differentiated.
 
 The `transient.adjoint` result includes:
 

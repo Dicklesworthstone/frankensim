@@ -18,7 +18,7 @@ footprints, interval lengths and fan schedules remain unchanged. Each cycle runs
 the existing backward-Euler solid and quasi-steady air solve. No state is inferred
 from a scalar hotspot and no heat is erased at a cycle boundary.
 
-Both fixed and adaptive stepping are supported. Fixed timesteps preserve the
+Temperature-storage requests support fixed and adaptive stepping. Fixed timesteps preserve the
 original per-interval partition. Adaptive stepping restarts its step suggestion
 at each interval boundary, as before; only accepted fields and heat become
 history. `max_steps` and adaptive `max_trials` remain per-cycle budgets.
@@ -26,6 +26,9 @@ history. `max_steps` and adaptive `max_trials` remain per-cycle budgets.
 That remaining budget is passed into the next cycle before it advances, not
 checked after an unlimited cycle. Cycles and the original wall budget bound the
 whole invocation. A refused solve or exhausted budget publishes no partial run.
+
+Total-enthalpy storage supports repeated fixed steps with the additional
+state and periodicity rules described below.
 
 The top-level final temperature field, fan result and coefficients describe the
 last accepted cycle endpoint. To avoid storing every nodal trajectory, the
@@ -41,6 +44,72 @@ condition and every accepted endpoint, not just the last cycle. The first
 sampled limit violation likewise uses global elapsed time. A hot initial
 condition or earlier overshoot cannot disappear from the reported maximum.
 No limit on unsampled times, future cycles or the continuum field is inferred.
+
+## Enthalpy and phase-change duty cycles
+
+With `transient.enthalpy`, each repeated cycle starts from the complete accepted
+specific-enthalpy field of the preceding cycle. Temperature and liquid fraction
+are evaluated from each assigned chart; a constant melting temperature never
+resets or discards latent energy. Fixed reference masses, material laws,
+convection, contact and ambient radiation retain their existing physical owners.
+The [repeated enthalpy pulse](enthalpy-repeated-pulse.json) begins inside a
+350 K latent plateau, raises the workload from scale 1 to 6 in each cycle,
+and carries the resulting latent and sensible storage through three cycles:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/enthalpy-repeated-pulse.json
+```
+
+The fixture's `repeat` uses `{"cycles":3,"max_total_steps":12}`. Its fixed-count
+sampled-peak adjoint spans the complete chronological history. Initial-enthalpy
+derivatives refer to the original field; each interval workload or fan-speed
+control affects every occurrence, and inlet controls apply throughout. The
+global adjoint is reported in `repeated_cycles.adjoint`, with all checkpoints
+charged to the declared `max_checkpoint_bytes`. Removing `transient.adjoint`
+runs the same forward experiment without reverse work. The fixture is synthetic;
+the supplied limit and materials are illustrative inputs, not executed binary
+results or measured thermal-performance claims.
+
+The top-level h, temperature and phase fields describe the last accepted
+endpoint. `transient` retains only the last cycle in local time, and
+`repeated_cycles` supplies cumulative energy, work, all-cycle peaks and cycle
+summaries. In addition to the temperature residual, each cycle reports
+`start_to_end_specific_enthalpy_residual_j_kg`. These are differences between
+the actual start and end fields, not changes in a scalar mean.
+
+For bounded periodic stopping, remove the fixed cycle count and adjoint, and
+supply both temperature and enthalpy tolerances:
+
+```json
+"repeat": {
+  "until_periodic": {
+    "max_cycles": 100,
+    "temperature_tolerance_k": 0.0001,
+    "specific_enthalpy_tolerance_j_kg": 0.001,
+    "consecutive_cycles": 2
+  },
+  "max_total_steps": 400
+}
+```
+
+Both maximum absolute nodal start/end differences must pass their declared
+tolerances on every qualifying cycle. Either failure resets the consecutive
+streak. Equal temperatures while latent enthalpy is drifting do not pass.
+The `periodic-field-tolerance-met` result reports
+`periodic.full_field_residual_k` and
+`periodic.full_specific_enthalpy_residual_j_kg`. Missing the h tolerance in
+enthalpy mode refuses; providing it for temperature storage also refuses.
+Exhausting cycles, accepted steps or the wall budget refuses without publishing
+an unconverged result. This is a discrete cycle-map test, not distance to the
+infinite-cycle limit, stability evidence or a future-peak bound.
+
+Enthalpy repetition currently requires fixed timesteps and refuses
+`repeat.fan_controller`. Fixed-count adjoints and workload/fan sizing cover
+every cycle's sampled peak. Periodic stopping is available for forward runs
+and derivative-free sizing; its variable stopping decision is not
+differentiated. Every sizing candidate starts from the same original h field,
+and its inner cycles carry their own accepted physical state.
 
 ## Repeated-cycle sizing
 

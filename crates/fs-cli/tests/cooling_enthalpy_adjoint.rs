@@ -8,6 +8,8 @@ mod json;
 
 #[path = "cooling_enthalpy_adjoint/fan.rs"]
 mod fan;
+#[path = "cooling_enthalpy_adjoint/repeat.rs"]
+mod repeat;
 
 use json::JsonValue as J;
 use std::io::Write;

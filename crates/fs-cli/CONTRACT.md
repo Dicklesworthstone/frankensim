@@ -174,6 +174,11 @@ before allocation. Reconstruction requires exact accepted h and temperature
 bits and rechecks physical residual/energy gates. The cap is not a bound on
 all solver workspace. Reverse solves share the original invocation deadline;
 failed replay, derivative gates or cancellation publish no partial gradient.
+Fixed-count `transient.repeat` retains one chronological tape across every
+cycle. Its initial-h derivatives refer only to the original state; each
+interval workload, inlet and fan control affects every occurrence. Checkpoint
+admission accounts for all retained endpoints, and reverse carry crosses
+cycle boundaries without a temperature-to-enthalpy inverse or a cold reset.
 
 The report's initial-state keys are
 `dtemperature_dinitial_specific_enthalpies_k_kg_j` and
@@ -209,9 +214,26 @@ claimed. `examples/cooling-network/enthalpy-power-sizing.json` is a runnable
 synthetic phase-changing request with coupled air and ambient radiation;
 `examples/cooling-network/enthalpy-fan-sizing.json` exercises the fan control.
 
-This CLI consumer admits fixed schedules and fixed reference densities with
+`transient.repeat` admits fixed `cycles` or bounded `until_periodic`, with the
+existing `max_total_steps` cap. Actual accepted nodal h and T cross each cycle
+boundary. The last-cycle `transient` report remains in local time; cumulative
+`repeated_cycles` contains every cycle's energy, accepted work and sampled
+peak, including warm-up. Sizing restarts each candidate from the original h
+and uses the complete repeated experiment. Periodic stopping requires both
+`temperature_tolerance_k` and explicit positive
+`specific_enthalpy_tolerance_j_kg`, applied to maximum absolute nodal
+start/end differences for the declared consecutive cycles. Temperature
+agreement alone cannot establish a settled latent state. Temperature-storage
+requests reject the enthalpy tolerance. A failed periodic gate, total-step
+budget or cancellation publishes no partial result. Periodic stopping does
+not admit adjoints, and h-mode `repeat.fan_controller` explicitly refuses.
+The cycle-map residual is not distance to an infinite-cycle limit or a bound
+on future peaks. The synthetic `enthalpy-repeated-pulse.json` example carries
+both latent and sensible storage through three cycles with a global adjoint.
+
+This CLI consumer admits fixed timesteps and fixed reference densities with
 uniform or explicitly assigned equilibrium charts.
-Adaptive/repeated schedules, steady design and controls outside these two transient searches,
+Adaptive stepping, steady design and controls outside these two transient searches,
 time/mesh studies, recirculation and enclosure radiation explicitly refuse.
 No moving geometry, phase advection,
 fluid storage, phase kinetics or inter-step peak/error certificate is claimed.

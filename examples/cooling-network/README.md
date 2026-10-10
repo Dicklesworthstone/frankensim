@@ -47,6 +47,10 @@ selects derivative-free sizing.
 The [enthalpy fan-sizing example](enthalpy-fan-sizing.json) searches actual
 affinity-scaled fan schedules with the same full enthalpy, air and radiation
 model; supported flow-derived convection is recomputed at every candidate.
+The [repeated enthalpy pulse](enthalpy-repeated-pulse.json) carries latent and
+sensible storage across duty cycles with one complete history adjoint.
+Enthalpy periodic stopping checks both temperature and specific-enthalpy
+agreement; see [the repeated-cycle contract](REPEATED_COOLING.md#enthalpy-and-phase-change-duty-cycles).
 
 Every vertex, tetrahedron, surface, coefficient, heat source, hydraulic connection
 and source temperature comes from the request. Supply a conforming,

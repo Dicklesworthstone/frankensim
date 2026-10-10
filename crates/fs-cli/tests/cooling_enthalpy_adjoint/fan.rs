@@ -3,7 +3,7 @@
 
 use super::*;
 
-fn fan_request(correlated: bool, qoi: Option<&str>) -> J {
+pub(super) fn fan_request(correlated: bool, qoi: Option<&str>) -> J {
     let mut result = request(qoi);
     // The unit-speed intersection is Q=7, pressure=2: the first and bypass
     // paths carry 5 and 2, then mix before the final exchanger. The synthetic
@@ -71,7 +71,7 @@ fn fan_request(correlated: bool, qoi: Option<&str>) -> J {
     result
 }
 
-fn scale_speed(request: &mut J, interval: Option<usize>, multiplier: f64) {
+pub(super) fn scale_speed(request: &mut J, interval: Option<usize>, multiplier: f64) {
     let intervals = array_mut(member(member(request, "transient"), "intervals"));
     for (index, row) in intervals.iter_mut().enumerate() {
         if interval.is_none_or(|i| i == index) {
@@ -87,7 +87,7 @@ fn scaled_fan(multiplier: f64) -> J {
     result
 }
 
-fn same_physical_history(first: &J, second: &J) {
+pub(super) fn same_physical_history(first: &J, second: &J) {
     for path in [
         &["solid_specific_enthalpies_j_kg"][..],
         &["solid_temperatures_k"][..],
