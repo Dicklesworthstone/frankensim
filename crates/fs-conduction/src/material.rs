@@ -224,6 +224,79 @@ impl ConductivityTable {
         Self::from_claims_selected(claims, property, grid, ClaimSelection::Pinned(pinned), None)
     }
 
+    /// Preserve an explicitly global constant source law as a constant table.
+    ///
+    /// This is a separate constructor from temperature-grid sampling: the
+    /// pinned claim must itself be a scalar with `ConstantWithinValidity`
+    /// interpolation and a completely unconstrained validity domain. A flat
+    /// sampled curve or a finite validity interval never supplies that fact.
+    /// The exact pinned query receipt is retained; no source authority is
+    /// inferred from the returned table's unbounded temperature span.
+    ///
+    /// This permits continuum verification of a nominal constant-coefficient
+    /// model without treating a sampled field's extrema as a continuum
+    /// temperature-range proof. Existing sampled tables remain unchanged.
+    ///
+    /// # Errors
+    /// Invalid query temperature, absent or non-global/nonconstant claim,
+    /// query refusal, incompatible dimensions, or nonpositive conductivity.
+    pub fn from_unbounded_constant_claim(
+        claims: &ClaimSet,
+        property: &str,
+        temperature: f64,
+        pinned: ClaimId,
+    ) -> Result<ConductivityTable, ConductionError> {
+        if !temperature.is_finite() || temperature <= 0.0 {
+            return Err(ConductionError::Conductivity {
+                what: "constant source query requires a positive finite kelvin temperature".into(),
+            });
+        }
+        let claim = claims
+            .claim(pinned)
+            .ok_or_else(|| ConductionError::Conductivity {
+                what: "the pinned global constant conductivity claim is absent".into(),
+            })?;
+        if !matches!(claim.value, PropertyValue::Scalar { .. })
+            || claim.interpolation != fs_matdb::InterpolationPolicy::ConstantWithinValidity
+            || !claim.validity.bounds().is_empty()
+            || claim.validity.has_typed_axes()
+        {
+            return Err(ConductionError::Conductivity {
+                what: "global constant conductivity requires a scalar ConstantWithinValidity claim with explicitly unconstrained validity; finite spans and sampled curves need a continuum temperature-range proof".into(),
+            });
+        }
+        let query_error = |error: String| ConductionError::MaterialQuery {
+            property: property.to_string(),
+            temperature,
+            upstream: error,
+        };
+        let point = QueryPoint::new()
+            .with(TEMPERATURE_AXIS, temperature)
+            .map_err(|error| query_error(error.to_string()))?;
+        let answer = claims
+            .query_pinned(property, &point, pinned)
+            .map_err(|error| query_error(error.to_string()))?;
+        let sample = &answer.evidence.value;
+        if sample.dims != CONDUCTIVITY_DIMS {
+            return Err(ConductionError::Dimensions {
+                context: format!("global constant conductivity {property:?}"),
+                expected: CONDUCTIVITY_DIMS.0,
+                found: sample.dims.0,
+            });
+        }
+        if !sample.value.is_finite() || sample.value <= 0.0 {
+            return Err(ConductionError::Conductivity {
+                what: "global constant conductivity must be finite and positive".into(),
+            });
+        }
+        Ok(Self {
+            property: property.to_string(),
+            knots: vec![(temperature, sample.value)],
+            receipts: vec![answer.receipt],
+            provenance: ProvenanceClass::MatdbReceipts,
+        })
+    }
+
     /// Sample an exact property key at fully declared source query points,
     /// preserving the property's kind and every coordinate descriptor.
     ///
@@ -1141,6 +1214,127 @@ impl ElementMaterials {
             ProvenanceClass::MatdbReceipts
         } else {
             ProvenanceClass::Declared
+        }
+    }
+}
+
+#[cfg(test)]
+mod global_constant_tests {
+    use super::*;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{InterpolationPolicy, PropertyClaim, Provenance, UncertaintyModel};
+
+    fn source(
+        value: PropertyValue,
+        validity: ValidityDomain,
+        interpolation: InterpolationPolicy,
+    ) -> (ClaimSet, ClaimId) {
+        let mut claims = ClaimSet::new();
+        let id = claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new("thermal-conductivity", CONDUCTIVITY_DIMS),
+                value,
+                validity,
+                interpolation,
+                uncertainty: UncertaintyModel::Unstated,
+                observations: Vec::new(),
+                provenance: Provenance {
+                    source: "declared numerical constant fixture".into(),
+                    license: "internal-test-use".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+        (claims, id)
+    }
+
+    #[test]
+    fn g0_global_constant_keeps_pinned_receipt_and_does_not_change_sampled_span() {
+        let (claims, id) = source(
+            PropertyValue::Scalar {
+                value: 10.0,
+                dims: CONDUCTIVITY_DIMS,
+            },
+            ValidityDomain::unconstrained(),
+            InterpolationPolicy::ConstantWithinValidity,
+        );
+        let sampled = ConductivityTable::from_claims_pinned(
+            &claims,
+            "thermal-conductivity",
+            &[290.0, 310.0],
+            id,
+        )
+        .unwrap();
+        assert!(sampled.eval(320.0).is_err());
+        let global = ConductivityTable::from_unbounded_constant_claim(
+            &claims,
+            "thermal-conductivity",
+            300.0,
+            id,
+        )
+        .unwrap();
+        assert_eq!(global.span(), TemperatureSpan::Unbounded);
+        assert_eq!(global.provenance(), ProvenanceClass::MatdbReceipts);
+        assert_eq!(global.eval(320.0).unwrap(), 10.0);
+        let point = QueryPoint::new().with("T", 300.0).unwrap();
+        let original = claims
+            .query_pinned("thermal-conductivity", &point, id)
+            .unwrap();
+        assert_eq!(global.receipts(), &[original.receipt]);
+        assert!(sampled.eval(320.0).is_err());
+        for temperature in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                ConductivityTable::from_unbounded_constant_claim(
+                    &claims,
+                    "thermal-conductivity",
+                    temperature,
+                    id
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn g0_global_constant_refuses_bounded_scalar_and_flat_curve() {
+        for (value, validity, interpolation) in [
+            (
+                PropertyValue::Scalar {
+                    value: 10.0,
+                    dims: CONDUCTIVITY_DIMS,
+                },
+                ValidityDomain::unconstrained().with("T", 290.0, 310.0),
+                InterpolationPolicy::ConstantWithinValidity,
+            ),
+            (
+                PropertyValue::Scalar {
+                    value: 10.0,
+                    dims: CONDUCTIVITY_DIMS,
+                },
+                ValidityDomain::unconstrained().with("pressure", 0.0, 1.0),
+                InterpolationPolicy::ConstantWithinValidity,
+            ),
+            (
+                PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: Dims([0, 0, 0, 1, 0, 0]),
+                    knots: vec![(290.0, 10.0), (310.0, 10.0)],
+                    dims: CONDUCTIVITY_DIMS,
+                },
+                ValidityDomain::unconstrained(),
+                InterpolationPolicy::LinearInside,
+            ),
+        ] {
+            let (claims, id) = source(value, validity, interpolation);
+            assert!(
+                ConductivityTable::from_unbounded_constant_claim(
+                    &claims,
+                    "thermal-conductivity",
+                    300.0,
+                    id
+                )
+                .is_err()
+            );
         }
     }
 }
