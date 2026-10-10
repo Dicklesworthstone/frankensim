@@ -540,6 +540,135 @@ pub(crate) fn assemble_jacobian_with_optional_interfaces(
     interfaces: Option<&ThermalInterfaces>,
     element_materials: Option<&ElementMaterials>,
 ) -> Result<Csr, ConductionError> {
+    assemble_transport_jacobian(
+        cx,
+        mesh,
+        boundary,
+        material,
+        temperature,
+        None,
+        None,
+        None,
+        interfaces,
+        element_materials,
+    )
+}
+
+/// Spatial enthalpy tangent for `K_e = s_e(h) K_base(T_bar_e(h))`.
+///
+/// Each conductive entry is `s_e J_T,ac T'_c + r_base,a s'_e,c`, where
+/// `r_base = K_base^e T` is the unscaled element conductive residual. The
+/// second term remains active on a latent plateau, where `T'_c` can be zero.
+/// Robin and contact columns receive `T'_c` only; their transfer laws are
+/// never multiplied by `s_e`. Storage mass and the timestep are not included.
+/// The four scale derivatives follow the element's local vertex order.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_enthalpy_jacobian_with_optional_interfaces(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    material: &ConductivityModel,
+    temperature: &[f64],
+    temperature_derivatives: &[f64],
+    element_scales: Option<&[f64]>,
+    element_scale_derivatives: Option<&[[f64; 4]]>,
+    interfaces: Option<&ThermalInterfaces>,
+    element_materials: Option<&ElementMaterials>,
+) -> Result<Csr, ConductionError> {
+    checkpoint(cx, "assemble-enthalpy-jacobian-input", 0)?;
+    let n = mesh.vertex_count();
+    for (field, found) in [
+        ("temperature iterate", temperature.len()),
+        (
+            "enthalpy temperature derivative",
+            temperature_derivatives.len(),
+        ),
+    ] {
+        if found != n {
+            return Err(ConductionError::FieldLength {
+                field,
+                expected: n,
+                found,
+            });
+        }
+    }
+    if element_scales.is_some() != element_scale_derivatives.is_some() {
+        return Err(ConductionError::Config {
+            parameter: "enthalpy conductivity scales",
+            what: "element scales and their enthalpy derivatives must be supplied together".into(),
+        });
+    }
+    if let (Some(scales), Some(derivatives)) = (element_scales, element_scale_derivatives) {
+        for (field, found) in [
+            ("element conductivity scale", scales.len()),
+            ("element conductivity scale derivative", derivatives.len()),
+        ] {
+            if found != mesh.element_count() {
+                return Err(ConductionError::FieldLength {
+                    field,
+                    expected: mesh.element_count(),
+                    found,
+                });
+            }
+        }
+        for (element, (&scale, slopes)) in scales.iter().zip(derivatives).enumerate() {
+            if element % ASSEMBLY_TILE == 0 {
+                checkpoint(cx, "assemble-enthalpy-jacobian-input", element)?;
+            }
+            crate::require_finite("element conductivity scale", scale)?;
+            if scale <= 0.0 {
+                return Err(ConductionError::Conductivity {
+                    what: format!("element {element} conductivity scale must be positive"),
+                });
+            }
+            for &slope in slopes {
+                crate::require_finite("element conductivity scale derivative", slope)?;
+            }
+        }
+    }
+    for (vertex, (&t, &slope)) in temperature.iter().zip(temperature_derivatives).enumerate() {
+        if vertex % ASSEMBLY_TILE == 0 {
+            checkpoint(cx, "assemble-enthalpy-jacobian-input", vertex)?;
+        }
+        crate::require_finite("temperature iterate", t)?;
+        crate::require_finite("enthalpy temperature derivative", slope)?;
+        if slope < 0.0 {
+            return Err(ConductionError::Config {
+                parameter: "enthalpy temperature derivative",
+                what: format!("vertex {vertex} temperature derivative must be nonnegative"),
+            });
+        }
+    }
+    assemble_transport_jacobian(
+        cx,
+        mesh,
+        boundary,
+        material,
+        temperature,
+        Some(temperature_derivatives),
+        element_scales,
+        element_scale_derivatives,
+        interfaces,
+        element_materials,
+    )
+}
+
+// The temperature and enthalpy charts share the same element geometry,
+// constitutive Jacobian and boundary/contact owners. Enthalpy/phase laws do not
+// enter this assembler: their caller supplies the declared chart derivatives.
+#[allow(clippy::too_many_arguments)]
+fn assemble_transport_jacobian(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    material: &ConductivityModel,
+    temperature: &[f64],
+    temperature_derivatives: Option<&[f64]>,
+    element_scales: Option<&[f64]>,
+    element_scale_derivatives: Option<&[[f64; 4]]>,
+    interfaces: Option<&ThermalInterfaces>,
+    element_materials: Option<&ElementMaterials>,
+) -> Result<Csr, ConductionError> {
     if let Some(interfaces) = interfaces {
         interfaces.validate_for(mesh, boundary)?;
     } else {
@@ -569,9 +698,27 @@ pub(crate) fn assemble_jacobian_with_optional_interfaces(
             let model = conductivity_model(material, element_materials, e)?;
             let k = model.tensor_at(t_e)?;
             let ke = element_stiffness(mesh, e, &k);
+            let scale = element_scales.map_or(1.0, |scales| scales[e]);
             for a in 0..4 {
                 for b in 0..4 {
-                    coo.push(tet[a] as usize, tet[b] as usize, ke[a][b]);
+                    let mut entry = ke[a][b];
+                    if let Some(slopes) = temperature_derivatives {
+                        entry *= scale;
+                        entry *= slopes[tet[b] as usize];
+                        crate::require_finite("enthalpy transport Jacobian", entry)?;
+                    }
+                    coo.push(tet[a] as usize, tet[b] as usize, entry);
+                }
+                if let Some(derivatives) = element_scale_derivatives {
+                    let mut residual = 0.0f64;
+                    for (b, &vertex) in tet.iter().enumerate() {
+                        residual = ke[a][b].mul_add(temperature[vertex as usize], residual);
+                    }
+                    for c in 0..4 {
+                        let entry = residual * derivatives[e][c];
+                        crate::require_finite("enthalpy phase conductivity Jacobian", entry)?;
+                        coo.push(tet[a] as usize, tet[c] as usize, entry);
+                    }
                 }
             }
             if !model.is_temperature_dependent() {
@@ -597,17 +744,55 @@ pub(crate) fn assemble_jacobian_with_optional_interfaces(
                 let ga_kpg = g[a][0].mul_add(kpg[0], g[a][1].mul_add(kpg[1], g[a][2] * kpg[2]));
                 let contribution = volume * ga_kpg / 4.0;
                 for c in 0..4 {
-                    coo.push(tet[a] as usize, tet[c] as usize, contribution);
+                    let mut entry = contribution;
+                    if let Some(slopes) = temperature_derivatives {
+                        entry *= scale;
+                        entry *= slopes[tet[c] as usize];
+                        crate::require_finite("enthalpy conductivity Jacobian", entry)?;
+                    }
+                    coo.push(tet[a] as usize, tet[c] as usize, entry);
                 }
             }
         }
         start = end;
     }
-    assemble_boundary(cx, mesh, boundary, &mut coo, &mut discard)?;
-    if let Some(interfaces) = interfaces {
-        interfaces.assemble_into(cx, &mut coo)?;
+    if let Some(slopes) = temperature_derivatives {
+        // Assemble these terms through their unchanged owners, then apply only
+        // the temperature chart. A bulk phase multiplier cannot scale a Robin
+        // face or a contact transfer law.
+        let mut boundary_coo = Coo::new(n, n);
+        assemble_boundary(cx, mesh, boundary, &mut boundary_coo, &mut discard)?;
+        if let Some(interfaces) = interfaces {
+            interfaces.assemble_into(cx, &mut boundary_coo)?;
+        }
+        let boundary_tangent = boundary_coo.assemble();
+        let mut visited = 0usize;
+        for row in 0..n {
+            if row % ASSEMBLY_TILE == 0 {
+                checkpoint(cx, "assemble-enthalpy-jacobian-boundary", row)?;
+            }
+            let (columns, entries) = boundary_tangent.row(row);
+            for (&column, &entry) in columns.iter().zip(entries) {
+                if visited % ASSEMBLY_TILE == 0 {
+                    checkpoint(cx, "assemble-enthalpy-jacobian-boundary", visited)?;
+                }
+                let entry = entry * slopes[column];
+                crate::require_finite("enthalpy boundary/contact Jacobian", entry)?;
+                coo.push(row, column, entry);
+                visited += 1;
+            }
+        }
+    } else {
+        assemble_boundary(cx, mesh, boundary, &mut coo, &mut discard)?;
+        if let Some(interfaces) = interfaces {
+            interfaces.assemble_into(cx, &mut coo)?;
+        }
     }
-    Ok(coo.assemble())
+    let tangent = coo.assemble();
+    if temperature_derivatives.is_some() {
+        checkpoint(cx, "assemble-enthalpy-jacobian", n)?;
+    }
+    Ok(tangent)
 }
 
 /// Eliminate the Dirichlet rows/columns: returns `(A_ff, b_f)` with

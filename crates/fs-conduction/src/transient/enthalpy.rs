@@ -1,7 +1,7 @@
 //! Stationary reference-mass enthalpy transport on the existing P1 mesh.
 //!
 //! With specific enthalpy `h` [J/kg], frozen reference density `rho0` and
-//! `q = -k(T) grad(T)`, the weak balance is
+//! `q = -k(T,f) grad(T)`, the weak balance is
 //! `integral(rho0 N_i dh/dt) + integral(grad(N_i) k grad(T)) = load_i`.
 //! Neumann flux is positive OUTWARD; Robin contributes `htc*(T-T_ref)`
 //! outward. Existing source, boundary and contact assemblers own all spatial
@@ -10,12 +10,14 @@
 //! Nodal constitutive evaluation gives `T_i=T(h_i)` and the existing P1
 //! temperature interpolant. Row-sum storage gives invariant reference masses
 //! `m_i=sum_e rho0 V_e/4`. Backward Euler solves, in joules,
-//! `R(h)=m*(h-h_old)+dt*(A(T(h))*T(h)-b)=0`. Its Jacobian action is
-//! `J_h v=m*v+dt*J_T(T)*(T'(h)*v)`: the derivative scales COLUMNS, not rows.
-//! The chart's exact latent plateau has `T'=0`; positive mass keeps these
-//! columns nonsingular. No apparent heat capacity or extra latent account is
-//! introduced. Conductivity, including its exact `k'(T)` contribution, remains
-//! owned by the existing conduction assembly.
+//! `R(h)=m*(h-h_old)+dt*(A(T(h),f(h))*T(h)-b)=0`. The exact spatial
+//! Jacobian includes both temperature-column scaling and the direct phase
+//! conductivity derivative. An optional caller-declared law multiplies each
+//! element's existing tensor by `s(mean_nodal_liquid_mass_fraction)`. Its
+//! derivative can remain nonzero on a latent plateau where `T'=0`; reference
+//! mass still supplies storage there. No apparent heat capacity or extra
+//! latent account is introduced. The shared conduction assembly retains the
+//! exact base `k'(T)` contribution, natural boundaries and contacts.
 //!
 //! Uniform and explicitly assigned heterogeneous reference materials share this
 //! transport kernel, natural flux/Robin boundaries and finite-resistance
@@ -47,9 +49,11 @@ use crate::{
     ConductionError, ConductionMesh, ConductionProblem, InterfaceFlux, RobinFlux, ThermalBc,
     ThermalInterfaces,
     assemble::{
-        ASSEMBLY_TILE, AssembledSystem, DofMap, assemble_jacobian_with_optional_interfaces,
+        ASSEMBLY_TILE, AssembledSystem, DofMap,
+        assemble_enthalpy_jacobian_with_optional_interfaces,
         assemble_operator_scaled_with_interfaces,
     },
+    material::LiquidMassFractionConductivity,
     solve::energy_balance,
 };
 
@@ -208,6 +212,15 @@ pub struct EnthalpyBackwardEuler<'m, 'c> {
     // public uniform API, including phase_curve(), keeps its original meaning.
     nodal_curves: Option<Vec<&'c EquilibriumEnthalpyPhaseCurve>>,
     masses: Vec<f64>,
+    phase_conductivity: Option<PhaseConductivity>,
+}
+
+#[derive(Debug)]
+struct PhaseConductivity {
+    element_laws: Vec<LiquidMassFractionConductivity>,
+    // A fraction-slope corner matters only where an incident element actually
+    // changes conductivity with that fraction. Constant multipliers do not.
+    variable_vertices: Vec<bool>,
 }
 
 impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
@@ -284,7 +297,53 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
             curve,
             nodal_curves: None,
             masses,
+            phase_conductivity: None,
         })
+    }
+
+    /// Bind an explicit phase multiplier to every tetrahedron, replacing any
+    /// previous assignment on this consumed owner.
+    ///
+    /// Each law is evaluated at the arithmetic mean of the element's nodal
+    /// liquid **mass** fractions. It scales the existing, independently
+    /// assigned conductivity tensor at mean nodal temperature. Boundary and
+    /// contact conductances are not scaled. Reference mass and geometry remain
+    /// fixed. The same law participates in residuals, Newton and adjoints.
+    pub fn with_phase_conductivity(
+        mut self,
+        cx: &Cx<'_>,
+        element_laws: Vec<LiquidMassFractionConductivity>,
+    ) -> Result<Self, EnthalpyError> {
+        poll(cx, 0)?;
+        if element_laws.len() != self.mesh.element_count() {
+            return Err(EnthalpyError::InvalidInput(
+                "one phase conductivity law per tetrahedron required",
+            ));
+        }
+        let mut variable_vertices = vec![false; self.masses.len()];
+        for (element, (vertices, law)) in self
+            .mesh
+            .complex()
+            .tets
+            .iter()
+            .zip(&element_laws)
+            .enumerate()
+        {
+            if element % ASSEMBLY_TILE == 0 {
+                poll(cx, element)?;
+            }
+            if law.derivative() != 0.0 {
+                for &vertex in vertices {
+                    variable_vertices[vertex as usize] = true;
+                }
+            }
+        }
+        poll(cx, element_laws.len())?;
+        self.phase_conductivity = Some(PhaseConductivity {
+            element_laws,
+            variable_vertices,
+        });
+        Ok(self)
     }
 
     /// Invariant reference masses in nodal mesh order, kg.
@@ -447,7 +506,91 @@ impl StepContext<'_, '_, '_, '_> {
         Ok(temperature)
     }
 
-    fn assemble(&self, temperature: &[f64]) -> Result<AssembledSystem, EnthalpyError> {
+    fn phase_scales(&self, h: &[f64]) -> Result<Option<Vec<f64>>, EnthalpyError> {
+        let Some(policy) = &self.storage.phase_conductivity else {
+            return Ok(None);
+        };
+        let mut scales = Vec::with_capacity(policy.element_laws.len());
+        for (element, (vertices, law)) in self
+            .storage
+            .mesh
+            .complex()
+            .tets
+            .iter()
+            .zip(&policy.element_laws)
+            .enumerate()
+        {
+            if element % ASSEMBLY_TILE == 0 {
+                poll(self.cx, element)?;
+            }
+            let mut fraction = 0.0;
+            for &vertex in vertices {
+                let vertex = vertex as usize;
+                fraction += self
+                    .storage
+                    .curve_for_vertex(vertex)
+                    .state_at_specific_enthalpy(h[vertex])
+                    .map_err(|source| EnthalpyError::Phase { vertex, source })?
+                    .liquid_mass_fraction()
+                    / 4.0;
+            }
+            scales.push(law.multiplier_at(fraction)?);
+        }
+        Ok(Some(scales))
+    }
+
+    fn phase_scale_derivatives(&self, h: &[f64]) -> Result<Option<Vec<[f64; 4]>>, EnthalpyError> {
+        let Some(policy) = &self.storage.phase_conductivity else {
+            return Ok(None);
+        };
+        let mut derivatives = Vec::with_capacity(policy.element_laws.len());
+        for (element, (vertices, law)) in self
+            .storage
+            .mesh
+            .complex()
+            .tets
+            .iter()
+            .zip(&policy.element_laws)
+            .enumerate()
+        {
+            if element % ASSEMBLY_TILE == 0 {
+                poll(self.cx, element)?;
+            }
+            let mut row = [0.0; 4];
+            let contrast = law.derivative();
+            if contrast != 0.0 {
+                for (column, &vertex) in vertices.iter().enumerate() {
+                    let vertex = vertex as usize;
+                    let fraction_derivative = self
+                        .storage
+                        .curve_for_vertex(vertex)
+                        .liquid_mass_fraction_derivative_at_specific_enthalpy(h[vertex])
+                        .map_err(|source| EnthalpyError::Phase { vertex, source })?;
+                    // Divide the larger factor first: a subnormal contrast
+                    // can still produce a representable derivative on a
+                    // narrow latent interval with a large fraction slope.
+                    row[column] = finite(if contrast.abs() >= fraction_derivative {
+                        (contrast / 4.0) * fraction_derivative
+                    } else {
+                        contrast * (fraction_derivative / 4.0)
+                    })?;
+                    if fraction_derivative != 0.0 && row[column] == 0.0 {
+                        return Err(EnthalpyError::InvalidInput(
+                            "nonzero phase conductivity derivative is not representable",
+                        ));
+                    }
+                }
+            }
+            derivatives.push(row);
+        }
+        Ok(Some(derivatives))
+    }
+
+    fn assemble(
+        &self,
+        temperature: &[f64],
+        phase_scales: Option<&[f64]>,
+    ) -> Result<AssembledSystem, EnthalpyError> {
         Ok(assemble_operator_scaled_with_interfaces(
             self.cx,
             self.storage.mesh,
@@ -455,7 +598,7 @@ impl StepContext<'_, '_, '_, '_> {
             self.problem.material,
             self.problem.source,
             temperature,
-            None,
+            phase_scales,
             self.interfaces,
             self.problem.element_materials,
         )?)
@@ -463,16 +606,8 @@ impl StepContext<'_, '_, '_, '_> {
 
     fn stage(&self, h: &[f64]) -> Result<NewtonStage<'_, '_, '_, '_, '_>, EnthalpyError> {
         let temperature = self.temperatures(h)?;
-        let picard = self.assemble(&temperature)?;
-        let tangent = assemble_jacobian_with_optional_interfaces(
-            self.cx,
-            self.storage.mesh,
-            self.problem.boundary,
-            self.problem.material,
-            &temperature,
-            self.interfaces,
-            self.problem.element_materials,
-        )?;
+        let phase_scales = self.phase_scales(h)?;
+        let picard = self.assemble(&temperature, phase_scales.as_deref())?;
         let mut slope = Vec::with_capacity(h.len());
         let mut inverse = Vec::with_capacity(h.len());
         for (vertex, &value) in h.iter().enumerate() {
@@ -496,6 +631,19 @@ impl StepContext<'_, '_, '_, '_> {
             slope.push(derivative);
             inverse.push(finite(1.0 / diagonal)?);
         }
+        let phase_derivatives = self.phase_scale_derivatives(h)?;
+        let tangent = assemble_enthalpy_jacobian_with_optional_interfaces(
+            self.cx,
+            self.storage.mesh,
+            self.problem.boundary,
+            self.problem.material,
+            &temperature,
+            &slope,
+            phase_scales.as_deref(),
+            phase_derivatives.as_deref(),
+            self.interfaces,
+            self.problem.element_materials,
+        )?;
         poll(self.cx, h.len())?;
         Ok(NewtonStage {
             context: self,
@@ -509,7 +657,8 @@ impl StepContext<'_, '_, '_, '_> {
 
     fn residual(&self, h: &[f64], out: &mut [f64]) -> Result<(), EnthalpyError> {
         let temperature = self.temperatures(h)?;
-        let system = self.assemble(&temperature)?;
+        let phase_scales = self.phase_scales(h)?;
+        let system = self.assemble(&temperature, phase_scales.as_deref())?;
         for (vertex, value) in out.iter_mut().enumerate() {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(self.cx, vertex)?;
@@ -535,7 +684,8 @@ impl StepContext<'_, '_, '_, '_> {
         tolerance_j: f64,
     ) -> Result<EnthalpyStepSolution, EnthalpyError> {
         let temperature = self.temperatures(&h)?;
-        let system = self.assemble(&temperature)?;
+        let phase_scales = self.phase_scales(&h)?;
+        let system = self.assemble(&temperature, phase_scales.as_deref())?;
         let mut liquid_mass_fraction = Vec::with_capacity(h.len());
         let mut storage = 0.0;
         for (vertex, &value) in h.iter().enumerate() {
@@ -666,7 +816,7 @@ impl NonlinearProblem for NewtonStage<'_, '_, '_, '_, '_> {
             let applied: f64 = columns
                 .iter()
                 .zip(entries)
-                .map(|(&column, &entry)| entry * (self.slope[column] * direction[column]))
+                .map(|(&column, &entry)| entry * direction[column])
                 .sum();
             *value = self.context.storage.masses[row] * direction[row] + self.context.dt * applied;
         }

@@ -15,12 +15,10 @@ use std::fmt;
 use fs_exec::Cx;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 
-use super::adjoint::{
-    EnthalpyAdjointError, EnthalpyStepGradient, EnthalpyStepLinearization,
-};
+use super::adjoint::{EnthalpyAdjointError, EnthalpyStepGradient, EnthalpyStepLinearization};
 use super::{
-    EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyError, EnthalpyStepConfig,
-    EnthalpyStepSolution, finite, poll,
+    EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution,
+    finite, poll,
 };
 use crate::{
     ConductionMesh, ConductionProblem, LinearConfig, ThermalInterfaces, assemble::ASSEMBLY_TILE,
@@ -191,16 +189,16 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
                 poll(cx, element)?;
             }
             let id = element_material_ids[element];
-            let material = materials.get(id).ok_or(
-                HeterogeneousEnthalpyError::UnknownMaterial {
-                    element,
-                    material: id,
-                    material_count: materials.len(),
-                },
-            )?;
-            let contribution = finite(
-                material.reference_density_kg_m3 * mesh.element_volume(element) / 4.0,
-            )?;
+            let material =
+                materials
+                    .get(id)
+                    .ok_or(HeterogeneousEnthalpyError::UnknownMaterial {
+                        element,
+                        material: id,
+                        material_count: materials.len(),
+                    })?;
+            let contribution =
+                finite(material.reference_density_kg_m3 * mesh.element_volume(element) / 4.0)?;
             if contribution <= 0.0 {
                 return Err(EnthalpyError::InvalidInput(
                     "positive reference mass is not representable",
@@ -240,11 +238,24 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
                 curve: materials[0].curve,
                 nodal_curves: Some(nodal_curves),
                 masses,
+                phase_conductivity: None,
             },
             element_material_ids: element_material_ids.to_vec(),
             vertex_material_ids,
             material_count: materials.len(),
         })
+    }
+
+    /// Bind one explicit liquid-mass-fraction conductivity multiplier per
+    /// tetrahedron. Chart and conductivity material assignments retain their
+    /// separate identities; this scales each element's existing base tensor.
+    pub fn with_phase_conductivity(
+        mut self,
+        cx: &Cx<'_>,
+        element_laws: Vec<crate::material::LiquidMassFractionConductivity>,
+    ) -> Result<Self, EnthalpyError> {
+        self.inner = self.inner.with_phase_conductivity(cx, element_laws)?;
+        Ok(self)
     }
 
     /// Invariant reference masses in nodal mesh order, kg.
@@ -440,9 +451,9 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
         config: EnthalpyStepConfig,
         accepted: EnthalpyStepSolution,
     ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
-        let inner = self.inner.linearize_accepted(
-            cx, problem, interfaces, old_h, dt_s, config, accepted,
-        )?;
+        let inner = self
+            .inner
+            .linearize_accepted(cx, problem, interfaces, old_h, dt_s, config, accepted)?;
         self.bind_linearization(cx, old_h, inner)
     }
 
@@ -509,7 +520,8 @@ impl HeterogeneousEnthalpyStepLinearization<'_> {
             if element % ASSEMBLY_TILE == 0 {
                 poll(cx, element)?;
             }
-            let mass_direction = finite(self.mesh.element_volume(element) / 4.0 * density_direction)?;
+            let mass_direction =
+                finite(self.mesh.element_volume(element) / 4.0 * density_direction)?;
             for &vertex in &self.mesh.complex().tets[element] {
                 let vertex = vertex as usize;
                 let contribution = finite(mass_direction * self.specific_enthalpy_change[vertex])?;
@@ -543,9 +555,8 @@ impl HeterogeneousEnthalpyStepLinearization<'_> {
             let mut sum = 0.0;
             for &vertex in &self.mesh.complex().tets[element] {
                 let vertex = vertex as usize;
-                let term = finite(
-                    transport.adjoint[vertex] * self.specific_enthalpy_change[vertex],
-                )?;
+                let term =
+                    finite(transport.adjoint[vertex] * self.specific_enthalpy_change[vertex])?;
                 sum = finite(sum + term)?;
             }
             let derivative = finite(-self.mesh.element_volume(element) / 4.0 * sum)?;

@@ -1,11 +1,11 @@
 //! Discrete adjoints of the accepted reference-mass enthalpy balance.
 //!
-//! For `R=M(h-h_old)+dt*(A(T(h))*T(h)-b(q))`, solve
+//! For `R=M(h-h_old)+dt*(A(T(h),f(h))*T(h)-b(q))`, solve
 //! `J_h^T lambda=h_bar`, then return `M*lambda` for history and
 //! `dt*M_source^T*lambda` for nodal volumetric source density. Here
-//! `J_h^T=M+dt*diag(T'(h))*J_T^T`: column scaling in the primal becomes
-//! row scaling in the transpose. The shared bounded FGMRES solver sees this
-//! explicit transpose action and the exact diagonal Jacobi inverse.
+//! the spatial `J_h` already includes temperature-column scaling and any
+//! declared phase-conductivity chain rule. The shared bounded FGMRES solver
+//! sees its explicit transpose action and the exact diagonal Jacobi inverse.
 //! The ambient-radiation binder can retain physical rank-one feedback terms;
 //! these participate in both actions, Jacobi and all history/source pullbacks.
 //!
@@ -13,7 +13,7 @@
 //! step are frozen. The base pullback also fixes boundary data; `robin_response`
 //! explicitly selects convective references and coefficients. Source derivatives describe the P1
 //! nodal source field, including a uniform source represented by equal nodal
-//! values. No derivative of solver iterations, latent fraction, material
+//! values. No derivative of solver iterations, phase-law parameters, material
 //! parameters, moving geometry or chart selection is inferred. Chart corners
 //! and validity endpoints refuse classical two-sided derivatives; a latent
 //! plateau interior has exactly zero temperature sensitivity.
@@ -53,7 +53,8 @@ pub enum EnthalpyAdjointError {
         /// Original absolute/relative Newton target, J.
         tolerance_j: f64,
     },
-    /// Adjacent chart segments have different temperature slopes.
+    /// Adjacent chart segments have different temperature slopes or different
+    /// fraction slopes used by an active phase-conductivity law.
     ChartKink {
         /// Vertex on the ambiguous branch boundary.
         vertex: usize,
@@ -310,8 +311,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             if row % ASSEMBLY_TILE == 0 {
                 poll(cx, row)?;
             }
-            let diagonal =
-                finite(self.masses[row] + dt_s * stage.tangent.get(row, row) * stage.slope[row])?;
+            let diagonal = finite(self.masses[row] + dt_s * stage.tangent.get(row, row))?;
             if diagonal == 0.0 {
                 return Err(EnthalpyAdjointError::InvalidInput(
                     "nonzero exact enthalpy Jacobian diagonal required for Jacobi",
@@ -437,13 +437,12 @@ impl EnthalpyStepLinearization<'_> {
             let (columns, entries) = self.tangent.row(row);
             if transpose {
                 for (&column, &entry) in columns.iter().zip(entries) {
-                    y[column] =
-                        finite((entry * x_row).mul_add(self.dt * self.slopes[column], y[column]))?;
+                    y[column] = finite((entry * x_row).mul_add(self.dt, y[column]))?;
                 }
             } else {
                 let mut sum = 0.0;
                 for (&column, &entry) in columns.iter().zip(entries) {
-                    sum = finite(entry.mul_add(self.slopes[column] * x[column], sum))?;
+                    sum = finite(entry.mul_add(x[column], sum))?;
                 }
                 y[row] = finite(self.dt * sum)?;
             }
@@ -671,7 +670,22 @@ fn check_chart(
                     .temperature_derivative_at_specific_enthalpy(h)
                     .map_err(|source| EnthalpyError::Phase { vertex, source })
             };
-            if slope(knots[index - 1].specific_enthalpy_j_kg)? != slope(value)? {
+            let temperature_kink = slope(knots[index - 1].specific_enthalpy_j_kg)? != slope(value)?;
+            let mut fraction_kink = false;
+            if storage
+                .phase_conductivity
+                .as_ref()
+                .is_some_and(|policy| policy.variable_vertices[vertex])
+            {
+                let fraction_slope = |h| {
+                    curve
+                        .liquid_mass_fraction_derivative_at_specific_enthalpy(h)
+                        .map_err(|source| EnthalpyError::Phase { vertex, source })
+                };
+                fraction_kink = fraction_slope(knots[index - 1].specific_enthalpy_j_kg)?
+                    != fraction_slope(value)?;
+            }
+            if temperature_kink || fraction_kink {
                 return Err(EnthalpyAdjointError::ChartKink {
                     vertex,
                     specific_enthalpy_j_kg: value,

@@ -640,6 +640,47 @@ impl EquilibriumEnthalpyPhaseCurve {
         &self,
         specific_enthalpy_j_kg: f64,
     ) -> Result<f64, PhaseStateError> {
+        let (lower_knot, upper_knot) = self.derivative_segment(specific_enthalpy_j_kg)?;
+        let temperature_increment = upper_knot.temperature_k - lower_knot.temperature_k;
+        let slope = temperature_increment
+            / (upper_knot.specific_enthalpy_j_kg - lower_knot.specific_enthalpy_j_kg);
+        if !slope.is_finite() || (temperature_increment > 0.0 && slope == 0.0) {
+            return Err(PhaseStateError::UnrepresentableTemperatureDerivative);
+        }
+        Ok(slope)
+    }
+
+    /// Exact piecewise-linear derivative of liquid **mass** fraction with
+    /// respect to specific enthalpy, in kg/J.
+    ///
+    /// Uses the same right derivative at interior knots and left derivative
+    /// at the upper endpoint as [`Self::temperature_derivative_at_specific_enthalpy`].
+    /// A latent plateau can have a positive fraction derivative while its
+    /// temperature derivative is exactly zero. No phase smoothing, volume
+    /// fraction conversion or extrapolation is performed.
+    ///
+    /// # Errors
+    /// Refuses nonfinite or out-of-domain enthalpy. A nonzero segment slope
+    /// that cannot be represented returns
+    /// [`PhaseStateError::UnrepresentableLiquidMassFractionDerivative`].
+    pub fn liquid_mass_fraction_derivative_at_specific_enthalpy(
+        &self,
+        specific_enthalpy_j_kg: f64,
+    ) -> Result<f64, PhaseStateError> {
+        let (lower_knot, upper_knot) = self.derivative_segment(specific_enthalpy_j_kg)?;
+        let fraction_increment = upper_knot.liquid_mass_fraction - lower_knot.liquid_mass_fraction;
+        let slope = fraction_increment
+            / (upper_knot.specific_enthalpy_j_kg - lower_knot.specific_enthalpy_j_kg);
+        if !slope.is_finite() || (fraction_increment > 0.0 && slope == 0.0) {
+            return Err(PhaseStateError::UnrepresentableLiquidMassFractionDerivative);
+        }
+        Ok(slope)
+    }
+
+    fn derivative_segment(
+        &self,
+        specific_enthalpy_j_kg: f64,
+    ) -> Result<(EnthalpyPhaseKnot, EnthalpyPhaseKnot), PhaseStateError> {
         if !specific_enthalpy_j_kg.is_finite() {
             return Err(PhaseStateError::NonFiniteSpecificEnthalpy);
         }
@@ -656,15 +697,7 @@ impl EquilibriumEnthalpyPhaseCurve {
             .knots
             .partition_point(|knot| knot.specific_enthalpy_j_kg <= specific_enthalpy_j_kg)
             .min(self.knots.len() - 1);
-        let lower_knot = self.knots[upper_index - 1];
-        let upper_knot = self.knots[upper_index];
-        let temperature_increment = upper_knot.temperature_k - lower_knot.temperature_k;
-        let slope = temperature_increment
-            / (upper_knot.specific_enthalpy_j_kg - lower_knot.specific_enthalpy_j_kg);
-        if !slope.is_finite() || (temperature_increment > 0.0 && slope == 0.0) {
-            return Err(PhaseStateError::UnrepresentableTemperatureDerivative);
-        }
-        Ok(slope)
+        Ok((self.knots[upper_index - 1], self.knots[upper_index]))
     }
 
     /// Resolve equilibrium temperature, density, and phase fractions from
@@ -964,6 +997,8 @@ pub enum PhaseStateError {
     /// A segment's positive `dT/dh` overflowed or underflowed to zero.
     /// A genuine isothermal plateau instead returns exactly zero successfully.
     UnrepresentableTemperatureDerivative,
+    /// A positive liquid-mass-fraction slope overflowed or underflowed to zero.
+    UnrepresentableLiquidMassFractionDerivative,
     /// A signed energy increment was not finite.
     NonFiniteSpecificEnergyIncrement,
     /// Evaluation would extrapolate beyond the source-provided curve.
