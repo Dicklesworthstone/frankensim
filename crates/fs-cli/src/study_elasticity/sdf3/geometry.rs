@@ -1,4 +1,4 @@
-//! Physical SI graph domains. The legacy unit-cube field keeps its own arithmetic.
+//! Physical SI implicit domains. The legacy unit-cube field keeps its arithmetic.
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,11 +81,24 @@ pub(super) fn validate(spec: &Spec) -> Result<()> {
     let shortest = spans.iter().copied().fold(f64::INFINITY, f64::min);
     let longest = spans.iter().copied().fold(0.0_f64, f64::max);
     if longest / shortest > 64.0
-        || !(0.1..=0.8).contains(&(spec.height / spans[2]))
-        || !(0.0..=0.4).contains(&(spec.curvature * spans[0] * spans[0] / spans[2]))
         || !(0.001 * shortest..=longest).contains(&spec.radius)
     {
-        return Err(invalid("physical graph requires aspect <=64, height/Lz in [0.1,0.8], curvature*Lx^2/Lz in [0,0.4], and a positive physical filter radius within the domain envelope"));
+        return Err(invalid("physical domain requires aspect <=64 and a positive filter radius within the domain envelope"));
+    }
+    if let Some(domain) = &spec.constructive {
+        let range = domain.enclose(lo, hi);
+        if !range.lo().is_finite() || !range.hi().is_finite() {
+            return Err(invalid("constructive field overflows on the declared physical bounds"));
+        }
+        if range.lo() >= 0.0 {
+            return Err(invalid("constructive field proves no material interior in the declared box"));
+        }
+        // A sign range does not prove connectivity, support, or resolved cuts.
+        // The unchanged bounded quadrature and elasticity owner admit those.
+    } else if !(0.1..=0.8).contains(&(spec.height / spans[2]))
+        || !(0.0..=0.4).contains(&(spec.curvature * spans[0] * spans[0] / spans[2]))
+    {
+        return Err(invalid("physical graph requires height/Lz in [0.1,0.8] and curvature*Lx^2/Lz in [0,0.4]"));
     }
     Ok(())
 }

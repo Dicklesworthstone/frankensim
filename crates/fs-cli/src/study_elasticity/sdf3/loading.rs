@@ -1,5 +1,6 @@
 //! One declared reference load law feeds equilibrium AND enriched goal residuals.
-//! Surface loads act only on the retained implicit graph, not the box faces.
+//! Surface loads act on retained implicit boundaries, including cavity walls,
+//! inside the declared x patch. They do not act on clipping-box faces.
 use super::*;
 use fs_cutfem::elastic3::surface::SurfaceForce3;
 
@@ -57,6 +58,13 @@ pub(super) fn build_operator(
     spec: &Spec, bounds: HexCell, tree: &Octree3, domain: &dyn CutSdf3,
     material: &IsotropicElastic, quadrature: &mut QuadratureControl3<'_>,
 ) -> std::result::Result<AdaptiveElasticity3, ElasticityError3> {
+    // This is the shared construction seam for compliance, every goal-refined
+    // background, replay, and minimum-volume stress studies. Never replace an
+    // authored shape with the legacy height-field placeholder in one branch.
+    let domain: &dyn CutSdf3 = match &spec.constructive {
+        Some(shape) => shape,
+        None => domain,
+    };
     let clamp = |p| spec.fixed.contains(p, spec.bounds);
     let options = ElasticityOptions3 {
         max_cells: spec.leaves, max_dofs: 50_000, ..Default::default()

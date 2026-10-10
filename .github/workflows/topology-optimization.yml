@@ -76,4 +76,4 @@ jobs:
         run: cargo test --release -p fs-cli --features sdf3-study --lib study::elasticity
       - name: Test native study, resume and retained report commands
         if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-cli --features sdf3-study --test study_checkpoint_cli --test study_sdf3_cli
+        run: cargo test --release -p fs-cli --features sdf3-study --test study_checkpoint_cli --test study_sdf3_cli --test study_csg3_cli

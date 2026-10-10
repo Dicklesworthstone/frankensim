@@ -5,6 +5,9 @@ use fs_ir::ast::{Node, NodeKind};
 use fs_topopt::sdf3::design::StressDesignOptions3;
 use fs_topopt::sdf3::stress::StressOptions3;
 
+#[path = "spec/csg.rs"]
+mod csg;
+
 #[derive(Clone, Debug)]
 pub(super) struct Spec {
     pub canonical: String,
@@ -16,6 +19,7 @@ pub(super) struct Spec {
     pub per_solve: usize,
     pub boxes: usize,
     pub points: usize,
+    pub constructive: Option<fs_cutfem::csg3::CsgDomain3>,
     pub physical: bool,
     pub bounds: ([f64; 3], [f64; 3]),
     pub fixed: FixedFace,
@@ -173,12 +177,18 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         word(value, expected)?;
     }
     word(fields(&items[7], "units", &["storage"])?[0], "SI")?;
+    let domain_items = super::super::list(&items[8], "3-D domain")?;
+    let is_constructive = domain_items.get(2).is_some_and(|node| {
+        matches!(&node.kind, NodeKind::Symbol(s) | NodeKind::Str(s) if s == "constructive-implicit")
+    });
     let domain = fields(
         &items[8],
         "domain",
-        &["type", "bounds", "height-m", "curvature-per-m"],
+        if is_constructive { &["type", "bounds", "shape"] }
+        else { &["type", "bounds", "height-m", "curvature-per-m"] },
     )?;
-    let physical = matches!(&domain[0].kind,
+    let constructive = if is_constructive { Some(csg::parse(domain[2])?) } else { None };
+    let physical = is_constructive || matches!(&domain[0].kind,
         NodeKind::Symbol(s) | NodeKind::Str(s) if s == "physical-curved-height-sdf");
     if !physical {
         word(domain[0], "curved-height-sdf")?;
@@ -377,11 +387,12 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         per_solve: count(budgets[3])?,
         boxes: count(budgets[4])?,
         points: count(budgets[5])?,
+        constructive,
         physical,
         bounds,
         fixed,
-        height: scalar(domain[2])?,
-        curvature: scalar(domain[3])?,
+        height: if is_constructive { 0.0 } else { scalar(domain[2])? },
+        curvature: if is_constructive { 0.0 } else { scalar(domain[3])? },
         level: u32::try_from(count(physics[1])?).map_err(|_| invalid("initial-level overflow"))?,
         max_level: u32::try_from(count(physics[2])?)
             .map_err(|_| invalid("maximum-level overflow"))?,
