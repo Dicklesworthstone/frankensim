@@ -134,8 +134,8 @@ impl Selection {
         if !self.enabled() {return Ok(());}
         if !matches!(command,"drum"|"drum-wav"|"drum-mic"|"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"|
             "snare"|"snare-wav"|"snare-mic"|"snare-off"|"snare-off-wav"|"snare-off-mic"|
-            "splash"|"splash-wav"|"splash-mic") {
-            return Err("felt mallets require nonlinear-capable drum, snare or splash mechanics; modal-only and paired-hi-hat images are not selected here".into());
+            "splash"|"splash-wav"|"splash-mic"|"hihat"|"hihat-wav"|"hihat-mic") {
+            return Err("felt mallets require nonlinear-capable drum, snare, splash or paired-hi-hat mechanics; modal-only images cannot retain felt history".into());
         }
         if self.first.is_some() && first.position_m.is_none() {
             return Err("--mallet-spec requires --strike-position-m X Y".into());

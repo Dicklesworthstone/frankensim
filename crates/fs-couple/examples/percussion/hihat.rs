@@ -12,7 +12,6 @@ mod play;
 pub use play::{is_command,run};
 #[path="hihat_squeeze.rs"]
 mod squeeze;
-use super::flexible_sticks as flexible;
 use fs_couple::render::plate::impact::striker::flexible::{FlexibleStriker,StrikerPorts};
 
 // One independently prepared physical shell and its exact inner-skin chart.
@@ -102,8 +101,27 @@ fn build_with_squeeze(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
 fn build_with_strikers(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:Stroke,
     second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>,
     flexible:[Option<&FlexibleStriker>;2])->Result<Pair,Error> {
-    if flexible[1].is_some() && second.is_none() {
+    let shafts=shaft_playing::Selection{first:flexible[0].cloned(),second:flexible[1].cloned()};
+    build_with_mallets(spec,upper,lower,stroke,second,steps,dt,audio,film,&shafts,
+        &mallets::Selection::default())
+}
+#[allow(clippy::too_many_arguments)]
+fn build_with_mallets(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:Stroke,
+    second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>,
+    shafts:&shaft_playing::Selection,mallets:&mallets::Selection)->Result<Pair,Error> {
+    mallets.admit("hihat",stroke,second)?;
+    if shafts.second.is_some() && second.is_none() {
         return Err("a flexible second stick requires its own strike position".into());
+    }
+    for (shaft,mallet) in [shafts.first.as_ref(),shafts.second.as_ref()].into_iter()
+        .zip([mallets.first.as_ref(),mallets.second.as_ref()]) {
+        if let Some(mallet)=mallet {mallet.admit_shaft(shaft.is_some())?;}
+    }
+    // Both complete opposed mounts already own twelve independent felt sites.
+    // One four-site head fits the existing sixteen-pad owner; never remove
+    // stand contacts or collapse a footprint to admit a second felt head.
+    if mallets.first.is_some() && mallets.second.is_some() {
+        return Err("paired cymbals admit one four-site felt mallet: twelve mount sites plus two mallets exceed the sixteen-pad limit".into());
     }
     spec.validate()?;
     let upper=Shell::new(upper,dt)?;let lower=Shell::new(lower,dt)?;
@@ -118,9 +136,9 @@ fn build_with_strikers(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spe
     let pedal_coord=lo.end;let second_coord=pedal_coord+1;
     // Append shaft modes after the entire unchanged shell/pedal/stick prefix.
     // Neither skin source addresses nor existing rigid force coordinates move.
-    let elastic_first=second_coord+usize::from(second.is_some());
-    let elastic_second=elastic_first+flexible[0].map_or(0,|s|s.elastic_modes());
-    let total=elastic_second+flexible[1].map_or(0,|s|s.elastic_modes());
+    let base=second_coord+usize::from(second.is_some());
+    let mut shaft=shafts.build_with_mallets(base,second_coord,stroke,second,dt,mallets)?;
+    let total=shaft.total;
     if total>fs_couple::render::plate::impact::MAX_IMPACT_MODES {
         return Err("paired cymbals exceed the original complete-state mode ceiling".into());
     }
@@ -135,19 +153,39 @@ fn build_with_strikers(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spe
     pads.extend(washers(&lower,&spec.mounts[1],lo.start,total,None)?);
     let position=stroke.position_m.unwrap_or(spec.strike);
     let p=upper.port(position,ShellFace::Positive)?;
-    let first=flexible::Launch::new(flexible[0],0,elastic_first,total,dt,stroke.speed_m_s)?;
-    let stick_weight=first.weight;
-    let mut hit=first.tip_row(0,total)?;
-    for (k,w) in p.weights.iter().enumerate(){hit[hi.start+k]=*w;}
+    let (first,stick_weight)=match &mallets.first {
+        Some(spec)=>{
+            let tip=spec.compile_shell(&upper.reduction,&upper.mesh,stroke,0,hi.start,total)?;
+            let tip=spec.bind_shaft(tip,0,&mut shaft)?;
+            pads.extend(tip.pads);(tip.body,tip.port.inverse_sqrt_mass)
+        }
+        None=>match shaft.bodies[0].take() {
+            Some(body)=>body,None=>stick_with_speed(stroke.speed_m_s)?,
+        },
+    };
     let inter=collision(spec,&upper,&lower,lo.start,total)?;
-    let mut contacts=vec![elastic_contact(hit)?,inter.clone()];
+    let mut contacts=Vec::new();
+    if mallets.first.is_none() {
+        let mut hit=shaft.tip_row(0,stick_weight)?;
+        for (k,w) in p.weights.iter().enumerate(){hit[hi.start+k]=*w;}
+        contacts.push(elastic_contact(hit)?);
+    }
+    contacts.push(inter.clone());
     let second=second.map(|stroke|->Result<_,Error>{
+        if let Some(spec)=&mallets.second {
+            let tip=spec.compile_shell(&upper.reduction,&upper.mesh,stroke,second_coord,hi.start,total)?;
+            let tip=spec.bind_shaft(tip,1,&mut shaft)?;
+            pads.extend(tip.pads);
+            return Ok((tip.body,None,sticks::Port{coordinate:second_coord,weight:tip.port.inverse_sqrt_mass}));
+        }
         let p=upper.port(stroke.position_m.ok_or("second hi-hat stick requires a station")?,ShellFace::Positive)?;
-        let launch=flexible::Launch::new(flexible[1],second_coord,elastic_second,total,dt,stroke.speed_m_s)?;
-        let mut b=launch.tip_row(second_coord,total)?;
+        let (body,weight)=match shaft.bodies[1].take() {
+            Some(body)=>body,None=>stick_with_speed(stroke.speed_m_s)?,
+        };
+        let mut b=shaft.tip_row(1,weight)?;
         for (k,w) in p.weights.iter().enumerate(){b[hi.start+k]=*w;}
-        let port=sticks::Port{coordinate:second_coord,weight:launch.weight};
-        Ok((launch,elastic_contact(b)?,port))
+        let port=sticks::Port{coordinate:second_coord,weight};
+        Ok((body,Some(elastic_contact(b)?),port))
     }).transpose()?;
     let acoustics=if audio {Some(acoustics::Boundary::shell_pair(&upper.skin,hi.start,
         &lower.skin,lo.start,spec.separation)?)}else{None};
@@ -164,15 +202,12 @@ fn build_with_strikers(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spe
     let mut down=zero_body(BodyPotential::Shell(lower.reduction),&lower_omega);
     up.damping_per_s=upper_omega.iter().map(|w|2.*spec.damping[0]*w).collect();
     down.damping_per_s=lower_omega.iter().map(|w|2.*spec.damping[1]*w).collect();
-    let mut bodies=vec![first.body,up,down,carriage];
-    let mut second_elastic=None;let mut second_ports=None;
-    let second_stick=second.map(|(launch,contact,port)|{
-        bodies.push(launch.body);contacts.push(contact);
-        second_elastic=launch.elastic;second_ports=launch.ports;port
+    let mut bodies=vec![first,up,down,carriage];
+    let second_stick=second.map(|(body,contact,port)|{
+        bodies.push(body);if let Some(contact)=contact {contacts.push(contact);}port
     });
-    if let Some(body)=first.elastic {bodies.push(body);}
-    if let Some(body)=second_elastic {bodies.push(body);}
-    let flexible_sticks=[first.ports,second_ports];
+    bodies.append(&mut shaft.elastic);
+    let flexible_sticks=shaft.ports;
     let system=ImpactSystem::new(bodies,contacts,pads,vec![],config(steps,dt))?;
     let system=match (film,gas) {
         (Some(film),Some(gas))=>system.with_compressible_squeeze_film(film,gas)?,
@@ -195,3 +230,7 @@ mod flexible_tests;
 #[cfg(test)]
 #[path="hihat_gas_tests.rs"]
 mod gas_tests;
+
+#[cfg(test)]
+#[path="hihat_mallet_tests.rs"]
+mod mallet_tests;

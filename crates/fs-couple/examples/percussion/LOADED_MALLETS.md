@@ -19,7 +19,10 @@ Both hands can independently select this composition. Use
 `--second-flexible-stick`, `--second-mallet-spec` and an explicit
 `--second-stick-position-m` for the second hand. Drum, stretching drum, snare,
 snare-off and single-cymbal commands retain their existing CSV, WAV and
-microphone forms. Modal-only and paired-hi-hat felt paths still refuse.
+microphone forms. Paired hi-hats admit one loaded felt head on either hand,
+alongside an optional wood tip on the other hand; all twelve mount sites remain.
+Two felt heads exceed the existing sixteen-pad limit and refuse. See
+[HIHAT.md](HIHAT.md). Modal-only felt paths still refuse.
 These examples are invocation recipes, not claimed completed recordings.
 
 ## An explicit physical head, not a reinterpreted effective mass

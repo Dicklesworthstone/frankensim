@@ -112,8 +112,10 @@ already-admitted cavity and prescribed-vent options keep their semantics.
 The `drum-modal` linear-only image refuses rather than dropping felt history.
 Rimshots, stick-stick collisions, evolving footprint area and exterior mallet
 radiation remain outside this chart. The v1 fixed-axis image does not include
-mallet rotation or shaft bending; the explicit v2 composition below does. Existing snare restrictions on compliant mutes remain. Paired hi-hat
-mallets are not admitted by this change; no stand sites are removed to fit them.
+mallet rotation or shaft bending; the explicit v2 composition below does.
+Paired hi-hats admit one felt mallet on either hand through the same curved-skin
+and loaded-shaft owners. Their twelve stand sites plus four mallet sites fill
+the existing sixteen-pad limit; a second felt mallet refuses. See [HIHAT.md](HIHAT.md).
 
 ## Focused tests
 

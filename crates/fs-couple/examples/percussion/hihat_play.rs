@@ -17,8 +17,8 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let first_force=mechanics::drive::option(&mut args)?;
     let second_force=mechanics::drive::second_option(&mut args)?;
     let squeeze=squeeze::option(&mut args)?;
-    let first_flexible=flexible::option(&mut args,"--flexible-stick")?;
-    let second_flexible=flexible::option(&mut args,"--second-flexible-stick")?;
+    let mallet_paths=mallets::options(&mut args)?;
+    let shafts=shaft_playing::Selection::options(&mut args)?;
     let (args,stroke)=playing::parse(args)?;
     let command=args.first().map(String::as_str);
     if !is_command(command)||args.len()<2 {return Err("usage: hihat INPUT.fshh [steps]; hihat-wav INPUT [frames] [full_scale_pa]; hihat-mic INPUT [frames] [full_scale_pa] [x y z]; see HIHAT.md".into());}
@@ -26,7 +26,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     acoustics::stereo::feedback::admit_command(feedback,command.unwrap(),false)?;
     let mic=command==Some("hihat-mic");let audio=command!=Some("hihat");
     if (!audio&&args.len()>3)||(audio&&args.len()>4&&!(mic&&args.len()==7))
-        ||(!mic&&right.is_some())||(!audio&&radiation.is_some())||(second_force.is_some()||second_flexible.is_some())&&second.is_none() {
+        ||(!mic&&right.is_some())||(!audio&&radiation.is_some())||(second_force.is_some()||shafts.second.is_some())&&second.is_none() {
         return Err("hi-hat received incompatible output, receiver or second-stick controls".into());
     }
     let count=if args.len()>=3 {args[2].parse::<u64>()?}else{if audio{48000}else{4096}};
@@ -38,14 +38,11 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let receiver=if mic {acoustics::Receiver::FinitePoint(if args.len()==7{
         [args[4].parse()?,args[5].parse()?,args[6].parse()?]
     }else{[0.08,0.05,0.35]})}else{acoustics::Receiver::FarField([1.5,0.7,1.5])};
+    let mallets=mallets::Selection::load(mallet_paths)?;
+    mallets.admit(command.unwrap(),stroke,second)?;
     let spec=Spec::load(Path::new(&args[1]))?;let [upper,lower]=spec.shells()?;
-    let pair=if first_flexible.is_some()||second_flexible.is_some() {
-        build_with_strikers(&spec,&upper,&lower,stroke,second,steps,dt,audio,squeeze.as_ref(),
-            [first_flexible.as_ref(),second_flexible.as_ref()])?
-    }else{match squeeze.as_ref() {
-        Some(film)=>build_with_squeeze(&spec,&upper,&lower,stroke,second,steps,dt,audio,Some(film))?,
-        None=>build(&spec,&upper,&lower,stroke,second,steps,dt,audio)?,
-    }};
+    let pair=build_with_mallets(&spec,&upper,&lower,stroke,second,steps,dt,audio,squeeze.as_ref(),
+        &shafts,&mallets)?;
     let receivers=match microphone_spec {
         Some(spec)=>spec.into_receivers(),
         None=>{let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}receivers},

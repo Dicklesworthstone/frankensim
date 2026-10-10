@@ -102,8 +102,48 @@ Both existing stick-force files and two-stick position/speed controls work.
 `--prepared-nonlinear`, `--analytic-newton`, `--impact-substeps`,
 `--microphone-right` (finite microphone only), and `--radiation-spec` retain
 their existing meanings. A cancelled/refused tick consumes no pedal or stick
-input. Other drum/single-cymbal options, including mallets and compliant mutes,
-are not admitted here; they are not silently ignored or converted.
+input. Compliant mutes and other drum/single-cymbal options are not admitted
+here; they are not silently ignored or converted.
+
+### Felt mallets and loaded shafts
+
+Either hand can replace its wood tip with `--mallet-spec` or
+`--second-mallet-spec` on all three hi-hat output forms. The selected hand
+requires an explicit strike position. A v1 card supplies its effective moving
+mass; a v2 card requires the same hand's flexible shaft and loads that shaft
+with the head's actual mass and rotary inertia before reduction. See
+[MALLETS.md](MALLETS.md) and [LOADED_MALLETS.md](LOADED_MALLETS.md).
+
+```sh
+cargo run --release -p fs-couple --example percussion -- \
+  hihat crates/fs-couple/examples/percussion/estimated-hihat.fshh 12000 \
+  --strike-position-m 0.06 0.01 --strike-speed-m-s 0.5 \
+  --mallet-spec crates/fs-couple/examples/percussion/estimated-loaded-mallet.fsmallet \
+  --flexible-stick crates/fs-couple/examples/percussion/estimated-flexible-stick.fst \
+  --second-stick-position-m -0.06 0.01 --second-stick-speed-m-s 0.3 \
+  --analytic-newton --impact-substeps 8 511
+```
+
+The four-site felt face uses the upper shell's actual positive skin and the
+same footprint-derived clearances as a single cymbal. It replaces that hand's
+Hertz contact. A loaded shaft also retains each site's reciprocal bending
+moment, with physical hand forcing at the supplied hand station. The other
+hand may remain a wood tip with or without shaft flexure.
+
+All twelve opposed mount sites remain first in the material-history layout;
+the four mallet sites follow them. **One felt mallet fits the existing
+sixteen-pad limit. Two felt mallets refuse before shell preparation.** Neither
+stand sites nor footprint samples are dropped to make a selection fit.
+Inter-cymbal contact, pedal work, optional squeeze-film/gas storage, radiation
+feedback, and both acoustic shell sources retain their existing composition.
+Mallet or shaft coordinates are not additional acoustic sources. Failed ticks
+preserve all material histories and the shared pedal/hand clock.
+
+Focused regressions cover either-hand admission, the complete second-mallet
+layout with compressible gap air, a loaded felt strike with two flexible hands
+and pedal forcing, and absence of a parallel hard tip before physical contact.
+Native execution and full renders are still required; these invocations do
+not establish calibrated sound or real-time performance.
 
 Both skins are placed in ONE stationary BEM solve, retaining cross-body
 scattering at the separated reference geometry. Source velocities are not
