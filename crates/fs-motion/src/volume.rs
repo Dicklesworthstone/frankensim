@@ -346,10 +346,10 @@ impl<F: ChamberChartFamily> ChamberVolumeFunction<F> {
         h_m: f64,
         errors: ChamberVolumeErrors,
     ) -> Result<Self, MotionError> {
-        if !integration_domain.is_finite()
-            || !(integration_domain.max.x > integration_domain.min.x
-                && integration_domain.max.y > integration_domain.min.y
-                && integration_domain.max.z > integration_domain.min.z)
+        if !(integration_domain.is_finite()
+            && integration_domain.max.x > integration_domain.min.x
+            && integration_domain.max.y > integration_domain.min.y
+            && integration_domain.max.z > integration_domain.min.z)
         {
             return Err(MotionError::InvalidGeometry {
                 what: "chamber integration domain must be finite with positive 3-D extent",

@@ -158,7 +158,7 @@ impl CertifiedMotorTube {
         }
         for pair in segments.windows(2) {
             let t = pair[0].domain().hi();
-            if pair[1].domain().lo() != t {
+            if pair[1].domain().lo().partial_cmp(&t) != Some(std::cmp::Ordering::Equal) {
                 return Err(MotionError::ChartTransition {
                     at: t,
                     dot: f64::NAN,

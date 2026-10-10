@@ -70,12 +70,12 @@ fn extract_tables() -> GaTables {
         for j in 0..BLADES {
             let prod = basis(i).gp(&basis(j));
             for (k, &coeff) in prod.0.iter().enumerate() {
-                if coeff == 1.0 || coeff == -1.0 {
+                if coeff.to_bits() == 1.0_f64.to_bits() || coeff.to_bits() == (-1.0_f64).to_bits() {
                     gp.push(GpTerm {
                         i: i as u8,
                         j: j as u8,
                         k: k as u8,
-                        sign: if coeff == 1.0 { 1 } else { -1 },
+                        sign: if coeff > 0.0 { 1 } else { -1 },
                     });
                 } else {
                     debug_assert!(
@@ -90,7 +90,9 @@ fn extract_tables() -> GaTables {
     for (k, slot) in rev_sign.iter_mut().enumerate() {
         let rev = basis(k).reverse();
         let coeff = rev.0[k];
-        debug_assert!(coeff == 1.0 || coeff == -1.0);
+        debug_assert!(
+            coeff.to_bits() == 1.0_f64.to_bits() || coeff.to_bits() == (-1.0_f64).to_bits()
+        );
         *slot = if coeff < 0.0 { -1 } else { 1 };
     }
     GaTables { gp, rev_sign }

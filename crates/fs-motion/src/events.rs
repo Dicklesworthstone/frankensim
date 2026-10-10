@@ -360,18 +360,16 @@ fn refine_certified(
     }
 }
 
-/// Scan one guard family over `span` with complete accounting for the
-/// Taylor-pair class. Deterministic: fixed left-first bisection order,
-/// no scheduler dependence. Polls cancellation at every interval pop.
-pub fn scan_events(
+fn validate_scan_request(
     tube: &CertifiedMotorTube,
     family: &GuardFamily,
     span: Interval,
     config: &EventScanConfig,
-    cx: &Cx<'_>,
-) -> Result<EventScan, MotionError> {
-    if !(config.min_width > 0.0 && config.min_width.is_finite())
-        || !(config.refine_width > 0.0 && config.refine_width.is_finite())
+) -> Result<(), MotionError> {
+    if !(config.min_width > 0.0
+        && config.min_width.is_finite()
+        && config.refine_width > 0.0
+        && config.refine_width.is_finite())
     {
         return Err(MotionError::InvalidConfiguration {
             what: "min_width and refine_width must be positive and finite",
@@ -392,6 +390,58 @@ pub fn scan_events(
             domain_hi: domain.hi(),
         });
     }
+    Ok(())
+}
+
+fn push_budget_windows(
+    model: &GuardModel,
+    windows: impl IntoIterator<Item = Interval>,
+    possible: &mut Vec<PossibleEvent>,
+) {
+    for window in windows {
+        possible.push(PossibleEvent {
+            window,
+            guard_band: model.g.eval_interval(window),
+            derivative_band: model.gdot.eval_interval(window),
+            reason: PossibleReason::BudgetExhausted,
+        });
+    }
+}
+
+fn finish_scan(
+    mut certified: Vec<CertifiedEvent>,
+    mut possible: Vec<PossibleEvent>,
+    receipt: ScanReceipt,
+    mut verdict: ScanVerdict,
+) -> EventScan {
+    certified.sort_by(|a, b| a.window.lo().total_cmp(&b.window.lo()));
+    possible.sort_by(|a, b| a.window.lo().total_cmp(&b.window.lo()));
+    if verdict == ScanVerdict::Complete && !possible.is_empty() {
+        verdict = ScanVerdict::IncompleteUnknownWindows;
+    }
+    EventScan {
+        count: RootCountCertificate {
+            confirmed: certified.len(),
+            possible_windows: possible.len(),
+            verdict,
+        },
+        certified,
+        possible,
+        receipt,
+    }
+}
+
+/// Scan one guard family over `span` with complete accounting for the
+/// Taylor-pair class. Deterministic: fixed left-first bisection order,
+/// no scheduler dependence. Polls cancellation at every interval pop.
+pub fn scan_events(
+    tube: &CertifiedMotorTube,
+    family: &GuardFamily,
+    span: Interval,
+    config: &EventScanConfig,
+    cx: &Cx<'_>,
+) -> Result<EventScan, MotionError> {
+    validate_scan_request(tube, family, span, config)?;
     let mut certified = Vec::new();
     let mut possible = Vec::new();
     let mut receipt = ScanReceipt {
@@ -434,14 +484,7 @@ pub fn scan_events(
                 verdict = ScanVerdict::SubdivisionBudgetExhausted;
                 let mut leftovers = vec![window];
                 leftovers.extend(stack.drain(..).map(|(w, _)| w));
-                for w in leftovers {
-                    possible.push(PossibleEvent {
-                        window: w,
-                        guard_band: model.g.eval_interval(w),
-                        derivative_band: model.gdot.eval_interval(w),
-                        reason: PossibleReason::BudgetExhausted,
-                    });
-                }
+                push_budget_windows(model, leftovers, &mut possible);
                 continue 'segments;
             }
             receipt.intervals_examined += 1;
@@ -468,14 +511,11 @@ pub fn scan_events(
                             // current-segment remainder plus every later
                             // segment as possible windows.
                             verdict = ScanVerdict::ZenoBudgetExceeded;
-                            for (w, _) in stack.drain(..) {
-                                possible.push(PossibleEvent {
-                                    window: w,
-                                    guard_band: model.g.eval_interval(w),
-                                    derivative_band: model.gdot.eval_interval(w),
-                                    reason: PossibleReason::BudgetExhausted,
-                                });
-                            }
+                            push_budget_windows(
+                                model,
+                                stack.drain(..).map(|(window, _)| window),
+                                &mut possible,
+                            );
                             zeno_budget_hit = true;
                             continue 'segments;
                         }
@@ -507,21 +547,7 @@ pub fn scan_events(
             }
         }
     }
-    certified.sort_by(|a, b| a.window.lo().total_cmp(&b.window.lo()));
-    possible.sort_by(|a, b| a.window.lo().total_cmp(&b.window.lo()));
-    if verdict == ScanVerdict::Complete && !possible.is_empty() {
-        verdict = ScanVerdict::IncompleteUnknownWindows;
-    }
-    Ok(EventScan {
-        count: RootCountCertificate {
-            confirmed: certified.len(),
-            possible_windows: possible.len(),
-            verdict,
-        },
-        certified,
-        possible,
-        receipt,
-    })
+    Ok(finish_scan(certified, possible, receipt, verdict))
 }
 
 /// Build a plane-crossing guard family for a moving point: the guard
@@ -667,8 +693,6 @@ pub struct SimultaneousGroup {
 pub const MAX_ENUMERATED_GROUP: usize = 4;
 
 fn permutations(n: usize) -> Vec<Vec<usize>> {
-    let mut out = Vec::new();
-    let mut items: Vec<usize> = (0..n).collect();
     fn heap(k: usize, items: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
         if k <= 1 {
             out.push(items.clone());
@@ -676,13 +700,15 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
         }
         for i in 0..k {
             heap(k - 1, items, out);
-            if k % 2 == 0 {
+            if k.is_multiple_of(2) {
                 items.swap(i, k - 1);
             } else {
                 items.swap(0, k - 1);
             }
         }
     }
+    let mut out = Vec::new();
+    let mut items: Vec<usize> = (0..n).collect();
     heap(items.len(), &mut items, &mut out);
     out
 }

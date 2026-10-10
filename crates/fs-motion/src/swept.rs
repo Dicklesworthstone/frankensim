@@ -627,13 +627,11 @@ impl<C: Chart, O: EnvelopeOracle<C>> EnvelopeChart<C, O> {
 
             let can_split = span.width() > self.config.time_tolerance
                 && stats.subdivisions < self.config.max_subdivisions;
-            if can_split {
-                if let Some(mid) = split_point(span) {
-                    pending.push(Interval::new(span.lo(), mid));
-                    pending.push(Interval::new(mid, span.hi()));
-                    stats.subdivisions += 1;
-                    continue;
-                }
+            if can_split && let Some(mid) = split_point(span) {
+                pending.push(Interval::new(span.lo(), mid));
+                pending.push(Interval::new(mid, span.hi()));
+                stats.subdivisions += 1;
+                continue;
             }
 
             let precise_regular = class == EnvelopeBranchClass::RegularInterior

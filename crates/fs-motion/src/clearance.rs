@@ -337,13 +337,13 @@ fn build_receipt(
 ) -> Result<ClearanceRange, MotionError> {
     let (lower_m, lower_errors) = current_lower(cells);
     let upper_m = witness.map(|item| item.upper_m);
-    if let Some(upper) = upper_m {
-        if lower_m > upper {
-            return Err(MotionError::InconsistentEnclosure {
-                lower: lower_m,
-                upper,
-            });
-        }
+    if let Some(upper) = upper_m
+        && lower_m > upper
+    {
+        return Err(MotionError::InconsistentEnclosure {
+            lower: lower_m,
+            upper,
+        });
     }
     Ok(ClearanceRange {
         lower_m,
