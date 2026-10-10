@@ -1,7 +1,7 @@
 //! Exact discrete qp-relaxed stress sensitivities on retained 3-D cut quadrature.
 //!
 //! `s_lq = rho_bar[cell]^q * vm(C_ref eps(u_l))`, with `1 <= q < penal`.
-//! The aggregate is the p-th root of the volume-normalized integral of `s^p`,
+//! The default aggregate is the p-th root of the volume-normalized integral of `s^p`,
 //! averaged with normalized positive load weights. Loads are solved separately;
 //! opposite loads cannot cancel stresses. This is a smooth quadrature aggregate,
 //! not a continuum maximum or an upper bound on any sampled maximum.
@@ -14,11 +14,20 @@
 //! With a nonzero ersatz modulus, the algebraic qp measure eventually folds
 //! back as density approaches zero. This evaluator exposes that declared model;
 //! the minimum-volume driver separately admits only densities above its turnover.
+//!
+//! The explicit [`StressMeasure3::SampledPeakBound`] instead bounds both the
+//! relaxed AND physical stress at every retained sample of every declared case.
+//! It is an unweighted p-norm, not a normalized integral. Its sampling-dependent
+//! conservatism and finite-sample scope are part of the selected problem.
 
 use super::*;
 use crate::SolveWork;
 use fs_cutfem::elastic3::{ElasticityError3, stress::BulkStressPoint3};
 use std::ops::ControlFlow;
+
+#[path = "stress/measure.rs"]
+mod measure;
+pub use measure::StressMeasure3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StressOptions3 {
@@ -81,7 +90,8 @@ pub struct StressEvaluation3 {
     pub scales: Vec<f64>,
     pub aggregate: f64,
     pub gradient: Vec<f64>,
-    /// Maximum over all quadrature points of all positive-weight load cases.
+    /// Maximum over positive-weight cases for the normalized measure, or ALL
+    /// declared cases for the sampled-peak measure (including zero weights).
     pub sampled_relaxed_max: f64,
     /// Maximum of vm(scale * C_ref eps(u)), separately from the relaxed measure.
     pub sampled_physical_max: f64,
@@ -209,6 +219,22 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         options: StressOptions3,
         control: &mut SolveControl<'_>,
     ) -> Result<StressEvaluation3, StressError3> {
+        self.evaluate_stress_with_measure(rho, loads, options, StressMeasure3::NormalizedAverage, control)
+    }
+
+    /// Select the stress functional explicitly while retaining the same physics,
+    /// full adjoint/filter chain, preparation reuse, work caps and scale rollback.
+    /// The legacy entry point selects [`StressMeasure3::NormalizedAverage`].
+    /// Peak mode includes even zero-weight cases; weights still describe the
+    /// declared load family but cannot suppress a stress constraint.
+    pub fn evaluate_stress_with_measure(
+        &mut self,
+        rho: &[f64],
+        loads: &[LoadCase<'_>],
+        options: StressOptions3,
+        measure: StressMeasure3,
+        control: &mut SolveControl<'_>,
+    ) -> Result<StressEvaluation3, StressError3> {
         admit(self, rho, loads, options)?;
         control.checkpoint("sdf3-stress-evaluation")?;
         let design = self.design(rho, control)?;
@@ -228,6 +254,19 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 .iter()
                 .map(|r| power(*r, options.relaxation_power))
                 .collect();
+            // Collapse the physical/relaxed pair into one smooth coefficient
+            // per cell. No second point family or extra equilibrium is needed.
+            let peak_factors = if measure == StressMeasure3::SampledPeakBound {
+                let mut factors = Vec::with_capacity(self.cells());
+                for (cell, &r) in design.projected.iter().enumerate() {
+                    control.checkpoint("sdf3-stress-peak-scale")?;
+                    factors.push(measure::peak_scale(r, relaxation[cell], design.scales[cell],
+                        self.params, options)?);
+                }
+                Some(factors)
+            } else { None };
+            let coefficient = |cell: usize| peak_factors.as_ref()
+                .map_or(relaxation[cell], |factors| factors[cell].0);
             let mut points: Vec<Vec<BulkStressPoint3>> = Vec::with_capacity(loads.len());
             let mut displacements = Vec::with_capacity(loads.len());
             let mut compliances = Vec::with_capacity(loads.len());
@@ -237,6 +276,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             let mut point_count = 0usize;
             let mut maximum = 0.0_f64;
             let mut physical_maximum = 0.0_f64;
+            let mut normalization = 0.0_f64;
             let mut nonzero_weighted_force = false;
             for (case, load) in loads.iter().enumerate() {
                 control.checkpoint("sdf3-stress-primal")?;
@@ -246,7 +286,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                     .enumerate()
                     .map(|(i, &f)| if self.operator.fixed()[i / 3] { 0.0 } else { f })
                     .collect();
-                nonzero_weighted_force |= weights[case] > 0.0 && rhs.iter().any(|f| *f != 0.0);
+                nonzero_weighted_force |= measure.includes(weights[case]) && rhs.iter().any(|f| *f != 0.0);
                 let u = checked_solve_preconditioned(
                     &self.operator,
                     &prepared,
@@ -272,13 +312,17 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                     if index % 256 == 0 {
                         control.checkpoint("sdf3-stress-measures")?;
                     }
-                    let stress =
-                        finite(relaxation[point.cell] * von_mises(&point.reference_stress).0)?;
+                    let reference_vm = von_mises(&point.reference_stress).0;
+                    let stress = finite(relaxation[point.cell] * reference_vm)?;
                     cm = cm.max(stress);
                     pm = pm.max(finite(von_mises(&point.stress).0)?);
                     cells[point.cell] = cells[point.cell].max(stress);
+                    if measure.includes(weights[case]) {
+                        normalization = normalization.max(finite(
+                            coefficient(point.cell) * reference_vm)?);
+                    }
                 }
-                if weights[case] > 0.0 {
+                if measure.includes(weights[case]) {
                     maximum = maximum.max(cm);
                     physical_maximum = physical_maximum.max(pm);
                 }
@@ -292,9 +336,9 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             // Normalize by the observed maximum only to avoid overflow. This
             // is an algebraically equivalent p-norm, not a stop-gradient scale.
             let mut sum = 0.0;
-            if maximum > 0.0 {
+            if normalization > 0.0 {
                 for (case, data) in points.iter().enumerate() {
-                    if weights[case] == 0.0 {
+                    if !measure.includes(weights[case]) {
                         continue;
                     }
                     for (index, point) in data.iter().enumerate() {
@@ -302,15 +346,20 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                             control.checkpoint("sdf3-stress-aggregate")?;
                         }
                         let ratio =
-                            relaxation[point.cell] * von_mises(&point.reference_stress).0 / maximum;
-                        sum += weights[case]
-                            * (point.weight / volume)
+                            coefficient(point.cell) * von_mises(&point.reference_stress).0 / normalization;
+                        sum += measure.sample_weight(weights[case], point.weight, volume)
                             * power(ratio, options.aggregation_power);
                     }
                 }
             }
             let root = power(finite(sum)?, 1.0 / options.aggregation_power);
-            let aggregate = finite(maximum * root)?;
+            let aggregate = finite(normalization * root)?;
+            if measure == StressMeasure3::SampledPeakBound
+                && (aggregate < maximum || aggregate < physical_maximum) {
+                // Check the actual separately evaluated numerical maxima too;
+                // do not silently correct a functional with the wrong tangent.
+                return Err(StressError3::Invalid("sampled peak aggregate failed its upper-bound gate"));
+            }
             if aggregate == 0.0 && nonzero_weighted_force {
                 return Err(StressError3::Invalid(
                     "zero stress aggregate has no admitted differentiable branch",
@@ -326,22 +375,24 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                         control.checkpoint("sdf3-stress-derivative")?;
                     }
                     let (vm, dvm) = von_mises(&point.reference_stress);
-                    let derivative = if aggregate == 0.0 || weights[case] == 0.0 {
+                    let derivative = if aggregate == 0.0 || !measure.includes(weights[case]) {
                         0.0
                     } else {
-                        let ratio = relaxation[point.cell] * vm / maximum;
+                        let ratio = coefficient(point.cell) * vm / normalization;
                         finite(
-                            weights[case]
-                                * (point.weight / volume)
+                            measure.sample_weight(weights[case], point.weight, volume)
                                 * power(ratio / root, options.aggregation_power - 1.0),
                         )?
                     };
                     let r = design.projected[point.cell];
-                    local[point.cell] += derivative
-                        * vm
-                        * options.relaxation_power
-                        * power(r, options.relaxation_power - 1.0);
-                    let scale = derivative * relaxation[point.cell];
+                    if let Some(factors) = &peak_factors {
+                        local[point.cell] += derivative * vm * factors[point.cell].1;
+                    } else {
+                        // Preserve the default functional's original arithmetic.
+                        local[point.cell] += derivative * vm * options.relaxation_power
+                            * power(r, options.relaxation_power - 1.0);
+                    }
+                    let scale = derivative * coefficient(point.cell);
                     derivatives.push(dvm.map(|v| scale * v));
                 }
                 let rhs = self
@@ -406,3 +457,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         outcome
     }
 }
+
+#[cfg(test)]
+#[path = "stress/peak_tests.rs"]
+mod peak_tests;

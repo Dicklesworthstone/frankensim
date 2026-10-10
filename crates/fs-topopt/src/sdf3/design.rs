@@ -5,7 +5,7 @@
 //! there is no dense KKT system, surrogate, numerical-gradient optimizer or
 //! separate optimizer implementation. Geometry and material model remain fixed.
 
-use super::stress::{self, StressError3, StressEvaluation3, StressOptions3};
+use super::stress::{self, StressError3, StressEvaluation3, StressMeasure3, StressOptions3};
 use super::{CutDensityStudy3, PhysicalRegion3, Sdf3Elasticity};
 use crate::pipeline::LoadCase;
 use crate::{SimpParams, SolveControl, SolveWork};
@@ -19,7 +19,8 @@ use std::{cell::RefCell, ops::ControlFlow};
 pub struct StressDesignOptions3 {
     pub stress: StressOptions3,
     /// Cap on the declared quadrature aggregate, in reference-material stress
-    /// units. It is NOT a cap on sampled or continuum maximum stress.
+    /// units. The default is a normalized average; an explicitly selected
+    /// sampled-peak norm bounds the retained samples, never the continuum.
     pub stress_limit: f64,
     /// Exact raw-density box [density_floor, 1]. Prescribed physical regions
     /// are applied after the filter/projection map, so an authored void is zero.
@@ -103,11 +104,12 @@ fn sample<O: Sdf3Elasticity>(
     loads: &[LoadCase<'_>],
     rho: &[f64],
     options: StressDesignOptions3,
+    measure: StressMeasure3,
     last: &mut Option<StressEvaluation3>,
     control: &mut SolveControl<'_>,
 ) -> Result<Option<ProjectedAlSample>, StressError3> {
     control.checkpoint("sdf3-stress-design-evaluate")?;
-    let evaluated = study.evaluate_stress(rho, loads, options.stress, control)?;
+    let evaluated = study.evaluate_stress_with_measure(rho, loads, options.stress, measure, control)?;
     // The graph filter's exact maximum principle preserves the raw box. Check
     // the actually solved/projection values too, rather than assume numerical
     // filter error cannot cross the strength-model boundary. An authored
@@ -155,6 +157,7 @@ pub struct StressDesignStudy3<'a, 'callback, O: Sdf3Elasticity> {
     loads: &'a [LoadCase<'a>],
     control: &'a mut SolveControl<'callback>,
     options: StressDesignOptions3,
+    measure: StressMeasure3,
     state: ProjectedAlState,
     accepted: StressEvaluation3,
     best_feasible: Option<StressEvaluation3>,
@@ -167,6 +170,20 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
         loads: &'a [LoadCase<'a>],
         rho: &[f64],
         options: StressDesignOptions3,
+        control: &'a mut SolveControl<'callback>,
+    ) -> Result<Self, ProjectedAlError<StressError3>> {
+        Self::new_with_measure(study, loads, rho, options, StressMeasure3::NormalizedAverage, control)
+    }
+
+    /// Start with an explicit stress functional. This changes only the scalar
+    /// constraint and its exact adjoint, not the AL optimizer or density bounds.
+    /// Keep this measure bound to the source when persisting `checkpoint()`.
+    pub fn new_with_measure(
+        study: &'a mut CutDensityStudy3<O>,
+        loads: &'a [LoadCase<'a>],
+        rho: &[f64],
+        options: StressDesignOptions3,
+        measure: StressMeasure3,
         control: &'a mut SolveControl<'callback>,
     ) -> Result<Self, ProjectedAlError<StressError3>> {
         let n = study.cells();
@@ -208,6 +225,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                         loads,
                         rho,
                         options,
+                        measure,
                         &mut last,
                         &mut **ledger.borrow_mut(),
                     )
@@ -240,6 +258,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
             loads,
             control,
             options,
+            measure,
             state,
             accepted,
             best_feasible,
@@ -258,6 +277,21 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
         loads: &'a [LoadCase<'a>],
         checkpoint: StressDesignCheckpoint3,
         options: StressDesignOptions3,
+        control: &'a mut SolveControl<'callback>,
+    ) -> Result<Self, ProjectedAlError<StressError3>> {
+        Self::restore_with_measure(study, loads, checkpoint, options, StressMeasure3::NormalizedAverage, control)
+    }
+
+    /// Restore using the original explicitly bound measure. As with geometry,
+    /// loads and the other stress options, the checkpoint consumer must retain
+    /// this policy. Both accepted and distinct incumbent endpoints are freshly
+    /// evaluated with it; a changed physical response rejects restoration.
+    pub fn restore_with_measure(
+        study: &'a mut CutDensityStudy3<O>,
+        loads: &'a [LoadCase<'a>],
+        checkpoint: StressDesignCheckpoint3,
+        options: StressDesignOptions3,
+        measure: StressMeasure3,
         control: &'a mut SolveControl<'callback>,
     ) -> Result<Self, ProjectedAlError<StressError3>> {
         let n = study.cells();
@@ -293,7 +327,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
             return Err(ProjectedAlError::Invalid("stress checkpoint lost its feasible incumbent"));
         }
         let previous_scales = study.operator.scales().to_vec();
-        let mut result = Self::new(study, loads, restored.point(), options, control)?;
+        let mut result = Self::new_with_measure(study, loads, restored.point(), options, measure, control)?;
         let rebuilt = (|| {
             if result.state.sample() != restored.sample()
                 || history.last() != Some(&row(&result.accepted, restored.work().iterations, options))
@@ -309,7 +343,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                         return Err(ProjectedAlError::Invalid("invalid retained feasible density"));
                     }
                     let mut evaluated = None;
-                    sample(result.study, loads, &rho, options, &mut evaluated, result.control)
+                    sample(result.study, loads, &rho, options, measure, &mut evaluated, result.control)
                         .map_err(ProjectedAlError::Evaluation)?;
                     evaluated
                 }
@@ -344,6 +378,9 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
             restoration_evaluations: self.restoration_evaluations,
         }
     }
+    /// Functional used by initialization, trials, adjoints and restored fields.
+    #[must_use]
+    pub fn stress_measure(&self) -> StressMeasure3 { self.measure }
     #[must_use]
     pub fn accepted(&self) -> &StressEvaluation3 {
         &self.accepted
@@ -397,6 +434,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                 let study = &mut *self.study;
                 let loads = self.loads;
                 let options = self.options;
+                let measure = self.measure;
                 self.state.try_run(
                     remaining.min(1),
                     &mut |rho| {
@@ -405,6 +443,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                             loads,
                             rho,
                             options,
+                            measure,
                             &mut last,
                             &mut **ledger.borrow_mut(),
                         )
