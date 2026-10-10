@@ -109,6 +109,12 @@ fn build_with_strikers(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spe
 fn build_with_mallets(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:Stroke,
     second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>,
     shafts:&shaft_playing::Selection,mallets:&mallets::Selection)->Result<Pair,Error> {
+    build_with_material(spec,upper,lower,stroke,second,steps,dt,audio,film,shafts,mallets,None)
+}
+#[allow(clippy::too_many_arguments)]
+fn build_with_material(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:Stroke,
+    second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>,
+    shafts:&shaft_playing::Selection,mallets:&mallets::Selection,material:Option<&shell_relaxation::Spec>)->Result<Pair,Error> {
     mallets.admit("hihat",stroke,second)?;
     if shafts.second.is_some() && second.is_none() {
         return Err("a flexible second stick requires its own strike position".into());
@@ -124,6 +130,14 @@ fn build_with_mallets(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
         return Err("paired cymbals admit one four-site felt mallet: twelve mount sites plus two mallets exceed the sixteen-pad limit".into());
     }
     spec.validate()?;
+    if let Some(material)=material {
+        material.admit_windows(&[upper.band_hz,lower.band_hz])?;
+        for side in 0..2 {
+            if material.selected(side) && spec.damping[side]!=0. {
+                return Err("selected hi-hat shell relaxation requires explicit zero intrinsic damping in the pair input; no double-counted or silently overwritten material loss".into());
+            }
+        }
+    }
     let upper=Shell::new(upper,dt)?;let lower=Shell::new(lower,dt)?;
     // Conservative reference separation for the ENTIRE finite skins, not just
     // selected rim sites. No ambiguous overlapping initial acoustic bodies.
@@ -214,6 +228,7 @@ fn build_with_mallets(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
         (Some(film),None)=>system.with_squeeze_film(film)?,
         (None,_)=>system,
     };
+    let system=match material {Some(material)=>material.attach(system)?,None=>system};
     Ok(Pair{experiment:Experiment{flexible_sticks:flexible_sticks.clone(),mute:None,system:Mechanics::Reference(system),force:vec![0.;total],
         stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None},
         pedal,collision:inter,upper_modes:hi,lower_modes:lo,flexible_sticks})
@@ -234,3 +249,7 @@ mod gas_tests;
 #[cfg(test)]
 #[path="hihat_mallet_tests.rs"]
 mod mallet_tests;
+
+#[cfg(test)]
+#[path="shell_relaxation_pair_tests.rs"]
+mod relaxation_tests;
