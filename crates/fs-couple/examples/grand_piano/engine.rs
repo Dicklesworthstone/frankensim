@@ -5,6 +5,7 @@
 //! The backcheck/rest stop is idealized, not a full grand-action reconstruction.
 use fs_material::{Uniaxial, WoolFelt};
 use fs_material::visco::GeneralizedMaxwell;
+use fs_couple::render::plate::impact::cavity::{CavityCoupling, exchange::PreparedCavityExchange};
 use super::{felt,geometry::Course,linear::{Bank,BoardMode,dampers,hammer_footprint}};
 #[path = "felt_relaxation.rs"]
 mod relaxation;
@@ -58,12 +59,14 @@ pub struct Accounting {
     pub modal_loss_j:f64,
     /// Dissipation in the passive acoustic realization, not wood/felt loss.
     pub radiation_loss_j:f64,
+    /// Explicit cavity momentum drag, separate from exterior radiation loss.
+    pub cavity_loss_j:f64,
     pub damper_loss_j:f64,
     pub catch_loss_j:f64,
     pub max_balance_error_j:f64,
 }
 impl Accounting {
-    pub fn dissipated_j(self)->f64 {self.felt_loss_j+self.shank_loss_j+self.modal_loss_j+self.radiation_loss_j+self.damper_loss_j+self.catch_loss_j}
+    pub fn dissipated_j(self)->f64 {self.felt_loss_j+self.shank_loss_j+self.modal_loss_j+self.radiation_loss_j+self.cavity_loss_j+self.damper_loss_j+self.catch_loss_j}
 }
 
 pub struct Instrument {
@@ -82,6 +85,7 @@ pub struct Instrument {
     /// Supplied lateral/vertical viscous drag ratio for each complete course.
     transverse_damper_ratio:Option<Vec<f64>>,
     radiation:Option<radiation::Prepared>,
+    cavity:Option<PreparedCavityExchange>,
     output_rate:u32,substeps:usize,sustain:f64,sostenuto:bool,una_corda:bool,
     /// Point-image controls only. A spatial specification owns its pad/free
     /// break and individual drag values instead. Neither is verified Model D data.
@@ -261,7 +265,7 @@ impl Instrument {
             saved_contacts:contacts.clone(),hammer_next:hammers.clone(),hammer_free:vec![0.0;courses.len()],
             jack_force:vec![0.0;courses.len()],rest_force:vec![0.0;courses.len()],
             source_rate_n_s_m_p:vec![0.0;nc],
-            bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,contact_thickness_m,contact_recession_m,contact_solver,spatial_dampers:None,transverse_damper_ratio,radiation:None,output_rate:rate,substeps,sustain:0.0,
+            bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,contact_thickness_m,contact_recession_m,contact_solver,spatial_dampers:None,transverse_damper_ratio,radiation:None,cavity:None,output_rate:rate,substeps,sustain:0.0,
             sostenuto:false,una_corda:false,last_damped_midi:88,damper_drag_ns_m:0.4,
             accounting:Accounting::default(),contact_h,force:vec![0.0;nc],gap:vec![0.0;nc],
             active:Vec::with_capacity(nc)})
@@ -317,6 +321,27 @@ impl Instrument {
         self.radiation.as_ref().map_or(0.,radiation::Prepared::energy)
     }
     pub fn has_radiation(&self)->bool {self.radiation.is_some()}
+    /// Attach a geometry-derived cavity in the complete loaded board basis.
+    /// Uniform compression and standing-wave storage remain in the shared
+    /// mechanical clock; this is not a pressure output filter. The physical
+    /// card must be admitted before any excitation or acoustic state exists.
+    pub fn configure_cavity(&mut self,model:&CavityCoupling)->Result<(),String>{
+        if self.cavity.is_some() || self.accounting.input_work_j!=0.0
+            || self.bank.q.iter().chain(&self.bank.v).any(|v|*v!=0.0)
+            || self.hammers.iter().any(|h|h.active||h.held)
+            || model.structural_modes()!=self.bank.board_count {
+            return Err("cavity must be prepared once in the loaded board basis, before piano excitation".into());
+        }
+        let prepared=model.prepare_exchange(self.bank.rate,fs_phs::PortExchangeBudget {
+            max_left:super::linear::MAX_BOARD_MODES,max_right:8,
+            max_setup_terms:64*1024*1024,maximum_dt_coupling:0.125,
+        }).map_err(|e|e.to_string())?;
+        self.cavity=Some(prepared);Ok(())
+    }
+    pub fn cavity_energy_j(&self)->f64 {
+        self.cavity.as_ref().map_or(0.0,PreparedCavityExchange::energy)
+    }
+    pub fn has_cavity(&self)->bool {self.cavity.is_some()}
     /// Number of independent hammer/felt sites, not number of strings or voices.
     pub fn hammer_contact_count(&self)->usize{self.contacts.len()}
     /// Cold preparation in the existing loaded basis. Publish only on complete
@@ -416,7 +441,7 @@ impl Instrument {
     }
 
     pub fn energy_j(&self)->f64 {
-        let mut e=self.bank.energy()+self.radiation_energy_j();
+        let mut e=self.bank.energy()+self.radiation_energy_j()+self.cavity_energy_j();
         for (h,p) in self.hammers.iter().zip(&self.hammer_models) {e+=p.energy(&h.motion,CATCH_DISTANCE);}
         for (i,p) in self.contacts.iter().enumerate(){
             e+=self.creep[i].stored(&p.memory);
@@ -463,6 +488,12 @@ impl Instrument {
         let before=self.energy_j();
         let mut radiation_loss=if let Some(air)=&mut self.radiation {
             air.before(&mut self.bank.v[self.bank.modes.len()..]).map_err(Error::Contact)?
+        } else {0.};
+        // Symmetric nesting preserves the order when both air owners are
+        // selected: exterior / cavity / mechanics / cavity / exterior.
+        let mut cavity_loss=if let Some(air)=&mut self.cavity {
+            air.before(&mut self.bank.v[self.bank.modes.len()..])
+                .map_err(|_|Error::Contact("cavity exchange failed finite/energy admission"))?
         } else {0.};
         let mut damper_loss=self.damp(0.5*dt,false)?;
         self.bank.begin_string_stretching_step();
@@ -546,20 +577,25 @@ impl Instrument {
             }
         }
         damper_loss+=self.damp(0.5*dt,true)?;
+        if let Some(air)=&mut self.cavity {
+            cavity_loss+=air.after(&mut self.bank.v[self.bank.modes.len()..])
+                .map_err(|_|Error::Contact("cavity exchange failed finite/energy admission"))?;
+        }
         if let Some(air)=&mut self.radiation {
             radiation_loss+=air.after(&mut self.bank.v[self.bank.modes.len()..]).map_err(Error::Contact)?;
         }
         let modal_loss=self.bank.last_modal_loss_j;
-        let after=self.energy_j();let balance=after-before+felt_loss+shank_loss+modal_loss+radiation_loss+damper_loss+catch_loss-jack_work;
+        let after=self.energy_j();let balance=after-before+felt_loss+shank_loss+modal_loss+radiation_loss+cavity_loss+damper_loss+catch_loss-jack_work;
         let tolerance=1e-9+1e-8*before.abs().max(after.abs());
         if !after.is_finite()||after>100.0{return Err(Error::NonFinite);}
-        if balance.abs()>tolerance||felt_loss< -tolerance||shank_loss< -tolerance||modal_loss< -tolerance||radiation_loss< -tolerance||catch_loss< -tolerance {
+        if balance.abs()>tolerance||felt_loss< -tolerance||shank_loss< -tolerance||modal_loss< -tolerance||radiation_loss< -tolerance||cavity_loss< -tolerance||catch_loss< -tolerance {
             return Err(Error::Energy{defect_j:balance});
         }
         self.accounting.input_work_j+=jack_work;self.accounting.shank_loss_j+=shank_loss;
         self.accounting.felt_loss_j+=felt_loss;self.accounting.felt_relaxation_loss_j+=relaxation_loss;
         self.accounting.modal_loss_j+=modal_loss;
         self.accounting.radiation_loss_j+=radiation_loss;
+        self.accounting.cavity_loss_j+=cavity_loss;
         self.accounting.damper_loss_j+=damper_loss;self.accounting.catch_loss_j+=catch_loss;
         self.accounting.max_balance_error_j=self.accounting.max_balance_error_j.max(balance.abs());
         Ok(())
@@ -584,12 +620,14 @@ impl Instrument {
         self.saved_hammers.copy_from_slice(&self.hammers);self.saved_contacts.clone_from_slice(&self.contacts);
         let saved=self.accounting;let modal=self.bank.last_modal_loss_j;
         if let Some(air)=&mut self.radiation {air.checkpoint();}
+        if let Some(air)=&mut self.cavity {air.checkpoint();}
         let mut average=0.0;
         for substep in 0..self.substeps {
             if let Err(error)=self.mechanics_step(){
                 self.bank.q.copy_from_slice(&self.saved_q);self.bank.v.copy_from_slice(&self.saved_v);
                 self.hammers.copy_from_slice(&self.saved_hammers);self.contacts.clone_from_slice(&self.saved_contacts);
                 if let Some(air)=&mut self.radiation {air.restore();}
+                if let Some(air)=&mut self.cavity {air.restore();}
                 self.accounting=saved;self.bank.last_modal_loss_j=modal;return Err(error);
             }
             if let Some(buffer)=trace.as_deref_mut(){
@@ -610,6 +648,10 @@ mod footprint_tests;
 #[cfg(test)]
 #[path = "radiation_engine_tests.rs"]
 mod radiation_tests;
+
+#[cfg(test)]
+#[path = "cavity_engine_tests.rs"]
+mod cavity_tests;
 
 #[cfg(test)]
 #[path = "damper_engine_tests.rs"]

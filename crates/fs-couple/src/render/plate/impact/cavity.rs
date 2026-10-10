@@ -21,6 +21,8 @@ use fs_exec::CancelGate;
 
 /// Geometry-derived cylindrical pressure basis, using the existing eigensolver.
 pub mod cylinder;
+/// Passive pressure/velocity exchange around an existing mechanical step.
+pub mod exchange;
 /// Passive inertial openings coupled to the same distributed pressure field.
 pub mod neck;
 /// Prepared linear bodies, simultaneous contact and distributed air.
