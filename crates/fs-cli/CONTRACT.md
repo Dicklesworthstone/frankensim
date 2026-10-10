@@ -796,6 +796,37 @@ at invocation completion; optimizer resume and the generic `--budget` override
 are explicitly refused. A binary without the feature refuses this producer
 with an actionable feature message.
 
+### Fixed-background 3-D minimum-volume stress study
+
+With `sdf3-study`, the same `fsim-sdf3-study :version 1` surface accepts
+`(objective :type volume-fraction :sense minimize :unit "1")` with the explicit
+`stress-limited-simp` optimizer in `examples/marquee/bracket-3d-stress.fsim`.
+It uses `fs_topopt::sdf3::design::StressDesignStudy3` and its exact-discrete
+stress adjoints, graph filter, projection and projected augmented Lagrangian.
+The initial octree remains fixed; `maximum-level` must equal `initial-level`.
+The same independently integrated body, reference-pressure and traction laws,
+SI domain and clamp declarations as the compliance study apply.
+
+The limit is the normalized volume-and-load-weighted qp von Mises aggregate,
+not a sampled or continuum maximum-stress bound. The report retains both
+sampled maxima separately. The density floor must stay above the ersatz-model
+stress turnover. Two heterogeneous directional finite differences check the
+initial stress and volume derivatives before optimization. These probes and
+all optimizer trials spend the declared evaluation and Krylov allowances;
+`max-stress-points` bounds the retained point family in one evaluation.
+
+Every accepted update is sealed before further optimization. Accepted AL
+iterates may be infeasible, so exports include both the last accepted state
+and the least-volume accepted feasible incumbent. Only a converged, feasible
+current iterate reports `completed`; iteration/evaluation/linear limits report
+`budget-exhausted` with the actual constraint violation and finite retained
+fields. KKT residuals apply to the last accepted iterate. `--budget N` caps
+updates in this invocation. `report` and `package` export sealed artifacts
+without solving. Cross-process optimizer resume is explicitly refused; durable
+design records do not pretend to restore multipliers or optimizer state.
+The structural evidence package grants no continuum, manufacturing, global
+optimality or physical-validation authority.
+
 ### Native cooling probability study
 
 `study <study.fsim> <ledger.db> [--budget N]` recognizes

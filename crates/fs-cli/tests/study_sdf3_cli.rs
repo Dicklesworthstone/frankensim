@@ -273,3 +273,6 @@ fn g4_sdf3_exhausted_initial_solve_exports_no_unassessed_design() {
 
 #[path = "study_sdf3_cli/checkpoint.rs"]
 mod checkpoint;
+
+#[path = "study_sdf3_cli/stress.rs"]
+mod stress;

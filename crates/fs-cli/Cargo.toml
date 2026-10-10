@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 fs-alloc = { path = "../fs-alloc" }
+fs-ascent = { path = "../fs-ascent", optional = true }
 fs-airflow = { path = "../fs-airflow" }
 fs-blake3 = { path = "../fs-blake3" }
 fs-checker = { path = "../fs-checker" }
@@ -53,8 +54,10 @@ fs-uq = { path = "../fs-uq" }
 fs-viz = { path = "../fs-viz" }
 
 [features]
+# Explicit nominal linear continuum bounds retain the verifier's feature gate.
+thermal-verification = ["fs-conduction/thermal-verification"]
 # The numerical 3-D CutFEM study retains the underlying frontier feature gate.
-sdf3-study = ["dep:fs-cutfem", "dep:fs-ivl", "dep:fs-topopt"]
+sdf3-study = ["dep:fs-ascent", "dep:fs-cutfem", "dep:fs-ivl", "dep:fs-topopt"]
 
 [dev-dependencies]
 fs-mbd = { path = "../fs-mbd" }
