@@ -231,10 +231,38 @@ The cycle-map residual is not distance to an infinite-cycle limit or a bound
 on future peaks. The synthetic `enthalpy-repeated-pulse.json` example carries
 both latent and sensible storage through three cycles with a global adjoint.
 
-This CLI consumer admits fixed timesteps and fixed reference densities with
-uniform or explicitly assigned equilibrium charts.
-Adaptive stepping, steady design and controls outside these two transient searches,
-time/mesh studies, recirculation and enclosure radiation explicitly refuse.
+Total-enthalpy schedules also admit `transient.adaptive` with positive
+`absolute_tolerance_k` and an explicit positive
+`absolute_specific_enthalpy_tolerance_j_kg`, plus the existing
+`relative_tolerance`, `minimum_trial_step_s` and `max_trials`.
+A complete coupled full step is compared with two coupled half steps. The
+maximum normalized discrepancy across every nodal temperature and every nodal
+specific enthalpy must pass; relative scales use changes from the old field,
+so a reference offset cannot relax acceptance. The second half step starts
+from the first half step's h. Only the accepted pair contributes history,
+phase summaries, sampled peaks and energy; coarse and rejected trial solves
+remain charged to solid work. There is no extrapolation.
+
+The trial ceiling respects both `max_step_s` and each interval's requested
+spacing `duration_s / steps`; trials stop at workload/fan events. The minimum
+trial step bounds refinement, while shorter interval tails or explicitly
+requested spacing remain possible. Both accepted endpoints must fit
+`max_steps` and the remaining repeated `max_total_steps` budget before a
+trial starts. Trial statistics reset each cycle; `transient.adaptive` describes
+the final cycle, while `repeated_cycles` owns cumulative accepted work and
+energy. Adaptive forward repetition, periodic stopping and derivative-free
+workload/fan sizing use this same h history. Adaptive adjoints explicitly
+refuse. The reported `estimated_local_error_ratio` appears only at the second
+endpoint of an accepted pair; it is a local endpoint discrepancy estimate,
+not a global, midpoint or continuous-time error bound.
+`examples/cooling-network/enthalpy-adaptive-pulse.json` supplies a synthetic
+mixed sensible/latent field. `tests/cooling_enthalpy/adaptive.rs` adds analytic
+plateau/repeated-energy checks, accepted-grid replay and bounded refusal cases.
+
+This CLI consumer admits fixed or adaptive timesteps and fixed reference
+densities with uniform or explicitly assigned equilibrium charts. Steady design
+and controls outside these two transient searches, time/mesh studies,
+recirculation and enclosure radiation explicitly refuse.
 No moving geometry, phase advection,
 fluid storage, phase kinetics or inter-step peak/error certificate is claimed.
 `tests/cooling_enthalpy.rs` exercises the real binary with independent analytic

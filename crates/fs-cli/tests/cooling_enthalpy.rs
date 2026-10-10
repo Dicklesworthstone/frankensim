@@ -6,6 +6,9 @@
 #[path = "../src/json_read.rs"]
 mod json;
 
+#[path = "cooling_enthalpy/adaptive.rs"]
+mod adaptive;
+
 #[path = "cooling_enthalpy/repeat.rs"]
 mod repeat;
 

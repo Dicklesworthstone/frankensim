@@ -27,7 +27,7 @@ That remaining budget is passed into the next cycle before it advances, not
 checked after an unlimited cycle. Cycles and the original wall budget bound the
 whole invocation. A refused solve or exhausted budget publishes no partial run.
 
-Total-enthalpy storage supports repeated fixed steps with the additional
+Total-enthalpy storage supports repeated fixed or adaptive steps with the additional
 state and periodicity rules described below.
 
 The top-level final temperature field, fan result and coefficients describe the
@@ -104,12 +104,23 @@ Exhausting cycles, accepted steps or the wall budget refuses without publishing
 an unconverged result. This is a discrete cycle-map test, not distance to the
 infinite-cycle limit, stability evidence or a future-peak bound.
 
-Enthalpy repetition currently requires fixed timesteps and refuses
-`repeat.fan_controller`. Fixed-count adjoints and workload/fan sizing cover
-every cycle's sampled peak. Periodic stopping is available for forward runs
-and derivative-free sizing; its variable stopping decision is not
-differentiated. Every sizing candidate starts from the same original h field,
-and its inner cycles carry their own accepted physical state.
+Enthalpy repetition supports fixed or adaptive timesteps and refuses
+`repeat.fan_controller`. For adaptive stepping, supply both the temperature
+and specific-enthalpy tolerances described in
+[adaptive enthalpy controls](TRANSIENT_COOLING.md#adaptive-total-enthalpy-timesteps).
+The accepted pair carries h into later trials and across cycle boundaries.
+Each pair consumes two accepted endpoints from the cycle's `max_steps` and
+the experiment's shared `max_total_steps`; neither coarse nor rejected trials
+consume accepted-endpoint slots, but every attempted solid solve counts as
+work. `max_trials` and adaptive statistics reset per cycle. The
+`transient.adaptive` record therefore describes only the final cycle.
+
+Fixed-count adjoints require fixed timesteps. Workload/fan sizing covers every
+cycle's sampled peak, including adaptive forward runs with derivative-free
+search. Periodic stopping is available for forward runs and derivative-free
+sizing; its variable stopping decision is not differentiated. Every sizing
+candidate starts from the same original h field, and its inner cycles carry
+their own accepted physical state.
 
 ## Repeated-cycle sizing
 
