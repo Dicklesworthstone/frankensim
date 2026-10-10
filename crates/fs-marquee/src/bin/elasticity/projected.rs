@@ -8,12 +8,14 @@ use fs_topols::{Cantilever, GridSdf, OptimizeSettings};
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::io::Write;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[path = "projected/checkpoint.rs"]
 mod checkpoint;
 
-const USAGE: &str = "usage: fs-marquee-elasticity --projected OUTPUT_DIR [LEVEL=4] [ITERATIONS=30] [VOLFRAC=0.45] [MAX_CANDIDATES=6] [--initial-field CSV] [--youngs E] [--poisson NU] [--load TRACTION] [--load-band HALF_WIDTH] [--max-updates N] | OUTPUT_DIR --resume CHECKPOINT [--max-updates N]";
+const USAGE: &str = "usage: fs-marquee-elasticity --projected OUTPUT_DIR [LEVEL=4] [ITERATIONS=30] [VOLFRAC=0.45] [MAX_CANDIDATES=6] [--initial-field CSV] [--youngs E] [--poisson NU] [--load TRACTION] [--load-band HALF_WIDTH] [--max-updates N] [--max-seconds N] | OUTPUT_DIR --resume CHECKPOINT [--max-updates N] [--max-seconds N]";
 
 /// The geometry and material declarations are inputs to the actual PDE, not
 /// merely report labels. All coordinates and loads retain the normalized model.
@@ -22,6 +24,7 @@ struct Options {
     initial_field: Option<PathBuf>,
     resume: Option<PathBuf>,
     max_updates: Option<usize>,
+    max_seconds: Option<u64>,
     level: u32,
     iterations: usize,
     volfrac: f64,
@@ -36,7 +39,7 @@ impl Options {
     fn parse(args: &[String]) -> Result<Self, Box<dyn Error>> {
         let defaults = OptimizeSettings::default();
         let mut options = Self {
-            output_dir: PathBuf::new(), initial_field: None, resume: None, max_updates: None, level: 4,
+            output_dir: PathBuf::new(), initial_field: None, resume: None, max_updates: None, max_seconds: None, level: 4,
             iterations: 30, volfrac: 0.45, max_candidates: 6,
             youngs: defaults.youngs, poisson: defaults.poisson,
             load: 1.0, load_band: 0.125,
@@ -47,7 +50,7 @@ impl Options {
         while index < args.len() {
             let name = args[index].as_str();
             if name.starts_with("--") {
-                if !matches!(name, "--initial-field" | "--youngs" | "--poisson" | "--load" | "--load-band" | "--resume" | "--max-updates") {
+                if !matches!(name, "--initial-field" | "--youngs" | "--poisson" | "--load" | "--load-band" | "--resume" | "--max-updates" | "--max-seconds") {
                     return Err(format!("unknown projected option {name}; {USAGE}").into());
                 }
                 if !seen.insert(name) {
@@ -60,6 +63,7 @@ impl Options {
                     "--initial-field" => options.initial_field = Some(PathBuf::from(value)),
                     "--resume" => options.resume = Some(PathBuf::from(value)),
                     "--max-updates" => options.max_updates = Some(value.parse()?),
+                    "--max-seconds" => options.max_seconds = Some(value.parse()?),
                     "--youngs" => options.youngs = value.parse()?,
                     "--poisson" => options.poisson = value.parse()?,
                     "--load" => options.load = value.parse()?,
@@ -73,12 +77,15 @@ impl Options {
         }
         if positional.is_empty() || positional.len() > 5 { return Err(USAGE.into()); }
         if options.resume.is_some() && (positional.len() != 1
-            || seen.iter().any(|name| !matches!(*name, "--resume" | "--max-updates")))
+            || seen.iter().any(|name| !matches!(*name, "--resume" | "--max-updates" | "--max-seconds")))
         {
-            return Err("resume restores the saved problem and search policy; use only OUTPUT_DIR, --resume and optional --max-updates".into());
+            return Err("resume restores the saved problem and search policy; use only OUTPUT_DIR, --resume and optional --max-updates/--max-seconds".into());
         }
         if options.max_updates.is_some_and(|count| count > 200) {
             return Err("--max-updates must lie in [0,200]; zero saves the admitted baseline without evolving it".into());
+        }
+        if options.max_seconds.is_some_and(|seconds| seconds > 86_400) {
+            return Err("--max-seconds must lie in [0,86400]; zero stops before numerical work".into());
         }
         options.output_dir = PathBuf::from(&positional[0]);
         options.level = parse(&positional, 1, options.level)?;
@@ -118,6 +125,30 @@ impl Options {
     }
 
     fn fixture(&self) -> Cantilever { Cantilever { load: self.load, band: self.load_band } }
+}
+
+/// One cooperative budget covers both baseline/recovery and every candidate
+/// solve. Assembly and individual kernels remain non-preemptible; this is not
+/// a hard wall-clock deadline. Execution budgets are not problem declarations
+/// and therefore may be changed between checkpoint segments.
+struct TimeBudget {
+    started: Instant,
+    limit: Option<Duration>,
+}
+
+impl TimeBudget {
+    fn new(seconds: Option<u64>) -> Self {
+        Self { started: Instant::now(), limit: seconds.map(Duration::from_secs) }
+    }
+
+    fn expired_at(&self, elapsed: Duration) -> bool {
+        self.limit.is_some_and(|limit| elapsed >= limit)
+    }
+
+    fn poll(&self) -> ControlFlow<()> {
+        if self.expired_at(self.started.elapsed()) { ControlFlow::Break(()) }
+        else { ControlFlow::Continue(()) }
+    }
 }
 
 fn field(path: &Path, phi: &GridSdf) -> Result<(), Box<dyn Error>> {
@@ -162,8 +193,9 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     if output_dir.try_exists()? {
         return Err("output directory already exists; refusing to overwrite it".into());
     }
-    let mut optimizer = if let Some(path) = &options.resume {
-        checkpoint::load(path)?
+    let budget = TimeBudget::new(options.max_seconds);
+    let prepared = if let Some(path) = &options.resume {
+        checkpoint::load_controlled(path, |_| budget.poll())?
     } else {
         let geometry = options.geometry()?;
         let n = geometry.n();
@@ -177,8 +209,15 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
         let controls = ProjectedSettings {
             max_candidates: options.max_candidates, ..ProjectedSettings::default()
         };
-        ProjectedOptimizer::new(geometry, options.fixture(), options.settings(),
-            fixed, projection, controls)?
+        ProjectedOptimizer::new_controlled(&geometry, options.fixture(), options.settings(),
+            fixed, projection, controls, |_| budget.poll())?
+    };
+    let mut optimizer = match prepared {
+        ControlFlow::Continue(optimizer) => optimizer,
+        ControlFlow::Break(()) => {
+            eprintln!("fs-marquee-elasticity: time budget exhausted before baseline admission; no output published");
+            return Ok(124);
+        }
     };
     // On recovery, use the saved declaration, never Options' fresh-run defaults.
     let settings = optimizer.checkpoint().settings();
@@ -201,7 +240,11 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
         if options.max_updates.is_some_and(|cap| iteration - segment_start >= cap) {
             break "paused";
         }
-        match optimizer.advance_one()? {
+        let progress = match optimizer.advance_one_controlled(|_| budget.poll())? {
+            ControlFlow::Continue(progress) => progress,
+            ControlFlow::Break(()) => break "time_budget",
+        };
+        match progress {
             ProjectedProgress::Accepted(step) => {
                 // Persist before auxiliary exports: an output failure must not
                 // lose a fully accepted expensive numerical update.
@@ -240,6 +283,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     let resumed_from = options.resume.as_ref().map_or_else(|| "null".to_string(),
         |path| json_string(&path.to_string_lossy()));
     let checkpoint_file = checkpoint::filename(optimizer.checkpoint().next_iteration());
+    let max_seconds = options.max_seconds.map_or_else(|| "null".to_string(), |value| value.to_string());
     let summary = format!(
         concat!(
             "{{\"schema\":\"fs-marquee-projected-v1\",\"model\":\"normalized_unit_square_plane_strain_cantilever\",",
@@ -250,7 +294,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
             "\"compliance\":{:.17e},\"volume\":{:.17e},\"snapshot\":\"{:#018x}\",",
             "\"relative_reduction_from_feasible_baseline\":{:.17e},",
             "\"baseline_scope\":\"segment\",\"segment_start_iteration\":{},\"segment_accepted_updates\":{},",
-            "\"resumed_from\":{},\"checkpoint\":{},",
+            "\"resumed_from\":{},\"checkpoint\":{},\"max_seconds\":{},",
             "\"initial_field\":{},\"youngs\":{:.17e},\"poisson\":{:.17e},",
             "\"load\":{:.17e},\"load_band\":{:.17e},\"fixed_boundaries\":[\"left\",\"right\"],",
             "\"claims\":{{\"converged\":false,\"global_optimum\":false,\"physical_validation\":false,\"certified_continuum_volume\":false}}}}"
@@ -259,7 +303,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
         max_candidates, volfrac, projection.tolerance, baseline.compliance, baseline.volume,
         current.compliance, current.volume, current.snapshot, reduction,
         segment_start, optimizer.checkpoint().next_iteration() - segment_start,
-        resumed_from, json_string(&checkpoint_file),
+        resumed_from, json_string(&checkpoint_file), max_seconds,
         initial_field, settings.youngs, settings.poisson, fixture.load, fixture.band,
     );
     // Create the completion marker only after every field and trace export.
@@ -267,7 +311,11 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     writeln!(completion, "{summary}")?;
     completion.flush()?;
     println!("{summary}");
-    Ok(if matches!(status, "iteration_limit" | "paused") { 0 } else { 11 })
+    Ok(match status {
+        "iteration_limit" | "paused" => 0,
+        "time_budget" => 124,
+        _ => 11,
+    })
 }
 
 #[cfg(test)]
@@ -355,6 +403,8 @@ mod tests {
             vec!["out", "--max-updates", "201"],
             vec!["out", "--max-updates", "-1"],
             vec!["out", "--max-updates"],
+            vec!["out", "--max-seconds", "86401"],
+            vec!["out", "--max-seconds", "-1"],
         ] {
             assert!(Options::parse(&args(&values)).is_err(), "{values:?}");
         }
@@ -385,5 +435,26 @@ mod tests {
         assert!(summary.contains("\"candidate_budget_per_update\":1"));
         assert!(run(&arguments).is_err(), "existing output is never overwritten");
         assert_eq!(std::fs::read(source).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn time_budget_boundaries_are_inclusive_and_opt_in() {
+        let unlimited = TimeBudget::new(None);
+        assert!(!unlimited.expired_at(Duration::from_secs(1_000_000)));
+        let limited = TimeBudget::new(Some(5));
+        assert!(!limited.expired_at(Duration::from_secs(5) - Duration::from_nanos(1)));
+        assert!(limited.expired_at(Duration::from_secs(5)));
+        assert!(limited.expired_at(Duration::from_secs(6)));
+        let options = Options::parse(&args(&["out", "--resume", "state.bin", "--max-seconds", "120"])).unwrap();
+        assert_eq!(options.max_seconds, Some(120));
+    }
+
+    #[test]
+    fn expired_setup_publishes_no_output_or_partial_baseline() {
+        let path = std::env::temp_dir().join(format!("frankensim-projected-expired-{}", std::process::id()));
+        assert!(!path.exists());
+        assert_eq!(run(&[path.to_string_lossy().into_owned(), "3".into(),
+            "--max-seconds".into(), "0".into()]).unwrap(), 124);
+        assert!(!path.exists());
     }
 }

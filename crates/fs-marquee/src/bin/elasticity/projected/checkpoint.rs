@@ -2,12 +2,13 @@
 //! immutable file; a torn new file cannot overwrite an earlier accepted state.
 //! The checksum detects damaged bytes, not physical/model validity. Recovery
 //! still re-admits the constraints and independently solves the retained field.
-use fs_topols::projected::{ProjectedOptimizer, ProjectedSettings};
+use fs_topols::projected::{ProjectedOptimizer, ProjectedSettings, ProjectedSetupStage};
 use fs_topols::volume::VolumeProjectionSettings;
 use fs_topols::{Cantilever, GridSdf, OptimizeCheckpoint, OptimizeSettings};
 use std::error::Error;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::ops::ControlFlow;
 use std::path::Path;
 
 const MAGIC: &[u8] = b"fs-marquee-projected-checkpoint-v1\0";
@@ -154,13 +155,29 @@ pub(super) fn save(directory: &Path, optimizer: &ProjectedOptimizer) -> Result<(
     Ok(())
 }
 
-pub(super) fn load(path: &Path) -> Result<ProjectedOptimizer, Box<dyn Error>> {
+pub(super) fn load_controlled<B>(
+    path: &Path,
+    mut control: impl FnMut(ProjectedSetupStage) -> ControlFlow<B>,
+) -> Result<ControlFlow<B, ProjectedOptimizer>, Box<dyn Error>> {
+    if let ControlFlow::Break(reason) = control(ProjectedSetupStage::Prepare) {
+        return Ok(ControlFlow::Break(reason));
+    }
     let mut bytes = Vec::new();
     File::open(path)?.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
     let (checkpoint, fixed, projection, controls) = decode(&bytes)?;
     // Never rebuild fixed nodes from the imported field or re-project on resume.
     // The canonical owner verifies exact fixed bits and area and re-solves it.
-    Ok(ProjectedOptimizer::from_checkpoint(checkpoint, fixed, projection, controls)?)
+    Ok(ProjectedOptimizer::from_checkpoint_controlled(
+        &checkpoint, fixed, projection, controls, control,
+    )?)
+}
+
+#[cfg(test)]
+fn load(path: &Path) -> Result<ProjectedOptimizer, Box<dyn Error>> {
+    match load_controlled(path, |_| ControlFlow::<std::convert::Infallible>::Continue(()))? {
+        ControlFlow::Continue(optimizer) => Ok(optimizer),
+        ControlFlow::Break(never) => match never {},
+    }
 }
 
 #[cfg(test)]
@@ -261,5 +278,17 @@ mod tests {
             resumed.projection_settings(), resumed.controls()),
             encode(original.checkpoint(), original.fixed_nodes(),
                 original.projection_settings(), original.controls()));
+    }
+
+    #[test]
+    fn cancelled_recovery_stops_before_opening_or_decoding_a_checkpoint() {
+        let mut polls = 0;
+        let result = load_controlled(Path::new("unused-cancelled-checkpoint.bin"), |stage| {
+            polls += 1;
+            assert_eq!(stage, ProjectedSetupStage::Prepare);
+            ControlFlow::Break("budget")
+        }).unwrap();
+        assert!(matches!(result, ControlFlow::Break("budget")));
+        assert_eq!(polls, 1);
     }
 }
