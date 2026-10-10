@@ -25,10 +25,12 @@
 //! `(D - I/2 + alpha N) p = (S + alpha D' + alpha/2 I) q`.
 //!
 //! DISCRETIZATION HONESTY: Plain CBIE surfaces retaining oriented triangles
-//! integrate static near-panel single/double layers analytically, then use
-//! tensor Gauss integration for their nonsingular Helmholtz remainders. This
-//! resolves opposite faces of thin shells without sampling a narrow static
-//! kernel spike. Well-separated interactions still use centroid point panels.
+//! integrate static single/double layers analytically for every triangle, then
+//! use tensor Gauss integration for their nonsingular Helmholtz remainders:
+//! 8x8 near a panel and 4x4 for well-separated interactions. This resolves
+//! opposite faces of thin shells without sampling a narrow static kernel spike,
+//! preserves the closed-surface static double-layer identity, and retains the
+//! far-panel spatial moments needed by weakly radiating bending motions.
 //! Burton-Miller and legacy centroid-only surfaces retain equivalent-disc self
 //! terms and point-panel off-diagonal approximation. Triangle CBIE self terms use
 //! a centroid fan plus a Duffy transform, which cancels the weak `1/r`
@@ -347,6 +349,22 @@ const GL8_W: [f64; 8] = [
     0.050_614_268_145_188_13,
 ];
 
+// Four-point Gauss-Legendre rule on [0, 1]. Well-separated regular remainders
+// do not need the near-panel 8x8 rule, but a centroid loses their spatial
+// moments. Those errors can overwhelm a bending mode's small radiation power.
+const GL4_X: [f64; 4] = [
+    0.069_431_844_202_973_71,
+    0.330_009_478_207_571_87,
+    0.669_990_521_792_428_1,
+    0.930_568_155_797_026_2,
+];
+const GL4_W: [f64; 4] = [
+    0.173_927_422_568_726_92,
+    0.326_072_577_431_273_07,
+    0.326_072_577_431_273_07,
+    0.173_927_422_568_726_92,
+];
+
 fn regularized_coplanar_hypersingular(k: f64, r: f64) -> C64 {
     if k == 0.0 {
         return C64::ZERO;
@@ -447,6 +465,17 @@ fn triangle_weak_influence(
     triangle: [[f64; 3]; 3],
     ny: [f64; 3],
 ) -> (C64, C64) {
+    triangle_weak_influence_with_rule(k, x, triangle, ny, &GL8_X, &GL8_W)
+}
+
+fn triangle_weak_influence_with_rule<const ORDER: usize>(
+    k: f64,
+    x: [f64; 3],
+    triangle: [[f64; 3]; 3],
+    ny: [f64; 3],
+    nodes: &[f64; ORDER],
+    weights: &[f64; ORDER],
+) -> (C64, C64) {
     let [a, b, c] = triangle;
     let ab = sub(b, a);
     let ac = sub(c, a);
@@ -454,8 +483,8 @@ fn triangle_weak_influence(
     let (static_single, static_double) = triangle_static_influence(x, triangle, ny);
     let mut single = C64::from_re(static_single);
     let mut double = C64::from_re(static_double);
-    for (&u, &wu) in GL8_X.iter().zip(&GL8_W) {
-        for (&v, &wv) in GL8_X.iter().zip(&GL8_W) {
+    for (&u, &wu) in nodes.iter().zip(weights) {
+        for (&v, &wv) in nodes.iter().zip(weights) {
             let y = affine3(a, ab, u, ac, (1.0 - u) * v);
             let weight = wu * wv * (1.0 - u) * double_area;
             let d = sub(x, y);
@@ -930,10 +959,22 @@ fn assemble_dense(surface: &SpherePanels, k: f64, alpha: C64) -> (Vec<C64>, Vec<
                     self_terms(k, areas[i])
                 };
                 (s, C64::ZERO, C64::ZERO, n_reg - n0_row)
-            } else if let Some(triangles) = weak_triangles
-                && triangle_is_near(xi, centroids[j], triangles[j])
-            {
-                let (s, d) = triangle_weak_influence(k, xi, triangles[j], normals[j]);
+            } else if let Some(triangles) = weak_triangles {
+                // Static S/D must use the same triangle geometry everywhere.
+                // Integrate the regular far remainder too: centroid moments
+                // can swamp the radiation of nearly cancelling skin velocities.
+                let (s, d) = if triangle_is_near(xi, centroids[j], triangles[j]) {
+                    triangle_weak_influence(k, xi, triangles[j], normals[j])
+                } else {
+                    triangle_weak_influence_with_rule(
+                        k,
+                        xi,
+                        triangles[j],
+                        normals[j],
+                        &GL4_X,
+                        &GL4_W,
+                    )
+                };
                 (s, d, C64::ZERO, C64::ZERO)
             } else {
                 let (g, dgdny, dgdnx, d2g) = kernels(k, xi, ni, centroids[j], normals[j]);
@@ -1538,6 +1579,43 @@ mod tests {
         vec![C64::ONE; n]
     }
 
+    fn thin_box_surface() -> SpherePanels {
+        // A closed plate-sized boundary with opposing skins 1 mm apart.
+        // Six divisions across each skin leave both near and far interactions;
+        // the coarse wavelength guard still admits the 1640 Hz endpoint.
+        let extents = [0.30, 0.24, 0.001];
+        let divisions = [6, 6, 1];
+        let mut triangles = Vec::new();
+        for axis in 0..3 {
+            let u = (axis + 1) % 3;
+            let v = (axis + 2) % 3;
+            for side in [-1.0, 1.0] {
+                let point = |i: usize, j: usize| {
+                    let mut p = [0.0; 3];
+                    p[axis] = side * extents[axis] / 2.0;
+                    p[u] = (i as f64 / divisions[u] as f64 - 0.5) * extents[u];
+                    p[v] = (j as f64 / divisions[v] as f64 - 0.5) * extents[v];
+                    p
+                };
+                for i in 0..divisions[u] {
+                    for j in 0..divisions[v] {
+                        let a = point(i, j);
+                        let b = point(i + 1, j);
+                        let c = point(i + 1, j + 1);
+                        let d = point(i, j + 1);
+                        for mut triangle in [[a, b, c], [a, c, d]] {
+                            if side < 0.0 {
+                                triangle.swap(1, 2);
+                            }
+                            triangles.push(triangle);
+                        }
+                    }
+                }
+            }
+        }
+        SpherePanels::from_triangles(triangles).expect("closed thin box")
+    }
+
     fn mean_impedance(sol: &RadiationSolution, surface: &SpherePanels) -> C64 {
         // Area-weighted mean of p / v over panels with |v| > 0.
         let mut num = C64::ZERO;
@@ -1734,6 +1812,74 @@ mod tests {
             );
             assert_eq!(single.im, 0.0);
             assert_eq!(double.im, 0.0);
+        }
+    }
+
+    #[test]
+    fn closed_thin_surface_preserves_the_static_double_layer_identity() {
+        // The exterior trace of the static double layer of constant density
+        // vanishes: (D_0 + I/2) 1 = 0, so the CBIE matrix has row sum -1.
+        // Mixing exact near panels with centroid far panels broke this identity.
+        let surface = thin_box_surface();
+        let n = surface.centroids().len();
+        let triangles = surface.triangles().expect("triangle geometry");
+        assert!((0..n).any(|i| (0..n).any(|j| {
+            !triangle_is_near(surface.centroids()[i], surface.centroids()[j], triangles[j])
+        })));
+        let (matrix, _) = assemble_dense(&surface, 0.0, C64::ZERO);
+        for row in matrix.chunks_exact(n) {
+            let sum = row.iter().fold(C64::ZERO, |sum, &value| sum + value);
+            assert!((sum.re + 1.0).abs() < 2.0e-12, "static row sum: {sum:?}");
+            assert_eq!(sum.im, 0.0);
+        }
+    }
+
+    #[test]
+    fn thin_plate_bending_fields_radiate_positive_power_across_the_band() {
+        // G1 physical falsifier: the two skins have opposite normal velocities
+        // for the same transverse bending motion. At low frequency their small
+        // radiated field is especially sensitive to lost far-panel moments.
+        // The previous centroid far rule produced six negative powers at 40 Hz
+        // and one at 1640 Hz in this 16-field family, despite an admitted mesh.
+        let surface = thin_box_surface();
+        let medium = Medium {
+            density: 1.2,
+            sound_speed: 343.0,
+        };
+        let mut fields = Vec::new();
+        for mx in 1..=4 {
+            for my in 1..=4 {
+                fields.push(
+                    surface
+                        .centroids()
+                        .iter()
+                        .zip(surface.normals())
+                        .map(|(point, normal)| {
+                            let x_phase =
+                                mx as f64 * core::f64::consts::PI * (point[0] / 0.30 + 0.5);
+                            let y_phase =
+                                my as f64 * core::f64::consts::PI * (point[1] / 0.24 + 0.5);
+                            C64::from_re(normal[2] * det::sin(x_phase) * det::sin(y_phase))
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        let field_refs: Vec<&[C64]> = fields.iter().map(Vec::as_slice).collect();
+        for frequency in [40.0, 1640.0] {
+            let k = core::f64::consts::TAU * frequency / medium.sound_speed;
+            let solutions =
+                solve_radiation_batch(&surface, k, medium, &field_refs, Formulation::PlainCbie)
+                    .expect("mesh-resolved thin-plate radiation");
+            for (index, solution) in solutions.iter().enumerate() {
+                assert!(
+                    solution.radiated_power_roundoff_interval.0 > 0.0,
+                    "{frequency} Hz, bending field ({}, {}): {:?}",
+                    index / 4 + 1,
+                    index % 4 + 1,
+                    solution.radiated_power_roundoff_interval
+                );
+            }
         }
     }
 

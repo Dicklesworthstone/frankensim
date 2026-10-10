@@ -208,13 +208,22 @@ NASA marks it as U.S. Government work with public use permitted.
 
 1. Kernel formulas are pinned by central-finite-difference tests of G.
    Plain-CBIE triangle surfaces use exact static single/double-layer integrals
-   plus fixed Gauss integration of the regular Helmholtz remainders; the self
-   and near-face single layers share that same static integral. Independent
+   for every interaction, preserving `D_0[1] = -1/2` at a panel centroid.
+   Fixed Gauss integration covers the regular Helmholtz remainders: 8x8 near
+   a panel and 4x4 for far interactions. A far-panel centroid approximation
+   loses spatial moments that can dominate weak bending radiation; replacing
+   only its static part is insufficient. The self and near-face single layers
+   share the same static integral. Independent
    rectangular-panel single-layer and solid-angle formulas test thin opposing
    faces down to a 1 micrometre gap and both orientations. Gauss-Duffy
    integration handles the self remainders; scale covariance and the analytic
-   pulsating sphere pin this
-   path. Burton-Miller retains the established equivalent-disc self and
+   pulsating sphere pin this path. A closed 1 mm plate boundary additionally
+   tests the static row identity and positive radiation from sixteen bending
+   fields at 40 and 1640 Hz, without a power floor or relaxed power gate.
+   Far remainders now require sixteen kernel evaluations per pair; dense
+   factorization and batch counts are unchanged. These collocation tests are
+   not a general passivity or convergence certificate. Burton-Miller retains
+   the established equivalent-disc self and
    centroid off-diagonal scheme because its hypersingular finite-part
    operator needs a different Galerkin-quality rule.
 2. The hypersingular static self entry uses the exact closed-surface
