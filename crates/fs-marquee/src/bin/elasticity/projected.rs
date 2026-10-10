@@ -10,13 +10,18 @@ use std::error::Error;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const USAGE: &str = "usage: fs-marquee-elasticity --projected OUTPUT_DIR [LEVEL=4] [ITERATIONS=30] [VOLFRAC=0.45] [MAX_CANDIDATES=6] [--initial-field CSV] [--youngs E] [--poisson NU] [--load TRACTION] [--load-band HALF_WIDTH]";
+#[path = "projected/checkpoint.rs"]
+mod checkpoint;
+
+const USAGE: &str = "usage: fs-marquee-elasticity --projected OUTPUT_DIR [LEVEL=4] [ITERATIONS=30] [VOLFRAC=0.45] [MAX_CANDIDATES=6] [--initial-field CSV] [--youngs E] [--poisson NU] [--load TRACTION] [--load-band HALF_WIDTH] [--max-updates N] | OUTPUT_DIR --resume CHECKPOINT [--max-updates N]";
 
 /// The geometry and material declarations are inputs to the actual PDE, not
 /// merely report labels. All coordinates and loads retain the normalized model.
 struct Options {
     output_dir: PathBuf,
     initial_field: Option<PathBuf>,
+    resume: Option<PathBuf>,
+    max_updates: Option<usize>,
     level: u32,
     iterations: usize,
     volfrac: f64,
@@ -31,7 +36,7 @@ impl Options {
     fn parse(args: &[String]) -> Result<Self, Box<dyn Error>> {
         let defaults = OptimizeSettings::default();
         let mut options = Self {
-            output_dir: PathBuf::new(), initial_field: None, level: 4,
+            output_dir: PathBuf::new(), initial_field: None, resume: None, max_updates: None, level: 4,
             iterations: 30, volfrac: 0.45, max_candidates: 6,
             youngs: defaults.youngs, poisson: defaults.poisson,
             load: 1.0, load_band: 0.125,
@@ -42,7 +47,7 @@ impl Options {
         while index < args.len() {
             let name = args[index].as_str();
             if name.starts_with("--") {
-                if !matches!(name, "--initial-field" | "--youngs" | "--poisson" | "--load" | "--load-band") {
+                if !matches!(name, "--initial-field" | "--youngs" | "--poisson" | "--load" | "--load-band" | "--resume" | "--max-updates") {
                     return Err(format!("unknown projected option {name}; {USAGE}").into());
                 }
                 if !seen.insert(name) {
@@ -53,6 +58,8 @@ impl Options {
                     .ok_or_else(|| format!("missing value for {name}"))?;
                 match name {
                     "--initial-field" => options.initial_field = Some(PathBuf::from(value)),
+                    "--resume" => options.resume = Some(PathBuf::from(value)),
+                    "--max-updates" => options.max_updates = Some(value.parse()?),
                     "--youngs" => options.youngs = value.parse()?,
                     "--poisson" => options.poisson = value.parse()?,
                     "--load" => options.load = value.parse()?,
@@ -65,6 +72,14 @@ impl Options {
             index += 1;
         }
         if positional.is_empty() || positional.len() > 5 { return Err(USAGE.into()); }
+        if options.resume.is_some() && (positional.len() != 1
+            || seen.iter().any(|name| !matches!(*name, "--resume" | "--max-updates")))
+        {
+            return Err("resume restores the saved problem and search policy; use only OUTPUT_DIR, --resume and optional --max-updates".into());
+        }
+        if options.max_updates.is_some_and(|count| count > 200) {
+            return Err("--max-updates must lie in [0,200]; zero saves the admitted baseline without evolving it".into());
+        }
         options.output_dir = PathBuf::from(&positional[0]);
         options.level = parse(&positional, 1, options.level)?;
         options.iterations = parse(&positional, 2, options.iterations)?;
@@ -147,22 +162,34 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     if output_dir.try_exists()? {
         return Err("output directory already exists; refusing to overwrite it".into());
     }
-    let Options { level, iterations, volfrac, max_candidates, .. } = options;
-    let geometry = options.geometry()?;
-    let n = geometry.n();
-    // Hold the actual imported supported/loaded boundary traces fixed. No
-    // material can disappear from a loaded edge merely to reduce external work.
-    let fixed: Vec<_> = geometry.nodes().iter().copied().enumerate()
-        .filter(|(index, _)| index % (n + 1) == 0 || index % (n + 1) == n).collect();
-    let settings = options.settings();
-    let projection = VolumeProjectionSettings {
-        target: volfrac, tolerance: 1e-4, max_shift: 2.0, max_evaluations: 64,
+    let mut optimizer = if let Some(path) = &options.resume {
+        checkpoint::load(path)?
+    } else {
+        let geometry = options.geometry()?;
+        let n = geometry.n();
+        // Hold the actual imported supported/loaded boundary traces fixed. No
+        // material can disappear from a loaded edge merely to reduce external work.
+        let fixed: Vec<_> = geometry.nodes().iter().copied().enumerate()
+            .filter(|(index, _)| index % (n + 1) == 0 || index % (n + 1) == n).collect();
+        let projection = VolumeProjectionSettings {
+            target: options.volfrac, tolerance: 1e-4, max_shift: 2.0, max_evaluations: 64,
+        };
+        let controls = ProjectedSettings {
+            max_candidates: options.max_candidates, ..ProjectedSettings::default()
+        };
+        ProjectedOptimizer::new(geometry, options.fixture(), options.settings(),
+            fixed, projection, controls)?
     };
-    let controls = ProjectedSettings { max_candidates, ..ProjectedSettings::default() };
-    let mut optimizer = ProjectedOptimizer::new(geometry,
-        options.fixture(), settings, fixed, projection, controls)?;
+    // On recovery, use the saved declaration, never Options' fresh-run defaults.
+    let settings = optimizer.checkpoint().settings();
+    let fixture = optimizer.checkpoint().fixture();
+    let projection = optimizer.projection_settings();
+    let max_candidates = optimizer.controls().max_candidates;
+    let (level, iterations, volfrac) = (settings.level, settings.iterations, settings.volfrac);
+    let segment_start = optimizer.checkpoint().next_iteration();
     let baseline = optimizer.baseline();
     std::fs::create_dir(output_dir)?;
+    checkpoint::save(output_dir, &optimizer)?;
     field(&output_dir.join("baseline-level-set.csv"), optimizer.checkpoint().geometry())?;
     let mut trajectory = writer(&output_dir.join("trajectory.jsonl"))?;
     let mut attempts = writer(&output_dir.join("attempts.jsonl"))?;
@@ -170,8 +197,15 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     let mut candidate_count = 0usize;
     let status = loop {
         let iteration = optimizer.checkpoint().next_iteration();
+        if optimizer.checkpoint().is_complete() { break "iteration_limit"; }
+        if options.max_updates.is_some_and(|cap| iteration - segment_start >= cap) {
+            break "paused";
+        }
         match optimizer.advance_one()? {
             ProjectedProgress::Accepted(step) => {
+                // Persist before auxiliary exports: an output failure must not
+                // lose a fully accepted expensive numerical update.
+                checkpoint::save(output_dir, &optimizer)?;
                 candidate_count += step.attempts.len();
                 attempt_rows(&mut attempts, step.iteration, &step.attempts)?;
                 writeln!(trajectory,
@@ -203,6 +237,9 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     } else { 0.0 };
     let initial_field = options.initial_field.as_ref().map_or_else(|| "null".to_string(),
         |path| json_string(&path.to_string_lossy()));
+    let resumed_from = options.resume.as_ref().map_or_else(|| "null".to_string(),
+        |path| json_string(&path.to_string_lossy()));
+    let checkpoint_file = checkpoint::filename(optimizer.checkpoint().next_iteration());
     let summary = format!(
         concat!(
             "{{\"schema\":\"fs-marquee-projected-v1\",\"model\":\"normalized_unit_square_plane_strain_cantilever\",",
@@ -212,6 +249,8 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
             "\"baseline_compliance\":{:.17e},\"baseline_volume\":{:.17e},",
             "\"compliance\":{:.17e},\"volume\":{:.17e},\"snapshot\":\"{:#018x}\",",
             "\"relative_reduction_from_feasible_baseline\":{:.17e},",
+            "\"baseline_scope\":\"segment\",\"segment_start_iteration\":{},\"segment_accepted_updates\":{},",
+            "\"resumed_from\":{},\"checkpoint\":{},",
             "\"initial_field\":{},\"youngs\":{:.17e},\"poisson\":{:.17e},",
             "\"load\":{:.17e},\"load_band\":{:.17e},\"fixed_boundaries\":[\"left\",\"right\"],",
             "\"claims\":{{\"converged\":false,\"global_optimum\":false,\"physical_validation\":false,\"certified_continuum_volume\":false}}}}"
@@ -219,14 +258,16 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
         status, level, iterations, optimizer.checkpoint().next_iteration(), candidate_count,
         max_candidates, volfrac, projection.tolerance, baseline.compliance, baseline.volume,
         current.compliance, current.volume, current.snapshot, reduction,
-        initial_field, options.youngs, options.poisson, options.load, options.load_band,
+        segment_start, optimizer.checkpoint().next_iteration() - segment_start,
+        resumed_from, json_string(&checkpoint_file),
+        initial_field, settings.youngs, settings.poisson, fixture.load, fixture.band,
     );
     // Create the completion marker only after every field and trace export.
     let mut completion = writer(&output_dir.join("summary.json"))?;
     writeln!(completion, "{summary}")?;
     completion.flush()?;
     println!("{summary}");
-    Ok(if status == "iteration_limit" { 0 } else { 11 })
+    Ok(if matches!(status, "iteration_limit" | "paused") { 0 } else { 11 })
 }
 
 #[cfg(test)]
@@ -300,5 +341,49 @@ mod tests {
         assert!(summary.contains(&format!("\"youngs\":{:.17e}", 2.0)));
         assert!(summary.contains(&format!("\"load\":{:.17e}", 1.5)));
         assert!(summary.contains(&json_string(&input.to_string_lossy())));
+    }
+
+    #[test]
+    fn resume_rejects_problem_overrides_but_allows_a_segment_limit() {
+        let options = Options::parse(&args(&["out", "--resume", "state.bin", "--max-updates", "0"])).unwrap();
+        assert_eq!(options.resume, Some(PathBuf::from("state.bin")));
+        assert_eq!(options.max_updates, Some(0));
+        for values in [
+            vec!["out", "3", "--resume", "state.bin"],
+            vec!["out", "--resume", "state.bin", "--youngs", "2"],
+            vec!["out", "--initial-field", "field.csv", "--resume", "state.bin"],
+            vec!["out", "--max-updates", "201"],
+            vec!["out", "--max-updates", "-1"],
+            vec!["out", "--max-updates"],
+        ] {
+            assert!(Options::parse(&args(&values)).is_err(), "{values:?}");
+        }
+    }
+
+    #[test]
+    fn executable_pause_resume_preserves_geometry_and_declared_physics() {
+        let root = std::env::temp_dir().join(format!("frankensim-projected-resume-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        let arguments = vec![first.to_string_lossy().into_owned(), "3".into(), "2".into(),
+            "0.6".into(), "1".into(), "--youngs".into(), "2".into(), "--load".into(),
+            "1.5".into(), "--max-updates".into(), "0".into()];
+        assert_eq!(run(&arguments).unwrap(), 0);
+        let source = first.join(checkpoint::filename(0));
+        let source_bytes = std::fs::read(&source).unwrap();
+        assert_eq!(run(&[second.to_string_lossy().into_owned(), "--resume".into(),
+            source.to_string_lossy().into_owned(), "--max-updates".into(), "0".into()]).unwrap(), 0);
+        assert_eq!(std::fs::read(second.join(checkpoint::filename(0))).unwrap(), source_bytes);
+        assert_eq!(std::fs::read(first.join("level-set.csv")).unwrap(),
+            std::fs::read(second.join("level-set.csv")).unwrap());
+        let summary = std::fs::read_to_string(second.join("summary.json")).unwrap();
+        assert!(summary.contains("\"status\":\"paused\""));
+        assert!(summary.contains("\"baseline_scope\":\"segment\""));
+        assert!(summary.contains(&format!("\"youngs\":{:.17e}", 2.0)));
+        assert!(summary.contains(&format!("\"load\":{:.17e}", 1.5)));
+        assert!(summary.contains("\"candidate_budget_per_update\":1"));
+        assert!(run(&arguments).is_err(), "existing output is never overwritten");
+        assert_eq!(std::fs::read(source).unwrap(), source_bytes);
     }
 }
