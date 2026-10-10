@@ -3,6 +3,7 @@
 //! inside the declared x patch. They do not act on clipping-box faces.
 use super::*;
 use fs_cutfem::elastic3::surface::SurfaceForce3;
+use fs_cutfem::elastic3::dirichlet::EmbeddedDirichletOptions3;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Force {
@@ -52,8 +53,8 @@ impl SurfaceSpec {
     }
 }
 
-/// Only surface-bearing studies pay for surface rules. Both rule families use
-/// the same domain, clamp and shared box/point allowance on EVERY background.
+/// Surface loads OR embedded supports require surface rules. All rule families
+/// use the same domain, support law and cumulative allowance on EVERY grid.
 pub(super) fn build_operator(
     spec: &Spec, bounds: HexCell, tree: &Octree3, domain: &dyn CutSdf3,
     material: &IsotropicElastic, quadrature: &mut QuadratureControl3<'_>,
@@ -75,7 +76,30 @@ pub(super) fn build_operator(
     let options = ElasticityOptions3 {
         max_cells: spec.leaves, max_dofs: 50_000, ..Default::default()
     };
-    if spec.surfaces.iter().any(Option::is_some) {
+    if let Some(beta) = spec.fixed.embedded_penalty() {
+        let conflict = std::cell::Cell::new(false);
+        let patch = |p, n| {
+            let selected = spec.fixed.embedded_contains(p, spec.bounds);
+            // Diagnose the ACTUAL retained patch, including a surface on a
+            // shared band endpoint. Selection itself remains pure and stable.
+            // Never remove requested loads to manufacture lower compliance.
+            if selected && spec.surfaces.iter().flatten().any(|law|
+                law.traction(p, n, spec.bounds).iter().any(|v| *v != 0.0))
+            {
+                conflict.set(true);
+            }
+            selected
+        };
+        let operator = AdaptiveElasticity3::build_with_embedded_dirichlet(
+            bounds, tree, domain, material, &clamp, &patch, options,
+            EmbeddedDirichletOptions3 { beta }, Default::default(), quadrature,
+        )?;
+        if conflict.get() {
+            return Err(ElasticityError3::Invalid(
+                "surface load overlaps an embedded support; declare disjoint physical patches"));
+        }
+        Ok(operator)
+    } else if spec.surfaces.iter().any(Option::is_some) {
         AdaptiveElasticity3::build_with_surface(bounds, tree, domain, material,
             &clamp, options, Default::default(), quadrature)
     } else {
@@ -111,3 +135,6 @@ pub(super) fn with_laws<T>(spec: &Spec,
 #[cfg(test)]
 #[path = "loading_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "embedded_tests.rs"]
+mod embedded_tests;

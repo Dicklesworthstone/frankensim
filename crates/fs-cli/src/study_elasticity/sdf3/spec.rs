@@ -96,6 +96,32 @@ fn surface(node: &Node) -> Result<Option<loading::SurfaceSpec>> {
     }))
 }
 
+fn boundary(node: &Node) -> Result<FixedFace> {
+    if let NodeKind::Symbol(s) | NodeKind::Str(s) = &node.kind {
+        return match s.as_str() {
+            "left" => Ok(FixedFace::Left),
+            "right" => Ok(FixedFace::Right),
+            "front" => Ok(FixedFace::Front),
+            "back" => Ok(FixedFace::Back),
+            "bottom" => Ok(FixedFace::Bottom),
+            _ => Err(invalid("fixed-boundary requires a supported box face or (embedded :axis ... :fraction ... :penalty ...)")),
+        };
+    }
+    let values = fields(node, "embedded", &["axis", "fraction", "penalty"])?;
+    let axis = match &values[0].kind {
+        NodeKind::Symbol(s) | NodeKind::Str(s) => match s.as_str() {
+            "x" => 0, "y" => 1, "z" => 2,
+            _ => return Err(invalid("embedded support axis must be x, y or z")),
+        },
+        _ => return Err(invalid("embedded support axis must be x, y or z")),
+    };
+    Ok(FixedFace::Embedded {
+        axis,
+        fraction: super::super::pair(values[1], "embedded support fraction")?,
+        beta: scalar(values[2])?,
+    })
+}
+
 pub(super) fn parse(source: &str) -> Result<Spec> {
     let root = fs_ir::sexpr::parse(source).map_err(|e| invalid(e.to_string()))?;
     let items = super::super::list(&root, "3-D study")?;
@@ -152,17 +178,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
     let scenario = fields(&items[10], "scenario",
         &["fixed-boundary", if mixed { "loads" } else { "body-loads" }],
     )?;
-    let fixed = match &scenario[0].kind {
-        NodeKind::Symbol(s) | NodeKind::Str(s) => match s.as_str() {
-            "left" => FixedFace::Left,
-            "right" => FixedFace::Right,
-            "front" => FixedFace::Front,
-            "back" => FixedFace::Back,
-            "bottom" => FixedFace::Bottom,
-            _ => return Err(invalid("fixed-boundary requires left, right, front, back or bottom")),
-        },
-        _ => return Err(invalid("fixed-boundary must name a box face")),
-    };
+    let fixed = boundary(scenario[0])?;
     let load_nodes = super::super::list(scenario[1], "independent loads")?;
     if load_nodes.is_empty() || load_nodes.len() > 4 {
         return Err(invalid("declare 1..=4 independent reference loads"));

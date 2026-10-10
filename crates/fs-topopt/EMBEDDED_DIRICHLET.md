@@ -15,7 +15,57 @@ Hanging-node elimination, Jacobi/Galerkin preparation and density contractions
 therefore see the same modified operator. The default beta is 32, not a theorem
 that every cut, material distribution or disconnected component is stable.
 
-## Runnable consumers
+## Native study files
+
+The native `sdf3-study` command accepts a homogeneous embedded support in place
+of the old box-face name. No displacement is imposed on the clipping box:
+
+```lisp
+(scenario
+  :fixed-boundary (embedded :axis x :fraction (0.0 0.5) :penalty 32.0)
+  :loads (
+    (load :body-n-m3 (0.0 0.0 0.0)
+      :surface (traction :pa (1.0 0.0 0.0) :x-fraction (0.5 1.0))
+      :weight 1.0)))
+```
+
+The band selects retained **implicit-surface** points in the given fraction of
+the declared physical box's x, y or z span. Its endpoints are inclusive and
+must coincide with initial octree planes. This prevents silently approximating
+a partially covered initial cell, but does not certify patch topology or area.
+The penalty is explicit, finite and in `[1,10000]`; the range is an admission
+limit, not proof of coercivity. A patch with no positive numerical area refuses.
+All fields must appear in the shown order. Nonzero displacement and extra fields
+are not ignored: they are unsupported by this fixed-reference-load interface.
+
+```sh
+cargo run --release -p fs-cli --features sdf3-study --bin frankensim -- \
+  --json study examples/marquee/bracket-3d-embedded.fsim embedded-study.db
+```
+
+The complete two-stage example uses a slab `0.17<x<0.83` in the unit box. The
+left interior face is supported; independent tension and shear act on the right
+interior face. Material and load values are numerical demonstration inputs, not
+a validated engineering specification. `constructive-implicit` and
+`physical-curved-height-sdf` accept this support form; the legacy
+`curved-height-sdf` declaration keeps its original left-box-clamp envelope.
+
+Compliance stages, goal-refined backgrounds, stress-constrained studies and
+recovery use the same native operator builder. The canonical source binds the
+support band and penalty into study identity. Its shape, surface selection,
+Nitsche terms and reference loads are rebuilt together, never substituted with
+a box fixture on resume. A conflict between nonzero surface traction/pressure
+and selected support points refuses before an operator is returned; requested
+loads are never silently deleted to reduce compliance. Body loads are allowed.
+Conflicts are assessed on the retained quadrature, including shared band
+endpoints, rather than claiming an exact continuous boundary partition.
+
+The native regressions exercise an affine displacement oracle with **zero box
+clamps**, actual support area, full-chain density gradients, malformed/empty and
+loaded patches, shared work caps, cancellation, adaptive optimization and
+ledger replay. Presence of these regressions is not itself an execution receipt.
+
+## Runnable core consumers
 
 ```sh
 # Homogeneous embedded support; two independent right-face loads; two grids.
