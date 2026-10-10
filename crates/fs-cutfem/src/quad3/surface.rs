@@ -78,7 +78,7 @@ pub fn surface_cell_rules3(sdf: &dyn CutSdf3, cell: HexCell, options: SurfaceOpt
     options.validate()?;
     control.poll()?;
     let mut result = SurfaceRules3 { points: Vec::new() };
-    visit_surface(sdf, cell, control.options.depth, options, control, &mut result)?;
+    visit_surface(sdf, cell, control.options.depth, control.unresolved_refinements, options, control, &mut result)?;
     if !result.area().is_finite() { return Err(QuadratureError3::Invalid("surface area overflow")); }
     control.poll()?;
     Ok(result)
@@ -107,7 +107,7 @@ fn endpoint(sdf: &dyn CutSdf3, p: [f64; 3], resolution: f64, slope: f64,
     Ok(value)
 }
 
-fn visit_surface(sdf: &dyn CutSdf3, cell: HexCell, depth: u32, options: SurfaceOptions3,
+fn visit_surface(sdf: &dyn CutSdf3, cell: HexCell, depth: u32, extra: u32, options: SurfaceOptions3,
     control: &mut QuadratureControl3<'_>, out: &mut SurfaceRules3) -> Result<(), QuadratureError3> {
     control.poll()?;
     if control.work.boxes >= control.options.max_boxes { return Err(QuadratureError3::BoxBudget); }
@@ -117,19 +117,22 @@ fn visit_surface(sdf: &dyn CutSdf3, cell: HexCell, depth: u32, options: SurfaceO
     let sign = control.field(|| sdf.enclose(lo, hi))?;
     if sign.lo() >= 0.0 || sign.hi() < 0.0 { return Ok(()); }
     if depth > 0 {
-        let mid: [f64; 3] = std::array::from_fn(|a| f64::midpoint(lo[a], hi[a]));
-        if (0..3).any(|a| mid[a] <= lo[a] || mid[a] >= hi[a]) {
-            return Err(QuadratureError3::Invalid("surface subdivision cannot advance"));
-        }
-        for octant in 0..8 {
-            let a = std::array::from_fn(|i| if octant & (1 << i) == 0 { lo[i] } else { mid[i] });
-            let b = std::array::from_fn(|i| if octant & (1 << i) == 0 { mid[i] } else { hi[i] });
-            let child = HexCell::try_new(a, b).map_err(|_| QuadratureError3::Invalid("invalid surface subdivision"))?;
-            visit_surface(sdf, child, depth-1, options, control, out)?;
+        for child in children(cell)? {
+            visit_surface(sdf, child, depth - 1, extra, options, control, out)?;
         }
         return Ok(());
     }
-    let (axis, increasing, slope) = select_height(sdf, cell, control)?;
+    let (axis, increasing, slope) = match select_height(sdf, cell, control) {
+        Ok(height) => height,
+        Err(QuadratureError3::UnresolvedCell(_)) if extra > 0 => {
+            for child in children(cell)? {
+                visit_surface(sdf, child, 0, extra - 1, options, control, out)?;
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let first_point = out.points.len();
     let bases: Vec<_> = (0..3).filter(|&i| i != axis).collect();
     let (a, b) = (bases[0], bases[1]);
     let sa = 0.5*(hi[a]-lo[a]); let sb = 0.5*(hi[b]-lo[b]);
@@ -178,5 +181,10 @@ fn visit_surface(sdf: &dyn CutSdf3, cell: HexCell, depth: u32, options: SurfaceO
         control.work.points += 1;
         out.points.push(SurfacePoint3 { position: p, normal, weight });
     } }
+    if out.points.len() == first_point && extra > 0 {
+        for child in children(cell)? {
+            visit_surface(sdf, child, 0, extra - 1, options, control, out)?;
+        }
+    }
     Ok(())
 }

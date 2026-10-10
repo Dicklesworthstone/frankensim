@@ -62,7 +62,13 @@ pub(super) fn build_operator(
     // background, replay, and minimum-volume stress studies. Never replace an
     // authored shape with the legacy height-field placeholder in one branch.
     let domain: &dyn CutSdf3 = match &spec.constructive {
-        Some(shape) => shape,
+        Some(shape) => {
+            // Boolean switches can spoil a height direction away from the zero
+            // set. Refine only those unresolved leaves; keep all global work
+            // caps and the certified derivative/normal admission unchanged.
+            quadrature.set_unresolved_refinement_limit(2)?;
+            shape
+        }
         None => domain,
     };
     let clamp = |p| spec.fixed.contains(p, spec.bounds);

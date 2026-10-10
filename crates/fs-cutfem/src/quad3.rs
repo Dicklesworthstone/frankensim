@@ -89,6 +89,7 @@ impl std::error::Error for QuadratureError3 {}
 /// Reusable cumulative quadrature budget and cooperative cancellation context.
 pub struct QuadratureControl3<'a> {
     options: QuadratureOptions3,
+    unresolved_refinements: u32,
     work: QuadratureWork3,
     callback: &'a mut dyn FnMut(QuadratureWork3) -> ControlFlow<()>,
 }
@@ -105,7 +106,25 @@ impl<'a> QuadratureControl3<'a> {
             || options.root_relative_tolerance >= 1.0 {
             return Err(QuadratureError3::Invalid("invalid depth/root budget or tolerance"));
         }
-        Ok(Self { options, work: QuadratureWork3::default(), callback })
+        Ok(Self { options, unresolved_refinements: 0, work: QuadratureWork3::default(), callback })
+    }
+
+    /// Fund extra LOCAL octant subdivisions when a cut leaf has no certified
+    /// height direction or its height rule emits no support. Defaults to zero,
+    /// preserving the original fixed-depth behavior. Bulk and surface traversals
+    /// share this policy and the original cumulative box/point allowances.
+    ///
+    /// Only unresolved leaves spend these levels; resolved leaves retain their
+    /// original arithmetic. Total depth is at most twelve. Changing this limit
+    /// neither refunds work nor increases any box, point or root budget. It does
+    /// not turn unresolved cuts into empty regions or certify Gauss accuracy.
+    pub fn set_unresolved_refinement_limit(&mut self, additional_depth: u32)
+        -> Result<(), QuadratureError3> {
+        if additional_depth > 12 - self.options.depth {
+            return Err(QuadratureError3::Invalid("combined cut subdivision depth exceeds twelve"));
+        }
+        self.unresolved_refinements = additional_depth;
+        Ok(())
     }
 
     /// Consumed work is observable even after cancellation or refusal.
@@ -168,7 +187,7 @@ pub fn cut_cell_rules3(
 ) -> Result<CutRules3, QuadratureError3> {
     control.poll()?;
     let mut result = CutRules3 { bulk: Vec::new(), volume_bounds: Interval::new(0.0, 0.0), cut_boxes: 0, surface: None };
-    visit(sdf, cell, control.options.depth, control, &mut result)?;
+    visit(sdf, cell, control.options.depth, control.unresolved_refinements, control, &mut result)?;
     // Outward additions around exact zero can produce a negative subnormal.
     result.volume_bounds = Interval::new(result.volume_bounds.lo().max(0.0), result.volume_bounds.hi());
     if !result.volume().is_finite() || !result.volume_bounds.hi().is_finite() {
@@ -229,8 +248,23 @@ fn full_box(cell: HexCell, control: &mut QuadratureControl3<'_>, out: &mut CutRu
     Ok(())
 }
 
-fn visit(sdf: &dyn CutSdf3, cell: HexCell, depth: u32, control: &mut QuadratureControl3<'_>, out: &mut CutRules3)
-    -> Result<(), QuadratureError3> {
+fn children(cell: HexCell) -> Result<[HexCell; 8], QuadratureError3> {
+    let (lo, hi) = (cell.lo(), cell.hi());
+    let m: [f64; 3] = std::array::from_fn(|a| f64::midpoint(lo[a], hi[a]));
+    if (0..3).any(|a| m[a] <= lo[a] || m[a] >= hi[a]) {
+        return Err(QuadratureError3::Invalid("subdivision cannot advance"));
+    }
+    let mut children = [cell; 8];
+    for (octant, child) in children.iter_mut().enumerate() {
+        let a = std::array::from_fn(|i| if octant & (1 << i) == 0 { lo[i] } else { m[i] });
+        let b = std::array::from_fn(|i| if octant & (1 << i) == 0 { m[i] } else { hi[i] });
+        *child = HexCell::try_new(a, b).map_err(|_| QuadratureError3::Invalid("invalid subdivision"))?;
+    }
+    Ok(children)
+}
+
+fn visit(sdf: &dyn CutSdf3, cell: HexCell, depth: u32, extra: u32,
+    control: &mut QuadratureControl3<'_>, out: &mut CutRules3) -> Result<(), QuadratureError3> {
     control.poll()?;
     if control.work.boxes >= control.options.max_boxes { return Err(QuadratureError3::BoxBudget); }
     control.work.boxes += 1;
@@ -243,21 +277,18 @@ fn visit(sdf: &dyn CutSdf3, cell: HexCell, depth: u32, control: &mut QuadratureC
         return full_box(cell, control, out);
     }
     if depth > 0 {
-        let m = std::array::from_fn::<_, 3, _>(|a| f64::midpoint(lo[a], hi[a]));
-        if (0..3).any(|a| m[a] <= lo[a] || m[a] >= hi[a]) {
-            return Err(QuadratureError3::Invalid("subdivision cannot advance"));
-        }
-        for octant in 0..8 {
-            let a = std::array::from_fn(|i| if octant & (1 << i) == 0 { lo[i] } else { m[i] });
-            let b = std::array::from_fn(|i| if octant & (1 << i) == 0 { m[i] } else { hi[i] });
-            let child = HexCell::try_new(a, b).map_err(|_| QuadratureError3::Invalid("invalid subdivision"))?;
-            visit(sdf, child, depth - 1, control, out)?;
-        }
+        for child in children(cell)? { visit(sdf, child, depth - 1, extra, control, out)?; }
         return Ok(());
     }
-    let (axis, increasing, best) = select_height(sdf, cell, control)?;
-    out.cut_boxes += 1;
-    out.volume_bounds = out.volume_bounds + Interval::new(0.0, volume.hi());
+    let (axis, increasing, best) = match select_height(sdf, cell, control) {
+        Ok(height) => height,
+        Err(QuadratureError3::UnresolvedCell(_)) if extra > 0 => {
+            for child in children(cell)? { visit(sdf, child, 0, extra - 1, control, out)?; }
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let first_point = out.bulk.len();
     let bases: Vec<usize> = (0..3).filter(|&a| a != axis).collect();
     let (a, b) = (bases[0], bases[1]);
     let ma = f64::midpoint(lo[a], hi[a]); let mb = f64::midpoint(lo[b], hi[b]);
@@ -274,6 +305,14 @@ fn visit(sdf: &dyn CutSdf3, cell: HexCell, depth: u32, control: &mut QuadratureC
             point(out, p, wa * wb * w * sa * sb * half, control)?;
         }
     } }
+    if out.bulk.len() == first_point && extra > 0 {
+        // Empty Gauss support is not proof of an empty cut box. No points or
+        // volume contribution from this parent have been retained or refunded.
+        for child in children(cell)? { visit(sdf, child, 0, extra - 1, control, out)?; }
+        return Ok(());
+    }
+    out.cut_boxes += 1;
+    out.volume_bounds = out.volume_bounds + Interval::new(0.0, volume.hi());
     Ok(())
 }
 
