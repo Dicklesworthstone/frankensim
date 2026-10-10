@@ -113,13 +113,27 @@ keys); a merely renamed project shows the hash change and a bit-identical QoI.
 The experimental `cooling-network <request.json>` binary command admits an
 opt-in `transient.enthalpy` storage model in its existing
 `frankensim.cooling-network.v1` request. It calls the production
-`EnthalpyBackwardEuler` owner, including its ambient-radiation endpoint when
+`HeterogeneousEnthalpyBackwardEuler` owner (also for one uniform chart), including its ambient-radiation endpoint when
 requested, and the existing quasi-steady mixed-air coupling. This command
 remains a nominal estimate outside the native `.fsim`/ledger workflow.
 
-The enthalpy object requires one fixed reference density, 2–4096 equilibrium
-chart knots, caller-declared material identity/source, explicit Newton/Krylov/
-backtracking budgets and one uniform or nodal specific-enthalpy initial state.
+The enthalpy object requires explicit Newton/Krylov/backtracking budgets and
+one uniform or nodal specific-enthalpy initial state. The original uniform
+chart fields remain valid. Alternatively, `materials` supplies 1–256 named
+records, each with a positive fixed reference density, 2–4096 equilibrium
+chart knots and caller-declared material identity/source; `element_materials`
+assigns exactly one name per tetrahedron. These storage assignments are
+independent of conductivity and contact material labels. Uniform fields and
+the assigned representation cannot be combined. Each enthalpy vertex belongs
+to exactly one named record: different charts require separate interface
+vertices and an explicit thermal contact, even if their numbers coincide.
+No chart blending or temperature-to-enthalpy interface conversion is inferred.
+
+Each chart's optional `phase` is `solid-liquid` by default, preserving the
+existing mixed-phase ingress. Explicit `solid` and `liquid` call the material
+owner's single-phase constructor: every knot has the corresponding liquid
+fraction 0 or 1, and temperature rises strictly with enthalpy. An ordinary
+sensible solid therefore needs no fictitious melting endpoint.
 It excludes the temperature/capacity initializers and `transient.nonlinear`.
 The material owner validates the chart; temperature and phase are evaluated
 from accepted specific enthalpy, including unsmoothed latent plateaus. The
@@ -143,21 +157,63 @@ The final JSON includes `solid_specific_enthalpies_j_kg`,
 `solid_liquid_mass_fractions`, existing final temperatures and the scheme
 `backward-euler-total-enthalpy`. `transient.enthalpy` retains initial/final
 total reference enthalpy and the chart/source/density/control/work declarations.
+Assigned charts retain their named `materials`, `element_materials`, and
+derived `vertex_materials`; each history observation resolves its own chart.
 Each accepted history row also carries specific-enthalpy extrema and a
 reference-mass-weighted mean liquid fraction. A new schedule may restart from
 the returned nodal enthalpy; no temperature-to-enthalpy inverse is inferred on
-a plateau. Full nodal history is not stored.
+a plateau. The forward JSON does not store full nodal history.
 
-This first CLI consumer admits fixed schedules and one fixed-density chart.
-Adaptive/repeated schedules, design/adjoint consumers, time/mesh studies, recirculation and
-enclosure radiation explicitly refuse. No moving geometry, phase advection,
+On fixed grids, `transient.adjoint` admits `final` or `sampled-peak` objectives
+and an explicit `max_checkpoint_bytes`. The dedicated enthalpy tape carries
+the physical h cotangent through every earlier step; it never divides by
+`dT/dh` on a latent plateau. It binds checked endpoint implicit derivatives
+with complete mixed-air and declared ambient-radiation feedback. Retained
+h/temperature/reference checkpoints and control accumulators are charged
+before allocation. Reconstruction requires exact accepted h and temperature
+bits and rechecks physical residual/energy gates. The cap is not a bound on
+all solver workspace. Reverse solves share the original invocation deadline;
+failed replay, derivative gates or cancellation publish no partial gradient.
+
+The report's initial-state keys are
+`dtemperature_dinitial_specific_enthalpies_k_kg_j` and
+`dtemperature_duniform_initial_specific_enthalpy_k_kg_j`. Interval
+`dtemperature_dpower_multiplier_k` and graph-node-ordered
+`dtemperature_dinlet_temperatures` retain the ordinary trajectory conventions.
+Charts, reference densities, conductivity, geometry, fan drive, convection
+laws, contact resistance and radiation controls remain fixed. The
+`component_power` and `contact_resistance` adjoint options refuse. Material
+slope corners and validity endpoints refuse classical endpoint derivatives;
+plateau interiors are supported. Ties select the existing earliest sampled
+maximum/active-vertex branch without claiming a unique derivative.
+
+`transient.power_design` uses the existing workload-multiplier sizing search.
+With a sampled-peak adjoint it can use its checked directional sensitivity;
+omitting `transient.adjoint` selects the existing derivative-free search.
+Each evaluated candidate runs the complete physical trajectory and passes its
+residual, energy and feasibility gates. The reported feasible workload applies
+to sampled endpoints; no continuous-time peak bound or global optimum is
+claimed. `examples/cooling-network/enthalpy-power-sizing.json` is a runnable
+synthetic phase-changing request with coupled air and ambient radiation.
+
+This CLI consumer admits fixed schedules and fixed reference densities with
+uniform or explicitly assigned equilibrium charts.
+Adaptive/repeated schedules, fan/design controls outside workload sizing,
+time/mesh studies, recirculation and enclosure radiation explicitly refuse.
+No moving geometry, phase advection,
 fluid storage, phase kinetics or inter-step peak/error certificate is claimed.
 `tests/cooling_enthalpy.rs` exercises the real binary with independent analytic
 nodal/whole-window latent storage, hot/cold reservoir and unchanged air-load
 references, endpoint summaries, deterministic replay, restart parity and
-unsupported/data/budget/cancellation refusals. The fixture is synthetic:
-`examples/cooling-network/enthalpy-phase-pulse.json`; its request and numerical
-reference are documented in `examples/cooling-network/TRANSIENT_COOLING.md`.
+unsupported/data/budget/cancellation refusals. Its heterogeneous matching-contact
+case checks every nodal reference mass, two distinct latent temperatures,
+internal-transfer cancellation and both hot/cold radiative reservoirs against
+independent algebra. Single-phase sensible diffusion is compared with an
+independent four-node linear solve, and a latent insert/ordinary-solid case
+checks joint transport. The fixtures are synthetic:
+`examples/cooling-network/enthalpy-phase-pulse.json` and
+`examples/cooling-network/enthalpy-contact-materials.json`; requests and numerical
+references are documented in `examples/cooling-network/TRANSIENT_COOLING.md`.
 
 ### Material discovery
 

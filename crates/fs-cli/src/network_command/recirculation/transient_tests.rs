@@ -24,7 +24,7 @@ fn accepted_transient_endpoints_close_fresh_exhaust_energy() {
         "intervals":[{"duration_s":0.1,"power_scale":1},
                      {"duration_s":0.1,"power_scale":0}]}"#).unwrap();
     request.transient = Some(transient::Schedule::parse(&value,
-        request.mesh.vertex_count(), request.mesh.element_count(), None).unwrap());
+        &request.mesh, None).unwrap());
     let result = execute(&request, &CancelGate::new_clock_free()).unwrap();
     let root = J::parse(&result).unwrap();
     let trajectory = root.get("transient").unwrap();

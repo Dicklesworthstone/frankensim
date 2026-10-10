@@ -250,7 +250,6 @@ fn scaled_workload(workload: &Workload, multiplier: f64) -> Result<Workload> {
 /// Preserve footprints and let the original PowerMap construct the actual
 /// source. Initial temperatures and fan speeds are never power-scaled.
 fn power_schedule(cx: &Cx<'_>, schedule: &Schedule, multiplier: f64) -> Result<Schedule> {
-    if schedule.enthalpy.is_some() {return Err(bad("enthalpy does not support design schedules"));}
     let intervals=schedule.intervals.iter().map(|interval| {
         poll(cx)?;
         Ok(Interval {duration:interval.duration,steps:interval.steps,speed:interval.speed,
@@ -259,7 +258,8 @@ fn power_schedule(cx: &Cx<'_>, schedule: &Schedule, multiplier: f64) -> Result<S
     Ok(Schedule {initial:schedule.initial.clone(),capacities:schedule.capacities.clone(),intervals,
         limit:schedule.limit,total_steps:schedule.total_steps,max_step_s:schedule.max_step_s,max_steps:schedule.max_steps,
         adaptive:schedule.adaptive,nonlinear:schedule.nonlinear,adjoint:schedule.adjoint,
-        time_convergence:None,fan_speed_design:None,power_design:None,repeat:schedule.repeat,enthalpy:None})
+        time_convergence:None,fan_speed_design:None,power_design:None,repeat:schedule.repeat,
+        enthalpy:schedule.enthalpy.clone()})
 }
 
 /// An immutable candidate schedule gives forward and reverse the SAME fan

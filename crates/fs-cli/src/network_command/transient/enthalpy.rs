@@ -1,26 +1,40 @@
 //! Fixed-grid total-enthalpy trajectories. Accepted h, never temperature, is
 //! physical history. Air and radiation iterations borrow the same old h.
+mod adjoint;
+
 use super::*;
 use fs_blake3::ContentHash;
 use fs_conduction::transient::enthalpy::{
-    EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyStepConfig, EnthalpyStepSolution,
+    EnthalpyBudget, EnthalpyStepConfig, EnthalpyStepSolution, HeterogeneousEnthalpyBackwardEuler,
+    ReferenceEnthalpyMaterial,
 };
-use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
+use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
 use fs_solver::{Globalization, LineSearchConfig, NewtonKrylovConfig};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct Config {
-    curve: EquilibriumEnthalpyPhaseCurve,
-    source: String,
-    density: f64,
+    materials: Vec<Material>,
+    element_material_ids: Vec<usize>,
+    vertex_material_ids: Vec<usize>,
+    assigned: bool,
     initial_h: Vec<f64>,
     newton: NewtonKrylovConfig,
     max_iterations: usize,
     max_backtracks: usize,
 }
 
+#[derive(Debug, Clone)]
+struct Material {
+    name: String,
+    curve: EquilibriumEnthalpyPhaseCurve,
+    source: String,
+    density: f64,
+    phase: String,
+}
+
 impl Config {
-    pub(super) fn parse(value: &J, schedule: &J, vertices: usize) -> Result<Self> {
+    pub(super) fn parse(value: &J, schedule: &J, mesh: &ConductionMesh) -> Result<Self> {
+        let vertices = mesh.vertex_count();
         for key in [
             "initial_temperature_k",
             "initial_temperatures_k",
@@ -29,14 +43,12 @@ impl Config {
             "nonlinear",
             "adaptive",
             "repeat",
-            "adjoint",
             "time_convergence",
             "fan_speed_design",
-            "power_design",
         ] {
             if schedule.get(key).is_some() {
                 return Err(bad(format!(
-                    "transient.enthalpy does not admit transient.{key}; use explicit h and a fixed forward schedule"
+                    "transient.enthalpy does not admit transient.{key}; use explicit h and a fixed schedule"
                 )));
             }
         }
@@ -47,47 +59,100 @@ impl Config {
                 "source",
                 "reference_density_kg_m3",
                 "knots",
+                "phase",
+                "materials",
+                "element_materials",
                 "initial_specific_enthalpy_j_kg",
                 "initial_specific_enthalpies_j_kg",
                 "newton",
             ],
             "transient.enthalpy",
         )?;
-        let identity = ContentHash::from_hex(&string(
-            get(value, "material_card_identity")?,
-            "material_card_identity",
-        )?)
-        .ok_or_else(|| bad("enthalpy material_card_identity requires 64 hex characters"))?;
-        let source = string(get(value, "source")?, "enthalpy.source")?;
-        let density = positive(
-            get(value, "reference_density_kg_m3")?,
-            "reference_density_kg_m3",
-        )?;
-        let mut knots = Vec::new();
-        for row in array(get(value, "knots")?, "enthalpy.knots", 4096)? {
-            object(
-                row,
-                &[
-                    "specific_enthalpy_j_kg",
-                    "temperature_k",
-                    "liquid_mass_fraction",
-                ],
-                "enthalpy knot",
+        let assigned = value.get("materials").is_some() || value.get("element_materials").is_some();
+        let (materials, element_material_ids) = if assigned {
+            for key in [
+                "material_card_identity",
+                "source",
+                "reference_density_kg_m3",
+                "knots",
+                "phase",
+            ] {
+                if value.get(key).is_some() {
+                    return Err(bad(
+                        "choose uniform enthalpy chart fields or materials and element_materials",
+                    ));
+                }
+            }
+            let mut materials = Vec::new();
+            let mut names = BTreeMap::new();
+            for row in array(get(value, "materials")?, "enthalpy.materials", 256)? {
+                object(
+                    row,
+                    &[
+                        "name",
+                        "material_card_identity",
+                        "source",
+                        "reference_density_kg_m3",
+                        "knots",
+                        "phase",
+                    ],
+                    "enthalpy material",
+                )?;
+                let name = string(get(row, "name")?, "enthalpy material name")?;
+                if names.insert(name.clone(), materials.len()).is_some() {
+                    return Err(bad("duplicate enthalpy material name"));
+                }
+                materials.push(Material::parse(row, name)?);
+            }
+            if materials.is_empty() {
+                return Err(bad("enthalpy materials must be nonempty"));
+            }
+            let rows = array(
+                get(value, "element_materials")?,
+                "enthalpy.element_materials",
+                mesh.element_count(),
             )?;
-            knots.push(EnthalpyPhaseKnot {
-                specific_enthalpy_j_kg: number(
-                    get(row, "specific_enthalpy_j_kg")?,
-                    "specific enthalpy",
-                )?,
-                temperature_k: positive(get(row, "temperature_k")?, "knot temperature")?,
-                liquid_mass_fraction: number(
-                    get(row, "liquid_mass_fraction")?,
-                    "liquid mass fraction",
-                )?,
-                bulk_density_kg_m3: density,
-            });
+            if rows.len() != mesh.element_count() {
+                return Err(bad("one enthalpy material per tetrahedron required"));
+            }
+            let ids = rows
+                .iter()
+                .map(|row| {
+                    let name = string(row, "enthalpy element material")?;
+                    names
+                        .get(&name)
+                        .copied()
+                        .ok_or_else(|| bad(format!("unknown enthalpy material {name}")))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            (materials, ids)
+        } else {
+            (
+                vec![Material::parse(value, "uniform".into())?],
+                vec![0; mesh.element_count()],
+            )
+        };
+        // A nodal h has exactly one constitutive meaning, even if two named
+        // records happen to contain equal numbers. Conductivity names do not
+        // select storage charts. Unlike a temperature interface, two h charts
+        // require separate traces joined by an explicit contact.
+        let mut vertex_material_ids = vec![usize::MAX; vertices];
+        for (tet, &material) in mesh.complex().tets.iter().zip(&element_material_ids) {
+            for &vertex in tet {
+                let slot = &mut vertex_material_ids[vertex as usize];
+                if *slot != usize::MAX && *slot != material {
+                    return Err(bad(format!(
+                        "enthalpy vertex {vertex} belongs to different materials; use distinct interface vertices and an explicit thermal contact"
+                    )));
+                }
+                *slot = material;
+            }
         }
-        let curve = EquilibriumEnthalpyPhaseCurve::try_new(identity, knots).map_err(producer)?;
+        if vertex_material_ids.contains(&usize::MAX) {
+            return Err(bad(
+                "enthalpy storage requires every vertex to belong to a tetrahedron",
+            ));
+        }
         let initial_h = match (
             value.get("initial_specific_enthalpy_j_kg"),
             value.get("initial_specific_enthalpies_j_kg"),
@@ -175,9 +240,10 @@ impl Config {
             ..NewtonKrylovConfig::default()
         };
         let config = Self {
-            curve,
-            source,
-            density,
+            materials,
+            element_material_ids,
+            vertex_material_ids,
+            assigned,
             initial_h,
             newton,
             max_iterations,
@@ -190,13 +256,41 @@ impl Config {
     pub(super) fn initial_temperatures(&self) -> Result<Vec<f64>> {
         self.initial_h
             .iter()
-            .map(|&h| {
-                self.curve
+            .enumerate()
+            .map(|(vertex, &h)| {
+                self.materials[self.vertex_material_ids[vertex]]
+                    .curve
                     .state_at_specific_enthalpy(h)
                     .map(|state| state.temperature_k())
                     .map_err(producer)
             })
             .collect()
+    }
+
+    fn prepare<'m, 'c>(
+        &'c self,
+        cx: &Cx<'_>,
+        mesh: &'m ConductionMesh,
+    ) -> Result<Prepared<'m, 'c>> {
+        let materials = self
+            .materials
+            .iter()
+            .map(|row| ReferenceEnthalpyMaterial {
+                curve: &row.curve,
+                reference_density_kg_m3: row.density,
+            })
+            .collect::<Vec<_>>();
+        Prepared::new(
+            cx,
+            mesh,
+            &materials,
+            &self.element_material_ids,
+            EnthalpyBudget {
+                max_vertices: 20_000,
+                max_elements: 100_000,
+            },
+        )
+        .map_err(producer)
     }
 
     pub(super) fn admit(&self, request: &Request, schedule: &Schedule) -> Result<()> {
@@ -207,15 +301,16 @@ impl Config {
             || request.recirculation.is_some()
             || schedule.adaptive.is_some()
             || schedule.repeat.is_some()
-            || schedule.adjoint.is_some()
             || schedule.time_convergence.is_some()
-            || schedule.power_design.is_some()
             || schedule.fan_speed_design.is_some()
             || schedule.nonlinear.is_some()
         {
             return Err(bad(
-                "enthalpy supports fixed forward schedules without design, adjoint, adaptive/repeated/study or recirculation modes",
+                "enthalpy supports fixed schedules and workload-power sizing without steady/fan design, adaptive/repeated/study or recirculation modes",
             ));
+        }
+        if let Some(adjoint) = schedule.adjoint {
+            adjoint.admit_enthalpy()?;
         }
         let columns = self
             .max_iterations
@@ -231,6 +326,87 @@ impl Config {
             policy.enthalpy_controls(request)?;
         }
         Ok(())
+    }
+}
+
+// The library keeps one checked h tangent and the same accepted-step API for
+// uniform and assigned charts. A trajectory adjoint can bind this owner too.
+type Prepared<'m, 'c> = HeterogeneousEnthalpyBackwardEuler<'m, 'c>;
+
+impl Material {
+    fn parse(value: &J, name: String) -> Result<Self> {
+        let identity = ContentHash::from_hex(&string(
+            get(value, "material_card_identity")?,
+            "material_card_identity",
+        )?)
+        .ok_or_else(|| bad("enthalpy material_card_identity requires 64 hex characters"))?;
+        let source = string(get(value, "source")?, "enthalpy.source")?;
+        let density = positive(
+            get(value, "reference_density_kg_m3")?,
+            "reference_density_kg_m3",
+        )?;
+        let phase = value
+            .get("phase")
+            .map(|v| string(v, "enthalpy.phase"))
+            .transpose()?
+            .unwrap_or_else(|| "solid-liquid".into());
+        let mut knots = Vec::new();
+        for row in array(get(value, "knots")?, "enthalpy.knots", 4096)? {
+            object(
+                row,
+                &[
+                    "specific_enthalpy_j_kg",
+                    "temperature_k",
+                    "liquid_mass_fraction",
+                ],
+                "enthalpy knot",
+            )?;
+            knots.push(EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: number(
+                    get(row, "specific_enthalpy_j_kg")?,
+                    "specific enthalpy",
+                )?,
+                temperature_k: positive(get(row, "temperature_k")?, "knot temperature")?,
+                liquid_mass_fraction: number(
+                    get(row, "liquid_mass_fraction")?,
+                    "liquid mass fraction",
+                )?,
+                bulk_density_kg_m3: density,
+            });
+        }
+        let curve = match phase.as_str() {
+            "solid-liquid" => EquilibriumEnthalpyPhaseCurve::try_new(identity, knots),
+            "solid" => EquilibriumEnthalpyPhaseCurve::try_single_phase(
+                identity,
+                SolidLiquidPhase::Solid,
+                knots,
+            ),
+            "liquid" => EquilibriumEnthalpyPhaseCurve::try_single_phase(
+                identity,
+                SolidLiquidPhase::Liquid,
+                knots,
+            ),
+            _ => return Err(bad("enthalpy phase must be solid-liquid, solid or liquid")),
+        }
+        .map_err(producer)?;
+        Ok(Self {
+            name,
+            curve,
+            source,
+            density,
+            phase,
+        })
+    }
+
+    fn fields(&self) -> Result<String> {
+        Ok(format!(
+            "\"material_card_identity\":{},\"chart_identity\":{},\"source\":{},\"reference_density_kg_m3\":{},\"phase\":{}",
+            quote(&self.curve.material_card_identity().to_hex()),
+            quote(&self.curve.identity().to_hex()),
+            quote(&self.source),
+            num(self.density)?,
+            quote(&self.phase)
+        ))
     }
 }
 
@@ -268,7 +444,7 @@ fn advance(
     request: &Request,
     cx: &Cx<'_>,
     config: &Config,
-    engine: &EnthalpyBackwardEuler<'_, '_>,
+    engine: &Prepared<'_, '_>,
     network: &TransportNetwork<'_>,
     coefficients: &BTreeMap<String, f64>,
     old_h: &[f64],
@@ -422,7 +598,7 @@ fn summary(cx: &Cx<'_>, config: &Config, masses: &[f64], h: &[f64]) -> Result<(S
         }
         minimum = minimum.min(h);
         maximum = maximum.max(h);
-        let phase = config
+        let phase = config.materials[config.vertex_material_ids[i]]
             .curve
             .state_at_specific_enthalpy(h)
             .map_err(producer)?;
@@ -441,28 +617,19 @@ fn summary(cx: &Cx<'_>, config: &Config, masses: &[f64], h: &[f64]) -> Result<(S
     ))
 }
 
-pub(super) fn solve(
+pub(super) fn simulate(
     request: &Request,
     cx: &Cx<'_>,
     schedule: &Schedule,
     config: &Config,
-) -> Result<String> {
+) -> Result<Trajectory> {
     config.admit(request, schedule)?;
     poll(cx)?;
-    let engine = EnthalpyBackwardEuler::uniform(
-        cx,
-        &request.mesh,
-        &config.curve,
-        config.density,
-        EnthalpyBudget {
-            max_vertices: 20_000,
-            max_elements: 100_000,
-        },
-    )
-    .map_err(producer)?;
+    let engine = config.prepare(cx, &request.mesh)?;
     let masses = engine.reference_nodal_masses_kg();
     let mut h = config.initial_h.clone();
     let (initial, initial_vertex) = initial_objective(request, cx, &schedule.initial)?;
+    let mut tape = adjoint::Tape::new(request, schedule, initial, initial_vertex)?;
     let (phase, initial_total) = summary(cx, config, masses, &h)?;
     let mut history = vec![format!(
         "{{\"time_s\":0,\"objective_temperature_k\":{},\"active_vertex\":{},\"initial_state\":true,{phase}}}",
@@ -536,6 +703,18 @@ pub(super) fn solve(
                 request
                     .objective
                     .evaluate(cx, &solved.solid.temperature, &solved.coupled.solid)?;
+            if let Some(tape) = &mut tape {
+                tape.record(
+                    &solved.solid.specific_enthalpy_j_kg,
+                    &solved.solid.temperature,
+                    &solved.coupled.reference_temperatures_k,
+                    endpoint,
+                    dt,
+                    ordinal,
+                    state.value,
+                    state.vertex,
+                )?;
+            }
             if state.value > peak {
                 peak = state.value;
                 peak_time = endpoint;
@@ -609,6 +788,14 @@ pub(super) fn solve(
         return Err(producer("whole-window enthalpy energy gate failed"));
     }
     let (_, final_total) = summary(cx, config, masses, &h)?;
+    let (adjoint, reconstruction_solves, design_gradient) = match tape {
+        Some(tape) => tape.reverse(request, cx, schedule, config, &engine)?,
+        None => ("null".into(), 0, None),
+    };
+    let total_solves = work
+        .solves
+        .checked_add(reconstruction_solves)
+        .ok_or_else(|| budget("enthalpy total solid work overflow"))?;
     let result = final_result.ok_or_else(|| bad("enthalpy trajectory has no final step"))?;
     let prefix = result
         .strip_suffix("}\n")
@@ -621,12 +808,29 @@ pub(super) fn solve(
     let Globalization::LineSearch(line) = config.newton.globalization else {
         return Err(bad("enthalpy requires its admitted line search"));
     };
+    let material_fields = if config.assigned {
+        let materials = config
+            .materials
+            .iter()
+            .map(|m| Ok(format!("{{\"name\":{},{}}}", quote(&m.name), m.fields()?)))
+            .collect::<Result<Vec<_>>>()?;
+        let names = |ids: &[usize]| {
+            ids.iter()
+                .map(|&id| quote(&config.materials[id].name))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        format!(
+            "\"materials\":[{}],\"element_materials\":[{}],\"vertex_materials\":[{}]",
+            materials.join(","),
+            names(&config.element_material_ids),
+            names(&config.vertex_material_ids)
+        )
+    } else {
+        config.materials[0].fields()?
+    };
     let policy = format!(
-        "{{\"material_card_identity\":{},\"chart_identity\":{},\"source\":{},\"reference_density_kg_m3\":{},\"initial_total_enthalpy_j\":{},\"final_total_enthalpy_j\":{},\"max_iterations\":{},\"residual_rtol\":{},\"residual_atol_j\":{},\"linear_restart\":{},\"max_linear_cycles\":{},\"armijo_c\":{},\"shrink\":{},\"max_backtracks\":{},\"solid_solves\":{},\"newton_updates\":{},\"krylov_iterations\":{},\"scope\":\"one caller-declared fixed-density equilibrium chart; reference masses and geometry fixed; source/identifier are declarations, not verified material evidence; sensible and latent energy counted once; final nodal h is restart history\"}}",
-        quote(&config.curve.material_card_identity().to_hex()),
-        quote(&config.curve.identity().to_hex()),
-        quote(&config.source),
-        num(config.density)?,
+        "{{{material_fields},\"initial_total_enthalpy_j\":{},\"final_total_enthalpy_j\":{},\"max_iterations\":{},\"residual_rtol\":{},\"residual_atol_j\":{},\"linear_restart\":{},\"max_linear_cycles\":{},\"armijo_c\":{},\"shrink\":{},\"max_backtracks\":{},\"solid_solves\":{},\"newton_updates\":{},\"krylov_iterations\":{},\"scope\":\"caller-declared fixed-density equilibrium charts with explicit element ownership; reference masses and geometry fixed; source/identifier are declarations, not verified material evidence; sensible and latent energy counted once; final nodal h is restart history\"}}",
         num(initial_total)?,
         num(final_total)?,
         config.max_iterations,
@@ -642,11 +846,11 @@ pub(super) fn solve(
         work.krylov
     );
     let output = format!(
-        "{prefix},\"solid_specific_enthalpies_j_kg\":{},\"solid_liquid_mass_fractions\":{},\"transient\":{{\"scheme\":\"backward-euler-total-enthalpy\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{completed},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":null,\"nonlinear\":null,\"adjoint\":null,\"enthalpy\":{policy}{radiation_field},\"scope\":\"fixed forward workload/fan schedule; accepted enthalpy is physical history; temperatures and mass-weighted phase summaries observe that state; sampled endpoints do not bound inter-step peaks; no moving geometry, melt flow, adaptive/repeated/design/study/adjoint or enclosure mode\"}}}}\n",
+        "{prefix},\"solid_specific_enthalpies_j_kg\":{},\"solid_liquid_mass_fractions\":{},\"transient\":{{\"scheme\":\"backward-euler-total-enthalpy\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{completed},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":null,\"nonlinear\":null,\"adjoint\":{adjoint},\"enthalpy\":{policy}{radiation_field},\"scope\":\"fixed workload/fan schedule with optional physical h-history adjoint and workload-power sizing; accepted enthalpy is physical history; temperatures and mass-weighted phase summaries observe that state; sampled endpoints do not bound inter-step peaks; no moving geometry, melt flow, adaptive/repeated/study or enclosure mode\"}}}}\n",
         numbers(&h)?,
         numbers(&final_liquid)?,
         num(time)?,
-        work.solves,
+        total_solves,
         work.solves,
         num(peak)?,
         num(peak_time)?,
@@ -659,5 +863,12 @@ pub(super) fn solve(
         history.join(",")
     );
     poll(cx)?;
-    Ok(output)
+    Ok(Trajectory {
+        output,
+        peak_k: peak,
+        peak_time_s: peak_time,
+        solid_solves: total_solves,
+        steps: completed,
+        design_gradient,
+    })
 }

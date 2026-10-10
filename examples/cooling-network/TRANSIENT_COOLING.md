@@ -131,6 +131,29 @@ explicitly. Omit the temperature initializers, volumetric-capacity fields and
 `transient.nonlinear`; mixing storage formulations refuses. Conductivity
 declarations and supported finite thermal contacts remain independent inputs.
 
+To declare an ordinary sensible solid without inventing a melting endpoint,
+add `"phase": "solid"`; every knot must have liquid fraction zero and strictly
+increasing temperature. `"phase": "liquid"` likewise requires fraction one.
+The default `"phase": "solid-liquid"` retains the mixed-phase constructor,
+including its fully solid/fully liquid endpoint requirements and exact plateaus.
+
+For multiple storage materials, replace the uniform chart fields inside
+`enthalpy` with a `materials` array and an `element_materials` array. Each of
+the 1–256 material records supplies a unique `name`, `material_card_identity`,
+`source`, `reference_density_kg_m3`, `knots`, and optional `phase` as above.
+`element_materials` contains exactly one of those names for each solid
+tetrahedron, in the same order. Initial nodal enthalpies and Newton controls
+remain beside these arrays. See the complete
+[two-material contact request](enthalpy-contact-materials.json).
+
+Storage names never select conductivity or contact cards. Their assignments
+are independent of `solid.materials` and `solid.element_materials`, and no
+association is inferred from matching names. A single vertex cannot carry two
+different storage identities, even when their tabulated values agree. Use
+separate interface vertices and an explicit `solid.contacts` declaration for
+different enthalpy charts; undeclared mixtures refuse. Shared vertices within
+one storage material remain valid.
+
 The required `enthalpy.newton` object declares `max_iterations`,
 `residual_rtol`, `residual_atol_j`, `linear_restart`, `max_linear_cycles`,
 `armijo_c`, `shrink` and `max_backtracks`. `linear_restart` is capped at the
@@ -155,9 +178,13 @@ The final result adds `solid_specific_enthalpies_j_kg` and
 `transient.scheme` becomes `backward-euler-total-enthalpy`;
 `transient.enthalpy` retains the declared chart identity/source/reference
 density, initial and final total reference enthalpy, and solver controls/work.
+For assigned materials it reports the material table with chart identities,
+`element_materials` and the derived `vertex_materials` instead of the uniform
+identity/density fields. Summaries use each vertex's own constitutive chart
+and reference mass, including when only some materials melt.
 Each history row also reports the minimum and maximum specific enthalpy and
 reference-mass-weighted mean liquid fraction. Full nodal enthalpy history is
-not retained. A new fixed schedule can start from the returned final nodal
+not included in the forward JSON. A new fixed schedule can start from the returned final nodal
 enthalpies; temperature alone cannot reconstruct a state on a latent plateau.
 
 The synthetic example stays at 350 K while its enthalpy and liquid fraction
@@ -173,13 +200,84 @@ with these independent formulas, and compare a split/restarted trajectory with
 the uninterrupted run. These are numerical references, not measured material
 or hardware validation.
 
+The two-material example has matching contact traces between mirrored unit
+tetrahedra. Their reference densities are 10 and 20 kg/m³ and their latent
+temperatures are 350 and 330 K. A 0.5 m² contact with resistance
+0.1 m² K/W transfers 100 W from the first material to the second. This transfer
+changes individual nodal enthalpies and cancels from the combined energy
+balance. Two independent unit-capacity-rate air streams remove a total
+78.0845054746 W. Radiation to 300 K reservoirs removes 902.815209140 W;
+changing the reservoirs to 400 K adds 2059.88235101 W. The 0.2-second pulse
+supplies 400 J, followed by 0.2 seconds of cooling. All nodes remain inside
+their declared plateaus, so the binary test can check every nodal enthalpy
+against independent surface-area/contact/reference-mass arithmetic, along
+with mass-weighted phase summaries and split/restart parity. Additional
+tests replace one chart by an ordinary solid and compare separate uniform
+solid/liquid diffusion cases with an independent four-node linear solve.
+
 This opt-in CLI mode supports fixed schedules and fixed reference density with
-one declared equilibrium chart. Adaptive/repeated schedules, design searches,
-CLI adjoints, time/mesh studies, recirculation and enclosure radiation explicitly refuse.
-The library's enthalpy adjoints are separate APIs; the existing temperature
-trajectory adjoint cannot be substituted for them. Geometry, mass and energetic
-internal variables are frozen. There is no fluid storage, phase advection,
-melting-driven motion or certified inter-step peak.
+uniform or explicitly assigned equilibrium charts, including single-phase
+charts. Geometry, mass and energetic internal variables are frozen. Adaptive
+and repeated schedules, fan sizing, time/mesh studies, recirculation and
+enclosure radiation explicitly refuse. There is no fluid storage, phase
+advection, melting-driven motion or certified inter-step peak.
+
+### Enthalpy history gradients and workload sizing
+
+Add `"adjoint": {"qoi": "sampled-peak", "max_checkpoint_bytes": 1048576}`
+inside `transient` to differentiate the earliest sampled maximum. Set `qoi`
+to `"final"` for the final objective instead. The dedicated enthalpy history
+adjoint includes the coupled air references and the physical ambient-radiation
+feedback. It carries the enthalpy derivative directly between steps, including
+through latent-plateau interiors where temperature alone cannot carry the
+stored-state sensitivity. It supports the same explicit single-phase and
+heterogeneous chart assignments as the forward solve.
+
+The `transient.adjoint` result includes:
+
+- `dtemperature_dinitial_specific_enthalpies_k_kg_j`: one derivative per initial
+  nodal enthalpy, in K kg/J.
+- `dtemperature_duniform_initial_specific_enthalpy_k_kg_j`: the derivative for
+  an equal additive change to all initial nodal enthalpies, in K kg/J.
+- `intervals[].dtemperature_dpower_multiplier_k`: the derivative of a multiplier
+  on that interval's actual declared workload. A zero-workload interval has
+  zero derivative for this multiplicative control.
+- `dtemperature_dinlet_temperatures`: derivatives of inlet temperatures applied
+  throughout the trajectory, in the existing graph-node order.
+
+The tape bounds retained h, temperature and air-reference checkpoints and
+control accumulators with `max_checkpoint_bytes`, then reconstructs accepted
+steps with exact h/temperature replay and renewed physical residual/energy
+checks. This cap does not include all transient solver workspace. Derivative
+work shares the original wall deadline; a failed replay or derivative solve
+refuses the result. Chart slope corners and validity endpoints refuse classical
+endpoint derivatives; ties retain the selected branch without claiming a
+unique derivative. Geometry, chart data, reference density, conductivity,
+contact resistance, fan drive, convection laws and radiation controls stay
+fixed. The optional `component_power` and `contact_resistance` adjoint requests
+are unsupported in this mode.
+
+The complete [enthalpy power-sizing request](enthalpy-power-sizing.json) uses
+an explicit latent plateau, a two-stage heating pulse, a temperature limit,
+ambient radiation, and the existing scalar workload search. It begins inside
+the plateau and sizes the pulse against a limit above the melting temperature:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/enthalpy-power-sizing.json
+```
+
+Its `transient.power_design` object declares `min_power_multiplier`,
+`max_power_multiplier`, `power_multiplier_tolerance`, `temperature_tolerance_k`
+and `max_evaluations`. A `sampled-peak` adjoint supplies the search with a checked
+workload sensitivity. Remove `transient.adjoint` to use derivative-free sizing;
+remove `transient.power_design` to evaluate just the declared schedule and its
+gradient. Each candidate must run its complete coupled trajectory and satisfy
+the physical acceptance gates before its sampled feasibility is used. The
+returned feasible workload is checked across that trajectory's sampled
+endpoints; it is not a continuous-time temperature certificate or a global
+optimality claim. The example supplies synthetic numerical data, not a
+validated hardware power limit.
 
 ## Pulse example
 

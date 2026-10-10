@@ -69,7 +69,7 @@ fn scheduled_fan_updates_flow_derived_coefficients_not_only_the_label() {
     let nominal=J::parse(&execute(&r,&CancelGate::new_clock_free()).unwrap()).unwrap();
     let spec=J::parse(r#"{"initial_temperature_k":300,"volumetric_heat_capacity_j_m3_k":2000000,"max_step_s":1,"max_steps":4,
         "intervals":[{"duration_s":2,"power_scale":1,"fan_speed_ratio":1},{"duration_s":2,"power_scale":1,"fan_speed_ratio":1.5}]}"#).unwrap();
-    r.transient=Some(Schedule::parse(&spec,r.mesh.vertex_count(),r.mesh.element_count(),r.fan.as_ref()).unwrap());
+    r.transient=Some(Schedule::parse(&spec,&r.mesh,r.fan.as_ref()).unwrap());
     let result=J::parse(&execute(&r,&CancelGate::new_clock_free()).unwrap()).unwrap();
     close(result.path(&["fan","flow_m3_s"]).unwrap().as_f64().unwrap(),0.006,1e-9);
     let before=nominal.get("convection").unwrap().as_array().unwrap();

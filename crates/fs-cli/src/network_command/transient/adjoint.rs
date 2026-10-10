@@ -6,12 +6,12 @@ use super::*;
 mod controls;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Observable { Final, SampledPeak }
+pub(super) enum Observable { Final, SampledPeak }
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Config {
-    observable: Observable,
-    max_checkpoint_bytes: usize,
+    pub(super) observable: Observable,
+    pub(super) max_checkpoint_bytes: usize,
     controls: controls::Options,
 }
 impl Config {
@@ -29,6 +29,13 @@ impl Config {
     pub(super) fn validate_design(self) -> Result<()> {
         if self.observable != Observable::SampledPeak {
             return Err(bad("transient sizing requires adjoint.qoi=sampled-peak; a final-temperature derivative cannot guide a peak constraint"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn admit_enthalpy(self) -> Result<()> {
+        if self.controls.requested() {
+            return Err(bad("enthalpy adjoints currently support initial specific enthalpy, interval power and inlet temperatures; component-power and contact-resistance controls are not admitted"));
         }
         Ok(())
     }
@@ -287,7 +294,7 @@ impl Tape {
     }
 }
 
-fn seed_initial(request: &Request, cx: &Cx<'_>, vertex: Option<usize>, weights: &mut [f64]) -> Result<()> {
+pub(super) fn seed_initial(request: &Request, cx: &Cx<'_>, vertex: Option<usize>, weights: &mut [f64]) -> Result<()> {
     if let objective::Objective::MeanWall(name) = &request.objective {
         let surface = request.surfaces.iter().find(|s| &s.name == name)
             .ok_or_else(|| bad("missing initial objective surface"))?;

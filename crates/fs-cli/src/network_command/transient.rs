@@ -50,10 +50,11 @@ pub(super) struct Schedule {
 }
 
 impl Schedule {
-    pub(super) fn parse(value: &J, vertices: usize, elements: usize, fan: Option<&fan_drive::FanDrive>) -> Result<Self> {
+    pub(super) fn parse(value: &J, mesh: &ConductionMesh, fan: Option<&fan_drive::FanDrive>) -> Result<Self> {
+        let (vertices, elements) = (mesh.vertex_count(), mesh.element_count());
         object(value, &["initial_temperature_k", "initial_temperatures_k", "volumetric_heat_capacity_j_m3_k",
             "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "nonlinear", "adjoint", "time_convergence", "fan_speed_design", "power_design", "repeat", "enthalpy"], "transient")?;
-        let enthalpy = value.get("enthalpy").map(|policy| enthalpy::Config::parse(policy,value,vertices)).transpose()?;
+        let enthalpy = value.get("enthalpy").map(|policy| enthalpy::Config::parse(policy,value,mesh)).transpose()?;
         let nonlinear = value.get("nonlinear").map(nonlinear::Config::parse).transpose()?;
         let adjoint = value.get("adjoint").map(adjoint::Config::parse).transpose()?;
         if adjoint.is_some() {
@@ -253,7 +254,7 @@ struct Trajectory {
 
 pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<String> {
     if let Some(policy)=&schedule.enthalpy {
-        return enthalpy::solve(request,cx,schedule,policy);
+        policy.admit(request,schedule)?;
     }
     if let Some(config)=schedule.time_convergence {
         return time_convergence::solve(request,cx,schedule,config);
@@ -272,6 +273,10 @@ type SampleObserver<'a> = dyn FnMut(f64,&[f64])->Result<()> + 'a;
 /// Every design candidate starts cold/as declared; only cycles WITHIN that
 /// candidate inherit the preceding accepted thermal state.
 fn simulate(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64)->Result<Trajectory> {
+    if let Some(policy)=&schedule.enthalpy {
+        if speed_multiplier != 1.0 { return Err(bad("enthalpy fan-speed sizing is not admitted")); }
+        return enthalpy::simulate(request,cx,schedule,policy);
+    }
     simulate_observed(request,cx,schedule,speed_multiplier,None)
 }
 

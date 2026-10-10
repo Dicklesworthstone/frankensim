@@ -289,7 +289,7 @@ impl Request {
             }
         }
         let transient = root.get("transient").map(|value| transient::Schedule::parse(
-            value, mesh.vertex_count(), mesh.element_count(), fan.as_ref(),
+            value, &mesh, fan.as_ref(),
         )).transpose()?;
         if transient.is_some() && (gradient || design.is_some() || fan_speed_design.is_some()) {
             return Err(bad("transient requires gradient=false and no steady design search"));

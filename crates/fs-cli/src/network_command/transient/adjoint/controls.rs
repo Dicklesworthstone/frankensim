@@ -12,6 +12,10 @@ pub(super) struct Options {
     contacts: bool,
 }
 impl Options {
+    pub(super) fn requested(self) -> bool {
+        self.components || self.contacts
+    }
+
     pub(super) fn parse(value: &J) -> Result<Self> {
         Ok(Self {
             components: value.get("component_power").map(|v| boolean(v,"adjoint.component_power"))

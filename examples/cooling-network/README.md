@@ -35,6 +35,15 @@ latent heat through `transient.enthalpy`. The
 [phase-pulse example](enthalpy-phase-pulse.json) evolves nodal enthalpy and liquid
 fraction with convection and ambient radiation, while retaining the declared
 reference mass. See [the enthalpy request and output contract](TRANSIENT_COOLING.md#fixed-density-total-enthalpy-and-latent-heat).
+The [two-material contact example](enthalpy-contact-materials.json) assigns
+independent phase charts and reference densities per tetrahedron, with explicit
+contact between separate traces. An explicit single-phase chart can represent
+an ordinary solid alongside a latent-heat insert without inventing melting data.
+Fixed-grid enthalpy histories also provide workload and initial-enthalpy
+gradients with mixed-air and ambient-radiation feedback. The
+[enthalpy power-sizing example](enthalpy-power-sizing.json) uses that gradient
+in the existing scalar workload search; omitting its `transient.adjoint`
+selects derivative-free sizing.
 
 Every vertex, tetrahedron, surface, coefficient, heat source, hydraulic connection
 and source temperature comes from the request. Supply a conforming,

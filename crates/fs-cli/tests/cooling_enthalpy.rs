@@ -21,6 +21,10 @@ const FIXTURE: &str = include_str!(concat!(
 const RHO: f64 = 10.0;
 const SIGMA: f64 = 5.670_374_419e-8;
 const EPSILON: f64 = 0.8;
+const CONTACT_FIXTURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/cooling-network/enthalpy-contact-materials.json"
+));
 
 fn number(value: f64) -> J {
     J::Number {
@@ -352,14 +356,6 @@ fn unsupported_storage_modes_and_invalid_or_exhausted_inputs_refuse() {
         ),
         ("repeat", r#"{"cycles":2,"max_total_steps":16}"#),
         (
-            "adjoint",
-            r#"{"qoi":"sampled-peak","max_checkpoint_bytes":1048576}"#,
-        ),
-        (
-            "power_design",
-            r#"{"min_power_multiplier":0,"max_power_multiplier":1,"power_multiplier_tolerance":0.01,"temperature_tolerance_k":0.1,"max_evaluations":16}"#,
-        ),
-        (
             "fan_speed_design",
             r#"{"min_speed_multiplier":0.5,"max_speed_multiplier":1,"speed_multiplier_tolerance":0.01,"temperature_tolerance_k":0.1,"max_evaluations":16}"#,
         ),
@@ -438,4 +434,349 @@ fn unsupported_storage_modes_and_invalid_or_exhausted_inputs_refuse() {
         Some(i32::from(fs_cli::exit::BUDGET))
     );
     assert!(cancelled.stdout.is_empty());
+}
+
+// Two mirrored unit tetrahedra share a declared contact of area 1/2.
+// Different plateau temperatures make its internal transfer 100 W. Separate
+// unit-capacity air streams and black reservoirs have analytic external loads.
+// Densities 10 and 20 give distinct nodal reference masses, rho/24.
+fn contact_reference(time: f64, ambient: f64) -> (Vec<f64>, f64, f64) {
+    let area = (2.0 + 3.0_f64.sqrt()) / 2.0;
+    let nodal_area = [
+        1.0 / 3.0,
+        (1.0 + 3.0_f64.sqrt()) / 6.0,
+        (1.0 + 3.0_f64.sqrt()) / 6.0,
+        area / 3.0,
+    ];
+    let (mut air_total, mut radiation_total) = (0.0, 0.0);
+    let mut h = Vec::new();
+    for (temperature, density, initial, contact) in [
+        (350.0_f64, 10.0, 2000.0, 100.0),
+        (330.0_f64, 20.0, 3000.0, -100.0),
+    ] {
+        let air = (temperature - 300.0) * (1.0 - (-2.0 * area).exp());
+        let radiation = EPSILON * SIGMA * area * (temperature.powi(4) - ambient.powi(4));
+        air_total += air;
+        radiation_total += radiation;
+        for (vertex, weight) in nodal_area.iter().enumerate() {
+            let out =
+                weight * (air + radiation) / area + if vertex < 3 { contact / 3.0 } else { 0.0 };
+            h.push(initial + 6000.0 * time.min(0.2) / density - time * out / (density / 24.0));
+        }
+    }
+    (h, air_total, radiation_total)
+}
+
+#[test]
+fn heterogeneous_contact_plateaus_close_each_nodal_mass_and_internal_heat_transfer() {
+    for ambient in [300.0, 400.0] {
+        let mut request = J::parse(CONTACT_FIXTURE).unwrap();
+        let J::Array(patches) = member(member(&mut request, "radiation"), "surfaces") else {
+            panic!()
+        };
+        for patch in patches {
+            put(patch, "ambient_temperature_k", number(ambient));
+        }
+        let result = run(&request);
+        let transient = result.get("transient").unwrap();
+        let policy = transient.get("enthalpy").unwrap();
+        assert_eq!(
+            policy.get("materials").unwrap().as_array().unwrap().len(),
+            2
+        );
+        let names = policy.get("vertex_materials").unwrap().as_array().unwrap();
+        assert_eq!(names.len(), 8);
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(
+                name.as_str(),
+                Some(if i < 4 {
+                    "first-storage"
+                } else {
+                    "second-storage"
+                })
+            );
+        }
+        let (expected, air, radiation) = contact_reference(0.4, ambient);
+        for (i, actual) in values(&result, "solid_specific_enthalpies_j_kg")
+            .iter()
+            .enumerate()
+        {
+            near(*actual, expected[i], 2e-6);
+        }
+        for (i, actual) in values(&result, "solid_temperatures_k").iter().enumerate() {
+            near(*actual, if i < 4 { 350.0 } else { 330.0 }, 1e-8);
+        }
+        let phases = values(&result, "solid_liquid_mass_fractions");
+        for (i, &phase) in phases.iter().enumerate() {
+            assert!((0.0..1.0).contains(&phase));
+            near(
+                phase,
+                (expected[i] - 1000.0) / if i < 4 { 2000.0 } else { 4000.0 },
+                1e-9,
+            );
+        }
+        near(n(transient, "input_energy_j"), 400.0, 1e-8);
+        near(n(transient, "air_energy_gain_j"), 0.4 * air, 1e-7);
+        near(
+            n(transient, "radiative_energy_loss_j"),
+            0.4 * radiation,
+            1e-6,
+        );
+        near(
+            n(transient, "stored_energy_change_j"),
+            400.0 - 0.4 * (air + radiation),
+            1e-6,
+        );
+        let initial_total = (10.0 * 2000.0 + 20.0 * 3000.0) / 6.0;
+        near(n(policy, "initial_total_enthalpy_j"), initial_total, 1e-8);
+        near(
+            n(policy, "final_total_enthalpy_j"),
+            initial_total + 400.0 - 0.4 * (air + radiation),
+            1e-6,
+        );
+        for row in transient.get("history").unwrap().as_array().unwrap() {
+            let (h, _, _) = contact_reference(n(row, "time_s"), ambient);
+            near(
+                n(row, "minimum_specific_enthalpy_j_kg"),
+                h.iter().copied().fold(f64::INFINITY, f64::min),
+                2e-6,
+            );
+            near(
+                n(row, "maximum_specific_enthalpy_j_kg"),
+                h.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                2e-6,
+            );
+            let mean = h
+                .iter()
+                .enumerate()
+                .map(|(i, &h)| {
+                    let (mass, latent) = if i < 4 {
+                        (10.0 / 24.0, 2000.0)
+                    } else {
+                        (20.0 / 24.0, 4000.0)
+                    };
+                    mass * (h - 1000.0) / latent
+                })
+                .sum::<f64>()
+                / 5.0;
+            near(n(row, "mean_liquid_mass_fraction"), mean, 1e-9);
+        }
+        assert_eq!(text(&result), text(&run(&request)));
+        let mut first = request.clone();
+        put(
+            member(&mut first, "transient"),
+            "intervals",
+            J::parse(r#"[{"duration_s":0.2,"power_scale":1}]"#).unwrap(),
+        );
+        let first = run(&first);
+        put(
+            member(member(&mut request, "transient"), "enthalpy"),
+            "initial_specific_enthalpies_j_kg",
+            first.get("solid_specific_enthalpies_j_kg").unwrap().clone(),
+        );
+        put(
+            member(&mut request, "transient"),
+            "intervals",
+            J::parse(r#"[{"duration_s":0.2,"power_scale":0}]"#).unwrap(),
+        );
+        let restarted = run(&request);
+        for (a, b) in values(&restarted, "solid_specific_enthalpies_j_kg")
+            .iter()
+            .zip(&expected)
+        {
+            near(*a, *b, 2e-6);
+        }
+    }
+    // An ordinary solid can share this solve with a latent insert without an
+    // invented melting endpoint. Its h evolves on a strictly sensible chart.
+    let mut mixed = J::parse(CONTACT_FIXTURE).unwrap();
+    let J::Array(materials) = member(
+        member(member(&mut mixed, "transient"), "enthalpy"),
+        "materials",
+    ) else {
+        panic!()
+    };
+    put(&mut materials[1], "phase", J::Str("solid".into()));
+    put(&mut materials[1], "knots", J::parse(r#"[{"specific_enthalpy_j_kg":0,"temperature_k":230,"liquid_mass_fraction":0},{"specific_enthalpy_j_kg":7000,"temperature_k":530,"liquid_mass_fraction":0}]"#).unwrap());
+    let result = run(&mixed);
+    let phases = values(&result, "solid_liquid_mass_fractions");
+    assert!(phases[..4].iter().all(|x| (0.0..1.0).contains(x)));
+    assert!(phases[4..].iter().all(|&x| x == 0.0));
+    let temperatures = values(&result, "solid_temperatures_k");
+    let h = values(&result, "solid_specific_enthalpies_j_kg");
+    for i in 4..8 {
+        near(temperatures[i], 230.0 + 300.0 * h[i] / 7000.0, 1e-9);
+    }
+    assert!((h[7] - 3000.0).abs() > 1.0);
+}
+
+// Independent four-node linear sensible-heat BE assembly. Air reference is
+// eliminated analytically; no production FEM or solver routine is called.
+fn sensible_reference() -> [f64; 4] {
+    let faces = [
+        ([1, 2, 3], 3.0_f64.sqrt() / 2.0),
+        ([0, 2, 3], 0.5),
+        ([0, 1, 3], 0.5),
+        ([0, 1, 2], 0.5),
+    ];
+    let area = (3.0 + 3.0_f64.sqrt()) / 2.0;
+    let gradients = [
+        [-1.0, -1.0, -1.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
+    let mut boundary = [[0.0; 4]; 4];
+    let mut load = [0.0; 4];
+    for (face, area) in faces {
+        for i in face {
+            load[i] += area / 3.0;
+            for j in face {
+                boundary[i][j] += area / 12.0 * if i == j { 2.0 } else { 1.0 };
+            }
+        }
+    }
+    let beta = (1.0 - (-2.0 * area).exp()) / (2.0 * area);
+    let mass = 10.0 * 10.0 / 24.0;
+    let mut temperature = [300.0; 4];
+    for step in 0..4 {
+        let mut a = [[0.0; 5]; 4];
+        for i in 0..4 {
+            for j in 0..4 {
+                let stiffness = 10.0 / 6.0
+                    * (0..3)
+                        .map(|d| gradients[i][d] * gradients[j][d])
+                        .sum::<f64>();
+                a[i][j] = (if i == j { mass } else { 0.0 })
+                    + 0.2
+                        * (stiffness + 2.0 * boundary[i][j]
+                            - 2.0 * load[i] * (1.0 - beta) * load[j] / area);
+            }
+            a[i][4] = mass * temperature[i]
+                + 0.2 * (2.0 * load[i] * beta * 300.0 + if step < 2 { 6000.0 / 24.0 } else { 0.0 });
+        }
+        for k in 0..4 {
+            let diagonal = a[k][k];
+            for j in k..5 {
+                a[k][j] /= diagonal;
+            }
+            for i in 0..4 {
+                if i != k {
+                    let factor = a[i][k];
+                    for j in k..5 {
+                        a[i][j] -= factor * a[k][j];
+                    }
+                }
+            }
+        }
+        temperature = std::array::from_fn(|i| a[i][4]);
+    }
+    temperature
+}
+
+#[test]
+fn explicit_solid_and_liquid_charts_match_independent_sensible_diffusion() {
+    let expected = sensible_reference();
+    for (phase, fraction) in [("solid", 0.0), ("liquid", 1.0)] {
+        let mut request = J::parse(FIXTURE).unwrap();
+        remove(&mut request, "radiation");
+        let config = member(member(&mut request, "transient"), "enthalpy");
+        put(config, "phase", J::Str(phase.into()));
+        put(config, "initial_specific_enthalpy_j_kg", number(500.0));
+        put(config, "knots", J::parse(&format!(r#"[{{"specific_enthalpy_j_kg":0,"temperature_k":250,"liquid_mass_fraction":{fraction}}},{{"specific_enthalpy_j_kg":4500,"temperature_k":700,"liquid_mass_fraction":{fraction}}}]"#)).unwrap());
+        let result = run(&request);
+        for (i, actual) in values(&result, "solid_temperatures_k").iter().enumerate() {
+            near(*actual, expected[i], 2e-7);
+        }
+        for (i, actual) in values(&result, "solid_specific_enthalpies_j_kg")
+            .iter()
+            .enumerate()
+        {
+            near(*actual, 10.0 * (expected[i] - 250.0), 2e-6);
+        }
+        assert!(
+            values(&result, "solid_liquid_mass_fractions")
+                .iter()
+                .all(|&x| x == fraction)
+        );
+        let mut row = request
+            .get("transient")
+            .unwrap()
+            .get("enthalpy")
+            .unwrap()
+            .clone();
+        for key in ["initial_specific_enthalpy_j_kg", "newton"] {
+            remove(&mut row, key);
+        }
+        put(&mut row, "name", J::Str("declared-storage".into()));
+        let config = member(member(&mut request, "transient"), "enthalpy");
+        for key in [
+            "phase",
+            "material_card_identity",
+            "source",
+            "reference_density_kg_m3",
+            "knots",
+        ] {
+            remove(config, key);
+        }
+        put(config, "materials", J::Array(vec![row]));
+        put(
+            config,
+            "element_materials",
+            J::Array(vec![J::Str("declared-storage".into())]),
+        );
+        let assigned = run(&request);
+        assert_eq!(
+            values(&assigned, "solid_specific_enthalpies_j_kg"),
+            values(&result, "solid_specific_enthalpies_j_kg")
+        );
+    }
+}
+
+#[test]
+fn material_assignment_and_single_phase_conflicts_refuse_before_output() {
+    let input = J::parse(CONTACT_FIXTURE).unwrap();
+    let mut unknown = input.clone();
+    put(
+        member(member(&mut unknown, "transient"), "enthalpy"),
+        "element_materials",
+        J::parse(r#"["first-storage","second-conductivity"]"#).unwrap(),
+    );
+    assert!(refuses(&unknown).contains("unknown enthalpy material"));
+    let mut conflicting = input.clone();
+    put(
+        member(member(&mut conflicting, "transient"), "enthalpy"),
+        "reference_density_kg_m3",
+        number(10.0),
+    );
+    assert!(refuses(&conflicting).contains("choose uniform"));
+    let mut shared = input;
+    let solid = member(&mut shared, "solid");
+    put(
+        solid,
+        "vertices_m",
+        J::parse("[[0,0,0],[1,0,0],[0,1,0],[0,0,1],[0,0,-1]]").unwrap(),
+    );
+    put(
+        solid,
+        "tetrahedra",
+        J::parse("[[0,1,2,3],[0,1,2,4]]").unwrap(),
+    );
+    remove(solid, "contacts");
+    let J::Array(surfaces) = member(solid, "surfaces") else {
+        panic!()
+    };
+    put(
+        &mut surfaces[1],
+        "faces",
+        J::parse("[[1,2,4],[0,2,4],[0,1,4]]").unwrap(),
+    );
+    assert!(refuses(&shared).contains("distinct interface vertices"));
+    let mut invalid = J::parse(FIXTURE).unwrap();
+    put(
+        member(member(&mut invalid, "transient"), "enthalpy"),
+        "phase",
+        J::Str("solid".into()),
+    );
+    assert!(refuses(&invalid).contains("phase"));
 }
