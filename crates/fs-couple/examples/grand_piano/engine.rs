@@ -378,7 +378,7 @@ impl Instrument {
         e
     }
 
-    fn damp(&mut self,dt:f64)->Result<f64,Error>{
+    fn damp(&mut self,dt:f64,reverse:bool)->Result<f64,Error>{
         if let Some(dampers)=&self.spatial_dampers {
             let hammers=&self.hammers;
             return dampers.apply(&mut self.bank.v,dt,self.sustain,
@@ -386,7 +386,13 @@ impl Instrument {
         }
         if !self.damper_drag_ns_m.is_finite()||self.damper_drag_ns_m<0.0{return Err(Error::InvalidControl);}
         let mut loss=0.0;
-        for si in 0..self.bank.strings.len(){
+        // Shared-board rank-one flows do not commute. Reverse the second
+        // damping half-step around mechanics to obtain a full palindrome,
+        // retaining second order with one update per port in each half-step.
+        // The spatial image above already composes a palindrome internally.
+        let strings=self.bank.strings.len();
+        for index in 0..strings{
+            let si=if reverse{strings-1-index}else{index};
             let ci=self.bank.strings[si].course;let h=self.hammers[ci];
             if !self.bank.strings[si].duplex&&!h.held&&!h.latched&&self.courses[ci].midi<=self.last_damped_midi {
                 let ratio=if self.bank.strings[si].polarization==0 {1.} else {
@@ -406,7 +412,7 @@ impl Instrument {
         let mut radiation_loss=if let Some(air)=&mut self.radiation {
             air.before(&mut self.bank.v[self.bank.modes.len()..]).map_err(Error::Contact)?
         } else {0.};
-        let mut damper_loss=self.damp(0.5*dt)?;
+        let mut damper_loss=self.damp(0.5*dt,false)?;
         self.bank.begin_string_stretching_step();
         self.bank.predict();self.active.clear();
         self.jack_force.fill(0.0);self.rest_force.fill(0.0);
@@ -487,7 +493,7 @@ impl Instrument {
                 }
             }
         }
-        damper_loss+=self.damp(0.5*dt)?;
+        damper_loss+=self.damp(0.5*dt,true)?;
         if let Some(air)=&mut self.radiation {
             radiation_loss+=air.after(&mut self.bank.v[self.bank.modes.len()..]).map_err(Error::Contact)?;
         }

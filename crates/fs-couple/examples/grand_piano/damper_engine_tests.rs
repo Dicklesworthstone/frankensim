@@ -1,4 +1,4 @@
-//! Spatial damping through the actual hammer/string/board engine, not a PCM envelope.
+//! Point and spatial damping through the actual hammer/string/board engine.
 use super::*;
 
 fn instrument(spatial: bool) -> Instrument {
@@ -12,6 +12,83 @@ fn instrument(spatial: bool) -> Instrument {
 }
 fn balance(p: &Instrument) {
     assert!((p.accounting.input_work_j-p.energy_j()-p.accounting.dissipated_j()).abs() < 1e-7);
+}
+
+fn damping_interval(p: &mut Instrument, dt: f64) -> f64 {
+    // Same half-flows as mechanics_step, with identity mechanical evolution.
+    p.damp(0.5*dt,false).unwrap()+p.damp(0.5*dt,true).unwrap()
+}
+
+#[test]
+fn point_dampers_converge_quadratically_to_the_shared_board_exponential() {
+    // G1: two identical speaking strings share one moving board coordinate.
+    // Their physical port rows are g1=(s,0,b), g2=(0,s,b). The exact generator
+    // g1*g1^T+g2*g2^T has eigenvalues 0, s^2, s^2+2*b^2; no split-flow oracle.
+    let c=Course { midi:60,unison:1,length_m:1.0,linear_density_kg_m:0.02,
+        tension_n:100.0,flexural_rigidity_nm2:0.0,strike_fraction:0.12,
+        hammer_mass_kg:0.008,felt_thickness_m:0.008,felt_area_m2:0.0001,
+        duplex_length_m:0.0,detune_cents:0.0 };
+    let mut p=Instrument::new(vec![c,Course{midi:64,..c}],&[BoardMode {
+        frequency_hz:100.0,damping_ratio:0.0,bridge:[12.0;88],volume:0.1,
+    }],48_000,1,1,false).unwrap();
+    p.damper_drag_ns_m=1.0;
+    assert_eq!(p.bank.v.len(),3);
+    let s=p.bank.modes[0].damper_shape;
+    let b=p.bank.strings[0].damper_lift*p.bank.strings[0].bridge[0];
+    assert_eq!(p.bank.modes[1].damper_shape,s);
+    assert_eq!(p.bank.strings[1].damper_lift*p.bank.strings[1].bridge[0],b);
+    assert!(b.abs()>1.0,"the shared coordinate must make the ports noncommute");
+    let initial=[0.3,-0.2,0.1];
+    let time=0.8/(s*s+2.0*b*b);
+    let mut exact=[0.0;3];
+    for (eigenvalue,direction) in [(0.0,[-b,-b,s]),(s*s,[1.0,-1.0,0.0]),
+        (s*s+2.0*b*b,[s,s,2.0*b])] {
+        let norm=direction.iter().map(|x|x*x).sum::<f64>();
+        let amplitude=direction.iter().zip(initial).map(|(x,v)|x*v).sum::<f64>()
+            /norm*(-eigenvalue*time).exp();
+        for (v,x) in exact.iter_mut().zip(direction) {*v+=amplitude*x;}
+    }
+    let initial_energy=0.5*initial.iter().map(|v|v*v).sum::<f64>();
+    for sustain in [0.0,0.5] {
+        p.set_sustain(sustain).unwrap();
+        let mut previous=f64::INFINITY;
+        for steps in [4,8,16] {
+            p.bank.v.copy_from_slice(&initial);
+            let dt=time/(1.0-sustain).powi(2)/f64::from(steps);
+            let mut loss=0.0;
+            for _ in 0..steps {loss+=damping_interval(&mut p,dt);}
+            let error=p.bank.v.iter().zip(exact).map(|(a,b)|(a-b).powi(2)).sum::<f64>().sqrt();
+            assert!(error>1e-10 && error<previous/3.5,
+                "sustain {sustain}, steps {steps}: error {error:e}, previous {previous:e}");
+            previous=error;
+            assert!(loss>0.0);
+            assert!((p.bank.energy()+loss-initial_energy).abs()<1e-13);
+        }
+    }
+}
+
+#[test]
+fn point_damper_single_port_receives_exactly_one_physical_interval() {
+    let c=super::super::geometry::demonstration_scale().unwrap()[48];
+    let c=Course{unison:1,duplex_length_m:0.0,..c};
+    let mut p=Instrument::new(vec![c],&[BoardMode {
+        frequency_hz:100.0,damping_ratio:0.0,bridge:[0.2;88],volume:0.1,
+    }],48_000,1,1,false).unwrap();
+    let s=&p.bank.strings[0];
+    let g=[p.bank.modes[0].damper_shape,s.damper_lift*s.bridge[0]];
+    let norm=g.iter().map(|x|x*x).sum::<f64>();
+    let initial=[0.3,-0.2];let dt=0.002;
+    for sustain in [0.0,0.5,1.0] {
+        p.set_sustain(sustain).unwrap();p.bank.v.copy_from_slice(&initial);
+        let speed=g.iter().zip(initial).map(|(x,v)|x*v).sum::<f64>();
+        let change=(-p.damper_drag_ns_m*(1.0-sustain).powi(2)*norm*dt).exp_m1()*speed/norm;
+        let loss=damping_interval(&mut p,dt);
+        for ((&actual,start),port) in p.bank.v.iter().zip(initial).zip(g) {
+            assert!((actual-start-port*change).abs()<1e-14);
+        }
+        assert!((p.bank.energy()+loss-0.065).abs()<1e-13);
+        if sustain==1.0 {assert_eq!(p.bank.v,initial);assert_eq!(loss,0.0);}
+    }
 }
 
 #[test]
@@ -39,8 +116,12 @@ fn pad_release_changes_the_real_board_trace_not_the_held_attack() {
 }
 
 #[test]
-fn sostenuto_and_full_sustain_keep_spatial_dampers_lifted_until_release() {
-    let mut p = instrument(true); p.note_on(69, 2.0).unwrap();
+fn sostenuto_and_full_sustain_keep_both_damper_images_lifted_until_release() {
+    for spatial in [false,true] {check_pedal_lifts(spatial);}
+}
+
+fn check_pedal_lifts(spatial: bool) {
+    let mut p = instrument(spatial); p.note_on(69, 2.0).unwrap();
     for _ in 0..1200 { p.step().unwrap(); }
     p.set_sostenuto(true); p.note_off(69).unwrap();
     for _ in 0..128 { p.step().unwrap(); }

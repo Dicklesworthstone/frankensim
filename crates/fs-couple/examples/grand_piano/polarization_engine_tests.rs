@@ -55,9 +55,9 @@ fn explicit_lateral_pads_follow_pedals_and_never_damp_duplex_coordinates() {
             p.bank.v[s.modes.clone()].fill(0.003);
         }
         let initial=p.bank.v.clone();let energy=p.energy_j();
-        p.set_sustain(1.).unwrap();assert_eq!(p.damp(0.001).unwrap(),0.);
+        p.set_sustain(1.).unwrap();assert_eq!(p.damp(0.001,false).unwrap(),0.);
         assert_eq!(p.bank.v,initial);p.set_sustain(0.).unwrap();
-        let loss=p.damp(0.001).unwrap();
+        let loss=p.damp(0.001,false).unwrap();
         assert!((p.energy_j()+loss-energy).abs()<1e-12);
         if ratio==0. {assert_eq!(loss,0.);assert_eq!(p.bank.v,initial);}
         else {

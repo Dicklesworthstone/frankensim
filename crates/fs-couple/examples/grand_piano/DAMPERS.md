@@ -71,8 +71,11 @@ with additional stations tied to the highest retained spatial partial. The
 limits are 128 stations per string and four million projection terms; they
 refuse rather than dropping modes. This guard is not a spatial error bound.
 The entire shared-board port sequence is composed forward then backward using
-exact dissipative rank-one velocity flows. This gives a passive, second-order
-split approximation, not the exact full coupled damping exponential. Stored
+exact dissipative rank-one velocity flows. Point dampers use the existing
+half-step before mechanics and its reversed sequence afterward; spatial pads
+compose the symmetric sequence inside each damping half-step. Each string
+receives the original total drag interval. This gives a passive, second-order split
+approximation, not the exact full coupled damping exponential. Stored
 energy does not change when installing a viscous specification. Preparation is
 cold; stepping adds no allocation in this damping kernel.
 
