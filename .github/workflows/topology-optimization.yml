@@ -20,6 +20,9 @@ jobs:
           persist-credentials: false
       - name: Materialize pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test constructive 3D geometry and certified crossings
+        if: ${{ !cancelled() }}
+        run: set -o pipefail; cargo test --release -p fs-cutfem --lib csg3 2>&1 | tee topology-csg3.log
       - name: Test same-material and stress-constrained descent
         if: ${{ !cancelled() }}
         run: set -o pipefail; cargo test --release -p fs-topols --lib projected 2>&1 | tee topology-tests.log

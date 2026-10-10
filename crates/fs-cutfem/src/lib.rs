@@ -51,6 +51,7 @@
 pub mod agg;
 pub mod cond;
 pub mod controlled;
+pub mod csg3;
 pub mod elastic;
 pub mod elastic3;
 pub mod fem;
