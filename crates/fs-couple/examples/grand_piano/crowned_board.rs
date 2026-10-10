@@ -13,7 +13,8 @@
 //! Cartesian translations/rotations for a separately supplied acoustic skin.
 //! See Mamou-Mani et al., JASA 123 (2008), doi:10.1121/1.2836787 for the
 //! distinction between initial crown and a downbearing/prestress calculation.
-use super::board_geometry::{BoardGeometry, PreparedBoard, SurfaceSample, motion::MotionSurface};
+use super::board_geometry::{BoardGeometry, PreparedBoard, SurfaceSample,
+    motion::MotionSurface, reduction, ritz};
 use super::linear::{BoardMode, MAX_BOARD_MODES};
 use fs_plate::{PlateSection, ShellMesh, ShellModel, ShellSupport};
 use fs_plate::shell::stiffened::{BeamSection, ShellBeam, assemble_stiffened_shell};
@@ -205,9 +206,26 @@ impl CrownedBoard {
     pub fn prepare_with_motion(&self,keys:&[u8],upper_hz:f64)->Result<PreparedBoard,String> {
         self.prepare_inner(keys,upper_hz,true)
     }
+    /// Reduce a complete source slice of the actual equilibrium shell to the
+    /// admitted runtime rank. All six Cartesian DOFs and the physical bridge
+    /// arms follow the same nodal transformation as the acoustic motion.
+    pub fn prepare_reduced(&self,keys:&[u8],upper_hz:f64,retain_motion:bool,
+        options:&ritz::RitzOptions)->Result<PreparedBoard,String> {
+        self.prepare_inner_with_reduction(keys,upper_hz,retain_motion,Some(options))
+    }
     fn prepare_inner(&self,keys:&[u8],upper_hz:f64,retain_motion:bool)->Result<PreparedBoard,String> {
+        self.prepare_inner_with_reduction(keys,upper_hz,retain_motion,None)
+    }
+    fn prepare_inner_with_reduction(&self,keys:&[u8],upper_hz:f64,retain_motion:bool,
+        reduction_options:Option<&ritz::RitzOptions>)->Result<PreparedBoard,String> {
         if !upper_hz.is_finite() || upper_hz<=0. || upper_hz>80_000. || keys.is_empty() {
             return Err("invalid crowned soundboard frequency/key budget".into());
+        }
+        if let Some(options)=reduction_options {
+            options.validate()?;
+            if options.sample_hz.iter().any(|hz|*hz>upper_hz) {
+                return Err("board reduction target frequencies must lie within the explicit source board band".into());
+            }
         }
         let mut seen=BTreeSet::new();
         for &key in keys {
@@ -218,11 +236,28 @@ impl CrownedBoard {
         let (model,acoustic_mesh,equilibrium)=downbearing::prepare(self)?;
         let report=fs_plate::modes_shell(&model,(0.,(TAU*upper_hz).powi(2)),&fs_plate::SliceOptions::default())
             .map_err(|e|e.to_string())?;
-        if report.below_low!=0 || report.modes.is_empty() || report.modes.len()>MAX_BOARD_MODES {
-            return Err(format!("crowned shell has {} modes in band and {} below zero; admitted complete stable slice is 1..={MAX_BOARD_MODES}",report.modes.len(),report.below_low));
+        let limit=if reduction_options.is_some() {ritz::MAX_SOURCE_MODES}else{MAX_BOARD_MODES};
+        if report.below_low!=0 || report.modes.is_empty() || report.modes.len()>limit {
+            return Err(format!("crowned shell has {} modes in band and {} below zero; admitted complete stable slice is 1..={limit}",report.modes.len(),report.below_low));
         }
+        let reduced=reduction_options.map(|options| {
+            // Check the vectors before physical port indexing; the common
+            // helper validates every certificate and mass product before Ritz.
+            if report.modes.iter().any(|pair|pair.phi.len()!=model.free) {
+                return Err("invalid source crowned eigenvector dimension".into());
+            }
+            let ports:Vec<Vec<f64>>=keys.iter().map(|key| {
+                let site=self.sites.iter().find(|site|site.key==*key)
+                    .expect("every requested crowned bridge was admitted above");
+                report.modes.iter().map(|pair|
+                    bridge_displacement(&model,&pair.phi,self.mesh.tris[site.tri],site)).collect()
+            }).collect();
+            reduction::project_modal(model.free,self.damping,&report,&ports,options,
+                |x,y|model.m.spmv(x,y))
+        }).transpose()?;
+        let pairs=reduced.as_ref().map_or(report.modes.as_slice(),|value|value.modes.as_slice());
         let mut modes=Vec::new();let mut intervals=Vec::new();let mut mphi=vec![0.;model.free];
-        for (i,pair) in report.modes.iter().enumerate() {
+        for (i,pair) in pairs.iter().enumerate() {
             if pair.phi.len()!=model.free || pair.phi.iter().any(|x|!x.is_finite())
                 || !pair.lambda.is_finite() || pair.lambda<=0. || pair.interval.0<=0.
                 || !pair.interval.0.is_finite() || !pair.interval.1.is_finite()
@@ -232,20 +267,20 @@ impl CrownedBoard {
             model.m.spmv(&pair.phi,&mut mphi);
             let product=|phi:&[f64]|phi.iter().zip(&mphi).map(|(a,b)|a*b).sum::<f64>();
             if (product(&pair.phi)-1.).abs()>1e-7 || !product(&pair.phi).is_finite()
-                || report.modes[..i].iter().any(|p| {let v=product(&p.phi);!v.is_finite()||v.abs()>1e-7}) {
+                || pairs[..i].iter().any(|p| {let v=product(&p.phi);!v.is_finite()||v.abs()>1e-7}) {
                 return Err("crowned modes are not mass orthonormal".into());
             }
             let mut bridge=[0.;88];
             for site in &self.sites {
-                let mut displacement=0.;
-                for (n,&node) in self.mesh.tris[site.tri].iter().enumerate() {
-                    let u=nodal(&model,&pair.phi,node,0);let theta=nodal(&model,&pair.phi,node,3);
-                    displacement+=site.weights[n]*(u[2]+cross(theta,site.arm)[2]);
-                }
-                bridge[usize::from(site.key-21)]=displacement;
+                bridge[usize::from(site.key-21)]=
+                    bridge_displacement(&model,&pair.phi,self.mesh.tris[site.tri],site);
             }
             if bridge.iter().any(|x|!x.is_finite()) {return Err("crowned bridge projection overflow".into());}
-            modes.push(BoardMode {frequency_hz:pair.lambda.sqrt()/TAU,damping_ratio:self.damping,bridge,volume:0.});
+            let damping_ratio=reduced.as_ref().map_or(self.damping,|value| {
+                if i<value.report.protected_low_modes {self.damping}
+                else {value.physical_damping[i*pairs.len()+i]/(2.0*pair.lambda.sqrt())}
+            });
+            modes.push(BoardMode {frequency_hz:pair.lambda.sqrt()/TAU,damping_ratio,bridge,volume:0.});
             intervals.push((pair.interval.0.sqrt()/TAU,pair.interval.1.sqrt()/TAU));
         }
         let mut surface=Vec::with_capacity(self.mesh.tris.len()*3);
@@ -257,7 +292,7 @@ impl CrownedBoard {
             for weights in [[2./3.,1./6.,1./6.],[1./6.,2./3.,1./6.],[1./6.,1./6.,2./3.]] {
                 let position=[(0..3).map(|i|weights[i]*acoustic_mesh.nodes[tri[i]][0]).sum(),
                     (0..3).map(|i|weights[i]*acoustic_mesh.nodes[tri[i]][1]).sum(),0.];
-                let shape:Vec<f64>=report.modes.iter().map(|pair|(0..3).map(|i|
+                let shape:Vec<f64>=pairs.iter().map(|pair|(0..3).map(|i|
                     weights[i]*dot(n,nodal(&model,&pair.phi,tri[i],0))/n[2]).sum()).collect();
                 if shape.iter().any(|x|!x.is_finite()) {return Err("crowned radiation projection overflow".into());}
                 for (mode,&value) in modes.iter_mut().zip(&shape) {mode.volume+=projected*value;}
@@ -265,18 +300,31 @@ impl CrownedBoard {
             }
         }
         let motion=if retain_motion {
-            let shapes=report.modes.iter().map(|pair|(0..acoustic_mesh.nodes.len()).map(|node|
+            let shapes=pairs.iter().map(|pair|(0..acoustic_mesh.nodes.len()).map(|node|
                 std::array::from_fn(|c|model.dof_map[6*node+c].map_or(0.,|d|pair.phi[d])))
                 .collect()).collect();
             Some(MotionSurface::new(acoustic_mesh,shapes)?)
         } else {None};
+        let mut provenance=format!("{}; 3-D CST/DKT crowned shell, {} eccentric rectangular beam segments; reference max |z|={} m; projected flat-baffle radiation; {}",self.source,self.beams.len(),self.max_height_m,equilibrium);
+        let (physical_damping,reduction)=if let Some(value)=reduced {
+            provenance.push_str(&format!("; explicit bridge-driven Ritz projection: {} source modes, {} retained, {} unchanged low modes; mixed tail intervals certify the projected equilibrium pencil only",
+                value.report.source_modes,modes.len(),value.report.protected_low_modes));
+            (Some(value.physical_damping),Some(value.report))
+        } else {(None,None)};
         Ok(PreparedBoard {modes,surface,motion,area_m2:surface_area,mass_kg:self.mass_kg,
-            provenance:format!("{}; 3-D CST/DKT crowned shell, {} eccentric rectangular beam segments; reference max |z|={} m; projected flat-baffle radiation; {}",self.source,self.beams.len(),self.max_height_m,equilibrium),
-            frequency_intervals_hz:intervals,physical_damping:None,reduction:None,free_dofs:model.free})
+            provenance,frequency_intervals_hz:intervals,physical_damping,reduction,free_dofs:model.free})
     }
 }
 fn nodal(model:&ShellModel,phi:&[f64],node:usize,start:usize)->[f64;3] {
     std::array::from_fn(|i|model.dof_map[6*node+start+i].map_or(0.,|d|phi[d]))
+}
+fn bridge_displacement(model:&ShellModel,phi:&[f64],tri:[usize;3],site:&Site)->f64 {
+    let mut displacement=0.;
+    for (n,node) in tri.into_iter().enumerate() {
+        let u=nodal(model,phi,node,0);let theta=nodal(model,phi,node,3);
+        displacement+=site.weights[n]*(u[2]+cross(theta,site.arm)[2]);
+    }
+    displacement
 }
 
 #[cfg(test)]
@@ -357,5 +405,110 @@ mod tests {
             assert_eq!(shape.len(),motion.mesh.nodes.len());
             for &node in &board.fixed {assert_eq!(shape[node],[0.;6]);}
         }
+    }
+    #[test]
+    fn reduced_preloaded_crown_preserves_low_modes_energy_and_every_physical_projection() {
+        // G0/G3: compare against the unreduced equilibrium shell, using its
+        // physical M inner product to recover the transformation independently.
+        let text=format!("{}bridge_arm,69,0.013,-0.027,0.019\npreload-reference,unloaded\ndownbearing-source,estimated,reduced crown regression\ndownbearing,69,10\n",
+            fixture(0.015).replace("node,4,0.5,0.5,","node,4,0.43,0.54,"));
+        let board=CrownedBoard::read(&text).unwrap();
+        let source=board.prepare_with_motion(&[69],20_000.).unwrap();
+        let options=ritz::RitzOptions::parse("3,1,60,600").unwrap();
+        let reduced=board.prepare_reduced(&[69],20_000.,true,&options).unwrap();
+        assert!(source.modes.len()>3);assert_eq!(reduced.modes.len(),3);
+        let audit=reduced.reduction.as_ref().unwrap();
+        assert_eq!(audit.source_modes,source.modes.len());
+        assert_eq!(audit.protected_low_modes,1);
+        assert_eq!(audit.source_frequency_intervals_hz,source.frequency_intervals_hz);
+        assert_eq!(audit.sample_hz,options.sample_hz);
+        let full=source.motion.as_ref().unwrap();let motion=reduced.motion.as_ref().unwrap();
+        assert_eq!(motion.mesh.nodes,full.mesh.nodes);
+        assert_eq!(motion.mesh.tris,full.mesh.tris);
+        assert!(motion.mesh.nodes[4][2]<0.015 && motion.mesh.nodes[4][2]>0.);
+        assert_eq!(source.mass_kg,reduced.mass_kg);assert_eq!(source.area_m2,reduced.area_m2);
+        assert_eq!(reduced.modes[0].frequency_hz,source.modes[0].frequency_hz);
+        assert_eq!(reduced.modes[0].damping_ratio,source.modes[0].damping_ratio);
+        assert_eq!(reduced.modes[0].bridge,source.modes[0].bridge);
+        assert_eq!(reduced.frequency_intervals_hz[0],source.frequency_intervals_hz[0]);
+        assert_eq!(motion.shapes[0],full.shapes[0]);
+        assert!(motion.shapes.iter().flatten().any(|q|q[0]!=0. || q[1]!=0.));
+        assert!(motion.shapes.iter().flatten().any(|q|q[3..].iter().any(|v|*v!=0.)));
+        let (model,_,_)=downbearing::prepare(&board).unwrap();
+        let free=|shape:&[[f64;6]]| {
+            let mut q=vec![0.;model.free];
+            for (node,values) in shape.iter().enumerate() {
+                for (c,value) in values.iter().enumerate() {
+                    if let Some(d)=model.dof_map[6*node+c] {q[d]=*value;}
+                }
+            }
+            q
+        };
+        let source_q:Vec<_>=full.shapes.iter().map(|s|free(s)).collect();
+        let reduced_q:Vec<_>=motion.shapes.iter().map(|s|free(s)).collect();
+        let mut columns=Vec::new();
+        for q in &reduced_q {
+            let mut mq=vec![0.;model.free];model.m.spmv(q,&mut mq);
+            columns.push(source_q.iter().map(|s|s.iter().zip(&mq)
+                .map(|(a,b)|a*b).sum::<f64>()).collect::<Vec<_>>());
+        }
+        let close=|actual:f64,expected:f64,scale:f64| {
+            assert!((actual-expected).abs()<2e-7*scale.max(1e-12),
+                "physical projection differs: {actual} versus {expected}, scale {scale}");
+        };
+        let c=reduced.physical_damping.as_ref().unwrap();assert_eq!(c.len(),9);
+        assert!(c[5].abs()>1e-10,"mixed tail must retain off-diagonal physical loss");
+        for i in 0..3 {
+            for node in 0..motion.mesh.nodes.len() {for component in 0..6 {
+                let terms:Vec<_>=full.shapes.iter().zip(&columns[i])
+                    .map(|(s,w)|s[node][component]*w).collect();
+                close(motion.shapes[i][node][component],terms.iter().sum(),
+                    terms.iter().map(|x|x.abs()).sum());
+            }}
+            let site=&board.sites[0];
+            let (at,scales)=motion.project_at(site.tri,site.weights,site.arm,[0.,0.,1.]).unwrap();
+            close(reduced.modes[i].bridge[48],at[i],scales[i]);
+            let volume: f64=reduced.surface.iter().map(|s|s.area_m2*s.mode_shape[i]).sum();
+            assert_eq!(volume,reduced.modes[i].volume);
+            for (surface,original) in reduced.surface.iter().zip(&source.surface) {
+                assert_eq!(surface.position_m,original.position_m);
+                assert_eq!(surface.area_m2,original.area_m2);
+                let expected:f64=original.mode_shape.iter().zip(&columns[i]).map(|(a,b)|a*b).sum();
+                let scale:f64=original.mode_shape.iter().zip(&columns[i]).map(|(a,b)|(a*b).abs()).sum();
+                close(surface.mode_shape[i],expected,scale);
+            }
+            let mut kq=vec![0.;model.free];model.k.spmv(&reduced_q[i],&mut kq);
+            for j in 0..3 {
+                let expected:f64=source.modes.iter().enumerate().map(|(a,m)|
+                    2.*m.damping_ratio*TAU*m.frequency_hz*columns[i][a]*columns[j][a]).sum();
+                close(c[i*3+j],expected,c[i*3+i].max(c[j*3+j]));
+                assert_eq!(c[i*3+j],c[j*3+i]);
+                let stiffness:f64=reduced_q[j].iter().zip(&kq).map(|(a,b)|a*b).sum();
+                let eigenvalue=(TAU*reduced.modes[i].frequency_hz).powi(2);
+                close(stiffness,if i==j {eigenvalue}else{0.},eigenvalue);
+            }
+        }
+        assert!(reduced.provenance.contains("downbearing equilibrium"));
+        assert!(reduced.provenance.contains("projected equilibrium pencil only"));
+    }
+    #[test]
+    fn crowned_reduction_checks_targets_and_keeps_an_exact_protected_only_slice() {
+        let board=CrownedBoard::read(&fixture(0.015)).unwrap();
+        let source=board.prepare_with_motion(&[69],400.).unwrap();
+        let count=source.modes.len();
+        let options=ritz::RitzOptions {max_modes:count,keep_low_modes:count,sample_hz:vec![100.]};
+        let reduced=board.prepare_reduced(&[69],400.,true,&options).unwrap();
+        assert_eq!(source.motion.as_ref().unwrap().shapes,reduced.motion.as_ref().unwrap().shapes);
+        assert_eq!(source.frequency_intervals_hz,reduced.frequency_intervals_hz);
+        for (a,b) in source.modes.iter().zip(&reduced.modes) {
+            assert_eq!(a.frequency_hz,b.frequency_hz);assert_eq!(a.bridge,b.bridge);
+            assert_eq!(a.volume,b.volume);assert_eq!(a.damping_ratio,b.damping_ratio);
+        }
+        for invalid in [ritz::RitzOptions {sample_hz:vec![401.],..options.clone()},
+            ritz::RitzOptions {max_modes:129,..options.clone()},
+            ritz::RitzOptions {keep_low_modes:count+1,..options.clone()}] {
+            assert!(board.prepare_reduced(&[69],400.,false,&invalid).is_err());
+        }
+        assert!(board.prepare_reduced(&[60],400.,false,&options).is_err());
     }
 }

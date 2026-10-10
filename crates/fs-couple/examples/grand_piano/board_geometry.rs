@@ -28,7 +28,7 @@ pub mod motion;
 #[path = "board_ritz.rs"]
 pub mod ritz;
 #[path = "board_reduction.rs"]
-mod reduction;
+pub(super) mod reduction;
 
 pub const HEADER: &str = "frankensim-board-geometry-si-v1";
 // Use the SAME retention budget as modal import, bridge mechanics and radiation.

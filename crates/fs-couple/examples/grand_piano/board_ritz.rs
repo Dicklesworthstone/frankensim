@@ -42,7 +42,7 @@ impl RitzOptions {
         Ok(options)
     }
 
-    pub(super) fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if !(1..=MAX_RITZ_MODES).contains(&self.max_modes) || self.keep_low_modes > self.max_modes
             || !(1..=MAX_SAMPLE_FREQUENCIES).contains(&self.sample_hz.len())
             || self.sample_hz.iter().any(|f| !f.is_finite() || *f <= 0.0)

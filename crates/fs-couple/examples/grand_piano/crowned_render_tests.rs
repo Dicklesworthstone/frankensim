@@ -86,3 +86,37 @@ fn crowned_geometry_custom_felt_and_spatial_release_share_the_existing_main_audi
     };
     assert_eq!(run(false),run(true));
 }
+
+#[test]
+fn reduced_crown_reaches_played_pressure_with_full_material_loss() {
+    let o=options(&["--preset","steinway-d","--board-geometry","supplied.fss",
+        "--render","piano.wav","--modes","12","--board-band-hz","20000",
+        "--board-reduction","3,1,60,600"]).unwrap();
+    let text=shell().replace("node,4,0.5,0.5,","node,4,0.43,0.54,")
+        +"bridge_arm,69,0.013,-0.027,0.019\n";
+    let board=prepare_geometric_board_with_reduction(&text,&[69],o.board_band_hz,
+        false,false,false,0,true,o.board_reduction.as_ref()).unwrap();
+    assert!(board.reduction.as_ref().unwrap().source_modes>board.modes.len());
+    assert_eq!(board.modes.len(),3);
+    assert_eq!(board.physical_damping.as_ref().unwrap().len(),9);
+    assert!(board.motion.is_some());
+    let course=selected_scale(None,&o).unwrap()[48];
+    let run=|split:bool| {
+        let piano=prepare_instrument_with_board_damping(vec![course],&board.modes,&o,
+            None,None,board.physical_damping.as_deref()).unwrap();
+        let score=performance::Performance::read(
+            "sample,event,key,value\n0,note_on,69,2\n600,note_off,69,0\n",&[69],1800).unwrap();
+        let mut stream=audio::AudioStream::new(piano,score,Some(&board.surface),
+            [0.3,0.7,1.2],fs_bem::helmholtz::Medium::air(),o.observer_gain).unwrap();
+        let mut output=vec![0.;1800];
+        if split {for block in output.chunks_mut(127) {stream.render_block(block).unwrap();}}
+        else {stream.render_block(&mut output).unwrap();}
+        let piano=stream.instrument();
+        assert!(piano.accounting.modal_loss_j>0.);
+        assert!((piano.accounting.input_work_j-piano.energy_j()-piano.accounting.dissipated_j()).abs()<1e-7);
+        assert!(output.iter().all(|p|p.is_finite()));
+        assert!(output.iter().any(|p|p.abs()>1e-10));
+        output
+    };
+    assert_eq!(run(false),run(true));
+}

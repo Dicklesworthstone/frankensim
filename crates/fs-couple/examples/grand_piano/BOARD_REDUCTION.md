@@ -1,7 +1,7 @@
 # Bridge-informed soundboard reduction
 
-An explicit flat-board preparation path can now project a larger certified
-soundboard modal slice into the existing bounded piano engine. It addresses the
+An explicit preparation path for flat and crowned boards can project a larger
+certified soundboard modal slice into the existing bounded piano engine. It addresses the
 retention obstacle encountered when a useful source band contains more than
 128 modes. It does not promote a new default band or establish convergence of
 the underlying board mesh, material data, bridge mobility, or microphone sound.
@@ -53,8 +53,14 @@ unreduced path still admits a complete slice of at most 128. The string partial
 budget controlled by `--modes` is independent. No path silently discards the
 highest source eigenpairs to fit a budget.
 
-Crowned shells are currently unsupported by this reduction. In
-`grand_piano`, it requires a geometric render and excludes `--dump-board`:
+Supplied crowned shells are reduced after the ordinary shell preparation. If
+downbearing is supplied, the existing static solve first establishes the loaded
+equilibrium and tangent stiffness; its certified tangent modes are the source
+slice. Reduction preserves that equilibrium geometry and all six nodal shell
+degrees of freedom. Flat-board mass and acoustic-refinement options remain
+restricted to flat geometry.
+
+In `grand_piano`, reduction requires a geometric render and excludes `--dump-board`:
 the existing modal CSV cannot represent the full projected damping operator.
 Geometry-only exports do not perform this reduction. A reduced modal table must
 not be re-imported as though per-mode damping ratios were its complete material
@@ -100,7 +106,8 @@ coordinates once. The same nodal field is then used for all bridge projections,
 volume velocity, Rayleigh surface quadrature, and full-vector motion supplied
 to polarization and finite-body acoustics.
 
-The selected P1 or edge-cubic field is used consistently. Neither reduction
+The selected P1 or edge-cubic field is used consistently, including shell
+translation, rotation and eccentric bridge-arm motion. Neither reduction
 nor the acoustic receiver introduces a separate displacement interpolation.
 Material geometry, mass, stiffness, supports, and bridge locations are supplied
 by the original board.
@@ -170,8 +177,9 @@ checks that bridge, volume, surface, and full-vector motion use one basis.
 Frontend regressions cover admission and propagation into actual played and
 harmonic preparation.
 
-These regressions were added without an executed result in the implementation
-session: the local execution service disconnected before syntax checking,
-compilation, or native tests could run. Direct GitHub publication and exact
-committed-source verification succeeded; those checks are not numerical or
-performance validation.
+The five standalone Ritz-kernel regressions pass with the repository's pinned
+`nightly-2026-07-06` compiler. Crowned-shell regressions additionally cover the
+loaded equilibrium, exact protected modes, six-DOF motion, physical damping,
+bridge compliance and propagation into both frontends. Their integrated native
+execution requires the constellation dependencies and a compatible Cargo lock;
+the kernel result alone is not an integrated-example or performance result.

@@ -85,6 +85,25 @@ fn reduced_board_dense_loss_and_motion_reach_playback_harmonic_response_and_bem(
 }
 
 #[test]
+fn exterior_reduction_accepts_the_supplied_crown_and_preserves_its_motion() {
+    let (flat,_,_,_)=inputs();
+    let crown=crowned_board::elevate(&flat,&[0.,0.,0.,0.,0.0015],
+        "authored soft shell for reduction regression").unwrap();
+    let options=playback::Options::parse(&args("--board-reduction 3,1,80,160")).unwrap();
+    let board=prepare_board_motion(&crown,&[69],20000.,&options).unwrap();
+    assert!(board.reduction.as_ref().unwrap().source_modes>board.modes.len());
+    assert_eq!(board.modes.len(),3);
+    assert_eq!(board.physical_damping.as_ref().unwrap().len(),9);
+    let motion=board.motion.as_ref().unwrap();
+    assert_eq!(motion.mesh.nodes[4][2],0.0015);
+    assert_eq!(motion.shapes.len(),board.modes.len());
+    let (primary,_)=motion.project_at(0,[0.,0.,1.],[0.;3],[0.,0.,1.]).unwrap();
+    for (mode,g) in board.modes.iter().zip(primary) {
+        assert!((mode.bridge[48]-g).abs()<1e-12);
+    }
+}
+
+#[test]
 fn exterior_reduction_options_preserve_bounds_flag_values_and_source_band() {
     let parsed=playback::Options::parse(&args(
         "--board-reduction 2,0,80,160 --equilibrate-board-mass"
@@ -109,5 +128,5 @@ fn exterior_reduction_options_preserve_bounds_flag_values_and_source_band() {
     assert!(prepare_board_motion(&board,&[69],spec.board_band_hz,&outside).is_err());
     let error=prepare_board_motion(crowned_board::HEADER,&[69],spec.board_band_hz,&parsed)
         .unwrap_err();
-    assert!(error.contains("flat"),"a crowned header must refuse the flat reduction before parsing: {error}");
+    assert!(error.contains("flat"),"a crowned header must refuse flat-board mass controls before parsing: {error}");
 }

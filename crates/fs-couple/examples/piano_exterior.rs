@@ -78,8 +78,9 @@ by playback and admittance. Set max_modes <=32 for render-loaded, whose passive
 radiation fit keeps its existing independent budget. Snapshot displacement
 projection error is not a transfer, acoustic or mesh-convergence certificate.
 See grand_piano/BOARD_REDUCTION.md for the explicit format and scope.
-These flat-board options refuse crowned shells; higher-band convergence remains
-an independent requirement. The optional FSB stiffener-mass row accepts lumped,
+Reduction also accepts crowned shells and uses the equilibrium tangent modes
+when downbearing is supplied. Mass options remain flat-only; higher-band
+convergence remains an independent requirement. The optional FSB stiffener-mass row accepts lumped,
 consistent-hermite or consistent-eccentric. The last adds supplied bending rotary
 and offset centroid inertia to Hermite translation; no torsional polar inertia is inferred.
 admittance alone accepts --lossless-structure to remove the existing wood and
@@ -193,13 +194,13 @@ fn prepare_board_motion(board_text:&str,keys:&[u8],band_hz:f64,options:&playback
     ->Result<board_geometry::PreparedBoard,String> {
     options.validate()?;
     if crowned_board::is_crowned(board_text) {
-        if options.board_reduction.is_some() {
-            return Err("--board-reduction currently requires a flat geometric board".into());
-        }
         if options.equilibrate_board_mass || options.consistent_board_mass || options.edge_cubic_board_mass {
             return Err("flat-board mass controls require a flat geometric board".into());
         }
-        crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(keys,band_hz)
+        let geometry=crowned_board::CrownedBoard::read(board_text)?;
+        if let Some(reduction)=&options.board_reduction {
+            geometry.prepare_reduced(keys,band_hz,true,reduction)
+        } else {geometry.prepare_with_motion(keys,band_hz)}
     } else {
         let geometry=board_geometry::BoardGeometry::read(board_text)?;
         if let Some(reduction)=&options.board_reduction {

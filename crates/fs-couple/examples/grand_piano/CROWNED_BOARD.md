@@ -132,12 +132,33 @@ is used for both force and motion. Absent arms retain the original midsurface
 port, not an invented top-of-bridge point. A vertical force applied along a
 purely vertical arm has no torque, correctly. Horizontal arms admit moments.
 
+## Reducing a crowned or preloaded board
+
+Both `grand_piano` and `piano_exterior` accept
+`--board-reduction max_modes,keep_low_modes,frequency_hz,...` for a supplied
+crowned board. This explicitly permits a certified source slice of up to 512
+modes, then retains at most 128 coordinates in the existing piano engine.
+Static and sampled harmonic bridge-force responses choose the mixed part of
+the basis; the requested lowest modes remain exact. The full projected wood
+damping matrix travels with the reduced geometry into playback and harmonic
+admittance. See [BOARD_REDUCTION.md](BOARD_REDUCTION.md) for selection and error
+reporting, including the separate 32-coordinate radiation-loading limit.
+
+For explicit downbearing, the ordinary static solve first establishes the
+equilibrium geometry and tangent shell stiffness. Reduction uses those tangent
+modes and preserves all six nodal translation/rotation components, bridge arms,
+and the same equilibrium surface for acoustic motion. It introduces no extra
+preload, geometry flattening, or second equilibrium solve. The flat-board mass
+and acoustic-refinement controls still refuse crowned input.
+
 ## Limits that affect the sound
 
-This is a **linearization about a supplied initial geometry**. It does not
-solve string downbearing, static deformation, residual crown stress, glue slip,
-rim flexibility or prestress-dependent tangent stiffness. A nonzero pretension
-request refuses. Initial crown and a preloaded equilibrium are different models;
+Without explicit loads, this is a **linearization about a supplied initial
+geometry**. Supplying the complete downbearing card instead requests the static
+equilibrium and its prestress-dependent tangent model described in
+[DOWNBEARING.md](DOWNBEARING.md). Residual manufacturing stress, glue slip and
+rim flexibility are not inferred. A nonzero authored pretension request
+refuses. Initial crown and a preloaded equilibrium are different models;
 see Mamou-Mani, Frelat and Besnainou, *Numerical simulation of piano soundboard
 under downbearing*, JASA 123 (2008), DOI 10.1121/1.2836787.
 

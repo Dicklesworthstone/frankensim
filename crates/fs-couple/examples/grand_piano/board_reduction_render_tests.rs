@@ -23,7 +23,7 @@ fn reduction_requires_a_played_geometric_model_and_a_representable_export() {
     ] { assert!(options(args).is_err(),"{args}"); }
     let reduction = board_geometry::ritz::RitzOptions::parse("2,0,100").unwrap();
     let error = prepare_geometric_board_with_reduction(crowned_board::HEADER,&[69],300.,
-        false,false,false,0,true,Some(&reduction)).unwrap_err();
+        true,false,false,0,true,Some(&reduction)).unwrap_err();
     assert!(error.contains("flat geometric board"));
 }
 

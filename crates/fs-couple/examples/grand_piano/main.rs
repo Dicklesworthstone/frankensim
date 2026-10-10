@@ -130,14 +130,15 @@ Crowned structures retain 3-D motion, grain and eccentric ribs/bridges; their
 radiation is a projected flat-baffle approximation, not 3-D exterior BEM.
 Crown is reference geometry, not solved downbearing; see CROWNED_BOARD.md.
 The explicit frequency band ordinarily admits at most 128 board modes.
---board-reduction explicitly permits up to 512 source modes on a flat board,
+--board-reduction explicitly permits up to 512 source modes on a flat or crowned board,
 then retains at most max_modes (1..128), including keep_low_modes exact low
 modes. Static and damped responses at 1..16 increasing target frequencies guide
 the remaining basis at every admitted primary bridge. Targets must lie within
 --board-band-hz; that source band is never widened implicitly. Full projected
 wood damping, bridge motion and the radiating field stay in the same basis.
-This requires --render and excludes crowned shells and --dump-board: modal CSV
-cannot preserve the dense material operator. See BOARD_REDUCTION.md.
+For supplied downbearing, reduction uses the solved equilibrium tangent modes.
+This requires --render and excludes --dump-board: modal CSV cannot preserve the
+dense material operator. Flat-board mass controls remain flat-only. See BOARD_REDUCTION.md.
 --modes independently admits up to 512 string partials. These budgets and the
 reported snapshot projection error do not certify transfer, acoustic or mesh
 convergence, perceptual similarity, or real-time performance.
@@ -377,7 +378,7 @@ impl Options {
         let geometric = options.preset.is_some() || options.board_geometry.is_some();
         if let Some(reduction) = &options.board_reduction {
             if !geometric || options.render.is_none() || options.dump_board.is_some() {
-                return Err("--board-reduction requires a flat geometric --render and excludes --dump-board; modal CSV cannot preserve full damping".into());
+                return Err("--board-reduction requires a geometric --render and excludes --dump-board; modal CSV cannot preserve full damping".into());
             }
             if reduction.sample_hz.iter().any(|hz| *hz > options.board_band_hz) {
                 return Err("--board-reduction target frequencies must lie within --board-band-hz".into());
@@ -628,7 +629,11 @@ fn prepare_geometric_board_with_reduction(text: &str, keys: &[u8], band_hz: f64,
     reduction: Option<&board_geometry::ritz::RitzOptions>) -> Result<board_geometry::PreparedBoard, String> {
     if let Some(reduction) = reduction {
         if crowned_board::is_crowned(text) {
-            return Err("--board-reduction currently requires a flat geometric board".into());
+            if equilibrate_mass || consistent_mass || edge_cubic_mass || acoustic_refinement_levels != 0 {
+                return Err("flat-board mass controls require a flat geometric board".into());
+            }
+            return crowned_board::CrownedBoard::read(text)?
+                .prepare_reduced(keys, band_hz, retain_motion, reduction);
         }
         return board_geometry::BoardGeometry::read(text)?
             .with_acoustic_refinement(acoustic_refinement_levels)?
