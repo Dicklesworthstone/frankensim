@@ -214,7 +214,6 @@ pub type BlockOperator3<'a> = BlockOperator<'a, 3>;
 
 impl<'a, const N: usize> BlockOperator<'a, N> {
     /// Validate and retain a block table.
-    #[must_use]
     pub fn new(blocks: [[&'a dyn RectLinearOp; N]; N]) -> Result<Self, BlockError> {
         if N == 0 {
             return Err(BlockError::Empty);
@@ -223,8 +222,8 @@ impl<'a, const N: usize> BlockOperator<'a, N> {
         let mut col_sizes = [0usize; N];
         for row in 0..N {
             row_sizes[row] = blocks[row][0].rows();
-            for column in 1..N {
-                let actual = blocks[row][column].rows();
+            for block in blocks[row].iter().skip(1) {
+                let actual = block.rows();
                 if actual != row_sizes[row] {
                     return Err(BlockError::RowMismatch {
                         row,
@@ -236,8 +235,8 @@ impl<'a, const N: usize> BlockOperator<'a, N> {
         }
         for column in 0..N {
             col_sizes[column] = blocks[0][column].cols();
-            for row in 1..N {
-                let actual = blocks[row][column].cols();
+            for block_row in blocks.iter().skip(1) {
+                let actual = block_row[column].cols();
                 if actual != col_sizes[column] {
                     return Err(BlockError::ColumnMismatch {
                         column,
@@ -352,7 +351,6 @@ pub struct RealEquivalentComplexOp<'a> {
 
 impl<'a> RealEquivalentComplexOp<'a> {
     /// Validate a same-dimension real/imaginary pair.
-    #[must_use]
     pub fn new(real: &'a dyn LinearOp, imaginary: &'a dyn LinearOp) -> Result<Self, BlockError> {
         if real.n() != imaginary.n() {
             return Err(BlockError::ComplexPairMismatch {
@@ -444,7 +442,6 @@ pub struct BlockSchur2<'a> {
 
 impl<'a> BlockSchur2<'a> {
     /// Validate the split and retain injected inverse approximations.
-    #[must_use]
     pub fn new(
         first: usize,
         second: usize,

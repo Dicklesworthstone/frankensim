@@ -268,7 +268,9 @@ fn factor_bound<F: FnMut() -> bool>(
             work.tick()?;
             if j < i {
                 let upper = a.get(j,i);
-                if upper != value { difference[j] = add_up(difference[j], up((upper-value).abs())?)?; }
+                if upper.partial_cmp(&value) != Some(std::cmp::Ordering::Equal) {
+                    difference[j] = add_up(difference[j], up((upper-value).abs())?)?;
+                }
                 if value != 0.0 {
                     if limits.max_entries.saturating_sub(active) < 2 {
                         stats.peak_entries = active;

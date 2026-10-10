@@ -45,7 +45,12 @@ pub enum GramOrthantError {
     /// Finite inputs led to unrepresentable arithmetic.
     NonFinite,
     /// Budget exhausted; does NOT classify infeasibility or nonuniqueness.
-    NotConverged { residual: f64, sweeps: usize },
+    NotConverged {
+        /// Last projected residual in the supplied normalized Gram problem.
+        residual: f64,
+        /// Number of completed coordinate sweeps.
+        sweeps: usize,
+    },
 }
 impl core::fmt::Display for GramOrthantError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

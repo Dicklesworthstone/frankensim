@@ -354,9 +354,9 @@ fn enclose_feedback_inner(
     }
     let mut residual_inf = 0.0_f64;
     let mut perturbation_inf = 0.0_f64;
-    for i in 0..n {
+    for (i, &source) in rhs.iter().enumerate().take(n) {
         work.tick()?;
-        let mut residual = ScalarEnclosure::point(rhs[i]);
+        let mut residual = ScalarEnclosure::point(source);
         let (indices, values) = matrix.row(i);
         for (&j, &value) in indices.iter().zip(values) {
             work.tick()?;

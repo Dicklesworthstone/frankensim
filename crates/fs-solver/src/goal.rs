@@ -47,15 +47,42 @@ pub struct GoalResidualLimits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoalResidualError {
     /// A nonempty square system is required.
-    Shape { rows: usize, columns: usize },
+    Shape {
+        /// Supplied matrix row count.
+        rows: usize,
+        /// Supplied matrix column count.
+        columns: usize,
+    },
     /// An input vector has the wrong length.
-    Length { field: &'static str, expected: usize, found: usize },
+    Length {
+        /// Input vector whose length failed admission.
+        field: &'static str,
+        /// Length required by the stored system.
+        expected: usize,
+        /// Supplied vector length.
+        found: usize,
+    },
     /// A declared structural limit was exceeded.
-    Limit { field: &'static str, required: usize, allowed: usize },
+    Limit {
+        /// Structural resource whose cap was exceeded.
+        field: &'static str,
+        /// Work or storage required by the proposed operation.
+        required: usize,
+        /// Caller-declared admission cap.
+        allowed: usize,
+    },
     /// An input scalar was nonfinite.
-    NonFinite { field: &'static str, index: usize },
+    NonFinite {
+        /// Input vector containing the nonfinite scalar.
+        field: &'static str,
+        /// Scalar position in that vector.
+        index: usize,
+    },
     /// The checked scaling must be strictly positive everywhere.
-    NonPositiveScaling { index: usize },
+    NonPositiveScaling {
+        /// Position of the nonpositive scaling entry.
+        index: usize,
+    },
     /// Finite outward endpoints could not be represented.
     ArithmeticRange,
     /// Scratch storage could not be admitted or allocated.

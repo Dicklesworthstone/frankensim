@@ -56,10 +56,15 @@ pub struct MultilevelWork {
 /// No partial hierarchy is returned on any refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MultilevelError {
+    /// Shape, storage, or scalar input violates the named invariant.
     Invalid(&'static str),
+    /// The named structural work or storage cap was exceeded.
     Budget(&'static str),
+    /// A checkpoint requested cancellation before publication.
     Cancelled,
+    /// Stored transpose entries are not exactly equal.
     Nonsymmetric,
+    /// A diagonal or bounded bottom factor fails positive-definite admission.
     NotPositiveDefinite,
 }
 impl std::fmt::Display for MultilevelError {
@@ -78,6 +83,7 @@ pub struct MultilevelControl<'a> {
     checkpoint: &'a mut dyn FnMut(MultilevelWork) -> ControlFlow<()>,
 }
 impl<'a> MultilevelControl<'a> {
+    /// Admit supported level and bottom caps, then poll before setup work.
     pub fn new(budget: MultilevelBudget,
         checkpoint: &'a mut dyn FnMut(MultilevelWork) -> ControlFlow<()>) -> Result<Self, MultilevelError> {
         if !(2..=20).contains(&budget.max_levels) || !(1..=512).contains(&budget.max_coarsest_dofs) {
@@ -86,8 +92,11 @@ impl<'a> MultilevelControl<'a> {
         let mut result = Self { budget, work: MultilevelWork::default(), checkpoint };
         result.poll()?; Ok(result)
     }
+    /// Setup work charged so far, including discarded candidate products.
     #[must_use] pub const fn work(&self) -> MultilevelWork { self.work }
+    /// Caller-declared structural admission caps.
     #[must_use] pub const fn budget(&self) -> MultilevelBudget { self.budget }
+    /// Poll cancellation without changing charged work.
     pub fn poll(&mut self) -> Result<(), MultilevelError> {
         if (self.checkpoint)(self.work).is_break() { Err(MultilevelError::Cancelled) } else { Ok(()) }
     }
@@ -96,7 +105,7 @@ impl<'a> MultilevelControl<'a> {
             return Err(MultilevelError::Budget("Galerkin summands"));
         }
         self.work.galerkin_products += 1;
-        if self.work.galerkin_products % 1024 == 0 { self.poll()?; }
+        if self.work.galerkin_products.is_multiple_of(1024) { self.poll()?; }
         Ok(())
     }
     fn remaining_entries(&self) -> usize { self.budget.max_matrix_entries - self.work.matrix_entries }
@@ -119,6 +128,7 @@ pub struct SymmetricGalerkin {
     entry_cap: usize,
 }
 impl SymmetricGalerkin {
+    /// Poll and admit a nonempty dimension within the remaining entry cap.
     pub fn new(n: usize, control: &mut MultilevelControl<'_>) -> Result<Self, MultilevelError> {
         control.poll()?;
         if n == 0 || n > control.budget.max_fine_dofs {
@@ -126,6 +136,7 @@ impl SymmetricGalerkin {
         }
         Ok(Self { n, upper: BTreeMap::new(), entries: 0, entry_cap: control.remaining_entries() })
     }
+    /// Charge and accumulate one upper-triangle contribution in caller order.
     pub fn add(&mut self, i: usize, j: usize, value: f64,
         control: &mut MultilevelControl<'_>) -> Result<(), MultilevelError> {
         if i >= self.n || j >= self.n { return Err(MultilevelError::Invalid("Galerkin index")); }
@@ -188,7 +199,9 @@ fn matrix(a: &Csr, control: &mut MultilevelControl<'_>) -> Result<Vec<f64>, Mult
         }
         for (&j, &value) in c.iter().zip(v) {
             // No silent symmetrization of a caller's nonsymmetric operator.
-            if a.get(j, i) != value { return Err(MultilevelError::Nonsymmetric); }
+            if a.get(j, i).partial_cmp(&value) != Some(std::cmp::Ordering::Equal) {
+                return Err(MultilevelError::Nonsymmetric);
+            }
         }
         let d = a.get(i, i);
         if !d.is_finite() || d <= 0.0 { return Err(MultilevelError::NotPositiveDefinite); }
@@ -216,7 +229,9 @@ pub fn sparse_galerkin(a: &Csr, p: &Csr, control: &mut MultilevelControl<'_>) ->
         if ac.iter().any(|&j| j >= a.nrows()) || ac.windows(2).any(|w| w[0] >= w[1])
             || av.iter().any(|v| !v.is_finite()) { return Err(MultilevelError::Invalid("invalid Galerkin source row")); }
         for (&j, &value) in ac.iter().zip(av) {
-            if a.get(j, i) != value { return Err(MultilevelError::Nonsymmetric); }
+            if a.get(j, i).partial_cmp(&value) != Some(std::cmp::Ordering::Equal) {
+                return Err(MultilevelError::Nonsymmetric);
+            }
             if value == 0.0 { continue; }
             let (qc, qv) = p.row(j);
             for (&k, &u) in pc.iter().zip(pv) { for (&l, &v) in qc.iter().zip(qv) {
@@ -303,9 +318,11 @@ impl<'a, A: LinearOp> SparseMultilevel<'a, A> {
         Ok(Self { operator, inverse_diagonal: inverse_diagonal.to_vec(), transfers,
             levels, bottom, equilibration, sizes, work: control.work() })
     }
+    /// Borrow the retained matrix-free finest operator.
     #[must_use] pub fn operator(&self) -> &A { self.operator }
     /// Includes the matrix-free finest level first.
     #[must_use] pub fn level_sizes(&self) -> &[usize] { &self.sizes }
+    /// Charged setup work retained with the completed hierarchy.
     #[must_use] pub const fn work(&self) -> MultilevelWork { self.work }
     fn cycle(&self, level: usize, rhs: &[f64]) -> Vec<f64> {
         let a = &self.levels[level].a; let n = a.nrows();

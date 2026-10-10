@@ -69,7 +69,7 @@ pub fn enclose_goal_error_with_inverse(
         ("inverse rows", n, 256),
         (
             "inverse entries",
-            n.checked_mul(n).unwrap_or(usize::MAX),
+            n.saturating_mul(n),
             limits.max_nonzeros,
         ),
         (
@@ -162,7 +162,7 @@ pub fn enclose_goal_error_with_inverse(
         }
         Ok(None) => report.status = GoalBoundStatus::InverseBoundUnavailable,
         Err(GoalResidualError::ArithmeticRange) => {
-            report.status = GoalBoundStatus::BoundNotRepresentable
+            report.status = GoalBoundStatus::BoundNotRepresentable;
         }
         Err(error) => return Err(error),
     }

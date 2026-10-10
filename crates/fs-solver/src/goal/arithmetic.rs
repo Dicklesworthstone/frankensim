@@ -76,7 +76,8 @@ impl ScalarEnclosure {
     }
 
     pub(super) fn radius_about(self, value: f64) -> Result<f64, GoalResidualError> {
-        if self.lower == value && self.upper == value {
+        if self.lower.partial_cmp(&value) == Some(std::cmp::Ordering::Equal)
+            && self.upper.partial_cmp(&value) == Some(std::cmp::Ordering::Equal) {
             return Ok(0.0);
         }
         up((self.lower - value).abs().max((self.upper - value).abs()))

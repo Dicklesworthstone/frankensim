@@ -337,7 +337,6 @@ impl VerifiedLinearSystem {
 }
 
 /// Verify shape/finiteness, invoke a verifier, and retain its coherent finding.
-#[must_use]
 pub fn verify_linear_system<V: LinearSystemVerifier>(
     operator: &dyn LinearOp,
     rhs: &[f64],

@@ -337,10 +337,9 @@ pub fn prepare_spectral_inverse(
             // The preceding attempt's local maps/columns have been dropped.
             work.live = 0;
             work.grow(matrix.nrows().checked_mul(8).ok_or(Halt::Storage)?)?;
-            if let Some(columns) = factor(matrix, shift, &mut work)? {
-                if let Some(certificate) = verify(matrix, shift, &columns, &mut work)? {
-                    return Ok(Some(certificate));
-                }
+            if let Some(columns) = factor(matrix, shift, &mut work)?
+                && let Some(certificate) = verify(matrix, shift, &columns, &mut work)? {
+                return Ok(Some(certificate));
             }
             shift *= 0.5;
             if shift == 0.0 { break; }
