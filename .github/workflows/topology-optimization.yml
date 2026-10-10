@@ -67,13 +67,21 @@ jobs:
         with:
           persist-credentials: false
       - name: Materialize pinned dependencies
-        run: set -o pipefail; cargo run --manifest-path tools/bootstrap/Cargo.toml 2>&1 | tail -n 30
+        run: |
+          set -o pipefail
+          cargo run --manifest-path tools/bootstrap/Cargo.toml 2>&1 | tail -n 30
       - name: Test fixed physical regions and adaptive checkpoint boundaries
         if: ${{ !cancelled() }}
-        run: set -o pipefail; cargo test --release -p fs-topopt --features cutfem-marquee --lib sdf3:: 2>&1 | tail -n 100
+        run: |
+          set -o pipefail
+          cargo test --release -p fs-topopt --features cutfem-marquee --lib sdf3:: 2>&1 | tail -n 100
       - name: Test native elasticity studies and constrained continuation
         if: ${{ !cancelled() }}
-        run: set -o pipefail; cargo test --release -p fs-cli --features sdf3-study --lib study::elasticity 2>&1 | tail -n 100
+        run: |
+          set -o pipefail
+          cargo test --release -p fs-cli --features sdf3-study --lib study::elasticity 2>&1 | tail -n 100
       - name: Test native study, resume and retained report commands
         if: ${{ !cancelled() }}
-        run: set -o pipefail; cargo test --release -p fs-cli --features sdf3-study --test study_checkpoint_cli --test study_sdf3_cli --test study_csg3_cli 2>&1 | tail -n 100
+        run: |
+          set -o pipefail
+          cargo test --release -p fs-cli --features sdf3-study --test study_checkpoint_cli --test study_sdf3_cli --test study_csg3_cli 2>&1 | tail -n 100

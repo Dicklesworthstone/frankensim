@@ -39,6 +39,8 @@ mod loading;
 #[path = "sdf3/geometry.rs"]
 mod geometry;
 use geometry::{FixedFace, PhysicalDomain};
+#[path = "sdf3/regions.rs"]
+mod regions;
 
 #[path = "sdf3/output.rs"]
 mod output;
@@ -48,7 +50,7 @@ use spec::Spec;
 #[path = "sdf3/stress.rs"]
 mod stress;
 
-const SCOPE: &str = "Estimated 3-D linear-elastic SIMP compliance on a fixed raw implicit domain. The octree background is refined by numerical two-grid goal residuals; raw densities are transferred, physical-volume feasibility restored, and compliance/volume directional derivatives checked before every stage. These are discrete numerical comparisons, not continuum error enclosures, moving-boundary optimization, mesh-independent optima, manufacturing guarantees or physical validation. Compliance descent applies within each stage. Memory admission is an envelope, not measured RSS. Cancellation and wall time are checked at cooperative quadrature/solver boundaries; individual kernels and ledger I/O are indivisible. Every completed stage is durably retained before more physics. Resume verifies the retained stage prefix by replay under the same executable; replay spends the original wall, Krylov and geometry allowances. This is not direct optimizer-state restoration. Failed replay or a process crash preserves previous checkpoints but cannot durably charge later uncheckpointed work. The final ledger write is outside its own recorded wall measurement.";
+const SCOPE: &str = "Estimated 3-D linear-elastic SIMP compliance on a fixed raw implicit domain. The octree background is refined by numerical two-grid goal residuals; raw densities are transferred, physical-volume feasibility restored, and compliance/volume directional derivatives checked before every stage. Declared whole-cell solid/void density constraints survive projection and refinement; void retains the declared ersatz stiffness and is not a geometric hole. These are discrete numerical comparisons, not continuum error enclosures, moving-boundary optimization, mesh-independent optima, manufacturing guarantees or physical validation. Compliance descent applies within each stage. Memory admission is an envelope, not measured RSS. Cancellation and wall time are checked at cooperative quadrature/solver boundaries; individual kernels and ledger I/O are indivisible. Every completed stage is durably retained before more physics. Resume verifies the retained stage prefix by replay under the same executable; replay spends the original wall, Krylov and geometry allowances. This is not direct optimizer-state restoration. Failed replay or a process crash preserves previous checkpoints but cannot durably charge later uncheckpointed work. The final ledger write is outside its own recorded wall measurement.";
 
 struct Domain {
     height: f64,
@@ -220,7 +222,7 @@ fn compute_observed(
                 else { exit::REFUSED },
             message: format!("initial 3-D geometry could not complete: {e}; no displacement or optimized design is available"),
         })?;
-    let mut study = CutDensityStudy3::new(operator, spec.radius, spec.schedule[0]);
+    let mut study = regions::bind(CutDensityStudy3::new(operator, spec.radius, spec.schedule[0]), spec)?;
     let raw = vec![spec.density; study.cells()];
     let mut checkpoint = |_| poll();
     let mut control = SolveControl::new(
@@ -283,10 +285,7 @@ fn compute_observed(
             result.evaluation_stop,
             Some(EvaluationStop::LinearBudget { .. } | EvaluationStop::TotalBudget { .. })
         )
-        || report
-            .refinement_error
-            .as_ref()
-            .is_some_and(refinement_budget)
+        || report.refinement_error.as_ref().is_some_and(refinement_budget)
     {
         "budget-exhausted"
     } else {
@@ -306,14 +305,9 @@ pub(super) fn study(
 ) -> Result<Outcome> {
     let cap = budget(override_text)?;
     let spec = spec::parse(source)?;
-    let ledger = Ledger::open(
-        ledger_path
-            .to_str()
-            .ok_or_else(|| fail("cli-study-sdf3-ledger", "ledger path is not UTF-8"))?,
-    )?;
-    if spec.stress.is_some() {
-        return stress::drive(&spec, &ledger, cap, gate);
-    }
+    let ledger = Ledger::open(ledger_path.to_str()
+        .ok_or_else(|| fail("cli-study-sdf3-ledger", "ledger path is not UTF-8"))?)?;
+    if spec.stress.is_some() { return stress::drive(&spec, &ledger, cap, gate); }
     checkpoint::drive(&spec, &ledger, cap, gate, None, checkpoint::announce)
 }
 
