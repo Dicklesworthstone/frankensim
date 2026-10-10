@@ -27,6 +27,31 @@ Runtime dependencies are `fs-blake3`, `fs-conduction`, `fs-convection`,
 quantities, as a Re/Pr handoff to the existing convection rung, and as the
 CHT ladder's correlation-rung transfer.
 
+### Coupled total-enthalpy endpoint adjoints
+
+`graph::thermal::coupled_transport::sensitivity::enthalpy` binds the concrete
+`EnthalpyRobinResponse` to the existing mixed-air transport linearization. It
+reuses the temperature response's exact port-name/order, HTC, area, effective
+reference and branch heat-balance admission. The solid's complete physical
+Jacobian includes reference-mass storage, nonlinear conductivity and any
+ambient-radiation feedback; the air sees only original convective exchanges.
+The endpoint pullback carries direct nodal specific-enthalpy seeds separately
+from temperature/wall/heat/air objectives, preserving latent history where
+`dT/dh=0`. It closes the implicit transpose interface equation using the
+existing unrelaxed residual checks and stationary or fresh bounded IQN-ILS
+updates, never differentiating primal solver iterations.
+
+Returned previous-h, P1 source-density, assembled-load, supply-temperature and
+convective `ln(HTC)` gradients include mixed-air feedback. Inner-column limits
+apply per solid sweep and the interface budget bounds sweeps; cumulative
+Krylov work is reported. An exhausted, invalid or cancelled solve publishes no
+partial gradient and leaves the accepted endpoint reusable. Geometry, flow,
+time grid, reference masses, chart and material laws remain fixed; this API
+does not add fan/flow, phase-chart, adaptive-grid or enclosure derivatives.
+`tests/coupled_enthalpy.rs` checks real perturbed coupled solves, mixed
+sensible/latent slopes, explicit latent carry, convection-only radiative
+ports, feedback sensitivity and refusal/reuse behavior.
+
 ### Coupled discrete thermal goals
 
 `conjugate::goal::compare_discrete_goal` compares two supplied full solid

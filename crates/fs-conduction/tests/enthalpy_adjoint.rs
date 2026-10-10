@@ -154,6 +154,77 @@ fn linear() -> LinearConfig {
 }
 
 #[test]
+fn convective_response_keeps_latent_carry_separate_from_temperature_seeds() {
+    let mut fixture = Fixture::new();
+    fixture.boundary = ThermalBoundaryBuilder::new(&fixture.mesh)
+        .region(
+            "air",
+            |_| true,
+            fs_conduction::ThermalBc::robin(4.0, 330.0).unwrap(),
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    with_cx(|cx| {
+        let source = ScalarField::Uniform(0.0);
+        let step = fixture
+            .stepper(cx)
+            .linearize_step(
+                cx,
+                fixture.problem(&source),
+                None,
+                &[200.0; 4],
+                DT,
+                config(),
+            )
+            .unwrap();
+        let response = step.robin_response(cx, &["air"], linear()).unwrap();
+        assert_eq!(response.temperature(), &[350.0; 4]);
+        let gradient = response
+            .pullback(cx, &[0.1; 4], &WEIGHTS, &[0.7], &[0.2])
+            .unwrap();
+        for (&history, &source) in gradient
+            .transport
+            .previous_specific_enthalpy
+            .iter()
+            .zip(&gradient.transport.source_density)
+        {
+            assert!((history - 0.1).abs() < 1e-14);
+            assert!((source - DT * 0.1 / 2.0).abs() < 1e-14);
+        }
+        let area = fixture
+            .mesh
+            .boundary()
+            .iter()
+            .map(|face| face.area)
+            .sum::<f64>();
+        let lambda = 0.1 / (2.0 / 24.0);
+        let reference = (DT * lambda - 0.2) * 4.0 * area;
+        assert!((gradient.references[0] - reference).abs() < 1e-12);
+        assert!((gradient.log_htc[0] + 20.0 * reference).abs() < 1e-12);
+        assert!(
+            gradient
+                .nodal_load
+                .iter()
+                .all(|v| (*v - DT * lambda).abs() < 1e-14)
+        );
+        assert!(step.robin_response(cx, &["air", "air"], linear()).is_err());
+        assert!(step.robin_response(cx, &["missing"], linear()).is_err());
+        assert!(
+            response
+                .pullback(cx, &[0.1; 3], &WEIGHTS, &[0.7], &[0.2])
+                .is_err()
+        );
+        assert_eq!(
+            gradient,
+            response
+                .pullback(cx, &[0.1; 4], &WEIGHTS, &[0.7], &[0.2])
+                .unwrap()
+        );
+    });
+}
+
+#[test]
 fn mixed_phase_jacobian_and_transpose_satisfy_the_dot_identity() {
     let fixture = Fixture::new();
     let source = ScalarField::nodal("nodal deposition", 4, SOURCE.to_vec()).unwrap();

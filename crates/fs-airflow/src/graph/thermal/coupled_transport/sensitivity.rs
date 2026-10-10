@@ -19,6 +19,7 @@
 use std::fmt;
 use fs_conduction::ConductionError;
 use fs_conduction::adjoint::robin::{RobinDifferential, RobinResponse};
+use fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError;
 #[cfg(test)]
 use fs_conduction::adjoint::robin::RobinLinearization;
 use fs_couple::iqn_ils::{IqnIls, IqnIlsConfig, IqnIlsError};
@@ -30,6 +31,8 @@ use super::super::transport::sensitivity::{TransportDifferential, TransportLinea
 
 mod flow_scale;
 pub use flow_scale::CoupledFlowScaleGradient;
+/// Checked total-enthalpy endpoint adjoints with explicit latent history carry.
+pub mod enthalpy;
 
 /// Explicit budget for the reduced interface linear equation.
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +113,8 @@ pub enum CoupledSensitivityError {
     InvalidInput(&'static str),
     /// Underlying solid refusal, preserved without coercing it to convergence.
     Solid(ConductionError),
+    /// Underlying checked enthalpy endpoint or transpose refusal.
+    Enthalpy(EnthalpyAdjointError),
     /// Underlying transport or conjugate admission refusal.
     Air(TransportError),
     /// Invalid acceleration policy or unrepresentable vector-update arithmetic.
@@ -129,6 +134,9 @@ impl From<ConductionError> for CoupledSensitivityError {
 impl From<TransportError> for CoupledSensitivityError {
     fn from(error: TransportError) -> Self { Self::Air(error) }
 }
+impl From<EnthalpyAdjointError> for CoupledSensitivityError {
+    fn from(error: EnthalpyAdjointError) -> Self { Self::Enthalpy(error) }
+}
 type Result<T> = std::result::Result<T, CoupledSensitivityError>;
 
 /// Concrete FEM/air binding at a checked coupled fixed point. Steady and
@@ -146,40 +154,8 @@ impl<'a, 'flow> CoupledLinearization<'a, 'flow> {
     pub fn new(cx: &Cx<'_>, network: &'a TransportNetwork<'flow>, solid: &'a RobinResponse,
         primal_gate: &ConjugateConfig) -> Result<Self> {
         poll(cx)?;
-        let names = network.regions();
-        if names.is_empty() || names.len() != solid.ports().len()
-            || names.iter().zip(solid.ports()).any(|(a,b)| *a != b.name.as_str())
-        { return Err(bad("solid ports must equal all network regions in exact order")); }
         let walls = solid.wall_means(cx, solid.temperature())?;
-        let air = network.linearize(cx, &walls)?;
-        let probe = ConjugateConfig { max_iterations: 1, relaxation: Relaxation::Fixed { omega: 1.0 }, ..*primal_gate };
-        for branch in 0..network.hydraulics().branches.len() {
-            poll(cx)?;
-            let range = network.row_range(branch);
-            if range.is_empty() { continue; }
-            let inlet = air.primal().branches[branch].inlet_temperature_k
-                .ok_or_else(|| bad("missing active branch inlet"))?;
-            let path = network.path(branch, inlet)?;
-            let mut states = Vec::new();
-            let mut refs = Vec::new();
-            for (index, segment) in range.clone().zip(path.segments()) {
-                poll(cx)?;
-                let port = &solid.ports()[index];
-                if port.htc_w_m2_k != segment.htc_w_per_m2_k()
-                    || (port.area_m2 - segment.area_m2()).abs() > 128.0*f64::EPSILON*port.area_m2.max(segment.area_m2())
-                { return Err(bad("solid and air must share h and area, not merely a region name")); }
-                let flux = solid.robin_fluxes().iter().find(|flux| flux.region == port.name)
-                    .ok_or_else(|| bad("solid report is missing the bound Robin region"))?;
-                states.push(SolidRegionState::from_robin_flux(flux));
-                refs.push(port.reference_k);
-                if (air.primal().reference_temperatures_k[index]-port.reference_k).abs() > primal_gate.temperature_tolerance_k {
-                    return Err(bad("solid references are not a converged coupled fixed point"));
-                }
-            }
-            solve_conjugate_from(cx, &path, &probe, &refs, |_, _| Ok(states.clone()))
-                .map_err(TransportError::from)?;
-        }
-        poll(cx)?;
+        let air = bind_solid_transport(cx, network, solid.ports(), solid.robin_fluxes(), &walls, primal_gate)?;
         Ok(Self { solid, air })
     }
 
@@ -304,6 +280,47 @@ impl<'a, 'flow> CoupledLinearization<'a, 'flow> {
         }
         unreachable!("positive bounded iteration returns")
     }
+}
+// Both concrete physical owners pass their privately bound original
+// convection ports. A temperature-space response is not required by this gate.
+fn bind_solid_transport<'a, 'flow>(cx: &Cx<'_>, network: &'a TransportNetwork<'flow>,
+    ports: &[fs_conduction::adjoint::robin::RobinPort], fluxes: &[fs_conduction::RobinFlux],
+    walls: &[f64], primal_gate: &ConjugateConfig) -> Result<TransportLinearization<'a, 'flow>> {
+    poll(cx)?;
+    let names = network.regions();
+    if names.is_empty() || names.len() != ports.len()
+        || names.iter().zip(ports).any(|(a,b)| *a != b.name.as_str())
+    { return Err(bad("solid ports must equal all network regions in exact order")); }
+    let air = network.linearize(cx, walls)?;
+    let probe = ConjugateConfig { max_iterations: 1, relaxation: Relaxation::Fixed { omega: 1.0 }, ..*primal_gate };
+    for branch in 0..network.hydraulics().branches.len() {
+        poll(cx)?;
+        let range = network.row_range(branch);
+        if range.is_empty() { continue; }
+        let inlet = air.primal().branches[branch].inlet_temperature_k
+            .ok_or_else(|| bad("missing active branch inlet"))?;
+        let path = network.path(branch, inlet)?;
+        let mut states = Vec::new();
+        let mut refs = Vec::new();
+        for (index, segment) in range.clone().zip(path.segments()) {
+            poll(cx)?;
+            let port = &ports[index];
+            if port.htc_w_m2_k != segment.htc_w_per_m2_k()
+                || (port.area_m2 - segment.area_m2()).abs() > 128.0*f64::EPSILON*port.area_m2.max(segment.area_m2())
+            { return Err(bad("solid and air must share h and area, not merely a region name")); }
+            let flux = fluxes.iter().find(|flux| flux.region == port.name)
+                .ok_or_else(|| bad("solid report is missing the bound Robin region"))?;
+            states.push(SolidRegionState::from_robin_flux(flux));
+            refs.push(port.reference_k);
+            if (air.primal().reference_temperatures_k[index]-port.reference_k).abs() > primal_gate.temperature_tolerance_k {
+                return Err(bad("solid references are not a converged coupled fixed point"));
+            }
+        }
+        solve_conjugate_from(cx, &path, &probe, &refs, |_, _| Ok(states.clone()))
+            .map_err(TransportError::from)?;
+    }
+    poll(cx)?;
+    Ok(air)
 }
 fn update(cx: &Cx<'_>, current: &mut Vec<f64>, next: &[f64], omega: f64,
     accelerator: &mut Option<IqnIls>) -> Result<()> {

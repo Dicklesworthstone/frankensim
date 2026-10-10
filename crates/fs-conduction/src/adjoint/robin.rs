@@ -36,7 +36,7 @@ pub struct RobinPort {
     pub htc_w_m2_k: f64,
     /// Nominal Robin reference, K.
     pub reference_k: f64,
-    faces: Vec<([usize; 3], f64)>,
+    pub(crate) faces: Vec<([usize; 3], f64)>,
 }
 
 /// Tangent inputs in port order, plus a full assembled-load perturbation.
@@ -345,21 +345,26 @@ fn temperature_dependent(cx: &Cx<'_>, problem: ConductionProblem<'_>) -> Result<
 }
 
 fn bind_ports(cx: &Cx<'_>, problem: ConductionProblem<'_>, regions: &[&str]) -> Result<Vec<RobinPort>, ConductionError> {
+    bind_boundary_ports(cx, problem.mesh, problem.boundary, regions)
+}
+
+pub(crate) fn bind_boundary_ports(cx: &Cx<'_>, mesh: &crate::ConductionMesh,
+    boundary: &crate::ThermalBoundary, regions: &[&str]) -> Result<Vec<RobinPort>, ConductionError> {
     let mut seen = BTreeSet::new();
     let mut ports = Vec::with_capacity(regions.len());
     for &name in regions {
         poll(cx, ports.len())?;
         if !seen.insert(name) { return Err(invalid("duplicate Robin sensitivity region")); }
-        let region = problem.boundary.region_names().iter().position(|n| n == name)
+        let region = boundary.region_names().iter().position(|n| n == name)
             .ok_or_else(|| invalid("unknown Robin sensitivity region"))?;
         let ThermalBc::Robin { htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(r) }
-            = &problem.boundary.conditions()[region]
+            = &boundary.conditions()[region]
         else { return Err(invalid("selected sensitivity regions require uniform Robin h and reference")); };
         let mut port = RobinPort { name: name.to_string(), area_m2: 0.0,
             htc_w_m2_k: *h, reference_k: *r, faces: Vec::new() };
-        for (slot, face) in problem.mesh.boundary().iter().enumerate() {
+        for (slot, face) in mesh.boundary().iter().enumerate() {
             poll(cx, slot)?;
-            if problem.boundary.region_for(slot) == Some(region) {
+            if boundary.region_for(slot) == Some(region) {
                 add(&mut port.area_m2, face.area)?;
                 port.faces.push((face.vertices.map(|v| v as usize), face.area));
             }

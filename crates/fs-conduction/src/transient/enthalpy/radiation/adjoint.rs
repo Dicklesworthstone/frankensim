@@ -287,6 +287,9 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             }
             .into());
         }
+        // Coupled air sees only the original convective ports. The physical
+        // tangent above still contains all radiative state feedback.
+        transport.retain_convection_boundary(problem.boundary);
         poll(cx, n)?;
         Ok(EnthalpyRadiationStepLinearization {
             transport,

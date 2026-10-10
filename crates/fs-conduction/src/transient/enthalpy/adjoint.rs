@@ -9,8 +9,9 @@
 //! The ambient-radiation binder can retain physical rank-one feedback terms;
 //! these participate in both actions, Jacobi and all history/source pullbacks.
 //!
-//! Geometry, reference masses, chart, conductivity laws, boundary data,
-//! interfaces and time step are frozen. Source derivatives describe the P1
+//! Geometry, reference masses, chart, conductivity laws, interfaces and time
+//! step are frozen. The base pullback also fixes boundary data; `robin_response`
+//! explicitly selects convective references and coefficients. Source derivatives describe the P1
 //! nodal source field, including a uniform source represented by equal nodal
 //! values. No derivative of solver iterations, latent fraction, material
 //! parameters, moving geometry or chart selection is inferred. Chart corners
@@ -24,6 +25,10 @@ use fs_solver::{
     FgmresState, FlexiblePreconditioner, LinearOp, NewtonKrylovState, SolverRunProgress, norm2,
 };
 use fs_sparse::Csr;
+
+/// Convection-only response of the checked total-enthalpy endpoint.
+pub mod robin;
+pub use robin::{EnthalpyRobinGradient, EnthalpyRobinResponse};
 
 use super::{
     EnthalpyBackwardEuler, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution, StepContext,
@@ -168,6 +173,9 @@ pub struct EnthalpyStepLinearization<'m> {
     // Only the physical ambient-radiation binder installs these updates.
     // They are in residual-joule/enthalpy coordinates, after chart scaling.
     feedback: Vec<EnthalpyFeedback>,
+    // Retained by the checked producer. Radiation restores its ORIGINAL
+    // convection boundary after preparing the complete physical tangent.
+    convection_boundary: crate::ThermalBoundary,
 }
 
 #[derive(Debug)]
@@ -321,11 +329,16 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             inverse_diagonal,
             dt: dt_s,
             feedback: Vec::new(),
+            convection_boundary: problem.boundary.clone(),
         })
     }
 }
 
 impl EnthalpyStepLinearization<'_> {
+    pub(super) fn retain_convection_boundary(&mut self, boundary: &crate::ThermalBoundary) {
+        self.convection_boundary = boundary.clone();
+    }
+
     /// Attach one physical boundary feedback term. Entry admission is owned by
     /// the radiative binder; no external caller may modify the checked tangent.
     pub(super) fn add_radiation_feedback(

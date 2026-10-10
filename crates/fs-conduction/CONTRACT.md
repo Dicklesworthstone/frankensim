@@ -1070,6 +1070,22 @@ authority.
   conductivity for both hot and cold reservoirs. It also checks transpose
   identities, true returned dual residuals, exact latent-interior controls,
   facade/tape parity and tampered-primal/budget/cancellation refusals.
+- `EnthalpyStepLinearization::robin_response` binds original uniform convection
+  ports to that same checked enthalpy endpoint. The producer retains the exact
+  convection boundary; a radiative binder restores the original boundary after
+  forming the complete physical tangent. Neither `transport()` nor
+  `into_transport()` loses its radiative feedback. A response cannot be built
+  from caller-supplied temperatures, heat reports or replacement port data.
+  Its pullback accepts direct specific-enthalpy carry separately from nodal
+  temperature, area-mean wall and outward convection-heat seeds. Temperature
+  seeds are multiplied by `dT/dh` before adding carry: no inverse slope or
+  apparent heat capacity is used on a latent plateau. The same true-residual
+  FGMRES solve returns history/source gradients, convection-reference and
+  `ln(HTC)` controls, and assembled nodal watt-load gradients `dt*lambda`.
+  Consistent triangular Robin mass quadrature and explicit heat-functional
+  terms enter the controls. All other material/chart/geometry parameters stay
+  fixed. Only convection rows are exposed to the air coupling owner; radiation
+  is retained inside the solid Jacobian and never counted as air heat.
 - The Biot-gated `LumpedEnthalpyBody` admits equilibrium solid-liquid phase
   change and latent heat on a caller-supplied, bounded specific-enthalpy curve.
   It couples constant internal power with convection and surface radiation and

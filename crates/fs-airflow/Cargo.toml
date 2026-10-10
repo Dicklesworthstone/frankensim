@@ -34,6 +34,7 @@ fs-alloc = { path = "../fs-alloc" }
 # Test-only authority for the declared base-to-fin bondline cards in the
 # plate-fin end-to-end fixture.
 fs-matdb = { path = "../fs-matdb" }
+fs-material = { path = "../fs-material" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 
 [lints]
