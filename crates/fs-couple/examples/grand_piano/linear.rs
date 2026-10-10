@@ -165,17 +165,30 @@ fn board_damping_flow(board: &[BoardMode], basis: &[f64], rate: u32)
             2.0*b.damping_ratio*TAU*b.frequency_hz*basis[a*r+i]*basis[a*r+j]).sum();
         c[i*r+j]=value;c[j*r+i]=value;
     } }
+    board_damping_matrix_flow(&c,r,rate)
+}
+
+fn board_damping_spectrum(c: &[f64], r: usize) -> Result<Vec<fs_modal::ModePair>, String> {
+    if c.iter().any(|x|!x.is_finite()) {return Err("loaded board damping overflow".into());}
     let scale=c.iter().fold(0.0_f64,|s,x|s.max(x.abs()));
     if !scale.is_finite() {return Err("loaded board damping overflow".into());}
-    if scale==0.0 {return Ok(identity(r));}
-    let eigen=fs_modal::eigh_gen_dense(&c,&identity(r),r).map_err(|e|e.to_string())?;
+    if scale==0.0 {return Ok(Vec::new());}
+    let eigen=fs_modal::eigh_gen_dense(c,&identity(r),r).map_err(|e|e.to_string())?;
     let tolerance=1e-10*scale*r as f64;
-    let mut flow=vec![0.0;r*r];
-    for pair in eigen {
+    for pair in &eigen {
         if !pair.lambda.is_finite() || pair.lambda < -tolerance
             || !pair.residual.is_finite() || pair.residual > tolerance {
             return Err("physical board damping is not resolved positive semidefinite".into());
         }
+    }
+    Ok(eigen)
+}
+
+fn board_damping_matrix_flow(c: &[f64], r: usize, rate: u32) -> Result<Vec<f64>, String> {
+    let eigen=board_damping_spectrum(c,r)?;
+    if eigen.is_empty() {return Ok(identity(r));}
+    let mut flow=vec![0.0;r*r];
+    for pair in eigen {
         // A zero-loss direction can have a roundoff-negative eigenvalue.
         // Only the scale-aware numerical nullspace is projected to zero.
         let decay=det::exp(-0.5*pair.lambda.max(0.0)/f64::from(rate));
@@ -217,6 +230,8 @@ pub struct Bank {
     pub last_modal_loss_j: f64,
     physical_board_k: Vec<f64>,
     board_half_damping: Option<Vec<f64>>,
+    board_damping_enabled: bool,
+    bare_board_damping_configured: bool,
     damped_board_v: Vec<f64>,
     board_pre_loss: f64,
     board_volume: Vec<f64>,
@@ -432,13 +447,56 @@ impl Bank {
         Ok(Self { strings,groups,modes,contact_strings,board_count:r,q:vec![0.0;n+r],v:vec![0.0;n+r],
             next_q:vec![0.0;n+r],next_v:vec![0.0;n+r],contact_compliance,
             free_contact:vec![0.0;nc],rate,footprints:None,stretching:None,omitted_duplex_modes,transition,physical_board_k,
-            board_half_damping,damped_board_v:vec![0.0;r],board_pre_loss:0.0,
+            board_half_damping,board_damping_enabled:damping,bare_board_damping_configured:false,
+            damped_board_v:vec![0.0;r],board_pre_loss:0.0,
             diagonal_omega2:oscillator.iter().map(|m|m.angular_frequency_rad_s.powi(2)).collect(),last_modal_loss_j:0.0,
             board_volume,board_basis,schur_inverse,contact_response:response,
             #[cfg(test)]
             contact_board,
             free_q:vec![0.0;n+r],free_v:vec![0.0;n+r],
             r_string:vec![0.0;n],board_rhs:vec![0.0;r],board_end:vec![0.0;r] })
+    }
+
+    /// Replace bare-board modal loss with a complete supplied viscous matrix
+    /// [1/s], row-major in the original mass-normalized bare-board coordinates.
+    /// A Ritz basis generally needs this dense form even when source damping
+    /// was diagonal. It is not added to BoardMode::damping_ratio.
+    ///
+    /// Cold and once only. Input must be finite, exactly symmetric and resolved
+    /// PSD; the same scale-aware nullspace tolerance as the existing damping
+    /// flow applies. Return the effective continuous Phi^T C Phi used by that
+    /// flow, so harmonic loss uses the same physical operator. Global damping
+    /// false still validates the supplied matrix but returns an all-zero image.
+    pub fn configure_bare_board_damping(&mut self,c:&[f64])->Result<Vec<f64>,String> {
+        let r=self.board_count;
+        if self.bare_board_damping_configured || self.q.iter().chain(&self.v).any(|x|*x!=0.0) {
+            return Err("bare-board damping requires a fresh unconfigured bank".into());
+        }
+        if c.len()!=r*r || c.iter().any(|x|!x.is_finite())
+            || (0..r).any(|i|(i+1..r).any(|j|c[i*r+j]!=c[j*r+i])) {
+            return Err("bare-board damping must be a complete finite symmetric matrix".into());
+        }
+        // Validate the physical input too: an ill-scaled congruence must not
+        // conceal a negative source direction, including in lossless mode.
+        board_damping_spectrum(c,r)?;
+        let mut c_phi=vec![0.0;r*r];
+        for a in 0..r {for j in 0..r {
+            c_phi[a*r+j]=(0..r).map(|b|c[a*r+b]*self.board_basis[b*r+j]).sum();
+        }}
+        let mut loaded=vec![0.0;r*r];
+        for i in 0..r {for j in i..r {
+            let value=(0..r).map(|a|self.board_basis[a*r+i]*c_phi[a*r+j]).sum();
+            loaded[i*r+j]=value;loaded[j*r+i]=value;
+        }}
+        let flow=board_damping_matrix_flow(&loaded,r,self.rate)?;
+        // Publication follows complete admission. The geometry, conservative
+        // map, contact compliance and all authoritative motion remain intact.
+        self.board_half_damping=if self.board_damping_enabled && loaded.iter().any(|x|*x!=0.0) {
+            Some(flow)
+        } else {None};
+        if !self.board_damping_enabled {loaded.fill(0.0);}
+        self.bare_board_damping_configured=true;
+        Ok(loaded)
     }
 
     pub fn has_secondary_polarization(&self)->bool {
@@ -829,6 +887,68 @@ mod tests {
         assert!((loss+0.5*out.iter().map(|x|x*x).sum::<f64>()
             -0.5*v.iter().map(|x|x*x).sum::<f64>()).abs()<1e-15);
     }
+    #[test]
+    fn dense_bare_board_damping_keeps_rank_one_flow_and_complete_force_work() {
+        let scale=super::super::geometry::demonstration_scale().unwrap();
+        let board=super::super::board::demonstration();let r=board.len();assert_eq!(r,4);
+        let mut b=Bank::new(&[scale[48]],&board,192_000,21_600.0,12,true).unwrap();
+        let stiffness=b.physical_board_k.clone();let compliance=b.contact_compliance.clone();
+        let basis=b.board_basis.clone();
+        let u=[4.0,-3.0,2.0,1.0];let mut c=vec![0.0;r*r];
+        for i in 0..r {for j in 0..r {c[i*r+j]=2.0*u[i]*u[j];}}
+        let loaded=b.configure_bare_board_damping(&c).unwrap();
+        assert_eq!(b.physical_board_k,stiffness);assert_eq!(b.contact_compliance,compliance);
+        assert_eq!(b.board_basis,basis);assert!(b.q.iter().chain(&b.v).all(|x|*x==0.0));
+        let axis=b.project_board_shape(&u).unwrap();
+        for i in 0..r {for j in 0..r {
+            assert!((loaded[i*r+j]-2.0*axis[i]*axis[j]).abs()<1e-12);
+        }}
+        let v=[0.02,-0.013,0.007,0.025];let mut out=vec![0.0;r];
+        let norm2=axis.iter().map(|x|x*x).sum::<f64>();
+        let along=axis.iter().zip(&v).map(|(a,b)|a*b).sum::<f64>()/norm2;
+        // Independent closed form for exp(-dt*u*u^T), including its nullspace.
+        let change=det::expm1(-norm2/f64::from(b.rate))*along;
+        let loss=damp_board(b.board_half_damping.as_ref().unwrap(),&v,&mut out);
+        for i in 0..r {assert!((out[i]-v[i]-change*axis[i]).abs()<2e-13);}
+        assert!(loss>0.0);
+        assert!((loss+0.5*out.iter().map(|x|x*x).sum::<f64>()
+            -0.5*v.iter().map(|x|x*x).sum::<f64>()).abs()<1e-15);
+        let n=b.modes.len();b.v[n..].copy_from_slice(&v);
+        let force=vec![0.05;b.contact_strings.len()];
+        for _ in 0..24 {
+            let before=b.energy();b.predict();b.finish(&force);
+            let work:f64=force.iter().enumerate().map(|(i,f)|
+                f*(b.contact_position(i,&b.next_q)-b.contact_position(i,&b.q))).sum();
+            assert!((b.energy_at(&b.next_q,&b.next_v)-before+b.last_modal_loss_j-work).abs()<1e-11);
+            assert!(b.last_modal_loss_j>=-1e-14);b.commit();
+        }
+    }
+
+    #[test]
+    fn dense_board_damping_admission_is_atomic_cold_and_respects_global_lossless() {
+        let scale=super::super::geometry::demonstration_scale().unwrap();
+        let board=super::super::board::demonstration();let r=board.len();
+        for enabled in [false,true] {
+            let mut b=Bank::new(&[scale[48]],&board,192_000,21_600.0,4,enabled).unwrap();
+            let original=b.board_half_damping.clone();
+            let mut asymmetric=identity(r);asymmetric[1]=1.0;
+            let mut indefinite=identity(r);indefinite[1]=2.0;indefinite[r]=2.0;
+            for bad in [vec![],vec![f64::NAN;r*r],asymmetric,indefinite] {
+                assert!(b.configure_bare_board_damping(&bad).is_err());
+                assert_eq!(b.board_half_damping,original);assert!(!b.bare_board_damping_configured);
+            }
+            b.q[0]=1e-6;assert!(b.configure_bare_board_damping(&identity(r)).is_err());b.q[0]=0.0;
+            assert_eq!(b.board_half_damping,original);
+            let c:Vec<f64>=(0..r*r).map(|k|((k/r+1)*(k%r+1)) as f64).collect();
+            let loaded=b.configure_bare_board_damping(&c).unwrap();
+            assert_eq!(b.board_half_damping.is_some(),enabled);
+            if !enabled {assert!(loaded.iter().all(|x|*x==0.0));}
+            let accepted=b.board_half_damping.clone();
+            assert!(b.configure_bare_board_damping(&vec![0.0;r*r]).is_err());
+            assert_eq!(b.board_half_damping,accepted);
+        }
+    }
+
     #[test]
     fn broader_board_retains_high_modes_and_closes_force_work() {
         let scale=super::super::geometry::demonstration_scale().unwrap();

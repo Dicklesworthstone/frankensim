@@ -291,6 +291,17 @@ impl Instrument {
         }
         Ok(())
     }
+    /// Replace physical wood loss with a complete viscous operator in the
+    /// original mass-normalized board coordinates. The bank owns its loaded
+    /// projection and dissipative flow. Preparation changes no motion or felt
+    /// history, and cannot replace a running instrument's material law.
+    pub fn configure_bare_board_damping(&mut self,c:&[f64])->Result<(),String>{
+        if self.accounting.input_work_j!=0.0 || self.hammers.iter().any(|h|h.active||h.held)
+            || self.bank.q.iter().chain(&self.bank.v).any(|x|*x!=0.0) {
+            return Err("bare-board damping must be prepared before piano excitation".into());
+        }
+        self.bank.configure_bare_board_damping(c).map(|_|())
+    }
     /// Attach before any excitation. Rows must already be in this bank's
     /// complete mass-loaded basis. No state-reset/replacement while playing.
     pub fn configure_radiation(&mut self,model:&radiation::Model)->Result<(),String>{
@@ -614,6 +625,25 @@ mod tests {
     fn instrument()->Instrument{
         let scale=super::super::geometry::demonstration_scale().unwrap();
         Instrument::new(vec![scale[48]],&super::super::board::demonstration(),48_000,4,12,true).unwrap()
+    }
+    #[test]
+    fn dense_board_loss_is_cold_and_closes_the_complete_strike_work(){
+        let mut p=instrument();let r=p.bank.board_count;
+        let mut c=vec![2.0;r*r];
+        for i in 0..r {c[i*r+i]+=4.0;}
+        p.configure_bare_board_damping(&c).unwrap();
+        assert!(p.configure_bare_board_damping(&c).is_err());
+        assert_eq!(p.energy_j(),0.0);assert_eq!(p.accounting.input_work_j,0.0);
+        p.note_on(69,2.0).unwrap();
+        for _ in 0..1500 {p.step().unwrap();}
+        assert!(p.accounting.modal_loss_j>0.0 && p.accounting.felt_loss_j>0.0);
+        let before=p.energy_j();let q=p.bank.q.clone();let v=p.bank.v.clone();
+        assert!(p.configure_bare_board_damping(&c).is_err());
+        assert_eq!(p.energy_j(),before);assert_eq!(p.bank.q,q);assert_eq!(p.bank.v,v);
+        assert!((p.accounting.input_work_j-p.energy_j()-p.accounting.dissipated_j()).abs()<1e-7);
+        let mut silent=instrument();silent.silent_key_down(69).unwrap();
+        assert!(silent.configure_bare_board_damping(&c).is_err());
+        silent.note_off(69).unwrap();silent.configure_bare_board_damping(&c).unwrap();
     }
     #[test]
     fn real_contact_is_passive_audible_and_replayable(){

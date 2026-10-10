@@ -113,6 +113,14 @@ impl BridgeResponse {
             .any(|v|!v.is_finite()) {return Err("nonfinite or incomplete harmonic bank".into());}
         Ok(Self {bank,endpoint_k,board_c,string_c,keys:courses.iter().map(|c|c.midi).collect(),band_hz})
     }
+    /// Install the same cold bare-board damping replacement as playback.
+    /// Bank owns symmetry/PSD admission and Phi^T C Phi; harmonic power uses
+    /// that exact returned operator. No second projection or added modal loss.
+    pub fn configure_bare_board_damping(&mut self,c:&[f64])->Result<(),String> {
+        let loaded=self.bank.configure_bare_board_damping(c)?;
+        self.board_c=loaded;
+        Ok(())
+    }
     pub fn bank(&self)->&Bank {&self.bank}
     pub fn keys(&self)->&[u8] {&self.keys}
     /// Work-conjugate row of the original hammer-plane bridge force/velocity.
@@ -362,6 +370,52 @@ mod tests {
         assert!(errors[1]<0.004,"continuous damping disagrees with time bank: {errors:?}");
         assert!(errors[1]<errors[0],"generator comparison must improve at finer step: {errors:?}");
     }
+    #[test]
+    fn dense_board_loss_is_the_supplied_bare_power_without_duplicate_modal_loss() {
+        let mut m=model(true);let c=[8.0,3.0,3.0,2.0];
+        m.configure_bare_board_damping(&c).unwrap();
+        let hz=277.0;let w=TAU*hz;
+        let answer=m.solve(hz,69,C64::ONE,None).unwrap();
+        let bare:Vec<C64>=(0..2).map(|i| {
+            let mut unit=vec![0.0;2];unit[i]=1.0;
+            product(&m.bank.project_board_shape(&unit).unwrap(),&answer.board_displacement)
+        }).collect();
+        let power=0.5*w*w*(0..2).map(|i|
+            (bare[i].conj()*product(&c[2*i..2*i+2],&bare)).re).sum::<f64>();
+        assert!(power>0.0);
+        assert!((answer.board_loss_w-power).abs()<1e-10*power);
+        assert!(answer.power_defect_w.abs()<1e-9*answer.input_w);
+        let installed=m.board_c.clone();
+        assert!(m.configure_bare_board_damping(&c).is_err());assert_eq!(m.board_c,installed);
+        assert!(m.bank.q.iter().chain(&m.bank.v).all(|x|*x==0.0));
+    }
+
+    #[test]
+    fn dense_board_operator_matches_the_time_generator_with_source_string_loss() {
+        let (mut courses,board)=inputs();courses.truncate(1);courses[0].duplex_length_m=0.0;
+        let c=[8.0,3.0,3.0,2.0];let mut errors=Vec::new();
+        for rate in [96_000,192_000] {
+            let mut m=BridgeResponse::new_with_string_damping(&courses,&board,rate,
+                21_600.0,4,true,None,true).unwrap();
+            m.configure_bare_board_damping(&c).unwrap();
+            let n=m.bank.modes.len();
+            for i in 0..n {m.bank.v[i]=0.01*((i+1) as f64).sin();}
+            m.bank.v[n]=0.006;m.bank.v[n+1]=-0.004;
+            let bare:Vec<f64>=(0..2).map(|i| {
+                let mut unit=vec![0.0;2];unit[i]=1.0;
+                m.bank.project_board_shape(&unit).unwrap().iter()
+                    .zip(&m.bank.v[n..]).map(|(a,b)|a*b).sum()
+            }).collect();
+            let mut expected:f64=(0..n).map(|i|m.string_c[i]*m.bank.v[i].powi(2)).sum();
+            for i in 0..2 {for j in 0..2 {expected+=c[2*i+j]*bare[i]*bare[j];}}
+            m.bank.predict();m.bank.finish(&vec![0.0;m.bank.contact_strings.len()]);
+            let measured=m.bank.last_modal_loss_j*f64::from(rate);
+            errors.push((measured-expected).abs()/expected);
+        }
+        assert!(errors[1]<0.004,"dense physical damping disagrees with time bank: {errors:?}");
+        assert!(errors[1]<errors[0],"generator must improve with the finer step: {errors:?}");
+    }
+
     #[test]
     fn refusals_do_not_shift_poles_or_invent_damping_and_zero_force_is_zero() {
         let m=model(false);let pole=m.bank.modes[0].omega/TAU;

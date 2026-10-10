@@ -187,3 +187,22 @@ Why this observable matters: Kerem Ege and Antoine Chaigne, *End conditions of
 piano strings* (2011), arXiv:1101.4511, treats the bridge input admittance as the
 string termination. This implementation does not reproduce their specimen or
 claim agreement with their measurements.
+
+## Complete physical board damping
+
+The engine `Instrument::configure_bare_board_damping` and the harmonic
+`BridgeResponse::configure_bare_board_damping` accept a complete symmetric
+positive-semidefinite viscous matrix before excitation. It is row-major in the
+original mass-normalized bare-board coordinates, with units `1/s`, and replaces
+the loss derived from the individual `BoardMode::damping_ratio` values.
+
+The bank projects this matrix through its actual string-loaded board basis.
+Playback uses the existing dissipative velocity half-flow; harmonic analysis
+uses that same admitted continuous matrix in its impedance and power balance.
+Off-diagonal entries are retained. This supports non-proportional wood loss
+and physical damping projected from a larger modal basis.
+
+Configuration is cold and once-only. Invalid shape, nonfinite or asymmetric
+data, materially indefinite damping, or a running instrument refuse without
+publishing a partial change. A globally lossless bank still validates the
+physical matrix, then keeps its effective damping zero.
