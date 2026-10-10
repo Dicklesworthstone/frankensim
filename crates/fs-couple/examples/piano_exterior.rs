@@ -14,6 +14,7 @@
 #[path="grand_piano/microphone.rs"] mod microphone;
 #[path="grand_piano/audio.rs"] mod audio;
 #[path="grand_piano/hammer_materials.rs"] mod hammer_materials;
+#[path="grand_piano/string_polarization.rs"] mod string_polarization;
 #[path="grand_piano/mesh_import.rs"] mod mesh_import;
 #[path="grand_piano/mesh_render.rs"] mod mesh_render;
 #[path="grand_piano/exterior_geometry.rs"] mod exterior_geometry;
@@ -38,10 +39,16 @@ piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj A
     [--rt0425-hammer-stiffness] [--rt0425-hammer-dissipation]
     [--rt0425-string-damping]
     [--dampers estimated|pads.fspd]
+    [--string-polarization bridge-frames.fspp]
     [--performance events.csv | --midi performance.mid]
     [--midi-channel 1..16] [--midi-velocity-max-m-s V] [--midi-half-pedal]
     [--note 21..108] [--velocity m/s]
 These playback options apply to both render and render-loaded.
+--string-polarization uses both transverse directions of each physical string,
+projected from the same full-vector board modes. Every key must supply its
+bridge site, 3-D arm, orthonormal string/hammer frame and lateral damper ratio.
+Missing motion or a primary projection inconsistent with the board refuses;
+no lateral coupling is guessed. See grand_piano/STRING_POLARIZATION.md.
 The RT-0425 hammer flags require the steinway-d scale and no supplied hammer
 cards. Dissipation also requires RT-0425 stiffness. They select the already
 implemented per-string K_H and published R_H contact laws, not output EQ.
@@ -171,7 +178,7 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
             geometry.prepare_with_motion_mass_equilibrated(&keys,spec.board_band_hz)?
         } else {geometry.prepare_with_motion(&keys,spec.board_band_hz)?}
     };
-    let piano=controls.instrument(courses,&board.modes,options)?;
+    let piano=controls.instrument_with_motion(courses,&board.modes,board.motion.as_ref(),options)?;
     let (bare,description)=section_skin::boundary(obj,board_text,&spec,
         board.motion.as_ref().ok_or("missing full-vector structural motion")?,continuous)?;
     let bare=if let Some(rigid)=&rigid {
@@ -455,6 +462,31 @@ mod tests {
         assert!(residual.abs()<1e-7);
         let data=audio.wav.windows(4).position(|w|w==b"data").unwrap()+8;
         for frame in audio.wav[data..].chunks_exact(4) {assert_eq!(&frame[..2],&frame[2..]);}
+    }
+
+    #[test]
+    fn projected_vector_strings_reach_the_same_finite_body_renderer() {
+        let (board,courses,obj,spec)=small_source_inputs();
+        let board=board.replace("node,4,0.05,0.05", "node,4,0.043,0.054");
+        let frames=format!("{}\nsource,estimated,test bridge height and frame\ncourse,69,0,0,0,1,0,0,0.02,0,1,0,0,0,1,0.3\n",
+            string_polarization::HEADER);
+        let options=playback::Options::default();
+        let controls=playback::Controls::from_texts(&courses,None,None,Some("estimated")).unwrap()
+            .with_string_polarization(&frames,&courses).unwrap();
+        let mut scene=prepare_controlled_body(&board,courses,Some(&obj),spec,&options,controls,false).unwrap();
+        assert!(scene.piano.bank.has_secondary_polarization());
+        assert!(scene.piano.bank.strings.iter().filter(|s|s.polarization==1)
+            .any(|s|s.bridge.iter().any(|g|g.abs()>1e-8)));
+        let (baked,_,_)=bake(&mut scene,false).unwrap();
+        let score=performance::Performance::read("sample,event,key,value\n0,note_on,69,0.5\n1200,note_off,69,0\n",&[69],2400).unwrap();
+        let audio=exterior_audio::render(&mut scene.piano,score,2400,&baked,2.).unwrap();
+        assert_eq!(u16::from_le_bytes([audio.wav[22],audio.wav[23]]),2);
+        assert!(audio.peak_pa>1e-14);
+        assert!(scene.piano.accounting.felt_loss_j>0. && scene.piano.accounting.damper_loss_j>0.);
+        assert!(scene.piano.bank.strings.iter().filter(|s|s.polarization==1).any(|s|
+            scene.piano.bank.q[s.modes.clone()].iter().any(|q|q.abs()>1e-14)));
+        assert!((scene.piano.accounting.input_work_j-scene.piano.energy_j()
+            -scene.piano.accounting.dissipated_j()).abs()<1e-7);
     }
 
     #[test]

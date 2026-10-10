@@ -1,7 +1,8 @@
 //! Physical preparation for finite-body piano playback. No second engine.
 //! All controls are admitted before structural/BEM work and before score input
 //! can change state. Supplied cards cover the complete scale, including silence.
-use super::{engine, geometry::Course, hammer_materials, linear, steinway_scale};
+use super::{board_geometry::motion::MotionSurface, engine, geometry::Course, hammer_materials,
+    linear, steinway_scale, string_polarization};
 use super::exterior_geometry::RATE;
 use std::collections::BTreeSet;
 use super::performance::midi;
@@ -23,6 +24,7 @@ pub struct Options {
     pub hammer_footprints: Option<String>,
     pub dampers: Option<String>,
     pub string_stretching: Option<String>,
+    pub string_polarization: Option<String>,
     pub rigid_assembly: Option<String>,
     pub equilibrate_board_mass: bool,
     pub rt0425_hammer_stiffness: bool,
@@ -34,7 +36,8 @@ impl Default for Options {
         Self { substeps: 4, modes: 24, midi: None, performance: None,
             midi_mapping: midi::Mapping::default(), note: None, velocity: None,
             mapping_explicit: false, hammers: None,
-            hammer_footprints: None, dampers: None, string_stretching: None, rigid_assembly: None,
+            hammer_footprints: None, dampers: None, string_stretching: None, string_polarization: None,
+            rigid_assembly: None,
             equilibrate_board_mass: false, rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false, rt0425_string_damping: false }
     }
@@ -75,7 +78,7 @@ impl Options {
                 result.rt0425_string_damping = true;
                 continue;
             }
-            if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers", "--string-stretching", "--rigid-assembly",
+            if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers", "--string-stretching", "--string-polarization", "--rigid-assembly",
                 "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity"].contains(&flag.as_str()) {
                 return Err(format!("unknown exterior playback option {flag}"));
             }
@@ -89,6 +92,7 @@ impl Options {
                 "--hammer-footprints" => result.hammer_footprints = Some(value.clone()),
                 "--dampers" => result.dampers = Some(value.clone()),
                 "--string-stretching" => result.string_stretching = Some(value.clone()),
+                "--string-polarization" => result.string_polarization = Some(value.clone()),
                 "--rigid-assembly" => result.rigid_assembly = Some(value.clone()),
                 "--performance" => result.performance = Some(value.clone()),
                 "--midi" => {
@@ -118,7 +122,8 @@ impl Options {
         if options.midi.is_some() || options.performance.is_some() || options.note.is_some()
             || options.velocity.is_some() || options.hammers.is_some()
             || options.hammer_footprints.is_some() || options.dampers.is_some()
-            || options.string_stretching.is_some() || options.rt0425_hammer_stiffness
+            || options.string_stretching.is_some() || options.string_polarization.is_some()
+            || options.rt0425_hammer_stiffness
             || options.rt0425_hammer_dissipation || options.rt0425_string_damping {
             return Err("response/admittance accept --modes, --substeps and --rigid-assembly, not playback controls".into());
         }
@@ -134,6 +139,9 @@ impl Options {
         }
         if self.string_stretching.as_ref().is_some_and(|p| p.trim().is_empty()) {
             return Err("--string-stretching requires a nonempty complete material specification path".into());
+        }
+        if self.string_polarization.as_ref().is_some_and(|p| p.trim().is_empty()) {
+            return Err("--string-polarization requires a nonempty complete bridge-frame specification path".into());
         }
         if !(1..=linear::MAX_STRING_MODES).contains(&self.modes)
             || !(1..=16).contains(&self.substeps) {
@@ -157,7 +165,7 @@ impl Options {
         Ok(())
     }
     pub fn report(&self, piano: &engine::Instrument) -> String {
-        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} coordinates including duplex; {} contact sites. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {}; nonlinear string extension: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
+        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} coordinates including duplex; {} contact sites. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {}; nonlinear string extension: {} (selection: {}); two transverse directions: {} (geometry/drag: {}). These are retention/work budgets, not convergence or real-time certificates.",
             piano.bank.rate, self.substeps, self.modes, piano.bank.modes.len(),
             piano.bank.contact_strings.len(), self.hammers.as_deref().unwrap_or("source defaults"),
             if self.rt0425_hammer_dissipation { "RT-0425 per-string K_H and R_H" }
@@ -167,7 +175,9 @@ impl Options {
             else { "estimated common law" },
             self.hammer_footprints.as_deref().unwrap_or("point"),
             self.dampers.as_deref().unwrap_or("point"), piano.bank.has_string_stretching(),
-            self.string_stretching.as_deref().unwrap_or("inline or original linear image"))
+            self.string_stretching.as_deref().unwrap_or("inline or original linear image"),
+            piano.bank.has_secondary_polarization(),
+            self.string_polarization.as_deref().unwrap_or("inline or original one-plane image"))
     }
 }
 
@@ -178,6 +188,7 @@ pub struct Controls {
     footprints: Option<linear::hammer_footprint::Specification>,
     dampers: Option<linear::dampers::Specification>,
     stretching: Option<linear::string_stretching::Specification>,
+    polarization: Option<string_polarization::Specification>,
     source_hammer_rates: Option<Vec<f64>>,
     source_hammer_stiffness: bool,
 }
@@ -209,6 +220,8 @@ impl Controls {
         // An absent or invalid supplied file cannot select the linear image.
         controls.stretching = options.string_stretching.as_deref().map(|path|
             linear::string_stretching::Specification::load(path, courses)).transpose()?;
+        controls.polarization = options.string_polarization.as_deref().map(|path|
+            string_polarization::Specification::load(path, courses)).transpose()?;
         Ok(controls)
     }
     /// The owners perform geometry, constitutive, duplicate and coverage checks.
@@ -227,7 +240,7 @@ impl Controls {
             Some(text) => Some(linear::dampers::Specification::read(text, courses)?),
             None => None,
         };
-        Ok(Self { materials, footprints, dampers, stretching: None,
+        Ok(Self { materials, footprints, dampers, stretching: None, polarization: None,
             source_hammer_rates: None, source_hammer_stiffness: false })
     }
     /// Cold inline equivalent of --string-stretching, through the SAME owner.
@@ -237,11 +250,22 @@ impl Controls {
         self.stretching = Some(linear::string_stretching::Specification::read(text, courses)?);
         Ok(self)
     }
+    /// Inline equivalent of the complete --string-polarization physical input.
+    /// Projection waits for the played board's full-vector eigensolve.
+    pub fn with_string_polarization(mut self, text: &str, courses: &[Course]) -> Result<Self, String> {
+        if self.polarization.is_some() { return Err("duplicate string polarization selection".into()); }
+        self.polarization = Some(string_polarization::Specification::read(text, courses)?);
+        Ok(self)
+    }
     /// Reuse the source shank and original nonlinear felt/bridge engine. Larger
     /// mode budgets never relax its output-frequency ceiling; changing substeps
     /// changes its clock, not its retained acoustic/structural frequency band.
     pub fn instrument(self, courses: Vec<Course>, board: &[linear::BoardMode], options: &Options)
         -> Result<engine::Instrument, String> {
+        self.instrument_with_motion(courses, board, None, options)
+    }
+    pub fn instrument_with_motion(self, courses: Vec<Course>, board: &[linear::BoardMode],
+        motion: Option<&MotionSurface>, options: &Options) -> Result<engine::Instrument, String> {
         options.validate()?;
         if options.rt0425_hammer_stiffness != self.source_hammer_stiffness
             || options.rt0425_hammer_dissipation != self.source_hammer_rates.is_some() {
@@ -250,10 +274,15 @@ impl Controls {
         if options.string_stretching.is_some() && self.stretching.is_none() {
             return Err("supplied string stretching controls were not admitted; no linear fallback".into());
         }
+        if options.string_polarization.is_some() && self.polarization.is_none() {
+            return Err("supplied string polarization controls were not admitted; no one-plane fallback".into());
+        }
+        let polarization = self.polarization.as_ref().map(|spec|
+            spec.project(&courses, board, motion)).transpose()?;
         let mut piano = engine::Instrument::new_with_string_damping(courses, board, RATE,
             options.substeps, options.modes, true, self.materials,
             Some(engine::ShankGeometry::published()), self.footprints.as_ref(),
-            None, options.rt0425_string_damping)?;
+            polarization.as_ref().map(string_polarization::Prepared::secondary), options.rt0425_string_damping)?;
         if let Some(dampers) = &self.dampers { piano.configure_dampers(dampers)?; }
         if let Some(rates) = &self.source_hammer_rates {
             piano.configure_source_hammer_dissipation(rates)?;
@@ -284,6 +313,9 @@ mod tests {
         assert!(Options::harmonic(&["--modes".into(),"128".into()]).is_ok());
         assert!(Options::harmonic(&["--equilibrate-board-mass".into()]).unwrap().equilibrate_board_mass);
         assert!(Options::harmonic(&["--dampers".into(),"estimated".into()]).is_err());
+        assert!(Options::harmonic(&["--string-polarization".into(),"frames.fspp".into()]).is_err());
+        assert_eq!(parse(&["--string-polarization", "frames.fspp"]).unwrap()
+            .string_polarization.as_deref(), Some("frames.fspp"));
         for args in [vec!["--modes", "0"], vec!["--modes", "513"], vec!["--modes", "NaN"],
             vec!["--substeps", "0"], vec!["--substeps", "17"], vec!["--modes"],
             vec!["--modes", "24", "--modes", "48"], vec!["one.mid", "two.mid"],
@@ -291,6 +323,20 @@ mod tests {
             vec!["--equilibrate-board-mass", "--equilibrate-board-mass"]] {
             assert!(parse(&args).is_err(), "accepted {args:?}");
         }
+    }
+    #[test]
+    fn supplied_polarization_cannot_fall_back_to_missing_geometric_motion() {
+        let c = course();
+        let card = format!("{}\nsource,estimated,test frame\ncourse,69,0,0,0,1,0,0,0.02,0,1,0,0,0,1,0.3\n",
+            string_polarization::HEADER);
+        let controls = Controls::from_texts(&[c], None, None, None).unwrap()
+            .with_string_polarization(&card, &[c]).unwrap();
+        assert!(controls.instrument(vec![c], &super::super::board::demonstration(), &Options::default())
+            .err().unwrap().contains("full-vector"));
+        let options = parse(&["--string-polarization", "frames.fspp"]).unwrap();
+        assert!(Controls::from_texts(&[c], None, None, None).unwrap()
+            .instrument(vec![c], &super::super::board::demonstration(), &options)
+            .err().unwrap().contains("no one-plane fallback"));
     }
     #[test]
     fn published_hammer_flags_reach_played_contact_without_changing_the_default() {

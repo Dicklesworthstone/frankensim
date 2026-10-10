@@ -113,10 +113,12 @@ the selected material path.
 
 ## Boundaries
 
-This is averaged, moderate-slope axial extension of the existing single
-transverse-polarization string image. It does not resolve longitudinal waves,
-a second transverse polarization, tension-dependent winding slip, full 3-D
-hammer/string contact, or measured piano string materials. The acoustic fit
+This is averaged, moderate-slope axial extension of the existing string image.
+With `--string-polarization`, both transverse directions share their total
+strain, one tension and one extension energy per physical segment; see
+`STRING_POLARIZATION.md` for the required geometric input. It does not resolve
+longitudinal waves, tension-dependent winding slip, full 3-D hammer/string
+contact, or measured piano string materials. The acoustic fit
 remains bounded to its admitted sampled band even when a nonlinear attack
 contains higher-frequency energy. Retained modes, substeps and a supplied EA
 are not a realism, convergence or real-time certificate.

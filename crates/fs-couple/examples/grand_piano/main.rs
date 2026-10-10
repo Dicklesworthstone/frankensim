@@ -16,6 +16,7 @@ mod microphone;
 mod pressure_basis;
 mod audio;
 mod hammer_materials;
+mod string_polarization;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d] [--board board.csv | --board-geometry panel.fsb|panel.fss]
@@ -24,6 +25,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
     [--dampers estimated | pads.fspd] [--string-stretching axial.fspx]
+    [--string-polarization bridge-frames.fspp]
     [--concert-pitch 430..450 | --raw-tensions]
     [--mesh-divisions 4..32] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
@@ -57,11 +59,12 @@ preset scale's intrinsic string losses instead of the estimated common law.
 coordinates, then certifies modes in the original SI coordinates. It is an
 opt-in numerical trial, not a different soundboard or a tuned piano preset.
 --consistent-board-mass integrates the flat panel's P1 transverse inertia
-exactly; slope and beam inertia remain lumped. It is an opt-in numerical
+exactly; slope inertia remains lumped and beam inertia is lumped by default. It is an opt-in numerical
 trial, not a measured Model D material correction.
 --edge-cubic-board-mass integrates a declared cubic panel displacement field
 and applies that same field at bridge and acoustic surface samples. This is
-an opt-in numerical trial; slope and beam inertia remain lumped.
+an opt-in numerical trial; slope inertia remains lumped and beam inertia is lumped by default.
+The optional FSB stiffener-mass row selects consistent Hermite beam inertia.
 These opt-in corrections have not passed a perceptual similarity gate.
 --acoustic-refinement-levels uniformly subdivides flat P1 radiating triangles
 for Rayleigh integration only. It preserves the structural mesh, modes and
@@ -95,6 +98,13 @@ damper. 'estimated' declares approximate spans and drag; a file must cover
 every scale key with a pad or explicit free row. It requires --render and
 uses existing MIDI/CSV key, sustain and sostenuto controls. See DAMPERS.md.
 This is spatial drag, not falling-pad or hysteretic felt contact mechanics.
+--string-polarization adds both transverse directions of each physical string.
+Its complete per-key file supplies bridge sites, 3-D arms, string/hammer axes
+and lateral damper ratios. The same board solve projects both bridge rows;
+the primary row must agree with the board's existing bridge geometry.
+It requires a geometric --render; modal CSV and edge-cubic fields lack the
+required full-vector motion. No lateral coupling or drag is guessed.
+See STRING_POLARIZATION.md for the physical input format and scope.
 --string-stretching supplies linear or geometric-extension selection for EVERY
 scale key. A stretch row supplies axial rigidity EA in N and a moderate-slope
 bound; these are not inferred from tension, EI or winding mass. It requires
@@ -169,7 +179,7 @@ struct Options {
     render: Option<String>, scale: Option<String>, board: Option<String>,
     board_geometry: Option<String>, performance: Option<String>, preset: Option<String>,
     hammers: Option<String>, hammer_footprints: Option<String>, dampers: Option<String>,
-    string_stretching: Option<String>,
+    string_stretching: Option<String>, string_polarization: Option<String>,
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, raw_tensions: bool,
     rt0425_bridge_contacts: bool, rt0425_hammer_stiffness: bool,
@@ -192,7 +202,7 @@ impl Default for Options {
             rt0425_bridge_contacts: false, rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false, rt0425_string_damping: false,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
-            string_stretching: None,
+            string_stretching: None, string_polarization: None,
             midi: None, midi_mapping: midi::Mapping::default(),
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
@@ -234,6 +244,7 @@ impl Options {
                 "--hammer-footprints" => options.hammer_footprints = Some(value.clone()),
                 "--dampers" => options.dampers = Some(value.clone()),
                 "--string-stretching" => options.string_stretching = Some(value.clone()),
+                "--string-polarization" => options.string_polarization = Some(value.clone()),
                 "--concert-pitch" => options.concert_pitch = Some(value.parse().map_err(|_| invalid())?),
                 "--mesh-divisions" => options.mesh_divisions = value.parse().map_err(|_| invalid())?,
                 "--dump-geometry" => options.dump_geometry = Some(value.clone()),
@@ -346,6 +357,11 @@ impl Options {
             return Err("MIDI controls require --midi, channel 1..16 and finite maximum hammer velocity in (0,8] m/s".into());
         }
         let geometric = options.preset.is_some() || options.board_geometry.is_some();
+        if options.string_polarization.as_ref().is_some_and(|s| s.trim().is_empty()
+            || s.starts_with("--") || options.render.is_none() || !geometric
+            || options.edge_cubic_board_mass) {
+            return Err("--string-polarization requires a complete nonempty specification and a geometric render with full-vector P1 or crowned motion; modal CSV and edge-cubic fields are unsupported".into());
+        }
         if options.acoustic_refinement_levels > 3 || (seen.contains("--acoustic-refinement-levels")
             && (!geometric || options.render.is_none() || options.diagnostic_volume
                 || options.edge_cubic_board_mass)) {
@@ -393,7 +409,7 @@ impl Options {
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
             options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref(), options.hammer_footprints.as_ref(), options.midi.as_ref(),
             options.dampers.as_ref().filter(|s| s.as_str() != "estimated"),
-            options.string_stretching.as_ref()];
+            options.string_stretching.as_ref(), options.string_polarization.as_ref()];
         let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref(),
             options.dump_geometry.as_ref(), options.dump_obj.as_ref(), options.bridge_trace_csv.as_ref(),
             options.modal_pressure_csv.as_ref(), options.receiver_pressure_csv.as_ref(),
@@ -484,6 +500,11 @@ fn prepare_instrument(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
 fn prepare_instrument_with_string_material(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     options: &Options, stretching: Option<&linear::string_stretching::Specification>)
     -> Result<engine::Instrument, String> {
+    prepare_instrument_with_physical_controls(scale, modes, options, stretching, None)
+}
+fn prepare_instrument_with_physical_controls(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
+    options: &Options, stretching: Option<&linear::string_stretching::Specification>,
+    polarization: Option<&string_polarization::Prepared>) -> Result<engine::Instrument, String> {
     let dampers = match options.dampers.as_deref() {
         None => None,
         Some("estimated") => Some(linear::dampers::Specification::estimated(&scale)?),
@@ -491,21 +512,26 @@ fn prepare_instrument_with_string_material(scale: Vec<geometry::Course>, modes: 
     };
     let text = options.hammers.as_ref().map(|path| std::fs::read_to_string(path)
         .map_err(|e| format!("{path}: {e}"))).transpose()?;
-    let mut piano = prepare_instrument_with_admitted_materials(scale, modes, options, text.as_deref(), stretching)?;
+    let mut piano = prepare_instrument_with_admitted_materials(scale, modes, options, text.as_deref(), stretching, polarization)?;
     if let Some(spec) = &dampers { piano.configure_dampers(spec)?; }
     Ok(piano)
 }
 fn prepare_instrument_with_hammers(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     options: &Options, text: Option<&str>) -> Result<engine::Instrument, String> {
     let stretching = load_string_stretching(&scale, options)?;
-    prepare_instrument_with_admitted_materials(scale, modes, options, text, stretching.as_ref())
+    prepare_instrument_with_admitted_materials(scale, modes, options, text, stretching.as_ref(), None)
 }
 fn prepare_instrument_with_admitted_materials(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
-    options: &Options, text: Option<&str>, stretching: Option<&linear::string_stretching::Specification>)
+    options: &Options, text: Option<&str>, stretching: Option<&linear::string_stretching::Specification>,
+    polarization: Option<&string_polarization::Prepared>)
     -> Result<engine::Instrument, String> {
     if options.string_stretching.is_some() && stretching.is_none() {
         return Err("supplied string stretching was not admitted; no linear fallback".into());
     }
+    if options.string_polarization.is_some() && polarization.is_none() {
+        return Err("supplied string polarization was not projected from the played board; no one-plane fallback".into());
+    }
+    let secondary = polarization.map(string_polarization::Prepared::secondary);
     let imported = text.map(|text| hammer_materials::read(text,
         &scale.iter().map(|c| c.midi).collect::<Vec<_>>())).transpose()?;
     let footprints=options.hammer_footprints.as_deref().map(|path|
@@ -524,10 +550,13 @@ fn prepare_instrument_with_admitted_materials(scale: Vec<geometry::Course>, mode
         };
         engine::Instrument::new_with_string_damping(scale, modes, options.sample_rate,
             options.substeps, options.modes, true, materials, Some(engine::ShankGeometry::published()),
-            footprints.as_ref(), None, options.rt0425_string_damping)
+            footprints.as_ref(), secondary, options.rt0425_string_damping)
     } else if let Some(materials) = imported {
-        engine::Instrument::new_with_contact_geometry(scale, modes, options.sample_rate,
-            options.substeps, options.modes, true, materials, None, footprints.as_ref())
+        engine::Instrument::new_with_transverse_contact_geometry(scale, modes, options.sample_rate,
+            options.substeps, options.modes, true, materials, None, footprints.as_ref(), secondary)
+    } else if secondary.is_some() {
+        engine::Instrument::new_with_demonstration_geometry(scale, modes, options.sample_rate,
+            options.substeps, options.modes, true, footprints.as_ref(), secondary)
     } else if let Some(spec)=&footprints {
         engine::Instrument::new_with_footprints(scale,modes,options.sample_rate,options.substeps,
             options.modes,true,spec)
@@ -547,15 +576,30 @@ fn load_board(text: Option<&str>, scale: &[geometry::Course]) -> Result<Vec<line
 fn prepare_geometric_board(text: &str, keys: &[u8], band_hz: f64,
     equilibrate_mass: bool, consistent_mass: bool, edge_cubic_mass: bool, acoustic_refinement_levels: usize)
     -> Result<board_geometry::PreparedBoard, String> {
+    prepare_geometric_board_motion(text, keys, band_hz, equilibrate_mass, consistent_mass,
+        edge_cubic_mass, acoustic_refinement_levels, false)
+}
+#[allow(clippy::too_many_arguments)]
+fn prepare_geometric_board_motion(text: &str, keys: &[u8], band_hz: f64,
+    equilibrate_mass: bool, consistent_mass: bool, edge_cubic_mass: bool,
+    acoustic_refinement_levels: usize, retain_motion: bool) -> Result<board_geometry::PreparedBoard, String> {
+    if retain_motion && edge_cubic_mass {
+        return Err("string polarization requires full-vector P1 or crowned motion; edge-cubic motion is unavailable".into());
+    }
     if crowned_board::is_crowned(text) {
         if equilibrate_mass || consistent_mass || edge_cubic_mass || acoustic_refinement_levels != 0 {
             return Err("flat-board mass controls require a flat geometric board".into());
         }
-        crowned_board::CrownedBoard::read(text)?.prepare(keys, band_hz)
+        let geometry = crowned_board::CrownedBoard::read(text)?;
+        if retain_motion { geometry.prepare_with_motion(keys, band_hz) }
+        else { geometry.prepare(keys, band_hz) }
     } else {
         let geometry=board_geometry::BoardGeometry::read(text)?
             .with_acoustic_refinement(acoustic_refinement_levels)?;
-        if edge_cubic_mass { geometry.prepare_edge_cubic_transverse_mass(keys,band_hz,equilibrate_mass) }
+        if retain_motion && consistent_mass { geometry.prepare_with_motion_consistent_transverse_mass(keys,band_hz,equilibrate_mass) }
+        else if retain_motion && equilibrate_mass { geometry.prepare_with_motion_mass_equilibrated(keys,band_hz) }
+        else if retain_motion { geometry.prepare_with_motion(keys,band_hz) }
+        else if edge_cubic_mass { geometry.prepare_edge_cubic_transverse_mass(keys,band_hz,equilibrate_mass) }
         else if consistent_mass { geometry.prepare_consistent_transverse_mass(keys,band_hz,equilibrate_mass) }
         else if equilibrate_mass { geometry.prepare_mass_equilibrated(keys,band_hz) }
         else { geometry.prepare(keys,band_hz) }
@@ -668,6 +712,12 @@ fn write_receiver_pressure(out: &mut impl std::io::Write, pressure: &[f64],
 fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     surface: Option<&[board_geometry::SurfaceSample]>, options: &Options,
     stretching: Option<&linear::string_stretching::Specification>) -> Result<(), String> {
+    render_with_physical_controls(path, scale, modes, surface, options, stretching, None)
+}
+fn render_with_physical_controls(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
+    surface: Option<&[board_geometry::SurfaceSample]>, options: &Options,
+    stretching: Option<&linear::string_stretching::Specification>,
+    polarization: Option<&string_polarization::Prepared>) -> Result<(), String> {
     let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
     let rate = options.sample_rate;
     let count = (options.duration * f64::from(rate)).round() as u32;
@@ -697,7 +747,7 @@ fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: 
         scale.iter().position(|c| c.midi == key)
             .ok_or_else(|| format!("bridge observation key {key} is absent"))
     }).transpose()?;
-    let piano = prepare_instrument_with_string_material(scale, modes, options, stretching)?;
+    let piano = prepare_instrument_with_physical_controls(scale, modes, options, stretching, polarization)?;
     let bridge_row = observed_course.map(|course| {
         piano.bank.strings.iter().find(|s|
             s.course == course && s.member == 0 && s.polarization == 0 && !s.duplex)
@@ -705,6 +755,9 @@ fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: 
             .ok_or_else(|| format!("no speaking vertical bridge port for key {key}"))
     }).transpose()?;
     debug_assert_eq!(piano.sample_rate(), rate);
+    if let Some(polarization) = polarization {
+        println!("Two transverse directions per string; bridge motion and lateral damper ratios supplied by {}. One hammer/contact area and shared mechanics clock; see STRING_POLARIZATION.md.", polarization.source);
+    }
     if let Some(path) = &options.string_stretching {
         let count = (0..piano.bank.strings.len())
             .filter(|&i| piano.bank.string_stretching_observation(i).is_some()).count();
@@ -830,6 +883,8 @@ fn run() -> Result<(), String> {
     // Freeze supplied string material before geometry work or any exports.
     // Playback receives this admitted value, never a later read of the path.
     let stretching = load_string_stretching(&scale, &options)?;
+    let polarization = options.string_polarization.as_deref().map(|path|
+        string_polarization::Specification::load(path, &scale)).transpose()?;
     let scale_source = options.scale.as_deref().unwrap_or(if options.preset.is_some() {
         "RT-0425 Appendix A wrapped-string MODEL: 84 published courses plus four estimated extensions"
     } else { "ESTIMATED demonstration" });
@@ -852,11 +907,13 @@ fn run() -> Result<(), String> {
         (Some(p), _) => Some(p.geometry.clone()),
         _ => None,
     };
-    let (modes, board_source, surface) = if let Some(text) = &geometry_text {
+    let (modes, board_source, surface, polarization) = if let Some(text) = &geometry_text {
         let start = std::time::Instant::now();
-        let prepared = prepare_geometric_board(text, &scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
+        let prepared = prepare_geometric_board_motion(text, &scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
             options.board_band_hz, options.equilibrate_board_mass, options.consistent_board_mass,
-            options.edge_cubic_board_mass, options.acoustic_refinement_levels)?;
+            options.edge_cubic_board_mass, options.acoustic_refinement_levels, polarization.is_some())?;
+        let projected = polarization.as_ref().map(|spec|
+            spec.project(&scale, &prepared.modes, prepared.motion.as_ref())).transpose()?;
         let model_name = if crowned_board::is_crowned(text) { "Crowned shell" } else { "Flat plate" };
         println!("{model_name} {:.6} m^2, {:.6} kg (panel+ribs/bridges), {} free DOFs, {} modes in (0,{}] Hz; preparation {:.6} s.",
             prepared.area_m2, prepared.mass_kg, prepared.free_dofs, prepared.modes.len(),
@@ -865,10 +922,10 @@ fn run() -> Result<(), String> {
             println!("board mode {i}: [{:.9}, {:.9}] Hz", interval.0, interval.1);
         }
         (prepared.modes, format!("GEOMETRY-DERIVED {model_name}; {}; rim compliance not modeled", prepared.provenance),
-            Some(prepared.surface))
+            Some(prepared.surface), projected)
     } else {
         (load_board(board_text.as_deref(), &scale)?, options.board.as_deref()
-            .unwrap_or("AUTHORED illustrative modes; not measured Steinway geometry").to_owned(), None)
+            .unwrap_or("AUTHORED illustrative modes; not measured Steinway geometry").to_owned(), None, None)
     };
     if modes.iter().any(|m| m.frequency_hz >= 0.45 * f64::from(options.sample_rate)) {
         return Err("soundboard mode at/above output retention ceiling; use an explicitly reduced board".into());
@@ -898,7 +955,8 @@ fn run() -> Result<(), String> {
         write_fresh_output(path, format!("# Source: {board_source}\n{}", write_board_for_scale(&modes, &scale)).as_bytes())?;
     }
     if let Some(path) = &options.render {
-        return render_with_string_material(path, scale, &modes, surface.as_deref(), &options, stretching.as_ref());
+        return render_with_physical_controls(path, scale, &modes, surface.as_deref(), &options,
+            stretching.as_ref(), polarization.as_ref());
     }
     println!("Model D published envelope: {} x {} m; board {} -> {} m (center -> edge).",
         geometry::D_LENGTH_M, geometry::D_WIDTH_M, geometry::D_BOARD_CENTER_M, geometry::D_BOARD_EDGE_M);
@@ -909,6 +967,10 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(error) = run() { eprintln!("grand_piano: {error}"); std::process::exit(1); }
 }
+
+#[cfg(test)]
+#[path = "string_polarization_render_tests.rs"]
+mod string_polarization_render_tests;
 
 #[cfg(test)]
 #[path = "string_stretching_render_tests.rs"]

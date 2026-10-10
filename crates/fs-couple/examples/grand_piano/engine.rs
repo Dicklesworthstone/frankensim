@@ -137,12 +137,22 @@ impl Instrument {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_footprints(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
         modes_per_string:usize,damping:bool,footprints:&hammer_footprint::Specification)->Result<Self,String> {
+        Self::new_with_demonstration_geometry(courses,board,rate,substeps,modes_per_string,damping,
+            Some(footprints),None)
+    }
+
+    /// The existing demonstration materials with explicitly projected string
+    /// directions. Geometry changes neither material cards nor hammer area.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_demonstration_geometry(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
+        modes_per_string:usize,damping:bool,footprints:Option<&hammer_footprint::Specification>,
+        secondary:Option<(&[Vec<f64>],&[f64])>)->Result<Self,String> {
         let law=felt::demonstration_law()?;let prony=relaxation::demonstration_prony();
         let materials=(0..courses.len()).map(|_|(law.clone(),GeneralizedMaxwell {
             e_inf:prony.e_inf,terms:prony.terms.clone(),
         })).collect();
-        Self::new_with_contact_geometry(courses,board,rate,substeps,modes_per_string,damping,
-            materials,None,Some(footprints))
+        Self::new_with_transverse_contact_geometry(courses,board,rate,substeps,modes_per_string,damping,
+            materials,None,footprints,secondary)
     }
 
     /// Complete cold physical construction. Every footprint site has separate
