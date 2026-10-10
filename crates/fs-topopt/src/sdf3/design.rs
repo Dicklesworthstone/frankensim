@@ -6,7 +6,7 @@
 //! separate optimizer implementation. Geometry and material model remain fixed.
 
 use super::stress::{self, StressError3, StressEvaluation3, StressOptions3};
-use super::{CutDensityStudy3, Sdf3Elasticity};
+use super::{CutDensityStudy3, PhysicalRegion3, Sdf3Elasticity};
 use crate::pipeline::LoadCase;
 use crate::{SimpParams, SolveControl, SolveWork};
 use fs_ascent::projected_al::{
@@ -21,9 +21,10 @@ pub struct StressDesignOptions3 {
     /// Cap on the declared quadrature aggregate, in reference-material stress
     /// units. It is NOT a cap on sampled or continuum maximum stress.
     pub stress_limit: f64,
-    /// Exact raw-density box [density_floor, 1].
-    /// Its projected lower bound must remain above the ersatz-modulus qp
-    /// turnover; a very small floor or sharp projection can be refused.
+    /// Exact raw-density box [density_floor, 1]. Prescribed physical regions
+    /// are applied after the filter/projection map, so an authored void is zero.
+    /// The projected lower bound of free material must remain above the
+    /// ersatz-modulus qp turnover; a small floor or sharp projection is refused.
     pub density_floor: f64,
     /// The single inequality is dimensionless: aggregate/stress_limit - 1.
     /// Feasibility and numerical KKT tolerances use these coordinates.
@@ -109,11 +110,16 @@ fn sample<O: Sdf3Elasticity>(
     let evaluated = study.evaluate_stress(rho, loads, options.stress, control)?;
     // The graph filter's exact maximum principle preserves the raw box. Check
     // the actually solved/projection values too, rather than assume numerical
-    // filter error cannot cross the strength-model boundary.
-    if evaluated
-        .projected_rho
-        .iter()
-        .any(|r| !monotone_stress_branch(*r, study.params(), options.stress.relaxation_power))
+    // filter error cannot cross the strength-model boundary. An authored
+    // physical void is an immutable zero in the material map, not an optimizer
+    // step along the ersatz foldback branch. No free density gets this exception.
+    if evaluated.projected_rho.iter().enumerate().any(|(i, r)| {
+        let prescribed_void = *r == 0.0
+            && study.physical_regions()
+                .is_some_and(|regions| regions[i] == PhysicalRegion3::Void);
+        !prescribed_void
+            && !monotone_stress_branch(*r, study.params(), options.stress.relaxation_power)
+    })
     {
         return Err(StressError3::Invalid(
             "projected density entered the ersatz stress turnover",

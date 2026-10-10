@@ -88,3 +88,69 @@ fn g4_infeasible_stress_endpoint_is_never_completed_or_selected_as_feasible() {
     assert!(run.state.best.is_none());
     assert!(run.state.accepted.as_ref().unwrap().aggregate > spec.stress.unwrap().stress_limit);
 }
+
+const REGIONS_FIXTURE: &str =
+    include_str!("../../../../../../examples/marquee/bracket-3d-stress-regions.fsim");
+
+#[test]
+fn g0_stress_regions_are_identity_bearing_and_keep_free_density_admission() {
+    let spec = spec::parse(REGIONS_FIXTURE).unwrap();
+    assert_eq!(spec.regions.len(), 2);
+    let canonical = spec::parse(&spec.canonical).unwrap();
+    assert_eq!(canonical.id, spec.id);
+    assert_eq!(canonical.regions, spec.regions);
+    let changed = REGIONS_FIXTURE.replace(
+        ":void (((0.0 0.5 0.5) (0.5 1.0 1.0)))",
+        ":void (((0.5 0.5 0.5) (1.0 1.0 1.0)))",
+    );
+    assert_ne!(spec::parse(&changed).unwrap().id, spec.id);
+    assert!(spec::parse(&REGIONS_FIXTURE.replace(
+        ":density-floor 0.05", ":density-floor 0.0001",
+    )).is_err());
+}
+
+fn assert_stress_regions(study: &CutDensityStudy3<AdaptiveSolveSpace3>, state: &State) {
+    use fs_topopt::sdf3::PhysicalRegion3;
+    let labels = study.physical_regions().expect("authored labels must be bound before any solve");
+    let leaves = study.operator().elasticity().leaves();
+    assert_eq!(labels.len(), leaves.len());
+    assert_eq!(labels.iter().filter(|r| **r == PhysicalRegion3::Solid).count(), 1);
+    assert_eq!(labels.iter().filter(|r| **r == PhysicalRegion3::Void).count(), 1);
+    for field in [state.accepted.as_ref(), state.best.as_ref()].into_iter().flatten() {
+        for ((leaf, label), density) in leaves.iter().zip(labels).zip(&field.projected_rho) {
+            let expected = match leaf.index() {
+                [0, 0, 0] => PhysicalRegion3::Solid,
+                [0, 1, 1] => PhysicalRegion3::Void,
+                _ => PhysicalRegion3::Design,
+            };
+            assert_eq!(*label, expected);
+            match label {
+                PhysicalRegion3::Solid => assert_eq!(*density, 1.0),
+                PhysicalRegion3::Void => assert_eq!(*density, 0.0),
+                PhysicalRegion3::Design => assert!(*density > 0.0 && *density <= 1.0),
+            }
+        }
+        assert!(field.volume_fraction >= study.prescribed_solid_fraction());
+    }
+}
+
+#[test]
+fn g1_stress_regions_use_the_actual_gradient_gate_and_survive_accepted_material_removal() {
+    let spec = spec::parse(REGIONS_FIXTURE).unwrap();
+    let mut checkpoints = 0;
+    let run = compute_observed(&spec, &CancelGate::new(), 4, None, 0.0, |study, state| {
+        checkpoints += 1;
+        assert!(state.audit.passed);
+        assert_stress_regions(study, state);
+        Ok(())
+    }).unwrap();
+    assert!(checkpoints > 1, "require durable accepted updates");
+    assert_eq!(run.state.iterations(), 4);
+    assert!(run.state.audit.passed);
+    assert_eq!(run.state.audit.probes.len(), 2);
+    assert_stress_regions(&run.study, &run.state);
+    let best = run.state.best.as_ref().expect("a feasible design must be retained");
+    assert!(best.volume_fraction < run.state.history[0].volume_fraction);
+    assert!(best.aggregate <= spec.stress.unwrap().stress_limit * (1.0 + 2e-6));
+    assert_ne!(best.displacements[0], best.displacements[1]);
+}

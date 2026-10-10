@@ -13,7 +13,7 @@ mod output;
 #[path = "stress/resume.rs"]
 mod resume;
 
-const SCOPE: &str = "Estimated fixed-background 3-D linear-elastic SIMP minimum-volume design. The constraint is a normalized volume-and-load-weighted qp von Mises aggregate in Pa; it is not a limit on sampled or continuum maximum stress. Independent body, reference-pressure and traction cases remain separate. The initial stress and volume adjoints pass bounded directional finite differences before optimization. Accepted augmented-Lagrangian steps can be infeasible; the least-volume accepted feasible design is retained separately and selected for export when available. KKT residuals describe the last accepted iterate, not an earlier exported incumbent. Only numerical convergence with a feasible current iterate reports completed. Every accepted update is durable before further optimization. Cross-process resume restores the complete accepted optimizer state under the same source and executable, rebuilding geometry and re-solving the accepted and distinct feasible incumbent endpoints against the original allowances. Earlier optimizer steps are not replayed. Failed restoration and work after a process crash cannot be durably charged; previous checkpoints remain intact. Report and package export all retained results without another solve. No continuum safety, global optimum, manufacturing, adaptivity or physical-validation claim is made. Memory is an admission envelope, not measured RSS. Wall time and cancellation are cooperative; quadrature, solver, stress-cell and optimizer boundaries poll, while individual kernels and ledger I/O are indivisible.";
+const SCOPE: &str = "Estimated fixed-background 3-D linear-elastic SIMP minimum-volume design. The constraint is a normalized volume-and-load-weighted qp von Mises aggregate in Pa; it is not a limit on sampled or continuum maximum stress. Independent body, reference-pressure and traction cases remain separate. The initial stress and volume adjoints pass bounded directional finite differences before optimization. Authored solid and zero-density regions are enforced in the physical map before every solve and pullback, including endpoint restoration; the raw density floor continues to guard optimizable material against ersatz stress foldback. Accepted augmented-Lagrangian steps can be infeasible; the least-volume accepted feasible design is retained separately and selected for export when available. KKT residuals describe the last accepted iterate, not an earlier exported incumbent. Only numerical convergence with a feasible current iterate reports completed. Every accepted update is durable before further optimization. Cross-process resume restores the complete accepted optimizer state under the same source and executable, rebuilding geometry and re-solving the accepted and distinct feasible incumbent endpoints against the original allowances. Earlier optimizer steps are not replayed. Failed restoration and work after a process crash cannot be durably charged; previous checkpoints remain intact. Report and package export all retained results without another solve. No continuum safety, global optimum, manufacturing, adaptivity or physical-validation claim is made. Memory is an admission envelope, not measured RSS. Wall time and cancellation are cooperative; quadrature, solver, stress-cell and optimizer boundaries poll, while individual kernels and ledger I/O are indivisible.";
 const EVALUATION_CAP: &str = "stress evaluation allowance exhausted";
 type StressResult<T> = std::result::Result<T, ProjectedAlError<StressError3>>;
 
@@ -321,11 +321,16 @@ fn compute_observed(
             },
         })?;
     let geometry = quadrature.work();
-    let mut study = CutDensityStudy3::new(
-        AdaptiveSolveSpace3::jacobi(operator, 100_000_000),
-        spec.radius,
-        spec.schedule[0],
-    );
+    // Bind the physical map before gradient admission, every candidate solve,
+    // and accepted/incumbent endpoint re-evaluation on optimizer restoration.
+    let mut study = regions::bind(
+        CutDensityStudy3::new(
+            AdaptiveSolveSpace3::jacobi(operator, 100_000_000),
+            spec.radius,
+            spec.schedule[0],
+        ),
+        spec,
+    )?;
     let raw = vec![spec.density; study.cells()];
     let mut cp = |_| poll();
     let mut control = SolveControl::new(

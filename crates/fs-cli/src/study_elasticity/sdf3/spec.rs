@@ -252,9 +252,6 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
     spec.validate()?;
     if let Some(node) = items.get(13) {
         spec.regions = regions::parse(node, &spec)?;
-        if spec.stress.is_some() && !spec.regions.is_empty() {
-            return Err(invalid("design-regions currently require adaptive-simp compliance mode; stress-mode region recovery is not admitted"));
-        }
     }
     Ok(spec)
 }

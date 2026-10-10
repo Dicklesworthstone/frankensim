@@ -35,9 +35,12 @@ fn fields(
         if i != 0 {
             cells.push(',');
         }
+        let region = study.physical_regions()
+            .map_or(fs_topopt::sdf3::PhysicalRegion3::Design, |regions| regions[i])
+            .label();
         let _ = write!(
             cells,
-            "{{\"level\":{},\"index\":{:?},\"raw_density\":{:.17e},\"projected_density\":{:.17e},\"cut_volume_m3\":{:.17e}}}",
+            "{{\"level\":{},\"index\":{:?},\"physical_region\":{region:?},\"raw_density\":{:.17e},\"projected_density\":{:.17e},\"cut_volume_m3\":{:.17e}}}",
             cell.level(),
             cell.index(),
             value.rho[i],
