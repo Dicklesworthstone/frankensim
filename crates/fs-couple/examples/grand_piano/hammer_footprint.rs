@@ -14,36 +14,70 @@ const MAX_CONTACTS: usize = 88 * 3 * 4;
 const MAX_SHAPE_TERMS: usize = MAX_CONTACTS * super::MAX_STRING_MODES;
 pub const HEADER: &str = "frankensim-hammer-footprints-v1";
 
-/// Uniform longitudinal face centred at the scale's existing strike station.
-/// Total area and thickness still belong to that course's physical felt card.
+/// Authored quadrature on a face whose compression columns remain parallel to
+/// the original hammer direction. Geometry is supplied, never inferred.
 #[derive(Clone, Copy, Debug)]
-pub struct Footprint { pub length_m: f64, pub sites: usize }
+pub struct ProfileSite {
+    /// Longitudinal offset from the scale's strike station [m].
+    pub offset_m: f64,
+    /// Face recession behind the nominal hammer crown [m], nonnegative.
+    pub recession_m: f64,
+    /// Local undeformed felt column thickness [m].
+    pub thickness_m: f64,
+    /// Fraction of one string's allocated felt area; all sites sum to one.
+    pub area_fraction: f64,
+}
 
 #[derive(Clone, Debug)]
-pub struct Specification { pub footprints: BTreeMap<u8, Option<Footprint>> }
+pub enum Footprint {
+    Point,
+    /// Uniform face centred at the original strike station. The original
+    /// course thickness and positive Gauss area weights remain unchanged.
+    Span { length_m: f64, sites: usize },
+    Profile(Vec<ProfileSite>),
+}
+
+#[derive(Clone, Debug)]
+pub struct Specification { pub footprints: BTreeMap<u8, Footprint> }
 impl Specification {
-    /// Complete per-key selection: `point,key` or `span,key,length_m,sites`.
-    /// Span sites are 2 or 4 Gauss points. No default width/material is inferred.
+    /// Complete per-key point/span/profile selection. A profile is followed by
+    /// 1..4 explicit `site,key,offset_m,recession_m,thickness_m,area_fraction`
+    /// rows in increasing offset order. No geometry or weight normalization.
     pub fn read(text: &str, courses: &[Course]) -> Result<Self, String> {
         if text.len() as u64 > MAX_BYTES { return Err("hammer footprint file exceeds 64 KiB".into()); }
-        let mut footprints = BTreeMap::new(); let mut header = false;
+        let mut footprints: BTreeMap<u8, Footprint> = BTreeMap::new(); let mut header = false;
         for (line, raw) in text.lines().enumerate() {
             let row = raw.split('#').next().unwrap_or("").trim();
             if row.is_empty() { continue; }
-            let error = || format!("hammer footprint line {}: expected point,key or span,key,length_m,sites", line + 1);
+            let error = || format!("hammer footprint line {}: expected point,key; span,key,length_m,sites; profile,key; or site,key,offset_m,recession_m,thickness_m,area_fraction", line + 1);
             if !header {
                 if row != HEADER { return Err(error()); }
                 header = true; continue;
             }
             let fields: Vec<_> = row.split(',').map(str::trim).collect();
-            if fields.len() != 2 && fields.len() != 4 { return Err(error()); }
+            if !matches!(fields.len(), 2 | 4 | 6) { return Err(error()); }
             let key = fields[1].parse::<u8>().map_err(|_| error())?;
+            if fields[0] == "site" {
+                if fields.len() != 6 { return Err(error()); }
+                let Some(Footprint::Profile(sites)) = footprints.get_mut(&key) else {
+                    return Err(format!("line {}: site requires an earlier profile declaration for key {key}", line + 1));
+                };
+                if sites.len() == 4 { return Err(format!("key {key}: hammer profile exceeds four sites per string")); }
+                sites.push(ProfileSite {
+                    offset_m: fields[2].parse().map_err(|_| error())?,
+                    recession_m: fields[3].parse().map_err(|_| error())?,
+                    thickness_m: fields[4].parse().map_err(|_| error())?,
+                    area_fraction: fields[5].parse().map_err(|_| error())?,
+                });
+                continue;
+            }
             let footprint = match (fields[0], fields.len()) {
-                ("point", 2) => None,
-                ("span", 4) => Some(Footprint {
+                ("point", 2) => Footprint::Point,
+                ("span", 4) => Footprint::Span {
                     length_m: fields[2].parse().map_err(|_| error())?,
                     sites: fields[3].parse().map_err(|_| error())?,
-                }),
+                },
+                ("profile", 2) => Footprint::Profile(Vec::new()),
                 _ => return Err(error()),
             };
             if footprints.insert(key, footprint).is_some() { return Err(format!("duplicate hammer footprint key {key}")); }
@@ -67,14 +101,37 @@ impl Specification {
         for c in courses {
             c.validate()?;
             let entry = self.footprints.get(&c.midi).ok_or_else(|| format!("missing hammer footprint key {}", c.midi))?;
-            if let Some(p) = entry {
+            if let Footprint::Span { length_m, sites } = entry {
                 let centre = c.strike_fraction * c.length_m;
-                let left = centre - 0.5 * p.length_m;
-                let right = centre + 0.5 * p.length_m;
-                if !p.length_m.is_finite() || p.length_m <= 0.0 || !matches!(p.sites, 2 | 4)
+                let left = centre - 0.5 * length_m;
+                let right = centre + 0.5 * length_m;
+                if !length_m.is_finite() || *length_m <= 0.0 || !matches!(*sites, 2 | 4)
                     || !left.is_finite() || !right.is_finite() || left <= 0.0
                     || left >= centre || right <= centre || right >= c.length_m {
                     return Err(format!("key {}: complete hammer span must lie inside the speaking string; sites must be 2 or 4", c.midi));
+                }
+            }
+            if let Footprint::Profile(sites) = entry {
+                if !(1..=4).contains(&sites.len()) {
+                    return Err(format!("key {}: a hammer profile requires one to four sites", c.midi));
+                }
+                let mut previous = 0.0;
+                let mut area = 0.0;
+                for p in sites {
+                    let station = c.strike_fraction + p.offset_m / c.length_m;
+                    if [p.offset_m, p.recession_m, p.thickness_m, p.area_fraction, station]
+                        .iter().any(|v| !v.is_finite())
+                        || p.recession_m < 0.0 || p.thickness_m <= 0.0
+                        || !(p.recession_m + p.thickness_m).is_finite()
+                        || p.area_fraction <= 0.0 || p.area_fraction > 1.0
+                        || station <= previous || station >= 1.0 {
+                        return Err(format!("key {}: ordered in-string profile sites need nonnegative recession, positive thickness and positive area fractions", c.midi));
+                    }
+                    previous = station;
+                    area += p.area_fraction;
+                }
+                if (area - 1.0).abs() > 1e-12 {
+                    return Err(format!("key {}: hammer profile area fractions must sum to one without normalization", c.midi));
                 }
             }
         }
@@ -95,7 +152,10 @@ fn quadrature(sites: usize) -> Vec<(f64, f64)> {
     }
 }
 
-pub(super) struct Point { pub shape: Vec<f64>, pub lift: f64, pub fraction: f64 }
+pub(super) struct Point {
+    pub shape: Vec<f64>, pub lift: f64, pub fraction: f64,
+    pub recession_m: f64, pub thickness_m: f64,
+}
 pub(super) struct Prepared {
     pub points: Vec<Point>,
     ranges: Vec<Range<usize>>,
@@ -162,23 +222,23 @@ impl Bank {
             || self.strings.iter().any(|s| s.course >= courses.len()) {
             return Err("hammer footprints require a fresh unconfigured bank and its original course order".into());
         }
-        if spec.footprints.values().all(Option::is_none) { return Ok(()); }
+        if spec.footprints.values().all(|p| matches!(p, Footprint::Point)) { return Ok(()); }
         let mut points = Vec::new(); let mut contacts = Vec::new();
         let mut ranges = Vec::with_capacity(self.strings.len()); let mut terms = 0usize;
         for (si, s) in self.strings.iter().enumerate() {
             let first = points.len();
             if s.contact.is_some() {
                 let c = &courses[s.course];
-                match spec.footprints[&c.midi] {
-                    None => {
+                match &spec.footprints[&c.midi] {
+                    Footprint::Point => {
                         points.push(Point { shape: s.modes.clone().map(|k| self.modes[k].hammer_shape).collect(),
-                            lift: s.hammer_lift, fraction: 1.0 });
+                            lift: s.hammer_lift, fraction: 1.0, recession_m: 0.0, thickness_m: c.felt_thickness_m });
                         contacts.push(si);
                     }
-                    Some(p) => {
-                        let half = 0.5 * p.length_m / c.length_m;
+                    Footprint::Span { length_m, sites } => {
+                        let half = 0.5 * length_m / c.length_m;
                         let mut previous = 0.0;
-                        for (x, fraction) in quadrature(p.sites) {
+                        for (x, fraction) in quadrature(*sites) {
                             let station = c.strike_fraction + half * x;
                             if !station.is_finite() || station <= previous || station >= 1.0 {
                                 return Err("hammer footprint quadrature has no representable separation".into());
@@ -190,7 +250,22 @@ impl Bank {
                             if !lift.is_finite() || shape.iter().any(|x| !x.is_finite()) {
                                 return Err("hammer footprint projection overflow".into());
                             }
-                            points.push(Point { shape, lift, fraction }); contacts.push(si);
+                            points.push(Point { shape, lift, fraction, recession_m: 0.0,
+                                thickness_m: c.felt_thickness_m }); contacts.push(si);
+                        }
+                    }
+                    Footprint::Profile(sites) => {
+                        for p in sites {
+                            let station = c.strike_fraction + p.offset_m / c.length_m;
+                            let shape: Vec<f64> = (1..=s.modes.len()).map(|n|
+                                det::sin(n as f64 * std::f64::consts::PI * station) / det::sqrt(c.modal_mass_kg())).collect();
+                            let lift = station - shape.iter().zip(&self.modes[s.modes.clone()]).map(|(g,m)|g*m.beta).sum::<f64>();
+                            if !lift.is_finite() || shape.iter().any(|x| !x.is_finite()) {
+                                return Err("hammer profile projection overflow".into());
+                            }
+                            points.push(Point { shape, lift, fraction: p.area_fraction,
+                                recession_m: p.recession_m, thickness_m: p.thickness_m });
+                            contacts.push(si);
                         }
                     }
                 }
@@ -245,6 +320,17 @@ impl Bank {
     /// The course's original area is divided among unison strings separately.
     pub fn contact_area_fraction(&self, c: usize) -> f64 {
         self.footprints.as_ref().map_or(1.0, |p| p.points[c].fraction)
+    }
+
+    /// Static recession changes only the gap, never the work-conjugate string
+    /// displacement/force row returned by contact_position.
+    pub fn contact_recession_m(&self, c: usize) -> f64 {
+        self.footprints.as_ref().map_or(0.0, |p| p.points[c].recession_m)
+    }
+
+    /// Point-only banks retain the source course thickness at the engine.
+    pub fn contact_felt_thickness_m(&self, c: usize) -> Option<f64> {
+        self.footprints.as_ref().map(|p| p.points[c].thickness_m)
     }
 }
 

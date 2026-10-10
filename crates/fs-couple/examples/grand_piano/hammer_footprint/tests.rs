@@ -7,7 +7,8 @@ fn courses() -> Vec<Course> {
 }
 fn spec(courses: &[Course], span: bool) -> Specification {
     Specification { footprints: courses.iter().map(|c| (c.midi,
-        span.then_some(Footprint { length_m: 0.08*c.length_m, sites: 4 }))).collect() }
+        if span { Footprint::Span { length_m: 0.08*c.length_m, sites: 4 } }
+        else { Footprint::Point })).collect() }
 }
 fn bank(span: bool, damped: bool) -> Bank {
     let c=courses();
@@ -33,6 +34,64 @@ fn footprint_input_is_complete_physical_and_quadrature_conserves_area() {
             let expected=if power%2==0 {1.0/(power+1) as f64}else{0.0};
             assert!((actual-expected).abs()<2e-15);
         }
+    }
+}
+
+#[test]
+fn authored_profile_requires_complete_ordered_geometry_and_conserved_area() {
+    let c=courses();
+    let one=format!("{HEADER}\nprofile,69\nsite,69,0,0,0.008,1\n");
+    Specification::read(&one,&c).unwrap();
+    let four=format!("{HEADER}\nprofile,69\nsite,69,-0.003,0.0003,0.006,0.15\nsite,69,-0.001,0,0.008,0.35\nsite,69,0.001,0,0.008,0.35\nsite,69,0.003,0.0003,0.006,0.15\n");
+    Specification::read(&four,&c).unwrap();
+    for invalid in [
+        one.replace("profile,69\n",""),format!("{HEADER}\nprofile,69\n"),
+        format!("{one}point,69\n"),format!("{four}site,69,0.004,0,0.008,0.1\n"),
+        one.replace("profile,69","point,69"),one.replace("site,69","site,68"),
+        one.replace("site,69,0,0,0.008,1","site,69,100,0,0.008,1"),
+        one.replace("site,69,0,0,0.008,1","site,69,0,-0.001,0.008,1"),
+        one.replace("0.008","0"),one.replace("0.008","NaN"),
+        one.replace(",0,0.008",",inf,0.008"),
+        one.replace("0.008,1","0.008,0"),one.replace("0.008,1","0.008,0.9"),
+        four.replace("site,69,0.001","site,69,-0.001"),
+        four.replace("site,69,0.001","site,69,-0.002"),
+    ] {assert!(Specification::read(&invalid,&c).is_err(),"accepted {invalid}");}
+}
+
+#[test]
+fn profile_projects_supplied_stations_without_putting_recession_in_string_work() {
+    let c=courses();
+    let text=format!("{HEADER}\nprofile,69\nsite,69,-0.004,0.0004,0.006,0.3\nsite,69,0.002,0,0.008,0.7\n");
+    let selection=Specification::read(&text,&c).unwrap();
+    let mut b=Bank::new_with_hammer_footprints(&c,&board::demonstration(),192_000,
+        21_600.0,12,true,&selection).unwrap();
+    let point=bank(false,true);
+    assert_eq!(b.q,point.q);assert_eq!(b.board_basis,point.board_basis);
+    assert_eq!(b.physical_board_k,point.physical_board_k);
+    assert_eq!(b.contact_strings.len(),2*point.contact_strings.len());
+    for (i,(&offset,(&recession,&thickness))) in [-0.004,0.002].iter()
+        .zip([0.0004,0.0].iter().zip([0.006,0.008].iter())).enumerate() {
+        assert_eq!(b.contact_recession_m(i),recession);
+        assert_eq!(b.contact_felt_thickness_m(i),Some(thickness));
+        // Static face geometry cannot do work on a stationary string.
+        assert_eq!(b.contact_position(i,&b.q),0.0);
+        let si=b.contact_strings[i];let k=b.strings[si].modes.start+1;
+        b.q[k]=1e-5;
+        let station=c[0].strike_fraction+offset/c[0].length_m;
+        let expected=det::sin(2.0*std::f64::consts::PI*station)
+            /det::sqrt(c[0].modal_mass_kg())*b.q[k];
+        assert!((b.contact_position(i,&b.q)-expected).abs()<1e-15);
+        b.q[k]=0.0;
+    }
+    // Arbitrary signed forces check the actual moving-bridge work row, beyond
+    // a getter or a duplicate projection formula.
+    let force:Vec<_>=(0..b.contact_strings.len()).map(|i|0.2*(i as f64+0.5).sin()).collect();
+    for _ in 0..12 {
+        let before=b.energy();b.predict();b.finish(&force);
+        let work:f64=force.iter().enumerate().map(|(i,f)|
+            f*(b.contact_position(i,&b.next_q)-b.contact_position(i,&b.q))).sum();
+        assert!((b.energy_at(&b.next_q,&b.next_v)-before+b.last_modal_loss_j-work).abs()<1e-11);
+        b.commit();
     }
 }
 

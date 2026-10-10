@@ -135,8 +135,11 @@ is 48 kHz. Defaults retain four mechanics substeps and at most 24 partials per
 string; --modes and --substeps expose the existing larger physical budgets.
 They do not retune strings, widen the admitted output band, or certify accuracy.
 --hammers supplies complete per-key WoolFelt/Prony cards. --hammer-footprints
-selects point or finite longitudinal contact sites for every key. --dampers
-selects supplied finite pads or explicit estimates. All use the SAME nonlinear
+selects point, uniform span or authored crown profile for every key. Profile
+sites supply offsets, recession, local thickness and fractions of the original
+area; their gaps control engagement and their felt/Prony histories are independent.
+Published R_H requires the original uniform felt thickness. See HAMMER_FOOTPRINTS.md.
+--dampers selects supplied finite pads or explicit estimates. All use the SAME nonlinear
 engine, actual loaded bridge basis and radiation feedback, not output filters.
 Invalid or missing supplied cards refuse before any structural/BEM preparation.
 See grand_piano/EXTERIOR_PLAYBACK.md for the physical controls.

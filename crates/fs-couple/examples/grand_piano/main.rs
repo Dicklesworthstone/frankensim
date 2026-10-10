@@ -89,12 +89,15 @@ only the struck keys. Missing, duplicate or invalid cards refuse without fallbac
 These cards change physical contact forces and relaxation, not an output EQ.
 The preset shank and the scale's hammer mass/patch geometry remain unchanged.
 See HAMMERS.md for the SI format; importing values does not certify measurements.
---hammer-footprints supplies point or finite longitudinal span for EVERY key.
-Two or four positive-area contact sites retain separate felt/Prony histories,
-sharing the original hammer inertia and total area. It requires --render and
-works with the preset, supplied materials, MIDI and all existing pedals.
-No default width, output filter or direct hammer radiation is inferred.
-See HAMMER_FOOTPRINTS.md; this is not a resolved 3-D growing contact patch.
+--hammer-footprints supplies point, uniform span or authored crown profile for
+EVERY key. Profiles supply one to four ordered sites with longitudinal offsets,
+face recession, local felt thickness and positive fractions of the original area.
+Sites engage according to their gaps and retain independent felt/Prony histories
+while sharing the hammer. Point/span thickness still comes from the scale.
+It requires --render and works with supplied materials, MIDI and existing pedals.
+Published R_H requires the original uniform thickness. Varying thickness applies
+the selected felt/Prony law locally and cannot silently reuse that source rate.
+See HAMMER_FOOTPRINTS.md for SI rows and the parallel-column contact model.
 --dampers selects finite-footprint viscous pads instead of the default point
 damper. 'estimated' declares approximate spans and drag; a file must cover
 every scale key with a pad or explicit free row. It requires --render and
@@ -978,6 +981,10 @@ mod string_stretching_render_tests;
 #[cfg(test)]
 #[path = "hammer_footprint_render_tests.rs"]
 mod footprint_render_tests;
+
+#[cfg(test)]
+#[path = "hammer_profile_render_tests.rs"]
+mod hammer_profile_render_tests;
 
 #[cfg(test)]
 #[path = "crowned_render_tests.rs"]
