@@ -65,13 +65,24 @@ fn watertight_aperture_preserves_heads_and_projects_actual_neck_volume_flow_once
 fn circular_patch_area_refines_without_changing_the_outer_edge_vertices() {
     let outer=[[-0.04,-0.06,0.0],[0.04,-0.06,0.0],[0.04,0.0,0.0],
         [0.04,0.06,0.0],[-0.04,0.06,0.0],[-0.04,0.0,0.0]];
+    let radius=0.01_f64;let circle_area=PI*radius.powi(2);
     let mut previous=f64::INFINITY;
     for segments in [16,32,64] {
-        let p=partition(&outer,[0.0;3],[1.0,0.0,0.0],[0.0,1.0,0.0],0.01,segments).unwrap();
-        let error=PI*0.01_f64.powi(2)-p.area_m2;
-        assert!(error>0.0 && error<0.3*previous);previous=error;
+        let p=partition(&outer,[0.0;3],[1.0,0.0,0.0],[0.0,1.0,0.0],radius,segments).unwrap();
+        let error=circle_area-p.area_m2;
+        // Fixed seam rays also subdivide the uniform ring. They improve the
+        // 16-sided polygon more than the 32-sided one (error ratio 0.308723),
+        // so a per-level ratio below 0.3 is not a valid convergence condition.
+        // Every grid is nested and at least as accurate as its regular N-gon;
+        // that exact geometric upper bound decays quadratically with 1/N.
+        let regular_error=circle_area-0.5*segments as f64*radius.powi(2)
+            *(TAU/segments as f64).sin();
+        assert!(error>0.0 && error<previous);
+        assert!(error<=regular_error+64.0*f64::EPSILON*circle_area);previous=error;
         assert!((p.triangles.iter().map(|t|area(*t)).sum::<f64>()-0.08*0.12).abs()<1e-14);
-        assert_eq!(perimeter(&p.triangles).unwrap().len(),outer.len());
+        let edge=perimeter(&p.triangles).unwrap();
+        assert_eq!(edge.len(),outer.len());
+        assert!(outer.iter().all(|p|edge.contains(p)));
     }
 }
 

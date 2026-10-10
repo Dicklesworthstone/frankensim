@@ -41,6 +41,32 @@ fn tetrahedron()->Boundary {
 }
 
 #[test]
+fn whole_band_cbie_uses_a_conservative_interior_resonance_bound() {
+    let mut boundary=tetrahedron();
+    // A wide thin body has a small interior thickness despite its large radius.
+    for p in boundary.triangles.iter_mut().flatten() {p[0]*=10.0;p[1]*=10.0;p[2]*=0.1;}
+    let surface=SpherePanels::from_triangles(boundary.triangles.clone()).unwrap();
+    let k=core::f64::consts::TAU*1640.0/Medium::air().sound_speed;
+    assert!(k*0.1>0.5,"the old enclosing-radius heuristic selected Burton-Miller");
+    assert_eq!(band_formulation(&surface,k),Formulation::PlainCbie);
+    // Conservative equality and out-of-band cases retain the resonance-safe arm.
+    let threshold=core::f64::consts::PI/0.002;
+    assert_eq!(band_formulation(&surface,threshold),Formulation::BurtonMiller);
+    assert_eq!(band_formulation(&surface,threshold*1.01),Formulation::BurtonMiller);
+    for invalid in [0.0,-1.0,f64::INFINITY,f64::NAN] {
+        assert_eq!(band_formulation(&surface,invalid),Formulation::BurtonMiller);
+    }
+    // Translation and an axis permutation preserve containment; the criterion
+    // does not mistake distance from the coordinate origin for body thickness.
+    for p in boundary.triangles.iter_mut().flatten() {*p=[p[2]+3.0,p[0]-2.0,p[1]+1.0];}
+    let moved=SpherePanels::from_triangles(boundary.triangles).unwrap();
+    assert_eq!(band_formulation(&moved,k),Formulation::PlainCbie);
+    let sphere=SpherePanels::icosphere(1.0,1).unwrap();
+    assert_eq!(band_formulation(&sphere,core::f64::consts::PI),Formulation::BurtonMiller,
+        "the canonical sphere interior resonance must never select CBIE");
+}
+
+#[test]
 fn shared_bem_source_reproduces_independent_spatial_receiver_bakes() {
     let boundary=tetrahedron();
     let receivers=[Receiver::FinitePoint([0.0,0.0,0.12]),Receiver::FinitePoint([0.1,0.0,0.08])];
@@ -153,10 +179,12 @@ fn wider_radiation_band_uses_real_bem_and_independently_audited_receiver_filters
     let surface=SpherePanels::from_triangles(refined.triangles.clone()).unwrap();
     let radius=b.triangles.iter().flatten().map(|p|p.iter().map(|x|x*x).sum::<f64>().sqrt()).fold(0.0_f64,f64::max);
     let medium=Medium::air();let mut compared=0;
+    let formulation=band_formulation(&surface,core::f64::consts::TAU*spec.band_hz[1]/medium.sound_speed);
+    assert_eq!(formulation,Formulation::PlainCbie);
     // New frequencies are absent from training, order selection AND audit.
     for hz in [2207.0,3911.0,6123.0,7777.0] {
         let w=core::f64::consts::TAU*hz;let fields=acceleration_fields(&refined.weights,w);
-        let solutions=solve_radiation_batch(&surface,w/medium.sound_speed,medium,&[&fields[0]],Formulation::BurtonMiller).unwrap();
+        let solutions=solve_radiation_batch(&surface,w/medium.sound_speed,medium,&[&fields[0]],formulation).unwrap();
         for (channel,&receiver) in receivers.iter().enumerate() {
             let truth=receiver_response(&surface,&solutions[0],medium,receiver,radius,result[channel].propagation_delay_s).unwrap();
             let fitted=result[channel].filters[0].eval(w).unwrap().conj();

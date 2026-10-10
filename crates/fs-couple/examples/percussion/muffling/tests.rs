@@ -54,13 +54,21 @@ fn a_muffler_changes_real_head_motion_while_the_existing_energy_balance_closes()
         assert_eq!(free.system.state(),held.system.state());
         assert_eq!(free.observer_a,held.observer_a); assert_eq!(free.observer_b,held.observer_b);
         let initial = 0.5*(stroke().speed_m_s/held.stick_weight).powi(2);
-        let mut loss = 0.0; let mut changed = 0.0_f64;
+        let mut loss = 0.0; let mut changed = 0.0_f64; let mut before = initial;
         for _ in 0..256 {
             free.system.step(&free.force,&gate).unwrap();
             let f = held.system.step(&held.force,&gate).unwrap();
             loss += f.dissipated_energy_j;
-            assert!(f.dissipated_energy_j>=0.0 && f.supplied_work_j==0.0);
+            // The prepared ZOH owner reports signed work-minus-storage
+            // roundoff; even an undamped stick can have a tiny negative value.
+            // Keep that diagnostic: clamping it would hide energy residuals.
+            let roundoff = 256.0*f64::EPSILON*(before+f.stored_energy_j
+                +f.supplied_work_j.abs()+f.dissipated_energy_j.abs());
+            assert!(f.dissipated_energy_j>=-roundoff,
+                "prepared={prepared}: loss={} J, roundoff={roundoff} J",f.dissipated_energy_j);
+            assert_eq!(f.supplied_work_j,0.0);
             assert!((f.stored_energy_j+loss-initial).abs()<1e-6);
+            before = f.stored_energy_j;
             for (&a,&b) in free.system.state()[2..].iter().zip(&held.system.state()[2..]) {
                 changed = changed.max((a-b).abs());
             }

@@ -82,9 +82,22 @@ mod tests {
     #[test]
     fn prescribed_vent_runs_through_real_bem_fits_stereo_and_pcm_without_advancing_mechanics_twice() {
         let frames=192;let mut e=build(true,false,frames);let mut reference=build(false,false,frames);
-        let wav=acoustics::stereo::render_receivers(&mut e,frames as usize,20.0,&[
+        let receivers=[
             acoustics::Receiver::FinitePoint([0.08,0.05,0.35]),
-            acoustics::Receiver::FinitePoint([-0.12,0.05,0.4])]).unwrap();
+            acoustics::Receiver::FinitePoint([-0.12,0.05,0.4])];
+        // This deliberately small 2-ring/8-sector mechanical fixture has only
+        // 2.79 panels/wavelength at the default 1640 Hz upper band. Refusing
+        // that request is correct; use an explicit 500 Hz observer band that
+        // retains its whole 80..500 Hz head window and resolves the boundary.
+        let before=e.system.state().to_vec();
+        let error=acoustics::stereo::render_receivers(&mut e,frames as usize,20.0,&receivers).unwrap_err();
+        assert!(matches!(error.downcast_ref::<fs_bem::helmholtz::HelmholtzError>(),
+            Some(fs_bem::helmholtz::HelmholtzError::TooCoarse {..})));
+        assert_eq!(e.system.state(),before);
+        let spec=acoustics::stereo::radiation_spec::Spec {band_hz:[40.0,500.0],
+            ..acoustics::stereo::radiation_spec::Spec::default()};
+        let wav=acoustics::stereo::render_receivers_with_spec(&mut e,frames as usize,20.0,
+            &receivers,spec,&CancelGate::new_clock_free()).unwrap();
         assert_eq!(&wav[..4],b"RIFF");assert_eq!(&wav[8..12],b"WAVE");
         assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()),2);
         assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()),48000);

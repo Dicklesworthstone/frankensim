@@ -1,11 +1,14 @@
 # Geometry to radiated pressure: an offline percussion reference
 
 The example now composes the existing mechanical and exterior-acoustic owners.
-**It has not been natively compiled or executed in this implementation session:**
-`cargo` and `rustc` were unavailable. The new commands, tests and physical path
-are implemented, but no native WAV, listening result, successful BEM bake or
-real-time benchmark is claimed. A failed solve/fit aborts export, not a fallback
-sound. This is not yet a full-band or calibrated instrument.
+The thin-face quadrature and whole-band formulation changes described below
+have **not yet passed a native regression or WAV run**. The current build attempt
+exhausted available disk space during dependency compilation, before either
+`fs-bem` or the percussion tests ran. Independent quadrature checks verify the
+new static triangle formulas; they do not establish that a complete source bake
+passes the numerical-power and filter gates. No new native WAV, listening result
+or real-time benchmark is claimed. A failed solve/fit aborts export. This is not
+yet a full-band or calibrated instrument.
 
 ## Commands
 
@@ -35,7 +38,7 @@ or hidden gain adjustment is applied. Clipped sample count and peak pressure
 are printed to stderr. The candidate WAV is written only after every requested
 mechanical and acoustic sample succeeds. A redirection shell can still create
 an empty destination file if the program refuses. Native runs may be expensive:
-41 dense BEM frequency solves precede an allocating reference mechanical solve.
+81 dense BEM frequency solves precede the mechanical solve in the default band.
 
 ## Physical path and reusable pieces
 
@@ -62,6 +65,24 @@ Normal velocities for a unit generalized acceleration obey `v = i a/omega`
 under BEM's `exp(-i omega t)` convention. Materially negative radiated power
 beyond the solver's roundoff interval is refused, as are BEM work/resolution
 limits. The default splash and drum each have 1024 exterior panels.
+
+The entire frequency band uses one boundary operator. Plain CBIE is selected
+when the actual closed body fits in a slab of width `h` satisfying
+`k_max * h < pi`: the one-dimensional Dirichlet Poincare inequality excludes
+all interior Dirichlet resonances in that band. A thin cymbal can satisfy this
+bound even when its radius is large compared with the wavelength. If the bound
+does not establish exclusion, the renderer retains Burton-Miller. It never
+switches operators between frequency samples to hide a bad transfer.
+
+For CBIE self and near interactions, `fs-bem` evaluates static triangle single
+and double layers analytically and integrates their regular Helmholtz
+remainders. Far interactions retain centroid quadrature. The same static
+single-layer integral is used for self panels and near opposite faces. This
+resolves the narrow interactions between the cymbal's two skins; a fixed area
+quadrature alone can miss most of the double-layer contribution at a 0.5 mm
+gap. The tests compare both signs and sub-millimetre gaps to independent closed
+rectangular-panel integrals. These changes do not loosen the negative-power,
+resolution, or filter-error gates and do not certify continuum convergence.
 
 The `*-wav` observer at `[1.5, 0.7, 1.5]` metres is an explicit **far-field** receiver,
 not a close drum microphone. Its direction is projected before vector fitting,
@@ -108,8 +129,9 @@ or rollback is asserted. Export uses the existing pressure PCM encoder.
 
 ## What the gates establish, and what they do not
 
-There are 21 training and 20 interleaved held-out BEM frequencies from 40 to
-1640 Hz. Per-input maximum and RMS complex errors are normalized by that input's
+There are 21 training, 20 order-selection and 40 independent final-audit BEM
+frequencies from 40 to 1640 Hz. Per-input maximum and RMS complex errors are
+normalized by that input's
 largest sampled response, with limits 0.15 and 0.05. These are authored numerical
 fit tolerances, not measured perceptual tolerances or a continuum certificate.
 A refusal requires better resolution/order/sampling, not disabling the gate.
@@ -162,3 +184,20 @@ An independent 64-by-128 spherical surface quadrature of a known translating
 relative error at four microphone ranges. At k*r=0.2 its pressure magnitude is
 5.099 times the far-field approximation, so the distinction is load-bearing.
 That independent calculation is not execution of the Rust BEM or its new tests.
+
+The focused native checks still required for the current quadrature repair are:
+
+```sh
+cargo test --release -p fs-bem --lib helmholtz
+cargo test --release -p fs-couple --example percussion
+cargo run --release -p fs-couple --example percussion -- splash-wav 480 20 > splash-smoke.wav
+```
+
+The short splash request retains the full default source basis and 40–1640 Hz
+acoustic preparation while allowing the far-field propagation delay to elapse.
+It has not been run successfully in this session. In particular, correcting the
+near-face kernels does not prove that every weakly radiating elastic mode passes
+the existing power gate; far-panel discretization and fit error remain subject
+to those unchanged checks. The small vented-snare regression explicitly verifies
+that its coarse boundary refuses the default 1640 Hz band, then requests a
+resolved 40–500 Hz band covering its complete retained 80–500 Hz head window.

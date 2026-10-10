@@ -45,6 +45,34 @@ fn bake_receivers_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiat
     Ok(bake_scene_with_spec(boundary,receivers,spec,gate,false)?.0)
 }
 
+/// Choose one operator for the whole band, using the actual closed boundary.
+/// The exterior Neumann CBIE's irregular frequencies are interior Dirichlet
+/// eigenvalues. If the enclosed domain fits in a slab of width h, extension by
+/// zero and the one-dimensional Dirichlet Poincare inequality give
+/// integral |grad u|^2 >= (pi/h)^2 integral |u|^2. Thus k_max*h < pi excludes
+/// every interior resonance in the band, even for a wide, thin shell.
+///
+/// This excludes continuum resonances only: mesh resolution, numerical power
+/// and observer-fit gates still apply. A failed bound keeps Burton-Miller;
+/// never switch formulations between frequency samples to hide a bad solve.
+fn band_formulation(surface:&SpherePanels,k_max:f64)->Formulation {
+    let Some(triangles)=surface.triangles() else {return Formulation::BurtonMiller;};
+    if !k_max.is_finite() || k_max<=0.0 || triangles.is_empty() {
+        return Formulation::BurtonMiller;
+    }
+    let mut lower=[f64::INFINITY;3];let mut upper=[f64::NEG_INFINITY;3];
+    for point in triangles.iter().flatten() { for axis in 0..3 {
+        if !point[axis].is_finite() {return Formulation::BurtonMiller;}
+        lower[axis]=lower[axis].min(point[axis]);upper[axis]=upper[axis].max(point[axis]);
+    }}
+    // Outward rounding makes both the containment width and k*h conservative.
+    // PI.next_down() lies strictly below pi; equality never earns admission.
+    let width=(0..3).map(|axis|(upper[axis]-lower[axis]).next_up()).fold(f64::INFINITY,f64::min);
+    if width.is_finite() && width>0.0 && (k_max*width).next_up()<core::f64::consts::PI.next_down() {
+        Formulation::PlainCbie
+    }else{Formulation::BurtonMiller}
+}
+
 // The same BEM fields feed both pressure observers and (when selected) the
 // complete force/velocity matrix. One-way callers never construct a load.
 fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
@@ -77,11 +105,11 @@ fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_
     let mut impedances=if load {vec![vec![C64::ZERO;count*count];omega.len()]}else{Vec::new()};
     eprintln!("radiation preparation: source_panels={panels}, prepared_panels={prepared_panels}, subdivisions={}, dense_work_units={work}, band_hz={:?}; same polyhedral source geometry, no mechanical refinement",spec.subdivisions,spec.band_hz);
     let mut ppw=f64::INFINITY;let mut condition=0.0_f64;
-    // One formulation for the entire transfer; stitching different discrete
-    // operators at kR=0.5 creates a numerical jump that a causal fit cannot fix.
-    let formulation=if omega[omega.len()-1]*radius/medium.sound_speed<0.5 {
-        Formulation::PlainCbie
-    }else{Formulation::BurtonMiller};
+    // The old enclosing-radius cutoff forced thin cymbals onto the centroid
+    // Burton-Miller arm even far below their first interior resonance. That arm
+    // has a documented low-frequency negative-resistance error; CBIE also owns
+    // the actual triangle quadrature needed by their closely spaced faces.
+    let formulation=band_formulation(&surface,omega[omega.len()-1]/medium.sound_speed);
     // Solve the highest frequency first: the BEM owner's wavelength guard can
     // reject an underresolved band before spending work on its lower samples.
     for index in (0..omega.len()).rev() {
@@ -100,7 +128,9 @@ fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_
                 || !solution.panels_per_wavelength.is_finite()
                 || !solution.condition_lower_bound.is_finite()
                 || solution.radiated_power_roundoff_interval.1<0.0 {
-                return Err("BEM reports invalid diagnostics or negative radiation power beyond roundoff; refine the acoustic solve".into());
+                return Err(format!("BEM reports invalid diagnostics or negative radiation power beyond roundoff at {} Hz, input {input}, formulation {formulation:?}: power_interval={:?}, panels_per_wavelength={}, condition_lower_bound={}; refine the acoustic solve",
+                    w/core::f64::consts::TAU,solution.radiated_power_roundoff_interval,
+                    solution.panels_per_wavelength,solution.condition_lower_bound).into());
             }
             ppw=ppw.min(solution.panels_per_wavelength);condition=condition.max(solution.condition_lower_bound);
             for channel in 0..receivers.len() {
