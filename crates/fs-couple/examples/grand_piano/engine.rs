@@ -369,6 +369,15 @@ impl Instrument {
         self.hammers[ci].jack=Jack{peak_n,duration_s,elapsed_s:0.0};self.reset_overlaps(ci);
         self.accounting.input_work_j+=self.energy_j()-before;Ok(())
     }
+
+    /// Depress a key without a strike: lift its existing dampers and make it
+    /// eligible for sostenuto capture. This idealized control does no modeled
+    /// work, does not reposition/relaunch a hammer, and preserves all contact
+    /// histories and ringing motion. Repeating it is idempotent. note_off
+    /// releases the hold; the normal hammer/key rearming rules still apply.
+    pub fn silent_key_down(&mut self,midi:u8)->Result<(),Error>{
+        let i=self.key_index(midi)?;self.hammers[i].held=true;Ok(())
+    }
     pub fn note_off(&mut self,midi:u8)->Result<(),Error>{
         let i=self.key_index(midi)?;self.hammers[i].held=false;self.hammers[i].jack.peak_n=0.0;Ok(())
     }
@@ -572,6 +581,10 @@ mod radiation_tests;
 #[cfg(test)]
 #[path = "damper_engine_tests.rs"]
 mod damper_tests;
+
+#[cfg(test)]
+#[path = "silent_key_engine_tests.rs"]
+mod silent_key_tests;
 
 #[cfg(test)]
 mod tests {
