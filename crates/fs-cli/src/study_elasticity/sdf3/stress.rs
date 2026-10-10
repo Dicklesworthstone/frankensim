@@ -301,34 +301,32 @@ fn compute_observed(
         &mut cp,
     )
     .map_err(|e| fail("cli-study-sdf3-geometry", e.to_string()))?;
-    let operator = loading::build_operator(spec, bounds, &tree, domain, &material, &mut quadrature)
-        .map_err(|e| Failure {
-            code: "cli-study-sdf3-geometry",
-            message: e.to_string(),
-            exit: if gate.is_requested() {
-                exit::CANCELLED
-            } else if poll().is_break()
-                || matches!(
-                    e,
-                    ElasticityError3::Quadrature(
-                        QuadratureError3::BoxBudget | QuadratureError3::PointBudget
-                    )
-                )
-            {
+    let prepared = (|| -> std::result::Result<AdaptiveSolveSpace3, GoalRefinementError3> {
+        let mut build = |grid: &Octree3, checkpoint: &mut dyn FnMut() -> ControlFlow<()>| {
+            if checkpoint().is_break() { return Err(EvaluationStop::Cancelled.into()); }
+            loading::build_operator(spec, bounds, grid, domain, &material, &mut quadrature)
+                .map_err(GoalRefinementError3::from)
+        };
+        // Geometry-only correction spaces use the same original quadrature
+        // allowance and support law, including during direct-state recovery.
+        let corrections = solver::correction_spaces(spec, &mut build, &mut || poll())?;
+        let operator = build(&tree, &mut || poll())?;
+        let correction_refs: Vec<_> = corrections.iter().collect();
+        spec.solver.wrap(operator, &correction_refs, || poll())
+    })();
+    let operator = prepared.map_err(|e| Failure {
+        code: "cli-study-sdf3-geometry",
+        message: e.to_string(),
+        exit: if gate.is_requested() { exit::CANCELLED }
+            else if poll().is_break() || geometry_budget(&e) || solver::setup_budget(&e) {
                 exit::BUDGET
-            } else {
-                exit::REFUSED
-            },
-        })?;
+            } else { exit::REFUSED },
+    })?;
     let geometry = quadrature.work();
     // Bind the physical map before gradient admission, every candidate solve,
     // and accepted/incumbent endpoint re-evaluation on optimizer restoration.
     let mut study = regions::bind(
-        CutDensityStudy3::new(
-            AdaptiveSolveSpace3::jacobi(operator, 100_000_000),
-            spec.radius,
-            spec.schedule[0],
-        ),
+        CutDensityStudy3::new(operator, spec.radius, spec.schedule[0]),
         spec,
     )?;
     let raw = vec![spec.density; study.cells()];
