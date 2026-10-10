@@ -913,8 +913,21 @@ current iterate reports `completed`; iteration/evaluation/linear limits report
 `budget-exhausted` with the actual constraint violation and finite retained
 fields. KKT residuals apply to the last accepted iterate. `--budget N` caps
 updates in this invocation. `report` and `package` export sealed artifacts
-without solving. Cross-process optimizer resume is explicitly refused; durable
-design records do not pretend to restore multipliers or optimizer state.
+without solving. `study --resume study-<receipt-hash> <ledger.db> --budget N`
+continues from the accepted optimizer state under the original source and the
+same executable. It preserves multipliers, penalty, spectral step, inner
+tolerance, previous outer violation, all accepted history and the distinct
+least-volume feasible incumbent. Rebuilt geometry and one accepted-endpoint
+stress re-solve (two when the incumbent differs) spend the original geometry,
+Krylov, wall and evaluation allowances; earlier optimization updates and the
+initial gradient gate are not replayed. The physical endpoint responses must
+match the retained source before continuation. Reports count restoration
+evaluations explicitly. The invocation cap adds updates to the retained count
+without extending the original target or any resource allowance. Completed
+or target-exhausted receipts return unchanged. Historical receipts without
+optimizer state remain exportable but cannot resume. Failed restoration and
+work lost after a crash cannot be durably charged; previous checkpoints remain
+intact.
 The structural evidence package grants no continuum, manufacturing, global
 optimality or physical-validation authority.
 

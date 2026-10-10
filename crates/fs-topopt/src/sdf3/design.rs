@@ -10,7 +10,7 @@ use super::{CutDensityStudy3, Sdf3Elasticity};
 use crate::pipeline::LoadCase;
 use crate::{SimpParams, SolveControl, SolveWork};
 use fs_ascent::projected_al::{
-    ProjectedAlError, ProjectedAlOptions, ProjectedAlReport, ProjectedAlSample, ProjectedAlState,
+    ProjectedAlCheckpoint, ProjectedAlError, ProjectedAlOptions, ProjectedAlReport, ProjectedAlSample, ProjectedAlState,
     ProjectedAlStop, ProjectedAlWork,
 };
 use std::{cell::RefCell, ops::ControlFlow};
@@ -40,7 +40,7 @@ impl Default for StressDesignOptions3 {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StressDesignIteration3 {
     pub iteration: usize,
     pub volume_fraction: f64,
@@ -51,6 +51,26 @@ pub struct StressDesignIteration3 {
     pub constraint_violation: f64,
     /// Feasibility of this aggregate at the declared numerical tolerance.
     pub feasible: bool,
+}
+
+/// Accepted optimizer state and the best feasible design, without serializing
+/// an operator or trusting cached displacement/gradient fields after restart.
+/// The consumer must bind this to the original geometry, loads and policy.
+#[derive(Debug, Clone)]
+pub struct StressDesignCheckpoint3 {
+    pub optimizer: ProjectedAlCheckpoint,
+    pub best_feasible_density: Option<Vec<f64>>,
+    pub history: Vec<StressDesignIteration3>,
+    /// Physical endpoint re-evaluations already included in optimizer work.
+    pub restoration_evaluations: usize,
+}
+impl StressDesignCheckpoint3 {
+    /// One accepted-design solve, and a second only for a distinct incumbent.
+    #[must_use]
+    pub fn restoration_cost(&self) -> usize {
+        1 + usize::from(self.best_feasible_density.as_ref()
+            .is_some_and(|rho| rho != &self.optimizer.point))
+    }
 }
 fn row(
     e: &StressEvaluation3,
@@ -133,6 +153,7 @@ pub struct StressDesignStudy3<'a, 'callback, O: Sdf3Elasticity> {
     accepted: StressEvaluation3,
     best_feasible: Option<StressEvaluation3>,
     history: Vec<StressDesignIteration3>,
+    restoration_evaluations: usize,
 }
 impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
     pub fn new(
@@ -217,7 +238,105 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
             accepted,
             best_feasible,
             history: vec![first],
+            restoration_evaluations: 0,
         })
+    }
+
+    /// Rebuild accepted and incumbent fields from the SAME admitted physical
+    /// problem, then restore spectral steps, multipliers and spent work exactly.
+    /// Endpoint checks cost one or two real stress evaluations, included in the
+    /// original evaluation allowance; all Krylov work uses the supplied control.
+    /// Failed admission restores incoming scales and changes no checkpoint.
+    pub fn restore(
+        study: &'a mut CutDensityStudy3<O>,
+        loads: &'a [LoadCase<'a>],
+        checkpoint: StressDesignCheckpoint3,
+        options: StressDesignOptions3,
+        control: &'a mut SolveControl<'callback>,
+    ) -> Result<Self, ProjectedAlError<StressError3>> {
+        let n = study.cells();
+        let cost = checkpoint.restoration_cost();
+        let restoration_evaluations = checkpoint.restoration_evaluations.checked_add(cost)
+            .ok_or(ProjectedAlError::Invalid("stress restoration counter overflow"))?;
+        let mut optimizer = checkpoint.optimizer;
+        let previous_evaluations = optimizer.work.evaluations;
+        optimizer.work.evaluations = previous_evaluations.checked_add(cost)
+            .ok_or(ProjectedAlError::Invalid("stress restoration evaluation overflow"))?;
+        let restored = ProjectedAlState::try_restore(
+            optimizer, &vec![options.density_floor; n], &vec![1.0; n], options.optimizer,
+        )?;
+        let history = checkpoint.history;
+        if checkpoint.restoration_evaluations >= previous_evaluations
+            || history.len() != restored.work().iterations + 1
+            || history.iter().enumerate().any(|(i, r)| {
+                r.iteration != i || !r.volume_fraction.is_finite()
+                    || !(0.0..=1.0).contains(&r.volume_fraction)
+                    || [r.stress_aggregate, r.sampled_relaxed_max, r.sampled_physical_max,
+                        r.constraint_violation].iter().any(|v| !v.is_finite() || *v < 0.0)
+                    || r.constraint_violation != (r.stress_aggregate / options.stress_limit - 1.0).max(0.0)
+                    || r.feasible != (r.constraint_violation <= options.optimizer.tolerance)
+            })
+        {
+            return Err(ProjectedAlError::Invalid("invalid stress checkpoint history or work"));
+        }
+        let best_row = history.iter().filter(|r| r.feasible).fold(None,
+            |best: Option<&StressDesignIteration3>, r| {
+                if best.is_none_or(|b| r.volume_fraction < b.volume_fraction) { Some(r) } else { best }
+            });
+        if best_row.is_some() != checkpoint.best_feasible_density.is_some() {
+            return Err(ProjectedAlError::Invalid("stress checkpoint lost its feasible incumbent"));
+        }
+        let previous_scales = study.operator.scales().to_vec();
+        let mut result = Self::new(study, loads, restored.point(), options, control)?;
+        let rebuilt = (|| {
+            if result.state.sample() != restored.sample()
+                || history.last() != Some(&row(&result.accepted, restored.work().iterations, options))
+            {
+                return Err(ProjectedAlError::Invalid("restored stress point changed its physical response"));
+            }
+            let best = match checkpoint.best_feasible_density {
+                None => None,
+                Some(rho) if rho == result.accepted.rho => Some(result.accepted.clone()),
+                Some(rho) => {
+                    if rho.len() != n || rho.iter().any(|r| !r.is_finite()
+                        || !(options.density_floor..=1.0).contains(r)) {
+                        return Err(ProjectedAlError::Invalid("invalid retained feasible density"));
+                    }
+                    let mut evaluated = None;
+                    sample(result.study, loads, &rho, options, &mut evaluated, result.control)
+                        .map_err(ProjectedAlError::Evaluation)?;
+                    evaluated
+                }
+            };
+            if let (Some(evaluated), Some(expected)) = (&best, best_row) {
+                if row(evaluated, expected.iteration, options) != *expected {
+                    return Err(ProjectedAlError::Invalid("retained feasible design changed its physical response"));
+                }
+            }
+            Ok(best)
+        })();
+        let best = match rebuilt {
+            Ok(best) => best,
+            Err(error) => {
+                result.study.operator.set_scales(&previous_scales).expect("incoming scales remain valid");
+                return Err(error);
+            }
+        };
+        result.state = restored;
+        result.best_feasible = best;
+        result.history = history;
+        result.restoration_evaluations = restoration_evaluations;
+        Ok(result)
+    }
+
+    #[must_use]
+    pub fn checkpoint(&self) -> StressDesignCheckpoint3 {
+        StressDesignCheckpoint3 {
+            optimizer: self.state.checkpoint(),
+            best_feasible_density: self.best_feasible.as_ref().map(|e| e.rho.clone()),
+            history: self.history.clone(),
+            restoration_evaluations: self.restoration_evaluations,
+        }
     }
     #[must_use]
     pub fn accepted(&self) -> &StressEvaluation3 {

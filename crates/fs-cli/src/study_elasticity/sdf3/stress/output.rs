@@ -150,6 +150,7 @@ pub(super) fn persist(
     ledger: &Ledger,
     study: &CutDensityStudy3<AdaptiveSolveSpace3>,
     state: &State,
+    producer: ContentHash,
     previous: Option<ContentHash>,
     limit: usize,
 ) -> Result<Outcome> {
@@ -182,13 +183,16 @@ pub(super) fn persist(
         fields(study, state.accepted.as_ref())?
     );
     let (rows, table) = rows(state);
+    let checkpoint = resume::encode(spec, state, producer, &design, &rows);
+    let resumable = checkpoint.is_some();
+    let restoration_evaluations = state.checkpoint.as_ref().map_or(0, |c| c.restoration_evaluations);
     let trace = hash_domain("org.frankensim.cli.sdf3-stress.trace.v1", rows.as_bytes());
     let stop = stopping(state);
     let gradient = probes(state);
     let work = state.spent.json();
     let evaluations = state.audit.evaluations + state.optimizer_work.evaluations;
     let optimizer = format!(
-        "{{\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{},\"total_evaluations_including_gradient_gate\":{evaluations}}}",
+        "{{\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{},\"restoration_evaluations\":{restoration_evaluations},\"total_evaluations_including_gradient_gate\":{evaluations}}}",
         state.iterations(),
         state.optimizer_work.evaluations,
         state.optimizer_work.multiplier_updates,
@@ -199,11 +203,12 @@ pub(super) fn persist(
         options.stress_limit, options.stress.relaxation_power, options.stress.aggregation_power
     );
     let summary = format!(
-        "{{\"driver\":{STRESS3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"objective\":\"volume-fraction\",\"objective_unit\":\"1\",\"final_volume_fraction\":{final_volume},\"iterations_completed\":{},\"target_iterations\":{},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{selected},\"last_accepted\":{last},\"stress_measure\":{measure},\"gradient_check\":{gradient},\"optimizer_work\":{optimizer},\"work\":{work},\"stop\":{stop},\"resume_supported\":false,\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"driver\":{STRESS3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"objective\":\"volume-fraction\",\"objective_unit\":\"1\",\"final_volume_fraction\":{final_volume},\"iterations_completed\":{},\"target_iterations\":{},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{selected},\"last_accepted\":{last},\"stress_measure\":{measure},\"gradient_check\":{gradient},\"optimizer_work\":{optimizer},\"work\":{work},\"stop\":{stop},\"resume_supported\":{resumable},\"resume_mode\":{:?},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         spec.id.to_hex(),
         state.status,
         state.iterations(),
         spec.updates,
+        resume::MODE,
         quoted(SCOPE)
     );
     let html = format!(
@@ -248,8 +253,8 @@ pub(super) fn persist(
         .to_json()
         .map_err(|e| fail("cli-study-sdf3-package", e.to_string()))?;
     let versions = format!(
-        "{{\"driver\":{STRESS3_DRIVER:?},\"crate\":{:?},\"constellation_lock\":{constellation:?},\"policy\":\"PHR projected AL v1 defaults except explicit input; initial-gradient-step=1e-4; gradient-rtol=5e-4; quadrature-depth=2; fixed-background; no cross-process optimizer restoration\"}}",
-        env!("CARGO_PKG_VERSION")
+        "{{\"driver\":{STRESS3_DRIVER:?},\"crate\":{:?},\"constellation_lock\":{constellation:?},\"producer\":{:?},\"policy\":\"PHR projected AL v1 defaults except explicit input; initial-gradient-step=1e-4; gradient-rtol=5e-4; quadrature-depth=2; fixed-background; accepted optimizer-state restoration v1\"}}",
+        env!("CARGO_PKG_VERSION"), producer.to_hex()
     );
     let budgets = format!(
         "{{\"wall_s\":{},\"consumed_wall_s\":{},\"memory_bytes\":{},\"linear_iterations\":{},\"per_solve_iterations\":{},\"quadrature_boxes\":{},\"quadrature_points\":{},\"max_stress_points_per_evaluation\":{},\"max_evaluations_including_gradient_gate\":{},\"work\":{work},\"optimizer_work\":{optimizer}}}",
@@ -263,13 +268,16 @@ pub(super) fn persist(
         options.stress.max_points,
         options.optimizer.max_evaluations
     );
-    let artifacts = [
+    let mut artifacts = vec![
         ("iterations", "study-iterations", rows.as_bytes()),
         ("design", "study-design", design.as_bytes()),
         ("report_html", "study-report-html", html.as_bytes()),
         ("report_json", "study-report-json", summary.as_bytes()),
         ("package", "study-package", package.as_bytes()),
     ];
+    if let Some(checkpoint) = &checkpoint {
+        artifacts.push(("checkpoint", resume::KIND, checkpoint.as_bytes()));
+    }
     if artifacts
         .iter()
         .any(|(_, _, bytes)| bytes.len() as u64 > MAX_ARTIFACT_BYTES)
@@ -296,15 +304,17 @@ pub(super) fn persist(
             ledger.link(op, &artifact.hash, EdgeRole::Out)?;
             let _ = write!(refs, ",{name:?}:\"{}\"", artifact.hash.to_hex());
         }
+        if !resumable { refs.push_str(",\"checkpoint\":null"); }
         let receipt = format!(
-            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{STRESS3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"source\":{:?},\"iterations_completed\":{},\"target_iterations\":{},\"iteration_limit_this_invocation\":{limit},\"trace_hash\":{:?},\"consumed_wall_s\":{},\"work\":{work},\"optimizer_work\":{optimizer},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"stop\":{stop},\"predecessor\":{predecessor},\"resume_supported\":false,\"resume_reason\":\"accepted designs are durable; cross-process optimizer restoration is not implemented\"{refs}}}",
+            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{STRESS3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"source\":{:?},\"iterations_completed\":{},\"target_iterations\":{},\"iteration_limit_this_invocation\":{limit},\"trace_hash\":{:?},\"consumed_wall_s\":{},\"work\":{work},\"optimizer_work\":{optimizer},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"stop\":{stop},\"predecessor\":{predecessor},\"producer\":{:?},\"resume_supported\":{resumable},\"resume_mode\":{:?}{refs}}}",
             spec.id.to_hex(),
             state.status,
             source.hash.to_hex(),
             state.iterations(),
             spec.updates,
             trace.to_hex(),
-            state.spent.wall_s
+            state.spent.wall_s,
+            producer.to_hex(), resume::MODE,
         );
         let stored = ledger.put_artifact(RECEIPT_KIND, receipt.as_bytes(), None)?;
         ledger.link(op, &stored.hash, EdgeRole::Out)?;

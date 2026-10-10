@@ -35,7 +35,7 @@ fn g0_stress_schema_has_explicit_units_work_and_monotone_material_branch() {
 fn g1_stress_driver_uses_actual_gradients_and_retains_feasible_material_reduction() {
     let spec = spec::parse(FIXTURE).unwrap();
     let mut checkpoints = Vec::new();
-    let run = compute_observed(&spec, &CancelGate::new(), 4, |_, state| {
+    let run = compute_observed(&spec, &CancelGate::new(), 4, None, 0.0, |_, state| {
         checkpoints.push(state.iterations());
         assert!(state.audit.passed);
         assert!(state.accepted.is_some());
@@ -67,7 +67,7 @@ fn g4_stress_evaluation_and_linear_caps_publish_no_unchecked_design() {
         FIXTURE.replace(":max-stress-points 50000", ":max-stress-points 1"),
     ] {
         let spec = spec::parse(&source).unwrap();
-        let run = compute_observed(&spec, &CancelGate::new(), 1, |_, _| {
+        let run = compute_observed(&spec, &CancelGate::new(), 1, None, 0.0, |_, _| {
             panic!("no accepted design before gradient admission")
         })
         .unwrap();
@@ -83,7 +83,7 @@ fn g4_stress_evaluation_and_linear_caps_publish_no_unchecked_design() {
 fn g4_infeasible_stress_endpoint_is_never_completed_or_selected_as_feasible() {
     let spec =
         spec::parse(&FIXTURE.replace(":stress-limit-pa 8.0", ":stress-limit-pa 0.0001")).unwrap();
-    let run = compute_observed(&spec, &CancelGate::new(), 1, |_, _| Ok(())).unwrap();
+    let run = compute_observed(&spec, &CancelGate::new(), 1, None, 0.0, |_, _| Ok(())).unwrap();
     assert_ne!(run.state.status, "completed");
     assert!(run.state.best.is_none());
     assert!(run.state.accepted.as_ref().unwrap().aggregate > spec.stress.unwrap().stress_limit);

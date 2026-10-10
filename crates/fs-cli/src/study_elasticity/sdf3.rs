@@ -324,8 +324,7 @@ pub(super) fn resume(
     gate: &CancelGate,
 ) -> Result<Outcome> {
     if old.value.str_field("driver") == Some(STRESS3_DRIVER) {
-        return Err(fail("cli-study-sdf3-resume-unsupported",
-            "stress-constrained studies retain every accepted design, but do not restore optimizer state across processes; use report/package to inspect the retained best-feasible and last-accepted designs"));
+        return stress::resume(ledger, old, budget(override_text)?, gate);
     }
     let cap = budget(override_text)?;
     let source = linked(ledger, &old.value, "source", "study-source")?;

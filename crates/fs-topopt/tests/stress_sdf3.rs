@@ -332,6 +332,62 @@ fn g1_minimum_volume_trajectory_reaches_a_binding_stress_cap() {
 }
 
 #[test]
+fn g5_stress_restore_keeps_dual_state_incumbent_and_trajectory_without_replaying_updates() {
+    let (mut full_study, force) = uniform(1, 0.0);
+    let loads = [LoadCase { force: &force, weight: 1.0 }];
+    let mut callback = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let cap = full_study.evaluate_stress(&[0.55], &loads, Default::default(), &mut control).unwrap().aggregate;
+    let options = design_options(cap);
+    let mut full = StressDesignStudy3::new(&mut full_study, &loads, &[0.9], options, &mut control).unwrap();
+    full.run(4).unwrap();
+    let expected = full.checkpoint();
+    let expected_field = full.accepted().displacements.clone();
+    let expected_best = full.best_feasible().unwrap().displacements.clone();
+    drop(full);
+
+    let (mut first_study, first_force) = uniform(1, 0.0);
+    let first_loads = [LoadCase { force: &first_force, weight: 1.0 }];
+    let mut first_control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let mut first = StressDesignStudy3::new(&mut first_study, &first_loads, &[0.9], options, &mut first_control).unwrap();
+    first.run(2).unwrap();
+    let retained = first.checkpoint();
+    let cost = retained.restoration_cost();
+    drop(first);
+
+    let (mut rebuilt, rebuilt_force) = uniform(1, 0.0);
+    let rebuilt_loads = [LoadCase { force: &rebuilt_force, weight: 1.0 }];
+    let mut rebuilt_control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let mut resumed = StressDesignStudy3::restore(&mut rebuilt, &rebuilt_loads,
+        retained.clone(), options, &mut rebuilt_control).unwrap();
+    assert_eq!(resumed.history(), retained.history);
+    assert_eq!(resumed.optimizer_work().iterations, 2);
+    assert_eq!(resumed.optimizer_work().evaluations, retained.optimizer.work.evaluations + cost);
+    resumed.run(2).unwrap();
+    assert_eq!(resumed.accepted().displacements, expected_field);
+    assert_eq!(resumed.best_feasible().unwrap().displacements, expected_best);
+    let mut actual = resumed.checkpoint();
+    assert_eq!(actual.history, expected.history);
+    assert_eq!(actual.best_feasible_density, expected.best_feasible_density);
+    assert_eq!(actual.restoration_evaluations, cost);
+    actual.optimizer.work.evaluations -= cost;
+    assert_eq!(actual.optimizer, expected.optimizer);
+    drop(resumed);
+
+    let mut limited = options;
+    limited.optimizer.max_evaluations = retained.optimizer.work.evaluations + cost - 1;
+    let before = rebuilt_control.work();
+    assert!(StressDesignStudy3::restore(&mut rebuilt, &rebuilt_loads,
+        retained.clone(), limited, &mut rebuilt_control).is_err());
+    assert_eq!(rebuilt_control.work(), before, "budget refusal precedes physics");
+    let changed_force: Vec<_> = rebuilt_force.iter().map(|v| 2.0 * v).collect();
+    let changed_loads = [LoadCase { force: &changed_force, weight: 1.0 }];
+    assert!(matches!(StressDesignStudy3::restore(&mut rebuilt, &changed_loads,
+        retained, options, &mut rebuilt_control), Err(ProjectedAlError::Invalid(
+            "restored stress point changed its physical response"))));
+}
+
+#[test]
 fn g4_cancelled_trial_and_postaccept_poll_preserve_matching_fields_and_resume() {
     for stage in ["sdf3-stress-adjoint", "sdf3-stress-design-accepted"] {
         let (mut study, force) = uniform(1, 0.0);

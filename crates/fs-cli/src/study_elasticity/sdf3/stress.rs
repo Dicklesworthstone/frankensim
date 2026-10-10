@@ -5,13 +5,15 @@ use fs_ascent::projected_al::{
     ProjectedAlError, ProjectedAlReport, ProjectedAlStop, ProjectedAlWork,
 };
 use fs_topopt::pipeline::LoadCase;
-use fs_topopt::sdf3::design::{StressDesignIteration3, StressDesignOptions3, StressDesignStudy3};
+use fs_topopt::sdf3::design::{StressDesignCheckpoint3, StressDesignIteration3, StressDesignOptions3, StressDesignStudy3};
 use fs_topopt::sdf3::stress::{StressError3, StressEvaluation3};
 
 #[path = "stress/output.rs"]
 mod output;
+#[path = "stress/resume.rs"]
+mod resume;
 
-const SCOPE: &str = "Estimated fixed-background 3-D linear-elastic SIMP minimum-volume design. The constraint is a normalized volume-and-load-weighted qp von Mises aggregate in Pa; it is not a limit on sampled or continuum maximum stress. Independent body, reference-pressure and traction cases remain separate. The initial stress and volume adjoints pass bounded directional finite differences before optimization. Accepted augmented-Lagrangian steps can be infeasible; the least-volume accepted feasible design is retained separately and selected for export when available. KKT residuals describe the last accepted iterate, not an earlier exported incumbent. Only numerical convergence with a feasible current iterate reports completed. Every accepted update is durable before further optimization. Cross-process optimizer resume is unsupported; report and package export all retained results without another solve. No continuum safety, global optimum, manufacturing, adaptivity or physical-validation claim is made. Memory is an admission envelope, not measured RSS. Wall time and cancellation are cooperative; quadrature, solver, stress-cell and optimizer boundaries poll, while individual kernels and ledger I/O are indivisible.";
+const SCOPE: &str = "Estimated fixed-background 3-D linear-elastic SIMP minimum-volume design. The constraint is a normalized volume-and-load-weighted qp von Mises aggregate in Pa; it is not a limit on sampled or continuum maximum stress. Independent body, reference-pressure and traction cases remain separate. The initial stress and volume adjoints pass bounded directional finite differences before optimization. Accepted augmented-Lagrangian steps can be infeasible; the least-volume accepted feasible design is retained separately and selected for export when available. KKT residuals describe the last accepted iterate, not an earlier exported incumbent. Only numerical convergence with a feasible current iterate reports completed. Every accepted update is durable before further optimization. Cross-process resume restores the complete accepted optimizer state under the same source and executable, rebuilding geometry and re-solving the accepted and distinct feasible incumbent endpoints against the original allowances. Earlier optimizer steps are not replayed. Failed restoration and work after a process crash cannot be durably charged; previous checkpoints remain intact. Report and package export all retained results without another solve. No continuum safety, global optimum, manufacturing, adaptivity or physical-validation claim is made. Memory is an admission envelope, not measured RSS. Wall time and cancellation are cooperative; quadrature, solver, stress-cell and optimizer boundaries poll, while individual kernels and ledger I/O are indivisible.";
 const EVALUATION_CAP: &str = "stress evaluation allowance exhausted";
 type StressResult<T> = std::result::Result<T, ProjectedAlError<StressError3>>;
 
@@ -27,7 +29,7 @@ struct Probe {
     volume_relative_error: f64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Audit {
     probes: Vec<Probe>,
     evaluations: usize,
@@ -44,6 +46,7 @@ struct State {
     optimizer_work: ProjectedAlWork,
     spent: Spent,
     status: &'static str,
+    checkpoint: Option<StressDesignCheckpoint3>,
 }
 impl State {
     fn new() -> Self {
@@ -57,6 +60,7 @@ impl State {
             optimizer_work: ProjectedAlWork::default(),
             spent: Spent::default(),
             status: "checkpointed",
+            checkpoint: None,
         }
     }
     fn iterations(&self) -> usize {
@@ -74,6 +78,7 @@ impl State {
         self.best = design.best_feasible().cloned();
         self.history = design.history().to_vec();
         self.optimizer_work = design.optimizer_work();
+        self.checkpoint = Some(design.checkpoint());
         self.report = result.as_ref().ok().cloned();
         self.error = result.err();
     }
@@ -226,18 +231,34 @@ fn status(state: &State, gate: &CancelGate, expired: bool) -> &'static str {
     }
 }
 
+fn restoration_failure(error: ProjectedAlError<StressError3>, gate: &CancelGate, expired: bool) -> Failure {
+    let budget = matches!(&error, ProjectedAlError::Evaluation(
+        StressError3::PointBudget | StressError3::Invalid(EVALUATION_CAP)
+            | StressError3::Evaluation(EvaluationStop::LinearBudget { .. } | EvaluationStop::TotalBudget { .. })));
+    Failure {
+        code: "cli-study-sdf3-stress-restore", message: error.to_string(),
+        exit: if gate.is_requested() { exit::CANCELLED }
+            else if expired || budget { exit::BUDGET } else { exit::REFUSED },
+    }
+}
+
 fn compute_observed(
     spec: &Spec,
     gate: &CancelGate,
     limit: usize,
+    recovery: Option<&resume::Recovery>,
+    preparation_wall_s: f64,
     mut accepted: impl FnMut(&CutDensityStudy3<AdaptiveSolveSpace3>, &State) -> Result<()>,
 ) -> Result<Computation> {
     let options = spec
         .stress
         .ok_or_else(|| fail("cli-study-sdf3-input", "missing stress optimizer"))?;
+    let prior = recovery.map_or(Spent::default(), |r| r.spent)
+        .add(SolveWork::default(), QuadratureWork3::default(), preparation_wall_s)?;
+    prior.validate(spec)?;
     let start = Instant::now();
     let poll = || {
-        if gate.is_requested() || start.elapsed().as_secs_f64() >= spec.wall_s {
+        if gate.is_requested() || prior.wall_s + start.elapsed().as_secs_f64() >= spec.wall_s {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -273,8 +294,8 @@ fn compute_observed(
     let mut cp = |_| poll();
     let mut quadrature = QuadratureControl3::new(
         QuadratureOptions3 {
-            max_boxes: spec.boxes,
-            max_points: spec.points,
+            max_boxes: spec.boxes - prior.geometry.boxes,
+            max_points: spec.points - prior.geometry.points,
             ..Default::default()
         },
         &mut cp,
@@ -309,12 +330,15 @@ fn compute_observed(
     let mut cp = |_| poll();
     let mut control = SolveControl::new(
         SolveBudget {
-            total_iterations: spec.linear,
+            total_iterations: spec.linear - prior.linear.linear_iterations,
             per_solve_iterations: spec.per_solve,
         },
         &mut cp,
     );
     let mut state = State::new();
+    if let Some(recovery) = recovery {
+        state.audit = recovery.audit.clone();
+    }
     loading::with_laws(spec, |laws| -> Result<()> {
         let forces = laws
             .iter()
@@ -329,6 +353,9 @@ fn compute_observed(
         let forces = match forces {
             Ok(f) => f,
             Err(e) => {
+                if recovery.is_some() {
+                    return Err(restoration_failure(e, gate, poll().is_break()));
+                }
                 state.error = Some(e);
                 return Ok(());
             }
@@ -341,7 +368,7 @@ fn compute_observed(
                 weight: law.weight,
             })
             .collect();
-        if let Err(e) = gradient_gate(
+        if recovery.is_none() && let Err(e) = gradient_gate(
             &mut study,
             &loads,
             &raw,
@@ -361,15 +388,20 @@ fn compute_observed(
         // Initialization is one admitted callback attempt even if its solve
         // fails before a complete optimizer session can be returned.
         state.optimizer_work.evaluations = 1;
-        let mut design = match StressDesignStudy3::new(
-            &mut study,
-            &loads,
-            &raw,
-            remaining_options,
-            &mut control,
-        ) {
+        let initialized = match recovery {
+            None => StressDesignStudy3::new(
+                &mut study, &loads, &raw, remaining_options, &mut control,
+            ),
+            Some(recovery) => StressDesignStudy3::restore(
+                &mut study, &loads, recovery.checkpoint.clone(), remaining_options, &mut control,
+            ),
+        };
+        let mut design = match initialized {
             Ok(design) => design,
             Err(e) => {
+                if recovery.is_some() {
+                    return Err(restoration_failure(e, gate, poll().is_break()));
+                }
                 state.error = Some(e);
                 return Ok(());
             }
@@ -385,9 +417,10 @@ fn compute_observed(
             return Ok(());
         }
         state.spent =
-            Spent::default().add(design.work(), geometry, start.elapsed().as_secs_f64())?;
+            prior.add(design.work(), geometry, start.elapsed().as_secs_f64())?;
         accepted(design.study(), &state)?;
-        for step in 0..limit.min(spec.updates) {
+        let updates = limit.min(spec.updates - design.optimizer_work().iterations);
+        for step in 0..updates {
             let result = design.run(1);
             state.capture(&design, result);
             if state.error.is_some()
@@ -398,16 +431,16 @@ fn compute_observed(
             {
                 break;
             }
-            if step + 1 < limit.min(spec.updates) {
+            if step + 1 < updates {
                 state.spent =
-                    Spent::default().add(design.work(), geometry, start.elapsed().as_secs_f64())?;
+                    prior.add(design.work(), geometry, start.elapsed().as_secs_f64())?;
                 accepted(design.study(), &state)?;
             }
         }
         Ok(())
     })?;
-    state.spent = Spent::default().add(control.work(), geometry, start.elapsed().as_secs_f64())?;
-    state.status = status(&state, gate, start.elapsed().as_secs_f64() >= spec.wall_s);
+    state.spent = prior.add(control.work(), geometry, start.elapsed().as_secs_f64())?;
+    state.status = status(&state, gate, state.spent.wall_s >= spec.wall_s);
     Ok(Computation { study, state })
 }
 
@@ -417,28 +450,15 @@ pub(super) fn drive(
     cap: Option<usize>,
     gate: &CancelGate,
 ) -> Result<Outcome> {
-    let limit = cap.unwrap_or(spec.updates).min(spec.updates);
-    let mut predecessor = None;
-    let result = compute_observed(spec,gate,limit,|study,state| {
-        let out = output::persist(spec,ledger,study,state,predecessor,limit)?;
-        predecessor = out.pointer.strip_prefix("study-").and_then(ContentHash::from_hex);
-        use std::io::Write as _;
-        let _ = writeln!(std::io::stderr().lock(),
-            "{{\"schema\":\"frankensim.cli.sdf3-stress-progress.v1\",\"run_id\":{},\"iterations_completed\":{}}}",
-            quoted(&out.pointer), state.iterations());
-        Ok(())
-    }).map_err(|mut e| {
-        if let Some(previous) = predecessor { e.message.push_str(&format!("; last durable result: study-{}",previous.to_hex())); }
-        e
-    })?;
-    output::persist(
-        spec,
-        ledger,
-        &result.study,
-        &result.state,
-        predecessor,
-        limit,
-    )
+    resume::drive(spec, ledger, cap, gate, None)
+}
+
+pub(super) fn resume(ledger: &Ledger, old: &Loaded, cap: Option<usize>, gate: &CancelGate) -> Result<Outcome> {
+    let source = linked(ledger, &old.value, "source", "study-source")?;
+    let source = std::str::from_utf8(&source)
+        .map_err(|e| fail("cli-study-sdf3-stress-checkpoint", e.to_string()))?;
+    let spec = spec::parse(source)?;
+    resume::drive(&spec, ledger, cap, gate, Some(old))
 }
 
 #[cfg(test)]

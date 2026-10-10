@@ -151,7 +151,85 @@ pub struct ProjectedAlState {
     multiplier: f64, penalty: f64, spectral_step: f64,
     inner_tolerance: f64, previous_violation: f64,
 }
+
+/// Complete accepted numerical state for a caller-owned durable checkpoint.
+/// Bounds, policy and physical problem identity belong to the caller and must
+/// be bound to the same retained source before restoration. This value carries
+/// no authority to change that problem or renew its work allowances.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectedAlCheckpoint {
+    pub point: Vec<f64>,
+    pub sample: ProjectedAlSample,
+    pub work: ProjectedAlWork,
+    pub multiplier: f64,
+    pub penalty: f64,
+    pub spectral_step: f64,
+    pub inner_tolerance: f64,
+    /// None is the initial, not-yet-updated outer violation (positive infinity).
+    pub previous_violation: Option<f64>,
+}
+
 impl ProjectedAlState {
+    #[must_use]
+    pub fn checkpoint(&self) -> ProjectedAlCheckpoint {
+        ProjectedAlCheckpoint {
+            point: self.x.clone(), sample: self.sample.clone(), work: self.work,
+            multiplier: self.multiplier, penalty: self.penalty,
+            spectral_step: self.spectral_step, inner_tolerance: self.inner_tolerance,
+            previous_violation: self.previous_violation.is_finite().then_some(self.previous_violation),
+        }
+    }
+
+    /// Restore all spectral/dual scheduling state without evaluating or replaying
+    /// old iterates. The caller must independently admit the physical sample and
+    /// source identity; this method checks numerical shape, bounds and counters.
+    /// Any physical re-evaluations used to admit a checkpoint must be included
+    /// in `checkpoint.work.evaluations` before calling this method.
+    pub fn try_restore<E>(checkpoint: ProjectedAlCheckpoint, lower: &[f64], upper: &[f64],
+        options: ProjectedAlOptions) -> Result<Self, ProjectedAlError<E>> {
+        let n = checkpoint.point.len();
+        options.validate(n)?;
+        checkpoint.sample.validate(n)?;
+        let w = checkpoint.work;
+        if lower.len() != n || upper.len() != n
+            || checkpoint.point.iter().zip(lower).zip(upper).any(|((&x, &lo), &hi)|
+                !x.is_finite() || !lo.is_finite() || !hi.is_finite() || !(hi-lo).is_finite()
+                || lo > hi || x < lo || x > hi)
+            || w.evaluations == 0 || w.evaluations > options.max_evaluations
+            || w.iterations >= w.evaluations
+            || w.rejected_trials > w.evaluations - 1 - w.iterations
+            || w.multiplier_updates > options.max_multiplier_updates
+            || !checkpoint.multiplier.is_finite() || checkpoint.multiplier < 0.0
+            || !checkpoint.penalty.is_finite()
+            || !(options.initial_penalty..=options.max_penalty).contains(&checkpoint.penalty)
+            || !checkpoint.spectral_step.is_finite()
+            || !(options.min_spectral_step..=options.max_spectral_step).contains(&checkpoint.spectral_step)
+            || !checkpoint.inner_tolerance.is_finite()
+            || !(0.1 * options.tolerance..=options.inner_tolerance).contains(&checkpoint.inner_tolerance)
+            || match checkpoint.previous_violation {
+                None => w.multiplier_updates != 0,
+                Some(v) => !v.is_finite() || v < 0.0 || w.multiplier_updates == 0,
+            }
+        {
+            return Err(ProjectedAlError::Invalid("invalid projected AL checkpoint"));
+        }
+        if w.multiplier_updates == 0 && (checkpoint.multiplier != 0.0
+            || checkpoint.penalty != options.initial_penalty
+            || checkpoint.inner_tolerance != options.inner_tolerance)
+        {
+            return Err(ProjectedAlError::Invalid("checkpoint changed an unadvanced dual schedule"));
+        }
+        let state = Self {
+            x: checkpoint.point, lower: lower.to_vec(), upper: upper.to_vec(),
+            sample: checkpoint.sample, options, work: w,
+            multiplier: checkpoint.multiplier, penalty: checkpoint.penalty,
+            spectral_step: checkpoint.spectral_step, inner_tolerance: checkpoint.inner_tolerance,
+            previous_violation: checkpoint.previous_violation.unwrap_or(f64::INFINITY),
+        };
+        state.report::<E>(ProjectedAlStop::IterationLimit)?;
+        Ok(state)
+    }
+
     pub fn try_new<E>(x: &[f64], lower: &[f64], upper: &[f64], options: ProjectedAlOptions,
         evaluate: &mut impl FnMut(&[f64]) -> Result<Option<ProjectedAlSample>, E>,
         mut checkpoint: impl FnMut(ProjectedAlWork) -> ControlFlow<()>) -> Result<Self, ProjectedAlError<E>> {

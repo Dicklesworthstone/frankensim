@@ -54,7 +54,7 @@ impl Spent {
         })
     }
 
-    fn read(receipt: &JsonValue) -> Result<Self> {
+    pub(super) fn read(receipt: &JsonValue) -> Result<Self> {
         let work = receipt.get("work").ok_or_else(|| malformed("missing cumulative work"))?;
         Ok(Self {
             wall_s: receipt.get("consumed_wall_s").and_then(JsonValue::as_f64)
@@ -82,7 +82,7 @@ impl Spent {
         )
     }
 
-    fn require_remaining(&self, spec: &Spec) -> Result<()> {
+    pub(super) fn require_remaining(&self, spec: &Spec) -> Result<()> {
         self.validate(spec)?;
         if self.wall_s >= spec.wall_s || self.linear.linear_iterations >= spec.linear
             || self.geometry.boxes >= spec.boxes || self.geometry.points >= spec.points
@@ -111,7 +111,7 @@ fn cancelled(gate: &CancelGate) -> Result<()> {
 
 /// Bind all linked code and numerical dependencies, not only this adapter's
 /// version string. The running executable is read in bounded, cancellable tiles.
-fn producer_identity(gate: &CancelGate) -> Result<ContentHash> {
+pub(super) fn producer_identity(gate: &CancelGate) -> Result<ContentHash> {
     #[cfg(target_os = "linux")]
     let path = std::path::PathBuf::from("/proc/self/exe");
     #[cfg(not(target_os = "linux"))]

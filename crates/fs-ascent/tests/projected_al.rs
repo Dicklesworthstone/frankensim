@@ -57,6 +57,35 @@ fn g5_split_runs_preserve_spectral_steps_multipliers_and_all_work() {
     let spent=split.work();let report=split.try_run(0,&mut quadratic,|_|ControlFlow::Continue(())).unwrap();
     assert_eq!(report.work,spent);
 }
+
+#[test]
+fn g5_durable_checkpoint_preserves_the_complete_optimizer_trajectory() {
+    let options = ProjectedAlOptions::default();
+    let mut full = start(17, 0.9, options);
+    full.try_run(7, &mut quadratic, |_| ControlFlow::Continue(())).unwrap();
+    let saved = full.checkpoint();
+    let mut resumed = ProjectedAlState::try_restore::<&'static str>(
+        saved.clone(), &[0.0; 17], &[1.0; 17], options,
+    ).unwrap();
+    assert_eq!(resumed.checkpoint(), saved);
+    let expected = full.try_run(1000, &mut quadratic, |_| ControlFlow::Continue(())).unwrap();
+    let actual = resumed.try_run(1000, &mut quadratic, |_| ControlFlow::Continue(())).unwrap();
+    assert_eq!(actual.stop, ProjectedAlStop::Converged);
+    assert_eq!(actual.stop, expected.stop);
+    assert_eq!(resumed.checkpoint(), full.checkpoint());
+    for mutate in [
+        |s: &mut fs_ascent::projected_al::ProjectedAlCheckpoint| s.penalty = 0.0,
+        |s: &mut fs_ascent::projected_al::ProjectedAlCheckpoint| s.work.evaluations = 0,
+        |s: &mut fs_ascent::projected_al::ProjectedAlCheckpoint| s.sample.gradient[0] = f64::NAN,
+        |s: &mut fs_ascent::projected_al::ProjectedAlCheckpoint| s.point[0] = 2.0,
+    ] {
+        let mut invalid = saved.clone();
+        mutate(&mut invalid);
+        assert!(ProjectedAlState::try_restore::<&'static str>(
+            invalid, &[0.0; 17], &[1.0; 17], options,
+        ).is_err());
+    }
+}
 #[test]
 fn g4_cancelled_trial_and_callback_errors_do_not_publish_a_candidate() {
     let mut state=start(17,0.9,Default::default());let point=state.point().to_vec();let sample=state.sample().clone();

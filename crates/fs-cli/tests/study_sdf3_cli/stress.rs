@@ -83,14 +83,70 @@ fn g1_g5_stress_cli_reduces_volume_keeps_independent_fields_and_exports_sealed_r
             Some(fs_blake3::hash_bytes(contents).to_hex().as_str())
         );
     }
-    let refused = command("study")
+    let finished = command("study")
         .arg("--resume")
         .arg(id)
         .arg(&ledger)
         .output()
         .unwrap();
-    document(&refused, 4);
-    assert!(String::from_utf8_lossy(&refused.stdout).contains("cli-study-sdf3-resume-unsupported"));
+    let finished = document(&finished, 6);
+    assert_eq!(finished.str_field("run_id"), Some(id), "an exhausted update target is unchanged");
+}
+
+#[test]
+fn g5_stress_cli_resumes_in_a_new_process_with_identical_design_and_spent_original_budgets() {
+    let dir = scratch("stress-resume");
+    let source = STRESS.replace(":max-updates 80", ":max-updates 4");
+    let (reference_ledger, reference) = run(&dir, "uninterrupted", &source, 6);
+    let path = dir.join("segmented.fsim");
+    let ledger = dir.join("segmented.db");
+    fs::write(&path, &source).unwrap();
+    let first = document(&command("study").arg(&path).arg(&ledger)
+        .args(["--budget", "2"]).output().unwrap(), 6);
+    let first_id = first.str_field("run_id").unwrap();
+    let before = data(&ledger, &first, "checkpoint");
+    assert_eq!(first.path(&["receipt", "resume_supported"]), Some(&J::Bool(true)));
+    // Resume uses the immutable retained source, even when the working file is
+    // later edited into a different design problem.
+    fs::write(&path, source.replace(":stress-limit-pa 8.0", ":stress-limit-pa 0.0001")).unwrap();
+    let resumed = document(&command("study").arg("--resume").arg(first_id).arg(&ledger)
+        .args(["--budget", "2"]).output().unwrap(), 6);
+    assert_eq!(resumed.path(&["receipt", "iterations_completed"]).and_then(J::as_f64), Some(4.0));
+    for artifact in ["design", "iterations"] {
+        assert_eq!(retained(&ledger, &resumed, artifact), retained(&reference_ledger, &reference, artifact));
+    }
+    assert_eq!(data(&ledger, &first, "checkpoint"), before, "original checkpoint is immutable");
+    let report = data(&ledger, &resumed, "report_json");
+    let uninterrupted = data(&reference_ledger, &reference, "report_json");
+    let costs = report.get("optimizer_work").unwrap();
+    let extra = number(costs, "restoration_evaluations");
+    assert!((1.0..=2.0).contains(&extra), "only accepted/distinct incumbent endpoints re-solve");
+    assert_eq!(number(costs, "evaluations"),
+        number(uninterrupted.get("optimizer_work").unwrap(), "evaluations") + extra);
+    assert_eq!(report.get("gradient_check"), uninterrupted.get("gradient_check"));
+    assert_eq!(report.get("stop"), uninterrupted.get("stop"));
+    assert_eq!(report.get("selected_feasible"), Some(&J::Bool(true)));
+    assert!(number(report.get("work").unwrap(), "linear_iterations")
+        > number(uninterrupted.get("work").unwrap(), "linear_iterations"));
+    assert!(number(costs, "total_evaluations_including_gradient_gate") <= 2000.0);
+    let complete_id = resumed.str_field("run_id").unwrap();
+    let again = document(&command("study").arg("--resume").arg(complete_id).arg(&ledger)
+        .output().unwrap(), 6);
+    assert_eq!(again.str_field("run_id"), Some(complete_id));
+}
+
+#[test]
+fn g4_stress_resume_cannot_renew_an_exhausted_evaluation_allowance() {
+    let dir = scratch("stress-resume-budget");
+    let (ledger, first) = run(&dir, "limited",
+        &STRESS.replace(":max-evaluations 2000", ":max-evaluations 6"), 6);
+    assert_eq!(first.path(&["receipt", "iterations_completed"]).and_then(J::as_f64), Some(0.0));
+    let old = retained(&ledger, &first, "checkpoint");
+    let stopped = command("study").arg("--resume").arg(first.str_field("run_id").unwrap())
+        .arg(&ledger).args(["--budget", "80"]).output().unwrap();
+    document(&stopped, 6);
+    assert!(String::from_utf8_lossy(&stopped.stdout).contains("cli-study-sdf3-resume-budget"));
+    assert_eq!(retained(&ledger, &first, "checkpoint"), old);
 }
 
 #[test]
