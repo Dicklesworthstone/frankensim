@@ -90,7 +90,10 @@ impl Schedule {
         let max_steps = count(get(value,"max_steps")?,"max_steps",10_000)?;
         let time_convergence = value.get("time_convergence")
             .map(|policy| time_convergence::Config::parse(policy,value,max_steps)).transpose()?;
-        let adaptive = value.get("adaptive").map(|v| adaptive::Config::parse(v, max_dt)).transpose()?;
+        let adaptive = match &enthalpy {
+            Some(policy) => policy.adaptive_config(),
+            None => value.get("adaptive").map(|v| adaptive::Config::parse(v, max_dt)).transpose()?,
+        };
         if value.get("fan_speed_design").is_some() && value.get("power_design").is_some() {
             return Err(bad("choose transient fan-speed sizing or workload-power sizing, not both"));
         }
