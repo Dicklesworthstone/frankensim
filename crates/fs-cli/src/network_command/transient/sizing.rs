@@ -265,7 +265,7 @@ fn power_schedule(cx: &Cx<'_>, schedule: &Schedule, multiplier: f64) -> Result<S
 /// An immutable candidate schedule gives forward and reverse the SAME fan
 /// controls. Clear search directives only; preserve every physical and solver
 /// policy. Each candidate starts at the original field, including repetitions.
-fn speed_schedule(cx: &Cx<'_>, schedule: &Schedule, multiplier: f64) -> Result<Schedule> {
+pub(super) fn speed_schedule(cx: &Cx<'_>, schedule: &Schedule, multiplier: f64) -> Result<Schedule> {
     if !(multiplier.is_finite() && multiplier > 0.0) { return Err(bad("positive fan multiplier required")); }
     let mut candidate = power_schedule(cx,schedule,1.0)?;
     for interval in &mut candidate.intervals {

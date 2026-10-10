@@ -1,0 +1,102 @@
+{
+  "schema": "frankensim.cooling-network.v1",
+  "units": "SI",
+  "seed": "77",
+  "budgets": {
+    "graph_sweeps": 100,
+    "coupling_iterations": 100,
+    "linear_iterations": 2000,
+    "derivative_iterations": 100,
+    "wall_seconds": 120
+  },
+  "tolerances": {
+    "flow_m3_s": 1e-12,
+    "heat_w": 1e-7,
+    "temperature_k": 1e-9,
+    "linear_relative": 1e-12,
+    "relaxation": 1
+  },
+  "air": { "density_kg_m3": 1, "specific_heat_j_kg_k": 1 },
+  "hydraulics": {
+    "node_count": 2,
+    "fan": {
+      "name": "synthetic-affinity-fan",
+      "source": "Synthetic affinity-scaled fan, not measured hardware",
+      "source_id": "enthalpy-fan-sizing-example-v1",
+      "inlet": 0, "outlet": 1, "temperature_k": 300,
+      "count": 1, "arrangement": "series", "speed_ratio": 1,
+      "min_speed_ratio": 0.5, "max_speed_ratio": 2,
+      "min_flow_m3_s": 0.000001, "pressure_tolerance_rel": 0.05,
+      "points": [
+        { "flow_m3_s": 0, "static_pressure_pa": 2 },
+        { "flow_m3_s": 2, "static_pressure_pa": 0 }
+      ],
+      "max_iterations": 160,
+      "flow_tolerance_m3_s": 1e-12,
+      "pressure_tolerance_pa": 1e-10
+    },
+    "branches": [{
+      "name": "air", "from": 0, "to": 1,
+      "resistance_pa_s2_m6": 1,
+      "source": "Synthetic quadratic loss law",
+      "regions": ["wall"]
+    }]
+  },
+  "solid": {
+    "vertices_m": [[0,0,0],[1,0,0],[0,1,0],[0,0,1]],
+    "tetrahedra": [[0,1,2,3]],
+    "conductivity_w_m_k": 10,
+    "source_w_m3": 6000,
+    "adiabatic_remainder": false,
+    "surfaces": [{
+      "name": "wall",
+      "faces": [[1,2,3],[0,2,3],[0,1,3],[0,1,2]],
+      "htc_w_m2_k": 2
+    }]
+  },
+  "objective": { "max_solid_temperature": true, "gradient": false },
+  "radiation": {
+    "max_iterations": 128,
+    "temperature_tolerance_k": 1e-10,
+    "relaxation": 0.5,
+    "surfaces": [{
+      "surface": "wall", "emissivity": 0.8, "ambient_temperature_k": 300,
+      "source": "Synthetic gray patch facing a fixed black reservoir"
+    }]
+  },
+  "transient": {
+    "enthalpy": {
+      "material_card_identity": "7878787878787878787878787878787878787878787878787878787878787878",
+      "source": "Synthetic equilibrium chart with a finite latent plateau; caller identity, not measured material evidence",
+      "reference_density_kg_m3": 10,
+      "phase": "solid-liquid",
+      "knots": [
+        { "specific_enthalpy_j_kg": 0, "temperature_k": 250, "liquid_mass_fraction": 0 },
+        { "specific_enthalpy_j_kg": 1000, "temperature_k": 350, "liquid_mass_fraction": 0 },
+        { "specific_enthalpy_j_kg": 3000, "temperature_k": 350, "liquid_mass_fraction": 1 },
+        { "specific_enthalpy_j_kg": 10000, "temperature_k": 1050, "liquid_mass_fraction": 1 }
+      ],
+      "initial_specific_enthalpy_j_kg": 2000,
+      "newton": {
+        "max_iterations": 32, "residual_rtol": 1e-12, "residual_atol_j": 1e-10,
+        "linear_restart": 4, "max_linear_cycles": 8,
+        "armijo_c": 1e-4, "shrink": 0.5, "max_backtracks": 24
+      }
+    },
+    "max_step_s": 0.2,
+    "max_steps": 8,
+    "temperature_limit_k": 378.5,
+    "adjoint": { "qoi": "sampled-peak", "max_checkpoint_bytes": 1048576 },
+    "fan_speed_design": {
+      "min_speed_multiplier": 0.5,
+      "max_speed_multiplier": 2,
+      "speed_multiplier_tolerance": 0.0001,
+      "temperature_tolerance_k": 0.00001,
+      "max_evaluations": 64
+    },
+    "intervals": [
+      { "duration_s": 0.4, "power_scale": 1, "fan_speed_ratio": 1 },
+      { "duration_s": 0.4, "power_scale": 6, "fan_speed_ratio": 1 }
+    ]
+  }
+}

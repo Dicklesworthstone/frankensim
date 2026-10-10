@@ -218,11 +218,11 @@ solid/liquid diffusion cases with an independent four-node linear solve.
 This opt-in CLI mode supports fixed schedules and fixed reference density with
 uniform or explicitly assigned equilibrium charts, including single-phase
 charts. Geometry, mass and energetic internal variables are frozen. Adaptive
-and repeated schedules, fan sizing, time/mesh studies, recirculation and
+and repeated schedules, steady design, time/mesh studies, recirculation and
 enclosure radiation explicitly refuse. There is no fluid storage, phase
 advection, melting-driven motion or certified inter-step peak.
 
-### Enthalpy history gradients and workload sizing
+### Enthalpy history gradients and workload/fan sizing
 
 Add `"adjoint": {"qoi": "sampled-peak", "max_checkpoint_bytes": 1048576}`
 inside `transient` to differentiate the earliest sampled maximum. Set `qoi`
@@ -244,6 +244,12 @@ The `transient.adjoint` result includes:
   zero derivative for this multiplicative control.
 - `dtemperature_dinlet_temperatures`: derivatives of inlet temperatures applied
   throughout the trajectory, in the existing graph-node order.
+- `intervals[].dtemperature_dlog_fan_speed_ratio_k`: the total speed derivative
+  for the admitted single affinity-scaled fan bank. It includes changing air
+  capacity, complete solid/air/radiation feedback, and supported Reynolds
+  dependence of a flow-derived convection law. A declared constant HTC has
+  zero convection contribution. This field is `null` without a fan or when a
+  convection card lacks an admitted smooth Reynolds derivative.
 
 The tape bounds retained h, temperature and air-reference checkpoints and
 control accumulators with `max_checkpoint_bytes`, then reconstructs accepted
@@ -253,7 +259,8 @@ work shares the original wall deadline; a failed replay or derivative solve
 refuses the result. Chart slope corners and validity endpoints refuse classical
 endpoint derivatives; ties retain the selected branch without claiming a
 unique derivative. Geometry, chart data, reference density, conductivity,
-contact resistance, fan drive, convection laws and radiation controls stay
+contact resistance, fan curve, quadratic loss coefficients, convection law
+data and radiation controls stay
 fixed. The optional `component_power` and `contact_resistance` adjoint requests
 are unsupported in this mode.
 
@@ -278,6 +285,38 @@ returned feasible workload is checked across that trajectory's sampled
 endpoints; it is not a continuous-time temperature certificate or a global
 optimality claim. The example supplies synthetic numerical data, not a
 validated hardware power limit.
+
+The [enthalpy fan-sizing request](enthalpy-fan-sizing.json) instead declares
+`hydraulics.fan`, an explicit `fan_speed_ratio` for each interval, and
+`transient.fan_speed_design`. Its controls are `min_speed_multiplier`,
+`max_speed_multiplier`, `speed_multiplier_tolerance`,
+`temperature_tolerance_k` and `max_evaluations`; it cannot be combined with
+`transient.power_design`.
+The synthetic chart starts inside its latent plateau and the two-stage
+workload increases from power scale 1 to 6, taking the endpoint into the liquid
+sensible regime. Fan cooling during the early constant-temperature stages
+changes stored enthalpy and therefore the later temperature: that history
+contribution is retained in the fan gradient. The declared temperature limit
+and speed bracket are illustrative numerical inputs, not binary-result or
+hardware-performance claims.
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/enthalpy-fan-sizing.json
+```
+
+Each candidate multiplies the complete declared fan schedule, starts from the
+same initial enthalpy and recomputes actual airflow, convection and radiative
+feedback over the whole trajectory. The forward solve, selected-speed report
+and adjoint reconstruction all use those effective speeds. A sampled-peak
+adjoint can suggest safeguarded search steps; missing smooth card derivatives
+leave the speed slope unavailable and the search uses evaluated bisection
+steps. Omitting `transient.adjoint` selects derivative-free sizing. The final
+`transient_fan_speed_design` result reports the selected multiplier, effective
+interval speeds, evaluated sampled peak and search history. It supplies no
+electrical-power prediction, global minimum-speed proof or continuous peak
+certificate. The fixture is synthetic and makes no measured fan-performance
+claim.
 
 ## Pulse example
 

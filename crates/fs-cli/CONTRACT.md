@@ -180,25 +180,38 @@ The report's initial-state keys are
 `dtemperature_duniform_initial_specific_enthalpy_k_kg_j`. Interval
 `dtemperature_dpower_multiplier_k` and graph-node-ordered
 `dtemperature_dinlet_temperatures` retain the ordinary trajectory conventions.
-Charts, reference densities, conductivity, geometry, fan drive, convection
-laws, contact resistance and radiation controls remain fixed. The
+For an admitted single affinity-scaled fan bank, interval
+`dtemperature_dlog_fan_speed_ratio_k` includes uniform air-capacity scaling,
+complete solid/air/radiation feedback and supported Reynolds dependence of
+convection. Declared scalar HTC has zero speed dependence. A convection card
+without an admitted smooth Reynolds derivative leaves the fan derivative
+unavailable (`null`), while the complete forward candidate remains usable.
+Charts, reference densities, conductivity, geometry, fan curves, quadratic
+loss coefficients, convection law data, contact resistance and radiation
+controls remain fixed. The
 `component_power` and `contact_resistance` adjoint options refuse. Material
 slope corners and validity endpoints refuse classical endpoint derivatives;
 plateau interiors are supported. Ties select the existing earliest sampled
 maximum/active-vertex branch without claiming a unique derivative.
 
-`transient.power_design` uses the existing workload-multiplier sizing search.
+`transient.power_design` and `transient.fan_speed_design` use the existing
+workload- or fan-multiplier sizing searches and are mutually exclusive.
 With a sampled-peak adjoint it can use its checked directional sensitivity;
 omitting `transient.adjoint` selects the existing derivative-free search.
-Each evaluated candidate runs the complete physical trajectory and passes its
-residual, energy and feasibility gates. The reported feasible workload applies
+Fan candidates bind actual scaled speeds into an immutable schedule shared by
+forward solves, reports and adjoint replay. Flow and correlated HTC are
+recomputed at each candidate; none is frozen at the original speed. Every
+candidate restarts from the same initial enthalpy and runs the complete
+physical trajectory with residual and energy acceptance before sampled
+feasibility is classified. The reported feasible workload or fan schedule applies
 to sampled endpoints; no continuous-time peak bound or global optimum is
 claimed. `examples/cooling-network/enthalpy-power-sizing.json` is a runnable
-synthetic phase-changing request with coupled air and ambient radiation.
+synthetic phase-changing request with coupled air and ambient radiation;
+`examples/cooling-network/enthalpy-fan-sizing.json` exercises the fan control.
 
 This CLI consumer admits fixed schedules and fixed reference densities with
 uniform or explicitly assigned equilibrium charts.
-Adaptive/repeated schedules, fan/design controls outside workload sizing,
+Adaptive/repeated schedules, steady design and controls outside these two transient searches,
 time/mesh studies, recirculation and enclosure radiation explicitly refuse.
 No moving geometry, phase advection,
 fluid storage, phase kinetics or inter-step peak/error certificate is claimed.

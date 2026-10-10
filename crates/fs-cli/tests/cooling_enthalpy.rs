@@ -356,10 +356,6 @@ fn unsupported_storage_modes_and_invalid_or_exhausted_inputs_refuse() {
         ),
         ("repeat", r#"{"cycles":2,"max_total_steps":16}"#),
         (
-            "fan_speed_design",
-            r#"{"min_speed_multiplier":0.5,"max_speed_multiplier":1,"speed_multiplier_tolerance":0.01,"temperature_tolerance_k":0.1,"max_evaluations":16}"#,
-        ),
-        (
             "time_convergence",
             r#"{"max_refinements":2,"consecutive_passes":2,"temperature_tolerance_k":0.01,"max_total_steps":100,"max_trace_bytes":1048576}"#,
         ),
@@ -373,6 +369,10 @@ fn unsupported_storage_modes_and_invalid_or_exhausted_inputs_refuse() {
         let diagnostic = refuses(&unsupported);
         assert!(diagnostic.contains("enthalpy"), "{key}: {diagnostic}");
     }
+    let mut missing_fan = input.clone();
+    put(member(&mut missing_fan, "transient"), "fan_speed_design",
+        J::parse(r#"{"min_speed_multiplier":0.5,"max_speed_multiplier":1,"speed_multiplier_tolerance":0.01,"temperature_tolerance_k":0.1,"max_evaluations":16}"#).unwrap());
+    assert!(refuses(&missing_fan).contains("requires hydraulics.fan"));
     let mut gradient = input.clone();
     put(
         member(&mut gradient, "objective"),

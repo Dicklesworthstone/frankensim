@@ -39,11 +39,14 @@ The [two-material contact example](enthalpy-contact-materials.json) assigns
 independent phase charts and reference densities per tetrahedron, with explicit
 contact between separate traces. An explicit single-phase chart can represent
 an ordinary solid alongside a latent-heat insert without inventing melting data.
-Fixed-grid enthalpy histories also provide workload and initial-enthalpy
+Fixed-grid enthalpy histories also provide workload, fan-speed and initial-enthalpy
 gradients with mixed-air and ambient-radiation feedback. The
 [enthalpy power-sizing example](enthalpy-power-sizing.json) uses that gradient
 in the existing scalar workload search; omitting its `transient.adjoint`
 selects derivative-free sizing.
+The [enthalpy fan-sizing example](enthalpy-fan-sizing.json) searches actual
+affinity-scaled fan schedules with the same full enthalpy, air and radiation
+model; supported flow-derived convection is recomputed at every candidate.
 
 Every vertex, tetrahedron, surface, coefficient, heat source, hydraulic connection
 and source temperature comes from the request. Supply a conforming,

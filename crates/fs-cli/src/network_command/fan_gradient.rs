@@ -63,25 +63,48 @@ pub(super) fn from_flow_response(
 ) -> Result<CoolingGradient> {
     poll(cx)?;
     if request.fan.is_none() { return Ok(CoolingGradient { thermal, speed: None }); }
-    if names.len() != thermal.log_htc.len() {
+    let Some(convection) = convection_contribution(cx, names, derivations, &thermal.log_htc)? else {
+        return Ok(CoolingGradient { thermal, speed: Some(SpeedGradient::Unavailable) });
+    };
+    let total = checked(log_flow_scale + convection)?;
+    Ok(CoolingGradient { thermal,
+        speed: Some(SpeedGradient::Available { flow: log_flow_scale, convection, total }) })
+}
+
+/// Complete fan affinity for a physical endpoint/history gradient without
+/// changing its storage coordinate. The supplied capacity and HTC gradients
+/// must already include every solid/air/radiation feedback path and direct h
+/// carry. This contraction neither reconstructs nor solves a solid endpoint.
+pub(super) fn log_speed_from_flow_response(
+    cx: &Cx<'_>, names: &[&str], derivations: &[convection::Derived],
+    log_htc: &[f64], log_flow_scale: f64,
+) -> Result<Option<f64>> {
+    convection_contribution(cx, names, derivations, log_htc)?
+        .map(|convection| checked(log_flow_scale + convection))
+        .transpose()
+}
+
+fn convection_contribution(
+    cx: &Cx<'_>, names: &[&str], derivations: &[convection::Derived], log_htc: &[f64],
+) -> Result<Option<f64>> {
+    poll(cx)?;
+    if names.len() != log_htc.len() {
         return Err(bad("fan derivative requires the exact coupled region ordering"));
     }
     let mut slopes = BTreeMap::new();
     for derived in derivations {
         poll(cx)?;
-        let Some(slope) = reynolds_elasticity(&derived.nu)? else {
-            return Ok(CoolingGradient { thermal, speed: Some(SpeedGradient::Unavailable) });
-        };
+        let Some(slope) = reynolds_elasticity(&derived.nu)? else { return Ok(None); };
         slopes.insert(derived.surface.as_str(), slope);
     }
-    let mut convection = 0.0;
-    for (name, gradient) in names.iter().zip(&thermal.log_htc) {
+    let mut contribution = 0.0;
+    for (name, gradient) in names.iter().zip(log_htc) {
         poll(cx)?;
-        convection = checked(convection + checked(gradient * slopes.get(name).copied().unwrap_or(0.0))?)?;
+        // A declared scalar HTC stays constant as the fan speed changes.
+        contribution = checked(contribution
+            + checked(gradient * slopes.get(name).copied().unwrap_or(0.0))?)?;
     }
-    let total = checked(log_flow_scale + convection)?;
-    Ok(CoolingGradient { thermal,
-        speed: Some(SpeedGradient::Available { flow: log_flow_scale, convection, total }) })
+    Ok(Some(contribution))
 }
 
 /// Use exactly one coupled adjoint. The common-flow extension needs one extra

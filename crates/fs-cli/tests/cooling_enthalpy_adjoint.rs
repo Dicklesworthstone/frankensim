@@ -6,6 +6,9 @@
 #[path = "../src/json_read.rs"]
 mod json;
 
+#[path = "cooling_enthalpy_adjoint/fan.rs"]
+mod fan;
+
 use json::JsonValue as J;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};

@@ -35,7 +35,7 @@ impl Config {
 
     pub(super) fn admit_enthalpy(self) -> Result<()> {
         if self.controls.requested() {
-            return Err(bad("enthalpy adjoints currently support initial specific enthalpy, interval power and inlet temperatures; component-power and contact-resistance controls are not admitted"));
+            return Err(bad("enthalpy adjoints currently support initial specific enthalpy, interval power, supported fan speed and inlet temperatures; component-power and contact-resistance controls are not admitted"));
         }
         Ok(())
     }

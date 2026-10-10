@@ -44,7 +44,6 @@ impl Config {
             "adaptive",
             "repeat",
             "time_convergence",
-            "fan_speed_design",
         ] {
             if schedule.get(key).is_some() {
                 return Err(bad(format!(
@@ -302,11 +301,10 @@ impl Config {
             || schedule.adaptive.is_some()
             || schedule.repeat.is_some()
             || schedule.time_convergence.is_some()
-            || schedule.fan_speed_design.is_some()
             || schedule.nonlinear.is_some()
         {
             return Err(bad(
-                "enthalpy supports fixed schedules and workload-power sizing without steady/fan design, adaptive/repeated/study or recirculation modes",
+                "enthalpy supports fixed schedules and workload/fan sizing without steady design, adaptive/repeated/study or recirculation modes",
             ));
         }
         if let Some(adjoint) = schedule.adjoint {
@@ -846,7 +844,7 @@ pub(super) fn simulate(
         work.krylov
     );
     let output = format!(
-        "{prefix},\"solid_specific_enthalpies_j_kg\":{},\"solid_liquid_mass_fractions\":{},\"transient\":{{\"scheme\":\"backward-euler-total-enthalpy\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{completed},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":null,\"nonlinear\":null,\"adjoint\":{adjoint},\"enthalpy\":{policy}{radiation_field},\"scope\":\"fixed workload/fan schedule with optional physical h-history adjoint and workload-power sizing; accepted enthalpy is physical history; temperatures and mass-weighted phase summaries observe that state; sampled endpoints do not bound inter-step peaks; no moving geometry, melt flow, adaptive/repeated/study or enclosure mode\"}}}}\n",
+        "{prefix},\"solid_specific_enthalpies_j_kg\":{},\"solid_liquid_mass_fractions\":{},\"transient\":{{\"scheme\":\"backward-euler-total-enthalpy\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{completed},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":null,\"nonlinear\":null,\"adjoint\":{adjoint},\"enthalpy\":{policy}{radiation_field},\"scope\":\"fixed workload/fan schedule with optional physical h-history adjoint and workload-power or fan-speed sizing; accepted enthalpy is physical history; temperatures and mass-weighted phase summaries observe that state; sampled endpoints do not bound inter-step peaks; no moving geometry, melt flow, adaptive/repeated/study or enclosure mode\"}}}}\n",
         numbers(&h)?,
         numbers(&final_liquid)?,
         num(time)?,

@@ -59,7 +59,15 @@ impl Tape {
             .checked_add(schedule.intervals.len())
             .and_then(|n| n.checked_add(request.graph.node_count()))
             .and_then(|n| n.checked_mul(std::mem::size_of::<f64>()))
-            .and_then(|n| n.checked_add(3 * std::mem::size_of::<Vec<f64>>()));
+            .and_then(|n| n.checked_add(3 * std::mem::size_of::<Vec<f64>>()))
+            .and_then(|n| {
+                schedule
+                    .intervals
+                    .len()
+                    .checked_mul(std::mem::size_of::<Option<f64>>())
+                    .and_then(|fan| n.checked_add(fan))
+            })
+            .and_then(|n| n.checked_add(std::mem::size_of::<Vec<Option<f64>>>()));
         let charged_bytes = frame_bytes
             .zip(accumulator_bytes)
             .and_then(|(a, b)| a.checked_add(b))
@@ -164,6 +172,7 @@ impl Tape {
         };
         let mut carry = vec![0.0; self.vertices];
         let mut powers = vec![0.0; schedule.intervals.len()];
+        let mut fan_speeds = vec![request.fan.as_ref().map(|_| 0.0); schedule.intervals.len()];
         let mut inlets = vec![0.0; request.graph.node_count()];
         let mut reconstruction = Work::default();
         let mut reconstructed = 0_usize;
@@ -220,7 +229,7 @@ impl Tape {
                     .iter()
                     .map(|s| (s.name.clone(), s.h))
                     .collect();
-                let (coefficients, _) = convection::resolve(request, cx, &flow, &base)?;
+                let (coefficients, derived) = convection::resolve(request, cx, &flow, &base)?;
                 let network = request.transport(cx, &flow, &coefficients)?;
                 let names = network.regions();
                 let load = interval.workload.prepare(request, cx)?;
@@ -370,20 +379,48 @@ impl Tape {
                     if let Some(state) = objective_state {
                         state.seed(&mut objective);
                     }
-                    let gradient = binding
-                        .pullback_iqn(
+                    let interface_config = InterfaceSolveConfig {
+                        max_iterations: request.limits.derivative,
+                        absolute_tolerance: request.limits.relative,
+                        relative_tolerance: request.limits.relative,
+                        relaxation: request.limits.relaxation,
+                    };
+                    let (gradient, speed) = if request.fan.is_some() {
+                        let response = binding
+                            .pullback_flow_scale_iqn(
+                                cx,
+                                &objective,
+                                &carry,
+                                interface_config,
+                                acceleration::POLICY,
+                            )
+                            .map_err(producer)?;
+                        let speed = fan_gradient::log_speed_from_flow_response(
                             cx,
-                            &objective,
-                            &carry,
-                            InterfaceSolveConfig {
-                                max_iterations: request.limits.derivative,
-                                absolute_tolerance: request.limits.relative,
-                                relative_tolerance: request.limits.relative,
-                                relaxation: request.limits.relaxation,
-                            },
-                            acceleration::POLICY,
+                            &names,
+                            &derived,
+                            &response.thermal.log_htc,
+                            response.log_flow_scale,
+                        )?;
+                        (response.thermal, speed)
+                    } else {
+                        (
+                            binding
+                                .pullback_iqn(
+                                    cx,
+                                    &objective,
+                                    &carry,
+                                    interface_config,
+                                    acceleration::POLICY,
+                                )
+                                .map_err(producer)?,
+                            None,
                         )
-                        .map_err(producer)?;
+                    };
+                    fan_speeds[ordinal] = match (fan_speeds[ordinal], speed) {
+                        (Some(sum), Some(value)) => Some(finite(sum + value)?),
+                        _ => None,
+                    };
                     for (vertex, value) in gradient.solid.source_density.iter().enumerate() {
                         if vertex % 512 == 0 {
                             poll(cx)?;
@@ -412,20 +449,20 @@ impl Tape {
         let uniform = carry
             .iter()
             .try_fold(0.0, |sum, value| finite(sum + value))?;
-        let rows = powers.iter().enumerate().map(|(i,power)| Ok(format!(
-            "{{\"interval\":{i},\"dtemperature_dpower_multiplier_k\":{},\"dtemperature_dlog_fan_speed_ratio_k\":null}}", num(*power)?)))
+        let rows = powers.iter().zip(&fan_speeds).enumerate().map(|(i,(power,speed))| Ok(format!(
+            "{{\"interval\":{i},\"dtemperature_dpower_multiplier_k\":{},\"dtemperature_dlog_fan_speed_ratio_k\":{}}}", num(*power)?, optional(*speed)?)))
             .collect::<Result<Vec<_>>>()?.join(",");
         let design = if self.config.observable == Observable::SampledPeak {
             Some(design_sensitivity::DesignSensitivity::from_intervals(
                 selected.value,
                 &powers,
-                &vec![None; powers.len()],
+                &fan_speeds,
             )?)
         } else {
             None
         };
         let report = format!(
-            "{{\"method\":\"discrete-backward-euler-coupled-enthalpy-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":1,\"dtemperature_dinitial_specific_enthalpies_k_kg_j\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_j\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"reconstruction_solid_solves\":{},\"adjoint_sweeps\":{},\"adjoint_krylov_iterations\":{},\"max_interface_residual\":{},\"scope\":\"fixed accepted grid; final or earliest sampled-maximum branch, no continuous peak bound or unique derivative at ties; full specific-enthalpy history, contact, mixed-air and declared ambient-radiation feedback; interval controls multiply their actual source without division by baseline power; initial h derivatives have units K kg/J; inlet controls apply throughout; fixed reference densities, charts, conductivity, contact resistance, geometry, fan drive, convection laws and radiation controls; slope corners and validity endpoints refuse classical endpoint derivatives; replay verifies accepted h and T bits and rechecks physical residual/energy gates; checkpoint bytes bound retained h/T/references and control accumulators, not total workspace; per-endpoint derivative budgets share the original wall deadline\"}}",
+            "{{\"method\":\"discrete-backward-euler-coupled-enthalpy-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":1,\"dtemperature_dinitial_specific_enthalpies_k_kg_j\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_j\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"reconstruction_solid_solves\":{},\"adjoint_sweeps\":{},\"adjoint_krylov_iterations\":{},\"max_interface_residual\":{},\"scope\":\"fixed accepted grid; final or earliest sampled-maximum branch, no continuous peak bound or unique derivative at ties; full specific-enthalpy history, contact, mixed-air and declared ambient-radiation feedback; interval controls multiply their actual source without division by baseline power; initial h derivatives have units K kg/J; inlet controls apply throughout; fan controls include single-bank affinity, capacity transport and supported convection Reynolds response, null when unavailable; fixed reference densities, charts, conductivity/contact laws, geometry, fluid properties and radiation controls; slope corners and validity endpoints refuse classical endpoint derivatives; replay verifies accepted h and T bits and rechecks physical residual/energy gates; checkpoint bytes bound retained h/T/references and control accumulators, not total workspace; per-endpoint derivative budgets share the original wall deadline\"}}",
             quote(match self.config.observable {
                 Observable::Final => "final",
                 Observable::SampledPeak => "sampled-peak",

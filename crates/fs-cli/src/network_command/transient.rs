@@ -274,7 +274,12 @@ type SampleObserver<'a> = dyn FnMut(f64,&[f64])->Result<()> + 'a;
 /// candidate inherit the preceding accepted thermal state.
 fn simulate(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64)->Result<Trajectory> {
     if let Some(policy)=&schedule.enthalpy {
-        if speed_multiplier != 1.0 { return Err(bad("enthalpy fan-speed sizing is not admitted")); }
+        if speed_multiplier != 1.0 {
+            // Bind the effective fan speeds into the immutable candidate so
+            // forward physics, reported controls and any h-history replay agree.
+            let candidate=sizing::speed_schedule(cx,schedule,speed_multiplier)?;
+            return enthalpy::simulate(request,cx,&candidate,policy);
+        }
         return enthalpy::simulate(request,cx,schedule,policy);
     }
     simulate_observed(request,cx,schedule,speed_multiplier,None)
