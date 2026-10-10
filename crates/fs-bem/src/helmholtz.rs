@@ -24,11 +24,13 @@
 //! HBIE: `N p - D' q - q/2 = 0` (hypersingular finite part), combined as
 //! `(D - I/2 + alpha N) p = (S + alpha D' + alpha/2 I) q`.
 //!
-//! DISCRETIZATION HONESTY: surfaces that retain oriented triangle vertices use
-//! tensor Gauss integration for self and geometrically near influence; only
-//! well-separated interactions use the centroid point-panel approximation.
-//! Legacy centroid-only surfaces retain the original equivalent-disc self
-//! terms and point-panel off-diagonal approximation. Triangle self terms use
+//! DISCRETIZATION HONESTY: Plain CBIE surfaces retaining oriented triangles
+//! integrate static near-panel single/double layers analytically, then use
+//! tensor Gauss integration for their nonsingular Helmholtz remainders. This
+//! resolves opposite faces of thin shells without sampling a narrow static
+//! kernel spike. Well-separated interactions still use centroid point panels.
+//! Burton-Miller and legacy centroid-only surfaces retain equivalent-disc self
+//! terms and point-panel off-diagonal approximation. Triangle CBIE self terms use
 //! a centroid fan plus a Duffy transform, which cancels the weak `1/r`
 //! singularity and the regularized hypersingular `1/r` remainder. The legacy
 //! equivalent-disc finite parts use
@@ -363,9 +365,82 @@ fn regularized_coplanar_hypersingular(k: f64, r: f64) -> C64 {
     numerator.scale(1.0 / (4.0 * core::f64::consts::PI * r * r * r))
 }
 
+fn regularized_single_layer(k: f64, r: f64) -> C64 {
+    let z = k * r;
+    // cos(z)-1 = -2*sin(z/2)^2 remains accurate for nearly touching skins.
+    let half_sine = det::sin(0.5 * z);
+    C64::new(-2.0 * half_sine * half_sine, det::sin(z))
+        .scale(1.0 / (4.0 * core::f64::consts::PI * r))
+}
+
+/// Static single and double layers, with the same outward source normal as the
+/// Helmholtz kernels. The solid angle is the van Oosterom-Strackee expression
+/// (doi:10.1109/TBME.1983.325207); the single layer follows the polygon edge
+/// integral of Wilton et al. (doi:10.1109/TAP.1984.1143304).
+///
+/// In the triangle plane, div((y-x_parallel)/r) = 1/r + h^2/r^3. Its boundary
+/// integral therefore gives S = (sum edge_distance * integral_edge(1/r)
+/// - h * solid_angle)/(4*pi), while D = solid_angle/(4*pi). This separation
+/// retains the double-layer jump as h tends to zero instead of asking a fixed
+/// area quadrature to find an increasingly narrow h/r^3 peak.
+fn triangle_static_influence(x: [f64; 3], triangle: [[f64; 3]; 3], ny: [f64; 3]) -> (f64, f64) {
+    let relative = triangle.map(|p| sub(p, x));
+    let radii = relative.map(norm);
+    let height = -dot(relative[0], ny);
+    let double_area = norm(cross(
+        sub(triangle[1], triangle[0]),
+        sub(triangle[2], triangle[0]),
+    ));
+    let denominator = radii[0] * radii[1] * radii[2]
+        + dot(relative[0], relative[1]) * radii[2]
+        + dot(relative[1], relative[2]) * radii[0]
+        + dot(relative[2], relative[0]) * radii[1];
+    // Coplanar off-panel targets have zero ordinary double layer. The self
+    // panel has its separately specified trace/jump in assemble_dense.
+    let solid_angle = if height == 0.0 {
+        0.0
+    } else {
+        2.0 * det::atan2(height * double_area, denominator)
+    };
+    let mut edge_sum = 0.0;
+    for edge in 0..3 {
+        let next = (edge + 1) % 3;
+        let direction = sub(triangle[next], triangle[edge]);
+        let length = norm(direction);
+        let tangent = direction.map(|v| v / length);
+        let outward = cross(tangent, ny);
+        let distance = dot(relative[edge], outward);
+        // The product tends to zero even when the projection lies on this
+        // edge and its logarithmic line integral diverges.
+        if distance == 0.0 {
+            continue;
+        }
+        let start = dot(relative[edge], tangent);
+        let end = start + length;
+        // Avoid subtracting almost equal endpoint radii for a target close to
+        // an edge. These are algebraic forms of asinh(end/d)-asinh(start/d).
+        let integral = if start >= 0.0 {
+            det::ln((radii[next] + end) / (radii[edge] + start))
+        } else if end <= 0.0 {
+            det::ln((radii[edge] - start) / (radii[next] - end))
+        } else {
+            let perpendicular = norm(cross(tangent, relative[edge]));
+            det::ln((radii[edge] - start) / perpendicular)
+                + det::ln((radii[next] + end) / perpendicular)
+        };
+        edge_sum += distance * integral;
+    }
+    let four_pi = 4.0 * core::f64::consts::PI;
+    (
+        (edge_sum - height * solid_angle) / four_pi,
+        solid_angle / four_pi,
+    )
+}
+
 /// Integrate the weakly singular single-layer and ordinary double-layer
-/// kernels over a flat source triangle. The target must not lie on the source
-/// triangle; the self panel uses [`triangle_self_terms`].
+/// kernels over a flat source triangle after subtracting their exact static
+/// singularities. The target must not lie on the source triangle; the self
+/// panel uses [`triangle_self_terms`]. No geometry refinement is implied.
 fn triangle_weak_influence(
     k: f64,
     x: [f64; 3],
@@ -376,16 +451,17 @@ fn triangle_weak_influence(
     let ab = sub(b, a);
     let ac = sub(c, a);
     let double_area = norm(cross(ab, ac));
-    let mut single = C64::ZERO;
-    let mut double = C64::ZERO;
+    let (static_single, static_double) = triangle_static_influence(x, triangle, ny);
+    let mut single = C64::from_re(static_single);
+    let mut double = C64::from_re(static_double);
     for (&u, &wu) in GL8_X.iter().zip(&GL8_W) {
         for (&v, &wv) in GL8_X.iter().zip(&GL8_W) {
             let y = affine3(a, ab, u, ac, (1.0 - u) * v);
             let weight = wu * wv * (1.0 - u) * double_area;
             let d = sub(x, y);
             let r = norm(d);
-            let g = green(k, r);
-            let dgdny = green_dr(k, r).scale(-dot(ny, d) / r);
+            let g = regularized_single_layer(k, r);
+            let dgdny = regularized_coplanar_hypersingular(k, r).scale(dot(ny, d));
             single = single + g.scale(weight);
             double = double + dgdny.scale(weight);
         }
@@ -393,12 +469,16 @@ fn triangle_weak_influence(
     (single, double)
 }
 
-/// Duffy-integrated `(S_ii, (N_k-N_0)_ii)` for a flat triangle collocated at
-/// its centroid. Splitting the panel into a centroid fan places the singularity
-/// at one vertex of each subtriangle; the Duffy Jacobian cancels the remaining
-/// integrable `1/r` behavior without an equivalent-disc shape approximation.
+/// `(S_ii, (N_k-N_0)_ii)` for a flat triangle collocated at its centroid. The
+/// static S term uses the same exact integral as a nearby opposite face; a
+/// quadrature mismatch between those terms would dominate their thin-gap limit.
+/// The dynamic remainders use a centroid fan and Duffy transform, cancelling
+/// the hypersingular remainder's integrable `1/r` behavior.
 fn triangle_self_terms(k: f64, x: [f64; 3], triangle: [[f64; 3]; 3]) -> (C64, C64) {
-    let mut single_layer = C64::ZERO;
+    let area_normal = cross(sub(triangle[1], triangle[0]), sub(triangle[2], triangle[0]));
+    let area_scale = norm(area_normal);
+    let normal = area_normal.map(|v| v / area_scale);
+    let mut single_layer = C64::from_re(triangle_static_influence(x, triangle, normal).0);
     let mut hypersingular_regular = C64::ZERO;
     for edge in 0..3 {
         let e0 = sub(triangle[edge], x);
@@ -413,7 +493,7 @@ fn triangle_self_terms(k: f64, x: [f64; 3], triangle: [[f64; 3]; 3]) -> (C64, C6
                 ];
                 let r = radial * norm(ray);
                 let weight = wr * wt * radial * double_area;
-                single_layer = single_layer + green(k, r).scale(weight);
+                single_layer = single_layer + regularized_single_layer(k, r).scale(weight);
                 hypersingular_regular =
                     hypersingular_regular + regularized_coplanar_hypersingular(k, r).scale(weight);
             }
@@ -1615,6 +1695,46 @@ mod tests {
             (scaled_regularized_hypersingular - regularized_hypersingular.scale(1.0 / scale)).abs()
                 < 2.0e-13 * scaled_regularized_hypersingular.abs()
         );
+    }
+
+    #[test]
+    fn thin_opposing_panels_retain_the_exact_static_solid_angle_and_potential() {
+        // An independent rectangular-panel integral checks both triangle
+        // orientation and the near-face limit. A plain 8x8 area rule misses
+        // most of the normal-derivative peak at the cymbal-sized gaps below.
+        let a = 0.010_f64;
+        let b = 0.007_f64;
+        let triangles = [
+            [[-a, -b, 0.0], [a, -b, 0.0], [a, b, 0.0]],
+            [[-a, -b, 0.0], [a, b, 0.0], [-a, b, 0.0]],
+        ];
+        for height in [0.0016, 0.0005, 0.000001, -0.0005] {
+            let h = f64::abs(height);
+            let radius = (a * a + b * b + h * h).sqrt();
+            let angle = det::atan2(a * b, h * radius);
+            let single_ref = (a * det::ln((b + radius) / (a * a + h * h).sqrt())
+                + b * det::ln((a + radius) / (b * b + h * h).sqrt())
+                - h * angle)
+                / core::f64::consts::PI;
+            let double_ref = angle.copysign(height) / core::f64::consts::PI;
+            let (mut single, mut double) = (C64::ZERO, C64::ZERO);
+            for triangle in triangles {
+                let (s, d) =
+                    triangle_weak_influence(0.0, [0.0, 0.0, height], triangle, [0.0, 0.0, 1.0]);
+                single = single + s;
+                double = double + d;
+            }
+            assert!(
+                (single.re - single_ref).abs() < 2.0e-12 * single_ref,
+                "gap {height}: single={single:?}, exact={single_ref}"
+            );
+            assert!(
+                (double.re - double_ref).abs() < 2.0e-12 * double_ref.abs(),
+                "gap {height}: double={double:?}, exact={double_ref}"
+            );
+            assert_eq!(single.im, 0.0);
+            assert_eq!(double.im, 0.0);
+        }
     }
 
     #[test]

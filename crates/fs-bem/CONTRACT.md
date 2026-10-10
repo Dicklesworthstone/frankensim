@@ -207,9 +207,13 @@ NASA marks it as U.S. Government work with public use permitted.
 ### Helmholtz invariants
 
 1. Kernel formulas are pinned by central-finite-difference tests of G.
-   Plain-CBIE triangle surfaces use fixed Gauss-Duffy integration for the
-   weak single-layer self term and triangle integration for edge-near weak
-   operators; scale covariance and the analytic pulsating sphere pin this
+   Plain-CBIE triangle surfaces use exact static single/double-layer integrals
+   plus fixed Gauss integration of the regular Helmholtz remainders; the self
+   and near-face single layers share that same static integral. Independent
+   rectangular-panel single-layer and solid-angle formulas test thin opposing
+   faces down to a 1 micrometre gap and both orientations. Gauss-Duffy
+   integration handles the self remainders; scale covariance and the analytic
+   pulsating sphere pin this
    path. Burton-Miller retains the established equivalent-disc self and
    centroid off-diagonal scheme because its hypersingular finite-part
    operator needs a different Galerkin-quality rule.
