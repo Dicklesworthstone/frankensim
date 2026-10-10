@@ -90,6 +90,68 @@ fn three_body_air_port_converges_to_independent_coupled_eigen_dynamics() {
 }
 
 #[test]
+fn cavity_retains_separate_body_budgets_and_reciprocal_acoustic_storage() {
+    let air = basis(); let gate = CancelGate::new_clock_free();
+    let compiled = CavityCoupling::new(&air, 2, &[0.05, 0.03, -0.04, 0.02], &[0.0, 30.0]).unwrap();
+    let parts = || vec![body(800.0, 0.0, 0.1), body(900.0, 0.0, 0.1)];
+    let mut cfg = config(500_000);
+    cfg.component.maximum_total_energy_j = 0.006;
+    cfg.coupling.maximum_total_energy_j = 0.02;
+    let damper = super::super::super::damping::ViscousDamper {
+        weights: vec![1.0, -1.0], damping_n_s_m: 0.5,
+    };
+    let (mut system, probe) = compiled.clone().build_linear_with_dampers(parts(), vec![],
+        vec![damper], 0.1, cfg, &gate).unwrap();
+    // Each original head has 0.005 J, so both fit their 0.006 J budgets.
+    // The former aggregate component wrongly rejected their combined 0.01 J.
+    let initial = system.frame().stored_energy_j;
+    assert!((initial-0.01).abs() < 1e-16);
+    assert_eq!(system.mode_count(), 3); assert_eq!(probe.structural_modes(), 2);
+    assert_eq!(&system.state()[4..], &[0.0; 2]);
+
+    // A force within the external-force and combined-energy ceilings would
+    // raise the first head above its own budget. Refusal remains transactional.
+    let before = system.state().to_vec(); let report = *system.frame();
+    let error = system.step(&[10_000.0, 0.0, 0.0], &gate).unwrap_err();
+    assert!(error.to_string().contains("energy"));
+    assert_eq!(system.state(), before); assert_eq!(*system.frame(), report);
+
+    let scale = air.rho0*air.c0*air.c0/air.lambdas[0];
+    let mut loss = 0.0; let mut peak_air_speed = 0.0_f64; let mut peak_pressure = 0.0_f64;
+    for _ in 0..256 {
+        let frame = system.step(&[0.0; 3], &gate).unwrap();
+        let x = system.state();
+        let head_a = 0.5*((800.0*x[0]).powi(2)+x[1]*x[1]);
+        let head_b = 0.5*((900.0*x[2]).powi(2)+x[3]*x[3]);
+        let acoustic = 0.5*x[5]*x[5];
+        let uniform = 0.05*x[0]-0.04*x[2];
+        let standing = 0.03*x[0]+0.02*x[2]+1000.0/scale.sqrt()*x[4];
+        let shared = 0.5*scale*(uniform*uniform+standing*standing);
+        assert!([head_a, head_b, acoustic].iter().all(|e| *e <= 0.006));
+        assert!((frame.stored_energy_j-head_a-head_b-acoustic-shared).abs() < 1e-12);
+        let pressure = probe.pressure_at(x, &[1.0, 0.4]).unwrap();
+        assert!((pressure+scale*(uniform+0.4*standing)).abs() < 1e-9);
+        peak_air_speed = peak_air_speed.max(x[5].abs());
+        peak_pressure = peak_pressure.max(pressure.abs());
+        assert_eq!(frame.supplied_work_j, 0.0); loss += frame.dissipated_energy_j;
+        assert!((frame.stored_energy_j+loss-initial).abs() < 1e-10);
+    }
+    assert!(peak_air_speed > 1e-6 && peak_pressure > 1e-3 && loss > 0.0);
+
+    let mut total_limit = cfg; total_limit.coupling.maximum_total_energy_j = 0.009;
+    assert!(compiled.clone().build_linear(parts(), vec![], 0.1, total_limit, &gate).is_err(),
+        "separate body budgets must not enlarge the whole-system energy ceiling");
+    // Neck flow belongs to the appended acoustic inertia component. Its
+    // independently prescribed kinetic energy must satisfy that same budget.
+    let mut opening = neck(vec![1.0, 0.2]); opening.initial_volume_m3 = 0.0;
+    let inertance = air.rho0*opening.effective_length_m/opening.area_m2;
+    opening.initial_flow_m3_s = (2.0*0.007/inertance).sqrt();
+    let with_neck = compiled.with_necks(vec![opening], &gate).unwrap();
+    assert!(with_neck.build_linear(vec![body(800.0,0.0,0.0),body(900.0,0.0,0.0)],
+        vec![], 0.1, cfg, &gate).is_err(), "acoustic inertia keeps its own component budget");
+}
+
+#[test]
 fn rescaled_pressure_basis_keeps_the_same_prepared_motion_and_pressure() {
     let air = basis(); let mut scaled = air.clone();
     for norm in &mut scaled.lambdas { *norm *= 9.0; }

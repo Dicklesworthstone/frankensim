@@ -1,9 +1,9 @@
 //! Compile the SAME distributed-air Hamiltonian into the existing prepared
 //! modal/contact solver. A spring may involve both heads, acoustic inertia and
-//! openings. Concatenating unchanged diagonal coordinates makes that complete
-//! signed column one attachment, not several pairwise springs (which would
-//! introduce the wrong cross terms). This is a direct sum, not an eigensolve,
-//! homogenization, shared wire state, or an additional numerical integrator.
+//! openings. Complete signed columns retain every cross term while keeping
+//! each original solid body and the appended acoustic inertia as independently
+//! budgeted components. No bodies are regrouped, no wire is homogenized, and
+//! no additional eigenbasis or numerical integrator is introduced.
 //!
 //! All original state addresses survive. Mechanical contact columns gain zeros
 //! for air coordinates. Pressure is still observed through CavityCoupling, and
@@ -19,9 +19,10 @@ impl CavityCoupling {
     /// Prepare linear structural bodies, distributed air and nonlinear contact.
     /// Cavity springs replace, never supplement, the old compact gas spring.
     /// `reference_area_m2` only scales the spring coordinate; it is not a new
-    /// physical aperture. The aggregate diagonal component uses `config.component`
-    /// as its state/energy budget. The original modal, port and contact limits
-    /// are also enforced. Initial body states and contact loss are unchanged.
+    /// physical aperture. Each original body keeps its `config.component`
+    /// state/energy budget; appended acoustic/neck inertia has its own component
+    /// with the same budget. The whole-system modal, port, contact and energy
+    /// limits still apply. Initial body states and contact loss are unchanged.
     ///
     /// Acoustic/neck momentum drag is retained through the linear impact
     /// owner's simultaneous grounded viscous links, consuming one connection
@@ -50,28 +51,20 @@ impl CavityCoupling {
         }
         let dt_s = f64::from(config.sample_rate_hz).recip();
         let (parts, contacts, _) = self.extend_parts(bodies, contacts, Vec::new(), dt_s, gate)?;
-        let mut frequencies = Vec::with_capacity(self.total);
-        let mut initial = Vec::with_capacity(self.total);
-        let mut damping = Vec::with_capacity(self.total);
-        for body in parts {
+        for body in &parts {
             if gate.is_requested() { return Err(ImpactError::Cancelled); }
-            let BodyPotential::Linear(omega) = body.potential else {
+            let BodyPotential::Linear(omega) = &body.potential else {
                 return Err(invalid("prepared cavity requires linear bodies; nonlinear storage is not discarded"));
             };
             if omega.is_empty() || body.initial.len() != omega.len()
                 || body.damping_per_s.len() != omega.len() {
                 return Err(invalid("prepared cavity body has an inconsistent diagonal state layout"));
             }
-            frequencies.extend(omega);
-            initial.extend(body.initial);
-            damping.extend(body.damping_per_s);
         }
-        let body = ImpactBody { potential: BodyPotential::Linear(frequencies),
-            initial, damping_per_s: damping };
         let volumes = self.springs.iter().cloned().map(|spring|
             VolumeConnection { spring, reference_area_m2 }).collect();
         let dampers = super::super::damping::extend(dampers, self.structural, self.total)?;
-        let system = LinearImpactSystem::new_with_dampers(vec![body], contacts, volumes, dampers, config, gate)?;
+        let system = LinearImpactSystem::new_with_dampers(parts, contacts, volumes, dampers, config, gate)?;
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
         Ok((system, self))
     }
