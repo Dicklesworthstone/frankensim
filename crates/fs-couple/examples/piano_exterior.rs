@@ -34,7 +34,7 @@ piano_exterior response BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUST
 piano_exterior render BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
 piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
     [--modes 1..512] [--substeps 1..16] [--rigid-assembly ASSEMBLY.fspr]
-    [--equilibrate-board-mass]
+    [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
     [--rt0425-hammer-stiffness] [--rt0425-hammer-dissipation]
     [--rt0425-string-damping]
@@ -54,11 +54,17 @@ cards. Dissipation also requires RT-0425 stiffness. They select the already
 implemented per-string K_H and published R_H contact laws, not output EQ.
 The RT-0425 string flag requires the steinway-d scale and projects published
 per-key R_u and eta_u onto the existing reduced string modes; it is opt-in.
-response and admittance also accept --modes/--substeps, --rigid-assembly and
---equilibrate-board-mass after the output path,
+response and admittance also accept --modes/--substeps, --rigid-assembly,
+--equilibrate-board-mass and either flat-board mass option after the output path,
 so harmonic comparisons can use the SAME retained string/board system.
 Mass equilibration is an opt-in numerical solve for a flat geometric board;
 it leaves geometry, materials, mode cap and original residual admission unchanged.
+--consistent-board-mass selects consistent P1 panel inertia. --edge-cubic-board-mass
+selects the existing cubic transverse field for inertia, bridge coupling and
+acoustic surface motion, including its analytic physical rotations. Both retain
+the same eigensolve throughout playback and can compose with string polarization.
+These flat-board options refuse crowned shells; higher-band convergence remains
+an independent requirement. Beam inertia follows the optional FSB stiffener-mass row.
 admittance alone accepts --lossless-structure to remove the existing wood and
 string material damping for a declared conservative-structure comparison.
 It retains the complete complex radiation load and all original modes. Near
@@ -161,23 +167,33 @@ fn prepare_controlled(board_text:&str,courses:Vec<geometry::Course>,obj:&str,spe
     options:&playback::Options,controls:playback::Controls)->Result<Scene,String> {
     prepare_controlled_body(board_text,courses,Some(obj),spec,options,controls,false)
 }
+/// One structural solve owns bridge, string-frame and acoustic motion fields.
+fn prepare_board_motion(board_text:&str,keys:&[u8],band_hz:f64,options:&playback::Options)
+    ->Result<board_geometry::PreparedBoard,String> {
+    options.validate()?;
+    if crowned_board::is_crowned(board_text) {
+        if options.equilibrate_board_mass || options.consistent_board_mass || options.edge_cubic_board_mass {
+            return Err("flat-board mass controls require a flat geometric board".into());
+        }
+        crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(keys,band_hz)
+    } else {
+        let geometry=board_geometry::BoardGeometry::read(board_text)?;
+        if options.edge_cubic_board_mass {
+            geometry.prepare_with_motion_edge_cubic_transverse_mass(keys,band_hz,options.equilibrate_board_mass)
+        } else if options.consistent_board_mass {
+            geometry.prepare_with_motion_consistent_transverse_mass(keys,band_hz,options.equilibrate_board_mass)
+        } else if options.equilibrate_board_mass {
+            geometry.prepare_with_motion_mass_equilibrated(keys,band_hz)
+        } else {geometry.prepare_with_motion(keys,band_hz)}
+    }
+}
 fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Option<&str>,mut spec:Specification,
     options:&playback::Options,controls:playback::Controls,continuous:bool)->Result<Scene,String> {
     options.validate()?;
     if obj.is_none() {spec.require_board_skin()?;}
     let rigid=options.rigid_assembly.as_deref().map(Assembly::load).transpose()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
-    let board=if crowned_board::is_crowned(board_text) {
-        if options.equilibrate_board_mass {
-            return Err("--equilibrate-board-mass requires a flat geometric board".into());
-        }
-        crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?
-    } else {
-        let geometry=board_geometry::BoardGeometry::read(board_text)?;
-        if options.equilibrate_board_mass {
-            geometry.prepare_with_motion_mass_equilibrated(&keys,spec.board_band_hz)?
-        } else {geometry.prepare_with_motion(&keys,spec.board_band_hz)?}
-    };
+    let board=prepare_board_motion(board_text,&keys,spec.board_band_hz,options)?;
     let piano=controls.instrument_with_motion(courses,&board.modes,board.motion.as_ref(),options)?;
     let (bare,description)=section_skin::boundary(obj,board_text,&spec,
         board.motion.as_ref().ok_or("missing full-vector structural motion")?,continuous)?;
@@ -210,7 +226,7 @@ fn admittance_options(args:&[String])->Result<(playback::Options,bool),String> {
         if flag=="--lossless-structure" {
             if !damping {return Err("duplicate --lossless-structure".into());}
             damping=false;
-        } else if flag=="--equilibrate-board-mass" {
+        } else if matches!(flag.as_str(),"--equilibrate-board-mass"|"--consistent-board-mass"|"--edge-cubic-board-mass") {
             numeric.push(flag.clone());
         } else {
             numeric.push(flag.clone());
@@ -235,17 +251,7 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
     let rigid=options.rigid_assembly.as_deref().map(Assembly::load).transpose()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     if !keys.contains(&drive) {return Err("admittance drive key is absent from the scale".into());}
-    let board=if crowned_board::is_crowned(board_text) {
-        if options.equilibrate_board_mass {
-            return Err("--equilibrate-board-mass requires a flat geometric board".into());
-        }
-        crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?
-    } else {
-        let geometry=board_geometry::BoardGeometry::read(board_text)?;
-        if options.equilibrate_board_mass {
-            geometry.prepare_with_motion_mass_equilibrated(&keys,spec.board_band_hz)?
-        } else {geometry.prepare_with_motion(&keys,spec.board_band_hz)?}
-    };
+    let board=prepare_board_motion(board_text,&keys,spec.board_band_hz,options)?;
     let model=bridge_response::BridgeResponse::new(courses,&board.modes,RATE*options.substeps as u32,
         0.45*f64::from(RATE),options.modes,damping)?;
     let (bare,description)=section_skin::boundary(obj,board_text,spec,
@@ -410,6 +416,28 @@ mod tests {
         assert!(!damping);
         assert!(admittance_options(&[
             "--equilibrate-board-mass".into(), "--equilibrate-board-mass".into()]).is_err());
+        for flag in ["--consistent-board-mass", "--edge-cubic-board-mass"] {
+            let (options,damping)=admittance_options(&[
+                flag.into(), "--equilibrate-board-mass".into(), "--lossless-structure".into()]).unwrap();
+            assert!(options.equilibrate_board_mass);
+            assert_eq!(options.edge_cubic_board_mass,flag=="--edge-cubic-board-mass");
+            assert_eq!(options.consistent_board_mass,flag=="--consistent-board-mass");
+            assert!(!damping);
+            assert!(admittance_options(&["--modes".into(),flag.into()]).is_err());
+        }
+        assert!(admittance_options(&["--consistent-board-mass".into(),"--edge-cubic-board-mass".into()]).is_err());
+    }
+    #[test]
+    fn exterior_inertia_selection_retains_the_selected_motion_and_refuses_crowned_substitution() {
+        let (board,_,_,spec)=small_source_inputs();
+        for flag in ["--consistent-board-mass", "--edge-cubic-board-mass"] {
+            let options=playback::Options::parse(&[flag.into(),"--equilibrate-board-mass".into()]).unwrap();
+            let prepared=prepare_board_motion(&board,&[69],spec.board_band_hz,&options).unwrap();
+            assert_eq!(prepared.motion.as_ref().unwrap().is_edge_cubic(),flag=="--edge-cubic-board-mass");
+            assert!(prepared.provenance.contains("mass-diagonal solver equilibration"));
+            assert!(prepare_board_motion(crowned_board::HEADER,&[69],spec.board_band_hz,&options)
+                .err().unwrap().contains("flat geometric board"));
+        }
     }
     #[test]
     fn opt_in_board_scaling_reaches_the_exterior_scene_and_is_reported() {
@@ -466,11 +494,12 @@ mod tests {
 
     #[test]
     fn projected_vector_strings_reach_the_same_finite_body_renderer() {
+        for edge_cubic_board_mass in [false,true] {
         let (board,courses,obj,spec)=small_source_inputs();
         let board=board.replace("node,4,0.05,0.05", "node,4,0.043,0.054");
         let frames=format!("{}\nsource,estimated,test bridge height and frame\ncourse,69,0,0,0,1,0,0,0.02,0,1,0,0,0,1,0.3\n",
             string_polarization::HEADER);
-        let options=playback::Options::default();
+        let options=playback::Options {edge_cubic_board_mass,..playback::Options::default()};
         let controls=playback::Controls::from_texts(&courses,None,None,Some("estimated")).unwrap()
             .with_string_polarization(&frames,&courses).unwrap();
         let mut scene=prepare_controlled_body(&board,courses,Some(&obj),spec,&options,controls,false).unwrap();
@@ -487,6 +516,7 @@ mod tests {
             scene.piano.bank.q[s.modes.clone()].iter().any(|q|q.abs()>1e-14)));
         assert!((scene.piano.accounting.input_work_j-scene.piano.energy_j()
             -scene.piano.accounting.dissipated_j()).abs()<1e-7);
+        }
     }
 
     #[test]

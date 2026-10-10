@@ -142,6 +142,14 @@ beam option. Complete modal slices still must fit the unchanged 128-mode limit.
 The example keeps the existing 1.2 kHz band; higher bands require their own
 mesh and bridge-response convergence checks.
 
+`piano_exterior` response, admittance, render and render-loaded accept the same
+`--consistent-board-mass` or `--edge-cubic-board-mass` selection, optionally
+with `--equilibrate-board-mass`. Cubic preparation now retains its analytic
+displacement and rotations for both explicit string-polarization frames and
+finite acoustic skins, all from the same board eigensolve. The existing
+32-mode passive-load fit limit still applies to render-loaded; the other
+structural and acoustic budgets are unchanged.
+
 This option supplies **translational** Euler–Bernoulli inertia. It does not add
 axial, eccentric rotary or torsional beam inertia; the existing offset stiffness
 `EI + EAe²` is unchanged. Crowned shells have their own six-DOF beam model and

@@ -102,8 +102,8 @@ This is spatial drag, not falling-pad or hysteretic felt contact mechanics.
 Its complete per-key file supplies bridge sites, 3-D arms, string/hammer axes
 and lateral damper ratios. The same board solve projects both bridge rows;
 the primary row must agree with the board's existing bridge geometry.
-It requires a geometric --render; modal CSV and edge-cubic fields lack the
-required full-vector motion. No lateral coupling or drag is guessed.
+It requires a geometric --render, using the selected P1, edge-cubic or crowned
+motion field. Modal CSV lacks that motion. No lateral coupling or drag is guessed.
 See STRING_POLARIZATION.md for the physical input format and scope.
 --string-stretching supplies linear or geometric-extension selection for EVERY
 scale key. A stretch row supplies axial rigidity EA in N and a moderate-slope
@@ -358,9 +358,8 @@ impl Options {
         }
         let geometric = options.preset.is_some() || options.board_geometry.is_some();
         if options.string_polarization.as_ref().is_some_and(|s| s.trim().is_empty()
-            || s.starts_with("--") || options.render.is_none() || !geometric
-            || options.edge_cubic_board_mass) {
-            return Err("--string-polarization requires a complete nonempty specification and a geometric render with full-vector P1 or crowned motion; modal CSV and edge-cubic fields are unsupported".into());
+            || s.starts_with("--") || options.render.is_none() || !geometric) {
+            return Err("--string-polarization requires a complete nonempty specification and a geometric render with full-vector motion; modal CSV is unsupported".into());
         }
         if options.acoustic_refinement_levels > 3 || (seen.contains("--acoustic-refinement-levels")
             && (!geometric || options.render.is_none() || options.diagnostic_volume
@@ -583,9 +582,6 @@ fn prepare_geometric_board(text: &str, keys: &[u8], band_hz: f64,
 fn prepare_geometric_board_motion(text: &str, keys: &[u8], band_hz: f64,
     equilibrate_mass: bool, consistent_mass: bool, edge_cubic_mass: bool,
     acoustic_refinement_levels: usize, retain_motion: bool) -> Result<board_geometry::PreparedBoard, String> {
-    if retain_motion && edge_cubic_mass {
-        return Err("string polarization requires full-vector P1 or crowned motion; edge-cubic motion is unavailable".into());
-    }
     if crowned_board::is_crowned(text) {
         if equilibrate_mass || consistent_mass || edge_cubic_mass || acoustic_refinement_levels != 0 {
             return Err("flat-board mass controls require a flat geometric board".into());
@@ -596,7 +592,8 @@ fn prepare_geometric_board_motion(text: &str, keys: &[u8], band_hz: f64,
     } else {
         let geometry=board_geometry::BoardGeometry::read(text)?
             .with_acoustic_refinement(acoustic_refinement_levels)?;
-        if retain_motion && consistent_mass { geometry.prepare_with_motion_consistent_transverse_mass(keys,band_hz,equilibrate_mass) }
+        if retain_motion && edge_cubic_mass { geometry.prepare_with_motion_edge_cubic_transverse_mass(keys,band_hz,equilibrate_mass) }
+        else if retain_motion && consistent_mass { geometry.prepare_with_motion_consistent_transverse_mass(keys,band_hz,equilibrate_mass) }
         else if retain_motion && equilibrate_mass { geometry.prepare_with_motion_mass_equilibrated(keys,band_hz) }
         else if retain_motion { geometry.prepare_with_motion(keys,band_hz) }
         else if edge_cubic_mass { geometry.prepare_edge_cubic_transverse_mass(keys,band_hz,equilibrate_mass) }

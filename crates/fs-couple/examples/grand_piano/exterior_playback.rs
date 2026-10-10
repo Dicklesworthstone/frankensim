@@ -27,6 +27,8 @@ pub struct Options {
     pub string_polarization: Option<String>,
     pub rigid_assembly: Option<String>,
     pub equilibrate_board_mass: bool,
+    pub consistent_board_mass: bool,
+    pub edge_cubic_board_mass: bool,
     pub rt0425_hammer_stiffness: bool,
     pub rt0425_hammer_dissipation: bool,
     pub rt0425_string_damping: bool,
@@ -38,7 +40,8 @@ impl Default for Options {
             mapping_explicit: false, hammers: None,
             hammer_footprints: None, dampers: None, string_stretching: None, string_polarization: None,
             rigid_assembly: None,
-            equilibrate_board_mass: false, rt0425_hammer_stiffness: false,
+            equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
+            rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false, rt0425_string_damping: false }
     }
 }
@@ -64,6 +67,14 @@ impl Options {
             }
             if flag == "--equilibrate-board-mass" {
                 result.equilibrate_board_mass = true;
+                continue;
+            }
+            if flag == "--consistent-board-mass" {
+                result.consistent_board_mass = true;
+                continue;
+            }
+            if flag == "--edge-cubic-board-mass" {
+                result.edge_cubic_board_mass = true;
                 continue;
             }
             if flag == "--rt0425-hammer-stiffness" {
@@ -116,7 +127,8 @@ impl Options {
         Ok(result)
     }
     /// Frequency-domain analysis has no hammer or pedal state. It admits only
-    /// resolution and rigid-geometry controls; material/gesture options cannot be silently ignored.
+    /// resolution, flat-board inertia and rigid-geometry controls;
+    /// material/gesture options cannot be silently ignored.
     pub fn harmonic(args: &[String]) -> Result<Self, String> {
         let options = Self::parse(args)?;
         if options.midi.is_some() || options.performance.is_some() || options.note.is_some()
@@ -125,11 +137,14 @@ impl Options {
             || options.string_stretching.is_some() || options.string_polarization.is_some()
             || options.rt0425_hammer_stiffness
             || options.rt0425_hammer_dissipation || options.rt0425_string_damping {
-            return Err("response/admittance accept --modes, --substeps and --rigid-assembly, not playback controls".into());
+            return Err("response/admittance accept resolution, flat-board inertia and rigid-assembly options, not playback controls".into());
         }
         Ok(options)
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.consistent_board_mass && self.edge_cubic_board_mass {
+            return Err("select at most one of --consistent-board-mass and --edge-cubic-board-mass".into());
+        }
         if (self.rt0425_hammer_stiffness && self.hammers.is_some())
             || (self.rt0425_hammer_dissipation && !self.rt0425_hammer_stiffness) {
             return Err("RT-0425 hammer stiffness requires source hammers; dissipation also requires that stiffness".into());
@@ -312,6 +327,9 @@ mod tests {
         assert_eq!(new.midi.as_deref(), Some("score.mid"));
         assert!(Options::harmonic(&["--modes".into(),"128".into()]).is_ok());
         assert!(Options::harmonic(&["--equilibrate-board-mass".into()]).unwrap().equilibrate_board_mass);
+        assert!(Options::harmonic(&["--consistent-board-mass".into()]).unwrap().consistent_board_mass);
+        assert!(Options::harmonic(&["--edge-cubic-board-mass".into(), "--equilibrate-board-mass".into()])
+            .unwrap().edge_cubic_board_mass);
         assert!(Options::harmonic(&["--dampers".into(),"estimated".into()]).is_err());
         assert!(Options::harmonic(&["--string-polarization".into(),"frames.fspp".into()]).is_err());
         assert_eq!(parse(&["--string-polarization", "frames.fspp"]).unwrap()
@@ -320,7 +338,10 @@ mod tests {
             vec!["--substeps", "0"], vec!["--substeps", "17"], vec!["--modes"],
             vec!["--modes", "24", "--modes", "48"], vec!["one.mid", "two.mid"],
             vec!["--hammers", "--dampers", "estimated"], vec!["--unknown", "value"],
-            vec!["--equilibrate-board-mass", "--equilibrate-board-mass"]] {
+            vec!["--equilibrate-board-mass", "--equilibrate-board-mass"],
+            vec!["--consistent-board-mass", "--consistent-board-mass"],
+            vec!["--edge-cubic-board-mass", "--edge-cubic-board-mass"],
+            vec!["--edge-cubic-board-mass", "--consistent-board-mass"]] {
             assert!(parse(&args).is_err(), "accepted {args:?}");
         }
     }

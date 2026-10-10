@@ -11,7 +11,7 @@
 //! Heights use a declared 1 nm grid solely to avoid sub-roundoff step facets.
 //! The actual maximum thickness change and enclosed-volume error are returned.
 //! Folded graphs, nonmanifold steps and unresolved panels refuse, not repair.
-use super::MotionSurface;
+use super::{MotionSurface, EDGE_CUBIC_QUADRATURE};
 use fs_plate::ShellMesh;
 use std::{collections::{BTreeMap, BTreeSet}, fmt::Write};
 
@@ -293,9 +293,11 @@ impl Skin {
     pub fn panel_triangles(&self)->Vec<[[f64;3];3]> {
         self.triangles.iter().map(|t|t.map(|i|self.vertices[i])).collect()
     }
-    /// Exact positive three-point quadrature for P1 translations plus the
-    /// bilinear rotation/offset field. Known section sites are retained; no
-    /// nearest-facet search, vertex snap or extrapolation across a hole occurs.
+    /// Exact panel means: the original positive three-point rule for P1
+    /// translation/rotation, or the degree-three rule for cubic displacement
+    /// plus its quadratic physical rotation and linearly varying skin arm.
+    /// Known source-facet sites are retained even on subtriangles and walls;
+    /// no nearest-facet search, vertex snap or cross-facet extrapolation occurs.
     pub fn normal_weights(&self,motion:&MotionSurface,normals:&[[f64;3]])->Result<Vec<Vec<f64>>,String> {
         if motion.mesh.tris!=self.source_triangles || motion.mesh.nodes!=self.source_nodes || normals.len()!=self.triangles.len()
             || normals.iter().any(|n|n.iter().any(|x|!x.is_finite()) || (dot(*n,*n)-1.).abs()>1e-8) {
@@ -303,6 +305,15 @@ impl Skin {
         }
         let mut out=vec![vec![0.;self.triangles.len()];motion.shapes.len()];
         for (f,site) in self.embeddings.iter().enumerate() {
+            if motion.is_edge_cubic() {
+                for (q,weight) in EDGE_CUBIC_QUADRATURE {
+                    let bary=std::array::from_fn(|i|(0..3).map(|j|q[j]*site.bary[j][i]).sum());
+                    let z=(0..3).map(|j|q[j]*site.z[j]).sum::<f64>();
+                    let (values,_)=motion.project_at(site.element,bary,[0.,0.,z],normals[f])?;
+                    for (result,value) in out.iter_mut().zip(values) {result[f]+=weight*value;}
+                }
+                continue;
+            }
             let tri=motion.mesh.tris[site.element];
             for q in QUADRATURE {
                 let bary:[f64;3]=std::array::from_fn(|i|(0..3).map(|j|q[j]*site.bary[j][i]).sum());
@@ -328,3 +339,7 @@ impl Skin {
 #[cfg(test)]
 #[path="board_skin_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="board_skin_cubic_tests.rs"]
+mod cubic_tests;

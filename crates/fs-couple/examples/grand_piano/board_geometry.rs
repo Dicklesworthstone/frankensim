@@ -313,6 +313,13 @@ impl BoardGeometry {
     ) -> Result<PreparedBoard, String> {
         self.prepare_inner(keys, upper_hz, true, mass_equilibrated, true, false)
     }
+    /// Retain the matching cubic displacement and analytic physical rotations
+    /// from the SAME eigenvectors used by cubic panel inertia and bridge ports.
+    pub fn prepare_with_motion_edge_cubic_transverse_mass(
+        &self, keys: &[u8], upper_hz: f64, mass_equilibrated: bool,
+    ) -> Result<PreparedBoard, String> {
+        self.prepare_inner(keys, upper_hz, true, mass_equilibrated, false, true)
+    }
     fn prepare_inner(
         &self,
         keys: &[u8],
@@ -460,7 +467,11 @@ impl BoardGeometry {
                 // DKT coordinates are slopes, NOT physical axial rotations.
                 [0.,0.,at(0),at(2),-at(1),0.]
             }).collect()).collect();
-            Some(motion::MotionSurface::new(geometry,shapes)?)
+            Some(if edge_cubic_transverse_mass {
+                motion::MotionSurface::new_edge_cubic(geometry,shapes)?
+            } else {
+                motion::MotionSurface::new(geometry,shapes)?
+            })
         } else {None};
         let mass = self.mass_kg();
         if !mass.is_finite() || mass <= 0.0 { return Err("board mass overflow".into()); }
@@ -642,14 +653,15 @@ mod tests {
                 let volume: f64 = b.surface.iter().map(|s| s.area_m2 * s.mode_shape[i]).sum();
                 assert!((volume - mode.volume).abs() < 1e-12);
             }
-            if panel < 2 {
-                let full = if panel == 0 { exact.prepare_with_motion_mass_equilibrated(&[69], 300.0) }
-                    else { exact.prepare_with_motion_consistent_transverse_mass(&[69], 300.0, true) }.unwrap();
-                assert_eq!(b.frequency_intervals_hz, full.frequency_intervals_hz);
-                assert!(full.motion.is_some());
-                for (x, y) in b.modes.iter().zip(&full.modes) {
-                    assert_eq!(x.bridge, y.bridge); assert_eq!(x.volume, y.volume);
-                }
+            let full = match panel {
+                0 => exact.prepare_with_motion_mass_equilibrated(&[69], 300.0),
+                1 => exact.prepare_with_motion_consistent_transverse_mass(&[69], 300.0, true),
+                _ => exact.prepare_with_motion_edge_cubic_transverse_mass(&[69], 300.0, true),
+            }.unwrap();
+            assert_eq!(b.frequency_intervals_hz, full.frequency_intervals_hz);
+            assert_eq!(full.motion.as_ref().unwrap().is_edge_cubic(), panel == 2);
+            for (x, y) in b.modes.iter().zip(&full.modes) {
+                assert_eq!(x.bridge, y.bridge); assert_eq!(x.volume, y.volume);
             }
         }
         for rows in ["stiffener-mass,unknown\n", "stiffener-mass\n",
@@ -758,6 +770,34 @@ mod tests {
         for point in &full.surface {
             let row=motion.normal_weights(point.position_m,[0.,0.,1.],0.).unwrap();
             for (a,b) in row.iter().zip(&point.mode_shape) {assert!((a-b).abs()<1e-11);}
+        }
+    }
+
+    #[test]
+    fn retained_cubic_motion_matches_its_bridge_and_surface_in_the_same_eigensolve() {
+        let g=BoardGeometry::read(&fixture()).unwrap();
+        let site=&g.bridge_sites[0];
+        for equilibrated in [false,true] {
+            let ordinary=g.prepare_edge_cubic_transverse_mass(&[69],300.,equilibrated).unwrap();
+            let full=g.prepare_with_motion_edge_cubic_transverse_mass(&[69],300.,equilibrated).unwrap();
+            let motion=full.motion.as_ref().unwrap();
+            assert!(motion.is_edge_cubic());assert!(ordinary.motion.is_none());
+            assert_eq!(ordinary.frequency_intervals_hz,full.frequency_intervals_hz);
+            let (primary,scale)=motion.project_at(site.triangle,site.weights,[0.;3],[0.,0.,1.]).unwrap();
+            for (i,(a,b)) in ordinary.modes.iter().zip(&full.modes).enumerate() {
+                assert_eq!(a.bridge,b.bridge);assert_eq!(a.volume,b.volume);
+                assert!((primary[i]-b.bridge[usize::from(site.midi-21)]).abs()
+                    <=1e-12*scale[i].max(f64::MIN_POSITIVE));
+            }
+            for point in &full.surface {
+                let row=motion.normal_weights(point.position_m,[0.,0.,1.],0.).unwrap();
+                for (a,b) in row.iter().zip(&point.mode_shape) {assert!((a-b).abs()<1e-11);}
+            }
+            let linear=motion::MotionSurface::new(motion.mesh.clone(),motion.shapes.clone()).unwrap();
+            let (a,_)=motion.project_at(site.triangle,site.weights,[0.,0.,0.009],[1.,0.,0.]).unwrap();
+            let (b,_)=linear.project_at(site.triangle,site.weights,[0.,0.,0.009],[1.,0.,0.]).unwrap();
+            assert!(a.iter().zip(b).any(|(a,b)|(a-b).abs()>1e-10),
+                "cubic interior rotations must not fall back to interpolated nodal rotations");
         }
     }
 

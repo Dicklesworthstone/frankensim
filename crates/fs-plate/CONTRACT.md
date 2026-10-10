@@ -286,9 +286,19 @@ measured piano bridge-mobility or high-band convergence claim.
   translational stiffener inertia. `edge_cubic_transverse_shape` evaluates that same field at a supplied
   barycentric point; `edge_cubic_transverse_mean_shape` gives its exact area
   mean. They allow reciprocal point effort/motion and exact volume projection
-  without silently returning to P1 after assembly. For this chosen interior
+  without silently returning to P1 after assembly.
+  `edge_cubic_transverse_gradient_shape` differentiates that same field
+  analytically in physical x/y coordinates. Flat-plate consumers recover
+  physical axial rotations as `(w_y,-w_x,0)` and attachment motion as
+  `u + theta x arm`; this does not change the DKT stiffness or claim a globally
+  C1 field across facets. The field, derivatives and exact mass integral share
+  the same Bernstein owner. Analytic tests cover quadratic fields on oblique
+  triangles, vertex/edge limits and a nonquadratic cubic interior.
+  For this chosen interior
   control, the positive three-point triangle rule samples exactly that area
-  mean, although it is not a general cubic integration rule. Neither option
+  mean, although it is not a general cubic integration rule. Cropped panels
+  or a quadratic rotation times a varying attachment arm require degree-three
+  quadrature within each source facet. Neither option
   alone certifies Model D high-band bridge convergence.
 - Uniform isotropic pre-tension only (scalar T); tensor/nonuniform
   prestress fields join the soundboard-downbearing consumer.

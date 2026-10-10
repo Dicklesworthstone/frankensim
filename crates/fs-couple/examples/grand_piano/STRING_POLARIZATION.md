@@ -85,10 +85,16 @@ coupling to make the result audible. A crowned shell additionally supplies
 in-plane nodal translation.
 
 Flat P1 motion supports the original inertia, mass equilibration and consistent
-P1 transverse inertia choices. The edge-cubic field is rejected because its
-current full-vector motion export is P1, so it cannot provide the same physical
-field at an arbitrary bridge site. Rayleigh acoustic refinement does not change
-the structural interpolation sites or modes.
+P1 transverse inertia choices. `--edge-cubic-board-mass` instead retains the
+existing cubic displacement and its analytic physical rotations
+`[dw/dy,-dw/dx,0]`. Bridge frames and acoustic skins evaluate that same field;
+they do not interpolate the cubic solution with P1 motion. The primary bridge
+compatibility check still applies at every mode, including interior sites.
+Both flat choices are available in `piano_exterior` response, admittance,
+render and render-loaded. Crowned shells retain their existing full-vector
+field and refuse flat-board mass selections. Rayleigh acoustic refinement
+does not change the structural interpolation sites or modes and currently
+requires P1 motion.
 
 ## Played behavior and limits
 
