@@ -75,6 +75,19 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   the P1 geometric stiffness on w, and `Stiffener` Hermite beams: bending
   with the parallel-axis effective rigidity `EI + EAe²` on (w, slope-along),
   torsion GJ on the cross-slope, lumped translational beam mass.
+- `PlateChart::assemble_with_mass(stiffeners, opts, transverse_mass, stiffener_mass)`
+  selects the existing `TransverseMass::{Lumped, Linear, EdgeCubic}` panel law
+  independently of `StiffenerMass::{Lumped, ConsistentHermite}`. The latter
+  exactly integrates `rho*A*N(s)^T*N(s)` for the same cubic Hermite transverse
+  displacement used by beam bending. Its coordinates `(w1, dw/ds1, w2, dw/ds2)`
+  map through the existing beam tangent into plate `(w, wx, wy)` DOFs, including
+  support elimination. It replaces endpoint lumping; it never adds a second
+  copy of beam mass. Geometry, total physical mass, beam stiffness and all
+  existing assembly methods remain unchanged. Zero density admits an explicitly
+  massless brace; negative/nonfinite density and overflowing consistent inertia
+  refuse. This is translational Euler–Bernoulli inertia only: no eccentric
+  axial motion, rotary inertia, cross-slope torsional inertia or shear deformation
+  is inferred. The existing parallel-axis rigidity remains `EI + EAe²`.
 - `modes(model, window, opts)` — thin front over `fs_modal::slice_window`:
   every frequency arrives as a certified eigenvalue interval and the
   in-window count is inertia-certified.
@@ -232,6 +245,13 @@ the global quadratic energy and translational/rotary mass match independent
 piecewise continuum integrals. G3 requires bit-identical pencils when a uniform
 section is repartitioned into equal element sections. G0 rejects wrong counts,
 nonphysical D/mass inputs, stale topology and invalid connectivity.
+Consistent Hermite beam tests compare every cubic polynomial velocity product
+to its independent continuum integral, preserve rigid-translation mass and
+subdivided-beam kinetic energy, and reverse segment direction. An assembled
+oblique-beam test checks tangential versus cross-slope mapping, rigid tilt,
+cubic bending, support elimination and unchanged stiffness/default pencils
+with all three panel inertia choices. These are discretization checks, not a
+measured piano bridge-mobility or high-band convergence claim.
 
 ## No-claim boundaries
 - Bending only: NO membrane/in-plane DOFs, so no drilling stabilization is
@@ -256,13 +276,14 @@ nonphysical D/mass inputs, stale topology and invalid connectivity.
   `PlateChart::assemble_consistent_transverse_mass` option uses the exact P1
   triangle integral for transverse panel inertia while retaining lumped
   slope and stiffener inertia. It preserves total rigid-translation mass;
-  consistent DKT rotary-field and beam inertia remain follow-ups. A second
+  consistent DKT rotary-field and beam rotary inertia remain follow-ups. A second
   opt-in, `PlateChart::assemble_edge_cubic_transverse_mass`, integrates a
   cubic Bernstein deflection field whose edges reproduce nodal Hermite values
   and tangential slopes. Its symmetric interior control reproduces quadratic
   fields but is an explicit reconstruction, since DKT does not specify an
   interior deflection field. The existing rotary and stiffener inertia laws
-  remain. `edge_cubic_transverse_shape` evaluates that same field at a supplied
+  remain unless `assemble_with_mass` explicitly selects consistent Hermite
+  translational stiffener inertia. `edge_cubic_transverse_shape` evaluates that same field at a supplied
   barycentric point; `edge_cubic_transverse_mean_shape` gives its exact area
   mean. They allow reciprocal point effort/motion and exact volume projection
   without silently returning to P1 after assembly. For this chosen interior

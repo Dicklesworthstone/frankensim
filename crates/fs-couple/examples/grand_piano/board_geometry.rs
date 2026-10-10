@@ -18,7 +18,7 @@ use super::linear::{BoardMode, MAX_BOARD_MODES};
 use fs_math::det;
 use fs_plate::{
     AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateModel,
-    PlateSection, SliceOptions, Stiffener,
+    PlateSection, SliceOptions, Stiffener, StiffenerMass, TransverseMass,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::TAU;
@@ -45,6 +45,7 @@ pub struct BoardGeometry {
     provenance: String,
     chart: PlateChart,
     stiffeners: Vec<Stiffener>,
+    stiffener_mass: StiffenerMass,
     supports: AssemblyOptions,
     bridge_sites: Vec<BridgeSite>,
     /// Authored or measured modal damping ratio, not a fitted geometry result.
@@ -102,6 +103,7 @@ impl BoardGeometry {
     /// - support,clamped|simply_supported
     /// - fixed,node (explicit supports; no inferred rim constraint)
     /// - stiffener,E_Pa,G_Pa,A_m2,I_m4,J_m4,eccentricity_m,rho_kg_m3,node0,node1,...
+    /// - stiffener-mass,lumped|consistent-hermite (optional; default lumped)
     /// - bridge,midi,triangle_id,bary0,bary1,bary2
     /// - damping,dimensionless_ratio
     /// - pretension,N_per_m (uniform nonnegative membrane tension, NOT crown)
@@ -114,6 +116,7 @@ impl BoardGeometry {
         let mut triangles = Vec::new();
         let mut sections = Vec::new();
         let mut stiffeners = Vec::new();
+        let mut stiffener_mass = None;
         let mut sites = Vec::new();
         let mut fixed = BTreeSet::new();
         let mut keys = BTreeSet::new();
@@ -178,6 +181,14 @@ impl BoardGeometry {
                         }
                         stiffeners.push(s);
                     }
+                    ("stiffener-mass", 2) => {
+                        let value = match f[1] {
+                            "lumped" => StiffenerMass::Lumped,
+                            "consistent-hermite" => StiffenerMass::ConsistentHermite,
+                            _ => return Err("stiffener-mass must be lumped or consistent-hermite".into()),
+                        };
+                        once(&mut stiffener_mass, value, "stiffener-mass")?;
+                    }
                     ("bridge", 6) => {
                         let key = index(&f, 1)?;
                         if !(21..=108).contains(&key) || !keys.insert(key) {
@@ -231,6 +242,7 @@ impl BoardGeometry {
         }
         Ok(Self {
             provenance: source.ok_or("missing source authority/attribution")?, chart, stiffeners,
+            stiffener_mass: stiffener_mass.unwrap_or_default(),
             supports: AssemblyOptions {
                 support: support.ok_or("missing support type")?,
                 pretension: pretension.ok_or("missing explicit pretension (use zero for none)")?,
@@ -265,8 +277,8 @@ impl BoardGeometry {
     pub fn prepare_mass_equilibrated(&self, keys: &[u8], upper_hz: f64) -> Result<PreparedBoard, String> {
         self.prepare_inner(keys, upper_hz, false, true, false, false)
     }
-    /// Use exact P1 transverse panel inertia; slope and beam inertia remain
-    /// lumped. This is an opt-in structural discretization trial.
+    /// Use exact P1 transverse panel inertia; slope inertia remains lumped.
+    /// Beam inertia follows the independently supplied stiffener-mass row.
     pub fn prepare_consistent_transverse_mass(
         &self,
         keys: &[u8],
@@ -293,6 +305,13 @@ impl BoardGeometry {
     /// geometric board pencil in mass-equilibrated coordinates.
     pub fn prepare_with_motion_mass_equilibrated(&self, keys: &[u8], upper_hz: f64) -> Result<PreparedBoard, String> {
         self.prepare_inner(keys, upper_hz, true, true, false, false)
+    }
+    /// Retain the same full-vector nodal motion with exact P1 panel inertia.
+    /// The bridge, surface and motion projections share one eigensolve.
+    pub fn prepare_with_motion_consistent_transverse_mass(
+        &self, keys: &[u8], upper_hz: f64, mass_equilibrated: bool,
+    ) -> Result<PreparedBoard, String> {
+        self.prepare_inner(keys, upper_hz, true, mass_equilibrated, true, false)
     }
     fn prepare_inner(
         &self,
@@ -322,16 +341,16 @@ impl BoardGeometry {
             }
         }
         if keys.is_empty() { return Err("empty key set".into()); }
-        let model = if edge_cubic_transverse_mass {
-            self.chart
-                .assemble_edge_cubic_transverse_mass(&self.stiffeners, &self.supports)
+        let transverse_mass = if edge_cubic_transverse_mass {
+            TransverseMass::EdgeCubic
         } else if consistent_transverse_mass {
-            self.chart
-                .assemble_consistent_transverse_mass(&self.stiffeners, &self.supports)
+            TransverseMass::Linear
         } else {
-            self.chart.assemble(&self.stiffeners, &self.supports)
-        }
-        .map_err(|e| e.to_string())?;
+            TransverseMass::Lumped
+        };
+        let model = self.chart.assemble_with_mass(
+            &self.stiffeners, &self.supports, transverse_mass, self.stiffener_mass,
+        ).map_err(|e| e.to_string())?;
         if model.free == 0 { return Err("all soundboard degrees of freedom are constrained".into()); }
         let modal_options = SliceOptions {
             mass_diagonal_equilibration: mass_equilibrated,
@@ -447,10 +466,21 @@ impl BoardGeometry {
         if !mass.is_finite() || mass <= 0.0 { return Err("board mass overflow".into()); }
         let mut provenance = self.provenance.clone();
         if consistent_transverse_mass {
-            provenance.push_str("; exact P1 transverse panel mass; lumped slope/beam mass");
+            if self.stiffener_mass == StiffenerMass::Lumped {
+                provenance.push_str("; exact P1 transverse panel mass; lumped slope/beam mass");
+            } else {
+                provenance.push_str("; exact P1 transverse panel mass; lumped slope inertia");
+            }
         }
         if edge_cubic_transverse_mass {
-            provenance.push_str("; opt-in cubic edge-compatible panel mass and bridge/surface fields; lumped rotary/beam inertia");
+            if self.stiffener_mass == StiffenerMass::Lumped {
+                provenance.push_str("; opt-in cubic edge-compatible panel mass and bridge/surface fields; lumped rotary/beam inertia");
+            } else {
+                provenance.push_str("; opt-in cubic edge-compatible panel mass and bridge/surface fields; lumped rotary inertia");
+            }
+        }
+        if self.stiffener_mass == StiffenerMass::ConsistentHermite {
+            provenance.push_str("; exact consistent Hermite translational stiffener mass; no added beam rotary inertia");
         }
         if mass_equilibrated {
             provenance.push_str("; mass-diagonal solver equilibration");
@@ -587,6 +617,45 @@ mod tests {
         assert!((g.mass_kg() - panel - 500.0 * 0.0003 * 0.7).abs() < 1e-12);
         assert!(BoardGeometry::read(&format!("{text}{rib}{rib}")).is_err());
         assert!(BoardGeometry::read(&format!("{text}{}", rib.replace(",500,", ",-500,"))).is_err());
+    }
+
+    #[test]
+    fn consistent_hermite_stiffener_mass_reaches_all_flat_preparation_paths() {
+        let text = format!("{}stiffener,10000000000,600000000,0.0003,0.00000001,0.00000002,0.01,500,4,5,6,7\n", fixture());
+        let base = BoardGeometry::read(&text).unwrap();
+        let explicit_lumped = BoardGeometry::read(&format!("{text}stiffener-mass,lumped\n")).unwrap();
+        let exact = BoardGeometry::read(&format!("{text}stiffener-mass,consistent-hermite\n")).unwrap();
+        for panel in 0..3 {
+            let prepare = |geometry: &BoardGeometry| match panel {
+                0 => geometry.prepare_mass_equilibrated(&[69], 300.0),
+                1 => geometry.prepare_consistent_transverse_mass(&[69], 300.0, true),
+                _ => geometry.prepare_edge_cubic_transverse_mass(&[69], 300.0, true),
+            }.unwrap();
+            let a = prepare(&base); let unchanged = prepare(&explicit_lumped); let b = prepare(&exact);
+            assert_eq!(a.frequency_intervals_hz, unchanged.frequency_intervals_hz);
+            assert_eq!(a.provenance, unchanged.provenance);
+            assert_eq!(a.mass_kg, b.mass_kg); assert_eq!(a.area_m2, b.area_m2);
+            assert_eq!(a.free_dofs, b.free_dofs);
+            assert_ne!(a.modes[0].frequency_hz, b.modes[0].frequency_hz);
+            assert!(b.provenance.contains("consistent Hermite translational stiffener mass"));
+            for (i, mode) in b.modes.iter().enumerate() {
+                let volume: f64 = b.surface.iter().map(|s| s.area_m2 * s.mode_shape[i]).sum();
+                assert!((volume - mode.volume).abs() < 1e-12);
+            }
+            if panel < 2 {
+                let full = if panel == 0 { exact.prepare_with_motion_mass_equilibrated(&[69], 300.0) }
+                    else { exact.prepare_with_motion_consistent_transverse_mass(&[69], 300.0, true) }.unwrap();
+                assert_eq!(b.frequency_intervals_hz, full.frequency_intervals_hz);
+                assert!(full.motion.is_some());
+                for (x, y) in b.modes.iter().zip(&full.modes) {
+                    assert_eq!(x.bridge, y.bridge); assert_eq!(x.volume, y.volume);
+                }
+            }
+        }
+        for rows in ["stiffener-mass,unknown\n", "stiffener-mass\n",
+            "stiffener-mass,lumped,extra\n", "stiffener-mass,lumped\nstiffener-mass,consistent-hermite\n"] {
+            assert!(BoardGeometry::read(&format!("{text}{rows}")).is_err());
+        }
     }
 
     #[test]

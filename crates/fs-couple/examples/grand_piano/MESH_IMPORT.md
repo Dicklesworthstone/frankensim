@@ -107,6 +107,47 @@ inputs, duplicate controls and over-budget inputs also refuse. Native plate
 admission runs before writing an FSB. It checks local incidence and plate
 quality, **not general triangle intersections or specimen accuracy**.
 
+### Consistent rib and bridge inertia
+
+Add this optional row to a **flat** FSB or its OBJ import sidecar to integrate
+the mass of the bending ribs and bridges along their cubic Hermite displacement:
+
+```text
+stiffener-mass,consistent-hermite
+```
+
+Without this row, or with `stiffener-mass,lumped`, the original endpoint mass
+law is retained. The consistent option uses each existing beam's density,
+cross-section area and length. It replaces the two endpoint masses with the
+exact integral of the beam's transverse velocity field, including its nodal
+tangential slopes. Total physical beam mass is unchanged; no material parameter,
+mode capacity or structural geometry is changed. This gives rib and bridge
+bending inertia the same interpolation as their existing bending stiffness.
+
+The row survives native FSB → OBJ/sidecar → FSB round trips and reaches ordinary
+rendering, modal export, full-vector motion preparation and exterior harmonic
+solves through the same board assembler. For example, after adding it to an
+exported `model-d.fsb`:
+
+```sh
+cargo run --release -p fs-couple --example grand_piano -- \
+  --preset steinway-d --board-geometry model-d.fsb \
+  --equilibrate-board-mass --edge-cubic-board-mass \
+  --board-band-hz 1200 --note 84 --duration 2 --render c6-hermite.wav
+```
+
+Panel inertia is selected independently: the usual lumped panel, exact P1
+`--consistent-board-mass`, and `--edge-cubic-board-mass` each compose with this
+beam option. Complete modal slices still must fit the unchanged 128-mode limit.
+The example keeps the existing 1.2 kHz band; higher bands require their own
+mesh and bridge-response convergence checks.
+
+This option supplies **translational** Euler–Bernoulli inertia. It does not add
+axial, eccentric rotary or torsional beam inertia; the existing offset stiffness
+`EI + EAe²` is unchanged. Crowned shells have their own six-DOF beam model and
+refuse this flat-board row, including during crown import. The numerical option
+does not establish measured Model D mobility or improve a recording by itself.
+
 ## External Steinway asset research (checked 2026-09-22)
 
 - **seavenois, Steinway D274**, BlendSwap 7279, page-declared CC0, Blender 2.6x,

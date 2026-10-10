@@ -72,7 +72,7 @@ impl Spec {
             let f: Vec<_> = row.split(',').map(str::trim).collect();
             if f.len() > MAX_NODES + 8 { return Err(format!("line {line}: too many fields")); }
             let parsed = (|| -> Result<(), String> {
-                if ["source","part","units","frame","flatness","support","damping","pretension","boundary"]
+                if ["source","part","units","frame","flatness","support","damping","pretension","boundary","stiffener-mass"]
                     .contains(&f[0]) && !seen.insert(f[0].to_owned()) {
                     return Err(format!("duplicate {} row", f[0]));
                 }
@@ -119,7 +119,7 @@ impl Spec {
                         let vertices = f[8..].iter().map(|v| index(v)).collect::<Result<Vec<_>,_>>()?;
                         s.stiffeners.push((values, vertices));
                     }
-                    ("support" | "damping" | "pretension", 2) => s.controls.push(f.join(",")),
+                    ("support" | "damping" | "pretension" | "stiffener-mass", 2) => s.controls.push(f.join(",")),
                     _ => return Err(format!("unknown row or wrong field count: {}", f[0])),
                 }
                 Ok(())
@@ -283,7 +283,7 @@ pub fn export(text:&str) -> Result<(String,String),String> {
     for (values,id) in materials { writeln!(spec,"material,section_{id},{values}").unwrap(); }
     for f in &rows {
         match f[0] {
-            "source" | "support" | "damping" | "pretension" => { writeln!(spec,"{}",f.join(",")).unwrap(); }
+            "source" | "support" | "damping" | "pretension" | "stiffener-mass" => { writeln!(spec,"{}",f.join(",")).unwrap(); }
             "fixed" => { writeln!(spec,"fixed,{}",f[1].parse::<usize>().map_err(|_|"invalid support")?+1).unwrap(); }
             "stiffener" => {
                 spec.push_str(&f[..8].join(","));
@@ -311,6 +311,19 @@ mod tests {
     use super::*;
     const OBJ:&str="o decoration\nv 90 90 90\no soundboard\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0.5 0.5 0\nusemtl spruce\nf 2 3 6\nf 3 4 6\nf 4 5 6\nf 5 2 6\n";
     const SPEC:&str="frankensim-obj-board-v1\nsource,estimated,synthetic material/mesh regression\npart,soundboard\nunits,1\nframe,0,0,0,1,0,0,0,1,0\nflatness,1e-8\nmaterial,spruce,0.008,450,1e10,8e8,0.3,6e8,0.2\nsupport,simply_supported\nboundary,all\ndamping,0.01\npretension,0\nbridge,69,0.5,0.5\n";
+    #[test]
+    fn consistent_hermite_stiffener_mass_survives_native_obj_round_trip() {
+        let spec = format!("{SPEC}stiffener-mass,consistent-hermite\nstiffener,1e10,6e8,0.0003,1e-8,2e-8,0.01,500,2,6\n");
+        let first = import(OBJ, &spec).unwrap();
+        let (obj, exported) = export(&first.fsb).unwrap();
+        let second = import(&obj, &exported).unwrap();
+        for text in [&first.fsb, &exported, &second.fsb] {
+            assert_eq!(text.lines().filter(|row| *row == "stiffener-mass,consistent-hermite").count(), 1);
+        }
+        assert!(import(OBJ, &format!("{spec}stiffener-mass,lumped\n")).is_err());
+        assert!(import(OBJ, &spec.replace("consistent-hermite", "unknown")).is_err());
+    }
+
     #[test]
     fn selected_material_mesh_reaches_the_real_modal_solver() {
         let imported = import(OBJ,SPEC).unwrap();

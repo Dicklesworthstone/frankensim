@@ -112,6 +112,7 @@ impl CrownedBoard {
                     if row!=SHAPE || shape {return Err("declare rectangular beam sections exactly once".into());}
                     shape=true;
                 }
+                "stiffener-mass" => return Err("stiffener-mass selects flat plate beam inertia; crowned shells use their own six-DOF beam mass law".into()),
                 "bridge_arm" => {
                     if f.len()!=5 {return Err("bridge_arm needs key,dx,dy,dz in metres".into());}
                     let key:u8=f[1].parse().map_err(|_|"invalid bridge arm key")?;
@@ -319,6 +320,14 @@ mod tests {
         assert_eq!(b.sections.len(),b.mesh.tris.len());
         assert!(b.beams.iter().any(|b|b.offsets_m[0][2]<0.));
         assert!(b.beams.iter().any(|b|b.offsets_m[0][2]>0.));
+    }
+    #[test]
+    fn consistent_hermite_flat_inertia_cannot_be_silently_dropped_by_crown_import() {
+        let good=fixture(0.01);
+        for law in ["lumped", "consistent-hermite"] {
+            let error=CrownedBoard::read(&format!("{good}stiffener-mass,{law}\n")).err().unwrap();
+            assert!(error.contains("six-DOF beam mass law"));
+        }
     }
     #[test]
     fn unsupported_crown_preload_and_missing_data_refuse() {

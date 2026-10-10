@@ -27,7 +27,9 @@
 //! Mass is lumped by default (translational `ρhA/3` per node, rotary
 //! `ρh³/12·A/3` on slope DOFs). An opt-in exact P1 transverse mass integral
 //! retains lumped slope and beam inertia. Both are SPD, as the fs-modal
-//! pencil contract requires. Full DKT rotary-field consistency is open. Membrane
+//! pencil contract requires. Independent consistent Hermite stiffener mass
+//! integrates the existing cubic beam displacement exactly. Full DKT rotary-field
+//! consistency and beam rotary inertia are open. Membrane
 //! prestress enters as the standard P1 geometric stiffness `K_G = T·∫∇w·∇w`
 //! (drumheads are the K_G-dominated, D→0 limit — tested against continuum
 //! membrane frequencies). Stiffeners are 2-node Hermite beams on plate node
@@ -40,6 +42,8 @@
 
 pub mod loading;
 pub mod shell;
+mod stiffener_mass;
+pub use stiffener_mass::StiffenerMass;
 pub use shell::{
     ShellMesh, ShellModel, ShellSupport, assemble_shell, canonical_church_bell_profile,
     generate_bell_shell, generate_cylinder_shell, modes_shell,
@@ -715,6 +719,7 @@ impl PlateChart {
             stiffeners,
             opts,
             TransverseMass::Linear,
+            StiffenerMass::Lumped,
         )
     }
 
@@ -738,6 +743,32 @@ impl PlateChart {
             stiffeners,
             opts,
             TransverseMass::EdgeCubic,
+            StiffenerMass::Lumped,
+        )
+    }
+
+    /// Assemble the existing plate and beam stiffness with explicit, independent
+    /// panel and stiffener translational mass integrals. Rotary panel inertia
+    /// remains lumped; no rotary or eccentric axial beam inertia is inferred.
+    /// Existing assembly methods retain their original lumped beam law.
+    ///
+    /// # Errors
+    /// Returns [`PlateError`] for invalid geometry, sections or beam inertia.
+    pub fn assemble_with_mass(
+        &self,
+        stiffeners: &[Stiffener],
+        opts: &AssemblyOptions,
+        transverse_mass: TransverseMass,
+        stiffener_mass: StiffenerMass,
+    ) -> Result<PlateModel, PlateError> {
+        assemble_with_sections_inner(
+            &self.mesh,
+            self.section_field(),
+            &self.boundary_nodes,
+            stiffeners,
+            opts,
+            transverse_mass,
+            stiffener_mass,
         )
     }
 }
@@ -999,7 +1030,7 @@ pub struct Stiffener {
     /// Eccentricity of the beam centroid from the plate midplane [m]
     /// (parallel-axis: effective `EI + EAe²`).
     pub eccentricity: f64,
-    /// Density [kg/m³] (lumped translational mass contribution).
+    /// Density [kg/m³] (translational beam mass, lumped by default).
     pub density: f64,
 }
 
@@ -1110,13 +1141,19 @@ pub fn assemble_with_sections(
         stiffeners,
         opts,
         TransverseMass::Lumped,
+        StiffenerMass::Lumped,
     )
 }
 
-#[derive(Clone, Copy)]
-enum TransverseMass {
+/// Translational panel inertia field; rotary slope inertia remains lumped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TransverseMass {
+    /// Original nodal lumping, `rho*h*area/3` per vertex.
+    #[default]
     Lumped,
+    /// Exact integral of the linear barycentric displacement field.
     Linear,
+    /// Exact integral of the quadratic-complete cubic edge reconstruction.
     EdgeCubic,
 }
 
@@ -1228,6 +1265,7 @@ fn assemble_with_sections_inner(
     stiffeners: &[Stiffener],
     opts: &AssemblyOptions,
     transverse_mass: TransverseMass,
+    stiffener_mass: StiffenerMass,
 ) -> Result<PlateModel, PlateError> {
     mesh.validate()?;
     sections.validate(mesh.tris.len())?;
@@ -1355,7 +1393,7 @@ fn assemble_with_sections_inner(
     }
 
     // Stiffeners: Hermite bending on (w, slope-along) with EI + EAe²,
-    // torsion GJ on the cross-slope, lumped translational mass.
+    // torsion GJ on the cross-slope, selectable translational mass.
     for st in stiffeners {
         if st.nodes.len() < 2 {
             return Err(PlateError::BadStiffener {
@@ -1400,12 +1438,29 @@ fn assemble_with_sections_inner(
                 vec![(3 * n2, 1.0)],
                 vec![(3 * n2 + 1, tx), (3 * n2 + 2, ty)],
             ];
+            let consistent_mass = if matches!(stiffener_mass, StiffenerMass::ConsistentHermite) {
+                if !st.density.is_finite() || st.density < 0.0 {
+                    return Err(PlateError::BadStiffener {
+                        what: "consistent Hermite beam density must be finite and nonnegative",
+                    });
+                }
+                Some(stiffener_mass::hermite_mass(l, st.density * st.area).ok_or(
+                    PlateError::BadStiffener {
+                        what: "consistent Hermite beam mass must be finite and nonnegative",
+                    },
+                )?)
+            } else {
+                None
+            };
             for r in 0..4 {
                 for c in 0..4 {
                     let v = coef * kb[r][c];
                     for &(gr, wr) in &maps[r] {
                         for &(gc, wc) in &maps[c] {
                             push_sym(&mut kc, gr, gc, v * wr * wc);
+                            if let Some(mass) = &consistent_mass {
+                                push_sym(&mut mc, gr, gc, mass[r][c] * wr * wc);
+                            }
                         }
                     }
                 }
@@ -1426,10 +1481,13 @@ fn assemble_with_sections_inner(
                     }
                 }
             }
-            // Lumped translational beam mass.
-            let mb = st.density * st.area * l / 2.0;
-            push_sym(&mut mc, 3 * n1, 3 * n1, mb);
-            push_sym(&mut mc, 3 * n2, 3 * n2, mb);
+            // Replace, never supplement, endpoint lumping with the consistent
+            // integral. Both representations contain exactly rho*A*l mass.
+            if matches!(stiffener_mass, StiffenerMass::Lumped) {
+                let mb = st.density * st.area * l / 2.0;
+                push_sym(&mut mc, 3 * n1, 3 * n1, mb);
+                push_sym(&mut mc, 3 * n2, 3 * n2, mb);
+            }
         }
     }
 
@@ -1558,6 +1616,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn consistent_hermite_mass_maps_oblique_beams_without_changing_stiffness() {
+        let mesh = PlateMesh::from_unstructured(
+            vec![(0.2, -0.1), (1.4, 0.8), (0.0, 1.2)], vec![[0, 1, 2]],
+        ).unwrap();
+        let chart = PlateChart::with_boundary_and_regions(mesh, steel_section(), vec![], vec![]).unwrap();
+        let opts = AssemblyOptions { support: EdgeSupport::Clamped, pretension: 0.0 };
+        let beam = Stiffener { nodes: vec![0, 1], e: 12e9, g: 0.8e9,
+            area: 0.004, inertia: 2e-7, torsion: 3e-7, eccentricity: 0.03, density: 500.0 };
+        let length = 1.5_f64;
+        let (tx, ty) = (0.8, 0.6);
+        let energy = |m: &Csr, q: &[f64]| {
+            let mut mq = vec![0.0; q.len()];
+            m.spmv(q, &mut mq);
+            q.iter().zip(mq).map(|(a, b)| a * b).sum::<f64>()
+        };
+        for panel in [TransverseMass::Lumped, TransverseMass::Linear, TransverseMass::EdgeCubic] {
+            let bare = chart.assemble_with_mass(&[], &opts, panel, StiffenerMass::Lumped).unwrap();
+            let lumped = chart.assemble_with_mass(std::slice::from_ref(&beam), &opts,
+                panel, StiffenerMass::Lumped).unwrap();
+            let exact = chart.assemble_with_mass(std::slice::from_ref(&beam), &opts,
+                panel, StiffenerMass::ConsistentHermite).unwrap();
+            let legacy = match panel {
+                TransverseMass::Lumped => chart.assemble(std::slice::from_ref(&beam), &opts),
+                TransverseMass::Linear => chart.assemble_consistent_transverse_mass(std::slice::from_ref(&beam), &opts),
+                TransverseMass::EdgeCubic => chart.assemble_edge_cubic_transverse_mass(std::slice::from_ref(&beam), &opts),
+            }.unwrap();
+            for row in 0..exact.free {
+                assert_eq!(exact.k.row(row), lumped.k.row(row));
+                assert_eq!(legacy.k.row(row), lumped.k.row(row));
+                assert_eq!(legacy.m.row(row), lumped.m.row(row));
+            }
+            // Constant translation, rigid tilt, and a cubic bending velocity.
+            // Cross-slope motion is unrelated to this transverse beam inertia.
+            for p in [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.3, -0.4, 0.2, 0.1]] {
+                let integral: f64 = (0..4).flat_map(|i| (0..4).map(move |j|
+                    p[i] * p[j] * length.powi((i + j + 1) as i32) / (i + j + 1) as f64)).sum();
+                for cross_slope in [0.0, 0.7] {
+                    let mut q = vec![0.0; exact.free];
+                    for (node, s) in [(0, 0.0), (1, length)] {
+                        let w = p[0] + s * (p[1] + s * (p[2] + s * p[3]));
+                        let slope = p[1] + s * (2.0 * p[2] + 3.0 * s * p[3]);
+                        q[3 * node..3 * node + 3].copy_from_slice(&[
+                            w, tx * slope - ty * cross_slope, ty * slope + tx * cross_slope,
+                        ]);
+                    }
+                    let actual = energy(&exact.m, &q) - energy(&bare.m, &q);
+                    let expected = beam.density * beam.area * integral;
+                    assert!((actual - expected).abs() < 1e-12 * expected.abs().max(1.0));
+                }
+            }
+            let mut reversed = beam.clone();
+            reversed.nodes.reverse();
+            let reverse = chart.assemble_with_mass(&[reversed], &opts,
+                panel, StiffenerMass::ConsistentHermite).unwrap();
+            // Reversing a physical segment changes neither its mass nor its DOF map.
+            for row in 0..exact.free { assert_eq!(exact.m.row(row), reverse.m.row(row)); }
+        }
+        let supported = PlateChart::with_boundary_and_regions(
+            chart.mesh.clone(), chart.section, vec![0], vec![],
+        ).unwrap().assemble_with_mass(std::slice::from_ref(&beam), &opts,
+            TransverseMass::Lumped, StiffenerMass::ConsistentHermite).unwrap();
+        let full = chart.assemble_with_mass(std::slice::from_ref(&beam), &opts,
+            TransverseMass::Lumped, StiffenerMass::ConsistentHermite).unwrap();
+        for row in 0..supported.free { for col in 0..supported.free {
+            assert_eq!(supported.m.get(row, col), full.m.get(row + 3, col + 3));
+        } }
     }
 
     #[test]
