@@ -42,6 +42,8 @@ pub(super) struct Spec {
     pub schedule: Vec<SimpParams>,
     /// Whole initial-grid cells whose physical density cannot be optimized.
     pub regions: Vec<regions::RegionBox>,
+    /// Explicit numerical correction policy; absent declarations preserve legacy arithmetic.
+    pub solver: solver::Policy,
     /// A fixed-background minimum-volume problem; adaptive controls apply only
     /// to the compliance mode when this is absent.
     pub stress: Option<StressDesignOptions3>,
@@ -122,10 +124,25 @@ fn boundary(node: &Node) -> Result<FixedFace> {
     })
 }
 
+fn linear_solver(node: &Node) -> Result<solver::Policy> {
+    let values = fields(node, "linear-solver", &[
+        "type", "coarsest-level", "max-transfer-terms", "max-matrix-entries",
+        "max-galerkin-products", "max-diagonal-contributions",
+    ])?;
+    word(values[0], "multilevel")?;
+    Ok(solver::Policy::Multilevel {
+        coarsest_level: u32::try_from(count(values[1])?).map_err(|_| invalid("coarsest-level overflow"))?,
+        transfer_terms: count(values[2])?,
+        matrix_entries: count(values[3])?,
+        galerkin_products: count(values[4])?,
+        diagonal_contributions: count(values[5])?,
+    })
+}
+
 pub(super) fn parse(source: &str) -> Result<Spec> {
     let root = fs_ir::sexpr::parse(source).map_err(|e| invalid(e.to_string()))?;
     let items = super::super::list(&root, "3-D study")?;
-    if !(13..=14).contains(&items.len())
+    if !(13..=15).contains(&items.len())
         || !matches!(&items[0].kind, NodeKind::Symbol(s) if s == "fsim-sdf3-study")
         || !matches!(&items[1].kind, NodeKind::Keyword(s) if s == "version")
         || !matches!(items[2].kind, NodeKind::Int(1))
@@ -246,6 +263,22 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
             (scalar(opt[1])?, scalar(opt[2])?, scalar(opt[3])?, count(opt[4])?, scalar(opt[5])?,
                 scalar(opt[6])?, count(opt[7])?, schedule, None)
         };
+    let mut solver = solver::Policy::Legacy;
+    let mut region_node = None;
+    for node in &items[13..] {
+        let section = super::super::list(node, "optional 3-D study section")?;
+        match section.first().map(|n| &n.kind) {
+            Some(NodeKind::Symbol(name)) if name == "design-regions"
+                && region_node.is_none() && matches!(solver, solver::Policy::Legacy) => {
+                region_node = Some(node);
+            }
+            Some(NodeKind::Symbol(name)) if name == "linear-solver"
+                && matches!(solver, solver::Policy::Legacy) => {
+                solver = linear_solver(node)?;
+            }
+            _ => return Err(invalid("optional sections must be design-regions then linear-solver, without duplicates or unknown fields")),
+        }
+    }
     let canonical = fs_ir::sexpr::print(&root).map_err(|e| invalid(e.to_string()))?;
     let id = hash_domain("org.frankensim.cli.sdf3-study.v1", format!(
         "{}\n{}\n{canonical}", if stress_mode { STRESS3_DRIVER } else { SDF3_DRIVER },
@@ -262,11 +295,11 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         max_level: u32::try_from(count(physics[2])?).map_err(|_| invalid("maximum-level overflow"))?,
         leaves: count(physics[3])?, youngs: scalar(physics[4])?, poisson: scalar(physics[5])?,
         loads, surfaces, density, volume, radius, updates, move_limit, marking, max_marks,
-        schedule, regions: Vec::new(), stress,
+        schedule, regions: Vec::new(), solver, stress,
     };
     // Validate the physical frame and grid envelope before deriving any indices.
     spec.validate()?;
-    if let Some(node) = items.get(13) {
+    if let Some(node) = region_node {
         spec.regions = regions::parse(node, &spec)?;
     }
     Ok(spec)
@@ -290,12 +323,14 @@ impl Spec {
         {
             return Err(invalid("initial octree level must be 1..=2, maximum 5, at most 2048 leaves and 1..=8 marks"));
         }
+        self.solver.validate(self.level)?;
         // Admission envelope, not a measured or certified peak-RSS bound.
         let stress_memory = self.stress.map_or(0, |s| 1024usize.saturating_mul(s.stress.max_points));
         let admitted_memory = (64 * 1024 * 1024 + 256 * self.points + 65_536 * self.leaves)
-            .saturating_add(stress_memory);
+            .saturating_add(stress_memory)
+            .saturating_add(self.solver.memory_envelope(self.level));
         if admitted_memory > self.memory {
-            return Err(invalid("declared memory is too small for the requested geometry/field envelope"));
+            return Err(invalid("declared memory is too small for the requested geometry/field/solver envelope"));
         }
         geometry::validate(self)?;
         if !(1e-6..=1e15).contains(&self.youngs) || !(0.0..=1.0 / 3.0).contains(&self.poisson) {

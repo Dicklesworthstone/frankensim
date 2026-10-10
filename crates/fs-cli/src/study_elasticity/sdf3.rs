@@ -19,7 +19,7 @@ use fs_solver::op::two_level::{TwoLevelBudget, TwoLevelError};
 use fs_topopt::sdf3::CutDensityStudy3;
 use fs_topopt::sdf3::adaptive_continuation::{
     AdaptiveContinuationError3, AdaptiveContinuationOptions3, AdaptiveContinuationReport3,
-    controlled_adaptive_sdf3_continuation_observed,
+    controlled_adaptive_sdf3_continuation_with_coarse_levels_observed,
 };
 use fs_topopt::sdf3_goal::{
     GoalPreconditioner3, GoalReferenceLoad3, GoalRefinementError3, GoalRefinementOptions3,
@@ -41,6 +41,8 @@ mod geometry;
 use geometry::{FixedFace, PhysicalDomain};
 #[path = "sdf3/regions.rs"]
 mod regions;
+#[path = "sdf3/solver.rs"]
+mod solver;
 
 #[path = "sdf3/output.rs"]
 mod output;
@@ -123,10 +125,7 @@ fn refinement_budget(error: &AdaptiveContinuationError3) -> bool {
         AdaptiveContinuationError3::Background(
             OctreeError3::LeafBudget | OctreeError3::LevelBudget,
         ) => true,
-        AdaptiveContinuationError3::Goal(GoalRefinementError3::Preconditioner(
-            AdaptivePreconditionError3::Coarse(TwoLevelError::Budget(_)),
-        )) => true,
-        AdaptiveContinuationError3::Goal(error) => geometry_budget(error),
+        AdaptiveContinuationError3::Goal(error) => geometry_budget(error) || solver::setup_budget(error),
         _ => false,
     }
 }
@@ -185,9 +184,9 @@ fn compute_observed(
     let material = IsotropicElastic::new(spec.youngs, spec.poisson, 1.0)
         .map_err(|e| fail("cli-study-sdf3-material", e.to_string()))?;
     let geometry = Cell::new(QuadratureWork3::default());
-    let mut build = |tree: &Octree3,
-                     checkpoint: &mut dyn FnMut() -> ControlFlow<()>|
-     -> std::result::Result<AdaptiveSolveSpace3, GoalRefinementError3> {
+    let mut build_raw = |tree: &Octree3,
+                         checkpoint: &mut dyn FnMut() -> ControlFlow<()>|
+     -> std::result::Result<AdaptiveElasticity3, GoalRefinementError3> {
         let limits = QuadratureOptions3 {
             max_boxes: spec.boxes - prior.geometry.boxes - geometry.get().boxes,
             max_points: spec.points - prior.geometry.points - geometry.get().points,
@@ -212,16 +211,26 @@ fn compute_observed(
             points: add(old.points, spent.points)?,
             field_evaluations: add(old.field_evaluations, spent.field_evaluations)?,
         });
-        Ok(AdaptiveSolveSpace3::jacobi(result?, 100_000_000))
+        result.map_err(GoalRefinementError3::from)
     };
-    let operator = build(&tree, &mut || ControlFlow::Continue(()))
-        .map_err(|e| Failure {
-            code: "cli-study-sdf3-geometry",
-            exit: if gate.is_requested() { exit::CANCELLED }
-                else if geometry_budget(&e) || prior.wall_s + start.elapsed().as_secs_f64() >= spec.wall_s { exit::BUDGET }
-                else { exit::REFUSED },
-            message: format!("initial 3-D geometry could not complete: {e}; no displacement or optimized design is available"),
-        })?;
+    let setup_failure = |e: GoalRefinementError3| Failure {
+        code: "cli-study-sdf3-geometry",
+        exit: if gate.is_requested() { exit::CANCELLED }
+            else if geometry_budget(&e) || solver::setup_budget(&e)
+                || prior.wall_s + start.elapsed().as_secs_f64() >= spec.wall_s { exit::BUDGET }
+            else { exit::REFUSED },
+        message: format!("initial 3-D geometry/solver preparation could not complete: {e}; no displacement or optimized design is available"),
+    };
+    let corrections = solver::correction_spaces(spec, &mut build_raw, &mut || poll())
+        .map_err(&setup_failure)?;
+    let correction_refs: Vec<_> = corrections.iter().collect();
+    let mut build = |tree: &Octree3, checkpoint: &mut dyn FnMut() -> ControlFlow<()>| {
+        let operator = build_raw(tree, checkpoint)?;
+        spec.solver.wrap(operator, &correction_refs, || {
+            if poll().is_break() { ControlFlow::Break(()) } else { checkpoint() }
+        })
+    };
+    let operator = build(&tree, &mut || ControlFlow::Continue(())).map_err(setup_failure)?;
     let mut study = regions::bind(CutDensityStudy3::new(operator, spec.radius, spec.schedule[0]), spec)?;
     let raw = vec![spec.density; study.cells()];
     let mut checkpoint = |_| poll();
@@ -233,9 +242,10 @@ fn compute_observed(
         &mut checkpoint,
     );
     let mut completed_stages = 0;
-    let report = loading::with_laws(spec, |loads| controlled_adaptive_sdf3_continuation_observed(
+    let report = loading::with_laws(spec, |loads| controlled_adaptive_sdf3_continuation_with_coarse_levels_observed(
         &mut study,
         &mut tree,
+        &correction_refs,
         loads,
         &raw,
         &spec.schedule[..requested_stages],
@@ -248,13 +258,7 @@ fn compute_observed(
             },
             enrichment: GoalRefinementOptions3 {
                 max_load_cases: 4,
-                preconditioner: GoalPreconditioner3::TwoLevel {
-                    budget: TwoLevelBudget {
-                        max_fine_dofs: 50_000,
-                        ..Default::default()
-                    },
-                    max_diagonal_contributions: 100_000_000,
-                },
+                preconditioner: spec.solver.enrichment(),
                 ..Default::default()
             },
             marking_fraction: spec.marking,
