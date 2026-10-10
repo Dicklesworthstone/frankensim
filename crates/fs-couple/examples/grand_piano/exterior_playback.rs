@@ -126,20 +126,26 @@ impl Options {
         result.validate()?;
         Ok(result)
     }
-    /// Frequency-domain analysis has no hammer or pedal state. It admits only
-    /// resolution, flat-board inertia and rigid-geometry controls;
-    /// material/gesture options cannot be silently ignored.
+    /// Frequency-domain analysis retains the played linear string/board image,
+    /// including both string directions and the selected intrinsic loss law.
+    /// Hammer, pedal and nonlinear-extension controls have no harmonic state.
     pub fn harmonic(args: &[String]) -> Result<Self, String> {
         let options = Self::parse(args)?;
+        options.validate_harmonic()?;
+        Ok(options)
+    }
+    pub fn validate_harmonic(&self) -> Result<(), String> {
+        self.validate()?;
+        let options = self;
         if options.midi.is_some() || options.performance.is_some() || options.note.is_some()
             || options.velocity.is_some() || options.hammers.is_some()
             || options.hammer_footprints.is_some() || options.dampers.is_some()
-            || options.string_stretching.is_some() || options.string_polarization.is_some()
+            || options.string_stretching.is_some()
             || options.rt0425_hammer_stiffness
-            || options.rt0425_hammer_dissipation || options.rt0425_string_damping {
-            return Err("response/admittance accept resolution, flat-board inertia and rigid-assembly options, not playback controls".into());
+            || options.rt0425_hammer_dissipation {
+            return Err("response/admittance accept resolution, board inertia, rigid assembly, string polarization and intrinsic string damping; hammer, pedal, score and nonlinear-extension controls require playback".into());
         }
-        Ok(options)
+        Ok(())
     }
     pub fn validate(&self) -> Result<(), String> {
         if self.consistent_board_mass && self.edge_cubic_board_mass {
@@ -331,7 +337,8 @@ mod tests {
         assert!(Options::harmonic(&["--edge-cubic-board-mass".into(), "--equilibrate-board-mass".into()])
             .unwrap().edge_cubic_board_mass);
         assert!(Options::harmonic(&["--dampers".into(),"estimated".into()]).is_err());
-        assert!(Options::harmonic(&["--string-polarization".into(),"frames.fspp".into()]).is_err());
+        assert_eq!(Options::harmonic(&["--string-polarization".into(),"frames.fspp".into(),
+            "--rt0425-string-damping".into()]).unwrap().string_polarization.as_deref(),Some("frames.fspp"));
         assert_eq!(parse(&["--string-polarization", "frames.fspp"]).unwrap()
             .string_polarization.as_deref(), Some("frames.fspp"));
         for args in [vec!["--modes", "0"], vec!["--modes", "513"], vec!["--modes", "NaN"],
@@ -399,7 +406,7 @@ mod tests {
     fn published_string_damping_reaches_the_exterior_instrument() {
         let c = course();
         let source = parse(&["--rt0425-string-damping"]).unwrap();
-        assert!(Options::harmonic(&["--rt0425-string-damping".into()]).is_err());
+        assert!(Options::harmonic(&["--rt0425-string-damping".into()]).unwrap().rt0425_string_damping);
         let build = |options: &Options| Controls::load(options, &[c]).unwrap()
             .instrument(vec![c], &super::super::board::demonstration(), options).unwrap();
         let mut old = build(&Options::default());

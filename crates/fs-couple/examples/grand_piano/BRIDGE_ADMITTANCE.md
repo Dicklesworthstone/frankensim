@@ -12,7 +12,7 @@ cargo run --release -p fs-couple --example piano_exterior -- \
 
 `steinway-d` may replace `strings.csv` to use all 88 raw source courses. Use the
 same supplied tensions that produced any settled board. Flat or crowned/loaded
-board files, full-vector skin mapping, rigid lid/cabinet components and one/two
+board files, full-vector skin mapping, rigid lid/cabinet components and up to 64
 receivers use the existing format in `EXTERIOR_ACOUSTICS.md`. Every acoustic
 part must still be explicitly mapped. No missing geometry or material is filled
 in, and visual MTL properties are not interpreted as elastic constants.
@@ -31,7 +31,7 @@ the existing endpoint stiffness/mass contributions remain.
 
 The frequency-domain image has **no hammer or key-damper contact**. It is the
 linear continuous operator underlying the moving-boundary bank, with the same
-authored string bending-loss spectrum and physical wood damping matrix. It is
+selected string loss law and physical wood damping matrix. It is
 not the exact transfer of the time stepper at finite step size. Modal wood
 losses and the current string spectrum are not measured Steinway calibrations.
 
@@ -61,6 +61,57 @@ setup budget refuses. Singular LU, nonfinite results and failed full-equation
 or power checks still refuse. This does not supply an arbitrary solution at a
 genuine unresolved coupled-system resonance.
 
+## Analyze the same string directions and losses as playback
+
+The harmonic `admittance` and `response` fronts accept the physical
+`--string-polarization` and `--rt0425-string-damping` controls already used by
+played output. For example:
+
+```sh
+cargo run --release -p fs-couple --example piano_exterior -- \
+  admittance settled.fss steinway-d acoustic-body.obj acoustic.fspe 69 bridge.csv \
+  --modes 128 --string-polarization bridge-frames.fspp --rt0425-string-damping
+```
+
+The polarization file uses the same full-vector geometric motion and complete
+per-key bridge-frame projection described in `STRING_POLARIZATION.md`. Both
+transverse directions of every admitted speaking string, unison member and
+duplex span remain in the harmonic bank, including all unplayed keys. Their
+physical endpoint inertia changes the loaded board basis before the acoustic
+boundary is projected. Their signed bridge forces then contribute to the
+same coupled equation. An unstruck lateral speaking string is not treated as
+a duplex merely because it has no hammer contact.
+
+The existing unit-force experiment retains its meaning: drive and `bridge`
+CSV rows describe force and velocity in the primary hammer-plane direction
+at the supplied key's bridge station. Lateral strings react through the shared
+board; they do not add a second applied force, double the hammer, or redefine
+the reported velocity as a sum over directions. A zero lateral bridge
+projection preserves the original primary experiment while retaining the
+uncoupled extra string coordinates.
+
+`--rt0425-string-damping` selects the same published per-key `R_u` and `eta_u`
+projection as playback, for both directions and all retained spans. It requires
+the `steinway-d` source scale. The estimated common loss remains the default.
+The conservative mechanics, physical string frequencies and board damping law
+are unchanged by choosing the source string loss. This remains the existing
+reduced transverse-string model, not the complete higher-order model from the
+report or a measured-instrument calibration.
+
+Use matching string controls, retained partial count and structural inputs
+when comparing harmonic admittance with a played note. The pressure-only
+`response` experiment still applies prescribed generalized board acceleration;
+its columns are not bridge-force mobilities. Hammer/felt contact, key dampers
+and finite-amplitude geometric string extension remain outside these linear
+harmonic experiments.
+
+The selected harmonic constructor builds the existing bank directly and reads
+its actual course/member/polarization/duplex order. Regression tests compare
+the recovered solution with the complete stiffness Hessian of that bank's
+stored energy, compare source-loss power with its time generator, and retain
+both coordinates at coincident polarization poles. These source tests do not
+constitute native execution or physical validation evidence by themselves.
+
 ## Explicit conservative-structure comparison
 
 `admittance` alone accepts `--lossless-structure`:
@@ -85,6 +136,9 @@ arithmetic remain unchanged. `response`, `render` and `render-loaded` reject
 the flag; no played piano silently loses its existing physical dissipation.
 Numeric retention controls keep their previous meaning. Duplicate flags and
 missing option values refuse before input/output access.
+Combining `--lossless-structure` with `--rt0425-string-damping` also refuses:
+one requests zero material loss and the other explicitly requests a loss law.
+Polarization remains compatible with the conservative-structure experiment.
 
 Four new response tests compare exact/near/coincident partials against the
 original time bank's full energy Hessian, retain normal damped behavior, and

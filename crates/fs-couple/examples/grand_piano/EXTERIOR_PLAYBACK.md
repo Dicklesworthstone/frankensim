@@ -120,8 +120,8 @@ and `eta_u` intrinsic string losses for the `steinway-d` scale. The existing
 scalar stiff-string modes use a reduced damping projection; the flag does not
 import the report's complete higher-order string model. It reaches both
 one-way and radiation-loaded playback, including finite hammer footprints,
-while the estimated common loss remains the default. Harmonic `response` and
-`admittance` do not accept the playback flag.
+and the harmonic `admittance` model. The estimated common loss remains the
+default. The CLI requires the source scale for this selection in every command.
 
 All supplied cards must cover EVERY admitted scale key, not just the notes in
 the score. Missing files, incomplete cards, duplicate options and invalid
@@ -130,11 +130,28 @@ occurs. Constitutive and spatial admission remain with their existing owners.
 The output report identifies the chosen controls, actual mechanical rate,
 retained string-coordinate count and contact-site count.
 
-`response` and `admittance` also accept `--modes` and `--substeps` after their
-output path. Use the same values for a harmonic comparison of a played render.
-They reject hammer/damper/score options because those experiments have no
-nonlinear contact or key-damper state. The ordinary pressure-only response and
-unfitted, fully coupled BEM bridge-force experiment are otherwise unchanged.
+`response` and `admittance` accept `--modes`, `--substeps`, the flat-board inertia
+options, `--string-polarization` and `--rt0425-string-damping` after their output
+path. Use the same scale, geometry, frame card and retention choices as playback.
+Both transverse string directions then contribute their actual endpoint inertia
+and reciprocal bridge forces in one loaded board basis. The admittance model
+also retains the selected intrinsic loss law for all unison and duplex segments.
+Its applied bridge force and reported bridge velocity use the primary hammer
+direction; the secondary strings respond through the coupled board.
+
+The complete frame card is admitted before board preparation and projected from
+the same retained P1, cubic or crowned motion used by playback. Missing frames
+or inconsistent primary geometry refuse. The supplied lateral damper ratio is
+still part of the card, but the harmonic model has no key-damper contacts.
+`--lossless-structure` remains an admittance-only comparison and refuses an
+explicit simultaneous `--rt0425-string-damping` selection.
+
+`response` gives pressure per prescribed modal acceleration. Its input basis
+includes the selected directional string mass loading; intrinsic damping does
+not change this acoustic motion-to-pressure transfer into a structural force
+response. Use `admittance` for damped bridge mobility, receiver pressure per
+bridge force, and the wood/string/radiation power balance. Hammer, damper,
+score and nonlinear-extension controls still require played simulation.
 
 More retained partials, contact sites and substeps increase work and memory.
 Nothing here certifies real-time performance, spatial convergence, calibrated

@@ -55,8 +55,13 @@ implemented per-string K_H and published R_H contact laws, not output EQ.
 The RT-0425 string flag requires the steinway-d scale and projects published
 per-key R_u and eta_u onto the existing reduced string modes; it is opt-in.
 response and admittance also accept --modes/--substeps, --rigid-assembly,
---equilibrate-board-mass and either flat-board mass option after the output path,
-so harmonic comparisons can use the SAME retained string/board system.
+--equilibrate-board-mass, either flat-board mass option, --string-polarization
+and --rt0425-string-damping after the output path. Admittance retains both
+transverse string directions and the selected intrinsic loss law from playback.
+Its applied bridge force and reported bridge velocity remain in the primary
+hammer direction; secondary strings react through the same board. The response
+command is pressure per supplied modal acceleration, so intrinsic damping does
+not turn that acoustic transfer into a force-driven structural response.
 Mass equilibration is an opt-in numerical solve for a flat geometric board;
 it leaves geometry, materials, mode cap and original residual admission unchanged.
 --consistent-board-mass selects consistent P1 panel inertia. --edge-cubic-board-mass
@@ -70,6 +75,7 @@ string material damping for a declared conservative-structure comparison.
 It retains the complete complex radiation load and all original modes. Near
 fixed-interface string poles use a bounded coupled solve, not fabricated loss.
 This option is not accepted by response, render or render-loaded.
+It also excludes --rt0425-string-damping, which explicitly selects a lossy law.
 
 BODY.obj can instead be the explicit keyword board-skin: derive both faces,
 rim/hole walls and section-thickness steps from the SAME prepared physical board.
@@ -208,8 +214,9 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
 }
 fn response(scene:&Scene)->Result<String,String> {
     let samples=scene.boundary.sample(&scene.spec)?;
-    let mut csv=format!("# finite exterior BEM, exp(-i omega t), Pa per unit mass-normalized modal acceleration\n# source: {}\n# structure: {}\n# panels={}, components={}, min_panels_per_wavelength={}, condition_lower_bound_max={}\n# rigid scatterers, one-way acoustics; no radiation loading, flexible cabinet, room or above-band claim\nfrequency_hz,receiver,input,real_pa_per_acceleration,imag_pa_per_acceleration\n",
-        scene.spec.source,scene.board.provenance,scene.boundary.surface.areas().len(),scene.boundary.components,
+    let mut csv=format!("# finite exterior BEM, exp(-i omega t), Pa per unit mass-normalized modal acceleration\n# source: {}\n# structure: {}\n# retained string coordinates={}, two transverse directions={}; acoustic motion-to-pressure map, not force-driven structural response\n# panels={}, components={}, min_panels_per_wavelength={}, condition_lower_bound_max={}\n# rigid scatterers, one-way acoustics; no radiation loading, flexible cabinet, room or above-band claim\nfrequency_hz,receiver,input,real_pa_per_acceleration,imag_pa_per_acceleration\n",
+        scene.spec.source,scene.board.provenance,scene.piano.bank.modes.len(),scene.piano.bank.has_secondary_polarization(),
+        scene.boundary.surface.areas().len(),scene.boundary.components,
         samples.minimum_ppw,samples.maximum_condition_lower_bound);
     for (f,w) in samples.omega.iter().enumerate() {for (receiver,inputs) in samples.values.iter().enumerate() {
         for (input,row) in inputs.iter().enumerate() {
@@ -226,7 +233,7 @@ fn admittance_options(args:&[String])->Result<(playback::Options,bool),String> {
         if flag=="--lossless-structure" {
             if !damping {return Err("duplicate --lossless-structure".into());}
             damping=false;
-        } else if matches!(flag.as_str(),"--equilibrate-board-mass"|"--consistent-board-mass"|"--edge-cubic-board-mass") {
+        } else if matches!(flag.as_str(),"--equilibrate-board-mass"|"--consistent-board-mass"|"--edge-cubic-board-mass"|"--rt0425-string-damping") {
             numeric.push(flag.clone());
         } else {
             numeric.push(flag.clone());
@@ -235,7 +242,11 @@ fn admittance_options(args:&[String])->Result<(playback::Options,bool),String> {
             numeric.push(value.clone());
         }
     }
-    Ok((playback::Options::harmonic(&numeric)?,damping))
+    let options=playback::Options::harmonic(&numeric)?;
+    if !damping && options.rt0425_string_damping {
+        return Err("--lossless-structure excludes --rt0425-string-damping".into());
+    }
+    Ok((options,damping))
 }
 fn admittance(board_text:&str,courses:&[geometry::Course],obj:&str,spec:&Specification,drive:u8)->Result<String,String> {
     admittance_controlled(board_text,courses,obj,spec,drive,&playback::Options::default(),true)
@@ -246,14 +257,24 @@ fn admittance_controlled(board_text:&str,courses:&[geometry::Course],obj:&str,sp
 }
 fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Option<&str>,spec:&Specification,
     drive:u8,options:&playback::Options,damping:bool,continuous:bool)->Result<String,String> {
-    options.validate()?;
+    options.validate_harmonic()?;
+    if !damping && options.rt0425_string_damping {
+        return Err("--lossless-structure excludes --rt0425-string-damping".into());
+    }
     if obj.is_none() {spec.require_board_skin()?;}
     let rigid=options.rigid_assembly.as_deref().map(Assembly::load).transpose()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     if !keys.contains(&drive) {return Err("admittance drive key is absent from the scale".into());}
+    // Admit the complete supplied frame card before the board eigensolve.
+    // Its projection must use the SAME retained motion as played preparation.
+    let polarization=options.string_polarization.as_deref().map(|path|
+        string_polarization::Specification::load(path,courses)).transpose()?;
     let board=prepare_board_motion(board_text,&keys,spec.board_band_hz,options)?;
-    let model=bridge_response::BridgeResponse::new(courses,&board.modes,RATE*options.substeps as u32,
-        0.45*f64::from(RATE),options.modes,damping)?;
+    let projected=polarization.as_ref().map(|frames|
+        frames.project(courses,&board.modes,board.motion.as_ref())).transpose()?;
+    let model=bridge_response::BridgeResponse::new_with_string_damping(courses,&board.modes,
+        RATE*options.substeps as u32,0.45*f64::from(RATE),options.modes,damping,
+        projected.as_ref().map(|frames|frames.secondary().0),options.rt0425_string_damping)?;
     let (bare,description)=section_skin::boundary(obj,board_text,spec,
         board.motion.as_ref().ok_or("missing harmonic surface motion")?,continuous)?;
     let (bare,description)=if let Some(rigid)=&rigid {
@@ -261,8 +282,10 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
     } else {(bare,description)};
     let boundary=bare.loaded(model.bank())?;
     let csv=exterior_loading::sweep(&boundary,&model,spec,drive)?;
-    Ok(format!("# acoustic geometry: {description}\n# structure: {}\n# structural loss: {}; radiation loading remains in the coupled columns\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
-        board.provenance,if damping {"original wood/string material damping"}else{"explicitly disabled by --lossless-structure"},
+    Ok(format!("# acoustic geometry: {description}\n# structure: {}\n# structural loss: {}; radiation loading remains in the coupled columns\n# intrinsic string loss: {}\n# two transverse directions={}; bridge force and reported velocity use the primary hammer direction\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
+        board.provenance,if damping {"physical wood damping and selected intrinsic string law"}else{"explicitly disabled by --lossless-structure"},
+        if !damping {"disabled"}else if options.rt0425_string_damping {"RT-0425 per-key R_u and eta_u"}else{"estimated common law"},
+        model.bank().has_secondary_polarization(),
         board.modes.len(),model.bank().modes.len(),model.bank().omitted_duplex_modes,csv))
 }
 /// Admit both acoustic realizations before attaching the load or dispatching
@@ -301,6 +324,9 @@ fn run(args:&[String])->Result<(),String> {
         },
         [command,board,strings,obj,spec,drive,output,tail @ ..] if command=="admittance"=>{
             let (options,damping)=admittance_options(tail)?;
+            if options.rt0425_string_damping && strings!="steinway-d" {
+                return Err("RT-0425 source laws require the steinway-d source scale".into());
+            }
             let drive:u8=drive.parse().map_err(|_|"admittance requires a MIDI bridge key in 21..108")?;
             if !(21..=108).contains(&drive) {return Err("admittance drive key outside 21..108".into());}
             if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
@@ -578,3 +604,7 @@ mod lossless_admittance_tests;
 #[cfg(test)]
 #[path="grand_piano/rigid_assembly_render_tests.rs"]
 mod rigid_assembly_render_tests;
+
+#[cfg(test)]
+#[path="grand_piano/harmonic_controls_render_tests.rs"]
+mod harmonic_controls_render_tests;
