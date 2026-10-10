@@ -2,7 +2,7 @@
 //! All controls are admitted before structural/BEM work and before score input
 //! can change state. Supplied cards cover the complete scale, including silence.
 use super::{board_geometry::motion::MotionSurface, engine, geometry::Course, hammer_materials,
-    linear, steinway_scale, string_polarization};
+    linear, steinway_scale, string_polarization, cavity};
 use super::exterior_geometry::RATE;
 use std::collections::BTreeSet;
 use super::performance::midi;
@@ -25,6 +25,7 @@ pub struct Options {
     pub dampers: Option<String>,
     pub string_stretching: Option<String>,
     pub string_polarization: Option<String>,
+    pub cavity: Option<String>,
     pub rigid_assembly: Option<String>,
     pub equilibrate_board_mass: bool,
     pub consistent_board_mass: bool,
@@ -40,7 +41,7 @@ impl Default for Options {
             midi_mapping: midi::Mapping::default(), note: None, velocity: None,
             mapping_explicit: false, hammers: None,
             hammer_footprints: None, dampers: None, string_stretching: None, string_polarization: None,
-            rigid_assembly: None,
+            rigid_assembly: None, cavity: None,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
             board_reduction: None,
             rt0425_hammer_stiffness: false,
@@ -91,7 +92,7 @@ impl Options {
                 result.rt0425_string_damping = true;
                 continue;
             }
-            if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers", "--string-stretching", "--string-polarization", "--rigid-assembly",
+            if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers", "--string-stretching", "--string-polarization", "--cavity", "--rigid-assembly",
                 "--board-reduction", "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity"].contains(&flag.as_str()) {
                 return Err(format!("unknown exterior playback option {flag}"));
             }
@@ -106,6 +107,7 @@ impl Options {
                 "--dampers" => result.dampers = Some(value.clone()),
                 "--string-stretching" => result.string_stretching = Some(value.clone()),
                 "--string-polarization" => result.string_polarization = Some(value.clone()),
+                "--cavity" => result.cavity = Some(value.clone()),
                 "--rigid-assembly" => result.rigid_assembly = Some(value.clone()),
                 "--board-reduction" => result.board_reduction = Some(super::board_geometry::ritz::RitzOptions::parse(value)?),
                 "--performance" => result.performance = Some(value.clone()),
@@ -143,10 +145,10 @@ impl Options {
         if options.midi.is_some() || options.performance.is_some() || options.note.is_some()
             || options.velocity.is_some() || options.hammers.is_some()
             || options.hammer_footprints.is_some() || options.dampers.is_some()
-            || options.string_stretching.is_some()
+            || options.string_stretching.is_some() || options.cavity.is_some()
             || options.rt0425_hammer_stiffness
             || options.rt0425_hammer_dissipation {
-            return Err("response/admittance accept resolution, board inertia/reduction, rigid assembly, string polarization and intrinsic string damping; hammer, pedal, score and nonlinear-extension controls require playback".into());
+            return Err("response/admittance accept resolution, board inertia/reduction, rigid assembly, string polarization and intrinsic string damping; cavity, hammer, pedal, score and nonlinear-extension controls require playback".into());
         }
         Ok(())
     }
@@ -166,6 +168,9 @@ impl Options {
         }
         if self.string_polarization.as_ref().is_some_and(|p| p.trim().is_empty()) {
             return Err("--string-polarization requires a nonempty complete bridge-frame specification path".into());
+        }
+        if self.cavity.as_ref().is_some_and(|p| p.trim().is_empty()) {
+            return Err("--cavity requires a nonempty physical enclosure specification path".into());
         }
         if !(1..=linear::MAX_STRING_MODES).contains(&self.modes)
             || !(1..=16).contains(&self.substeps) {
@@ -189,7 +194,7 @@ impl Options {
         Ok(())
     }
     pub fn report(&self, piano: &engine::Instrument) -> String {
-        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} coordinates including duplex; {} contact sites. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {}; nonlinear string extension: {} (selection: {}); two transverse directions: {} (geometry/drag: {}). These are retention/work budgets, not convergence or real-time certificates.",
+        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} coordinates including duplex; {} contact sites. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {}; nonlinear string extension: {} (selection: {}); two transverse directions: {} (geometry/drag: {}); reciprocal cavity: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
             piano.bank.rate, self.substeps, self.modes, piano.bank.modes.len(),
             piano.bank.contact_strings.len(), self.hammers.as_deref().unwrap_or("source defaults"),
             if self.rt0425_hammer_dissipation { "RT-0425 per-string K_H and R_H" }
@@ -201,7 +206,8 @@ impl Options {
             self.dampers.as_deref().unwrap_or("point"), piano.bank.has_string_stretching(),
             self.string_stretching.as_deref().unwrap_or("inline or original linear image"),
             piano.bank.has_secondary_polarization(),
-            self.string_polarization.as_deref().unwrap_or("inline or original one-plane image"))
+            self.string_polarization.as_deref().unwrap_or("inline or original one-plane image"),
+            piano.has_cavity(), self.cavity.as_deref().unwrap_or("inline or no enclosure"))
     }
 }
 
@@ -213,6 +219,7 @@ pub struct Controls {
     dampers: Option<linear::dampers::Specification>,
     stretching: Option<linear::string_stretching::Specification>,
     polarization: Option<string_polarization::Specification>,
+    cavity: Option<cavity::Specification>,
     source_hammer_rates: Option<Vec<f64>>,
     source_hammer_stiffness: bool,
 }
@@ -246,6 +253,7 @@ impl Controls {
             linear::string_stretching::Specification::load(path, courses)).transpose()?;
         controls.polarization = options.string_polarization.as_deref().map(|path|
             string_polarization::Specification::load(path, courses)).transpose()?;
+        controls.cavity = options.cavity.as_deref().map(cavity::Specification::load).transpose()?;
         Ok(controls)
     }
     /// The owners perform geometry, constitutive, duplicate and coverage checks.
@@ -264,7 +272,7 @@ impl Controls {
             Some(text) => Some(linear::dampers::Specification::read(text, courses)?),
             None => None,
         };
-        Ok(Self { materials, footprints, dampers, stretching: None, polarization: None,
+        Ok(Self { materials, footprints, dampers, stretching: None, polarization: None, cavity: None,
             source_hammer_rates: None, source_hammer_stiffness: false })
     }
     /// Cold inline equivalent of --string-stretching, through the SAME owner.
@@ -281,6 +289,13 @@ impl Controls {
         self.polarization = Some(string_polarization::Specification::read(text, courses)?);
         Ok(self)
     }
+    /// Inline equivalent of the admitted sealed cavity card. Projection waits
+    /// for the same geometric motion used by bridge and exterior fields.
+    pub fn with_cavity(mut self, text: &str) -> Result<Self, String> {
+        if self.cavity.is_some() { return Err("duplicate cavity selection".into()); }
+        self.cavity = Some(cavity::Specification::read(text)?);
+        Ok(self)
+    }
     /// Read the already admitted frames before structural rank selection.
     /// Absence preserves the original primary-only board preparation; supplied
     /// frames cover the complete scale in its source order, including silence.
@@ -288,6 +303,7 @@ impl Controls {
         -> Result<Option<Vec<super::board_geometry::motion::SourceBridgeFrame>>, String> {
         self.polarization.as_ref().map(|spec| spec.source_ports(courses)).transpose()
     }
+    pub fn has_cavity(&self) -> bool { self.cavity.is_some() }
     /// Reuse the source shank and original nonlinear felt/bridge engine. Larger
     /// mode budgets never relax its output-frequency ceiling; changing substeps
     /// changes its clock, not its retained acoustic/structural frequency band.
@@ -297,6 +313,10 @@ impl Controls {
     }
     pub fn instrument_with_motion(self, courses: Vec<Course>, board: &[linear::BoardMode],
         motion: Option<&MotionSurface>, options: &Options) -> Result<engine::Instrument, String> {
+        self.instrument_with_cavity_report(courses, board, motion, options).map(|(piano,_)| piano)
+    }
+    pub fn instrument_with_cavity_report(self, courses: Vec<Course>, board: &[linear::BoardMode],
+        motion: Option<&MotionSurface>, options: &Options) -> Result<(engine::Instrument,Option<String>), String> {
         options.validate()?;
         if options.rt0425_hammer_stiffness != self.source_hammer_stiffness
             || options.rt0425_hammer_dissipation != self.source_hammer_rates.is_some() {
@@ -308,8 +328,13 @@ impl Controls {
         if options.string_polarization.is_some() && self.polarization.is_none() {
             return Err("supplied string polarization controls were not admitted; no one-plane fallback".into());
         }
+        if options.cavity.is_some() && self.cavity.is_none() {
+            return Err("supplied cavity controls were not admitted; no uncoupled fallback".into());
+        }
         let polarization = self.polarization.as_ref().map(|spec|
             spec.project(&courses, board, motion)).transpose()?;
+        let cavity = self.cavity.as_ref().map(|spec|
+            spec.project_motion(board, motion.ok_or("cavity needs retained geometric soundboard motion")?)).transpose()?;
         let mut piano = engine::Instrument::new_with_string_damping(courses, board, RATE,
             options.substeps, options.modes, true, self.materials,
             Some(engine::ShankGeometry::published()), self.footprints.as_ref(),
@@ -319,7 +344,8 @@ impl Controls {
             piano.configure_source_hammer_dissipation(rates)?;
         }
         if let Some(stretching) = &self.stretching { piano.configure_string_stretching(stretching)?; }
-        Ok(piano)
+        if let Some(cavity) = &cavity { piano.configure_cavity(&cavity.loaded(&piano.bank)?)?; }
+        Ok((piano,cavity.as_ref().map(cavity::Projected::report)))
     }
 }
 

@@ -17,6 +17,7 @@ mod pressure_basis;
 mod audio;
 mod hammer_materials;
 mod string_polarization;
+mod cavity;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d] [--board board.csv | --board-geometry panel.fsb|panel.fss]
@@ -26,6 +27,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
     [--dampers estimated | pads.fspd] [--string-stretching axial.fspx]
     [--string-polarization bridge-frames.fspp]
+    [--cavity enclosure.fspc]
     [--concert-pitch 430..450 | --raw-tensions]
     [--mesh-divisions 4..32] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--board-reduction max_modes,keep_low_modes,Hz,...]
@@ -111,6 +113,13 @@ the primary row must agree with the board's existing bridge geometry.
 It requires a geometric --render, using the selected P1, edge-cubic or crowned
 motion field. Modal CSV lacks that motion. No lateral coupling or drag is guessed.
 See STRING_POLARIZATION.md for the physical input format and scope.
+--cavity supplies a sealed rectangular air cavity below a flat geometric
+soundboard. Its source, dimensions, air state, retained pressure modes and
+momentum damping are explicit. Uniform compression and standing waves react
+on the played board in the same mechanical clock, alongside strings/contact.
+The board may cover part of the top face; the remainder is a rigid wall.
+It requires --render and full geometric motion. See CAVITY.md for the format;
+no cavity geometry or sealed-enclosure assumption is inferred from the preset.
 --string-stretching supplies linear or geometric-extension selection for EVERY
 scale key. A stretch row supplies axial rigidity EA in N and a moderate-slope
 bound; these are not inferred from tension, EI or winding mass. It requires
@@ -196,7 +205,7 @@ struct Options {
     render: Option<String>, scale: Option<String>, board: Option<String>,
     board_geometry: Option<String>, performance: Option<String>, preset: Option<String>,
     hammers: Option<String>, hammer_footprints: Option<String>, dampers: Option<String>,
-    string_stretching: Option<String>, string_polarization: Option<String>,
+    string_stretching: Option<String>, string_polarization: Option<String>, cavity: Option<String>,
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, raw_tensions: bool,
     rt0425_bridge_contacts: bool, rt0425_hammer_stiffness: bool,
@@ -220,7 +229,7 @@ impl Default for Options {
             rt0425_bridge_contacts: false, rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false, rt0425_string_damping: false,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
-            string_stretching: None, string_polarization: None,
+            string_stretching: None, string_polarization: None, cavity: None,
             midi: None, midi_mapping: midi::Mapping::default(),
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
@@ -264,6 +273,7 @@ impl Options {
                 "--dampers" => options.dampers = Some(value.clone()),
                 "--string-stretching" => options.string_stretching = Some(value.clone()),
                 "--string-polarization" => options.string_polarization = Some(value.clone()),
+                "--cavity" => options.cavity = Some(value.clone()),
                 "--concert-pitch" => options.concert_pitch = Some(value.parse().map_err(|_| invalid())?),
                 "--mesh-divisions" => options.mesh_divisions = value.parse().map_err(|_| invalid())?,
                 "--dump-geometry" => options.dump_geometry = Some(value.clone()),
@@ -389,6 +399,10 @@ impl Options {
             || s.starts_with("--") || options.render.is_none() || !geometric) {
             return Err("--string-polarization requires a complete nonempty specification and a geometric render with full-vector motion; modal CSV is unsupported".into());
         }
+        if options.cavity.as_ref().is_some_and(|s| s.trim().is_empty()
+            || s.starts_with("--") || options.render.is_none() || !geometric) {
+            return Err("--cavity requires a complete nonempty specification and a geometric render; modal CSV has no cavity interface".into());
+        }
         if options.acoustic_refinement_levels > 3 || (seen.contains("--acoustic-refinement-levels")
             && (!geometric || options.render.is_none() || options.diagnostic_volume
                 || options.edge_cubic_board_mass)) {
@@ -436,7 +450,7 @@ impl Options {
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
             options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref(), options.hammer_footprints.as_ref(), options.midi.as_ref(),
             options.dampers.as_ref().filter(|s| s.as_str() != "estimated"),
-            options.string_stretching.as_ref(), options.string_polarization.as_ref()];
+            options.string_stretching.as_ref(), options.string_polarization.as_ref(), options.cavity.as_ref()];
         let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref(),
             options.dump_geometry.as_ref(), options.dump_obj.as_ref(), options.bridge_trace_csv.as_ref(),
             options.modal_pressure_csv.as_ref(), options.receiver_pressure_csv.as_ref(),
@@ -791,6 +805,17 @@ fn render_with_board_damping(path: &str, scale: Vec<geometry::Course>, modes: &[
     stretching: Option<&linear::string_stretching::Specification>,
     polarization: Option<&string_polarization::Prepared>, physical_damping: Option<&[f64]>)
     -> Result<(), String> {
+    render_with_cavity(path, scale, modes, surface, options, stretching, polarization, physical_damping, None)
+}
+#[allow(clippy::too_many_arguments)]
+fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
+    surface: Option<&[board_geometry::SurfaceSample]>, options: &Options,
+    stretching: Option<&linear::string_stretching::Specification>,
+    polarization: Option<&string_polarization::Prepared>, physical_damping: Option<&[f64]>,
+    cavity: Option<&cavity::Projected>) -> Result<(), String> {
+    if options.cavity.is_some() && cavity.is_none() {
+        return Err("supplied cavity was not admitted and projected before rendering".into());
+    }
     let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
     let rate = options.sample_rate;
     let count = (options.duration * f64::from(rate)).round() as u32;
@@ -820,7 +845,11 @@ fn render_with_board_damping(path: &str, scale: Vec<geometry::Course>, modes: &[
         scale.iter().position(|c| c.midi == key)
             .ok_or_else(|| format!("bridge observation key {key} is absent"))
     }).transpose()?;
-    let piano = prepare_instrument_with_board_damping(scale, modes, options, stretching, polarization, physical_damping)?;
+    let mut piano = prepare_instrument_with_board_damping(scale, modes, options, stretching, polarization, physical_damping)?;
+    if let Some(cavity) = cavity {
+        piano.configure_cavity(&cavity.loaded(&piano.bank)?)?;
+        println!("{}", cavity.report());
+    }
     let bridge_row = observed_course.map(|course| {
         piano.bank.strings.iter().find(|s|
             s.course == course && s.member == 0 && s.polarization == 0 && !s.duplex)
@@ -939,6 +968,10 @@ fn render_with_board_damping(path: &str, scale: Vec<geometry::Course>, modes: &[
         piano.accounting.input_work_j - piano.energy_j() - piano.accounting.dissipated_j(), piano.accounting.max_balance_error_j);
     println!("Felt loss {:.9} J, including {:.9} J time-dependent relaxation; shank damping {:.9} J.",
         piano.accounting.felt_loss_j, piano.accounting.felt_relaxation_loss_j, piano.accounting.shank_loss_j);
+    if piano.has_cavity() {
+        println!("Cavity storage {:.9} J; explicit air momentum loss {:.9} J, each included once in the combined balance.",
+            piano.cavity_energy_j(), piano.accounting.cavity_loss_j);
+    }
     if piano.damper_resolution().is_some() {
         println!("Spatial damper loss {:.9} J, already included in component losses; no output-envelope damping.",
             piano.accounting.damper_loss_j);
@@ -958,6 +991,7 @@ fn run() -> Result<(), String> {
     let stretching = load_string_stretching(&scale, &options)?;
     let polarization = options.string_polarization.as_deref().map(|path|
         string_polarization::Specification::load(path, &scale)).transpose()?;
+    let cavity = options.cavity.as_deref().map(cavity::Specification::load).transpose()?;
     let scale_source = options.scale.as_deref().unwrap_or(if options.preset.is_some() {
         "RT-0425 Appendix A wrapped-string MODEL: 84 published courses plus four estimated extensions"
     } else { "ESTIMATED demonstration" });
@@ -980,15 +1014,16 @@ fn run() -> Result<(), String> {
         (Some(p), _) => Some(p.geometry.clone()),
         _ => None,
     };
-    let (modes, board_source, surface, polarization, physical_damping) = if let Some(text) = &geometry_text {
+    let (modes, board_source, surface, polarization, physical_damping, cavity) = if let Some(text) = &geometry_text {
         let start = std::time::Instant::now();
         let source_ports = polarization.as_ref().map(|spec| spec.source_ports(&scale)).transpose()?;
         let prepared = prepare_geometric_board_with_source_ports(text, &scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
             options.board_band_hz, options.equilibrate_board_mass, options.consistent_board_mass,
-            options.edge_cubic_board_mass, options.acoustic_refinement_levels, polarization.is_some(),
+            options.edge_cubic_board_mass, options.acoustic_refinement_levels, polarization.is_some() || cavity.is_some(),
             options.board_reduction.as_ref(), source_ports.as_deref())?;
         let projected = polarization.as_ref().map(|spec|
             spec.project(&scale, &prepared.modes, prepared.motion.as_ref())).transpose()?;
+        let cavity = cavity.as_ref().map(|spec| spec.project(&prepared)).transpose()?;
         let model_name = if crowned_board::is_crowned(text) { "Crowned shell" } else { "Flat plate" };
         println!("{model_name} {:.6} m^2, {:.6} kg (panel+ribs/bridges), {} free DOFs, {} retained modes; source band (0,{}] Hz; preparation {:.6} s.",
             prepared.area_m2, prepared.mass_kg, prepared.free_dofs, prepared.modes.len(),
@@ -1008,10 +1043,10 @@ fn run() -> Result<(), String> {
             println!("board mode {i} ({scope}): [{:.9}, {:.9}] Hz", interval.0, interval.1);
         }
         (prepared.modes, format!("GEOMETRY-DERIVED {model_name}; {}; rim compliance not modeled", prepared.provenance),
-            Some(prepared.surface), projected, prepared.physical_damping)
+            Some(prepared.surface), projected, prepared.physical_damping, cavity)
     } else {
         (load_board(board_text.as_deref(), &scale)?, options.board.as_deref()
-            .unwrap_or("AUTHORED illustrative modes; not measured Steinway geometry").to_owned(), None, None, None)
+            .unwrap_or("AUTHORED illustrative modes; not measured Steinway geometry").to_owned(), None, None, None, None)
     };
     if modes.iter().any(|m| m.frequency_hz >= 0.45 * f64::from(options.sample_rate)) {
         return Err("soundboard mode at/above output retention ceiling; use an explicitly reduced board".into());
@@ -1041,8 +1076,8 @@ fn run() -> Result<(), String> {
         write_fresh_output(path, format!("# Source: {board_source}\n{}", write_board_for_scale(&modes, &scale)).as_bytes())?;
     }
     if let Some(path) = &options.render {
-        return render_with_board_damping(path, scale, &modes, surface.as_deref(), &options,
-            stretching.as_ref(), polarization.as_ref(), physical_damping.as_deref());
+        return render_with_cavity(path, scale, &modes, surface.as_deref(), &options,
+            stretching.as_ref(), polarization.as_ref(), physical_damping.as_deref(), cavity.as_ref());
     }
     println!("Model D published envelope: {} x {} m; board {} -> {} m (center -> edge).",
         geometry::D_LENGTH_M, geometry::D_WIDTH_M, geometry::D_BOARD_CENTER_M, geometry::D_BOARD_EDGE_M);
@@ -1053,6 +1088,10 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(error) = run() { eprintln!("grand_piano: {error}"); std::process::exit(1); }
 }
+
+#[cfg(test)]
+#[path = "cavity_render_tests.rs"]
+mod cavity_render_tests;
 
 #[cfg(test)]
 #[path = "board_reduction_render_tests.rs"]

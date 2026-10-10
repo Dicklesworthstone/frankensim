@@ -126,11 +126,12 @@ pub fn render(piano:&mut Instrument,score:Performance,frames:usize,baked:&Baked,
     let coupling=if piano.has_radiation() {
         "Passive acoustic feedback, second-order substep splitting"
     } else {"One-way acoustics, no radiation backreaction"};
-    let report=format!("{frames} frames, {channels} receivers, {RATE} Hz, peak {peak_pa:e} Pa; {clips} clips at {full_scale_pa} Pa full scale, no normalization.\nHeld-out transfer max={}, worst modal RMS={}; flight lower bounds {:?} s, decimator delay {} frames.\nInput {} J; combined stored {} J; total loss {} J; combined closure {} J. Acoustic storage {} J and acoustic loss {} J are included once in those totals. {coupling}. No flexible lid/cabinet, room or accuracy outside the sampled band.",
+    let report=format!("{frames} frames, {channels} receivers, {RATE} Hz, peak {peak_pa:e} Pa; {clips} clips at {full_scale_pa} Pa full scale, no normalization.\nHeld-out transfer max={}, worst modal RMS={}; flight lower bounds {:?} s, decimator delay {} frames.\nInput {} J; combined stored {} J; total loss {} J; combined closure {} J. Acoustic storage {} J and acoustic loss {} J (exterior) are included once in those totals. Cavity storage {} J and cavity momentum loss {} J are also included once. {coupling}. No flexible lid/cabinet, room or accuracy outside the sampled band.",
         baked.maximum_error,baked.worst_rms_error,baked.delays_s,decimator_delay,
         piano.accounting.input_work_j,piano.energy_j(),piano.accounting.dissipated_j(),
         piano.accounting.input_work_j-piano.energy_j()-piano.accounting.dissipated_j(),
-        piano.radiation_energy_j(),piano.accounting.radiation_loss_j);
+        piano.radiation_energy_j(),piano.accounting.radiation_loss_j,
+        piano.cavity_energy_j(),piano.accounting.cavity_loss_j);
     Ok(Rendered {wav,report,peak_pa})
 }
 

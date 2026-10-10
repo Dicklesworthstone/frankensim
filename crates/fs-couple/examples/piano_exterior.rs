@@ -15,6 +15,7 @@
 #[path="grand_piano/audio.rs"] mod audio;
 #[path="grand_piano/hammer_materials.rs"] mod hammer_materials;
 #[path="grand_piano/string_polarization.rs"] mod string_polarization;
+#[path="grand_piano/cavity.rs"] mod cavity;
 #[path="grand_piano/mesh_import.rs"] mod mesh_import;
 #[path="grand_piano/mesh_render.rs"] mod mesh_render;
 #[path="grand_piano/exterior_geometry.rs"] mod exterior_geometry;
@@ -41,6 +42,7 @@ piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj A
     [--rt0425-string-damping]
     [--dampers estimated|pads.fspd]
     [--string-polarization bridge-frames.fspp]
+    [--cavity enclosure.fspc]
     [--performance events.csv | --midi performance.mid]
     [--midi-channel 1..16] [--midi-velocity-max-m-s V] [--midi-half-pedal]
     [--note 21..108] [--velocity m/s]
@@ -50,6 +52,13 @@ projected from the same full-vector board modes. Every key must supply its
 bridge site, 3-D arm, orthonormal string/hammer frame and lateral damper ratio.
 Missing motion or a primary projection inconsistent with the board refuses;
 no lateral coupling is guessed. See grand_piano/STRING_POLARIZATION.md.
+--cavity adds reciprocal sealed-cavity compression and standing waves below
+the flat board, using supplied dimensions, air state and momentum damping.
+It composes with both render and render-loaded, including stereo receivers;
+see grand_piano/CAVITY.md. Supply a closed enclosure OBJ with the exposed board
+face moving and enclosure walls rigid. Bare board-skin selections and moving
+underside panels refuse: that face is already inside the cavity. The enclosing
+volume must agree with the cavity card; it is not inferred from the exterior OBJ.
 The RT-0425 hammer flags require the steinway-d scale and no supplied hammer
 cards. Dissipation also requires RT-0425 stiffness. They select the already
 implemented per-string K_H and published R_H contact laws, not output EQ.
@@ -225,16 +234,21 @@ fn prepare_board_motion_with_source_ports(board_text:&str,keys:&[u8],band_hz:f64
 fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Option<&str>,mut spec:Specification,
     options:&playback::Options,controls:playback::Controls,continuous:bool)->Result<Scene,String> {
     options.validate()?;
+    if obj.is_none() && controls.has_cavity() {
+        return Err("a sealed cavity requires a supplied outer enclosure OBJ; bare board-skin exposes the interior board face".into());
+    }
     if obj.is_none() {spec.require_board_skin()?;}
     let rigid=options.rigid_assembly.as_deref().map(Assembly::load).transpose()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     let source_ports=controls.source_ports(&courses)?;
     let board=prepare_board_motion_with_source_ports(board_text,&keys,spec.board_band_hz,
         options,source_ports.as_deref())?;
-    let mut piano=controls.instrument_with_motion(courses,&board.modes,board.motion.as_ref(),options)?;
+    let (mut piano,cavity_report)=controls.instrument_with_cavity_report(courses,&board.modes,board.motion.as_ref(),options)?;
+    if let Some(report)=cavity_report {spec.source.push_str(&format!("; {report}"));}
     if let Some(c)=board.physical_damping.as_deref() {piano.configure_bare_board_damping(c)?;}
     let (bare,description)=section_skin::boundary(obj,board_text,&spec,
         board.motion.as_ref().ok_or("missing full-vector structural motion")?,continuous)?;
+    if piano.has_cavity() {validate_cavity_boundary(&bare)?;}
     let bare=if let Some(rigid)=&rigid {
         let combined=rigid.attach(bare)?;
         spec.source.push_str(&format!("; {}",rigid.report()));
@@ -243,6 +257,17 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
     let boundary=bare.loaded(&piano.bank)?;
     spec.source.push_str(&format!("; {description}"));
     Ok(Scene {piano,board,boundary,spec})
+}
+/// The sealed chart is below a planar +z board. Its underside cannot also be
+/// an exterior moving source. Full enclosure/volume agreement remains explicit
+/// input geometry; this rejects the known duplicated-fluid configuration.
+fn validate_cavity_boundary(boundary:&Boundary)->Result<(),String> {
+    for (panel,normal) in boundary.surface.normals().iter().enumerate() {
+        if normal[2] < -1e-10 && boundary.weights.iter().any(|row|row[panel]!=0.0) {
+            return Err("sealed cavity exterior cannot expose a moving board underside; supply the outer enclosure with rigid bottom and walls".into());
+        }
+    }
+    Ok(())
 }
 /// Preserve the source FE certificates separately from the reduced pencil.
 /// These comments describe the prepared basis, not an acoustic error estimate.
@@ -352,7 +377,7 @@ fn bake(scene:&mut Scene,loaded:bool)->Result<(exterior_audio::Baked,exterior_ge
         scene.piano.configure_radiation(&fit.model)?;
         format!("Passive load: {} acoustic coordinates; complex matrix peak/RMS={:.6}/{:.6}; resistance peak/RMS={:.6}/{:.6}. These sampled bounds do not certify time-step or spatial convergence.",
             fit.model.poles.len(),fit.peak_error,fit.rms_error,fit.resistance_peak_error,fit.resistance_rms_error)
-    } else {String::from("One-way reference: no acoustic reaction on the mechanics.")};
+    } else {String::from("One-way exterior reference: no exterior radiation reaction on the mechanics.")};
     Ok((baked,samples,report))
 }
 fn run(args:&[String])->Result<(),String> {
@@ -644,6 +669,10 @@ mod tests {
         assert!(admittance(&board,&courses,&obj,&spec,60).is_err());
     }
 }
+
+#[cfg(test)]
+#[path="grand_piano/cavity_exterior_tests.rs"]
+mod cavity_exterior_tests;
 
 #[cfg(test)]
 #[path="grand_piano/radiation_render_tests.rs"]

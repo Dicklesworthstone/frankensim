@@ -90,7 +90,9 @@ fn force_driven_csv_reaches_loaded_stereo_and_matches_direct_owner_controls() {
     let text="sample,event,key,value\n0,sustain,0,0.5\n0,una_corda,0,1\n24,jack_staccato,69,70\n240,sostenuto,0,1\n1200,note_off,69,0\n1440,sostenuto,0,0\n1680,sustain,0,0\n2000,una_corda,0,0\n";
     let score=playback::Score::csv(text,&[69],4800).unwrap();
     assert!(score.report.contains("peak N"));
-    let audio=exterior_audio::render(&mut scene.piano,score.performance,4800,&baked,2.).unwrap();
+    // This 70 N jack fixture reaches 3.725 Pa. Its explicit PCM recording
+    // range must contain that physical signal; clipping admission stays on.
+    let audio=exterior_audio::render(&mut scene.piano,score.performance,4800,&baked,4.).unwrap();
     for n in 0..4800 {
         match n {
             0=>{manual.piano.set_sustain(0.5).unwrap();manual.piano.set_una_corda(true);},
