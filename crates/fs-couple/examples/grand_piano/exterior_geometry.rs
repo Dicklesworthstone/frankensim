@@ -4,8 +4,7 @@
 //! Multiple disjoint outward closed components are allowed. Self-intersection,
 //! component overlap and cavity accessibility remain input responsibilities.
 use super::{board_geometry::motion::MotionSurface, linear::Bank};
-use fs_bem::{helmholtz::{self, Medium}, panel3d::SpherePanels,
-    radiation_policy::GeometryPolicy, near_field::FirstOrder};
+use fs_bem::{helmholtz::{self, Medium}, panel3d::SpherePanels, near_field::FirstOrder};
 use fs_math::c64::C64;
 use std::{collections::{BTreeMap,BTreeSet},f64::consts::TAU,
     sync::atomic::{AtomicUsize,Ordering}};
@@ -19,6 +18,10 @@ pub mod rigid;
 #[path = "exterior_receivers.rs"]
 mod receivers;
 pub use receivers::ReceiverSet;
+
+#[path = "exterior_source.rs"]
+mod source;
+pub use source::SourceSweep;
 
 pub const RATE:u32=48_000;
 pub const MAX_OBJ_BYTES:usize=32*1024*1024;
@@ -241,12 +244,9 @@ impl Boundary {
     fn sample_grid_plan(&self,omega:&[f64],receivers:&[[f64;3]],medium:Medium,min_ppw:f64,plan:ReceiverSet<'_>)
         ->Result<Samples,String> {
         let panels=self.surface.areas().len();
-        let dense_bytes=panels.checked_mul(panels).and_then(|n|n.checked_mul(3*std::mem::size_of::<C64>()))
-            .ok_or("exterior dense-work size overflow")?;
-        let memory_workers=(MAX_FREQUENCY_DENSE_BYTES/dense_bytes.max(1)).max(1);
         let workers=if panels>=1024 {
             std::thread::available_parallelism().map_or(1,|n|n.get())
-                .min(MAX_FREQUENCY_WORKERS).min(memory_workers).min(omega.len().max(1))
+                .min(MAX_FREQUENCY_WORKERS).min(omega.len().max(1))
         } else {1};
         self.sample_grid_plan_with_workers(omega,receivers,medium,min_ppw,plan,workers)
     }
@@ -266,7 +266,8 @@ impl Boundary {
         }
         // Select from actual closed-component spectra, not the radius of the
         // empty space between the soundboard and disjoint rigid scatterers.
-        let policy=GeometryPolicy::new(&self.surface).map_err(|e|e.to_string())?;
+        let source=SourceSweep::new(self,omega,medium,workers)?;
+        let workers=source.workers();
         let delays_s=plan.delays_s().to_vec();
         let mut values=vec![vec![Vec::with_capacity(omega.len());count];receivers.len()];
         let mut minimum_ppw=f64::INFINITY;let mut maximum_condition_lower_bound=0.0_f64;
@@ -275,8 +276,8 @@ impl Boundary {
             let evaluation=plan.prepare(k)?;
             let fields:Vec<Vec<C64>>=self.weights.iter().map(|r|r.iter().map(|b|C64::new(0.,b/w)).collect()).collect();
             let refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
-            let formulation=policy.formulation(k).map_err(|e|e.to_string())?;
-            let solutions=policy.solve_batch(k,medium,&refs)
+            let formulation=source.formulation(k).map_err(|e|e.to_string())?;
+            let solutions=source.solve_batch(k,medium,&refs)
                 .map_err(|e|format!("exterior solve at {} Hz ({formulation:?}): {e}",w/TAU))?;
             let mut pressure_rows=Vec::with_capacity(count);
             let mut frequency_ppw=f64::INFINITY;
@@ -422,7 +423,7 @@ pub(crate) mod tests {
         }
         text
     }
-    fn motion()->MotionSurface {
+    pub(super) fn motion()->MotionSurface {
         let mesh=fs_plate::ShellMesh::new(vec![[0.,0.,0.],[0.1,0.,0.],[0.1,0.1,0.],[0.,0.1,0.]],
             vec![[0,1,2],[0,2,3]]).unwrap();
         MotionSurface::new(mesh,vec![vec![[0.,0.,1.,0.,0.,0.];4]]).unwrap()

@@ -2,10 +2,9 @@
 //! One existing modal BEM batch gives both Z = G^T A P and every receiver's
 //! pressure/velocity transfer. exp(-i omega t): the force opposing motion
 //! adds -i omega Z to the same string/board dynamic stiffness.
-use super::{bridge_response::{BridgeResponse,Response}, exterior_geometry::{Boundary,Specification,MAX_PANELS,MAX_HARMONIC_RECEIVERS,ReceiverSet}};
-use fs_bem::radiation_policy::GeometryPolicy;
+use super::{bridge_response::{BridgeResponse,Response}, exterior_geometry::{Boundary,Specification,MAX_PANELS,MAX_HARMONIC_RECEIVERS,ReceiverSet,SourceSweep}};
 #[cfg(test)]
-use fs_bem::helmholtz::{self,Formulation};
+use fs_bem::{helmholtz::{self,Formulation},radiation_policy::GeometryPolicy};
 use fs_math::c64::C64;
 use std::{f64::consts::TAU,fmt::Write};
 
@@ -37,23 +36,49 @@ impl LoadingSample {
 /// The supplied boundary must already be transformed by `loaded(model.bank())`.
 /// No symmetrization, passive projection, loss insertion or resonance fitting.
 pub fn sample(boundary:&Boundary,spec:&Specification,w:f64)->Result<LoadingSample,String> {
-    let count=boundary.weights.len();let panels=boundary.surface.areas().len();
-    if !(1..=super::linear::MAX_BOARD_MODES).contains(&count) || !(1..=MAX_PANELS).contains(&panels)
-        || boundary.weights.iter().any(|r|r.len()!=panels || r.iter().any(|v|!v.is_finite()))
-        || !w.is_finite() || w<=0. || w/TAU<spec.band_hz.0-1e-10 || w/TAU>spec.band_hz.1+1e-10
-        || !spec.medium.density.is_finite() || spec.medium.density<=0.
-        || !spec.medium.sound_speed.is_finite() || spec.medium.sound_speed<=0.
-        || !spec.min_ppw.is_finite() || spec.min_ppw<6.
-        || !(1..=MAX_HARMONIC_RECEIVERS).contains(&spec.receivers.len()) {
-        return Err("invalid complete radiation-loading basis, medium or requested frequency".into());
+    LoadingSweep::new(boundary,spec,&[w])?.sample(w)
+}
+
+/// Immutable geometry, modal velocity fields and receiver admission shared by
+/// a harmonic sweep or a loaded-playback fit. Every frequency still gets its
+/// own operator, factorization and bounded receiver quadrature.
+pub struct LoadingSweep<'a> {
+    boundary:&'a Boundary,
+    spec:&'a Specification,
+    receivers:ReceiverSet<'a>,
+    source:SourceSweep<'a>,
+    fields:Vec<Vec<C64>>,
+}
+impl<'a> LoadingSweep<'a> {
+    pub fn new(boundary:&'a Boundary,spec:&'a Specification,omega:&[f64])->Result<Self,String> {
+        let count=boundary.weights.len();let panels=boundary.surface.areas().len();
+        if !(1..=super::linear::MAX_BOARD_MODES).contains(&count) || !(1..=MAX_PANELS).contains(&panels)
+            || boundary.weights.iter().any(|r|r.len()!=panels || r.iter().any(|v|!v.is_finite()))
+            || omega.iter().any(|w|!w.is_finite() || *w<=0.
+                || *w/TAU<spec.band_hz.0-1e-10 || *w/TAU>spec.band_hz.1+1e-10)
+            || !spec.medium.density.is_finite() || spec.medium.density<=0.
+            || !spec.medium.sound_speed.is_finite() || spec.medium.sound_speed<=0.
+            || !spec.min_ppw.is_finite() || spec.min_ppw<6.
+            || !(1..=MAX_HARMONIC_RECEIVERS).contains(&spec.receivers.len()) {
+            return Err("invalid complete radiation-loading basis, medium or requested frequency".into());
+        }
+        let receivers=ReceiverSet::for_spec(boundary,spec)?;
+        let source=SourceSweep::new(boundary,omega,spec.medium,1)?;
+        let fields=boundary.weights.iter().map(|r|r.iter().map(|v|C64::new(*v,0.)).collect()).collect();
+        Ok(Self {boundary,spec,receivers,source,fields})
     }
-    let plan=ReceiverSet::for_spec(boundary,spec)?;
-    let evaluation=plan.prepare(w/spec.medium.sound_speed)?;
-    let fields:Vec<Vec<C64>>=boundary.weights.iter().map(|r|r.iter().map(|v|C64::new(*v,0.)).collect()).collect();
-    let refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();let k=w/spec.medium.sound_speed;
-    let policy=GeometryPolicy::new(&boundary.surface).map_err(|e|e.to_string())?;
-    let formulation=policy.formulation(k).map_err(|e|e.to_string())?;
-    let solutions=policy.solve_batch(k,spec.medium,&refs)
+    pub fn delays_s(&self)->&[f64] {self.receivers.delays_s()}
+    pub fn sample(&self,w:f64)->Result<LoadingSample,String> {
+    let boundary=self.boundary;let spec=self.spec;
+    let count=boundary.weights.len();let panels=boundary.surface.areas().len();
+    if !w.is_finite() || w<=0. || w/TAU<spec.band_hz.0-1e-10 || w/TAU>spec.band_hz.1+1e-10 {
+        return Err("radiation-loading frequency is outside the declared band".into());
+    }
+    let k=w/spec.medium.sound_speed;
+    let evaluation=self.receivers.prepare(k)?;
+    let refs:Vec<&[C64]>=self.fields.iter().map(Vec::as_slice).collect();
+    let formulation=self.source.formulation(k).map_err(|e|e.to_string())?;
+    let solutions=self.source.solve_batch(k,spec.medium,&refs)
         .map_err(|e|format!("radiation-load solve at {} Hz ({formulation:?}): {e}",w/TAU))?;
     let mut impedance=vec![C64::ZERO;count*count];
     let mut receiver_transfer=vec![vec![C64::ZERO;count];spec.receivers.len()];
@@ -80,6 +105,7 @@ pub fn sample(boundary:&Boundary,spec:&Specification,w:f64)->Result<LoadingSampl
         return Err("projected radiation impedance or receiver transfer is nonfinite".into());
     }
     Ok(LoadingSample {impedance,receiver_transfer,minimum_ppw,condition_lower_bound})
+    }
 }
 
 /// Unit peak bridge force; every other course is a passive, undamped-by-key
@@ -90,10 +116,11 @@ pub fn sample(boundary:&Boundary,spec:&Specification,w:f64)->Result<LoadingSampl
 pub fn sweep(boundary:&Boundary,model:&BridgeResponse,spec:&Specification,drive:u8)->Result<String,String> {
     model.bridge_row(drive)?;
     if boundary.weights.len()!=model.bank().board_count {return Err("radiation and string bank bases differ".into());}
+    let omega=spec.omega();let prepared=LoadingSweep::new(boundary,spec,&omega)?;
     let mut out=format!("# radiation-loaded bridge admittance; exp(-i omega t); unit peak force 1 N at key {drive}\n# acoustic source: {}\n# all {} scale courses and {} retained string coordinates; no hammer or key-damper contact\n# bridge values: m/s/N; receiver values: Pa/N; power columns: cycle-average W for 1 N peak\n# one_way columns use the SAME air transfer on mechanics without radiation reaction; not vacuum sound\n# no fitted transfer, time-domain radiation feedback, full-band convergence or measured Steinway claim\nfrequency_hz,observable,index,real,imag,one_way_real,one_way_imag,input_w,wood_w,string_w,radiation_w,power_defect_w,backward_error,panels_per_wavelength,condition_lower_bound\n",
         spec.source,model.keys().len(),model.bank().modes.len());
-    for w in spec.omega() {
-        let hz=w/TAU;let field=sample(boundary,spec,w)?;
+    for w in omega {
+        let hz=w/TAU;let field=prepared.sample(w)?;
         let loaded=model.solve(hz,drive,C64::ONE,Some(&field.impedance))?;
         let unreacted=model.solve(hz,drive,C64::ONE,None)?;
         let pressure=field.pressure(&loaded,w)?;let reference=field.pressure(&unreacted,w)?;
@@ -158,6 +185,21 @@ mod tests {
         let pa=load.pressure(&a,w).unwrap();let pb=load.pressure(&b,w).unwrap();
         for (a,b) in pa.iter().zip(pb) {assert!((a.scale(2.)-b).abs()<1e-12*(1.+a.abs()));}
         assert!((b.input_w-4.*a.input_w).abs()<1e-12*(1.+a.input_w));
+    }
+    #[test]
+    fn harmonic_source_sweep_preserves_impedance_receiver_rows_and_admission() {
+        let (boundary,_,spec)=fixture();let omega=spec.omega();
+        let prepared=LoadingSweep::new(&boundary,&spec,&omega).unwrap();
+        assert_eq!(prepared.delays_s(),ReceiverSet::for_spec(&boundary,&spec).unwrap().delays_s());
+        for w in omega {
+            let cached=prepared.sample(w).unwrap();let direct=sample(&boundary,&spec,w).unwrap();
+            assert_eq!(cached.impedance,direct.impedance);
+            assert_eq!(cached.receiver_transfer,direct.receiver_transfer);
+            assert_eq!(cached.minimum_ppw,direct.minimum_ppw);
+            assert_eq!(cached.condition_lower_bound,direct.condition_lower_bound);
+        }
+        for w in [0.,f64::NAN,TAU*500.] {assert!(prepared.sample(w).is_err());}
+        assert!(LoadingSweep::new(&boundary,&spec,&[]).is_err());
     }
     #[test]
     fn harmonic_array_preserves_source_impedance_and_individual_pressure() {

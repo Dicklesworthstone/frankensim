@@ -85,8 +85,16 @@ Structural motion projection uses a source-triangle bounding tree and keeps a
 3,000,000-work cap on tree visits, triangle bounds and exact facet checks;
 the old acoustic-panel × structural-triangle estimate no longer rejects a
 spatially sparse, separately resolved pair. For acoustic meshes of at least
-1024 panels, independent frequencies use at most four scoped workers, capped
-at 768 MiB of estimated dense matrix working set. Results return in the
+1024 panels, independent frequencies use at most four scoped workers. The
+768 MiB budget covers their estimated dense matrices plus one shared static
+geometry table. Sweeps with at least two plain-CBIE frequencies prepare the
+exact frequency-independent triangle integrals once (16 bytes per panel pair).
+At 2048 panels this admits three workers and a 64 MiB shared table. A single
+frequency or a Burton–Miller-only grid needs no table. Formulation selection,
+dynamic triangle integration and the modal factorization still run at each
+frequency; there is no interpolation between frequencies. The same preparation
+is used by harmonic admittance and loaded-playback fitting, which also reuse
+their modal velocity fields and receiver admission. Results return in the
 original frequency order. Each requested frequency must
 meet the declared minimum panels/wavelength (at least six); negative radiation
 power beyond roundoff and nonfinite diagnostics refuse. The reported condition
