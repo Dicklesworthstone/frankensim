@@ -1,5 +1,6 @@
 //! Cold, full-vector shell/plate motion at an explicitly supplied acoustic skin.
-//! P1 translation and physical axial rotation, with u_skin = u + theta x arm.
+//! P1 translation/rotation or the explicit edge-cubic flat-plate field,
+//! with physical axial rotation and u_skin = u + theta x arm.
 //! Shapes remain in the SAME bare-board modal basis used by bridge mechanics.
 //! A projection is along the actual facet normal, never a nearest-node snap.
 use fs_plate::ShellMesh;
@@ -9,11 +10,23 @@ use super::MAX_BOARD_MODES;
 #[path = "board_skin.rs"]
 pub mod skin;
 
+/// Area-normalized degree-three triangle rule. A cubic displacement plus
+/// its quadratic rotation crossed with a linear arm integrates exactly on
+/// one structural facet. The signed centroid weight is for linear motion
+/// projection, not a positive mass/energy quadrature or a cross-facet rule.
+pub const EDGE_CUBIC_QUADRATURE: [([f64; 3], f64); 4] = [
+    ([1. / 3.; 3], -27. / 48.),
+    ([0.6, 0.2, 0.2], 25. / 48.),
+    ([0.2, 0.6, 0.2], 25. / 48.),
+    ([0.2, 0.2, 0.6], 25. / 48.),
+];
+
 #[derive(Debug)]
 pub struct MotionSurface {
     pub mesh: ShellMesh,
     /// Mode-major, node-major (u_x,u_y,u_z,theta_x,theta_y,theta_z).
     pub shapes: Vec<Vec<[f64; 6]>>,
+    edge_cubic: bool,
     projection_tree: Vec<ProjectionNode>,
 }
 fn dot(a:[f64;3],b:[f64;3])->f64 {a.iter().zip(b).map(|(a,b)|a*b).sum()}
@@ -86,7 +99,93 @@ impl MotionSurface {
         let mut projection_tree = Vec::new();
         let mut elements: Vec<_> = (0..mesh.tris.len()).collect();
         build_projection_tree(&mesh, &mut elements, &mut projection_tree);
-        Ok(Self {mesh,shapes,projection_tree})
+        Ok(Self {mesh,shapes,edge_cubic:false,projection_tree})
+    }
+    /// Retain the flat plate's existing edge-cubic field in the same modal
+    /// basis. Nodal storage still uses physical rotations: wx=-theta_y,
+    /// wy=theta_x. Interior rotations come from the analytic cubic gradient,
+    /// not P1 interpolation of those nodal rotations. This is not a shell
+    /// displacement law and admits no in-plane/drilling DOFs or crown.
+    pub fn new_edge_cubic(mesh:ShellMesh,shapes:Vec<Vec<[f64;6]>>)->Result<Self,String> {
+        let mut surface=Self::new(mesh,shapes)?;
+        if surface.mesh.nodes.iter().any(|p|p[2]!=surface.mesh.nodes[0][2])
+            || surface.shapes.iter().flatten().any(|q|q[0]!=0. || q[1]!=0. || q[5]!=0.) {
+            return Err("edge-cubic motion requires a flat XY plate with transverse displacement and physical slope rotations".into());
+        }
+        surface.edge_cubic=true;
+        Ok(surface)
+    }
+    pub fn is_edge_cubic(&self)->bool { self.edge_cubic }
+    /// Project a known structural site, including its supplied physical arm.
+    /// The first vector is the motion/effort coefficient in each retained mode;
+    /// the second is an absolute-term scale for relative roundoff checks, with
+    /// no unit-sized floor that could hide disagreement in very small modes.
+    /// Both mechanics and skin pressure must use this same linear map.
+    pub fn project_at(&self,element:usize,barycentric:[f64;3],arm_m:[f64;3],direction:[f64;3])
+        ->Result<(Vec<f64>,Vec<f64>),String> {
+        let &tri=self.mesh.tris.get(element).ok_or("motion projection has no such structural facet")?;
+        if barycentric.iter().chain(&arm_m).chain(&direction).any(|v|!v.is_finite())
+            || barycentric.iter().any(|b|*b < -1e-10 || *b > 1.+1e-10)
+            || (barycentric.iter().sum::<f64>()-1.).abs()>1e-8
+            || (dot(direction,direction)-1.).abs()>1e-8 {
+            return Err("motion projection requires in-triangle weights, a finite SI arm and a unit direction".into());
+        }
+        let cubic=if self.edge_cubic {
+            let [Some(a),Some(b),Some(c)]=tri.map(|node|self.mesh.nodes.get(node)) else {
+                return Err("motion projection has an invalid structural node".into());
+            };
+            if a.iter().chain(b).chain(c).any(|v|!v.is_finite()) || a[2]!=b[2] || a[2]!=c[2] {
+                return Err("edge-cubic motion requires a finite flat XY facet".into());
+            }
+            let x=[a[0],b[0],c[0]];let y=[a[1],b[1],c[1]];
+            Some((fs_plate::edge_cubic_transverse_shape(&x,&y,barycentric),
+                fs_plate::edge_cubic_transverse_gradient_shape(&x,&y,barycentric)))
+        } else {None};
+        let mut result=Vec::with_capacity(self.shapes.len());
+        let mut scales=Vec::with_capacity(self.shapes.len());
+        for mode in &self.shapes {
+            let [Some(a),Some(b),Some(c)]=tri.map(|node|mode.get(node)) else {
+                return Err("motion projection is missing a retained nodal coordinate".into());
+            };
+            let nodal=[*a,*b,*c];
+            if nodal.iter().flatten().any(|v|!v.is_finite()) {
+                return Err("motion projection contains a nonfinite nodal coordinate".into());
+            }
+            let (value,scale)=if let Some((shape,gradient))=&cubic {
+                if nodal.iter().any(|q|q[0]!=0. || q[1]!=0. || q[5]!=0.) {
+                    return Err("edge-cubic motion cannot discard in-plane or drilling coordinates".into());
+                }
+                let dofs:[f64;9]=std::array::from_fn(|i| {
+                    let q=nodal[i/3];match i%3 {0=>q[2],1=>-q[4],_=>q[3]}
+                });
+                let sample=|row:&[f64;9]|row.iter().zip(dofs).map(|(a,b)|a*b).sum::<f64>();
+                let w=sample(shape);let theta=[sample(&gradient[1]),-sample(&gradient[0]),0.];
+                let rotation=cross(theta,arm_m);
+                let value=dot(direction,[rotation[0],rotation[1],w+rotation[2]]);
+                let dx_scale=(direction[2]*arm_m[0]).abs()+(direction[0]*arm_m[2]).abs();
+                let dy_scale=(direction[2]*arm_m[1]).abs()+(direction[1]*arm_m[2]).abs();
+                let scale=(0..9).map(|i|dofs[i].abs()*(direction[2].abs()*shape[i].abs()
+                    +dx_scale*gradient[0][i].abs()+dy_scale*gradient[1][i].abs())).sum();
+                (value,scale)
+            } else {
+                let mut value=0.;let mut scale=0.;
+                // Preserve the original P1 projection's value arithmetic.
+                for (i,q) in nodal.into_iter().enumerate() {
+                    let rotation=cross([q[3],q[4],q[5]],arm_m);
+                    let u=std::array::from_fn(|c|q[c]+rotation[c]);
+                    value+=barycentric[i]*dot(direction,u);
+                    let rotation_scale=[(q[4]*arm_m[2]).abs()+(q[5]*arm_m[1]).abs(),
+                        (q[5]*arm_m[0]).abs()+(q[3]*arm_m[2]).abs(),
+                        (q[3]*arm_m[1]).abs()+(q[4]*arm_m[0]).abs()];
+                    scale+=barycentric[i].abs()*(0..3).map(|c|
+                        direction[c].abs()*(q[c].abs()+rotation_scale[c])).sum::<f64>();
+                }
+                (value,scale)
+            };
+            if !value.is_finite() || !scale.is_finite() {return Err("skin motion projection overflow".into());}
+            result.push(value);scales.push(scale);
+        }
+        Ok((result,scales))
     }
     /// Incremental normal motion at a skin point, including through-thickness
     /// rotation. The nearest admissible facet-normal projection must lie inside
@@ -141,20 +240,10 @@ impl MotionSurface {
             let weights:[f64;3]=std::array::from_fn(|i|
                 (if i==0 {1.} else {0.})+g.gradient[i][0]*x+g.gradient[i][1]*y);
             if weights.iter().any(|b|!b.is_finite() || *b < -1e-10 || *b > 1.+1e-10) {continue;}
-            best=distance.abs();selected=Some((tri,weights,g.frame[2].map(|n|distance*n)));
+            best=distance.abs();selected=Some((element,weights,g.frame[2].map(|n|distance*n)));
         }
-        let (tri,weights,arm)=selected.ok_or("moving acoustic skin has no in-panel structural projection within its declared offset")?;
-        let mut result=Vec::with_capacity(self.shapes.len());
-        for mode in &self.shapes {
-            let mut value=0.;
-            for (i,node) in tri.into_iter().enumerate() {
-                let q=mode[node];let rotation=cross([q[3],q[4],q[5]],arm);
-                let u=std::array::from_fn(|c|q[c]+rotation[c]);
-                value+=weights[i]*dot(normal,u);
-            }
-            if !value.is_finite() {return Err("skin motion projection overflow".into());}
-            result.push(value);
-        }
+        let (element,weights,arm)=selected.ok_or("moving acoustic skin has no in-panel structural projection within its declared offset")?;
+        let (result,_)=self.project_at(element,weights,arm,normal)?;
         Ok((result, work))
     }
 }
@@ -162,6 +251,68 @@ impl MotionSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn cubic_mode() -> MotionSurface {
+        let mesh=ShellMesh::new(vec![[0.,0.,0.],[1.,0.,0.],[0.,1.,0.]],vec![[0,1,2]]).unwrap();
+        // Exact existing cubic reconstruction of nodal x^3 values/slopes:
+        // w=x^3-(1-x-y)*x*y. Include a tiny second mode for relative checks.
+        let q=vec![[0.;6],[0.,0.,1.,0.,-3.,0.],[0.;6]];
+        let small=q.iter().map(|a|a.map(|v|v*1e-12)).collect();
+        MotionSurface::new_edge_cubic(mesh,vec![q,small]).unwrap()
+    }
+    #[test]
+    fn cubic_motion_uses_analytic_rotations_and_the_actual_attachment_arm() {
+        let motion=cubic_mode();
+        assert!(motion.is_edge_cubic());
+        for [x,y] in [[0.,0.],[1.,0.],[0.37,0.],[0.23,0.41],[0.6,0.4]] {
+            let w=x*x*x-(1.-x-y)*x*y;
+            let wx=3.*x*x+2.*x*y+y*y-y;let wy=x*x+2.*x*y-x;
+            for arm in [[0.;3],[0.,0.,0.012],[0.018,-0.013,0.007]] {
+                let u=[-arm[2]*wx,-arm[2]*wy,w+arm[0]*wx+arm[1]*wy];
+                for direction in [[0.,0.,1.],[1.,0.,0.],[0.6,0.8,0.]] {
+                    let (actual,scale)=motion.project_at(0,[1.-x-y,x,y],arm,direction).unwrap();
+                    let expected=dot(direction,u);
+                    assert!((actual[0]-expected).abs()<1e-14);
+                    assert!((actual[1]-1e-12*expected).abs()<1e-26);
+                    assert!((scale[1]-1e-12*scale[0]).abs()<1e-26);
+                    for i in 0..2 {assert!(actual[i].abs()<=scale[i]*(1.+1e-14));}
+                }
+            }
+        }
+        let at=motion.project_at(0,[0.4,0.23,0.37],[0.,0.,0.009],[1.,0.,0.]).unwrap().0;
+        let searched=motion.normal_weights([0.23,0.37,0.009],[1.,0.,0.],0.01).unwrap();
+        for (a,b) in at.iter().zip(searched) {assert!((a-b).abs()<1e-14*a.abs().max(1e-30));}
+        let linear=MotionSurface::new(motion.mesh.clone(),motion.shapes.clone()).unwrap();
+        assert!(!linear.is_edge_cubic());
+        let legacy=linear.project_at(0,[0.4,0.23,0.37],[0.,0.,0.009],[1.,0.,0.]).unwrap().0;
+        assert!((legacy[0]-at[0]).abs()>1e-4,"interior gradient must not use P1 nodal slopes");
+    }
+    #[test]
+    fn cubic_motion_refuses_crown_or_discarded_dofs_and_invalid_known_sites() {
+        let motion=cubic_mode();
+        let mut crown=motion.mesh.clone();crown.nodes[2][2]=0.001;
+        assert!(MotionSurface::new_edge_cubic(crown,motion.shapes.clone()).is_err());
+        for coordinate in [0,1,5] {
+            let mut shapes=motion.shapes.clone();shapes[0][0][coordinate]=0.1;
+            assert!(MotionSurface::new_edge_cubic(motion.mesh.clone(),shapes).is_err());
+        }
+        for (element,bary,arm,direction) in [
+            (1,[0.4,0.3,0.3],[0.;3],[0.,0.,1.]),
+            (0,[-0.1,0.6,0.5],[0.;3],[0.,0.,1.]),
+            (0,[0.4,0.3,0.4],[0.;3],[0.,0.,1.]),
+            (0,[0.4,0.3,0.3],[f64::NAN,0.,0.],[0.,0.,1.]),
+            (0,[0.4,0.3,0.3],[0.;3],[0.,0.,0.]),
+        ] {assert!(motion.project_at(element,bary,arm,direction).is_err());}
+    }
+    #[test]
+    fn cubic_triangle_rule_integrates_every_monomial_through_degree_three() {
+        let factorial=[1.,1.,2.,6.,24.,120.];
+        for a in 0..=3 {for b in 0..=3-a {for c in 0..=3-a-b {
+            let actual:f64=EDGE_CUBIC_QUADRATURE.iter().map(|(q,weight)|
+                weight*q[0].powi(a as i32)*q[1].powi(b as i32)*q[2].powi(c as i32)).sum();
+            let expected=2.*factorial[a]*factorial[b]*factorial[c]/factorial[a+b+c+2];
+            assert!((actual-expected).abs()<1e-14);
+        }}}
+    }
     #[test]
     fn tilted_skin_retains_full_vector_rigid_motion_and_offset_rotation() {
         let mesh=ShellMesh::new(vec![[0.,0.,0.],[1.,0.,0.02],[0.,1.,0.01]],vec![[0,1,2]]).unwrap();

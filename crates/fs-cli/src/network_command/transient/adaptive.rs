@@ -18,7 +18,17 @@ pub(super) struct Config {
 
 impl Config {
     pub(super) fn parse(value: &J, max_step_s: f64) -> Result<Self> {
-        object(value, &["absolute_tolerance_k", "relative_tolerance", "minimum_trial_step_s", "max_trials"], "transient.adaptive")?;
+        Self::parse_for_storage(value, max_step_s, false)
+    }
+
+    pub(super) fn parse_for_storage(value: &J, max_step_s: f64, enthalpy: bool) -> Result<Self> {
+        let fields: &[&str] = if enthalpy {
+            &["absolute_tolerance_k", "absolute_specific_enthalpy_tolerance_j_kg",
+              "relative_tolerance", "minimum_trial_step_s", "max_trials"]
+        } else {
+            &["absolute_tolerance_k", "relative_tolerance", "minimum_trial_step_s", "max_trials"]
+        };
+        object(value, fields, "transient.adaptive")?;
         let config = Self {
             absolute_tolerance_k: positive(get(value, "absolute_tolerance_k")?, "adaptive.absolute_tolerance_k")?,
             relative_tolerance: number(get(value, "relative_tolerance")?, "adaptive.relative_tolerance")?,
@@ -48,8 +58,8 @@ impl Stats {
     }
 }
 
-pub(super) struct Accepted {
-    pub samples: [(f64, Endpoint); 2],
+pub(super) struct Accepted<E = Endpoint> {
+    pub samples: [(f64, E); 2],
     pub error_ratio: f64,
     pub next_trial_s: f64,
 }
@@ -60,8 +70,27 @@ pub(super) struct Accepted {
 pub(super) fn step(
     cx: &Cx<'_>, old: &[f64], time: f64, interval_end: f64, suggested_s: f64,
     max_step_s: f64, config: Config, stats: &mut Stats,
-    mut advance: impl FnMut(&[f64], f64) -> Result<Endpoint>,
+    advance: impl FnMut(&[f64], f64) -> Result<Endpoint>,
 ) -> Result<Accepted> {
+    step_with(
+        cx, old, time, interval_end, suggested_s, max_step_s, config, stats,
+        advance, |endpoint: &Endpoint| endpoint.1.temperature.as_slice(),
+        |old, coarse: &Endpoint, fine: &Endpoint|
+            error_ratio(cx, old, &coarse.1.temperature, &fine.1.temperature, config),
+    )
+}
+
+/// One retry/clock owner for temperature and enthalpy storage. The history
+/// accessor selects the actual storage variable; discrepancy only observes
+/// completed trial endpoints. Neither callback publishes a state or heat row.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn step_with<E>(
+    cx: &Cx<'_>, old: &[f64], time: f64, interval_end: f64, suggested_s: f64,
+    max_step_s: f64, config: Config, stats: &mut Stats,
+    mut advance: impl FnMut(&[f64], f64) -> Result<E>,
+    history: impl Fn(&E) -> &[f64],
+    mut discrepancy: impl FnMut(&[f64], &E, &E) -> Result<f64>,
+) -> Result<Accepted<E>> {
     let mut proposed = suggested_s.min(max_step_s).min(interval_end - time);
     loop {
         poll(cx)?;
@@ -77,8 +106,11 @@ pub(super) fn step(
         poll(cx)?;
         let first = advance(old, middle - time)?;
         poll(cx)?;
-        let second = advance(&first.1.temperature, end - middle)?;
-        let ratio = error_ratio(cx, old, &coarse.1.temperature, &second.1.temperature, config)?;
+        let second = advance(history(&first), end - middle)?;
+        let ratio = finite(discrepancy(old, &coarse, &second)?)?;
+        if ratio < 0.0 {
+            return Err(bad("adaptive endpoint discrepancy must be nonnegative"));
+        }
         poll(cx)?;
         if ratio <= 1.0 {
             stats.largest_accepted_ratio = stats.largest_accepted_ratio.max(ratio);
@@ -91,7 +123,7 @@ pub(super) fn step(
         stats.rejected += 1;
         let reduced = (width * factor(ratio, false)).max(config.minimum_trial_step_s);
         if !(reduced < width && time + reduced < end) {
-            return Err(resolution("local temperature discrepancy still exceeds tolerance at the minimum representable/admitted trial step"));
+            return Err(resolution("local state discrepancy still exceeds tolerance at the minimum representable/admitted trial step"));
         }
         // No rejected midpoint or field becomes history; retry without recursion.
         proposed = reduced;
@@ -99,16 +131,29 @@ pub(super) fn step(
 }
 
 fn error_ratio(cx: &Cx<'_>, old: &[f64], coarse: &[f64], fine: &[f64], config: Config) -> Result<f64> {
+    field_error_ratio(cx, old, coarse, fine, config.absolute_tolerance_k, config.relative_tolerance)
+}
+
+/// Relative scale uses changes from the old state, so shifting a Kelvin or
+/// specific-enthalpy reference offset cannot change the error criterion.
+pub(super) fn field_error_ratio(
+    cx: &Cx<'_>, old: &[f64], coarse: &[f64], fine: &[f64],
+    absolute_tolerance: f64, relative_tolerance: f64,
+) -> Result<f64> {
+    if !(absolute_tolerance.is_finite() && absolute_tolerance > 0.0
+        && relative_tolerance.is_finite() && (0.0..1.0).contains(&relative_tolerance)) {
+        return Err(bad("adaptive field tolerances must have positive finite absolute and relative in [0,1)"));
+    }
     if old.is_empty() || old.len() != coarse.len() || old.len() != fine.len() {
-        return Err(bad("adaptive temperature vectors must have the same nonzero length"));
+        return Err(bad("adaptive state vectors must have the same nonzero length"));
     }
     let mut largest = 0.0_f64;
     for (index, ((&old, &coarse), &fine)) in old.iter().zip(coarse).zip(fine).enumerate() {
         if index % 512 == 0 { poll(cx)?; }
         finite(old)?; finite(coarse)?; finite(fine)?;
-        // Relative tolerance scales the physical change, not the 300 K offset.
+        // Relative tolerance scales the physical change, not a reference offset.
         let change = finite(coarse - old)?.abs().max(finite(fine - old)?.abs());
-        let tolerance = finite(config.absolute_tolerance_k + config.relative_tolerance * change)?;
+        let tolerance = finite(absolute_tolerance + relative_tolerance * change)?;
         let ratio = finite(finite(fine - coarse)?.abs() / tolerance)?;
         largest = largest.max(ratio);
     }

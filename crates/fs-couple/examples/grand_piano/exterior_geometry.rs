@@ -205,12 +205,24 @@ impl Boundary {
                 projection_work=projection_work.saturating_add(work);
                 if projection_work>MAX_PROJECTION_WORK {return Err("acoustic skin exceeds bounded projection-work budget".into());}
             }
-            for bary in [[2./3.,1./6.,1./6.],[1./6.,2./3.,1./6.],[1./6.,1./6.,2./3.]] {
-                let point=std::array::from_fn(|c|(0..3).map(|i|bary[i]*tri[i][c]).sum());
-                let (row,work)=motion.normal_weights_with_work(point,normal,spec.offset_m)?;
-                projection_work=projection_work.saturating_add(work);
-                if projection_work>MAX_PROJECTION_WORK {return Err("acoustic skin exceeds bounded projection-work budget".into());}
-                for (out,value) in weights.iter_mut().zip(row) {out[face]+=value/3.;}
+            if motion.is_edge_cubic() {
+                // Degree-three integration on a single structural facet. An
+                // arbitrary OBJ face crossing facets still needs refinement.
+                for (bary,weight) in super::board_geometry::motion::EDGE_CUBIC_QUADRATURE {
+                    let point=std::array::from_fn(|c|(0..3).map(|i|bary[i]*tri[i][c]).sum());
+                    let (row,work)=motion.normal_weights_with_work(point,normal,spec.offset_m)?;
+                    projection_work=projection_work.saturating_add(work);
+                    if projection_work>MAX_PROJECTION_WORK {return Err("acoustic skin exceeds bounded projection-work budget".into());}
+                    for (out,value) in weights.iter_mut().zip(row) {out[face]+=weight*value;}
+                }
+            } else {
+                for bary in [[2./3.,1./6.,1./6.],[1./6.,2./3.,1./6.],[1./6.,1./6.,2./3.]] {
+                    let point=std::array::from_fn(|c|(0..3).map(|i|bary[i]*tri[i][c]).sum());
+                    let (row,work)=motion.normal_weights_with_work(point,normal,spec.offset_m)?;
+                    projection_work=projection_work.saturating_add(work);
+                    if projection_work>MAX_PROJECTION_WORK {return Err("acoustic skin exceeds bounded projection-work budget".into());}
+                    for (out,value) in weights.iter_mut().zip(row) {out[face]+=value/3.;}
+                }
             }
         }
         Ok(Self {surface,weights,center,radius,components})

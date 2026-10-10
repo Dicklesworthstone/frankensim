@@ -7,6 +7,7 @@
 //! These are different experiments and their compliances are not compared.
 
 use std::ops::ControlFlow;
+use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
 use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
 use fs_cutfem::octree3::{Octree3, OctreeError3};
 use fs_dwr::elasticity3::GoalMarking3;
@@ -14,7 +15,8 @@ use super::continuation::controlled_gradient_checked_sdf3_continuation;
 use super::{AdaptiveSdf3Elasticity, CutDensityStudy3};
 use crate::pipeline::LoadCase;
 use crate::sdf3_goal::{
-    ComplianceRefinement3, GoalReferenceLoad3, GoalRefinementError3, GoalRefinementOptions3,
+    ComplianceRefinement3, GoalPreconditioner3, GoalReferenceLoad3, GoalRefinementError3,
+    GoalRefinementOptions3,
 };
 use crate::{
     ContinuationTermination, EvaluationStop, GradientCheckOptions, MultiLoadContinuationReport,
@@ -189,10 +191,42 @@ pub fn controlled_adaptive_sdf3_continuation_observed<O: AdaptiveSdf3Elasticity,
     study: &mut CutDensityStudy3<O>, tree: &mut Octree3,
     loads: &[GoalReferenceLoad3<'_>], rho0: &[f64], schedule: &[SimpParams],
     options: AdaptiveContinuationOptions3, control: &mut SolveControl<'_>,
+    build: impl FnMut(&Octree3, &mut dyn FnMut() -> ControlFlow<()>) -> Result<O, GoalRefinementError3>,
+    accepted: impl FnMut(&CutDensityStudy3<O>, &Octree3, &AdaptiveContinuationReport3) -> Result<(), E>,
+) -> Result<AdaptiveContinuationReport3, E> {
+    controlled_adaptive_sdf3_continuation_with_coarse_levels_observed(
+        study, tree, &[], loads, rho0, schedule, options, control, build, accepted,
+    )
+}
+
+/// Observed continuation with reusable correction geometries BELOW the initial
+/// accepted grid, nearest first. This removes the requirement that every later
+/// accepted grid fit the dense bottom-factor limit of its enriched solve.
+///
+/// Each goal probe prepends the CURRENT accepted operator to `coarser`, then
+/// forms sparse Galerkin operators from the inherited fine stiffness. Coarse
+/// geometry is never substituted for that stiffness, and its scales are not
+/// mutated. The caller builds these geometries under the same domain, material,
+/// support and geometry budget before entry; transfer admission checks each
+/// adjacent pair. Only the multilevel enrichment policy admits extra levels.
+///
+/// Optimization preparations remain owned by `study` and `build`; callers may
+/// bind the same correction geometries there. Setup products and rejected work
+/// are charged through the existing SolveControl. Stage publication, physical
+/// region inheritance and rollback are identical to the ordinary observed path.
+#[allow(clippy::too_many_arguments)]
+pub fn controlled_adaptive_sdf3_continuation_with_coarse_levels_observed<O: AdaptiveSdf3Elasticity, E>(
+    study: &mut CutDensityStudy3<O>, tree: &mut Octree3,
+    coarser: &[&AdaptiveElasticity3], loads: &[GoalReferenceLoad3<'_>],
+    rho0: &[f64], schedule: &[SimpParams],
+    options: AdaptiveContinuationOptions3, control: &mut SolveControl<'_>,
     mut build: impl FnMut(&Octree3, &mut dyn FnMut() -> ControlFlow<()>) -> Result<O, GoalRefinementError3>,
     mut accepted: impl FnMut(&CutDensityStudy3<O>, &Octree3, &AdaptiveContinuationReport3) -> Result<(), E>,
 ) -> Result<AdaptiveContinuationReport3, E> {
     assert!(!schedule.is_empty(), "continuation requires at least one stage");
+    assert!(coarser.len() <= 18 && (coarser.is_empty()
+        || matches!(options.enrichment.preconditioner, GoalPreconditioner3::Multilevel { .. })),
+        "extra correction levels require multilevel enrichment and at most 18 geometries");
     for params in schedule { params.assert_valid(); }
     options.gradient.assert_valid();
     assert!(options.marking_fraction.is_finite() && options.marking_fraction > 0.0
@@ -222,8 +256,8 @@ pub fn controlled_adaptive_sdf3_continuation_observed<O: AdaptiveSdf3Elasticity,
             let probe_tree = tree.refined(source.leaves(), || poll(control, "sdf3-adaptive-enrichment-tree"))?;
             let probe = build_operator(&probe_tree, control, "sdf3-adaptive-enrichment-geometry", &mut build)?;
             check_tree(&probe, &probe_tree)?;
-            let estimate = study.estimate_reference_compliance_enrichment(
-                probe.into_adaptive(), loads, &accepted.displacements, options.enrichment, control,
+            let estimate = study.estimate_reference_compliance_enrichment_with_coarse_levels(
+                probe.into_adaptive(), coarser, loads, &accepted.displacements, options.enrichment, control,
             )?;
             let marking = estimate.mark(options.marking_fraction, options.max_marks,
                 || poll(control, "sdf3-adaptive-mark")).map_err(GoalRefinementError3::from)?;
@@ -306,3 +340,6 @@ pub fn controlled_adaptive_sdf3_continuation_observed<O: AdaptiveSdf3Elasticity,
 #[cfg(test)]
 #[path = "adaptive_continuation/checkpoint_tests.rs"]
 mod checkpoint_tests;
+#[cfg(test)]
+#[path = "adaptive_continuation/multilevel_tests.rs"]
+mod multilevel_tests;

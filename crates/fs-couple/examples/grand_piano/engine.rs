@@ -73,6 +73,9 @@ pub struct Instrument {
     creep:Vec<relaxation::Prepared>,
     // Actual per-site areas: unison allocation times longitudinal quadrature.
     contact_areas:Vec<f64>,
+    // Immutable authored contact geometry. Static recession is excluded from
+    // the force/displacement projection but included in every felt overlap.
+    contact_thickness_m:Vec<f64>,contact_recession_m:Vec<f64>,
     source_rate_n_s_m_p:Vec<f64>,
     contact_solver:Option<contact_solver::Prepared>,
     spatial_dampers:Option<dampers::Prepared>,
@@ -220,9 +223,22 @@ impl Instrument {
         if contact_areas.iter().any(|a|!a.is_finite()||*a<=0.0) {
             return Err("hammer contact area is not finite positive".into());
         }
+        let contact_thickness_m:Vec<f64>=bank.contact_strings.iter().enumerate().map(|(i,&si)|
+            bank.contact_felt_thickness_m(i).unwrap_or(courses[bank.strings[si].course].felt_thickness_m)).collect();
+        let contact_recession_m:Vec<f64>=(0..nc).map(|i|bank.contact_recession_m(i)).collect();
+        for (i,&si) in bank.contact_strings.iter().enumerate() {
+            let thickness=contact_thickness_m[i];let recession=contact_recession_m[i];
+            let maximum=thickness*laws[bank.strings[si].course].eps_densify;
+            let volume=contact_areas[i]*thickness;
+            if !thickness.is_finite()||thickness<=0.0||!recession.is_finite()||recession<0.0
+                || !maximum.is_finite()||maximum<=0.0||!volume.is_finite()||volume<=0.0
+                || !((-CATCH_DISTANCE-recession)/thickness).is_finite() {
+                return Err("hammer site thickness, recession or derived felt volume/strain is unrepresentable".into());
+            }
+        }
         let creep=bank.contact_strings.iter().enumerate().map(|(i,&si)| {
-            let ci=bank.strings[si].course;let c=&courses[ci];
-            spectra[ci].prepare(contact_areas[i],c.felt_thickness_m,dt)
+            let ci=bank.strings[si].course;
+            spectra[ci].prepare(contact_areas[i],contact_thickness_m[i],dt)
         }).collect::<Result<Vec<_>,_>>()?;
         let hammer_models=courses.iter().map(|c| match shank_geometry {
             Some(g)=>shank::Prepared::from_geometry(g,c.hammer_mass_kg,mechanics_rate),
@@ -231,9 +247,9 @@ impl Instrument {
         let hammers:Vec<_>=hammer_models.iter().map(|p|Hammer {
             motion:p.rest(CATCH_DISTANCE),active:false,held:false,latched:false,on_rest:true,jack:Jack::default(),
         }).collect();
-        let contacts:Vec<_>=bank.contact_strings.iter().map(|&si| Contact {
+        let contacts:Vec<_>=bank.contact_strings.iter().enumerate().map(|(i,&si)| Contact {
             state:laws[bank.strings[si].course].initial_state(),memory:relaxation::Memory::default(),
-            overlap:-CATCH_DISTANCE,force:0.0,enabled:true,
+            overlap:-CATCH_DISTANCE-contact_recession_m[i],force:0.0,enabled:true,
         }).collect();
         let mut contact_h=bank.contact_compliance.clone();
         for i in 0..nc {for j in 0..nc {
@@ -245,7 +261,7 @@ impl Instrument {
             saved_contacts:contacts.clone(),hammer_next:hammers.clone(),hammer_free:vec![0.0;courses.len()],
             jack_force:vec![0.0;courses.len()],rest_force:vec![0.0;courses.len()],
             source_rate_n_s_m_p:vec![0.0;nc],
-            bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,contact_solver,spatial_dampers:None,transverse_damper_ratio,radiation:None,output_rate:rate,substeps,sustain:0.0,
+            bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,contact_thickness_m,contact_recession_m,contact_solver,spatial_dampers:None,transverse_damper_ratio,radiation:None,output_rate:rate,substeps,sustain:0.0,
             sostenuto:false,una_corda:false,last_damped_midi:88,damper_drag_ns_m:0.4,
             accounting:Accounting::default(),contact_h,force:vec![0.0;nc],gap:vec![0.0;nc],
             active:Vec::with_capacity(nc)})
@@ -255,6 +271,10 @@ impl Instrument {
     /// Admit the published per-string R_H only with its conservative K_H law.
     /// A finite footprint distributes each string's coefficient over its sites.
     pub fn configure_source_hammer_dissipation(&mut self, per_course:&[f64])->Result<(),String>{
+        if self.bank.contact_strings.iter().enumerate().any(|(i,&si)|
+            self.contact_thickness_m[i]!=self.courses[self.bank.strings[si].course].felt_thickness_m) {
+            return Err("published R_H is a penetration-based source coefficient and requires the original uniform felt thickness; varying profile thickness needs explicit local rate data".into());
+        }
         if per_course.len()!=self.courses.len()
             || per_course.iter().any(|r|!r.is_finite()||*r<=0.0)
             || self.accounting.input_work_j!=0.0
@@ -325,9 +345,11 @@ impl Instrument {
             self.contacts[c].enabled=member<count;
             if self.contacts[c].enabled {
                 let x=self.bank.contact_position(c,&self.bank.q);
-                let free=self.laws[ci].eps_residual(&self.contacts[c].state)*self.courses[ci].felt_thickness_m
+                let free=self.laws[ci].eps_residual(&self.contacts[c].state)*self.contact_thickness_m[c]
                     +self.creep[c].deformation(&self.contacts[c].memory);
-                launch=launch.min(x+free-0.002);
+                let mut clear=x+free-0.002;
+                if self.contact_recession_m[c]!=0.0 {clear+=self.contact_recession_m[c];}
+                launch=launch.min(clear);
             }
         }
         launch
@@ -335,7 +357,7 @@ impl Instrument {
     fn reset_overlaps(&mut self,ci:usize) {
         let y=self.hammer_models[ci].position(&self.hammers[ci].motion);
         for c in 0..self.contacts.len(){if self.bank.strings[self.bank.contact_strings[c]].course==ci {
-            self.contacts[c].overlap=y-self.bank.contact_position(c,&self.bank.q);self.contacts[c].force=0.0;
+            self.contacts[c].overlap=y-self.bank.contact_position(c,&self.bank.q)-self.contact_recession_m[c];self.contacts[c].force=0.0;
         }}
     }
 
@@ -369,6 +391,15 @@ impl Instrument {
         self.hammers[ci].jack=Jack{peak_n,duration_s,elapsed_s:0.0};self.reset_overlaps(ci);
         self.accounting.input_work_j+=self.energy_j()-before;Ok(())
     }
+
+    /// Depress a key without a strike: lift its existing dampers and make it
+    /// eligible for sostenuto capture. This idealized control does no modeled
+    /// work, does not reposition/relaunch a hammer, and preserves all contact
+    /// histories and ringing motion. Repeating it is idempotent. note_off
+    /// releases the hold; the normal hammer/key rearming rules still apply.
+    pub fn silent_key_down(&mut self,midi:u8)->Result<(),Error>{
+        let i=self.key_index(midi)?;self.hammers[i].held=true;Ok(())
+    }
     pub fn note_off(&mut self,midi:u8)->Result<(),Error>{
         let i=self.key_index(midi)?;self.hammers[i].held=false;self.hammers[i].jack.peak_n=0.0;Ok(())
     }
@@ -379,10 +410,10 @@ impl Instrument {
         for (i,p) in self.contacts.iter().enumerate(){
             e+=self.creep[i].stored(&p.memory);
             if p.enabled {
-                let ci=self.bank.strings[self.bank.contact_strings[i]].course;let c=&self.courses[ci];
+                let ci=self.bank.strings[self.bank.contact_strings[i]].course;let thickness=self.contact_thickness_m[i];
                 let elastic=p.overlap-self.creep[i].deformation(&p.memory);
-                e+=self.contact_areas[i]*c.felt_thickness_m
-                    *felt::stored(&self.laws[ci],elastic/c.felt_thickness_m,&p.state);
+                e+=self.contact_areas[i]*thickness
+                    *felt::stored(&self.laws[ci],elastic/thickness,&p.state);
             }
         }
         e
@@ -461,21 +492,21 @@ impl Instrument {
         }}
         let mut felt_loss=0.0;let mut relaxation_loss=0.0;
         for i in 0..nc {
-            let ci=self.bank.strings[self.bank.contact_strings[i]].course;let c=self.courses[ci];
-            let end=self.hammer_models[ci].position(&self.hammer_next[ci].motion)-self.bank.contact_position(i,&self.bank.next_q);
+            let ci=self.bank.strings[self.bank.contact_strings[i]].course;let thickness=self.contact_thickness_m[i];
+            let end=self.hammer_models[ci].position(&self.hammer_next[ci].motion)-self.bank.contact_position(i,&self.bank.next_q)-self.contact_recession_m[i];
             let material=&self.creep[i];let old=&self.contacts[i];
             let (memory,viscous)=material.advance(&old.memory,self.force[i]);
             relaxation_loss+=viscous;felt_loss+=viscous;
             if old.enabled {
                 let start_elastic=old.overlap-material.deformation(&old.memory);
                 let end_elastic=end-material.deformation(&memory);
-                if end/c.felt_thickness_m>self.laws[ci].eps_densify+1e-10 {
+                if end/thickness>self.laws[ci].eps_densify+1e-10 {
                     return Err(Error::Contact("total felt densification bound exceeded"));
                 }
-                let state=self.laws[ci].update_state(end_elastic/c.felt_thickness_m,&old.state);
-                let volume=self.contact_areas[i]*c.felt_thickness_m;
-                let delta=volume*(felt::stored(&self.laws[ci],end_elastic/c.felt_thickness_m,&state)
-                    -felt::stored(&self.laws[ci],start_elastic/c.felt_thickness_m,&old.state));
+                let state=self.laws[ci].update_state(end_elastic/thickness,&old.state);
+                let volume=self.contact_areas[i]*thickness;
+                let delta=volume*(felt::stored(&self.laws[ci],end_elastic/thickness,&state)
+                    -felt::stored(&self.laws[ci],start_elastic/thickness,&old.state));
                 let contact_loss=self.force[i]*(end_elastic-start_elastic)-delta;
                 if self.source_rate_n_s_m_p[i]>0.0 {
                     if contact_loss < -1e-12 { return Err(Error::Energy{defect_j:contact_loss}); }
@@ -572,6 +603,10 @@ mod radiation_tests;
 #[cfg(test)]
 #[path = "damper_engine_tests.rs"]
 mod damper_tests;
+
+#[cfg(test)]
+#[path = "silent_key_engine_tests.rs"]
+mod silent_key_tests;
 
 #[cfg(test)]
 mod tests {

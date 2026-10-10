@@ -103,7 +103,7 @@ impl BoardGeometry {
     /// - support,clamped|simply_supported
     /// - fixed,node (explicit supports; no inferred rim constraint)
     /// - stiffener,E_Pa,G_Pa,A_m2,I_m4,J_m4,eccentricity_m,rho_kg_m3,node0,node1,...
-    /// - stiffener-mass,lumped|consistent-hermite (optional; default lumped)
+    /// - stiffener-mass,lumped|consistent-hermite|consistent-eccentric (optional; default lumped)
     /// - bridge,midi,triangle_id,bary0,bary1,bary2
     /// - damping,dimensionless_ratio
     /// - pretension,N_per_m (uniform nonnegative membrane tension, NOT crown)
@@ -185,7 +185,8 @@ impl BoardGeometry {
                         let value = match f[1] {
                             "lumped" => StiffenerMass::Lumped,
                             "consistent-hermite" => StiffenerMass::ConsistentHermite,
-                            _ => return Err("stiffener-mass must be lumped or consistent-hermite".into()),
+                            "consistent-eccentric" => StiffenerMass::ConsistentEccentric,
+                            _ => return Err("stiffener-mass must be lumped, consistent-hermite or consistent-eccentric".into()),
                         };
                         once(&mut stiffener_mass, value, "stiffener-mass")?;
                     }
@@ -312,6 +313,13 @@ impl BoardGeometry {
         &self, keys: &[u8], upper_hz: f64, mass_equilibrated: bool,
     ) -> Result<PreparedBoard, String> {
         self.prepare_inner(keys, upper_hz, true, mass_equilibrated, true, false)
+    }
+    /// Retain the matching cubic displacement and analytic physical rotations
+    /// from the SAME eigenvectors used by cubic panel inertia and bridge ports.
+    pub fn prepare_with_motion_edge_cubic_transverse_mass(
+        &self, keys: &[u8], upper_hz: f64, mass_equilibrated: bool,
+    ) -> Result<PreparedBoard, String> {
+        self.prepare_inner(keys, upper_hz, true, mass_equilibrated, false, true)
     }
     fn prepare_inner(
         &self,
@@ -460,7 +468,11 @@ impl BoardGeometry {
                 // DKT coordinates are slopes, NOT physical axial rotations.
                 [0.,0.,at(0),at(2),-at(1),0.]
             }).collect()).collect();
-            Some(motion::MotionSurface::new(geometry,shapes)?)
+            Some(if edge_cubic_transverse_mass {
+                motion::MotionSurface::new_edge_cubic(geometry,shapes)?
+            } else {
+                motion::MotionSurface::new(geometry,shapes)?
+            })
         } else {None};
         let mass = self.mass_kg();
         if !mass.is_finite() || mass <= 0.0 { return Err("board mass overflow".into()); }
@@ -468,6 +480,8 @@ impl BoardGeometry {
         if consistent_transverse_mass {
             if self.stiffener_mass == StiffenerMass::Lumped {
                 provenance.push_str("; exact P1 transverse panel mass; lumped slope/beam mass");
+            } else if self.stiffener_mass == StiffenerMass::ConsistentEccentric {
+                provenance.push_str("; exact P1 transverse panel mass; lumped panel slope inertia");
             } else {
                 provenance.push_str("; exact P1 transverse panel mass; lumped slope inertia");
             }
@@ -475,12 +489,17 @@ impl BoardGeometry {
         if edge_cubic_transverse_mass {
             if self.stiffener_mass == StiffenerMass::Lumped {
                 provenance.push_str("; opt-in cubic edge-compatible panel mass and bridge/surface fields; lumped rotary/beam inertia");
+            } else if self.stiffener_mass == StiffenerMass::ConsistentEccentric {
+                provenance.push_str("; opt-in cubic edge-compatible panel mass and bridge/surface fields; lumped panel rotary inertia");
             } else {
                 provenance.push_str("; opt-in cubic edge-compatible panel mass and bridge/surface fields; lumped rotary inertia");
             }
         }
         if self.stiffener_mass == StiffenerMass::ConsistentHermite {
             provenance.push_str("; exact consistent Hermite translational stiffener mass; no added beam rotary inertia");
+        }
+        if self.stiffener_mass == StiffenerMass::ConsistentEccentric {
+            provenance.push_str("; exact consistent Hermite translation, bending rotary and eccentric-centroid stiffener inertia; no inferred torsional polar inertia");
         }
         if mass_equilibrated {
             provenance.push_str("; mass-diagonal solver equilibration");
@@ -642,20 +661,55 @@ mod tests {
                 let volume: f64 = b.surface.iter().map(|s| s.area_m2 * s.mode_shape[i]).sum();
                 assert!((volume - mode.volume).abs() < 1e-12);
             }
-            if panel < 2 {
-                let full = if panel == 0 { exact.prepare_with_motion_mass_equilibrated(&[69], 300.0) }
-                    else { exact.prepare_with_motion_consistent_transverse_mass(&[69], 300.0, true) }.unwrap();
-                assert_eq!(b.frequency_intervals_hz, full.frequency_intervals_hz);
-                assert!(full.motion.is_some());
-                for (x, y) in b.modes.iter().zip(&full.modes) {
-                    assert_eq!(x.bridge, y.bridge); assert_eq!(x.volume, y.volume);
-                }
+            let full = match panel {
+                0 => exact.prepare_with_motion_mass_equilibrated(&[69], 300.0),
+                1 => exact.prepare_with_motion_consistent_transverse_mass(&[69], 300.0, true),
+                _ => exact.prepare_with_motion_edge_cubic_transverse_mass(&[69], 300.0, true),
+            }.unwrap();
+            assert_eq!(b.frequency_intervals_hz, full.frequency_intervals_hz);
+            assert_eq!(full.motion.as_ref().unwrap().is_edge_cubic(), panel == 2);
+            for (x, y) in b.modes.iter().zip(&full.modes) {
+                assert_eq!(x.bridge, y.bridge); assert_eq!(x.volume, y.volume);
             }
         }
         for rows in ["stiffener-mass,unknown\n", "stiffener-mass\n",
             "stiffener-mass,lumped,extra\n", "stiffener-mass,lumped\nstiffener-mass,consistent-hermite\n"] {
             assert!(BoardGeometry::read(&format!("{text}{rows}")).is_err());
         }
+    }
+
+    #[test]
+    fn consistent_eccentric_stiffeners_reach_each_panel_and_motion_preparation() {
+        let text=format!("{}stiffener,10000000000,600000000,0.0003,0.00000001,0.00000002,0.01,500,4,5,6,7\n",fixture());
+        let old=BoardGeometry::read(&format!("{text}stiffener-mass,consistent-hermite\n")).unwrap();
+        let source=format!("{text}stiffener-mass,consistent-eccentric\n");
+        let new=BoardGeometry::read(&source).unwrap();
+        assert_eq!(new.stiffener_mass,StiffenerMass::ConsistentEccentric);
+        for panel in 0..3 {
+            let prepare=|g:&BoardGeometry| match panel {
+                0=>g.prepare_mass_equilibrated(&[69],300.),
+                1=>g.prepare_consistent_transverse_mass(&[69],300.,true),
+                _=>g.prepare_edge_cubic_transverse_mass(&[69],300.,true),
+            }.unwrap();
+            let a=prepare(&old);let b=prepare(&new);
+            assert_eq!(a.mass_kg,b.mass_kg);assert_eq!(a.area_m2,b.area_m2);
+            assert_eq!(a.free_dofs,b.free_dofs);
+            assert!(b.modes[0].frequency_hz<a.modes[0].frequency_hz,
+                "positive added inertia must affect this bending mode with unchanged stiffness");
+            assert!(b.provenance.contains("bending rotary and eccentric-centroid stiffener inertia"));
+            assert!(b.provenance.contains("no inferred torsional polar inertia"));
+            let full=match panel {
+                0=>new.prepare_with_motion_mass_equilibrated(&[69],300.),
+                1=>new.prepare_with_motion_consistent_transverse_mass(&[69],300.,true),
+                _=>new.prepare_with_motion_edge_cubic_transverse_mass(&[69],300.,true),
+            }.unwrap();
+            assert_eq!(b.frequency_intervals_hz,full.frequency_intervals_hz);
+            assert_eq!(full.motion.as_ref().unwrap().is_edge_cubic(),panel==2);
+            for (x,y) in b.modes.iter().zip(&full.modes) {
+                assert_eq!(x.bridge,y.bridge);assert_eq!(x.volume,y.volume);
+            }
+        }
+        assert!(BoardGeometry::read(&format!("{source}stiffener-mass,lumped\n")).is_err());
     }
 
     #[test]
@@ -758,6 +812,34 @@ mod tests {
         for point in &full.surface {
             let row=motion.normal_weights(point.position_m,[0.,0.,1.],0.).unwrap();
             for (a,b) in row.iter().zip(&point.mode_shape) {assert!((a-b).abs()<1e-11);}
+        }
+    }
+
+    #[test]
+    fn retained_cubic_motion_matches_its_bridge_and_surface_in_the_same_eigensolve() {
+        let g=BoardGeometry::read(&fixture()).unwrap();
+        let site=&g.bridge_sites[0];
+        for equilibrated in [false,true] {
+            let ordinary=g.prepare_edge_cubic_transverse_mass(&[69],300.,equilibrated).unwrap();
+            let full=g.prepare_with_motion_edge_cubic_transverse_mass(&[69],300.,equilibrated).unwrap();
+            let motion=full.motion.as_ref().unwrap();
+            assert!(motion.is_edge_cubic());assert!(ordinary.motion.is_none());
+            assert_eq!(ordinary.frequency_intervals_hz,full.frequency_intervals_hz);
+            let (primary,scale)=motion.project_at(site.triangle,site.weights,[0.;3],[0.,0.,1.]).unwrap();
+            for (i,(a,b)) in ordinary.modes.iter().zip(&full.modes).enumerate() {
+                assert_eq!(a.bridge,b.bridge);assert_eq!(a.volume,b.volume);
+                assert!((primary[i]-b.bridge[usize::from(site.midi-21)]).abs()
+                    <=1e-12*scale[i].max(f64::MIN_POSITIVE));
+            }
+            for point in &full.surface {
+                let row=motion.normal_weights(point.position_m,[0.,0.,1.],0.).unwrap();
+                for (a,b) in row.iter().zip(&point.mode_shape) {assert!((a-b).abs()<1e-11);}
+            }
+            let linear=motion::MotionSurface::new(motion.mesh.clone(),motion.shapes.clone()).unwrap();
+            let (a,_)=motion.project_at(site.triangle,site.weights,[0.,0.,0.009],[1.,0.,0.]).unwrap();
+            let (b,_)=linear.project_at(site.triangle,site.weights,[0.,0.,0.009],[1.,0.,0.]).unwrap();
+            assert!(a.iter().zip(b).any(|(a,b)|(a-b).abs()>1e-10),
+                "cubic interior rotations must not fall back to interpolated nodal rotations");
         }
     }
 

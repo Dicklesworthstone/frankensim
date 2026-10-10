@@ -122,25 +122,17 @@ impl Specification {
         let mut damper_ratios = Vec::with_capacity(courses.len());
         for course in courses {
             let site = &self.sites[&course.midi];
-            let tri = motion.mesh.tris.get(site.triangle)
-                .ok_or_else(|| format!("string polarization key {}: bridge triangle is absent", course.midi))?;
             let lateral_axis = cross(site.string_axis, site.hammer_axis);
+            let (primary, scales) = motion.project_at(site.triangle, site.weights, site.arm_m, site.hammer_axis)
+                .map_err(|e| format!("string polarization key {}: {e}", course.midi))?;
+            let (secondary, _) = motion.project_at(site.triangle, site.weights, site.arm_m, lateral_axis)
+                .map_err(|e| format!("string polarization key {}: {e}", course.midi))?;
             let mut row = Vec::with_capacity(board.len());
-            for (mode_index, mode) in motion.shapes.iter().enumerate() {
-                let mut primary = 0.0;
-                let mut secondary = 0.0;
-                let mut scale = 0.0_f64;
-                for (i, &node) in tri.iter().enumerate() {
-                    let q = mode.get(node).ok_or("string polarization triangle has an absent motion node")?;
-                    let rotation = cross([q[3], q[4], q[5]], site.arm_m);
-                    let u = std::array::from_fn(|c| q[c] + rotation[c]);
-                    let p = site.weights[i] * dot(site.hammer_axis, u);
-                    primary += p;
-                    secondary += site.weights[i] * dot(lateral_axis, u);
-                    scale += site.weights[i] * (0..3).map(|c|
-                        site.hammer_axis[c].abs() * (q[c].abs() + rotation[c].abs())).sum::<f64>();
-                }
-                let expected = board[mode_index].bridge[usize::from(course.midi - 21)];
+            for (mode_index, mode) in board.iter().enumerate() {
+                let primary = primary[mode_index];
+                let secondary = secondary[mode_index];
+                let scale = scales[mode_index];
+                let expected = mode.bridge[usize::from(course.midi - 21)];
                 if !primary.is_finite() || !secondary.is_finite() || !expected.is_finite() || !scale.is_finite() {
                     return Err("string polarization motion projection is not finite".into());
                 }

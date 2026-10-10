@@ -7,7 +7,7 @@ use fs_cutfem::{CutSdf3, HeightAxis, HexCell};
 use fs_ivl::Interval;
 use fs_material::IsotropicElastic;
 use fs_topopt::pipeline::LoadCase;
-use fs_topopt::sdf3::CutDensityStudy3;
+use fs_topopt::sdf3::{CutDensityStudy3, PhysicalRegion3};
 use fs_topopt::sdf3::design::{StressDesignOptions3, StressDesignStudy3};
 use fs_topopt::sdf3::stress::{StressError3, StressOptions3};
 use fs_topopt::{EvaluationStop, SimpParams, SolveBudget, SolveControl, SolveProgress};
@@ -476,4 +476,126 @@ fn g4_cumulative_points_and_linear_budget_refuse_partial_evidence_without_mutati
     ));
     assert_eq!(control.work().linear_iterations, 1);
     assert_eq!(study.operator().scales(), original);
+}
+
+fn authored_stress_regions(study: &CutDensityStudy3) -> Vec<PhysicalRegion3> {
+    study.operator().cell_keys().iter().map(|key| match *key {
+        [0, 0, 0] => PhysicalRegion3::Solid,
+        [0, 1, 1] => PhysicalRegion3::Void,
+        _ => PhysicalRegion3::Design,
+    }).collect()
+}
+
+#[test]
+fn g1_prescribed_material_stress_and_volume_gradients_include_the_filter_transpose() {
+    let (study, force) = uniform(2, 2.0);
+    let regions = authored_stress_regions(&study);
+    let solid = regions.iter().position(|r| *r == PhysicalRegion3::Solid).unwrap();
+    let void = regions.iter().position(|r| *r == PhysicalRegion3::Void).unwrap();
+    let mut study = study.with_physical_regions(regions).unwrap();
+    let rho: Vec<_> = (0..study.cells()).map(|i| 0.65 + 0.01 * i as f64).collect();
+    let loads = [LoadCase { force: &force, weight: 1.0 }];
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
+    let original = study.operator().scales().to_vec();
+    let exact = study.evaluate_stress(&rho, &loads, Default::default(), &mut control).unwrap();
+    assert_eq!((exact.projected_rho[solid], exact.projected_rho[void]), (1.0, 0.0));
+    assert_eq!((exact.scales[solid], exact.scales[void]), (1.0, study.params().e_min));
+    assert_eq!(study.operator().scales(), original, "stress trials restore incoming scales");
+    for i in [solid, void] {
+        assert!(exact.volume_gradient[i] > 0.0,
+            "protected cells' raw controls still influence neighboring free material");
+    }
+    for i in 0..rho.len() {
+        let h = 1e-4;
+        let mut plus = rho.clone();
+        let mut minus = rho.clone();
+        plus[i] += h;
+        minus[i] -= h;
+        let a = study.evaluate_stress(&plus, &loads, Default::default(), &mut control).unwrap();
+        let b = study.evaluate_stress(&minus, &loads, Default::default(), &mut control).unwrap();
+        for field in [&a, &b] {
+            assert_eq!((field.projected_rho[solid], field.projected_rho[void]), (1.0, 0.0));
+        }
+        let sd = (a.aggregate - b.aggregate) / (2.0 * h);
+        let vd = (a.volume_fraction - b.volume_fraction) / (2.0 * h);
+        assert!((sd - exact.gradient[i]).abs() <= 5e-4 * sd.abs().max(exact.aggregate * 1e-7),
+            "stress cell={i} difference={sd} adjoint={}", exact.gradient[i]);
+        assert!((vd - exact.volume_gradient[i]).abs() <= 5e-5 * vd.abs().max(1e-8),
+            "volume cell={i} difference={vd} adjoint={}", exact.volume_gradient[i]);
+    }
+}
+
+#[test]
+fn g5_prescribed_material_survives_stress_updates_and_physical_endpoint_restoration() {
+    let (study, force) = uniform(2, 0.0);
+    let regions = authored_stress_regions(&study);
+    let solid = regions.iter().position(|r| *r == PhysicalRegion3::Solid).unwrap();
+    let void = regions.iter().position(|r| *r == PhysicalRegion3::Void).unwrap();
+    let mut study = study.with_physical_regions(regions.clone()).unwrap();
+    let rho = vec![0.75; study.cells()];
+    let loads = [LoadCase { force: &force, weight: 1.0 }];
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
+    let initial = study.evaluate_stress(&rho, &loads, Default::default(), &mut control).unwrap();
+    let options = design_options(2.0 * initial.aggregate);
+    let mut full = StressDesignStudy3::new(&mut study, &loads, &rho, options, &mut control).unwrap();
+    full.run(2).unwrap();
+    assert_eq!(full.optimizer_work().iterations, 2, "require real accepted updates");
+    let retained = full.checkpoint();
+    let cost = retained.restoration_cost();
+    full.run(2).unwrap();
+    let expected = full.checkpoint();
+    let expected_field = full.accepted().clone();
+    let expected_best = full.best_feasible().unwrap().clone();
+    assert!(expected_best.volume_fraction < initial.volume_fraction);
+    assert!(expected_best.aggregate <= options.stress_limit * (1.0 + options.optimizer.tolerance));
+    for field in [&expected_field, &expected_best] {
+        assert_eq!((field.projected_rho[solid], field.projected_rho[void]), (1.0, 0.0));
+        assert!(field.volume_fraction >= full.study().prescribed_solid_fraction());
+    }
+    drop(full);
+
+    let (rebuilt, rebuilt_force) = uniform(2, 0.0);
+    let mut rebuilt = rebuilt.with_physical_regions(regions.clone()).unwrap();
+    let rebuilt_loads = [LoadCase { force: &rebuilt_force, weight: 1.0 }];
+    let mut resumed_control = SolveControl::new(SolveBudget::default(), &mut poll);
+    let mut resumed = StressDesignStudy3::restore(
+        &mut rebuilt, &rebuilt_loads, retained.clone(), options, &mut resumed_control,
+    ).unwrap();
+    assert_eq!(resumed.study().physical_regions(), Some(regions.as_slice()));
+    assert_eq!(resumed.history(), retained.history);
+    resumed.run(2).unwrap();
+    assert_eq!(resumed.accepted().projected_rho, expected_field.projected_rho);
+    assert_eq!(resumed.accepted().displacements, expected_field.displacements);
+    assert_eq!(resumed.best_feasible().unwrap().projected_rho, expected_best.projected_rho);
+    assert_eq!(resumed.best_feasible().unwrap().displacements, expected_best.displacements);
+    let mut actual = resumed.checkpoint();
+    assert_eq!(actual.history, expected.history);
+    assert_eq!(actual.best_feasible_density, expected.best_feasible_density);
+    assert_eq!(actual.restoration_evaluations, cost);
+    actual.optimizer.work.evaluations -= cost;
+    assert_eq!(actual.optimizer, expected.optimizer);
+    drop(resumed);
+
+    // Identical raw densities are not the same physical problem if labels
+    // disappear. Rehydration must reject the changed response and roll back.
+    let (mut unmasked, unmasked_force) = uniform(2, 0.0);
+    let unmasked_loads = [LoadCase { force: &unmasked_force, weight: 1.0 }];
+    let incoming = unmasked.operator().scales().to_vec();
+    assert!(matches!(
+        StressDesignStudy3::restore(
+            &mut unmasked, &unmasked_loads, retained, options, &mut resumed_control,
+        ),
+        Err(ProjectedAlError::Invalid("restored stress point changed its physical response"))
+    ));
+    assert_eq!(unmasked.operator().scales(), incoming);
+
+    let refused = StressDesignOptions3 { density_floor: 0.0001, ..options };
+    let before = resumed_control.work();
+    assert!(matches!(
+        StressDesignStudy3::new(&mut rebuilt, &rebuilt_loads, &rho, refused, &mut resumed_control),
+        Err(ProjectedAlError::Invalid("density floor and projection permit ersatz stress foldback"))
+    ));
+    assert_eq!(resumed_control.work(), before, "authored voids cannot exempt optimizable cells");
 }

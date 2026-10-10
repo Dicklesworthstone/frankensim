@@ -1,13 +1,14 @@
-//! Fixed-grid total-enthalpy trajectories. Accepted h, never temperature, is
-//! physical history. Air and radiation iterations borrow the same old h.
+//! Total-enthalpy trajectories. Accepted h, never temperature, is physical
+//! history. Air, radiation and adaptive trials borrow the same old h.
+mod adaptive;
 mod adjoint;
 mod cycles;
 
 use super::*;
 use fs_blake3::ContentHash;
 use fs_conduction::transient::enthalpy::{
-    EnthalpyBudget, EnthalpyStepConfig, EnthalpyStepSolution, HeterogeneousEnthalpyBackwardEuler,
-    ReferenceEnthalpyMaterial,
+    EnthalpyBudget, EnthalpyStepConfig, EnthalpyStepSolution,
+    heterogeneous::{HeterogeneousEnthalpyBackwardEuler, ReferenceEnthalpyMaterial},
 };
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
 use fs_solver::{Globalization, LineSearchConfig, NewtonKrylovConfig};
@@ -22,6 +23,7 @@ pub(super) struct Config {
     newton: NewtonKrylovConfig,
     max_iterations: usize,
     max_backtracks: usize,
+    adaptive: Option<adaptive::Config>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,7 +44,6 @@ impl Config {
             "volumetric_heat_capacity_j_m3_k",
             "element_heat_capacities_j_m3_k",
             "nonlinear",
-            "adaptive",
             "time_convergence",
         ] {
             if schedule.get(key).is_some() {
@@ -247,9 +248,17 @@ impl Config {
             newton,
             max_iterations,
             max_backtracks,
+            adaptive: schedule.get("adaptive").map(|value| {
+                let max_step_s = positive(get(schedule, "max_step_s")?, "max_step_s")?;
+                adaptive::Config::parse(value, max_step_s)
+            }).transpose()?,
         };
         config.initial_temperatures()?;
         Ok(config)
+    }
+
+    pub(super) fn adaptive_config(&self) -> Option<super::adaptive::Config> {
+        self.adaptive.map(|policy| policy.time)
     }
 
     pub(super) fn initial_temperatures(&self) -> Result<Vec<f64>> {
@@ -304,15 +313,17 @@ impl Config {
             || request.fan_speed_design.is_some()
             || request.mesh_convergence.is_some()
             || request.recirculation.is_some()
-            || schedule.adaptive.is_some()
             || schedule.time_convergence.is_some()
             || schedule.nonlinear.is_some()
         {
             return Err(bad(
-                "enthalpy supports fixed-grid schedules and workload/fan sizing without steady design, adaptive/study or recirculation modes",
+                "enthalpy supports fixed or adaptive schedules and workload/fan sizing without steady design, studies or recirculation modes",
             ));
         }
         if let Some(adjoint) = schedule.adjoint {
+            if schedule.adaptive.is_some() {
+                return Err(bad("enthalpy adjoints require fixed timesteps"));
+            }
             adjoint.admit_enthalpy()?;
             if let Some(repeat) = schedule.repeat {
                 repeat.validate_adjoint()?;
@@ -597,7 +608,6 @@ fn advance(
         energy_residual_j,
     })
 }
-
 fn summary(cx: &Cx<'_>, config: &Config, masses: &[f64], h: &[f64]) -> Result<(String, f64)> {
     let (mut minimum, mut maximum) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut mass, mut liquid, mut energy) = (0.0, 0.0, 0.0);
@@ -687,6 +697,15 @@ fn simulate_cycle(
 ) -> Result<Cycle> {
     poll(cx)?;
     let masses = engine.reference_nodal_masses_kg();
+    // Schedule owns the active time controls, including immutable sizing
+    // candidates. The storage owner supplies the required enthalpy tolerance.
+    let adaptive_policy = schedule.adaptive.map(|time| -> Result<adaptive::Config> {
+        let mut policy = config.adaptive.ok_or_else(|| bad(
+            "adaptive enthalpy requires absolute_specific_enthalpy_tolerance_j_kg",
+        ))?;
+        policy.time = time;
+        Ok(policy)
+    }).transpose()?;
     let mut h = initial_h.to_vec();
     let initial_temperature = config.temperatures(initial_h)?;
     let (initial, initial_vertex) = initial_objective(request, cx, &initial_temperature)?;
@@ -709,6 +728,7 @@ fn simulate_cycle(
     let (mut time, mut stored, mut input, mut exhaust, mut radiative) = (0.0, 0.0, 0.0, 0.0, 0.0);
     let mut completed = 0_usize;
     let mut work = Work::default();
+    let mut adaptive_stats = adaptive::Stats::default();
     let mut final_result = None;
     let mut final_liquid = Vec::new();
     let mut final_temperature = Vec::new();
@@ -732,128 +752,143 @@ fn simulate_cycle(
         let workload_json = interval.workload.render()?;
         let start = time;
         let end = finite(start + interval.duration)?;
-        for step in 1..=interval.steps {
+        let mut step = 0_usize;
+        // Explicit interval counts can refine the trial ceiling. A later
+        // controller suggestion cannot silently coarsen that requested scale.
+        let trial_ceiling = schedule.max_step_s.min(interval.duration / interval.steps as f64);
+        let mut suggested = trial_ceiling;
+        while time < end {
             poll(cx)?;
-            if completed >= max_steps {
+            let needed = if adaptive_policy.is_some() { 2 } else { 1 };
+            if needed > max_steps || completed > max_steps.saturating_sub(needed) {
                 return Err(budget("enthalpy endpoint budget exhausted"));
             }
-            let endpoint = if step == interval.steps {
-                end
-            } else {
-                start + interval.duration * (step as f64 / interval.steps as f64)
-            };
-            let dt = finite(endpoint - time)?;
-            if dt <= 0.0 {
-                return Err(bad("enthalpy endpoint time is not representable"));
-            }
-            let solved = advance(
-                request,
-                cx,
-                config,
-                engine,
-                &network,
-                &coefficients,
-                &h,
-                &load.source,
-                dt,
-                &mut work,
-            )?;
-            for c in &derived {
-                c.check_direction(&solved.coupled.solid, request.limits.heat)?;
-            }
-            if let Some(expected) = load.expected_power_w {
-                if (solved.solid.source_w - expected).abs() > request.limits.heat {
-                    return Err(producer(
-                        "enthalpy source disagrees with component workload",
-                    ));
+            let mut trial = |old_h: &[f64], dt: f64| {
+                if !(dt.is_finite() && dt > 0.0) {
+                    return Err(bad("enthalpy endpoint time is not representable"));
                 }
-            }
-            let radiation_w = solved.radiation.as_ref().map_or(0.0, |heat| heat.outward_w);
-            let state =
-                request
-                    .objective
-                    .evaluate(cx, &solved.solid.temperature, &solved.coupled.solid)?;
-            let active_tape = match recording.as_mut() {
-                Some((tape, offset)) => Some((&mut **tape, *offset)),
-                None => tape.as_mut().map(|tape| (tape, 0.0)),
-            };
-            if let Some((tape, offset)) = active_tape {
-                tape.record(
-                    &solved.solid.specific_enthalpy_j_kg,
-                    &solved.solid.temperature,
-                    &solved.coupled.reference_temperatures_k,
-                    finite(offset + endpoint)?,
-                    dt,
-                    ordinal,
-                    state.value,
-                    state.vertex,
+                let solved = advance(
+                    request, cx, config, engine, &network, &coefficients,
+                    old_h, &load.source, dt, &mut work,
                 )?;
-            }
-            if state.value > peak {
-                peak = state.value;
-                peak_time = endpoint;
-            }
-            if first_violation.is_none() && schedule.limit.is_some_and(|limit| state.value > limit)
-            {
-                first_violation = Some(endpoint);
-            }
-            stored = finite(stored + solved.solid.stored_energy_change_j)?;
-            input = finite(input + dt * solved.solid.source_w)?;
-            exhaust = finite(exhaust + dt * solved.coupled.transport.external_heat_gain_w)?;
-            radiative = finite(radiative + dt * radiation_w)?;
-            let (phase, _) = summary(cx, config, masses, &solved.solid.specific_enthalpy_j_kg)?;
-            let radiation_field = if solved.radiation.is_some() {
-                format!(",\"radiative_heat_w\":{}", num(radiation_w)?)
-            } else {
-                String::new()
-            };
-            history.push(format!("{{\"time_s\":{},\"dt_s\":{},\"interval\":{ordinal},{workload_json},\"fan_speed_ratio\":{},\"objective_temperature_k\":{},\"active_vertex\":{},\"source_w\":{},\"air_heat_gain_w\":{},\"stored_energy_change_j\":{},\"solid_energy_residual_j\":{},\"coupled_energy_residual_j\":{},\"physical_residual_norm_j\":{},\"coupling_iterations\":{},\"estimated_local_error_ratio\":null,{phase}{radiation_field}}}",
-                num(endpoint)?,num(dt)?,optional(interval.speed)?,num(state.value)?,
-                state.vertex.map_or_else(||"null".into(),|v|v.to_string()),num(solved.solid.source_w)?,
-                num(solved.coupled.transport.external_heat_gain_w)?,num(solved.solid.stored_energy_change_j)?,
-                num(solved.energy_residual_j)?,num(solved.solid.stored_energy_change_j-dt*(solved.solid.source_w-solved.coupled.transport.external_heat_gain_w-radiation_w))?,
-                num(solved.physical_residual_j)?,solved.coupled.iterations));
-            // Publication follows complete solid, air, radiation and energy acceptance.
-            h.clone_from(&solved.solid.specific_enthalpy_j_kg);
-            time = endpoint;
-            completed += 1;
-            if ordinal + 1 == schedule.intervals.len() && step == interval.steps {
-                final_temperature = solved.solid.temperature.clone();
-                final_liquid = solved.solid.liquid_mass_fraction;
-                let evaluated = Evaluation {
-                    coupled: solved.coupled,
-                    temperatures: solved.solid.temperature,
-                    gradient: None,
-                    objective: state.value,
-                    objective_state: state,
-                    robin_total_w: solved.solid.robin_out_w,
-                    source_total_w: solved.solid.source_w,
-                    htc: network
-                        .regions()
-                        .iter()
-                        .map(|name| coefficients[*name])
-                        .collect(),
-                    convection: std::mem::take(&mut derived),
-                    contact_fluxes: solved.solid.contact_fluxes,
-                };
-                let mut result = render(request, &flow, &evaluated)?;
-                if let (Some(policy), Some(heat)) = (&request.radiation, &solved.radiation) {
-                    let prefix = result
-                        .strip_suffix("}\n")
-                        .ok_or_else(|| bad("internal enthalpy result framing"))?;
-                    result = format!(
-                        "{prefix},\"radiation\":{}}}\n",
-                        policy.endpoint_report(heat)?
-                    );
+                for c in &derived {
+                    c.check_direction(&solved.coupled.solid, request.limits.heat)?;
                 }
-                final_result = Some(match (&request.fan, interval.speed) {
-                    (Some(fan), Some(speed)) => fan.attach(result, &flow, speed)?,
-                    _ => result,
-                });
+                if let Some(expected) = load.expected_power_w {
+                    if (solved.solid.source_w - expected).abs() > request.limits.heat {
+                        return Err(producer("enthalpy source disagrees with component workload"));
+                    }
+                }
+                Ok(solved)
+            };
+            let (samples, estimate) = if let Some(policy) = adaptive_policy {
+                let old_temperature = config.temperatures(&h)?;
+                let accepted = adaptive::step(
+                    cx, &h, &old_temperature, time, end, suggested, trial_ceiling,
+                    policy, &mut adaptive_stats, &mut trial,
+                )?;
+                suggested = accepted.next_trial_s;
+                (Vec::from(accepted.samples), Some(accepted.error_ratio))
+            } else {
+                step += 1;
+                let endpoint = if step == interval.steps {
+                    end
+                } else {
+                    start + interval.duration * (step as f64 / interval.steps as f64)
+                };
+                (vec![(endpoint, trial(&h, finite(endpoint - time)?)?)], None)
+            };
+            let last_sample = samples.len() - 1;
+            for (sample_index, (endpoint, solved)) in samples.into_iter().enumerate() {
+                let dt = finite(endpoint - time)?;
+                let radiation_w = solved.radiation.as_ref().map_or(0.0, |heat| heat.outward_w);
+                let state =
+                    request
+                        .objective
+                        .evaluate(cx, &solved.solid.temperature, &solved.coupled.solid)?;
+                let active_tape = match recording.as_mut() {
+                    Some((tape, offset)) => Some((&mut **tape, *offset)),
+                    None => tape.as_mut().map(|tape| (tape, 0.0)),
+                };
+                if let Some((tape, offset)) = active_tape {
+                    tape.record(
+                        &solved.solid.specific_enthalpy_j_kg,
+                        &solved.solid.temperature,
+                        &solved.coupled.reference_temperatures_k,
+                        finite(offset + endpoint)?,
+                        dt,
+                        ordinal,
+                        state.value,
+                        state.vertex,
+                    )?;
+                }
+                if state.value > peak {
+                    peak = state.value;
+                    peak_time = endpoint;
+                }
+                if first_violation.is_none() && schedule.limit.is_some_and(|limit| state.value > limit)
+                {
+                    first_violation = Some(endpoint);
+                }
+                stored = finite(stored + solved.solid.stored_energy_change_j)?;
+                input = finite(input + dt * solved.solid.source_w)?;
+                exhaust = finite(exhaust + dt * solved.coupled.transport.external_heat_gain_w)?;
+                radiative = finite(radiative + dt * radiation_w)?;
+                let (phase, _) = summary(cx, config, masses, &solved.solid.specific_enthalpy_j_kg)?;
+                let radiation_field = if solved.radiation.is_some() {
+                    format!(",\"radiative_heat_w\":{}", num(radiation_w)?)
+                } else {
+                    String::new()
+                };
+                history.push(format!("{{\"time_s\":{},\"dt_s\":{},\"interval\":{ordinal},{workload_json},\"fan_speed_ratio\":{},\"objective_temperature_k\":{},\"active_vertex\":{},\"source_w\":{},\"air_heat_gain_w\":{},\"stored_energy_change_j\":{},\"solid_energy_residual_j\":{},\"coupled_energy_residual_j\":{},\"physical_residual_norm_j\":{},\"coupling_iterations\":{},\"estimated_local_error_ratio\":{},{phase}{radiation_field}}}",
+                    num(endpoint)?,num(dt)?,optional(interval.speed)?,num(state.value)?,
+                    state.vertex.map_or_else(||"null".into(),|v|v.to_string()),num(solved.solid.source_w)?,
+                    num(solved.coupled.transport.external_heat_gain_w)?,num(solved.solid.stored_energy_change_j)?,
+                    num(solved.energy_residual_j)?,num(solved.solid.stored_energy_change_j-dt*(solved.solid.source_w-solved.coupled.transport.external_heat_gain_w-radiation_w))?,
+                    num(solved.physical_residual_j)?,solved.coupled.iterations,
+                    optional(estimate.filter(|_| sample_index == last_sample))?));
+                // Publication follows complete solid, air, radiation and energy acceptance.
+                h.clone_from(&solved.solid.specific_enthalpy_j_kg);
+                time = endpoint;
+                completed += 1;
+                if ordinal + 1 == schedule.intervals.len() && endpoint == end {
+                    final_temperature = solved.solid.temperature.clone();
+                    final_liquid = solved.solid.liquid_mass_fraction;
+                    let evaluated = Evaluation {
+                        coupled: solved.coupled,
+                        temperatures: solved.solid.temperature,
+                        gradient: None,
+                        objective: state.value,
+                        objective_state: state,
+                        robin_total_w: solved.solid.robin_out_w,
+                        source_total_w: solved.solid.source_w,
+                        htc: network
+                            .regions()
+                            .iter()
+                            .map(|name| coefficients[*name])
+                            .collect(),
+                        convection: std::mem::take(&mut derived),
+                        contact_fluxes: solved.solid.contact_fluxes,
+                    };
+                    let mut result = render(request, &flow, &evaluated)?;
+                    if let (Some(policy), Some(heat)) = (&request.radiation, &solved.radiation) {
+                        let prefix = result
+                            .strip_suffix("}\n")
+                            .ok_or_else(|| bad("internal enthalpy result framing"))?;
+                        result = format!(
+                            "{prefix},\"radiation\":{}}}\n",
+                            policy.endpoint_report(heat)?
+                        );
+                    }
+                    final_result = Some(match (&request.fan, interval.speed) {
+                        (Some(fan), Some(speed)) => fan.attach(result, &flow, speed)?,
+                        _ => result,
+                    });
+                }
             }
         }
     }
-    if completed != schedule.total_steps {
+    if adaptive_policy.is_none() && completed != schedule.total_steps {
         return Err(bad(
             "enthalpy completed endpoint count differs from schedule",
         ));
@@ -920,8 +955,9 @@ fn simulate_cycle(
         work.updates,
         work.krylov
     );
+    let adaptive_report = adaptive::render(&adaptive_stats, adaptive_policy)?;
     let output = format!(
-        "{prefix},\"solid_specific_enthalpies_j_kg\":{},\"solid_liquid_mass_fractions\":{},\"transient\":{{\"scheme\":\"backward-euler-total-enthalpy\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{completed},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":null,\"nonlinear\":null,\"adjoint\":{adjoint},\"enthalpy\":{policy}{radiation_field},\"scope\":\"fixed-grid workload/fan schedule with optional physical h-history adjoint and workload-power or fan-speed sizing; accepted enthalpy is physical history; temperatures and mass-weighted phase summaries observe that state; repeated_cycles, when present, owns all-cycle totals and adjoints while transient describes the final cycle in local time; sampled endpoints do not bound inter-step peaks; no moving geometry, melt flow, adaptive/study or enclosure mode\"}}}}\n",
+        "{prefix},\"solid_specific_enthalpies_j_kg\":{},\"solid_liquid_mass_fractions\":{},\"transient\":{{\"scheme\":\"backward-euler-total-enthalpy\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{completed},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":{adaptive_report},\"nonlinear\":null,\"adjoint\":{adjoint},\"enthalpy\":{policy}{radiation_field},\"scope\":\"fixed or adaptive workload/fan schedule with workload-power or fan-speed sizing; physical h-history adjoints require fixed timesteps; accepted enthalpy is physical history; temperatures and mass-weighted phase summaries observe that state; repeated_cycles, when present, owns all-cycle totals and adjoints while transient describes the final cycle in local time; sampled endpoints do not bound inter-step peaks; no moving geometry, melt flow, study or enclosure mode\"}}}}\n",
         numbers(&h)?,
         numbers(&final_liquid)?,
         num(time)?,

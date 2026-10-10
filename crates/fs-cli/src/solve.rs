@@ -186,7 +186,7 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// enclosures without promoting the distinct maximum-temperature decision.
 /// Version 50 executes declared finite-time storage with nested backward-Euler
 /// grids and retains final-time evidence without steady-solution certificates.
-pub const SOLVE_DRIVER_VERSION: u32 = 52;
+pub const SOLVE_DRIVER_VERSION: u32 = 53;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -6760,15 +6760,14 @@ fn conduction_solve_receipt(
             };
             let time = transient::solve(
                 &cx, spec, problem, interfaces.as_ref(), &labels, &region_ids,
-                linear, deadline,
+                radiation.as_ref(), linear, deadline,
             )?;
             transient_energy_w = Some((time.endpoint_storage_w, time.endpoint_energy_residual_w));
             transient_fragment = Some(time.receipt);
             // The temporal estimate belongs to the retained time comparison.
             // Spatial error remains unknown, so it cannot fill Discretization.
             let _ = time.temporal_half_width_k;
-            (radiation::SolidSolution::from_conduction(time.solution),
-                None, BTreeMap::new(), Vec::new())
+            (time.solution, None, BTreeMap::new(), Vec::new())
         } else if laws.is_empty()
             && !natural_laws.is_empty()
         {
@@ -7408,7 +7407,7 @@ fn conduction_solve_receipt(
                 .unwrap_or_default()
         ),
         json_string(if transient_requested {
-            "retained-promoted-mesh-plus-declared-region-seeds-plus-audited-labeled-volume-plus-matdb-backed-linear-transient-conduction-and-declared-storage"
+            "retained-promoted-mesh-plus-declared-region-seeds-plus-audited-labeled-volume-plus-matdb-backed-transient-conduction-and-declared-storage"
         } else { CONDUCTION_AUTHORITY }),
         json_string(if transient_requested { transient::NO_CLAIM } else { CONDUCTION_NO_CLAIM }),
     );

@@ -37,7 +37,7 @@ impl Instrument {
         self.force.fill(0.0);
         for c in 0..nc {
             let ci=self.bank.strings[self.bank.contact_strings[c]].course;
-            self.gap[c]=self.hammer_free[ci]-self.bank.free_contact[c];
+            self.gap[c]=self.hammer_free[ci]-self.bank.free_contact[c]-self.contact_recession_m[c];
             if self.hammers[ci].active&&self.contacts[c].enabled {
                 self.active.push(c);self.force[c]=self.contacts[c].force;
             }
@@ -49,12 +49,12 @@ impl Instrument {
             self.contact_sweep()?;
             converged=true;
             for &i in &self.active {
-                let ci=self.bank.strings[self.bank.contact_strings[i]].course;let c=self.courses[ci];
+                let ci=self.bank.strings[self.bank.contact_strings[i]].course;
                 let material=&self.creep[i];let old=&self.contacts[i];
                 let start=old.overlap-material.deformation(&old.memory);
                 let end=self.gap[i]-material.free_deformation(&old.memory)-material.compliance()*self.force[i];
                 let expected=felt::average_with_rate(&self.laws[ci],&old.state,start,end,
-                    c.felt_thickness_m,self.contact_areas[i],self.source_rate_n_s_m_p[i],
+                    self.contact_thickness_m[i],self.contact_areas[i],self.source_rate_n_s_m_p[i],
                     1.0/f64::from(self.bank.rate)).0;
                 if !expected.is_finite()||(self.force[i]-expected).abs()>1e-5+1e-8*expected.abs(){converged=false;}
             }

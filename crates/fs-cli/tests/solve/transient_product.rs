@@ -212,7 +212,7 @@ fn g1_native_transient_robin_warming_reports_actual_nested_time_difference() {
     assert!(final_transient < receipt_number_field(&steady_qoi, "value"));
 }
 
-fn driven_face_project(bytes: &[u8]) -> ProjectSpec {
+pub(super) fn driven_face_project(bytes: &[u8]) -> ProjectSpec {
     let mut spec = conduction_fixture_project(7, bytes);
     declaration(&mut spec, 15.0, 0.5);
     spec.power.as_mut().unwrap()[0].watts.value = 0.0;
@@ -252,7 +252,7 @@ fn driven_face_project(bytes: &[u8]) -> ProjectSpec {
     spec
 }
 
-fn transient_conductivity_cards(kind: &str) -> CardPackSet {
+pub(super) fn transient_conductivity_cards(kind: &str) -> CardPackSet {
     let (property, interpolation) = match kind {
         "nonlinear" | "constant-curve" => (
             fs_matdb::PropertyValue::Curve {

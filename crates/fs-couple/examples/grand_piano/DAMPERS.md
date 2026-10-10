@@ -34,6 +34,53 @@ There is no output envelope, resonance reset, tail cutoff or pressure gain.
 The original contact solver, loss accounting and failed-sample rollback remain
 in use. Microphones receive the changed physical board velocities.
 
+## Silent key depression and selective sympathetic resonance
+
+An SI performance CSV can hold chosen keys open without striking them. Use
+`silent_key_down,key,0`, then the ordinary `note_off,key,0` to release each key.
+The same control is available to hosts as `Instrument::silent_key_down(midi)`
+and to prepared schedules as `Control::SilentKeyDown { key }`.
+
+For example, save this 48 kHz schedule as `sympathetic.csv` and render a scale
+that contains keys 48 and 60:
+
+```csv
+sample,event,key,value
+0,silent_key_down,60,0
+0,sostenuto,0,1
+4800,note_off,60,0
+9600,note_on,48,2
+33600,note_off,48,0
+96000,sustain,0,0.5
+96000,sostenuto,0,0
+144000,sustain,0,0
+```
+
+```bash
+cargo run --release -p fs-couple --example grand_piano -- \
+  --preset steinway-d --dampers estimated --performance sympathetic.csv \
+  --duration 4 --render sympathetic.wav
+```
+
+Key 60 is held silently before the rising sostenuto edge and remains captured
+after its key release. The later strike of key 48 supplies the energy; motion
+reaches key 60 through the existing reciprocal string/bridge/soundboard model.
+At two seconds the sostenuto release engages the half-pedal drag, and at three
+seconds sustain returns to zero. Equal-sample rows execute in file order: a
+silent depression after an already-down sostenuto pedal is not captured.
+
+Silent depression changes only the existing key hold. It preserves hammer
+position and velocity, felt crush and relaxation memory, and all string/board
+motion. Repeated silent depression is harmless, including on a ringing key;
+release it before requesting a new strike, under the usual rearming rules.
+It works with both point and spatial dampers. An undamped upper key naturally
+has no pad to lift. There is no change to MIDI: zero-velocity note-on remains
+note-off, and CSV `note_on` still requires positive SI hammer velocity.
+
+The control does zero **modeled** work because the current damper images are
+viscous ports without moving pad masses or a complete key action. It does not
+claim to simulate the slow physical motion of a silent key depression.
+
 ## Per-key input in SI units
 
 The header is `frankensim-piano-dampers-v1`. Every key in the supplied string

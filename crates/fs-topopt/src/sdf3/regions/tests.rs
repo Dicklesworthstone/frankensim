@@ -76,14 +76,19 @@ fn zero_filter_inactive_controls_do_not_break_actual_oc_descent() {
     let loads = [LoadCase { force: &y, weight: 0.3 }, LoadCase { force: &z, weight: 0.7 }];
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
-    let rho = study.feasible_start(&vec![0.5; n], 0.55, 1e-8, &mut control).unwrap();
-    let report = controlled_sdf3_optimality_criteria(&mut study, &loads, &rho,
-        MultiLoadOcOptions { volume_fraction: 0.55, max_iterations: 3, change_tolerance: 0.0, ..Default::default() }, &mut control);
+    let options = MultiLoadOcOptions {
+        volume_fraction: 0.55, max_iterations: 3, change_tolerance: 0.0, ..Default::default()
+    };
+    let rho = study.feasible_start(&vec![0.5; n], options.volume_fraction,
+        options.volume_tolerance, &mut control).unwrap();
+    let report = controlled_sdf3_optimality_criteria(&mut study, &loads, &rho, options, &mut control);
     assert!(report.history.len() > 1, "require a real update, not a no-op: {report:?}");
     assert!(report.history.last().unwrap().compliance < report.history[0].compliance);
     assert_eq!((report.projected_rho[0], report.projected_rho[n - 1]), (1.0, 0.0));
     assert_eq!((report.rho[0], report.rho[n - 1]), (rho[0], rho[n - 1]));
-    assert!(report.history.iter().all(|h| h.volume_fraction <= 0.55000001));
+    // Use the actual admitted f64 sum, not a separately rounded decimal literal.
+    let cap = options.volume_fraction + options.volume_tolerance;
+    assert!(report.history.iter().all(|h| h.volume_fraction <= cap), "{report:?}");
     let replay = study.evaluate(&report.rho, &loads, &mut control).unwrap();
     assert_eq!(report.displacements, replay.objective.displacements);
     assert_eq!(report.projected_rho, replay.projected_rho);

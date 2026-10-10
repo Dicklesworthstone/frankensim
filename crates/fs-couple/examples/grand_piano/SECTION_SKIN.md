@@ -99,9 +99,17 @@ estimated study setup, not calibrated air or microphone measurements.
 Generation occurs **after** the existing static equilibrium preparation, so
 an admitted loaded crown produces a loaded skin rather than a flattened or
 unloaded substitute. Each acoustic panel retains its known source facet,
-barycentric coordinates and through-thickness arm. Positive degree-two
-quadrature integrates translation plus physical rotation at those sites.
+barycentric coordinates and through-thickness arm. The P1 motion route retains
+its positive degree-two quadrature. With `--edge-cubic-board-mass`, the native
+skin evaluates the same cubic transverse displacement and analytic physical
+rotations as the bridge, using a degree-three four-point rule for panel motion.
+The rule also integrates quadratic rotation times a linearly varying arm.
 There is no nearest-node assignment or extrapolation beyond the panel.
+
+The same cubic rule is used for supplied OBJ panels. Its polynomial exactness
+requires a panel contained in one structural facet; an arbitrary OBJ panel
+crossing several facets still needs spatial refinement. Generated section
+skins retain the source-facet embedding explicitly.
 
 The existing string-mass-loaded transformation is applied once. `response`,
 `admittance`, `render`, and `render-loaded` then use their original BEM, contact,

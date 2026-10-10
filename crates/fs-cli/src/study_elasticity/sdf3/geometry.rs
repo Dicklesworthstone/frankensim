@@ -1,13 +1,16 @@
 //! Physical SI implicit domains. The legacy unit-cube field keeps its arithmetic.
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum FixedFace {
     Left,
     Right,
     Front,
     Back,
     Bottom,
+    /// Homogeneous full-vector Nitsche support on the retained implicit surface
+    /// within a normalized axis band. It selects no strong box clamps.
+    Embedded { axis: usize, fraction: [f64; 2], beta: f64 },
 }
 impl FixedFace {
     pub(super) fn contains(self, p: [f64; 3], bounds: ([f64; 3], [f64; 3])) -> bool {
@@ -17,12 +20,43 @@ impl FixedFace {
             Self::Front => (1, false),
             Self::Back => (1, true),
             Self::Bottom => (2, false),
+            Self::Embedded { .. } => return false,
         };
         let (lo, hi) = bounds;
         // Octree endpoint interpolation may round lo + (hi - lo) differently
         // from hi. Both name the same terminal lattice plane, not a finite band.
         if upper { p[axis] == hi[axis] || p[axis] == lo[axis] + (hi[axis] - lo[axis]) }
         else { p[axis] == lo[axis] }
+    }
+
+    pub(super) fn embedded_penalty(self) -> Option<f64> {
+        match self { Self::Embedded { beta, .. } => Some(beta), _ => None }
+    }
+
+    /// The same reference-coordinate selection is evaluated on every grid.
+    /// Only the physical implicit surface can be selected, not the box boundary.
+    pub(super) fn embedded_contains(self, p: [f64; 3], bounds: ([f64; 3], [f64; 3])) -> bool {
+        let Self::Embedded { axis, fraction: [a, b], .. } = self else { return false; };
+        let lo = bounds.0[axis];
+        let span = bounds.1[axis] - lo;
+        p[axis] >= lo + a * span && p[axis] <= lo + b * span
+    }
+
+    pub(super) fn validate(self, level: u32) -> Result<()> {
+        let Self::Embedded { axis, fraction: [a, b], beta } = self else { return Ok(()); };
+        if !(1..=2).contains(&level) || axis > 2 || !a.is_finite() || !b.is_finite()
+            || !(0.0 <= a && a < b && b <= 1.0)
+            || !beta.is_finite() || !(1.0..=10_000.0).contains(&beta)
+        {
+            return Err(fail("cli-study-sdf3-input",
+                "embedded support needs axis x/y/z, fraction 0<=a<b<=1, and penalty in [1,10000]"));
+        }
+        let cells = f64::from(1_u32 << level);
+        if (a * cells).fract() != 0.0 || (b * cells).fract() != 0.0 {
+            return Err(fail("cli-study-sdf3-input",
+                "embedded support band must align to the initial octree planes"));
+        }
+        Ok(())
     }
 }
 
@@ -40,9 +74,25 @@ impl CutSdf3 for PhysicalDomain {
     fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval {
         let point = |x| Interval::new(x, x);
         let x = Interval::new(lo[0], hi[0]);
-        Interval::new(lo[2], hi[2]) - point(self.bounds.0[2]) - point(self.height)
-            - point(self.curvature) * (x - point(self.bounds.0[0]))
-                * (point(self.bounds.1[0]) - x)
+        let a = point(self.bounds.0[0]);
+        let b = point(self.bounds.1[0]);
+        let at = |x: Interval| point(self.curvature) * (x - a) * (b - x);
+        let curve = if lo[0] == hi[0] {
+            at(x)
+        } else {
+            // Repeated x in the natural interval extension invents material in
+            // cells above a curved face. A certified slope sign places extrema
+            // at the endpoints; boxes crossing the apex keep the natural bound.
+            let slope = point(self.curvature) * ((b - x) - (x - a));
+            if slope.lo() >= 0.0 {
+                Interval::new(at(point(lo[0])).lo(), at(point(hi[0])).hi())
+            } else if slope.hi() <= 0.0 {
+                Interval::new(at(point(hi[0])).lo(), at(point(lo[0])).hi())
+            } else {
+                at(x)
+            }
+        };
+        Interval::new(lo[2], hi[2]) - point(self.bounds.0[2]) - point(self.height) - curve
     }
     fn derivative_enclose(&self, lo: [f64; 3], hi: [f64; 3], axis: HeightAxis) -> Interval {
         let point = |x| Interval::new(x, x);
@@ -58,6 +108,7 @@ impl CutSdf3 for PhysicalDomain {
 
 pub(super) fn validate(spec: &Spec) -> Result<()> {
     let invalid = |what| fail("cli-study-sdf3-input", what);
+    spec.fixed.validate(spec.level)?;
     if !spec.physical {
         if spec.bounds != ([0.0; 3], [1.0; 3]) || spec.fixed != FixedFace::Left
             || !(0.1..=0.8).contains(&spec.height)
@@ -101,6 +152,30 @@ pub(super) fn validate(spec: &Spec) -> Result<()> {
         return Err(invalid("physical graph requires height/Lz in [0.1,0.8] and curvature*Lx^2/Lz in [0,0.4]"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn physical_graph_certifies_the_empty_cell_above_the_pressure_fixture() {
+    let domain = PhysicalDomain {
+        bounds: ([0.0; 3], [0.1, 0.05, 0.04]), height: 0.028, curvature: 1.0,
+    };
+    let range = domain.enclose([0.0, 0.0, 0.03], [0.025, 0.0125, 0.04]);
+    assert!(range.lo() > 0.0, "the true face stays below z=0.03 in this cell");
+    let apex = domain.enclose([0.04, 0.0, 0.03], [0.06, 0.0125, 0.04]);
+    assert!(apex.lo() < 0.0 && apex.hi() > 0.0, "do not remove the interior apex");
+    for i in 0..=16 {
+        let x = 0.1 * i as f64 / 16.0;
+        let lo = [x, 0.0, 0.02];
+        let hi = [(x + 0.01).min(0.1), 0.05, 0.04];
+        let range = domain.enclose(lo, hi);
+        for px in [lo[0], lo[0].midpoint(hi[0]), hi[0]] {
+            for z in [lo[2], hi[2]] {
+                let value = domain.value([px, 0.02, z]);
+                assert!(range.lo() <= value && value <= range.hi());
+            }
+        }
+    }
 }
 
 #[cfg(test)]

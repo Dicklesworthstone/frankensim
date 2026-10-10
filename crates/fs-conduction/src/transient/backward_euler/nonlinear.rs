@@ -80,10 +80,10 @@ pub struct NonlinearStepSolution {
     pub threshold_j: f64,
 }
 
-struct Evaluation {
-    system: AssembledSystem,
+pub(super) struct Evaluation {
+    pub(super) system: AssembledSystem,
     residual: Vec<f64>,
-    norm: f64,
+    pub(super) norm: f64,
 }
 
 impl BackwardEuler<'_> {
@@ -248,7 +248,7 @@ impl BackwardEuler<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_endpoint(
+    pub(super) fn evaluate_endpoint(
         &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
         interfaces: Option<&ThermalInterfaces>, old: &[f64], temperature: &[f64],
         dt: f64, dofs: &DofMap,

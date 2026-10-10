@@ -203,3 +203,61 @@ fn g4_stress_cli_keeps_a_durable_accepted_prefix_and_never_labels_an_infeasible_
     assert_eq!(report.str_field("selected_design"), Some("last-accepted"));
     assert!(number(report.get("selected").unwrap(), "constraint_violation") > 0.0);
 }
+
+const STRESS_REGIONS: &str =
+    include_str!("../../../../examples/marquee/bracket-3d-stress-regions.fsim");
+
+#[test]
+fn g5_stress_regions_survive_a_new_process_and_remain_in_sealed_design_exports() {
+    let dir = scratch("stress-regions-resume");
+    let (reference_ledger, reference) = run(&dir, "uninterrupted", STRESS_REGIONS, 6);
+    let path = dir.join("segmented.fsim");
+    let ledger = dir.join("segmented.db");
+    fs::write(&path, STRESS_REGIONS).unwrap();
+    let first = document(&command("study").arg(&path).arg(&ledger)
+        .args(["--budget", "2"]).output().unwrap(), 6);
+    let first_id = first.str_field("run_id").unwrap();
+    let original_checkpoint = retained(&ledger, &first, "checkpoint");
+    // Resume must recover the authored region map from the retained source,
+    // even when the working file now places the void in a different cell.
+    fs::write(&path, STRESS_REGIONS.replace(
+        ":void (((0.0 0.5 0.5) (0.5 1.0 1.0)))",
+        ":void (((0.5 0.5 0.5) (1.0 1.0 1.0)))",
+    )).unwrap();
+    let resumed = document(&command("study").arg("--resume").arg(first_id).arg(&ledger)
+        .args(["--budget", "2"]).output().unwrap(), 6);
+    assert_eq!(resumed.path(&["receipt", "iterations_completed"]).and_then(J::as_f64), Some(4.0));
+    assert_eq!(retained(&ledger, &first, "checkpoint"), original_checkpoint);
+    for artifact in ["design", "iterations"] {
+        assert_eq!(retained(&ledger, &resumed, artifact),
+            retained(&reference_ledger, &reference, artifact));
+    }
+    for result in [&first, &resumed] {
+        let report = data(&ledger, result, "report_json");
+        assert_eq!(report.path(&["gradient_check", "passed"]), Some(&J::Bool(true)));
+        assert_eq!(report.get("selected_feasible"), Some(&J::Bool(true)));
+        let design = data(&ledger, result, "design");
+        for key in ["selected", "last_accepted"] {
+            let field = design.get(key).unwrap();
+            let cells = field.get("cells").and_then(J::as_array).unwrap();
+            let mut counts = [0; 3];
+            for cell in cells {
+                let index = cell.get("index").and_then(J::as_array).unwrap();
+                let index: Vec<_> = index.iter().map(|v| v.as_f64().unwrap()).collect();
+                let expected = if index == [0.0, 0.0, 0.0] { "solid" }
+                    else if index == [0.0, 1.0, 1.0] { "void" } else { "design" };
+                assert_eq!(cell.str_field("physical_region"), Some(expected));
+                match expected {
+                    "solid" => { counts[0] += 1; assert_eq!(number(cell, "projected_density"), 1.0); }
+                    "void" => { counts[1] += 1; assert_eq!(number(cell, "projected_density"), 0.0); }
+                    _ => { counts[2] += 1; assert!(number(cell, "projected_density") > 0.0); }
+                }
+            }
+            assert_eq!(counts, [1, 1, 6]);
+        }
+    }
+    let id = resumed.str_field("run_id").unwrap();
+    let exported = document(&command("report").arg(id).arg(&ledger).output().unwrap(), 0);
+    assert_eq!(fs::read(exported.str_field("design").unwrap()).unwrap(),
+        retained(&ledger, &resumed, "design"));
+}

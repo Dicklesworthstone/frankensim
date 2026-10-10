@@ -215,19 +215,80 @@ with mass-weighted phase summaries and split/restart parity. Additional
 tests replace one chart by an ordinary solid and compare separate uniform
 solid/liquid diffusion cases with an independent four-node linear solve.
 
-This opt-in CLI mode supports fixed schedules and fixed reference density with
-uniform or explicitly assigned equilibrium charts, including single-phase
-charts. Geometry, mass and energetic internal variables are frozen. Adaptive
-stepping, steady design, time/mesh studies, recirculation and
-enclosure radiation explicitly refuse. There is no fluid storage, phase
+This opt-in CLI mode supports fixed or adaptive schedules and fixed reference
+density with uniform or explicitly assigned equilibrium charts, including
+single-phase charts. Geometry, mass and energetic internal variables are
+frozen. Steady design, time/mesh studies, recirculation and enclosure radiation
+explicitly refuse. There is no fluid storage, phase
 advection, melting-driven motion or certified inter-step peak.
 
-Repeated fixed-step duty cycles carry the accepted nodal enthalpy into the next
+Repeated fixed or adaptive duty cycles carry the accepted nodal enthalpy into the next
 cycle, including latent energy invisible in a temperature plateau. The
 [repeated enthalpy pulse](enthalpy-repeated-pulse.json) runs three cycles and
 retains a single history adjoint through the entire experiment. See
 [repeated enthalpy state and periodic stopping](REPEATED_COOLING.md#enthalpy-and-phase-change-duty-cycles)
 for the two-field stopping criterion and cumulative output.
+
+### Adaptive total-enthalpy timesteps
+
+The [adaptive enthalpy pulse](enthalpy-adaptive-pulse.json) starts one node in a
+sensible part of the chart and three in its latent plateau. Changing heat flow
+between them makes this a useful example for checking both stored energy and
+temperature. The chart and all fixture properties are synthetic; no calibrated
+temperature, refinement count or measured performance is supplied.
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/enthalpy-adaptive-pulse.json
+cargo test -p fs-cli --test cooling_enthalpy adaptive
+```
+
+Alongside `transient.enthalpy`, provide:
+
+```json
+"adaptive": {
+  "absolute_tolerance_k": 0.02,
+  "absolute_specific_enthalpy_tolerance_j_kg": 0.05,
+  "relative_tolerance": 0.001,
+  "minimum_trial_step_s": 0.000001,
+  "max_trials": 4000
+}
+```
+
+Both absolute tolerances are positive. The relative tolerance lies in
+`[0,1)`. For each field, divide the absolute coarse/fine nodal difference by
+its absolute tolerance plus the relative tolerance times the larger
+coarse/old or fine/old change. The maximum across every node of both fields
+must be at most one. Neither an absolute enthalpy reference nor an absolute
+Kelvin offset changes this scale. Temperature agreement alone cannot conceal
+a discrepancy in latent energy.
+
+Every trial solves the complete coupled system once over the full duration
+and twice over half durations. The second half starts from the first half's
+specific enthalpy. Acceptance commits those two endpoints without
+extrapolation; discarded trials never become physical history or add heat.
+All attempted solid solves count as work. Existing convection, contact,
+radiation and energy checks run on each trial endpoint.
+
+`max_step_s` and explicit interval `steps` both limit the trial spacing.
+Trials end at workload or fan changes. `minimum_trial_step_s` is the refinement
+floor; an interval tail or a finer explicit spacing can be shorter.
+`max_steps` must have room for both accepted half steps before a trial starts.
+Exhausted trials, accepted endpoints or unresolved minimum-step error refuse
+without publishing a partial trajectory.
+
+The `transient.adaptive` report names
+`backward-euler-enthalpy-step-doubling` and includes trial/rejection counts,
+both tolerances and the largest accepted error ratio. Only the second
+endpoint of each pair carries `estimated_local_error_ratio`; its midpoint
+has `null`. These estimates do not bound global error, midpoint error or
+temperatures between samples.
+
+Forward repeated cycles and derivative-free workload/fan sizing support these
+controls. Trial statistics reset each cycle and the last-cycle `transient`
+report remains local; `repeated_cycles` accumulates accepted energy and work.
+Adaptive schedules refuse `transient.adjoint`. Use fixed timesteps for the
+history gradients described next.
 
 ### Enthalpy history gradients and workload/fan sizing
 

@@ -7,6 +7,10 @@ use fs_couple::pcm_wav::{decimate::Decimator,encode_pcm16_wav_interleaved};
 use fs_vfit::{FitOptions,WeightPreset,vector_fit};
 use fs_vfit::discretize::{bilinear_state_space,DiscreteStateSpace,DiscreteStateSpaceRuntime,DelayedFilter,DigitalFilter};
 
+#[path="exterior_stream.rs"]
+mod stream;
+pub use stream::ExteriorStream;
+
 const MAX_ERROR:f64=0.15;
 const MAX_RMS:f64=0.05;
 pub struct Baked {
@@ -103,38 +107,27 @@ pub struct Rendered {pub wav:Vec<u8>,pub report:String,pub peak_pa:f64}
 /// Offline, fresh-at-rest instrument, one event/decimation clock for all
 /// receivers. Failures publish no WAV; accepted mechanics may have advanced,
 /// so discard this candidate rather than claiming cross-owner rollback.
-pub fn render(piano:&mut Instrument,mut score:Performance,frames:usize,baked:&Baked,full_scale_pa:f64)
+pub fn render(piano:&mut Instrument,score:Performance,frames:usize,baked:&Baked,full_scale_pa:f64)
     ->Result<Rendered,String> {
-    let modes=piano.bank.board_count;let trace_len=piano.board_trace_len();
-    if !(2400..=2_880_000).contains(&frames) || piano.sample_rate()!=RATE || modes==0
-        || trace_len%modes!=0 || piano.bank.rate!=RATE*(trace_len/modes) as u32
-        || !full_scale_pa.is_finite() || full_scale_pa<=0.
-        || baked.filters.iter().any(|r|r.len()!=modes)
-        || piano.bank.q.iter().chain(&piano.bank.v).any(|v|*v!=0.) {
+    if !(2400..=2_880_000).contains(&frames) || !full_scale_pa.is_finite() || full_scale_pa<=0. {
         return Err("exterior render requires a fresh resting piano and matching complete clocks/basis".into());
     }
-    let mut receivers=baked.runtime()?;let channels=receivers.len();
-    let mut decimator=Decimator::new(trace_len/modes,modes).map_err(|e|e.to_string())?;
-    let mut trace=vec![0.;trace_len];let mut acceleration=trace.clone();let mut previous=vec![0.;modes];
-    let mut pressure=Vec::with_capacity(frames*channels);
-    for sample in 0..frames {
-        score.dispatch(sample as u64,piano)?;
-        piano.step_with_board_trace(&mut trace).map_err(|e|format!("mechanics frame {sample}: {e}"))?;
-        for (frame,out) in trace.chunks_exact(modes).zip(acceleration.chunks_exact_mut(modes)) {
-            for i in 0..modes {out[i]=(frame[i]-previous[i])*f64::from(piano.bank.rate);previous[i]=frame[i];}
-        }
-        let filtered=decimator.preview(&acceleration).map_err(|e|e.to_string())?;
-        let mut next=[0.;2];
-        for (value,receiver) in next.iter_mut().zip(&mut receivers) {*value=receiver.step(filtered)?;}
-        decimator.commit();pressure.extend_from_slice(&next[..channels]);
-    }
+    let (pressure,channels,decimator_delay)={
+        let mut stream=ExteriorStream::new(piano,score,baked)?;
+        let channels=stream.channels();let mut pressure=vec![0.;frames*channels];
+        stream.render_interleaved_block(&mut pressure).map_err(|e|e.to_string())?;
+        (pressure,channels,stream.decimator_delay_frames())
+    };
     let (wav,clips)=encode_pcm16_wav_interleaved(&pressure,RATE,channels as u16,full_scale_pa).map_err(|e|e.to_string())?;
     let peak_pa=pressure.iter().fold(0.0_f64,|m,v|m.max(v.abs()));
+    if clips!=0 {
+        return Err(format!("exterior PCM refuses {clips} clipped samples at {full_scale_pa} Pa full scale (peak {peak_pa:e} Pa); increase the explicit full-scale pressure and render again; no WAV published"));
+    }
     let coupling=if piano.has_radiation() {
         "Passive acoustic feedback, second-order substep splitting"
     } else {"One-way acoustics, no radiation backreaction"};
     let report=format!("{frames} frames, {channels} receivers, {RATE} Hz, peak {peak_pa:e} Pa; {clips} clips at {full_scale_pa} Pa full scale, no normalization.\nHeld-out transfer max={}, worst modal RMS={}; flight lower bounds {:?} s, decimator delay {} frames.\nInput {} J; combined stored {} J; total loss {} J; combined closure {} J. Acoustic storage {} J and acoustic loss {} J are included once in those totals. {coupling}. No flexible lid/cabinet, room or accuracy outside the sampled band.",
-        baked.maximum_error,baked.worst_rms_error,baked.delays_s,decimator.delay_output_frames(),
+        baked.maximum_error,baked.worst_rms_error,baked.delays_s,decimator_delay,
         piano.accounting.input_work_j,piano.energy_j(),piano.accounting.dissipated_j(),
         piano.accounting.input_work_j-piano.energy_j()-piano.accounting.dissipated_j(),
         piano.radiation_energy_j(),piano.accounting.radiation_loss_j);

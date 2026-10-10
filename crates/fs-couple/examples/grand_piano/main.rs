@@ -64,7 +64,9 @@ trial, not a measured Model D material correction.
 --edge-cubic-board-mass integrates a declared cubic panel displacement field
 and applies that same field at bridge and acoustic surface samples. This is
 an opt-in numerical trial; slope inertia remains lumped and beam inertia is lumped by default.
-The optional FSB stiffener-mass row selects consistent Hermite beam inertia.
+The optional FSB stiffener-mass row accepts lumped, consistent-hermite or
+consistent-eccentric. The last adds the supplied bending rotary and offset
+centroid inertia to Hermite translation; it does not infer torsional polar inertia.
 These opt-in corrections have not passed a perceptual similarity gate.
 --acoustic-refinement-levels uniformly subdivides flat P1 radiating triangles
 for Rayleigh integration only. It preserves the structural mesh, modes and
@@ -87,12 +89,15 @@ only the struck keys. Missing, duplicate or invalid cards refuse without fallbac
 These cards change physical contact forces and relaxation, not an output EQ.
 The preset shank and the scale's hammer mass/patch geometry remain unchanged.
 See HAMMERS.md for the SI format; importing values does not certify measurements.
---hammer-footprints supplies point or finite longitudinal span for EVERY key.
-Two or four positive-area contact sites retain separate felt/Prony histories,
-sharing the original hammer inertia and total area. It requires --render and
-works with the preset, supplied materials, MIDI and all existing pedals.
-No default width, output filter or direct hammer radiation is inferred.
-See HAMMER_FOOTPRINTS.md; this is not a resolved 3-D growing contact patch.
+--hammer-footprints supplies point, uniform span or authored crown profile for
+EVERY key. Profiles supply one to four ordered sites with longitudinal offsets,
+face recession, local felt thickness and positive fractions of the original area.
+Sites engage according to their gaps and retain independent felt/Prony histories
+while sharing the hammer. Point/span thickness still comes from the scale.
+It requires --render and works with supplied materials, MIDI and existing pedals.
+Published R_H requires the original uniform thickness. Varying thickness applies
+the selected felt/Prony law locally and cannot silently reuse that source rate.
+See HAMMER_FOOTPRINTS.md for SI rows and the parallel-column contact model.
 --dampers selects finite-footprint viscous pads instead of the default point
 damper. 'estimated' declares approximate spans and drag; a file must cover
 every scale key with a pad or explicit free row. It requires --render and
@@ -102,8 +107,8 @@ This is spatial drag, not falling-pad or hysteretic felt contact mechanics.
 Its complete per-key file supplies bridge sites, 3-D arms, string/hammer axes
 and lateral damper ratios. The same board solve projects both bridge rows;
 the primary row must agree with the board's existing bridge geometry.
-It requires a geometric --render; modal CSV and edge-cubic fields lack the
-required full-vector motion. No lateral coupling or drag is guessed.
+It requires a geometric --render, using the selected P1, edge-cubic or crowned
+motion field. Modal CSV lacks that motion. No lateral coupling or drag is guessed.
 See STRING_POLARIZATION.md for the physical input format and scope.
 --string-stretching supplies linear or geometric-extension selection for EVERY
 scale key. A stretch row supplies axial rigidity EA in N and a moderate-slope
@@ -358,9 +363,8 @@ impl Options {
         }
         let geometric = options.preset.is_some() || options.board_geometry.is_some();
         if options.string_polarization.as_ref().is_some_and(|s| s.trim().is_empty()
-            || s.starts_with("--") || options.render.is_none() || !geometric
-            || options.edge_cubic_board_mass) {
-            return Err("--string-polarization requires a complete nonempty specification and a geometric render with full-vector P1 or crowned motion; modal CSV and edge-cubic fields are unsupported".into());
+            || s.starts_with("--") || options.render.is_none() || !geometric) {
+            return Err("--string-polarization requires a complete nonempty specification and a geometric render with full-vector motion; modal CSV is unsupported".into());
         }
         if options.acoustic_refinement_levels > 3 || (seen.contains("--acoustic-refinement-levels")
             && (!geometric || options.render.is_none() || options.diagnostic_volume
@@ -583,9 +587,6 @@ fn prepare_geometric_board(text: &str, keys: &[u8], band_hz: f64,
 fn prepare_geometric_board_motion(text: &str, keys: &[u8], band_hz: f64,
     equilibrate_mass: bool, consistent_mass: bool, edge_cubic_mass: bool,
     acoustic_refinement_levels: usize, retain_motion: bool) -> Result<board_geometry::PreparedBoard, String> {
-    if retain_motion && edge_cubic_mass {
-        return Err("string polarization requires full-vector P1 or crowned motion; edge-cubic motion is unavailable".into());
-    }
     if crowned_board::is_crowned(text) {
         if equilibrate_mass || consistent_mass || edge_cubic_mass || acoustic_refinement_levels != 0 {
             return Err("flat-board mass controls require a flat geometric board".into());
@@ -596,7 +597,8 @@ fn prepare_geometric_board_motion(text: &str, keys: &[u8], band_hz: f64,
     } else {
         let geometry=board_geometry::BoardGeometry::read(text)?
             .with_acoustic_refinement(acoustic_refinement_levels)?;
-        if retain_motion && consistent_mass { geometry.prepare_with_motion_consistent_transverse_mass(keys,band_hz,equilibrate_mass) }
+        if retain_motion && edge_cubic_mass { geometry.prepare_with_motion_edge_cubic_transverse_mass(keys,band_hz,equilibrate_mass) }
+        else if retain_motion && consistent_mass { geometry.prepare_with_motion_consistent_transverse_mass(keys,band_hz,equilibrate_mass) }
         else if retain_motion && equilibrate_mass { geometry.prepare_with_motion_mass_equilibrated(keys,band_hz) }
         else if retain_motion { geometry.prepare_with_motion(keys,band_hz) }
         else if edge_cubic_mass { geometry.prepare_edge_cubic_transverse_mass(keys,band_hz,equilibrate_mass) }
@@ -979,6 +981,10 @@ mod string_stretching_render_tests;
 #[cfg(test)]
 #[path = "hammer_footprint_render_tests.rs"]
 mod footprint_render_tests;
+
+#[cfg(test)]
+#[path = "hammer_profile_render_tests.rs"]
+mod hammer_profile_render_tests;
 
 #[cfg(test)]
 #[path = "crowned_render_tests.rs"]

@@ -28,8 +28,10 @@
 //! `ρh³/12·A/3` on slope DOFs). An opt-in exact P1 transverse mass integral
 //! retains lumped slope and beam inertia. Both are SPD, as the fs-modal
 //! pencil contract requires. Independent consistent Hermite stiffener mass
-//! integrates the existing cubic beam displacement exactly. Full DKT rotary-field
-//! consistency and beam rotary inertia are open. Membrane
+//! integrates the existing cubic beam displacement exactly. The explicit
+//! eccentric beam option also integrates centroid motion and supplied bending
+//! rotary inertia; full DKT rotary-field and torsional mass consistency remain
+//! open. Membrane
 //! prestress enters as the standard P1 geometric stiffness `K_G = T·∫∇w·∇w`
 //! (drumheads are the K_G-dominated, D→0 limit — tested against continuum
 //! membrane frequencies). Stiffeners are 2-node Hermite beams on plate node
@@ -42,7 +44,13 @@
 
 pub mod loading;
 pub mod shell;
+mod edge_cubic;
 mod stiffener_mass;
+use edge_cubic::edge_cubic_mass;
+pub use edge_cubic::{
+    edge_cubic_transverse_gradient_shape, edge_cubic_transverse_mean_shape,
+    edge_cubic_transverse_shape,
+};
 pub use stiffener_mass::StiffenerMass;
 pub use shell::{
     ShellMesh, ShellModel, ShellSupport, assemble_shell, canonical_church_bell_profile,
@@ -1157,106 +1165,6 @@ pub enum TransverseMass {
     EdgeCubic,
 }
 
-/// Degree-three Bernstein displacement coefficients (three vertices, six
-/// edge controls, one interior control) as linear forms in `(w, wx, wy)`.
-/// On each edge, the curve is the cubic Hermite interpolant of its endpoints
-/// and tangential slopes. The symmetric interior rule reproduces all
-/// quadratic polynomials exactly, while making no claim about DKT's absent
-/// interior displacement field.
-fn edge_cubic_displacement(x: &[f64; 3], y: &[f64; 3]) -> [[f64; 9]; 10] {
-    let mut b = [[0.0; 9]; 10];
-    for node in 0..3 {
-        b[node][3 * node] = 1.0;
-    }
-    for (edge, (start, end)) in [(0, 1), (1, 2), (2, 0)].into_iter().enumerate() {
-        let dx = (x[end] - x[start]) / 3.0;
-        let dy = (y[end] - y[start]) / 3.0;
-        b[3 + 2 * edge][3 * start] = 1.0;
-        b[3 + 2 * edge][3 * start + 1] = dx;
-        b[3 + 2 * edge][3 * start + 2] = dy;
-        b[4 + 2 * edge][3 * end] = 1.0;
-        b[4 + 2 * edge][3 * end + 1] = -dx;
-        b[4 + 2 * edge][3 * end + 2] = -dy;
-    }
-    for dof in 0..9 {
-        b[9][dof] = 0.25 * (3..9).map(|edge| b[edge][dof]).sum::<f64>()
-            - (b[0][dof] + b[1][dof] + b[2][dof]) / 6.0;
-    }
-    b
-}
-
-const EDGE_CUBIC_EXP: [[i32; 3]; 10] = [
-    [3, 0, 0],
-    [0, 3, 0],
-    [0, 0, 3],
-    [2, 1, 0],
-    [1, 2, 0],
-    [0, 2, 1],
-    [0, 1, 2],
-    [1, 0, 2],
-    [2, 0, 1],
-    [1, 1, 1],
-];
-const EDGE_CUBIC_MULT: [f64; 10] = [1.0, 1.0, 1.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 6.0];
-
-/// Transverse displacement shape for the opt-in edge-cubic plate mass law.
-/// The caller supplies a validated triangle and barycentric coordinates on
-/// it. Entries use the local `(w, wx, wy)` order for each vertex. Apply the
-/// same shape to point effort and motion to preserve virtual work.
-#[must_use]
-pub fn edge_cubic_transverse_shape(x: &[f64; 3], y: &[f64; 3], barycentric: [f64; 3]) -> [f64; 9] {
-    let b = edge_cubic_displacement(x, y);
-    let mut shape = [0.0; 9];
-    for i in 0..10 {
-        let value = EDGE_CUBIC_MULT[i]
-            * (0..3)
-                .map(|axis| barycentric[axis].powi(EDGE_CUBIC_EXP[i][axis]))
-                .product::<f64>();
-        for dof in 0..9 {
-            shape[dof] += value * b[i][dof];
-        }
-    }
-    shape
-}
-
-/// Area-average transverse displacement shape for the same cubic field.
-#[must_use]
-pub fn edge_cubic_transverse_mean_shape(x: &[f64; 3], y: &[f64; 3]) -> [f64; 9] {
-    let b = edge_cubic_displacement(x, y);
-    let mut mean = [0.0; 9];
-    for row in &b {
-        for dof in 0..9 {
-            mean[dof] += row[dof] / 10.0;
-        }
-    }
-    mean
-}
-
-/// Exact `rho*h*∫w²` matrix for the declared cubic Bernstein field.
-fn edge_cubic_mass(x: &[f64; 3], y: &[f64; 3], rho_h_area: f64) -> [f64; 81] {
-    const FACT: [f64; 7] = [1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0];
-    let b = edge_cubic_displacement(x, y);
-    let mut mass = [0.0; 81];
-    for i in 0..10 {
-        for j in 0..10 {
-            let gram = 2.0
-                * rho_h_area
-                * EDGE_CUBIC_MULT[i]
-                * EDGE_CUBIC_MULT[j]
-                * (0..3)
-                    .map(|axis| FACT[(EDGE_CUBIC_EXP[i][axis] + EDGE_CUBIC_EXP[j][axis]) as usize])
-                    .product::<f64>()
-                / 40320.0;
-            for r in 0..9 {
-                for c in 0..9 {
-                    mass[9 * r + c] += gram * b[i][r] * b[j][c];
-                }
-            }
-        }
-    }
-    mass
-}
-
 #[allow(clippy::too_many_lines)] // the same assembly pipeline with an explicit mass integral
 fn assemble_with_sections_inner(
     mesh: &PlateMesh,
@@ -1393,7 +1301,7 @@ fn assemble_with_sections_inner(
     }
 
     // Stiffeners: Hermite bending on (w, slope-along) with EI + EAe²,
-    // torsion GJ on the cross-slope, selectable translational mass.
+    // torsion GJ on the cross-slope, selectable physical beam inertia.
     for st in stiffeners {
         if st.nodes.len() < 2 {
             return Err(PlateError::BadStiffener {
@@ -1438,7 +1346,8 @@ fn assemble_with_sections_inner(
                 vec![(3 * n2, 1.0)],
                 vec![(3 * n2 + 1, tx), (3 * n2 + 2, ty)],
             ];
-            let consistent_mass = if matches!(stiffener_mass, StiffenerMass::ConsistentHermite) {
+            let consistent_mass = if matches!(stiffener_mass,
+                StiffenerMass::ConsistentHermite | StiffenerMass::ConsistentEccentric) {
                 if !st.density.is_finite() || st.density < 0.0 {
                     return Err(PlateError::BadStiffener {
                         what: "consistent Hermite beam density must be finite and nonnegative",
@@ -1452,6 +1361,12 @@ fn assemble_with_sections_inner(
             } else {
                 None
             };
+            let eccentric_mass = if matches!(stiffener_mass, StiffenerMass::ConsistentEccentric) {
+                Some(stiffener_mass::eccentric_inertia(l,st.density,st.area,st.inertia,st.eccentricity)
+                    .ok_or(PlateError::BadStiffener {
+                        what: "eccentric beam inertia needs finite geometry, nonnegative density and bending inertia",
+                    })?)
+            } else { None };
             for r in 0..4 {
                 for c in 0..4 {
                     let v = coef * kb[r][c];
@@ -1460,6 +1375,9 @@ fn assemble_with_sections_inner(
                             push_sym(&mut kc, gr, gc, v * wr * wc);
                             if let Some(mass) = &consistent_mass {
                                 push_sym(&mut mc, gr, gc, mass[r][c] * wr * wc);
+                            }
+                            if let Some(mass) = &eccentric_mass {
+                                push_sym(&mut mc, gr, gc, mass.along[r][c] * wr * wc);
                             }
                         }
                     }
@@ -1477,12 +1395,16 @@ fn assemble_with_sections_inner(
                     for &(gr, wr) in &tmaps[r] {
                         for &(gc, wc) in &tmaps[c] {
                             push_sym(&mut kc, gr, gc, gj * kt[r][c] * wr * wc);
+                            if let Some(mass) = &eccentric_mass {
+                                push_sym(&mut mc, gr, gc, mass.across[r][c] * wr * wc);
+                            }
                         }
                     }
                 }
             }
             // Replace, never supplement, endpoint lumping with the consistent
-            // integral. Both representations contain exactly rho*A*l mass.
+            // integral. Every option retains exactly rho*A*l translation mass;
+            // eccentric rotation adds kinetic terms, not material or mass.
             if matches!(stiffener_mass, StiffenerMass::Lumped) {
                 let mb = st.density * st.area * l / 2.0;
                 push_sym(&mut mc, 3 * n1, 3 * n1, mb);
@@ -1688,6 +1610,65 @@ mod tests {
     }
 
     #[test]
+    fn eccentric_stiffener_inertia_maps_physical_moments_without_changing_stiffness() {
+        let mesh = PlateMesh::from_unstructured(
+            vec![(0.2,-0.1),(1.4,0.8),(0.0,1.2)],vec![[0,1,2]],
+        ).unwrap();
+        let chart = PlateChart::with_boundary_and_regions(mesh,steel_section(),vec![],vec![]).unwrap();
+        let opts = AssemblyOptions { support: EdgeSupport::Clamped, pretension: 0.0 };
+        let beam = Stiffener { nodes: vec![0,1], e: 12e9, g: 0.8e9,
+            area: 0.004, inertia: 2e-7, torsion: 3e-7, eccentricity: 0.03, density: 500.0 };
+        let length = 1.5_f64;let (tx,ty) = (0.8,0.6);
+        let integral = |p: [f64;3]| (0..3).flat_map(|i| (0..3).map(move |j|
+            p[i]*p[j]*length.powi((i+j+1) as i32)/(i+j+1) as f64)).sum::<f64>();
+        for panel in [TransverseMass::Lumped,TransverseMass::Linear,TransverseMass::EdgeCubic] {
+            let old = chart.assemble_with_mass(std::slice::from_ref(&beam),&opts,
+                panel,StiffenerMass::ConsistentHermite).unwrap();
+            let new = chart.assemble_with_mass(std::slice::from_ref(&beam),&opts,
+                panel,StiffenerMass::ConsistentEccentric).unwrap();
+            for row in 0..new.free { assert_eq!(new.k.row(row),old.k.row(row)); }
+            for p in [[1.0,0.0,0.0,0.0],[0.0,1.0,0.0,0.0],[0.3,-0.4,0.2,0.1]] {
+                for [c0,c1] in [[0.0,0.0],[0.7,0.0],[-0.2,0.4]] {
+                    let mut q = vec![0.0;new.free];
+                    for (node,s) in [(0,0.0),(1,length)] {
+                        let w = p[0]+s*(p[1]+s*(p[2]+s*p[3]));
+                        let slope = p[1]+s*(2.0*p[2]+3.0*s*p[3]);
+                        let cross = c0+c1*s;
+                        q[3*node..3*node+3].copy_from_slice(&[
+                            w,tx*slope-ty*cross,ty*slope+tx*cross,
+                        ]);
+                    }
+                    let mut actual = 0.0;
+                    for r in 0..new.free { for c in 0..new.free {
+                        actual += q[r]*(new.m.get(r,c)-old.m.get(r,c))*q[c];
+                    } }
+                    let offset_inertia = beam.area*beam.eccentricity*beam.eccentricity;
+                    let expected = beam.density*((beam.inertia+offset_inertia)
+                        *integral([p[1],2.0*p[2],3.0*p[3]])+offset_inertia*integral([c0,c1,0.0]));
+                    assert!((actual-expected).abs()<1e-12*beam.density*beam.area*length);
+                }
+            }
+            let mut reversed = beam.clone();reversed.nodes.reverse();
+            let reverse = chart.assemble_with_mass(&[reversed],&opts,
+                panel,StiffenerMass::ConsistentEccentric).unwrap();
+            let mut changed_torsion = beam.clone();changed_torsion.torsion*=7.0;
+            let torsion = chart.assemble_with_mass(&[changed_torsion],&opts,
+                panel,StiffenerMass::ConsistentEccentric).unwrap();
+            for row in 0..new.free {
+                assert_eq!(new.m.row(row),reverse.m.row(row));
+                assert_eq!(new.m.row(row),torsion.m.row(row),"Saint-Venant J is not a polar mass moment");
+            }
+            let supported = PlateChart::with_boundary_and_regions(
+                chart.mesh.clone(),chart.section,vec![0],vec![],
+            ).unwrap().assemble_with_mass(std::slice::from_ref(&beam),&opts,
+                panel,StiffenerMass::ConsistentEccentric).unwrap();
+            for r in 0..supported.free { for c in 0..supported.free {
+                assert_eq!(supported.m.get(r,c),new.m.get(r+3,c+3));
+            } }
+        }
+    }
+
+    #[test]
     fn exact_p1_transverse_mass_preserves_rigid_mass_and_changes_bending_inertia() {
         let section = steel_section();
         let mesh =
@@ -1743,99 +1724,6 @@ mod tests {
             assert_eq!(a_cols, b_cols);
             assert_eq!(a_vals, b_vals);
         }
-    }
-
-    #[test]
-    fn edge_cubic_mass_reproduces_quadratic_fields_and_physical_integrals() {
-        let x = [0.0, 1.0, 0.0];
-        let y = [0.0, 0.0, 1.0];
-        let b = edge_cubic_displacement(&x, &y);
-        let exponents = [
-            [3, 0, 0],
-            [0, 3, 0],
-            [0, 0, 3],
-            [2, 1, 0],
-            [1, 2, 0],
-            [0, 2, 1],
-            [0, 1, 2],
-            [1, 0, 2],
-            [2, 0, 1],
-            [1, 1, 1],
-        ];
-        let multiplicity = [1.0, 1.0, 1.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 6.0];
-        let check = |field: fn(f64, f64) -> (f64, f64, f64)| {
-            let mut dofs = [0.0; 9];
-            for node in 0..3 {
-                let (w, wx, wy) = field(x[node], y[node]);
-                dofs[3 * node..3 * node + 3].copy_from_slice(&[w, wx, wy]);
-            }
-            for bary in [[0.2_f64, 0.3, 0.5], [0.6, 0.1, 0.3], [0.1, 0.8, 0.1]] {
-                let px = bary[1];
-                let py = bary[2];
-                let actual = exponents
-                    .iter()
-                    .enumerate()
-                    .map(|(i, e)| {
-                        let bernstein = multiplicity[i]
-                            * (0..3)
-                                .map(|axis| bary[axis].powi(e[axis] as i32))
-                                .product::<f64>();
-                        bernstein * b[i].iter().zip(dofs).map(|(v, u)| v * u).sum::<f64>()
-                    })
-                    .sum::<f64>();
-                assert!((actual - field(px, py).0).abs() < 1e-14);
-                let point_shape = edge_cubic_transverse_shape(&x, &y, bary);
-                let sampled = point_shape
-                    .iter()
-                    .zip(dofs)
-                    .map(|(v, u)| v * u)
-                    .sum::<f64>();
-                assert!((sampled - field(px, py).0).abs() < 1e-14);
-            }
-        };
-        check(|_, _| (1.0, 0.0, 0.0));
-        check(|x, _y| (x, 1.0, 0.0));
-        check(|x, y| (y, 0.0, 1.0));
-        check(|x, y| (x * x, 2.0 * x, 0.0));
-        check(|x, y| (x * y, y, x));
-        check(|x, y| (y * y, 0.0, 2.0 * y));
-
-        let mean = edge_cubic_transverse_mean_shape(&x, &y);
-        let three_point = [
-            [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0],
-            [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
-            [1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0],
-        ];
-        for local in 0..9 {
-            let sampled = three_point
-                .iter()
-                .map(|&barycentric| edge_cubic_transverse_shape(&x, &y, barycentric)[local])
-                .sum::<f64>()
-                / 3.0;
-            assert!((sampled - mean[local]).abs() < 1e-14);
-        }
-        let mean_value = |dofs: [f64; 9]| mean.iter().zip(dofs).map(|(v, u)| v * u).sum::<f64>();
-        assert!((mean_value([1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]) - 1.0).abs() < 1e-14);
-        assert!(
-            (mean_value([0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]) - 1.0 / 3.0).abs() < 1e-14
-        );
-        assert!(
-            (mean_value([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0]) - 1.0 / 6.0).abs() < 1e-14
-        );
-
-        let mass = edge_cubic_mass(&x, &y, 0.5);
-        let energy = |dofs: [f64; 9]| -> f64 {
-            (0..9)
-                .map(|r| {
-                    (0..9)
-                        .map(|c| dofs[r] * mass[9 * r + c] * dofs[c])
-                        .sum::<f64>()
-                })
-                .sum()
-        };
-        assert!((energy([1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]) - 0.5).abs() < 1e-14);
-        assert!((energy([0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]) - 1.0 / 12.0).abs() < 1e-14);
-        assert!((energy([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0]) - 1.0 / 30.0).abs() < 1e-14);
     }
 
     #[test]

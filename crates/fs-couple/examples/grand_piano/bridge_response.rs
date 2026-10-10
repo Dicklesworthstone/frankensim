@@ -5,7 +5,7 @@
 //! retained. Regular string coordinates are eliminated into a board-sized Schur
 //! complement. Near fixed-interface poles stay in a bounded, pivoted border;
 //! the full recovered equation and power balance are audited in both cases.
-use super::{geometry::Course, linear::{Bank, BoardMode, MAX_BOARD_MODES}};
+use super::{geometry::Course, linear::{Bank, BoardMode, MAX_BOARD_MODES},steinway_scale};
 use fs_la::eigen_complex::lu_complex;
 use fs_material::visco::GeneralizedMaxwell;
 use fs_math::c64::C64;
@@ -20,8 +20,8 @@ fn product(row:&[f64],x:&[C64])->C64 {
 }
 
 /// Cold continuous-operator image. It never advances the bank or its controls.
-/// Damping is the bank's authored bending spectrum and physical bare-board
-/// viscous matrix, not a diagonal approximation in the loaded board basis.
+/// Damping uses the bank's selected string law and physical bare-board viscous
+/// matrix, not a diagonal approximation in the loaded board basis.
 /// Hammer contact, key dampers, and nonlinear soundboard motion are excluded.
 pub struct BridgeResponse {
     bank: Bank,
@@ -36,7 +36,7 @@ pub struct Response {
     /// Loaded mass-normalized generalized displacements [m sqrt(kg)].
     pub board_displacement: Vec<C64>,
     pub string_displacement: Vec<C64>,
-    /// All admitted course velocities, in the original scale order [m/s].
+    /// Primary-plane bridge velocities, in the original scale order [m/s].
     pub bridge_velocity: Vec<C64>,
     /// Cycle-average powers [W]; amplitudes are peak phasors.
     pub input_w: f64,
@@ -52,7 +52,18 @@ pub struct Response {
 impl BridgeResponse {
     pub fn new(courses:&[Course],board:&[BoardMode],rate:u32,band_hz:f64,
         max_modes:usize,damping:bool)->Result<Self,String> {
-        let bank=Bank::new(courses,board,rate,band_hz,max_modes,damping)?;
+        Self::new_with_string_damping(courses,board,rate,band_hz,max_modes,damping,None,false)
+    }
+    /// Continuous response of the SAME selected transverse-string bank used
+    /// for playback. Secondary rows are physical projections in the complete
+    /// bare-board basis; the bank owns their mass loading and modal lowering.
+    /// Source damping reuses the published per-key R_u/eta_u projection.
+    /// damping=false removes both wood and string loss, regardless of selector.
+    pub fn new_with_string_damping(courses:&[Course],board:&[BoardMode],rate:u32,band_hz:f64,
+        max_modes:usize,damping:bool,secondary:Option<&[Vec<f64>]>,rt0425_string_damping:bool)
+        ->Result<Self,String> {
+        let bank=Bank::new_with_string_damping(courses,board,rate,band_hz,max_modes,
+            damping,secondary,rt0425_string_damping)?;
         let r=bank.board_count;
         let mut endpoint_k=vec![0.;r*r];let mut board_c=vec![0.;r*r];
         // A bare coordinate's unit row is mapped by the bank's actual Phi.
@@ -66,43 +77,50 @@ impl BridgeResponse {
                 if damping {board_c[i*r+j]+=2.*mode.damping_ratio*omega*row[i]*row[j];}
             }}
         }
-        // Same established material image as Bank::new, NOT a new loss law.
+        // Same established material images as Bank, NOT a new loss law.
         // The parity regression below discriminates the complete generator.
         let bending=GeneralizedMaxwell::new(200e9,vec![(8e9,0.0004),(2e9,0.02)])
             .map_err(|e|e.to_string())?;
-        let mut string_c=vec![0.;bank.modes.len()];let mut si=0;
-        for (ci,course) in courses.iter().enumerate() {
-            for member in 0..course.unison {
-                let cents=(member as f64-0.5*(course.unison-1) as f64)*course.detune_cents;
-                let tension=course.tension_at_cents(cents)?;
-                for duplex in [false,true] {
-                    if duplex && course.duplex_length_m==0. {continue;}
-                    let length=if duplex {course.duplex_length_m}else{course.length_m};
-                    let port=&bank.strings[si];
-                    if port.course!=ci {return Err("harmonic string order disagrees with bank".into());}
-                    for i in 0..r {for j in 0..r {
-                        endpoint_k[i*r+j]+=tension/length*port.bridge[i]*port.bridge[j];
-                    }}
-                    for (index,k) in port.modes.clone().enumerate() {
-                        let mode=bank.modes[k];let wave=(index+1) as f64*PI/length;
-                        let fraction=course.flexural_rigidity_nm2*wave*wave/
-                            (tension+course.flexural_rigidity_nm2*wave*wave);
-                        if damping {string_c[k]=2.*mode.omega*(0.30/mode.omega
-                            +0.5*bending.loss_factor(mode.omega)*fraction);}
-                    }
-                    si+=1;
+        let mut string_c=vec![0.;bank.modes.len()];let mut next_mode=0;
+        // The actual bank owns course/plane/member/span order. A secondary
+        // speaking string has no hammer contact but is NOT a duplex segment.
+        for port in &bank.strings {
+            let course=courses.get(port.course).ok_or("harmonic string course differs from bank")?;
+            if port.modes.start!=next_mode || port.modes.end>bank.modes.len() {
+                return Err("harmonic string mode order disagrees with bank".into());
+            }
+            let cents=(port.member as f64-0.5*(course.unison-1) as f64)*course.detune_cents;
+            let tension=course.tension_at_cents(cents)?;
+            let length=if port.duplex {course.duplex_length_m}else{course.length_m};
+            for i in 0..r {for j in 0..r {
+                endpoint_k[i*r+j]+=tension/length*port.bridge[i]*port.bridge[j];
+            }}
+            for (index,k) in port.modes.clone().enumerate() {
+                let mode=bank.modes[k];let wave=(index+1) as f64*PI/length;
+                let fraction=course.flexural_rigidity_nm2*wave*wave/
+                    (tension+course.flexural_rigidity_nm2*wave*wave);
+                if damping {
+                    let zeta=if rt0425_string_damping {
+                        let (r_u,eta_u)=steinway_scale::string_damping_rt0425(course.midi)?;
+                        r_u/mode.omega+eta_u*mode.omega
+                    } else {0.30/mode.omega+0.5*bending.loss_factor(mode.omega)*fraction};
+                    string_c[k]=2.*mode.omega*zeta;
                 }
             }
+            next_mode=port.modes.end;
         }
-        if si!=bank.strings.len() || endpoint_k.iter().chain(&board_c).chain(&string_c)
+        if next_mode!=bank.modes.len() || endpoint_k.iter().chain(&board_c).chain(&string_c)
             .any(|v|!v.is_finite()) {return Err("nonfinite or incomplete harmonic bank".into());}
         Ok(Self {bank,endpoint_k,board_c,string_c,keys:courses.iter().map(|c|c.midi).collect(),band_hz})
     }
     pub fn bank(&self)->&Bank {&self.bank}
     pub fn keys(&self)->&[u8] {&self.keys}
+    /// Work-conjugate row of the original hammer-plane bridge force/velocity.
+    /// Secondary strings react through the board without becoming extra drives.
     pub fn bridge_row(&self,key:u8)->Result<&[f64],String> {
         let course=self.keys.iter().position(|k|*k==key).ok_or("drive key absent from physical scale")?;
-        self.bank.strings.iter().find(|s|s.course==course).map(|s|s.bridge.as_slice())
+        self.bank.strings.iter().find(|s|s.course==course && s.polarization==0 && !s.duplex)
+            .map(|s|s.bridge.as_slice())
             .ok_or_else(||"course has no physical bridge port".into())
     }
     /// Z is a row-major force/velocity radiation impedance in the SAME loaded
@@ -252,6 +270,10 @@ impl BridgeResponse {
 #[cfg(test)]
 #[path="bridge_pole_tests.rs"]
 mod pole_tests;
+
+#[cfg(test)]
+#[path="harmonic_controls_tests.rs"]
+mod control_tests;
 
 #[cfg(test)]
 mod tests {

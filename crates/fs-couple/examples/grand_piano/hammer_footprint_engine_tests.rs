@@ -11,6 +11,22 @@ fn instrument(span:bool,flexible:bool)->Instrument {
         vec![(felt::demonstration_law().unwrap(),relaxation::demonstration_prony())],
         flexible.then(ShankGeometry::published),Some(&geometry)).unwrap()
 }
+fn profile(c:Course,recessed:bool,varying_thickness:bool)->hammer_footprint::Specification {
+    let mut text=format!("{}\nprofile,{}\n",hammer_footprint::HEADER,c.midi);
+    for (offset,outer,fraction) in [(-0.0015,true,0.15),(-0.0005,false,0.35),
+        (0.0005,false,0.35),(0.0015,true,0.15)] {
+        let recession=if recessed&&outer {0.0003}else{0.0};
+        let thickness=c.felt_thickness_m*if varying_thickness&&outer {0.75}else{1.0};
+        text.push_str(&format!("site,{},{offset},{recession},{thickness},{fraction}\n",c.midi));
+    }
+    hammer_footprint::Specification::read(&text,&[c]).unwrap()
+}
+fn profiled(recessed:bool)->Instrument {
+    let c=geometry::demonstration_scale().unwrap()[48];
+    Instrument::new_with_contact_geometry(vec![c],&board::demonstration(),48_000,4,12,true,
+        vec![(felt::demonstration_law().unwrap(),relaxation::demonstration_prony())],
+        None,Some(&profile(c,recessed,true))).unwrap()
+}
 fn balance(p:&Instrument){
     let defect=p.accounting.input_work_j-p.accounting.dissipated_j()-p.energy_j();
     assert!(defect.abs()<1e-7,"complete contact work defect {defect:e}");
@@ -24,6 +40,108 @@ fn same_history(a:&Instrument,b:&Instrument){
     }
     assert_eq!(a.accounting.input_work_j,b.accounting.input_work_j);
     assert_eq!(a.accounting.dissipated_j(),b.accounting.dissipated_j());
+}
+
+#[test]
+fn profile_thickness_scales_local_creep_and_recession_keeps_the_rest_unloaded(){
+    let mut p=profiled(true);let point=instrument(false,false);
+    assert_eq!(p.hammers.len(),1);assert_eq!(p.sample_rate(),point.sample_rate());
+    assert_eq!(p.board_trace_len(),point.board_trace_len());
+    assert!((p.contact_areas.iter().sum::<f64>()-p.courses[0].felt_area_m2).abs()<1e-18);
+    for i in 0..p.contacts.len(){
+        let fraction=p.bank.contact_area_fraction(i);
+        let thickness=p.contact_thickness_m[i];
+        assert_eq!(p.contacts[i].overlap,-CATCH_DISTANCE-p.contact_recession_m[i]);
+        let ratio=thickness/p.courses[0].felt_thickness_m;
+        assert!((p.creep[i].compliance()*fraction/point.creep[0].compliance()-ratio).abs()<1e-14);
+        let (local,loss)=p.creep[i].advance(&relaxation::Memory::default(),fraction*3.0);
+        let (whole,reference_loss)=point.creep[0].advance(&relaxation::Memory::default(),3.0);
+        assert!((p.creep[i].deformation(&local)-ratio*point.creep[0].deformation(&whole)).abs()<1e-15);
+        assert!((loss-ratio*fraction*reference_loss).abs()<1e-15);
+    }
+    for _ in 0..128 {assert_eq!(p.step().unwrap(),0.0);}
+    assert_eq!(p.energy_j(),0.0);assert_eq!(p.accounting.input_work_j,0.0);
+    assert_eq!(p.accounting.dissipated_j(),0.0);
+    assert!(p.contacts.iter().all(|c|c.force==0.0&&c.state.eps_max==0.0
+        &&c.memory==relaxation::Memory::default()));
+}
+
+#[test]
+fn supplied_crown_engages_progressively_with_stretching_and_one_physical_work_ledger(){
+    let mut curved=profiled(true);let mut flat=profiled(false);
+    let stretching=super::super::linear::string_stretching::Specification::read(
+        "frankensim-piano-string-stretching-v1\nstretch,69,150000,0.2\n",
+        &curved.courses).unwrap();
+    for p in [&mut curved,&mut flat] {p.configure_string_stretching(&stretching).unwrap();p.note_on(69,2.0).unwrap();}
+    let mut centre_only=false;let mut outer_engaged=false;let mut changed=0.0_f64;
+    for _ in 0..2400 {
+        curved.step().unwrap();flat.step().unwrap();
+        let sites=&curved.contacts[..4];
+        centre_only|=(sites[1].force>1e-6||sites[2].force>1e-6)
+            &&sites[0].force==0.0&&sites[3].force==0.0;
+        outer_engaged|=sites[0].force>1e-6||sites[3].force>1e-6;
+        for (a,b) in curved.bank.q.iter().zip(&flat.bank.q){changed=changed.max((a-b).abs());}
+        let crown=curved.hammer_models[0].position(&curved.hammers[0].motion);
+        for (i,c) in curved.contacts.iter().enumerate(){
+            assert_eq!(c.overlap,crown-curved.bank.contact_position(i,&curved.bank.q)-curved.contact_recession_m[i]);
+        }
+    }
+    assert!(centre_only,"recessed outer sites must wait while the crown first loads");
+    assert!(outer_engaged,"the supplied outer face must join the finite strike");
+    assert!(changed>1e-12);assert!(curved.contacts.iter().all(|c|c.state.eps_max>0.0));
+    assert!(curved.contacts[..4].windows(2).any(|c|c[0].state.eps_max!=c[1].state.eps_max));
+    assert!(curved.accounting.felt_relaxation_loss_j>0.0);
+    assert_eq!(curved.accounting.input_work_j,flat.accounting.input_work_j);
+    balance(&curved);balance(&flat);
+}
+
+#[test]
+fn profiled_felt_keeps_local_history_through_refusal_and_restrike(){
+    let mut a=profiled(true);let mut b=profiled(true);
+    a.note_on(69,2.0).unwrap();b.note_on(69,2.0).unwrap();
+    for _ in 0..1200 {
+        a.step().unwrap();b.step().unwrap();
+        if a.contacts.iter().any(|c|c.force>0.0){break;}
+    }
+    assert!(a.contacts.iter().any(|c|c.force>0.0));
+    a.note_off(69).unwrap();b.note_off(69).unwrap();
+    let before=a.energy_j();let diagonal=a.contact_h[0];a.contact_h[0]=f64::NAN;
+    assert!(a.step().is_err());a.contact_h[0]=diagonal;
+    same_history(&a,&b);assert_eq!(a.energy_j(),before);
+    assert_eq!(a.hammers[0].motion.q,b.hammers[0].motion.q);
+    assert_eq!(a.hammers[0].motion.v,b.hammers[0].motion.v);
+    for _ in 0..8000 {a.step().unwrap();b.step().unwrap();if !a.hammers[0].active{break;}}
+    assert!(!a.hammers[0].active);same_history(&a,&b);
+    let conditioning:Vec<_>=a.contacts.iter().map(|c|c.state.eps_max).collect();
+    let recovery:Vec<_>=a.contacts.iter().map(|c|c.memory).collect();
+    assert!(conditioning.iter().any(|e|*e>0.0));
+    a.note_on(69,1.0).unwrap();b.note_on(69,1.0).unwrap();
+    assert_eq!(conditioning,a.contacts.iter().map(|c|c.state.eps_max).collect::<Vec<_>>());
+    assert_eq!(recovery,a.contacts.iter().map(|c|c.memory).collect::<Vec<_>>());
+    for _ in 0..1200 {assert_eq!(a.step().unwrap(),b.step().unwrap());}
+    same_history(&a,&b);balance(&a);
+}
+
+#[test]
+fn source_penetration_rate_accepts_recession_but_refuses_changed_local_thickness(){
+    let c=super::super::steinway_scale::courses().unwrap()[48];
+    let rate=super::super::steinway_scale::hammer_relaxation_rt0425(c.midi).unwrap();
+    let build=|varying|Instrument::new_with_contact_geometry(vec![c],&board::demonstration(),
+        48_000,4,12,true,
+        vec![super::super::steinway_scale::hammer_material_rt0425_damped(&c).unwrap()],
+        None,Some(&profile(c,true,varying))).unwrap();
+    let mut varied=build(true);
+    let error=varied.configure_source_hammer_dissipation(&[rate]).unwrap_err();
+    assert!(error.contains("penetration-based")&&error.contains("uniform felt thickness"));
+    assert!(varied.source_rate_n_s_m_p.iter().all(|r|*r==0.0));
+    assert_eq!(varied.energy_j(),0.0);assert_eq!(varied.accounting.input_work_j,0.0);
+    let mut uniform=build(false);uniform.configure_source_hammer_dissipation(&[rate]).unwrap();
+    for (i,r) in uniform.source_rate_n_s_m_p.iter().enumerate(){
+        assert!((r/rate-uniform.bank.contact_area_fraction(i)).abs()<1e-14);
+    }
+    uniform.note_on(c.midi,2.0).unwrap();
+    for _ in 0..1600 {uniform.step().unwrap();}
+    assert!(uniform.accounting.felt_relaxation_loss_j>0.0);balance(&uniform);
 }
 
 #[test]

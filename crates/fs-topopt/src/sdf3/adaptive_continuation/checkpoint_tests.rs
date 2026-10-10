@@ -76,7 +76,7 @@ fn g1_g5_checkpoints_precede_more_physics_and_do_not_change_numerical_results() 
             assert_eq!(last.rho.len(), study.cells());
             assert!(study.operator().leaves().iter().all(|leaf| tree.leaves().contains(leaf)));
             assert!(report.continuation.work.linear_iterations > 0);
-            endpoints.push((last.rho.clone(), last.displacements.clone(), tree.leaves().to_vec()));
+            endpoints.push((last.rho.clone(), last.displacements.clone(), tree.leaves().clone()));
             published.set(n);
             Ok::<(), ()>(())
         },
@@ -100,7 +100,7 @@ fn g1_g5_checkpoints_precede_more_physics_and_do_not_change_numerical_results() 
 #[test]
 fn g4_checkpoint_failure_returns_the_storage_error_without_starting_a_proposal() {
     let (mut study, mut tree) = fixture();
-    let original = tree.leaves().to_vec();
+    let original = tree.leaves().clone();
     let raw = vec![0.5; study.cells()];
     let body = |_: [f64; 3]| [0.0, 0.0, -1.0];
     let loads = [GoalReferenceLoad3 { load: ReferenceLoad3::body(&body), weight: 1.0 }];
@@ -121,7 +121,7 @@ fn g4_checkpoint_failure_returns_the_storage_error_without_starting_a_proposal()
     ).unwrap_err();
     assert_eq!(error, "checkpoint-storage-full");
     assert_eq!(callbacks, 1);
-    assert_eq!(tree.leaves(), original);
+    assert_eq!(tree.leaves(), &original);
     assert_eq!(solved.unwrap().rho.len(), study.cells());
 }
 

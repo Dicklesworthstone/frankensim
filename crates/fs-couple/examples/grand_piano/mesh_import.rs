@@ -325,6 +325,19 @@ mod tests {
     }
 
     #[test]
+    fn consistent_eccentric_stiffener_mass_survives_native_obj_round_trip() {
+        let spec=format!("{SPEC}stiffener-mass,consistent-eccentric\nstiffener,1e10,6e8,0.0003,1e-8,2e-8,0.01,500,2,6\n");
+        let first=import(OBJ,&spec).unwrap();
+        let (obj,exported)=export(&first.fsb).unwrap();
+        let second=import(&obj,&exported).unwrap();
+        for text in [&first.fsb,&exported,&second.fsb] {
+            assert_eq!(text.lines().filter(|row|*row=="stiffener-mass,consistent-eccentric").count(),1);
+        }
+        assert!(import(OBJ,&format!("{spec}stiffener-mass,consistent-hermite\n")).is_err());
+        assert!(import(OBJ,&spec.replace("consistent-eccentric","consistent-eccentric,extra")).is_err());
+    }
+
+    #[test]
     fn selected_material_mesh_reaches_the_real_modal_solver() {
         let imported = import(OBJ,SPEC).unwrap();
         assert_eq!(imported.source_vertices,vec![2,3,4,5,6]);

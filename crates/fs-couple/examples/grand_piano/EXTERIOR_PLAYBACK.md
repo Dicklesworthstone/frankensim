@@ -20,6 +20,65 @@ score the existing A4 study is used, or the nearest admitted key for a partial
 scale lacking A4. `--note` and `--velocity` explicitly select a supplied-key
 study and post-escapement hammer velocity in m/s. Outputs remain 48 kHz physical-Pa
 PCM, without automatic normalization. The render duration remains 0.05–60 s.
+If the selected full-scale pressure would clip any PCM sample, the render
+refuses before publishing a WAV and reports the clip count and physical peak.
+Choose explicit headroom above that peak and rerender; the signal is never
+silently attenuated or published with saturated samples.
+
+## Persistent finite-body pressure blocks
+
+The prepared finite-body playback path now exposes
+`exterior_audio::ExteriorStream`. Both `render` and `render-loaded` use this
+same stream for their existing WAV output. A host can keep it alive across
+arbitrary blocks and apply physical key/pedal gestures between calls:
+
+```rust,ignore
+// piano, score and baked are fully prepared before constructing the stream.
+let mut stream = exterior_audio::ExteriorStream::new(&mut piano, score, &baked)?;
+let mut block_pa = vec![0.0; 256 * stream.channels()]; // allocate before playback
+stream.render_interleaved_block(&mut block_pa)?;
+stream.instrument_mut().set_sustain(0.5)?;
+stream.render_interleaved_block(&mut block_pa)?;
+```
+
+Blocks contain physical pressure in Pa, in the supplied receiver order. Mono
+also accepts `render_block`; stereo uses frame-interleaved L,R output and
+refuses implicit downmixing. The mutable piano reference remains with the
+stream, and receiver runtimes borrow the immutable baked coefficients. Its
+instrument accessors support physical gestures and accounting inspection;
+changing the prepared modal basis or clocks requires fresh preparation.
+
+Each output frame dispatches controls on one 48 kHz sample clock, advances the
+piano once, differentiates the complete mechanical-substep board trace, and
+feeds one shared causal decimator into the fitted receivers. Each receiver
+retains its own state-space and propagation-delay history. Block boundaries
+reset none of these states. The arithmetic and receiver order match the
+previous offline path, including passive radiation feedback when attached to
+the instrument. Empty calls consume no events or time, and a live gesture
+applies before the next output sample. Scheduled events retain their exact
+sample positions even inside a block.
+
+All stream buffers are allocated during construction. Successful block calls
+perform no allocation, fitting, BEM solves, file access or logging in this
+composition layer. They retain the existing decimator and flight delays;
+`sample_position` counts emitted output frames and `decimator_delay_frames`
+reports observation latency in addition to the receivers' flight delays.
+This is a reusable output API; no audio-device integration or measured
+real-time deadline is claimed.
+
+An incomplete stereo frame refuses before advancing controls or mechanics,
+zeros the supplied buffer, and may be retried with a complete buffer. A
+mechanical, control or receiver execution error preserves only the successful
+frame prefix and zeros the entire failed frame and remaining suffix.
+`BlockError.completed_frames` counts that prefix in the current block;
+`BlockError.sample` gives the absolute failed frame. Such an error latches
+the stream: later nonempty calls fail without advancing it. In particular,
+an observer can fail after mechanics or an earlier receiver advanced, so
+recovery requires a fresh instrument/stream instead of resuming mismatched
+histories. The WAV wrapper returns no output from a failed stream or from
+clipped PCM conversion.
+
+## Physical preparation options
 
 `--modes 1..512` changes the per-string retention ceiling, including unplayed
 sympathetic strings and duplex segments. Bass strings are no longer restricted
@@ -61,8 +120,8 @@ and `eta_u` intrinsic string losses for the `steinway-d` scale. The existing
 scalar stiff-string modes use a reduced damping projection; the flag does not
 import the report's complete higher-order string model. It reaches both
 one-way and radiation-loaded playback, including finite hammer footprints,
-while the estimated common loss remains the default. Harmonic `response` and
-`admittance` do not accept the playback flag.
+and the harmonic `admittance` model. The estimated common loss remains the
+default. The CLI requires the source scale for this selection in every command.
 
 All supplied cards must cover EVERY admitted scale key, not just the notes in
 the score. Missing files, incomplete cards, duplicate options and invalid
@@ -71,11 +130,28 @@ occurs. Constitutive and spatial admission remain with their existing owners.
 The output report identifies the chosen controls, actual mechanical rate,
 retained string-coordinate count and contact-site count.
 
-`response` and `admittance` also accept `--modes` and `--substeps` after their
-output path. Use the same values for a harmonic comparison of a played render.
-They reject hammer/damper/score options because those experiments have no
-nonlinear contact or key-damper state. The ordinary pressure-only response and
-unfitted, fully coupled BEM bridge-force experiment are otherwise unchanged.
+`response` and `admittance` accept `--modes`, `--substeps`, the flat-board inertia
+options, `--string-polarization` and `--rt0425-string-damping` after their output
+path. Use the same scale, geometry, frame card and retention choices as playback.
+Both transverse string directions then contribute their actual endpoint inertia
+and reciprocal bridge forces in one loaded board basis. The admittance model
+also retains the selected intrinsic loss law for all unison and duplex segments.
+Its applied bridge force and reported bridge velocity use the primary hammer
+direction; the secondary strings respond through the coupled board.
+
+The complete frame card is admitted before board preparation and projected from
+the same retained P1, cubic or crowned motion used by playback. Missing frames
+or inconsistent primary geometry refuse. The supplied lateral damper ratio is
+still part of the card, but the harmonic model has no key-damper contacts.
+`--lossless-structure` remains an admittance-only comparison and refuses an
+explicit simultaneous `--rt0425-string-damping` selection.
+
+`response` gives pressure per prescribed modal acceleration. Its input basis
+includes the selected directional string mass loading; intrinsic damping does
+not change this acoustic motion-to-pressure transfer into a structural force
+response. Use `admittance` for damped bridge mobility, receiver pressure per
+bridge force, and the wood/string/radiation power balance. Hammer, damper,
+score and nonlinear-extension controls still require played simulation.
 
 More retained partials, contact sites and substeps increase work and memory.
 Nothing here certifies real-time performance, spatial convergence, calibrated

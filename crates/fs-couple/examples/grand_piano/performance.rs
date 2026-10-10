@@ -1,6 +1,8 @@
 //! Prepared sample-accurate control stream. Parsing/allocation is cold; dispatch
 //! is a monotone cursor over a prevalidated schedule, not a scan per audio sample.
 //! note_on values are post-escapement hammer velocity in m/s, not MIDI gain.
+//! silent_key_down lifts a key's dampers without launching its hammer or adding
+//! modeled work; note_off releases it. MIDI zero-velocity note-on remains off.
 //! jack_staccato/jack_legato values are PEAK JACK FORCE IN NEWTONS, with
 //! 7/100 ms sin-squared pulses (Chabassier/Durufle JSV 2014 Table 3). The
 //! mechanical engine, not this schedule, determines let-off and strike velocity.
@@ -17,6 +19,7 @@ const MAX_EVENTS: usize = 1_000_000;
 pub enum Control {
     NoteOn { key: u8, velocity_m_s: f64 },
     JackOn { key: u8, peak_n: f64, duration_s: f64 },
+    SilentKeyDown { key: u8 },
     NoteOff { key: u8 },
     Sustain(f64),
     Sostenuto(bool),
@@ -48,7 +51,7 @@ impl Performance {
                 Control::JackOn { key, peak_n, duration_s } => keys.contains(&key)
                     && peak_n.is_finite() && peak_n > 0.0 && peak_n <= 200.0
                     && duration_s.is_finite() && (0.001..=0.2).contains(&duration_s),
-                Control::NoteOff { key } => keys.contains(&key),
+                Control::SilentKeyDown { key } | Control::NoteOff { key } => keys.contains(&key),
                 Control::Sustain(value) => value.is_finite() && (0.0..=1.0).contains(&value),
                 Control::Sostenuto(_) | Control::UnaCorda(_) => true,
             };
@@ -88,6 +91,7 @@ impl Performance {
                     "jack_staccato" | "jack_legato" if keys.contains(&key) && value > 0.0 && value <= 200.0 =>
                         Control::JackOn { key, peak_n:value,
                             duration_s:if f[1]=="jack_staccato" {0.007}else{0.100} },
+                    "silent_key_down" if keys.contains(&key) && value == 0.0 => Control::SilentKeyDown { key },
                     "note_off" if keys.contains(&key) && value == 0.0 => Control::NoteOff { key },
                     "sustain" if key == 0 && (0.0..=1.0).contains(&value) => Control::Sustain(value),
                     "sostenuto" if key == 0 && (value == 0.0 || value == 1.0) => Control::Sostenuto(value == 1.0),
@@ -135,6 +139,7 @@ impl Performance {
             match event.control {
                 Control::NoteOn { key, velocity_m_s } => piano.note_on(key, velocity_m_s),
                 Control::JackOn { key, peak_n, duration_s } => piano.jack_on(key, peak_n, duration_s),
+                Control::SilentKeyDown { key } => piano.silent_key_down(key),
                 Control::NoteOff { key } => piano.note_off(key),
                 Control::Sustain(value) => piano.set_sustain(value),
                 Control::Sostenuto(on) => { piano.set_sostenuto(on); Ok(()) }
@@ -183,6 +188,10 @@ impl Performance {
         Self::read(&text, keys, frames)
     }
 }
+
+#[cfg(test)]
+#[path = "silent_key_performance_tests.rs"]
+mod silent_key_tests;
 
 #[cfg(test)]
 mod tests {
