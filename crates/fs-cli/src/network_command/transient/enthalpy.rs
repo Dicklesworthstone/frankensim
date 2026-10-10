@@ -6,8 +6,8 @@ mod cycles;
 use super::*;
 use fs_blake3::ContentHash;
 use fs_conduction::transient::enthalpy::{
-    EnthalpyBudget, EnthalpyStepConfig, EnthalpyStepSolution, HeterogeneousEnthalpyBackwardEuler,
-    ReferenceEnthalpyMaterial,
+    EnthalpyBudget, EnthalpyStepConfig, EnthalpyStepSolution,
+    heterogeneous::{HeterogeneousEnthalpyBackwardEuler, ReferenceEnthalpyMaterial},
 };
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
 use fs_solver::{Globalization, LineSearchConfig, NewtonKrylovConfig};
@@ -597,7 +597,6 @@ fn advance(
         energy_residual_j,
     })
 }
-
 fn summary(cx: &Cx<'_>, config: &Config, masses: &[f64], h: &[f64]) -> Result<(String, f64)> {
     let (mut minimum, mut maximum) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut mass, mut liquid, mut energy) = (0.0, 0.0, 0.0);

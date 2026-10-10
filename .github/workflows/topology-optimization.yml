@@ -84,4 +84,4 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
-          cargo test --release -p fs-cli --features sdf3-study --test study_checkpoint_cli --test study_sdf3_cli --test study_csg3_cli 2>&1 | tail -n 100
+          cargo test --release -p fs-cli --features sdf3-study --test study_checkpoint_cli --test study_sdf3_cli --test study_csg3_cli --test study_embedded_cli 2>&1 | tail -n 100
