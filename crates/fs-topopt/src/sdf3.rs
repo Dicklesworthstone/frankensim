@@ -17,6 +17,7 @@
 
 mod operator;
 mod refine;
+pub mod regions;
 pub mod continuation;
 pub mod adaptive_continuation;
 pub mod response;
@@ -24,6 +25,7 @@ pub mod stress;
 pub mod design;
 pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
 pub use refine::inherit_raw_densities3;
+pub use regions::PhysicalRegion3;
 use fs_cutfem::elastic3::CutElasticity3;
 use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::precond::{IdentityPrecond, Precond};
@@ -62,6 +64,9 @@ pub struct CutDensityStudy3<O: Sdf3Elasticity = CutElasticity3> {
     mass: Vec<f64>,
     params: SimpParams,
     filter_radius: f64,
+    /// Fixed PHYSICAL densities, after filtering/projection. Raw filter
+    /// controls remain variables and may still influence adjacent free cells.
+    physical_regions: Option<Vec<PhysicalRegion3>>,
 }
 
 struct Design3 { projected: Vec<f64>, slope: Vec<f64>, scales: Vec<f64>, volume: f64 }
@@ -105,7 +110,8 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             coo.push(i,i,weight); coo.push(j,j,weight);
             coo.push(i,j,-weight); coo.push(j,i,-weight);
         }
-        Self { operator, filter: CsrOp::symmetric(coo.assemble()), mass, params, filter_radius: radius }
+        Self { operator, filter: CsrOp::symmetric(coo.assemble()), mass, params, filter_radius: radius,
+            physical_regions: None }
     }
 
     /// Read-only access to the geometry, accepted scales, and field ordering.
@@ -135,11 +141,18 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         let mut projected = Vec::with_capacity(rho.len());
         let mut slope = Vec::with_capacity(rho.len());
         let mut scales = Vec::with_capacity(rho.len());
-        for &r in &filtered {
+        for (index, &r) in filtered.iter().enumerate() {
             let h = heaviside(r,p.beta,p.eta);
             if !h.is_finite() { return Err(failure("sdf3-projection")); }
             let physical = h.clamp(0.0,1.0);
             let derivative = if h < 0.0 || h > 1.0 { 0.0 } else { heaviside_derivative(r,p.beta,p.eta) };
+            // Override the physical map AND its local derivative, before SIMP,
+            // volume integration and all compliance/stress/response pullbacks.
+            let (physical, derivative) = match self.physical_regions.as_ref().map(|r| r[index]) {
+                Some(PhysicalRegion3::Solid) => (1.0, 0.0),
+                Some(PhysicalRegion3::Void) => (0.0, 0.0),
+                _ => (physical, derivative),
+            };
             // Unlike a hidden positive rho floor, this value and derivative
             // are of the SAME map, including the exact zero-density limit.
             let power = if physical == 0.0 { 0.0 } else { fs_math::det::pow(physical,p.penal) };
@@ -235,8 +248,11 @@ fn checked_solve_preconditioned(op:&impl LinearOp,preconditioner:&impl Precond,r
     Ok(x)
 }
 
-fn trial(rho:&[f64],ratios:&[f64],lambda:f64,step:f64)->Vec<f64> {
+fn trial(rho:&[f64],ratios:&[Option<f64>],lambda:f64,step:f64)->Vec<f64> {
     rho.iter().zip(ratios).map(|(&r,&q)| {
+        // A control with exactly zero volume AND objective sensitivity is
+        // inactive (e.g. an unfiltered fixed physical cell). Never form 0/0.
+        let Some(q) = q else { return r; };
         let low=(r-step).max(1e-3);let high=(r+step).min(1.0);let exponent=0.5*(q-lambda);
         if exponent<=fs_math::det::ln(low/r) {low}
         else if exponent>=fs_math::det::ln(high/r) {high}
@@ -264,12 +280,15 @@ pub fn controlled_sdf3_optimality_criteria<O:Sdf3Elasticity>(study:&mut CutDensi
         retain(&mut report,&current,0,0.0);
         for iteration in 1..=options.max_iterations {
             control.checkpoint("sdf3-optimizer")?;
-            if !current.volume_gradient.iter().all(|v|v.is_finite()&&*v>0.0)
-                || !current.objective.gradient.iter().all(|g|g.is_finite()&&*g<=0.0) {return Err(failure("sdf3-oc-gradient"));}
-            let ratios:Vec<f64>=current.objective.gradient.iter().zip(&current.volume_gradient).map(|(&g,&v)|
-                if g<0.0 {fs_math::det::ln(-g)-fs_math::det::ln(v)} else {f64::NEG_INFINITY}).collect();
-            let low=ratios.iter().copied().filter(|x|x.is_finite()).fold(f64::INFINITY,f64::min)-32.0;
-            let high=ratios.iter().copied().filter(|x|x.is_finite()).fold(f64::NEG_INFINITY,f64::max)+32.0;
+            if !current.volume_gradient.iter().all(|v|v.is_finite()&&*v>=0.0)
+                || !current.objective.gradient.iter().all(|g|g.is_finite()&&*g<=0.0)
+                || current.objective.gradient.iter().zip(&current.volume_gradient)
+                    .any(|(&g,&v)| v == 0.0 && g != 0.0) {return Err(failure("sdf3-oc-gradient"));}
+            let ratios:Vec<Option<f64>>=current.objective.gradient.iter().zip(&current.volume_gradient).map(|(&g,&v)|
+                if v == 0.0 { None }
+                else { Some(if g<0.0 {fs_math::det::ln(-g)-fs_math::det::ln(v)} else {f64::NEG_INFINITY}) }).collect();
+            let low=ratios.iter().flatten().copied().filter(|x|x.is_finite()).fold(f64::INFINITY,f64::min)-32.0;
+            let high=ratios.iter().flatten().copied().filter(|x|x.is_finite()).fold(f64::NEG_INFINITY,f64::max)+32.0;
             if !low.is_finite()||!high.is_finite() {report.termination=MultiLoadOcTermination::NoAcceptableStep;break;}
             let mut accepted=None;let mut step=options.move_limit;
             for _ in 0..=options.max_backtracks {
