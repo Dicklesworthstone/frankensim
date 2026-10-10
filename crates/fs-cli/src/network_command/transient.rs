@@ -142,7 +142,8 @@ impl Schedule {
         if adaptive.is_some() && total_steps > max_steps / 2 {
             return Err(budget("adaptive half-step endpoints require at least twice the planned full-step count"));
         }
-        let repeat = value.get("repeat").map(|v| repeat::Config::parse(v, total_steps, adaptive.is_some())).transpose()?;
+        let repeat = value.get("repeat").map(|v| repeat::Config::parse_for_storage(v, total_steps,
+            adaptive.is_some(), enthalpy.is_some())).transpose()?;
         let schedule = Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,
             adaptive,nonlinear,adjoint,time_convergence,fan_speed_design,power_design,repeat,enthalpy};
         for design in [&schedule.fan_speed_design,&schedule.power_design].into_iter().flatten() {

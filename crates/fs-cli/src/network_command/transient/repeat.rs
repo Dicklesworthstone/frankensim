@@ -14,7 +14,38 @@ pub(super) struct Config {
     cycles: usize,
     max_total_steps: usize,
     periodic: Option<Periodic>,
+    specific_enthalpy_tolerance_j_kg: Option<f64>,
     controller: Option<FanController>,
+}
+
+/// Only repetition policy crosses into the physical h-history owner. No
+/// temperature-only cycle solver or JSON result supplies its accepted state.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct EnthalpyPolicy {
+    pub(super) cycles: usize,
+    pub(super) max_total_steps: usize,
+    pub(super) periodic: Option<EnthalpyPeriodic>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct EnthalpyPeriodic {
+    pub(super) temperature_tolerance_k: f64,
+    pub(super) specific_enthalpy_tolerance_j_kg: f64,
+    pub(super) consecutive_cycles: usize,
+}
+
+impl EnthalpyPeriodic {
+    pub(super) fn observe(self, temperature_residual_k: f64,
+        specific_enthalpy_residual_j_kg: f64, streak: &mut usize) -> Result<bool> {
+        if finite(temperature_residual_k)? < 0.0 || finite(specific_enthalpy_residual_j_kg)? < 0.0 {
+            return Err(bad("enthalpy periodic residuals must be finite and nonnegative"));
+        }
+        *streak = if temperature_residual_k <= self.temperature_tolerance_k
+            && specific_enthalpy_residual_j_kg <= self.specific_enthalpy_tolerance_j_kg {
+            streak.checked_add(1).ok_or_else(||budget("enthalpy periodic streak overflow"))?
+        } else { 0 };
+        Ok(*streak >= self.consecutive_cycles)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -108,12 +139,28 @@ impl FanController {
 }
 
 impl Config {
+    #[cfg(test)]
     pub(super) fn parse(value: &J, planned_steps: usize, adaptive: bool) -> Result<Self> {
+        Self::parse_for_storage(value, planned_steps, adaptive, false)
+    }
+
+    pub(super) fn parse_for_storage(value: &J, planned_steps: usize, adaptive: bool,
+        enthalpy: bool) -> Result<Self> {
         object(value, &["cycles", "until_periodic", "max_total_steps", "fan_controller"], "transient.repeat")?;
+        if enthalpy && value.get("fan_controller").is_some() {
+            return Err(bad("enthalpy repetition does not admit repeat.fan_controller"));
+        }
+        let mut specific_enthalpy_tolerance_j_kg = None;
         let (cycles, periodic) = match (value.get("cycles"), value.get("until_periodic")) {
             (Some(cycles), None) => (count(cycles,"repeat.cycles",4096)?, None),
             (None, Some(value)) => {
-                object(value, &["max_cycles", "temperature_tolerance_k", "consecutive_cycles"], "repeat.until_periodic")?;
+                object(value, &["max_cycles", "temperature_tolerance_k", "specific_enthalpy_tolerance_j_kg", "consecutive_cycles"], "repeat.until_periodic")?;
+                specific_enthalpy_tolerance_j_kg = match (enthalpy, value.get("specific_enthalpy_tolerance_j_kg")) {
+                    (true, Some(tolerance)) => Some(positive(tolerance,"periodic.specific_enthalpy_tolerance_j_kg")?),
+                    (true, None) => return Err(bad("enthalpy periodic stopping requires explicit specific_enthalpy_tolerance_j_kg alongside temperature_tolerance_k")),
+                    (false, Some(_)) => return Err(bad("specific_enthalpy_tolerance_j_kg requires transient.enthalpy storage")),
+                    (false, None) => None,
+                };
                 let cycles = count(get(value,"max_cycles")?,"periodic.max_cycles",4096)?;
                 let periodic = Periodic {
                     tolerance_k: positive(get(value,"temperature_tolerance_k")?,"periodic.temperature_tolerance_k")?,
@@ -126,7 +173,7 @@ impl Config {
             }
             _ => return Err(bad("repeat requires either cycles or until_periodic, not both")),
         };
-        let config = Self { cycles, periodic,
+        let config = Self { cycles, periodic, specific_enthalpy_tolerance_j_kg,
             max_total_steps: count(get(value,"max_total_steps")?,"repeat.max_total_steps",1_000_000)?,
             controller: value.get("fan_controller").map(FanController::parse).transpose()?,
         };
@@ -137,6 +184,19 @@ impl Config {
             return Err(budget("planned repeated cycles exceed the total accepted-step budget"));
         }
         Ok(config)
+    }
+
+    pub(super) fn enthalpy_policy(self) -> Result<EnthalpyPolicy> {
+        if self.controller.is_some() {
+            return Err(bad("enthalpy repetition does not admit repeat.fan_controller"));
+        }
+        let periodic = self.periodic.map(|periodic| -> Result<EnthalpyPeriodic> { Ok(EnthalpyPeriodic {
+            temperature_tolerance_k: periodic.tolerance_k,
+            specific_enthalpy_tolerance_j_kg: self.specific_enthalpy_tolerance_j_kg
+                .ok_or_else(||bad("enthalpy periodic stopping requires explicit specific_enthalpy_tolerance_j_kg alongside temperature_tolerance_k"))?,
+            consecutive_cycles: periodic.consecutive,
+        }) }).transpose()?;
+        Ok(EnthalpyPolicy { cycles: self.cycles, max_total_steps: self.max_total_steps, periodic })
     }
 
     pub(super) fn validate_adjoint(self) -> Result<()> {
@@ -157,6 +217,9 @@ pub(super) fn simulate_observed(request: &Request, cx: &Cx<'_>, schedule: &Sched
     speed_multiplier: f64, config: Config, mut observer: Option<&mut SampleObserver<'_>>) -> Result<Trajectory>
 {
     poll(cx)?;
+    if config.specific_enthalpy_tolerance_j_kg.is_some() {
+        return Err(bad("specific_enthalpy_tolerance_j_kg requires the enthalpy cycle owner"));
+    }
     let mut tape = if schedule.adjoint.is_some() {
         if config.periodic.is_some() || config.controller.is_some() || speed_multiplier != 1.0 {
             return Err(bad("repeated adjoints require fixed cycles and declared speeds without periodic stopping or a controller"));
@@ -325,3 +388,43 @@ mod periodic_tests;
 
 #[cfg(test)]
 mod control_tests;
+
+#[cfg(test)]
+mod enthalpy_policy_tests {
+    use super::*;
+
+    const PERIODIC: &str = r#"{"until_periodic":{"max_cycles":8,"temperature_tolerance_k":0.01,"specific_enthalpy_tolerance_j_kg":0.1,"consecutive_cycles":2},"max_total_steps":64}"#;
+
+    #[test]
+    fn latent_temperature_agreement_cannot_hide_enthalpy_drift() {
+        let config=Config::parse_for_storage(&J::parse(PERIODIC).unwrap(),4,false,true).unwrap();
+        let policy=config.enthalpy_policy().unwrap();
+        assert_eq!((policy.cycles,policy.max_total_steps),(8,64));
+        let periodic=policy.periodic.unwrap();
+        let mut streak=0;
+        assert!(!periodic.observe(0.0,1.0,&mut streak).unwrap());
+        assert_eq!(streak,0);
+        assert!(!periodic.observe(0.0,0.05,&mut streak).unwrap());
+        assert!(!periodic.observe(0.02,0.0,&mut streak).unwrap());
+        assert_eq!(streak,0);
+        assert!(!periodic.observe(0.01,0.1,&mut streak).unwrap());
+        assert!(periodic.observe(0.0,0.0,&mut streak).unwrap());
+        assert!(periodic.observe(f64::NAN,0.0,&mut streak).is_err());
+    }
+
+    #[test]
+    fn periodic_policy_requires_the_matching_storage_units() {
+        let value=J::parse(PERIODIC).unwrap();
+        assert!(Config::parse(&value,4,false).unwrap_err().message.contains("requires transient.enthalpy"));
+        let temperature_only=J::parse(&PERIODIC.replace("\"specific_enthalpy_tolerance_j_kg\":0.1,","")).unwrap();
+        assert!(Config::parse(&temperature_only,4,false).is_ok());
+        assert!(Config::parse_for_storage(&temperature_only,4,false,true).unwrap_err().message.contains("requires explicit specific_enthalpy_tolerance"));
+        assert!(Config::parse(&temperature_only,4,false).unwrap().enthalpy_policy().is_err());
+        let fixed=J::parse(r#"{"cycles":3,"max_total_steps":12}"#).unwrap();
+        let policy=Config::parse_for_storage(&fixed,4,false,true).unwrap().enthalpy_policy().unwrap();
+        assert_eq!(policy.cycles,3);
+        assert!(policy.periodic.is_none());
+        let controlled=J::parse(r#"{"cycles":3,"max_total_steps":12,"fan_controller":{}}"#).unwrap();
+        assert!(Config::parse_for_storage(&controlled,4,false,true).unwrap_err().message.contains("does not admit repeat.fan_controller"));
+    }
+}

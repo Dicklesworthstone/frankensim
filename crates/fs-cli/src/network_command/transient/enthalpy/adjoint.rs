@@ -23,12 +23,16 @@ struct Selection {
     time: f64,
     value: f64,
     vertex: Option<usize>,
+    // Cycle starts evaluate the field directly, while accepted endpoints use
+    // the producer's convective quadrature for a wall-mean objective.
+    boundary: bool,
 }
 
 pub(super) struct Tape {
     config: AdjointConfig,
     frames: Vec<Frame>,
     planned: usize,
+    cycles: usize,
     vertices: usize,
     regions: usize,
     charged_bytes: usize,
@@ -42,13 +46,43 @@ impl Tape {
         initial: f64,
         vertex: Option<usize>,
     ) -> Result<Option<Self>> {
+        if schedule.adjoint.is_some() && schedule.repeat.is_some() {
+            return Err(bad(
+                "repeated enthalpy adjoints require the complete duty-cycle tape",
+            ));
+        }
+        Self::for_cycles(request, schedule, initial, vertex, 1)
+    }
+
+    pub(super) fn for_cycles(
+        request: &Request,
+        schedule: &Schedule,
+        initial: f64,
+        vertex: Option<usize>,
+        cycles: usize,
+    ) -> Result<Option<Self>> {
         let Some(config) = schedule.adjoint else {
             return Ok(None);
         };
         config.admit_enthalpy()?;
+        if schedule.adaptive.is_some()
+            || schedule.power_design.is_some()
+            || schedule.fan_speed_design.is_some()
+            || cycles == 0
+        {
+            return Err(bad(
+                "enthalpy adjoints require fixed timesteps and an admitted cycle count without nested design searches",
+            ));
+        }
+        if let Some(repeat) = schedule.repeat {
+            repeat.validate_adjoint()?;
+        }
         let vertices = request.mesh.vertex_count();
         let regions = request.surfaces.len();
-        let planned = schedule.total_steps;
+        let planned = schedule
+            .total_steps
+            .checked_mul(cycles)
+            .ok_or_else(|| budget("enthalpy adjoint endpoint count overflow"))?;
         let frame_bytes = vertices
             .checked_mul(2)
             .and_then(|n| n.checked_add(regions))
@@ -85,6 +119,7 @@ impl Tape {
             config,
             frames,
             planned,
+            cycles,
             vertices,
             regions,
             charged_bytes,
@@ -93,8 +128,29 @@ impl Tape {
                 time: 0.0,
                 value: finite(initial)?,
                 vertex,
+                boundary: true,
             },
         }))
+    }
+
+    pub(super) fn begin_cycle(
+        &mut self,
+        initial: f64,
+        vertex: Option<usize>,
+        time: f64,
+    ) -> Result<()> {
+        finite(initial)?;
+        finite(time)?;
+        if initial > self.peak.value {
+            self.peak = Selection {
+                state: self.frames.len(),
+                time,
+                value: initial,
+                vertex,
+                boundary: true,
+            };
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -128,6 +184,7 @@ impl Tape {
                 time,
                 value: objective,
                 vertex,
+                boundary: false,
             };
         }
         self.frames.push(Frame {
@@ -167,6 +224,7 @@ impl Tape {
                     time: frame.time,
                     value: frame.objective,
                     vertex: frame.vertex,
+                    boundary: false,
                 }
             }
         };
@@ -288,7 +346,7 @@ impl Tape {
                             frame,
                             &names,
                             &solved.convective_robin_fluxes,
-                            index + 1 == selected.state,
+                            index + 1 == selected.state && !selected.boundary,
                         )?;
                         (solved.conduction, state)
                     } else {
@@ -308,7 +366,7 @@ impl Tape {
                             frame,
                             &names,
                             &solved.robin_fluxes,
-                            index + 1 == selected.state,
+                            index + 1 == selected.state && !selected.boundary,
                         )?;
                         (solved, state)
                     };
@@ -376,7 +434,16 @@ impl Tape {
                     let binding = CoupledEnthalpyLinearization::new(cx, &network, &response, &gate)
                         .map_err(producer)?;
                     let mut objective = binding.zero_objective();
-                    if let Some(state) = objective_state {
+                    if index + 1 == selected.state && selected.boundary {
+                        let (value, vertex) = initial_objective(request, cx, &frame.temperature)?;
+                        if vertex != selected.vertex || value.to_bits() != selected.value.to_bits()
+                        {
+                            return Err(producer(
+                                "enthalpy cycle-boundary objective changed during adjoint reconstruction",
+                            ));
+                        }
+                        seed_initial(request, cx, vertex, &mut objective.nodal_temperatures)?;
+                    } else if let Some(state) = objective_state {
                         state.seed(&mut objective);
                     }
                     let interface_config = InterfaceSolveConfig {
@@ -462,7 +529,7 @@ impl Tape {
             None
         };
         let report = format!(
-            "{{\"method\":\"discrete-backward-euler-coupled-enthalpy-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":1,\"dtemperature_dinitial_specific_enthalpies_k_kg_j\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_j\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"reconstruction_solid_solves\":{},\"adjoint_sweeps\":{},\"adjoint_krylov_iterations\":{},\"max_interface_residual\":{},\"scope\":\"fixed accepted grid; final or earliest sampled-maximum branch, no continuous peak bound or unique derivative at ties; full specific-enthalpy history, contact, mixed-air and declared ambient-radiation feedback; interval controls multiply their actual source without division by baseline power; initial h derivatives have units K kg/J; inlet controls apply throughout; fan controls include single-bank affinity, capacity transport and supported convection Reynolds response, null when unavailable; fixed reference densities, charts, conductivity/contact laws, geometry, fluid properties and radiation controls; slope corners and validity endpoints refuse classical endpoint derivatives; replay verifies accepted h and T bits and rechecks physical residual/energy gates; checkpoint bytes bound retained h/T/references and control accumulators, not total workspace; per-endpoint derivative budgets share the original wall deadline\"}}",
+            "{{\"method\":\"discrete-backward-euler-coupled-enthalpy-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":{},\"dtemperature_dinitial_specific_enthalpies_k_kg_j\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_j\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"reconstruction_solid_solves\":{},\"adjoint_sweeps\":{},\"adjoint_krylov_iterations\":{},\"max_interface_residual\":{},\"scope\":\"fixed accepted grid and cycle count; final or earliest sampled-maximum branch in global time, no continuous peak bound or unique derivative at ties; full specific-enthalpy history across every cycle, contact, mixed-air and declared ambient-radiation feedback; shared interval controls affect every repeated occurrence and multiply their actual source without division by baseline power; initial h derivatives describe the original initial field and have units K kg/J; inlet controls apply throughout; fan controls include single-bank affinity, capacity transport and supported convection Reynolds response, null when unavailable; fixed reference densities, charts, conductivity/contact laws, geometry, fluid properties and radiation controls; slope corners and validity endpoints refuse classical endpoint derivatives; replay verifies accepted h and T bits and rechecks physical residual/energy gates; checkpoint bytes bound retained h/T/references for all cycles and control accumulators, not total workspace; per-endpoint derivative budgets share the original wall deadline\"}}",
             quote(match self.config.observable {
                 Observable::Final => "final",
                 Observable::SampledPeak => "sampled-peak",
@@ -473,6 +540,7 @@ impl Tape {
             selected
                 .vertex
                 .map_or_else(|| "null".into(), |v| v.to_string()),
+            self.cycles,
             numbers(&carry)?,
             num(uniform)?,
             numbers(&inlets)?,

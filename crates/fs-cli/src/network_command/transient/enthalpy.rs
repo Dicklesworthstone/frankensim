@@ -1,6 +1,7 @@
 //! Fixed-grid total-enthalpy trajectories. Accepted h, never temperature, is
 //! physical history. Air and radiation iterations borrow the same old h.
 mod adjoint;
+mod cycles;
 
 use super::*;
 use fs_blake3::ContentHash;
@@ -42,7 +43,6 @@ impl Config {
             "element_heat_capacities_j_m3_k",
             "nonlinear",
             "adaptive",
-            "repeat",
             "time_convergence",
         ] {
             if schedule.get(key).is_some() {
@@ -253,8 +253,14 @@ impl Config {
     }
 
     pub(super) fn initial_temperatures(&self) -> Result<Vec<f64>> {
-        self.initial_h
-            .iter()
+        self.temperatures(&self.initial_h)
+    }
+
+    fn temperatures(&self, h: &[f64]) -> Result<Vec<f64>> {
+        if h.len() != self.vertex_material_ids.len() {
+            return Err(bad("enthalpy history requires one value per solid vertex"));
+        }
+        h.iter()
             .enumerate()
             .map(|(vertex, &h)| {
                 self.materials[self.vertex_material_ids[vertex]]
@@ -299,16 +305,21 @@ impl Config {
             || request.mesh_convergence.is_some()
             || request.recirculation.is_some()
             || schedule.adaptive.is_some()
-            || schedule.repeat.is_some()
             || schedule.time_convergence.is_some()
             || schedule.nonlinear.is_some()
         {
             return Err(bad(
-                "enthalpy supports fixed schedules and workload/fan sizing without steady design, adaptive/repeated/study or recirculation modes",
+                "enthalpy supports fixed-grid schedules and workload/fan sizing without steady design, adaptive/study or recirculation modes",
             ));
         }
         if let Some(adjoint) = schedule.adjoint {
             adjoint.admit_enthalpy()?;
+            if let Some(repeat) = schedule.repeat {
+                repeat.validate_adjoint()?;
+            }
+        }
+        if let Some(repeat) = schedule.repeat {
+            repeat.enthalpy_policy()?;
         }
         let columns = self
             .max_iterations
@@ -624,10 +635,69 @@ pub(super) fn simulate(
     config.admit(request, schedule)?;
     poll(cx)?;
     let engine = config.prepare(cx, &request.mesh)?;
+    match schedule.repeat {
+        Some(policy) => cycles::simulate(
+            request,
+            cx,
+            schedule,
+            config,
+            &engine,
+            policy.enthalpy_policy()?,
+        ),
+        None => simulate_cycle(
+            request,
+            cx,
+            schedule,
+            config,
+            &engine,
+            &config.initial_h,
+            schedule.max_steps,
+            None,
+        )
+        .map(|cycle| cycle.trajectory),
+    }
+}
+
+/// Accepted physical state and accounting cross a cycle boundary as typed
+/// values. Output JSON is only a presentation of this state.
+struct Cycle {
+    trajectory: Trajectory,
+    final_h: Vec<f64>,
+    final_temperature: Vec<f64>,
+    duration_s: f64,
+    input_j: f64,
+    stored_j: f64,
+    exhaust_j: f64,
+    radiative_j: f64,
+    first_violation_s: Option<f64>,
+}
+
+/// Local time always starts at zero. Only tape/report times receive the global
+/// offset, so repetition cannot round or enlarge a physical integration step.
+#[allow(clippy::too_many_arguments)]
+fn simulate_cycle(
+    request: &Request,
+    cx: &Cx<'_>,
+    schedule: &Schedule,
+    config: &Config,
+    engine: &Prepared<'_, '_>,
+    initial_h: &[f64],
+    remaining_steps: usize,
+    mut recording: Option<(&mut adjoint::Tape, f64)>,
+) -> Result<Cycle> {
+    poll(cx)?;
     let masses = engine.reference_nodal_masses_kg();
-    let mut h = config.initial_h.clone();
-    let (initial, initial_vertex) = initial_objective(request, cx, &schedule.initial)?;
-    let mut tape = adjoint::Tape::new(request, schedule, initial, initial_vertex)?;
+    let mut h = initial_h.to_vec();
+    let initial_temperature = config.temperatures(initial_h)?;
+    let (initial, initial_vertex) = initial_objective(request, cx, &initial_temperature)?;
+    let mut tape = if recording.is_some() {
+        None
+    } else {
+        adjoint::Tape::new(request, schedule, initial, initial_vertex)?
+    };
+    if let Some((tape, offset)) = recording.as_mut() {
+        tape.begin_cycle(initial, initial_vertex, *offset)?;
+    }
     let (phase, initial_total) = summary(cx, config, masses, &h)?;
     let mut history = vec![format!(
         "{{\"time_s\":0,\"objective_temperature_k\":{},\"active_vertex\":{},\"initial_state\":true,{phase}}}",
@@ -641,6 +711,8 @@ pub(super) fn simulate(
     let mut work = Work::default();
     let mut final_result = None;
     let mut final_liquid = Vec::new();
+    let mut final_temperature = Vec::new();
+    let max_steps = schedule.max_steps.min(remaining_steps);
     for (ordinal, interval) in schedule.intervals.iter().enumerate() {
         poll(cx)?;
         interval.workload.validate(request, cx)?;
@@ -662,7 +734,7 @@ pub(super) fn simulate(
         let end = finite(start + interval.duration)?;
         for step in 1..=interval.steps {
             poll(cx)?;
-            if completed >= schedule.max_steps {
+            if completed >= max_steps {
                 return Err(budget("enthalpy endpoint budget exhausted"));
             }
             let endpoint = if step == interval.steps {
@@ -678,7 +750,7 @@ pub(super) fn simulate(
                 request,
                 cx,
                 config,
-                &engine,
+                engine,
                 &network,
                 &coefficients,
                 &h,
@@ -701,12 +773,16 @@ pub(super) fn simulate(
                 request
                     .objective
                     .evaluate(cx, &solved.solid.temperature, &solved.coupled.solid)?;
-            if let Some(tape) = &mut tape {
+            let active_tape = match recording.as_mut() {
+                Some((tape, offset)) => Some((&mut **tape, *offset)),
+                None => tape.as_mut().map(|tape| (tape, 0.0)),
+            };
+            if let Some((tape, offset)) = active_tape {
                 tape.record(
                     &solved.solid.specific_enthalpy_j_kg,
                     &solved.solid.temperature,
                     &solved.coupled.reference_temperatures_k,
-                    endpoint,
+                    finite(offset + endpoint)?,
                     dt,
                     ordinal,
                     state.value,
@@ -742,6 +818,7 @@ pub(super) fn simulate(
             time = endpoint;
             completed += 1;
             if ordinal + 1 == schedule.intervals.len() && step == interval.steps {
+                final_temperature = solved.solid.temperature.clone();
                 final_liquid = solved.solid.liquid_mass_fraction;
                 let evaluated = Evaluation {
                     coupled: solved.coupled,
@@ -787,7 +864,7 @@ pub(super) fn simulate(
     }
     let (_, final_total) = summary(cx, config, masses, &h)?;
     let (adjoint, reconstruction_solves, design_gradient) = match tape {
-        Some(tape) => tape.reverse(request, cx, schedule, config, &engine)?,
+        Some(tape) => tape.reverse(request, cx, schedule, config, engine)?,
         None => ("null".into(), 0, None),
     };
     let total_solves = work
@@ -844,7 +921,7 @@ pub(super) fn simulate(
         work.krylov
     );
     let output = format!(
-        "{prefix},\"solid_specific_enthalpies_j_kg\":{},\"solid_liquid_mass_fractions\":{},\"transient\":{{\"scheme\":\"backward-euler-total-enthalpy\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{completed},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":null,\"nonlinear\":null,\"adjoint\":{adjoint},\"enthalpy\":{policy}{radiation_field},\"scope\":\"fixed workload/fan schedule with optional physical h-history adjoint and workload-power or fan-speed sizing; accepted enthalpy is physical history; temperatures and mass-weighted phase summaries observe that state; sampled endpoints do not bound inter-step peaks; no moving geometry, melt flow, adaptive/repeated/study or enclosure mode\"}}}}\n",
+        "{prefix},\"solid_specific_enthalpies_j_kg\":{},\"solid_liquid_mass_fractions\":{},\"transient\":{{\"scheme\":\"backward-euler-total-enthalpy\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{completed},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":null,\"nonlinear\":null,\"adjoint\":{adjoint},\"enthalpy\":{policy}{radiation_field},\"scope\":\"fixed-grid workload/fan schedule with optional physical h-history adjoint and workload-power or fan-speed sizing; accepted enthalpy is physical history; temperatures and mass-weighted phase summaries observe that state; repeated_cycles, when present, owns all-cycle totals and adjoints while transient describes the final cycle in local time; sampled endpoints do not bound inter-step peaks; no moving geometry, melt flow, adaptive/study or enclosure mode\"}}}}\n",
         numbers(&h)?,
         numbers(&final_liquid)?,
         num(time)?,
@@ -861,12 +938,22 @@ pub(super) fn simulate(
         history.join(",")
     );
     poll(cx)?;
-    Ok(Trajectory {
-        output,
-        peak_k: peak,
-        peak_time_s: peak_time,
-        solid_solves: total_solves,
-        steps: completed,
-        design_gradient,
+    Ok(Cycle {
+        trajectory: Trajectory {
+            output,
+            peak_k: peak,
+            peak_time_s: peak_time,
+            solid_solves: total_solves,
+            steps: completed,
+            design_gradient,
+        },
+        final_h: h,
+        final_temperature,
+        duration_s: time,
+        input_j: input,
+        stored_j: stored,
+        exhaust_j: exhaust,
+        radiative_j: radiative,
+        first_violation_s: first_violation,
     })
 }

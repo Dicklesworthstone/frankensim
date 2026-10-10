@@ -6,6 +6,9 @@
 #[path = "../src/json_read.rs"]
 mod json;
 
+#[path = "cooling_enthalpy/repeat.rs"]
+mod repeat;
+
 use json::JsonValue as J;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -354,7 +357,6 @@ fn unsupported_storage_modes_and_invalid_or_exhausted_inputs_refuse() {
             "adaptive",
             r#"{"absolute_tolerance_k":0.01,"relative_tolerance":0,"minimum_trial_step_s":0.01,"max_trials":100}"#,
         ),
-        ("repeat", r#"{"cycles":2,"max_total_steps":16}"#),
         (
             "time_convergence",
             r#"{"max_refinements":2,"consecutive_passes":2,"temperature_tolerance_k":0.01,"max_total_steps":100,"max_trace_bytes":1048576}"#,
