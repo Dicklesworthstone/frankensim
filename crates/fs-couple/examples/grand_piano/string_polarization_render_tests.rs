@@ -80,7 +80,7 @@ fn cubic_bridge_frames_use_the_existing_cubic_field_inside_a_structural_triangle
 
 #[test]
 fn supplied_frames_drive_lateral_strings_through_the_same_felt_pedals_and_stereo_clock() {
-    for cubic in [false, true] {
+    for (cubic, reduced) in [(false,false),(true,false),(false,true),(true,true)] {
     let frame_path = input(&frames());
     let face_path = input("frankensim-hammer-footprints-v1\nspan,69,0.008,2\n");
     let hammer_path = input("frankensim-hammer-materials-v1\nfelt,69,400000,0.2,2.5,3.2,0.25,0.8,2500000\n");
@@ -88,16 +88,35 @@ fn supplied_frames_drive_lateral_strings_through_the_same_felt_pedals_and_stereo
         "--render", "p.wav", "--modes", "12", "--string-polarization", &frame_path,
         "--hammers", &hammer_path, "--hammer-footprints", &face_path, "--dampers", "estimated"]).unwrap();
     let c = selected_scale(None, &o).unwrap()[48];
-    let board = prepare_geometric_board_motion(&panel(), &[69], 400., true, !cubic, cubic, 0, true).unwrap();
     let spec = string_polarization::Specification::load(&frame_path, &[c]).unwrap();
+    let source_ports = spec.source_ports(&[c]).unwrap();
+    let mut board_text=panel();
+    if reduced {
+        // Put all three authored plate modes in a tight certified source
+        // band; this exercises compression, not a sparse high-band study.
+        board_text=board_text.replace(",0.008,450,1e10,8e8,0.3,6e8,0.27",
+            ",0.08,450,1e6,8e4,0.3,6e4,0.27");
+        o.board_band_hz=100.;
+        o.board_reduction=Some(board_geometry::ritz::RitzOptions::parse("2,0,10,30").unwrap());
+    }
+    let board = prepare_geometric_board_with_source_ports(&board_text, &[69], o.board_band_hz,
+        true, !cubic, cubic, 0, true, o.board_reduction.as_ref(), Some(&source_ports))
+        .unwrap_or_else(|e|panic!("cubic={cubic}, reduced={reduced}: {e}"));
+    if reduced {
+        assert!(board.reduction.as_ref().unwrap().source_modes>board.modes.len());
+        assert_eq!(board.modes.len(),2);
+    }
     let projected = spec.project(&[c], &board.modes, board.motion.as_ref()).unwrap();
     assert!(projected.secondary().0[0].iter().any(|g| g.abs() > 1e-8));
     let stretch = linear::string_stretching::Specification::read(
         "frankensim-piano-string-stretching-v1\nstretch,69,100000,0.2\n", &[c]).unwrap();
-    let a = prepare_instrument_with_physical_controls(vec![c], &board.modes, &o, Some(&stretch), Some(&projected)).unwrap();
-    let b = prepare_instrument_with_physical_controls(vec![c], &board.modes, &o, Some(&stretch), Some(&projected)).unwrap();
+    let a = prepare_instrument_with_board_damping(vec![c], &board.modes, &o, Some(&stretch),
+        Some(&projected), board.physical_damping.as_deref()).unwrap();
+    let b = prepare_instrument_with_board_damping(vec![c], &board.modes, &o, Some(&stretch),
+        Some(&projected), board.physical_damping.as_deref()).unwrap();
     o.string_polarization = None;
-    let old = prepare_instrument_with_physical_controls(vec![c], &board.modes, &o, Some(&stretch), None).unwrap();
+    let old = prepare_instrument_with_board_damping(vec![c], &board.modes, &o, Some(&stretch),
+        None, board.physical_damping.as_deref()).unwrap();
     assert_eq!(a.hammer_contact_count(), old.hammer_contact_count());
     assert_eq!(a.bank.strings.len(), 2 * old.bank.strings.len());
     assert_eq!(a.sample_rate(), old.sample_rate());

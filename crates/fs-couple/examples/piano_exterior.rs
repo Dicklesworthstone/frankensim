@@ -70,8 +70,9 @@ selects the existing cubic transverse field for inertia, bridge coupling and
 acoustic surface motion, including its analytic physical rotations. Both retain
 the same eigensolve throughout playback and can compose with string polarization.
 --board-reduction admits up to 512 certified source modes within the supplied
-FSPE board-band-hz, then retains at most 128 coordinates using primary bridge
-static/harmonic response directions and the requested exact low modes. Its
+FSPE board-band-hz, then retains at most 128 coordinates using bridge
+static/harmonic response directions and the requested exact low modes. Both
+directions of supplied --string-polarization frames guide the basis. Its
 1..16 increasing target frequencies must lie inside that source band. Full
 projected wood damping and the transformed bridge/acoustic motion are shared
 by playback and admittance. Set max_modes <=32 for render-loaded, whose passive
@@ -192,6 +193,11 @@ fn prepare_controlled(board_text:&str,courses:Vec<geometry::Course>,obj:&str,spe
 /// One structural solve owns bridge, string-frame and acoustic motion fields.
 fn prepare_board_motion(board_text:&str,keys:&[u8],band_hz:f64,options:&playback::Options)
     ->Result<board_geometry::PreparedBoard,String> {
+    prepare_board_motion_with_source_ports(board_text,keys,band_hz,options,None)
+}
+fn prepare_board_motion_with_source_ports(board_text:&str,keys:&[u8],band_hz:f64,
+    options:&playback::Options,frames:Option<&[board_geometry::motion::SourceBridgeFrame]>)
+    ->Result<board_geometry::PreparedBoard,String> {
     options.validate()?;
     if crowned_board::is_crowned(board_text) {
         if options.equilibrate_board_mass || options.consistent_board_mass || options.edge_cubic_board_mass {
@@ -199,13 +205,13 @@ fn prepare_board_motion(board_text:&str,keys:&[u8],band_hz:f64,options:&playback
         }
         let geometry=crowned_board::CrownedBoard::read(board_text)?;
         if let Some(reduction)=&options.board_reduction {
-            geometry.prepare_reduced(keys,band_hz,true,reduction)
+            geometry.prepare_reduced_with_ports(keys,band_hz,true,reduction,frames)
         } else {geometry.prepare_with_motion(keys,band_hz)}
     } else {
         let geometry=board_geometry::BoardGeometry::read(board_text)?;
         if let Some(reduction)=&options.board_reduction {
-            return geometry.prepare_reduced(keys,band_hz,true,options.equilibrate_board_mass,
-                options.consistent_board_mass,options.edge_cubic_board_mass,reduction);
+            return geometry.prepare_reduced_with_ports(keys,band_hz,true,options.equilibrate_board_mass,
+                options.consistent_board_mass,options.edge_cubic_board_mass,reduction,frames);
         }
         if options.edge_cubic_board_mass {
             geometry.prepare_with_motion_edge_cubic_transverse_mass(keys,band_hz,options.equilibrate_board_mass)
@@ -222,7 +228,9 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
     if obj.is_none() {spec.require_board_skin()?;}
     let rigid=options.rigid_assembly.as_deref().map(Assembly::load).transpose()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
-    let board=prepare_board_motion(board_text,&keys,spec.board_band_hz,options)?;
+    let source_ports=controls.source_ports(&courses)?;
+    let board=prepare_board_motion_with_source_ports(board_text,&keys,spec.board_band_hz,
+        options,source_ports.as_deref())?;
     let mut piano=controls.instrument_with_motion(courses,&board.modes,board.motion.as_ref(),options)?;
     if let Some(c)=board.physical_damping.as_deref() {piano.configure_bare_board_damping(c)?;}
     let (bare,description)=section_skin::boundary(obj,board_text,&spec,
@@ -240,7 +248,7 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
 /// These comments describe the prepared basis, not an acoustic error estimate.
 fn board_reduction_report(board:&board_geometry::PreparedBoard)->String {
     let Some(report)=&board.reduction else {return String::new();};
-    let mut out=format!("# soundboard reduction: source_modes={}, retained_modes={}, protected_low_modes={}; primary bridge static/harmonic targets={:?} Hz\n# nonzero_snapshots={}, maximum_relative_displacement_projection_error={:.17e}; no transfer, acoustic or mesh-convergence certificate\n",
+    let mut out=format!("# soundboard reduction: source_modes={}, retained_modes={}, protected_low_modes={}; bridge static/harmonic targets={:?} Hz (primary and any supplied secondary directions)\n# nonzero_snapshots={}, maximum_relative_displacement_projection_error={:.17e}; no transfer, acoustic or mesh-convergence certificate\n",
         report.source_modes,board.modes.len(),report.protected_low_modes,report.sample_hz,
         report.snapshot_count,report.max_relative_snapshot_error);
     for (i,(lo,hi)) in report.source_frequency_intervals_hz.iter().enumerate() {
@@ -309,7 +317,9 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
     // Its projection must use the SAME retained motion as played preparation.
     let polarization=options.string_polarization.as_deref().map(|path|
         string_polarization::Specification::load(path,courses)).transpose()?;
-    let board=prepare_board_motion(board_text,&keys,spec.board_band_hz,options)?;
+    let source_ports=polarization.as_ref().map(|frames|frames.source_ports(courses)).transpose()?;
+    let board=prepare_board_motion_with_source_ports(board_text,&keys,spec.board_band_hz,
+        options,source_ports.as_deref())?;
     let projected=polarization.as_ref().map(|frames|
         frames.project(courses,&board.modes,board.motion.as_ref())).transpose()?;
     let mut model=bridge_response::BridgeResponse::new_with_string_damping(courses,&board.modes,

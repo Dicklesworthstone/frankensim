@@ -3,7 +3,8 @@
 //! physical input. Neither a lateral bridge coefficient nor a damper ratio is
 //! inferred from the primary displacement, a material name or a piano preset.
 use std::{collections::BTreeMap, io::Read};
-use super::{board_geometry::motion::MotionSurface, geometry::Course, linear::BoardMode};
+use super::{board_geometry::motion::{MotionSurface, SourceBridgeFrame, SourceBridgePort},
+    geometry::Course, linear::BoardMode};
 
 pub const HEADER: &str = "frankensim-piano-string-polarization-v1";
 const MAX_BYTES: u64 = 64 * 1024;
@@ -107,12 +108,28 @@ impl Specification {
         Ok(())
     }
 
+    /// Expose the complete admitted source frames before modal reduction.
+    /// These are physical probes, not coefficients copied from a retained
+    /// basis: a lateral-only source mode must participate in Ritz selection.
+    /// Rows follow the supplied scale order, including its silent courses.
+    pub fn source_ports(&self, courses: &[Course]) -> Result<Vec<SourceBridgeFrame>, String> {
+        self.validate_scale(courses)?;
+        Ok(courses.iter().map(|course| {
+            let site = &self.sites[&course.midi];
+            let primary = SourceBridgePort { triangle: site.triangle, weights: site.weights,
+                arm_m: site.arm_m, direction: site.hammer_axis };
+            let secondary = SourceBridgePort { direction: cross(site.string_axis, site.hammer_axis),
+                ..primary };
+            SourceBridgeFrame { midi: course.midi, primary, secondary }
+        }).collect())
+    }
+
     /// Project u + theta x arm in the SAME bare-board basis as primary bridge
     /// mechanics. The primary check refuses incompatible sites or frames that
     /// would silently change the struck plane; it never repairs supplied input.
     pub fn project(&self, courses: &[Course], board: &[BoardMode], motion: Option<&MotionSurface>)
         -> Result<Prepared, String> {
-        self.validate_scale(courses)?;
+        let frames = self.source_ports(courses)?;
         let motion = motion.ok_or("string polarization requires full-vector geometric board motion; modal CSV has no lateral-motion source")?;
         if board.is_empty() || motion.shapes.len() != board.len()
             || motion.shapes.iter().any(|m| m.len() != motion.mesh.nodes.len()) {
@@ -120,12 +137,13 @@ impl Specification {
         }
         let mut lateral = Vec::with_capacity(courses.len());
         let mut damper_ratios = Vec::with_capacity(courses.len());
-        for course in courses {
+        for (course, frame) in courses.iter().zip(frames) {
             let site = &self.sites[&course.midi];
-            let lateral_axis = cross(site.string_axis, site.hammer_axis);
-            let (primary, scales) = motion.project_at(site.triangle, site.weights, site.arm_m, site.hammer_axis)
+            let (primary, scales) = motion.project_at(frame.primary.triangle, frame.primary.weights,
+                frame.primary.arm_m, frame.primary.direction)
                 .map_err(|e| format!("string polarization key {}: {e}", course.midi))?;
-            let (secondary, _) = motion.project_at(site.triangle, site.weights, site.arm_m, lateral_axis)
+            let (secondary, _) = motion.project_at(frame.secondary.triangle, frame.secondary.weights,
+                frame.secondary.arm_m, frame.secondary.direction)
                 .map_err(|e| format!("string polarization key {}: {e}", course.midi))?;
             let mut row = Vec::with_capacity(board.len());
             for (mode_index, mode) in board.iter().enumerate() {
@@ -176,6 +194,48 @@ mod tests {
         assert_eq!(projected.secondary().1, &[0.4]);
         let reversed = Specification::read(&card(&ROW.replace("0,1,0,0,0,1", "0,-1,0,0,0,1")), &[course()]).unwrap();
         assert!((reversed.project(&[course()], &board(), Some(&motion())).unwrap().secondary().0[0][0] + 1.1).abs() < 1e-14);
+    }
+    #[test]
+    fn source_frames_retain_a_primary_invisible_mode_and_mutual_bridge_compliance() {
+        use super::super::board_geometry::ritz::{RitzOptions, bridge_basis};
+        let spec = Specification::read(&card(ROW), &[course()]).unwrap();
+        let frames = spec.source_ports(&[course()]).unwrap();
+        assert_eq!(frames.len(), 1); assert_eq!(frames[0].midi, 69);
+        let mesh = fs_plate::ShellMesh::new(vec![[0.,0.,0.], [1.,0.,0.], [0.,1.,0.]],
+            vec![[0,1,2]]).unwrap();
+        // Source mode 1 moves only along the supplied lateral direction. A
+        // primary-only Ritz basis cannot see it, even with spare capacity.
+        let source = [[[0.,0.,1.,0.,2.,0.]; 3], [[1.,0.,0.,0.,0.,0.]; 3]];
+        let ports: Vec<Vec<f64>> = [frames[0].primary, frames[0].secondary].iter().map(|port| {
+            let projection = port.prepare(&mesh, false).unwrap();
+            source.iter().map(|mode| projection.project_nodal(*mode).unwrap().0).collect()
+        }).collect();
+        assert_eq!(ports[0], [1., 0.]);
+        assert!((ports[1][0]-0.04).abs() < 1e-15);
+        assert_eq!(ports[1][1], 1.);
+        let lambda = [100_f64, 200.].map(|hz| (std::f64::consts::TAU*hz).powi(2));
+        let damping = [0.3, 0.4];
+        let options = RitzOptions::parse("2,0,150").unwrap();
+        let primary_only = bridge_basis(&lambda, &damping, &ports[..1], &options).unwrap();
+        assert_eq!(primary_only.columns, vec![vec![1.,0.]]);
+        let both = bridge_basis(&lambda, &damping, &ports, &options).unwrap();
+        assert_eq!(both.columns.len(), 2);
+        assert!(both.max_relative_snapshot_error < 1e-14);
+        let reduced: Vec<Vec<f64>> = ports.iter().map(|port| both.columns.iter().map(|q|
+            q.iter().zip(port).map(|(q,b)| q*b).sum()).collect()).collect();
+        let k = &both.stiffness;
+        let determinant = k[0]*k[3]-k[1]*k[2];
+        assert!(determinant > 0.);
+        let solve = |force: &[f64]| [(k[3]*force[0]-k[1]*force[1])/determinant,
+            (k[0]*force[1]-k[2]*force[0])/determinant];
+        // Independent 2x2 solve checks both directions of reciprocal transfer
+        // and lateral self-compliance, including the previously unseen mode.
+        for drive in 0..2 { for receive in 0..2 {
+            let displacement = solve(&reduced[drive]);
+            let response: f64 = reduced[receive].iter().zip(displacement).map(|(b,q)| b*q).sum();
+            let exact: f64 = (0..2).map(|i| ports[drive][i]*ports[receive][i]/lambda[i]).sum();
+            assert!((response-exact).abs() < 1e-12*exact.abs());
+        } }
     }
     #[test]
     fn incomplete_or_nonphysical_frames_and_unavailable_motion_refuse_without_fallback() {

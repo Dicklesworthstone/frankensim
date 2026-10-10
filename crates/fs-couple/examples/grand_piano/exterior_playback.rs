@@ -281,6 +281,13 @@ impl Controls {
         self.polarization = Some(string_polarization::Specification::read(text, courses)?);
         Ok(self)
     }
+    /// Read the already admitted frames before structural rank selection.
+    /// Absence preserves the original primary-only board preparation; supplied
+    /// frames cover the complete scale in its source order, including silence.
+    pub fn source_ports(&self, courses: &[Course])
+        -> Result<Option<Vec<super::board_geometry::motion::SourceBridgeFrame>>, String> {
+        self.polarization.as_ref().map(|spec| spec.source_ports(courses)).transpose()
+    }
     /// Reuse the source shank and original nonlinear felt/bridge engine. Larger
     /// mode budgets never relax its output-frequency ceiling; changing substeps
     /// changes its clock, not its retained acoustic/structural frequency band.

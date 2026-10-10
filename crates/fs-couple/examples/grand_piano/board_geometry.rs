@@ -361,8 +361,25 @@ impl BoardGeometry {
         edge_cubic_mass: bool,
         options: &ritz::RitzOptions,
     ) -> Result<PreparedBoard, String> {
+        self.prepare_reduced_with_ports(keys, upper_hz, retain_motion, mass_equilibrated,
+            consistent_mass, edge_cubic_mass, options, None)
+    }
+    /// Include supplied secondary bridge forces when selecting the reduced
+    /// source space. Primary geometry must agree in every original FE mode.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_reduced_with_ports(
+        &self,
+        keys: &[u8],
+        upper_hz: f64,
+        retain_motion: bool,
+        mass_equilibrated: bool,
+        consistent_mass: bool,
+        edge_cubic_mass: bool,
+        options: &ritz::RitzOptions,
+        frames: Option<&[motion::SourceBridgeFrame]>,
+    ) -> Result<PreparedBoard, String> {
         self.prepare_inner_with_reduction(keys, upper_hz, retain_motion, mass_equilibrated,
-            consistent_mass, edge_cubic_mass, Some(options))
+            consistent_mass, edge_cubic_mass, Some(options), frames)
     }
     fn prepare_inner(
         &self,
@@ -374,7 +391,7 @@ impl BoardGeometry {
         edge_cubic_transverse_mass: bool,
     ) -> Result<PreparedBoard, String> {
         self.prepare_inner_with_reduction(keys, upper_hz, retain_motion, mass_equilibrated,
-            consistent_transverse_mass, edge_cubic_transverse_mass, None)
+            consistent_transverse_mass, edge_cubic_transverse_mass, None, None)
     }
     #[allow(clippy::too_many_arguments)]
     fn prepare_inner_with_reduction(
@@ -386,6 +403,7 @@ impl BoardGeometry {
         consistent_transverse_mass: bool,
         edge_cubic_transverse_mass: bool,
         reduction_options: Option<&ritz::RitzOptions>,
+        source_frames: Option<&[motion::SourceBridgeFrame]>,
     ) -> Result<PreparedBoard, String> {
         if consistent_transverse_mass && edge_cubic_transverse_mass {
             return Err("choose one transverse panel mass law".into());
@@ -412,6 +430,7 @@ impl BoardGeometry {
             }
         }
         if keys.is_empty() { return Err("empty key set".into()); }
+        if let Some(frames) = source_frames { reduction::validate_frames(keys, frames)?; }
         let transverse_mass = if edge_cubic_transverse_mass {
             TransverseMass::EdgeCubic
         } else if consistent_transverse_mass {
@@ -438,7 +457,7 @@ impl BoardGeometry {
             return Err(format!("certified band contains {} modes; runtime admits 1..={MAX_BOARD_MODES}; choose a narrower explicit band", report.modes.len()));
         }
         let reduced = reduction_options.map(|options|
-            reduction::project(self, &model, &report, keys, edge_cubic_transverse_mass, options))
+            reduction::project(self, &model, &report, keys, edge_cubic_transverse_mass, options, source_frames))
             .transpose()?;
         let pairs = reduced.as_ref().map_or(report.modes.as_slice(), |value| value.modes.as_slice());
         let mesh = &self.chart.mesh;
@@ -586,6 +605,9 @@ impl BoardGeometry {
         let (physical_damping, reduction) = if let Some(value) = reduced {
             provenance.push_str(&format!("; explicit bridge-driven Ritz projection: {} source modes, {} retained, {} unchanged low modes; mixed tail intervals certify the projected pencil only",
                 value.report.source_modes, modes.len(), value.report.protected_low_modes));
+            if source_frames.is_some() {
+                provenance.push_str("; Ritz targets include both supplied transverse bridge directions");
+            }
             (Some(value.physical_damping), Some(value.report))
         } else { (None, None) };
         Ok(PreparedBoard {
@@ -1011,6 +1033,53 @@ mod tests {
                     .map(|point| point.area_m2 * point.mode_shape[i]).sum();
                 assert!((integrated - mode.volume).abs() < 1e-10);
             }
+        }
+    }
+
+    #[test]
+    fn supplied_transverse_source_targets_reach_flat_p1_and_cubic_reduction() {
+        // Three physical DOFs with separated bending/rocking frequencies.
+        // The symmetric primary at the only free node cannot excite rocking;
+        // its offset lateral force can. This is an authored integration panel,
+        // not a high-band convergence experiment or piano material specimen.
+        let mut text=String::from("frankensim-board-geometry-si-v1\nsource,estimated,three-DOF transverse-target panel\nsupport,clamped\npretension,0\ndamping,0.01\n");
+        for (i,(x,y)) in [(0.,0.),(1.,0.),(1.,1.),(0.,1.),(0.5,0.5)].iter().enumerate() {
+            text.push_str(&format!("node,{i},{x},{y}\n"));
+        }
+        for (i,t) in [[0,1,4],[1,2,4],[2,3,4],[3,0,4]].iter().enumerate() {
+            text.push_str(&format!("triangle,{i},{},{},{},0.08,450,1000000,80000,0.3,60000,0\n",t[0],t[1],t[2]));
+        }
+        text.push_str("fixed,0\nfixed,1\nfixed,2\nfixed,3\nbridge,69,0,0,0,1\n");
+        let geometry=BoardGeometry::read(&text).unwrap();
+        let site=&geometry.bridge_sites[0];
+        // A vertical arm leaves the primary z displacement unchanged while
+        // exposing the actual bending rotation to the lateral string force.
+        let primary=motion::SourceBridgePort {triangle:site.triangle,weights:site.weights,
+            arm_m:[0.,0.,0.012],direction:[0.,0.,1.]};
+        let frames=[motion::SourceBridgeFrame {midi:69,primary,
+            secondary:motion::SourceBridgePort {direction:[1.,0.,0.],..primary}}];
+        for cubic in [false,true] {
+            let source=geometry.prepare_inner(&[69],100.,true,true,false,cubic).unwrap();
+            assert_eq!((source.free_dofs,source.modes.len()),(3,3));
+            let options=ritz::RitzOptions {max_modes:3,keep_low_modes:1,sample_hz:vec![10.,30.]};
+            let primary_only=geometry.prepare_reduced(&[69],100.,true,true,false,cubic,&options).unwrap();
+            let both=geometry.prepare_reduced_with_ports(&[69],100.,true,true,false,cubic,
+                &options,Some(&frames)).unwrap();
+            let audit=both.reduction.as_ref().unwrap();
+            assert_eq!(audit.source_modes,source.modes.len());
+            assert!(audit.snapshot_count>primary_only.reduction.as_ref().unwrap().snapshot_count);
+            assert!(both.modes.len()>primary_only.modes.len(),"cubic={cubic}");
+            assert!(audit.max_relative_snapshot_error<1e-8,"cubic={cubic}");
+            assert_eq!(both.motion.as_ref().unwrap().is_edge_cubic(),cubic);
+            for i in 0..options.keep_low_modes {
+                assert_eq!(both.modes[i].frequency_hz,source.modes[i].frequency_hz);
+                assert_eq!(both.motion.as_ref().unwrap().shapes[i],source.motion.as_ref().unwrap().shapes[i]);
+            }
+            let (lateral,_)=both.motion.as_ref().unwrap().project_at(site.triangle,
+                site.weights,primary.arm_m,[1.,0.,0.]).unwrap();
+            assert!(lateral.iter().any(|value|value.abs()>1e-10));
+            assert!(both.physical_damping.is_some());
+            assert!(both.provenance.contains("both supplied transverse bridge directions"));
         }
     }
 
