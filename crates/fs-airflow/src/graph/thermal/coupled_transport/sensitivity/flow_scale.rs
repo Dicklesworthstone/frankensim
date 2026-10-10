@@ -64,30 +64,50 @@ impl CoupledLinearization<'_, '_> {
         objective: &CoupledObjective,
         thermal: CoupledGradient,
     ) -> Result<CoupledFlowScaleGradient> {
-        poll(cx)?;
-        let mut weights = objective.air.clone();
-        for (weight, multiplier) in weights.references.iter_mut().zip(&thermal.interface_adjoint) {
-            *weight = finite(*weight + multiplier)?;
-        }
-        let air = self.air.pullback(cx, &weights)?;
-        let primal = self.air.primal();
-        // Temperature functionals have degree zero; watt functionals have
-        // degree one. Keep even the raw imbalance/defect terms rather than
-        // silently treating an admitted numerical residual as exactly zero.
-        let mut log_flow_scale = 0.0;
-        for (weight, value) in [
-            (weights.wall_heat_rate, primal.wall_heat_rate_w),
-            (weights.external_heat_gain, primal.external_heat_gain_w),
-            (weights.heat_imbalance, primal.heat_imbalance_w),
-            (weights.hydraulic_energy_defect, primal.hydraulic_energy_defect_w),
-        ] {
-            log_flow_scale = finite(log_flow_scale + finite(weight * value)?)?;
-        }
-        for value in air.log_conductances {
-            poll(cx)?;
-            log_flow_scale = finite(log_flow_scale - value)?;
-        }
-        poll(cx)?;
-        Ok(CoupledFlowScaleGradient { thermal, log_flow_scale })
+        let log_flow_scale =
+            contract_flow_scale(cx, &self.air, &objective.air, &thermal.interface_adjoint)?;
+        Ok(CoupledFlowScaleGradient {
+            thermal,
+            log_flow_scale,
+        })
     }
+}
+
+/// Common air-only contraction after either checked solid response closes its
+/// transpose interface equation. Never substitute the total coupled ln(HTC)
+/// gradient: the Euler identity scales only the air conductances.
+pub(super) fn contract_flow_scale(
+    cx: &Cx<'_>,
+    transport: &TransportLinearization<'_, '_>,
+    objective: &TransportObjective,
+    interface_adjoint: &[f64],
+) -> Result<f64> {
+    poll(cx)?;
+    let mut weights = objective.clone();
+    for (weight, multiplier) in weights.references.iter_mut().zip(interface_adjoint) {
+        *weight = finite(*weight + multiplier)?;
+    }
+    let air = transport.pullback(cx, &weights)?;
+    let primal = transport.primal();
+    // Temperature functionals have degree zero; watt functionals have
+    // degree one. Keep even the raw imbalance/defect terms rather than
+    // silently treating an admitted numerical residual as exactly zero.
+    let mut log_flow_scale = 0.0;
+    for (weight, value) in [
+        (weights.wall_heat_rate, primal.wall_heat_rate_w),
+        (weights.external_heat_gain, primal.external_heat_gain_w),
+        (weights.heat_imbalance, primal.heat_imbalance_w),
+        (
+            weights.hydraulic_energy_defect,
+            primal.hydraulic_energy_defect_w,
+        ),
+    ] {
+        log_flow_scale = finite(log_flow_scale + finite(weight * value)?)?;
+    }
+    for value in air.log_conductances {
+        poll(cx)?;
+        log_flow_scale = finite(log_flow_scale - value)?;
+    }
+    poll(cx)?;
+    Ok(log_flow_scale)
 }

@@ -45,12 +45,29 @@ Returned previous-h, P1 source-density, assembled-load, supply-temperature and
 convective `ln(HTC)` gradients include mixed-air feedback. Inner-column limits
 apply per solid sweep and the interface budget bounds sweeps; cumulative
 Krylov work is reported. An exhausted, invalid or cancelled solve publishes no
-partial gradient and leaves the accepted endpoint reusable. Geometry, flow,
-time grid, reference masses, chart and material laws remain fixed; this API
-does not add fan/flow, phase-chart, adaptive-grid or enclosure derivatives.
+partial gradient and leaves the accepted endpoint reusable. Geometry, time
+grid, reference masses, chart and material laws remain fixed; the original
+pullbacks also hold flows fixed. This API does not add individual branch-flow,
+fan operating-point, phase-chart, adaptive-grid or enclosure derivatives.
+
+`pullback_flow_scale` and `pullback_flow_scale_iqn` additionally return the
+derivative with respect to `ln(s)` when every signed branch and external
+heat-capacity rate scales by the same positive `s`, at fixed proportions,
+directions, topology, HTC, wetted areas and inlet temperatures. They first
+close the complete enthalpy/interface transpose, including direct h carry and
+ambient-radiation feedback, and reuse the existing air-only Euler contraction:
+explicit degree-one air heat objectives minus the sum of **air** log-conductance
+pullbacks with the accepted interface multiplier. The solid HTC derivatives
+are not subtracted. One extra air reverse sweep adds no solid Krylov work and
+preserves the original thermal gradient. Contraction failure/cancellation
+returns no partial result. A consumer must independently justify that its
+physical fan control follows this common-flow scaling model.
 `tests/coupled_enthalpy.rs` checks real perturbed coupled solves, mixed
 sensible/latent slopes, explicit latent carry, convection-only radiative
-ports, feedback sensitivity and refusal/reuse behavior.
+ports, feedback sensitivity and refusal/reuse behavior. Uniform-flow checks
+perturb actual hydraulic pressure by `s^2` and resolve the coupled endpoint,
+including ambient radiation, direct heat objectives and a latent state whose
+temperature derivative is zero while its h-history flow derivative is nonzero.
 
 ### Coupled discrete thermal goals
 

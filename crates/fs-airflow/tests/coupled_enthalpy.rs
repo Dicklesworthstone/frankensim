@@ -111,6 +111,7 @@ struct Controls {
     source: [f64; 4],
     inlet: [f64; 2],
     htc: [f64; 2],
+    flow_scale: f64,
 }
 impl Default for Controls {
     fn default() -> Self {
@@ -119,6 +120,7 @@ impl Default for Controls {
             source: [12.0, -3.0, 8.0, 5.0],
             inlet: [330.0, 290.0],
             htc: [20.0, 10.0],
+            flow_scale: 1.0,
         }
     }
 }
@@ -149,11 +151,11 @@ fn with_network<R>(cx: &Cx<'_>, c: &Controls, f: impl FnOnce(&TransportNetwork<'
         &[
             FixedPressure {
                 node: 0,
-                pressure: Pressure::new(2.0),
+                pressure: Pressure::new(2.0 * c.flow_scale * c.flow_scale),
             },
             FixedPressure {
                 node: 1,
-                pressure: Pressure::new(2.0),
+                pressure: Pressure::new(2.0 * c.flow_scale * c.flow_scale),
             },
             FixedPressure {
                 node: 3,
@@ -420,7 +422,9 @@ impl Fixture {
             let a = &coupled.transport;
             value += dot(&a.reference_temperatures_k, &o.air.references)
                 + o.air.wall_heat_rate * a.wall_heat_rate_w
-                + o.air.external_heat_gain * a.external_heat_gain_w;
+                + o.air.external_heat_gain * a.external_heat_gain_w
+                + o.air.heat_imbalance * a.heat_imbalance_w
+                + o.air.hydraulic_energy_defect * a.hydraulic_energy_defect_w;
             value += a
                 .branches
                 .iter()
@@ -679,6 +683,109 @@ fn radiation_keeps_full_state_feedback_but_exposes_only_convection_to_air() {
 }
 
 #[test]
+fn uniform_flow_scale_matches_resolved_mixed_air_and_radiation_with_direct_heat_terms() {
+    let fixture = Fixture::new(true);
+    let c = Controls {
+        flow_scale: 1.3,
+        ..Controls::default()
+    };
+    with_gate(&CancelGate::new_clock_free(), |cx| {
+        with_network(cx, &c, |network| {
+            let (solid, primal) = fixture.solve(cx, &c, network);
+            assert_eq!(solid.temperature[1], 350.0);
+            let linearization = fixture.bind(cx, &c, solid, &primal.reference_temperatures_k);
+            let response = linearization.robin_response(cx, &NAMES, linear()).unwrap();
+            let coupled =
+                CoupledEnthalpyLinearization::new(cx, network, &response, &gate()).unwrap();
+            // Includes explicit air watt objectives as well as mixed-air,
+            // temperature, convection and latent-history contributions.
+            let o = objective(&coupled);
+            let g = coupled
+                .pullback_flow_scale_iqn(cx, &o, &CARRY, interface(), IqnIlsConfig::default())
+                .unwrap();
+            let ordinary = coupled
+                .pullback_iqn(cx, &o, &CARRY, interface(), IqnIlsConfig::default())
+                .unwrap();
+            assert_eq!(g.thermal.solid, ordinary.solid);
+            assert_eq!(g.thermal.inlets, ordinary.inlets);
+            assert_eq!(g.thermal.log_htc, ordinary.log_htc);
+            assert_eq!(g.thermal.interface_adjoint, ordinary.interface_adjoint);
+            assert_eq!(
+                g.thermal.solid_krylov_iterations,
+                ordinary.solid_krylov_iterations
+            );
+            let stationary = coupled
+                .pullback_flow_scale(cx, &o, &CARRY, interface())
+                .unwrap();
+            close(g.log_flow_scale, stationary.log_flow_scale);
+            let evaluate = |epsilon: f64| {
+                let mut shifted = c.clone();
+                // Quadratic hydraulic losses at pressure scaled by s^2
+                // independently produce every branch/external flow times s.
+                // Each evaluation resolves h, T, radiation and mixed air from
+                // the same original history; no primal wall is frozen.
+                shifted.flow_scale *= epsilon.exp();
+                fixture.objective(cx, &shifted, &o, &CARRY)
+            };
+            let epsilon = 0.005;
+            close(
+                g.log_flow_scale,
+                (-evaluate(2.0 * epsilon) + 8.0 * evaluate(epsilon) - 8.0 * evaluate(-epsilon)
+                    + evaluate(-2.0 * epsilon))
+                    / (12.0 * epsilon),
+            );
+            assert!(g.log_flow_scale.abs() > 1e-3);
+        })
+    });
+}
+
+#[test]
+fn uniform_flow_scale_preserves_latent_history_when_temperature_response_is_zero() {
+    let fixture = Fixture::new(true);
+    let c = Controls {
+        old: [2000.0; 4],
+        flow_scale: 0.7,
+        ..Controls::default()
+    };
+    with_gate(&CancelGate::new_clock_free(), |cx| {
+        with_network(cx, &c, |network| {
+            let (solid, primal) = fixture.solve(cx, &c, network);
+            assert_eq!(solid.temperature, [350.0; 4]);
+            let linearization = fixture.bind(cx, &c, solid, &primal.reference_temperatures_k);
+            let response = linearization.robin_response(cx, &NAMES, linear()).unwrap();
+            let coupled =
+                CoupledEnthalpyLinearization::new(cx, network, &response, &gate()).unwrap();
+            let mut temperature = coupled.zero_objective();
+            temperature.nodal_temperatures.fill(1.0);
+            let t = coupled
+                .pullback_flow_scale(cx, &temperature, &[0.0; 4], interface())
+                .unwrap();
+            assert_eq!(t.log_flow_scale, 0.0);
+            let o = coupled.zero_objective();
+            let carry = [0.0, 1.0, 0.0, 0.0];
+            let h = coupled
+                .pullback_flow_scale_iqn(cx, &o, &carry, interface(), IqnIlsConfig::default())
+                .unwrap();
+            assert!(h.log_flow_scale.abs() > 1.0);
+            for (actual, expected) in h.thermal.solid.previous_specific_enthalpy.iter().zip(carry) {
+                close(*actual, expected);
+            }
+            let epsilon = 1e-4_f64;
+            let mut plus = c.clone();
+            let mut minus = c.clone();
+            plus.flow_scale *= epsilon.exp();
+            minus.flow_scale *= (-epsilon).exp();
+            close(
+                h.log_flow_scale,
+                (fixture.objective(cx, &plus, &o, &carry)
+                    - fixture.objective(cx, &minus, &o, &carry))
+                    / (2.0 * epsilon),
+            );
+        })
+    });
+}
+
+#[test]
 fn cancellation_and_exhausted_interface_work_publish_no_gradient_and_binding_is_reusable() {
     let fixture = Fixture::new(false);
     let c = Controls::default();
@@ -705,13 +812,30 @@ fn cancellation_and_exhausted_interface_work_publish_no_gradient_and_binding_is_
                 ),
                 Err(CoupledSensitivityError::DidNotConverge { .. })
             ));
+            assert!(matches!(
+                coupled.pullback_flow_scale_iqn(
+                    cx,
+                    &o,
+                    &CARRY,
+                    InterfaceSolveConfig {
+                        max_iterations: 1,
+                        ..interface()
+                    },
+                    IqnIlsConfig::default(),
+                ),
+                Err(CoupledSensitivityError::DidNotConverge { .. })
+            ));
             let cancelled = CancelGate::new_clock_free();
             cancelled.request();
             with_gate(&cancelled, |cx| {
                 assert!(matches!(
                     coupled.pullback_iqn(cx, &o, &CARRY, interface(), IqnIlsConfig::default()),
                     Err(CoupledSensitivityError::Interrupted)
-                ))
+                ));
+                assert!(matches!(
+                    coupled.pullback_flow_scale(cx, &o, &CARRY, interface()),
+                    Err(CoupledSensitivityError::Interrupted)
+                ));
             });
             let repeated = coupled
                 .pullback_iqn(cx, &o, &CARRY, interface(), IqnIlsConfig::default())

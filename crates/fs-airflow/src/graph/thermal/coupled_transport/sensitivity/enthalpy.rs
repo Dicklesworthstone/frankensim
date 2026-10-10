@@ -28,8 +28,20 @@ pub struct CoupledEnthalpyGradient {
     pub solid_krylov_iterations: usize,
 }
 
+/// Total enthalpy endpoint pullback extended by a common signed-flow scale.
+#[derive(Debug, Clone)]
+pub struct CoupledEnthalpyFlowScaleGradient {
+    /// Original controls, including the direct latent-history cotangent.
+    pub thermal: CoupledEnthalpyGradient,
+    /// Objective units per ln(s) when every branch and external heat-capacity
+    /// rate scales by s at fixed HTC, areas, topology and inlet temperatures.
+    /// This is not an individual branch-flow or fan operating-point derivative.
+    pub log_flow_scale: f64,
+}
+
 /// Concrete checked enthalpy/transport binding, with no user callback escape.
-/// Hydraulics, geometry, masses, material laws, time step and old h are frozen.
+/// Geometry, masses, material laws, time step and old h are frozen. Flows stay
+/// fixed except for the explicit common-flow-scale pullbacks.
 /// Its source/history gradients include mixed-air and any radiative feedback.
 pub struct CoupledEnthalpyLinearization<'a, 'step, 'm, 'flow> {
     solid: &'a EnthalpyRobinResponse<'step, 'm>,
@@ -96,6 +108,62 @@ impl<'a, 'step, 'm, 'flow> CoupledEnthalpyLinearization<'a, 'step, 'm, 'flow> {
         acceleration: IqnIlsConfig,
     ) -> Result<CoupledEnthalpyGradient> {
         self.pullback_driver(cx, objective, h_carry, config, Some(acceleration))
+    }
+
+    /// Extend the stationary coupled pullback by uniform scaling of all signed
+    /// flow/capacity rates, with their proportions, directions and HTC fixed.
+    /// The accepted interface multiplier includes the direct h carry and the
+    /// full solid/radiation response. One additional air reverse sweep computes
+    /// the scale derivative; no further solid Krylov work is required.
+    ///
+    /// # Errors
+    /// Preserves all endpoint, transpose-residual, budget and cancellation
+    /// refusals. A failed or nonfinite contraction publishes no gradient.
+    pub fn pullback_flow_scale(
+        &self,
+        cx: &Cx<'_>,
+        objective: &CoupledObjective,
+        h_carry: &[f64],
+        config: InterfaceSolveConfig,
+    ) -> Result<CoupledEnthalpyFlowScaleGradient> {
+        let thermal = self.pullback(cx, objective, h_carry, config)?;
+        self.with_flow_scale(cx, objective, thermal)
+    }
+
+    /// Same uniform-flow control using fresh bounded IQN-ILS for the coupled
+    /// transpose. Acceptance checks the true interface equation before the
+    /// air-only contraction, never a frozen-wall or frozen-history derivative.
+    ///
+    /// # Errors
+    /// The refusals of [`Self::pullback_iqn`] and nonfinite/cancelled contraction.
+    pub fn pullback_flow_scale_iqn(
+        &self,
+        cx: &Cx<'_>,
+        objective: &CoupledObjective,
+        h_carry: &[f64],
+        config: InterfaceSolveConfig,
+        acceleration: IqnIlsConfig,
+    ) -> Result<CoupledEnthalpyFlowScaleGradient> {
+        let thermal = self.pullback_iqn(cx, objective, h_carry, config, acceleration)?;
+        self.with_flow_scale(cx, objective, thermal)
+    }
+
+    fn with_flow_scale(
+        &self,
+        cx: &Cx<'_>,
+        objective: &CoupledObjective,
+        thermal: CoupledEnthalpyGradient,
+    ) -> Result<CoupledEnthalpyFlowScaleGradient> {
+        let log_flow_scale = super::flow_scale::contract_flow_scale(
+            cx,
+            &self.air,
+            &objective.air,
+            &thermal.interface_adjoint,
+        )?;
+        Ok(CoupledEnthalpyFlowScaleGradient {
+            thermal,
+            log_flow_scale,
+        })
     }
 
     fn pullback_driver(
