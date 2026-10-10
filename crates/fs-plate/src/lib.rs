@@ -28,8 +28,10 @@
 //! `ρh³/12·A/3` on slope DOFs). An opt-in exact P1 transverse mass integral
 //! retains lumped slope and beam inertia. Both are SPD, as the fs-modal
 //! pencil contract requires. Independent consistent Hermite stiffener mass
-//! integrates the existing cubic beam displacement exactly. Full DKT rotary-field
-//! consistency and beam rotary inertia are open. Membrane
+//! integrates the existing cubic beam displacement exactly. The explicit
+//! eccentric beam option also integrates centroid motion and supplied bending
+//! rotary inertia; full DKT rotary-field and torsional mass consistency remain
+//! open. Membrane
 //! prestress enters as the standard P1 geometric stiffness `K_G = T·∫∇w·∇w`
 //! (drumheads are the K_G-dominated, D→0 limit — tested against continuum
 //! membrane frequencies). Stiffeners are 2-node Hermite beams on plate node
@@ -1299,7 +1301,7 @@ fn assemble_with_sections_inner(
     }
 
     // Stiffeners: Hermite bending on (w, slope-along) with EI + EAe²,
-    // torsion GJ on the cross-slope, selectable translational mass.
+    // torsion GJ on the cross-slope, selectable physical beam inertia.
     for st in stiffeners {
         if st.nodes.len() < 2 {
             return Err(PlateError::BadStiffener {
@@ -1344,7 +1346,8 @@ fn assemble_with_sections_inner(
                 vec![(3 * n2, 1.0)],
                 vec![(3 * n2 + 1, tx), (3 * n2 + 2, ty)],
             ];
-            let consistent_mass = if matches!(stiffener_mass, StiffenerMass::ConsistentHermite) {
+            let consistent_mass = if matches!(stiffener_mass,
+                StiffenerMass::ConsistentHermite | StiffenerMass::ConsistentEccentric) {
                 if !st.density.is_finite() || st.density < 0.0 {
                     return Err(PlateError::BadStiffener {
                         what: "consistent Hermite beam density must be finite and nonnegative",
@@ -1358,6 +1361,12 @@ fn assemble_with_sections_inner(
             } else {
                 None
             };
+            let eccentric_mass = if matches!(stiffener_mass, StiffenerMass::ConsistentEccentric) {
+                Some(stiffener_mass::eccentric_inertia(l,st.density,st.area,st.inertia,st.eccentricity)
+                    .ok_or(PlateError::BadStiffener {
+                        what: "eccentric beam inertia needs finite geometry, nonnegative density and bending inertia",
+                    })?)
+            } else { None };
             for r in 0..4 {
                 for c in 0..4 {
                     let v = coef * kb[r][c];
@@ -1366,6 +1375,9 @@ fn assemble_with_sections_inner(
                             push_sym(&mut kc, gr, gc, v * wr * wc);
                             if let Some(mass) = &consistent_mass {
                                 push_sym(&mut mc, gr, gc, mass[r][c] * wr * wc);
+                            }
+                            if let Some(mass) = &eccentric_mass {
+                                push_sym(&mut mc, gr, gc, mass.along[r][c] * wr * wc);
                             }
                         }
                     }
@@ -1383,12 +1395,16 @@ fn assemble_with_sections_inner(
                     for &(gr, wr) in &tmaps[r] {
                         for &(gc, wc) in &tmaps[c] {
                             push_sym(&mut kc, gr, gc, gj * kt[r][c] * wr * wc);
+                            if let Some(mass) = &eccentric_mass {
+                                push_sym(&mut mc, gr, gc, mass.across[r][c] * wr * wc);
+                            }
                         }
                     }
                 }
             }
             // Replace, never supplement, endpoint lumping with the consistent
-            // integral. Both representations contain exactly rho*A*l mass.
+            // integral. Every option retains exactly rho*A*l translation mass;
+            // eccentric rotation adds kinetic terms, not material or mass.
             if matches!(stiffener_mass, StiffenerMass::Lumped) {
                 let mb = st.density * st.area * l / 2.0;
                 push_sym(&mut mc, 3 * n1, 3 * n1, mb);
@@ -1591,6 +1607,65 @@ mod tests {
         for row in 0..supported.free { for col in 0..supported.free {
             assert_eq!(supported.m.get(row, col), full.m.get(row + 3, col + 3));
         } }
+    }
+
+    #[test]
+    fn eccentric_stiffener_inertia_maps_physical_moments_without_changing_stiffness() {
+        let mesh = PlateMesh::from_unstructured(
+            vec![(0.2,-0.1),(1.4,0.8),(0.0,1.2)],vec![[0,1,2]],
+        ).unwrap();
+        let chart = PlateChart::with_boundary_and_regions(mesh,steel_section(),vec![],vec![]).unwrap();
+        let opts = AssemblyOptions { support: EdgeSupport::Clamped, pretension: 0.0 };
+        let beam = Stiffener { nodes: vec![0,1], e: 12e9, g: 0.8e9,
+            area: 0.004, inertia: 2e-7, torsion: 3e-7, eccentricity: 0.03, density: 500.0 };
+        let length = 1.5_f64;let (tx,ty) = (0.8,0.6);
+        let integral = |p: [f64;3]| (0..3).flat_map(|i| (0..3).map(move |j|
+            p[i]*p[j]*length.powi((i+j+1) as i32)/(i+j+1) as f64)).sum::<f64>();
+        for panel in [TransverseMass::Lumped,TransverseMass::Linear,TransverseMass::EdgeCubic] {
+            let old = chart.assemble_with_mass(std::slice::from_ref(&beam),&opts,
+                panel,StiffenerMass::ConsistentHermite).unwrap();
+            let new = chart.assemble_with_mass(std::slice::from_ref(&beam),&opts,
+                panel,StiffenerMass::ConsistentEccentric).unwrap();
+            for row in 0..new.free { assert_eq!(new.k.row(row),old.k.row(row)); }
+            for p in [[1.0,0.0,0.0,0.0],[0.0,1.0,0.0,0.0],[0.3,-0.4,0.2,0.1]] {
+                for [c0,c1] in [[0.0,0.0],[0.7,0.0],[-0.2,0.4]] {
+                    let mut q = vec![0.0;new.free];
+                    for (node,s) in [(0,0.0),(1,length)] {
+                        let w = p[0]+s*(p[1]+s*(p[2]+s*p[3]));
+                        let slope = p[1]+s*(2.0*p[2]+3.0*s*p[3]);
+                        let cross = c0+c1*s;
+                        q[3*node..3*node+3].copy_from_slice(&[
+                            w,tx*slope-ty*cross,ty*slope+tx*cross,
+                        ]);
+                    }
+                    let mut actual = 0.0;
+                    for r in 0..new.free { for c in 0..new.free {
+                        actual += q[r]*(new.m.get(r,c)-old.m.get(r,c))*q[c];
+                    } }
+                    let offset_inertia = beam.area*beam.eccentricity*beam.eccentricity;
+                    let expected = beam.density*((beam.inertia+offset_inertia)
+                        *integral([p[1],2.0*p[2],3.0*p[3]])+offset_inertia*integral([c0,c1,0.0]));
+                    assert!((actual-expected).abs()<1e-12*beam.density*beam.area*length);
+                }
+            }
+            let mut reversed = beam.clone();reversed.nodes.reverse();
+            let reverse = chart.assemble_with_mass(&[reversed],&opts,
+                panel,StiffenerMass::ConsistentEccentric).unwrap();
+            let mut changed_torsion = beam.clone();changed_torsion.torsion*=7.0;
+            let torsion = chart.assemble_with_mass(&[changed_torsion],&opts,
+                panel,StiffenerMass::ConsistentEccentric).unwrap();
+            for row in 0..new.free {
+                assert_eq!(new.m.row(row),reverse.m.row(row));
+                assert_eq!(new.m.row(row),torsion.m.row(row),"Saint-Venant J is not a polar mass moment");
+            }
+            let supported = PlateChart::with_boundary_and_regions(
+                chart.mesh.clone(),chart.section,vec![0],vec![],
+            ).unwrap().assemble_with_mass(std::slice::from_ref(&beam),&opts,
+                panel,StiffenerMass::ConsistentEccentric).unwrap();
+            for r in 0..supported.free { for c in 0..supported.free {
+                assert_eq!(supported.m.get(r,c),new.m.get(r+3,c+3));
+            } }
+        }
     }
 
     #[test]

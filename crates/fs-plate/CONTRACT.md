@@ -77,7 +77,8 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   torsion GJ on the cross-slope, lumped translational beam mass.
 - `PlateChart::assemble_with_mass(stiffeners, opts, transverse_mass, stiffener_mass)`
   selects the existing `TransverseMass::{Lumped, Linear, EdgeCubic}` panel law
-  independently of `StiffenerMass::{Lumped, ConsistentHermite}`. The latter
+  independently of `StiffenerMass::{Lumped, ConsistentHermite, ConsistentEccentric}`.
+  `ConsistentHermite`
   exactly integrates `rho*A*N(s)^T*N(s)` for the same cubic Hermite transverse
   displacement used by beam bending. Its coordinates `(w1, dw/ds1, w2, dw/ds2)`
   map through the existing beam tangent into plate `(w, wx, wy)` DOFs, including
@@ -88,6 +89,19 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   refuse. This is translational Euler–Bernoulli inertia only: no eccentric
   axial motion, rotary inertia, cross-slope torsional inertia or shear deformation
   is inferred. The existing parallel-axis rigidity remains `EI + EAe²`.
+- `StiffenerMass::ConsistentEccentric` adds the exact beam kinetic terms
+  `rho*(I+A*e²)*integral((d/ds w_dot)²)` and
+  `rho*A*e²*integral(beta_cross_dot²)` to that Hermite translation law.
+  The first uses the derivative of the same cubic Hermite displacement;
+  the cross slope uses the existing linear torsion interpolation and normal
+  `(-ty,tx)`. With physical axial rotations `(wy,-wx,0)` and centroid arm
+  `(0,0,e)`, both `A*e²` terms are translation of the offset beam centroid.
+  `I` supplies only the given centroidal bending rotary inertia. The stiffness,
+  total material mass and existing mass variants are unchanged; constant
+  translation still has exactly `rho*A*L` inertia. Saint-Venant `J` is not a
+  polar mass moment: no torsional section rotary inertia, independent axial
+  DOFs or beam shear deformation is inferred. Missing/nonfinite geometric
+  data and overflowing derived inertia refuse rather than dropping a term.
 - `modes(model, window, opts)` — thin front over `fs_modal::slice_window`:
   every frequency arrives as a certified eigenvalue interval and the
   in-window count is inertia-certified.
@@ -250,7 +264,14 @@ to its independent continuum integral, preserve rigid-translation mass and
 subdivided-beam kinetic energy, and reverse segment direction. An assembled
 oblique-beam test checks tangential versus cross-slope mapping, rigid tilt,
 cubic bending, support elimination and unchanged stiffness/default pencils
-with all three panel inertia choices. These are discretization checks, not a
+with all three panel inertia choices. Eccentric-inertia tests integrate cubic
+bending derivatives and linear cross slopes against independent polynomial
+integrals; rigid tilt checks the supplied centroidal and parallel-axis moments.
+They retain constant-translation mass, reverse directions/offset signs,
+subdivide spans, exercise the centered/massless limits and refuse bad inputs.
+The assembled oblique-beam case checks both physical slope maps, supports and
+unchanged stiffness; changing Saint-Venant J cannot change the mass matrix.
+These are discretization checks, not a
 measured piano bridge-mobility or high-band convergence claim.
 
 ## No-claim boundaries
@@ -271,19 +292,22 @@ measured piano bridge-mobility or high-band convergence claim.
   Timoshenko in v1 — the eccentricity term dominates instrument bracing).
 - The eccentricity model is the parallel-axis rigidity `EI + EAe²` acting
   through plate bending curvature; it does not model the membrane force
-  the offset beam induces in the plate (requires membrane DOFs).
+  the offset beam induces in the plate (requires membrane DOFs). Its optional
+  consistent eccentric inertia follows the same existing beam kinematics;
+  it does not add the missing in-plane structural load path.
 - Lumped transverse and rotary mass remains the default. An explicit
   `PlateChart::assemble_consistent_transverse_mass` option uses the exact P1
   triangle integral for transverse panel inertia while retaining lumped
   slope and stiffener inertia. It preserves total rigid-translation mass;
-  consistent DKT rotary-field and beam rotary inertia remain follow-ups. A second
+  consistent DKT rotary-field and torsional beam rotary inertia remain follow-ups. A second
   opt-in, `PlateChart::assemble_edge_cubic_transverse_mass`, integrates a
   cubic Bernstein deflection field whose edges reproduce nodal Hermite values
   and tangential slopes. Its symmetric interior control reproduces quadratic
   fields but is an explicit reconstruction, since DKT does not specify an
   interior deflection field. The existing rotary and stiffener inertia laws
   remain unless `assemble_with_mass` explicitly selects consistent Hermite
-  translational stiffener inertia. `edge_cubic_transverse_shape` evaluates that same field at a supplied
+  translation or consistent eccentric stiffener inertia.
+  `edge_cubic_transverse_shape` evaluates that same field at a supplied
   barycentric point; `edge_cubic_transverse_mean_shape` gives its exact area
   mean. They allow reciprocal point effort/motion and exact volume projection
   without silently returning to P1 after assembly.

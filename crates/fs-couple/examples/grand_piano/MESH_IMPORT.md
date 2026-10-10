@@ -124,6 +124,29 @@ tangential slopes. Total physical beam mass is unchanged; no material parameter,
 mode capacity or structural geometry is changed. This gives rib and bridge
 bending inertia the same interpolation as their existing bending stiffness.
 
+To retain the inertia of the beam's offset centroid and its supplied bending
+moment of area as well, select:
+
+```text
+stiffener-mass,consistent-eccentric
+```
+
+This uses the same Hermite transverse mass and adds the exact kinetic terms
+
+\[
+\frac12\rho(I+Ae^2)\int(\partial_s\dot w)^2\,ds
++\frac12\rho Ae^2\int\dot\beta_\perp^2\,ds.
+\]
+
+Here `A`, `I`, `e` and `rho` are the existing stiffener row's area, centroidal
+bending moment of area, vertical eccentricity and density. The tangential
+rotation is the derivative of the beam's cubic Hermite displacement; the
+cross slope uses its existing linear torsion interpolation. Rotation moves
+the eccentric centroid in both in-plane directions, which contributes the
+two `A e²` terms without adding more material mass. A centered beam retains
+its supplied bending rotary inertia; a rigid translation retains exactly
+`rho A L` mass. The existing stiffness `E(I + A e²)` is unchanged.
+
 The row survives native FSB → OBJ/sidecar → FSB round trips and reaches ordinary
 rendering, modal export, full-vector motion preparation and exterior harmonic
 solves through the same board assembler. For example, after adding it to an
@@ -136,7 +159,7 @@ cargo run --release -p fs-couple --example grand_piano -- \
   --board-band-hz 1200 --note 84 --duration 2 --render c6-hermite.wav
 ```
 
-Panel inertia is selected independently: the usual lumped panel, exact P1
+For either consistent beam option, panel inertia is selected independently: the usual lumped panel, exact P1
 `--consistent-board-mass`, and `--edge-cubic-board-mass` each compose with this
 beam option. Complete modal slices still must fit the unchanged 128-mode limit.
 The example keeps the existing 1.2 kHz band; higher bands require their own
@@ -150,9 +173,12 @@ finite acoustic skins, all from the same board eigensolve. The existing
 32-mode passive-load fit limit still applies to render-loaded; the other
 structural and acoustic budgets are unchanged.
 
-This option supplies **translational** Euler–Bernoulli inertia. It does not add
-axial, eccentric rotary or torsional beam inertia; the existing offset stiffness
-`EI + EAe²` is unchanged. Crowned shells have their own six-DOF beam model and
+`consistent-hermite` retains its original **translational** Euler–Bernoulli
+meaning. `consistent-eccentric` additionally supplies the explicitly described
+centroid and bending rotary terms. Neither option invents a torsional polar
+moment from the Saint-Venant torsion constant `J`, adds independent axial
+beam modes, or changes the existing stiffness. Crowned shells have
+their own six-DOF beam model and
 refuse this flat-board row, including during crown import. The numerical option
 does not establish measured Model D mobility or improve a recording by itself.
 

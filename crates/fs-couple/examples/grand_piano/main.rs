@@ -64,7 +64,9 @@ trial, not a measured Model D material correction.
 --edge-cubic-board-mass integrates a declared cubic panel displacement field
 and applies that same field at bridge and acoustic surface samples. This is
 an opt-in numerical trial; slope inertia remains lumped and beam inertia is lumped by default.
-The optional FSB stiffener-mass row selects consistent Hermite beam inertia.
+The optional FSB stiffener-mass row accepts lumped, consistent-hermite or
+consistent-eccentric. The last adds the supplied bending rotary and offset
+centroid inertia to Hermite translation; it does not infer torsional polar inertia.
 These opt-in corrections have not passed a perceptual similarity gate.
 --acoustic-refinement-levels uniformly subdivides flat P1 radiating triangles
 for Rayleigh integration only. It preserves the structural mesh, modes and

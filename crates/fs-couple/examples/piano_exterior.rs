@@ -69,7 +69,9 @@ selects the existing cubic transverse field for inertia, bridge coupling and
 acoustic surface motion, including its analytic physical rotations. Both retain
 the same eigensolve throughout playback and can compose with string polarization.
 These flat-board options refuse crowned shells; higher-band convergence remains
-an independent requirement. Beam inertia follows the optional FSB stiffener-mass row.
+an independent requirement. The optional FSB stiffener-mass row accepts lumped,
+consistent-hermite or consistent-eccentric. The last adds supplied bending rotary
+and offset centroid inertia to Hermite translation; no torsional polar inertia is inferred.
 admittance alone accepts --lossless-structure to remove the existing wood and
 string material damping for a declared conservative-structure comparison.
 It retains the complete complex radiation load and all original modes. Near
