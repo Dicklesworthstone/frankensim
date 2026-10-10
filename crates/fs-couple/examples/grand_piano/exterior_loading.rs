@@ -2,7 +2,7 @@
 //! One existing modal BEM batch gives both Z = G^T A P and every receiver's
 //! pressure/velocity transfer. exp(-i omega t): the force opposing motion
 //! adds -i omega Z to the same string/board dynamic stiffness.
-use super::{bridge_response::{BridgeResponse,Response}, exterior_geometry::{Boundary,Specification,MAX_PANELS,ReceiverSet}};
+use super::{bridge_response::{BridgeResponse,Response}, exterior_geometry::{Boundary,Specification,MAX_PANELS,MAX_HARMONIC_RECEIVERS,ReceiverSet}};
 use fs_bem::radiation_policy::GeometryPolicy;
 #[cfg(test)]
 use fs_bem::helmholtz::{self,Formulation};
@@ -44,7 +44,7 @@ pub fn sample(boundary:&Boundary,spec:&Specification,w:f64)->Result<LoadingSampl
         || !spec.medium.density.is_finite() || spec.medium.density<=0.
         || !spec.medium.sound_speed.is_finite() || spec.medium.sound_speed<=0.
         || !spec.min_ppw.is_finite() || spec.min_ppw<6.
-        || !(1..=2).contains(&spec.receivers.len()) {
+        || !(1..=MAX_HARMONIC_RECEIVERS).contains(&spec.receivers.len()) {
         return Err("invalid complete radiation-loading basis, medium or requested frequency".into());
     }
     let plan=ReceiverSet::for_spec(boundary,spec)?;
@@ -158,6 +158,28 @@ mod tests {
         let pa=load.pressure(&a,w).unwrap();let pb=load.pressure(&b,w).unwrap();
         for (a,b) in pa.iter().zip(pb) {assert!((a.scale(2.)-b).abs()<1e-12*(1.+a.abs()));}
         assert!((b.input_w-4.*a.input_w).abs()<1e-12*(1.+a.input_w));
+    }
+    #[test]
+    fn harmonic_array_preserves_source_impedance_and_individual_pressure() {
+        let (boundary,model,mut spec)=fixture();let w=TAU*100.;
+        let original=sample(&boundary,&spec,w).unwrap();
+        spec.receivers=(0..MAX_HARMONIC_RECEIVERS).map(|i|
+            [0.02+0.001*i as f64,0.04,1.]).collect();
+        spec.near_field_receivers=true;
+        let points=spec.receivers.clone();let array=sample(&boundary,&spec,w).unwrap();
+        assert_eq!(array.receiver_transfer.len(),MAX_HARMONIC_RECEIVERS);
+        assert_eq!(array.impedance,original.impedance);
+        let response=model.solve(100.,69,C64::ONE,Some(&array.impedance)).unwrap();
+        let pressures=array.pressure(&response,w).unwrap();
+        for (i,point) in points.into_iter().enumerate() {
+            spec.receivers=vec![point];let single=sample(&boundary,&spec,w).unwrap();
+            assert_eq!(array.impedance,single.impedance);
+            assert_eq!(array.receiver_transfer[i],single.receiver_transfer[0]);
+            assert_eq!(pressures[i],single.pressure(&response,w).unwrap()[0]);
+        }
+        spec.receivers=vec![[0.05,0.05,1.];MAX_HARMONIC_RECEIVERS+1];
+        assert!(sample(&boundary,&spec,w).is_err());
+        spec.receivers.clear();assert!(sample(&boundary,&spec,w).is_err());
     }
     #[test]
     fn failed_geometry_frequency_or_drive_has_no_partial_response() {

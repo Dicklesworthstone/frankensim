@@ -97,7 +97,10 @@ wood and felt loss. It requires 33..257 odd frequency samples and at most 32
 complete board modes; failed passive fits REFUSE, never fall back to one-way.
 The ordinary render command remains one-way for a controlled comparison.
 response writes complex pressure per mass-normalized modal acceleration in
-exp(-i omega t) convention. render fits causal fixed-receiver transfers with
+exp(-i omega t) convention. response and admittance admit 1..64 receivers,
+sharing the same source solve; render and render-loaded require one or two.
+Larger audio requests refuse before structural or acoustic preparation.
+render fits causal fixed-receiver transfers with
 held-out checks, then observes EVERY mechanics substep before PCM encoding.
 It uses one score and physical clock for both receivers, no channel normalization.
 Default gesture: A4 or the nearest available key at 2 m/s; --note/--velocity
@@ -252,6 +255,7 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
 /// Admit both acoustic realizations before attaching the load or dispatching
 /// any score event. Loaded and one-way output share the original PCM path.
 fn bake(scene:&mut Scene,loaded:bool)->Result<(exterior_audio::Baked,exterior_geometry::Samples,String),String> {
+    scene.spec.require_audio_receivers()?;
     let (load,samples)=if loaded {
         let (fit,samples)=radiation_fit::prepare(&scene.boundary,&scene.spec,scene.piano.bank.rate)?;
         (Some(fit),samples)
@@ -310,6 +314,7 @@ fn run(args:&[String])->Result<(),String> {
             }
             if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
             let spec=Specification::read(&read_bounded(spec,exterior_geometry::MAX_SPEC_BYTES)?)?;
+            if frames.is_some() {spec.require_audio_receivers()?;}
             if command=="render-loaded" && spec.frequencies<33 {
                 return Err("render-loaded requires at least 33 odd-grid frequencies".into());
             }
@@ -355,6 +360,28 @@ mod tests {
         for key in ["0","109","NaN"] {
             let args=["admittance","missing.fss","missing.csv","missing.obj","missing.fspe",key,"unused.csv"].map(str::to_owned);
             assert!(run(&args).is_err());
+        }
+    }
+    #[test]
+    fn harmonic_arrays_refuse_playback_before_opening_structure_or_preparing_acoustics() {
+        let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir=std::env::temp_dir().join(format!("fs-piano-array-{}-{stamp}",std::process::id()));
+        std::fs::create_dir(&dir).unwrap();let name=|file:&str|dir.join(file).to_str().unwrap().to_owned();
+        let spec=format!("{}receiver-m,0.06,0.05,1\nreceiver-m,0.07,0.05,1\n",exterior_geometry::tests::specification());
+        std::fs::OpenOptions::new().create_new(true).write(true).open(name("array.fspe")).unwrap()
+            .write_all(spec.as_bytes()).unwrap();
+        for command in ["render","render-loaded"] {
+            let output=name(&format!("{command}.wav"));
+            let args=vec![command.into(),name("missing-board.fsb"),name("missing-scale.csv"),
+                name("missing-body.obj"),name("array.fspe"),output.clone(),"0.05".into()];
+            assert!(run(&args).unwrap_err().contains("one or two receivers"));
+            assert!(!std::path::Path::new(&output).exists());
+        }
+        let mut scene=small_source_scene();scene.spec.receivers.push([0.06,0.05,1.]);
+        for loaded in [false,true] {
+            assert!(bake(&mut scene,loaded).err().unwrap().contains("one or two receivers"));
+            assert!(!scene.piano.has_radiation());
+            assert!(scene.piano.bank.q.iter().chain(&scene.piano.bank.v).all(|x|*x==0.));
         }
     }
     #[test]

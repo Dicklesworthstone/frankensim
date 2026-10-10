@@ -24,6 +24,8 @@ pub const RATE:u32=48_000;
 pub const MAX_OBJ_BYTES:usize=32*1024*1024;
 pub const MAX_SPEC_BYTES:usize=64*1024;
 pub const MAX_PANELS:usize=2048;
+// Match the existing fs-bem near-field receiver bound; audio remains mono/stereo.
+pub const MAX_HARMONIC_RECEIVERS:usize=64;
 const MAX_PROJECTION_WORK:usize=3_000_000;
 // Each Helmholtz worker owns two dense complex matrices and one LU image.
 // Bound their aggregate working set independently of the panel-count gate.
@@ -77,12 +79,14 @@ impl Specification {
                     let index:usize=f[1].parse().map_err(|_|"receiver-pattern needs a zero-based receiver index")?;
                     let pattern=FirstOrder::new(number(f[2])?,[number(f[3])?,number(f[4])?,number(f[5])?])
                         .map_err(|e|e.to_string())?;
-                    if index>=2 || receiver_patterns.insert(index,pattern).is_some() {
-                        return Err("receiver-pattern index must be unique and 0 or 1".into());
+                    if index>=MAX_HARMONIC_RECEIVERS || receiver_patterns.insert(index,pattern).is_some() {
+                        return Err(format!("receiver-pattern index must be unique and in 0..{}",MAX_HARMONIC_RECEIVERS));
                     }
                 }
                 "receiver-m" if f.len()==4=>{
-                    if receivers.len()==2 {return Err("at most two finite-point receivers".into());}
+                    if receivers.len()>=MAX_HARMONIC_RECEIVERS {
+                        return Err(format!("at most {MAX_HARMONIC_RECEIVERS} harmonic receivers"));
+                    }
                     receivers.push([number(f[1])?,number(f[2])?,number(f[3])?]);
                 }
                 "receiver-evaluation"|"source"|"obj-scale-m"|"obj-origin"|"max-skin-offset-m"|"medium"|
@@ -117,7 +121,7 @@ impl Specification {
             || (!near_field_receivers && out.receiver_patterns.values().any(|p|p.pressure_fraction()<1.)) {
             return Err("directional receivers require receiver-evaluation,near-field and an existing receiver index".into());
         }
-        if out.receivers.is_empty() || !out.rules.values().any(|moving|*moving)
+        if !(1..=MAX_HARMONIC_RECEIVERS).contains(&out.receivers.len()) || !out.rules.values().any(|moving|*moving)
             || !(1e-9..=1e6).contains(&out.scale_m) || !(0.0..=0.05).contains(&out.offset_m)
             || out.medium.density<=0. || out.medium.sound_speed<=0.
             || out.band_hz.0<10. || out.band_hz.1<=out.band_hz.0 || out.band_hz.1>=0.45*f64::from(RATE)
@@ -133,6 +137,13 @@ impl Specification {
                 pattern.pressure_fraction(),pattern.front_axis()));
         }
         Ok(out)
+    }
+    /// Harmonic arrays never implicitly select a multichannel audio image.
+    pub fn require_audio_receivers(&self)->Result<(),String> {
+        if !(1..=2).contains(&self.receivers.len()) {
+            return Err("played exterior audio requires one or two receivers; use response or admittance for harmonic arrays".into());
+        }
+        Ok(())
     }
     pub fn omega(&self)->Vec<f64> {(0..self.frequencies).map(|i|
         TAU*(self.band_hz.0+(self.band_hz.1-self.band_hz.0)*i as f64/(self.frequencies-1) as f64)).collect()}
@@ -244,7 +255,7 @@ impl Boundary {
         let count=self.weights.len();let panels=self.surface.areas().len();
         if workers==0 || workers>MAX_FREQUENCY_WORKERS || count==0
             || count>super::linear::MAX_BOARD_MODES || panels>MAX_PANELS
-            || !(1..=2).contains(&receivers.len()) || omega.is_empty() || omega.len()>257
+            || !(1..=MAX_HARMONIC_RECEIVERS).contains(&receivers.len()) || omega.is_empty() || omega.len()>257
             || omega.iter().enumerate().any(|(i,w)|!w.is_finite() || *w<=0.
                 || (i>0 && *w<=omega[i-1]))
             || !medium.density.is_finite() || medium.density<=0.
@@ -442,6 +453,68 @@ pub(crate) mod tests {
         }).collect::<Vec<_>>().join("\n");
         assert!(Boundary::from_obj(&inward,&spec,&motion()).is_err());
         assert!(Specification::read(&specification().replace("min-panels-per-wavelength,6","min-panels-per-wavelength,1")).is_err());
+    }
+    #[test]
+    fn harmonic_array_cardinality_and_pattern_indices_are_bounded() {
+        let header=specification().replace("receiver-m,0.05,0.05,1\n","");
+        let rows=|count|format!("{header}{}","receiver-m,0.05,0.05,1\n".repeat(count));
+        for count in [1,2,3,MAX_HARMONIC_RECEIVERS] {
+            let text=format!("{}receiver-pattern,{},1,0,0,-1\n",rows(count),count-1);
+            let spec=Specification::read(&text).unwrap();
+            assert_eq!(spec.receivers.len(),count);
+            assert!(spec.receiver_patterns.contains_key(&(count-1)));
+            assert_eq!(spec.require_audio_receivers().is_ok(),count<=2);
+        }
+        assert!(Specification::read(&rows(0)).is_err());
+        assert!(Specification::read(&rows(MAX_HARMONIC_RECEIVERS+1)).is_err());
+        for suffix in ["receiver-pattern,64,1,0,0,1\n","receiver-m,NaN,0,1\n"] {
+            assert!(Specification::read(&format!("{}{suffix}",rows(MAX_HARMONIC_RECEIVERS-1))).is_err());
+        }
+        assert!(Specification::read(&format!("{}receiver-pattern,3,1,0,0,1\n",rows(3))).is_err());
+    }
+    #[test]
+    fn harmonic_arrays_match_individual_and_permuted_scalar_receivers() {
+        let spec=Specification::read(&specification()).unwrap();
+        let boundary=Boundary::from_obj(&box_obj("skin",[0.,0.,-0.01],[0.1,0.1,0.02]),&spec,&motion()).unwrap();
+        let mut points:Vec<_>=(0..MAX_HARMONIC_RECEIVERS).map(|i|
+            [0.02+0.001*i as f64,0.04,if i%2==0 {1.}else {-1.}]).collect();
+        points[MAX_HARMONIC_RECEIVERS-1]=points[0]; // coincident observers remain independent rows
+        let omega=[TAU*100.,TAU*200.];
+        for near in [false,true] {
+            let batch=boundary.sample_grid_mode(&omega,&points,spec.medium,6.,near).unwrap();
+            assert_eq!(batch.values.len(),MAX_HARMONIC_RECEIVERS);
+            let three=boundary.sample_grid_mode(&omega,&points[..3],spec.medium,6.,near).unwrap();
+            assert_eq!(three.values,batch.values[..3]);
+            for (i,&point) in points.iter().enumerate() {
+                let single=boundary.sample_grid_mode(&omega,&[point],spec.medium,6.,near).unwrap();
+                assert_eq!(batch.values[i],single.values[0]);
+                assert_eq!(batch.delays_s[i],single.delays_s[0]);
+                assert_eq!(batch.minimum_ppw,single.minimum_ppw);
+                assert_eq!(batch.maximum_condition_lower_bound,single.maximum_condition_lower_bound);
+            }
+            let reversed:Vec<_>=points.iter().copied().rev().collect();
+            let reverse=boundary.sample_grid_mode(&omega,&reversed,spec.medium,6.,near).unwrap();
+            for i in 0..points.len() {assert_eq!(batch.values[i],reverse.values[points.len()-1-i]);}
+            for invalid in [Vec::new(),vec![points[0];MAX_HARMONIC_RECEIVERS+1],vec![[f64::NAN,0.,1.]]] {
+                assert!(boundary.sample_grid_mode(&omega,&invalid,spec.medium,6.,near).is_err());
+            }
+        }
+    }
+    #[test]
+    fn harmonic_array_near_field_work_budget_is_aggregate() {
+        let mut spec=Specification::read(&format!("{}rigid,case\n",specification())).unwrap();
+        spec.near_field_receivers=true;
+        spec.receivers=vec![[0.05,0.05,2.];MAX_HARMONIC_RECEIVERS];
+        let mut obj=box_obj("skin",[0.,0.,-0.01],[0.1,0.1,0.02]);
+        for i in 1..33 {obj.push_str(&box_obj("case",[0.2*f64::from(i),0.,-0.01],[0.1,0.1,0.02]));}
+        let boundary=Boundary::from_obj(&obj,&spec,&motion()).unwrap();
+        // 396 panels * 64 receivers * at least 80 kernel evaluations exceeds
+        // the existing 2M cap. A single receiver on this same surface fits.
+        let one=ReceiverSet::new(&boundary,&spec.receivers[..1],spec.medium,true).unwrap();
+        assert!(one.prepare(1.).is_ok());
+        let all=ReceiverSet::for_spec(&boundary,&spec).unwrap();
+        let error=all.prepare(1.).err().unwrap();
+        assert!(error.contains("kernel-evaluation budget exhausted"),"{error}");
     }
     #[test]
     fn real_bem_observes_both_sides_and_rigid_scattering_changes_pressure() {

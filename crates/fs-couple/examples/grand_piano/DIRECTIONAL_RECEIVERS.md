@@ -18,7 +18,9 @@ receiver-pattern,1,0.5,0,0,-1
 
 The existing receiver positions are in metres in the board frame. A pattern
 row is `receiver-pattern,index,pressure_fraction,front_x,front_y,front_z`.
-The index is zero-based, following `receiver-m` order. The front axis must be
+The index is zero-based, following `receiver-m` order. Harmonic `response` and
+`admittance` admit up to 64 receivers (indices 0 through 63); played `render`
+and `render-loaded` remain mono/stereo. The front axis must be
 an explicitly supplied unit vector **pointing from the microphone toward its
 front source**. Here both microphones point down at the soundboard. Axes are
 not normalized, inferred from geometry, or rotated to make the result work.

@@ -64,6 +64,36 @@ fn opposite_microphones_observe_pressure_velocity_without_changing_radiation_imp
     assert!(changed);assert!(selected.piano.bank.q.iter().chain(&selected.piano.bank.v).all(|v|*v==0.));
 }
 #[test]
+fn harmonic_array_mixed_patterns_follow_receiver_permutations_and_single_observers() {
+    let extra="receiver-m,0.08,0.04,0.025\nreceiver-m,0.04,0.04,0.022\n";
+    let rows=format!("{extra}receiver-pattern,0,0.5,0,0,-1\nreceiver-pattern,1,0.5,0,0,1\nreceiver-pattern,3,0,0,0,-1\n");
+    let selected=scene(&rows);let w=TAU*100.;
+    let array=exterior_loading::sample(&selected.boundary,&selected.spec,w).unwrap();
+    let omni=Specification::read(&text(extra)).unwrap();
+    let scalar=exterior_loading::sample(&selected.boundary,&omni,w).unwrap();
+    assert_eq!(array.impedance,scalar.impedance);
+    for (i,&point) in selected.spec.receivers.iter().enumerate() {
+        let mut spec=Specification::read(&text("")).unwrap();spec.receivers=vec![point];
+        if let Some(&pattern)=selected.spec.receiver_patterns.get(&i) {spec.receiver_patterns.insert(0,pattern);}
+        let single=exterior_loading::sample(&selected.boundary,&spec,w).unwrap();
+        assert_eq!(array.impedance,single.impedance);
+        for (&a,&b) in array.receiver_transfer[i].iter().zip(&single.receiver_transfer[0]) {
+            // The mixed array refines velocity even for its omni member; a
+            // scalar-only single receiver need not be bit-identical to it.
+            assert!((a-b).abs()<1e-6*b.abs().max(1e-12));
+        }
+    }
+    let permutation=[3,1,2,0];let mut permuted=Specification::read(&text(&rows)).unwrap();
+    permuted.receivers=permutation.iter().map(|&i|selected.spec.receivers[i]).collect();
+    permuted.receiver_patterns=permutation.iter().enumerate().filter_map(|(index,old)|
+        selected.spec.receiver_patterns.get(old).map(|&pattern|(index,pattern))).collect();
+    let reordered=exterior_loading::sample(&selected.boundary,&permuted,w).unwrap();
+    assert_eq!(array.impedance,reordered.impedance);
+    for (new,old) in permutation.into_iter().enumerate() {
+        assert_eq!(reordered.receiver_transfer[new],array.receiver_transfer[old]);
+    }
+}
+#[test]
 fn source_hammer_directional_stereo_retains_one_clock_and_identical_reacted_mechanics() {
     let score=||performance::Performance::read("sample,event,key,value\n0,note_on,69,0.5\n1200,note_off,69,0\n",&[69],2400).unwrap();
     for feedback in [false,true] {
@@ -93,7 +123,7 @@ fn directional_specs_reach_both_harmonic_commands_and_bad_axes_publish_nothing()
     let dir=std::env::temp_dir().join(format!("fs-piano-directional-{}-{stamp}",std::process::id()));
     std::fs::create_dir(&dir).unwrap();let name=|p:&str|dir.join(p).to_str().unwrap().to_owned();
     let (board,courses,_,_)=super::super::tests::small_source_inputs();
-    let valid=text("receiver-pattern,0,0.5,0,0,-1\nreceiver-pattern,1,0,0,0,1\n");
+    let valid=text("receiver-m,0.08,0.04,0.025\nreceiver-m,0.04,0.04,0.022\nreceiver-pattern,0,0.5,0,0,-1\nreceiver-pattern,1,0,0,0,1\nreceiver-pattern,3,0.5,0,0,1\n");
     for (path,contents) in [("board.fsb",board),("scale.csv",geometry::write_scale(&courses)),
         ("mics.fspe",valid.clone()),("bad.fspe",valid.replace("0.5,0,0,-1","0.5,0,0,-2"))] {
         std::fs::OpenOptions::new().create_new(true).write(true).open(name(path)).unwrap().write_all(contents.as_bytes()).unwrap();
@@ -104,6 +134,13 @@ fn directional_specs_reach_both_harmonic_commands_and_bad_axes_publish_nothing()
         let output=name(&format!("{command}.csv"));args.push(output.clone());
         super::super::run(&args).unwrap();let csv=std::fs::read_to_string(&output).unwrap();
         assert!(csv.contains("ideal first-order"));assert!(csv.contains("Pa-equivalent"));assert!(!csv.contains("NaN"));
+        let indices:BTreeSet<usize>=csv.lines().filter_map(|line| {
+            let cells:Vec<_>=line.split(',').collect();
+            if command=="response" {cells.get(1)?.parse().ok()}
+            else if cells.get(1)==Some(&"receiver") {cells.get(2)?.parse().ok()}
+            else {None}
+        }).collect();
+        assert_eq!(indices,(0..4).collect());
         assert!(super::super::run(&args).is_err());assert_eq!(csv,std::fs::read_to_string(&output).unwrap());
     }
     let bad=vec!["render-loaded".into(),name("board.fsb"),name("scale.csv"),"board-skin-continuous".into(),name("bad.fspe"),name("refused.wav"),"0.05".into()];

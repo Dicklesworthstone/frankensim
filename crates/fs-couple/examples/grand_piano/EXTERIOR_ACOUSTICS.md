@@ -44,8 +44,15 @@ rigid,cabinet
 rigid,lid
 ```
 
-A second `receiver-m` row requests a second physical receiver. Positions and
-medium values are coherent SI in the structural board frame. Transform OBJ
+`response` and `admittance` accept **1 to 64 `receiver-m` rows**, in the order
+used by the output indices. Coincident receivers remain distinct rows. Optional
+`receiver-pattern` indices follow the same order; see `DIRECTIONAL_RECEIVERS.md`.
+All receivers share the source boundary solve. Near-field evaluation also reuses
+each frequency's prepared observation rows across modal inputs. An array does not repeat piano preparation
+or change the source impedance. `render` and `render-loaded` accept only one or
+two receivers and reject a larger array before structural or acoustic preparation.
+
+Positions and medium values are coherent SI in the structural board frame. Transform OBJ
 coordinates by `p_m = obj-scale-m * (p_obj - obj-origin)`; origin is in source
 OBJ units. Axes must already agree with the board axes. This does not infer
 orientation, centimetres/metres, acoustic impedances or mechanical material
@@ -87,11 +94,16 @@ number lower bound is not a condition-number certificate. Refine the input
 mesh or choose a narrower explicitly declared band when resolution is refused;
 no modes or frequencies are silently dropped.
 
-Receivers must conservatively lie outside the body's enclosing sphere, leaving
-at least two 48 kHz propagation samples and at most 0.5 seconds of guaranteed
-travel time. This excludes some legitimate close microphones. Receivers below
-the soundboard are legal. The BEM evaluates finite-distance pressure, including
-spreading and propagation; no extra 1/r or gain is applied.
+The default centroid receivers must conservatively lie outside the body's
+enclosing sphere. Explicit `receiver-evaluation,near-field` uses actual
+point-to-triangle clearance and triangle-integrated observation instead; see
+`NEAR_FIELD_RECEIVERS.md`. Both require at least two 48 kHz propagation samples
+and at most 0.5 seconds of guaranteed travel time. Receivers below the soundboard
+are legal. Near-field arrays retain the existing **2,000,000 kernel-evaluation
+budget across all receivers and panels at each frequency**; the 64-receiver
+count is a ceiling, not a promise every mesh/array will fit that work budget.
+The BEM evaluates finite-distance pressure, including spreading and propagation;
+no extra 1/r or gain is applied.
 
 The CSV contains receiver-major/input transfer values at each frequency:
 pressure [Pa] per unit generalized modal acceleration [m sqrt(kg)/s^2], with

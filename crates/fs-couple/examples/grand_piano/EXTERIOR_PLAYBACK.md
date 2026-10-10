@@ -3,6 +3,9 @@
 Both `piano_exterior render` and `render-loaded` accept the physical controls
 already used by `grand_piano`. The former remains one-way; the latter retains
 passive radiation feedback. No new piano engine or acoustic solver is selected.
+Played output requires one or two receivers. The harmonic `response` and
+`admittance` commands support arrays of up to 64; larger played-output requests
+refuse before loading the structural inputs or preparing BEM/receiver fits.
 
 ```sh
 cargo run --release -p fs-couple --example piano_exterior -- \

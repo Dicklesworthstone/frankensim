@@ -1,6 +1,6 @@
 //! One explicit receiver policy for pressure, harmonic loading and played sound.
 //! Moving or rotating a receiver never changes the source solve or impedance.
-use super::{Boundary,Medium,Specification,RATE};
+use super::{Boundary,Medium,Specification,RATE,MAX_HARMONIC_RECEIVERS};
 use fs_bem::{helmholtz::{self,RadiationSolution},near_field,panel3d::SpherePanels};
 use fs_math::c64::C64;
 
@@ -23,7 +23,7 @@ impl<'a> ReceiverSet<'a> {
         Ok(out)
     }
     pub fn new(boundary:&'a Boundary,points:&[[f64;3]],medium:Medium,near:bool)->Result<Self,String> {
-        if !(1..=2).contains(&points.len()) || !medium.sound_speed.is_finite() || medium.sound_speed<=0.
+        if !(1..=MAX_HARMONIC_RECEIVERS).contains(&points.len()) || !medium.sound_speed.is_finite() || medium.sound_speed<=0.
             || !medium.density.is_finite() || medium.density<=0. {
             return Err("invalid receiver count or physical medium".into());
         }
