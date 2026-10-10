@@ -295,6 +295,7 @@ fn reference_project() -> ProjectSpec {
                 ],
                 adiabatic_remainder: false,
                 radiation: None,
+                transient: None,
             }),
             fan_efficiency: None,
         }),
@@ -2213,4 +2214,78 @@ fn v9_envelopes_migrate_to_v10_and_refuse_a_pre_v10_natural_law() {
     assert!(receipt.verifies(v9.as_bytes(), current.as_bytes()));
     let false_v9 = down(&print_sexpr(&natural_project()).expect("renders"));
     assert_eq!(parse_sexpr_migrating(&false_v9).expect_err("v9 had no natural law").code, "fsim-migration-payload");
+}
+
+fn transient_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.transient = Some(fs_project::ConductionTransient {
+        initial_temperature: kelvin(293.15),
+        horizon: QtyAny::new(10.0, fs_project::spec::dims::TIME),
+        max_step: QtyAny::new(1.0, fs_project::spec::dims::TIME),
+        max_steps: 30,
+        energy_tolerance: QtyAny::new(1e-6, fs_project::spec::dims::ENERGY),
+        capacities: setup.regions.iter().map(|row| fs_project::TransientRegionCapacity {
+            region: row.region.clone(),
+            volumetric_heat_capacity: QtyAny::new(2e6, fs_project::spec::dims::VOLUMETRIC_HEAT_CAPACITY),
+            source: "manufactured constant capacity for numerical verification".to_string(),
+        }).collect(),
+    });
+    spec
+}
+
+#[test]
+fn g0_transient_intent_round_trips_and_admits_complete_time_and_capacity_data() {
+    let spec = transient_project();
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let sexpr = print_sexpr(&spec).unwrap();
+    assert!(sexpr.contains(":transient (transient :initial-temperature "));
+    assert_eq!(parse_sexpr(&sexpr).unwrap().spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).unwrap()).unwrap().spec, spec);
+    let original_hash = canonical_hash(sexpr.as_bytes());
+    let mut changed = spec.clone();
+    changed.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap().capacities[0].volumetric_heat_capacity.value *= 2.0;
+    assert_ne!(original_hash, canonical_hash(print_sexpr(&changed).unwrap().as_bytes()));
+    for (label, mutate, expected) in [
+        ("capacity coverage", 0, "project-conduction-transient-capacity-coverage"),
+        ("capacity units", 1, "project-conduction-transient-capacity"),
+        ("capacity source", 2, "project-conduction-transient-capacity"),
+        ("fine grid work", 3, "project-conduction-transient-steps"),
+        ("time units", 4, "project-conduction-transient-quantity"),
+        ("duplicate region", 5, "project-conduction-transient-capacity-region"),
+    ] {
+        let mut bad = spec.clone();
+        let policy = bad.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient.as_mut().unwrap();
+        match mutate {
+            0 => { policy.capacities.pop(); }
+            1 => policy.capacities[0].volumetric_heat_capacity.dims = fs_project::spec::dims::POWER,
+            2 => policy.capacities[0].source.clear(),
+            3 => policy.max_steps = 29,
+            4 => policy.horizon.dims = fs_project::spec::dims::LENGTH,
+            _ => policy.capacities[1].region = policy.capacities[0].region.clone(),
+        }
+        assert!(bad.validate().iter().any(|row| row.code == expected), "{label}: {:?}", bad.validate());
+    }
+    let ignored = sexpr.replace(":max-steps 30", ":max-steps 30 :implicit-capacity true");
+    let decoded = parse_sexpr_lenient(&ignored).unwrap();
+    assert!(decoded.findings().iter().any(|row| row.code == "project-unknown-field"));
+}
+
+#[test]
+fn g0_v10_migration_preserves_natural_convection_and_never_invents_transient_storage() {
+    let historical = natural_project();
+    let current = print_sexpr(&historical).unwrap();
+    let down = |text: &str| text
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 10", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 10", 1);
+    let old = down(&current);
+    let migrated = parse_sexpr_migrating(&old).unwrap();
+    assert_eq!(migrated.decoded.spec, historical);
+    let receipt = migrated.migration.unwrap();
+    assert_eq!((receipt.source_version, receipt.target_version), (10, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "transient-conduction-v11");
+    assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
+    let hidden_storage = down(&print_sexpr(&transient_project()).unwrap());
+    assert_eq!(parse_sexpr_migrating(&hidden_storage).unwrap_err().code, "fsim-migration-payload");
 }

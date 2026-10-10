@@ -24,7 +24,11 @@ fn zero_mean_source_has_nonzero_certified_flux_defect_including_tensor_cross_ter
         let tensors = [k]; let source = [[-3.,1.,1.,1.]];
         let problem = AffineSourceTetProblem { vertices: &VERTICES, tets: &TETS,
             conductivity: &tensors, source: &source, boundary: &boundary };
-        let result = affine_source_energy_bound(&problem, &[0.;4], FluxBudget::default(), || true).unwrap();
+        // With no graph iterations, the zero candidate proposes zero RT0
+        // flux and the exact zero source mean leaves it unchanged. This
+        // isolates the polynomial lifting whose norm is the analytic oracle.
+        let result = affine_source_energy_bound(&problem, &[0.;4],
+            FluxBudget { max_iterations: 0, ..FluxBudget::default() }, || true).unwrap();
         contains(result.majorant_squared, exact);
         assert!(result.majorant_squared.hi-result.majorant_squared.lo < 1e-12);
         assert!(result.energy_error_upper > 0.03);
@@ -33,6 +37,14 @@ fn zero_mean_source_has_nonzero_certified_flux_defect_including_tensor_cross_ter
         assert!(tensor_energy_bound(&averaged, &[0.;4], FluxBudget::default(), || true)
             .unwrap().energy_error_upper < 1e-12);
         for flux in result.outward_flux_integrals[0] { contains(flux, 0.0); }
+        // The default graph proposal may introduce nonzero cancelling
+        // Dirichlet-face fluxes. These enclose an auxiliary equilibrated flux,
+        // not the exact physical face flux or the lifting alone.
+        let proposed = affine_source_energy_bound(&problem, &[0.;4],
+            FluxBudget::default(), || true).unwrap();
+        contains(proposed.outward_flux_integrals[0].into_iter()
+            .fold(Iv::zero(), Iv::add), 0.0);
+        assert!(proposed.energy_error_upper > 0.03);
     }
 }
 

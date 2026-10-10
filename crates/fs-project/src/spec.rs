@@ -40,6 +40,10 @@ pub mod dims {
     pub const VOLUMETRIC_FLOW: Dims = Dims([3, 0, -1, 0, 0, 0]);
     /// Square metre.
     pub const AREA: Dims = Dims([2, 0, 0, 0, 0, 0]);
+    /// Joule.
+    pub const ENERGY: Dims = Dims([2, 1, -2, 0, 0, 0]);
+    /// Volumetric heat capacity, J/(m³ K).
+    pub const VOLUMETRIC_HEAT_CAPACITY: Dims = Dims([-1, 1, -2, -1, 0, 0]);
 }
 
 /// Project metadata: who the study is for and what decision it feeds.
@@ -716,6 +720,41 @@ pub struct ConductionRadiation {
     pub relaxation: f64,
 }
 
+/// One sourced, temperature-independent capacity for a declared solid region.
+/// This is an explicit engineering input; it does not manufacture a material
+/// card receipt or infer density and specific heat from conductivity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransientRegionCapacity {
+    /// Declared conduction region, independent of mesh element numbering.
+    pub region: String,
+    /// Positive volumetric heat capacity in J/(m³ K).
+    pub volumetric_heat_capacity: QtyAny,
+    /// Nonempty source or engineering basis for the declared value.
+    pub source: String,
+}
+
+/// Fixed-horizon backward-Euler cooling (schema v11).
+///
+/// The producer executes a grid bounded by `max_step`, then its nested half
+/// grid. `max_steps` bounds their COMBINED work; only the fine final field is
+/// published. Their final-QoI difference is a temporal estimate, not a bound
+/// on spatial error, unsampled peaks, or missing physical uncertainty.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConductionTransient {
+    /// Uniform physical initial temperature, K.
+    pub initial_temperature: QtyAny,
+    /// Positive final physical time, s.
+    pub horizon: QtyAny,
+    /// Largest coarse-grid step, s.
+    pub max_step: QtyAny,
+    /// Maximum combined coarse and fine steps, between 3 and 10,000.
+    pub max_steps: u32,
+    /// Absolute discrete storage-minus-net-input tolerance per step, J.
+    pub energy_tolerance: QtyAny,
+    /// Exactly one explicitly sourced capacity per conduction region.
+    pub capacities: Vec<TransientRegionCapacity>,
+}
+
 /// Explicit inputs required to lower project geometry into a conduction
 /// problem without inventing an interior point or a thermal boundary.
 #[derive(Debug, Clone, PartialEq)]
@@ -731,6 +770,8 @@ pub struct ConductionSetup {
     /// Absence preserves the non-radiating model; no emissivity or ambient
     /// reservoir is inferred from a bulk conductivity card or the envelope.
     pub radiation: Option<ConductionRadiation>,
+    /// Optional finite-time solve. Absence retains the steady model.
+    pub transient: Option<ConductionTransient>,
 }
 
 /// The cooling section: declared-empty lists are facts, not omissions.
@@ -1914,7 +1955,7 @@ impl ProjectSpec {
                         }
                     }
                 }
-                if !has_anchor {
+                if !has_anchor && conduction.transient.is_none() {
                     out.push(violation(
                         "project-conduction-boundary-unanchored",
                         "cooling.conduction carries only heat-flux boundaries",
@@ -1924,9 +1965,73 @@ impl ProjectSpec {
                 if let Some(radiation) = &conduction.radiation {
                     Self::check_radiation(conduction, radiation, out);
                 }
+                if let Some(transient) = &conduction.transient {
+                    Self::check_transient(conduction, transient, out);
+                }
             }
         }
         self.check_range_quantities(out);
+    }
+
+    fn check_transient(
+        conduction: &ConductionSetup,
+        transient: &ConductionTransient,
+        out: &mut Vec<Violation>,
+    ) {
+        for (name, quantity, dimension) in [
+            ("initial-temperature", transient.initial_temperature, dims::TEMPERATURE),
+            ("horizon", transient.horizon, dims::TIME),
+            ("max-step", transient.max_step, dims::TIME),
+            ("energy-tolerance", transient.energy_tolerance, dims::ENERGY),
+        ] {
+            if quantity.dims != dimension || !quantity.value.is_finite() || quantity.value <= 0.0 {
+                out.push(violation(
+                    "project-conduction-transient-quantity",
+                    format!("transient.{name} must be a positive finite quantity with dimensions {dimension:?}"),
+                    "declare physical initial temperature, time controls and discrete energy tolerance in coherent SI units",
+                ));
+            }
+        }
+        let steps = (transient.horizon.value / transient.max_step.value).ceil().max(1.0);
+        if !(3..=10_000).contains(&transient.max_steps)
+            || !steps.is_finite()
+            || steps > f64::from(transient.max_steps / 3)
+        {
+            out.push(violation(
+                "project-conduction-transient-steps",
+                "transient.max-steps must cover the coarse grid and its nested half grid, within 3..=10000 steps",
+                "set max-steps to at least 3 * ceil(horizon / max-step), or reduce the physical horizon",
+            ));
+        }
+        let regions: BTreeSet<_> = conduction.regions.iter().map(|row| row.region.as_str()).collect();
+        let mut seen = BTreeSet::new();
+        for capacity in &transient.capacities {
+            if !regions.contains(capacity.region.as_str()) || !seen.insert(capacity.region.as_str()) {
+                out.push(violation(
+                    "project-conduction-transient-capacity-region",
+                    format!("capacity region `{}` is unknown or repeated", capacity.region),
+                    "declare exactly one capacity for each conduction region",
+                ));
+            }
+            if capacity.volumetric_heat_capacity.dims != dims::VOLUMETRIC_HEAT_CAPACITY
+                || !capacity.volumetric_heat_capacity.value.is_finite()
+                || capacity.volumetric_heat_capacity.value <= 0.0
+                || capacity.source.trim().is_empty()
+            {
+                out.push(violation(
+                    "project-conduction-transient-capacity",
+                    format!("capacity for `{}` requires positive finite J/(m³ K) and a source", capacity.region),
+                    "supply the sourced volumetric capacity; conductivity does not determine heat storage",
+                ));
+            }
+        }
+        if regions != seen {
+            out.push(violation(
+                "project-conduction-transient-capacity-coverage",
+                "transient capacity declarations do not exactly cover conduction regions",
+                "declare one sourced heat capacity for every region",
+            ));
+        }
     }
 
     fn check_radiation(

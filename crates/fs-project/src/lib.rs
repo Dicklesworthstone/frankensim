@@ -43,7 +43,10 @@ pub const STUDY_FSIM_VERSION: u32 = 1;
 /// artifact, with a mandatory basis and source (bead q61wp.79); the solve stage
 /// propagates it into the Geometry budget term. Version-6 documents declare
 /// none and migrate without inventing one.
-pub const FSIM_VERSION: u32 = 10;
+/// Version 11 adds explicit finite-time conduction, sourced regional heat
+/// capacities and combined coarse/fine time-work limits. Older projects remain
+/// steady after a receipted schema rewrite; no heat storage is inferred.
+pub const FSIM_VERSION: u32 = 11;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,
@@ -70,14 +73,14 @@ pub use migration::{
     parse_sexpr_migrating,
 };
 pub use spec::{
-    AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
+    AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup, ConductionTransient,
     ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
     FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
     InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance, Metadata, SurfaceOffset,
     OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface,
     RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
     RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary,
-    ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent, Versions,
+    ThermalBoundaryCondition, ThermalLimit, TransientRegionCapacity, UnitsDoctrine, Vent, Versions,
     requirement_source_reviews,
 };
 pub use study::{

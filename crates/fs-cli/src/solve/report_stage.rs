@@ -5,9 +5,10 @@
 //! Authority doctrine (bead frankensim-rc-root-q61wp.12): this stage adds NO
 //! physical, numerical, or validation authority. Every number in the report
 //! is copied from a retained receipt that names its own producer; every claim
-//! in the package carries the colour its producer recorded (today: Estimated
-//! with an unbounded dispersion, because all eight engineering-uncertainty
-//! terms are explicit NO-DATA). A receipt that does not parse, or that lacks a
+//! in the package carries only authority the standalone checker can admit.
+//! A separately requested nominal mean enclosure is projected beside the
+//! maximum-temperature decision, without filling that decision's unknown
+//! engineering-uncertainty terms. A receipt that does not parse, or that lacks a
 //! field the report needs, refuses the stage instead of being papered over
 //! with a literal — the 2026-08-25 fabricated report is the failure this
 //! module exists to make impossible.
@@ -293,6 +294,23 @@ fn stage_summary(stage: SolveStage, receipt: &JsonValue) -> Vec<(String, String)
                     "energy_relative_closure",
                     &["energy", "relative_closure"][..],
                 ),
+                ("energy_storage_w", &["energy", "storage_w"][..]),
+                ("transient_final_time_s", &["transient", "final_time_s"][..]),
+                ("transient_coarse_steps", &["transient", "coarse_steps"][..]),
+                ("transient_fine_steps", &["transient", "fine_steps"][..]),
+                ("transient_total_steps", &["transient", "total_steps"][..]),
+                (
+                    "transient_temporal_error_status",
+                    &["transient", "temporal_error", "status"][..],
+                ),
+                (
+                    "transient_temporal_half_width_k",
+                    &["transient", "temporal_error", "estimated_half_width_k"][..],
+                ),
+                (
+                    "transient_window_energy_residual_j",
+                    &["transient", "energy", "window_residual_j"][..],
+                ),
                 ("elements", &["mesh", "elements"][..]),
                 ("vertices", &["mesh", "vertices"][..]),
                 ("interface_pairs", &["interfaces", "pair_count"][..]),
@@ -320,6 +338,7 @@ fn stage_summary(stage: SolveStage, receipt: &JsonValue) -> Vec<(String, String)
                     .is_none_or(|(last, _)| last.as_str() != label)
                     && path.len() > 1
                     && path[0] != "adaptive"
+                    && path[0] != "transient"
                 {
                     push_summary(&mut summary, receipt, label, &path[1..]);
                 }
@@ -457,6 +476,52 @@ fn provenance_from_spec(spec: &ProjectSpec) -> ReportProvenance {
     }
 }
 
+/// A numerical enclosure has authority only for its named nominal functional.
+/// It does not fill any term in the separate maximum-temperature decision.
+struct MeanBoundProjection {
+    name: String,
+    region: String,
+    value_k: f64,
+    lower_k: f64,
+    upper_k: f64,
+    error_upper_k: f64,
+    producer: String,
+    scope: String,
+}
+
+fn mean_bound_projection(receipt: &JsonValue) -> Result<Option<MeanBoundProjection>, SolveRefusal> {
+    let Some(bound) = receipt.get("volume_mean_bound") else { return Ok(None); };
+    let stage = SolveStage::Conduction;
+    if required_str(stage, bound, "schema")? != "frankensim.cli.volume-mean-bound.v1"
+        || required_str(stage, bound, "name")? != super::mean_bound::OUTPUT
+        || required_str(stage, bound, "functional")? != "region-volume-mean-temperature"
+        || required_str(stage, bound, "unit")? != "K"
+        || required_str(stage, bound, "authority")? != "Verified"
+        || required_str(stage, bound, "producer")? != "fs-conduction::verification::region"
+    {
+        return Err(shape_error(stage, "unsupported regional mean-bound producer or functional"));
+    }
+    let interval = bound.get("enclosure_k")
+        .ok_or_else(|| shape_error(stage, "missing mean-temperature enclosure"))?;
+    let result = MeanBoundProjection {
+        name: required_str(stage, bound, "name")?.to_string(),
+        region: required_str(stage, bound, "region")?.to_string(),
+        value_k: required_f64(stage, bound, "value_k")?,
+        lower_k: required_f64(stage, interval, "lower")?,
+        upper_k: required_f64(stage, interval, "upper")?,
+        error_upper_k: required_f64(stage, bound, "error_upper_k")?,
+        producer: required_str(stage, bound, "producer")?.to_string(),
+        scope: required_str(stage, bound, "scope")?.to_string(),
+    };
+    if ![result.value_k, result.lower_k, result.upper_k, result.error_upper_k]
+        .iter().all(|value| value.is_finite())
+        || result.lower_k > result.upper_k || result.error_upper_k < 0.0
+    {
+        return Err(shape_error(stage, "invalid regional mean-temperature enclosure"));
+    }
+    Ok(Some(result))
+}
+
 /// Build the report, its JSON twin, and the evidence package from the retained
 /// receipts of the completed six-stage prefix, then return them as side
 /// artifacts plus the stage receipt.
@@ -511,6 +576,23 @@ pub(super) fn report_receipt(
         .iter()
         .find(|receipt| receipt.stage == SolveStage::MaterialResolve)
         .expect("prefix includes material-resolve");
+    let mean_bound = mean_bound_projection(&conduction.value)?;
+    let transient = conduction.value.get("transient");
+    let time_context = if let Some(transient) = transient {
+        let stage = SolveStage::Conduction;
+        let final_time = required_f64(stage, transient, "final_time_s")?;
+        if required_str(stage, transient, "schema")? != "fs-cli-transient-conduction-v1"
+            || required_str(stage, transient, "status")? != "completed"
+            || required_str(stage, transient, "qoi_time")? != "final"
+            || !final_time.is_finite()
+            || final_time <= 0.0
+        {
+            return Err(shape_error(stage, "invalid transient final-time receipt"));
+        }
+        format!(" at final time {final_time} s")
+    } else {
+        String::new()
+    };
 
     // ---- QoI receipt: the only source of every number the report states.
     let qoi_stage = SolveStage::Qoi;
@@ -688,7 +770,7 @@ pub(super) fn report_receipt(
         .with_qoi(QoiReportItem {
             name: qoi_name.to_string(),
             description: format!(
-                "region `{qoi_region}` maximum temperature from the request-selective conduction producer"
+                "region `{qoi_region}` spatial maximum temperature{time_context} from the request-selective conduction producer"
             ),
             nominal_value: qoi_value,
             unit: qoi_unit.to_string(),
@@ -721,9 +803,9 @@ pub(super) fn report_receipt(
             name: name.clone(),
             description: match half_width {
                 Some((lo, hi)) => format!(
-                    "{source}; interval [{lo}, {hi}] {unit}; reported beside the decision QoI, no requirement composed"
+                    "{source}{time_context}; interval [{lo}, {hi}] {unit}; reported beside the decision QoI, no requirement composed"
                 ),
-                None => format!("{source}; reported beside the decision QoI, no requirement composed"),
+                None => format!("{source}{time_context}; reported beside the decision QoI, no requirement composed"),
             },
             nominal_value: *value,
             unit: unit.clone(),
@@ -736,6 +818,30 @@ pub(super) fn report_receipt(
             surrogate_error: f64::NAN,
             total_uncertainty_budget: f64::NAN,
             source_root: identity.clone(),
+        });
+    }
+    if let Some(bound) = &mean_bound {
+        report = report.with_qoi(QoiReportItem {
+            name: bound.name.clone(),
+            description: format!(
+                "region `{}` volume mean; numerical enclosure [{}, {}] K; combined numerical error upper {} K; {}",
+                bound.region, bound.lower_k, bound.upper_k, bound.error_upper_k, bound.scope,
+            ),
+            nominal_value: bound.value_k,
+            unit: "K".to_string(),
+            // Projection of the admitted numerical producer's retained interval.
+            color: Color::Verified { lo: bound.lower_k, hi: bound.upper_k },
+            // The enclosure combines spatial, algebraic, and outward-arithmetic
+            // effects; it is not a separately measured discretization term.
+            discretization_error: f64::NAN,
+            parameter_uncertainty: f64::NAN,
+            surrogate_error: f64::NAN,
+            total_uncertainty_budget: f64::NAN,
+            source_root: conduction.completed.receipt.to_hex(),
+        }).with_no_claim(NoClaimItem {
+            component: bound.name.clone(),
+            status: "Verified nominal numerical interval; physical uncertainty unknown".to_string(),
+            statement: bound.scope.clone(),
         });
     }
     if let Some(convergence) = ladder_convergence(&conduction.value, qoi_name, qoi_unit, qoi_value)
@@ -752,6 +858,13 @@ pub(super) fn report_receipt(
             component: "surface radiation".to_string(),
             status: "Estimated".to_string(),
             statement: no_claim.to_string(),
+        });
+    }
+    if let Some(transient) = transient {
+        report = report.with_no_claim(NoClaimItem {
+            component: "transient conduction".to_string(),
+            status: "Estimated".to_string(),
+            statement: required_str(SolveStage::Conduction, transient, "no_claim")?.to_string(),
         });
     }
     for receipt in &loaded {
@@ -831,7 +944,7 @@ pub(super) fn report_receipt(
     .with_claim(Claim::estimated(
         format!("qoi.{}.{}", identity_token(qoi_name), identity_token(qoi_region)),
         format!(
-            "{qoi_name} in region `{qoi_region}` = {qoi_value} {qoi_unit}; estimate-only candidate from {QOI_RECEIPT_SCHEMA} with {measured_terms} of {} engineering-uncertainty terms measured (Estimated){} (receipt {})",
+            "{qoi_name} in region `{qoi_region}`{time_context} = {qoi_value} {qoi_unit}; estimate-only candidate from {QOI_RECEIPT_SCHEMA} with {measured_terms} of {} engineering-uncertainty terms measured (Estimated){} (receipt {})",
             terms.len(),
             if measured_terms == terms.len() { "" } else { " and the rest NO-DATA" },
             qoi.completed.receipt.to_hex()
@@ -846,7 +959,7 @@ pub(super) fn report_receipt(
             identity_token(qoi_region)
         ),
         format!(
-            "requirement outcome `{outcome}`: effective limit {effective_limit} K, required margin {required_margin} K, nominal margin {nominal_margin} K (composition {composition_identity})"
+            "requirement outcome `{outcome}`{time_context}: effective limit {effective_limit} K, required margin {required_margin} K, nominal margin {nominal_margin} K (composition {composition_identity})"
         ),
         QOI_RECEIPT_SCHEMA,
         f64::INFINITY,
@@ -856,10 +969,25 @@ pub(super) fn report_receipt(
         package = package.with_claim(Claim::estimated(
             format!("qoi.{}", identity_token(name)),
             format!(
-                "{name} = {value} {unit}; {source}, estimate-only, no requirement composed (identity {identity}, receipt {})",
+                "{name}{time_context} = {value} {unit}; {source}, estimate-only, no requirement composed (identity {identity}, receipt {})",
                 qoi.completed.receipt.to_hex()
             ),
             QOI_RECEIPT_SCHEMA,
+            f64::INFINITY,
+        ));
+    }
+    if let Some(bound) = &mean_bound {
+        // The standalone checker's deny-all policy cannot authenticate a new
+        // source certificate. Retain the solver's statement and exact source
+        // address without inventing an independent verification capability.
+        package = package.with_claim(Claim::estimated(
+            format!("qoi.{}.{}", identity_token(&bound.name), identity_token(&bound.region)),
+            format!(
+                "{} in region `{}`: candidate mean {} K; {} reports a nominal numerical enclosure [{}, {}] K and absolute numerical error upper {} K (conduction receipt {}). {} This package preserves that solver-reported enclosure; its standalone checker does not independently reverify the continuum bound or authenticate its source.",
+                bound.name, bound.region, bound.value_k, bound.producer, bound.lower_k,
+                bound.upper_k, bound.error_upper_k, conduction.completed.receipt.to_hex(), bound.scope,
+            ),
+            "retained-nominal-mean-enclosure",
             f64::INFINITY,
         ));
     }
@@ -914,7 +1042,7 @@ pub(super) fn report_receipt(
         json_string(&package_hash.to_hex()),
         json_string(&package_root.to_hex()),
         fs_checker::CHECKER_PROTOCOL_VERSION,
-        1 + additional.len(),
+        1 + additional.len() + usize::from(mean_bound.is_some()),
         json_string(outcome),
         terms.len(),
         json_string(&qoi.completed.receipt.to_hex()),

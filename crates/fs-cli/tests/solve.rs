@@ -36,6 +36,9 @@ use fs_qty::QtyAny;
 #[path = "solve/radiation_product.rs"]
 mod radiation_product;
 
+#[path = "solve/transient_product.rs"]
+mod transient_product;
+
 const REFERENCE_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -558,6 +561,7 @@ fn conduction_fixture_project(seed_root: u64, bytes: &[u8]) -> ProjectSpec {
         }],
         adiabatic_remainder: false,
         radiation: None,
+        transient: None,
     });
     spec
 }
@@ -638,6 +642,7 @@ fn multi_region_contact_project() -> ProjectSpec {
         // adiabatic remainder until ThermalInterfaces binds them.
         adiabatic_remainder: true,
         radiation: None,
+        transient: None,
     });
     spec
 }

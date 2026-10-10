@@ -182,7 +182,11 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// stronger coefficients and cold-side deviations; unknown interaction is null.
 /// Version 48 includes complete natural-convection coefficient feedback in
 /// adaptive goals and admits only independently residual-checked comparisons.
-pub const SOLVE_DRIVER_VERSION: u32 = 48;
+/// Version 49 retains explicitly requested, nominal linear regional mean
+/// enclosures without promoting the distinct maximum-temperature decision.
+/// Version 50 executes declared finite-time storage with nested backward-Euler
+/// grids and retains final-time evidence without steady-solution certificates.
+pub const SOLVE_DRIVER_VERSION: u32 = 50;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -224,12 +228,14 @@ const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-soluti
 const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v2";
 
 mod adaptive_balance;
+mod mean_bound;
 mod nominal_adjoint;
 mod algebraic;
 mod conjugate;
 mod natural;
 mod radiation;
 mod report_stage;
+mod transient;
 pub(crate) use report_stage::{CompletedRunExport, load_completed_run};
 use report_stage::{ReportStageProduct, report_receipt};
 const CONDUCTION_INTERFACE_EVIDENCE_SCHEMA: &str =
@@ -1386,6 +1392,10 @@ struct RungSolved {
     surface_fragment: Option<String>,
     /// Natural-convection fixed point (fsim v10), `None` without such laws.
     natural_fragment: Option<String>,
+    /// Nested finite-time histories and final-QoI comparison (fsim v11).
+    transient_fragment: Option<String>,
+    /// Final accepted step's physical storage rate and numerical balance.
+    transient_energy_w: Option<(f64, f64)>,
     /// Boundary-face slots of every declared surface on this rung's mesh.
     surface_slots: BTreeMap<String, Vec<usize>>,
     adjoint_data: Option<RungAdjointData>,
@@ -4838,7 +4848,7 @@ fn qoi_receipt(
         }
     }
     let no_data_terms = terms.len() - measured_terms;
-    let no_claim = if measured_terms == 0 {
+    let mut no_claim = if measured_terms == 0 {
         "all eight engineering uncertainty terms are explicit NO-DATA; this receipt makes no binary compliance, DWR, validation, measurement, package, promotion, or conjugate-exchange claim".to_string()
     } else if no_data_terms == 0 {
         "all eight engineering uncertainty terms carry Estimated evidence (see each term's derivation and the conduction receipt); the verdict is an Estimated decision, not a certificate".to_string()
@@ -4847,6 +4857,9 @@ fn qoi_receipt(
             "{no_data_terms} of eight engineering uncertainty terms are explicit NO-DATA, so no binary compliance is claimed; measured terms are Estimated: discretization uses the retained mesh study, declared inputs use interval-vertex re-solves, and solver error uses the published linear system's outward maximum enclosure when available or an explicitly named tolerance comparison (see each derivation); measurement is negligible because no observation data enter; no validation, package, promotion, or conjugate-exchange claim"
         )
     };
+    if transient::requested(spec) {
+        no_claim.push_str(" Thermal outputs and the nominal requirement margin describe the declared final time only; no maximum over the continuous trajectory is claimed. The separately retained time-step comparison does not measure spatial error or complete the Discretization term.");
+    }
     let nominal = canonical_f64(row.value).ok_or_else(|| {
         qoi_error(
             "cli-solve-qoi-nonfinite",
@@ -5088,6 +5101,15 @@ fn qoi_receipt(
         json_string(&no_claim),
     );
     let mut receipt = receipt;
+    if let Some(time) = spec.cooling.as_ref().and_then(|cooling|
+        cooling.conduction.as_ref()).and_then(|setup| setup.transient.as_ref())
+    {
+        receipt.pop();
+        receipt.push_str(&format!(
+            ",\"thermal_time_scope\":{{\"kind\":\"final\",\"time_s\":{},\"continuous_time_peak_measured\":false}}}}",
+            canonical_f64(time.horizon.value).expect("admitted finite transient horizon"),
+        ));
+    }
     if inputs.radiation_sensitivity.is_some() {
         receipt.pop();
         receipt.push_str(&format!(",\"model_form_sensitivity\":{{\"radiation\":{radiation_sensitivity}}}}}"));
@@ -6341,20 +6363,30 @@ fn conduction_solve_receipt(
     conductivity_side: f64,
     geometry_side: f64,
 ) -> Result<ConductionStageProduct, SolveRefusal> {
+    transient::admit(spec)?;
+    let transient_requested = transient::requested(spec);
     // Output intent is admitted before geometry/numerical work. Propagation
     // vertices must not masquerade as the nominal report or repeat its adjoint.
     let adjoint_requested = nominal_adjoint::requested(spec)?
+        && flow_override.is_none() && htc_scale == 1.0
+        && conductivity_side == 0.0 && geometry_side == 0.0;
+    let mean_bound_requested = mean_bound::requested(spec)?
         && flow_override.is_none() && htc_scale == 1.0
         && conductivity_side == 0.0 && geometry_side == 0.0;
     // A timed partial field is never published: the ordinary staged refusal
     // retains the last completed pipeline prefix. Successful receipts replay
     // numerically without making their identity depend on replay machine speed.
     let deadline = (!resume
-        && spec
+        && (transient_requested || spec
             .solver
             .as_ref()
-            .is_some_and(|solver| solver.fidelity == SOLVER_FIDELITY_ADAPTIVE))
+            .is_some_and(|solver| solver.fidelity == SOLVER_FIDELITY_ADAPTIVE)))
     .then(|| (std::time::Instant::now(), available_wall_s));
+    let check_deadline = || if transient_requested {
+        transient::check_deadline(deadline)
+    } else {
+        adaptive_deadline(deadline)
+    };
     let stage = SolveStage::Conduction;
     let cancelled = || {
         if resume {
@@ -6365,7 +6397,7 @@ fn conduction_solve_receipt(
     };
     work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 0)
         .map_err(|_| cancelled())?;
-    adaptive_deadline(deadline)?;
+    check_deadline()?;
     let setup = spec
         .cooling
         .as_ref()
@@ -6518,14 +6550,15 @@ fn conduction_solve_receipt(
         let ladder_region = ladder_target_region(spec, &region_ids);
         // The published solve bounds its maximum's roundoff; the propagation's
         // perturbed re-solves (which arrive with a flow override) do not.
-        let roundoff_wanted = flow_override.is_none() && temperature_maximum_region(spec).is_some();
+        let roundoff_wanted = !transient_requested
+            && flow_override.is_none() && temperature_maximum_region(spec).is_some();
         // One solid solve on one rung of the h-ladder. Everything below the
         // volumetric audit depends on the rung's complex (element materials,
         // the region-owned mesh, source lumping, interface lowering, boundary
         // lowering by parent facet, the conjugate exchange), so it is one
         // function of the labeled complex and runs once per rung.
         let solve_rung = |labeled: &fs_mesh::LabeledTetComplex| -> Result<RungSolved, SolveRefusal> {
-        adaptive_deadline(deadline)?;
+        check_deadline()?;
         let census = labeled.quality();
         if let Some((what, fix)) = mesh_quality_refusal(&census, refinement.is_some()) {
             return Err(conduction_error(
@@ -6707,7 +6740,36 @@ fn conduction_solve_receipt(
             ));
         }
         let mut natural_fragment = None;
-        let (solid, conjugate_fragment, derived_boundary, air_paths) = if laws.is_empty()
+        let mut transient_fragment = None;
+        let mut transient_energy_w = None;
+        let (solid, conjugate_fragment, derived_boundary, air_paths) = if transient_requested {
+            let boundary = conduction_boundary(
+                setup, &mesh, labeled, &surfaces, &regions, &interface_faces,
+                &BTreeMap::new(), &surface_heat_inputs,
+            )?.boundary;
+            let interfaces = lower_thermal_interfaces(
+                spec, cards, &mesh, &boundary, &interface_resolution,
+            )?;
+            let mut linear = fs_conduction::LinearConfig::default();
+            if let Some(solver) = &spec.solver {
+                linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
+            }
+            let problem = fs_conduction::ConductionProblem {
+                mesh: solve_mesh, boundary: &boundary, material: &fallback,
+                element_materials: Some(&element_materials), source: &source,
+            };
+            let time = transient::solve(
+                &cx, spec, problem, interfaces.as_ref(), &labels, &region_ids,
+                linear, deadline,
+            )?;
+            transient_energy_w = Some((time.endpoint_storage_w, time.endpoint_energy_residual_w));
+            transient_fragment = Some(time.receipt);
+            // The temporal estimate belongs to the retained time comparison.
+            // Spatial error remains unknown, so it cannot fill Discretization.
+            let _ = time.temporal_half_width_k;
+            (radiation::SolidSolution::from_conduction(time.solution),
+                None, BTreeMap::new(), Vec::new())
+        } else if laws.is_empty()
             && !natural_laws.is_empty()
         {
             // Natural convection: h depends on the solved wall-to-ambient
@@ -6936,7 +6998,7 @@ fn conduction_solve_receipt(
                 finite(z)?,
             ))
         };
-        let adjoint_data = if adaptive_requested || roundoff_wanted || adjoint_requested {
+        let adjoint_data = if adaptive_requested || roundoff_wanted || adjoint_requested || mean_bound_requested {
             let boundary = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
                 &interface_faces, &derived_boundary, &surface_heat_inputs)?.boundary;
             let interfaces = lower_thermal_interfaces(
@@ -6956,7 +7018,7 @@ fn conduction_solve_receipt(
                 } else { None },
             })
         } else { None };
-        adaptive_deadline(deadline)?;
+        check_deadline()?;
         let mut solved = RungSolved {
             census,
             mesh,
@@ -6968,6 +7030,8 @@ fn conduction_solve_receipt(
             radiation_fragment,
             surface_fragment,
             natural_fragment,
+            transient_fragment,
+            transient_energy_w,
             surface_slots,
             adjoint_data,
             algebraic: algebraic::MaximumEvidence::default(),
@@ -6980,7 +7044,7 @@ fn conduction_solve_receipt(
             )?;
             solved.algebraic = evidence;
         }
-        adaptive_deadline(deadline)?;
+        check_deadline()?;
         Ok(solved)
         };
         // The h-ladder: rung 0 is the audited base; every further rung is one
@@ -7070,19 +7134,24 @@ fn conduction_solve_receipt(
             Some(region) if roundoff_wanted => Some(roundoff_term(&cx, &solved, region, &region_ids, work)?),
             _ => None,
         };
-        adaptive_deadline(deadline)?;
+        check_deadline()?;
         // Only the final accepted rung is linearized. No coarse/provisional
         // field, reconstructed surrogate, or additional primal is published.
         let nominal_adjoint_fragment = if adjoint_requested {
             Some(nominal_adjoint::extract(&cx, spec, &solved, &region_ids, &audited, work)?)
         } else { None };
-        adaptive_deadline(deadline)?;
-        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment))
+        let mean_bound_fragment = if mean_bound_requested {
+            Some(mean_bound::extract(&cx, spec, cards, &solved, &region_ids, work)?)
+        } else { None };
+        check_deadline()?;
+        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment, mean_bound_fragment))
     })?;
-    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment) =
+    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment, mean_bound_fragment) =
         result;
     let nominal_adjoint_fragment = nominal_adjoint_fragment.map_or_else(String::new,
         |receipt| format!(",\"nominal_adjoint\":{receipt}"));
+    let mean_bound_fragment = mean_bound_fragment.map_or_else(String::new,
+        |receipt| format!(",\"volume_mean_bound\":{receipt}"));
     let RungSolved {
         census,
         mesh,
@@ -7094,6 +7163,8 @@ fn conduction_solve_receipt(
         radiation_fragment,
         surface_fragment,
         natural_fragment,
+        transient_fragment,
+        transient_energy_w,
         surface_slots,
         adjoint_data: _,
         algebraic,
@@ -7255,6 +7326,19 @@ fn conduction_solve_receipt(
             rungs: ladder_estimate.rungs,
         })
         .or(adaptive_discretization);
+    // For a transient field the net input is physical heat storage. Numerical
+    // closure additionally subtracts the independently checked final ΔU/dt.
+    let (energy_closure_w, energy_relative_closure, storage_fragment) =
+        match transient_energy_w {
+            Some((storage_w, residual_w)) => {
+                let scale_w = report.energy.scale_w.max(storage_w.abs());
+                (-residual_w, residual_w.abs() / scale_w,
+                    format!(",\"storage_w\":{}", finite("energy.storage_w", storage_w)?))
+            }
+            None => (report.energy.closure_w, report.energy.relative_closure(), String::new()),
+        };
+    let transient_json = transient_fragment.as_ref().map_or_else(String::new,
+        |fragment| format!(",\"transient\":{fragment}"));
     let receipt = format!(
         "{{\"schema\":{},\"run\":{},\"stage\":\"conduction\",\
          \"mesh\":{{\"vertices\":{},\"elements\":{},\"boundary_faces\":{},\
@@ -7265,11 +7349,11 @@ fn conduction_solve_receipt(
          \"solver\":{{\"iterations\":{},\"stop_reason\":{},\"final_residual\":{},\
          \"residual_threshold\":{},\"free_dofs\":{}}},\
          \"energy\":{{\"source_w\":{},\"neumann_out_w\":{},\"robin_out_w\":{},\
-         \"dirichlet_in_w\":{},\"closure_w\":{},\"relative_closure\":{}}},\
+         \"dirichlet_in_w\":{},\"closure_w\":{},\"relative_closure\":{}{storage_fragment}}},\
          \"recovery\":{{\"memory_bytes\":{},\"max_depth\":{},\"max_steiner\":{},\
          \"segments\":{},\"facets\":{},\"flat_tets\":{}}},\
          \"ladder\":{{\"rungs\":[{}],\"stop\":{},\"richardson\":{}}},\
-         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"solver_control\":{},{}\"authority\":{},\"no_claim\":{}{nominal_adjoint_fragment}}}",
+         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"solver_control\":{},{}\"authority\":{},\"no_claim\":{}{nominal_adjoint_fragment}{mean_bound_fragment}{transient_json}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         mesh.vertex_count(),
@@ -7297,8 +7381,8 @@ fn conduction_solve_receipt(
         finite("energy.neumann_out_w", report.energy.neumann_out_w)?,
         finite("energy.robin_out_w", report.energy.robin_out_w)?,
         finite("energy.dirichlet_in_w", report.energy.dirichlet_in_w)?,
-        finite("energy.closure_w", report.energy.closure_w)?,
-        finite("energy.relative_closure", report.energy.relative_closure())?,
+        finite("energy.closure_w", energy_closure_w)?,
+        finite("energy.relative_closure", energy_relative_closure)?,
         memory_bytes,
         recovery_evidence.options.max_depth,
         recovery_evidence.options.max_steiner,
@@ -7323,8 +7407,10 @@ fn conduction_solve_receipt(
                 .map(|fragment| format!("\"natural_convection\":{fragment},"))
                 .unwrap_or_default()
         ),
-        json_string(CONDUCTION_AUTHORITY),
-        json_string(CONDUCTION_NO_CLAIM),
+        json_string(if transient_requested {
+            "retained-promoted-mesh-plus-declared-region-seeds-plus-audited-labeled-volume-plus-matdb-backed-linear-transient-conduction-and-declared-storage"
+        } else { CONDUCTION_AUTHORITY }),
+        json_string(if transient_requested { transient::NO_CLAIM } else { CONDUCTION_NO_CLAIM }),
     );
     let charge = solution_bytes
         .len()
@@ -7719,7 +7805,20 @@ fn propagate_declared_inputs(
     else {
         return Ok(None);
     };
-    let base = base_fidelity(spec);
+    let mut base = base_fidelity(spec);
+    // These solves measure input effects on the existing decision maximum.
+    // Their diagnostic receipts are discarded, so a requested nominal bound
+    // or adjoint must neither consume extra work nor reject an input vertex.
+    if let Some(outputs) = &mut base.outputs {
+        outputs.retain(|output| !matches!(output.name.as_str(),
+            "temperature-volume-mean-bound"
+                | "temperature-max-adjoint"
+                | "temperature-max-contact-adjoint"
+                | "temperature-max-boundary-adjoint"
+                | "temperature-max-contact-boundary-adjoint"
+                | "temperature-volume-mean-adjoint"
+        ));
+    }
     let solve = |project: &ProjectSpec, htc_scale: f64, conductivity_side: f64, geometry_side: f64| -> Result<Option<f64>, SolveRefusal> {
         let (_, handoff) = flow_network_receipt(project, run, work, resume)?;
         let product = conduction_solve_receipt(
@@ -8003,6 +8102,12 @@ fn conduction_receipt(
     let mut product = conduction_solve_receipt(
         ledger, spec, cards, context, run, work, resume, available_wall_s, None, 1.0, 0.0, 0.0,
     )?;
+    // The declared time-work cap includes exactly one coarse and one nested
+    // fine trajectory. Steady perturbation re-solves and their certificates
+    // describe a different equation and cannot enter this final-time budget.
+    if transient::requested(spec) {
+        return Ok(product);
+    }
     if let Some(propagation) =
         propagate_declared_inputs(
             ledger, spec, cards, context, run, work, resume, available_wall_s,

@@ -69,6 +69,9 @@ pub enum MigrationRule {
     /// thermal boundary law (a card-derived buoyant coefficient). A version-9
     /// document declares none, so only the envelope/schema declarations move.
     NaturalConvectionV10,
+    /// Version 10 gains optional explicit finite-time conduction. Historical
+    /// projects remain steady; no heat capacity or initial state is inferred.
+    TransientConductionV11,
 }
 
 impl MigrationRule {
@@ -92,6 +95,7 @@ impl MigrationRule {
             MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => "surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10",
             MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10 => "fan-efficiency-v9-then-natural-convection-v10",
             MigrationRule::NaturalConvectionV10 => "natural-convection-v10",
+            MigrationRule::TransientConductionV11 => "transient-conduction-v11",
         }
     }
 
@@ -109,6 +113,7 @@ impl MigrationRule {
             MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => 7,
             MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10 => 8,
             MigrationRule::NaturalConvectionV10 => 9,
+            MigrationRule::TransientConductionV11 => 10,
         }
     }
 }
@@ -218,6 +223,7 @@ pub fn migrate_envelope(
         7 => MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
         8 => MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10,
         9 => MigrationRule::NaturalConvectionV10,
+        10 => MigrationRule::TransientConductionV11,
         v if v == FSIM_VERSION => {
             return Err(ProjectError {
                 code: "fsim-migration-not-needed",
@@ -257,7 +263,8 @@ pub fn migrate_envelope(
         | MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10
         | MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10
         | MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10
-        | MigrationRule::NaturalConvectionV10 => {
+        | MigrationRule::NaturalConvectionV10
+        | MigrationRule::TransientConductionV11 => {
             // The document's internal `versions.schema` field must move with
             // the envelope: the validator admits only the current schema.
             // The rewrite is exactly these two byte strings, never a
@@ -294,6 +301,7 @@ pub fn migrate_envelope(
         });
     }
     if declared_version > 0
+        && declared_version < 10
         && decoded
             .spec
             .cooling
@@ -309,6 +317,18 @@ pub fn migrate_envelope(
             code: "fsim-migration-payload",
             detail: format!("schema version {declared_version} predates natural-convection laws but its payload declares one"),
             hint: "declare the law in a current-version project; migration only preserves historical intent".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 11
+        && decoded.spec.cooling.as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .is_some_and(|setup| setup.transient.is_some())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates transient conduction but its payload declares it"),
+            hint: "declare heat storage and time controls in a current-version project; migration preserves historical intent".to_string(),
         });
     }
     if declared_version > 0

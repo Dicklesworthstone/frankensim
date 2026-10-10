@@ -1210,7 +1210,43 @@ No unsafe code.
 
 ## Feature flags
 
-No feature flags. Runtime dependencies remain Franken-only.
+- `sdf3-study` enables the numerical 3-D compliance and stress-constrained
+  study producers described above.
+- `thermal-verification` enables an explicitly requested
+  `temperature-volume-mean-bound` report on native conduction solves. Declare
+  exactly one report without an output `:region`; the selected volume is the
+  existing `temperature-max` requirement region. The separate mean output
+  does not replace or certify that maximum-temperature requirement.
+
+The mean producer bounds the nominal linear PDE on the final published
+polyhedral mesh domain using the existing equilibrated primal and dual flux
+verifier. It retains the original field, source, boundary data, material cards
+and exact pinned property receipts. A global constant representation is
+admitted only from an explicitly unconstrained scalar constant source claim;
+finite material validity spans and flat sampled curves remain refused.
+Transient, nonlinear, radiation, contact and natural/forced-convection
+feedback models require their own bounds and are refused by this producer.
+Cell and iteration allowances bound work, and cancellation is cooperative;
+no intra-kernel wall-time guarantee is claimed.
+
+The HTML/JSON report projects the producer's Verified nominal numerical
+interval as a distinct QoI, while all unknown physical uncertainty stays
+unknown. The standalone package retains the exact interval and source
+receipt address as an Estimated statement: its existing structural checker
+does not independently authenticate or reverify the continuum producer.
+Builds without the feature explicitly refuse this output request.
+
+Native transient conduction is available without a feature flag through the
+schema-v11 `conduction.transient` declaration. The runnable input and commands
+are in `data/reference-project/cooling-transient.fsim` and `TRANSIENT.md`.
+Both backward-Euler grids start from the declared initial temperature; their
+combined step cap includes the coarse and nested fine solves. The ordinary
+field, thermal QoIs and requirement margin describe the fine final-time
+state. Temporal comparison is separate from the unknown spatial error, and
+no steady algebraic/roundoff certificate or steady input-propagation solve
+is attached. See the retained step/storage receipts for energy and work.
+
+Runtime dependencies remain Franken-only.
 
 ## Conformance tests
 

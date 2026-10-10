@@ -140,6 +140,17 @@ pub(super) struct SolidSolution {
 }
 
 impl SolidSolution {
+    /// Wrap a conduction producer that carries no radiative split or tangent.
+    pub(super) fn from_conduction(conduction: ConductionSolution) -> Self {
+        Self {
+            conduction,
+            convective_fluxes: None,
+            convective_out: None,
+            radiation: None,
+            combined_boundary: None,
+        }
+    }
+
     /// Retain the producer's immutable laws, never infer emissivity from a
     /// rounded receipt or a difference of combined coefficients.
     pub(super) fn radiation_patches(&self) -> Vec<AmbientRadiationPatch> {

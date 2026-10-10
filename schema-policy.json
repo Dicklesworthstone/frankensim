@@ -21,7 +21,7 @@
       "version_kind": "integer-const",
       "version_constant": "FSIM_VERSION",
       "version_location": "crates/fs-project/src/lib.rs",
-      "current_version": "10",
+      "current_version": "11",
       "lockstep": [],
       "surface": [
         "the canonical .fsim envelope and its canonical-hash construction",
@@ -37,7 +37,8 @@
         "the optional per-artifact surface-offset band admitted at bead q61wp.79 (schema v7): `:surface-offset-m` > 0 with mandatory `:offset-basis` and `:offset-source`, all three or none; a pre-v7 document declaring one refuses migration",
         "the optional assembly `(surface ...)` entity admitted at bead q61wp.52 (schema v8): a named exterior boundary patch of a part selected by a geometry assignment; a `power` row naming a surface is uniform heat input through it, and its faces take precedence over the enclosing region's thermal boundary rows",
         "the optional cooling `(fan-efficiency :total :half-width :source :source-id)` citation and the optional output `:region` (a declared surface) admitted at bead q61wp.83 (schema v9); the interval must lie inside (0, 1] with a non-empty citation, and a pre-v9 document declaring either refuses migration",
-        "the `(natural-convection :target :characteristic-length :ambient-temperature :correlation)` thermal boundary law admitted 2026-10-01 (schema v10): a card-derived buoyant Robin coefficient solved by fixed point at the mean wall-to-ambient difference; the ambient must lie inside the envelope, and a pre-v10 document declaring one refuses migration"
+        "the `(natural-convection :target :characteristic-length :ambient-temperature :correlation)` thermal boundary law admitted 2026-10-01 (schema v10): a card-derived buoyant Robin coefficient solved by fixed point at the mean wall-to-ambient difference; the ambient must lie inside the envelope, and a pre-v10 document declaring one refuses migration",
+        "optional conduction `:transient (transient ...)` admitted at bead q61wp.49 (schema v11): explicit initial temperature, horizon, maximum step, combined coarse/fine step cap, per-step energy tolerance, and one sourced volumetric heat capacity per named region; pre-v11 payloads declaring heat storage refuse migration"
       ],
       "minor_bump": "may add optional fields with receipted defaults and may add new structural findings; must keep every prior document loadable and its canonical hash stable",
       "major_bump": "may remove or retype fields, or change canonical-hash construction; requires a migration path and a new deprecation horizon",

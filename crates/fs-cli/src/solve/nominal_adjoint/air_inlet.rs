@@ -67,7 +67,7 @@ mod tests {
             channel_length: QtyAny::new(0.3, dims::LENGTH), correlation: "convection.gnielinski".into(),
         } };
         let setup = ConductionSetup { regions: vec![], boundaries: vec![law("out", 1), law("in", 0)],
-            adiabatic_remainder: true, radiation: None };
+            adiabatic_remainder: true, radiation: None, transient: None };
         let segments = vec![AirSegment::new("in", 0.1, 10.0).unwrap(), AirSegment::new("out", 0.1, 20.0).unwrap()];
         let paths = [AirPath::new(300.0, 0.01, 1000.0, segments.clone()).unwrap()];
         let gate = CancelGate::new_clock_free();

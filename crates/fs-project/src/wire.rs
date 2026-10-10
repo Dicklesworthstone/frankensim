@@ -21,7 +21,7 @@ use fs_scenario::Violation;
 
 use crate::FSIM_VERSION;
 use crate::spec::{
-    AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
+    AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup, ConductionTransient,
     ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
     FanEfficiency,
     FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
@@ -29,7 +29,7 @@ use crate::spec::{
     OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface,
     RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
     SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary, ThermalBoundaryCondition,
-    ThermalLimit, UnitsDoctrine, Vent, Versions,
+    ThermalLimit, TransientRegionCapacity, UnitsDoctrine, Vent, Versions,
 };
 
 /// Domain for canonical `.fsim` byte hashing.
@@ -700,6 +700,22 @@ fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
     if let Some(radiation) = &setup.radiation {
         declaration.push(kw("radiation"));
         declaration.push(lower_radiation(radiation)?);
+    }
+    if let Some(transient) = &setup.transient {
+        let mut capacities = vec![sym("capacities")];
+        for row in &transient.capacities {
+            capacities.push(list(vec![sym("capacity"), kw("region"), text(&row.region),
+                kw("volumetric-heat-capacity"), qty(row.volumetric_heat_capacity)?,
+                kw("source"), text(&row.source)]));
+        }
+        declaration.push(kw("transient"));
+        declaration.push(list(vec![sym("transient"),
+            kw("initial-temperature"), qty(transient.initial_temperature)?,
+            kw("horizon"), qty(transient.horizon)?,
+            kw("max-step"), qty(transient.max_step)?,
+            kw("max-steps"), int(i64::from(transient.max_steps)),
+            kw("energy-tolerance"), qty(transient.energy_tolerance)?,
+            kw("capacities"), list(capacities)]));
     }
     Ok(list(declaration))
 }
@@ -2494,7 +2510,7 @@ fn read_conduction(body: &[Node], out: &mut Vec<Violation>) -> Option<Conduction
     let pairs = read_pairs(
         body,
         "conduction",
-        &["adiabatic-remainder", "regions", "boundaries", "radiation"],
+        &["adiabatic-remainder", "regions", "boundaries", "radiation", "transient"],
         out,
     );
     let adiabatic_remainder = expect_boolean(
@@ -2737,6 +2753,57 @@ fn read_conduction(body: &[Node], out: &mut Vec<Violation>) -> Option<Conduction
         boundaries,
         adiabatic_remainder,
         radiation: field(&pairs, "radiation").and_then(|node| read_radiation(node, out)),
+        transient: field(&pairs, "transient").and_then(|node| read_transient(node, out)),
+    })
+}
+
+fn read_transient(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionTransient> {
+    let Some(("transient", body)) = section_name(node) else {
+        out.push(Violation { code: "project-malformed-clause",
+            what: "conduction.transient must be a `(transient ...)` declaration".to_string(),
+            fix: "declare initial temperature, time/work limits and regional heat capacities".to_string() });
+        return None;
+    };
+    let pairs = read_pairs(body, "transient", &["initial-temperature", "horizon", "max-step",
+        "max-steps", "energy-tolerance", "capacities"], out);
+    let max_steps = match field(&pairs, "max-steps") {
+        Some(Node { kind: NodeKind::Int(value), .. }) => u32::try_from(*value).unwrap_or_default(),
+        _ => 0,
+    };
+    if max_steps == 0 {
+        out.push(Violation { code: "project-malformed-clause",
+            what: "transient.max-steps must be a positive integer fitting u32".to_string(),
+            fix: "declare the total coarse and fine time-step budget".to_string() });
+    }
+    let mut capacities = Vec::new();
+    match field(&pairs, "capacities").and_then(section_name) {
+        Some(("capacities", rows)) => {
+            for node in rows {
+                let Some(("capacity", body)) = section_name(node) else {
+                    out.push(Violation { code: "project-malformed-clause",
+                        what: "transient.capacities rows must be `(capacity ...)`".to_string(),
+                        fix: "declare region, volumetric-heat-capacity and source".to_string() });
+                    continue;
+                };
+                let fields = read_pairs(body, "transient.capacity", &["region", "volumetric-heat-capacity", "source"], out);
+                capacities.push(TransientRegionCapacity {
+                    region: expect_str(field(&fields, "region"), "transient.capacity.region", out),
+                    volumetric_heat_capacity: expect_qty(field(&fields, "volumetric-heat-capacity"), "transient.capacity.volumetric-heat-capacity", out),
+                    source: expect_str(field(&fields, "source"), "transient.capacity.source", out),
+                });
+            }
+        }
+        _ => out.push(Violation { code: "project-malformed-clause",
+            what: "transient.capacities must be a `(capacities ...)` list".to_string(),
+            fix: "declare one sourced capacity per conduction region".to_string() }),
+    }
+    Some(ConductionTransient {
+        initial_temperature: expect_qty(field(&pairs, "initial-temperature"), "transient.initial-temperature", out),
+        horizon: expect_qty(field(&pairs, "horizon"), "transient.horizon", out),
+        max_step: expect_qty(field(&pairs, "max-step"), "transient.max-step", out),
+        max_steps,
+        energy_tolerance: expect_qty(field(&pairs, "energy-tolerance"), "transient.energy-tolerance", out),
+        capacities,
     })
 }
 
