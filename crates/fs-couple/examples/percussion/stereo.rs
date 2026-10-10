@@ -2,6 +2,7 @@
 //! BEM boundary solves are shared; receiver response, fitting, delays and filter
 //! histories remain independent. Mono uses this same path with one receiver.
 use super::*;
+use fs_bem::helmholtz::PreparedCbieGeometry;
 use fs_couple::pcm_wav::encode_pcm16_wav_interleaved;
 
 #[path = "observer_fit.rs"]
@@ -110,6 +111,19 @@ fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_
     // has a documented low-frequency negative-resistance error; CBIE also owns
     // the actual triangle quadrature needed by their closely spaced faces.
     let formulation=band_formulation(&surface,omega[omega.len()-1]/medium.sound_speed);
+    // Cache only the frequency-independent triangle integrals. The existing
+    // panel budget also bounds this extra storage (16 * max_panels^2 bytes).
+    // Preflight the highest frequency before allocating/integrating that table;
+    // each frequency retains its own dynamic quadrature, matrix and shared LU.
+    let geometry=if formulation==Formulation::PlainCbie {
+        let bytes=spec.max_panels.checked_mul(spec.max_panels)
+            .and_then(|n|n.checked_mul(core::mem::size_of::<(f64,f64)>()))
+            .ok_or("radiation static-geometry cache budget overflow")?;
+        let prepared=PreparedCbieGeometry::new_with_cancel(&surface,
+            omega[omega.len()-1]/medium.sound_speed,bytes,||gate.is_requested())?;
+        eprintln!("radiation static geometry: cache_bytes={}, byte_budget={bytes}; reused across all {} frequency operators",prepared.cache_bytes(),omega.len());
+        Some(prepared)
+    }else{None};
     // Solve the highest frequency first: the BEM owner's wavelength guard can
     // reject an underresolved band before spending work on its lower samples.
     for index in (0..omega.len()).rev() {
@@ -121,7 +135,9 @@ fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_
         let field_refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
         // Geometry, factorization and all source-mode solves are independent of
         // the observation point. Do not repeat them per microphone.
-        let solutions=solve_radiation_batch(&surface,k,medium,&field_refs,formulation)?;
+        let solutions=if let Some(prepared)=&geometry {
+            prepared.solve_batch(k,medium,&field_refs)?
+        }else{solve_radiation_batch(&surface,k,medium,&field_refs,formulation)?};
         if solutions.len()!=count {return Err("BEM source batch lost a mechanical input".into());}
         for (input,solution) in solutions.iter().enumerate() {
             if !solution.radiated_power_roundoff_interval.1.is_finite()

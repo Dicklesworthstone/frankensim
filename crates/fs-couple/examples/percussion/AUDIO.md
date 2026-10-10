@@ -1,8 +1,8 @@
 # Geometry to radiated pressure: an offline percussion reference
 
 The example now composes the existing mechanical and exterior-acoustic owners.
-The thin-face quadrature and whole-band formulation changes described below
-have **not yet passed a native regression or WAV run**. The current build attempt
+The triangle quadrature, whole-band formulation, and reusable geometry
+preparation described below have **not yet passed a native regression or WAV run**. The current build attempt
 exhausted available disk space during dependency compilation, before either
 `fs-bem` or the percussion tests ran. Independent quadrature checks verify the
 new static triangle formulas; they do not establish that a complete source bake
@@ -59,7 +59,7 @@ outward top velocity is negative, bottom velocity is positive. The diagnostic
 internal pressure is positive for net compression; its former CSV sign was
 reversed. The mechanical volume-spring Hamiltonian is unchanged.
 
-The boundary is passed to `fs-bem::helmholtz::solve_radiation_batch` as exact
+The boundary uses `fs-bem::helmholtz`'s batch radiation solve with exact
 triangles. One frequency shares its matrix/factorization across all modes.
 Normal velocities for a unit generalized acceleration obey `v = i a/omega`
 under BEM's `exp(-i omega t)` convention. Materially negative radiated power
@@ -74,15 +74,35 @@ bound even when its radius is large compared with the wavelength. If the bound
 does not establish exclusion, the renderer retains Burton-Miller. It never
 switches operators between frequency samples to hide a bad transfer.
 
-For CBIE self and near interactions, `fs-bem` evaluates static triangle single
-and double layers analytically and integrates their regular Helmholtz
-remainders. Far interactions retain centroid quadrature. The same static
-single-layer integral is used for self panels and near opposite faces. This
-resolves the narrow interactions between the cymbal's two skins; a fixed area
-quadrature alone can miss most of the double-layer contribution at a 0.5 mm
-gap. The tests compare both signs and sub-millimetre gaps to independent closed
-rectangular-panel integrals. These changes do not loosen the negative-power,
-resolution, or filter-error gates and do not certify continuum convergence.
+For CBIE, `fs-bem` evaluates the static triangle single and double layers
+analytically throughout the surface. It integrates the regular Helmholtz
+remainders with an 8-by-8 Gauss rule for near interactions and a 4-by-4 rule for
+far interactions; self remainders use the Gauss-Duffy rule. The self and nearby
+opposite-face single layers retain the same static integral. This resolves the
+narrow interactions between the cymbal's two skins: a fixed area quadrature can
+miss most of the double-layer contribution at a 0.5 mm gap. Retaining the far
+remainders' spatial moments also matters for weakly radiating bending motion.
+The tests compare both signs and sub-millimetre gaps to independent closed
+rectangular-panel integrals and exercise a closed thin plate. These changes do
+not loosen the negative-power, resolution, or filter-error gates and do not
+certify continuum convergence.
+
+`PreparedCbieGeometry` computes those frequency-independent static integrals
+once per source bake and borrows the exact immutable surface. Its two real
+coefficients per panel pair require 16 MiB for a 1024-panel source. The declared
+panel budget bounds the extra table to `16 * max_panels^2` bytes (64 MiB at the
+default 2048-panel budget); this is additional to the existing dense solve
+storage. The highest requested frequency must pass the original resolution
+guard before table allocation or integration. Reservation is fallible and
+geometry preparation polls cancellation between target rows.
+
+The default bake therefore avoids 80 repetitions of the same static integrals.
+All 81 frequency-dependent operators still integrate their dynamic remainders
+and receive fresh matrices and LU factors, with every original training,
+selection, and independent audit sample retained. This is reuse of an unchanged
+calculation, not a measured wall-clock speedup. The ordinary one-shot BEM entry
+points remain uncached, and Burton-Miller retains its original path. Frequency
+assembly and LU are still synchronous between the existing cancellation polls.
 
 The `*-wav` observer at `[1.5, 0.7, 1.5]` metres is an explicit **far-field** receiver,
 not a close drum microphone. Its direction is projected before vector fitting,

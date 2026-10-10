@@ -68,6 +68,10 @@ use fs_math::det;
 
 use crate::panel3d::SpherePanels;
 
+#[path = "cbie_geometry.rs"]
+mod cbie_geometry;
+pub use cbie_geometry::PreparedCbieGeometry;
+
 /// Dense-LU work cap: a complex dense system above this panel count is
 /// refused rather than silently thrashing (n^2 * 16 bytes; 8192 panels
 /// is already a 1 GiB matrix). The FMM path is the recorded follow-up.
@@ -110,6 +114,20 @@ pub enum HelmholtzError {
         /// What disagreed.
         what: &'static str,
     },
+    /// The optional reusable static-geometry table exceeds its byte budget.
+    CacheBudget {
+        /// Logical bytes needed for the complete table.
+        required_bytes: usize,
+        /// Caller-admitted maximum logical bytes.
+        maximum_bytes: usize,
+    },
+    /// Bounded geometry-cache storage could not be reserved.
+    AllocationFailed {
+        /// Which allocation refused.
+        what: &'static str,
+    },
+    /// Geometry preparation was cancelled between target rows.
+    Cancelled,
     /// The dense complex LU reported singularity.
     Singular,
 }
@@ -133,6 +151,19 @@ impl core::fmt::Display for HelmholtzError {
             ),
             HelmholtzError::ShapeMismatch { what } => {
                 write!(f, "FS-BEM-HELM-SHAPE-MISMATCH: {what}")
+            }
+            HelmholtzError::CacheBudget {
+                required_bytes,
+                maximum_bytes,
+            } => write!(
+                f,
+                "FS-BEM-HELM-CACHE-BUDGET: {required_bytes} static-table bytes exceeds the admitted {maximum_bytes} bytes"
+            ),
+            HelmholtzError::AllocationFailed { what } => {
+                write!(f, "FS-BEM-HELM-ALLOCATION: could not reserve {what}")
+            }
+            HelmholtzError::Cancelled => {
+                write!(f, "FS-BEM-HELM-CANCELLED: geometry preparation cancelled")
             }
             HelmholtzError::Singular => write!(f, "FS-BEM-HELM-SINGULAR: dense LU refused"),
         }
@@ -476,11 +507,30 @@ fn triangle_weak_influence_with_rule<const ORDER: usize>(
     nodes: &[f64; ORDER],
     weights: &[f64; ORDER],
 ) -> (C64, C64) {
+    triangle_weak_influence_with_static(
+        k,
+        x,
+        triangle,
+        ny,
+        (nodes, weights),
+        triangle_static_influence(x, triangle, ny),
+    )
+}
+
+fn triangle_weak_influence_with_static<const ORDER: usize>(
+    k: f64,
+    x: [f64; 3],
+    triangle: [[f64; 3]; 3],
+    ny: [f64; 3],
+    rule: (&[f64; ORDER], &[f64; ORDER]),
+    static_layers: (f64, f64),
+) -> (C64, C64) {
+    let (nodes, weights) = rule;
     let [a, b, c] = triangle;
     let ab = sub(b, a);
     let ac = sub(c, a);
     let double_area = norm(cross(ab, ac));
-    let (static_single, static_double) = triangle_static_influence(x, triangle, ny);
+    let (static_single, static_double) = static_layers;
     let mut single = C64::from_re(static_single);
     let mut double = C64::from_re(static_double);
     for (&u, &wu) in nodes.iter().zip(weights) {
@@ -504,10 +554,23 @@ fn triangle_weak_influence_with_rule<const ORDER: usize>(
 /// The dynamic remainders use a centroid fan and Duffy transform, cancelling
 /// the hypersingular remainder's integrable `1/r` behavior.
 fn triangle_self_terms(k: f64, x: [f64; 3], triangle: [[f64; 3]; 3]) -> (C64, C64) {
+    triangle_self_terms_with_static(k, x, triangle, triangle_self_static(x, triangle))
+}
+
+fn triangle_self_static(x: [f64; 3], triangle: [[f64; 3]; 3]) -> f64 {
     let area_normal = cross(sub(triangle[1], triangle[0]), sub(triangle[2], triangle[0]));
     let area_scale = norm(area_normal);
     let normal = area_normal.map(|v| v / area_scale);
-    let mut single_layer = C64::from_re(triangle_static_influence(x, triangle, normal).0);
+    triangle_static_influence(x, triangle, normal).0
+}
+
+fn triangle_self_terms_with_static(
+    k: f64,
+    x: [f64; 3],
+    triangle: [[f64; 3]; 3],
+    static_single: f64,
+) -> (C64, C64) {
+    let mut single_layer = C64::from_re(static_single);
     let mut hypersingular_regular = C64::ZERO;
     for edge in 0..3 {
         let e0 = sub(triangle[edge], x);
@@ -545,6 +608,27 @@ fn characteristic_panel_size(surface: &SpherePanels) -> f64 {
         max_area = max_area.max(a);
     }
     max_area.sqrt()
+}
+
+// Also used before a reusable geometry table allocates or integrates anything.
+fn admit_resolution(surface: &SpherePanels, k: f64) -> Result<f64, HelmholtzError> {
+    if !(k > 0.0 && k.is_finite()) {
+        return Err(HelmholtzError::BadParameter {
+            what: "wavenumber k must be positive and finite",
+        });
+    }
+    let n = surface.centroids().len();
+    if n > MAX_DENSE_PANELS {
+        return Err(HelmholtzError::WorkCap { panels: n });
+    }
+    let wavelength = 2.0 * core::f64::consts::PI / k;
+    let ppw = wavelength / characteristic_panel_size(surface);
+    if ppw < MIN_PANELS_PER_WAVELENGTH {
+        return Err(HelmholtzError::TooCoarse {
+            panels_per_wavelength: ppw,
+        });
+    }
+    Ok(ppw)
 }
 
 fn surface_fingerprint(surface: &SpherePanels) -> u64 {
@@ -631,6 +715,17 @@ impl<'a> RadiationOperator<'a> {
         velocity_fields: &[&[C64]],
         formulation: Formulation,
     ) -> Result<Self, HelmholtzError> {
+        Self::prepare_with_static(surface, k, medium, velocity_fields, formulation, None)
+    }
+
+    fn prepare_with_static(
+        surface: &'a SpherePanels,
+        k: f64,
+        medium: Medium,
+        velocity_fields: &[&[C64]],
+        formulation: Formulation,
+        static_layers: Option<&[(f64, f64)]>,
+    ) -> Result<Self, HelmholtzError> {
         if !(k > 0.0 && k.is_finite()) {
             return Err(HelmholtzError::BadParameter {
                 what: "wavenumber k must be positive and finite",
@@ -656,19 +751,10 @@ impl<'a> RadiationOperator<'a> {
                 what: "velocity length must equal the panel count",
             });
         }
-        if n > MAX_DENSE_PANELS {
-            return Err(HelmholtzError::WorkCap { panels: n });
-        }
-        let wavelength = 2.0 * core::f64::consts::PI / k;
-        let ppw = wavelength / characteristic_panel_size(surface);
-        if ppw < MIN_PANELS_PER_WAVELENGTH {
-            return Err(HelmholtzError::TooCoarse {
-                panels_per_wavelength: ppw,
-            });
-        }
+        let ppw = admit_resolution(surface, k)?;
 
         let alpha = alpha_for(formulation, k);
-        let (matrix, bmat) = assemble_dense(surface, k, alpha);
+        let (matrix, bmat) = assemble_dense_with_static(surface, k, alpha, static_layers);
         let lu = lu_complex(&matrix, n).map_err(|_| HelmholtzError::Singular)?;
         let condition_lower_bound = condition_lower_bound(&matrix, n, &lu);
         Ok(Self {
@@ -918,6 +1004,15 @@ fn alpha_for(formulation: Formulation, k: f64) -> C64 {
 /// the regularized disc part with the exact closed-surface row identity
 /// `N_0[1] = 0` (see the module docs).
 fn assemble_dense(surface: &SpherePanels, k: f64, alpha: C64) -> (Vec<C64>, Vec<C64>) {
+    assemble_dense_with_static(surface, k, alpha, None)
+}
+
+fn assemble_dense_with_static(
+    surface: &SpherePanels,
+    k: f64,
+    alpha: C64,
+    static_layers: Option<&[(f64, f64)]>,
+) -> (Vec<C64>, Vec<C64>) {
     let centroids = surface.centroids();
     let normals = surface.normals();
     let areas = surface.areas();
@@ -931,6 +1026,7 @@ fn assemble_dense(surface: &SpherePanels, k: f64, alpha: C64) -> (Vec<C64>, Vec<
     // finite-part Galerkin rule is implemented.
     let weak_triangles = if alpha == C64::ZERO { triangles } else { None };
     let n = centroids.len();
+    debug_assert!(static_layers.is_none_or(|layers| layers.len() == n * n));
     let half = C64::new(0.5, 0.0);
     let mut amat = vec![C64::ZERO; n * n];
     let mut bmat = vec![C64::ZERO; n * n];
@@ -954,7 +1050,12 @@ fn assemble_dense(surface: &SpherePanels, k: f64, alpha: C64) -> (Vec<C64>, Vec<
         for j in 0..n {
             let (s_ij, d_ij, dp_ij, n_ij) = if i == j {
                 let (s, n_reg) = if let Some(triangles) = weak_triangles {
-                    (triangle_self_terms(k, xi, triangles[i]).0, C64::ZERO)
+                    let single = if let Some(layers) = static_layers {
+                        triangle_self_terms_with_static(k, xi, triangles[i], layers[i * n + i].0).0
+                    } else {
+                        triangle_self_terms(k, xi, triangles[i]).0
+                    };
+                    (single, C64::ZERO)
                 } else {
                     self_terms(k, areas[i])
                 };
@@ -964,7 +1065,27 @@ fn assemble_dense(surface: &SpherePanels, k: f64, alpha: C64) -> (Vec<C64>, Vec<
                 // Integrate the regular far remainder too: centroid moments
                 // can swamp the radiation of nearly cancelling skin velocities.
                 let (s, d) = if triangle_is_near(xi, centroids[j], triangles[j]) {
-                    triangle_weak_influence(k, xi, triangles[j], normals[j])
+                    if let Some(layers) = static_layers {
+                        triangle_weak_influence_with_static(
+                            k,
+                            xi,
+                            triangles[j],
+                            normals[j],
+                            (&GL8_X, &GL8_W),
+                            layers[i * n + j],
+                        )
+                    } else {
+                        triangle_weak_influence(k, xi, triangles[j], normals[j])
+                    }
+                } else if let Some(layers) = static_layers {
+                    triangle_weak_influence_with_static(
+                        k,
+                        xi,
+                        triangles[j],
+                        normals[j],
+                        (&GL4_X, &GL4_W),
+                        layers[i * n + j],
+                    )
                 } else {
                     triangle_weak_influence_with_rule(
                         k,
@@ -2434,6 +2555,97 @@ mod tests {
                 Formulation::BurtonMiller
             ),
             Err(HelmholtzError::BadParameter { .. })
+        ));
+    }
+
+    #[test]
+    fn prepared_cbie_geometry_reuses_static_terms_without_changing_frequency_solutions() {
+        // A flattened, triangulated source exercises closely spaced skins,
+        // near/far rows, and non-axis-aligned self normals on a small mesh.
+        let sphere = SpherePanels::icosphere(0.12, 1).unwrap();
+        let triangles = sphere
+            .triangles()
+            .unwrap()
+            .iter()
+            .map(|triangle| triangle.map(|[x, y, z]| [x, y, z / 240.0]))
+            .collect();
+        let surface = SpherePanels::from_triangles(triangles).unwrap();
+        let n = surface.centroids().len();
+        let prepared = PreparedCbieGeometry::new(&surface, 10.0, 16 * n * n).unwrap();
+        assert_eq!(prepared.cache_bytes(), 16 * n * n);
+        let uniform = vec![C64::ONE; n];
+        let bending: Vec<_> = surface
+            .centroids()
+            .iter()
+            .zip(surface.normals())
+            .map(|(p, normal)| C64::new(normal[2] * (1.0 - p[0] * p[0] / 0.0144), 0.0))
+            .collect();
+        let complex: Vec<_> = surface
+            .normals()
+            .iter()
+            .enumerate()
+            .map(|(i, normal)| C64::new(i as f64 * 0.01, -normal[0]))
+            .collect();
+        let fields = [uniform.as_slice(), bending.as_slice(), complex.as_slice()];
+        for (k, medium) in [
+            (
+                0.7,
+                Medium {
+                    density: 1.2,
+                    sound_speed: 343.0,
+                },
+            ),
+            (
+                10.0,
+                Medium {
+                    density: 1.4,
+                    sound_speed: 320.0,
+                },
+            ),
+        ] {
+            let actual = prepared.solve_batch(k, medium, &fields).unwrap();
+            let expected =
+                solve_radiation_batch(&surface, k, medium, &fields, Formulation::PlainCbie)
+                    .unwrap();
+            for (actual, expected) in actual.iter().zip(&expected) {
+                assert_solution_bitwise_equal(actual, expected);
+            }
+        }
+        assert!(matches!(
+            prepared.solve_batch(1.0, Medium::air(), &[&uniform[..n - 1]]),
+            Err(HelmholtzError::ShapeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn prepared_cbie_geometry_admits_resolution_memory_and_cancellation_before_publication() {
+        let surface = SpherePanels::icosphere(0.1, 0).unwrap();
+        let bytes = 16 * surface.centroids().len().pow(2);
+        // Wavelength refusal wins before the zero memory budget or any rows.
+        assert!(matches!(
+            PreparedCbieGeometry::new(&surface, 1e6, 0),
+            Err(HelmholtzError::TooCoarse { .. })
+        ));
+        assert!(
+            matches!(PreparedCbieGeometry::new(&surface, 1.0, bytes - 1),
+            Err(HelmholtzError::CacheBudget { required_bytes, maximum_bytes })
+                if required_bytes == bytes && maximum_bytes == bytes - 1)
+        );
+        let mut polls = 0;
+        let cancelled = PreparedCbieGeometry::new_with_cancel(&surface, 1.0, bytes, || {
+            polls += 1;
+            polls == 3
+        });
+        assert!(matches!(cancelled, Err(HelmholtzError::Cancelled)));
+        assert_eq!(polls, 3);
+        let prepared = PreparedCbieGeometry::new(&surface, 1.0, bytes).unwrap();
+        assert!(matches!(
+            prepared.solve_batch(
+                1e6,
+                Medium::air(),
+                &[&vec![C64::ONE; surface.centroids().len()]]
+            ),
+            Err(HelmholtzError::TooCoarse { .. })
         ));
     }
 

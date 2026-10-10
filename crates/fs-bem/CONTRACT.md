@@ -64,6 +64,15 @@ everywhere: this is screening, not a viscous truth source.
   at one frequency, preserving input order while sharing one validated dense
   matrix, LU factorization, and condition diagnostic across every right-hand
   side.
+- `PreparedCbieGeometry` — optional immutable triangle preparation for repeated
+  plain-CBIE batches. Exact static single/double layers occupy `16 * n^2`
+  logical bytes, admitted against a caller-supplied byte budget only after the
+  highest planned wavenumber passes the ordinary dense/resolution caps.
+  Reservation is fallible; a cancellation callback is polled before allocation
+  and between target rows. The borrowed surface cannot be cross-wired. Every
+  `solve_batch` retains the original parameter/field/resolution checks and
+  builds and factors a fresh frequency-dependent operator with unchanged
+  dynamic quadrature. Existing one-shot entry points do not allocate this cache.
 - `Formulation::{PlainCbie, BurtonMiller, BurtonMillerWrongAlphaSign}` —
   measured roles: PlainCbie is the accurate non-resonant arm (1.7-3.4%
   on the pulsating sphere across ka in [0.05, 5]); BurtonMiller is the
@@ -122,7 +131,8 @@ everywhere: this is screening, not a viscous truth source.
   validated against the Bessel-free small-ka series.
 - `HelmholtzError` — stable `FS-BEM-HELM-*` refusals: bad parameter,
   too-coarse (< 6 panels/wavelength), dense work cap (8192 panels),
-  shape mismatch, singular.
+  shape mismatch, singular; optional geometry preparation additionally reports
+  cache-byte budget, allocation, and cancellation refusals.
 
 ## Invariants
 
@@ -178,6 +188,9 @@ FMM underneath, fixed shedding/convection order).
 ## Cancellation behavior
 
 Wake state is cloneable and callers can chunk at fallible `step` boundaries.
+`PreparedCbieGeometry::new_with_cancel` additionally polls a caller callback
+before allocation and between rows of its frequency-independent static table;
+no partially prepared object is returned on cancellation.
 Dense panel assembly/LU and each FMM/GMRES call do **not** currently accept a
 `Cx`, poll cancellation, or expose mid-call resume state. Cross-crate Cx/resume
 integration is tracked separately under `frankensim-ccmn`; no cancellation
