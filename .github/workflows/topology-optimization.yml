@@ -151,6 +151,9 @@ jobs:
       - name: Test core and real Cx cancellation adapters
         if: ${{ !cancelled() }}
         run: "cargo test --release -p fs-ascent --lib trust:: -- --test-threads=1"
-      - name: Test real optimization IR, reverse Hessians and existing trajectories
+      - name: Test real optimization IR and reverse Hessians
         if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-ascent --test reverse_newton --test ascent_battery -- --test-threads=1
+        run: cargo test --release -p fs-ascent --test reverse_newton -- --test-threads=1
+      - name: Test existing optimizer trajectories and golden evidence
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-ascent --test ascent_battery -- --test-threads=1

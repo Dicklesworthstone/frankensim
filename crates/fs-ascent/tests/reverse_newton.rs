@@ -150,3 +150,6 @@ fn structural_and_rule_refusals_do_not_silently_change_the_problem() {
     assert!(matches!(study.run(&StopRule::GradNorm(f64::NAN),10,100,None),Err(ReverseNewtonError::InvalidRule)));
     same(&study,&before);
 }
+
+#[path = "reverse_newton/preconditioned.rs"]
+mod preconditioned;

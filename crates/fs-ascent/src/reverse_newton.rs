@@ -3,7 +3,7 @@
 
 use crate::runner::Packing;
 use crate::stop::{StopObservation, StopReason, StopRule};
-use crate::trust::{TrustRegionProgress, TrustRegionReport, TrustRegionState};
+use crate::trust::{PreconditionerError, TrustRegionProgress, TrustRegionReport, TrustRegionState};
 use fs_exec::Cx;
 use fs_opt::reverse::{HessianError, ReverseError};
 use fs_opt::{Manifold, OptError, ProblemEvaluation, ReverseProblem, ReverseProblemError};
@@ -23,6 +23,9 @@ pub enum ReverseNewtonError {
     InvalidRule,
     /// The original first- or second-order evaluator refusal.
     Evaluation(ReverseProblemError),
+    /// The inverse action was malformed, nonpositive, non-finite or panicked.
+    /// Repairing the callback can resume from the retained accepted tape.
+    Preconditioner(PreconditionerError),
     /// Cancellation was observed before publishing the staged iteration.
     Cancelled,
     /// Attempted-work accounting cannot be represented.
@@ -45,6 +48,7 @@ impl core::fmt::Display for ReverseNewtonError {
             Self::PackedPointLength { expected, actual } => write!(f, "reverse Newton needs {expected} coordinates, received {actual}"),
             Self::InvalidRule => write!(f, "invalid reverse Newton stopping rule"),
             Self::Evaluation(error) => write!(f, "{error}"),
+            Self::Preconditioner(error) => write!(f, "{error}"),
             Self::Cancelled => write!(f, "reverse Newton cancelled; accepted checkpoint retained"),
             Self::CounterOverflow => write!(f, "reverse Newton work counter overflow"),
         }
@@ -52,7 +56,11 @@ impl core::fmt::Display for ReverseNewtonError {
 }
 impl std::error::Error for ReverseNewtonError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self { Self::Evaluation(error) => Some(error), _ => None }
+        match self {
+            Self::Evaluation(error) => Some(error),
+            Self::Preconditioner(error) => Some(error),
+            _ => None,
+        }
     }
 }
 
@@ -63,6 +71,8 @@ pub enum ReverseNewtonStop {
     Stopped(StopReason),
     /// The next Hessian product would exceed the caller's cumulative ceiling.
     HessianBudget,
+    /// The next inverse action would exceed its separate cumulative ceiling.
+    PreconditionerBudget,
 }
 
 /// Accepted solution and actual attempted work, including rolled-back searches.
@@ -72,6 +82,8 @@ pub struct ReverseNewtonReport {
     pub stop: ReverseNewtonStop,
     /// Objective evaluations and Hessian products include failed attempts.
     pub solution: TrustRegionReport,
+    /// Inverse-action attempts, including failures and discarded iterations.
+    pub preconditioner_evals: usize,
 }
 
 fn poll(cx: Option<&Cx<'_>>) -> Result<(), ReverseNewtonError> {
@@ -145,6 +157,7 @@ pub struct ReverseNewtonStudy<'a, 'p> {
     evaluation_limit: usize,
     evals: usize,
     hv_evals: usize,
+    preconditioner_evals: usize,
     rejected: usize,
     last_rejection: Option<ReverseProblemError>,
     numerical_stop: Option<StopReason>,
@@ -173,7 +186,7 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
         let state = TrustRegionState::new(point, &mut |_| (tape.objective_value(), gradient.clone()));
         poll(cx)?;
         Ok(Self { oracle, packing, tape, state, evaluation_limit, evals: 1, hv_evals: 0,
-            rejected: 0, last_rejection: None, numerical_stop: None })
+            preconditioner_evals: 0, rejected: 0, last_rejection: None, numerical_stop: None })
     }
 
     /// Snapshot without graph evaluation; counts cover rolled-back work too.
@@ -188,13 +201,17 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
     pub fn gradient(&self) -> &[f64] { self.state.gradient() }
     /// Initial objective and each completed outer iteration, including rejects.
     pub fn history(&self) -> &[f64] { self.state.history() }
+    /// Attempted inverse actions across all runs, including discarded work.
+    /// Available after typed failures too; cloning never resets this counter.
+    pub fn preconditioner_evals(&self) -> usize { self.preconditioner_evals }
     /// Non-finite objective/gradient trial count (not model-ratio rejections).
     pub fn domain_rejections(&self) -> usize { self.rejected }
     /// Latest original non-finite trial refusal.
     pub fn last_rejection(&self) -> Option<&ReverseProblemError> { self.last_rejection.as_ref() }
 
     fn report(&self, stop: ReverseNewtonStop) -> ReverseNewtonReport {
-        ReverseNewtonReport { stop, solution: self.snapshot() }
+        ReverseNewtonReport { stop, solution: self.snapshot(),
+            preconditioner_evals: self.preconditioner_evals }
     }
 
     /// Run additional complete trust-region iterations. All Budget leaves and
@@ -210,6 +227,42 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
     /// legacy vector algebra remain whole phases; no wall-clock bound is claimed.
     pub fn run(&mut self, rule: &StopRule, additional_iters: usize,
         max_hessian_products: usize, cx: Option<&Cx<'_>>)
+        -> Result<ReverseNewtonReport, ReverseNewtonError>
+    {
+        self.run_impl(rule, additional_iters, max_hessian_products, None, usize::MAX, cx)
+    }
+
+    /// Precondition the live reverse-Hessian Krylov solve without building or
+    /// finite-differencing a dense Hessian. `inverse(accepted_point, residual)`
+    /// returns a fixed linear SPD inverse action during each outer iteration;
+    /// it may depend on the accepted point. All coordinates are packed in the
+    /// problem's variable-declaration order. The trust ball and stopping tests
+    /// remain in the original coordinates, not a preconditioner-induced metric.
+    /// See [`TrustRegionState::run_preconditioned_bounded`] for normalization
+    /// and callback requirements. Positive-product checks are not an SPD proof.
+    ///
+    /// Both work ceilings are cumulative across runs, even when a partial
+    /// Krylov solve is discarded by cancellation, callback failure or budget
+    /// exhaustion. A larger ceiling or repaired callback can resume without
+    /// repeating the initial graph evaluation. Preconditioner exhaustion is
+    /// attributed separately from HVP and objective exhaustion. Cancellation
+    /// is checked inside AD sweeps and around every inverse callback.
+    ///
+    /// A callback's external mutable state is NOT part of this checkpoint.
+    /// A replay requiring bitwise parity must reproduce the same inverse map.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_preconditioned(&mut self, inverse: crate::FnHv<'_>, rule: &StopRule,
+        additional_iters: usize, max_hessian_products: usize,
+        max_preconditioner_applications: usize, cx: Option<&Cx<'_>>)
+        -> Result<ReverseNewtonReport, ReverseNewtonError>
+    {
+        self.run_impl(rule, additional_iters, max_hessian_products, Some(inverse),
+            max_preconditioner_applications, cx)
+    }
+
+    fn run_impl(&mut self, rule: &StopRule, additional_iters: usize,
+        max_hessian_products: usize, mut inverse: Option<crate::FnHv<'_>>,
+        max_preconditioner_applications: usize, cx: Option<&Cx<'_>>)
         -> Result<ReverseNewtonReport, ReverseNewtonError>
     {
         let objective_cap = self.evaluation_limit.min(budget(rule)?);
@@ -230,16 +283,25 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
             if self.hv_evals >= max_hessian_products {
                 return Ok(self.report(ReverseNewtonStop::HessianBudget));
             }
+            if inverse.is_some() && self.preconditioner_evals >= max_preconditioner_applications {
+                return Ok(self.report(ReverseNewtonStop::PreconditionerBudget));
+            }
             let mut candidate = self.state.clone();
             // The adapter counts rolled-back attempts too; translate that
             // remaining allowance into the staged kernel's cumulative count.
             let kernel_hessian_cap = candidate.report().hv_evals.checked_add(
                 max_hessian_products - self.hv_evals,
             ).ok_or(ReverseNewtonError::CounterOverflow)?;
+            let kernel_preconditioner_cap = if inverse.is_some() {
+                candidate.preconditioner_evals().checked_add(
+                    max_preconditioner_applications - self.preconditioner_evals,
+                ).ok_or(ReverseNewtonError::CounterOverflow)?
+            } else { usize::MAX };
             let error = RefCell::new(None);
             let mut trial = None;
             let packing = &self.packing; let oracle = self.oracle; let accepted = &self.tape;
             let evals = &mut self.evals; let hv_evals = &mut self.hv_evals;
+            let preconditioner_evals = &mut self.preconditioner_evals;
             let rejected = &mut self.rejected; let last_rejection = &mut self.last_rejection;
             let progress = {
                 let mut fg = |point: &[f64]| {
@@ -271,12 +333,38 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
                         Err(source) => { *error.borrow_mut() = Some(source.into()); refusal() }
                     }
                 };
-                candidate.run_bounded(&mut fg, &mut hv, &StopRule::GradNorm(0.0),
-                    1, kernel_hessian_cap).progress
+                match inverse.as_mut() {
+                    None => Ok(candidate.run_bounded(&mut fg, &mut hv,
+                        &StopRule::GradNorm(0.0), 1, kernel_hessian_cap).progress),
+                    Some(inverse) => {
+                        let mut apply = |point: &[f64], residual: &[f64]| {
+                            // The kernel admits and precharges its own count;
+                            // this count also survives discarding that kernel.
+                            *preconditioner_evals += 1;
+                            (**inverse)(point, residual)
+                        };
+                        let result = match cx {
+                            Some(cx) => candidate.run_preconditioned_bounded_cancellable(
+                                &mut fg, &mut hv, &mut apply, &StopRule::GradNorm(0.0),
+                                1, kernel_hessian_cap, kernel_preconditioner_cap, cx),
+                            None => candidate.run_preconditioned_bounded(
+                                &mut fg, &mut hv, &mut apply, &StopRule::GradNorm(0.0),
+                                1, kernel_hessian_cap, kernel_preconditioner_cap),
+                        };
+                        result.map(|report| report.progress)
+                    }
+                }
             };
             // The infallible kernel only saw temporary sentinels. Refuse the
             // entire staged state before it can expose any placeholder result.
             if let Some(error) = error.into_inner() { return Err(error); }
+            let progress = match progress {
+                Ok(progress) => progress,
+                Err(PreconditionerError::Budget { .. }) => {
+                    return Ok(self.report(ReverseNewtonStop::PreconditionerBudget));
+                }
+                Err(error) => return Err(ReverseNewtonError::Preconditioner(error)),
+            };
             if progress == TrustRegionProgress::HessianBudget {
                 return Ok(self.report(ReverseNewtonStop::HessianBudget));
             }
