@@ -614,6 +614,7 @@
     "crates/fs-conduction/tests/coupled_maximum_solve.rs",
     "crates/fs-conduction/tests/duty.rs",
     "crates/fs-conduction/tests/enthalpy_adjoint.rs",
+    "crates/fs-conduction/tests/enthalpy_radiation/endpoint.rs",
     "crates/fs-conduction/tests/enthalpy_stefan.rs",
     "crates/fs-conduction/tests/enthalpy_transport.rs",
     "crates/fs-conduction/tests/heterogeneous.rs",

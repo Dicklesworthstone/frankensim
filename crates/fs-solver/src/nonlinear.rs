@@ -1007,6 +1007,18 @@ pub struct NewtonKrylovConfig {
     pub globalization: Globalization,
 }
 
+impl NewtonKrylovConfig {
+    /// Validate the same controls used when constructing a Newton state.
+    /// Residual-only physical endpoint evaluators can admit a policy without
+    /// allocating a solver or requiring a differentiable constitutive state.
+    ///
+    /// # Errors
+    /// Returns the constructor's configuration error for invalid controls.
+    pub fn validate(self) -> Result<(), NewtonError> {
+        validate_newton_config(self)
+    }
+}
+
 impl Default for NewtonKrylovConfig {
     fn default() -> Self {
         Self {

@@ -38,6 +38,8 @@ pub mod deposition;
 /// Implicit ambient radiation with immutable enthalpy history and joule gates.
 pub mod radiation;
 pub use radiation::adjoint::{EnthalpyRadiationStepGradient, EnthalpyRadiationStepLinearization};
+mod endpoint;
+pub use endpoint::EnthalpyEndpointEvaluation;
 
 use std::{cell::RefCell, fmt};
 
@@ -663,6 +665,16 @@ impl StepContext<'_, '_, '_, '_> {
         let temperature = self.temperatures(h)?;
         let phase_scales = self.phase_scales(h)?;
         let system = self.assemble(&temperature, phase_scales.as_deref())?;
+        self.assembled_residual(h, &temperature, &system, out)
+    }
+
+    fn assembled_residual(
+        &self,
+        h: &[f64],
+        temperature: &[f64],
+        system: &AssembledSystem,
+        out: &mut [f64],
+    ) -> Result<(), EnthalpyError> {
         for (vertex, value) in out.iter_mut().enumerate() {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(self.cx, vertex)?;

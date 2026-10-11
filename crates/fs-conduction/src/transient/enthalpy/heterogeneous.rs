@@ -306,6 +306,27 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             .advance(cx, problem, interfaces, old_specific_h, dt_s, config)
     }
 
+    /// Evaluate one supplied physical endpoint using its assigned phase charts
+    /// and reference masses, without advancing history or taking a Newton step.
+    /// The caller owns residual and energy acceptance for the returned values.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        candidate_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        patches: Option<&[crate::AmbientRadiationPatch]>,
+    ) -> Result<super::EnthalpyEndpointEvaluation, EnthalpyError> {
+        self.inner.evaluate_endpoint(
+            cx, problem, interfaces, old_specific_h, candidate_specific_h,
+            dt_s, config, patches,
+        )
+    }
+
     /// Add implicit ambient radiation while retaining each vertex's declared
     /// phase chart and immutable reference mass. The shared driver checks the
     /// complete endpoint residual and nonlinear radiative energy balance.

@@ -1031,6 +1031,18 @@ authority.
   80 axial cells, checking improving front, molten-length and temperature
   discrepancies plus energy closure. This finite comparison does not establish
   a formal spatial or temporal order, or validate liquid-flow physics.
+- `EnthalpyBackwardEuler::evaluate_endpoint` and its heterogeneous facade
+  evaluate an arbitrary supplied enthalpy candidate under the current physical
+  boundary law without advancing history or taking a solver iteration. They
+  reuse the primal residual and source/face integration, including declared
+  phase conductivity, contact and optional nonlinear ambient radiation.
+  Convection and radiation remain separate signed exchanges. The returned
+  nodal residual and energy defect are measurements: the coupling caller must
+  enforce its own fixed acceptance gates. Equal temperatures or zero total
+  energy defect do not hide opposite latent-storage defects at separate nodes.
+  No tangent or differentiability claim is needed at an enthalpy-chart corner.
+  `tests/enthalpy_radiation/endpoint.rs` checks those latent defects, exact
+  phase-scaled P1 balances, signed reservoir heat and invalid/cancelled calls.
 - `EnthalpyBackwardEuler::advance_with_ambient_radiation` and its heterogeneous
   phase-assignment facade add implicit gray ambient radiation to this same
   reference-mass step. The existing steady ambient-patch iterator is shared:

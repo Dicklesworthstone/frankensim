@@ -229,7 +229,7 @@ fn initial_residual_tolerance_j(
 
 /// Evaluate the nonlinear boundary on a complete physical field. The actual
 /// integration and outward sign stay owned by the existing Robin assembler.
-fn boundary_at_temperature(
+pub(super) fn boundary_at_temperature(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
     patches: &[AmbientRadiationPatch],
