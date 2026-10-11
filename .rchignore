@@ -1,2 +1,4 @@
 # Workers reconstruct and hash-verify this capsule from the retained srcpack inputs.
 scratch/piano-quadrature-20261004/local-diagnostic-prepared-sources/
+# This 1.03 GB executable is a local controller, not a remote benchmark input.
+scratch/piano-quadrature-20261004/frep-blocker-20261008/rch-recovery-headroom-client
