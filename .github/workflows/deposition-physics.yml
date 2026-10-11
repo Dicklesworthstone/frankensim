@@ -33,3 +33,33 @@ jobs:
             rustc --edition=2024 -C "opt-level=$opt" --test crates/fs-material/src/thermovisco.rs -o "$RUNNER_TEMP/thermovisco-tests-$opt"
             "$RUNNER_TEMP/thermovisco-tests-$opt" --nocapture
           done
+  coupled-strip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile actual material, section and thermal producers
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustc --version --verbose
+          out="$RUNNER_TEMP"
+          printf '#[path = "%s/crates/fs-material/src/thermovisco.rs"] pub mod thermovisco;\n' "$GITHUB_WORKSPACE" > "$out/material-root.rs"
+          printf '#[path = "%s/crates/fs-solid/src/deposition.rs"] pub mod deposition;\n' "$GITHUB_WORKSPACE" > "$out/solid-root.rs"
+          # These roots only expose the exact source files, with no mock physics.
+          # This is scoped native verification, not a complete workspace build.
+          for opt in 0 3; do
+            rustc --edition=2024 -C "opt-level=$opt" --crate-type rlib --crate-name fs_material "$out/material-root.rs" -o "$out/libfs_material.rlib"
+            rustc --edition=2024 -C "opt-level=$opt" --crate-type rlib --crate-name fs_solid "$out/solid-root.rs" --extern fs_material="$out/libfs_material.rlib" -L "dependency=$out" -o "$out/libfs_solid.rlib"
+            rustc --edition=2024 -C "opt-level=$opt" --test crates/fs-solid/src/deposition.rs --extern fs_material="$out/libfs_material.rlib" -L "dependency=$out" -o "$out/section-tests-$opt"
+            "$out/section-tests-$opt" --nocapture
+            rustc --edition=2024 -C "opt-level=$opt" --test crates/fs-solid/examples/deposited_thermovisco_strip.rs --extern fs_material="$out/libfs_material.rlib" --extern fs_solid="$out/libfs_solid.rlib" -L "dependency=$out" -o "$out/coupled-tests-$opt"
+            "$out/coupled-tests-$opt" --nocapture
+          done
+          rustc --edition=2024 -O crates/fs-solid/examples/deposited_thermovisco_strip.rs --extern fs_material="$out/libfs_material.rlib" --extern fs_solid="$out/libfs_solid.rlib" -L "dependency=$out" -o "$out/deposited-strip"
+          /usr/bin/time -f 'native elapsed_s=%e maximum_rss_kb=%M' "$out/deposited-strip" 0.25

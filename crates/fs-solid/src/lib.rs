@@ -32,6 +32,8 @@ pub mod beamcol;
 pub mod contact;
 pub mod continuation;
 pub mod cutfront;
+/// Thermoviscoelastic deposited strips with retained history and release geometry.
+pub mod deposition;
 pub mod fiber;
 pub mod frame2d;
 pub mod hyper2d;
@@ -140,7 +142,7 @@ pub enum SolidError {
 }
 
 impl core::fmt::Display for SolidError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SolidError::SolveFailed {
                 iters,
@@ -191,7 +193,7 @@ pub struct RegimeIndicators {
 
 /// Documented element-selection guidance: standard displacement
 /// elements until near-incompressibility (ν ≥ 0.45) or bending
-/// domination (slenderness ≥ 5) — then the B-bar projection. The
+/// domination (slenderness ≥ 5) — the B-bar projection. The
 /// locking battery measures exactly this boundary.
 #[must_use]
 pub fn select_formulation(r: RegimeIndicators) -> Formulation {
