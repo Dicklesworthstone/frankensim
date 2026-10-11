@@ -6,12 +6,11 @@
 //! complement. Near fixed-interface poles stay in a bounded, pivoted border;
 //! all selected cavity inertias join that same border without pole division.
 //! The full recovered equation and power balance are audited in both cases.
-use super::{geometry::Course, linear::{Bank, BoardMode, MAX_BOARD_MODES},steinway_scale};
+use super::{geometry::Course, linear::{Bank, BoardMode, MAX_BOARD_MODES}};
 use fs_couple::render::plate::impact::cavity::CavityCoupling;
 use fs_la::eigen_complex::lu_complex;
-use fs_material::visco::GeneralizedMaxwell;
 use fs_math::c64::C64;
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::TAU;
 
 /// Numerical border capacity, not a physical string or retained-mode cutoff.
 const MAX_RETAINED_STRING_POLES: usize = 128;
@@ -87,11 +86,12 @@ impl BridgeResponse {
                 if damping {board_c[i*r+j]+=2.*mode.damping_ratio*omega*row[i]*row[j];}
             }}
         }
-        // Same established material images as Bank, NOT a new loss law.
-        // The parity regression below discriminates the complete generator.
-        let bending=GeneralizedMaxwell::new(200e9,vec![(8e9,0.0004),(2e9,0.02)])
-            .map_err(|e|e.to_string())?;
-        let mut string_c=vec![0.;bank.modes.len()];let mut next_mode=0;
+        // Consume the played bank's physical loss coefficients. The relative
+        // strain part also has a reciprocal bridge row; it is not diagonal
+        // damping in the kinetic-completed string coordinates.
+        let string_c:Vec<_>=bank.string_loss.modes.iter()
+            .map(|loss|loss.mass_rate+loss.strain_rate).collect();
+        let mut next_mode=0;
         // The actual bank owns course/plane/member/span order. A secondary
         // speaking string has no hammer contact but is NOT a duplex segment.
         for port in &bank.strings {
@@ -105,18 +105,6 @@ impl BridgeResponse {
             for i in 0..r {for j in 0..r {
                 endpoint_k[i*r+j]+=tension/length*port.bridge[i]*port.bridge[j];
             }}
-            for (index,k) in port.modes.clone().enumerate() {
-                let mode=bank.modes[k];let wave=(index+1) as f64*PI/length;
-                let fraction=course.flexural_rigidity_nm2*wave*wave/
-                    (tension+course.flexural_rigidity_nm2*wave*wave);
-                if damping {
-                    let zeta=if rt0425_string_damping {
-                        let (r_u,eta_u)=steinway_scale::string_damping_rt0425(course.midi)?;
-                        r_u/mode.omega+eta_u*mode.omega
-                    } else {0.30/mode.omega+0.5*bending.loss_factor(mode.omega)*fraction};
-                    string_c[k]=2.*mode.omega*zeta;
-                }
-            }
             next_mode=port.modes.end;
         }
         if next_mode!=bank.modes.len() || endpoint_k.iter().chain(&board_c).chain(&string_c)
@@ -150,6 +138,13 @@ impl BridgeResponse {
     pub fn bank(&self)->&Bank {&self.bank}
     pub fn has_cavity(&self)->bool {self.cavity.is_some()}
     pub fn keys(&self)->&[u8] {&self.keys}
+    /// Minus the string/board dynamic cross-entry before bridge projection.
+    /// Strain-rate loss acts on z-beta*b and therefore contributes on BOTH
+    /// sides of the harmonic equation, with the exp(-i omega t) convention.
+    fn string_coupling(&self,k:usize,w:f64)->C64 {
+        let mode=self.bank.modes[k];
+        C64::new(mode.a,-w*self.bank.string_loss.modes[k].strain_rate*mode.beta)
+    }
     /// Work-conjugate row of the original hammer-plane bridge force/velocity.
     /// Secondary strings react through the board without becoming extra drives.
     pub fn bridge_row(&self,key:u8)->Result<&[f64],String> {
@@ -199,18 +194,24 @@ impl BridgeResponse {
             }
             divisors.push(d);
         }
-        for port in &self.bank.strings {
-            let mut weight=C64::ZERO;
+        for (si,port) in self.bank.strings.iter().enumerate() {
+            let mut weight=C64::new(0.,-w*self.bank.string_loss.endpoint_drag[si]);
             for k in port.modes.clone() {
                 let mode=self.bank.modes[k];
-                // omega_s^2 beta^2 - a^2/D, evaluated without catastrophic
-                // low-frequency cancellation of the two static terms.
+                let loss=&self.bank.string_loss.modes[k];
+                let stiffness=C64::new(mode.omega.powi(2),-w*loss.strain_rate);
+                // K*beta²-(K*beta)²/D = K*beta²*(-w²-i*w*mass_rate)/D,
+                // where K=omega_s²-i*w*strain_rate. This preserves the
+                // reciprocal damping without subtracting large static terms.
                 weight=weight+if poles.binary_search(&k).is_ok() {
                     // Keep this coordinate's full board self-term; its cross
                     // reaction is solved explicitly in the bordered equation.
-                    C64::new(mode.omega.powi(2)*mode.beta.powi(2),0.)
-                } else {C64::new(-w*w,-w*self.string_c[k])
-                    .scale(mode.omega.powi(2)*mode.beta.powi(2))/divisors[k]};
+                    stiffness.scale(mode.beta.powi(2))
+                } else if loss.strain_rate==0. {
+                    C64::new(-w*w,-w*loss.mass_rate)
+                        .scale(mode.omega.powi(2)*mode.beta.powi(2))/divisors[k]
+                } else {(stiffness*C64::new(-w*w,-w*loss.mass_rate))
+                    .scale(mode.beta.powi(2))/divisors[k]};
             }
             for i in 0..r {for j in 0..r {
                 matrix[i*r+j]=matrix[i*r+j]+weight.scale(port.bridge[i]*port.bridge[j]);
@@ -221,7 +222,7 @@ impl BridgeResponse {
             // Preserve the original operation order away from string poles.
             let lu=lu_complex(&matrix,r).map_err(|_|"singular radiation-loaded bridge equation")?;
             let mut q=force.clone();lu.solve(&mut q);(q,Vec::new(),Vec::new())
-        } else {self.solve_pole_border(&matrix,&force,&divisors,&poles,
+        } else {self.solve_pole_border(w,&matrix,&force,&divisors,&poles,
             cavity.as_deref().map(|c|(c,cavity_size)))?};
         if q.iter().chain(&pole_displacements).chain(&cavity_displacement).any(|v|!finite(*v)) {
             return Err("nonfinite harmonic board/string/cavity response".into());
@@ -229,21 +230,31 @@ impl BridgeResponse {
         let mut strings=vec![C64::ZERO;n];
         let mut reconstructed=vec![C64::ZERO;r];let mut row_norm=vec![0.;r];
         let mut string_loss_w=0.;let mut worst_residual=0.0_f64;let mut operator_norm=0.0_f64;
-        for port in &self.bank.strings {
+        for (si,port) in self.bank.strings.iter().enumerate() {
             let b=product(&port.bridge,&q);let abs_g:f64=port.bridge.iter().map(|v|v.abs()).sum();
+            let endpoint_drag=self.bank.string_loss.endpoint_drag[si];
+            string_loss_w+=0.5*w*w*endpoint_drag*b.abs().powi(2);
+            for i in 0..r {
+                reconstructed[i]=reconstructed[i]+iw*b.scale(endpoint_drag*port.bridge[i]);
+                row_norm[i]+=w*endpoint_drag*port.bridge[i].abs()*abs_g;
+            }
             for k in port.modes.clone() {
-                let m=self.bank.modes[k];let displacement=match poles.binary_search(&k) {
-                    Ok(slot)=>pole_displacements[slot],Err(_)=>b.scale(m.a)/divisors[k],
+                let m=self.bank.modes[k];let coupling=self.string_coupling(k,w);
+                let loss=&self.bank.string_loss.modes[k];
+                let displacement=match poles.binary_search(&k) {
+                    Ok(slot)=>pole_displacements[slot],Err(_)=>b*coupling/divisors[k],
                 };
                 if !finite(displacement) {return Err("nonfinite recovered string response".into());}
                 strings[k]=displacement;
-                worst_residual=worst_residual.max((divisors[k]*displacement-b.scale(m.a)).abs());
-                operator_norm=operator_norm.max(divisors[k].abs()+m.a.abs()*abs_g);
-                string_loss_w+=0.5*w*w*self.string_c[k]*displacement.abs().powi(2);
-                let reaction=(b.scale(m.beta)-displacement).scale(m.a);
+                worst_residual=worst_residual.max((divisors[k]*displacement-b*coupling).abs());
+                operator_norm=operator_norm.max(divisors[k].abs()+coupling.abs()*abs_g);
+                let relative=displacement-b.scale(m.beta);
+                string_loss_w+=0.5*w*w*(loss.mass_rate*displacement.abs().powi(2)
+                    +loss.strain_rate*relative.abs().powi(2));
+                let reaction=(b.scale(m.beta)-displacement)*coupling;
                 for i in 0..r {
                     reconstructed[i]=reconstructed[i]+reaction.scale(port.bridge[i]);
-                    row_norm[i]+=m.a.abs()*port.bridge[i].abs()*(1.+m.beta.abs()*abs_g);
+                    row_norm[i]+=coupling.abs()*port.bridge[i].abs()*(1.+m.beta.abs()*abs_g);
                 }
             }
         }
@@ -309,10 +320,10 @@ impl BridgeResponse {
     }
 
     /// [board, retained string coordinates, all acoustic inertias]. Regular strings are already
-    /// eliminated. The exact symmetric cross-potential stays on BOTH sides;
+    /// eliminated. Reciprocal stiffness AND damping stay on BOTH sides;
     /// supplied radiation retains its original entries (including reciprocity
     /// or lack of it). No pseudoinverse, pole shift or artificial loss.
-    fn solve_pole_border(&self, board:&[C64], force:&[C64], divisors:&[C64],
+    fn solve_pole_border(&self, w:f64, board:&[C64], force:&[C64], divisors:&[C64],
         poles:&[usize], cavity:Option<(&[C64],usize)>)->Result<(Vec<C64>,Vec<C64>,Vec<C64>),String> {
         let r=self.bank.board_count;let air_start=r+poles.len();
         let acoustic=cavity.map_or(0,|(_,n)|n-r);let size=air_start+acoustic;
@@ -323,7 +334,7 @@ impl BridgeResponse {
             let row=r+slot;let mode=self.bank.modes[k];
             matrix[row*size+row]=divisors[k];
             for (i,g) in self.bank.strings[mode.string].bridge.iter().enumerate() {
-                let cross=C64::new(-mode.a*g,0.);
+                let cross=self.string_coupling(k,w).scale(-g);
                 matrix[i*size+row]=cross;matrix[row*size+i]=cross;
             }
         }
@@ -347,6 +358,25 @@ impl BridgeResponse {
 #[cfg(test)]
 #[path="bridge_pole_tests.rs"]
 mod pole_tests;
+
+/// Test oracle: polarize the played physical dissipation, independently of
+/// harmonic condensation and its complex string/bridge cross-entries. A
+/// larger stride permits the existing full string/board/cavity pencil tests.
+#[cfg(test)]
+fn add_string_damping_pencil(model:&BridgeResponse,w:f64,stride:usize,matrix:&mut [C64]) {
+    let size=model.bank.q.len();let mut velocity=vec![0.;size];let mut diagonal=vec![0.;size];
+    let power=|v:&[f64]|model.bank.string_loss.power(&model.bank.strings,&model.bank.modes,v);
+    for i in 0..size {velocity[i]=1.;diagonal[i]=power(&velocity);velocity[i]=0.;}
+    for i in 0..size {for j in i..size {
+        let coefficient=if i==j {diagonal[i]}else {
+            velocity[i]=1.;velocity[j]=1.;
+            let cross=0.5*(power(&velocity)-diagonal[i]-diagonal[j]);
+            velocity[i]=0.;velocity[j]=0.;cross
+        };
+        matrix[i*stride+j].im-=w*coefficient;
+        if i!=j {matrix[j*stride+i].im-=w*coefficient;}
+    }}
+}
 
 #[cfg(test)]
 #[path="bridge_cavity_tests.rs"]
@@ -392,7 +422,8 @@ mod tests {
             };
             full[i*size+j]=C64::new(value,0.);full[j*size+i]=C64::new(value,0.);
         }}
-        for i in 0..size {full[i*size+i]=full[i*size+i]-C64::new(w*w,if i<n {w*model.string_c[i]}else{0.});}
+        for i in 0..size {full[i*size+i].re-=w*w;}
+        add_string_damping_pencil(&model,w,size,&mut full);
         for i in 0..r {for j in 0..r {
             let at=(n+i)*size+n+j;
             full[at]=full[at]+C64::new(0.,-w*model.board_c[i*r+j])+C64::new(0.,-w)*z[i*r+j];
@@ -434,7 +465,7 @@ mod tests {
             let n=m.bank.modes.len();
             for i in 0..n {m.bank.v[i]=0.01*((i+1) as f64).sin();}
             m.bank.v[n]=0.006;m.bank.v[n+1]=-0.004;
-            let mut expected:f64=(0..n).map(|i|m.string_c[i]*m.bank.v[i].powi(2)).sum();
+            let mut expected=m.bank.string_loss.power(&m.bank.strings,&m.bank.modes,&m.bank.v);
             for i in 0..2 {for j in 0..2 {expected+=m.board_c[2*i+j]*m.bank.v[n+i]*m.bank.v[n+j];}}
             m.bank.predict();m.bank.finish(&vec![0.;m.bank.contact_strings.len()]);
             let measured=m.bank.last_modal_loss_j*f64::from(rate);
@@ -479,7 +510,7 @@ mod tests {
                 m.bank.project_board_shape(&unit).unwrap().iter()
                     .zip(&m.bank.v[n..]).map(|(a,b)|a*b).sum()
             }).collect();
-            let mut expected:f64=(0..n).map(|i|m.string_c[i]*m.bank.v[i].powi(2)).sum();
+            let mut expected=m.bank.string_loss.power(&m.bank.strings,&m.bank.modes,&m.bank.v);
             for i in 0..2 {for j in 0..2 {expected+=c[2*i+j]*bare[i]*bare[j];}}
             m.bank.predict();m.bank.finish(&vec![0.0;m.bank.contact_strings.len()]);
             let measured=m.bank.last_modal_loss_j*f64::from(rate);

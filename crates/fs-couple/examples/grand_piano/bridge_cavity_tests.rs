@@ -61,7 +61,7 @@ fn full_pencil(m: &BridgeResponse, air: &Air, hz: f64, force: C64, exterior: Opt
         matrix[j*size+i] = C64::new(stiffness,0.0);
     } }
     for i in 0..size { matrix[i*size+i].re -= w*w; }
-    for i in 0..n { matrix[i*size+i].im -= w*m.string_c[i]; }
+    add_string_damping_pencil(m,w,size,&mut matrix);
     for i in 0..r { for j in 0..r {
         let at = (n+i)*size+n+j;
         matrix[at].im -= w*m.board_c[i*r+j];

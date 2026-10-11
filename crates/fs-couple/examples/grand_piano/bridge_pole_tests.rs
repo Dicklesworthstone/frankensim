@@ -28,7 +28,8 @@ fn full(m:&BridgeResponse,hz:f64,key:u8,force:C64,z:Option<&[C64]>)->Vec<C64> {
         };
         a[i*size+j]=C64::new(k,0.0);a[j*size+i]=C64::new(k,0.0);
     }}
-    for i in 0..size {a[i*size+i]=a[i*size+i]-C64::new(w*w,if i<n {w*m.string_c[i]}else{0.0});}
+    for i in 0..size {a[i*size+i].re-=w*w;}
+    add_string_damping_pencil(m,w,size,&mut a);
     for i in 0..r {for j in 0..r {
         let at=(n+i)*size+n+j;a[at]=a[at]+C64::new(0.0,-w*m.board_c[i*r+j]);
         if let Some(z)=z {a[at]=a[at]+C64::new(0.0,-w)*z[i*r+j];}
@@ -112,4 +113,23 @@ fn too_many_coincident_poles_refuse_without_deleting_voices_or_inventing_a_loss(
     let error=m.solve(hz,21,C64::ONE,None).unwrap_err();assert!(error.contains("128-coordinate"));
     assert_eq!(m.bank.modes.len(),130);assert!(m.string_c.iter().all(|v|*v==0.0));
     assert!(m.bank.q.iter().chain(&m.bank.v).all(|v|*v==0.0));
+}
+
+#[test]
+fn sourced_viscous_loss_remains_reciprocal_inside_the_string_pole_border() {
+    let (mut courses,mut board)=inputs(false);
+    // A deliberately long physical string puts its first pole inside the
+    // border criterion even with positive source viscosity. Source key A0
+    // has zero fluid rate; no damping coefficient or pole is repaired.
+    courses[0].midi=21;courses[0].length_m*=128.;
+    for mode in &mut board {mode.bridge[0]=mode.bridge[48];}
+    let m=BridgeResponse::new_with_string_damping(&courses,&board,192_000,21_600.,4,true,None,true).unwrap();
+    assert_eq!(m.bank.string_loss.modes[0].mass_rate,0.);
+    assert!(m.bank.string_loss.modes[0].strain_rate>0.);
+    let hz=m.bank.modes[0].omega/TAU;
+    for perturbation in [0.,-1e-9,1e-9] {
+        let answer=compare(&m,hz*(1.+perturbation),21,None);
+        assert_eq!(answer.retained_string_poles,1);
+        assert!(answer.string_loss_w>0.);
+    }
 }

@@ -28,9 +28,8 @@ fn full(m:&BridgeResponse,hz:f64,key:u8,z:Option<&[C64]>)->Vec<C64> {
         };
         matrix[i*size+j]=C64::new(k,0.);matrix[j*size+i]=C64::new(k,0.);
     }}
-    for i in 0..size {
-        matrix[i*size+i]=matrix[i*size+i]-C64::new(w*w,if i<n {w*m.string_c[i]}else{0.});
-    }
+    for i in 0..size {matrix[i*size+i].re-=w*w;}
+    add_string_damping_pencil(m,w,size,&mut matrix);
     for i in 0..r {for j in 0..r {
         let at=(n+i)*size+n+j;matrix[at]=matrix[at]+C64::new(0.,-w*m.board_c[i*r+j]);
         if let Some(z)=z {matrix[at]=matrix[at]+C64::new(0.,-w)*z[i*r+j];}
@@ -80,7 +79,7 @@ fn published_losses_match_the_actual_two_plane_time_bank_generator() {
         let n=m.bank.modes.len();let r=m.bank.board_count;
         for i in 0..n {m.bank.v[i]=0.01*((i+1) as f64).sin();}
         m.bank.v[n]=0.006;m.bank.v[n+1]=-0.004;
-        let mut expected:f64=(0..n).map(|i|m.string_c[i]*m.bank.v[i].powi(2)).sum();
+        let mut expected=m.bank.string_loss.power(&m.bank.strings,&m.bank.modes,&m.bank.v);
         for i in 0..r {for j in 0..r {expected+=m.board_c[r*i+j]*m.bank.v[n+i]*m.bank.v[n+j];}}
         m.bank.predict();m.bank.finish(&vec![0.;m.bank.contact_strings.len()]);
         let measured=m.bank.last_modal_loss_j*f64::from(rate);
@@ -134,5 +133,52 @@ fn zero_secondary_ports_preserve_the_original_primary_bridge_experiment() {
     }
     for port in selected.bank.strings.iter().filter(|s|s.polarization==1) {
         assert!(b.string_displacement[port.modes.clone()].iter().all(|q|*q==C64::ZERO));
+    }
+}
+
+#[test]
+fn published_string_watts_match_spatial_velocity_and_strain_rate_integrals() {
+    // Independent continuum readback of M2AN 2014, equations (3.68), (3.71):
+    // https://www.numdam.org/item/10.1051/m2an/2013136.pdf
+    // In this scalar Euler--Bernoulli reduction eta_phi=eta_u, phi=y_x,
+    // and rotary inertia is absent. For peak displacement phasors the mean
+    // loss is w² integral(mu*R*|y|² + eta*T*|y_x|² + eta*EI*|y_xx|²) dx.
+    // Reconstruct fields in space, without using the damping helper's
+    // coefficients, its completed-coordinate power or the harmonic Schur.
+    let (courses,board,secondary)=inputs();
+    let m=BridgeResponse::new_with_string_damping(&courses,&board,192_000,21_600.,4,true,
+        Some(&secondary),true).unwrap();
+    for hz in [2.,277.,m.bank.modes[0].omega/TAU,2500.] {
+        let answer=m.solve(hz,69,C64::new(1.,0.3),None).unwrap();
+        let w=TAU*hz;let mut expected=0.;let cells=4096;
+        for port in &m.bank.strings {
+            let course=&courses[port.course];
+            let length=if port.duplex {course.duplex_length_m}else{course.length_m};
+            let cents=(port.member as f64-0.5*(course.unison-1) as f64)*course.detune_cents;
+            let tension=course.tension_at_cents(cents).unwrap();
+            let (rate,eta)=super::super::steinway_scale::string_damping_rt0425(course.midi).unwrap();
+            let normalization=(2./(course.linear_density_kg_m*length)).sqrt();
+            let bridge=product(&port.bridge,&answer.board_displacement);
+            for cell in 0..cells {
+                let fraction=(cell as f64+0.5)/cells as f64;
+                let mut displacement=bridge.scale(fraction);
+                let mut slope=bridge.scale(1./length);let mut curvature=C64::ZERO;
+                for (index,k) in port.modes.clone().enumerate() {
+                    let wave=(index+1) as f64*std::f64::consts::PI/length;
+                    let angle=(index+1) as f64*std::f64::consts::PI*fraction;
+                    let relative=answer.string_displacement[k]-bridge.scale(m.bank.modes[k].beta);
+                    displacement=displacement+relative.scale(normalization*angle.sin());
+                    slope=slope+relative.scale(normalization*wave*angle.cos());
+                    curvature=curvature-relative.scale(normalization*wave*wave*angle.sin());
+                }
+                expected+=w*w*length/cells as f64*(course.linear_density_kg_m*rate*displacement.abs().powi(2)
+                    +eta*tension*slope.abs().powi(2)
+                    +eta*course.flexural_rigidity_nm2*curvature.abs().powi(2));
+            }
+        }
+        assert!(expected>0.);
+        assert!((answer.string_loss_w/expected-1.).abs()<2e-7,
+            "physical string dissipation disagrees at {hz} Hz: {} vs {expected} W",answer.string_loss_w);
+        assert!(answer.power_defect_w.abs()<1e-10+1e-7*answer.input_w.abs());
     }
 }

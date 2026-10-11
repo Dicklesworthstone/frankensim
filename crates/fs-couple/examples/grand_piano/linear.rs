@@ -12,8 +12,9 @@
 //!
 //! Existing fs-couple exact-ZOH transitions advance each diagonal oscillator.
 //! The cross-potential uses average-displacement forces; a small Schur solve
-//! closes their work exactly. Linear component damping is dissipative. The
-//! coupling is second-order consistent, NOT the exact full coupled propagator.
+//! closes their work exactly. Symmetric velocity flows apply physical wood
+//! and moving-boundary string damping, including reciprocal bridge reactions.
+//! The coupling is second-order consistent, NOT the exact full propagator.
 //! No new oscillator, eigensolver or matrix factorization is implemented here.
 //!
 //! All unison members and duplex segments of a course/polarization share its
@@ -42,6 +43,9 @@ pub mod hammer_footprint;
 /// Geometric string extension in the SAME moving-bridge coordinates.
 #[path = "string_stretching.rs"]
 pub mod string_stretching;
+/// Physical velocity and strain-rate loss with reciprocal bridge reactions.
+#[path = "string_damping.rs"]
+pub mod string_damping;
 
 /// Prepared reduced-board capacity, shared with geometry/CSV/audio consumers.
 /// This is a memory/work ceiling, not a claim that every size is real-time.
@@ -237,7 +241,8 @@ pub struct Bank {
     board_half_damping: Option<Vec<f64>>,
     board_damping_enabled: bool,
     bare_board_damping_configured: bool,
-    damped_board_v: Vec<f64>,
+    pub(super) string_loss: string_damping::Prepared,
+    damped_v: Vec<f64>,
     board_pre_loss: f64,
     board_volume: Vec<f64>,
     /// Columns map loaded coordinates to the supplied bare-board coordinates.
@@ -282,7 +287,8 @@ impl Bank {
 
     /// Use RT-0425's per-note intrinsic string loss on the existing scalar
     /// stiff-string modes. The source's transverse rate and strain-rate terms
-    /// project to zeta = R_u/omega + eta_u*omega in this reduced model.
+    /// give fixed-bridge zeta = R_u/omega + eta_u*omega. With a moving bridge,
+    /// apply their physical velocity quadratic form, including chord traction.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_string_damping(courses: &[Course], board: &[BoardMode], rate: u32,
         band_hz: f64, max_modes: usize, damping: bool, secondary: Option<&[Vec<f64>]>,
@@ -310,6 +316,8 @@ impl Bank {
         let mut modes = Vec::new();
         let mut contact_strings = Vec::new();
         let mut oscillator = Vec::new();
+        let mut string_losses = Vec::new();
+        let mut endpoint_drag = Vec::new();
         let mut mass = identity(r);
         let mut bare_k = vec![0.0; r*r];
         for (i, b) in board.iter().enumerate() { bare_k[i*r+i] = (TAU*b.frequency_hz).powi(2); }
@@ -342,6 +350,11 @@ impl Bank {
                     let bridge: Vec<f64> = if polarization==0 {
                         board.iter().map(|b| b.bridge[usize::from(c.midi-21)]).collect()
                     } else {secondary.expect("admitted transverse rows")[ci].clone()};
+                    let (mass_rate,strain_time)=if !damping {(0.0,0.0)}
+                    else if rt0425_string_damping {
+                        let (r_u,eta_u)=steinway_scale::string_damping_rt0425(c.midi)?;
+                        (2.0*r_u,2.0*eta_u)
+                    } else {(0.60,0.0)};
                     for n in 1..=retention.count {
                         let f = card.partial_hz(n, tension);
                         let omega = TAU*f;
@@ -351,12 +364,12 @@ impl Bank {
                         let damper_shape = det::sin(n as f64*PI*0.35)/det::sqrt(card.modal_mass_kg());
                         let k = n as f64*PI/card.length_m;
                         let bend_fraction = card.flexural_rigidity_nm2*k*k/(tension + card.flexural_rigidity_nm2*k*k);
-                        let zeta = if !damping { 0.0 } else if rt0425_string_damping {
-                            let (r_u, eta_u) = steinway_scale::string_damping_rt0425(c.midi)?;
-                            r_u/omega + eta_u*omega
-                        } else { 0.30/omega + 0.5*bending.loss_factor(omega)*bend_fraction };
+                        let strain_rate = if !damping {0.0} else if rt0425_string_damping {
+                            strain_time*omega*omega
+                        } else {omega*bending.loss_factor(omega)*bend_fraction};
+                        string_losses.push(string_damping::ModeLoss {mass_rate,strain_rate});
                         oscillator.push(ModalAcousticMode { angular_frequency_rad_s: omega,
-                            damping_ratio: zeta, pressure_per_modal_velocity: C64::new(0.0,0.0) });
+                            damping_ratio: 0.0, pressure_per_modal_velocity: C64::new(0.0,0.0) });
                         modes.push(StringMode { omega, beta, a: omega*omega*beta,
                             hammer_shape, damper_shape, string: si });
                         beta2 += beta*beta;
@@ -370,6 +383,7 @@ impl Bank {
                     }
                     let residual_mass = card.linear_density_kg_m*card.length_m/3.0 - beta2;
                     if !residual_mass.is_finite() || residual_mass <= 0.0 { return Err("invalid residual string endpoint mass".into()); }
+                    endpoint_drag.push(mass_rate*residual_mass+strain_time*tension/card.length_m);
                     for i in 0..r { for j in 0..r {
                         mass[i*r+j] += residual_mass*bridge[i]*bridge[j];
                         endpoint_k[i*r+j] += tension/card.length_m*bridge[i]*bridge[j];
@@ -421,6 +435,8 @@ impl Bank {
         }
         let transition = transitions(rate, &oscillator)?;
         let n = modes.len();
+        let string_loss=string_damping::Prepared::new(&strings,&modes,&groups,
+            string_losses,endpoint_drag,r,0.5/f64::from(rate))?;
         let nc = contact_strings.len();
         let mut schur = vec![0.0; r*r];
         for i in 0..r { schur[i*r+i] = 1.0/transition[n+i].bq; }
@@ -454,7 +470,7 @@ impl Bank {
             next_q:vec![0.0;n+r],next_v:vec![0.0;n+r],contact_compliance,
             free_contact:vec![0.0;nc],rate,footprints:None,stretching:None,external_force:None,omitted_duplex_modes,capped_string_segments,transition,physical_board_k,
             board_half_damping,board_damping_enabled:damping,bare_board_damping_configured:false,
-            damped_board_v:vec![0.0;r],board_pre_loss:0.0,
+            string_loss,damped_v:vec![0.0;n+r],board_pre_loss:0.0,
             diagonal_omega2:oscillator.iter().map(|m|m.angular_frequency_rad_s.powi(2)).collect(),last_modal_loss_j:0.0,
             board_volume,board_basis,schur_inverse,contact_response:response,
             #[cfg(test)]
@@ -606,12 +622,16 @@ impl Bank {
     pub fn predict(&mut self) {
         if let Some(stretching)=&mut self.stretching {stretching.predict();}
         let n = self.modes.len(); let r = self.board_count;
-        self.board_pre_loss=if let Some(flow)=&self.board_half_damping {
-            damp_board(flow,&self.v[n..],&mut self.damped_board_v)
-        } else {self.damped_board_v.copy_from_slice(&self.v[n..]);0.0};
+        self.damped_v.copy_from_slice(&self.v);
+        self.board_pre_loss=self.string_loss.apply(&self.strings,&self.modes,
+            &self.groups,&mut self.damped_v);
+        if let Some(flow)=&self.board_half_damping {
+            self.board_pre_loss+=damp_board(flow,&self.damped_v[n..],&mut self.board_rhs);
+            self.damped_v[n..].copy_from_slice(&self.board_rhs);
+        }
         for k in 0..self.q.len() {
             let t=self.transition[k];
-            let v=if k<n {self.v[k]} else {self.damped_board_v[k-n]};
+            let v=self.damped_v[k];
             self.free_q[k]=t.qq*self.q[k]+t.qv*v;
             self.free_v[k]=t.vq*self.q[k]+t.vv*v;
             if let Some(stretching)=&self.stretching {
@@ -697,7 +717,7 @@ impl Bank {
                     let mut total_f=self.stretching.as_ref().map_or(f,|s|f+s.force[k]);
                     if let Some(force)=&self.external_force {total_f+=force[k];}
                     self.last_modal_loss_j+=total_f*(self.next_q[k]-self.q[k])-0.5*(
-                        self.next_v[k].powi(2)-self.v[k].powi(2)
+                        self.next_v[k].powi(2)-self.damped_v[k].powi(2)
                         +self.diagonal_omega2[k]*(self.next_q[k].powi(2)-self.q[k].powi(2)));
                 }
             }
@@ -709,13 +729,15 @@ impl Bank {
             let mut total_f=self.stretching.as_ref().map_or(f,|s|f+s.force[k]);
             if let Some(force)=&self.external_force {total_f+=force[k];}
             self.last_modal_loss_j+=total_f*(self.next_q[k]-self.q[k])-0.5*(
-                self.next_v[k].powi(2)-self.damped_board_v[j].powi(2)
+                self.next_v[k].powi(2)-self.damped_v[k].powi(2)
                 +self.diagonal_omega2[k]*(self.next_q[k].powi(2)-self.q[k].powi(2)));
         }
         if let Some(flow)=&self.board_half_damping {
             self.last_modal_loss_j+=damp_board(flow,&self.next_v[n..],&mut self.board_rhs);
             self.next_v[n..].copy_from_slice(&self.board_rhs);
         }
+        self.last_modal_loss_j+=self.string_loss.apply(&self.strings,&self.modes,
+            &self.groups,&mut self.next_v);
     }
 
     pub fn commit(&mut self) {
@@ -777,13 +799,13 @@ mod tests {
         assert_eq!(old.modes[0].omega, source.modes[0].omega);
         let omega = source.modes[0].omega;
         let (r_u, eta_u) = steinway_scale::string_damping_rt0425(69).unwrap();
-        let expected = transitions(192_000, &[ModalAcousticMode {
-            angular_frequency_rad_s: omega,
-            damping_ratio: r_u / omega + eta_u * omega,
-            pressure_per_modal_velocity: C64::new(0.0, 0.0),
-        }]).unwrap();
-        assert!((source.transition[0].vv - expected[0].vv).abs() < 1e-14);
-        assert!((source.transition[0].vv - old.transition[0].vv).abs() > 1e-12);
+        let loss=source.string_loss.modes[0];
+        assert_eq!(loss.mass_rate,2.0*r_u);
+        assert_eq!(loss.strain_rate,2.0*eta_u*omega*omega);
+        assert!(((loss.mass_rate+loss.strain_rate)/(2.0*omega)
+            -(r_u/omega+eta_u*omega)).abs()<1e-14);
+        assert_eq!(source.transition[0].vv,old.transition[0].vv);
+        assert_ne!(loss.strain_rate,old.string_loss.modes[0].strain_rate);
     }
     fn bank(damped:bool)->Bank{
         let scale=super::super::geometry::demonstration_scale().unwrap();
@@ -808,6 +830,26 @@ mod tests {
         let work=(0..nc).map(|i|forces[i]*(b.contact_position(i,&b.next_q)-b.contact_position(i,&b.q))).sum::<f64>();
         let defect=b.energy_at(&b.next_q,&b.next_v)-before+b.last_modal_loss_j-work;
         assert!(defect.abs()<1e-12,"{defect:e}");
+    }
+    #[test]
+    fn repeated_contact_trials_restart_from_the_same_physically_damped_state() {
+        let mut b=bank(true);
+        for k in 0..b.q.len() {b.q[k]=1e-8*det::sin(k as f64);b.v[k]=1e-3*det::cos(k as f64);}
+        let q=b.q.clone();let v=b.v.clone();let before=b.energy();
+        let forces=vec![0.05;b.contact_strings.len()];
+        b.predict();b.finish(&forces);
+        let accepted_q=b.next_q.clone();let accepted_v=b.next_v.clone();let loss=b.last_modal_loss_j;
+        for predict_again in [false,true] {
+            if predict_again {b.predict();}
+            b.finish(&forces);
+            assert_eq!(b.q,q);assert_eq!(b.v,v);
+            assert_eq!(b.next_q,accepted_q);assert_eq!(b.next_v,accepted_v);
+            assert_eq!(b.last_modal_loss_j,loss);
+        }
+        let work: f64=forces.iter().enumerate().map(|(i,f)|
+            f*(b.contact_position(i,&b.next_q)-b.contact_position(i,&b.q))).sum();
+        assert!(loss>0.0);
+        assert!((b.next_energy()-before+loss-work).abs()<1e-12);
     }
     #[test]
     fn generalized_force_response_is_reciprocal_and_matches_contact_ports() {
@@ -921,7 +963,11 @@ mod tests {
     fn unfactored(b:&Bank, forces:&[f64])->(Vec<f64>,Vec<f64>,Vec<f64>,f64) {
         let n=b.modes.len();let r=b.board_count;
         let mut v0=b.v.clone();let mut loss=0.0;
-        if let Some(flow)=&b.board_half_damping {loss+=damp_board(flow,&b.v[n..],&mut v0[n..]);}
+        let mut string_loss=b.string_loss.clone();
+        loss+=string_loss.apply(&b.strings,&b.modes,&b.groups,&mut v0);
+        if let Some(flow)=&b.board_half_damping {
+            let before=v0[n..].to_vec();loss+=damp_board(flow,&before,&mut v0[n..]);
+        }
         let fq:Vec<f64>=(0..n+r).map(|k|b.transition[k].qq*b.q[k]+b.transition[k].qv*v0[k]).collect();
         let fv:Vec<f64>=(0..n+r).map(|k|b.transition[k].vq*b.q[k]+b.transition[k].vv*v0[k]).collect();
         let mut rhs:Vec<f64>=(0..r).map(|j|fq[n+j]/b.transition[n+j].bq).collect();
@@ -964,6 +1010,7 @@ mod tests {
         if let Some(flow)=&b.board_half_damping {
             let original=v[n..].to_vec();loss+=damp_board(flow,&original,&mut v[n..]);
         }
+        loss+=string_loss.apply(&b.strings,&b.modes,&b.groups,&mut v);
         (free,q,v,loss)
     }
     fn close(a:&[f64],b:&[f64]) {
