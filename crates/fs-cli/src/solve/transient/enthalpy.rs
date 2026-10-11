@@ -14,9 +14,10 @@ use fs_solver::{Globalization, LineSearchConfig, NewtonKrylovConfig};
 
 use super::*;
 
+mod conductivity;
 mod natural;
 
-const NO_CLAIM: &str = "Estimated stationary P1 total-enthalpy transport with frozen reference mass and caller-declared equilibrium phase charts. Latent heat is stored only in specific enthalpy; no apparent heat capacity or additional latent account is used. Existing sourced conductivity, finite-resistance contact and prescribed Neumann/Robin boundaries remain active. Declared ambient radiation uses sourced area-mean gray patches; every trial retains the same old enthalpy and the accepted endpoint passes independent physical residual and nonlinear-heat energy checks. Declared natural convection evaluates the existing card at each candidate wall temperature and requires the complete physical residual and energy balance to close; exact equilibrium and out-of-domain Rayleigh states retain their refusals. Every workload switch is represented on both independent time grids. The final field comes only from the completed fine grid. The temperature difference is an assumed-first-order temporal estimate, not a spatial or continuous-time maximum bound; agreement on a latent plateau does not prove convergence of enthalpy or phase fraction. Supplied material-card identities and source text are attribution, not verification of the declared curves. Geometry, reference density and energetic internal variables are fixed. No material motion, density-driven expansion, phase kinetics, phase-dependent conductivity, enclosure radiation, pointwise T^4 quadrature, airflow coupling or trajectory adjoint is inferred.";
+const NO_CLAIM: &str = "Estimated stationary P1 total-enthalpy transport with frozen reference mass and caller-declared equilibrium phase charts. Latent heat is stored only in specific enthalpy; no apparent heat capacity or additional latent account is used. Existing sourced conductivity, finite-resistance contact and prescribed Neumann/Robin boundaries remain active. Declared regional conductivity multipliers use each element's mean nodal liquid mass fraction and the shared exact enthalpy tangent, including phase feedback on latent plateaus. The base tensor retains its temperature dependence and source support; multipliers are declared phenomenological data, not a volume-fraction mixture or validated material claim. Declared ambient radiation uses sourced area-mean gray patches; every trial retains the same old enthalpy and the accepted endpoint passes independent physical residual and nonlinear-heat energy checks. Declared natural convection evaluates the existing card at each candidate wall temperature and requires the complete physical residual and energy balance to close; exact equilibrium and out-of-domain Rayleigh states retain their refusals. Every workload switch is represented on both independent time grids. The final field comes only from the completed fine grid. The temperature difference is an assumed-first-order temporal estimate, not a spatial or continuous-time maximum bound; agreement on a latent plateau does not prove convergence of enthalpy or phase fraction. Supplied material-card identities and source text are attribution, not verification of the declared curves. Geometry, reference density and energetic internal variables are fixed. No material motion, density-driven expansion, phase kinetics, enclosure radiation, pointwise T^4 quadrature, airflow coupling or trajectory adjoint is inferred.";
 
 /// Storage-specific scope carried by the outer conduction report.
 pub(super) fn no_claim() -> &'static str {
@@ -632,8 +633,9 @@ pub(super) fn solve(
         let curve = row
             .phase_curve()
             .map_err(|v| conduction_error(v.code, v.what, v.fix))?;
+        let phase_conductivity = conductivity::receipt(row)?;
         material_rows.push(format!(
-            "{{\"region\":{},\"material_index\":{index},\"material_card_identity\":{},\"phase_curve_identity\":{},\"source\":{},\"reference_density_kg_m3\":{},\"initial_specific_enthalpy_j_kg\":{}}}",
+            "{{\"region\":{},\"material_index\":{index},\"material_card_identity\":{},\"phase_curve_identity\":{},\"source\":{},\"reference_density_kg_m3\":{},\"initial_specific_enthalpy_j_kg\":{}{phase_conductivity}}}",
             json_string(&row.region), json_string(&row.material_card_identity.to_hex()),
             json_string(&curve.identity().to_hex()), json_string(&row.source),
             number(row.reference_density.value)?, number(row.initial_specific_enthalpy.value)?,
@@ -666,6 +668,7 @@ pub(super) fn solve(
             HeterogeneousEnthalpyError::Enthalpy(inner) => failed(inner),
             other => bad(format!("enthalpy material assignment refused: {other}; distinct regional charts require distinct interface vertices and an explicit contact law")),
         })?;
+    let engine = conductivity::bind(cx, engine, storage, &assignment, deadline)?;
     let mut initial = Vec::with_capacity(n);
     for (vertex, &id) in engine.vertex_material_ids().iter().enumerate() {
         if vertex % 256 == 0 {

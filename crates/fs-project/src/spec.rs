@@ -749,6 +749,19 @@ pub struct TransientEnthalpyKnot {
     pub liquid_mass_fraction: f64,
 }
 
+/// Explicit conductivity multiplier linear in liquid mass fraction (schema v14).
+/// This phenomenological law scales the existing sourced conductivity tensor;
+/// it does not infer a volume-fraction mixture or authenticate material data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransientPhaseConductivity {
+    /// Positive finite dimensionless multiplier at zero liquid mass fraction.
+    pub solid_multiplier: f64,
+    /// Positive finite dimensionless multiplier at unit liquid mass fraction.
+    pub liquid_multiplier: f64,
+    /// Nonempty engineering basis or source for this explicit scaling law.
+    pub source: String,
+}
+
 /// Sourced equilibrium enthalpy data for one conduction region (schema v13).
 /// This is an explicit model declaration; the cited card identity does not
 /// authenticate the supplied knots or create material-database receipts.
@@ -771,6 +784,10 @@ pub struct TransientRegionEnthalpy {
     /// or all liquid with strictly increasing temperature; a melting chart
     /// spans fully solid through fully liquid.
     pub knots: Vec<TransientEnthalpyKnot>,
+    /// Optional declared scaling by the mean nodal liquid mass fraction.
+    /// Absence preserves the existing base conductivity and its temperature
+    /// dependence; no phase effect is inferred from the enthalpy chart.
+    pub phase_conductivity: Option<TransientPhaseConductivity>,
 }
 
 /// Nonlinear total-enthalpy storage controls for stationary conduction.
@@ -2124,6 +2141,11 @@ impl ProjectSpec {
             }
             let mut enthalpy_regions = BTreeSet::new();
             for material in &enthalpy.materials {
+                if let Some(law) = &material.phase_conductivity
+                    && let Err(finding) = law.model()
+                {
+                    out.push(finding);
+                }
                 if !regions.contains(material.region.as_str())
                     || !enthalpy_regions.insert(material.region.as_str())
                 {

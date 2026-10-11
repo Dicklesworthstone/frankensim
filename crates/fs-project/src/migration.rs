@@ -78,6 +78,9 @@ pub enum MigrationRule {
     /// Version 12 gains optional total-enthalpy storage. Historical projects
     /// retain constant capacities; no phase curve, density or state is inferred.
     TransientEnthalpyV13,
+    /// Version 13 gains optional explicit liquid-mass-fraction conductivity.
+    /// Historical enthalpy models retain their existing base conductivity.
+    TransientPhaseConductivityV14,
 }
 
 impl MigrationRule {
@@ -104,6 +107,7 @@ impl MigrationRule {
             MigrationRule::TransientConductionV11 => "transient-conduction-v11",
             MigrationRule::TransientPowerSchedulesV12 => "transient-power-schedules-v12",
             MigrationRule::TransientEnthalpyV13 => "transient-enthalpy-v13",
+            MigrationRule::TransientPhaseConductivityV14 => "transient-phase-conductivity-v14",
         }
     }
 
@@ -124,6 +128,7 @@ impl MigrationRule {
             MigrationRule::TransientConductionV11 => 10,
             MigrationRule::TransientPowerSchedulesV12 => 11,
             MigrationRule::TransientEnthalpyV13 => 12,
+            MigrationRule::TransientPhaseConductivityV14 => 13,
         }
     }
 }
@@ -236,6 +241,7 @@ pub fn migrate_envelope(
         10 => MigrationRule::TransientConductionV11,
         11 => MigrationRule::TransientPowerSchedulesV12,
         12 => MigrationRule::TransientEnthalpyV13,
+        13 => MigrationRule::TransientPhaseConductivityV14,
         v if v == FSIM_VERSION => {
             return Err(ProjectError {
                 code: "fsim-migration-not-needed",
@@ -278,7 +284,8 @@ pub fn migrate_envelope(
         | MigrationRule::NaturalConvectionV10
         | MigrationRule::TransientConductionV11
         | MigrationRule::TransientPowerSchedulesV12
-        | MigrationRule::TransientEnthalpyV13 => {
+        | MigrationRule::TransientEnthalpyV13
+        | MigrationRule::TransientPhaseConductivityV14 => {
             // The document's internal `versions.schema` field must move with
             // the envelope: the validator admits only the current schema.
             // The rewrite is exactly these two byte strings, never a
@@ -372,6 +379,25 @@ pub fn migrate_envelope(
             code: "fsim-migration-payload",
             detail: format!("schema version {declared_version} predates total-enthalpy storage but its payload declares it"),
             hint: "declare enthalpy models in a current-version project; migration preserves historical heat capacities".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 14
+        && decoded
+            .spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|setup| setup.transient.as_ref())
+            .and_then(|transient| transient.enthalpy.as_ref())
+            .is_some_and(|enthalpy| {
+                enthalpy.materials.iter().any(|material| material.phase_conductivity.is_some())
+            })
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates phase-dependent conductivity but its payload declares it"),
+            hint: "declare phase conductivity in a current-version project; migration preserves the original base conductivity".to_string(),
         });
     }
     if declared_version > 0

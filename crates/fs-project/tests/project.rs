@@ -2463,6 +2463,7 @@ fn enthalpy_project() -> ProjectSpec {
                     },
                 )
                 .collect(),
+                phase_conductivity: None,
             })
             .collect(),
         max_newton_iterations: 40,
@@ -2859,4 +2860,161 @@ fn g0_v12_migration_preserves_capacities_and_refuses_hidden_enthalpy() {
         parse_sexpr_migrating(&hidden).unwrap_err().code,
         "fsim-migration-payload"
     );
+}
+
+fn phase_conductivity_project() -> ProjectSpec {
+    let mut project = enthalpy_project();
+    project
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap()
+        .enthalpy
+        .as_mut()
+        .unwrap()
+        .materials[0]
+        .phase_conductivity = Some(fs_project::TransientPhaseConductivity {
+        solid_multiplier: 1.0,
+        liquid_multiplier: 0.2,
+        source: "synthetic phase scaling, independent of the base conductivity card".to_string(),
+    });
+    project
+}
+
+#[test]
+fn g0_phase_conductivity_round_trips_and_binds_the_declared_mass_fraction_law() {
+    let shipped = parse_sexpr(include_str!(
+        "../../../data/reference-project/cooling-enthalpy-phase-conductivity.fsim"
+    ))
+    .unwrap();
+    assert!(shipped.findings().is_empty(), "{:?}", shipped.findings());
+    let project = phase_conductivity_project();
+    assert!(project.validate().is_empty(), "{:?}", project.validate());
+    let sexpr = print_sexpr(&project).unwrap();
+    assert!(sexpr.contains(
+        ":phase-conductivity (phase-conductivity :law \"linear-liquid-mass-fraction\" :solid-multiplier 1.0 :liquid-multiplier 0.2 :source "
+    ));
+    let decoded = parse_sexpr(&sexpr).unwrap();
+    let json = parse_json(&print_json(&project).unwrap()).unwrap();
+    assert_eq!(decoded.spec, project);
+    assert_eq!(json.spec, project);
+    assert_eq!(decoded.hash(), json.hash());
+    assert_eq!(project.materials, enthalpy_project().materials);
+    for field in ["solid", "liquid", "source"] {
+        let mut changed = project.clone();
+        let materials = &mut changed
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .transient
+            .as_mut()
+            .unwrap()
+            .enthalpy
+            .as_mut()
+            .unwrap()
+            .materials;
+        assert!(materials[1].phase_conductivity.is_none());
+        let law = materials[0].phase_conductivity.as_mut().unwrap();
+        let model = law.model().unwrap();
+        assert!((model.multiplier_at(0.25).unwrap() - 0.8).abs() < 1e-14);
+        match field {
+            "solid" => law.solid_multiplier = 2.0,
+            "liquid" => law.liquid_multiplier = 0.4,
+            "source" => law.source.push_str("; revised basis"),
+            _ => unreachable!(),
+        }
+        assert_ne!(
+            decoded.hash(),
+            parse_sexpr(&print_sexpr(&changed).unwrap()).unwrap().hash()
+        );
+    }
+}
+
+#[test]
+fn g0_phase_conductivity_refuses_invalid_multipliers_sources_and_wire_laws() {
+    for (solid, liquid, source, code) in [
+        (0.0, 1.0, "declared", "project-conduction-transient-phase-conductivity"),
+        (-1.0, 1.0, "declared", "project-conduction-transient-phase-conductivity"),
+        (f64::NAN, 1.0, "declared", "project-conduction-transient-phase-conductivity"),
+        (f64::INFINITY, 1.0, "declared", "project-conduction-transient-phase-conductivity"),
+        (1.0, 0.0, "declared", "project-conduction-transient-phase-conductivity"),
+        (1.0, -1.0, "declared", "project-conduction-transient-phase-conductivity"),
+        (1.0, f64::NAN, "declared", "project-conduction-transient-phase-conductivity"),
+        (1.0, f64::INFINITY, "declared", "project-conduction-transient-phase-conductivity"),
+        (1.0, 1.0, "  ", "project-conduction-transient-phase-conductivity-source"),
+    ] {
+        let mut project = phase_conductivity_project();
+        let material = &mut project
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .transient
+            .as_mut()
+            .unwrap()
+            .enthalpy
+            .as_mut()
+            .unwrap()
+            .materials[0];
+        material.phase_conductivity = Some(fs_project::TransientPhaseConductivity {
+            solid_multiplier: solid,
+            liquid_multiplier: liquid,
+            source: source.to_string(),
+        });
+        assert!(material.phase_conductivity.as_ref().unwrap().model().is_err());
+        let findings = project.validate();
+        assert!(findings.iter().any(|row| row.code == code), "{findings:?}");
+    }
+    let valid = print_sexpr(&phase_conductivity_project()).unwrap();
+    for (before, after) in [
+        ("linear-liquid-mass-fraction", "linear-liquid-volume-fraction"),
+        (":law \"linear-liquid-mass-fraction\" ", ""),
+        (":solid-multiplier 1.0", ":solid-multiplier 1.0m"),
+        (":liquid-multiplier 0.2", ":liquid-multiplier 0.2 :liquid-multiplier 0.3"),
+        (":source \"synthetic phase scaling, independent of the base conductivity card\"", ""),
+    ] {
+        let malformed = valid.replacen(before, after, 1);
+        assert_ne!(valid, malformed);
+        assert!(parse_sexpr(&malformed).is_err());
+        let findings = parse_sexpr_lenient(&malformed).unwrap().findings();
+        assert!(!findings.is_empty(), "{malformed}");
+    }
+}
+
+#[test]
+fn g0_v13_migration_preserves_storage_and_refuses_hidden_phase_conductivity() {
+    let down = |text: &str| {
+        text.replacen(
+            &format!("(fsim-project :version {FSIM_VERSION}"),
+            "(fsim-project :version 13",
+            1,
+        )
+        .replacen(
+            &format!("(versions :schema {FSIM_VERSION}"),
+            "(versions :schema 13",
+            1,
+        )
+    };
+    for project in [transient_project(), enthalpy_project()] {
+        let current = print_sexpr(&project).unwrap();
+        let old = down(&current);
+        let migrated = parse_sexpr_migrating(&old).unwrap();
+        assert_eq!(migrated.decoded.spec, project);
+        let receipt = migrated.migration.unwrap();
+        assert_eq!((receipt.source_version, receipt.target_version), (13, FSIM_VERSION));
+        assert_eq!(receipt.rule.label(), "transient-phase-conductivity-v14");
+        assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
+    }
+    let hidden = down(&print_sexpr(&phase_conductivity_project()).unwrap());
+    assert_eq!(parse_sexpr_migrating(&hidden).unwrap_err().code, "fsim-migration-payload");
 }

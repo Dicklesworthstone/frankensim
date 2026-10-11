@@ -43,6 +43,7 @@ fn project(density: f64, horizon: f64, knots: &[(f64, f64, f64)]) -> ProjectSpec
         max_newton_iterations: 32,
         max_backtracks: 24,
         materials: vec![TransientRegionEnthalpy {
+            phase_conductivity: None,
             region: "air".into(),
             material_card_identity: identity,
             source: "synthetic enthalpy relation for an independent energy oracle; not a material-property claim".into(),
@@ -180,6 +181,7 @@ fn g1_native_enthalpy_constant_cp_matches_two_body_contact_and_conserves_total_e
         materials: ["cold", "hot"]
             .into_iter()
             .map(|region| TransientRegionEnthalpy {
+                phase_conductivity: None,
                 region: region.into(),
                 material_card_identity: fs_blake3::ContentHash::from_hex(
                     &fixture_card_identity().0,

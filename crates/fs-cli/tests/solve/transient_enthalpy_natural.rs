@@ -144,6 +144,7 @@ fn project(initial: f64, ambient: f64, watts: f64) -> ProjectSpec {
                 .unwrap(),
             source: SOURCE.into(),
             reference_density: QtyAny::new(DENSITY, dims::DENSITY),
+            phase_conductivity: None,
             initial_specific_enthalpy: QtyAny::new(0.0, dims::SPECIFIC_ENTHALPY),
             knots: [200.0, 450.0]
                 .into_iter()

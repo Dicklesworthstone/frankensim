@@ -1535,10 +1535,28 @@ do not become a zero-error temporal claim. This is Estimated fixed-domain
 transport, with source attribution rather than authentication of supplied
 phase data. Prescribed temperature, airflow convection and native
 trajectory adjoints are currently refused for this storage model. Expansion,
-motion, phase kinetics and phase-dependent conductivity are not inferred.
+motion and phase kinetics are not inferred.
 `data/reference-project/cooling-enthalpy.fsim` and `TRANSIENT.md` give a complete
 synthetic melting example through validate/import/solve/report. Driver version
 57 separates these semantics from older retained solves.
+
+
+Schema v14 optionally declares a conductivity multiplier for each regional
+enthalpy material. `linear-liquid-mass-fraction` interpolates between positive
+solid and liquid multipliers at the tetrahedron's mean nodal liquid mass
+fraction, then scales its existing sourced tensor at mean nodal temperature.
+The common enthalpy owner supplies the full phase derivative in the Newton
+tangent, including latent-plateau feedback. Regions without a declaration keep
+their base conductivity. The law is explicitly phenomenological: its source
+text and values carry Declared authority, without inferring a volume-fraction
+mixture or authenticating the supplied property data. Base conductivity support
+and original material-query receipts remain in force.
+Each material row in the transient receipt retains its optional law, endpoint
+multipliers, coordinate and source. Schema v13 migration preserves existing
+storage and base conductivity, adding no phase effect. The synthetic
+`cooling-enthalpy-phase-conductivity.fsim` example combines the law with
+latent storage, convection, radiation and a startup pulse. Driver version 61
+separates this transport model from older retained solves.
 
 The enthalpy model also composes with declared ambient gray radiation on its
 prescribed Robin patches. The shared radiative enthalpy owner holds physical

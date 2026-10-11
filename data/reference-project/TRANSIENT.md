@@ -210,6 +210,46 @@ states still refuse. `transient.natural` reports both grids' complete work;
 each step retains the physical residual and energy balance. The ordinary
 `natural_convection` receipt retains the final physical card evaluation.
 
+### Conductivity that follows the phase state
+
+Schema v14 adds an optional `:phase-conductivity` declaration after a regional
+enthalpy material's knots:
+
+```lisp
+:phase-conductivity
+(phase-conductivity
+  :law "linear-liquid-mass-fraction"
+  :solid-multiplier 1.0
+  :liquid-multiplier 0.2
+  :source "synthetic phase multipliers for an educational model")
+```
+
+At each nonlinear trial, the solver evaluates the liquid mass fraction at
+every node and uses each tetrahedron's mean fraction to scale its existing
+conductivity tensor. A 0.2 liquid multiplier means that the declared liquid
+limit conducts at one fifth of the base tensor's value at the same temperature.
+The exact enthalpy tangent includes this feedback, even on a latent plateau
+where temperature is fixed but liquid fraction changes. A region without a
+declaration retains its original conductivity.
+
+The base tensor still comes from its original material card and temperature
+domain. These optional factors are separately declared model inputs, recorded
+with their source; they do not establish a solid/liquid volume-mixture law or
+supply experimentally validated phase properties. Historical v13 projects
+migrate without adding a multiplier.
+
+`cooling-enthalpy-phase-conductivity.fsim` combines the synthetic declaration
+above with the existing 20 W startup pulse, Robin boundary and gray radiation:
+
+```bash
+frankensim --json validate data/reference-project/cooling-enthalpy-phase-conductivity.fsim
+frankensim --json import data/reference-project/cooling-enthalpy-phase-conductivity.fsim \
+  data/reference-project/plate.stl enthalpy-phase.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-enthalpy-phase-conductivity.fsim \
+  enthalpy-phase.db --materials data/reference-project/aa6061.fsmcdpk \
+  --materials data/reference-project/gray-surface.fsmcdpk
+```
+
 ## Pulse and duty-cycle heating
 
 Schema v12 admits optional `:power-schedules` inside the transient declaration.

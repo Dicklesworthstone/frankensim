@@ -187,7 +187,7 @@ bindings; it runs no solves and admits no scenarios itself.
   Migration from v9 is an envelope rewrite; a pre-v10 payload declaring one is
   refused.
 - Wire: `lower`/`recognize` map `ProjectSpec` to and from the `fs_ir::Node`
-  envelope `(fsim-project :version 13 ...)`. `print_sexpr`/`parse_sexpr` and
+  envelope `(fsim-project :version 14 ...)`. `print_sexpr`/`parse_sexpr` and
   `print_json`/`parse_json` are the two spellings; `parse_sexpr_lenient`
   accepts noncanonical bytes and omitted defaultable fields, issuing a
   `CanonicalizationReceipt` (both hashes, `verifies()`) and `DefaultReceipt`s.
@@ -255,7 +255,24 @@ bindings; it runs no solves and admits no scenarios itself.
   cancellation and accepted-step energy checks remain execution responsibilities;
   schema admission claims no physical validation, moving geometry, advection,
   pressure work or energetic internal-variable evolution.
-- `FSIM_VERSION = 13`. Readers refuse other versions
+- Optional `TransientRegionEnthalpy.phase_conductivity` (schema v14) declares
+  `TransientPhaseConductivity`: strictly positive finite dimensionless solid
+  and liquid multipliers and a nonempty source. Its only wire law is
+  `linear-liquid-mass-fraction`; missing/unknown laws and dimensional multiplier
+  values refuse. `model()` uses the existing conduction law, which multiplies
+  each element's base conductivity tensor at mean nodal temperature by
+  `solid_multiplier + (liquid_multiplier - solid_multiplier) * mean(f_liquid)`.
+  The fraction is the mean of the element's nodal liquid **mass** fractions;
+  no volume-fraction mixture, phase-density effect or tensor reorientation is
+  inferred. The base tensor retains its temperature dependence, validity and
+  card receipts; the separately sourced multiplier supplies no card authority.
+  Regions without a declaration retain their base conductivity. Both wire
+  spellings bind the law, multipliers and source. V13 migration preserves all
+  previous storage and base-conductivity inputs, and pre-v14 payloads carrying
+  phase-dependent conductivity refuse. The runnable synthetic
+  `cooling-enthalpy-phase-conductivity.fsim` composes this declaration with
+  existing enthalpy, startup-pulse, Robin and gray-radiation inputs.
+- `FSIM_VERSION = 14`. Readers refuse other versions
   (`fsim-unsupported-version`); `migrate_envelope` is the only path from an
   older envelope, applies a registered `MigrationRule`, and returns a
   `ProjectMigrationReceipt` (old/new hashes + rule, `verifies()`). The

@@ -47,6 +47,8 @@ mod transient_enthalpy;
 mod transient_enthalpy_radiation;
 #[path = "solve/transient_enthalpy_natural.rs"]
 mod transient_enthalpy_natural;
+#[path = "solve/transient_enthalpy_conductivity.rs"]
+mod transient_enthalpy_conductivity;
 
 #[path = "solve/transient_workload.rs"]
 mod transient_workload;

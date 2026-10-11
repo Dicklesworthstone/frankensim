@@ -29,8 +29,9 @@ use crate::spec::{
     RadiatingSurface, RequirementDirection, RequirementSeverity, RequirementSource,
     RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, SurfaceOffset,
     ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, TransientEnthalpy,
-    TransientEnthalpyKnot, TransientPowerStep, TransientRegionCapacity, TransientRegionEnthalpy,
-    TransientRegionPower, UnitsDoctrine, Vent, Versions,
+    TransientEnthalpyKnot, TransientPhaseConductivity, TransientPowerStep,
+    TransientRegionCapacity, TransientRegionEnthalpy, TransientRegionPower, UnitsDoctrine, Vent,
+    Versions,
 };
 
 /// Domain for canonical `.fsim` byte hashing.
@@ -753,7 +754,7 @@ fn lower_enthalpy(enthalpy: &TransientEnthalpy) -> Result<Node, ProjectError> {
                 float(knot.liquid_mass_fraction),
             ]));
         }
-        materials.push(list(vec![
+        let mut material = vec![
             sym("material"),
             kw("region"),
             text(&row.region),
@@ -767,7 +768,24 @@ fn lower_enthalpy(enthalpy: &TransientEnthalpy) -> Result<Node, ProjectError> {
             qty(row.initial_specific_enthalpy)?,
             kw("knots"),
             list(knots),
-        ]));
+        ];
+        if let Some(law) = &row.phase_conductivity {
+            material.extend([
+                kw("phase-conductivity"),
+                list(vec![
+                    sym("phase-conductivity"),
+                    kw("law"),
+                    text("linear-liquid-mass-fraction"),
+                    kw("solid-multiplier"),
+                    float(law.solid_multiplier),
+                    kw("liquid-multiplier"),
+                    float(law.liquid_multiplier),
+                    kw("source"),
+                    text(&law.source),
+                ]),
+            ]);
+        }
+        materials.push(list(material));
     }
     Ok(list(vec![
         sym("enthalpy"),
@@ -2927,6 +2945,7 @@ fn read_enthalpy(node: &Node, out: &mut Vec<Violation>) -> Option<TransientEntha
                         "reference-density",
                         "initial-specific-enthalpy",
                         "knots",
+                        "phase-conductivity",
                     ],
                     out,
                 );
@@ -3002,6 +3021,8 @@ fn read_enthalpy(node: &Node, out: &mut Vec<Violation>) -> Option<TransientEntha
                         out,
                     ),
                     knots,
+                    phase_conductivity: field(&fields, "phase-conductivity")
+                        .and_then(|node| read_phase_conductivity(node, out)),
                 });
             }
         }
@@ -3015,6 +3036,50 @@ fn read_enthalpy(node: &Node, out: &mut Vec<Violation>) -> Option<TransientEntha
         materials,
         max_newton_iterations: limits[0],
         max_backtracks: limits[1],
+    })
+}
+
+fn read_phase_conductivity(
+    node: &Node,
+    out: &mut Vec<Violation>,
+) -> Option<TransientPhaseConductivity> {
+    let Some(("phase-conductivity", body)) = section_name(node) else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: "enthalpy phase-conductivity must be a `(phase-conductivity ...)` declaration"
+                .to_string(),
+            fix: "declare the linear-liquid-mass-fraction law, endpoint multipliers and source"
+                .to_string(),
+        });
+        return None;
+    };
+    let fields = read_pairs(
+        body,
+        "enthalpy.phase-conductivity",
+        &["law", "solid-multiplier", "liquid-multiplier", "source"],
+        out,
+    );
+    let law = expect_str(field(&fields, "law"), "phase-conductivity.law", out);
+    if law != "linear-liquid-mass-fraction" {
+        out.push(Violation {
+            code: "project-conduction-transient-phase-conductivity-law",
+            what: format!("unsupported phase-conductivity law `{law}`"),
+            fix: "declare linear-liquid-mass-fraction; no volume-fraction mixture is inferred"
+                .to_string(),
+        });
+    }
+    Some(TransientPhaseConductivity {
+        solid_multiplier: expect_float(
+            field(&fields, "solid-multiplier"),
+            "phase-conductivity.solid-multiplier",
+            out,
+        ),
+        liquid_multiplier: expect_float(
+            field(&fields, "liquid-multiplier"),
+            "phase-conductivity.liquid-multiplier",
+            out,
+        ),
+        source: expect_str(field(&fields, "source"), "phase-conductivity.source", out),
     })
 }
 

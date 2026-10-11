@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
 use fs_scenario::Violation;
 
-use crate::spec::{ConductionTransient, TransientRegionEnthalpy, dims};
+use crate::spec::{ConductionTransient, TransientPhaseConductivity, TransientRegionEnthalpy, dims};
 
 fn invalid(code: &'static str, what: impl Into<String>, fix: &str) -> Violation {
     Violation {
@@ -21,6 +21,38 @@ fn work_limit() -> Violation {
         "the event-aligned coarse grid and its nested half grid exceed the declared combined step cap",
         "increase max-steps to cover three times the coarse intervals, at most 10000; each workload switch consumes a time-grid boundary",
     )
+}
+
+impl TransientPhaseConductivity {
+    /// Admit the declared mass-fraction law through the shared conduction owner.
+    /// The multiplier acts on the existing base tensor at mean nodal temperature,
+    /// evaluated at the element mean nodal liquid mass fraction. It does not
+    /// change that tensor's source validity or create a material-query receipt.
+    ///
+    /// # Errors
+    /// Refuses a missing source or nonpositive/nonfinite endpoint multipliers.
+    pub fn model(
+        &self,
+    ) -> Result<fs_conduction::material::LiquidMassFractionConductivity, Violation> {
+        if self.source.trim().is_empty() {
+            return Err(invalid(
+                "project-conduction-transient-phase-conductivity-source",
+                "phase-dependent conductivity has no source or engineering basis",
+                "state the basis for the declared phase multipliers separately from the base conductivity card",
+            ));
+        }
+        fs_conduction::material::LiquidMassFractionConductivity::declared(
+            self.solid_multiplier,
+            self.liquid_multiplier,
+        )
+        .map_err(|error| {
+            invalid(
+                "project-conduction-transient-phase-conductivity",
+                format!("phase-dependent conductivity refuses: {error}"),
+                "declare finite strictly positive dimensionless solid and liquid multipliers",
+            )
+        })
+    }
 }
 
 impl TransientRegionEnthalpy {

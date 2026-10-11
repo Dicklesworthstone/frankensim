@@ -53,7 +53,10 @@ pub const STUDY_FSIM_VERSION: u32 = 1;
 /// Version 13 adds optional stationary spatial total-enthalpy transport with
 /// explicit regional curves, reference densities, initial enthalpies and
 /// nonlinear work controls. Older projects keep their declared capacities.
-pub const FSIM_VERSION: u32 = 13;
+/// Version 14 adds optional sourced conductivity multipliers linear in liquid
+/// mass fraction per enthalpy region. Earlier projects retain their existing
+/// base conductivity; migration never infers a phase-dependent scaling law.
+pub const FSIM_VERSION: u32 = 14;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,
@@ -88,8 +91,9 @@ pub use spec::{
     RadiatingSurface, RequirementDirection, RequirementSeverity, RequirementSource,
     RequirementSourceKind, RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings,
     SurfaceOffset, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, TransientEnthalpy,
-    TransientEnthalpyKnot, TransientPowerStep, TransientRegionCapacity, TransientRegionEnthalpy,
-    TransientRegionPower, UnitsDoctrine, Vent, Versions, requirement_source_reviews,
+    TransientEnthalpyKnot, TransientPhaseConductivity, TransientPowerStep,
+    TransientRegionCapacity, TransientRegionEnthalpy, TransientRegionPower, UnitsDoctrine, Vent,
+    Versions, requirement_source_reviews,
 };
 pub use study::{
     StudyBudgets, StudyConstraints, StudyDomain, StudyHole, StudyObjective, StudyOptimizer,
