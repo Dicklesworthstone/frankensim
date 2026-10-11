@@ -190,7 +190,7 @@ fn forty_board_coordinates_reach_projected_bem_feedback_and_complete_stereo_rece
         )
         .unwrap()
     };
-    let audio = exterior_audio::render(&mut scene.piano, score(), 2400, &baked, 4.).unwrap();
+    let audio = exterior_audio::render(&mut scene.piano, score(), 2400, &baked, 4., crate::wav_output::Format::Pcm16).unwrap();
     let mut events = score();
     let mut unreacted = score();
     for n in 0..2400 {

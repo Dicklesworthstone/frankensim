@@ -47,7 +47,7 @@ fn section_derived_skin_reaches_real_source_hammers_bem_and_stereo_pcm() {
         let (baked,_,_)=bake(&mut actual,loaded).unwrap();bake(&mut direct,loaded).unwrap();
         assert_eq!(actual.boundary.surface.areas().len(),16);
         assert!(actual.spec.source.contains("explicit volume-preserving continuous"));
-        let out=exterior_audio::render(&mut actual.piano,score(),2400,&baked,2.).unwrap();
+        let out=exterior_audio::render(&mut actual.piano,score(),2400,&baked,2.,crate::wav_output::Format::Pcm16).unwrap();
         assert!(out.peak_pa>1e-14);assert!(actual.piano.accounting.felt_loss_j>0.);
         assert_eq!(u16::from_le_bytes([out.wav[22],out.wav[23]]),2);
         let mut schedule=score();

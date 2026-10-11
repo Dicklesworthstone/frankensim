@@ -3,7 +3,9 @@
 //! odd frequencies are held out. No physics or validation bound changes on failure.
 use super::{engine::Instrument,performance::Performance,exterior_geometry::{Samples,RATE}};
 use fs_math::{c64::C64,det};
-use fs_couple::pcm_wav::{decimate::Decimator,encode_pcm16_wav_interleaved};
+use fs_couple::pcm_wav::decimate::Decimator;
+#[cfg(test)]
+use fs_couple::pcm_wav::encode_pcm16_wav_interleaved;
 use fs_vfit::{FitOptions,WeightPreset,vector_fit};
 use fs_vfit::discretize::{bilinear_state_space,DiscreteStateSpace,DiscreteStateSpaceRuntime,DelayedFilter,DigitalFilter};
 
@@ -112,7 +114,8 @@ pub struct Rendered {pub wav:Vec<u8>,pub report:String,pub peak_pa:f64}
 /// Offline, fresh-at-rest instrument, one event/decimation clock for all
 /// receivers. Failures publish no WAV; accepted mechanics may have advanced,
 /// so discard this candidate rather than claiming cross-owner rollback.
-pub fn render(piano:&mut Instrument,score:Performance,frames:usize,baked:&Baked,full_scale_pa:f64)
+pub fn render(piano:&mut Instrument,score:Performance,frames:usize,baked:&Baked,full_scale_pa:f64,
+    format:super::wav_output::Format)
     ->Result<Rendered,String> {
     if !(2400..=2_880_000).contains(&frames) || !full_scale_pa.is_finite() || full_scale_pa<=0. {
         return Err("exterior render requires a fresh resting piano and matching complete clocks/basis".into());
@@ -123,20 +126,21 @@ pub fn render(piano:&mut Instrument,score:Performance,frames:usize,baked:&Baked,
         stream.render_interleaved_block(&mut pressure).map_err(|e|e.to_string())?;
         (pressure,channels,stream.decimator_delay_frames())
     };
-    let (wav,clips)=encode_pcm16_wav_interleaved(&pressure,RATE,channels as u16,full_scale_pa).map_err(|e|e.to_string())?;
+    let wav=format.encode(&pressure,RATE,channels as u16,full_scale_pa)?;
     let peak_pa=pressure.iter().fold(0.0_f64,|m,v|m.max(v.abs()));
-    if clips!=0 {
-        return Err(format!("exterior PCM refuses {clips} clipped samples at {full_scale_pa} Pa full scale (peak {peak_pa:e} Pa); increase the explicit full-scale pressure and render again; no WAV published"));
-    }
     let coupling=if piano.has_radiation() {
         "Passive acoustic feedback, second-order substep splitting"
     } else {"One-way acoustics, no radiation backreaction"};
-    let report=format!("{frames} frames, {channels} receivers, {RATE} Hz, peak {peak_pa:e} Pa; {clips} clips at {full_scale_pa} Pa full scale, no normalization.\nHeld-out transfer max={}, worst modal RMS={}; flight lower bounds {:?} s, decimator delay {} frames.\nInput {} J; combined stored {} J; total loss {} J; combined closure {} J. Acoustic storage {} J and acoustic loss {} J (exterior) are included once in those totals. Cavity storage {} J and cavity momentum loss {} J are also included once. {coupling}. No flexible lid/cabinet, room or accuracy outside the sampled band.",
+    let encoding=format.label();
+    let mut report=format!("{frames} frames, {channels} receivers, {RATE} Hz, peak {peak_pa:e} Pa; {encoding}, 0 clips at {full_scale_pa} Pa full scale, no normalization.\nHeld-out transfer max={}, worst modal RMS={}; flight lower bounds {:?} s, decimator delay {} frames.\nInput {} J; combined stored {} J; total loss {} J; combined closure {} J. Acoustic storage {} J and acoustic loss {} J (exterior) are included once in those totals. Cavity storage {} J and cavity momentum loss {} J are also included once. {coupling}. No flexible lid/cabinet, room or accuracy outside the sampled band.",
         baked.maximum_error,baked.worst_rms_error,baked.delays_s,decimator_delay,
         piano.accounting.input_work_j,piano.energy_j(),piano.accounting.dissipated_j(),
         piano.accounting.input_work_j-piano.energy_j()-piano.accounting.dissipated_j(),
         piano.radiation_energy_j(),piano.accounting.radiation_loss_j,
         piano.cavity_energy_j(),piano.accounting.cavity_loss_j);
+    if format==super::wav_output::Format::Float32 && peak_pa>full_scale_pa {
+        report.push_str("\nFloat WAV preserves pressure above nominal digital full scale; attenuate before fixed-point playback.");
+    }
     Ok(Rendered {wav,report,peak_pa})
 }
 

@@ -109,7 +109,7 @@ fn imported_lid_and_native_board_skin_reach_reacted_stereo_on_one_mechanical_clo
         bake(&mut manual, feedback).unwrap();
         let score = || performance::Performance::read(
             "sample,event,key,value\n0,note_on,69,0.5\n1200,note_off,69,0\n", &[69], 2400).unwrap();
-        let audio = exterior_audio::render(&mut actual.piano, score(), 2400, &baked, 2.).unwrap();
+        let audio = exterior_audio::render(&mut actual.piano, score(), 2400, &baked, 2., crate::wav_output::Format::Pcm16).unwrap();
         let mut schedule = score(); let mut bare_schedule = score();
         for n in 0..2400 {
             schedule.dispatch(n, &mut manual.piano).unwrap(); manual.piano.step().unwrap();

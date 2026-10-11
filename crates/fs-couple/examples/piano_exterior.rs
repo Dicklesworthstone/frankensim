@@ -13,6 +13,7 @@
 #[path="grand_piano/engine.rs"] mod engine;
 #[path="grand_piano/microphone.rs"] mod microphone;
 #[path="grand_piano/audio.rs"] mod audio;
+#[path="grand_piano/wav_output.rs"] mod wav_output;
 #[path="grand_piano/hammer_materials.rs"] mod hammer_materials;
 #[path="grand_piano/string_polarization.rs"] mod string_polarization;
 #[path="grand_piano/cavity.rs"] mod cavity;
@@ -47,6 +48,7 @@ piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj A
     [--performance events.csv | --midi performance.mid]
     [--midi-channel 1..16] [--midi-velocity-max-m-s V] [--midi-half-pedal]
     [--note 21..108] [--velocity m/s]
+    [--wav-format pcm16|pcm24|float32]
 These playback options apply to both render and render-loaded, except
 --radiation-ports, which explicitly selects acoustic reduction for render-loaded.
 It preserves all admitted board coordinates (up to 128), full microphone
@@ -60,6 +62,9 @@ projected from the same full-vector board modes. Every key must supply its
 bridge site, 3-D arm, orthonormal string/hammer frame and lateral damper ratio.
 Missing motion or a primary projection inconsistent with the board refuses;
 no lateral coupling is guessed. See grand_piano/STRING_POLARIZATION.md.
+--wav-format selects direct PCM16 (default), PCM24 or Float32 pressure export.
+All formats use the acoustic specification's same pressure full scale. Float32
+retains finite excursions beyond +/-1; attenuate before fixed-point playback.
 --cavity adds reciprocal sealed-cavity compression and standing waves below
 the flat board, using supplied dimensions, air state and momentum damping.
 It composes with both render and render-loaded, including stereo receivers;
@@ -495,7 +500,8 @@ fn run(args:&[String])->Result<(),String> {
             if let (Some(n),Some(score))=(frames,score) {
                 let (baked,samples,load_report)=bake(&mut scene,command=="render-loaded")?;
                 let score_report=score.report;
-                let audio=exterior_audio::render(&mut scene.piano,score.performance,n,&baked,scene.spec.full_scale_pa)?;
+                let audio=exterior_audio::render(&mut scene.piano,score.performance,n,&baked,
+                    scene.spec.full_scale_pa,options.wav_format.unwrap_or_default())?;
                 publish(output,&audio.wav)?;
                 let physical_report=options.report(&scene.piano);
                 print!("{}",board_reduction_report(&scene.board));
@@ -632,7 +638,7 @@ mod tests {
         let samples=scene.boundary.sample(&scene.spec).unwrap();
         let baked=exterior_audio::Baked::from_samples(&samples,scene.spec.fit_order).unwrap();
         let score=||performance::Performance::read("sample,event,key,value\n0,note_on,69,0.5\n1200,note_off,69,0\n",&[69],2400).unwrap();
-        let audio=exterior_audio::render(&mut scene.piano,score(),2400,&baked,2.).unwrap();
+        let audio=exterior_audio::render(&mut scene.piano,score(),2400,&baked,2.,wav_output::Format::Pcm16).unwrap();
         assert!(scene.piano.accounting.felt_loss_j>0.,"the source hammer must actually contact the string");
         assert!(audio.peak_pa>1e-14);assert_eq!(&audio.wav[..4],b"RIFF");
         assert_eq!(u16::from_le_bytes([audio.wav[22],audio.wav[23]]),2);
@@ -663,7 +669,7 @@ mod tests {
             .any(|s|s.bridge.iter().any(|g|g.abs()>1e-8)));
         let (baked,_,_)=bake(&mut scene,false).unwrap();
         let score=performance::Performance::read("sample,event,key,value\n0,note_on,69,0.5\n1200,note_off,69,0\n",&[69],2400).unwrap();
-        let audio=exterior_audio::render(&mut scene.piano,score,2400,&baked,2.).unwrap();
+        let audio=exterior_audio::render(&mut scene.piano,score,2400,&baked,2.,wav_output::Format::Pcm16).unwrap();
         assert_eq!(u16::from_le_bytes([audio.wav[22],audio.wav[23]]),2);
         assert!(audio.peak_pa>1e-14);
         assert!(scene.piano.accounting.felt_loss_j>0. && scene.piano.accounting.damper_loss_j>0.);
@@ -690,8 +696,8 @@ mod tests {
             let score=||performance::Performance::read(
                 "sample,event,key,value\n0,note_on,69,2.48\n1200,note_off,69,0\n",
                 &[69],2400).unwrap();
-            let source=exterior_audio::render(&mut selected.piano,score(),2400,&baked,2.).unwrap();
-            let old=exterior_audio::render(&mut baseline.piano,score(),2400,&baked,2.).unwrap();
+            let source=exterior_audio::render(&mut selected.piano,score(),2400,&baked,2.,wav_output::Format::Pcm16).unwrap();
+            let old=exterior_audio::render(&mut baseline.piano,score(),2400,&baked,2.,wav_output::Format::Pcm16).unwrap();
             assert_ne!(source.wav,old.wav);
             assert!(selected.piano.accounting.felt_relaxation_loss_j>0.0);
             assert!(source.peak_pa>0.0);

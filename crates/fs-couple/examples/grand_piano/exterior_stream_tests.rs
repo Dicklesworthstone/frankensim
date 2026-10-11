@@ -145,14 +145,26 @@ fn offline_wav_uses_the_same_physical_stream_and_refuses_actual_pcm_clipping() {
     let full_scale=2.*peak+1.;
     let (reference,clips)=encode_pcm16_wav_interleaved(&pressure,RATE,2,full_scale).unwrap();
     assert_eq!(clips,0);
-    let rendered=render(&mut pb,score(STRIKE),2400,&baked,full_scale).unwrap();
+    let rendered=render(&mut pb,score(STRIKE),2400,&baked,full_scale,crate::wav_output::Format::Pcm16).unwrap();
     assert_eq!(rendered.wav,reference);assert_eq!(rendered.peak_pa,peak);
     assert_eq!(pa.bank.q,pb.bank.q);assert_eq!(pa.bank.v,pb.bank.v);
     assert!(rendered.report.contains("0 clips"));
-    let error=render(&mut pc,score(STRIKE),2400,&baked,peak/4.).err().expect("clipping must refuse WAV output");
+    let error=render(&mut pc,score(STRIKE),2400,&baked,peak/4.,crate::wav_output::Format::Pcm16).err().expect("clipping must refuse WAV output");
     assert!(error.contains("clipped samples") && error.contains("no WAV published"));
     // Output conversion changes no mechanics and never hides clipping by gain.
     assert_eq!(pa.bank.q,pc.bank.q);assert_eq!(pa.bank.v,pc.bank.v);
+    // Direct high-resolution export observes this same stream before PCM16
+    // quantization, including floating output above nominal digital full scale.
+    use crate::wav_output::Format;
+    use fs_couple::pcm_wav::high_resolution::{encode_pressure_wav,Encoding};
+    for (format,encoding,scale) in [(Format::Pcm24,Encoding::Pcm24,full_scale),
+        (Format::Float32,Encoding::Float32,peak/4.)] {
+        let mut candidate=piano(4,false);
+        let audio=render(&mut candidate,score(STRIKE),2400,&baked,scale,format).unwrap();
+        assert_eq!(audio.wav,encode_pressure_wav(&pressure,RATE,2,scale,encoding).unwrap());
+        assert_eq!(audio.peak_pa,peak);assert!(audio.report.contains(format.label()));
+        assert_eq!(pa.bank.q,candidate.bank.q);assert_eq!(pa.bank.v,candidate.bank.v);
+    }
 }
 
 #[test]

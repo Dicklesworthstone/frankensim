@@ -21,7 +21,7 @@ fn loaded_bem_playback_changes_mechanics_and_preserves_one_stereo_clock() {
     }
     let score=||performance::Performance::read(
         "sample,event,key,value\n0,note_on,69,0.5\n1200,note_off,69,0\n",&[69],2400).unwrap();
-    let audio=exterior_audio::render(&mut scene.piano,score(),2400,&baked,2.).unwrap();
+    let audio=exterior_audio::render(&mut scene.piano,score(),2400,&baked,2.,crate::wav_output::Format::Pcm16).unwrap();
     assert!(scene.piano.accounting.felt_loss_j>0.,"the source hammer must actually strike");
     assert!(audio.peak_pa>1e-14);assert!(audio.report.contains("Passive acoustic feedback"));
     assert!(audio.report.contains("Acoustic storage"));assert!(!audio.report.contains("no radiation backreaction"));
@@ -71,7 +71,7 @@ fn full_physical_controls_reach_loaded_stereo_without_a_second_mechanical_clock(
     let (baked,_,_)=bake(&mut scene,true).unwrap();bake(&mut manual,true).unwrap();
     let score=||performance::Performance::read(
         "sample,event,key,value\n0,note_on,69,0.5\n1200,note_off,69,0\n",&[69],2400).unwrap();
-    let audio=exterior_audio::render(&mut scene.piano,score(),2400,&baked,2.).unwrap();
+    let audio=exterior_audio::render(&mut scene.piano,score(),2400,&baked,2.,crate::wav_output::Format::Pcm16).unwrap();
     let mut events=score();
     for n in 0..2400 {events.dispatch(n,&mut manual.piano).unwrap();manual.piano.step().unwrap();}
     assert_eq!(scene.piano.bank.q,manual.piano.bank.q);assert_eq!(scene.piano.bank.v,manual.piano.bank.v);
@@ -92,7 +92,7 @@ fn force_driven_csv_reaches_loaded_stereo_and_matches_direct_owner_controls() {
     assert!(score.report.contains("peak N"));
     // This 70 N jack fixture reaches 3.725 Pa. Its explicit PCM recording
     // range must contain that physical signal; clipping admission stays on.
-    let audio=exterior_audio::render(&mut scene.piano,score.performance,4800,&baked,4.).unwrap();
+    let audio=exterior_audio::render(&mut scene.piano,score.performance,4800,&baked,4.,crate::wav_output::Format::Pcm16).unwrap();
     for n in 0..4800 {
         match n {
             0=>{manual.piano.set_sustain(0.5).unwrap();manual.piano.set_una_corda(true);},

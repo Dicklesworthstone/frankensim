@@ -90,7 +90,7 @@ fn nonlinear_selection_reaches_loaded_and_one_way_stereo_without_a_second_mechan
         crate::bake(&mut manual, loaded).unwrap(); crate::bake(&mut reference, loaded).unwrap();
         let score = || Performance::read("sample,event,key,value\n0,note_on,69,1\n1200,sustain,0,0.4\n1200,note_off,69,0\n",
             &[69], 2400).unwrap();
-        let output = crate::exterior_audio::render(&mut scene.piano, score(), 2400, &baked, 2.).unwrap();
+        let output = crate::exterior_audio::render(&mut scene.piano, score(), 2400, &baked, 2., crate::wav_output::Format::Pcm16).unwrap();
         let mut program = score(); let mut linear_program = score();
         let mut maximum_extension = 0.0_f64;
         for sample in 0..2400 {

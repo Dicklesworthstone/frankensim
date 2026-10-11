@@ -17,6 +17,15 @@ Use `--wav-format float32` for floating-point output. The existing
 to both stereo channels. Omitting `--wav-format` keeps PCM16. The selector
 requires `--render`; no receiver CSV or intermediate WAV is needed.
 
+## Finite-body acoustic playback
+
+Append the same `--wav-format pcm24` or `--wav-format float32` selector to
+`piano_exterior render` or `render-loaded`. The pressure full scale comes from
+the existing acoustic specification. Both paths encode the actual mono/stereo
+receiver stream, including passive radiation loading when selected.
+Harmonic `response` and `admittance` commands refuse this playback option.
+Encoding does not change the transfer-fit limits or the physical flight delay.
+
 ## Re-encode an existing unquantized pressure trace
 
 `piano_audio` remains available to encode an existing receiver-pressure CSV
@@ -73,6 +82,8 @@ cargo test -p fs-couple --lib pcm_wav::high_resolution
 cargo test -p fs-couple --example piano_audio
 cargo test -p fs-couple --example grand_piano wav_format
 cargo test -p fs-couple --example grand_piano wav_output
+cargo test -p fs-couple --example piano_exterior wav_formats
+cargo test -p fs-couple --example piano_exterior offline_wav
 ```
 
 Six encoder regressions cover exact headers, signed 24-bit packing, padding,
@@ -92,3 +103,8 @@ options. The shared encoder-selection checks preserve the existing PCM16 bytes.
 These new Rust tests are authored but were not executed: the execution service
 disconnected during setup. They do not establish a listening or model-fidelity
 claim.
+
+The exterior regression compares actual stereo render output against the same
+unquantized stream in each encoding and preserves identical final mechanical
+states. Its floating case retains finite pressure above nominal digital full
+scale; the fixed-point clipping case still refuses publication.

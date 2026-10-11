@@ -42,8 +42,8 @@ fn cavity_reaction_reaches_exterior_pressure_and_shares_the_loaded_stereo_clock(
         let score=||performance::Performance::read(
             "sample,event,key,value\n0,note_on,69,0.5\n1000,sustain,0,0.4\n1000,note_off,69,0\n",
             &[69],frames as u64).unwrap();
-        let output=exterior_audio::render(&mut scene.piano,score(),frames,&baked,2.).unwrap();
-        let baseline=exterior_audio::render(&mut outside_only.piano,score(),frames,&baked,2.).unwrap();
+        let output=exterior_audio::render(&mut scene.piano,score(),frames,&baked,2.,crate::wav_output::Format::Pcm16).unwrap();
+        let baseline=exterior_audio::render(&mut outside_only.piano,score(),frames,&baked,2.,crate::wav_output::Format::Pcm16).unwrap();
         let mut events=score();
         for sample in 0..frames {
             events.dispatch(sample as u64,&mut manual.piano).unwrap();manual.piano.step().unwrap();

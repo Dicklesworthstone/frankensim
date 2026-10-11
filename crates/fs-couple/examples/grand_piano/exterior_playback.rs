@@ -14,6 +14,7 @@ pub use score::Score;
 pub struct Options {
     pub substeps: usize,
     pub modes: usize,
+    pub wav_format: Option<super::wav_output::Format>,
     pub midi: Option<String>,
     pub performance: Option<String>,
     pub midi_mapping: midi::Mapping,
@@ -38,7 +39,7 @@ pub struct Options {
 }
 impl Default for Options {
     fn default() -> Self {
-        Self { substeps: 4, modes: 24, midi: None, performance: None,
+        Self { substeps: 4, modes: 24, wav_format: None, midi: None, performance: None,
             midi_mapping: midi::Mapping::default(), note: None, velocity: None,
             mapping_explicit: false, hammers: None,
             hammer_footprints: None, dampers: None, string_stretching: None, string_polarization: None,
@@ -94,7 +95,7 @@ impl Options {
                 continue;
             }
             if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers", "--string-stretching", "--string-polarization", "--cavity", "--rigid-assembly",
-                "--board-reduction", "--radiation-ports", "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity"].contains(&flag.as_str()) {
+                "--board-reduction", "--radiation-ports", "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity", "--wav-format"].contains(&flag.as_str()) {
                 return Err(format!("unknown exterior playback option {flag}"));
             }
             let value = args.next().filter(|v| !v.is_empty() && !v.starts_with("--"))
@@ -103,6 +104,7 @@ impl Options {
             match flag.as_str() {
                 "--modes" => result.modes = value.parse().map_err(|_| invalid())?,
                 "--substeps" => result.substeps = value.parse().map_err(|_| invalid())?,
+                "--wav-format" => result.wav_format = Some(super::wav_output::Format::parse(value)?),
                 "--hammers" => result.hammers = Some(value.clone()),
                 "--hammer-footprints" => result.hammer_footprints = Some(value.clone()),
                 "--dampers" => result.dampers = Some(value.clone()),
@@ -143,6 +145,9 @@ impl Options {
     }
     pub fn validate_harmonic(&self) -> Result<(), String> {
         self.validate()?;
+        if self.wav_format.is_some() {
+            return Err("--wav-format requires render or render-loaded".into());
+        }
         if self.radiation_ports.is_some() {
             return Err("--radiation-ports requires render-loaded; harmonic analysis uses the complete BEM load".into());
         }
@@ -456,6 +461,20 @@ mod tests {
             assert!(piano.accounting.felt_loss_j > 0.0);
             assert!((piano.accounting.input_work_j - piano.energy_j()
                 - piano.accounting.dissipated_j()).abs() < 1e-7);
+        }
+    }
+    #[test]
+    fn wav_formats_are_playback_only_and_invalid_encodings_refuse_early() {
+        use super::super::wav_output::Format;
+        assert_eq!(Options::default().wav_format, None);
+        for (name, format) in [("pcm16", Format::Pcm16), ("pcm24", Format::Pcm24),
+            ("float32", Format::Float32)] {
+            assert_eq!(parse(&["--wav-format", name]).unwrap().wav_format, Some(format));
+            assert!(Options::harmonic(&["--wav-format".into(), name.into()]).is_err());
+        }
+        for args in [vec!["--wav-format"], vec!["--wav-format", "float64"],
+            vec!["--wav-format", "pcm24", "--wav-format", "float32"]] {
+            assert!(parse(&args).is_err());
         }
     }
     #[test]
