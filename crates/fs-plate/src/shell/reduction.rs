@@ -16,6 +16,9 @@
 use super::{ShellMesh, ShellModel, local_bending_stiffness};
 mod tangent;
 use crate::{ModePair, PlateError, PlateSection};
+/// Optional small-angle rigid pose, separate from elastic shell strain.
+pub mod rigid;
+pub use rigid::RigidMotionLimit;
 
 /// Two-sided finite-thickness acoustic boundary and reciprocal modal projection.
 pub mod radiation;
@@ -50,6 +53,8 @@ pub struct ShellReduction {
     nodes:usize,
     triangles:Vec<[usize;3]>,
     area_normals:Vec<[f64;3]>,
+    // Present only for the explicitly selected linearized rigid-pose image.
+    rigid_motion:Option<rigid::RigidMotion>,
 }
 fn bad(what:&'static str)->PlateError {PlateError::BadSection{what}}
 // Use the existing shell rigid-motion conformance scale, not the very small
@@ -57,8 +62,8 @@ fn bad(what:&'static str)->PlateError {PlateError::BadSection{what}}
 // This is a floating-point admission allowance, not a physical soft spring.
 const RIGID_PROJECTION_ROUNDOFF: f64 = 2.0e-12;
 
-// Recognize only an EXACT supplied translation with zero physical rotations.
-// Near-rigid eigenvectors and rigid rotations keep the ordinary spectral gate.
+// The original image recognizes only an EXACT supplied translation with zero
+// physical rotations. The opt-in rigid-pose image has separate geometric checks.
 fn exact_translation(mesh:&ShellMesh, model:&ShellModel, mode:&ModePair)->bool {
     if mode.lambda!=0.0 {return false;}
     let at=|node:usize,c:usize|model.dof_map[6*node+c].map_or(0.0,|i|mode.phi[i]);
@@ -80,6 +85,27 @@ impl ShellReduction {
     /// Dimension, budget, finite-set, basis or section/pencil disagreement.
     pub fn new(mesh:&ShellMesh, sections:&[PlateSection], model:&ShellModel,
         modes:&[ModePair], budget:ReductionBudget)->Result<Self,PlateError> {
+        Self::build(mesh,sections,model,modes,budget,None)
+    }
+    /// Reduce an explicit small-angle rigid-pose plus elastic-displacement image.
+    /// The leading supplied modes must be geometric rigid motions and numerical
+    /// null vectors of this same free shell pencil. They retain their full mass,
+    /// translation, rotation and power ports, but contribute no internal strain.
+    /// Elastic Green--Lagrange strain and DKT bending are unchanged.
+    ///
+    /// This is a constant-inertia, first-order pose image: no finite rotation,
+    /// centrifugal or gyroscopic terms are inferred. The time owner MUST call
+    /// `rigid_rotation` on each accepted endpoint, including the initial state.
+    /// Newton trials may extrapolate the smooth potential without a hard barrier.
+    /// # Errors
+    /// Ordinary reduction errors, or an invalid rigid prefix/angle restriction.
+    pub fn new_with_linearized_rigid_motion(mesh:&ShellMesh, sections:&[PlateSection],
+        model:&ShellModel, modes:&[ModePair], budget:ReductionBudget,
+        limit:RigidMotionLimit)->Result<Self,PlateError> {
+        Self::build(mesh,sections,model,modes,budget,Some(limit))
+    }
+    fn build(mesh:&ShellMesh, sections:&[PlateSection], model:&ShellModel,
+        modes:&[ModePair], budget:ReductionBudget, limit:Option<RigidMotionLimit>)->Result<Self,PlateError> {
         mesh.validate()?;
         let n=modes.len();
         if n==0 || n>budget.max_modes || !budget.relative_tolerance.is_finite()
@@ -98,7 +124,10 @@ impl ShellReduction {
             return Err(bad("shell modal basis and pencil dimensions or frequencies disagree"));
         }
         let nn=n.checked_mul(n).ok_or_else(||bad("shell projection size overflow"))?;
-        let translation:Vec<_>=modes.iter().map(|m|exact_translation(mesh,model,m)).collect();
+        let rigid_motion=limit.map(|l|rigid::admit(mesh,model,modes,l)).transpose()?;
+        let rigid_count=rigid_motion.as_ref().map_or(0,|r|r.rotations.len());
+        let free_rigid:Vec<_>=modes.iter().enumerate()
+            .map(|(i,m)|i<rigid_count || exact_translation(mesh,model,m)).collect();
         let mut original=vec![0.0;nn];
         let mut roundoff=vec![0.0;nn];
         let mut work=vec![0.0;model.free];
@@ -112,24 +141,24 @@ impl ShellReduction {
                 }
             }
             model.k.spmv(&modes[j].phi,&mut work);
-            if translation.iter().any(|v|*v) {
+            if free_rigid.iter().any(|v|*v) {
                 for (row,out) in absolute_work.iter_mut().enumerate() {
                     let (columns,values)=model.k.row(row);
                     *out=columns.iter().zip(values).map(|(&column,value)|
                         value.abs()*modes[j].phi[column].abs()).sum();
                     if !out.is_finite() {return Err(bad("shell rigid projection scale overflow"));}
-                    // A geometrically constant displacement must also be a
+                    // An admitted geometric rigid displacement must also be a
                     // numerical null vector of the supplied pencil. A grounded
                     // or mismatched model must not get a free mode by declaration.
-                    if translation[j] && (!work[row].is_finite()
+                    if free_rigid[j] && (!work[row].is_finite()
                         || work[row].abs()>RIGID_PROJECTION_ROUNDOFF*(*out).max(1.0)) {
-                        return Err(bad("shell supplied translation is not free in its pencil"));
+                        return Err(bad("shell supplied rigid motion is not free in its pencil"));
                     }
                 }
             }
             for i in 0..n {
                 original[i*n+j]=modes[i].phi.iter().zip(&work).map(|(a,b)|a*b).sum();
-                if translation[i] || translation[j] {
+                if free_rigid[i] || free_rigid[j] {
                     roundoff[i*n+j]=RIGID_PROJECTION_ROUNDOFF*modes[i].phi.iter()
                         .zip(&absolute_work).map(|(a,b)|a.abs()*b).sum::<f64>();
                     if !roundoff[i*n+j].is_finite() {return Err(bad("shell rigid projection allowance overflow"));}
@@ -137,7 +166,7 @@ impl ShellReduction {
             }
         }
         // The ordinary spectral criterion is unchanged for elastic modes.
-        // Exact translations additionally use |Phi|^T |K| |Phi| to account for
+        // Admitted rigid motions also use |Phi|^T |K| |Phi| to account for
         // cancellation of large assembled entries, not an arbitrary floor on
         // the physical eigenvalues. No spring or frequency is inserted.
         let spectral_scale=modes.iter().map(|m|m.lambda).fold(0.0_f64,f64::max);
@@ -203,9 +232,18 @@ impl ShellReduction {
                 return Err(bad("shell reduction's small-signal stiffness does not match supplied pencil"));
             }
         }}
+        // Only after the complete pencil and projected stiffness checks pass:
+        // the selected rigid coordinates are pose, not linear displacement fed
+        // into GL strain. Feeding a tilt into GL would invent a quartic spring.
+        for f in &mut facets {for s in &mut f.strains[..rigid_count] {
+            *s=ModeStrain{dx:[0.;3],dy:[0.;3],linear:[0.;3]};
+        }}
+        for i in 0..n {for j in 0..n {
+            if i<rigid_count || j<rigid_count {remainder[i*n+j]=0.;}
+        }}
         Ok(Self{omegas:modes.iter().map(|m|m.lambda.sqrt()).collect(),remainder,facets,translations,
             nodes:mesh.nodes.len(),triangles:mesh.tris.clone(),area_normals,rotations,
-            reference_positions:mesh.nodes.clone(),section_thicknesses:sections.iter().map(|s|s.thickness).collect()})
+            reference_positions:mesh.nodes.clone(),section_thicknesses:sections.iter().map(|s|s.thickness).collect(),rigid_motion})
     }
     /// Linear frequencies of the supplied numerical basis [rad/s]; zero denotes
     /// an explicitly supplied rigid coordinate, not an invented soft spring.

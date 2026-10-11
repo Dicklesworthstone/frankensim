@@ -15,6 +15,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let feedback=acoustics::stereo::feedback::option(&mut args)?;
     let second=sticks::option(&mut args)?;
     let targets=targets::Selection::options(&mut args,second)?;
+    let rocking=rocking::option(&mut args)?;
     let first_force=mechanics::drive::option(&mut args)?;
     let second_force=mechanics::drive::second_option(&mut args)?;
     let squeeze=squeeze::option(&mut args)?;
@@ -25,6 +26,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let (args,stroke)=playing::parse(args)?;
     let command=args.first().map(String::as_str);
     if !is_command(command)||args.len()<2 {return Err("usage: hihat INPUT.fshh [steps]; hihat-wav INPUT [frames] [full_scale_pa]; hihat-mic INPUT [frames] [full_scale_pa] [x y z]; see HIHAT.md".into());}
+    rocking::admit_command(rocking,command.unwrap())?;
     if let Some(spec)=&microphone_spec {spec.admit_command(command.unwrap(),args.len()>4,right.is_some())?;}
     acoustics::stereo::feedback::admit_command(feedback,command.unwrap(),false)?;
     let mic=command==Some("hihat-mic");let audio=command!=Some("hihat");
@@ -46,8 +48,8 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     if let Some(mute)=&mute {mute.admit_command(command.unwrap())?;}
     let material=material_path.as_deref().map(|path|shell_relaxation::Spec::load(path,true)).transpose()?;
     let spec=Spec::load(Path::new(&args[1]))?;let [upper,lower]=spec.shells()?;
-    let pair=build_with_targets(&spec,&upper,&lower,stroke,second,steps,dt,audio,squeeze.as_ref(),
-        &shafts,&mallets,material.as_ref(),mute.as_ref(),targets)?;
+    let pair=build_with_rocking(&spec,&upper,&lower,stroke,second,steps,dt,audio,squeeze.as_ref(),
+        &shafts,&mallets,material.as_ref(),mute.as_ref(),targets,rocking)?;
     let receivers=match microphone_spec {
         Some(spec)=>spec.into_receivers(),
         None=>{let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}receivers},
@@ -83,7 +85,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     }
     eprintln!("hi-hat exterior strike targets: first={}, second={}; positive hand travel, launch speed and force act inward toward that hand's selected shell",
         pair.targets.first.label(),if e.second_stick.is_some(){pair.targets.second.label()}else{"none"});
-    eprintln!("paired cymbals: upper_modes={}, lower_modes={}, contact_sites={}, one joint mechanics; supplied masses/geometry and authored contact, not a calibrated hi-hat; axial carriage, no rocking; squeeze_film={}",
+    eprintln!("paired cymbals: upper_modes={}, lower_modes={}, contact_sites={}, one joint mechanics; supplied masses/geometry and authored contact, not a calibrated hi-hat; axial carriage; maximum_rigid_shell_angle_rad={rocking:?}; squeeze_film={}",
         pair.upper_modes.len(),pair.lower_modes.len(),pair.collision.n_points(),
         squeeze.as_ref().map_or("none",squeeze::Config::label));
     let gate=CancelGate::new_clock_free();let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());
@@ -106,6 +108,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let gas=squeeze.as_ref().is_some_and(|f|f.gas().is_some());
     if gas {write!(out,",gas_min_absolute_pa,gas_max_absolute_pa,gas_mass_kg,gas_free_energy_j")?;}
     if material.is_some() {write!(out,",shell_memory_energy_j,shell_relaxation_power_w")?;}
+    if rocking.is_some() {rocking::header(&mut out,"upper")?;rocking::header(&mut out,"lower")?;}
     if let Some(mute)=&e.mute {mute.header(&mut out)?;}
     writeln!(out)?;
     for _ in 0..steps {
@@ -133,6 +136,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
             let o=head_relaxation::observation(&e.system);
             write!(out,",{:.17e},{:.17e}",o.stored_energy_j,o.dissipated_power_w)?;
         }
+        if rocking.is_some() {rocking::row(&e.system,1,false,&mut out)?;rocking::row(&e.system,2,true,&mut out)?;}
         if let Some(mute)=&e.mute {mute.row(&e.system,&mut out)?;}
         writeln!(out)?;
     }

@@ -46,8 +46,11 @@ Primary sources:
 The splash path constructs a free curved, tapered shell, reduces its numerical
 modes, and projects **its own** Green–Lagrange membrane strain. No rectangular
 plate coefficients are borrowed. The first example retains vertical rigid
-translation plus elastic modes in an explicit 50–1200 Hz window. It omits the
-other rigid coordinates and is not a full rocking/sliding stand model. No
+translation plus elastic modes in an explicit 50–1200 Hz window. Supplying
+`--cymbal-rocking MAXIMUM_ANGLE_RAD` adds two small-angle rigid tilts with inertia
+from the actual shell mesh, and lets the same stand felts resist off-center
+impacts. This also works on both hi-hat shells; see [ROCKING.md](ROCKING.md).
+Lateral sliding and finite-rotation dynamics remain outside this image. No
 continuum accuracy or sufficient crash bandwidth is implied by that window.
 
 Six opposing felt patches reuse WoolFelt's loading, unloading and crush state.
@@ -148,8 +151,10 @@ assert bit-identical trajectories between the two hardware sampling choices.
 A differently suspended gong still needs its own support model; this importer
 does not silently make the stand appropriate for every shell.
 
-The window remains limited to 31 elastic modes plus vertical translation and to
-the mechanical clock's Nyquist guard. Increasing its upper edge is not proof of
+The complete window and rigid coordinates must fit within 32 modes per shell:
+31 elastic modes with vertical translation, or 29 with the two optional rocking
+directions. The mechanical clock's Nyquist guard also applies. Increasing the
+window's upper edge is not proof of
 an adequate in-plane basis or nonlinear bandwidth. The fixed-receiver acoustic
 bake remains 40–1640 Hz. Large scans, sharp features or broader frequency windows
 can exceed the existing budgets and should refuse, not truncate silently. An

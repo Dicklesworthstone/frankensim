@@ -64,6 +64,7 @@ impl ImpactSystem {
         &mut self, state: &mut Vec<f64>, candidate: &mut [WoolFeltState],
         before: f64, record: PreparedStepRecord, gate: &CancelGate,
     ) -> Result<ImpactFrame, ImpactError> {
+        self.mechanical.validate_rigid_motion(state)?;
         for (_,offset,film) in &self.membranes { film.observe_interleaved(state,*offset)?; }
         for (_,offset,string) in &self.strings { string.observe_interleaved(state,*offset)?; }
         for (_,offset,support) in &self.supports {support.observe_interleaved(state,*offset)?;}

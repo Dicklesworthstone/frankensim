@@ -26,7 +26,13 @@ struct Shell {
 }
 impl Shell {
     fn new(spec:&specimen::Specimen,dt:f64)->Result<Self,Error> {
-        let (mesh,reduction)=shell_prepare::prepare(spec,dt)?;
+        Self::new_with_rocking(spec,dt,None)
+    }
+    fn new_with_rocking(spec:&specimen::Specimen,dt:f64,rocking:Option<f64>)->Result<Self,Error> {
+        let (mesh,reduction)=match rocking {
+            Some(limit)=>shell_prepare::prepare_rocking(spec,dt,limit)?,
+            None=>shell_prepare::prepare(spec,dt)?,
+        };
         let skin=reduction.radiation_surface(&mesh.nodal_thickness_m,
             RadiationSurfaceBudget{max_panels:2048,max_panel_modes:65536})?;
         // The negative skin reverses vertex order; restore SOURCE connectivity
@@ -139,6 +145,14 @@ fn build_with_targets(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
     second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>,
     shafts:&shaft_playing::Selection,mallets:&mallets::Selection,material:Option<&shell_relaxation::Spec>,
     mute:Option<&compliant_mute::Spec>,targets:targets::Selection)->Result<Pair,Error> {
+    build_with_rocking(spec,upper,lower,stroke,second,steps,dt,audio,film,shafts,mallets,material,
+        mute,targets,None)
+}
+#[allow(clippy::too_many_arguments)]
+fn build_with_rocking(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:Stroke,
+    second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>,
+    shafts:&shaft_playing::Selection,mallets:&mallets::Selection,material:Option<&shell_relaxation::Spec>,
+    mute:Option<&compliant_mute::Spec>,targets:targets::Selection,rocking:Option<f64>)->Result<Pair,Error> {
     targets.admit(second)?;
     mallets.admit("hihat",stroke,second)?;
     if let Some(mute)=mute {mute.admit_command("hihat")?;}
@@ -168,7 +182,8 @@ fn build_with_targets(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
             }
         }
     }
-    let upper=Shell::new(upper,dt)?;let lower=Shell::new(lower,dt)?;
+    let upper=Shell::new_with_rocking(upper,dt,rocking)?;
+    let lower=Shell::new_with_rocking(lower,dt,rocking)?;
     // Conservative reference separation for the ENTIRE finite skins, not just
     // selected rim sites. No ambiguous overlapping initial acoustic bodies.
     let min_z=|s:&Shell|s.skin.triangles().iter().flatten().map(|p|p[2]).fold(f64::INFINITY,f64::min);
@@ -309,6 +324,10 @@ mod mallet_tests;
 #[cfg(test)]
 #[path="hihat_target_tests.rs"]
 mod target_tests;
+
+#[cfg(test)]
+#[path="hihat_rocking_tests.rs"]
+mod rocking_tests;
 
 #[cfg(test)]
 #[path="hihat_mute_tests.rs"]

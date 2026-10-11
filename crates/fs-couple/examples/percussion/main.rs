@@ -28,6 +28,7 @@ mod mechanics;
 mod playing;
 mod specimen;
 mod shell_prepare;
+mod rocking;
 mod hihat;
 #[path="hihat_sticks.rs"]
 mod flexible_sticks;
@@ -104,13 +105,23 @@ fn splash_with_shafts(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Optio
 }
 #[allow(clippy::too_many_arguments)]
 fn splash_with_material(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option<specimen::Specimen>,mufflers:&[muffling::Muffler],second:Option<Stroke>,mute:Option<&compliant_mute::Spec>,mallets:&mallets::Selection,shafts:&shaft_playing::Selection,material:Option<&shell_relaxation::Spec>)->Result<Experiment,Error> {
+    splash_with_rocking(steps,dt_s,audio,stroke,supplied,mufflers,second,mute,mallets,shafts,material,None)
+}
+#[allow(clippy::too_many_arguments)]
+fn splash_with_rocking(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option<specimen::Specimen>,mufflers:&[muffling::Muffler],second:Option<Stroke>,mute:Option<&compliant_mute::Spec>,mallets:&mallets::Selection,shafts:&shaft_playing::Selection,material:Option<&shell_relaxation::Spec>,rocking:Option<f64>)->Result<Experiment,Error> {
     shafts.admit("splash",second,mallets)?;
     mallets.admit("splash",stroke,second)?;
     muffling::admit_command(mufflers,"splash")?;
     if let Some(spec)=mute {spec.admit_command("splash")?;}
     let imported=supplied.is_some();let specimen=supplied.unwrap_or_else(specimen::Specimen::reference);
     if let Some(material)=material {material.admit_windows(&[specimen.band_hz])?;}
-    let (shell,reduction)=shell_prepare::prepare(&specimen,dt_s)?;
+    let (shell,reduction)=match rocking {
+        Some(limit)=>shell_prepare::prepare_rocking(&specimen,dt_s,limit)?,
+        None=>shell_prepare::prepare(&specimen,dt_s)?,
+    };
+    if let Some(limit)=rocking {
+        eprintln!("cymbal support motion: vertical translation and two small-angle rigid tilts; maximum_rotation_rad={limit}; elastic strain excludes rigid motion, fixed reference contact/acoustic charts");
+    }
     let pi=std::f64::consts::PI;let [lower,upper]=specimen.band_hz;
     let acoustics=if audio {
         let surface=reduction.radiation_surface(&shell.nodal_thickness_m,
@@ -495,6 +506,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     let mallet_paths=mallets::options(&mut raw_args)?;
     let head_relaxation_path=head_relaxation::option(&mut raw_args)?;
     let shell_relaxation_path=shell_relaxation::option(&mut raw_args)?;
+    let rocking=rocking::option(&mut raw_args)?;
     let prescribed_vent=acoustics::aperture::option(&mut raw_args)?;
     let radiation_spec=acoustics::stereo::radiation_spec::option(&mut raw_args)?;
     let radiation_feedback=acoustics::stereo::feedback::option(&mut raw_args)?;
@@ -530,6 +542,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     head_relaxation::admit_command(head_relaxation_path.is_some(),&args[0])?;
     let head_relaxation=head_relaxation_path.as_deref().map(head_relaxation::Spec::load).transpose()?;
     shell_relaxation::admit_command(shell_relaxation_path.is_some(),&args[0])?;
+    rocking::admit_command(rocking,&args[0])?;
     let shell_relaxation=shell_relaxation_path.as_deref().map(|path|shell_relaxation::Spec::load(path,false)).transpose()?;
     let mallets=mallets::Selection::load(mallet_paths)?;
     mallets.admit(&args[0],stroke,second)?;
@@ -582,7 +595,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     let supplied_drum=drum_path.as_deref().map(drum_spec::Spec::load).transpose()?;
     let drag_per_s=cavity_drag.unwrap_or(0.0);
     let experiment=match args[0].as_str(){
-        "splash"|"splash-wav"|"splash-mic"=>splash_with_material(steps,dt_s,audio,stroke,supplied_shell,&mufflers,second,compliant_mute.as_ref(),&mallets,&shafts,shell_relaxation.as_ref())?,
+        "splash"|"splash-wav"|"splash-mic"=>splash_with_rocking(steps,dt_s,audio,stroke,supplied_shell,&mufflers,second,compliant_mute.as_ref(),&mallets,&shafts,shell_relaxation.as_ref(),rocking)?,
         "drum"|"drum-wav"|"drum-mic"=>drum_with_barrel(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref(),barrel_strike)?,
         "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_barrel(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref(),barrel_strike)?,
         "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_barrel(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref(),barrel_strike)?,
@@ -648,6 +661,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     write!(out,"time_s,point_a_displacement_m,point_a_velocity_m_s,point_b_displacement_m,cavity_internal_pa,total_energy_j,felt_crush_j,loss_j,balance_j{extra}{wire_columns}{carrier_columns}{air_columns}{neck_columns}{drive_columns}{stick_columns}{memory_columns}")?;
     if let Some(mute)=&experiment.mute {mute.header(&mut out)?;}
     shaft_playing::header(&experiment,&mut out)?;
+    if rocking.is_some() {rocking::header(&mut out,"cymbal")?;}
     writeln!(out)?;
     for _ in 0..steps {
         let f=experiment.system.step(&experiment.force,&gate)?;let x=experiment.system.state();
@@ -700,6 +714,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
         }
         if let Some(mute)=&experiment.mute {mute.row(&experiment.system,&mut out)?;}
         shaft_playing::row(&experiment,&mut out)?;
+        if rocking.is_some() {rocking::row(&experiment.system,1,false,&mut out)?;}
         writeln!(out)?;
     }
     out.flush()?;Ok(())

@@ -315,6 +315,7 @@ impl ImpactSystem {
         for (_,offset,support) in &supports {support.add_resistance(*offset,dim,&mut r)?;}
         let histories=Rc::new(RefCell::new(histories));
         let mechanical=Rc::new(MechanicalStorage{bodies:potentials,modes,pads:retained.clone(),volumes,histories:Rc::clone(&histories)});
+        mechanical.validate_rigid_motion(&x)?;
         let contact=Rc::new(ContactStorage::new(Box::new(tangent::SharedStorage(Rc::clone(&mechanical))),modes,admitted)
             .map_err(|e|ImpactError::Owner(e.to_string()))?);
         let system=PortHamiltonian::new(dim,modes,j,r,g,Box::new(tangent::SharedStorage(Rc::clone(&contact))))
@@ -332,6 +333,16 @@ impl ImpactSystem {
     /// Actual current storage including conditioning and creep.
     #[must_use]
     pub fn stored_energy_j(&self)->f64 {self.system.hamiltonian(&self.x)}
+    /// Small-angle rigid rotation [rad] of an explicitly enabled shell body.
+    /// The same physical rotation is bounded before initial or endpoint state
+    /// acceptance. Ordinary shell images and non-shell bodies return None.
+    pub fn shell_rotation(&self,body:usize)->Option<[f64;3]> {
+        let BodyPotential::Shell(shell)=self.mechanical.bodies.get(body)? else {return None;};
+        let offset:usize=self.mechanical.bodies[..body].iter().map(BodyPotential::count).sum();
+        let mut q=[0.0;MAX_IMPACT_MODES];
+        for (i,value) in q[..shell.mode_count()].iter_mut().enumerate() {*value=self.x[2*(offset+i)];}
+        shell.rigid_rotation(&q[..shell.mode_count()]).ok().flatten()
+    }
     /// Physical stretching diagnostics for a body in original construction order.
     /// Returns None for non-membrane bodies; observing consumes no mechanical time.
     pub fn membrane_observation(&self,body:usize)->Option<membrane::MembraneObservation> {
@@ -395,6 +406,25 @@ impl ImpactSystem {
             supplied:record.supplied,newton_iters:record.newton_iters,solver_residual:record.solver_residual};
         let mut histories=self.histories.borrow().clone();
         self.accept_step(&mut record.x,&mut histories,before,ledger,gate)
+    }
+}
+
+impl MechanicalStorage {
+    // Share one allocation-free model-domain check across initial construction,
+    // reference, prepared, analytic and substepped endpoint acceptance. It runs
+    // before felt/material history or the output clock can be committed.
+    fn validate_rigid_motion(&self,state:&[f64])->Result<(),ImpactError> {
+        if state.len()<2*self.modes {return Err(invalid("shell motion state is incomplete"));}
+        let mut q=[0.0;MAX_IMPACT_MODES];let mut offset=0;
+        for body in &self.bodies {
+            let n=body.count();
+            if let BodyPotential::Shell(shell)=body {
+                for (i,value) in q[..n].iter_mut().enumerate() {*value=state[2*(offset+i)];}
+                shell.rigid_rotation(&q[..n]).map_err(|e|ImpactError::Owner(e.to_string()))?;
+            }
+            offset+=n;
+        }
+        Ok(())
     }
 }
 

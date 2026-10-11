@@ -2,7 +2,8 @@
 
 `hihat`, `hihat-wav` and `hihat-mic` construct two independently reduced curved
 shells and one force-driven axial carriage in the existing nonlinear impact
-owner. Distributed inter-cymbal contacts, both shell potentials, stand felts,
+owner. Optional bounded cymbal rocking adds real angular inertia. Distributed
+inter-cymbal contacts, both shell potentials, stand felts,
 carriage inertia/return spring, and stick contacts are solved together. This
 is a new physical instrument composition, not a crossfade between open/closed
 recordings or two separately rendered cymbals mixed after impact.
@@ -91,7 +92,8 @@ All original mechanical source addresses, contact losses, Kelvin histories,
 energy gates, and accepted-step rollback remain in the same time owner.
 
 The shared shell preparation retains each complete requested elastic slice
-plus its true geometry-derived vertical translation. Original mode, panel,
+plus its true geometry-derived vertical translation. Optional rocking adds two
+geometry-derived angular coordinates per shell. Original mode, panel,
 material-validity and solver limits are unchanged; overflow never drops modes.
 CSV reports upper/downward and lower/downward point motion, pedal travel/speed,
 minimum sampled gap, active sites and the accepted total work/energy/loss ledger.
@@ -105,6 +107,33 @@ Both existing stick-force files and two-stick position/speed controls work.
 their existing meanings. A cancelled/refused tick consumes no pedal or stick
 input. `--compliant-mute` admits an explicitly selected outer hi-hat surface
 as described below. Other drum/single-cymbal options retain their admission rules.
+
+### Cymbal rocking against the stand felts
+
+`--cymbal-rocking MAXIMUM_ANGLE_RAD` enables small-angle rotation about the two
+horizontal axes on **both** shells. The maximum rotation magnitude must be in
+`(0,0.1]` radians; `--cymbal-rocking 0.03` is an example declared bound, not a
+measured hi-hat limit. The default continues to retain vertical translation and
+the complete elastic slice without these additional angular coordinates.
+
+Each shell's own geometry and shell mass matrix determine its angular inertia.
+Off-center strikes, the three-site opposed stand washers, inter-cymbal contacts,
+and optional thin-gap air apply reciprocal tilting moments at their physical
+stations. All twelve stand pads and their individual histories remain; the
+carriage continues to move axially through its supplied spring and pedal force.
+
+The option composes with independent targets, flexible sticks, felt mallets,
+a moving choke, shell material memory and the existing acoustic image. The pair
+gains four coordinates; all elastic modes must still fit the unchanged budget.
+CSV adds `upper_rigid_rotation_{x,y,z}_rad` and
+`lower_rigid_rotation_{x,y,z}_rad`, expressed as rotation vectors in the world
+frame. A step outside either shell's declared angular bound refuses without
+consuming the player's input or retaining a partial state.
+
+See [ROCKING.md](ROCKING.md) for the constant-inertia, first-order pose contract
+and its fixed contact/acoustic geometry limits. The paired regression exercises
+both angular responses with gap air, independent hand/pedal forces, preserved
+histories and rejected-step rollback; native execution remains required.
 
 ### Independent upper and lower exterior strikes
 
@@ -243,8 +272,9 @@ sign-flipped during the proper lower-body rotation. Pedal/sticks do not gain
 invented radiation channels; the actual resulting shell motion is observed.
 The complete reference skins must pass a conservative separating-plane check.
 
-This is an axial, fixed-reference, small-slope image. It does NOT include full
-stand rocking, tangential friction, changing contact normals/pairings, pedal
+This is a fixed-reference, small-slope image with axial carriage motion and
+optional bounded cymbal tilt. It does NOT include motion of the stand body,
+tangential friction, changing contact normals/pairings, pedal
 lever geometry, gravity, or acoustics recomputed as
 the gap closes. Sampling stations do not certify absence of interpenetration
 between stations. Stationary one-way BEM during a closing gesture is explicitly

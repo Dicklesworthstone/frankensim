@@ -42,6 +42,9 @@ impl ShellReduction {
             if d.iter().any(|x|!x.is_finite()) {return Err(bad("shell bending section overflow"));}
             let (k,_) = crate::dkt_stiffness(&g.x,&g.y,&d,f)?;
             for (mode,row) in local.iter_mut().enumerate() {
+                if self.rigid_motion.as_ref().is_some_and(|r|mode<r.rotations.len()) {
+                    row.fill(0.);continue;
+                }
                 let reference=self.translations[mode*self.nodes+tri[0]];
                 for (a,&node) in tri.iter().enumerate() {
                     let u=self.translations[mode*self.nodes+node];

@@ -254,6 +254,7 @@ mod tests {
             translations, rotations, reference_positions: mesh.nodes.clone(),
             section_thicknesses: mesh.tris.iter().map(|t| t.iter().map(|&i| h[i]/3.0).sum()).collect(),
             nodes: count, triangles: mesh.tris.clone(),
+            rigid_motion:None,
             area_normals: (0..mesh.tris.len()).map(|f| {
                 let g = mesh.facet(f).unwrap(); g.frame[2].map(|v| v*g.area_m2)
             }).collect(),
