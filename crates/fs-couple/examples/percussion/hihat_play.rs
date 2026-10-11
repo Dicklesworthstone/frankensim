@@ -14,6 +14,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let radiation=radiation_spec::option(&mut args)?;
     let feedback=acoustics::stereo::feedback::option(&mut args)?;
     let second=sticks::option(&mut args)?;
+    let targets=targets::Selection::options(&mut args,second)?;
     let first_force=mechanics::drive::option(&mut args)?;
     let second_force=mechanics::drive::second_option(&mut args)?;
     let squeeze=squeeze::option(&mut args)?;
@@ -45,8 +46,8 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     if let Some(mute)=&mute {mute.admit_command(command.unwrap())?;}
     let material=material_path.as_deref().map(|path|shell_relaxation::Spec::load(path,true)).transpose()?;
     let spec=Spec::load(Path::new(&args[1]))?;let [upper,lower]=spec.shells()?;
-    let pair=build_with_mute(&spec,&upper,&lower,stroke,second,steps,dt,audio,squeeze.as_ref(),
-        &shafts,&mallets,material.as_ref(),mute.as_ref())?;
+    let pair=build_with_targets(&spec,&upper,&lower,stroke,second,steps,dt,audio,squeeze.as_ref(),
+        &shafts,&mallets,material.as_ref(),mute.as_ref(),targets)?;
     let receivers=match microphone_spec {
         Some(spec)=>spec.into_receivers(),
         None=>{let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}receivers},
@@ -80,6 +81,8 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     for (hand,ports) in pair.flexible_sticks.iter().enumerate() {
         if let Some(p)=ports {eprintln!("physical shaft {}: {} elastic modes; contact at tip, external force at supplied hand station; no added acoustic source",hand+1,p.elastic_modes());}
     }
+    eprintln!("hi-hat exterior strike targets: first={}, second={}; positive hand travel, launch speed and force act inward toward that hand's selected shell",
+        pair.targets.first.label(),if e.second_stick.is_some(){pair.targets.second.label()}else{"none"});
     eprintln!("paired cymbals: upper_modes={}, lower_modes={}, contact_sites={}, one joint mechanics; supplied masses/geometry and authored contact, not a calibrated hi-hat; axial carriage, no rocking; squeeze_film={}",
         pair.upper_modes.len(),pair.lower_modes.len(),pair.collision.n_points(),
         squeeze.as_ref().map_or("none",squeeze::Config::label));
@@ -94,7 +97,11 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     }
     write!(out,"time_s,upper_down_m,lower_down_m,pedal_down_m,pedal_speed_m_s,min_contact_gap_m,active_sites,total_energy_j,loss_j,player_work_j,balance_j")?;
     for (hand,ports) in pair.flexible_sticks.iter().enumerate() {
-        if ports.is_some(){write!(out,",stick{}_tip_down_m,stick{}_tip_speed_m_s,stick{}_hand_down_m,stick{}_hand_speed_m_s,stick{}_bending_j",hand+1,hand+1,hand+1,hand+1,hand+1)?;}
+        if ports.is_some(){
+            let direction=if [pair.targets.first,pair.targets.second][hand]==targets::Target::Upper {"down"}else{"inward"};
+            write!(out,",stick{}_tip_{}_m,stick{}_tip_speed_m_s,stick{}_hand_{}_m,stick{}_hand_speed_m_s,stick{}_bending_j",
+                hand+1,direction,hand+1,hand+1,direction,hand+1,hand+1)?;
+        }
     }
     let gas=squeeze.as_ref().is_some_and(|f|f.gas().is_some());
     if gas {write!(out,",gas_min_absolute_pa,gas_max_absolute_pa,gas_mass_kg,gas_free_energy_j")?;}

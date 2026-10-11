@@ -52,7 +52,7 @@ comments are allowed. The included `.fshh` supplies every required record:
 - `site,x_m,y_m,fraction` supplies 1..64 distinct reference-XY rim-contact
   stations. Fractions are positive and sum to one; they partition the total
   effective contact stiffness K, NOT independent full-strength duplicates.
-- `strike_m,x,y` supplies the first stick's default station. Existing explicit
+- `strike_m,x,y` supplies the first stick's default world-XY station. Existing explicit
   strike position and speed controls override it; first launch defaults to
   0.8 m/s unless zero is selected. A second stick requires its own position.
 - `mount,upper|lower,radius_m,face_area_m2,thickness_m,precompression_m,
@@ -78,7 +78,7 @@ same area-weighted directors create the two-sided acoustic skin. Local point
 velocity includes translation plus `theta cross director_offset`; its
 transpose applies both force and moment to the shell. Barycentrics are located
 on the inner skin's actual XY chart, including mounting holes and ambiguity
-checks. Stick stations use the upper positive skin's actual XY chart instead;
+checks. Stick stations use the selected shell's positive skin's actual XY chart;
 an inner-skin barycentric location is not reused at a different physical face.
 
 With local outward surface displacements u and l, the signed point gap is
@@ -105,6 +105,55 @@ Both existing stick-force files and two-stick position/speed controls work.
 their existing meanings. A cancelled/refused tick consumes no pedal or stick
 input. `--compliant-mute` admits an explicitly selected outer hi-hat surface
 as described below. Other drum/single-cymbal options retain their admission rules.
+
+### Independent upper and lower exterior strikes
+
+Each hand chooses its own outer surface with `--strike-target upper|lower` and
+`--second-stick-target upper|lower`. Both default to `upper`, preserving existing
+performances. A second target requires `--second-stick-position-m X Y`; it does
+not create another hand implicitly. These flags apply to all three hi-hat output
+forms. They select physical contact geometry and force direction, not a sound
+layer or an acoustic gain.
+
+```sh
+cargo run --release -p fs-couple --example percussion -- \
+  hihat crates/fs-couple/examples/percussion/estimated-hihat.fshh 12000 \
+  --strike-target upper --strike-position-m 0.06 0.01 --strike-speed-m-s 0.5 \
+  --second-stick-target lower --second-stick-position-m -0.06 0.01 \
+  --second-stick-speed-m-s 0.6 --analytic-newton --impact-substeps 8 511 \
+  > opposed-strikes.csv
+```
+
+All supplied XY positions are in the pair's world frame. Lower stations map to
+local `(x,-y)` through the same proper rotation used by shell collision and
+radiation. An upper exterior striker travels downward; a lower exterior striker
+travels upward. For either hand, positive launch speed, displacement and force
+mean **inward toward its selected shell**, and negative force retracts that hand.
+The scalar contact penetration is `stick_inward + shell_outward`; the reaction
+uses that same row's transpose. Contacts retain the selected outer skin's
+thickness-offset moments, without changing either shell's acoustic source sign.
+
+Wood tips, flexible shafts, and the existing v1/v2 felt mallets all follow the
+selected target. The two hand-force files remain independent. Lower felt faces
+use their complete outer-skin footprint and geometric clearances; the shaft
+azimuth in a v2 card remains a **world-XY** direction, with each site's moment arm
+properly transformed. All twelve stand contacts, the pedal, optional gas/material
+state, moving choke, original source addresses and existing mode/pad limits stay
+in the joint solve. Two felt mallets, or one felt mallet plus a choke, still exceed
+the sixteen-pad limit and refuse.
+
+The `upper_down_m` and `lower_down_m` probes remain world-downward. The upper
+probe follows the first hand's station when that hand targets the upper shell;
+when the first hand targets the lower shell, the upper probe uses the first
+inter-cymbal contact station. The lower probe remains at that first contact
+station. Lower-target flexible-hand displacement columns say `inward_m`; their
+speed columns share the inward convention. Default-upper CSV names are unchanged.
+Only exterior axial impacts are modeled: inner-face strikes, striker-to-striker
+collision, and interaction with stand hardware require additional geometry and
+contacts. Focused regressions cover reflected finite-thickness virtual work,
+loaded-mallet moments and clearances, a lower wood impact with independent hand
+forces, and a lower felt strike with gap air and rejected-tick rollback. Native
+execution and acoustic renders remain required before sound or performance claims.
 
 ### Moving felt choke on either outer shell
 
@@ -160,14 +209,14 @@ with the head's actual mass and rotary inertia before reduction. See
 ```sh
 cargo run --release -p fs-couple --example percussion -- \
   hihat crates/fs-couple/examples/percussion/estimated-hihat.fshh 12000 \
-  --strike-position-m 0.06 0.01 --strike-speed-m-s 0.5 \
+  --strike-target lower --strike-position-m 0.06 0.01 --strike-speed-m-s 0.5 \
   --mallet-spec crates/fs-couple/examples/percussion/estimated-loaded-mallet.fsmallet \
   --flexible-stick crates/fs-couple/examples/percussion/estimated-flexible-stick.fst \
   --second-stick-position-m -0.06 0.01 --second-stick-speed-m-s 0.3 \
   --analytic-newton --impact-substeps 8 511
 ```
 
-The four-site felt face uses the upper shell's actual positive skin and the
+The four-site felt face uses the selected shell's actual positive skin and the
 same footprint-derived clearances as a single cymbal. It replaces that hand's
 Hertz contact. A loaded shaft also retains each site's reciprocal bending
 moment, with physical hand forcing at the supplied hand station. The other

@@ -12,6 +12,8 @@ mod play;
 pub use play::{is_command,run};
 #[path="hihat_squeeze.rs"]
 mod squeeze;
+#[path="hihat_targets.rs"]
+mod targets;
 use fs_couple::render::plate::impact::striker::flexible::{FlexibleStriker,StrikerPorts};
 
 // One independently prepared physical shell and its exact inner-skin chart.
@@ -52,6 +54,7 @@ struct Pair {
     upper_modes:std::ops::Range<usize>,
     lower_modes:std::ops::Range<usize>,
     flexible_sticks:[Option<StrikerPorts>;2],
+    targets:targets::Selection,
 }
 
 // Mounts are opposed compression-only washers, not an imposed shell position.
@@ -128,6 +131,15 @@ fn build_with_mute(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specime
     second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>,
     shafts:&shaft_playing::Selection,mallets:&mallets::Selection,material:Option<&shell_relaxation::Spec>,
     mute:Option<&compliant_mute::Spec>)->Result<Pair,Error> {
+    build_with_targets(spec,upper,lower,stroke,second,steps,dt,audio,film,shafts,mallets,material,
+        mute,targets::Selection::default())
+}
+#[allow(clippy::too_many_arguments)]
+fn build_with_targets(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:Stroke,
+    second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>,
+    shafts:&shaft_playing::Selection,mallets:&mallets::Selection,material:Option<&shell_relaxation::Spec>,
+    mute:Option<&compliant_mute::Spec>,targets:targets::Selection)->Result<Pair,Error> {
+    targets.admit(second)?;
     mallets.admit("hihat",stroke,second)?;
     if let Some(mute)=mute {mute.admit_command("hihat")?;}
     if shafts.second.is_some() && second.is_none() {
@@ -189,11 +201,15 @@ fn build_with_mute(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specime
     let pedal=sticks::Port{coordinate:pedal_coord,weight};
     let mut pads=washers(&upper,&spec.mounts[0],hi.start,total,Some(pedal))?;
     pads.extend(washers(&lower,&spec.mounts[1],lo.start,total,None)?);
-    let position=stroke.position_m.unwrap_or(spec.strike);
-    let p=upper.port(position,ShellFace::Positive)?;
+    let selected=|target|match target {
+        targets::Target::Upper=>(&upper,hi.start),targets::Target::Lower=>(&lower,lo.start),
+    };
+    let (first_shell,first_start)=selected(targets.first);
+    let position=targets.first.local_point(stroke.position_m.unwrap_or(spec.strike));
+    let p=first_shell.port(position,ShellFace::Positive)?;
     let (first,stick_weight)=match &mallets.first {
         Some(spec)=>{
-            let tip=spec.compile_shell(&upper.reduction,&upper.mesh,stroke,0,hi.start,total)?;
+            let tip=targets.first.mallet(spec,first_shell,stroke,0,first_start,total)?;
             let tip=spec.bind_shaft(tip,0,&mut shaft)?;
             pads.extend(tip.pads);(tip.body,tip.port.inverse_sqrt_mass)
         }
@@ -205,29 +221,40 @@ fn build_with_mute(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specime
     let mut contacts=Vec::new();
     if mallets.first.is_none() {
         let mut hit=shaft.tip_row(0,stick_weight)?;
-        for (k,w) in p.weights.iter().enumerate(){hit[hi.start+k]=*w;}
+        // For either exterior, stick travel is inward and local shell travel
+        // is outward: penetration = stick + shell. The lower world's force
+        // direction changes through its proper rotation, not a row sign flip.
+        for (k,w) in p.weights.iter().enumerate(){hit[first_start+k]=*w;}
         contacts.push(elastic_contact(hit)?);
     }
     contacts.push(inter.clone());
     let second=second.map(|stroke|->Result<_,Error>{
+        let (shell,start)=selected(targets.second);
         if let Some(spec)=&mallets.second {
-            let tip=spec.compile_shell(&upper.reduction,&upper.mesh,stroke,second_coord,hi.start,total)?;
+            let tip=targets.second.mallet(spec,shell,stroke,second_coord,start,total)?;
             let tip=spec.bind_shaft(tip,1,&mut shaft)?;
             pads.extend(tip.pads);
             return Ok((tip.body,None,sticks::Port{coordinate:second_coord,weight:tip.port.inverse_sqrt_mass}));
         }
-        let p=upper.port(stroke.position_m.ok_or("second hi-hat stick requires a station")?,ShellFace::Positive)?;
+        let stroke=targets.second.local_stroke(stroke);
+        let p=shell.port(stroke.position_m.ok_or("second hi-hat stick requires a station")?,ShellFace::Positive)?;
         let (body,weight)=match shaft.bodies[1].take() {
             Some(body)=>body,None=>stick_with_speed(stroke.speed_m_s)?,
         };
         let mut b=shaft.tip_row(1,weight)?;
-        for (k,w) in p.weights.iter().enumerate(){b[hi.start+k]=*w;}
+        for (k,w) in p.weights.iter().enumerate(){b[start+k]=*w;}
         let port=sticks::Port{coordinate:second_coord,weight};
         Ok((body,Some(elastic_contact(b)?),port))
     }).transpose()?;
     let acoustics=if audio {Some(acoustics::Boundary::shell_pair(&upper.skin,hi.start,
         &lower.skin,lo.start,spec.separation)?)}else{None};
     let mut a=vec![0.;total];let mut b=vec![0.;total];
+    // Keep the existing upper probe when hand one plays the upper shell. A
+    // lower strike need not lie over that shell: use the already admitted
+    // first inter-cymbal site for the upper probe instead.
+    let p=if targets.first==targets::Target::Upper {p}else{
+        upper.port([spec.sites[0].0,spec.sites[0].1],ShellFace::Negative)?
+    };
     for (k,w) in p.weights.iter().enumerate(){a[hi.start+k]=-w;}
     let p=lower.port([spec.sites[0].0,-spec.sites[0].1],ShellFace::Negative)?;
     for (k,w) in p.weights.iter().enumerate(){b[lo.start+k]=*w;}
@@ -260,7 +287,7 @@ fn build_with_mute(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specime
     let system=match material {Some(material)=>material.attach(system)?,None=>system};
     Ok(Pair{experiment:Experiment{flexible_sticks:flexible_sticks.clone(),mute,system:Mechanics::Reference(system),force:vec![0.;total],
         stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None},
-        pedal,collision:inter,upper_modes:hi,lower_modes:lo,flexible_sticks})
+        pedal,collision:inter,upper_modes:hi,lower_modes:lo,flexible_sticks,targets})
 }
 
 #[cfg(test)]
@@ -278,6 +305,10 @@ mod gas_tests;
 #[cfg(test)]
 #[path="hihat_mallet_tests.rs"]
 mod mallet_tests;
+
+#[cfg(test)]
+#[path="hihat_target_tests.rs"]
+mod target_tests;
 
 #[cfg(test)]
 #[path="hihat_mute_tests.rs"]
