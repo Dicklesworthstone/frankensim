@@ -1,0 +1,338 @@
+//! Retained longitudinal inertia on the existing string/contact clock.
+//!
+//! The generic fs-nlmodal owner supplies strain, storage and the discrete
+//! gradient. This adapter only pulls slope forces through the actual moving
+//! transverse bridge and advances axial coordinates using the bank's existing
+//! exact-ZOH transitions. Axial endpoints remain fixed. No extra contact tick,
+//! output oscillator, or assumed axial bridge direction is introduced.
+
+use fs_nlmodal::{KcStringParams, longitudinal::LongitudinalString};
+
+use super::super::{ModalAcousticMode, Transition, transitions};
+use super::{Channel, Observation, StringMode, StringPort, WaveMaterial};
+use fs_math::{c64::C64, det};
+
+const MAX_SLOPES: usize = 2 * (super::super::MAX_STRING_MODES + 1);
+
+pub(super) struct Prepared {
+    model: LongitudinalString,
+    string: usize,
+    second: Option<usize>,
+    length: f64,
+    ea: f64,
+    rest_tension: f64,
+    material: WaveMaterial,
+    transverse_scales: Vec<f64>,
+    transition: Vec<Transition>,
+    pub q: Vec<f64>,
+    pub v: Vec<f64>,
+    next_q: Vec<f64>,
+    next_v: Vec<f64>,
+    saved_q: Vec<f64>,
+    saved_v: Vec<f64>,
+    force: Vec<f64>,
+    required: Vec<f64>,
+    start_slopes: Vec<f64>,
+    end_slopes: Vec<f64>,
+    slope_gradient: Vec<f64>,
+    pub loss_j: f64,
+}
+
+impl Prepared {
+    pub fn new(
+        channel: &Channel,
+        density: f64,
+        rate: u32,
+        material: WaveMaterial,
+    ) -> Result<Self, String> {
+        if material.bandwidth_hz > 0.45 * f64::from(rate) {
+            return Err("longitudinal band exceeds the mechanics clock's 0.45*rate guard; supply more substeps or a lower explicit band".into());
+        }
+        let fundamental =
+            0.5 * det::sqrt(channel.material.axial_rigidity_n / density) / channel.length;
+        if !fundamental.is_finite() || fundamental <= 0. {
+            return Err("longitudinal string wave speed is unrepresentable".into());
+        }
+        let mut indices = Vec::new();
+        for mode in 1..=material.mode_cap + 1 {
+            if mode as f64 * fundamental > material.bandwidth_hz {
+                break;
+            }
+            if mode > material.mode_cap {
+                return Err("longitudinal mode cap cannot cover the supplied axial band; increase the explicit cap or lower the band".into());
+            }
+            indices.push(mode);
+        }
+        let model = LongitudinalString::new(
+            KcStringParams {
+                length: channel.length,
+                tension: channel.rest_tension,
+                lin_density: density,
+                ea: channel.material.axial_rigidity_n,
+            },
+            channel.diagonal.len(),
+            1 + usize::from(channel.second.is_some()),
+            &indices,
+        )
+        .map_err(|e| e.to_string())?;
+        let modes: Vec<_> = model
+            .axial_omegas()
+            .iter()
+            .map(|&omega| ModalAcousticMode {
+                angular_frequency_rad_s: omega,
+                damping_ratio: material.damping_ratio,
+                pressure_per_modal_velocity: C64::ZERO,
+            })
+            .collect();
+        let transition = transitions(rate, &modes)?;
+        let n = indices.len();
+        let slopes = model.slope_count();
+        Ok(Self {
+            model,
+            string: channel.string,
+            second: channel.second,
+            length: channel.length,
+            ea: channel.material.axial_rigidity_n,
+            rest_tension: channel.rest_tension,
+            material,
+            transverse_scales: channel.diagonal.iter().map(|x| det::sqrt(*x)).collect(),
+            transition,
+            q: vec![0.; n],
+            v: vec![0.; n],
+            next_q: vec![0.; n],
+            next_v: vec![0.; n],
+            saved_q: vec![0.; n],
+            saved_v: vec![0.; n],
+            force: vec![0.; n],
+            required: vec![0.; n],
+            start_slopes: vec![0.; slopes],
+            end_slopes: vec![0.; slopes],
+            slope_gradient: vec![0.; slopes],
+            loss_j: 0.,
+        })
+    }
+
+    pub fn mode_count(&self) -> usize {
+        self.q.len()
+    }
+    pub fn coupling_terms(&self) -> usize {
+        self.model.slope_count() * (1 + self.q.len())
+    }
+
+    fn fill_slopes(
+        string: usize,
+        second: Option<usize>,
+        length: f64,
+        scales: &[f64],
+        q: &[f64],
+        strings: &[StringPort],
+        modes: &[StringMode],
+        out: &mut [f64],
+    ) {
+        for (plane, si) in std::iter::once(string).chain(second).enumerate() {
+            let s = &strings[si];
+            let row = &mut out[plane * (scales.len() + 1)..(plane + 1) * (scales.len() + 1)];
+            let bridge = s
+                .bridge
+                .iter()
+                .zip(&q[modes.len()..])
+                .map(|(g, x)| g * x)
+                .sum::<f64>();
+            row[0] = bridge / length;
+            for ((slot, &scale), k) in row[1..].iter_mut().zip(scales).zip(s.modes.clone()) {
+                *slot = scale * (q[k] - modes[k].beta * bridge);
+            }
+        }
+    }
+
+    fn slopes(&self, q: &[f64], strings: &[StringPort], modes: &[StringMode], out: &mut [f64]) {
+        Self::fill_slopes(
+            self.string,
+            self.second,
+            self.length,
+            &self.transverse_scales,
+            q,
+            strings,
+            modes,
+            out,
+        );
+    }
+
+    pub fn energy(
+        &self,
+        q: &[f64],
+        strings: &[StringPort],
+        modes: &[StringMode],
+        candidate: bool,
+    ) -> f64 {
+        let mut scratch = [0.; MAX_SLOPES];
+        let slopes = &mut scratch[..self.model.slope_count()];
+        self.slopes(q, strings, modes, slopes);
+        let (u, v) = if candidate {
+            (&self.next_q, &self.next_v)
+        } else {
+            (&self.q, &self.v)
+        };
+        // Invalid energy propagates to the original finite/energy gate.
+        self.model.energy(slopes, u).unwrap_or(f64::NAN)
+            + 0.5 * v.iter().map(|x| x * x).sum::<f64>()
+    }
+
+    pub fn observe(
+        &self,
+        q: &[f64],
+        strings: &[StringPort],
+        modes: &[StringMode],
+        out: &mut Observation,
+    ) {
+        let mut scratch = [0.; MAX_SLOPES];
+        let slopes = &mut scratch[..self.model.slope_count()];
+        self.slopes(q, strings, modes, slopes);
+        let (mean, spread) = self
+            .model
+            .strain_bounds(slopes, &self.q)
+            .unwrap_or((f64::NAN, f64::NAN));
+        out.additional_strain = mean;
+        out.tension_n = self.rest_tension + self.ea * mean;
+        out.minimum_tension_n = self.rest_tension + self.ea * (mean - spread);
+        out.maximum_tension_n = self.rest_tension + self.ea * (mean + spread);
+        out.stretching_energy_j = self.model.energy(slopes, &self.q).unwrap_or(f64::NAN);
+        out.longitudinal_modes = self.q.len();
+        out.longitudinal_kinetic_energy_j = 0.5 * self.v.iter().map(|x| x * x).sum::<f64>();
+    }
+
+    pub fn begin(&mut self) {
+        self.force.fill(0.);
+    }
+    pub fn predict(&mut self) {
+        self.loss_j = 0.;
+        for k in 0..self.q.len() {
+            let t = self.transition[k];
+            self.next_q[k] = t.qq * self.q[k] + t.qv * self.v[k] + t.bq * self.force[k];
+            self.next_v[k] = t.vq * self.q[k] + t.vv * self.v[k] + t.bv * self.force[k];
+            let omega = self.model.axial_omegas()[k];
+            self.loss_j += self.force[k] * (self.next_q[k] - self.q[k])
+                - 0.5
+                    * (self.next_v[k].powi(2) - self.v[k].powi(2)
+                        + omega * omega * (self.next_q[k].powi(2) - self.q[k].powi(2)));
+        }
+    }
+
+    pub fn evaluate(
+        &mut self,
+        a: &[f64],
+        b: &[f64],
+        strings: &[StringPort],
+        modes: &[StringMode],
+        mechanical_force: &mut [f64],
+    ) -> Result<(), &'static str> {
+        Self::fill_slopes(
+            self.string,
+            self.second,
+            self.length,
+            &self.transverse_scales,
+            a,
+            strings,
+            modes,
+            &mut self.start_slopes,
+        );
+        Self::fill_slopes(
+            self.string,
+            self.second,
+            self.length,
+            &self.transverse_scales,
+            b,
+            strings,
+            modes,
+            &mut self.end_slopes,
+        );
+        self.model
+            .coupling_discrete_gradient(
+                &self.start_slopes,
+                &self.end_slopes,
+                &self.q,
+                &self.next_q,
+                &mut self.slope_gradient,
+                &mut self.required,
+            )
+            .map_err(|_| "longitudinal string discrete gradient failed finite admission")?;
+        for value in &mut self.required {
+            *value = -*value;
+        }
+        for (plane, si) in std::iter::once(self.string).chain(self.second).enumerate() {
+            let s = &strings[si];
+            let width = self.transverse_scales.len() + 1;
+            let row = &self.slope_gradient[plane * width..(plane + 1) * width];
+            let mut reaction = row[0] / self.length;
+            for ((&gradient, &scale), k) in row[1..]
+                .iter()
+                .zip(&self.transverse_scales)
+                .zip(s.modes.clone())
+            {
+                let gradient = gradient * scale;
+                mechanical_force[k] -= gradient;
+                reaction -= modes[k].beta * gradient;
+            }
+            for (&shape, value) in s.bridge.iter().zip(&mut mechanical_force[modes.len()..]) {
+                *value -= shape * reaction;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate(
+        &self,
+        q: &[f64],
+        strings: &[StringPort],
+        modes: &[StringMode],
+        candidate: bool,
+    ) -> Result<(), &'static str> {
+        let (u, v) = if candidate {
+            (&self.next_q, &self.next_v)
+        } else {
+            (&self.q, &self.v)
+        };
+        if u.iter().chain(v).any(|x| !x.is_finite() || x.abs() > 1e5) {
+            return Err("longitudinal string state is outside its finite motion domain");
+        }
+        let mut scratch = [0.; MAX_SLOPES];
+        let slopes = &mut scratch[..self.model.slope_count()];
+        self.slopes(q, strings, modes, slopes);
+        let (mean, spread) = self
+            .model
+            .strain_bounds(slopes, u)
+            .map_err(|_| "longitudinal string strain is unrepresentable")?;
+        if mean.abs() + spread > self.material.maximum_strain
+            || self.rest_tension + self.ea * (mean - spread) <= 0.
+        {
+            return Err(
+                "longitudinal string exceeds its supplied strain bound or cannot guarantee positive tension across the span",
+            );
+        }
+        Ok(())
+    }
+
+    pub fn residual(&self, residual: &mut f64, scale: &mut f64) {
+        for (&want, &got) in self.required.iter().zip(&self.force) {
+            *residual = residual.max((want - got).abs());
+            *scale = scale.max(want.abs());
+        }
+    }
+    pub fn correct(&mut self, relaxation: f64) {
+        for (got, &want) in self.force.iter_mut().zip(&self.required) {
+            *got += relaxation * (want - *got);
+        }
+    }
+    pub fn commit(&mut self) {
+        self.q.copy_from_slice(&self.next_q);
+        self.v.copy_from_slice(&self.next_v);
+    }
+    pub fn checkpoint(&mut self) {
+        self.saved_q.copy_from_slice(&self.q);
+        self.saved_v.copy_from_slice(&self.v);
+    }
+    pub fn restore(&mut self) {
+        self.q.copy_from_slice(&self.saved_q);
+        self.v.copy_from_slice(&self.saved_v);
+    }
+}

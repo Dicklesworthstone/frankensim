@@ -546,6 +546,7 @@ impl Bank {
 
     /// Prepare the unforced coupled end positions. No allocations.
     pub fn predict(&mut self) {
+        if let Some(stretching)=&mut self.stretching {stretching.predict();}
         let n = self.modes.len(); let r = self.board_count;
         self.board_pre_loss=if let Some(flow)=&self.board_half_damping {
             damp_board(flow,&self.v[n..],&mut self.damped_board_v)
@@ -605,6 +606,7 @@ impl Bank {
     pub fn finish(&mut self, forces: &[f64]) {
         let n=self.modes.len();let r=self.board_count;
         self.last_modal_loss_j=self.board_pre_loss;
+        if let Some(stretching)=&self.stretching {self.last_modal_loss_j+=stretching.modal_loss();}
         assert_eq!(forces.len(),self.contact_strings.len(),"one force per contact");
         if let Some(p) = &mut self.footprints { p.gather(&self.strings, forces); }
         // S^-1 W^T was already computed for the compliance matrix. Keep it
@@ -652,10 +654,25 @@ impl Bank {
         }
     }
 
-    pub fn commit(&mut self) { self.q.copy_from_slice(&self.next_q);self.v.copy_from_slice(&self.next_v); }
+    pub fn commit(&mut self) {
+        self.q.copy_from_slice(&self.next_q);self.v.copy_from_slice(&self.next_v);
+        if let Some(stretching)=&mut self.stretching {stretching.commit();}
+    }
 
     pub fn energy(&self) -> f64 { self.energy_at(&self.q,&self.v) }
+    /// Evaluate transverse/board coordinates with the authoritative axial
+    /// state held fixed. Use next_energy() for the complete uncommitted trial.
     pub fn energy_at(&self,q:&[f64],v:&[f64])->f64 {
+        let mut energy=self.linear_energy_at(q,v);
+        if let Some(s)=&self.stretching {energy+=s.energy(q,&self.strings,&self.modes);}
+        energy
+    }
+    pub fn next_energy(&self)->f64 {
+        let mut energy=self.linear_energy_at(&self.next_q,&self.next_v);
+        if let Some(s)=&self.stretching {energy+=s.candidate_energy(&self.next_q,&self.strings,&self.modes);}
+        energy
+    }
+    fn linear_energy_at(&self,q:&[f64],v:&[f64])->f64 {
         let n=self.modes.len();let r=self.board_count;
         let mut energy=0.5*v.iter().map(|x|x*x).sum::<f64>();
         for group in &self.groups {
@@ -666,7 +683,6 @@ impl Bank {
             } }
         }
         for i in 0..r { for j in 0..r {energy+=0.5*q[n+i]*self.physical_board_k[i*r+j]*q[n+j];} }
-        if let Some(s)=&self.stretching {energy+=s.energy(q,&self.strings,&self.modes);}
         energy
     }
 

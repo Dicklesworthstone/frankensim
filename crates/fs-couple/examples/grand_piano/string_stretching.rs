@@ -13,6 +13,9 @@ use fs_math::det;
 use super::{Bank, StringMode, StringPort};
 use super::super::geometry::Course;
 
+#[path = "longitudinal_string.rs"]
+mod longitudinal;
+
 pub const HEADER:&str="frankensim-piano-string-stretching-v1";
 const MAX_BYTES:u64=64*1024;
 /// Bounded nonlinear force iteration; this is not a real-time guarantee.
@@ -25,29 +28,50 @@ pub struct Material {
     /// Continuous-span moderate-slope bound. Never a displacement clamp.
     pub maximum_slope:f64,
 }
+/// Explicit retained longitudinal inertia and its material/domain budget.
+#[derive(Clone,Copy,Debug)]
+pub struct WaveMaterial {
+    pub bandwidth_hz:f64,
+    pub mode_cap:usize,
+    pub damping_ratio:f64,
+    pub maximum_strain:f64,
+}
 #[derive(Clone,Debug)]
-pub struct Specification {pub courses:BTreeMap<u8,Option<Material>>}
+pub struct Specification {
+    pub courses:BTreeMap<u8,Option<Material>>,
+    pub waves:BTreeMap<u8,WaveMaterial>,
+}
 impl Specification {
     pub fn read(text:&str,courses:&[Course])->Result<Self,String> {
         if text.len() as u64>MAX_BYTES {return Err("string stretching file exceeds 64 KiB".into());}
-        let mut rows=BTreeMap::new();let mut header=false;
+        let mut rows=BTreeMap::new();let mut waves=BTreeMap::new();let mut header=false;
         for (line,raw) in text.lines().enumerate() {
             let row=raw.split('#').next().unwrap_or("").trim();if row.is_empty(){continue;}
-            let bad=||format!("string stretching line {}: expected linear,key or stretch,key,EA_N,slope_bound",line+1);
+            let bad=||format!("string stretching line {}: expected linear,key; stretch,key,EA_N,slope_bound; or waves,key,EA_N,slope_bound,band_hz,mode_cap,zeta,strain_bound",line+1);
             if !header {if row!=HEADER{return Err(bad());}header=true;continue;}
             let fields:Vec<_>=row.split(',').map(str::trim).collect();
-            if !matches!(fields.len(),2|4){return Err(bad());}
+            if !matches!(fields.len(),2|4|8){return Err(bad());}
             let key=fields[1].parse::<u8>().map_err(|_|bad())?;
             let material=match (fields[0],fields.len()) {
                 ("linear",2)=>None,
                 ("stretch",4)=>Some(Material {axial_rigidity_n:fields[2].parse().map_err(|_|bad())?,
                     maximum_slope:fields[3].parse().map_err(|_|bad())?}),
+                ("waves",8)=>{
+                    waves.insert(key,WaveMaterial {
+                        bandwidth_hz:fields[4].parse().map_err(|_|bad())?,
+                        mode_cap:fields[5].parse().map_err(|_|bad())?,
+                        damping_ratio:fields[6].parse().map_err(|_|bad())?,
+                        maximum_strain:fields[7].parse().map_err(|_|bad())?,
+                    });
+                    Some(Material {axial_rigidity_n:fields[2].parse().map_err(|_|bad())?,
+                        maximum_slope:fields[3].parse().map_err(|_|bad())?})
+                },
                 _=>return Err(bad()),
             };
             if rows.insert(key,material).is_some(){return Err(format!("duplicate string stretching key {key}"));}
         }
         if !header{return Err("missing string stretching header".into());}
-        let s=Self{courses:rows};s.validate(courses)?;Ok(s)
+        let s=Self{courses:rows,waves};s.validate(courses)?;Ok(s)
     }
     pub fn load(path:&str,courses:&[Course])->Result<Self,String> {
         let mut text=String::new();std::fs::File::open(path).map_err(|e|format!("{path}: {e}"))?
@@ -69,6 +93,15 @@ impl Specification {
                 }
             }
         }
+        for (&key,w) in &self.waves {
+            if !self.courses.get(&key).is_some_and(Option::is_some)
+                || !w.bandwidth_hz.is_finite() || w.bandwidth_hz<=0.
+                || !(1..=32).contains(&w.mode_cap)
+                || !w.damping_ratio.is_finite() || !(0.0..=1.0).contains(&w.damping_ratio)
+                || !w.maximum_strain.is_finite() || w.maximum_strain<=0. || w.maximum_strain>0.1 {
+                return Err("longitudinal waves require a stretching material, positive band, 1..32 mode cap, zeta in [0,1], and strain bound in (0,0.1]".into());
+            }
+        }
         Ok(())
     }
 }
@@ -81,6 +114,12 @@ pub struct Observation {
     /// ONE physical segment's total, already included in bank energy. Querying
     /// either polarization returns this same quantity; do not sum it twice.
     pub stretching_energy_j:f64,
+    /// Retained axial coordinates for this ONE physical segment.
+    pub longitudinal_modes:usize,
+    pub longitudinal_kinetic_energy_j:f64,
+    /// Conservative continuous-span bounds, not collocation samples.
+    pub minimum_tension_n:f64,
+    pub maximum_tension_n:f64,
 }
 struct Channel {
     string:usize,
@@ -91,6 +130,7 @@ struct Channel {
     length:f64,
     rest_tension:f64,
     material:Material,
+    waves:Option<longitudinal::Prepared>,
 }
 impl Channel {
     fn plane_values(&self,si:usize,q:&[f64],strings:&[StringPort],modes:&[StringMode])->(f64,f64,f64) {
@@ -112,8 +152,12 @@ impl Channel {
     }
     fn observe(&self,q:&[f64],strings:&[StringPort],modes:&[StringMode])->Observation {
         let (s,slope_bound)=self.values(q,strings,modes);
-        Observation {additional_strain:0.25*s,tension_n:self.rest_tension+0.25*self.material.axial_rigidity_n*s,
-            slope_bound,stretching_energy_j:0.25*self.coefficient*s*s}
+        let tension_n=self.rest_tension+0.25*self.material.axial_rigidity_n*s;
+        let mut result=Observation {additional_strain:0.25*s,tension_n,
+            slope_bound,stretching_energy_j:0.25*self.coefficient*s*s,
+            minimum_tension_n:tension_n,maximum_tension_n:tension_n,..Observation::default()};
+        if let Some(w)=&self.waves {w.observe(q,strings,modes,&mut result);}
+        result
     }
 }
 
@@ -127,6 +171,7 @@ pub(super) struct Prepared {
 impl Prepared {
     fn new(bank:&Bank,courses:&[Course],spec:&Specification)->Result<Self,String> {
         spec.validate(courses)?;let mut channels=Vec::new();
+        let mut wave_coordinates=0usize;let mut wave_terms=0usize;
         for (si,s) in bank.strings.iter().enumerate() {
             if s.polarization!=0 {continue;} // this segment's second direction shares its first channel
             let c=courses.get(s.course).ok_or("missing original string course")?;
@@ -160,16 +205,48 @@ impl Prepared {
                 || diagonal.iter().any(|x|!x.is_finite()||*x<=0.) {
                 return Err("derived string extension channel is unrepresentable".into());
             }
-            channels.push(Channel {string:si,second,coefficient:ch.coefficient,diagonal,chord,length,
-                rest_tension:tension,material});
+            let mut channel=Channel {string:si,second,coefficient:ch.coefficient,diagonal,chord,length,
+                rest_tension:tension,material,waves:None};
+            if let Some(w)=spec.waves.get(&c.midi) {
+                let prepared=longitudinal::Prepared::new(&channel,c.linear_density_kg_m,bank.rate,*w)?;
+                wave_coordinates+=prepared.mode_count();
+                wave_terms+=prepared.coupling_terms();
+                if wave_coordinates>8192 || wave_terms>4_000_000 {
+                    return Err("longitudinal string bank exceeds 8192 axial coordinates or four million coupling terms".into());
+                }
+                // Zero modes is an explicit band-limited quasistatic channel.
+                // Keep its strain/domain admission even on a short duplex.
+                channel.waves=Some(prepared);
+            }
+            channels.push(channel);
         }
         Ok(Self {channels,force:vec![0.;bank.q.len()],required:vec![0.;bank.q.len()],
             residual:f64::INFINITY,relaxation:1.})
     }
     pub(super) fn energy(&self,q:&[f64],strings:&[StringPort],modes:&[StringMode])->f64 {
-        self.channels.iter().map(|c|c.observe(q,strings,modes).stretching_energy_j).sum()
+        self.channels.iter().map(|c|{
+            let o=c.observe(q,strings,modes);o.stretching_energy_j+o.longitudinal_kinetic_energy_j
+        }).sum()
     }
-    fn begin(&mut self) {self.force.fill(0.);self.residual=f64::INFINITY;self.relaxation=1.;}
+    pub(super) fn candidate_energy(&self,q:&[f64],strings:&[StringPort],modes:&[StringMode])->f64 {
+        self.channels.iter().map(|c|match &c.waves {
+            Some(w)=>w.energy(q,strings,modes,true),
+            None=>c.observe(q,strings,modes).stretching_energy_j,
+        }).sum()
+    }
+    fn begin(&mut self) {
+        self.force.fill(0.);self.residual=f64::INFINITY;self.relaxation=1.;
+        for c in &mut self.channels {if let Some(w)=&mut c.waves {w.begin();}}
+    }
+    pub(super) fn predict(&mut self) {
+        for c in &mut self.channels {if let Some(w)=&mut c.waves {w.predict();}}
+    }
+    pub(super) fn modal_loss(&self)->f64 {
+        self.channels.iter().filter_map(|c|c.waves.as_ref()).map(|w|w.loss_j).sum()
+    }
+    pub(super) fn commit(&mut self) {
+        for c in &mut self.channels {if let Some(w)=&mut c.waves {w.commit();}}
+    }
     /// Exact discrete gradient of c/4*(q^T E q)^2, pulled through BOTH moving-
     /// boundary directions. Its scalar tension uses the total geometric strain.
     fn evaluate(&mut self,a:&[f64],b:&[f64],strings:&[StringPort],modes:&[StringMode])->Result<(),&'static str> {
@@ -177,7 +254,11 @@ impl Prepared {
             return Err("string stretching requires complete finite mechanical coordinates");
         }
         self.required.fill(0.);
-        for c in &self.channels {
+        for c in &mut self.channels {
+            if let Some(w)=&mut c.waves {
+                w.evaluate(a,b,strings,modes,&mut self.required)?;
+                continue;
+            }
             let (sa,_) =c.values(a,strings,modes);let (sb,_) =c.values(b,strings,modes);
             let scalar=c.coefficient*f64::midpoint(sa,sb);
             for si in std::iter::once(c.string).chain(c.second) {
@@ -212,8 +293,13 @@ impl Prepared {
         for (&want,&got) in self.required.iter().zip(&self.force) {
             residual=residual.max((want-got).abs());scale=scale.max(want.abs());
         }
+        for c in &self.channels {if let Some(w)=&c.waves {
+            w.validate(a,strings,modes,false)?;
+            w.residual(&mut residual,&mut scale);
+        }}
         if residual<=1e-10*scale {
             self.validate_state(b,strings,modes)?;
+            for c in &self.channels {if let Some(w)=&c.waves {w.validate(b,strings,modes,true)?;}}
             return Ok(true); // force must still match the candidate it produced
         }
         // Underrelax only NUMERICAL iterates, never the accepted force law.
@@ -223,6 +309,7 @@ impl Prepared {
         for (got,&want) in self.force.iter_mut().zip(&self.required) {
             *got+=self.relaxation*(want-*got);
         }
+        for c in &mut self.channels {if let Some(w)=&mut c.waves {w.correct(self.relaxation);}}
         self.residual=residual;Ok(false)
     }
 }
@@ -238,6 +325,31 @@ impl Bank {
         if !p.channels.is_empty(){self.stretching=Some(p);}Ok(())
     }
     pub fn has_string_stretching(&self)->bool {self.stretching.is_some()}
+    pub fn longitudinal_mode_count(&self)->usize {
+        self.stretching.as_ref().map_or(0,|p|p.channels.iter()
+            .filter_map(|c|c.waves.as_ref()).map(longitudinal::Prepared::mode_count).sum())
+    }
+    /// Complete strain potential plus axial kinetic energy of wave-selected
+    /// segments. Included once in energy(); not a separately additive ledger.
+    pub fn longitudinal_energy_j(&self)->f64 {
+        self.stretching.as_ref().map_or(0.,|p|p.channels.iter().filter_map(|c|c.waves.as_ref())
+            .map(|w|w.energy(&self.q,&self.strings,&self.modes,false)).sum())
+    }
+    pub fn string_longitudinal_state(&self,string:usize)->Option<(&[f64],&[f64])> {
+        let c=self.stretching.as_ref()?.channels.iter()
+            .find(|c|c.string==string||c.second==Some(string))?;
+        let w=c.waves.as_ref()?;Some((&w.q,&w.v))
+    }
+    pub(crate) fn checkpoint_longitudinal(&mut self) {
+        if let Some(p)=&mut self.stretching {
+            for c in &mut p.channels {if let Some(w)=&mut c.waves {w.checkpoint();}}
+        }
+    }
+    pub(crate) fn restore_longitudinal(&mut self) {
+        if let Some(p)=&mut self.stretching {
+            for c in &mut p.channels {if let Some(w)=&mut c.waves {w.restore();}}
+        }
+    }
     pub fn string_stretching_observation(&self,string:usize)->Option<Observation> {
         let p=self.stretching.as_ref()?;
         p.channels.iter().find(|c|c.string==string || c.second==Some(string))
@@ -260,3 +372,7 @@ impl Bank {
 #[cfg(test)]
 #[path="string_stretching_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="longitudinal_bank_tests.rs"]
+mod longitudinal_tests;

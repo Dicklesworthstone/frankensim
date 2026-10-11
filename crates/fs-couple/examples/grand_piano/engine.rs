@@ -632,6 +632,7 @@ impl Instrument {
     }
     fn step_observed(&mut self,mut trace:Option<&mut[f64]>)->Result<f64,Error>{
         self.saved_q.copy_from_slice(&self.bank.q);self.saved_v.copy_from_slice(&self.bank.v);
+        self.bank.checkpoint_longitudinal();
         self.saved_hammers.copy_from_slice(&self.hammers);self.saved_contacts.clone_from_slice(&self.contacts);
         let saved=self.accounting;let modal=self.bank.last_modal_loss_j;
         if let Some(air)=&mut self.radiation {air.checkpoint();}
@@ -640,6 +641,7 @@ impl Instrument {
         for substep in 0..self.substeps {
             if let Err(error)=self.mechanics_step(){
                 self.bank.q.copy_from_slice(&self.saved_q);self.bank.v.copy_from_slice(&self.saved_v);
+                self.bank.restore_longitudinal();
                 self.hammers.copy_from_slice(&self.saved_hammers);self.contacts.clone_from_slice(&self.saved_contacts);
                 if let Some(air)=&mut self.radiation {air.restore();}
                 if let Some(air)=&mut self.cavity {air.restore();}
@@ -844,3 +846,7 @@ mod tests {
 #[cfg(test)]
 #[path="polarization_engine_tests.rs"]
 mod polarization_tests;
+
+#[cfg(test)]
+#[path="longitudinal_engine_tests.rs"]
+mod longitudinal_tests;
