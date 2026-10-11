@@ -30,6 +30,10 @@
 //! - [`kirchhoff_carrier_moving_end`] — the same channel on
 //!   free-fixed cosines `κ = (k−½)π/L`, `φ(0) ≠ 0`. A cable on a
 //!   moving support, not a second instrument law.
+//! - [`longitudinal::LongitudinalString`] — finite longitudinal inertia
+//!   coupled to one or two transverse slope fields. Unretained axial
+//!   strain channels are statically equilibrated; the zero-mode limit
+//!   recovers the same Kirchhoff--Carrier mean strain.
 //!
 //! Honest scope: moderate-rotation von Karman regime; no damage,
 //! plasticity, or wrinkling. In-plane edges remain movable (Airy
@@ -37,6 +41,8 @@
 
 use fs_math::det;
 use fs_phs::{PhsError, PortHamiltonian, Storage};
+
+pub mod longitudinal;
 
 /// One Airy-stress coupling channel: coefficient `c >= 0` and the
 /// symmetric matrix `E` (row-major `n x n`) of `q^T E q`.

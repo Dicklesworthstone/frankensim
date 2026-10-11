@@ -63,6 +63,27 @@ the crash cascade with structurally exact energy accounting.
   `ω = n π c/L √(1 + B n²)` with `B = π² EI/(T L²)`. `EI = 0` is
   the flexible taut-string limit. Cables, stays, and strings share
   this waveguide law.
+- `longitudinal::LongitudinalString` — the same moderate-slope axial
+  material strain `u_x + (y_x² + z_x²)/2` with explicit finite longitudinal
+  inertia. The caller supplies one or two cosine slope series, including
+  the moving transverse chord, and strictly ordered longitudinal sine
+  indices. Mass-normalized axial frequencies are
+  `omega_j = (j pi/L) sqrt(EA/mu)`. Exact cosine products give the geometric
+  mean `s0` and coefficients `sj`; storage is the positive sum
+  `EA L s0²/2 + EA L/4 sum_retained(dj uj + sj)²`. Unretained zero-mean
+  strain channels are statically equilibrated, without their inertia.
+  `energy` includes retained axial quadratic stiffness; it excludes all
+  kinetic energy and the pre-existing transverse linear potential.
+  `discrete_gradient` gives exact finite-step work, without dividing by
+  state differences. `coupling_discrete_gradient` removes only the axial
+  linear gradient for a caller whose existing propagator already owns it.
+  `strain_bounds` and `strain_at` expose actual reduced material strain
+  for caller-owned material/slack admission. No method selects damping,
+  advances state, or allocates during energy/force evaluation. Preparation
+  admits at most 512 transverse modes per direction, two directions,
+  and 32 explicit axial modes with indices at most 1024; it never drops
+  a mode to satisfy a frequency cutoff. The caller owns the cutoff,
+  resolved bandwidth, moving-end pullback, clock, and finite-strain domain.
 - `duffing_backbone` / `single_mode_beta` — the analytic
   perturbation pins.
 - Time stepping, striking, damping, and the energy ledger are
@@ -133,6 +154,14 @@ None.
 
 ## Conformance tests
 
+`src/longitudinal_tests.rs`: independent sampled-span strain integration
+including statically eliminated channels; ordinary force versus energy
+finite differences; exact finite-step work and removal of only the axial
+linear force; the existing Kirchhoff--Carrier condensed limit; analytic
+single-sine doubling of the axial drive index; moving-chord reciprocal
+pullback and whole-span strain bounds; finite and declared-cap admission.
+These are G0/G1/G3 model tests, not measured piano calibration.
+
 `tests/nlmodal.rs` (10): construction certificates (quadrature
 residual, mode counts, assembly); non-vacuous coupling + asymmetry
 refusal; Duffing backbone vs perturbation formula; Kirchhoff-Carrier
@@ -165,3 +194,9 @@ modal energies, leaked fractions, tensor size); typed refusals.
 - Damping is per-mode viscous `zeta_k` supplied by the caller;
   frequency-dependent loss models remain the visco-damping
   facility's.
+- The finite longitudinal string image fixes longitudinal endpoint
+  displacements while allowing caller-supplied transverse chord motion.
+  Omitted axial coordinates are statically condensed, not resolved waves;
+  this omits their inertial correction and does not certify broadband
+  convergence. No tension-dependent winding slip, axial bridge compliance,
+  full finite-strain geometry, or identified material loss is implied.
