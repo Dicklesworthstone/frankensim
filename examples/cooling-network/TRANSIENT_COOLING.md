@@ -265,9 +265,36 @@ solid/liquid diffusion cases with an independent four-node linear solve.
 This opt-in CLI mode supports fixed or adaptive schedules and fixed reference
 density with uniform or explicitly assigned equilibrium charts, including
 single-phase charts. Geometry and reference mass remain fixed.
-Steady design, time/mesh studies, return-fraction design and enclosure radiation
-explicitly refuse. There is no fluid storage, phase
+Steady design, time/mesh studies and return-fraction design explicitly refuse.
+There is no fluid storage, phase
 advection, melting-driven motion or certified inter-step peak.
+
+The [enthalpy enclosure request](enthalpy-enclosure.json) adds gray-diffuse
+exchange between the two contact-coupled bodies:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/enthalpy-enclosure.json
+```
+
+Its equal-area patches use explicitly prescribed ideal parallel-plate factors
+`[[0,1],[1,0]]`, with emissivities 0.8 and 0.6. These are synthetic exchange
+factors, not visibility inferred from the displayed tetrahedra. At the 350 K
+and 330 K latent plateaus, the independent two-gray-surface formula gives
+173.734057075 W from the first body to the second. Contact transfers another
+100 W internally, while the air removes 78.0845054746 W. Both internal transfers
+change the nodal enthalpies and cancel from the combined energy balance.
+
+The solver holds accepted h fixed throughout radiation and air iterations,
+then checks the full nonlinear residual and physical energy balance before
+accepting a step. Only the original convective flux feeds air transport.
+The final `radiation.surfaces` report gives signed `outward_heat_w` and
+`applied_heat_w` for each patch. `radiative_out_w` and the trajectory's
+`radiative_energy_loss_j` measure the closed-enclosure residual; they should be
+near zero even during substantial internal exchange. Enclosure radiation also
+works with adaptive schedules, repeated cycles, prescribed returns, workload
+and fan sizing. Fixed-grid trajectory gradients retain its full reflection
+feedback while emissivity, view factors and geometry stay fixed.
 
 The [enthalpy recirculation request](enthalpy-recirculation.json) couples a
 mixed sensible/latent body to a 60% exhaust return and 40% fresh-air supply:
@@ -282,8 +309,8 @@ state. `transient.history` includes mixed supply temperatures and the actual
 fresh-air/exhaust heat gain; the final `recirculation` report includes the
 configured fractions and full supply/return streams. The two additional totals,
 `fresh_exhaust_energy_gain_j` and `fresh_exhaust_energy_residual_j`, close stored
-enthalpy against input heat, fresh makeup/remaining exhaust, and any outward
-ambient radiation. Repeated runs report these values for each cycle and for
+enthalpy against input heat, fresh makeup/remaining exhaust, and
+net radiative heat. Repeated runs report these values for each cycle and for
 the whole experiment. Adaptive runs count only accepted half-steps in energy
 totals; rejected/coarse solves contribute work only. The existing inlet
 derivatives include return feedback and refer to fresh supply temperatures.
@@ -364,8 +391,8 @@ history gradients described next.
 Add `"adjoint": {"qoi": "sampled-peak", "max_checkpoint_bytes": 1048576}`
 inside `transient` to differentiate the earliest sampled maximum. Set `qoi`
 to `"final"` for the final objective instead. The dedicated enthalpy history
-adjoint includes the coupled air references and the physical ambient-radiation
-feedback. It carries the enthalpy derivative directly between steps, including
+adjoint includes the coupled air references and the physical ambient or
+closed-enclosure radiation feedback. It carries the enthalpy derivative directly between steps, including
 through latent-plateau interiors where temperature alone cannot carry the
 stored-state sensitivity. It supports the same explicit single-phase and
 heterogeneous chart assignments as the forward solve.

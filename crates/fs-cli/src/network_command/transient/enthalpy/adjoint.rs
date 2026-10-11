@@ -263,7 +263,7 @@ impl Tape {
             let radiation = request
                 .radiation
                 .as_ref()
-                .map(|p| p.enthalpy_controls(request))
+                .map(|p| p.enthalpy_controls(request, cx))
                 .transpose()?;
             let mut end = selected.state;
             while end > 0 {
@@ -324,7 +324,9 @@ impl Tape {
                         max_newton_iterations: config.max_iterations,
                         energy_tolerance_j: finite(request.limits.heat * frame.dt)?,
                     };
-                    let (accepted, objective_state) = if let Some((patches, policy)) = &radiation {
+                    let (accepted, objective_state) = if let Some(
+                        radiation::EnthalpyControls::Ambient { patches, policy },
+                    ) = &radiation {
                         let solved = engine
                             .advance_with_ambient_radiation(
                                 cx,
@@ -335,6 +337,26 @@ impl Tape {
                                 step_config,
                                 patches,
                                 *policy,
+                            )
+                            .map_err(producer)?;
+                        reconstruction.add(
+                            solved.radiation.iterations,
+                            solved.radiation.solid_iterations,
+                            solved.radiation.krylov_iterations,
+                        )?;
+                        let state = replay_objective(
+                            request,
+                            cx,
+                            frame,
+                            &names,
+                            &solved.convective_robin_fluxes,
+                            index + 1 == selected.state && !selected.boundary,
+                        )?;
+                        (solved.conduction, state)
+                    } else if let Some(radiation::EnthalpyControls::Enclosure { model, policy }) = &radiation {
+                        let solved = engine
+                            .advance_with_enclosure_radiation(
+                                cx, problem, interfaces, old, frame.dt, step_config, model, *policy,
                             )
                             .map_err(producer)?;
                         reconstruction.add(
@@ -373,9 +395,11 @@ impl Tape {
                         (solved, state)
                     };
                     check_replay(frame, &accepted)?;
-                    // Both owners expose the same checked physical tangent. Keep
+                    // All owners expose the same checked physical tangent. Keep
                     // the owning value alive while the convection response borrows it.
-                    let (radiative, ordinary) = if let Some((patches, _)) = &radiation {
+                    let (radiative, enclosed, ordinary) = if let Some(
+                        radiation::EnthalpyControls::Ambient { patches, .. },
+                    ) = &radiation {
                         let entries = self
                             .vertices
                             .checked_mul(patches.len())
@@ -398,9 +422,23 @@ impl Tape {
                                     .map_err(producer)?,
                             ),
                             None,
+                            None,
+                        )
+                    } else if let Some(radiation::EnthalpyControls::Enclosure { model, policy }) = &radiation {
+                        let entries = self.vertices.checked_mul(model.surfaces().len())
+                            .and_then(|n| n.checked_mul(2))
+                            .ok_or_else(|| budget("enthalpy enclosure feedback size overflow"))?;
+                        (
+                            None,
+                            Some(engine.linearize_accepted_with_enclosure_radiation(
+                                cx, problem, interfaces, old, frame.dt, step_config,
+                                model, *policy, accepted, entries,
+                            ).map_err(producer)?),
+                            None,
                         )
                     } else {
                         (
+                            None,
                             None,
                             Some(
                                 engine
@@ -417,9 +455,10 @@ impl Tape {
                             ),
                         )
                     };
-                    let step: &EnthalpyStepLinearization<'_> = match (&radiative, &ordinary) {
-                        (Some(step), None) => step.transport(),
-                        (None, Some(step)) => step.transport(),
+                    let step: &EnthalpyStepLinearization<'_> = match (&radiative, &enclosed, &ordinary) {
+                        (Some(step), None, None) => step.transport(),
+                        (None, Some(step), None) => step,
+                        (None, None, Some(step)) => step.transport(),
                         _ => return Err(bad("missing enthalpy endpoint tangent")),
                     };
                     let response = step
@@ -540,7 +579,7 @@ impl Tape {
         };
         let controls_fragment = controls.report_fragment(request, cx, schedule)?;
         let report = format!(
-            "{{\"method\":\"discrete-backward-euler-coupled-enthalpy-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":{},\"dtemperature_dinitial_specific_enthalpies_k_kg_j\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_j\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"reconstruction_solid_solves\":{},\"adjoint_sweeps\":{},\"adjoint_krylov_iterations\":{},\"max_interface_residual\":{}{controls_fragment},\"scope\":\"fixed accepted grid and cycle count; final or earliest sampled-maximum branch in global time, no continuous peak bound or unique derivative at ties; full specific-enthalpy history across every cycle, contact, mixed-air and declared ambient-radiation feedback; shared interval controls affect every repeated occurrence and multiply their actual source without division by baseline power; initial h derivatives describe the original initial field and have units K kg/J; inlet controls apply throughout; fan controls include single-bank affinity, capacity transport and supported convection Reynolds response, null when unavailable; separately requested component and contact controls report their own units and scope; fixed reference densities, charts, conductivity/contact laws, geometry, fluid properties and radiation controls; slope corners and validity endpoints refuse classical endpoint derivatives; replay verifies accepted h and T bits and rechecks physical residual/energy gates; checkpoint bytes bound retained h/T/references for all cycles and control accumulators, not total workspace; per-endpoint derivative budgets share the original wall deadline\"}}",
+            "{{\"method\":\"discrete-backward-euler-coupled-enthalpy-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":{},\"dtemperature_dinitial_specific_enthalpies_k_kg_j\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_j\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"reconstruction_solid_solves\":{},\"adjoint_sweeps\":{},\"adjoint_krylov_iterations\":{},\"max_interface_residual\":{}{controls_fragment},\"scope\":\"fixed accepted grid and cycle count; final or earliest sampled-maximum branch in global time, no continuous peak bound or unique derivative at ties; full specific-enthalpy history across every cycle, contact, mixed-air and declared ambient or closed-enclosure radiation feedback; shared interval controls affect every repeated occurrence and multiply their actual source without division by baseline power; initial h derivatives describe the original initial field and have units K kg/J; inlet controls apply throughout; fan controls include single-bank affinity, capacity transport and supported convection Reynolds response, null when unavailable; separately requested component and contact controls report their own units and scope; fixed reference densities, charts, conductivity/contact laws, geometry, fluid properties and radiation controls; slope corners and validity endpoints refuse classical endpoint derivatives; replay verifies accepted h and T bits and rechecks physical residual/energy gates; checkpoint bytes bound retained h/T/references for all cycles and control accumulators, not total workspace; per-endpoint derivative budgets share the original wall deadline\"}}",
             quote(match self.config.observable {
                 Observable::Final => "final",
                 Observable::SampledPeak => "sampled-peak",

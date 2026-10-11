@@ -389,6 +389,55 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             max_feedback_entries,
         )
     }
+
+    /// Advance closed enclosure exchange with heterogeneous charts and the
+    /// same fixed reference masses, contacts and phase conductivity laws.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_enclosure_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        enclosure: &crate::radiation::GrayDiffuseEnclosure,
+        radiation_config: crate::AmbientRadiationConfig,
+    ) -> Result<super::enclosure::EnthalpyEnclosureStepSolution, EnthalpyError> {
+        self.inner.advance_with_enclosure_radiation(
+            cx, problem, interfaces, old_h, dt_s, config, enclosure, radiation_config,
+        )
+    }
+
+    /// Recheck and retain the complete enclosure tangent in h coordinates;
+    /// original convection ports remain distinct from radiation exchange.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_accepted_with_enclosure_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        enclosure: &crate::radiation::GrayDiffuseEnclosure,
+        radiation_config: crate::AmbientRadiationConfig,
+        accepted: EnthalpyStepSolution,
+        max_feedback_entries: usize,
+    ) -> Result<EnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        self.inner.linearize_accepted_with_enclosure_radiation(
+            cx,
+            problem,
+            interfaces,
+            old_h,
+            dt_s,
+            config,
+            enclosure,
+            radiation_config,
+            accepted,
+            max_feedback_entries,
+        )
+    }
 }
 
 /// Physical history/source and frozen-reference-density pullbacks of one step.

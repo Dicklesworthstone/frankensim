@@ -378,9 +378,6 @@ impl Config {
                 "enthalpy max_iterations * linear_restart * max_linear_cycles exceeds budgets.linear_iterations per inner solid solve",
             ));
         }
-        if let Some(policy) = &request.radiation {
-            policy.enthalpy_controls(request)?;
-        }
         Ok(())
     }
 }
@@ -576,7 +573,7 @@ fn advance(
     let controls = request
         .radiation
         .as_ref()
-        .map(|policy| policy.enthalpy_controls(request))
+        .map(|policy| policy.enthalpy_controls(request, cx))
         .transpose()?;
     let mut last = None;
     let mut failure = None;
@@ -592,7 +589,9 @@ fn advance(
             };
             let interfaces = request.contacts.as_ref().map(|c| &c.interfaces);
             // Neither a changed air reference nor a radiative trial advances h.
-            let (solid, states, heat, residual, energy) = if let Some((patches, policy)) = &controls
+            let (solid, states, heat, residual, energy) = if let Some(
+                radiation::EnthalpyControls::Ambient { patches, policy },
+            ) = &controls
             {
                 let solved = engine
                     .advance_with_ambient_radiation(
@@ -623,6 +622,33 @@ fn advance(
                             .ok_or_else(|| bad("enthalpy lacks a network convection region"))
                     })
                     .collect::<Result<Vec<_>>>()?;
+                (
+                    solved.conduction,
+                    states,
+                    Some(heat),
+                    solved.physical_residual_norm_j,
+                    solved.physical_energy_residual_j,
+                )
+            } else if let Some(radiation::EnthalpyControls::Enclosure { model, policy }) = &controls {
+                let solved = engine
+                    .advance_with_enclosure_radiation(
+                        cx, problem, interfaces, old_h, dt, step_config, model, *policy,
+                    )
+                    .map_err(producer)?;
+                work.add(
+                    solved.radiation.iterations,
+                    solved.radiation.solid_iterations,
+                    solved.radiation.krylov_iterations,
+                )?;
+                let heat = request.radiation.as_ref()
+                    .ok_or_else(|| bad("missing enthalpy enclosure policy"))?
+                    .enthalpy_enclosure_heat(&solved.radiation)?;
+                let states = names.iter().map(|name| {
+                    solved.convective_robin_fluxes.iter()
+                        .find(|row| row.region == *name)
+                        .map(SolidRegionState::from_robin_flux)
+                        .ok_or_else(|| bad("enthalpy enclosure lacks a network convection region"))
+                }).collect::<Result<Vec<_>>>()?;
                 (
                     solved.conduction,
                     states,
@@ -1080,7 +1106,7 @@ fn simulate_cycle(
     );
     let adaptive_report = adaptive::render(&adaptive_stats, adaptive_policy)?;
     let output = format!(
-        "{prefix},\"solid_specific_enthalpies_j_kg\":{},\"solid_liquid_mass_fractions\":{},\"transient\":{{\"scheme\":\"backward-euler-total-enthalpy\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{completed},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":{adaptive_report},\"nonlinear\":null,\"adjoint\":{adjoint},\"enthalpy\":{policy}{radiation_field}{recirculation_field},\"scope\":\"fixed or adaptive workload/fan schedule with workload-power or fan-speed sizing and optional prescribed return-air mixing; physical h-history adjoints require fixed timesteps; accepted enthalpy is physical history; temperatures and mass-weighted phase summaries observe that state; repeated_cycles, when present, owns all-cycle totals and adjoints while transient describes the final cycle in local time; sampled endpoints do not bound inter-step peaks; no moving geometry, melt flow, study or enclosure mode\"}}}}\n",
+        "{prefix},\"solid_specific_enthalpies_j_kg\":{},\"solid_liquid_mass_fractions\":{},\"transient\":{{\"scheme\":\"backward-euler-total-enthalpy\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{completed},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":{adaptive_report},\"nonlinear\":null,\"adjoint\":{adjoint},\"enthalpy\":{policy}{radiation_field}{recirculation_field},\"scope\":\"fixed or adaptive workload/fan schedule with workload-power or fan-speed sizing and optional prescribed return-air mixing; physical h-history adjoints require fixed timesteps; accepted enthalpy is physical history; temperatures and mass-weighted phase summaries observe that state; repeated_cycles, when present, owns all-cycle totals and adjoints while transient describes the final cycle in local time; sampled endpoints do not bound inter-step peaks; ambient or closed-enclosure radiation retains its declared fixed controls; no moving geometry, melt flow or study mode\"}}}}\n",
         numbers(&h)?,
         numbers(&final_liquid)?,
         num(time)?,

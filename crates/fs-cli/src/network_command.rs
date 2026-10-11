@@ -162,9 +162,6 @@ impl Request {
                     return Err(bad(format!("transient.enthalpy does not admit {key}")));
                 }
             }
-            if root.get("radiation").and_then(|policy|policy.get("enclosure")).is_some() {
-                return Err(bad("transient.enthalpy supports ambient radiation, not radiation.enclosure"));
-            }
         }
         let seed = string(get(&root, "seed")?, "seed")?.parse::<u64>().map_err(|_| bad("seed must be a decimal u64 string"))?;
         let b = object(get(&root, "budgets")?, &["graph_sweeps", "coupling_iterations", "linear_iterations", "derivative_iterations", "wall_seconds"], "budgets")?;

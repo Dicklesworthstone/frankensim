@@ -57,6 +57,19 @@ pub(super) struct Policy {
     relaxation: f64,
 }
 
+/// The selected physical radiation owner for total-enthalpy endpoints.
+/// Closed exchange retains its actual radiosity model, never an ambient proxy.
+pub(super) enum EnthalpyControls {
+    Ambient {
+        patches: Vec<AmbientRadiationPatch>,
+        policy: AmbientRadiationConfig,
+    },
+    Enclosure {
+        model: fs_conduction::radiation::GrayDiffuseEnclosure,
+        policy: AmbientRadiationConfig,
+    },
+}
+
 #[derive(Debug)]
 struct PatchHeat {
     surface: String,
@@ -81,17 +94,25 @@ fn finite(value: f64, stage: &str) -> Result<f64> {
 }
 
 impl Policy {
-    /// Existing surface declarations for the physical total-enthalpy producer.
-    pub(super) fn enthalpy_controls(&self, request: &Request)
-        -> Result<(Vec<AmbientRadiationPatch>, AmbientRadiationConfig)> {
-        if self.enclosure.is_some() {
-            return Err(bad("transient.enthalpy supports ambient radiation, not radiation.enclosure"));
+    /// Bind the declared model to the same mesh and physical boundary owner.
+    pub(super) fn enthalpy_controls(&self, request: &Request, cx: &Cx<'_>)
+        -> Result<EnthalpyControls> {
+        let controls = |patches: usize| AmbientRadiationConfig {
+            max_iterations: self.max_iterations,
+            temperature_tolerance_k: self.tolerance_k,
+            balance_tolerance_w: request.limits.heat / (patches as f64 + 1.0),
+            balance_relative_tolerance: 0.0,
+            relaxation: self.relaxation,
+        };
+        if let Some(enclosure) = &self.enclosure {
+            let model = enclosure.bind(request, cx)?;
+            let policy = controls(model.surfaces().len());
+            return Ok(EnthalpyControls::Enclosure { model, policy });
         }
-        Ok((self.patches.values().map(Patch::model).collect::<Result<Vec<_>>>()?,
-            AmbientRadiationConfig {max_iterations:self.max_iterations,
-                temperature_tolerance_k:self.tolerance_k,
-                balance_tolerance_w:request.limits.heat/(self.patches.len() as f64+1.0),
-                balance_relative_tolerance:0.0,relaxation:self.relaxation}))
+        Ok(EnthalpyControls::Ambient {
+            patches: self.patches.values().map(Patch::model).collect::<Result<Vec<_>>>()?,
+            policy: controls(self.patches.len()),
+        })
     }
 
     pub(super) fn parse(value: &J, _root: &J, surfaces: &[Surface]) -> Result<Self> {

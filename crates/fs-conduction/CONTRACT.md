@@ -1059,6 +1059,32 @@ authority.
   This is a fixed-step estimated discretization, not pointwise `T(x)^4`
   quadrature, an enclosure/view-factor model, an adaptive transient frontend,
   or experimentally validated heat transfer.
+- `EnthalpyBackwardEuler::advance_with_enclosure_radiation` and its heterogeneous
+  facade couple the same immutable h history to the existing gray-diffuse
+  radiosity owner. One to 64 nonoverlapping radiative patches must exactly match
+  positive uniform Robin regions. Each patch emits at its P1 area mean and
+  applies a uniform outward flux using the algebraic reference shift
+  `T_air - q_rad/htc`; original convection alone is exposed to an air consumer.
+  Supplied view factors retain their existing closure/reciprocity admission.
+  Every accepted endpoint passes fresh radiosity equations, applied patch heat,
+  the complete nonlinear h residual and the original joule energy gate. The
+  initial physical residual sets the Newton target, with inner solves tightened
+  to one quarter of that target. Closed exchange changes local storage and its
+  signed sum cancels from whole-system heat; it is not an external reservoir.
+  The matching `linearize_accepted_with_enclosure_radiation` rechecks accepted h
+  and adds the exact tangent `dt*G*(dq/dT_patch)*W*diag(dT/dh)` to the existing
+  sparse h Jacobian. The patch derivative uses the same pivoted radiosity solve
+  and checks its original equations. Two nodal vectors per patch are admitted
+  before allocation; these factors participate in forward/transpose actions
+  and the preconditioner. Latent zero temperature slopes remain zero, while
+  direct h history, nonlinear/phase conductivity and contact remain active.
+  Original convection ports are retained for inlet and HTC derivatives.
+  Emissivities, view factors and geometry are fixed; emissivity validity
+  endpoints refuse classical derivatives. `tests/enthalpy_enclosure.rs` adds
+  independent reflected-heat/energy references, mixed latent transfer,
+  source/history finite differences, transpose pairing, deterministic replay
+  and admission/cancellation checks. This is the existing patch-mean radiation
+  discretization, without inferred geometric visibility or pointwise T^4 flux.
 - `transient::enthalpy::adjoint` supplies discrete endpoint derivatives for
   this same spatial enthalpy balance. `linearize_step` solves a real endpoint;
   `linearize_accepted` rechecks a supplied endpoint's original Newton target,

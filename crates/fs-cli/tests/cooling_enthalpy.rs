@@ -24,6 +24,9 @@ mod recirculation;
 #[path = "cooling_enthalpy/controller.rs"]
 mod controller;
 
+#[path = "cooling_enthalpy/enclosure.rs"]
+mod enclosure;
+
 use json::JsonValue as J;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -409,7 +412,7 @@ fn unsupported_storage_modes_and_invalid_or_exhausted_inputs_refuse() {
     let policy = member(&mut enclosure, "radiation");
     remove(policy, "surfaces");
     put(policy, "enclosure", J::Object(Vec::new()));
-    assert!(refuses(&enclosure).contains("enthalpy"));
+    assert!(refuses(&enclosure).contains("missing required field surfaces"));
 
     let mut duplicate = input.clone();
     put(

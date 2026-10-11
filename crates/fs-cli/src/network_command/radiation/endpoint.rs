@@ -37,6 +37,30 @@ impl EndpointHeat {
 }
 
 impl Policy {
+    /// Keep signed exchange and its closed-system residual distinct from a
+    /// radiative sink to a fixed reservoir. The producer owns physical gates.
+    pub(in crate::network_command) fn enthalpy_enclosure_heat(
+        &self,
+        report: &fs_conduction::transient::enthalpy::enclosure::EnthalpyEnclosureReport,
+    ) -> Result<EndpointHeat> {
+        let enclosure = self.enclosure.as_ref()
+            .ok_or_else(|| bad("enthalpy enclosure report has no declared enclosure"))?;
+        let applied_w = report.applied_heat_w.iter().try_fold(0.0, |sum, &heat|
+            finite(sum + heat, "enthalpy enclosure applied heat"))?;
+        let text = enclosure.report(&report.radiosity, &report.applied_heat_w,
+            report.max_heat_mismatch_w, Some(report.iterations), None)?;
+        let prefix = text.strip_suffix('}')
+            .ok_or_else(|| bad("enthalpy enclosure report framing"))?;
+        let text = format!("{prefix},\"temporal_scope\":\"final-accepted-endpoint\",\"heat_semantics\":\"signed exchange between solved patches; radiative_out_w is the closed-enclosure residual, not an external heat sink\"}}");
+        Ok(EndpointHeat {
+            outward_w: report.radiosity.enclosure_energy_closure_w,
+            applied_w,
+            max_mismatch_w: report.max_heat_mismatch_w,
+            rows: Vec::new(),
+            enclosure_report: Some(text),
+        })
+    }
+
     /// Iterate only radiation at fixed air references. No trial temperature is
     /// returned as the previous physical state for another radiation iteration.
     #[allow(clippy::too_many_arguments)]

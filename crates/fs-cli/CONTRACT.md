@@ -113,8 +113,9 @@ keys); a merely renamed project shows the hash change and a bit-identical QoI.
 The experimental `cooling-network <request.json>` binary command admits an
 opt-in `transient.enthalpy` storage model in its existing
 `frankensim.cooling-network.v1` request. It calls the production
-`HeterogeneousEnthalpyBackwardEuler` owner (also for one uniform chart), including its ambient-radiation endpoint when
-requested, and the existing quasi-steady mixed-air coupling. This command
+`HeterogeneousEnthalpyBackwardEuler` owner (also for one uniform chart), including
+its ambient or closed-enclosure radiation endpoint when requested, and the
+existing quasi-steady mixed-air coupling. This command
 remains a nominal estimate outside the native `.fsim`/ledger workflow.
 
 The enthalpy object requires explicit Newton/Krylov/backtracking budgets and
@@ -190,7 +191,7 @@ On fixed grids, `transient.adjoint` admits `final` or `sampled-peak` objectives
 and an explicit `max_checkpoint_bytes`. The dedicated enthalpy tape carries
 the physical h cotangent through every earlier step; it never divides by
 `dT/dh` on a latent plateau. It binds checked endpoint implicit derivatives
-with complete mixed-air and declared ambient-radiation feedback. Retained
+with complete mixed-air and declared ambient or enclosure radiation feedback. Retained
 h/temperature/reference checkpoints and control accumulators are charged
 before allocation. Reconstruction requires exact accepted h and temperature
 bits and rechecks physical residual/energy gates. The cap is not a bound on
@@ -310,7 +311,7 @@ return fractions held fixed. Accepted history reports mixed supply temperatures,
 true fresh-air/exhaust heat gain and mixing residuals. The final top-level report
 retains the declared topology and full supply/return streams. Separate endpoint,
 whole-window and all-cycle gates close stored enthalpy against source energy,
-actual fresh makeup/remaining exhaust and outward ambient radiation. Only
+actual fresh makeup/remaining exhaust and net radiative heat. Only
 accepted endpoints enter `fresh_exhaust_energy_gain_j` and
 `fresh_exhaust_energy_residual_j`; repeated-cycle summaries expose both per-cycle
 and cumulative values. Coarse/rejected adaptive trials contribute work only.
@@ -321,10 +322,29 @@ an imposed pressure reset, without return-duct hydraulics or air residence time.
 `examples/cooling-network/enthalpy-recirculation.json` combines mixed-phase
 storage, a prescribed return, component watts and a final-temperature adjoint.
 
+Top-level `radiation.enclosure` admits the same explicit gray emissivities and
+reciprocal, closed view-factor matrix as the other cooling paths. Each patch
+emits at its P1 area-mean temperature and applies a uniform radiative flux over
+its exactly matching convection region. All radiation and mixed-air trials
+retain the previous accepted h field. Acceptance reassembles the complete
+nonlinear h residual, checks fresh radiosity against applied heat, and closes
+stored enthalpy against the original convection and signed enclosure residual.
+Only convection enters air transport. Opposite patch exchanges change local h
+but cancel from whole-system heat; `radiative_out_w` and accumulated
+`radiative_energy_loss_j` are the signed enclosure closure residual, not the sum
+of outgoing patch heat. Final patch rows retain both `outward_heat_w` and
+`applied_heat_w`. This path composes with adaptive steps, fixed/repeated schedules,
+prescribed returns and workload/fan sizing. Fixed-grid history adjoints include
+the complete reflected-radiation h Jacobian, including latent zero temperature
+slopes and phase-dependent conductivity. Emissivities, view factors and geometry
+remain fixed controls. `examples/cooling-network/enthalpy-enclosure.json` and
+`tests/cooling_enthalpy/enclosure.rs` supply a synthetic two-patch analytic heat
+reference, mixed-phase trajectory finite differences and accepted restart checks.
+
 This CLI consumer admits fixed or adaptive timesteps and fixed reference
 densities with uniform or explicitly assigned equilibrium charts. Steady design
 and controls outside these two transient searches, time/mesh studies,
-return-fraction design and enclosure radiation explicitly refuse.
+and return-fraction design explicitly refuse.
 No moving geometry, phase advection,
 fluid storage, phase kinetics or inter-step peak/error certificate is claimed.
 `tests/cooling_enthalpy.rs` exercises the real binary with independent analytic

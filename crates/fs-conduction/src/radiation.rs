@@ -1312,7 +1312,11 @@ fn run_conduction(
     }
 }
 
-fn solve_dense(cx: &Cx<'_>, matrix: &[Vec<f64>], rhs: &[f64]) -> Result<Vec<f64>, ConductionError> {
+pub(crate) fn solve_dense(
+    cx: &Cx<'_>,
+    matrix: &[Vec<f64>],
+    rhs: &[f64],
+) -> Result<Vec<f64>, ConductionError> {
     let n = rhs.len();
     let mut a = matrix.to_vec();
     let mut b = rhs.to_vec();
