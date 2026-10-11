@@ -1,7 +1,8 @@
 # Moving compliant mutes: contact, inertia, squeeze and retraction
 
-`--compliant-mute file.fsm` adds one felt-lined moving pad on a drumhead or
-one/two opposed felt-lined jaws on a cymbal. Physical signed force programs
+`--compliant-mute file.fsm` adds one felt-lined moving pad on a drumhead,
+one/two opposed felt-lined jaws on a single cymbal, or one exterior pad on a
+selected member of a hi-hat pair. Physical signed force programs
 move real jaw inertias. Each footprint site makes compression-only contact
 with the actual vibrating surface. There is no PCM fade, mode reset, prescribed
 contact-force pulse, or instantaneous release command. This differs from
@@ -63,7 +64,9 @@ creep,above,stiffness_N_m,viscosity_Ns_m
 force,above,time_s,force_N
 ```
 
-`surface` occurs exactly once: `shell`, `batter`, or `resonant`. One to four
+`surface` occurs exactly once: `shell`, `batter`, `resonant`, `upper`, or `lower`.
+The last two select the corresponding outer shell of a hi-hat pair; they are
+refused on single-cymbal/drum commands. One to four
 positive-area `site` rows are footprint quadrature points in the reference XY
 plane, not a boundary polygon or four copies of the same averaged modal shape.
 Their areas partition the actual pad area on **each** jaw. Every site samples
@@ -73,7 +76,9 @@ There is no automatic spatial-resolution or contact-patch convergence claim.
 
 One or two `jaw` rows provide independently translating effective masses and
 pads. A shell can have `above`, `below`, or both. A drumhead permits exactly one
-exterior jaw: `batter` with `above`, or `resonant` with `below`. On a snare,
+exterior jaw: `batter` with `above`, or `resonant` with `below`. A hi-hat likewise
+requires one exterior jaw: `upper` with `above`, or `lower` with `below`; it
+never inserts a jaw in the closing gas gap. On a snare,
 the resonant-side jaw additionally needs a supplied envelope that remains
 clear of the whole wire bank, including on `snare-off`. Interior jaw/air
 displacement is not modelled and cannot be silently omitted. The example's
@@ -160,7 +165,13 @@ This image has nonlinear felt contact even for linearly reduced drumheads.
 `snare[-off][-wav|-mic] --compliant-mute` selects the nonlinear-capable mechanics
 with the full supplied wire bank and its contact losses. Head/wire stretching
 and material memory remain separate physical selections; no extra head law is
-needed to admit the pad. `drum-modal` still refuses felt history. Vented audio
+needed to admit the pad. On `hihat[-wav|-mic]`, the pad acts on the actual positive
+skin, including rotation displacement and the lower shell's world-coordinate
+transform. Its jaw, up to four pad sites and force program coexist with all
+twelve stand contacts, both acoustic shells, pedal, gas and flexible hands. See
+[HIHAT.md](HIHAT.md) and `estimated-hihat-mute.fsm`. A mallet plus a paired choke
+exceeds the existing sixteen-pad budget and refuses before shell preparation.
+`drum-modal` still refuses felt history. Vented audio
 requires the existing explicit prescribed-vent radiation path. Jaw radiation
 and acoustic occlusion/scattering by the mute are omitted: existing
 one-way BEM observes the resulting instrument motion on the same boundary.

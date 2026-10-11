@@ -19,6 +19,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let squeeze=squeeze::option(&mut args)?;
     let mallet_paths=mallets::options(&mut args)?;
     let material_path=shell_relaxation::option(&mut args)?;
+    let mute=compliant_mute::option(&mut args)?;
     let shafts=shaft_playing::Selection::options(&mut args)?;
     let (args,stroke)=playing::parse(args)?;
     let command=args.first().map(String::as_str);
@@ -41,10 +42,11 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     }else{[0.08,0.05,0.35]})}else{acoustics::Receiver::FarField([1.5,0.7,1.5])};
     let mallets=mallets::Selection::load(mallet_paths)?;
     mallets.admit(command.unwrap(),stroke,second)?;
+    if let Some(mute)=&mute {mute.admit_command(command.unwrap())?;}
     let material=material_path.as_deref().map(|path|shell_relaxation::Spec::load(path,true)).transpose()?;
     let spec=Spec::load(Path::new(&args[1]))?;let [upper,lower]=spec.shells()?;
-    let pair=build_with_material(&spec,&upper,&lower,stroke,second,steps,dt,audio,squeeze.as_ref(),
-        &shafts,&mallets,material.as_ref())?;
+    let pair=build_with_mute(&spec,&upper,&lower,stroke,second,steps,dt,audio,squeeze.as_ref(),
+        &shafts,&mallets,material.as_ref(),mute.as_ref())?;
     let receivers=match microphone_spec {
         Some(spec)=>spec.into_receivers(),
         None=>{let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}receivers},
@@ -67,6 +69,9 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
                     inputs.push(mechanics::drive::Input{program,coordinate:p.coordinate,tip_weight:p.weight});}
             }
         }
+    }
+    if let Some(mute)=mute {
+        inputs.extend(mute.into_inputs(e.mute.as_ref().ok_or("missing paired mute attachment")?)?);
     }
     e.system=e.system.with_stick_drives(inputs,dt,steps,e.force.len())?;
     if let Mechanics::Driven{drive,..}=&mut e.system {
@@ -94,6 +99,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let gas=squeeze.as_ref().is_some_and(|f|f.gas().is_some());
     if gas {write!(out,",gas_min_absolute_pa,gas_max_absolute_pa,gas_mass_kg,gas_free_energy_j")?;}
     if material.is_some() {write!(out,",shell_memory_energy_j,shell_relaxation_power_w")?;}
+    if let Some(mute)=&e.mute {mute.header(&mut out)?;}
     writeln!(out)?;
     for _ in 0..steps {
         let f=e.system.step(&e.force,&gate)?;let x=e.system.state();
@@ -120,6 +126,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
             let o=head_relaxation::observation(&e.system);
             write!(out,",{:.17e},{:.17e}",o.stored_energy_j,o.dissipated_power_w)?;
         }
+        if let Some(mute)=&e.mute {mute.row(&e.system,&mut out)?;}
         writeln!(out)?;
     }
     out.flush()?;Ok(())

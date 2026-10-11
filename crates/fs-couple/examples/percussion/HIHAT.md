@@ -78,7 +78,8 @@ same area-weighted directors create the two-sided acoustic skin. Local point
 velocity includes translation plus `theta cross director_offset`; its
 transpose applies both force and moment to the shell. Barycentrics are located
 on the inner skin's actual XY chart, including mounting holes and ambiguity
-checks. Stick stations use that same material chart on the upper positive face.
+checks. Stick stations use the upper positive skin's actual XY chart instead;
+an inner-skin barycentric location is not reused at a different physical face.
 
 With local outward surface displacements u and l, the signed point gap is
 `D + z_upper_skin + z_lower_skin + u + l`. The owner receives closure row
@@ -102,8 +103,50 @@ Both existing stick-force files and two-stick position/speed controls work.
 `--prepared-nonlinear`, `--analytic-newton`, `--impact-substeps`,
 `--microphone-right` (finite microphone only), and `--radiation-spec` retain
 their existing meanings. A cancelled/refused tick consumes no pedal or stick
-input. Compliant mutes and other drum/single-cymbal options are not admitted
-here; they are not silently ignored or converted.
+input. `--compliant-mute` admits an explicitly selected outer hi-hat surface
+as described below. Other drum/single-cymbal options retain their admission rules.
+
+### Moving felt choke on either outer shell
+
+`--compliant-mute file.fsm` adds one translating felt pad on `surface,upper`
+with `jaw,above,...`, or on `surface,lower` with `jaw,below,...`. These targets
+are explicit: an existing `surface,shell` card does not implicitly choose a
+member of the pair. Only an exterior jaw is admitted; a pad between the closing
+shells would need additional jaw/shell collision and displaced-air mechanics.
+
+```sh
+cargo run --release -p fs-couple --example percussion -- \
+  hihat crates/fs-couple/examples/percussion/estimated-hihat.fshh 12000 \
+  --strike-speed-m-s 0.5 --analytic-newton --impact-substeps 8 511 \
+  --compliant-mute crates/fs-couple/examples/percussion/estimated-hihat-mute.fsm \
+  > choked-pair.csv
+```
+
+The force program drives the pad's actual mass inward and later retracts it.
+Each positive-area site contacts the selected outer skin through its physical
+displacement and rotation port. World XY stations on the lower shell are
+transformed through the same proper rotation used by the pair geometry. Felt
+compression, release, creep and conditioning evolve in the joint time owner;
+the resulting shell motion supplies the existing acoustic sources. See
+[COMPLIANT_MUTE.md](COMPLIANT_MUTE.md) for the card and force conventions.
+
+All twelve mount sites, the pedal, both shells and their collision remain.
+The moving jaw precedes any flexible shaft coordinates, while source and pedal
+addresses remain unchanged. One to four choke sites fit the existing sixteen-pad
+limit. A four-site mallet plus a choke exceeds that limit and refuses before
+shell preparation; no stand or contact site is removed. Optional shell material
+memory, squeeze-film/gas storage, acoustic feedback and both flexible hands
+continue through the same shared state and force clock. The three hi-hat output
+forms accept this option; CSV also reports inward pad travel, velocity and
+endpoint contact force.
+
+The authored pad is an axial, conforming contact quadrature. It does not model
+hand anatomy, tangential friction, pad acoustic scattering, or jaw contact with
+stand/striker hardware. Site area is not a certification of a resolved footprint
+boundary. Focused tests cover both exterior signs, actual thickness moments,
+preserved source/material addresses, and a driven lower pad with retraction,
+gap air, shaft flexure, pedal work and rejected-tick rollback. These tests still
+require native execution; no calibrated choke duration or sound is claimed.
 
 ### Felt mallets and loaded shafts
 
