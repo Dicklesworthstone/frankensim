@@ -24,6 +24,7 @@ pub(super) fn simulate(
     let mut steps = 0_usize;
     let mut work = 0_usize;
     let (mut input, mut stored, mut exhaust, mut radiative) = (0.0, 0.0, 0.0, 0.0);
+    let mut fresh_exhaust = 0.0;
     let mut summaries = Vec::new();
     let mut streak = 0_usize;
     let mut last_residuals = None;
@@ -81,18 +82,38 @@ pub(super) fn simulate(
         input = finite(input + cycle.input_j)?;
         stored = finite(stored + cycle.stored_j)?;
         exhaust = finite(exhaust + cycle.exhaust_j)?;
+        fresh_exhaust = finite(fresh_exhaust + cycle.fresh_exhaust_j)?;
         radiative = finite(radiative + cycle.radiative_j)?;
         let energy_residual = finite(stored - input + exhaust + radiative)?;
         if energy_residual.abs() > finite(request.limits.heat * end)? {
             return Err(producer("repeated enthalpy cumulative energy gate failed"));
+        }
+        let fresh_energy_residual = finite(stored - input + fresh_exhaust + radiative)?;
+        if request.recirculation.is_some()
+            && fresh_energy_residual.abs() > finite(request.limits.heat * end)?
+        {
+            return Err(producer(
+                "repeated enthalpy cumulative fresh/exhaust energy gate failed",
+            ));
         }
         let radiation_field = if request.radiation.is_some() {
             format!(",\"radiative_energy_loss_j\":{}", num(cycle.radiative_j)?)
         } else {
             String::new()
         };
+        let recirculation_field = if request.recirculation.is_some() {
+            format!(
+                ",\"fresh_exhaust_energy_gain_j\":{},\"fresh_exhaust_energy_residual_j\":{}",
+                num(cycle.fresh_exhaust_j)?,
+                num(finite(
+                    cycle.stored_j - cycle.input_j + cycle.fresh_exhaust_j + cycle.radiative_j,
+                )?)?,
+            )
+        } else {
+            String::new()
+        };
         summaries.push(format!(
-            "{{\"cycle\":{},\"start_time_s\":{},\"end_time_s\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"start_to_end_field_residual_k\":{},\"start_to_end_specific_enthalpy_residual_j_kg\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"accepted_steps\":{},\"solid_solves\":{}{radiation_field}}}",
+            "{{\"cycle\":{},\"start_time_s\":{},\"end_time_s\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"start_to_end_field_residual_k\":{},\"start_to_end_specific_enthalpy_residual_j_kg\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"accepted_steps\":{},\"solid_solves\":{}{radiation_field}{recirculation_field}}}",
             cycle_index + 1,
             num(elapsed)?,
             num(end)?,
@@ -145,8 +166,17 @@ pub(super) fn simulate(
             } else {
                 String::new()
             };
+            let recirculation_field = if request.recirculation.is_some() {
+                format!(
+                    ",\"fresh_exhaust_energy_gain_j\":{},\"fresh_exhaust_energy_residual_j\":{}",
+                    num(fresh_exhaust)?,
+                    num(fresh_energy_residual)?,
+                )
+            } else {
+                String::new()
+            };
             let output = format!(
-                "{prefix},\"repeated_cycles\":{{\"status\":{},\"periodic\":{},\"fan_controller\":null,\"cycles_completed\":{},\"cycle_duration_s\":{},\"elapsed_time_s\":{},\"last_cycle_start_time_s\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"input_energy_j\":{},\"stored_energy_change_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"cycles\":[{}],\"adjoint\":{}{radiation_field},\"scope\":\"all cycles inherit the prior accepted specific enthalpy; peaks include the original initial state, every cycle boundary and every accepted endpoint, including warm-up; transient contains only the final cycle in local time; periodic stopping requires both full nodal temperature and enthalpy residuals; an optional fixed-count adjoint uses the complete h history, shared interval controls and global time; no controller, variable-stopping derivative, infinite-cycle or continuous-time peak bound\"}}}}\n",
+                "{prefix},\"repeated_cycles\":{{\"status\":{},\"periodic\":{},\"fan_controller\":null,\"cycles_completed\":{},\"cycle_duration_s\":{},\"elapsed_time_s\":{},\"last_cycle_start_time_s\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"input_energy_j\":{},\"stored_energy_change_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"cycles\":[{}],\"adjoint\":{}{radiation_field}{recirculation_field},\"scope\":\"all cycles inherit the prior accepted specific enthalpy; peaks include the original initial state, every cycle boundary and every accepted endpoint, including warm-up; transient contains only the final cycle in local time; periodic stopping requires both full nodal temperature and enthalpy residuals; an optional fixed-count adjoint uses the complete h history, shared interval controls and global time; no controller, variable-stopping derivative, infinite-cycle or continuous-time peak bound\"}}}}\n",
                 quote(status),
                 periodic,
                 cycle_index + 1,

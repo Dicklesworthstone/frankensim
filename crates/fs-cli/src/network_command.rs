@@ -157,7 +157,7 @@ impl Request {
             return Err(bad("expected schema frankensim.cooling-network.v1 and units SI"));
         }
         if root.get("transient").and_then(|schedule|schedule.get("enthalpy")).is_some() {
-            for key in ["design", "fan_speed_design", "mesh_convergence", "recirculation"] {
+            for key in ["design", "fan_speed_design", "mesh_convergence"] {
                 if root.get(key).is_some() {
                     return Err(bad(format!("transient.enthalpy does not admit {key}")));
                 }

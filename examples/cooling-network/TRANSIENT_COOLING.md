@@ -264,10 +264,32 @@ solid/liquid diffusion cases with an independent four-node linear solve.
 
 This opt-in CLI mode supports fixed or adaptive schedules and fixed reference
 density with uniform or explicitly assigned equilibrium charts, including
-single-phase charts. Geometry, mass and energetic internal variables are
-frozen. Steady design, time/mesh studies, recirculation and enclosure radiation
+single-phase charts. Geometry and reference mass remain fixed.
+Steady design, time/mesh studies, return-fraction design and enclosure radiation
 explicitly refuse. There is no fluid storage, phase
 advection, melting-driven motion or certified inter-step peak.
+
+The [enthalpy recirculation request](enthalpy-recirculation.json) couples a
+mixed sensible/latent body to a 60% exhaust return and 40% fresh-air supply:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/enthalpy-recirculation.json
+```
+
+Each endpoint recomputes exhaust and intake mixing from its accepted thermal
+state. `transient.history` includes mixed supply temperatures and the actual
+fresh-air/exhaust heat gain; the final `recirculation` report includes the
+configured fractions and full supply/return streams. The two additional totals,
+`fresh_exhaust_energy_gain_j` and `fresh_exhaust_energy_residual_j`, close stored
+enthalpy against input heat, fresh makeup/remaining exhaust, and any outward
+ambient radiation. Repeated runs report these values for each cycle and for
+the whole experiment. Adaptive runs count only accepted half-steps in energy
+totals; rejected/coarse solves contribute work only. The existing inlet
+derivatives include return feedback and refer to fresh supply temperatures.
+Return fractions stay fixed. The model is instantaneous adiabatic thermal
+mixing with an imposed pressure reset; it has no return-duct hydraulic solve,
+air storage or residence time.
 
 Repeated fixed or adaptive duty cycles carry the accepted nodal enthalpy into the next
 cycle, including latent energy invisible in a temperature plateau. The
@@ -379,10 +401,20 @@ work shares the original wall deadline; a failed replay or derivative solve
 refuses the result. Chart slope corners and validity endpoints refuse classical
 endpoint derivatives; ties retain the selected branch without claiming a
 unique derivative. Geometry, chart data, reference density, conductivity,
-contact resistance, fan curve, quadratic loss coefficients, convection law
-data and radiation controls stay
-fixed. The optional `component_power` and `contact_resistance` adjoint requests
-are unsupported in this mode.
+fan curve, quadratic loss coefficients, convection law data, return fractions
+and radiation controls stay fixed.
+
+Set `component_power: true` or `contact_resistance: true` in `transient.adjoint`
+to request the same physical control reports as the ordinary fixed-capacity
+trajectory. Component-watt derivatives use the original P1 footprints, including
+overlapping or zero-watt components. Interval rows change a component's applied
+watts at every occurrence of that base interval; base-watt rows change only
+`power_scale` intervals and leave explicit `component_powers_w` overrides fixed.
+Contact derivatives change one persistent log resistance through the entire
+history, including repeated cycles. These contractions share the existing
+coupled adjoint and checkpoint allowance, with no solve per control. They
+require the corresponding `solid.component_power` or `solid.contacts` data.
+The recirculation example enables the component-watt report for its device.
 
 The complete [enthalpy power-sizing request](enthalpy-power-sizing.json) uses
 an explicit latent plateau, a two-stage heating pulse, a temperature limit,

@@ -18,6 +18,9 @@ mod phase_conductivity;
 #[path = "cooling_enthalpy/controls.rs"]
 mod controls;
 
+#[path = "cooling_enthalpy/recirculation.rs"]
+mod recirculation;
+
 use json::JsonValue as J;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};

@@ -293,10 +293,28 @@ not a global, midpoint or continuous-time error bound.
 mixed sensible/latent field. `tests/cooling_enthalpy/adaptive.rs` adds analytic
 plateau/repeated-energy checks, accepted-grid replay and bounded refusal cases.
 
+Prescribed top-level `recirculation` is supported throughout fixed/adaptive
+enthalpy trajectories, repeated cycles and workload/fan sizing. Each solid/air
+endpoint solves its mixed intake from the current exhaust with the declared
+return fractions held fixed. Accepted history reports mixed supply temperatures,
+true fresh-air/exhaust heat gain and mixing residuals. The final top-level report
+retains the declared topology and full supply/return streams. Separate endpoint,
+whole-window and all-cycle gates close stored enthalpy against source energy,
+actual fresh makeup/remaining exhaust and outward ambient radiation. Only
+accepted endpoints enter `fresh_exhaust_energy_gain_j` and
+`fresh_exhaust_energy_residual_j`; repeated-cycle summaries expose both per-cycle
+and cumulative values. Coarse/rejected adaptive trials contribute work only.
+Fixed-grid inlet sensitivities refer to fresh makeup and include implicit return
+feedback. Return fractions are fixed controls; their transient derivatives or
+design remain unsupported. This is instantaneous adiabatic thermal mixing with
+an imposed pressure reset, without return-duct hydraulics or air residence time.
+`examples/cooling-network/enthalpy-recirculation.json` combines mixed-phase
+storage, a prescribed return, component watts and a final-temperature adjoint.
+
 This CLI consumer admits fixed or adaptive timesteps and fixed reference
 densities with uniform or explicitly assigned equilibrium charts. Steady design
 and controls outside these two transient searches, time/mesh studies,
-recirculation and enclosure radiation explicitly refuse.
+return-fraction design and enclosure radiation explicitly refuse.
 No moving geometry, phase advection,
 fluid storage, phase kinetics or inter-step peak/error certificate is claimed.
 `tests/cooling_enthalpy.rs` exercises the real binary with independent analytic

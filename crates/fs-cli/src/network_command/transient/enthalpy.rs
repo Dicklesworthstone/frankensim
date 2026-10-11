@@ -350,12 +350,11 @@ impl Config {
             || request.design.is_some()
             || request.fan_speed_design.is_some()
             || request.mesh_convergence.is_some()
-            || request.recirculation.is_some()
             || schedule.time_convergence.is_some()
             || schedule.nonlinear.is_some()
         {
             return Err(bad(
-                "enthalpy supports fixed or adaptive schedules and workload/fan sizing without steady design, studies or recirculation modes",
+                "enthalpy supports fixed or adaptive schedules and workload/fan sizing without steady design or studies",
             ));
         }
         if schedule.adjoint.is_some() {
@@ -684,6 +683,22 @@ fn advance(
             step_config.energy_tolerance_j
         )));
     }
+    if request.recirculation.is_some() {
+        // Returns are internal transfers. Close the storage balance against
+        // fresh makeup and the exhaust that actually leaves the whole system.
+        let fresh_defect = finite(
+            solid.stored_energy_change_j
+                - dt * (solid.source_w
+                    - recirculation::external_heat_gain(&coupled.transport)
+                    - radiation_w),
+        )?;
+        if fresh_defect.abs() > step_config.energy_tolerance_j {
+            return Err(producer(format!(
+                "coupled enthalpy fresh/exhaust energy residual {fresh_defect} J exceeds {} J",
+                step_config.energy_tolerance_j
+            )));
+        }
+    }
     poll(cx)?;
     Ok(Endpoint {
         coupled,
@@ -763,6 +778,7 @@ struct Cycle {
     input_j: f64,
     stored_j: f64,
     exhaust_j: f64,
+    fresh_exhaust_j: f64,
     radiative_j: f64,
     first_violation_s: Option<f64>,
 }
@@ -811,6 +827,7 @@ fn simulate_cycle(
     let (mut peak, mut peak_time) = (initial, 0.0);
     let mut first_violation = schedule.limit.filter(|&limit| initial > limit).map(|_| 0.0);
     let (mut time, mut stored, mut input, mut exhaust, mut radiative) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut fresh_exhaust = 0.0;
     let mut completed = 0_usize;
     let mut work = Work::default();
     let mut adaptive_stats = adaptive::Stats::default();
@@ -918,6 +935,10 @@ fn simulate_cycle(
                 stored = finite(stored + solved.solid.stored_energy_change_j)?;
                 input = finite(input + dt * solved.solid.source_w)?;
                 exhaust = finite(exhaust + dt * solved.coupled.transport.external_heat_gain_w)?;
+                fresh_exhaust = finite(
+                    fresh_exhaust
+                        + dt * recirculation::external_heat_gain(&solved.coupled.transport),
+                )?;
                 radiative = finite(radiative + dt * radiation_w)?;
                 let (phase, _) = summary(cx, config, masses, &solved.solid.specific_enthalpy_j_kg)?;
                 let radiation_field = if solved.radiation.is_some() {
@@ -925,7 +946,9 @@ fn simulate_cycle(
                 } else {
                     String::new()
                 };
-                history.push(format!("{{\"time_s\":{},\"dt_s\":{},\"interval\":{ordinal},{workload_json},\"fan_speed_ratio\":{},\"objective_temperature_k\":{},\"active_vertex\":{},\"source_w\":{},\"air_heat_gain_w\":{},\"stored_energy_change_j\":{},\"solid_energy_residual_j\":{},\"coupled_energy_residual_j\":{},\"physical_residual_norm_j\":{},\"coupling_iterations\":{},\"estimated_local_error_ratio\":{},{phase}{radiation_field}}}",
+                let recirculation_field =
+                    recirculation::history_field(request, &solved.coupled.transport)?;
+                history.push(format!("{{\"time_s\":{},\"dt_s\":{},\"interval\":{ordinal},{workload_json},\"fan_speed_ratio\":{},\"objective_temperature_k\":{},\"active_vertex\":{},\"source_w\":{},\"air_heat_gain_w\":{},\"stored_energy_change_j\":{},\"solid_energy_residual_j\":{},\"coupled_energy_residual_j\":{},\"physical_residual_norm_j\":{},\"coupling_iterations\":{},\"estimated_local_error_ratio\":{},{phase}{radiation_field}{recirculation_field}}}",
                     num(endpoint)?,num(dt)?,optional(interval.speed)?,num(state.value)?,
                     state.vertex.map_or_else(||"null".into(),|v|v.to_string()),num(solved.solid.source_w)?,
                     num(solved.coupled.transport.external_heat_gain_w)?,num(solved.solid.stored_energy_change_j)?,
@@ -982,6 +1005,12 @@ fn simulate_cycle(
     if defect.abs() > finite(request.limits.heat * time)? {
         return Err(producer("whole-window enthalpy energy gate failed"));
     }
+    let fresh_defect = finite(stored - input + fresh_exhaust + radiative)?;
+    if request.recirculation.is_some()
+        && fresh_defect.abs() > finite(request.limits.heat * time)?
+    {
+        return Err(producer("whole-window enthalpy fresh/exhaust energy gate failed"));
+    }
     let (_, final_total) = summary(cx, config, masses, &h)?;
     let (adjoint, reconstruction_solves, design_gradient) = match tape {
         Some(tape) => tape.reverse(request, cx, schedule, config, engine)?,
@@ -997,6 +1026,15 @@ fn simulate_cycle(
         .ok_or_else(|| bad("internal enthalpy result framing"))?;
     let radiation_field = if request.radiation.is_some() {
         format!(",\"radiative_energy_loss_j\":{}", num(radiative)?)
+    } else {
+        String::new()
+    };
+    let recirculation_field = if request.recirculation.is_some() {
+        format!(
+            ",\"fresh_exhaust_energy_gain_j\":{},\"fresh_exhaust_energy_residual_j\":{}",
+            num(fresh_exhaust)?,
+            num(fresh_defect)?,
+        )
     } else {
         String::new()
     };
@@ -1042,7 +1080,7 @@ fn simulate_cycle(
     );
     let adaptive_report = adaptive::render(&adaptive_stats, adaptive_policy)?;
     let output = format!(
-        "{prefix},\"solid_specific_enthalpies_j_kg\":{},\"solid_liquid_mass_fractions\":{},\"transient\":{{\"scheme\":\"backward-euler-total-enthalpy\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{completed},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":{adaptive_report},\"nonlinear\":null,\"adjoint\":{adjoint},\"enthalpy\":{policy}{radiation_field},\"scope\":\"fixed or adaptive workload/fan schedule with workload-power or fan-speed sizing; physical h-history adjoints require fixed timesteps; accepted enthalpy is physical history; temperatures and mass-weighted phase summaries observe that state; repeated_cycles, when present, owns all-cycle totals and adjoints while transient describes the final cycle in local time; sampled endpoints do not bound inter-step peaks; no moving geometry, melt flow, study or enclosure mode\"}}}}\n",
+        "{prefix},\"solid_specific_enthalpies_j_kg\":{},\"solid_liquid_mass_fractions\":{},\"transient\":{{\"scheme\":\"backward-euler-total-enthalpy\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{completed},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":{adaptive_report},\"nonlinear\":null,\"adjoint\":{adjoint},\"enthalpy\":{policy}{radiation_field}{recirculation_field},\"scope\":\"fixed or adaptive workload/fan schedule with workload-power or fan-speed sizing and optional prescribed return-air mixing; physical h-history adjoints require fixed timesteps; accepted enthalpy is physical history; temperatures and mass-weighted phase summaries observe that state; repeated_cycles, when present, owns all-cycle totals and adjoints while transient describes the final cycle in local time; sampled endpoints do not bound inter-step peaks; no moving geometry, melt flow, study or enclosure mode\"}}}}\n",
         numbers(&h)?,
         numbers(&final_liquid)?,
         num(time)?,
@@ -1074,6 +1112,7 @@ fn simulate_cycle(
         input_j: input,
         stored_j: stored,
         exhaust_j: exhaust,
+        fresh_exhaust_j: fresh_exhaust,
         radiative_j: radiative,
         first_violation_s: first_violation,
     })
