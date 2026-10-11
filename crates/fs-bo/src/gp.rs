@@ -7,6 +7,9 @@
 
 use fs_la::factor::{Cholesky, cholesky};
 
+/// Reusable baseline conditioning with explicit fixed posterior regularization.
+pub mod prepared;
+
 /// Matérn smoothness family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Matern {
