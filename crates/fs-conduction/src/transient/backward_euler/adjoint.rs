@@ -51,6 +51,48 @@ impl BackwardEuler<'_> {
             Some(policy) => self.advance_nonlinear(cx, problem, interfaces, old, dt_s, config, policy)?.step,
             None => self.advance(cx, problem, interfaces, old, dt_s, config)?,
         };
+        self.linearize_primal(cx, problem, interfaces, old, dt_s, config, regions, primal)
+    }
+
+    /// Solve and differentiate an endpoint with prescribed temperatures that
+    /// may differ from the old physical field. This is the derivative companion
+    /// of `advance_prescribed` / `advance_nonlinear_prescribed`, not a steady
+    /// solve and not an overwrite of the supplied history.
+    ///
+    /// The same endpoint Dirichlet lift, boundary-node storage reaction,
+    /// nonlinear material Jacobian, matching contact and energy gates apply.
+    /// History, source and capacity pullbacks retain their existing meanings;
+    /// prescribed ENDPOINT temperatures are held fixed, not differentiated.
+    /// Callers reconstructing a trajectory must compare the returned primal
+    /// with their retained endpoint before using any derivatives.
+    ///
+    /// # Errors
+    /// Refuses every invalid endpoint, material, port, work or cancellation
+    /// state rejected by the corresponding prescribed forward producer. No
+    /// endpoint or derivative is published after a failed forward solve.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_prescribed_step<'a>(
+        &'a self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64,
+        config: StepConfig, nonlinear: Option<NonlinearStepConfig>, regions: &[&str],
+    ) -> Result<StepLinearization<'a>, ConductionError> {
+        let primal = match nonlinear {
+            Some(policy) => self.advance_nonlinear_prescribed(
+                cx, problem, interfaces, old, dt_s, config, policy)?.step,
+            None => self.advance_prescribed(cx, problem, interfaces, old, dt_s, config)?,
+        };
+        self.linearize_primal(cx, problem, interfaces, old, dt_s, config, regions, primal)
+    }
+
+    // Both admission policies share exactly one endpoint-Jacobian and source
+    // projection implementation. Only a successful in-crate producer reaches
+    // this helper; a caller-constructed StepSolution is never accepted.
+    #[allow(clippy::too_many_arguments)]
+    fn linearize_primal<'a>(
+        &'a self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64,
+        config: StepConfig, regions: &[&str], primal: StepSolution,
+    ) -> Result<StepLinearization<'a>, ConductionError> {
         let dofs = DofMap::new(problem.boundary, self.mesh.vertex_count())?;
         let jacobian = assemble_jacobian_with_optional_interfaces(cx, self.mesh,
             problem.boundary, problem.material, &primal.temperature, interfaces, problem.element_materials)?;
