@@ -39,7 +39,7 @@ pub struct Options {
 }
 impl Default for Options {
     fn default() -> Self {
-        Self { substeps: 4, modes: 24, wav_format: None, midi: None, performance: None,
+        Self { substeps: 4, modes: super::linear::MAX_STRING_MODES, wav_format: None, midi: None, performance: None,
             midi_mapping: midi::Mapping::default(), note: None, velocity: None,
             mapping_explicit: false, hammers: None,
             hammer_footprints: None, dampers: None, string_stretching: None, string_polarization: None,
@@ -51,6 +51,14 @@ impl Default for Options {
     }
 }
 impl Options {
+    /// The caller knows whether the scale is the concert preset. Supplied
+    /// scales and explicit point/pad selections retain their own approximation.
+    /// Apply only to playback; harmonic analysis has no key-damper state.
+    pub fn select_preset_dampers(&mut self, preset: bool) {
+        if preset && self.dampers.is_none() {
+            self.dampers = Some("estimated".into());
+        }
+    }
     /// The legacy positional MIDI path remains legal, before or after flags.
     /// Unknown, repeated, missing and out-of-budget controls fail before I/O.
     pub fn parse(args: &[String]) -> Result<Self, String> {
@@ -102,7 +110,7 @@ impl Options {
                 .ok_or_else(|| format!("missing value for {flag}"))?;
             let invalid = || format!("invalid value for {flag}: {value}");
             match flag.as_str() {
-                "--modes" => result.modes = value.parse().map_err(|_| invalid())?,
+                "--modes" => result.modes = super::geometry::parse_partial_budget(value)?,
                 "--substeps" => result.substeps = value.parse().map_err(|_| invalid())?,
                 "--wav-format" => result.wav_format = Some(super::wav_output::Format::parse(value)?),
                 "--hammers" => result.hammers = Some(value.clone()),
@@ -215,9 +223,10 @@ impl Options {
             format!("spatial viscous, {strings} speaking-string pads / {stations} quadrature stations; loss {} J included in total loss",
                 piano.accounting.damper_loss_j)
         } else { String::from("point viscous") };
-        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} transverse coordinates including duplex; {} contact sites. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {} (source: {}); nonlinear string extension: {} (selection: {}); retained longitudinal coordinates: {} with fixed axial endpoints; two transverse directions: {} (geometry/drag: {}); reciprocal cavity: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
+        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} transverse coordinates including duplex; {} contact sites; {} string-direction segments omit in-band partials at the count ceiling. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {} (source: {}); nonlinear string extension: {} (selection: {}); retained longitudinal coordinates: {} with fixed axial endpoints; two transverse directions: {} (geometry/drag: {}); reciprocal cavity: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
             piano.bank.rate, self.substeps, self.modes, piano.bank.modes.len(),
-            piano.bank.contact_strings.len(), self.hammers.as_deref().unwrap_or("source defaults"),
+            piano.bank.contact_strings.len(), piano.bank.capped_string_segments,
+            self.hammers.as_deref().unwrap_or("source defaults"),
             if self.rt0425_hammer_dissipation { "RT-0425 per-string K_H and R_H" }
             else if self.rt0425_hammer_stiffness { "RT-0425 per-string K_H" }
             else { "original allocation" },
@@ -253,7 +262,7 @@ impl Controls {
         let footprints = options.hammer_footprints.as_deref()
             .map(|p| super::read_bounded(p, 64 * 1024)).transpose()?;
         let dampers = match options.dampers.as_deref() {
-            Some("estimated") => Some(String::from("estimated")),
+            Some(selection @ ("estimated" | "point")) => Some(String::from(selection)),
             Some(path) => Some(super::read_bounded(path, 1024 * 1024)?),
             None => None,
         };
@@ -279,7 +288,8 @@ impl Controls {
         Ok(controls)
     }
     /// The owners perform geometry, constitutive, duplicate and coverage checks.
-    /// 'estimated' is explicit damper selection, never a missing-file fallback.
+    /// 'estimated' and 'point' select the existing damper approximations;
+    /// neither is a missing-file fallback.
     pub fn from_texts(courses: &[Course], hammers: Option<&str>, footprints: Option<&str>,
         dampers: Option<&str>) -> Result<Self, String> {
         let keys: Vec<_> = courses.iter().map(|c| c.midi).collect();
@@ -291,8 +301,8 @@ impl Controls {
             linear::hammer_footprint::Specification::read(text, courses)).transpose()?;
         let dampers = match dampers {
             Some("estimated") => Some(engine::DamperSpecification::estimated(courses)?),
+            None | Some("point") => None,
             Some(text) => Some(engine::DamperSpecification::read(text, courses)?),
-            None => None,
         };
         Ok(Self { materials, footprints, dampers, stretching: None, polarization: None, cavity: None,
             source_hammer_rates: None, source_hammer_stiffness: false })
@@ -344,7 +354,11 @@ impl Controls {
             || options.rt0425_hammer_dissipation != self.source_hammer_rates.is_some() {
             return Err("RT-0425 hammer controls were not admitted before structural preparation".into());
         }
-        if options.dampers.is_some() && self.dampers.is_none() {
+        if options.dampers.as_deref() == Some("point") && self.dampers.is_some() {
+            return Err("point damper selection conflicts with admitted finite pads".into());
+        }
+        if options.dampers.as_deref().is_some_and(|selection| selection != "point")
+            && self.dampers.is_none() {
             return Err("supplied damper controls were not admitted; no point-drag fallback".into());
         }
         if options.string_stretching.is_some() && self.stretching.is_none() {
@@ -385,9 +399,34 @@ mod tests {
         format!("frankensim-hammer-materials-v1\nfelt,69,{stress},0.2,2.5,3.2,0.25,0.8,2500000\nbranch,69,2000000,0.0002\n")
     }
     #[test]
+    fn concert_preset_selects_finite_pads_without_overriding_explicit_dampers() {
+        let c = course(); let board = super::super::board::demonstration();
+        for (preset, selection, spatial) in [(true,None,true), (false,None,false),
+            (true,Some("point"),false), (true,Some("estimated"),true)] {
+            let mut options = Options { modes:24, dampers:selection.map(str::to_owned),
+                ..Options::default() };
+            options.select_preset_dampers(preset);
+            let p = Controls::load(&options, &[c]).unwrap()
+                .instrument(vec![c], &board, &options).unwrap();
+            assert_eq!(p.damper_resolution().is_some(), spatial);
+        }
+        let mut options = parse(&["--dampers", "supplied.fspd"]).unwrap();
+        options.modes = 24; options.select_preset_dampers(true);
+        assert_eq!(options.dampers.as_deref(), Some("supplied.fspd"));
+        let p = Controls::from_texts(&[c], None, None,
+            Some("frankensim-piano-dampers-v1\nfree,69\n")).unwrap()
+            .instrument(vec![c], &board, &options).unwrap();
+        assert_eq!(p.damper_resolution(), Some((0,0)));
+        let point = parse(&["--dampers", "point"]).unwrap();
+        assert!(Controls::from_texts(&[c], None, None, Some("estimated")).unwrap()
+            .instrument(vec![c], &board, &point).is_err());
+    }
+    #[test]
     fn legacy_score_and_new_complete_controls_have_unambiguous_admission() {
         let old = parse(&["score.mid"]).unwrap();
-        assert_eq!((old.substeps, old.modes), (4, 24));
+        assert_eq!((old.substeps, old.modes), (4, super::super::linear::MAX_STRING_MODES));
+        assert_eq!(parse(&["--modes", "auto"]).unwrap().modes, old.modes);
+        assert_eq!(parse(&["--modes", "24"]).unwrap().modes, 24);
         let new = parse(&["--modes", "512", "score.mid", "--substeps", "16", "--hammers", "cards.fsh",
             "--hammer-footprints", "faces.fshp", "--dampers", "estimated"]).unwrap();
         assert_eq!((new.substeps, new.modes), (16, 512));

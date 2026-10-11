@@ -15,6 +15,29 @@ pub const D_BOARD_CENTER_M: f64 = 0.009;
 pub const D_BOARD_EDGE_M: f64 = 0.006;
 pub const CSV_HEADER: &str = "midi,unison,length_m,linear_density_kg_m,tension_n,flexural_rigidity_nm2,strike_fraction,hammer_mass_kg,felt_thickness_m,felt_area_m2,duplex_length_m,detune_cents";
 
+/// Per-string work ceiling. Retention stops earlier at the output audio band;
+/// a fixed small count would remove most of the bass attack spectrum.
+pub const MAX_STRING_MODES: usize = 512;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartialRetention {
+    pub count: usize,
+    /// At least one physical partial inside the requested band was omitted.
+    pub capped: bool,
+}
+
+/// `auto` follows the physical frequency band up to the admitted work ceiling.
+/// A numeric selection remains an explicit, potentially narrower approximation.
+pub fn parse_partial_budget(value: &str) -> Result<usize, String> {
+    let count = if value == "auto" { MAX_STRING_MODES } else {
+        value.parse::<usize>().map_err(|_| "string modes require auto or 1..512")?
+    };
+    if !(1..=MAX_STRING_MODES).contains(&count) {
+        return Err("string modes require auto or 1..512".into());
+    }
+    Ok(count)
+}
+
 /// One uniform speaking course; individual unison members have tension offsets.
 /// Measured effective mass and bending rigidity allow wound strings to be
 /// represented without falsely treating the copper winding as a bonded rod.
@@ -54,7 +77,7 @@ impl Course {
             || self.detune_cents.abs() > 100.0 {
             return Err("invalid rigidity, strike station, duplex length or unison spread".into());
         }
-        for n in [1, 256] {
+        for n in [1, MAX_STRING_MODES] {
             if !self.partial_hz(n, self.tension_n).is_finite() {
                 return Err("derived string frequency overflow".into());
             }
@@ -70,6 +93,32 @@ impl Course {
         let k = n as f64 * PI / self.length_m;
         det::sqrt((tension_n * k * k + self.flexural_rigidity_nm2 * k.powi(4))
             / self.linear_density_kg_m) / TAU
+    }
+
+    /// Select this segment's physical partials using its actual length, EI,
+    /// mass density and member tension. The caller supplies the OUTPUT band,
+    /// not the oversampled mechanical Nyquist frequency. A capped selection
+    /// remains explicit rather than being reported as full-band retention.
+    pub fn partial_retention(&self, tension_n: f64, band_hz: f64, cap: usize)
+        -> Result<PartialRetention, String> {
+        self.validate()?;
+        if !tension_n.is_finite() || tension_n <= 0.0
+            || !band_hz.is_finite() || band_hz <= 0.0
+            || !(1..=MAX_STRING_MODES).contains(&cap) {
+            return Err("invalid string tension, output band or partial budget".into());
+        }
+        // Positive tension and nonnegative EI make this sequence increasing.
+        // Inspect one more partial to distinguish the work cap from the band.
+        for n in 1..=cap + 1 {
+            let hz = self.partial_hz(n, tension_n);
+            if !hz.is_finite() {
+                return Err("derived string frequency overflow".into());
+            }
+            if hz > band_hz {
+                return Ok(PartialRetention { count: n - 1, capped: false });
+            }
+        }
+        Ok(PartialRetention { count: cap, capped: true })
     }
 
     pub fn modal_mass_kg(&self) -> f64 {
@@ -210,6 +259,68 @@ pub fn write_scale(courses: &[Course]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // G0: independent stiff-string frequency inequalities, including the
+    // former bass truncation and an intentionally insufficient work budget.
+    #[test]
+    fn frequency_retention_preserves_in_band_bass_partials_and_bounds_every_register() {
+        let scale = demonstration_scale().unwrap();
+        for c in &scale {
+            for rate in [8_000, 44_100, 48_000, 96_000, 192_000] {
+                let band = 0.45 * f64::from(rate);
+                for cents in [-c.detune_cents, 0.0, c.detune_cents] {
+                    let tension = c.tension_at_cents(cents).unwrap();
+                    let kept = c.partial_retention(tension, band, MAX_STRING_MODES).unwrap();
+                    assert!(kept.count <= MAX_STRING_MODES);
+                    if kept.count != 0 {
+                        assert!(c.partial_hz(kept.count, tension) <= band);
+                    }
+                    let next_in_band = c.partial_hz(kept.count + 1, tension) <= band;
+                    assert_eq!(kept.capped, next_in_band);
+                    if kept.capped { assert_eq!(kept.count, MAX_STRING_MODES); }
+                }
+            }
+        }
+        let bass = scale[0];
+        let preview = bass.partial_retention(bass.tension_n, 21_600.0, 24).unwrap();
+        let audible = bass.partial_retention(bass.tension_n, 21_600.0, MAX_STRING_MODES).unwrap();
+        assert_eq!(preview, PartialRetention { count: 24, capped: true });
+        assert!(bass.partial_hz(24, bass.tension_n) < 1_000.0);
+        assert!(audible.count > 128 && !audible.capped);
+        assert!(bass.partial_hz(audible.count, bass.tension_n) > 21_000.0);
+    }
+
+    #[test]
+    fn cutoff_is_inclusive_and_duplex_uses_its_own_speaking_length() {
+        let c = demonstration_scale().unwrap()[48];
+        let cutoff = c.partial_hz(25, c.tension_n);
+        assert_eq!(c.partial_retention(c.tension_n, cutoff, 512).unwrap().count, 25);
+        assert_eq!(c.partial_retention(c.tension_n, cutoff.next_down(), 512).unwrap().count, 24);
+        let below_fundamental = c.partial_hz(1, c.tension_n).next_down();
+        assert_eq!(c.partial_retention(c.tension_n, below_fundamental, 512).unwrap(),
+            PartialRetention { count: 0, capped: false });
+        let duplex = Course { length_m: c.duplex_length_m, ..c };
+        let speaking = c.partial_retention(c.tension_n, 21_600.0, 512).unwrap();
+        let tail = duplex.partial_retention(c.tension_n, 21_600.0, 512).unwrap();
+        assert!(tail.count > 0 && tail.count < speaking.count);
+    }
+
+    #[test]
+    fn auto_budget_is_bounded_and_never_claims_a_capped_scale_is_full_band() {
+        assert_eq!(parse_partial_budget("auto").unwrap(), MAX_STRING_MODES);
+        assert_eq!(parse_partial_budget("24").unwrap(), 24);
+        for text in ["0", "513", "-1", "NaN", "", "2.5"] {
+            assert!(parse_partial_budget(text).is_err());
+        }
+        let c = Course { flexural_rigidity_nm2: 0.0, ..demonstration_scale().unwrap()[0] };
+        let kept = c.partial_retention(c.tension_n, 21_600.0, MAX_STRING_MODES).unwrap();
+        assert_eq!(kept, PartialRetention { count: MAX_STRING_MODES, capped: true });
+        for (tension, band, cap) in [(0.0, 21_600.0, 24), (f64::NAN, 21_600.0, 24),
+            (c.tension_n, 0.0, 24), (c.tension_n, f64::INFINITY, 24),
+            (c.tension_n, 21_600.0, 0), (c.tension_n, 21_600.0, 513)] {
+            assert!(c.partial_retention(tension, band, cap).is_err());
+        }
+    }
+
     #[test]
     fn geometry_roundtrips_all_keys_and_tunes_the_actual_first_partial() {
         let scale = demonstration_scale().unwrap();

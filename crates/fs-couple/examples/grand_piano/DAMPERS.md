@@ -2,9 +2,19 @@
 
 `--dampers pads.fspd` selects either **finite-gap wool-felt contact** or
 **spatial viscous damping**, according to the file header. Both act on the
-existing speaking strings and loaded soundboard. `--dampers estimated`
-explicitly selects approximate viscous pads. Omitting the option keeps the
-original point-drag image.
+existing speaking strings and loaded soundboard. The `grand_piano --preset
+steinway-d` render defaults to the existing estimated finite-width viscous
+pads. The same default applies to `piano_exterior render` and `render-loaded`
+when their scale argument is `steinway-d`. It removes the point approximation's
+artificial undamped partials at the chosen nodal station. Pad dimensions, drag
+and the upper damper break remain estimates; this is not a measured release
+decay or listening-validation claim.
+
+`--dampers estimated` selects those approximate pads explicitly.
+`--dampers point` selects the original point-drag approximation, including for
+comparisons and lower-cost rendering. Without the concert preset, omitting
+the option keeps point damping. A supplied pad file overrides either default,
+including its explicit `free` rows. No point drag is added to a finite-pad model.
 
 Felt contact adds physical separation, finite pad travel, compression, crush
 and time-dependent relaxation. It requires supplied pad geometry and material
@@ -14,7 +24,7 @@ pad mass, gravity, preload or a full keyboard linkage.
 
 ```bash
 cargo run --release -p fs-couple --example grand_piano -- \
-  --preset steinway-d --dampers estimated --note 69 \
+  --preset steinway-d --note 69 \
   --duration 6 --render release.wav
 
 cargo run --release -p fs-couple --example grand_piano -- \
@@ -227,8 +237,9 @@ count. The local dissipation is `c/(end-start) * integral(v(x)^2 dx)`.
 needs 88 rows; the two-row example is not a complete full-keyboard specification.
 Blank lines and `#` comments are accepted. Duplicate, missing, unknown, invalid
 or out-of-span rows refuse without choosing defaults. Reads are bounded to 1 MiB.
-For either input format, a file literally named `estimated` can be selected as
-`./estimated`; the bare word is reserved for the following estimate.
+For either input format, files literally named `estimated` or `point` can be
+selected as `./estimated` or `./point`; the bare words select the corresponding
+built-in approximations.
 
 `estimated` uses a centre at 35% of speaking length, width equal to the smaller
 of 40 mm and 8% of length, and 0.4 N s/m per string. Keys above MIDI 88 are free.

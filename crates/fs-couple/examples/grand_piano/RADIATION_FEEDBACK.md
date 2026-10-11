@@ -23,7 +23,8 @@ the **complete** board slice with at most 32 modes; with explicit
 `--radiation-ports`, retain up to 128 board coordinates and fit up to 32 acoustic
 ports. Use an odd 33..257-frequency grid and resolve every prepared acoustic
 pole below the mechanical Nyquist guard. The wrapper defaults to
-48 kHz, four mechanics substeps, and at most 24 partials per string. Its off-band
+48 kHz, four mechanics substeps, and frequency-based string retention through
+21.6 kHz up to 512 partials per segment (`--modes auto`). Its off-band
 poles extend to eight times the top fit frequency, so that top frequency must
 be **below 10.8 kHz**. The complete per-string/duplex and geometry admission
 rules still apply. Larger bases are refused, not truncated to fit the budget.

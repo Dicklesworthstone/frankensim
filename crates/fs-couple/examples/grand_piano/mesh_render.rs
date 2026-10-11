@@ -23,8 +23,11 @@ fn prepare(text:&str, scale:Vec<Course>) -> Result<(Instrument,PreparedBoard),St
         CrownedBoard::read(text)?.prepare(&keys,BOARD_BAND_HZ)?
     } else {BoardGeometry::read(text)?.prepare(&keys,BOARD_BAND_HZ)?};
     let materials=scale.iter().map(steinway_scale::hammer_material).collect::<Result<Vec<_>,_>>()?;
-    let piano=Instrument::new_with_course_shanks(scale,&board.modes,RATE,4,24,true,
+    let dampers=super::engine::DamperSpecification::estimated(&scale)?;
+    let mut piano=Instrument::new_with_course_shanks(scale,&board.modes,RATE,4,
+        super::geometry::MAX_STRING_MODES,true,
         materials,ShankGeometry::published())?;
+    piano.configure_damper_spec(&dampers)?;
     Ok((piano,board))
 }
 
@@ -44,10 +47,12 @@ fn encode(piano:Instrument, board:&PreparedBoard, score:Performance, count:usize
     let losses=piano.accounting.dissipated_j();
     let report=format!("{} frames at {} Hz; peak {:.9e} Pa, {} clips at 2 Pa PCM full scale; no normalization.\n\
         Panel/ribs/bridges: {:.9} m^2, {:.9} kg; {} modes through {} Hz.\n\
+        Strings: {} retained coordinates through 21.6 kHz, {} segments limited by the 512-partial ceiling; estimated finite-width viscous dampers.\n\
         Input {:.12e} J; stored {:.12e} J; component loss {:.12e} J; closure {:.12e} J.\n\
         Structure: {}. Source/estimated materials, raw source string tensions; no measured digital-twin claim.\n\
         Receiver {:?} m, infinite-baffle Rayleigh pressure; crown uses projected signed normal volume velocity; no room, lid scattering or radiation backreaction.",
         count,RATE,peak_pa,clips,board.area_m2,board.mass_kg,board.modes.len(),BOARD_BAND_HZ,
+        piano.bank.modes.len(),piano.bank.capped_string_segments,
         piano.accounting.input_work_j,piano.energy_j(),losses,
         piano.accounting.input_work_j-piano.energy_j()-losses,board.provenance,MICROPHONE_M);
     Ok(Rendered{wav,peak_pa,report})
@@ -107,6 +112,8 @@ mod tests {
             let mut scale=steinway_scale::courses().unwrap(); scale.retain(|c|c.midi==69);
             let (piano,board)=prepare(&imported.fsb,scale).unwrap();
             assert!((board.mass_kg-3.6).abs()<1e-10);
+            assert_eq!(piano.bank.capped_string_segments,0);
+            assert!(piano.damper_resolution().is_some());
             let score=Performance::read("sample,event,key,value\n0,note_on,69,2\n1024,note_off,69,0\n",&[69],2400).unwrap();
             encode(piano,&board,score,2400).unwrap()
         };

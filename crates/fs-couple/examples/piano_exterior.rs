@@ -35,14 +35,14 @@ piano_exterior admittance BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOU
 piano_exterior response BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.csv
 piano_exterior render BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
 piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
-    [--modes 1..512] [--substeps 1..16] [--rigid-assembly ASSEMBLY.fspr]
+    [--modes auto|1..512] [--substeps 1..16] [--rigid-assembly ASSEMBLY.fspr]
     [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
     [--board-reduction max_modes,keep_low_modes,Hz,...]
     [--radiation-ports 1..32]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
     [--rt0425-hammer-stiffness] [--rt0425-hammer-dissipation]
     [--rt0425-string-damping]
-    [--dampers estimated|pads.fspd]
+    [--dampers estimated|point|pads.fspd]
     [--string-polarization bridge-frames.fspp]
     [--cavity enclosure.fspc]
     [--performance events.csv | --midi performance.mid]
@@ -174,15 +174,22 @@ including jack_staccato/jack_legato force pulses in N and all three pedals.
 velocity-to-hammer mapping and optional continuous CC64 travel are explicit;
 ignored messages and synthetic end releases are reported, never hidden.
 CSV, MIDI and demonstration overrides are mutually exclusive. Output
-is 48 kHz. Defaults retain four mechanics substeps and at most 24 partials per
-string; --modes and --substeps expose the existing larger physical budgets.
+is 48 kHz. Defaults retain four mechanics substeps and --modes auto: each string
+keeps its physical partials through 21.6 kHz, up to the 512-partial work ceiling.
+Count-limited string segments are reported. --modes 24 selects the old smaller
+preview budget; --substeps exposes the existing mechanical-rate budget.
 They do not retune strings, widen the admitted output band, or certify accuracy.
 --hammers supplies complete per-key WoolFelt/Prony cards. --hammer-footprints
 selects point, uniform span or authored crown profile for every key. Profile
 sites supply offsets, recession, local thickness and fractions of the original
 area; their gaps control engagement and their felt/Prony histories are independent.
 Published R_H requires the original uniform felt thickness. See HAMMER_FOOTPRINTS.md.
---dampers selects supplied finite pads or explicit estimates. All use the SAME nonlinear
+Playback with the steinway-d scale defaults to estimated finite-width viscous
+pads, removing the point image's artificial undamped nodal partials. Supplied
+scale CSVs keep point damping by default. --dampers estimated selects the same
+approximate pads explicitly; --dampers point retains the point approximation;
+a supplied pad file overrides either default. Width, drag and the upper damper
+break remain estimates, not measured release times. All use the SAME nonlinear
 engine, actual loaded bridge basis and radiation feedback, not output filters.
 Invalid or missing supplied cards refuse before any structural/BEM preparation.
 See grand_piano/EXTERIOR_PLAYBACK.md for the physical controls.
@@ -465,7 +472,7 @@ fn run(args:&[String])->Result<(),String> {
             Ok(())
         }
         [command,board,strings,obj,spec,output,tail @ ..] if command=="response" || command=="render" || command=="render-loaded"=>{
-            let (frames,options)=match command.as_str() {
+            let (frames,mut options)=match command.as_str() {
                 "response"=>{
                     let options=playback::Options::harmonic(tail)?;
                     if options.cavity.is_some() {
@@ -484,6 +491,7 @@ fn run(args:&[String])->Result<(),String> {
                 && strings!="steinway-d" {
                 return Err("RT-0425 source laws require the steinway-d source scale".into());
             }
+            if frames.is_some() { options.select_preset_dampers(strings=="steinway-d"); }
             if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
             let spec=Specification::read(&read_bounded(spec,exterior_geometry::MAX_SPEC_BYTES)?)?;
             if frames.is_some() {spec.require_audio_receivers()?;}

@@ -171,7 +171,8 @@ solution; source heights, finite-rim diffraction, both radiating sides, lid,
 room scattering and air backreaction require a separate acoustic model.
 
 The convenience `render-steinway` currently retains board modes through 400 Hz,
-at most 24 partials per string, four mechanical substeps and 48 kHz output. The
+string partials through 21.6 kHz up to the 512-partial work ceiling, estimated
+finite-width dampers, four mechanical substeps and 48 kHz output. The
 main CLI exposes these controls, subject to the shared 128-board-mode and
 512-partial-per-string ceilings and the output band. A larger budget is not
 proof of spatial/time convergence. Both use the existing 2 Pa PCM full scale

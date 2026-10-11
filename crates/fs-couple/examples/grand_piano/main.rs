@@ -26,7 +26,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--rt0425-hammer-dissipation] [--rt0425-string-damping]
     [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
-    [--dampers estimated | pads.fspd] [--string-stretching axial.fspx]
+    [--dampers estimated | point | pads.fspd] [--string-stretching axial.fspx]
     [--string-polarization bridge-frames.fspp]
     [--cavity enclosure.fspc]
     [--concert-pitch 430..450 | --raw-tensions]
@@ -42,7 +42,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--modal-pressure-csv modal.csv]
     [--receiver-pressure-csv receivers.csv]
     [--pressure-basis-json basis.json]
-    [--sample-rate Hz] [--substeps 1..16] [--modes 1..512]
+    [--sample-rate Hz] [--substeps 1..16] [--modes auto|1..512]
     [--pcm-full-scale-pa positive-Pa] [--wav-format pcm16|pcm24|float32]
     [--dump-scale strings.csv] [--dump-board board.csv]
 --preset steinway-d reconstructs the published 17-rib Model D drawing, with
@@ -103,8 +103,12 @@ Published R_H requires the original uniform thickness. Varying thickness applies
 the selected felt/Prony law locally and cannot silently reuse that source rate.
 See HAMMER_FOOTPRINTS.md for SI rows and the parallel-column contact model.
 --dampers selects spatial viscous pads or finite-gap wool-felt pads; the file
-header chooses the model. 'estimated' declares only approximate viscous spans
-and drag. A file must cover every scale key with a pad or explicit free row.
+header chooses the model. The steinway-d preset defaults to the existing
+estimated finite-width viscous pads, removing the point image's artificial
+undamped partials at its nodal station. 'estimated' selects these approximate
+spans and drag explicitly; 'point' selects the original point approximation.
+Without a preset, omitted --dampers retains point damping. A file must cover
+every scale key with a pad or explicit free row and overrides either default.
 Felt pads additionally require supplied geometry, travel speed and material
 cards. MIDI/CSV key, sustain and sostenuto controls move their contact height;
 felt contact, stored energy and signed actuator work enter the mechanics solve.
@@ -154,7 +158,11 @@ wood damping, bridge motion and the radiating field stay in the same basis.
 For supplied downbearing, reduction uses the solved equilibrium tangent modes.
 This requires --render and excludes --dump-board: modal CSV cannot preserve the
 dense material operator. Flat-board mass controls remain flat-only. See BOARD_REDUCTION.md.
---modes independently admits up to 512 string partials. These budgets and the
+--modes defaults to auto: each string retains its physical partials through
+45% of the OUTPUT sample rate, up to the 512-partial work ceiling. This avoids
+the former 24-partial bass cutoff. A numeric value (for example --modes 24)
+explicitly selects a smaller budget. Any segments still limited by the count
+are reported; oversampling does not widen the output band. These budgets and the
 reported snapshot projection error do not certify transfer, acoustic or mesh
 convergence, perceptual similarity, or real-time performance.
 --performance uses sample,event,key,value CSV instead of the demo and cannot be
@@ -249,7 +257,7 @@ impl Default for Options {
             dump_board: None, bridge_trace_csv: None, modal_pressure_csv: None, receiver_pressure_csv: None,
             pressure_basis_json: None,
             note: None, velocity: None, duration: 6.0,
-            sample_rate: 48_000, substeps: 4, modes: 24, pcm_full_scale_pa: 2.0, help: false,
+            sample_rate: 48_000, substeps: 4, modes: linear::MAX_STRING_MODES, pcm_full_scale_pa: 2.0, help: false,
             wav_format: wav_output::Format::default() }
     }
 }
@@ -319,7 +327,7 @@ impl Options {
                 "--duration" => options.duration = value.parse().map_err(|_| invalid())?,
                 "--sample-rate" => options.sample_rate = value.parse().map_err(|_| invalid())?,
                 "--substeps" => options.substeps = value.parse().map_err(|_| invalid())?,
-                "--modes" => options.modes = value.parse().map_err(|_| invalid())?,
+                "--modes" => options.modes = geometry::parse_partial_budget(value)?,
                 "--pcm-full-scale-pa" => options.pcm_full_scale_pa = value.parse().map_err(|_| invalid())?,
                 "--wav-format" => options.wav_format = wav_output::Format::parse(value)?,
                 _ => return Err(format!("unknown option {flag}\n{USAGE}")),
@@ -362,7 +370,7 @@ impl Options {
             return Err("--hammer-footprints requires --render and a complete nonempty specification path".into());
         }
         if options.dampers.as_ref().is_some_and(|s| s.trim().is_empty() || options.render.is_none()) {
-            return Err("--dampers requires --render and either estimated or a nonempty specification path".into());
+            return Err("--dampers requires --render and estimated, point or a nonempty specification path".into());
         }
         if options.string_stretching.as_ref().is_some_and(|s|
             s.trim().is_empty() || s.starts_with("--") || options.render.is_none()) {
@@ -464,7 +472,7 @@ impl Options {
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
             options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref(), options.hammer_footprints.as_ref(), options.midi.as_ref(),
-            options.dampers.as_ref().filter(|s| s.as_str() != "estimated"),
+            options.dampers.as_ref().filter(|s| !matches!(s.as_str(), "estimated" | "point")),
             options.string_stretching.as_ref(), options.string_polarization.as_ref(), options.cavity.as_ref()];
         let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref(),
             options.dump_geometry.as_ref(), options.dump_obj.as_ref(), options.bridge_trace_csv.as_ref(),
@@ -571,7 +579,9 @@ fn prepare_instrument_with_board_damping(scale: Vec<geometry::Course>, modes: &[
         return Err("reduced soundboard requires its full projected material damping; no diagonal fallback".into());
     }
     let dampers = match options.dampers.as_deref() {
-        None => None,
+        None if options.preset.as_deref() == Some("steinway-d") =>
+            Some(engine::DamperSpecification::estimated(&scale)?),
+        None | Some("point") => None,
         Some("estimated") => Some(engine::DamperSpecification::estimated(&scale)?),
         Some(path) => Some(engine::DamperSpecification::load(path, &scale)?),
     };
@@ -887,7 +897,7 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
     }
     if let Some((strings,cells)) = piano.damper_resolution() {
         println!("Spatial viscous dampers: {} speaking-string pads, {} quadrature stations; source {}. No measured pad/action or real-time claim; see DAMPERS.md.",
-            strings, cells, options.dampers.as_deref().unwrap_or("supplied"));
+            strings, cells, options.dampers.as_deref().unwrap_or("estimated preset defaults"));
     }
     if let Some((strings,sites)) = piano.felt_damper_resolution() {
         println!("Finite-gap felt dampers: {strings} speaking-string pads, {sites} independent contact sites; source {}. Supplied finite-speed travel, wool-felt crush and Prony memory, coupled on the mechanics clock; see DAMPERS.md.",
@@ -982,8 +992,9 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         println!("Diagnostic volume-velocity observer, gain {} Pa/(m^3/s); no peak normalization or calibrated SPL claim.", options.observer_gain);
     }
     let piano = stream.instrument();
-    println!("{} string modes; {} board modes; {} above-band duplex segments omitted from dynamic retention (static attachment retained).",
-        piano.bank.modes.len(), piano.bank.board_count, piano.bank.omitted_duplex_modes);
+    println!("{} string modes; {} board modes; {} above-band duplex segments omitted from dynamic retention (static attachment retained); {} string-direction segments omit in-band partials at the selected count ceiling {}.",
+        piano.bank.modes.len(), piano.bank.board_count, piano.bank.omitted_duplex_modes,
+        piano.bank.capped_string_segments, options.modes);
     println!("{seconds:.6} s, {channels} channel(s) rendered in {elapsed:.6} s; wall/audio ratio {:.4}; peak {peak:.6} Pa-equivalent; {} output, no clipped samples.", elapsed / seconds, options.wav_format.label());
     if options.wav_format == wav_output::Format::Float32 && peak > options.pcm_full_scale_pa {
         println!("Float WAV preserves pressure above nominal digital full scale; attenuate before fixed-point playback.");
@@ -1340,6 +1351,7 @@ mod render_tests {
             "--dampers", "pads.fspd", "--hammers", "felt.fsh"]).unwrap();
         assert_eq!(o.dampers.as_deref(), Some("pads.fspd"));
         assert!(options(&["--render", "piano.wav", "--dampers", "estimated"]).is_ok());
+        assert!(options(&["--render", "piano.wav", "--dampers", "point"]).is_ok());
         assert_eq!(options(&[]).unwrap().dampers, None);
         for args in [vec!["--dampers"], vec!["--dampers", "estimated"],
             vec!["--render", "piano.wav", "--dampers", ""],
@@ -1348,6 +1360,66 @@ mod render_tests {
             vec!["--render", "piano.wav", "--dampers", "estimated", "--dampers", "other.fspd"]] {
             assert!(options(&args).is_err(), "accepted {args:?}");
         }
+    }
+    #[test]
+    fn preset_dampers_reach_nodal_partials_after_key_and_pedal_release() {
+        // A free bridge isolates the twentieth speaking partial from board
+        // loss. Its node at x/L=.35 defeats the original point damper.
+        let c = geometry::Course { midi:69, unison:1, length_m:1.0,
+            linear_density_kg_m:0.02, tension_n:100.0, flexural_rigidity_nm2:0.0,
+            strike_fraction:0.12, hammer_mass_kg:0.008, felt_thickness_m:0.008,
+            felt_area_m2:0.0001, duplex_length_m:0.0, detune_cents:0.0 };
+        let board = [linear::BoardMode { frequency_hz:100.0, damping_ratio:0.0,
+            bridge:[0.0;88], volume:0.1 }];
+        let build = |selection: Option<&str>| {
+            let o = Options { preset:Some("steinway-d".into()), modes:24,
+                dampers:selection.map(str::to_owned), ..Options::default() };
+            let mut p = prepare_instrument(vec![c], &board, &o).unwrap();
+            p.bank.v[19] = 0.2;
+            p.accounting.input_work_j = p.energy_j();
+            p.silent_key_down(69).unwrap();
+            p
+        };
+        let mut pad = build(None); let mut point = build(Some("point"));
+        assert!(pad.damper_resolution().is_some());
+        assert_eq!(point.damper_resolution(), None);
+        for held in [true, false] {
+            if !held {
+                for p in [&mut pad, &mut point] {
+                    p.set_sustain(1.0).unwrap(); p.note_off(69).unwrap();
+                }
+            }
+            for _ in 0..64 { pad.step().unwrap(); point.step().unwrap(); }
+            assert_eq!(pad.bank.q, point.bank.q);
+            assert_eq!(pad.bank.v, point.bank.v);
+            assert_eq!(pad.accounting.damper_loss_j, 0.0);
+        }
+        pad.set_sustain(0.0).unwrap(); point.set_sustain(0.0).unwrap();
+        for _ in 0..128 { pad.step().unwrap(); point.step().unwrap(); }
+        assert!(pad.accounting.damper_loss_j > 1e-6);
+        assert!(point.accounting.damper_loss_j.abs() < 1e-20);
+        assert!(pad.bank.energy() < point.bank.energy());
+        for p in [&pad, &point] {
+            assert!((p.accounting.input_work_j-p.energy_j()-p.accounting.dissipated_j()).abs() < 1e-10);
+        }
+    }
+    #[test]
+    fn explicit_free_dampers_override_the_preset_and_nonpreset_keeps_point_damping() {
+        let c = geometry::demonstration_scale().unwrap()[48];
+        let mut o = Options { modes:24, ..Options::default() };
+        assert_eq!(prepare_instrument(vec![c], &board::demonstration(), &o)
+            .unwrap().damper_resolution(), None);
+        let dir = output_fixture(); let free = dir.join("free.fspd");
+        write_fresh_output(free.to_str().unwrap(),
+            b"frankensim-piano-dampers-v1\nfree,69\n").unwrap();
+        o.preset = Some("steinway-d".into());
+        o.dampers = Some(free.to_str().unwrap().to_owned());
+        let mut p = prepare_instrument(vec![c], &board::demonstration(), &o).unwrap();
+        assert_eq!(p.damper_resolution(), Some((0,0)));
+        p.bank.v[0] = 0.01;
+        for _ in 0..64 { p.step().unwrap(); }
+        assert_eq!(p.accounting.damper_loss_j, 0.0);
+        assert!(p.bank.energy() > 0.0);
     }
     #[test]
     fn rt0425_corrections_are_explicit_preset_inputs() {
@@ -1388,6 +1460,24 @@ mod render_tests {
             vec!["--preset","steinway-d","--render","s.wav","--microphone-right","1,1,1","--microphone-right","2,1,1"]] {
             assert!(options(&args).is_err(),"accepted {args:?}");
         }
+    }
+    #[test]
+    fn default_and_auto_follow_the_output_band_with_a_numeric_preview_control() {
+        let ordinary=options(&[]).unwrap();
+        let automatic=options(&["--modes","auto"]).unwrap();
+        assert_eq!(ordinary.modes,linear::MAX_STRING_MODES);
+        assert_eq!(automatic.modes,ordinary.modes);
+        let mut c=geometry::demonstration_scale().unwrap()[0];
+        c.unison=1;c.duplex_length_m=0.0;
+        let board=board::demonstration();
+        let full=prepare_instrument(vec![c],&board,&ordinary).unwrap();
+        let preview=prepare_instrument(vec![c],&board,
+            &options(&["--modes","24"]).unwrap()).unwrap();
+        assert_eq!(preview.bank.modes.len(),24);
+        assert_eq!(preview.bank.capped_string_segments,1);
+        assert!(full.bank.modes.len()>128);
+        assert_eq!(full.bank.capped_string_segments,0);
+        assert!(full.bank.modes.iter().all(|m|m.omega/std::f64::consts::TAU<=21_600.0));
     }
     #[test]
     fn acoustic_refinement_is_an_explicit_bounded_pressure_control() {
@@ -1469,7 +1559,7 @@ mod render_tests {
             \0\xb0\x40\x7f\0\x90\x45\x7f\x04\x90\x45\0\x08\xff\x2f\0";
         let mut o = options(&["--preset", "steinway-d", "--render", "piano.wav"]).unwrap(); o.modes = 12;
         for spatial in [false,true] {
-        o.dampers = spatial.then(|| "estimated".to_owned());
+        o.dampers = Some(if spatial { "estimated" } else { "point" }.to_owned());
         let course = selected_scale(None, &o).unwrap()[48];
         let mut a = prepare_instrument(vec![course], &board::demonstration(), &o).unwrap();
         let mut b = prepare_instrument(vec![course], &board::demonstration(), &o).unwrap();

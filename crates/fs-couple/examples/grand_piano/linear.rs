@@ -49,7 +49,7 @@ pub const MAX_BOARD_MODES: usize = 128;
 /// A bass string may need hundreds of physical partials before reaching the
 /// output band. The frequency ceiling still stops retention; this is a per-
 /// string ceiling, not an instruction to allocate inaudible oscillators.
-pub const MAX_STRING_MODES: usize = 512;
+pub use super::geometry::MAX_STRING_MODES;
 
 #[derive(Clone, Debug)]
 pub struct BoardMode {
@@ -226,6 +226,8 @@ pub struct Bank {
     /// Prepared contact owners update this scratch inside the same trial solve.
     external_force: Option<Vec<f64>>,
     pub omitted_duplex_modes: usize,
+    /// Segment/direction count whose partial budget omits in-band vibration.
+    pub capped_string_segments: usize,
     /// Contiguous strings sharing one physical course bridge; prepared cold.
     groups: Vec<std::ops::Range<usize>>,
     transition: Vec<Transition>,
@@ -318,6 +320,7 @@ impl Bank {
         let bending = GeneralizedMaxwell::new(200e9, vec![(8e9, 0.0004), (2e9, 0.02)])
             .map_err(|e| e.to_string())?;
         let mut omitted_duplex_modes = 0;
+        let mut capped_string_segments = 0;
         for (ci, c) in courses.iter().enumerate() {
             c.validate()?;
             for polarization in 0..planes {
@@ -328,6 +331,8 @@ impl Bank {
                 for duplex in [false, true] {
                     if duplex && c.duplex_length_m == 0.0 { continue; }
                     let card = if duplex { Course { length_m: c.duplex_length_m, ..*c } } else { *c };
+                    let retention = card.partial_retention(tension, band_hz, max_modes)?;
+                    capped_string_segments += usize::from(retention.capped);
                     let start = modes.len();
                     let si = strings.len();
                     let mut beta2 = 0.0;
@@ -337,10 +342,8 @@ impl Bank {
                     let bridge: Vec<f64> = if polarization==0 {
                         board.iter().map(|b| b.bridge[usize::from(c.midi-21)]).collect()
                     } else {secondary.expect("admitted transverse rows")[ci].clone()};
-                    for n in 1..=max_modes {
+                    for n in 1..=retention.count {
                         let f = card.partial_hz(n, tension);
-                        if !f.is_finite() { return Err("derived string frequency overflow".into()); }
-                        if f > band_hz { break; }
                         let omega = TAU*f;
                         let sign = if n % 2 == 0 { -1.0 } else { 1.0 };
                         let beta = det::sqrt(2.0*card.linear_density_kg_m*card.length_m)*sign/(n as f64*PI);
@@ -449,7 +452,7 @@ impl Bank {
         } }
         Ok(Self { strings,groups,modes,contact_strings,board_count:r,q:vec![0.0;n+r],v:vec![0.0;n+r],
             next_q:vec![0.0;n+r],next_v:vec![0.0;n+r],contact_compliance,
-            free_contact:vec![0.0;nc],rate,footprints:None,stretching:None,external_force:None,omitted_duplex_modes,transition,physical_board_k,
+            free_contact:vec![0.0;nc],rate,footprints:None,stretching:None,external_force:None,omitted_duplex_modes,capped_string_segments,transition,physical_board_k,
             board_half_damping,board_damping_enabled:damping,bare_board_damping_configured:false,
             damped_board_v:vec![0.0;r],board_pre_loss:0.0,
             diagonal_omega2:oscillator.iter().map(|m|m.angular_frequency_rad_s.powi(2)).collect(),last_modal_loss_j:0.0,
@@ -1134,6 +1137,11 @@ mod tests {
         assert!(b.modes.len()>128);
         assert!(b.modes.len()<=MAX_STRING_MODES);
         assert!(b.modes.iter().all(|m|m.omega/TAU<=21_600.0));
+        assert_eq!(b.capped_string_segments,0);
+        let preview=Bank::new(&[c],&super::super::board::demonstration(),192_000,
+            21_600.0,24,false).unwrap();
+        assert_eq!(preview.modes.len(),24);
+        assert_eq!(preview.capped_string_segments,1);
         let forces=[0.1];
         for _ in 0..20 {
             let before=b.energy();b.predict();b.finish(&forces);

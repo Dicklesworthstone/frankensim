@@ -31,8 +31,10 @@ default demonstration strikes key 69 at 2 m/s; append a Standard MIDI File path
 after the duration to use the existing MIDI gesture importer (channel 1,
 velocity 127 -> 4.5 m/s, switch sustain; an explicit uncalibrated mapping).
 
-This offline path retains 24 partials per string, board modes through 400 Hz,
-and four mechanics substeps per 48 kHz frame. Its receiver is at
+This offline path retains string partials through 21.6 kHz up to the 512-partial
+work ceiling, board modes through 400 Hz, estimated finite-width dampers,
+and four mechanics substeps per 48 kHz frame. Count-limited string segments are
+reported. Its receiver is at
 [0.675, 1.0, 1.0] metres in the imported board chart. It uses the existing
 infinite-baffle physical-pressure observer and PCM encoder at 2 Pa full scale,
 without normalization; clipping and the mechanics energy balance are reported.

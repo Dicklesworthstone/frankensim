@@ -14,9 +14,10 @@ cargo run --release -p fs-couple --example piano_exterior -- \
   --hammers materials.fsh --hammer-footprints faces.fshp --dampers pads.fspd
 ```
 
-Each control is optional. Old positional MIDI invocations and the default
-4-substep, 24-partial source-shank image remain available unchanged. Without a
-score the existing A4 study is used, or the nearest admitted key for a partial
+Each control is optional. Positional MIDI invocations remain supported. The
+default uses four mechanical substeps and frequency-based partial retention;
+`--modes 24` selects the smaller preview budget. Without a score the existing
+A4 study is used, or the nearest admitted key for a partial
 scale lacking A4. `--note` and `--velocity` explicitly select a supplied-key
 study and post-escapement hammer velocity in m/s. Outputs remain 48 kHz physical-Pa
 PCM, without automatic normalization. The render duration remains 0.05–60 s.
@@ -80,11 +81,13 @@ clipped PCM conversion.
 
 ## Physical preparation options
 
-`--modes 1..512` changes the per-string retention ceiling, including unplayed
-sympathetic strings and duplex segments. Bass strings are no longer restricted
-to the 24-partial demonstration through this front door. Existing partials retain
+`--modes auto` is the default: the per-string retention ceiling is 512, including
+unplayed sympathetic strings and duplex segments, with each segment stopping at
+the output frequency band. `--modes 1..512` selects an explicit work budget;
+`--modes 24` keeps the smaller preview approximation. Existing partials retain
 their geometry/material-derived frequencies. The original 21.6 kHz retention
-ceiling still stops inadmissible modes; raising a count is not a full-band or
+ceiling still stops inadmissible modes; count-limited segments are reported.
+Raising a count is not a full-band structural/acoustic or
 convergence certificate. It changes the retained endpoint mass and therefore
 the loaded board basis: the acoustic solve is prepared from THAT same new bank.
 
@@ -101,9 +104,13 @@ The 10.8 kHz figure in the original feedback description is the DEFAULT 4x case.
 in `HAMMERS.md`. `--hammer-footprints faces.fshp` uses `HAMMER_FOOTPRINTS.md` to
 select point or finite longitudinal contact faces. Each site keeps independent
 felt/relaxation history, sharing its physical hammer, rather than filtering a
-point-contact waveform. `--dampers pads.fspd` uses the supplied spatial viscous
-pads from `DAMPERS.md`; `--dampers estimated` explicitly selects the existing
-approximate spans and drag values. These are not new measured Steinway data.
+point-contact waveform. Playback with the `steinway-d` scale defaults to the
+existing estimated finite damper pads from `DAMPERS.md`, so release damping
+reaches partials with a node at the old point contact. `--dampers point` selects
+that point-contact approximation; `--dampers estimated` explicitly selects the
+finite pads for another scale. `--dampers pads.fspd` supplies the complete pad
+card, including explicit free-string rows, and overrides the preset. The
+estimated spans and drag values are not measured Steinway data.
 
 With the `steinway-d` scale and source hammer cards, opt-in
 `--rt0425-hammer-stiffness` selects the already implemented published per-string

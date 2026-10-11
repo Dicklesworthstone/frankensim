@@ -126,8 +126,10 @@ velocity 127 -> 4.5 m/s, and the existing sustain controls. Without MIDI the
 example strikes key 69 at 2 m/s. MIDI supplies gestures, never material data,
 string frequencies or missing courses. Duration must be 0.05..60 seconds.
 
-The render wrapper retains 24 partials at most per string, four mechanical
-substeps per 48 kHz sample, source wool/Prony felt and the existing shank image.
+The render wrapper defaults to frequency-based string retention through
+21.6 kHz (at most 512 partials per segment), four mechanical substeps per 48 kHz
+sample, source wool/Prony felt and the existing shank image. `--modes 24` retains
+the smaller preview budget; any count-limited segments are reported.
 The complete board mode set through `board-band-hz` is required. This is a
 bounded offline rendering image, not a full-band Steinway fidelity claim.
 

@@ -22,9 +22,9 @@ in, and visual MTL properties are not interpreted as elastic constants.
 All admitted speaking strings, unison members and duplex spans remain present,
 including unplayed courses. The bank's moving-endpoint inertia completion,
 reciprocal cross-potential, actual tension/flexural partials and complete retained
-board basis are reused. The default is at most 24 partials per string;
-`--modes 1..512` exposes the existing retention budget, with the same 21.6 kHz
-ceiling. The structural slice is the complete
+board basis are reused. The default `--modes auto` follows each physical string
+through the 21.6 kHz output band, up to 512 partials. `--modes 1..512` selects
+an explicit smaller work budget; count-limited segments are reported. The structural slice is the complete
 admitted slice through `board-band-hz`. No mode is silently dropped to make a
 failed solve pass. High duplex partials outside the retained band are reported;
 the existing endpoint stiffness/mass contributions remain.
