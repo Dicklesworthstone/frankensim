@@ -1,0 +1,35 @@
+name: Deposition physics
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-material/src/thermovisco.rs'
+      - 'crates/fs-solid/src/deposition**'
+      - 'crates/fs-solid/src/deposition/**'
+      - 'crates/fs-solid/examples/deposited_thermovisco_strip.rs'
+      - 'crates/fs-conduction/src/transient/deposition.rs'
+      - '.github/workflows/deposition-physics.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  material-history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile the actual material law and run its numerical regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustc --version --verbose
+          # No substitute law and no unrelated constellation dependency resolution.
+          for opt in 0 3; do
+            rustc --edition=2024 -C "opt-level=$opt" --test crates/fs-material/src/thermovisco.rs -o "$RUNNER_TEMP/thermovisco-tests-$opt"
+            "$RUNNER_TEMP/thermovisco-tests-$opt" --nocapture
+          done

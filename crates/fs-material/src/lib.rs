@@ -30,6 +30,8 @@ pub mod plastic;
 pub mod porous;
 pub mod state_point;
 pub mod tensor;
+/// Bounded temperature-dependent Maxwell history, thermal strain and work balance.
+pub mod thermovisco;
 pub mod visco;
 
 pub use calibrate::{CalibrationFit, calibrate_bilinear};
