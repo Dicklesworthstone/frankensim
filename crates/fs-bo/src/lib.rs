@@ -15,6 +15,8 @@
 pub mod acq;
 #[cfg(feature = "tape-acq")]
 pub mod acq_grad;
+/// Pending-aware asynchronous campaigns for caller-owned simulation workers.
+pub mod async_study;
 pub mod bo;
 /// Joint latent feasibility and reference-capped noisy design improvement.
 pub mod constrained;
