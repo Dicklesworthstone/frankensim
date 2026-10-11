@@ -2214,6 +2214,7 @@ dependencies = [
  "fs-ir",
  "fs-ivl",
  "fs-matdb",
+ "fs-material",
  "fs-package",
  "fs-qty",
  "fs-regime",

@@ -75,6 +75,9 @@ pub enum MigrationRule {
     /// Version 11 gains optional regional delivered-power histories. Historical
     /// transient projects retain their static power rows and duty factors.
     TransientPowerSchedulesV12,
+    /// Version 12 gains optional total-enthalpy storage. Historical projects
+    /// retain constant capacities; no phase curve, density or state is inferred.
+    TransientEnthalpyV13,
 }
 
 impl MigrationRule {
@@ -100,6 +103,7 @@ impl MigrationRule {
             MigrationRule::NaturalConvectionV10 => "natural-convection-v10",
             MigrationRule::TransientConductionV11 => "transient-conduction-v11",
             MigrationRule::TransientPowerSchedulesV12 => "transient-power-schedules-v12",
+            MigrationRule::TransientEnthalpyV13 => "transient-enthalpy-v13",
         }
     }
 
@@ -119,6 +123,7 @@ impl MigrationRule {
             MigrationRule::NaturalConvectionV10 => 9,
             MigrationRule::TransientConductionV11 => 10,
             MigrationRule::TransientPowerSchedulesV12 => 11,
+            MigrationRule::TransientEnthalpyV13 => 12,
         }
     }
 }
@@ -230,6 +235,7 @@ pub fn migrate_envelope(
         9 => MigrationRule::NaturalConvectionV10,
         10 => MigrationRule::TransientConductionV11,
         11 => MigrationRule::TransientPowerSchedulesV12,
+        12 => MigrationRule::TransientEnthalpyV13,
         v if v == FSIM_VERSION => {
             return Err(ProjectError {
                 code: "fsim-migration-not-needed",
@@ -271,7 +277,8 @@ pub fn migrate_envelope(
         | MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10
         | MigrationRule::NaturalConvectionV10
         | MigrationRule::TransientConductionV11
-        | MigrationRule::TransientPowerSchedulesV12 => {
+        | MigrationRule::TransientPowerSchedulesV12
+        | MigrationRule::TransientEnthalpyV13 => {
             // The document's internal `versions.schema` field must move with
             // the envelope: the validator admits only the current schema.
             // The rewrite is exactly these two byte strings, never a
@@ -349,6 +356,22 @@ pub fn migrate_envelope(
             code: "fsim-migration-payload",
             detail: format!("schema version {declared_version} predates transient power schedules but its payload declares one"),
             hint: "declare delivered-power histories in a current-version project; migration preserves historical static power".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 13
+        && decoded
+            .spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|setup| setup.transient.as_ref())
+            .is_some_and(|transient| transient.enthalpy.is_some())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates total-enthalpy storage but its payload declares it"),
+            hint: "declare enthalpy models in a current-version project; migration preserves historical heat capacities".to_string(),
         });
     }
     if declared_version > 0

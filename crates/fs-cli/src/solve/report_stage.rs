@@ -581,7 +581,10 @@ pub(super) fn report_receipt(
     let time_context = if let Some(transient) = transient {
         let stage = SolveStage::Conduction;
         let final_time = required_f64(stage, transient, "final_time_s")?;
-        if required_str(stage, transient, "schema")? != "fs-cli-transient-conduction-v1"
+        if !matches!(
+            required_str(stage, transient, "schema")?,
+            "fs-cli-transient-conduction-v1" | "fs-cli-transient-enthalpy-v1"
+        )
             || required_str(stage, transient, "status")? != "completed"
             || required_str(stage, transient, "qoi_time")? != "final"
             || !final_time.is_finite()

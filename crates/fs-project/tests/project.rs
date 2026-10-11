@@ -2230,6 +2230,7 @@ fn transient_project() -> ProjectSpec {
             volumetric_heat_capacity: QtyAny::new(2e6, fs_project::spec::dims::VOLUMETRIC_HEAT_CAPACITY),
             source: "manufactured constant capacity for numerical verification".to_string(),
         }).collect(),
+        enthalpy: None,
         power_schedules: Vec::new(),
     });
     spec
@@ -2416,4 +2417,441 @@ fn g0_v11_migration_preserves_static_transients_and_refuses_hidden_workloads() {
     assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
     let hidden = down(&print_sexpr(&scheduled_transient_project()).unwrap());
     assert_eq!(parse_sexpr_migrating(&hidden).unwrap_err().code, "fsim-migration-payload");
+}
+
+fn enthalpy_project() -> ProjectSpec {
+    use fs_project::spec::dims;
+    let mut project = scheduled_transient_project();
+    let time = project
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap();
+    time.initial_temperature = kelvin(300.0);
+    time.enthalpy = Some(fs_project::TransientEnthalpy {
+        materials: time
+            .capacities
+            .iter()
+            .enumerate()
+            .map(|(index, row)| fs_project::TransientRegionEnthalpy {
+                region: row.region.clone(),
+                material_card_identity: ContentHash([100 + index as u8; 32]),
+                source: "explicit manufactured phase chart; numerical verification only"
+                    .to_string(),
+                reference_density: QtyAny::new(1200.0, dims::DENSITY),
+                initial_specific_enthalpy: QtyAny::new(
+                    150.0 + index as f64 * 10.0,
+                    dims::SPECIFIC_ENTHALPY,
+                ),
+                knots: [
+                    (0.0, 290.0, 0.0),
+                    (100.0, 300.0, 0.0),
+                    (200.0, 300.0, 1.0),
+                    (300.0, 310.0, 1.0),
+                ]
+                .into_iter()
+                .map(
+                    |(enthalpy, temperature, fraction)| fs_project::TransientEnthalpyKnot {
+                        specific_enthalpy: QtyAny::new(enthalpy, dims::SPECIFIC_ENTHALPY),
+                        temperature: kelvin(temperature),
+                        liquid_mass_fraction: fraction,
+                    },
+                )
+                .collect(),
+            })
+            .collect(),
+        max_newton_iterations: 40,
+        max_backtracks: 12,
+    });
+    time.capacities.clear();
+    project
+}
+
+#[test]
+fn g0_enthalpy_round_trips_explicit_plateau_states_and_sourced_models() {
+    let shipped = parse_sexpr(include_str!(
+        "../../../data/reference-project/cooling-enthalpy.fsim"
+    ))
+    .unwrap();
+    assert!(shipped.findings().is_empty(), "{:?}", shipped.findings());
+    let project = enthalpy_project();
+    assert!(project.validate().is_empty(), "{:?}", project.validate());
+    let sexpr = print_sexpr(&project).unwrap();
+    assert!(sexpr.contains(":capacities (capacities) :enthalpy (enthalpy "));
+    let decoded = parse_sexpr(&sexpr).unwrap();
+    let json = parse_json(&print_json(&project).unwrap()).unwrap();
+    assert_eq!(decoded.spec, project);
+    assert_eq!(json.spec, project);
+    assert_eq!(decoded.hash(), json.hash());
+    assert!(decoded.findings().is_empty());
+    let time = project
+        .cooling
+        .as_ref()
+        .unwrap()
+        .conduction
+        .as_ref()
+        .unwrap()
+        .transient
+        .as_ref()
+        .unwrap();
+    for (index, material) in time.enthalpy.as_ref().unwrap().materials.iter().enumerate() {
+        let curve = material.phase_curve().unwrap();
+        let initial = material.initial_specific_enthalpy.value;
+        let state = curve.state_at_specific_enthalpy(initial).unwrap();
+        assert_eq!(state.temperature_k(), 300.0);
+        assert!((state.liquid_mass_fraction() - (0.5 + index as f64 * 0.1)).abs() < 1e-14);
+        assert_eq!(
+            curve
+                .temperature_derivative_at_specific_enthalpy(initial)
+                .unwrap(),
+            0.0
+        );
+        assert!(
+            curve
+                .knots()
+                .iter()
+                .all(|knot| knot.bulk_density_kg_m3 == 1200.0)
+        );
+    }
+    // A plateau's equal temperature does not erase its distinct stored energy.
+    let mut changed = project.clone();
+    changed
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap()
+        .enthalpy
+        .as_mut()
+        .unwrap()
+        .materials[0]
+        .initial_specific_enthalpy
+        .value = 175.0;
+    assert!(changed.validate().is_empty());
+    assert_ne!(
+        canonical_hash(print_sexpr(&changed).unwrap().as_bytes()),
+        decoded.hash()
+    );
+    let unknown = sexpr.replace(
+        ":max-newton-iterations 40",
+        ":max-newton-iterations 40 :infer-latent-heat true",
+    );
+    assert!(
+        parse_sexpr_lenient(&unknown)
+            .unwrap()
+            .findings()
+            .iter()
+            .any(|row| row.code == "project-unknown-field")
+    );
+}
+
+#[test]
+fn g0_enthalpy_admits_explicit_solid_and_liquid_charts_without_phase_smoothing() {
+    for fraction in [0.0, 1.0] {
+        let mut project = enthalpy_project();
+        let enthalpy = project
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .transient
+            .as_mut()
+            .unwrap()
+            .enthalpy
+            .as_mut()
+            .unwrap();
+        enthalpy.max_backtracks = 0;
+        for material in &mut enthalpy.materials {
+            material.knots = vec![material.knots[0].clone(), material.knots[3].clone()];
+            for knot in &mut material.knots {
+                knot.liquid_mass_fraction = fraction;
+            }
+            material.initial_specific_enthalpy.value = 150.0;
+        }
+        assert!(project.validate().is_empty(), "{:?}", project.validate());
+        assert_eq!(
+            parse_sexpr(&print_sexpr(&project).unwrap()).unwrap().spec,
+            project
+        );
+    }
+}
+
+#[test]
+fn g0_enthalpy_refuses_invalid_units_curves_coverage_and_nonlinear_controls() {
+    use fs_project::spec::dims;
+    for (variant, expected) in [
+        (
+            "unknown region",
+            "project-conduction-transient-enthalpy-region",
+        ),
+        (
+            "duplicate region",
+            "project-conduction-transient-enthalpy-region",
+        ),
+        (
+            "missing region",
+            "project-conduction-transient-enthalpy-coverage",
+        ),
+        (
+            "empty source",
+            "project-conduction-transient-enthalpy-source",
+        ),
+        (
+            "zero identity",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "density units",
+            "project-conduction-transient-enthalpy-density",
+        ),
+        (
+            "zero density",
+            "project-conduction-transient-enthalpy-density",
+        ),
+        (
+            "nonfinite density",
+            "project-conduction-transient-enthalpy-density",
+        ),
+        ("one knot", "project-conduction-transient-enthalpy-knots"),
+        (
+            "too many knots",
+            "project-conduction-transient-enthalpy-knots",
+        ),
+        (
+            "enthalpy units",
+            "project-conduction-transient-enthalpy-knot-dims",
+        ),
+        (
+            "temperature units",
+            "project-conduction-transient-enthalpy-knot-dims",
+        ),
+        (
+            "nonfinite enthalpy",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "repeated enthalpy",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "decreasing temperature",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "decreasing fraction",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "nonfinite fraction",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "fraction outside domain",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "partial transition",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "single-phase plateau",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "zero Newton budget",
+            "project-conduction-transient-enthalpy-budget",
+        ),
+        (
+            "large Newton budget",
+            "project-conduction-transient-enthalpy-budget",
+        ),
+        (
+            "large backtrack budget",
+            "project-conduction-transient-enthalpy-budget",
+        ),
+    ] {
+        let mut project = enthalpy_project();
+        let enthalpy = project
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .transient
+            .as_mut()
+            .unwrap()
+            .enthalpy
+            .as_mut()
+            .unwrap();
+        match variant {
+            "unknown region" => enthalpy.materials[0].region = "unseeded".to_string(),
+            "duplicate region" => {
+                enthalpy.materials[1].region = enthalpy.materials[0].region.clone()
+            }
+            "missing region" => {
+                enthalpy.materials.pop();
+            }
+            "empty source" => enthalpy.materials[0].source = "  ".to_string(),
+            "zero identity" => enthalpy.materials[0].material_card_identity = ContentHash([0; 32]),
+            "density units" => {
+                enthalpy.materials[0].reference_density.dims = dims::VOLUMETRIC_HEAT_CAPACITY
+            }
+            "zero density" => enthalpy.materials[0].reference_density.value = 0.0,
+            "nonfinite density" => enthalpy.materials[0].reference_density.value = f64::INFINITY,
+            "one knot" => enthalpy.materials[0].knots.truncate(1),
+            "too many knots" => {
+                enthalpy.materials[0].knots = vec![enthalpy.materials[0].knots[0].clone(); 4097]
+            }
+            "enthalpy units" => {
+                enthalpy.materials[0].knots[0].specific_enthalpy.dims = dims::ENERGY
+            }
+            "temperature units" => enthalpy.materials[0].knots[0].temperature.dims = dims::TIME,
+            "nonfinite enthalpy" => {
+                enthalpy.materials[0].knots[0].specific_enthalpy.value = f64::NAN
+            }
+            "repeated enthalpy" => enthalpy.materials[0].knots[1].specific_enthalpy.value = 0.0,
+            "decreasing temperature" => enthalpy.materials[0].knots[2].temperature.value = 299.0,
+            "decreasing fraction" => {
+                enthalpy.materials[0].knots[1].liquid_mass_fraction = 0.7;
+                enthalpy.materials[0].knots[2].liquid_mass_fraction = 0.6;
+            }
+            "nonfinite fraction" => enthalpy.materials[0].knots[1].liquid_mass_fraction = f64::NAN,
+            "fraction outside domain" => enthalpy.materials[0].knots[1].liquid_mass_fraction = -0.1,
+            "partial transition" => enthalpy.materials[0].knots[0].liquid_mass_fraction = 0.1,
+            "single-phase plateau" => {
+                for knot in &mut enthalpy.materials[0].knots {
+                    knot.liquid_mass_fraction = 0.0;
+                }
+            }
+            "zero Newton budget" => enthalpy.max_newton_iterations = 0,
+            "large Newton budget" => enthalpy.max_newton_iterations = 1001,
+            "large backtrack budget" => enthalpy.max_backtracks = 65,
+            _ => unreachable!(),
+        }
+        let findings = project.validate();
+        assert!(
+            findings
+                .iter()
+                .any(|row| row.code == expected && !row.fix.is_empty()),
+            "{variant}: {findings:?}"
+        );
+    }
+}
+
+#[test]
+fn g0_enthalpy_requires_consistent_initial_energy_and_exclusive_storage() {
+    use fs_project::spec::dims;
+    for (value, dimension) in [
+        (150.0, dims::ENERGY),
+        (f64::NAN, dims::SPECIFIC_ENTHALPY),
+        (-1.0, dims::SPECIFIC_ENTHALPY),
+        (50.0, dims::SPECIFIC_ENTHALPY),
+    ] {
+        let mut project = enthalpy_project();
+        project
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .transient
+            .as_mut()
+            .unwrap()
+            .enthalpy
+            .as_mut()
+            .unwrap()
+            .materials[0]
+            .initial_specific_enthalpy = QtyAny::new(value, dimension);
+        assert!(
+            project
+                .validate()
+                .iter()
+                .any(|row| row.code == "project-conduction-transient-enthalpy-initial-state")
+        );
+    }
+    let mut project = enthalpy_project();
+    let old_capacities = transient_project()
+        .cooling
+        .unwrap()
+        .conduction
+        .unwrap()
+        .transient
+        .unwrap()
+        .capacities;
+    project
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap()
+        .capacities = old_capacities;
+    assert!(
+        project
+            .validate()
+            .iter()
+            .any(|row| row.code == "project-conduction-transient-storage-conflict")
+    );
+}
+
+#[test]
+fn g0_v12_migration_preserves_capacities_and_refuses_hidden_enthalpy() {
+    let historical = scheduled_transient_project();
+    let current = print_sexpr(&historical).unwrap();
+    let down = |text: &str| {
+        text.replacen(
+            &format!("(fsim-project :version {FSIM_VERSION}"),
+            "(fsim-project :version 12",
+            1,
+        )
+        .replacen(
+            &format!("(versions :schema {FSIM_VERSION}"),
+            "(versions :schema 12",
+            1,
+        )
+    };
+    let old = down(&current);
+    let migrated = parse_sexpr_migrating(&old).unwrap();
+    assert_eq!(migrated.decoded.spec, historical);
+    assert!(
+        migrated
+            .decoded
+            .spec
+            .cooling
+            .unwrap()
+            .conduction
+            .unwrap()
+            .transient
+            .unwrap()
+            .enthalpy
+            .is_none()
+    );
+    let receipt = migrated.migration.unwrap();
+    assert_eq!(
+        (receipt.source_version, receipt.target_version),
+        (12, FSIM_VERSION)
+    );
+    assert_eq!(receipt.rule.label(), "transient-enthalpy-v13");
+    assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
+    let hidden = down(&print_sexpr(&enthalpy_project()).unwrap());
+    assert_eq!(
+        parse_sexpr_migrating(&hidden).unwrap_err().code,
+        "fsim-migration-payload"
+    );
 }

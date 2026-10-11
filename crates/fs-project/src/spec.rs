@@ -44,6 +44,10 @@ pub mod dims {
     pub const ENERGY: Dims = Dims([2, 1, -2, 0, 0, 0]);
     /// Volumetric heat capacity, J/(m³ K).
     pub const VOLUMETRIC_HEAT_CAPACITY: Dims = Dims([-1, 1, -2, -1, 0, 0]);
+    /// Specific enthalpy, J/kg.
+    pub const SPECIFIC_ENTHALPY: Dims = Dims([2, 0, -2, 0, 0, 0]);
+    /// Reference mass density, kg/m³.
+    pub const DENSITY: Dims = Dims([-3, 1, 0, 0, 0, 0]);
 }
 
 /// Project metadata: who the study is for and what decision it feeds.
@@ -733,6 +737,54 @@ pub struct TransientRegionCapacity {
     pub source: String,
 }
 
+/// One explicitly supplied point on a stationary-domain enthalpy chart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransientEnthalpyKnot {
+    /// Specific thermodynamic enthalpy in J/kg, including latent heat once.
+    pub specific_enthalpy: QtyAny,
+    /// Positive absolute temperature in K. Equal adjacent temperatures retain
+    /// an isothermal latent plateau without apparent-capacity smoothing.
+    pub temperature: QtyAny,
+    /// Equilibrium liquid mass fraction in `[0, 1]`.
+    pub liquid_mass_fraction: f64,
+}
+
+/// Sourced equilibrium enthalpy data for one conduction region (schema v13).
+/// This is an explicit model declaration; the cited card identity does not
+/// authenticate the supplied knots or create material-database receipts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransientRegionEnthalpy {
+    /// Declared conduction region, independent of mesh element numbering.
+    pub region: String,
+    /// Nonzero immutable card identity attributed by the model's author.
+    pub material_card_identity: fs_blake3::ContentHash,
+    /// Nonempty source or engineering basis for this declared model.
+    pub source: String,
+    /// Positive reference density in kg/m³, fixed for this stationary domain.
+    pub reference_density: QtyAny,
+    /// Uniform initial specific enthalpy in this region, in J/kg. It must
+    /// resolve to the transient's initial temperature; plateau fractions are
+    /// determined by this value, never inferred from temperature alone.
+    pub initial_specific_enthalpy: QtyAny,
+    /// Between 2 and 4096 knots with strictly increasing enthalpy and
+    /// nondecreasing temperature/fraction. A single-phase chart is all solid
+    /// or all liquid with strictly increasing temperature; a melting chart
+    /// spans fully solid through fully liquid.
+    pub knots: Vec<TransientEnthalpyKnot>,
+}
+
+/// Nonlinear total-enthalpy storage controls for stationary conduction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransientEnthalpy {
+    /// Exactly one explicit enthalpy declaration per conduction region.
+    pub materials: Vec<TransientRegionEnthalpy>,
+    /// Per-step Newton iteration cap in `1..=1000`.
+    pub max_newton_iterations: u32,
+    /// Per-iteration line-search halving cap in `0..=64`; zero tries only
+    /// the full Newton step.
+    pub max_backtracks: u32,
+}
+
 /// One constant delivered-power interval, ending at the declared physical time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransientPowerStep {
@@ -774,8 +826,12 @@ pub struct ConductionTransient {
     pub max_steps: u32,
     /// Absolute discrete storage-minus-net-input tolerance per step, J.
     pub energy_tolerance: QtyAny,
-    /// Exactly one explicitly sourced capacity per conduction region.
+    /// Exactly one explicitly sourced capacity per conduction region for the
+    /// constant-capacity model. Must be empty when `enthalpy` is declared.
     pub capacities: Vec<TransientRegionCapacity>,
+    /// Optional total-enthalpy model (schema v13), replacing constant
+    /// capacities. No phase curve or reference density is inferred.
+    pub enthalpy: Option<TransientEnthalpy>,
     /// Optional sourced power histories (schema v12). Empty preserves the
     /// static workload. Every switch is a coarse and fine time-grid boundary.
     pub power_schedules: Vec<TransientRegionPower>,
@@ -2043,12 +2099,72 @@ impl ProjectSpec {
                 ));
             }
         }
-        if regions != seen {
+        if transient.enthalpy.is_none() && regions != seen {
             out.push(violation(
                 "project-conduction-transient-capacity-coverage",
                 "transient capacity declarations do not exactly cover conduction regions",
                 "declare one sourced heat capacity for every region",
             ));
+        }
+        if let Some(enthalpy) = &transient.enthalpy {
+            if !transient.capacities.is_empty() {
+                out.push(violation(
+                    "project-conduction-transient-storage-conflict",
+                    "transient declares both constant heat capacities and total-enthalpy storage",
+                    "leave capacities empty when declaring enthalpy; latent heat belongs to the enthalpy potential and must not be counted again",
+                ));
+            }
+            if !(1..=1000).contains(&enthalpy.max_newton_iterations) || enthalpy.max_backtracks > 64
+            {
+                out.push(violation(
+                    "project-conduction-transient-enthalpy-budget",
+                    "enthalpy requires 1..=1000 Newton iterations and 0..=64 line-search halvings",
+                    "declare explicit bounded nonlinear controls; zero backtracks permits only a full Newton step",
+                ));
+            }
+            let mut enthalpy_regions = BTreeSet::new();
+            for material in &enthalpy.materials {
+                if !regions.contains(material.region.as_str())
+                    || !enthalpy_regions.insert(material.region.as_str())
+                {
+                    out.push(violation(
+                        "project-conduction-transient-enthalpy-region",
+                        format!(
+                            "enthalpy region `{}` is unknown or repeated",
+                            material.region
+                        ),
+                        "declare exactly one enthalpy model for each conduction region",
+                    ));
+                }
+                match material.phase_curve() {
+                    Ok(curve) => {
+                        let initial = material.initial_specific_enthalpy;
+                        let state = curve.state_at_specific_enthalpy(initial.value);
+                        let temperature = transient.initial_temperature.value;
+                        if initial.dims != dims::SPECIFIC_ENTHALPY
+                            || !initial.value.is_finite()
+                            || !state.as_ref().is_ok_and(|state| {
+                                (state.temperature_k() - temperature).abs()
+                                    <= 64.0 * f64::EPSILON * temperature.abs().max(1.0)
+                            })
+                        {
+                            out.push(violation(
+                                "project-conduction-transient-enthalpy-initial-state",
+                                format!("initial enthalpy for `{}` must be finite J/kg inside its chart and resolve to the declared initial temperature", material.region),
+                                "declare each region's initial enthalpy explicitly, including its phase fraction on a latent plateau",
+                            ));
+                        }
+                    }
+                    Err(finding) => out.push(finding),
+                }
+            }
+            if regions != enthalpy_regions {
+                out.push(violation(
+                    "project-conduction-transient-enthalpy-coverage",
+                    "transient enthalpy declarations do not exactly cover conduction regions",
+                    "declare one sourced enthalpy model for every conduction region",
+                ));
+            }
         }
         let mut scheduled = BTreeSet::new();
         for schedule in &transient.power_schedules {

@@ -32,6 +32,7 @@ use super::{
 
 mod adjoint;
 mod conjugate;
+mod enthalpy;
 mod natural;
 mod workload;
 use workload::{TimeGrids, Workload};
@@ -57,7 +58,7 @@ fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error(
         "cli-solve-conduction-transient",
         message,
-        "use explicit regional capacities and admitted material and convection laws; inspect the time/work/energy declaration",
+        "declare either regional capacities or enthalpy charts with admitted material and boundary laws; inspect the time/work/energy declaration",
     )
 }
 
@@ -109,6 +110,14 @@ fn policy(spec: &ProjectSpec) -> Option<&ConductionTransient> {
 
 pub(super) fn requested(spec: &ProjectSpec) -> bool {
     policy(spec).is_some()
+}
+
+pub(super) fn no_claim(spec: &ProjectSpec) -> &'static str {
+    if policy(spec).is_some_and(|time| time.enthalpy.is_some()) {
+        enthalpy::no_claim()
+    } else {
+        NO_CLAIM
+    }
 }
 
 /// Refuse incompatible model combinations before meshing or solving.
@@ -165,6 +174,7 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
             "steady nominal adjoints cannot differentiate a transient trajectory",
         ));
     }
+    enthalpy::admit(spec)?;
     TimeGrids::new(transient)?;
     Ok(())
 }
@@ -621,6 +631,11 @@ pub(super) fn solve(
         return Err(bad(
             "the transient natural-convection declaration has no matching card lowering",
         ));
+    }
+    if policy.enthalpy.is_some() {
+        return enthalpy::solve(
+            cx, spec, problem, interfaces, labels, region_ids, linear, deadline,
+        );
     }
     let grids = TimeGrids::new(policy)?;
     let coarse_steps = grids.coarse.len();

@@ -50,7 +50,10 @@ pub const STUDY_FSIM_VERSION: u32 = 1;
 /// Version 12 adds optional sourced regional delivered-power schedules, with
 /// every switch represented on both time grids. Older transient projects keep
 /// their static power and migrate without inventing a workload history.
-pub const FSIM_VERSION: u32 = 12;
+/// Version 13 adds optional stationary spatial total-enthalpy transport with
+/// explicit regional curves, reference densities, initial enthalpies and
+/// nonlinear work controls. Older projects keep their declared capacities.
+pub const FSIM_VERSION: u32 = 13;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,
@@ -77,16 +80,16 @@ pub use migration::{
     parse_sexpr_migrating,
 };
 pub use spec::{
-    AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup, ConductionTransient,
-    ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
-    FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
-    InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance, Metadata, SurfaceOffset,
-    OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface,
-    RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
-    RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary,
-    ThermalBoundaryCondition, ThermalLimit, TransientPowerStep, TransientRegionCapacity,
-    TransientRegionPower, UnitsDoctrine, Vent, Versions,
-    requirement_source_reviews,
+    AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
+    ConductionTransient, ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl,
+    Envelope, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
+    GeometryAssignment, InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance,
+    Metadata, OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec,
+    RadiatingSurface, RequirementDirection, RequirementSeverity, RequirementSource,
+    RequirementSourceKind, RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings,
+    SurfaceOffset, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, TransientEnthalpy,
+    TransientEnthalpyKnot, TransientPowerStep, TransientRegionCapacity, TransientRegionEnthalpy,
+    TransientRegionPower, UnitsDoctrine, Vent, Versions, requirement_source_reviews,
 };
 pub use study::{
     StudyBudgets, StudyConstraints, StudyDomain, StudyHole, StudyObjective, StudyOptimizer,

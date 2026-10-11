@@ -187,7 +187,7 @@ bindings; it runs no solves and admits no scenarios itself.
   Migration from v9 is an envelope rewrite; a pre-v10 payload declaring one is
   refused.
 - Wire: `lower`/`recognize` map `ProjectSpec` to and from the `fs_ir::Node`
-  envelope `(fsim-project :version 12 ...)`. `print_sexpr`/`parse_sexpr` and
+  envelope `(fsim-project :version 13 ...)`. `print_sexpr`/`parse_sexpr` and
   `print_json`/`parse_json` are the two spellings; `parse_sexpr_lenient`
   accepts noncanonical bytes and omitted defaultable fields, issuing a
   `CanonicalizationReceipt` (both hashes, `verifies()`) and `DefaultReceipt`s.
@@ -226,7 +226,36 @@ bindings; it runs no solves and admits no scenarios itself.
   Empty schedules retain the original uniform coarse grid. Both wire spellings
   bind all delivered watts, sources and switch times. Migration from v11 keeps
   static power unchanged; a pre-v12 payload carrying a schedule refuses.
-- `FSIM_VERSION = 12`. Readers refuse other versions
+- Optional `ConductionTransient.enthalpy` (schema v13, MR19/MR48) replaces
+  constant-capacity storage with one explicitly sourced enthalpy chart per
+  conduction region. It binds an attributed nonzero material-card identity,
+  positive reference density in kg/m³, initial specific enthalpy in J/kg,
+  and 2..=4096 specific-enthalpy/temperature/liquid-mass-fraction knots.
+  `TransientRegionEnthalpy::phase_curve()` uses fs-material's existing
+  equilibrium chart admission: enthalpy increases strictly, temperature and
+  fraction do not decrease, and genuine isothermal latent plateaus retain
+  their full enthalpy span. Explicit all-solid/all-liquid charts use its
+  single-phase ingress and require strictly increasing temperatures; a
+  melting chart spans fully solid to fully liquid. The declared reference
+  density is held fixed at every knot for the stationary reference domain.
+  Every initial enthalpy must lie inside its chart and resolve to the common
+  initial temperature within a 64-epsilon relative roundoff allowance; equal
+  plateau temperatures can retain different regional stored energies and
+  phase fractions. Both storage models together refuse rather than adding
+  latent heat twice. Missing, repeated or unknown regions, invalid dimensions,
+  nonfinite data and missing sources refuse before execution. Newton work is
+  bounded to 1..=1000 iterations and 0..=64 line-search halvings per iteration;
+  zero halvings permits only the full step. Time-grid and workload rules are
+  shared with the constant-capacity model. G0 cases in `tests/project.rs`
+  cover both spellings, phase/units/source/work/initial-state refusals and
+  receipted v12 migration; migration retains existing capacities and schedules
+  and refuses pre-v13 declarations of enthalpy. These are explicit engineering
+  models: the cited card identity authenticates no data and creates no
+  material-query receipt. Transport, nonlinear conductivity, boundary support,
+  cancellation and accepted-step energy checks remain execution responsibilities;
+  schema admission claims no physical validation, moving geometry, advection,
+  pressure work or energetic internal-variable evolution.
+- `FSIM_VERSION = 13`. Readers refuse other versions
   (`fsim-unsupported-version`); `migrate_envelope` is the only path from an
   older envelope, applies a registered `MigrationRule`, and returns a
   `ProjectMigrationReceipt` (old/new hashes + rule, `verifies()`). The

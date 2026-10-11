@@ -1458,7 +1458,7 @@ does not independently authenticate or reverify the continuum producer.
 Builds without the feature explicitly refuse this output request.
 
 Native transient conduction is available without a feature flag through the
-schema-v12 `conduction.transient` declaration. The runnable input and commands
+schema-v13 `conduction.transient` declaration. The runnable input and commands
 are in `data/reference-project/cooling-transient.fsim` and `TRANSIENT.md`.
 Both backward-Euler grids start from the declared initial temperature; their
 combined step cap includes the coarse and nested fine solves. The ordinary
@@ -1469,9 +1469,45 @@ is attached. See the retained step/storage receipts for energy and work.
 Bound temperature-dependent conductivity selects the shared endpoint
 Newton/FGMRES solve with its full k′(T) tangent. Each accepted endpoint retains
 nonlinear work and the joule residual/threshold; material-domain and iteration
-failures publish no partial field. Capacity remains constant and no
-enthalpy/phase law is inferred. The native driven-face test checks an
+failures publish no partial field. The default storage model uses declared
+constant capacities. The native driven-face test checks an
 independently derived transient balance and a frozen-conductivity twin.
+
+An explicit `transient.enthalpy` selects the shared heterogeneous P1
+total-enthalpy solver instead. Each conduction region supplies a bounded
+equilibrium chart, fixed reference density, attributed card identity, source
+text and initial specific enthalpy. Sensible and latent energy use the same
+specific-enthalpy state; no separate latent account or apparent heat capacity
+is added. A temperature plateau preserves the declared liquid mass fraction
+through its enthalpy coordinate. Pure solid and pure liquid charts are also
+admitted. Distinct regional charts require separate interface vertices and a
+declared contact law; shared-vertex mixtures are explicitly refused.
+
+Every coarse and fine grid starts from the original regional enthalpies.
+Each accepted endpoint uses actual endpoint conductivity and the original
+physical old enthalpy throughout Newton, FGMRES and line-search trials. The
+shared nonlinear residual and independent joule-energy gate must both pass
+before history advances. Prescribed Neumann/Robin laws, matching contact and
+event-aligned regional power schedules remain active. The declared Newton,
+backtracking and existing linear allowances bound each response; checked
+products and memory estimates include both trajectories and retained evidence.
+Cancellation or any failed domain, work or energy gate publishes no partial
+conduction field.
+
+`fs-cli-transient-enthalpy-v1` retains the actual material and chart identities,
+sources, reference densities, accepted step energy, true nonlinear/Krylov
+residuals and work, mass-weighted phase fractions, and final nodal enthalpy,
+liquid mass fraction and reference mass. The normal field and report use the
+fine-grid final temperature. Coarse/fine enthalpy and phase differences remain
+visible even when both temperatures agree on a plateau; equal temperatures
+do not become a zero-error temporal claim. This is Estimated fixed-domain
+transport, with source attribution rather than authentication of supplied
+phase data. Prescribed temperature, dynamic convection, radiation and native
+trajectory adjoints are currently refused for this storage model. Expansion,
+motion, phase kinetics and phase-dependent conductivity are not inferred.
+`data/reference-project/cooling-enthalpy.fsim` and `TRANSIENT.md` give a complete
+synthetic melting example through validate/import/solve/report. Driver version
+57 separates these semantics from older retained solves.
 
 The same native declaration also admits ambient gray radiation on its
 prescribed Robin patches, using the existing sourced emissivity cards and

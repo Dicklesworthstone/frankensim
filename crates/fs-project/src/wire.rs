@@ -21,16 +21,16 @@ use fs_scenario::Violation;
 
 use crate::FSIM_VERSION;
 use crate::spec::{
-    AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup, ConductionTransient,
-    ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
-    FanEfficiency,
-    FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
-    InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance, Metadata, SurfaceOffset,
-    OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface,
-    RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
-    SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary, ThermalBoundaryCondition,
-    ThermalLimit, TransientPowerStep, TransientRegionCapacity, TransientRegionPower,
-    UnitsDoctrine, Vent, Versions,
+    AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
+    ConductionTransient, ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl,
+    Envelope, Fan, FanCurveDecl, FanCurvePoint, FanEfficiency, FanToleranceBasis, GeometryArtifact,
+    GeometryAssignment, InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance,
+    Metadata, OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec,
+    RadiatingSurface, RequirementDirection, RequirementSeverity, RequirementSource,
+    RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, SurfaceOffset,
+    ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, TransientEnthalpy,
+    TransientEnthalpyKnot, TransientPowerStep, TransientRegionCapacity, TransientRegionEnthalpy,
+    TransientRegionPower, UnitsDoctrine, Vent, Versions,
 };
 
 /// Domain for canonical `.fsim` byte hashing.
@@ -717,6 +717,9 @@ fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
             kw("max-steps"), int(i64::from(transient.max_steps)),
             kw("energy-tolerance"), qty(transient.energy_tolerance)?,
             kw("capacities"), list(capacities)];
+        if let Some(enthalpy) = &transient.enthalpy {
+            time.extend([kw("enthalpy"), lower_enthalpy(enthalpy)?]);
+        }
         if !transient.power_schedules.is_empty() {
             let mut schedules = vec![sym("power-schedules")];
             for schedule in &transient.power_schedules {
@@ -733,6 +736,48 @@ fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
         declaration.push(list(time));
     }
     Ok(list(declaration))
+}
+
+fn lower_enthalpy(enthalpy: &TransientEnthalpy) -> Result<Node, ProjectError> {
+    let mut materials = vec![sym("materials")];
+    for row in &enthalpy.materials {
+        let mut knots = vec![sym("knots")];
+        for knot in &row.knots {
+            knots.push(list(vec![
+                sym("knot"),
+                kw("specific-enthalpy"),
+                qty(knot.specific_enthalpy)?,
+                kw("temperature"),
+                qty(knot.temperature)?,
+                kw("liquid-mass-fraction"),
+                float(knot.liquid_mass_fraction),
+            ]));
+        }
+        materials.push(list(vec![
+            sym("material"),
+            kw("region"),
+            text(&row.region),
+            kw("material-card-identity"),
+            text(&row.material_card_identity.to_hex()),
+            kw("source"),
+            text(&row.source),
+            kw("reference-density"),
+            qty(row.reference_density)?,
+            kw("initial-specific-enthalpy"),
+            qty(row.initial_specific_enthalpy)?,
+            kw("knots"),
+            list(knots),
+        ]));
+    }
+    Ok(list(vec![
+        sym("enthalpy"),
+        kw("max-newton-iterations"),
+        int(i64::from(enthalpy.max_newton_iterations)),
+        kw("max-backtracks"),
+        int(i64::from(enthalpy.max_backtracks)),
+        kw("materials"),
+        list(materials),
+    ]))
 }
 
 fn lower_radiation(radiation: &ConductionRadiation) -> Result<Node, ProjectError> {
@@ -2780,7 +2825,7 @@ fn read_transient(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionTra
         return None;
     };
     let pairs = read_pairs(body, "transient", &["initial-temperature", "horizon", "max-step",
-        "max-steps", "energy-tolerance", "capacities", "power-schedules"], out);
+        "max-steps", "energy-tolerance", "capacities", "enthalpy", "power-schedules"], out);
     let max_steps = match field(&pairs, "max-steps") {
         Some(Node { kind: NodeKind::Int(value), .. }) => u32::try_from(*value).unwrap_or_default(),
         _ => 0,
@@ -2819,8 +2864,157 @@ fn read_transient(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionTra
         max_steps,
         energy_tolerance: expect_qty(field(&pairs, "energy-tolerance"), "transient.energy-tolerance", out),
         capacities,
+        enthalpy: field(&pairs, "enthalpy").and_then(|node| read_enthalpy(node, out)),
         power_schedules: field(&pairs, "power-schedules")
             .map_or_else(Vec::new, |node| read_transient_power_schedules(node, out)),
+    })
+}
+
+fn read_enthalpy(node: &Node, out: &mut Vec<Violation>) -> Option<TransientEnthalpy> {
+    let Some(("enthalpy", body)) = section_name(node) else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: "transient.enthalpy must be an `(enthalpy ...)` declaration".to_string(),
+            fix: "declare nonlinear work limits and one explicit enthalpy model per region"
+                .to_string(),
+        });
+        return None;
+    };
+    let pairs = read_pairs(
+        body,
+        "transient.enthalpy",
+        &["max-newton-iterations", "max-backtracks", "materials"],
+        out,
+    );
+    let mut limits = [0_u32; 2];
+    for (index, name) in ["max-newton-iterations", "max-backtracks"]
+        .iter()
+        .enumerate()
+    {
+        match field(&pairs, name) {
+            Some(Node {
+                kind: NodeKind::Int(value),
+                ..
+            }) if u32::try_from(*value).is_ok() => {
+                limits[index] = u32::try_from(*value).unwrap_or_default();
+            }
+            _ => out.push(Violation {
+                code: "project-malformed-clause",
+                what: format!("transient.enthalpy.{name} must be an explicit integer fitting u32"),
+                fix: "declare bounded Newton iterations and line-search halvings".to_string(),
+            }),
+        }
+    }
+    let mut materials = Vec::new();
+    match field(&pairs, "materials").and_then(section_name) {
+        Some(("materials", rows)) => {
+            for node in rows {
+                let Some(("material", body)) = section_name(node) else {
+                    out.push(Violation {
+                        code: "project-malformed-clause",
+                        what: "enthalpy.materials rows must be `(material ...)` declarations".to_string(),
+                        fix: "declare region, material-card-identity, source, reference-density, initial-specific-enthalpy and knots".to_string(),
+                    });
+                    continue;
+                };
+                let fields = read_pairs(
+                    body,
+                    "enthalpy.material",
+                    &[
+                        "region",
+                        "material-card-identity",
+                        "source",
+                        "reference-density",
+                        "initial-specific-enthalpy",
+                        "knots",
+                    ],
+                    out,
+                );
+                let identity = expect_str(
+                    field(&fields, "material-card-identity"),
+                    "enthalpy.material.material-card-identity",
+                    out,
+                );
+                let material_card_identity = ContentHash::from_hex(&identity).unwrap_or_else(|| {
+                    out.push(Violation {
+                        code: "project-conduction-transient-enthalpy-card-identity",
+                        what: "enthalpy material-card-identity must be a 64-digit hexadecimal content hash".to_string(),
+                        fix: "cite the exact immutable material-card identity; no card is inferred by material name".to_string(),
+                    });
+                    ContentHash([0; 32])
+                });
+                let mut knots = Vec::new();
+                match field(&fields, "knots").and_then(section_name) {
+                    Some(("knots", rows)) => {
+                        for node in rows {
+                            let Some(("knot", body)) = section_name(node) else {
+                                out.push(Violation {
+                                    code: "project-malformed-clause",
+                                    what: "enthalpy knots must be `(knot ...)` declarations".to_string(),
+                                    fix: "declare specific-enthalpy, temperature and liquid-mass-fraction".to_string(),
+                                });
+                                continue;
+                            };
+                            let fields = read_pairs(
+                                body,
+                                "enthalpy.knot",
+                                &["specific-enthalpy", "temperature", "liquid-mass-fraction"],
+                                out,
+                            );
+                            knots.push(TransientEnthalpyKnot {
+                                specific_enthalpy: expect_qty(
+                                    field(&fields, "specific-enthalpy"),
+                                    "enthalpy.knot.specific-enthalpy",
+                                    out,
+                                ),
+                                temperature: expect_qty(
+                                    field(&fields, "temperature"),
+                                    "enthalpy.knot.temperature",
+                                    out,
+                                ),
+                                liquid_mass_fraction: expect_float(
+                                    field(&fields, "liquid-mass-fraction"),
+                                    "enthalpy.knot.liquid-mass-fraction",
+                                    out,
+                                ),
+                            });
+                        }
+                    }
+                    _ => out.push(Violation {
+                        code: "project-malformed-clause",
+                        what: "each enthalpy material requires a `(knots ...)` list".to_string(),
+                        fix: "declare between 2 and 4096 ordered enthalpy/temperature/phase knots"
+                            .to_string(),
+                    }),
+                }
+                materials.push(TransientRegionEnthalpy {
+                    region: expect_str(field(&fields, "region"), "enthalpy.material.region", out),
+                    material_card_identity,
+                    source: expect_str(field(&fields, "source"), "enthalpy.material.source", out),
+                    reference_density: expect_qty(
+                        field(&fields, "reference-density"),
+                        "enthalpy.material.reference-density",
+                        out,
+                    ),
+                    initial_specific_enthalpy: expect_qty(
+                        field(&fields, "initial-specific-enthalpy"),
+                        "enthalpy.material.initial-specific-enthalpy",
+                        out,
+                    ),
+                    knots,
+                });
+            }
+        }
+        _ => out.push(Violation {
+            code: "project-malformed-clause",
+            what: "transient.enthalpy requires a `(materials ...)` list".to_string(),
+            fix: "declare one enthalpy model per conduction region".to_string(),
+        }),
+    }
+    Some(TransientEnthalpy {
+        materials,
+        max_newton_iterations: limits[0],
+        max_backtracks: limits[1],
     })
 }
 

@@ -188,7 +188,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// grids and retains final-time evidence without steady-solution certificates.
 /// Version 56 preserves original matching contacts and their source validity
 /// in continuum regional mean bounds; earlier receipts cannot resume this path.
-pub const SOLVE_DRIVER_VERSION: u32 = 56;
+/// Version 57 carries total specific enthalpy as native transient history and
+/// reports phase fractions without inferring latent state from temperature.
+pub const SOLVE_DRIVER_VERSION: u32 = 57;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -7466,7 +7468,7 @@ fn conduction_solve_receipt(
         json_string(if transient_requested {
             "retained-promoted-mesh-plus-declared-region-seeds-plus-audited-labeled-volume-plus-matdb-backed-transient-conduction-and-declared-storage"
         } else { CONDUCTION_AUTHORITY }),
-        json_string(if transient_requested { transient::NO_CLAIM } else { CONDUCTION_NO_CLAIM }),
+        json_string(if transient_requested { transient::no_claim(spec) } else { CONDUCTION_NO_CLAIM }),
     );
     let charge = solution_bytes
         .len()

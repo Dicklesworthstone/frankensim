@@ -39,6 +39,9 @@ mod radiation_product;
 #[path = "solve/transient_product.rs"]
 mod transient_product;
 
+#[path = "solve/transient_enthalpy.rs"]
+mod transient_enthalpy;
+
 #[path = "solve/transient_workload.rs"]
 mod transient_workload;
 #[path = "solve/transient_radiation.rs"]

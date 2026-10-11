@@ -88,10 +88,53 @@ Spatial ladder/adaptive studies, steady adjoint requests and simultaneous
 natural and airflow-convection boundaries are not admitted together with this
 declaration. Airflow is quasi-steady; its own heat storage and time-varying fan
 dynamics are not modeled. Heat capacity remains temperature independent;
-latent heat and phase changes require a different storage law. Stage
+latent heat and phase changes use the explicit total-enthalpy storage below. Stage
 cancellation retains the preceding
 completed pipeline stages; an unfinished conduction stage restarts from its
 declared initial state.
+
+## Total enthalpy and latent heat
+
+`cooling-enthalpy.fsim` exercises the spatial enthalpy solver on the same
+tetrahedron, with an insulated boundary and 5 W of internal heating for two
+seconds. It supplies a **synthetic** 1 kg/m³ reference density and a declared
+enthalpy chart with a 293.35 K latent plateau from 20 to 80 J/kg. These are
+educational model inputs, not properties of the AA6061 conductivity fixture.
+The source text records that distinction in the project itself.
+
+```bash
+frankensim --json validate data/reference-project/cooling-enthalpy.fsim
+frankensim --json import data/reference-project/cooling-enthalpy.fsim \
+  data/reference-project/plate.stl enthalpy.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-enthalpy.fsim enthalpy.db \
+  --materials data/reference-project/aa6061.fsmcdpk
+```
+
+The uniform initial enthalpy is zero at 293.15 K. The tetrahedron's volume is
+1/6 m³, so the declared density gives a reference mass of 1/6 kg. The
+independent energy balance predicts a 10 J increase after two seconds,
+specific enthalpy 60 J/kg, temperature 293.35 K and liquid mass fraction
+2/3. The spatial solver computes that uniform limit and retains the nodal
+enthalpy and phase fields plus accepted-step energy checks. Temperature
+agreement between the two grids on a plateau is not proof of phase or
+enthalpy convergence.
+
+Schema v13 adds `:enthalpy` inside `transient`, alongside an explicitly empty
+`:capacities (capacities)`. Every region needs a source, attributed card
+identity, reference density, initial specific enthalpy and an ordered chart.
+Specific enthalpy includes latent heat once; a separate capacity cannot be
+active with this storage model. Temperature alone cannot select the initial
+phase fraction on a plateau, which is why initial enthalpy is mandatory.
+The chart supports all-solid, all-liquid or full solid-to-liquid data without
+extrapolation. Newton iterations and line-search halvings are explicit bounded
+controls. Existing v12 projects migrate with their capacities unchanged.
+
+This native mode supports fixed reference geometry, temperature-dependent
+conductivity, regional power schedules, matching finite-resistance contact,
+and prescribed Neumann/Robin boundaries. Prescribed temperatures, ambient
+radiation, natural/airflow convection and adjoint requests currently refuse
+for enthalpy storage. The declared curves and card identities create no
+material-query receipts, expansion, phase kinetics or experimental validation.
 
 ## Pulse and duty-cycle heating
 

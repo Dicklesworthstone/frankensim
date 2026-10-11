@@ -1,10 +1,11 @@
-//! Event-aligned native thermal time grids shared by admission and execution.
+//! Native thermal time grids and enthalpy charts shared by admission and execution.
 
 use std::collections::BTreeSet;
 
+use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
 use fs_scenario::Violation;
 
-use crate::spec::{ConductionTransient, dims};
+use crate::spec::{ConductionTransient, TransientRegionEnthalpy, dims};
 
 fn invalid(code: &'static str, what: impl Into<String>, fix: &str) -> Violation {
     Violation {
@@ -20,6 +21,104 @@ fn work_limit() -> Violation {
         "the event-aligned coarse grid and its nested half grid exceed the declared combined step cap",
         "increase max-steps to cover three times the coarse intervals, at most 10000; each workload switch consumes a time-grid boundary",
     )
+}
+
+impl TransientRegionEnthalpy {
+    /// Admit the explicit stationary-domain chart using fs-material's common
+    /// equilibrium semantics. The reference density is fixed at every knot;
+    /// this model transports heat without volume change or mass advection.
+    ///
+    /// The card identity is caller attribution. This method never authenticates
+    /// a material card, resolves source claims or creates query receipts.
+    ///
+    /// # Errors
+    /// Refuses missing source, wrong SI dimensions, nonpositive/nonfinite
+    /// reference density, an unbounded knot count or invalid phase data.
+    /// Initial-state consistency is checked separately by project admission.
+    pub fn phase_curve(&self) -> Result<EquilibriumEnthalpyPhaseCurve, Violation> {
+        if self.source.trim().is_empty() {
+            return Err(invalid(
+                "project-conduction-transient-enthalpy-source",
+                format!("enthalpy model for `{}` has no source", self.region),
+                "provide the engineering basis or source of this explicit enthalpy model",
+            ));
+        }
+        if self.reference_density.dims != dims::DENSITY
+            || !self.reference_density.value.is_finite()
+            || self.reference_density.value <= 0.0
+        {
+            return Err(invalid(
+                "project-conduction-transient-enthalpy-density",
+                format!(
+                    "enthalpy model for `{}` needs a positive finite reference density in kg/m³",
+                    self.region
+                ),
+                "declare the stationary reference density; conductivity does not determine mass",
+            ));
+        }
+        if !(2..=4096).contains(&self.knots.len()) {
+            return Err(invalid(
+                "project-conduction-transient-enthalpy-knots",
+                format!(
+                    "enthalpy model for `{}` carries {} knots; 2..=4096 are required",
+                    self.region,
+                    self.knots.len()
+                ),
+                "declare a bounded chart spanning the intended enthalpy range",
+            ));
+        }
+        if self.knots.iter().any(|knot| {
+            knot.specific_enthalpy.dims != dims::SPECIFIC_ENTHALPY
+                || knot.temperature.dims != dims::TEMPERATURE
+        }) {
+            return Err(invalid(
+                "project-conduction-transient-enthalpy-knot-dims",
+                format!(
+                    "enthalpy model for `{}` has a knot with incorrect units",
+                    self.region
+                ),
+                "declare specific enthalpy in J/kg and absolute temperature in K",
+            ));
+        }
+        let knots = self
+            .knots
+            .iter()
+            .map(|knot| EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: knot.specific_enthalpy.value,
+                temperature_k: knot.temperature.value,
+                liquid_mass_fraction: knot.liquid_mass_fraction,
+                bulk_density_kg_m3: self.reference_density.value,
+            })
+            .collect();
+        let curve = if self
+            .knots
+            .iter()
+            .all(|knot| knot.liquid_mass_fraction == 0.0)
+        {
+            EquilibriumEnthalpyPhaseCurve::try_single_phase(
+                self.material_card_identity,
+                SolidLiquidPhase::Solid,
+                knots,
+            )
+        } else if self
+            .knots
+            .iter()
+            .all(|knot| knot.liquid_mass_fraction == 1.0)
+        {
+            EquilibriumEnthalpyPhaseCurve::try_single_phase(
+                self.material_card_identity,
+                SolidLiquidPhase::Liquid,
+                knots,
+            )
+        } else {
+            EquilibriumEnthalpyPhaseCurve::try_new(self.material_card_identity, knots)
+        };
+        curve.map_err(|error| invalid(
+            "project-conduction-transient-enthalpy-curve",
+            format!("enthalpy model for `{}` refuses: {error}", self.region),
+            "supply finite monotone phase data and a nonzero card identity; a melting chart must span fully solid through fully liquid",
+        ))
+    }
 }
 
 impl ConductionTransient {

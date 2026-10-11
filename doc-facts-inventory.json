@@ -574,6 +574,7 @@
     "crates/fs-cli/tests/native_uncertainty/qmc.rs",
     "crates/fs-cli/tests/solve.rs",
     "crates/fs-cli/tests/solve/radiation_product.rs",
+    "crates/fs-cli/tests/solve/transient_enthalpy.rs",
     "crates/fs-cli/tests/step_heatsink.rs",
     "crates/fs-cli/tests/study_checkpoint_cli.rs",
     "crates/fs-cli/tests/study_checkpoint_cli/multi_load.rs",
