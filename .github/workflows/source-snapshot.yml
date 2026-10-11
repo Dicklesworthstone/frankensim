@@ -1,0 +1,28 @@
+name: Read-only source snapshot
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/source-snapshot.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive the exact tracked source for local inspection
+        run: |
+          git rev-parse HEAD > source-revision.txt
+          git archive --format=tar.gz --output=source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tracked-source
+          path: |
+            source-revision.txt
+            source.tar.gz
+          retention-days: 1
+          compression-level: 0
