@@ -47,6 +47,63 @@ cloning and existing vector kernels remain whole phases. There is no hard
 wall-clock cancellation bound or process-restart serialization. Staging copies
 solver state and history; this is not an allocation-free implementation.
 
+## Preconditioning and inexact Newton steps
+
+`run_preconditioned` uses a caller-supplied **fixed linear SPD inverse action**
+inside each Krylov solve. The map may change with the accepted point between
+outer iterations. It does not replace the true reverse-mode Hessian, change the
+Euclidean trust ball or redefine the gradient-based outer stopping test.
+Coordinates follow variable-declaration order; an inverse callback receives the
+accepted packed point and an objective-normalized residual. A single fixed
+binary normalization per inner solve controls extreme inverse-action units.
+A positive residual product is checked locally; this does not certify global
+SPD, symmetry or linearity of an arbitrary callback.
+
+```rust,ignore
+use fs_ascent::trust::KrylovOptions;
+// Use the declared, positive stiffness diagonal of your model.
+let mut inverse = |_: &[f64], residual: &[f64]| {
+    residual.iter().zip(&stiffness_diagonal)
+        .map(|(r, diagonal)| r / diagonal).collect()
+};
+// Optional inexact-subproblem policy. Defaults remain 1e-8 and at most 2*n
+// Krylov products. This setting is retained when cloning the study.
+study.set_krylov_options(KrylovOptions::new(1e-3, 20)?);
+let report = study.run_preconditioned(&mut inverse,
+    &StopRule::GradNorm(1e-8), 100, 2_000, 1_000, Some(&cx))?;
+println!("inverse attempts: {}", report.preconditioner_evals);
+```
+
+The `20` above caps **Krylov products per outer iteration**, not total Hessian
+work: a truncated step still needs one more Hessian product for its final model
+check. It is an approximate Newton direction, and must pass the usual true
+objective/gradient evaluation and model-agreement acceptance. This local cap
+never borrows work from the cumulative `2_000` Hessian ceiling. Similarly, a
+looser relative residual tolerance changes inner accuracy, not outer convergence.
+Local caps work for both preconditioned and ordinary `run` calls.
+
+The cumulative `1_000` limit counts inverse attempts, including malformed results,
+contained callback panics, cancelled calls and discarded staged iterations.
+`PreconditionerBudget` is a distinct resumable stop. Other inverse refusals return
+`ReverseNewtonError::Preconditioner`; accepted state and tape remain intact.
+`study.preconditioner_evals()` exposes attempted inverse work even after errors.
+No inverse is evaluated after its budget, after residual convergence, merely to
+prepare a direction beyond the configured local cap, or when the next Hessian
+product is already unaffordable. Inverse callbacks are polled for cancellation
+before and after invocation, but cannot be interrupted internally.
+
+A solver checkpoint does not capture external mutable callback state. Replaying
+it requires reproducing the same inverse map and inner policy. Changing the
+policy spends no callbacks, refunds nothing and does not revive a numerical
+stall. These controls do not make the solver allocation-free or install a total
+memory/time budget.
+
+The complete synthetic stiff-diagonal example is runnable with:
+
+```sh
+cargo run -p fs-ascent --example preconditioned_newton
+```
+
 ## Derivative API and scope
 
 `ReverseEvaluation::hessian_vector_product` applies a weighted-root Hessian.
@@ -83,6 +140,8 @@ curvature, then approaches the known uniform positive minimum. It is explicit
 dimensionless algebra, not an identified material or mesh-based physics model.
 Native regression targets cover analytic products, shared vectors, constraints,
 symmetry, directions, second-order failures, domain recovery, strict dual work
-budgets, checkpoint splits and real-Cx cancellation. They were added but not
-run in the authoring environment because Cargo/rustc are unavailable. Executed
-Python mathematical translations are not evidence of a successful Rust build.
+budgets, checkpoint splits and real-Cx cancellation. Preconditioning regressions
+also exercise exact-budget recovery after partial searches and inverse faults.
+The focused production-source probe tests the numerical engine in unoptimized
+and optimized builds; it does not replace native Cargo/Cx/IR integration or the
+workspace DSR gate.

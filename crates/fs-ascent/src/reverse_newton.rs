@@ -3,7 +3,7 @@
 
 use crate::runner::Packing;
 use crate::stop::{StopObservation, StopReason, StopRule};
-use crate::trust::{PreconditionerError, TrustRegionProgress, TrustRegionReport, TrustRegionState};
+use crate::trust::{KrylovOptions, PreconditionerError, TrustRegionProgress, TrustRegionReport, TrustRegionState};
 use fs_exec::Cx;
 use fs_opt::reverse::{HessianError, ReverseError};
 use fs_opt::{Manifold, OptError, ProblemEvaluation, ReverseProblem, ReverseProblemError};
@@ -201,6 +201,13 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
     pub fn gradient(&self) -> &[f64] { self.state.gradient() }
     /// Initial objective and each completed outer iteration, including rejects.
     pub fn history(&self) -> &[f64] { self.state.history() }
+    /// Retained accuracy/work policy for each matrix-free Newton subproblem.
+    pub fn krylov_options(&self) -> KrylovOptions { self.state.krylov_options() }
+    /// Set a validated inexact-subproblem policy without changing the retained
+    /// tape, outer convergence criterion or cumulative work allowances.
+    pub fn set_krylov_options(&mut self, options: KrylovOptions) {
+        self.state.set_krylov_options(options);
+    }
     /// Attempted inverse actions across all runs, including discarded work.
     /// Available after typed failures too; cloning never resets this counter.
     pub fn preconditioner_evals(&self) -> usize { self.preconditioner_evals }

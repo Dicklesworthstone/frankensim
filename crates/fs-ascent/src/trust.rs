@@ -4,7 +4,7 @@
 
 mod engine;
 pub use engine::{
-    PreconditionerError, TrustRegionProgress, TrustRegionReport, TrustRegionRunReport, TrustRegionState,
+    KrylovOptions, KrylovOptionsError, PreconditionerError, TrustRegionProgress, TrustRegionReport, TrustRegionRunReport, TrustRegionState,
     hv_fd_of_gradients, trust_region_newton,
 };
 use fs_exec::Cx;

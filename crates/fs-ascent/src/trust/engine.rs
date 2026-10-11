@@ -14,6 +14,9 @@ mod range;
 #[path = "engine/preconditioner.rs"]
 mod preconditioner;
 pub use preconditioner::PreconditionerError;
+#[path = "engine/krylov.rs"]
+mod krylov;
+pub use krylov::{KrylovOptions, KrylovOptionsError};
 
 /// Outcome of a trust-region run.
 #[derive(Debug, Clone)]
@@ -70,6 +73,7 @@ pub struct TrustRegionState {
     hv_evals: usize,
     negative_curvature_hits: usize,
     preconditioner_evals: usize,
+    krylov_options: KrylovOptions,
     history: Vec<f64>,
     stalled: bool,
 }
@@ -177,6 +181,7 @@ impl TrustRegionState {
             hv_evals: 0,
             negative_curvature_hits: 0,
             preconditioner_evals: 0,
+            krylov_options: KrylovOptions::default(),
             history: vec![f],
             stalled: false,
         }
@@ -207,6 +212,18 @@ impl TrustRegionState {
     #[must_use]
     pub fn preconditioner_evals(&self) -> usize {
         self.preconditioner_evals
+    }
+
+    /// Inner accuracy/work policy retained by cloned checkpoints.
+    #[must_use]
+    pub fn krylov_options(&self) -> KrylovOptions { self.krylov_options }
+
+    /// Change the next subproblem's accuracy and local work cap. This does not
+    /// spend callbacks, clear accepted history, refund budgets, change the outer
+    /// stop rule or revive a numerical stall. Resuming without changing this
+    /// policy preserves complete-iteration split replay.
+    pub fn set_krylov_options(&mut self, options: KrylovOptions) {
+        self.krylov_options = options;
     }
 
     /// Matrix-free preconditioned Newton--Krylov with independent cumulative
@@ -409,14 +426,20 @@ impl TrustRegionState {
                 product
             };
             match inverse.as_mut() {
-                None => steihaug(gradient, &mut hv, self.delta, 1e-8, allowance, paused),
+                None if self.krylov_options == KrylovOptions::default() => {
+                    steihaug(gradient, &mut hv, self.delta, 1e-8, allowance, paused)
+                }
+                None => steihaug_preconditioned(gradient, &mut hv, self.delta,
+                    self.krylov_options.relative_tolerance(), allowance, paused, None,
+                    self.krylov_options.max_products()),
                 Some(inverse) => {
                     let mut action = preconditioner::Action::new(
                         &mut **inverse, &xc, &mut self.preconditioner_evals,
                         max_preconditioner_applications,
                     );
-                    steihaug_preconditioned(gradient, &mut hv, self.delta, 1e-8,
-                        allowance, paused, Some(&mut action))
+                    steihaug_preconditioned(gradient, &mut hv, self.delta,
+                        self.krylov_options.relative_tolerance(), allowance, paused,
+                        Some(&mut action), self.krylov_options.max_products())
                 }
             }
         };
@@ -525,7 +548,7 @@ fn steihaug(
     max_hv: usize,
     paused: &mut dyn FnMut() -> bool,
 ) -> Result<(Vec<f64>, bool, bool, usize), SteihaugStop> {
-    steihaug_preconditioned(g, hv, delta, tol, max_hv, paused, None)
+    steihaug_preconditioned(g, hv, delta, tol, max_hv, paused, None, usize::MAX)
 }
 
 fn steihaug_preconditioned(
@@ -536,6 +559,7 @@ fn steihaug_preconditioned(
     max_hv: usize,
     paused: &mut dyn FnMut() -> bool,
     mut inverse: Option<&mut preconditioner::Action<'_>>,
+    max_krylov_products: usize,
 ) -> Result<(Vec<f64>, bool, bool, usize), SteihaugStop> {
     let n = g.len();
     let mut p = vec![0.0f64; n];
@@ -558,7 +582,8 @@ fn steihaug_preconditioned(
         d = action.apply(&r, hv_count, paused)?;
         rz = preconditioner::positive_product(&r, &d)?;
     }
-    for _ in 0..n.saturating_mul(2) {
+    let inner_limit = n.saturating_mul(2).min(max_krylov_products);
+    for inner in 0..inner_limit {
         if rr.sqrt() < tol * g_norm.max(1e-30) {
             return Ok((p, false, false, hv_count));
         }
@@ -610,6 +635,13 @@ fn steihaug_preconditioned(
         let rr_new: f64 = r.iter().map(|v| v * v).sum();
         if !rr_new.is_finite() {
             return Err(SteihaugStop::Unusable(hv_count));
+        }
+        if inner + 1 == inner_limit && max_krylov_products != usize::MAX {
+            // This is a requested INEXACT Newton step, not permission to exceed
+            // the cumulative budget. The caller still gates the final model
+            // product, true objective and gradient before accepting this step.
+            // Do not form an unused direction or spend an unused inverse action.
+            break;
         }
         let z = if let Some(action) = inverse.as_deref_mut() {
             // Do not spend an inverse action after reaching the unpreconditioned residual
@@ -692,3 +724,7 @@ mod budget_tests;
 #[cfg(test)]
 #[path = "engine/preconditioner_tests.rs"]
 mod preconditioner_tests;
+
+#[cfg(test)]
+#[path = "engine/krylov_tests.rs"]
+mod krylov_tests;
