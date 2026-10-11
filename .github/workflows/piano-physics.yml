@@ -78,6 +78,16 @@ jobs:
         run: |
           set -o pipefail
           cargo test --release -p fs-couple --lib pcm_wav::baffled -- --test-threads=1 2>&1 | tee piano-baffled-tests.log
+      - name: Test high-resolution pressure encoding
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release -p fs-couple --lib pcm_wav::high_resolution -- --test-threads=1 2>&1 | tee piano-high-resolution-tests.log
+      - name: Test piano pressure-to-audio export
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release -p fs-couple --example piano_audio -- --test-threads=1 2>&1 | tee piano-audio-export-tests.log
       - name: Test the piano implementation
         if: ${{ !cancelled() }}
         run: |

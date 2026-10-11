@@ -158,3 +158,6 @@ mod stereo_tests;
 /// Shared retarded-time baffled-surface receiver, before PCM conversion.
 #[path = "baffled_pressure.rs"]
 pub mod baffled;
+
+/// Explicit PCM24/float32 export of physical pressure, preserving quiet tails.
+pub mod high_resolution;
