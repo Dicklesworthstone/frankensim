@@ -186,7 +186,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// enclosures without promoting the distinct maximum-temperature decision.
 /// Version 50 executes declared finite-time storage with nested backward-Euler
 /// grids and retains final-time evidence without steady-solution certificates.
-pub const SOLVE_DRIVER_VERSION: u32 = 55;
+/// Version 56 preserves original matching contacts and their source validity
+/// in continuum regional mean bounds; earlier receipts cannot resume this path.
+pub const SOLVE_DRIVER_VERSION: u32 = 56;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1405,6 +1407,10 @@ struct RungSolved {
 struct RungAdjointData {
     boundary: fs_conduction::ThermalBoundary,
     interfaces: Option<fs_conduction::ThermalInterfaces>,
+    /// Original matching faces and source-backed resistances used to bind
+    /// `interfaces`; continuum verification must preserve both traces.
+    #[cfg(feature = "thermal-verification")]
+    interface_surfaces: Vec<fs_conduction::InterfaceSurface>,
     source: fs_conduction::ScalarField,
     materials: fs_conduction::ElementMaterials,
     fallback: fs_conduction::ConductivityModel,
@@ -6160,8 +6166,17 @@ fn lower_thermal_interfaces(
     boundary: &fs_conduction::ThermalBoundary,
     resolution: &fs_project::ConductionInterfaceResolution,
 ) -> Result<Option<fs_conduction::ThermalInterfaces>, SolveRefusal> {
+    let surfaces = lower_thermal_interface_surfaces(spec, cards, resolution)?;
+    bind_thermal_interfaces(mesh, boundary, surfaces)
+}
+
+fn lower_thermal_interface_surfaces(
+    spec: &ProjectSpec,
+    cards: &CardPackSet,
+    resolution: &fs_project::ConductionInterfaceResolution,
+) -> Result<Vec<fs_conduction::InterfaceSurface>, SolveRefusal> {
     if resolution.pairs.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let library = cards.library();
     let requirements = BindingRequirements::thermal_steady_v1();
@@ -6297,6 +6312,17 @@ fn lower_thermal_interfaces(
                 )
             })?,
         );
+    }
+    Ok(surfaces)
+}
+
+fn bind_thermal_interfaces(
+    mesh: &fs_conduction::ConductionMesh,
+    boundary: &fs_conduction::ThermalBoundary,
+    surfaces: Vec<fs_conduction::InterfaceSurface>,
+) -> Result<Option<fs_conduction::ThermalInterfaces>, SolveRefusal> {
+    if surfaces.is_empty() {
+        return Ok(None);
     }
     fs_conduction::ThermalInterfaces::new(mesh, boundary, surfaces)
         .map(Some)
@@ -7026,15 +7052,20 @@ fn conduction_solve_receipt(
         let adjoint_data = if adaptive_requested || roundoff_wanted || adjoint_requested || mean_bound_requested {
             let boundary = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
                 &interface_faces, &derived_boundary, &surface_heat_inputs)?.boundary;
-            let interfaces = lower_thermal_interfaces(
-                spec, cards, &mesh, &boundary, &interface_resolution,
+            let interface_surfaces = lower_thermal_interface_surfaces(
+                spec, cards, &interface_resolution,
             )?;
+            let interfaces = bind_thermal_interfaces(&mesh, &boundary, interface_surfaces.clone())?;
             let mut linear = fs_conduction::LinearConfig::default();
             if let Some(solver) = &spec.solver {
                 linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
             }
             Some(RungAdjointData {
-                boundary, interfaces, source, materials: element_materials, fallback, linear, air_paths,
+                boundary, interfaces,
+                #[cfg(feature = "thermal-verification")]
+                interface_surfaces,
+                source,
+                materials: element_materials, fallback, linear, air_paths,
                 radiating_boundary, radiation_patches,
                 natural_goal: if adaptive_requested && !natural_laws.is_empty() {
                     Some(natural::adaptive::NaturalGoal::new(natural_laws,

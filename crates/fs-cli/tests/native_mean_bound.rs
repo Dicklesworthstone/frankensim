@@ -105,6 +105,8 @@ fn constant_pack(bounded: bool) -> (Vec<u8>, String, String) {
 struct Fixture {
     dir: PathBuf,
     project: fs_project::ProjectSpec,
+    meshes: Vec<PathBuf>,
+    interface_pack: Option<PathBuf>,
 }
 impl Fixture {
     fn new(bounded: bool) -> Self {
@@ -137,37 +139,44 @@ impl Fixture {
             binding.conductivity_tolerance = None;
         }
         project.solver.as_mut().unwrap().tolerance_rel = 1e-11;
-        Self { dir, project }
+        Self {
+            dir,
+            project,
+            meshes: vec![root.join("data/reference-project/plate.stl")],
+            interface_pack: None,
+        }
     }
     fn import(&self, project: &fs_project::ProjectSpec, ordinal: usize) -> (PathBuf, PathBuf) {
         let source = self.dir.join(format!("mean-{ordinal}.fsim"));
         let ledger = self.dir.join("runs.db");
         std::fs::write(&source, fs_project::print_sexpr(project).unwrap()).unwrap();
-        let mesh =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/reference-project/plate.stl");
-        command(&[
-            "--json",
-            "import",
-            source.to_str().unwrap(),
-            mesh.to_str().unwrap(),
+        let mut args = vec!["--json", "import", source.to_str().unwrap()];
+        args.extend(self.meshes.iter().map(|path| path.to_str().unwrap()));
+        args.extend([
             ledger.to_str().unwrap(),
             "--unit",
             "m",
             "--max-hole-edges",
             "0",
         ]);
+        command(&args);
         (source, ledger)
     }
     fn solve(&self, project: &fs_project::ProjectSpec, ordinal: usize) -> (J, J, J) {
         let (source, ledger) = self.import(project, ordinal);
-        let result = command(&[
+        let material = self.dir.join("constant.fsmcdpk");
+        let mut args = vec![
             "--json",
             "solve",
             source.to_str().unwrap(),
             ledger.to_str().unwrap(),
             "--materials",
-            self.dir.join("constant.fsmcdpk").to_str().unwrap(),
-        ]);
+            material.to_str().unwrap(),
+        ];
+        if let Some(interface) = &self.interface_pack {
+            args.extend(["--interfaces", interface.to_str().unwrap()]);
+        }
+        let result = command(&args);
         let run = artifact(&ledger, result.str_field("run_receipt").unwrap());
         let stage = run
             .get("stages")
@@ -183,7 +192,7 @@ impl Fixture {
     }
     fn refused(&self, project: &fs_project::ProjectSpec, ordinal: usize, reason: &str) {
         let (source, ledger) = self.import(project, ordinal);
-        let result = fs_cli::run(vec![
+        let mut args = vec![
             "--json".into(),
             "solve".into(),
             source.to_string_lossy().into_owned(),
@@ -193,7 +202,14 @@ impl Fixture {
                 .join("constant.fsmcdpk")
                 .to_string_lossy()
                 .into_owned(),
-        ]);
+        ];
+        if let Some(interface) = &self.interface_pack {
+            args.extend([
+                "--interfaces".into(),
+                interface.to_string_lossy().into_owned(),
+            ]);
+        }
+        let result = fs_cli::run(args);
         assert_ne!(
             result.exit_code,
             fs_cli::exit::SUCCESS,
@@ -217,6 +233,191 @@ fn request(project: &mut fs_project::ProjectSpec) {
             kind: "report".into(),
             region: None,
         });
+}
+
+#[cfg(feature = "thermal-verification")]
+fn contact_pack(resistance: f64, bounded: bool) -> (Vec<u8>, String) {
+    use fs_matdb::{NormalizedInterfacePack, SurfaceSpec, SystemContext};
+    let source = fs_blake3::hash_bytes(b"declared-constant-contact-mean-fixture");
+    let provenance = || Provenance {
+        source: "explicit constant contact PDE; not experimental data".into(),
+        license: "CC-BY-4.0; redistribution permitted".into(),
+        artifact: Some(source),
+    };
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "numerical-contact-fixture".into(),
+            method: "declared finite-resistance transmission law".into(),
+            artifact: source,
+            caveats: "synthetic; not experimental evidence".into(),
+            provenance: provenance(),
+        })
+        .unwrap();
+    let dims = fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
+    let domain = fs_evidence::ValidityDomain::unconstrained();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(
+                fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+                dims,
+            ),
+            value: PropertyValue::Scalar {
+                value: resistance,
+                dims,
+            },
+            validity: if bounded {
+                domain.with("T", 200.0, 450.0)
+            } else {
+                domain
+            },
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![observation],
+            provenance: provenance(),
+        })
+        .unwrap();
+    let pack = NormalizedPack::new(
+        "constant-contact-mean",
+        "declared-v1",
+        source,
+        "CC-BY-4.0; redistribution permitted",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let state = |chemistry: &str| MaterialStateId {
+        chemistry: chemistry.into(),
+        phase: "solid".into(),
+        process: "numerical".into(),
+        revision: 0,
+    };
+    let bytes = NormalizedInterfacePack::new(
+        SurfaceSpec {
+            material: state("cold-body"),
+            texture_frame: "normal-plus-x".into(),
+        },
+        SurfaceSpec {
+            material: state("hot-body"),
+            texture_frame: "normal-minus-x".into(),
+        },
+        SystemContext {
+            medium: "dry-contact".into(),
+            third_body: None,
+            environment: "fixture-air".into(),
+            history: "unaged".into(),
+        },
+        pack,
+    )
+    .unwrap()
+    .to_bytes();
+    let cards = CardPackSet::admit(vec![RawCardPack {
+        kind: CardPackKind::Interface,
+        source: "declared-contact-mean-fixture".into(),
+        bytes: bytes.clone(),
+        expect: None,
+    }])
+    .unwrap();
+    (bytes, cards.interfaces()[0].card().to_hex())
+}
+
+#[cfg(feature = "thermal-verification")]
+fn contact_fixture(resistance: f64, bounded: bool) -> Fixture {
+    use fs_project::{
+        EntityDecl, GeometryAssignment, HalfSpaceSide, MeshSelector, ThermalBoundary,
+        ThermalBoundaryCondition as B, spec::dims,
+    };
+    use fs_qty::QtyAny;
+    let mut fixture = Fixture::new(false);
+    let material = fixture.project.materials.as_ref().unwrap()[0].clone();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut project = fs_project::parse_sexpr_migrating(
+        &std::fs::read_to_string(root.join("examples/contact-pair/contact-pair.fsim")).unwrap(),
+    )
+    .unwrap()
+    .decoded
+    .spec;
+    for binding in project.materials.as_mut().unwrap() {
+        binding.card = material.card.clone();
+        binding.state = material.state.clone();
+        binding.claim = None;
+        binding.conductivity_tolerance = None;
+    }
+    let (bytes, card) = contact_pack(resistance, bounded);
+    let path = fixture.dir.join("contact.fsintpk");
+    std::fs::write(&path, bytes).unwrap();
+    let binding = &mut project.interface_cards.as_mut().unwrap()[0];
+    binding.card = card;
+    binding.claim = None;
+    for assignment in project.assignments.as_mut().unwrap() {
+        assignment.allow_overlap = true;
+    }
+    // Unit cubes on [0,1] and [1,2], k=10, inlet heat flux q=20:
+    // T_cold=300+2x, T_hot=300+2x+20R. Contact traces differ by 20R.
+    // The HOT component mean is 303+20R, not the whole-domain average.
+    for (name, artifact, offset, side) in [
+        ("cold-anchor", "cold-body", 0.0, HalfSpaceSide::AtMost),
+        ("hot-source", "hot-body", 2.0, HalfSpaceSide::AtLeast),
+    ] {
+        project
+            .assembly
+            .as_mut()
+            .unwrap()
+            .push(EntityDecl::Surface {
+                parent: "enclosure".into(),
+                name: name.into(),
+                display: name.into(),
+                expect_id: None,
+            });
+        project
+            .assignments
+            .as_mut()
+            .unwrap()
+            .push(GeometryAssignment {
+                artifact: artifact.into(),
+                target: name.into(),
+                length_unit: "m".into(),
+                allow_overlap: true,
+                selector: MeshSelector::HalfSpace {
+                    normal: [1.0, 0.0, 0.0],
+                    offset,
+                    side,
+                    tolerance: 0.0,
+                },
+            });
+    }
+    project.power.as_mut().unwrap()[0].watts.value = 0.0;
+    project.solver.as_mut().unwrap().tolerance_rel = 1e-11;
+    let setup = project
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap();
+    setup.adiabatic_remainder = true;
+    setup.boundaries = vec![
+        ThermalBoundary {
+            target: "cold-anchor".into(),
+            condition: B::FixedTemperature {
+                temperature: QtyAny::new(300.0, dims::TEMPERATURE),
+            },
+        },
+        ThermalBoundary {
+            target: "hot-source".into(),
+            condition: B::HeatFlux {
+                outward_flux: QtyAny::new(-20.0, dims::HEAT_FLUX),
+            },
+        },
+    ];
+    fixture.project = project;
+    fixture.meshes = vec![
+        root.join("examples/contact-pair/cold-body.stl"),
+        root.join("examples/contact-pair/hot-body.stl"),
+    ];
+    fixture.interface_pack = Some(path);
+    fixture
 }
 
 #[cfg(not(feature = "thermal-verification"))]
@@ -366,6 +567,111 @@ fn g1_native_affine_mean_bound_preserves_field_and_reaches_report_and_package() 
     assert!(text.contains(OUTPUT));
     let package = fs_package::EvidencePackage::from_json(&text).unwrap();
     assert!(fs_checker::check(&package).passed());
+}
+
+#[cfg(feature = "thermal-verification")]
+#[test]
+fn g1_native_contact_mean_preserves_traces_and_encloses_the_resistance_dependent_component() {
+    for resistance in [0.05, 0.2] {
+        let fixture = contact_fixture(resistance, false);
+        let mut project = fixture.project.clone();
+        let (_, baseline, original) = fixture.solve(&project, 0);
+        request(&mut project);
+        let (run, receipt, field) = fixture.solve(&project, 1);
+        assert_eq!(original.get("temperature"), field.get("temperature"));
+        for key in ["energy", "interfaces"] {
+            assert_eq!(
+                baseline.get(key),
+                receipt.get(key),
+                "original {key} changed"
+            );
+        }
+        let bound = receipt.get("volume_mean_bound").unwrap();
+        let expected = 303.0 + 20.0 * resistance;
+        assert_eq!(bound.str_field("region"), Some("hot"));
+        assert_eq!(bound.str_field("authority"), Some("Verified"));
+        let interval = bound.get("enclosure_k").unwrap();
+        assert!(
+            interval.f64_field("lower").unwrap() <= expected
+                && interval.f64_field("upper").unwrap() >= expected,
+            "R={resistance}: {interval:?} must enclose analytic hot mean {expected}"
+        );
+        assert!((bound.f64_field("value_k").unwrap() - expected).abs() < 1e-7);
+        assert!(bound.f64_field("error_upper_k").unwrap() < 1e-3);
+        let contacts = bound.get("contacts").unwrap().as_array().unwrap();
+        assert_eq!(contacts.len(), 1);
+        let contact = &contacts[0];
+        assert_eq!(contact.str_field("interface"), Some("cold-hot-joint"));
+        assert_eq!(
+            contact.str_field("card"),
+            Some(contact_pack(resistance, false).1.as_str())
+        );
+        assert_eq!(contact.f64_field("resistance_m2_k_per_w"), Some(resistance));
+        assert!(
+            !contact
+                .get("face_pairs")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(contact.str_field("receipt_bytes_hex").unwrap().len() > 100);
+        assert!(
+            bound
+                .str_field("scope")
+                .unwrap()
+                .contains("resistance-weighted jumps")
+        );
+        let (_, replay, _) = fixture.solve(&project, 2);
+        assert_eq!(bound, replay.get("volume_mean_bound").unwrap());
+
+        let ledger = fixture.dir.join("runs.db");
+        let exported = command(&[
+            "--json",
+            "report",
+            run.str_field("run").unwrap(),
+            ledger.to_str().unwrap(),
+        ]);
+        let report =
+            J::parse(&std::fs::read_to_string(exported.str_field("report_json").unwrap()).unwrap())
+                .unwrap();
+        let mean = report
+            .get("qois")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|qoi| qoi.str_field("name") == Some(OUTPUT))
+            .unwrap();
+        assert!((mean.f64_field("value").unwrap() - expected).abs() < 1e-7);
+        assert_eq!(mean.str_field("color"), Some("Verified"));
+        assert_eq!(
+            mean.get("total_budget"),
+            Some(&J::Null),
+            "contact uncertainty remains unknown"
+        );
+        let exported = command(&[
+            "--json",
+            "package",
+            run.str_field("run").unwrap(),
+            ledger.to_str().unwrap(),
+        ]);
+        let package = fs_package::EvidencePackage::from_json(
+            &std::fs::read_to_string(exported.str_field("package").unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(fs_checker::check(&package).passed());
+    }
+}
+
+#[cfg(feature = "thermal-verification")]
+#[test]
+fn g0_finite_contact_validity_does_not_become_a_continuum_temperature_proof() {
+    let fixture = contact_fixture(0.05, true);
+    let mut project = fixture.project.clone();
+    fixture.solve(&project, 0);
+    request(&mut project);
+    fixture.refused(&project, 1, "global constant contact resistance");
 }
 
 #[cfg(feature = "thermal-verification")]
