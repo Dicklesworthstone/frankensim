@@ -22,8 +22,32 @@ pub const MAX_AIR_STATES: usize = 1024;
 // Shared positive-real model; collective exchange does not alter its impedance.
 pub use fs_couple::render::plate::impact::radiation::{Model,Pole};
 
+#[path = "radiation_ports.rs"]
+mod ports;
+pub use ports::PortBasis;
+
 #[derive(Clone, Copy, Default)]
 struct Free { xx:f64, xp:f64, px:f64, pp:f64 }
+
+struct Projected {
+    basis: PortBasis,
+    incoming: Vec<f64>,
+    outgoing: Vec<f64>,
+    board: Vec<f64>,
+    air: Vec<[f64; 2]>,
+}
+
+fn stored_energy(state:&[[f64;2]])->f64 {
+    0.5*state.iter().map(|s|s[0]*s[0]+s[1]*s[1]).sum::<f64>()
+}
+fn free_motion(state:&mut[[f64;2]],free:&[Free])->f64 {
+    let before=stored_energy(state);
+    for (s,t) in state.iter_mut().zip(free) {
+        let [x,p]=*s;*s=[t.xx*x+t.xp*p,t.px*x+t.pp*p];
+    }
+    // Signed floating-point loss, not a clipped energy-balance correction.
+    before-stored_energy(state)
+}
 
 pub struct Prepared {
     ports: usize,
@@ -33,6 +57,7 @@ pub struct Prepared {
     free: Vec<Free>,
     exchange: PreparedPortExchange,
     velocities: Vec<f64>,
+    projected: Option<Projected>,
 }
 impl Prepared {
     pub fn new(model:&Model, rate:u32, ports:usize) -> Result<Self,String> {
@@ -75,9 +100,24 @@ impl Prepared {
             return Err("nonfinite prepared acoustic transition".into());
         }
         Ok(Self {ports,state:vec![[0.;2];free.len()],saved:vec![[0.;2];free.len()],
-            velocities:vec![0.;free.len()],free,exchange})
+            velocities:vec![0.;free.len()],free,exchange,projected:None})
     }
-    pub fn energy(&self)->f64 {0.5*self.state.iter().map(|s|s[0]*s[0]+s[1]*s[1]).sum::<f64>()}
+    /// Attach a passive model through explicit acoustic combinations of the
+    /// complete board. The existing exchange still sees at most 32 ports;
+    /// omitted acoustic directions retain their original mechanical motion.
+    /// Both board and air are staged before each half-flow is published.
+    pub fn new_projected(model:&Model,rate:u32,basis:&PortBasis)->Result<Self,String> {
+        if model.ports!=basis.ports() {
+            return Err("radiation model and selected acoustic basis have different port counts".into());
+        }
+        let mut prepared=Self::new(model,rate,basis.ports())?;
+        prepared.ports=basis.board_ports();
+        prepared.projected=Some(Projected {basis:basis.clone(),
+            incoming:vec![0.;basis.ports()],outgoing:vec![0.;basis.ports()],
+            board:vec![0.;basis.board_ports()],air:vec![[0.;2];model.poles.len()]});
+        Ok(prepared)
+    }
+    pub fn energy(&self)->f64 {stored_energy(&self.state)}
     pub fn checkpoint(&mut self) {self.saved.copy_from_slice(&self.state);}
     pub fn restore(&mut self) {self.state.copy_from_slice(&self.saved);}
     fn exchange(&mut self,board:&mut[f64])->Result<(),&'static str> {
@@ -89,20 +129,66 @@ impl Prepared {
         Ok(())
     }
     fn free_half(&mut self)->f64 {
-        let before=self.energy();
-        for (s,t) in self.state.iter_mut().zip(&self.free) {
-            let [x,p]=*s;*s=[t.xx*x+t.xp*p,t.px*x+t.pp*p];
+        free_motion(&mut self.state,&self.free)
+    }
+    fn projected_half(&mut self,board:&mut[f64],free_first:bool)->Result<f64,&'static str> {
+        if board.len()!=self.ports || board.iter().any(|v|!v.is_finite()) {
+            return Err("projected radiation requires the complete finite board velocity");
         }
-        // Signed floating-point loss, not a clipped energy-balance correction.
-        before-self.energy()
+        let work=self.projected.as_mut().ok_or("missing radiation port basis")?;
+        work.air.copy_from_slice(&self.state);
+        let mut loss=if free_first {free_motion(&mut work.air,&self.free)}else{0.};
+        for (u,row) in work.incoming.iter_mut().zip(work.basis.vectors()) {
+            *u=row.iter().zip(board.iter()).map(|(q,v)|q*v).sum();
+        }
+        work.outgoing.copy_from_slice(&work.incoming);
+        for (v,s) in self.velocities.iter_mut().zip(&work.air) {*v=s[1];}
+        let before=0.5*(board.iter().map(|v|v*v).sum::<f64>()
+            +self.velocities.iter().map(|v|v*v).sum::<f64>());
+        if !before.is_finite() || !loss.is_finite() {
+            return Err("projected radiation energy overflow");
+        }
+        self.exchange.apply(&mut work.outgoing,&mut self.velocities)
+            .map_err(|_|"collective projected radiation exchange failed finite/energy admission")?;
+        // Lift the CHANGE only: (I-QQ^T)v is never discarded or re-integrated.
+        for (i,(candidate,&original)) in work.board.iter_mut().zip(board.iter()).enumerate() {
+            let mut change=0.;
+            for ((row,&outgoing),&incoming) in work.basis.vectors().iter()
+                .zip(&work.outgoing).zip(&work.incoming) {
+                change+=row[i]*(outgoing-incoming);
+            }
+            *candidate=if change==0. {original}else{original+change};
+        }
+        let after=0.5*(work.board.iter().map(|v|v*v).sum::<f64>()
+            +self.velocities.iter().map(|v|v*v).sum::<f64>());
+        let tolerance=(512.*f64::EPSILON
+            *(self.ports+self.velocities.len()+work.basis.ports()+1) as f64
+            +4.*work.basis.orthogonality_error)*(before+after);
+        if !after.is_finite() || !tolerance.is_finite() || (after-before).abs()>tolerance {
+            return Err("projected radiation fails full board/air energy admission");
+        }
+        for (s,&v) in work.air.iter_mut().zip(&self.velocities) {s[1]=v;}
+        if !free_first {loss=free_motion(&mut work.air,&self.free);}
+        if !loss.is_finite() || !stored_energy(&work.air).is_finite() {
+            return Err("projected acoustic free motion is nonfinite");
+        }
+        board.copy_from_slice(&work.board);
+        self.state.copy_from_slice(&work.air);
+        Ok(loss)
     }
     pub fn before(&mut self,board:&mut[f64])->Result<f64,&'static str> {
+        if self.projected.is_some() {return self.projected_half(board,false);}
         self.exchange(board)?;Ok(self.free_half())
     }
     pub fn after(&mut self,board:&mut[f64])->Result<f64,&'static str> {
+        if self.projected.is_some() {return self.projected_half(board,true);}
         let loss=self.free_half();self.exchange(board)?;Ok(loss)
     }
 }
+
+#[cfg(test)]
+#[path = "radiation_projection_tests.rs"]
+mod projection_tests;
 
 #[cfg(test)]
 mod tests {

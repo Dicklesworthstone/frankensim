@@ -309,13 +309,28 @@ impl Instrument {
     /// Attach before any excitation. Rows must already be in this bank's
     /// complete mass-loaded basis. No state-reset/replacement while playing.
     pub fn configure_radiation(&mut self,model:&radiation::Model)->Result<(),String>{
+        self.require_cold_radiation()?;
+        let prepared=radiation::Prepared::new(model,self.bank.rate,self.bank.board_count)?;
+        self.radiation=Some(prepared);Ok(())
+    }
+    /// Retain every mechanical coordinate while attaching a smaller passive
+    /// acoustic model through orthonormal rows in this exact loaded basis.
+    pub fn configure_projected_radiation(&mut self,model:&radiation::Model,
+        basis:&radiation::PortBasis)->Result<(),String>{
+        self.require_cold_radiation()?;
+        if basis.board_ports()!=self.bank.board_count {
+            return Err("radiation basis does not cover the complete loaded board".into());
+        }
+        let prepared=radiation::Prepared::new_projected(model,self.bank.rate,basis)?;
+        self.radiation=Some(prepared);Ok(())
+    }
+    fn require_cold_radiation(&self)->Result<(),String>{
         if self.radiation.is_some() || self.accounting.input_work_j!=0.
             || self.bank.q.iter().chain(&self.bank.v).any(|v|*v!=0.)
             || self.hammers.iter().any(|h|h.active||h.held) {
             return Err("radiation must be prepared once, before piano excitation".into());
         }
-        let prepared=radiation::Prepared::new(model,self.bank.rate,self.bank.board_count)?;
-        self.radiation=Some(prepared);Ok(())
+        Ok(())
     }
     pub fn radiation_energy_j(&self)->f64 {
         self.radiation.as_ref().map_or(0.,radiation::Prepared::energy)
