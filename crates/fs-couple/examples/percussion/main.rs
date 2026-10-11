@@ -288,6 +288,7 @@ fn drum_with_shafts(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<sn
     spec.admit_clock(dt_s,audio)?;
     if let Some(material)=relaxation {material.admit(&spec)?;}
     if let Some(wires)=snares {spec.admit_snare(wires)?;}
+    if let Some(mute)=mute {mute.admit_drum_geometry(spec.radius_m,snares)?;}
     let radius=spec.radius_m;let depth=spec.depth_m;let pi=std::f64::consts::PI;
     let (films,mode_sets)=spec.prepare(dt_s,audio)?;
     let acoustics=if audio {Some(acoustics::Boundary::drum(&films,&mode_sets,depth,spec.outer_radius_m)?)}else{None};

@@ -7,10 +7,15 @@ use fs_material::fiber::WoolFelt;
 use std::io::{Read, Write};
 
 const MAX_BYTES: u64 = 65_536;
+/// Supplied bound on the whole jaw's XY projection, including its felt.
+/// Sites remain contact quadrature; this disk is not an averaged modal port.
+#[derive(Debug, Clone, Copy)]
+struct Envelope { center_m: [f64;2], radius_m: f64 }
 #[derive(Debug)]
 pub struct Spec {
     pub surface: Surface,
     sites: Vec<([f64;2], f64)>,
+    envelope: Option<Envelope>,
     jaws: Vec<CompliantJaw>,
     programs: Vec<drive::Program>,
 }
@@ -30,7 +35,8 @@ impl Spec {
         if rows.next().map(|(_,s)|s)!=Some("frankensim-compliant-mute-v1") {
             return Err("compliant mute needs frankensim-compliant-mute-v1 header".into());
         }
-        let mut surface=None;let mut sites=Vec::new();let mut jaws:Vec<CompliantJaw>=Vec::new();
+        let mut surface=None;let mut sites=Vec::new();let mut envelope=None;
+        let mut jaws:Vec<CompliantJaw>=Vec::new();
         let mut force=[String::new(),String::new()];let mut creep=[Vec::new(),Vec::new()];
         for (line,text) in rows {
             let f:Vec<_>=text.split(',').map(str::trim).collect();
@@ -47,6 +53,9 @@ impl Spec {
                 ("site",4) if sites.len()<4=> {
                     let area=number(3)?;if area<=0.0 {return Err(bad().into());}
                     sites.push(([number(1)?,number(2)?],area));
+                }
+                ("envelope",4) if envelope.is_none()=> {
+                    envelope=Some(Envelope {center_m:[number(1)?,number(2)?],radius_m:number(3)?});
                 }
                 ("jaw",13) if jaws.len()<2=> {
                     let s=side(f[1])?;
@@ -83,7 +92,8 @@ impl Spec {
         // one-coordinate row checks cards only; real geometry is lowered later.
         let checks:Vec<_>=sites.iter().map(|(_,area)|PadSite {weights:vec![1.0],area_m2:*area}).collect();
         MovingPads::new(1,&checks,&jaws)?;
-        let result=Self {surface,sites,jaws,programs};
+        let result=Self {surface,sites,envelope,jaws,programs};
+        result.admit_envelope()?;
         result.admit_command(if surface==Surface::Shell {"splash"}else{"drum"})?;
         Ok(result)
     }
@@ -99,12 +109,61 @@ impl Spec {
         if !(shell || drum) || (self.surface==Surface::Shell)!=shell {
             return Err("compliant mute requires the matching nonlinear-capable splash, drum or snare image".into());
         }
-        if snare && self.surface!=Surface::Batter {
-            return Err("snare mutes must approach the batter head; resonant-side jaw/wire collision is not represented".into());
+        if snare && self.surface==Surface::Resonant && self.envelope.is_none() {
+            return Err("a resonant-head snare mute needs a whole-jaw envelope separated from the wire bank".into());
         }
         if !shell && (self.jaws.len()!=1 || self.jaws[0].side!=
             if self.surface==Surface::Batter {PadSide::Negative}else{PadSide::Positive}) {
             return Err("drum mutes must approach the exterior: batter above or resonant below; no interior pad displacing unmodelled cavity air".into());
+        }
+        Ok(())
+    }
+    fn admit_envelope(&self) -> Result<(),Error> {
+        let Some(e)=self.envelope else {return Ok(());};
+        let area=std::f64::consts::PI*e.radius_m*e.radius_m;
+        if self.surface==Surface::Shell || !e.radius_m.is_finite() || e.radius_m<=0.0
+            || e.center_m.iter().any(|x|!x.is_finite()) || !area.is_finite() || area<=0.0
+            || self.sites.iter().map(|s|s.1).sum::<f64>()>area
+            || self.sites.iter().any(|(p,area)|
+                (p[0]-e.center_m[0]).hypot(p[1]-e.center_m[1])
+                    +(area/std::f64::consts::PI).sqrt()>e.radius_m) {
+            return Err("head-mute envelope needs a finite positive radius containing every circular contact cell and its total pad area".into());
+        }
+        Ok(())
+    }
+    /// Cold geometric exclusion before either head is assembled. All admitted
+    /// wire, carrier and jaw motion is axial, so their disjoint XY projections
+    /// stay disjoint throughout the performance; no jaw/wire collision is hidden.
+    pub fn admit_drum_geometry(&self, radius_m:f64, wires:Option<super::snare::SnareSet>)
+        -> Result<(),Error>
+    {
+        self.admit_command(if wires.is_some() {"snare"}else{"drum"})?;
+        self.admit_envelope()?;
+        let Some(e)=self.envelope else {return Ok(());};
+        let extent=e.center_m[0].hypot(e.center_m[1])+e.radius_m;
+        let margin=64.0*f64::EPSILON*(radius_m+extent);
+        if !radius_m.is_finite() || radius_m<=0.0 || !extent.is_finite() || !margin.is_finite()
+            || radius_m-extent<=margin {
+            return Err("the entire head-mute envelope must lie strictly inside the clear head radius; rim contact is not represented".into());
+        }
+        if self.surface==Surface::Resonant {
+            if let Some(wires)=wires {
+                wires.mode_count()?;
+                wires.coil.linear_density_kg_m()?;
+                // Enclose every full strand, including the coil/wire radius.
+                // The bank is a line when there is only one central strand.
+                let collar=wires.coil.coil_radius_m+wires.coil.wire_radius_m;
+                let half=[0.5*wires.length_m+collar,
+                    if wires.strands==1 {collar}else{0.5*wires.width_m+collar}];
+                let dx=(e.center_m[0].abs()-half[0]).max(0.0);
+                let dy=(e.center_m[1].abs()-half[1]).max(0.0);
+                let separation=dx.hypot(dy)-e.radius_m;
+                let margin=64.0*f64::EPSILON*(extent+half[0]+half[1]);
+                if half.iter().any(|x|!x.is_finite()) || !separation.is_finite()
+                    || !margin.is_finite() || separation<=margin {
+                    return Err("resonant-head mute envelope intersects or touches the complete wire bank; jaw/wire collision is not represented".into());
+                }
+            }
         }
         Ok(())
     }

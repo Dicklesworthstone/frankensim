@@ -18,6 +18,13 @@ fn text(surface:&str, opposed:bool, end:f64) -> String {
     }
     out
 }
+fn resonant_text(end:f64) -> String {
+    let mut out=text("resonant",false,end)
+        .replace("site,0.06,0.01,","site,0.06,0.07,")
+        .replace("site,0.065,0.013,","site,0.065,0.073,");
+    out.push_str("envelope,0.0625,0.0715,0.012\n");
+    out
+}
 fn bounds() -> ImpactSubstepConfig {ImpactSubstepConfig {max_depth:8,max_attempts:511}}
 fn rest(p:[f64;2]) -> Stroke {Stroke {speed_m_s:0.0,position_m:Some(p)}}
 fn prepare(mut e:Experiment) -> Experiment {
@@ -37,7 +44,7 @@ fn complete_cards_force_programs_and_exterior_sides_are_admitted_before_geometry
     resonant.admit_command("drum-wav").unwrap();
     for command in ["snare","snare-wav","snare-mic","snare-off","snare-off-wav","snare-off-mic"] {
         batter.admit_command(command).unwrap();
-        assert!(resonant.admit_command(command).is_err(),"jaw/wire collision is not represented");
+        assert!(resonant.admit_command(command).is_err(),"missing whole-jaw collision envelope");
     }
     assert!(batter.admit_command("drum-modal").is_err());
     for bad in [source.replace("surface,shell","surface,shell\nsurface,shell"),
@@ -52,7 +59,8 @@ fn complete_cards_force_programs_and_exterior_sides_are_admitted_before_geometry
     }
     assert!(Spec::parse(&"x".repeat(65_537)).is_err());
     for (source,command) in [(include_str!("../estimated-cymbal-mute.fsm"),"splash-mic"),
-        (include_str!("../estimated-drum-mute.fsm"),"drum-stretch")] {
+        (include_str!("../estimated-drum-mute.fsm"),"drum-stretch"),
+        (include_str!("../estimated-resonant-mute.fsm"),"snare-mic")] {
         Spec::parse(source).unwrap().admit_command(command).unwrap();
     }
     let file=concat!(env!("CARGO_MANIFEST_DIR"),"/examples/percussion/estimated-cymbal-mute.fsm");
@@ -67,6 +75,52 @@ fn complete_cards_force_programs_and_exterior_sides_are_admitted_before_geometry
     assert_eq!(inputs[0].coordinate,3);assert_eq!(inputs[1].coordinate,4);
     assert!(drive::StickDrive::new_inputs(inputs,1e-6,10,5).is_err(),"duration must cover the full force performance");
     let mut args=vec!["splash".into(),"--compliant-mute".into()];assert!(option(&mut args).is_err());
+}
+
+#[test]
+fn resonant_mute_excludes_the_entire_coil_bank_and_rim_before_head_preparation() {
+    let source=resonant_text(0.001);
+    let spec=Spec::parse(&source).unwrap();
+    let bank=crate::snare::SnareSet::reference(false);
+    for command in ["snare","snare-wav","snare-mic","snare-off","snare-off-wav","snare-off-mic"] {
+        spec.admit_command(command).unwrap();
+    }
+    spec.admit_drum_geometry(0.17,Some(bank)).unwrap();
+    Spec::parse(include_str!("../estimated-resonant-mute.fsm")).unwrap()
+        .admit_drum_geometry(0.17,Some(bank)).unwrap();
+    for bad in [source.clone()+"envelope,0.0625,0.0715,0.012\n",
+        source.replace("envelope,0.0625,0.0715,0.012","envelope,0.0625,0.0715,0"),
+        source.replace("envelope,0.0625,0.0715,0.012","envelope,0.0625,0.0715,-0.012"),
+        source.replace("envelope,0.0625,0.0715,0.012","envelope,NaN,0.0715,0.012"),
+        source.replace("envelope,0.0625,0.0715,0.012","envelope,0.0625,0.0715,1e308"),
+        source.replace("site,0.06,0.07,","site,0.12,0.07,"),
+        // Its centre fits, but its finite contact disk crosses the jaw bound.
+        source.replace("site,0.06,0.07,","site,0.074,0.0715,"),
+        source.replace(",0.0001\n",",0.001\n"),
+        text("shell",false,0.001)+"envelope,0.0625,0.0115,0.012\n"] {
+        assert!(Spec::parse(&bad).is_err(),"{bad}");
+    }
+    // Point sites can be clear while the solid jaw still hits the wire coils.
+    // Move one small site's disk as a whole to test the full-boundary decision.
+    let disk=|center:[f64;2],radius:f64| {
+        let mut s=Spec::parse(&source).unwrap();
+        s.sites=vec![(center,1e-8)];
+        s.envelope=Some(Envelope {center_m:center,radius_m:radius});
+        s
+    };
+    let outside_coil=0.5*bank.width_m+bank.coil.coil_radius_m+bank.coil.wire_radius_m;
+    for y in [0.0,outside_coil+0.005,outside_coil+0.01] {
+        assert!(disk([0.06,y],0.01).admit_drum_geometry(0.17,Some(bank)).is_err());
+    }
+    disk([0.06,outside_coil+0.010001],0.01).admit_drum_geometry(0.17,Some(bank)).unwrap();
+    assert!(disk([0.16,0.0],0.01).admit_drum_geometry(0.17,None).is_err(),"whole jaw touches the rim");
+    assert!(spec.admit_drum_geometry(f64::NAN,Some(bank)).is_err());
+    // A disengaged bank still occupies the same XY projection. Withdrawal
+    // is never permission to pass a lower jaw through its later trajectory.
+    assert!(disk([0.06,0.0],0.01).admit_drum_geometry(0.17,
+        Some(crate::snare::SnareSet::reference(true))).is_err());
+    let single=crate::snare::SnareSet {strands:1,..bank};
+    disk([0.06,0.015],0.005).admit_drum_geometry(0.17,Some(single)).unwrap();
 }
 
 #[test]
@@ -169,8 +223,17 @@ fn exterior_head_pad_keeps_cavity_pressure_and_private_material_coordinates_reci
 
 #[test]
 fn snare_batter_mute_keeps_the_wire_bank_and_drives_the_same_coupled_heads() {
+    snare_mute_motion(text("batter",false,256.0*2e-6));
+}
+
+#[test]
+fn snare_resonant_mute_drives_the_head_and_wires_without_a_direct_jaw_wire_contact() {
+    snare_mute_motion(resonant_text(256.0*2e-6));
+}
+
+fn snare_mute_motion(source:String) {
     let dt=2e-6;let ticks=256;
-    let spec=Spec::parse(&text("batter",false,ticks as f64*dt)).unwrap();
+    let spec=Spec::parse(&source).unwrap();
     let build=|wires,audio| drum_with_compliant_mute(ticks,dt,audio,false,Some(wires),false,
         rest([0.06,0.01]),true,None,
         Some(crate::drum_spec::Spec {radial_intervals:2,azimuths:8,..crate::drum_spec::Spec::reference()}),
@@ -204,8 +267,12 @@ fn snare_batter_mute_keeps_the_wire_bank_and_drives_the_same_coupled_heads() {
     // short integration window. Its explicit initial interference contributes
     // to initial contact storage; the energy ledger must retain that preload.
     let wires=crate::snare::SnareSet {strands:2,modes_per_strand:2,contact_cells:4,
-        clearance_m:-2e-6,..full_wires};
+        clearance_m:if spec.surface==Surface::Resonant {-2e-8}else{-2e-6},..full_wires};
     let mut e=build(wires,false);
+    let mut bare=prepare(drum_with_compliant_mute(ticks,dt,false,false,Some(wires),false,
+        rest([0.06,0.01]),true,None,
+        Some(crate::drum_spec::Spec {radial_intervals:2,azimuths:8,..crate::drum_spec::Spec::reference()}),
+        Some(rest([-0.05,0.02])),&[],20.0,None).unwrap());
     let first_wire=e.second_stick.unwrap().coordinate+1;
     let o=e.mute.as_ref().unwrap();let jaw=o.ports[0];
     let inputs=spec.into_inputs(o).unwrap();
@@ -213,18 +280,30 @@ fn snare_batter_mute_keeps_the_wire_bank_and_drives_the_same_coupled_heads() {
     let energy=initial.stored_energy_j();
     e=prepare(e);e.system=e.system.with_stick_drives(inputs,dt,ticks,e.force.len()).unwrap();
     let gate=CancelGate::new_clock_free();
-    let (mut net,mut pad_force,mut wire_motion,mut pressure)=(0.0,0.0_f64,0.0_f64,0.0_f64);
+    let (mut net,mut pad_force,mut wire_motion,mut pressure,mut changed)=
+        (0.0,0.0_f64,0.0_f64,0.0_f64,0.0_f64);
     for tick in 1..=ticks {
+        if tick==32 {
+            let before=e.system.state().to_vec();let pad=felt(&e.system,0);
+            let mut bad=e.force.clone();bad[jaw.coordinate]=1e7;
+            assert!(e.system.step(&bad,&gate).is_err());
+            assert_eq!(e.system.state(),before);assert_eq!(felt(&e.system,0),pad);
+        }
         let f=e.system.step(&e.force,&gate).unwrap();
+        bare.system.step(&bare.force,&gate).unwrap();
         net+=f.supplied_work_j-f.dissipated_energy_j;
         assert_eq!(f.time_s,tick as f64*dt);
         assert!((f.stored_energy_j-energy-net).abs()<1e-6);
         pad_force=pad_force.max(felt(&e.system,0).unwrap().1);
-        for i in first_wire..jaw.coordinate {wire_motion=wire_motion.max(e.system.state()[2*i+1].abs());}
+        for i in first_wire..jaw.coordinate {
+            wire_motion=wire_motion.max(e.system.state()[2*i+1].abs());
+            changed=changed.max((e.system.state()[2*i+1]-bare.system.state()[2*i+1]).abs());
+        }
         pressure=pressure.max(e.air.as_ref().unwrap().uniform_pressure(e.system.state()).unwrap().abs());
     }
-    assert!(pad_force>0.0,"the force-driven jaw must contact the batter head");
+    assert!(pad_force>0.0,"the force-driven jaw must contact its selected head");
     assert!(wire_motion>0.0,"the retained resonant-head contacts must react on the wires");
+    assert!(changed>1e-14,"pad motion must change the wires relative to the same unmuted preload");
     assert!(pressure>0.0,"both heads remain coupled through the same cavity gas");
     assert!(e.system.membrane_observation(1).is_none());
     assert!(e.system.membrane_observation(2).is_none());

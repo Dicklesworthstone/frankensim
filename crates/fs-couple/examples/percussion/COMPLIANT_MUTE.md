@@ -34,6 +34,13 @@ cargo run --release -p fs-couple --example percussion -- \
   --cavity-modes --cavity-drag-per-s 20 \
   --compliant-mute crates/fs-couple/examples/percussion/estimated-drum-mute.fsm \
   > muted-snare.csv
+
+# Touch/retract the resonant head outside the complete wire bank.
+cargo run --release -p fs-couple --example percussion -- \
+  snare 4096 --analytic-newton --impact-substeps 8 511 \
+  --cavity-modes --cavity-drag-per-s 20 \
+  --compliant-mute crates/fs-couple/examples/percussion/estimated-resonant-mute.fsm \
+  > lower-head-muted-snare.csv
 ```
 
 The supplied geometry, masses, gaps, pad laws and playing forces are **editable
@@ -67,13 +74,45 @@ There is no automatic spatial-resolution or contact-patch convergence claim.
 One or two `jaw` rows provide independently translating effective masses and
 pads. A shell can have `above`, `below`, or both. A drumhead permits exactly one
 exterior jaw: `batter` with `above`, or `resonant` with `below`. On a snare,
-only the batter-side jaw is admitted, including `snare-off`: collision between
-a resonant-side jaw and the wire bank is not represented. Interior jaw/air
+the resonant-side jaw additionally needs a supplied envelope that remains
+clear of the whole wire bank, including on `snare-off`. Interior jaw/air
 displacement is not modelled and cannot be silently omitted. The example's
 surface-motion axis is downward; jaw displacement, velocity and player force
 are **positive inward on either side**. The pad face conforms to the declared
 reference surface, with the same initial gap at every site. A jaw starts at
 rest with zero inward travel, not in a manufactured equilibrium.
+
+### Lower-head contact with a retained snare bank
+
+Add exactly one `envelope,center_x_m,center_y_m,radius_m` record for a
+resonant-side snare mute. It declares a circular XY bound on the **complete
+jaw and its felt**, throughout the allowed axial motion. For enveloped head
+pads, a site's finite contact footprint is bounded by the circle centred on
+its XY station with radius `sqrt(area_m2 / pi)`. Every such contact circle
+must fit inside the jaw envelope; testing its centre alone is insufficient.
+The total supplied contact area must also fit in the envelope's area. The
+existing site-centred contact quadrature and material histories remain;
+the envelope does not replace them with one averaged modal contact.
+
+Before either head's FEM preparation, the complete jaw disk must fit strictly
+inside the clear head radius and be separated from a rectangle enclosing
+every full wire span, expanded by the supplied coil radius plus wire radius.
+Tangency, overlap and numerically unresolved separation refuse. This check
+covers space between sampled wire/head contact stations as well. A single
+strand uses its actual central line rather than the unused bank width.
+
+The current head, wire, carrier and jaw coordinates move only axially, so
+their reference XY separation persists during squeezing and retraction. The
+pad acts on the resonant head; its effect on the complete wire bank follows
+through the existing head/wire contact, rather than a new direct jaw/wire law.
+Withdrawing a bank through a carrier or selecting `snare-off` does not bypass
+this exclusion. Overlapping wire/jaw geometry, lateral motion, tilting jaws,
+and resolved endpoint-hardware collisions still require additional mechanics.
+
+The envelope is optional for other head pads and is validated whenever it is
+supplied. It is not accepted for shell pads, whose curved/hole-containing
+surface needs different whole-footprint geometry. Existing inputs without an
+envelope retain their previous site quadrature and contact behavior.
 
 `drag_Ns_m` is nonnegative grounded drag on the jaw, not damping on the sound
 output. `gap_m` is nonnegative. The remaining parameters bind directly to the
@@ -136,7 +175,11 @@ cargo test --release -p fs-couple --lib render::plate::impact::compliant
 cargo test --release -p fs-couple --example percussion compliant_mute -- --test-threads=1
 ```
 
-The snare regression retains all twenty strands during construction and uses
-a smaller, explicitly preloaded bank for pad/head/wire energy-exchange checks.
-The new snare checks have been syntax-checked, but native execution remains
-unverified: the shared build exhausted disk and memory before compiling these tests.
+The snare regressions retain all twenty strands during construction and use
+a smaller, explicitly preloaded bank for pad/head/wire energy-exchange checks
+on both heads. Driven wire motion is compared with the same unmuted preload,
+and a refused force step preserves the jaw state and contact observation.
+Geometry coverage includes finite-area boundary sites, complete coil-bank
+overlap/tangency, a disengaged bank and whole-jaw rim exclusion. These new
+resonant-head checks require native execution; source review alone does not
+establish solver convergence or a completed acoustic render.
