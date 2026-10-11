@@ -31,7 +31,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--cavity enclosure.fspc]
     [--concert-pitch 430..450 | --raw-tensions]
     [--mesh-divisions 4..32] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
-    [--board-band-hz Hz] [--board-reduction max_modes,keep_low_modes,Hz,...]
+    [--board-band-hz Hz] [--board-reduction SPEC]
     [--performance events.csv] [--observer-gain Pa/(m^3/s)]
     [--midi performance.mid] [--midi-channel 1..16]
     [--midi-velocity-max-m-s V] [--midi-half-pedal]
@@ -148,13 +148,19 @@ Crowned structures retain 3-D motion, grain and eccentric ribs/bridges; their
 radiation is a projected flat-baffle approximation, not 3-D exterior BEM.
 Crown is reference geometry, not solved downbearing; see CROWNED_BOARD.md.
 The explicit frequency band ordinarily admits at most 128 board modes.
---board-reduction explicitly permits up to 512 source modes on a flat or crowned board,
-then retains at most max_modes (1..128), including keep_low_modes exact low
-modes. Static and damped responses at 1..16 increasing target frequencies guide
+--board-reduction SPEC explicitly permits up to 512 source modes on a flat or crowned board.
+SPEC is max_modes,keep_low_modes,Hz,... or
+adaptive,max_modes,keep_low_modes,tolerance,Hz,... (0 < tolerance < 1).
+It retains at most max_modes (1..128), including keep_low_modes exact low modes. Static and damped responses at 1..16 increasing target frequencies guide
 the remaining basis at every admitted primary bridge and both directions of
 each supplied --string-polarization frame. Targets must lie within
---board-band-hz; that source band is never widened implicitly. Full projected
-wood damping, bridge motion and the radiating field stay in the same basis.
+--board-band-hz; that source band is never widened implicitly. Adaptive selection
+checks actual complex driving-point bridge compliance at source resonances,
+midpoints, static and seed frequencies, enriching until the relative tolerance
+is met. Insufficient rank or work budget refuses preparation. The check covers
+this finite grid of the supplied source model, not continuous-band, cross-port
+or acoustic accuracy. Full projected wood damping, bridge motion and the
+radiating field stay in the same basis.
 For supplied downbearing, reduction uses the solved equilibrium tangent modes.
 This requires --render and excludes --dump-board: modal CSV cannot preserve the
 dense material operator. Flat-board mass controls remain flat-only. See BOARD_REDUCTION.md.
@@ -1070,9 +1076,14 @@ fn run() -> Result<(), String> {
             prepared.area_m2, prepared.mass_kg, prepared.free_dofs, prepared.modes.len(),
             options.board_band_hz, start.elapsed().as_secs_f64());
         if let Some(report) = &prepared.reduction {
-            println!("Bridge-informed reduction: {} certified source modes -> {} retained coordinates; {} exact low modes; {} normalized static/harmonic snapshots at {:?} Hz; maximum displacement projection residual {:.9e}. This residual does not certify transfer, acoustic or mesh convergence.",
+            println!("Bridge-informed reduction: {} certified source modes -> {} retained coordinates; {} exact low modes; {} normalized static/harmonic snapshots; requested seeds {:?} Hz; maximum displacement projection residual {:.9e}. This residual does not certify transfer, acoustic or mesh convergence.",
                 report.source_modes, prepared.modes.len(), report.protected_low_modes,
                 report.snapshot_count, report.sample_hz, report.max_relative_snapshot_error);
+            if let Some(check) = &report.adaptive_response {
+                println!("Adaptive bridge response: maximum relative complex driving-point compliance error {:.9e} <= {:.9e}; {} frequencies, {} force ports, {} enrichment rounds. Finite-grid source-model comparison; no cross-port, continuous-band, acoustic or mesh-convergence certificate.",
+                    check.max_relative_driving_point_error, check.tolerance,
+                    check.evaluation_hz.len(), check.port_count, check.enrichment_rounds);
+            }
             for (i, interval) in report.source_frequency_intervals_hz.iter().enumerate() {
                 println!("source FE mode {i}: [{:.9}, {:.9}] Hz", interval.0, interval.1);
             }

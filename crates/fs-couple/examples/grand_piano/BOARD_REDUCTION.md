@@ -12,6 +12,7 @@ Both piano frontends accept:
 
 ```text
 --board-reduction max_modes,keep_low_modes,frequency_hz,...
+--board-reduction adaptive,max_modes,keep_low_modes,tolerance,seed_hz,...
 ```
 
 - `max_modes`: maximum retained board coordinates, from 1 through 128.
@@ -20,6 +21,10 @@ Both piano frontends accept:
 - Frequencies: 1 through 16 finite, positive, strictly increasing values in Hz.
   Static response is included automatically. Each frequency must lie within the
   explicitly selected source board band.
+- `adaptive` adds a requested relative complex driving-point compliance
+  tolerance, finite and strictly between zero and one. The frequency list
+  supplies initial response directions; the actual check also includes static
+  response, every distinct source resonance and the intervening midpoints.
 
 For example, this requests a 2600 Hz source slice and at most 96 playback
 coordinates, preserving its first 24 modes:
@@ -70,6 +75,60 @@ the existing modal CSV cannot represent the full projected damping operator.
 Geometry-only exports do not perform this reduction. A reduced modal table must
 not be re-imported as though per-mode damping ratios were its complete material
 law.
+
+## Adaptive bridge-response accuracy
+
+Fixed snapshots can describe their selected displacement directions very
+accurately while missing resonances between the requested frequencies. In a
+three-mode source with resonances at 100, 1000 and 1100 Hz and 1% modal damping,
+a two-coordinate reduction protecting the 100 Hz mode and sampling at 100 Hz
+reported a maximum snapshot residual of about 0.0011%. Nevertheless, the
+actual bridge compliance errors at 1000 and 1100 Hz were approximately 95%,
+with amplitudes reduced by 7.4 and 8.2 dB. This is a numerical counterexample,
+not a measured piano spectrum.
+
+The explicit adaptive form checks the actual Galerkin transfer instead:
+
+```text
+--board-reduction adaptive,96,24,0.05,800,1600,2400
+```
+
+Here 0.05 requests at most 5% relative **complex** driving-point error at
+every evaluated frequency and admitted bridge force port. It accounts for
+amplitude and phase together. The 96-coordinate budget, 24 exact low modes
+and caller's source band remain explicit. This example is a preparation
+request, not evidence that a particular 2600 Hz geometry meets it.
+
+For a force column `b`, the source and reduced compliance are
+
+```text
+H(omega)   = b^T [diag(lambda) - omega^2 I - i omega diag(c)]^-1 b
+H_r(omega) = (Q^T b)^T [K_r - omega^2 I - i omega C_r]^-1 (Q^T b)
+error      = |H_r - H| / |H|
+```
+
+The real-valued transpose here preserves the physical force/velocity port;
+both evaluations use the same supplied source damping. The reduced solve uses
+the **complete** projected stiffness and damping, including off-diagonal
+terms. One factorization from the existing `fs_la::eigen_complex` owner is
+shared by all bridge ports at each frequency.
+
+Preparation starts with the protected low modes and seed responses, evaluates
+the full finite grid, and enriches the basis with real and imaginary source
+responses at the worst frequency/port pairs. Every successful final sweep
+checks all admitted primary bridges and any supplied secondary directions.
+It never drops a difficult frequency or bridge from the check to obtain
+acceptance. Insufficient independent directions, retained rank or bounded
+preparation work refuse the requested reduction before playback. No damping
+floor or relaxed tolerance is inserted.
+
+This is a comparison with the supplied **finite source model**, at a reported
+finite set of frequencies. It does not certify response between those points,
+transfer from one bridge to another, a string-loaded resonance, receiver
+pressure, modes outside the source band, or agreement with a real Model D.
+The same final nodal field still supplies all bridges and acoustic outputs;
+this option improves structural response selection without inventing a
+separate receiver spectrum.
 
 ## Physical construction
 
@@ -161,7 +220,11 @@ Preparation retains separate source and reduced metadata:
   certificates for individual eigenvalues of the unreduced FE model.
 - Reports include source count, actual retained count, protected count,
   requested harmonic frequencies, and nonzero snapshot count.
-- The reported maximum residual is
+- Adaptive reports additionally preserve the requested tolerance, achieved
+  maximum complex driving-point error, complete evaluation frequency list,
+  force-port count and enrichment-round count. Both frontends print the error
+  and its scope; exterior CSV comments retain the exact frequency grid.
+- The reported maximum snapshot residual is
   `||x - Q Q^T x|| / ||x||` over the normalized nonzero static, harmonic-real,
   and harmonic-imaginary displacement snapshots.
 
@@ -180,8 +243,13 @@ a damping floor. Source modes, ports, harmonic samples, retained rank, and
 estimated scalar work are bounded before allocating the snapshot bank. The
 leaf permits at most 176 force vectors (two directions for each of 88 courses)
 and 250 million estimated source-coordinate work visits; this is an admission
-budget, not a runtime claim. Omitting the polarization card preserves the
-original primary-only selection path.
+budget for fixed selection, not a runtime claim. Adaptive preparation has a
+separate budget of eight billion estimated complex scalar-work visits. Source
+response preparation, projection, complete response sweeps and enrichment are
+charged before execution. Larger source slices and ranks can exhaust it;
+refusal identifies the bounded preparation work instead of returning an
+unchecked basis. No real-time or wall-clock performance claim follows from
+these budgets. Omitting the polarization card preserves primary-only selection.
 
 Mesh refinement, source-band extension, retained-rank sweeps, and independent
 bridge/microphone comparisons remain necessary before promoting a new default
@@ -211,3 +279,32 @@ The repository's ordinary `--locked` build refused because its Cargo lock does
 not match the pinned constellation. No repository lock, dependency pin or
 solver admission was changed. These focused native results are not a full
 workspace/DSR acceptance, high-band convergence or performance result.
+
+### Adaptive response extension
+
+The adaptive extension's native exact-source owner checks pass nine tests
+(five existing fixed-selection tests and four adaptive regressions). They
+include the missed-resonance counterexample, multiport enrichment, preserved
+energy forms and protected modes, deterministic selection, and explicit
+refusal for exhausted budgets, undamped poles and nonrepresentable error
+calculations.
+
+A separate final-projection regression uses an eight-mode analytical physical
+pencil with unequal nodal masses and nonzero force participation in every mode.
+It reduces to seven coordinates, protects the lowest eigenpair, and compares
+the source with the returned nodal modes, rotated stiffness and full material
+damping at all 18 evaluation frequencies. Maximum relative complex
+driving-point error is approximately 0.00181843, below the requested 0.002.
+The final damping matrix has nonzero off-diagonal entries; the test checks its
+physical congruence and agreement with the pre-rotation response report.
+
+A native 40-source-mode, 88-distinct-port probe also passes, retaining 28
+coordinates and checking 81 frequencies. Its last 12 source modes are
+intentionally unforced; this exercises all-key admission and complete-grid
+evaluation without asserting that a real soundboard has that low rank.
+
+These extension checks use the pinned compiler and existing numerical owners.
+The full piano frontends, BEM sweep, complete rendering and listening accuracy
+were not validated by this extension run. The frontend admission tests have
+been extended for the new syntax; the adaptive option does not promote a new
+default board band or a calibrated Steinway geometry.

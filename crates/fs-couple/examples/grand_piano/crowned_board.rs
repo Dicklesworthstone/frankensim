@@ -510,7 +510,7 @@ mod tests {
         let board=CrownedBoard::read(&fixture(0.015)).unwrap();
         let source=board.prepare_with_motion(&[69],400.).unwrap();
         let count=source.modes.len();
-        let options=ritz::RitzOptions {max_modes:count,keep_low_modes:count,sample_hz:vec![100.]};
+        let options=ritz::RitzOptions {max_modes:count,keep_low_modes:count,sample_hz:vec![100.],transfer_tolerance:None};
         let reduced=board.prepare_reduced(&[69],400.,true,&options).unwrap();
         assert_eq!(source.motion.as_ref().unwrap().shapes,reduced.motion.as_ref().unwrap().shapes);
         assert_eq!(source.frequency_intervals_hz,reduced.frequency_intervals_hz);

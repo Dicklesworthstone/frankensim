@@ -37,7 +37,7 @@ piano_exterior render BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTIC
 piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
     [--modes auto|1..512] [--substeps 1..16] [--rigid-assembly ASSEMBLY.fspr]
     [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
-    [--board-reduction max_modes,keep_low_modes,Hz,...]
+    [--board-reduction SPEC]
     [--radiation-ports 1..32]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
     [--rt0425-hammer-stiffness] [--rt0425-hammer-dissipation]
@@ -98,12 +98,18 @@ it leaves geometry, materials, mode cap and original residual admission unchange
 selects the existing cubic transverse field for inertia, bridge coupling and
 acoustic surface motion, including its analytic physical rotations. Both retain
 the same eigensolve throughout playback and can compose with string polarization.
---board-reduction admits up to 512 certified source modes within the supplied
+--board-reduction SPEC accepts max_modes,keep_low_modes,Hz,... or
+adaptive,max_modes,keep_low_modes,tolerance,Hz,... (0 < tolerance < 1).
+It admits up to 512 certified source modes within the supplied
 FSPE board-band-hz, then retains at most 128 coordinates using bridge
 static/harmonic response directions and the requested exact low modes. Both
 directions of supplied --string-polarization frames guide the basis. Its
-1..16 increasing target frequencies must lie inside that source band. Full
-projected wood damping and the transformed bridge/acoustic motion are shared
+1..16 increasing target frequencies must lie inside that source band. Adaptive
+selection checks actual complex driving-point bridge compliance at source
+resonances, midpoints, static and seed frequencies, then adds response directions
+until the requested relative tolerance is met. Insufficient rank or work budget
+refuses. This finite source-model grid does not certify cross-port,
+continuous-band or acoustic accuracy. Full projected wood damping and the transformed bridge/acoustic motion are shared
 by playback and admittance. Without --radiation-ports, render-loaded requires
 max_modes <=32. Explicit acoustic reduction retains up to 128 board coordinates
 while the passive fitter keeps its independent 32-port budget. Snapshot displacement
@@ -306,6 +312,11 @@ fn board_reduction_report(board:&board_geometry::PreparedBoard)->String {
     let mut out=format!("# soundboard reduction: source_modes={}, retained_modes={}, protected_low_modes={}; bridge static/harmonic targets={:?} Hz (primary and any supplied secondary directions)\n# nonzero_snapshots={}, maximum_relative_displacement_projection_error={:.17e}; no transfer, acoustic or mesh-convergence certificate\n",
         report.source_modes,board.modes.len(),report.protected_low_modes,report.sample_hz,
         report.snapshot_count,report.max_relative_snapshot_error);
+    if let Some(check)=&report.adaptive_response {
+        writeln!(out,"# adaptive bridge response: maximum_relative_complex_driving_point_error={:.17e}, tolerance={:.17e}, force_ports={}, enrichment_rounds={}; finite-grid source-model comparison only; no cross-port, continuous-band, acoustic or mesh-convergence certificate",
+            check.max_relative_driving_point_error,check.tolerance,check.port_count,check.enrichment_rounds).unwrap();
+        writeln!(out,"# adaptive driving-point evaluation frequencies Hz: {:?}",check.evaluation_hz).unwrap();
+    }
     for (i,(lo,hi)) in report.source_frequency_intervals_hz.iter().enumerate() {
         writeln!(out,"# source FE mode {i}: [{lo:.17e},{hi:.17e}] Hz").unwrap();
     }

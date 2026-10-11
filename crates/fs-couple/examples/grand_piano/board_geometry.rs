@@ -69,8 +69,9 @@ pub struct SurfaceSample {
 }
 
 /// Audit of the explicit bridge-driven projection within one certified FE slice.
-/// Snapshot errors measure Euclidean projection in source-modal coordinates;
-/// they do not certify transfer accuracy, omitted higher modes or mesh convergence.
+/// Snapshot errors measure Euclidean projection in source-modal coordinates.
+/// Optional adaptive checks compare driving-point compliance on a finite grid;
+/// neither measure certifies omitted higher modes, acoustics or mesh convergence.
 #[derive(Clone, Debug)]
 pub struct ReductionReport {
     pub source_modes: usize,
@@ -80,6 +81,8 @@ pub struct ReductionReport {
     pub sample_hz: Vec<f64>,
     pub snapshot_count: usize,
     pub max_relative_snapshot_error: f64,
+    /// Actual reduced versus source bridge compliance on the reported grid.
+    pub adaptive_response: Option<ritz::AdaptiveResponseReport>,
 }
 
 #[derive(Debug)]
@@ -959,6 +962,7 @@ mod tests {
             assert!(source.modes.len() > 12, "fixture must exercise a reduced tail");
             let options = ritz::RitzOptions {
                 max_modes: source.modes.len(), keep_low_modes: 2, sample_hz: vec![90.0, 700.0],
+                transfer_tolerance: None,
             };
             let prepared = geometry.prepare_reduced(
                 &keys, 20_000.0, true, true, false, cubic, &options).unwrap();
@@ -1061,7 +1065,7 @@ mod tests {
         for cubic in [false,true] {
             let source=geometry.prepare_inner(&[69],100.,true,true,false,cubic).unwrap();
             assert_eq!((source.free_dofs,source.modes.len()),(3,3));
-            let options=ritz::RitzOptions {max_modes:3,keep_low_modes:1,sample_hz:vec![10.,30.]};
+            let options=ritz::RitzOptions {max_modes:3,keep_low_modes:1,sample_hz:vec![10.,30.],transfer_tolerance:None};
             let primary_only=geometry.prepare_reduced(&[69],100.,true,true,false,cubic,&options).unwrap();
             let both=geometry.prepare_reduced_with_ports(&[69],100.,true,true,false,cubic,
                 &options,Some(&frames)).unwrap();

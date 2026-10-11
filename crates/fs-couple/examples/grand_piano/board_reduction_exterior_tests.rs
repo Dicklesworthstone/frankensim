@@ -168,6 +168,18 @@ fn exterior_reduction_options_preserve_bounds_flag_values_and_source_band() {
     let selection=parsed.board_reduction.as_ref().unwrap();
     assert_eq!((selection.max_modes,selection.keep_low_modes),(2,0));
     assert_eq!(selection.sample_hz,vec![80.0,160.0]);
+    assert_eq!(selection.transfer_tolerance,None);
+    let adaptive=playback::Options::parse(&args(
+        "--board-reduction adaptive,2,0,0.05,80,160"
+    )).unwrap();
+    let adaptive=adaptive.board_reduction.unwrap();
+    assert_eq!((adaptive.max_modes,adaptive.keep_low_modes),(2,0));
+    assert_eq!(adaptive.sample_hz,selection.sample_hz);
+    assert_eq!(adaptive.transfer_tolerance,Some(0.05));
+    let (adaptive_harmonic,_)=admittance_options(&args(
+        "--board-reduction adaptive,2,0,0.05,80,160"
+    )).unwrap();
+    assert_eq!(adaptive_harmonic.board_reduction.unwrap().transfer_tolerance,Some(0.05));
     let (harmonic,damping)=admittance_options(&args(
         "--board-reduction 2,0,80,160 --lossless-structure"
     )).unwrap();
@@ -179,9 +191,14 @@ fn exterior_reduction_options_preserve_bounds_flag_values_and_source_band() {
         "--board-reduction 2,3,80", "--board-reduction 2,0",
         "--board-reduction 2,0,NaN", "--board-reduction 2,0,0",
         "--board-reduction 2,0,80 --dampers estimated",
+        "--board-reduction adaptive,2,0,0,80",
+        "--board-reduction adaptive,2,0,1,80",
+        "--board-reduction adaptive,2,0,NaN,80",
     ] {assert!(admittance_options(&args(invalid)).is_err(),"accepted {invalid}");}
     let (board,_,_,spec)=inputs();
     let outside=playback::Options::parse(&args("--board-reduction 2,0,400")).unwrap();
+    assert!(prepare_board_motion(&board,&[69],spec.board_band_hz,&outside).is_err());
+    let outside=playback::Options::parse(&args("--board-reduction adaptive,2,0,0.05,400")).unwrap();
     assert!(prepare_board_motion(&board,&[69],spec.board_band_hz,&outside).is_err());
     let error=prepare_board_motion(crowned_board::HEADER,&[69],spec.board_band_hz,&parsed)
         .unwrap_err();

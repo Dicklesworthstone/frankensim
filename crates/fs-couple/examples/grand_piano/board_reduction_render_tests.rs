@@ -12,6 +12,11 @@ fn reduction_requires_a_played_geometric_model_and_a_representable_export() {
     let reduction = accepted.board_reduction.unwrap();
     assert_eq!((reduction.max_modes,reduction.keep_low_modes),(96,24));
     assert_eq!(reduction.sample_hz,vec![800.,1600.,2400.]);
+    assert_eq!(reduction.transfer_tolerance,None);
+    let adaptive = options("--preset steinway-d --render ritz-piano.wav --board-band-hz 2600 --board-reduction adaptive,96,24,0.05,800,1600,2400").unwrap().board_reduction.unwrap();
+    assert_eq!((adaptive.max_modes,adaptive.keep_low_modes),(96,24));
+    assert_eq!(adaptive.sample_hz,reduction.sample_hz);
+    assert_eq!(adaptive.transfer_tolerance,Some(0.05));
     for args in [
         "--render ritz-piano.wav --board-reduction 2,0,100",
         "--preset steinway-d --board-reduction 2,0,100",
@@ -20,6 +25,10 @@ fn reduction_requires_a_played_geometric_model_and_a_representable_export() {
         "--preset steinway-d --render ritz-piano.wav --board-reduction 2,0,100 --board-reduction 3,1,200",
         "--preset steinway-d --render ritz-piano.wav --board-reduction 129,0,100",
         "--preset steinway-d --render ritz-piano.wav --board-reduction --board-band-hz 200",
+        "--preset steinway-d --render ritz-piano.wav --board-band-hz 200 --board-reduction adaptive,2,0,0.05,300",
+        "--preset steinway-d --render ritz-piano.wav --board-reduction adaptive,2,0,0,100",
+        "--preset steinway-d --render ritz-piano.wav --board-reduction adaptive,2,0,1,100",
+        "--preset steinway-d --render ritz-piano.wav --board-reduction adaptive,2,0,NaN,100",
     ] { assert!(options(args).is_err(),"{args}"); }
     let reduction = board_geometry::ritz::RitzOptions::parse("2,0,100").unwrap();
     let error = prepare_geometric_board_with_reduction(crowned_board::HEADER,&[69],300.,
@@ -35,7 +44,7 @@ fn played_frontend_requires_and_applies_the_full_reduced_material_operator() {
     selected.modes = 12;
     selected.dampers = Some("estimated".into());
     selected.board_reduction = Some(board_geometry::ritz::RitzOptions {
-        max_modes:modes.len(),keep_low_modes:0,sample_hz:vec![100.],
+        max_modes:modes.len(),keep_low_modes:0,sample_hz:vec![100.],transfer_tolerance:None,
     });
     assert!(prepare_instrument_with_physical_controls(vec![course],&modes,&selected,None,None)
         .err().unwrap().contains("full projected material damping"));

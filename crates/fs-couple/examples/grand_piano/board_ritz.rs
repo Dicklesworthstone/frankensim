@@ -8,6 +8,9 @@
 
 use std::f64::consts::TAU;
 
+#[path = "board_ritz_adaptive.rs"]
+mod adaptive;
+
 pub const MAX_SOURCE_MODES: usize = 512;
 pub const MAX_RITZ_MODES: usize = 128;
 pub const MAX_SAMPLE_FREQUENCIES: usize = 16;
@@ -25,20 +28,29 @@ pub struct RitzOptions {
     pub keep_low_modes: usize,
     /// Positive, strictly increasing harmonic samples; statics are implicit.
     pub sample_hz: Vec<f64>,
+    /// Optional relative driving-point compliance tolerance on the explicit
+    /// source-pole/midpoint/seed grid. This is not a continuous-band bound.
+    pub transfer_tolerance: Option<f64>,
 }
 
 impl RitzOptions {
-    /// `max_modes,keep_low_modes,frequency_hz,...`, with 1..=16 samples.
+    /// `max_modes,keep_low_modes,frequency_hz,...`, or
+    /// `adaptive,max_modes,keep_low_modes,tolerance,seed_hz,...`.
     pub fn parse(text: &str) -> Result<Self, String> {
-        let fields: Vec<_> = text.split(',').take(MAX_SAMPLE_FREQUENCIES + 3).collect();
-        if !(3..=MAX_SAMPLE_FREQUENCIES + 2).contains(&fields.len()) {
+        let fields: Vec<_> = text.split(',').take(MAX_SAMPLE_FREQUENCIES + 5).collect();
+        let adaptive = fields.first().is_some_and(|s| s.trim() == "adaptive");
+        let start = usize::from(adaptive);
+        let samples = if adaptive { 4 } else { 2 };
+        if !(samples + 1..=MAX_SAMPLE_FREQUENCIES + samples).contains(&fields.len()) {
             return Err("board reduction needs max_modes,keep_low_modes and 1..=16 frequencies in Hz".into());
         }
         let options = Self {
-            max_modes: fields[0].trim().parse().map_err(|_| "invalid Ritz mode budget")?,
-            keep_low_modes: fields[1].trim().parse().map_err(|_| "invalid protected low-mode count")?,
-            sample_hz: fields[2..].iter().map(|s| s.trim().parse::<f64>()
+            max_modes: fields[start].trim().parse().map_err(|_| "invalid Ritz mode budget")?,
+            keep_low_modes: fields[start + 1].trim().parse().map_err(|_| "invalid protected low-mode count")?,
+            sample_hz: fields[samples..].iter().map(|s| s.trim().parse::<f64>()
                 .map_err(|_| "invalid Ritz sample frequency".to_string())).collect::<Result<_,_>>()?,
+            transfer_tolerance: if adaptive { Some(fields[3].trim().parse()
+                .map_err(|_| "invalid adaptive bridge response tolerance")?) } else { None },
         };
         options.validate()?;
         Ok(options)
@@ -51,8 +63,22 @@ impl RitzOptions {
             || self.sample_hz.windows(2).any(|w| w[0] >= w[1]) {
             return Err("Ritz reduction requires 1..=128 modes, keep_low_modes <= max_modes, and 1..=16 finite positive strictly increasing frequencies".into());
         }
+        if self.transfer_tolerance.is_some_and(|v| !v.is_finite() || v <= 0.0 || v >= 1.0) {
+            return Err("adaptive bridge response tolerance must be finite and strictly between zero and one".into());
+        }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct AdaptiveResponseReport {
+    pub tolerance: f64,
+    pub max_relative_driving_point_error: f64,
+    /// Exact finite grid checked, including zero-frequency compliance.
+    pub evaluation_hz: Vec<f64>,
+    /// Every admitted force port was checked at its own driving point.
+    pub port_count: usize,
+    pub enrichment_rounds: usize,
 }
 
 #[derive(Debug)]
@@ -69,6 +95,9 @@ pub struct RitzBasis {
     /// Nonzero static, harmonic-real and harmonic-imaginary snapshots, before
     /// rank selection. Duplicate directions still count as supplied snapshots.
     pub snapshot_count: usize,
+    /// Driving-point checks only: no cross-port, receiver, mesh-convergence,
+    /// or continuous-frequency transfer certificate is implied.
+    pub adaptive_response: Option<AdaptiveResponseReport>,
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 { a.iter().zip(b).map(|(x,y)| x*y).sum() }
@@ -105,6 +134,9 @@ pub fn bridge_basis(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
         || !(1..=MAX_PORTS).contains(&ports.len())
         || ports.iter().any(|p| p.len() != n || p.iter().any(|x| !x.is_finite())) {
         return Err("Ritz reduction needs 1..=512 ascending positive source modes, matching nonnegative damping, 1..=176 finite bridge vectors and an admitted low-mode count".into());
+    }
+    if options.transfer_tolerance.is_some() {
+        return adaptive::build(lambda, damping, ports, options);
     }
     let target = options.max_modes.min(n);
     let extra = target-options.keep_low_modes;
@@ -198,6 +230,14 @@ pub fn bridge_basis(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
         let error = (dot(&residual,&residual)/dot(snapshot,snapshot)).sqrt();
         max_relative_snapshot_error = max_relative_snapshot_error.max(error);
     }
+    let (stiffness, projected_damping) = projected_forms(lambda, damping, &columns)?;
+    Ok(RitzBasis { columns, stiffness, damping: projected_damping,
+        max_relative_snapshot_error, snapshot_count: snapshots.len(), adaptive_response: None })
+}
+
+fn projected_forms(lambda: &[f64], damping: &[f64], columns: &[Vec<f64>])
+    -> Result<(Vec<f64>, Vec<f64>), String> {
+    let n = lambda.len();
     let r = columns.len();
     let mut stiffness = vec![0.0;r*r];let mut projected_damping = vec![0.0;r*r];
     for row in 0..r { for col in row..r {
@@ -212,8 +252,7 @@ pub fn bridge_basis(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
         stiffness[row*r+col] = k;stiffness[col*r+row] = k;
         projected_damping[row*r+col] = c;projected_damping[col*r+row] = c;
     } }
-    Ok(RitzBasis { columns, stiffness, damping: projected_damping,
-        max_relative_snapshot_error, snapshot_count: snapshots.len() })
+    Ok((stiffness, projected_damping))
 }
 
 #[cfg(test)]
@@ -223,7 +262,7 @@ mod tests {
     fn fixture(max_modes: usize, keep_low_modes: usize) -> (Vec<f64>,Vec<f64>,Vec<Vec<f64>>,RitzOptions) {
         (vec![1.,4.,9.,16.,25.,36.],vec![0.11,0.07,0.43,0.2,0.31,0.6],
             vec![vec![0.7,-0.4,1.2,0.3,-0.8,0.9]],
-            RitzOptions { max_modes,keep_low_modes,sample_hz:vec![0.31] })
+            RitzOptions { max_modes,keep_low_modes,sample_hz:vec![0.31],transfer_tolerance:None })
     }
     fn coordinates(columns: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
         columns.iter().map(|q|dot(q,x)).collect()
@@ -325,7 +364,7 @@ mod tests {
         assert!(RitzOptions::parse(&too_many).is_err());
         let lambda: Vec<_>=(1..=MAX_SOURCE_MODES).map(|i|i as f64).collect();
         let c=vec![0.1;lambda.len()];let ports=vec![vec![1.;lambda.len()];MAX_PORTS];
-        let expensive=RitzOptions {max_modes:128,keep_low_modes:0,sample_hz:(1..=16).map(f64::from).collect()};
+        let expensive=RitzOptions {max_modes:128,keep_low_modes:0,sample_hz:(1..=16).map(f64::from).collect(),transfer_tolerance:None};
         assert!(bridge_basis(&lambda,&c,&ports,&expensive).unwrap_err().contains("work estimate"));
         let admitted=bridge_basis(&lambda,&c,&ports[..1],&RitzOptions::parse("1,1,0.1").unwrap()).unwrap();
         assert_eq!(admitted.columns[0].len(),MAX_SOURCE_MODES);
