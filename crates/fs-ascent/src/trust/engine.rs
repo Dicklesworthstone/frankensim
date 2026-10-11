@@ -9,6 +9,9 @@
 
 use crate::stop::{StopObservation, StopReason, StopRule};
 
+#[path = "engine/range.rs"]
+mod range;
+
 /// Outcome of a trust-region run.
 #[derive(Debug, Clone)]
 pub struct TrustRegionReport {
@@ -460,23 +463,15 @@ fn steihaug(
         if hd.iter().any(|v| !v.is_finite()) {
             return Err(SteihaugStop::Unusable(hv_count));
         }
-        let dhd: f64 = d.iter().zip(&hd).map(|(a, b)| a * b).sum();
-        if !dhd.is_finite() {
-            return Err(SteihaugStop::Unusable(hv_count));
-        }
-        if dhd <= 0.0 {
+        let (negative_curvature, alpha) = range::curvature(rr, &d, &hd);
+        if negative_curvature {
             // Negative curvature: follow d to the boundary.
-            let tau = boundary_tau(&p, &d, delta);
-            for i in 0..n {
-                p[i] = tau.mul_add(d[i], p[i]);
-            }
-            return if p.iter().all(|v| v.is_finite()) {
+            return if range::to_boundary(&mut p, &d, delta) {
                 Ok((p, true, true, hv_count))
             } else {
                 Err(SteihaugStop::Unusable(hv_count))
             };
         }
-        let alpha = rr / dhd;
         let mut p_next = p.clone();
         for i in 0..n {
             p_next[i] = alpha.mul_add(d[i], p_next[i]);
@@ -485,11 +480,7 @@ fn steihaug(
         // Positive curvature can be so small that the unrestricted CG step
         // overflows. Its finite trust-boundary truncation is still usable.
         if !alpha.is_finite() || pn_norm >= delta {
-            let tau = boundary_tau(&p, &d, delta);
-            for i in 0..n {
-                p[i] = tau.mul_add(d[i], p[i]);
-            }
-            return if p.iter().all(|v| v.is_finite()) {
+            return if range::to_boundary(&mut p, &d, delta) {
                 Ok((p, true, false, hv_count))
             } else {
                 Err(SteihaugStop::Unusable(hv_count))
@@ -517,15 +508,6 @@ fn steihaug(
     } else {
         Err(SteihaugStop::Unusable(hv_count))
     }
-}
-
-/// Positive τ with ‖p + τ·d‖ = Δ.
-fn boundary_tau(p: &[f64], d: &[f64], delta: f64) -> f64 {
-    let pd: f64 = p.iter().zip(d).map(|(a, b)| a * b).sum();
-    let dd: f64 = d.iter().map(|v| v * v).sum();
-    let pp: f64 = p.iter().map(|v| v * v).sum();
-    let disc = pd.mul_add(pd, dd * (delta * delta - pp));
-    (-pd + fs_math::det::sqrt(disc.max(0.0))) / dd
 }
 
 /// Trust-region Newton–Krylov with the classical radius laws
@@ -569,6 +551,8 @@ pub fn hv_fd_of_gradients(fg: crate::FnGrad<'_>, x: &[f64], v: &[f64], eps: f64)
 }
 
 #[cfg(test)]
+#[path = "engine/tests.rs"]
 mod tests;
 #[cfg(test)]
+#[path = "engine/budget_tests.rs"]
 mod budget_tests;
