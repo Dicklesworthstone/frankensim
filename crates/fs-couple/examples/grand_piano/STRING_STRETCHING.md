@@ -1,9 +1,10 @@
-# Played geometric string extension
+# Played string extension and longitudinal waves
 
 `piano_exterior render` and `render-loaded` accept
-`--string-stretching strings.fsps`. This selects the existing same-tick
-Kirchhoff--Carrier string/hammer/bridge mechanics. It is not stretch tuning,
-MIDI pitch bend, an output effect, or an independent nonlinear oscillator.
+`--string-stretching strings.fsps`. The same per-key file selects linear
+strings, averaged Kirchhoff--Carrier extension (`stretch`), or finite
+longitudinal string dynamics (`waves`). Both nonlinear selections act through
+the existing string/hammer/bridge mechanics in the same mechanical tick.
 
 ```sh
 cargo run --release -p fs-couple --example piano_exterior -- \
@@ -39,9 +40,10 @@ strings. The material path cannot also name a render or export output.
 
 This composes with CSV and MIDI performances, finite hammer footprints, supplied
 hammer cards, all pedals, spatial dampers and the existing mono/stereo Rayleigh
-receivers. The render reports the selected speaking/duplex channel count;
-zero means explicit all-linear selection. All-linear files preserve the original
-playback arithmetic, including the Model D preset. Acoustic assumptions remain
+receivers. The render reports the selected speaking/duplex channel count and
+retained longitudinal coordinate count. Zero nonlinear channels means explicit
+all-linear selection. All-linear files preserve the original playback
+arithmetic, including the Model D preset. Acoustic assumptions remain
 those of `grand_piano`, not the finite-body exterior renderer above.
 
 Five focused `grand_piano` regressions cover CLI/source admission, malformed and
@@ -58,17 +60,44 @@ cargo test -p fs-couple --example grand_piano string_stretching
 
 ```text
 frankensim-piano-string-stretching-v1
-# Illustrative two-key study, NOT identified Steinway axial rigidities.
-stretch,69,150000,0.2
-linear,72
+# Illustrative three-key study, NOT identified Steinway axial rigidities.
+waves,69,150000,0.2,60000,16,0.02,0.05
+stretch,72,150000,0.2
+linear,74
 ```
 
 The file must cover **every key in the supplied scale exactly once**, including
 unplayed sympathetic courses. A full preset needs 88 rows. `linear,key` explicitly
 retains the original linear potential for that key. A `stretch` row supplies
 key, positive finite axial rigidity **EA in newtons**, and a finite continuous
-slope limit in `(0,0.3]`. The example is valid only with a two-key 69/72 scale.
+slope limit in `(0,0.3]`. The example is valid only with a three-key 69/72/74 scale
+whose geometry and selected mechanical rate admit the stated axial band.
 Comments after `#` and blank lines are permitted. The file is bounded to 64 KiB.
+
+The complete `waves` row has eight fields:
+
+```text
+waves,key,EA_N,maximum_slope,axial_band_hz,mode_cap,damping_ratio,maximum_strain
+```
+
+| Field | Meaning and admission |
+| --- | --- |
+| `key` | One supplied scale key, covered exactly once by `linear`, `stretch` or `waves`. |
+| `EA_N` | Positive finite axial rigidity in newtons. |
+| `maximum_slope` | Bound on the complete transverse slope, in `(0,0.3]`. |
+| `axial_band_hz` | Positive finite axial frequency ceiling, at most `0.45` times the mechanical sample rate. |
+| `mode_cap` | Integer in `1..32`, applied to each physical speaking or duplex segment. A cap below the modes needed for the supplied band refuses. |
+| `damping_ratio` | Supplied axial modal damping ratio in `[0,1]`; zero selects lossless axial oscillators. |
+| `maximum_strain` | Positive additional material-strain bound at most `0.1`, applied to the absolute mean plus the sum of retained nonuniform strain amplitudes about the prestressed reference. |
+
+For segment length `L` and supplied linear mass density `mu`, axial frequencies
+are `f_n = n sqrt(EA/mu)/(2L)`. The adapter retains consecutive modes from `n=1`
+through the selected band. It uses each segment's actual length, including duplex
+length; `mode_cap` is an admission limit, not permission to drop modes inside the
+band. The mechanical sample rate is `48000 * --substeps` in these renderers.
+Selecting a larger band therefore requires both enough modes and enough explicit
+time resolution. For the example above, `--substeps 8` admits the frequency
+ceiling; the supplied scale still determines whether its mode cap is sufficient.
 
 EA is neither installed tension T, bending rigidity EI, nor spring rate EA/L.
 In particular, an effective winding mass and bending rigidity do not determine
@@ -78,13 +107,14 @@ members and existing duplex segments; the geometry and individual detuning
 remain those of the original scale.
 
 On exterior commands, missing files, duplicate/extra/missing keys, nonfinite
-values and invalid slope limits refuse before structural eigenanalysis or
-acoustic BEM preparation.
+values and invalid material limits refuse before structural eigenanalysis or
+acoustic BEM preparation. Clock, per-segment retention and dynamic strain checks
+remain part of physical preparation and execution.
 An explicitly all-linear file is legal and retains the old numerical path.
 `response` and `admittance` reject the option: their present linear harmonic
 experiments cannot silently stand in for an amplitude-dependent response.
 
-## What actually changes
+## Shared mechanics
 
 The existing string owner supplies the extension channel. The piano adapter
 includes both the fixed-interface string displacement and the moving bridge's
@@ -96,12 +126,14 @@ histories and the shared board before accepting one mechanical tick.
 The unloaded small-amplitude frequencies, modal mass normalization, unison
 layout, material loss and acoustic boundary projection are unchanged. During a
 strike, geometric extension stores additional energy and changes physical
-string tension. The complete energy balance includes that storage. No stored
+string tension. A `waves` selection also carries longitudinal displacement and
+velocity and their supplied modal damping. The complete energy balance includes
+the retained axial kinetic energy and strain potential once. No stored
 energy is turned into an extra dissipative loss or an output pitch envelope.
 
 Hammer/jack clocks, damper flow and acoustic splitting advance once per tick,
 not once per nonlinear trial. The engine retains its original convergence,
-material, energy and sample-rollback checks. A slope or convergence refusal
+material, energy and sample-rollback checks. A slope, strain or convergence refusal
 does not clip the string or publish a weaker linear substitute. Raising
 substeps is an explicit caller choice, never automatic clock repair.
 
@@ -109,15 +141,58 @@ Both exterior receivers observe the same nonlinear mechanical trajectory.
 Radiation-loaded playback retains the fitted acoustic storage and reaction;
 selecting extension neither changes the fit tolerances nor bypasses a failed
 passive fit. The report identifies whether nonlinear channels are active and
-the selected material path.
+the selected material path and number of retained longitudinal coordinates.
+
+## Finite longitudinal dynamics
+
+The `fs-nlmodal::longitudinal::LongitudinalString` owner resolves the
+moderate-slope additional material strain about the prestressed reference
+
+```text
+epsilon = u_x + (y_x^2 + z_x^2)/2.
+```
+
+The supplied `maximum_strain` bounds this increment. It does not add the
+installed reference strain `T0/EA`. Total tension is checked separately as
+`T0 + EA * epsilon`, including its lower bound over the complete reduced span.
+
+Here `u` is longitudinal displacement with fixed axial endpoints, and `y` and
+`z` are the retained transverse directions. A single transverse direction is
+also supported. Both polarizations of one physical string share one axial state
+and one strain energy; selecting two directions does not double the string.
+The moving transverse bridge supplies the same physical chord and reciprocal
+force pullback as averaged extension.
+
+The retained axial sine modes have inertia, propagate their strain at the
+material wave speed, and exchange energy with transverse motion during contact
+and free vibration. Their damping acts on axial velocity. Higher unretained
+zero-mean strain channels are statically equilibrated: they have no resolved
+inertia or propagation. The mean extension remains present. An empty retained
+axial set therefore has the averaged Kirchhoff--Carrier potential; a small axial
+band does not establish a complete longitudinal wave solution.
+
+No independent force lag or sample clock is introduced. Trial axial states are
+accepted with the same converged string/contact solve, and a refused frame
+restores their state together with the original mechanics. The additional-strain
+bound is checked across the complete reduced span. Loss of positive total
+tension refuses the trial rather than entering an unmodeled slack-string regime.
+
+This is a reduced moderate-slope model with fixed axial endpoints. It does not
+apply a longitudinal force or velocity port to the soundboard. Its changed
+pressure comes through reciprocal **transverse** bridge motion. It is simpler
+than the geometrically nonlinear Timoshenko string model in Chabassier,
+Chaigne and Joly, [*Time domain simulation of a piano. Part 1* (2014)](https://archive.numdam.org/articles/10.1051/m2an/2013136/),
+which motivates resolving longitudinal waves in piano modeling; this feature
+does not claim to reproduce that full model.
 
 ## Boundaries
 
-This is averaged, moderate-slope axial extension of the existing string image.
-With `--string-polarization`, both transverse directions share their total
-strain, one tension and one extension energy per physical segment; see
+`stretch` selects averaged moderate-slope extension; `waves` adds the explicitly
+retained longitudinal modes described above. With `--string-polarization`, both
+transverse directions share their total strain and one extension energy per
+physical segment; see
 `STRING_POLARIZATION.md` for the required geometric input. It does not resolve
-longitudinal waves, tension-dependent winding slip, full 3-D hammer/string
+axial motion of the bridge, tension-dependent winding slip, full 3-D hammer/string
 contact, or measured piano string materials. The acoustic fit
 remains bounded to its admitted sampled band even when a nonlinear attack
 contains higher-frequency energy. Retained modes, substeps and a supplied EA
@@ -129,3 +204,14 @@ stereo against direct calls to the same mechanical owner. It requires nonzero
 extension, changed physical motion, felt/damper loss and the original combined
 energy bound; native execution status is reported separately from these tests'
 existence.
+
+The longitudinal renderer regressions exercise finite axial state through actual
+Rayleigh and finite-body BEM pressure, MIDI/CSV and block-size equivalence,
+finite hammer faces, spatial dampers, and the same exterior radiation feedback.
+They compare the selected wave model with the same supplied-EA averaged model;
+they do not serve as a mesh, axial-band or measured-piano convergence study.
+
+```sh
+cargo test -p fs-couple --example grand_piano longitudinal_render_tests
+cargo test -p fs-couple --example piano_exterior playback::longitudinal_tests
+```

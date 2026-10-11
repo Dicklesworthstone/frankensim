@@ -120,13 +120,15 @@ on the played board in the same mechanical clock, alongside strings/contact.
 The board may cover part of the top face; the remainder is a rigid wall.
 It requires --render and full geometric motion. See CAVITY.md for the format;
 no cavity geometry or sealed-enclosure assumption is inferred from the preset.
---string-stretching supplies linear or geometric-extension selection for EVERY
-scale key. A stretch row supplies axial rigidity EA in N and a moderate-slope
-bound; these are not inferred from tension, EI or winding mass. It requires
---render, retains the same strings/bridge/hammer/pedal states, and solves
-extension and felt contact in the same mechanical tick. All-linear selection
-preserves the original image. No pitch automation, clipping, modal retuning or
-output processing is substituted; see STRING_STRETCHING.md for the SI format.
+--string-stretching supplies linear, averaged-extension (stretch), or finite
+longitudinal-wave (waves) selection for EVERY scale key. All nonlinear rows
+supply axial rigidity EA in N and a moderate-slope bound. A waves row also
+supplies axial band, mode cap, damping ratio and material-strain bound; these
+are not inferred from tension, EI or winding mass. Axial modes share the
+existing string/contact clock and react through the moving transverse bridge.
+Axial endpoints remain fixed. It requires --render; all-linear selection
+preserves the original image. See STRING_STRETCHING.md for SI rows, explicit
+retention limits and the distinction from a full longitudinal bridge model.
 --dump-geometry/--dump-obj export the board model; export alone skips eigenanalysis.
 Thickness taper, material constants and key assignment include explicit estimates.
 Default per-key WoolFelt loading envelopes are source-derived; crush/unloading
@@ -863,7 +865,8 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
     if let Some(path) = &options.string_stretching {
         let count = (0..piano.bank.strings.len())
             .filter(|&i| piano.bank.string_stretching_observation(i).is_some()).count();
-        println!("String extension: {path}; {count} geometric speaking/duplex channels; same-tick contact and reciprocal bridge work. Zero means explicit all-linear selection. EA is supplied, not inferred; slope/iteration limits refuse rather than clamp. No real-time or calibration claim; see STRING_STRETCHING.md.");
+        println!("String extension: {path}; {count} geometric speaking/duplex channels; {} retained longitudinal coordinates; same-tick contact and reciprocal transverse bridge work. Axial endpoints remain fixed. Zero channels means explicit all-linear selection. EA, wave retention and drag are supplied; slope/strain/iteration limits refuse rather than clamp. No real-time or calibration claim; see STRING_STRETCHING.md.",
+            piano.bank.longitudinal_mode_count());
     }
     if let Some(path)=&options.hammer_footprints {
         println!("Hammer contact geometry: {path}; {} independent felt sites, unchanged total course area and hammer mass. No inferred/calibrated face width; see HAMMER_FOOTPRINTS.md.",
@@ -1104,6 +1107,10 @@ mod string_polarization_render_tests;
 #[cfg(test)]
 #[path = "string_stretching_render_tests.rs"]
 mod string_stretching_render_tests;
+
+#[cfg(test)]
+#[path = "longitudinal_render_tests.rs"]
+mod longitudinal_render_tests;
 
 #[cfg(test)]
 #[path = "hammer_footprint_render_tests.rs"]

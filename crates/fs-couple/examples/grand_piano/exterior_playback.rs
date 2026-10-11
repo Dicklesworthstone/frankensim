@@ -202,7 +202,7 @@ impl Options {
         Ok(())
     }
     pub fn report(&self, piano: &engine::Instrument) -> String {
-        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} coordinates including duplex; {} contact sites. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {}; nonlinear string extension: {} (selection: {}); two transverse directions: {} (geometry/drag: {}); reciprocal cavity: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
+        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} transverse coordinates including duplex; {} contact sites. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {}; nonlinear string extension: {} (selection: {}); retained longitudinal coordinates: {} with fixed axial endpoints; two transverse directions: {} (geometry/drag: {}); reciprocal cavity: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
             piano.bank.rate, self.substeps, self.modes, piano.bank.modes.len(),
             piano.bank.contact_strings.len(), self.hammers.as_deref().unwrap_or("source defaults"),
             if self.rt0425_hammer_dissipation { "RT-0425 per-string K_H and R_H" }
@@ -213,6 +213,7 @@ impl Options {
             self.hammer_footprints.as_deref().unwrap_or("point"),
             self.dampers.as_deref().unwrap_or("point"), piano.bank.has_string_stretching(),
             self.string_stretching.as_deref().unwrap_or("inline or original linear image"),
+            piano.bank.longitudinal_mode_count(),
             piano.bank.has_secondary_polarization(),
             self.string_polarization.as_deref().unwrap_or("inline or original one-plane image"),
             piano.has_cavity(), self.cavity.as_deref().unwrap_or("inline or no enclosure"))
@@ -520,3 +521,7 @@ mod tests {
 #[cfg(test)]
 #[path = "exterior_stretching_tests.rs"]
 mod stretching_tests;
+
+#[cfg(test)]
+#[path = "exterior_longitudinal_render_tests.rs"]
+mod longitudinal_tests;
