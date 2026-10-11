@@ -11,6 +11,9 @@ use crate::stop::{StopObservation, StopReason, StopRule};
 
 #[path = "engine/range.rs"]
 mod range;
+#[path = "engine/preconditioner.rs"]
+mod preconditioner;
+pub use preconditioner::PreconditionerError;
 
 /// Outcome of a trust-region run.
 #[derive(Debug, Clone)]
@@ -66,6 +69,7 @@ pub struct TrustRegionState {
     evals: usize,
     hv_evals: usize,
     negative_curvature_hits: usize,
+    preconditioner_evals: usize,
     history: Vec<f64>,
     stalled: bool,
 }
@@ -74,12 +78,14 @@ enum IterationOutcome {
     Complete { usable: bool, negative_curvature: bool },
     Paused,
     HessianBudget,
+    Preconditioner(PreconditionerError),
 }
 
 enum SteihaugStop {
     Unusable(usize),
     Paused(usize),
     Budget(usize),
+    Preconditioner(PreconditionerError),
 }
 
 fn inf_norm(values: &[f64]) -> f64 {
@@ -170,6 +176,7 @@ impl TrustRegionState {
             evals: 1,
             hv_evals: 0,
             negative_curvature_hits: 0,
+            preconditioner_evals: 0,
             history: vec![f],
             stalled: false,
         }
@@ -192,6 +199,49 @@ impl TrustRegionState {
     #[must_use]
     pub fn history(&self) -> &[f64] {
         &self.history
+    }
+
+    /// Cumulative inverse-preconditioner attempts, including discarded trials,
+    /// malformed results and caught callback panics. Unpreconditioned runs do
+    /// not spend this counter; cloning a state preserves it.
+    #[must_use]
+    pub fn preconditioner_evals(&self) -> usize {
+        self.preconditioner_evals
+    }
+
+    /// Matrix-free preconditioned Newton--Krylov with independent cumulative
+    /// Hessian and inverse-preconditioner ceilings. The preconditioner receives
+    /// `(accepted_point, residual)` and returns an approximate inverse-Hessian
+    /// action. It must be a fixed linear SPD map during each Krylov solve; it
+    /// may change with the accepted point between outer iterations.
+    ///
+    /// The trust ball remains Euclidean in the ORIGINAL design coordinates,
+    /// and convergence uses the original gradient, not a preconditioned norm.
+    /// The residual uses the engine's objective normalization. A fixed positive
+    /// power-of-two rescaling of the inverse action controls intermediate range
+    /// without changing the mathematical PCG step or the trust metric.
+    ///
+    /// A preconditioner refusal or exhausted allowance returns `Err` without
+    /// stalling the solver or publishing any part of the interrupted iteration.
+    /// Increase the ceiling (or repair the callback) to retry; spent work is
+    /// never refunded. Inspect [`Self::preconditioner_evals`] even on error.
+    /// Callback panics in the inverse action are caught; external side effects
+    /// are not undone. Objective/Hessian callbacks retain [`Self::run_bounded`]
+    /// panic semantics. Local positive-product checks do not prove global SPD
+    /// or linearity, and no arbitrary-conditioning guarantee is implied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_preconditioned_bounded(
+        &mut self,
+        fg: crate::FnGrad<'_>,
+        hv_at: crate::FnHv<'_>,
+        inverse: crate::FnHv<'_>,
+        rule: &StopRule,
+        max_iters: usize,
+        max_hessian_products: usize,
+        max_preconditioner_applications: usize,
+    ) -> Result<TrustRegionRunReport, PreconditionerError> {
+        self.run_with_preconditioner(fg, hv_at, Some(inverse), rule, max_iters,
+            max_hessian_products, max_preconditioner_applications, &mut || false)
     }
 
     /// Snapshot of the last accepted point; this does not evaluate the model.
@@ -266,6 +316,23 @@ impl TrustRegionState {
         max_hessian_products: usize,
         paused: &mut dyn FnMut() -> bool,
     ) -> TrustRegionRunReport {
+        self.run_with_preconditioner(fg, hv_at, None, rule, max_iters,
+            max_hessian_products, usize::MAX, paused)
+            .expect("an unpreconditioned solve cannot fail its inverse action")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_with_preconditioner(
+        &mut self,
+        fg: crate::FnGrad<'_>,
+        hv_at: crate::FnHv<'_>,
+        mut inverse: Option<crate::FnHv<'_>>,
+        rule: &StopRule,
+        max_iters: usize,
+        max_hessian_products: usize,
+        max_preconditioner_applications: usize,
+        paused: &mut dyn FnMut() -> bool,
+    ) -> Result<TrustRegionRunReport, PreconditionerError> {
         let budget = admit_rule(rule, self.evals);
         let mut completed = 0usize;
         let progress = loop {
@@ -290,9 +357,11 @@ impl TrustRegionState {
             if completed == max_iters {
                 break TrustRegionProgress::Stopped(StopReason::IterationCap);
             }
-            match self.iterate(fg, hv_at, max_hessian_products, paused) {
+            match self.iterate(fg, hv_at, max_hessian_products, paused,
+                &mut inverse, max_preconditioner_applications) {
                 IterationOutcome::Paused => break TrustRegionProgress::Paused,
                 IterationOutcome::HessianBudget => break TrustRegionProgress::HessianBudget,
+                IterationOutcome::Preconditioner(error) => return Err(error),
                 IterationOutcome::Complete { usable, negative_curvature } => {
                     self.stalled = !usable;
                     self.negative_curvature_hits += usize::from(negative_curvature);
@@ -302,10 +371,10 @@ impl TrustRegionState {
             self.history.push(self.f);
             completed += 1;
         };
-        TrustRegionRunReport {
+        Ok(TrustRegionRunReport {
             progress,
             solution: self.report(),
-        }
+        })
     }
 
     // Only callback counters change before the final cancellation checkpoint.
@@ -316,6 +385,8 @@ impl TrustRegionState {
         hv_at: crate::FnHv<'_>,
         max_hessian_products: usize,
         paused: &mut dyn FnMut() -> bool,
+        inverse: &mut Option<crate::FnHv<'_>>,
+        max_preconditioner_applications: usize,
     ) -> IterationOutcome {
         let scale = quadratic_scale(&self.g);
         let scaled_gradient =
@@ -337,7 +408,17 @@ impl TrustRegionState {
                 }
                 product
             };
-            steihaug(gradient, &mut hv, self.delta, 1e-8, allowance, paused)
+            match inverse.as_mut() {
+                None => steihaug(gradient, &mut hv, self.delta, 1e-8, allowance, paused),
+                Some(inverse) => {
+                    let mut action = preconditioner::Action::new(
+                        &mut **inverse, &xc, &mut self.preconditioner_evals,
+                        max_preconditioner_applications,
+                    );
+                    steihaug_preconditioned(gradient, &mut hv, self.delta, 1e-8,
+                        allowance, paused, Some(&mut action))
+                }
+            }
         };
         let (p, _hit, neg, hv_count) = match step {
             Ok(step) => step,
@@ -348,6 +429,9 @@ impl TrustRegionState {
             Err(SteihaugStop::Paused(hv_count)) => {
                 debug_assert_eq!(self.hv_evals - initial_hv, hv_count);
                 return IterationOutcome::Paused;
+            }
+            Err(SteihaugStop::Preconditioner(error)) => {
+                return IterationOutcome::Preconditioner(error);
             }
             Err(SteihaugStop::Budget(hv_count)) => {
                 debug_assert_eq!(self.hv_evals - initial_hv, hv_count);
@@ -441,6 +525,18 @@ fn steihaug(
     max_hv: usize,
     paused: &mut dyn FnMut() -> bool,
 ) -> Result<(Vec<f64>, bool, bool, usize), SteihaugStop> {
+    steihaug_preconditioned(g, hv, delta, tol, max_hv, paused, None)
+}
+
+fn steihaug_preconditioned(
+    g: &[f64],
+    hv: &mut dyn FnMut(&[f64]) -> Vec<f64>,
+    delta: f64,
+    tol: f64,
+    max_hv: usize,
+    paused: &mut dyn FnMut() -> bool,
+    mut inverse: Option<&mut preconditioner::Action<'_>>,
+) -> Result<(Vec<f64>, bool, bool, usize), SteihaugStop> {
     let n = g.len();
     let mut p = vec![0.0f64; n];
     let mut r: Vec<f64> = g.iter().map(|v| -v).collect();
@@ -450,6 +546,17 @@ fn steihaug(
     let mut hv_count = 0usize;
     if !rr.is_finite() {
         return Err(SteihaugStop::Unusable(hv_count));
+    }
+    let mut rz = rr;
+    if let Some(action) = inverse.as_deref_mut() {
+        if rr.sqrt() < tol * g_norm.max(1e-30) {
+            return Ok((p, false, false, hv_count));
+        }
+        if paused() { return Err(SteihaugStop::Paused(hv_count)); }
+        // No inverse work is useful when even the first Hessian is unaffordable.
+        if max_hv == 0 { return Err(SteihaugStop::Budget(hv_count)); }
+        d = action.apply(&r, hv_count, paused)?;
+        rz = preconditioner::positive_product(&r, &d)?;
     }
     for _ in 0..n.saturating_mul(2) {
         if rr.sqrt() < tol * g_norm.max(1e-30) {
@@ -473,7 +580,7 @@ fn steihaug(
         if hd.iter().any(|v| !v.is_finite()) {
             return Err(SteihaugStop::Unusable(hv_count));
         }
-        let (negative_curvature, alpha) = range::curvature(rr, &d, &hd);
+        let (negative_curvature, alpha) = range::curvature(rz, &d, &hd);
         if negative_curvature {
             // Negative curvature: follow d to the boundary.
             return if range::to_boundary(&mut p, &d, delta) {
@@ -504,13 +611,28 @@ fn steihaug(
         if !rr_new.is_finite() {
             return Err(SteihaugStop::Unusable(hv_count));
         }
-        let beta = rr_new / rr;
+        let z = if let Some(action) = inverse.as_deref_mut() {
+            // Do not spend an inverse action after reaching the unpreconditioned residual
+            // tolerance, or after exhausting this trial's Hessian allowance.
+            if rr_new.sqrt() < tol * g_norm.max(1e-30) {
+                return Ok((p, false, false, hv_count));
+            }
+            if paused() { return Err(SteihaugStop::Paused(hv_count)); }
+            if hv_count >= max_hv { return Err(SteihaugStop::Budget(hv_count)); }
+            Some(action.apply(&r, hv_count, paused)?)
+        } else { None };
+        let rz_new = match &z {
+            Some(z) => preconditioner::positive_product(&r, z)?,
+            None => rr_new,
+        };
+        let beta = rz_new / rz;
         if !beta.is_finite() {
             return Err(SteihaugStop::Unusable(hv_count));
         }
         rr = rr_new;
+        rz = rz_new;
         for i in 0..n {
-            d[i] = beta.mul_add(d[i], r[i]);
+            d[i] = beta.mul_add(d[i], z.as_ref().map_or(r[i], |z| z[i]));
         }
     }
     if p.iter().all(|v| v.is_finite()) {
@@ -566,3 +688,7 @@ mod tests;
 #[cfg(test)]
 #[path = "engine/budget_tests.rs"]
 mod budget_tests;
+
+#[cfg(test)]
+#[path = "engine/preconditioner_tests.rs"]
+mod preconditioner_tests;

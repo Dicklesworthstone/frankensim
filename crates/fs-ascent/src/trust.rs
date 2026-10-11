@@ -4,7 +4,7 @@
 
 mod engine;
 pub use engine::{
-    TrustRegionProgress, TrustRegionReport, TrustRegionRunReport, TrustRegionState,
+    PreconditionerError, TrustRegionProgress, TrustRegionReport, TrustRegionRunReport, TrustRegionState,
     hv_fd_of_gradients, trust_region_newton,
 };
 use fs_exec::Cx;
@@ -47,6 +47,28 @@ impl TrustRegionState {
         self.run_with_limits(fg, hv_at, rule, max_iters, max_hessian_products,
             &mut || cx.checkpoint().is_err())
     }
+
+    /// Cancellable preconditioned Newton--Krylov. Cancellation is polled around
+    /// every inverse action as well as the objective and Hessian callbacks.
+    /// Both derivative-work ceilings and their spent counts survive a pause.
+    /// See [`Self::run_preconditioned_bounded`] for the fixed-SPD contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_preconditioned_bounded_cancellable(
+        &mut self,
+        fg: crate::FnGrad<'_>,
+        hv_at: crate::FnHv<'_>,
+        inverse: crate::FnHv<'_>,
+        rule: &StopRule,
+        max_iters: usize,
+        max_hessian_products: usize,
+        max_preconditioner_applications: usize,
+        cx: &Cx,
+    ) -> Result<TrustRegionRunReport, PreconditionerError> {
+        self.run_with_preconditioner(fg, hv_at, Some(inverse), rule, max_iters,
+            max_hessian_products, max_preconditioner_applications,
+            &mut || cx.checkpoint().is_err())
+    }
+
 }
 
 #[cfg(test)]
