@@ -1,4 +1,4 @@
-//! Same-tick contact and geometric extension, with one physical commit.
+//! Same-tick hammer/damper contact and geometric extension, with one physical commit.
 //! The extra conservative force is resolved against the original Schur image.
 //! Hammer/jack prediction and acoustic/damper splitting occur once per tick,
 //! not once per trial; all felt/Prony history stays frozen during these solves.
@@ -23,10 +23,18 @@ impl Instrument {
     pub(super) fn solve_string_contact_step(&mut self)->Result<(),Error> {
         for _ in 0..string_stretching::MAX_TRIALS {
             self.solve_contacts_for_trial()?;
-            if self.bank.correct_string_stretching_step().map_err(Error::Contact)? {return Ok(());}
+            let strings_converged=self.bank.correct_string_stretching_step().map_err(Error::Contact)?;
+            let dampers_converged=if let Some(dampers)=&mut self.felt_dampers {
+                let converged=dampers.correct(&self.bank.next_q).map_err(Error::Contact)?;
+                if !converged {
+                    self.bank.set_external_force(dampers.generalized_force()).map_err(Error::Contact)?;
+                }
+                converged
+            }else{true};
+            if strings_converged&&dampers_converged {return Ok(());}
             self.bank.predict();
         }
-        Err(Error::Contact("geometric string/contact solve exhausted 64 trials"))
+        Err(Error::Contact("coupled string/hammer/damper solve exhausted 64 trials"))
     }
 
     // Original contact equation, global 32-sweep limit, per-hammer blocks and

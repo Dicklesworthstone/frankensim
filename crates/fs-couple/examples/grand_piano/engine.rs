@@ -18,6 +18,36 @@ pub mod radiation;
 mod contact_solver;
 #[path = "string_engine.rs"]
 mod string_mechanics;
+#[path = "felt_dampers.rs"]
+pub mod felt_dampers;
+
+/// Complete choice of one damper image through the existing input frontdoor.
+/// Material and geometry admission remains with each physical owner.
+pub enum DamperSpecification {
+    Viscous(dampers::Specification),
+    Felt(felt_dampers::Specification),
+}
+impl DamperSpecification {
+    pub fn read(text: &str, courses: &[Course]) -> Result<Self, String> {
+        let header = text.lines().map(|line| line.split('#').next().unwrap_or("").trim())
+            .find(|line| !line.is_empty());
+        if header == Some(felt_dampers::HEADER) {
+            felt_dampers::Specification::read(text, courses).map(Self::Felt)
+        } else {
+            dampers::Specification::read(text, courses).map(Self::Viscous)
+        }
+    }
+    pub fn load(path: &str, courses: &[Course]) -> Result<Self, String> {
+        use std::io::Read;
+        let mut text = String::new();
+        std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?
+            .take(1024*1024+1).read_to_string(&mut text).map_err(|e| format!("{path}: {e}"))?;
+        Self::read(&text, courses)
+    }
+    pub fn estimated(courses: &[Course]) -> Result<Self, String> {
+        dampers::Specification::estimated(courses).map(Self::Viscous)
+    }
+}
 
 const CATCH_DISTANCE: f64 = 0.020; // idealized backcheck/rest gap
 const LET_OFF_DISTANCE: f64 = 0.0015; // Chabassier/Durufle JSV 2014 Table 3
@@ -62,6 +92,10 @@ pub struct Accounting {
     /// Explicit cavity momentum drag, separate from exterior radiation loss.
     pub cavity_loss_j:f64,
     pub damper_loss_j:f64,
+    /// Prony relaxation subset of damper_loss_j, not an additional loss.
+    pub damper_relaxation_loss_j:f64,
+    /// Signed prescribed-pad work, already included in input_work_j.
+    pub damper_actuator_work_j:f64,
     pub catch_loss_j:f64,
     pub max_balance_error_j:f64,
 }
@@ -82,6 +116,7 @@ pub struct Instrument {
     source_rate_n_s_m_p:Vec<f64>,
     contact_solver:Option<contact_solver::Prepared>,
     spatial_dampers:Option<dampers::Prepared>,
+    felt_dampers:Option<felt_dampers::Prepared>,
     /// Supplied lateral/vertical viscous drag ratio for each complete course.
     transverse_damper_ratio:Option<Vec<f64>>,
     radiation:Option<radiation::Prepared>,
@@ -265,7 +300,7 @@ impl Instrument {
             saved_contacts:contacts.clone(),hammer_next:hammers.clone(),hammer_free:vec![0.0;courses.len()],
             jack_force:vec![0.0;courses.len()],rest_force:vec![0.0;courses.len()],
             source_rate_n_s_m_p:vec![0.0;nc],
-            bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,contact_thickness_m,contact_recession_m,contact_solver,spatial_dampers:None,transverse_damper_ratio,radiation:None,cavity:None,output_rate:rate,substeps,sustain:0.0,
+            bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,contact_thickness_m,contact_recession_m,contact_solver,spatial_dampers:None,felt_dampers:None,transverse_damper_ratio,radiation:None,cavity:None,output_rate:rate,substeps,sustain:0.0,
             sostenuto:false,una_corda:false,last_damped_midi:88,damper_drag_ns_m:0.4,
             accounting:Accounting::default(),contact_h,force:vec![0.0;nc],gap:vec![0.0;nc],
             active:Vec::with_capacity(nc)})
@@ -363,9 +398,40 @@ impl Instrument {
     /// admission; configuring a viscous law neither stores energy nor resets
     /// ongoing string, board, hammer or felt history. This is not a hot control.
     pub fn configure_dampers(&mut self,spec:&dampers::Specification)->Result<(),String>{
+        if self.felt_dampers.is_some() {
+            return Err("a felt damper owner is already prepared; its history cannot be replaced by drag".into());
+        }
         let prepared=dampers::Prepared::new_with_transverse_drag(spec,&self.courses,&self.bank,
             self.transverse_damper_ratio.as_deref())?;
         self.spatial_dampers=Some(prepared);Ok(())
+    }
+    pub fn configure_damper_spec(&mut self,spec:&DamperSpecification)->Result<(),String>{
+        match spec {
+            DamperSpecification::Viscous(spec)=>self.configure_dampers(spec),
+            DamperSpecification::Felt(spec)=>self.configure_felt_dampers(spec),
+        }
+    }
+    /// Attach supplied unloaded finite-gap pads once, before excitation. The
+    /// original viscous images and this contact image cannot be stacked.
+    pub fn configure_felt_dampers(&mut self,spec:&felt_dampers::Specification)->Result<(),String>{
+        if self.felt_dampers.is_some() || self.spatial_dampers.is_some()
+            || self.accounting.input_work_j!=0.0
+            || self.hammers.iter().any(|h|h.active||h.held||h.latched)
+            || self.bank.q.iter().chain(&self.bank.v).any(|x|*x!=0.0) {
+            return Err("felt dampers must be prepared once, before piano excitation or another damper image".into());
+        }
+        let prepared=felt_dampers::Prepared::new(spec,&self.courses,&self.bank)?;
+        self.bank.prepare_external_force();
+        self.felt_dampers=Some(prepared);
+        Ok(())
+    }
+    pub fn felt_damper_resolution(&self)->Option<(usize,usize)>{
+        self.felt_dampers.as_ref().map(felt_dampers::Prepared::resolution)
+    }
+    /// Read-only physical contact and travel observations; no extra advancement.
+    pub fn felt_dampers(&self)->Option<&felt_dampers::Prepared>{self.felt_dampers.as_ref()}
+    pub fn damper_energy_j(&self)->f64 {
+        self.felt_dampers.as_ref().map_or(0.0,felt_dampers::Prepared::energy)
     }
     /// None is the original point image; Some counts actual retained string
     /// pads and quadrature stations, including a valid all-free specification.
@@ -456,7 +522,7 @@ impl Instrument {
     }
 
     pub fn energy_j(&self)->f64 {
-        let mut e=self.bank.energy()+self.radiation_energy_j()+self.cavity_energy_j();
+        let mut e=self.bank.energy()+self.radiation_energy_j()+self.cavity_energy_j()+self.damper_energy_j();
         for (h,p) in self.hammers.iter().zip(&self.hammer_models) {e+=p.energy(&h.motion,CATCH_DISTANCE);}
         for (i,p) in self.contacts.iter().enumerate(){
             e+=self.creep[i].stored(&p.memory);
@@ -471,6 +537,9 @@ impl Instrument {
     }
 
     fn damp(&mut self,dt:f64,reverse:bool)->Result<f64,Error>{
+        // The finite-gap owner supplies actual contact forces in mechanics.
+        // Even explicit free rows must remain free of the fallback drag image.
+        if self.felt_dampers.is_some() {return Ok(0.0);}
         if let Some(dampers)=&self.spatial_dampers {
             let hammers=&self.hammers;
             return dampers.apply(&mut self.bank.v,dt,self.sustain,
@@ -511,6 +580,12 @@ impl Instrument {
                 .map_err(|_|Error::Contact("cavity exchange failed finite/energy admission"))?
         } else {0.};
         let mut damper_loss=self.damp(0.5*dt,false)?;
+        if let Some(dampers)=&mut self.felt_dampers {
+            let hammers=&self.hammers;
+            dampers.begin_step(self.sustain,|ci|hammers[ci].held||hammers[ci].latched)
+                .map_err(Error::Contact)?;
+            self.bank.set_external_force(dampers.generalized_force()).map_err(Error::Contact)?;
+        }
         self.bank.begin_string_stretching_step();
         self.bank.predict();self.active.clear();
         self.jack_force.fill(0.0);self.rest_force.fill(0.0);
@@ -575,6 +650,10 @@ impl Instrument {
             self.contacts[i].memory=memory;
             self.contacts[i].overlap=end;self.contacts[i].force=self.force[i];
         }
+        let (contact_damper_loss,damper_relaxation_loss,damper_work)=if let Some(dampers)=&mut self.felt_dampers {
+            dampers.accept(&self.bank.next_q).map_err(Error::Contact)?
+        }else{(0.0,0.0,0.0)};
+        damper_loss+=contact_damper_loss;
         self.hammers.copy_from_slice(&self.hammer_next);self.bank.commit();
         let mut catch_loss=0.0;
         for i in 0..self.hammers.len(){
@@ -600,13 +679,15 @@ impl Instrument {
             radiation_loss+=air.after(&mut self.bank.v[self.bank.modes.len()..]).map_err(Error::Contact)?;
         }
         let modal_loss=self.bank.last_modal_loss_j;
-        let after=self.energy_j();let balance=after-before+felt_loss+shank_loss+modal_loss+radiation_loss+cavity_loss+damper_loss+catch_loss-jack_work;
+        let after=self.energy_j();let balance=after-before+felt_loss+shank_loss+modal_loss+radiation_loss+cavity_loss+damper_loss+catch_loss-jack_work-damper_work;
         let tolerance=1e-9+1e-8*before.abs().max(after.abs());
         if !after.is_finite()||after>100.0{return Err(Error::NonFinite);}
-        if balance.abs()>tolerance||felt_loss< -tolerance||shank_loss< -tolerance||modal_loss< -tolerance||radiation_loss< -tolerance||cavity_loss< -tolerance||catch_loss< -tolerance {
+        if balance.abs()>tolerance||felt_loss< -tolerance||shank_loss< -tolerance||modal_loss< -tolerance||radiation_loss< -tolerance||cavity_loss< -tolerance||damper_loss< -tolerance||catch_loss< -tolerance {
             return Err(Error::Energy{defect_j:balance});
         }
-        self.accounting.input_work_j+=jack_work;self.accounting.shank_loss_j+=shank_loss;
+        self.accounting.input_work_j+=jack_work+damper_work;self.accounting.shank_loss_j+=shank_loss;
+        self.accounting.damper_actuator_work_j+=damper_work;
+        self.accounting.damper_relaxation_loss_j+=damper_relaxation_loss;
         self.accounting.felt_loss_j+=felt_loss;self.accounting.felt_relaxation_loss_j+=relaxation_loss;
         self.accounting.modal_loss_j+=modal_loss;
         self.accounting.radiation_loss_j+=radiation_loss;
@@ -633,6 +714,7 @@ impl Instrument {
     fn step_observed(&mut self,mut trace:Option<&mut[f64]>)->Result<f64,Error>{
         self.saved_q.copy_from_slice(&self.bank.q);self.saved_v.copy_from_slice(&self.bank.v);
         self.bank.checkpoint_longitudinal();
+        if let Some(dampers)=&mut self.felt_dampers {dampers.checkpoint();}
         self.saved_hammers.copy_from_slice(&self.hammers);self.saved_contacts.clone_from_slice(&self.contacts);
         let saved=self.accounting;let modal=self.bank.last_modal_loss_j;
         if let Some(air)=&mut self.radiation {air.checkpoint();}
@@ -642,10 +724,17 @@ impl Instrument {
             if let Err(error)=self.mechanics_step(){
                 self.bank.q.copy_from_slice(&self.saved_q);self.bank.v.copy_from_slice(&self.saved_v);
                 self.bank.restore_longitudinal();
+                if let Some(dampers)=&mut self.felt_dampers {
+                    dampers.restore();
+                }
                 self.hammers.copy_from_slice(&self.saved_hammers);self.contacts.clone_from_slice(&self.saved_contacts);
                 if let Some(air)=&mut self.radiation {air.restore();}
                 if let Some(air)=&mut self.cavity {air.restore();}
-                self.accounting=saved;self.bank.last_modal_loss_j=modal;return Err(error);
+                self.accounting=saved;self.bank.last_modal_loss_j=modal;
+                if let Some(dampers)=&self.felt_dampers {
+                    self.bank.set_external_force(dampers.generalized_force()).map_err(Error::Contact)?;
+                }
+                return Err(error);
             }
             if let Some(buffer)=trace.as_deref_mut(){
                 let r=self.bank.board_count;
@@ -673,6 +762,10 @@ mod cavity_tests;
 #[cfg(test)]
 #[path = "damper_engine_tests.rs"]
 mod damper_tests;
+
+#[cfg(test)]
+#[path = "felt_damper_engine_tests.rs"]
+mod felt_damper_tests;
 
 #[cfg(test)]
 #[path = "silent_key_engine_tests.rs"]
