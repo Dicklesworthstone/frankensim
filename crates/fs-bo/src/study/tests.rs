@@ -146,3 +146,117 @@ fn g0_inadmissible_completed_data_are_retained_not_rescheduled_or_noise_repaired
     assert_eq!(study.work().model_fit_attempts, 2);
     assert_eq!(study.work().acquisition_batch_attempts, 0);
 }
+
+fn learning() -> NoisyLearningConfig {
+    NoisyLearningConfig { refit_every: 2, fit: crate::hyper::HeteroFitConfig {
+        lengthscale_bounds: vec![(0.05, 2.0)], signal_bounds: (0.01, 5.0),
+        starts: 2, max_iterations: 12, max_evaluations: 20, gradient_tolerance: 1e-7, seed: 13,
+    } }
+}
+
+fn assert_same_fits(a: &[NoisyFitRecord], b: &[NoisyFitRecord]) {
+    assert_eq!(a.len(), b.len());
+    for (a, b) in a.iter().zip(b) {
+        assert_eq!((a.after_batches, a.observation_count, a.evaluations, a.seed),
+            (b.after_batches, b.observation_count, b.evaluations, b.seed));
+        assert_eq!(a.kernel.family, b.kernel.family);
+        assert_eq!(a.kernel.lengthscales, b.kernel.lengthscales);
+        assert_eq!(a.kernel.signal.to_bits(), b.kernel.signal.to_bits());
+        assert_eq!(a.initial_lml.to_bits(), b.initial_lml.to_bits());
+        assert_eq!(a.lml.to_bits(), b.lml.to_bits());
+        assert_eq!(a.projected_gradient_inf.to_bits(), b.projected_gradient_inf.to_bits());
+        assert_eq!(a.evaluation_limit_reached, b.evaluation_limit_reached);
+    }
+}
+
+#[test]
+fn learned_external_studies_match_synchronous_refits_and_all_outputs() {
+    for q in [1, 2] {
+        let mut c = config(); c.q = q;
+        let policy = learning();
+        let expected = crate::learning::minimize_noisy_with_learning(
+            &mut observation, 1, 3, 3, &c, &policy).unwrap();
+        let mut study = NoisyStudy::new_with_learning(45, 1, 3, 3, &c, &policy).unwrap();
+        assert_eq!(finish(&mut study, true), 3 + 3 * q);
+        assert_eq!(study.report(), &expected.report);
+        assert_same_fits(study.fit_records(), &expected.fits);
+        assert_eq!(study.fit_records().iter().map(|r| r.after_batches).collect::<Vec<_>>(), vec![0, 2]);
+        assert!(study.fit_records()[0].lml > study.fit_records()[0].initial_lml);
+        assert_eq!(study.kernel().signal, expected.fits.last().unwrap().kernel.signal);
+    }
+}
+
+#[test]
+fn learned_partial_batch_clone_preserves_the_next_warm_start() {
+    let c = config();
+    let mut study = NoisyStudy::new_with_learning(46, 1, 3, 2, &c, &learning()).unwrap();
+    for job in study.ask() { study.tell(&job, observation(&job.x)).unwrap(); }
+    study.advance().unwrap();
+    let job = study.ask()[1].clone();
+    study.tell(&job, observation(&job.x)).unwrap();
+    let mut clone = study.clone();
+    assert_eq!(finish(&mut study, true), 3);
+    assert_eq!(finish(&mut clone, false), 3);
+    assert_eq!(study.report(), clone.report());
+    assert_same_fits(study.fit_records(), clone.fit_records());
+}
+
+#[test]
+fn cancellation_after_kernel_learning_does_not_commit_the_kernel_or_fit_record() {
+    let c = config();
+    let policy = learning();
+    let mut study = NoisyStudy::new_with_learning(47, 1, 3, 1, &c, &policy).unwrap();
+    for job in study.ask() { study.tell(&job, observation(&job.x)).unwrap(); }
+    let before = study.clone();
+    // Measure the successful path's checkpoints, then refuse the final publish
+    // check. No dependence on the number of backtracks chosen by the learner.
+    let mut probe = before.clone();
+    let mut count = 0;
+    probe.advance_controlled(&mut || { count += 1; true }).unwrap();
+    let mut checks = 0;
+    assert_eq!(study.advance_controlled(&mut || { checks += 1; checks < count }),
+        Err(NoisyStudyError::Cancelled));
+    assert_eq!(study.pending(), before.pending());
+    assert_eq!(study.report(), before.report());
+    assert!(study.fit_records().is_empty());
+    assert_eq!(study.kernel().signal.to_bits(), c.kernel.signal.to_bits());
+    assert_eq!(study.work(), NoisyStudyWork { model_fit_attempts: 1, acquisition_batch_attempts: 1 });
+    study.advance().unwrap();
+    assert_eq!(study.ask(), probe.ask());
+    assert_eq!(study.report(), probe.report());
+    assert_same_fits(study.fit_records(), probe.fit_records());
+}
+
+#[test]
+fn cancellation_inside_learner_retains_received_jobs_for_retry() {
+    let mut study = NoisyStudy::new_with_learning(48, 1, 3, 0, &config(), &learning()).unwrap();
+    for job in study.ask() { study.tell(&job, observation(&job.x)).unwrap(); }
+    let pending = study.pending().to_vec();
+    let mut checks = 0;
+    assert_eq!(study.advance_controlled(&mut || { checks += 1; checks < 4 }),
+        Err(NoisyStudyError::Cancelled));
+    assert_eq!(study.pending(), pending);
+    assert!(study.report().x.is_empty());
+    assert!(study.fit_records().is_empty());
+    assert_eq!(finish(&mut study, false), 0);
+    assert_eq!(study.fit_records().len(), 1);
+    assert_eq!(study.work().model_fit_attempts, 2);
+}
+
+#[test]
+fn learned_constructor_refuses_invalid_work_policy_and_one_probe_recovers_fixed_study() {
+    let c = config();
+    let mut bad = learning(); bad.refit_every = 0;
+    assert!(matches!(NoisyStudy::new_with_learning(49, 1, 3, 2, &c, &bad),
+        Err(HeteroFitError::InvalidConfig)));
+    bad = learning(); bad.fit.max_evaluations = usize::MAX;
+    assert!(matches!(NoisyStudy::new_with_learning(49, 1, 3, 2, &c, &bad),
+        Err(HeteroFitError::InvalidConfig)));
+    let mut policy = learning(); policy.fit.max_evaluations = 1;
+    let mut learned = NoisyStudy::new_with_learning(50, 1, 3, 2, &c, &policy).unwrap();
+    let mut fixed = NoisyStudy::new(50, 1, 3, 2, &c);
+    finish(&mut learned, true); finish(&mut fixed, false);
+    assert_eq!(learned.report(), fixed.report());
+    assert_eq!(learned.work(), fixed.work());
+    assert!(learned.fit_records().iter().all(|fit| fit.evaluations == 1));
+}

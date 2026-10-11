@@ -6,8 +6,9 @@
 //! asynchronous fantasy/pending-point acquisition. External job dispatch and
 //! cancellation belong to the caller; this module owns no threads or I/O.
 
-use crate::gp::Gp;
-use crate::hyper::zero_noise_duplicates;
+use crate::gp::{Gp, Kernel};
+use crate::hyper::{HeteroFitError, fit_heteroscedastic_controlled, zero_noise_duplicates};
+use crate::learning::{NoisyFitRecord, NoisyLearningConfig};
 use crate::noisy::{NoisyBoConfig, NoisyBoReport, NoisyObservation};
 
 /// Stable logical job identity and the exact requested coordinates.
@@ -93,6 +94,8 @@ pub struct NoisyStudy {
     pending: Vec<PendingEvaluation>,
     complete: bool,
     work: NoisyStudyWork,
+    learning: Option<NoisyLearningConfig>,
+    fits: Vec<NoisyFitRecord>,
 }
 
 fn same_observation(a: NoisyObservation, b: NoisyObservation) -> bool {
@@ -128,7 +131,63 @@ impl NoisyStudy {
         Self { study_id, config: config.clone(), dim, iters,
             report: NoisyBoReport { x: Vec::new(), observations: Vec::new(), incumbent_trace: Vec::new() },
             pending: requests(study_id, 0, config.initial_design(dim, n_init)),
-            complete: false, work: NoisyStudyWork::default() }
+            complete: false, work: NoisyStudyWork::default(), learning: None, fits: Vec::new() }
+    }
+
+    /// Prepare external jobs with the synchronous learned driver's exact refit
+    /// cadence, warm starts and seed policy. Learning policy errors refuse
+    /// before issuing jobs. Base BO admission retains `new`'s panic semantics.
+    /// No physical evaluation or model fit is performed by this constructor.
+    pub fn new_with_learning(study_id: u64, dim: usize, n_init: usize, iters: usize,
+        config: &NoisyBoConfig, learning: &NoisyLearningConfig) -> Result<Self, HeteroFitError>
+    {
+        learning.fit.validate(&config.kernel)?;
+        if learning.refit_every == 0 { return Err(HeteroFitError::InvalidConfig); }
+        (iters / learning.refit_every).checked_add(1)
+            .and_then(|stages| stages.checked_mul(learning.fit.max_evaluations))
+            .ok_or(HeteroFitError::InvalidConfig)?;
+        let mut study = Self::new(study_id, dim, n_init, iters, config);
+        study.learning = Some(learning.clone());
+        Ok(study)
+    }
+
+    /// Accepted covariance, or the declared initial kernel before the first
+    /// successful refit. Cancelled advances never replace it.
+    #[must_use]
+    pub fn kernel(&self) -> &Kernel {
+        self.fits.last().map_or(&self.config.kernel, |fit| &fit.kernel)
+    }
+
+    /// Refit records committed with complete batch transitions. Discarded fits
+    /// do NOT enter this history; their enclosing model attempt remains in
+    /// `work()`. This is not a count of all likelihood probes spent on retries.
+    #[must_use]
+    pub fn fit_records(&self) -> &[NoisyFitRecord] { &self.fits }
+
+    fn prepare_model(&self, x: &[Vec<f64>], values: &[f64], variances: &[f64], stage: usize,
+        keep_going: &mut dyn FnMut() -> bool) -> Result<(Gp, Option<NoisyFitRecord>), NoisyStudyError>
+    {
+        if let Some(learning) = &self.learning {
+            if stage % learning.refit_every == 0 {
+                let mut policy = learning.fit.clone();
+                policy.seed ^= self.config.seed ^ (stage as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                let fit = fit_heteroscedastic_controlled(x, values, variances, self.kernel(),
+                    &policy, keep_going).map_err(|error| match error {
+                        HeteroFitError::Cancelled => NoisyStudyError::Cancelled,
+                        _ => NoisyStudyError::InvalidModel,
+                    })?;
+                let record = NoisyFitRecord {
+                    after_batches: stage, observation_count: x.len(), kernel: fit.model.kernel.clone(),
+                    initial_lml: fit.initial_lml, lml: fit.model.lml, evaluations: fit.evaluations,
+                    projected_gradient_inf: fit.projected_gradient_inf,
+                    evaluation_limit_reached: fit.evaluation_limit_reached, seed: policy.seed,
+                };
+                return Ok((fit.model, Some(record)));
+            }
+        }
+        let gp = Gp::try_fit_diag(x, values, self.kernel().clone(), variances)
+            .filter(|gp| gp.lml.is_finite()).ok_or(NoisyStudyError::InvalidModel)?;
+        Ok((gp, None))
     }
 
     /// Outstanding jobs in stable logical order. Repeated calls do no work and
@@ -199,6 +258,9 @@ impl NoisyStudy {
     /// retrying regenerates the same next jobs. Discarded numerical work remains
     /// counted in `work()`. One dense fit or a slot's bounded CMA-ES searches
     /// cannot be preempted here. Adapt a Cx checkpoint to this continuation hook.
+    /// Learned studies additionally poll inside the existing kernel learner.
+    /// A learned kernel and its record commit only with the entire transition;
+    /// retrying a cancelled fit/selection starts from the prior accepted kernel.
     ///
     /// # Panics
     /// Inherits existing acquisition/posterior arithmetic assertions. Such a
@@ -221,11 +283,10 @@ impl NoisyStudy {
         let values: Vec<f64> = next.observations.iter().map(|o| o.value - self.config.prior_mean).collect();
         let variances: Vec<f64> = next.observations.iter().map(|o| o.noise_variance).collect();
         if zero_noise_duplicates(&next.x, &variances) { return Err(NoisyStudyError::InvalidModel); }
-        let gp = Gp::try_fit_diag(&next.x, &values, self.config.kernel.clone(), &variances)
-            .filter(|gp| gp.lml.is_finite()).ok_or(NoisyStudyError::InvalidModel)?;
+        let stage = self.report.incumbent_trace.len();
+        let (gp, fit_record) = self.prepare_model(&next.x, &values, &variances, stage, keep_going)?;
         if !keep_going() { return Err(NoisyStudyError::Cancelled); }
         next.incumbent_trace.push(self.config.study_incumbent(&gp, &next.x));
-        let stage = self.report.incumbent_trace.len();
         let complete = stage == self.iters;
         let pending = if complete { Vec::new() } else {
             self.work.acquisition_batch_attempts = self.work.acquisition_batch_attempts.checked_add(1)
@@ -235,6 +296,7 @@ impl NoisyStudy {
             requests(self.study_id, next.x.len(), points)
         };
         if !keep_going() { return Err(NoisyStudyError::Cancelled); }
+        if let Some(record) = fit_record { self.fits.push(record); }
         self.report = next;
         self.pending = pending;
         self.complete = complete;
