@@ -54,6 +54,51 @@ impl NaturalGoal {
             max_feedback_entries: usize::try_from(memory_bytes / 32).unwrap_or(usize::MAX) })
     }
 
+    /// Re-evaluate every natural law before the radiation owner combines it
+    /// with its independent reservoir. The means and original convection rows
+    /// use the caller's Robin ordering, not the order of these natural laws.
+    /// Ordinary convection rows are untouched. No mutation on refusal.
+    pub(in crate::solve) fn rebind_convection(
+        &self,
+        cx: &Cx<'_>,
+        names: &[&str],
+        means: &[[f64; 2]],
+        reference: &mut [[f64; 4]],
+        approximate: &mut [[f64; 2]],
+    ) -> Result<(), SolveRefusal> {
+        poll(cx)?;
+        let m = names.len();
+        if m == 0 || m > 64 || means.len() != m || reference.len() != m
+            || approximate.len() != m
+        {
+            return Err(invalid("natural/radiative traces, means and law rows must share one bounded ordering"));
+        }
+        let mut updates = Vec::new();
+        updates.try_reserve_exact(self.laws.len())
+            .map_err(|_| invalid("natural/radiative law scratch allocation refused"))?;
+        for law in &self.laws {
+            poll(cx)?;
+            let mut matches = names.iter().enumerate().filter(|(_, name)| **name == law.target.as_str());
+            let i = matches.next().map(|(i, _)| i)
+                .ok_or_else(|| invalid("natural law has no original radiative-comparison convection trace"))?;
+            if matches.next().is_some() || reference[i][1] != law.ambient_k
+                || approximate[i][1] != law.ambient_k
+            {
+                return Err(invalid("natural/radiative law has duplicate ownership or a changed ambient"));
+            }
+            let (point, other) = law_pair(law, self.pressure_pa, means[i][0], means[i][1])?;
+            updates.push((i, point, other));
+        }
+        // Every law and domain check succeeds before any caller row changes.
+        // Fewer than 65 writes remain after the final cancellation checkpoint.
+        poll(cx)?;
+        for (i, point, other) in updates {
+            reference[i] = point;
+            approximate[i] = other;
+        }
+        Ok(())
+    }
+
     /// Check both fields against the real law. Smooth k(T), prescribed values,
     /// fixed contact, consistent face mass and the total transpose remain in
     /// the conduction owner. The finite nonlinear remainder stays observable.
@@ -104,17 +149,28 @@ impl NaturalGoal {
             if area <= 0.0 { return Err(invalid("natural-goal target has no positive area")); }
             let mean = finite(integral / area)?;
             let approximate_mean = finite(approximate_integral / area)?;
-            let point = coefficient(law, finite(mean - law.ambient_k)?, self.pressure_pa)?;
-            let other = coefficient(law, finite(approximate_mean - law.ambient_k)?, self.pressure_pa)?;
-            let slope = mean_slope(law, mean, point)?;
+            let (point, other) = law_pair(law, self.pressure_pa, mean, approximate_mean)?;
             names.push(law.target.as_str());
-            points.push([point.htc_w_m2_k, law.ambient_k, slope, 0.0]);
-            approximate_values.push([other.htc_w_m2_k, law.ambient_k]);
+            points.push(point);
+            approximate_values.push(other);
         }
         RobinResponse::compare_mean_robin_goal_at(cx, problem, interfaces, linear,
             reference, approximate, &names, &points, &approximate_values, weights,
             self.max_feedback_entries).map_err(lower)
     }
+}
+
+/// The two physical states share one immutable law, pressure and multiplier.
+/// Only the reference field needs a tangent. The approximate field may be on
+/// the other heated/cooled branch; its complete residual is still evaluated.
+fn law_pair(
+    law: &NaturalLaw, pressure_pa: f64, mean: f64, approximate_mean: f64,
+) -> Result<([f64; 4], [f64; 2]), SolveRefusal> {
+    let point = coefficient(law, finite(mean - law.ambient_k)?, pressure_pa)?;
+    let other = coefficient(law, finite(approximate_mean - law.ambient_k)?, pressure_pa)?;
+    let slope = mean_slope(law, mean, point)?;
+    Ok(([point.htc_w_m2_k, law.ambient_k, slope, 0.0],
+        [other.htc_w_m2_k, law.ambient_k]))
 }
 
 /// At fixed pressure, Ra ~ |Tw-Ta|/Tfilm^3 and Nu=(0.825+x)^2,
@@ -164,6 +220,70 @@ mod tests {
                 assert!((slope - scale * unscaled).abs() < 1e-13 * slope.abs().max(1.0));
             }
         } }
+    }
+
+    fn with_gate<T>(gate: &fs_exec::CancelGate, f: impl FnOnce(&Cx<'_>) -> T) -> T {
+        fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {
+            f(&Cx::new(gate, arena,
+                fs_exec::StreamKey { seed: 91, kernel_id: 821, tile: 0, iteration: 0 },
+                fs_exec::Budget::INFINITE, fs_exec::ExecMode::Deterministic))
+        })
+    }
+
+    #[test]
+    fn natural_radiation_rebind_uses_both_states_and_preserves_unrelated_rows() {
+        with_gate(&fs_exec::CancelGate::new_clock_free(), |cx| {
+            for pressure in [80000.0, 101325.0] {
+                for scale in [0.75, 1.25] {
+                    let input = law(scale);
+                    let goal = NaturalGoal::new(vec![input.clone()], pressure, 1 << 20).unwrap();
+                    // The natural row is deliberately not first; a different
+                    // ambient belongs to the untouched prescribed convection.
+                    for means in [[330.0, 320.0], [270.0, 280.0], [310.0, 290.0]] {
+                        let mut rows = [[7.0, 290.0, 0.0, 0.0], [99.0, 300.0, 0.0, 0.0]];
+                        let mut other = [[7.0, 290.0], [99.0, 300.0]];
+                        goal.rebind_convection(cx, &["fixed", "wall"], &[[315.0, 316.0], means],
+                            &mut rows, &mut other).unwrap();
+                        assert_eq!(rows[0], [7.0, 290.0, 0.0, 0.0]);
+                        assert_eq!(other[0], [7.0, 290.0]);
+                        let expected = coefficient(&input, means[0]-300.0, pressure).unwrap();
+                        let expected_other = coefficient(&input, means[1]-300.0, pressure).unwrap();
+                        assert_eq!(rows[1][0].to_bits(), expected.htc_w_m2_k.to_bits());
+                        assert_eq!(other[1][0].to_bits(), expected_other.htc_w_m2_k.to_bits());
+                        assert_ne!(rows[1][0].to_bits(), other[1][0].to_bits());
+                        let step = 1e-3;
+                        let fd = (coefficient(&input, means[0]-300.0+step, pressure).unwrap().htc_w_m2_k
+                            - coefficient(&input, means[0]-300.0-step, pressure).unwrap().htc_w_m2_k) / (2.0*step);
+                        assert!((rows[1][2]-fd).abs() < 2e-6*fd.abs().max(1e-3));
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn natural_radiation_rebind_is_atomic_on_invalid_or_missing_laws() {
+        with_gate(&fs_exec::CancelGate::new_clock_free(), |cx| {
+            let mut second = law(1.0);
+            second.target = "second".into();
+            let goal = NaturalGoal::new(vec![law(1.0), second], 101325.0, 1 << 20).unwrap();
+            for (names, means, ambient) in [
+                (["wall", "second"], [[330.0, 320.0], [300.0, 320.0]], 300.0),
+                (["wall", "second"], [[330.0, 320.0], [320.0, 300.0]], 300.0),
+                (["wall", "missing"], [[330.0, 320.0], [330.0, 320.0]], 300.0),
+                (["wall", "wall"], [[330.0, 320.0], [330.0, 320.0]], 300.0),
+                (["wall", "second"], [[330.0, 320.0], [330.0, 320.0]], 299.0),
+                (["wall", "second"], [[330.0, 320.0], [f64::NAN, 320.0]], 300.0),
+            ] {
+                let original = [[99.0, 300.0, 0.0, 0.0], [88.0, ambient, 0.0, 0.0]];
+                let original_other = [[99.0, 300.0], [88.0, ambient]];
+                let mut rows = original;
+                let mut other = original_other;
+                assert!(goal.rebind_convection(cx, &names, &means, &mut rows, &mut other).is_err());
+                assert_eq!(rows, original);
+                assert_eq!(other, original_other);
+            }
+        });
     }
 
     #[test]

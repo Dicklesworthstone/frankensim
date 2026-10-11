@@ -1,5 +1,5 @@
 //! Native enriched goals for the same area-mean radiation law as the primal.
-//! Each field owns its own radiative secant AND its own physical air march.
+//! Each field owns its radiative secant and its natural law or physical air march.
 //! The core owner supplies the complete transpose, material/contact terms and
 //! observed nonlinear remainder. Nothing here certifies continuum error.
 
@@ -66,8 +66,11 @@ pub(in crate::solve) fn probe(
     let data = fine.adjoint_data.as_ref().ok_or_else(|| bad("missing radiative goal operator"))?;
     let combined = data.radiating_boundary.as_ref()
         .ok_or_else(|| bad("radiation patches lack their accepted combined boundary"))?;
-    if data.radiation_patches.is_empty() || data.natural_goal.is_some() {
-        return Err(bad("radiative adaptive goals require retained patches and no undifferentiated natural-convection law"));
+    if data.radiation_patches.is_empty() {
+        return Err(bad("radiative adaptive goals require retained physical patches"));
+    }
+    if data.natural_goal.is_some() && !data.air_paths.is_empty() {
+        return Err(bad("simultaneous natural and forced airflow laws have no admitted combined model"));
     }
     let n = fine.mesh.vertex_count();
     if approximate.len() != n || fine.solution.temperature.len() != n
@@ -126,6 +129,13 @@ pub(in crate::solve) fn probe(
         if areas[i] <= 0.0 { return Err(bad("radiative adaptive Robin trace has no positive area")); }
         means[i][0] = finite(means[i][0] / areas[i])?;
         means[i][1] = finite(means[i][1] / areas[i])?;
+    }
+    if let Some(natural) = &data.natural_goal {
+        // h_c, its wall derivative, and the comparison field's h_c all come
+        // from the same retained card/pressure/multiplier as the primal.
+        // The radiation owner then differentiates BOTH h_total and the
+        // weighted reference; adding dh_c to a frozen Robin row is not enough.
+        natural.rebind_convection(cx, &names, &means, &mut points, &mut other)?;
     }
     let mut feedback = zeros::<f64>(m*m)?;
     if !data.air_paths.is_empty() {
