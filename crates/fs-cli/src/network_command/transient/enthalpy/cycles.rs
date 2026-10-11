@@ -1,6 +1,8 @@
 //! Repeated schedules carry accepted h through the same cycle-local producer.
 //! Scalar summaries retain every warm-up peak; an admitted fixed-count tape
 //! owns the complete chronological history and shared interval controls.
+//! The existing cycle-rate thermostat observes accepted T(h) and holds one
+//! multiplier through the entire following cycle, including adaptive trials.
 
 use super::*;
 
@@ -28,8 +30,34 @@ pub(super) fn simulate(
     let mut summaries = Vec::new();
     let mut streak = 0_usize;
     let mut last_residuals = None;
+    let mut controller_state = policy.controller.map(repeat::FanController::initial_state);
+    if let Some(controller) = policy.controller {
+        // Fan sizing, when requested, is already bound into schedule speeds.
+        // Validate every reachable controller factor against that candidate.
+        controller.validate(request, schedule, 1.0)?;
+    }
     for cycle_index in 0..policy.cycles {
         poll(cx)?;
+        let sensor_start = policy.controller.map(|controller| temperature[controller.sensor_vertex]);
+        let mut staged_controller = controller_state;
+        let mut switched = false;
+        let multiplier = match (policy.controller, staged_controller.as_mut()) {
+            (Some(controller), Some(state)) => {
+                switched = controller.update(sensor_start.expect("controller has sensor"), state)?;
+                state.multiplier
+            }
+            (None, None) => 1.0,
+            _ => return Err(bad("internal enthalpy fan-controller state mismatch")),
+        };
+        // Start from the immutable base candidate each time: neither earlier
+        // controller factors nor an outer sizing factor are applied twice.
+        // Unit/no-controller paths preserve the original schedule directly.
+        let controlled_schedule = if multiplier != 1.0 {
+            Some(sizing::speed_schedule(cx, schedule, multiplier)?)
+        } else {
+            None
+        };
+        let cycle_schedule = controlled_schedule.as_ref().unwrap_or(schedule);
         let remaining = policy
             .max_total_steps
             .checked_sub(steps)
@@ -40,7 +68,7 @@ pub(super) fn simulate(
         let cycle = simulate_cycle(
             request,
             cx,
-            schedule,
+            cycle_schedule,
             config,
             engine,
             &h,
@@ -50,10 +78,21 @@ pub(super) fn simulate(
         let temperature_residual = field_residual(cx, &temperature, &cycle.final_temperature)?;
         let enthalpy_residual = field_residual(cx, &h, &cycle.final_h)?;
         last_residuals = Some((temperature_residual, enthalpy_residual));
+        let sensor_end = policy.controller.map(|controller| {
+            cycle.final_temperature[controller.sensor_vertex]
+        });
+        let controller_stable = match (policy.controller, staged_controller) {
+            (Some(controller), Some(state)) => controller.next_multiplier(
+                sensor_end.expect("controller has end sensor"), state.multiplier,
+            )?.to_bits() == state.multiplier.to_bits(),
+            (None, None) => true,
+            _ => return Err(bad("internal enthalpy fan-controller state mismatch")),
+        };
         let complete = match policy.periodic {
-            Some(periodic) => {
+            Some(periodic) if controller_stable => {
                 periodic.observe(temperature_residual, enthalpy_residual, &mut streak)?
             }
+            Some(_) => { streak = 0; false }
             None => cycle_index + 1 == policy.cycles,
         };
         let end = finite(elapsed + cycle.duration_s)?;
@@ -96,6 +135,22 @@ pub(super) fn simulate(
                 "repeated enthalpy cumulative fresh/exhaust energy gate failed",
             ));
         }
+        // Only a fully accepted cycle commits the staged hysteresis state.
+        controller_state = staged_controller;
+        let controller_field = if policy.controller.is_some() {
+            let speeds = cycle_schedule.intervals.iter().map(|interval| {
+                poll(cx)?;
+                num(interval.speed.ok_or_else(|| bad("fan-controlled cycle lacks an interval speed"))?)
+            }).collect::<Result<Vec<_>>>()?;
+            format!(
+                ",\"controller_sensor_start_k\":{},\"controller_sensor_end_k\":{},\"controller_speed_multiplier\":{},\"controller_switched\":{},\"controller_state_stable\":{},\"applied_interval_fan_speed_ratios\":[{}]",
+                optional(sensor_start)?, optional(sensor_end)?, num(multiplier)?,
+                if switched { "true" } else { "false" },
+                if controller_stable { "true" } else { "false" }, speeds.join(","),
+            )
+        } else {
+            String::new()
+        };
         let radiation_field = if request.radiation.is_some() {
             format!(",\"radiative_energy_loss_j\":{}", num(cycle.radiative_j)?)
         } else {
@@ -113,7 +168,7 @@ pub(super) fn simulate(
             String::new()
         };
         summaries.push(format!(
-            "{{\"cycle\":{},\"start_time_s\":{},\"end_time_s\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"start_to_end_field_residual_k\":{},\"start_to_end_specific_enthalpy_residual_j_kg\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"accepted_steps\":{},\"solid_solves\":{}{radiation_field}{recirculation_field}}}",
+            "{{\"cycle\":{},\"start_time_s\":{},\"end_time_s\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"start_to_end_field_residual_k\":{},\"start_to_end_specific_enthalpy_residual_j_kg\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"accepted_steps\":{},\"solid_solves\":{}{controller_field}{radiation_field}{recirculation_field}}}",
             cycle_index + 1,
             num(elapsed)?,
             num(end)?,
@@ -136,7 +191,7 @@ pub(super) fn simulate(
             let periodic = match policy.periodic {
                 None => "null".into(),
                 Some(p) => format!(
-                    "{{\"temperature_tolerance_k\":{},\"specific_enthalpy_tolerance_j_kg\":{},\"full_field_residual_k\":{},\"full_specific_enthalpy_residual_j_kg\":{},\"consecutive_cycles_met\":{},\"required_consecutive_cycles\":{},\"max_cycles\":{},\"criterion\":\"same-phase maximum absolute nodal start/end differences in both temperature and specific enthalpy must pass on consecutive cycles; a cycle-map residual, not distance to the infinite-cycle solution\"}}",
+                    "{{\"temperature_tolerance_k\":{},\"specific_enthalpy_tolerance_j_kg\":{},\"full_field_residual_k\":{},\"full_specific_enthalpy_residual_j_kg\":{},\"consecutive_cycles_met\":{},\"required_consecutive_cycles\":{},\"max_cycles\":{},\"controller_state_stable\":{},\"criterion\":\"same-phase maximum absolute nodal start/end differences in both temperature and specific enthalpy plus unchanged hysteretic controller state must pass on consecutive cycles; a cycle-map residual, not distance to the infinite-cycle solution\"}}",
                     num(p.temperature_tolerance_k)?,
                     num(p.specific_enthalpy_tolerance_j_kg)?,
                     num(temperature_residual)?,
@@ -144,7 +199,13 @@ pub(super) fn simulate(
                     streak,
                     p.consecutive_cycles,
                     policy.cycles,
+                    if controller_stable { "true" } else { "false" },
                 ),
+            };
+            let fan_controller = match (policy.controller, controller_state) {
+                (Some(controller), Some(state)) => controller.report(state)?,
+                (None, None) => "null".into(),
+                _ => return Err(bad("internal enthalpy fan-controller state mismatch")),
             };
             // All forward cycles and their cumulative energy gate have passed.
             // Reverse replay never advances the accepted physical history.
@@ -176,7 +237,7 @@ pub(super) fn simulate(
                 String::new()
             };
             let output = format!(
-                "{prefix},\"repeated_cycles\":{{\"status\":{},\"periodic\":{},\"fan_controller\":null,\"cycles_completed\":{},\"cycle_duration_s\":{},\"elapsed_time_s\":{},\"last_cycle_start_time_s\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"input_energy_j\":{},\"stored_energy_change_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"cycles\":[{}],\"adjoint\":{}{radiation_field}{recirculation_field},\"scope\":\"all cycles inherit the prior accepted specific enthalpy; peaks include the original initial state, every cycle boundary and every accepted endpoint, including warm-up; transient contains only the final cycle in local time; periodic stopping requires both full nodal temperature and enthalpy residuals; an optional fixed-count adjoint uses the complete h history, shared interval controls and global time; no controller, variable-stopping derivative, infinite-cycle or continuous-time peak bound\"}}}}\n",
+                "{prefix},\"repeated_cycles\":{{\"status\":{},\"periodic\":{},\"fan_controller\":{fan_controller},\"cycles_completed\":{},\"cycle_duration_s\":{},\"elapsed_time_s\":{},\"last_cycle_start_time_s\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"input_energy_j\":{},\"stored_energy_change_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"cycles\":[{}],\"adjoint\":{}{radiation_field}{recirculation_field},\"scope\":\"all cycles inherit the prior accepted specific enthalpy; peaks include the original initial state, every cycle boundary and every accepted endpoint, including warm-up; transient contains only the final cycle in local time; the optional hysteretic controller samples accepted T(h) at cycle start and its multiplier scales the already sized interval speeds once; applied_interval_fan_speed_ratios are the actual ratios sent to the fan model; periodic stopping requires full nodal temperature and enthalpy residuals and unchanged controller state; an optional fixed-count adjoint without a controller uses the complete h history, shared interval controls and global time; no switching or variable-stopping derivative, infinite-cycle or continuous-time peak bound\"}}}}\n",
                 quote(status),
                 periodic,
                 cycle_index + 1,

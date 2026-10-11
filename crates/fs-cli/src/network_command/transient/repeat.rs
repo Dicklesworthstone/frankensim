@@ -25,6 +25,7 @@ pub(super) struct EnthalpyPolicy {
     pub(super) cycles: usize,
     pub(super) max_total_steps: usize,
     pub(super) periodic: Option<EnthalpyPeriodic>,
+    pub(super) controller: Option<FanController>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,8 +60,8 @@ impl Periodic {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct FanController {
-    sensor_vertex: usize,
+pub(super) struct FanController {
+    pub(super) sensor_vertex: usize,
     low_temperature_k: f64,
     high_temperature_k: f64,
     low_speed_multiplier: f64,
@@ -69,8 +70,8 @@ struct FanController {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct FanControlState {
-    multiplier: f64,
+pub(super) struct FanControlState {
+    pub(super) multiplier: f64,
     switches: usize,
 }
 
@@ -100,7 +101,19 @@ impl FanController {
         Ok(controller)
     }
 
-    fn validate(self, request: &Request, schedule: &Schedule, outer_multiplier: f64) -> Result<()> {
+    pub(super) fn initial_state(self) -> FanControlState {
+        FanControlState { multiplier: self.initial_speed_multiplier, switches: 0 }
+    }
+
+    pub(super) fn report(self, state: FanControlState) -> Result<String> {
+        Ok(format!(
+            "{{\"sensor_vertex\":{},\"low_temperature_k\":{},\"high_temperature_k\":{},\"low_speed_multiplier\":{},\"high_speed_multiplier\":{},\"initial_speed_multiplier\":{},\"final_speed_multiplier\":{},\"switches\":{},\"update_phase\":\"cycle-start from prior accepted cycle-end sensor; multiplier held for the complete next cycle\",\"scope\":\"ideal sampled thermostat; no sensor lag/noise, actuator dynamics, PWM, electrical-power or sub-cycle feedback model\"}}",
+            self.sensor_vertex,num(self.low_temperature_k)?,num(self.high_temperature_k)?,
+            num(self.low_speed_multiplier)?,num(self.high_speed_multiplier)?,
+            num(self.initial_speed_multiplier)?,num(state.multiplier)?,state.switches))
+    }
+
+    pub(super) fn validate(self, request: &Request, schedule: &Schedule, outer_multiplier: f64) -> Result<()> {
         if self.sensor_vertex >= request.mesh.vertex_count() {
             return Err(bad("fan-controller sensor_vertex is outside the solid mesh"));
         }
@@ -114,7 +127,7 @@ impl FanController {
         Ok(())
     }
 
-    fn next_multiplier(self, sensor_k: f64, current: f64) -> Result<f64> {
+    pub(super) fn next_multiplier(self, sensor_k: f64, current: f64) -> Result<f64> {
         finite(sensor_k)?;
         finite(current)?;
         if sensor_k >= self.high_temperature_k {
@@ -126,7 +139,7 @@ impl FanController {
         }
     }
 
-    fn update(self, sensor_k: f64, state: &mut FanControlState) -> Result<bool> {
+    pub(super) fn update(self, sensor_k: f64, state: &mut FanControlState) -> Result<bool> {
         let next = self.next_multiplier(sensor_k, state.multiplier)?;
         let switched = next.to_bits() != state.multiplier.to_bits();
         if switched {
@@ -147,9 +160,6 @@ impl Config {
     pub(super) fn parse_for_storage(value: &J, planned_steps: usize, adaptive: bool,
         enthalpy: bool) -> Result<Self> {
         object(value, &["cycles", "until_periodic", "max_total_steps", "fan_controller"], "transient.repeat")?;
-        if enthalpy && value.get("fan_controller").is_some() {
-            return Err(bad("enthalpy repetition does not admit repeat.fan_controller"));
-        }
         let mut specific_enthalpy_tolerance_j_kg = None;
         let (cycles, periodic) = match (value.get("cycles"), value.get("until_periodic")) {
             (Some(cycles), None) => (count(cycles,"repeat.cycles",4096)?, None),
@@ -187,16 +197,14 @@ impl Config {
     }
 
     pub(super) fn enthalpy_policy(self) -> Result<EnthalpyPolicy> {
-        if self.controller.is_some() {
-            return Err(bad("enthalpy repetition does not admit repeat.fan_controller"));
-        }
         let periodic = self.periodic.map(|periodic| -> Result<EnthalpyPeriodic> { Ok(EnthalpyPeriodic {
             temperature_tolerance_k: periodic.tolerance_k,
             specific_enthalpy_tolerance_j_kg: self.specific_enthalpy_tolerance_j_kg
                 .ok_or_else(||bad("enthalpy periodic stopping requires explicit specific_enthalpy_tolerance_j_kg alongside temperature_tolerance_k"))?,
             consecutive_cycles: periodic.consecutive,
         }) }).transpose()?;
-        Ok(EnthalpyPolicy { cycles: self.cycles, max_total_steps: self.max_total_steps, periodic })
+        Ok(EnthalpyPolicy { cycles: self.cycles, max_total_steps: self.max_total_steps, periodic,
+            controller: self.controller })
     }
 
     pub(super) fn validate_adjoint(self) -> Result<()> {
@@ -241,10 +249,7 @@ pub(super) fn simulate_observed(request: &Request, cx: &Cx<'_>, schedule: &Sched
     let mut summaries = Vec::new();
     let mut streak = 0_usize;
     let mut last_residual = None;
-    let mut controller_state = config.controller.map(|controller| FanControlState {
-        multiplier: controller.initial_speed_multiplier,
-        switches: 0,
-    });
+    let mut controller_state = config.controller.map(FanController::initial_state);
     if let Some(controller) = config.controller {
         controller.validate(request, schedule, speed_multiplier)?;
     }
@@ -332,11 +337,7 @@ pub(super) fn simulate_observed(request: &Request, cx: &Cx<'_>, schedule: &Sched
             };
             let fan_controller = match (config.controller, controller_state) {
                 (None, None) => "null".to_string(),
-                (Some(controller), Some(state)) => format!(
-                    "{{\"sensor_vertex\":{},\"low_temperature_k\":{},\"high_temperature_k\":{},\"low_speed_multiplier\":{},\"high_speed_multiplier\":{},\"initial_speed_multiplier\":{},\"final_speed_multiplier\":{},\"switches\":{},\"update_phase\":\"cycle-start from prior accepted cycle-end sensor; multiplier held for the complete next cycle\",\"scope\":\"ideal sampled thermostat; no sensor lag/noise, actuator dynamics, PWM, electrical-power or sub-cycle feedback model\"}}",
-                    controller.sensor_vertex,num(controller.low_temperature_k)?,num(controller.high_temperature_k)?,
-                    num(controller.low_speed_multiplier)?,num(controller.high_speed_multiplier)?,
-                    num(controller.initial_speed_multiplier)?,num(state.multiplier)?,state.switches),
+                (Some(controller), Some(state)) => controller.report(state)?,
                 _ => return Err(bad("internal fan-controller state mismatch")),
             };
             // Every forward cycle and the cumulative energy gate have passed.

@@ -21,6 +21,9 @@ mod controls;
 #[path = "cooling_enthalpy/recirculation.rs"]
 mod recirculation;
 
+#[path = "cooling_enthalpy/controller.rs"]
+mod controller;
+
 use json::JsonValue as J;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};

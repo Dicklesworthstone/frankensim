@@ -104,8 +104,27 @@ Exhausting cycles, accepted steps or the wall budget refuses without publishing
 an unconverged result. This is a discrete cycle-map test, not distance to the
 infinite-cycle limit, stability evidence or a future-peak bound.
 
-Enthalpy repetition supports fixed or adaptive timesteps and refuses
-`repeat.fan_controller`. For adaptive stepping, supply both the temperature
+Enthalpy repetition supports the same `repeat.fan_controller` with fixed or
+adaptive timesteps. The sensor reads accepted temperature derived from the
+inherited specific enthalpy, and the chosen multiplier stays fixed throughout
+the cycle. Rejected adaptive trials cannot change the controller. A periodic
+pass requires the temperature and enthalpy residuals plus an unchanged predicted
+next controller multiplier. Hysteretic control does not admit an adjoint.
+
+The [controlled enthalpy fan](enthalpy-controlled-fan.json) supplies a complete
+phase-storage request with the existing low/high/hold control law:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/enthalpy-controlled-fan.json
+```
+
+Each cycle reports its sampled sensor temperature and applied speed multiplier;
+the controller summary reports switch counts. The applied speed is the product
+of the prescribed interval speed, any outer fan-sizing multiplier, and the
+controller multiplier, each applied once.
+
+For adaptive stepping, supply both the temperature
 and specific-enthalpy tolerances described in
 [adaptive enthalpy controls](TRANSIENT_COOLING.md#adaptive-total-enthalpy-timesteps).
 The accepted pair carries h into later trials and across cycle boundaries.

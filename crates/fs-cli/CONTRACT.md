@@ -260,7 +260,17 @@ start/end differences for the declared consecutive cycles. Temperature
 agreement alone cannot establish a settled latent state. Temperature-storage
 requests reject the enthalpy tolerance. A failed periodic gate, total-step
 budget or cancellation publishes no partial result. Periodic stopping does
-not admit adjoints, and h-mode `repeat.fan_controller` explicitly refuses.
+not admit adjoints. Optional `repeat.fan_controller` uses the existing hysteretic
+controller, sampled from accepted temperature at each cycle start and held
+through that cycle. Its multiplier composes once with the prescribed fan
+schedule and any outer sizing multiplier; every reachable speed is admitted by
+the actual fan bank. Periodic passes require both field residuals and an
+unchanged next controller state. The result includes sampled sensor values,
+applied multipliers and switch counts. Controller state advances only at cycle
+boundaries, never on nonlinear or rejected adaptive trials. Adjoint requests
+with hysteretic control explicitly refuse. The synthetic
+`enthalpy-controlled-fan.json` example exercises phase storage with closed-loop
+cycle-rate fan control.
 The cycle-map residual is not distance to an infinite-cycle limit or a bound
 on future peaks. The synthetic `enthalpy-repeated-pulse.json` example carries
 both latent and sensible storage through three cycles with a global adjoint.

@@ -214,7 +214,7 @@ fn constant_plateau_temperature_cannot_hide_nonperiodic_enthalpy_drift() {
     );
     let diagnostic = refuses(&controlled);
     assert!(
-        diagnostic.contains("enthalpy") && diagnostic.contains("fan_controller"),
+        diagnostic.contains("fan_controller") && diagnostic.contains("hydraulics.fan"),
         "{diagnostic}"
     );
 }
