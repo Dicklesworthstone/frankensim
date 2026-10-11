@@ -380,7 +380,7 @@ pub(super) fn solve_mixed_steady(
                 canonical_f64(worst_relative).expect("finite relative change"),
                 canonical_f64(worst_heat_w).expect("finite heat mismatch"),
                 canonical_f64(worst_heat_ratio).expect("finite heat gate ratio"),
-                json_string("Steady natural reservoirs and forced-air surfaces exchange through the complete shared solid. Each outer iteration closes every air branch; natural heat and radiation remain outside air transport. Counts cover solid responses; inner material/radiation work retains its existing separate caps. No mixed adjoint, adaptive-goal or transient claim."),
+                json_string("Steady natural reservoirs and forced-air surfaces exchange through the complete shared solid. Each outer iteration closes every air branch; natural heat and radiation remain outside air transport. Counts cover solid responses; inner material/radiation work retains its existing separate caps. No mixed adaptive-goal or transient claim."),
             ));
             poll()?;
             return Ok(MixedSteady { exchange, natural_receipt });

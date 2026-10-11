@@ -1481,10 +1481,22 @@ bounded responses; failure publishes no partial conduction field.
 The `natural_convection.coupling` receipt records outer/inner work and final
 coefficient and natural heat discrepancies. The returned derived boundary is
 the one actually applied to the published field. Inner conductivity/radiation
-work retains its separate existing budgets. Mixed nominal adjoints, adaptive
-goal refinement and transients explicitly refuse; the linear inverse-error
-certificate is unavailable and the whole-model tolerance estimate remains.
-The result retains Estimated authority. `tests/solve/mixed_convection.rs`
+work retains its separate existing budgets. Mixed adaptive goal refinement
+and transients explicitly refuse; the linear inverse-error certificate is
+unavailable and the whole-model tolerance estimate remains.
+The result retains Estimated authority.
+
+Driver 63 admits steady mixed nominal adjoints through the existing complete
+material/radiation/air transpose. Signed natural wall and ambient coefficient
+partials share that operator with stream-wise air-reference feedback; no
+coefficient or air reference is frozen for differentiation. The unchanged
+accepted field must pass the complete constitutive residual gate. Power,
+material, fan-speed, air-inlet and radiation controls use the resulting dual;
+the boundary-extended request also includes prescribed-temperature lifts.
+These are local Estimated derivatives without inverse or gradient-error
+certificates. Two physical re-solve regressions in
+`tests/solve/mixed_convection/adjoint.rs` cover both natural heat signs,
+smooth conductivity, radiation and the prescribed-temperature lift. `tests/solve/mixed_convection.rs`
 supplies signed-reservoir, independent correlation/energy, radiation
 composition, deterministic replay and unsupported-mode regressions.
 

@@ -1,4 +1,4 @@
-//! One full material/radiation/air adjoint on the unchanged native field.
+//! One full natural/material/radiation/air adjoint on the unchanged native field.
 //! The actual air march supplies references; its analytic wall map supplies
 //! feedback. Radiation remains a separate reservoir, never a heat load to air.
 
@@ -7,10 +7,12 @@ use fs_conduction::{ScalarField, ThermalBc};
 use fs_conduction::adjoint::RobinGradient;
 use fs_conduction::radiation::AmbientRadiationGradient;
 use super::{ConductionProblem, Cx, ProjectSpec, RungSolved, SolveRefusal,
-    air_inlet, bad, conduction_error, finite, lower, poll, row, zeros};
+    air_inlet, bad, conduction_error, finite, lower, mixed_feedback, poll, row, zeros};
+use std::collections::BTreeMap;
 
 pub(super) struct Pullback {
     pub gradient: RobinGradient,
+    pub natural_ambient: BTreeMap<String, f64>,
     pub air_rows: Vec<String>,
     pub radiation_rows: Vec<String>,
 }
@@ -22,9 +24,8 @@ pub(super) fn pullback(
     let data = solved.adjoint_data.as_ref().ok_or_else(|| bad("missing coupled thermal operator"))?;
     let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
         .ok_or_else(|| bad("missing coupled thermal setup"))?;
-    if data.air_paths.is_empty() || setup.boundaries.iter().any(|b| matches!(
-        b.condition, fs_project::ThermalBoundaryCondition::NaturalConvection { .. })) {
-        return Err(bad("coupled thermal adjoints require fixed-flow air paths and no natural-convection state law"));
+    if data.air_paths.is_empty() {
+        return Err(bad("coupled thermal adjoints require retained fixed-flow air paths"));
     }
     let n = solved.mesh.vertex_count();
     let temperature = &solved.solution.temperature;
@@ -120,16 +121,19 @@ pub(super) fn pullback(
             return Err(bad("coupled radiation law differs from its declared physical source"));
         }
     }
+    let natural = mixed_feedback::bind(cx, spec, solved, &names, &regions, &means)?;
+    replacements.extend_from_slice(&natural.replacements);
     let boundary = data.boundary.with_uniform_robin_replacements(&replacements).map_err(lower)?;
     let problem = ConductionProblem { mesh: &solved.mesh, boundary: &boundary,
         material: &data.fallback, element_materials: Some(&data.materials), source: &data.source };
     let gradient = AmbientRadiationGradient::pullback_with_reference_feedback(cx, problem,
-        data.interfaces.as_ref(), data.linear, temperature, &names, &vec![0.0;m], &feedback,
+        data.interfaces.as_ref(), data.linear, temperature, &names, &natural.wall_slopes, &feedback,
         &data.radiation_patches, weights, entries).map_err(|e| {
             let mut refusal = lower(e);
             refusal.fix = "tighten the physical solid/air and radiation convergence controls; the unchanged field and complete coupled transpose must satisfy their residual gates".into();
             refusal
         })?;
+    let natural_ambient = natural.ambient(&names, &gradient.convection)?;
     let bars: Vec<_> = indices.iter().map(|&i| gradient.convection.references[i]).collect();
     let air_rows = air_inlet::rows(cx, setup, &data.air_paths, &air_names, &bars)?;
     let mut radiation_rows = Vec::new();
@@ -139,5 +143,5 @@ pub(super) fn pullback(
         radiation_rows.push(row("radiation-emissivity", &surface.name, i, "1", gradient.emissivities[i])?);
     }
     poll(cx)?;
-    Ok(Pullback { gradient: gradient.convection, air_rows, radiation_rows })
+    Ok(Pullback { gradient: gradient.convection, natural_ambient, air_rows, radiation_rows })
 }

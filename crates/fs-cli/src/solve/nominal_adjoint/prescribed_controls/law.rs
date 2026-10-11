@@ -75,7 +75,6 @@ pub(super) fn bind(cx: &Cx<'_>, spec: &ProjectSpec, solved: &RungSolved,
     }
     let mut feedback = zeros(m*m)?;
     if !data.air_paths.is_empty() {
-        if !natural_laws.is_empty() { return Err(bad("combined natural/airflow lift is not supplied")); }
         let law = affine_reference_law(cx,&data.air_paths,64,max_entries).map_err(|e| match e {
             CoupledGoalError::Interrupted => super::super::conduction_error("cli-solve-cancelled",
                 "prescribed air lift interrupted","resume the accepted pipeline prefix"),

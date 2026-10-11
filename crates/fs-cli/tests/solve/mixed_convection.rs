@@ -8,6 +8,8 @@ use super::*;
 mod json;
 use json::JsonValue as J;
 
+mod adjoint;
+
 fn n(row: &J, key: &str) -> f64 {
     row.f64_field(key).unwrap()
 }
@@ -175,17 +177,11 @@ fn g3_mixed_convection_keeps_radiation_out_of_both_convective_heat_accounts() {
 fn g0_mixed_unimplemented_tangents_and_time_paths_refuse_before_solving() {
     let bytes = tetra_stl();
     for (mode, expected_code) in [
-        ("adjoint", "cli-solve-nominal-adjoint"),
         ("adaptive", "cli-solve-conduction-mixed-adaptive"),
         ("transient", "cli-solve-conduction-natural-with-airflow"),
     ] {
         let mut spec = project(&bytes, 300.0);
         match mode {
-            "adjoint" => spec.outputs.as_mut().unwrap().push(OutputRequest {
-                name: "temperature-max-adjoint".to_string(),
-                kind: "report".to_string(),
-                region: None,
-            }),
             "adaptive" => spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string(),
             "transient" => transient_product::declaration(&mut spec, 100.0, 1.0),
             _ => unreachable!(),
