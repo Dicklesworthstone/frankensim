@@ -190,7 +190,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// in continuum regional mean bounds; earlier receipts cannot resume this path.
 /// Version 57 carries total specific enthalpy as native transient history and
 /// reports phase fractions without inferring latent state from temperature.
-pub const SOLVE_DRIVER_VERSION: u32 = 57;
+/// Version 58 couples native enthalpy to sourced ambient radiation and retains
+/// the accepted physical residual, nonlinear heat and cumulative trial work.
+pub const SOLVE_DRIVER_VERSION: u32 = 58;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

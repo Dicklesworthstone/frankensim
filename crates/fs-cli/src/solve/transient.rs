@@ -634,7 +634,7 @@ pub(super) fn solve(
     }
     if policy.enthalpy.is_some() {
         return enthalpy::solve(
-            cx, spec, problem, interfaces, labels, region_ids, linear, deadline,
+            cx, spec, problem, interfaces, labels, region_ids, radiation, linear, deadline,
         );
     }
     let grids = TimeGrids::new(policy)?;

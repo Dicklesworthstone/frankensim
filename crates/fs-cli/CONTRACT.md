@@ -1502,12 +1502,34 @@ fine-grid final temperature. Coarse/fine enthalpy and phase differences remain
 visible even when both temperatures agree on a plateau; equal temperatures
 do not become a zero-error temporal claim. This is Estimated fixed-domain
 transport, with source attribution rather than authentication of supplied
-phase data. Prescribed temperature, dynamic convection, radiation and native
+phase data. Prescribed temperature, dynamic convection and native
 trajectory adjoints are currently refused for this storage model. Expansion,
 motion, phase kinetics and phase-dependent conductivity are not inferred.
 `data/reference-project/cooling-enthalpy.fsim` and `TRANSIENT.md` give a complete
 synthetic melting example through validate/import/solve/report. Driver version
 57 separates these semantics from older retained solves.
+
+The enthalpy model also composes with declared ambient gray radiation on its
+prescribed Robin patches. The shared radiative enthalpy owner holds physical
+old enthalpy fixed through every trial, then reassembles the actual endpoint
+residual and checks storage against nonlinear radiative heat. The original
+energy tolerance and complete initial-residual target remain the acceptance
+gates. Each time row and trajectory energy use source minus Neumann heat,
+original convection and signed nonlinear radiation; a hotter reservoir may
+supply heat. The ordinary final Robin operator and radiation receipt retain
+the accepted applied boundary and its separate convection/radiation split.
+
+Per-step radiation receipts retain physical residual/threshold/energy, applied
+and nonlinear heat, source patches and all trial work. The shared owner exposes
+Newton histories only for the final inner solve of each accepted time step;
+these genuine rows keep that explicit scope. Separate `transient.radiation`
+counters include every trial's Newton and Krylov work, and the admitted
+step/radiation/Newton/Krylov/backtracking products bound the full trajectory.
+Driver version 58 separates this composition from older retained solves.
+`data/reference-project/cooling-enthalpy-radiation.fsim` is the synthetic
+latent-storage pulse example. The model remains radiation from patch-mean
+temperature to fixed reservoirs, without enclosure exchange or pointwise
+integration of T(x)^4.
 
 The same native declaration also admits ambient gray radiation on its
 prescribed Robin patches, using the existing sourced emissivity cards and

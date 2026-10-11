@@ -2479,6 +2479,11 @@ fn g0_enthalpy_round_trips_explicit_plateau_states_and_sourced_models() {
     ))
     .unwrap();
     assert!(shipped.findings().is_empty(), "{:?}", shipped.findings());
+    let radiative = parse_sexpr(include_str!(
+        "../../../data/reference-project/cooling-enthalpy-radiation.fsim"
+    ))
+    .unwrap();
+    assert!(radiative.findings().is_empty(), "{:?}", radiative.findings());
     let project = enthalpy_project();
     assert!(project.validate().is_empty(), "{:?}", project.validate());
     let sexpr = print_sexpr(&project).unwrap();

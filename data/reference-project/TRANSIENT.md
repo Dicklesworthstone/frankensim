@@ -131,10 +131,45 @@ controls. Existing v12 projects migrate with their capacities unchanged.
 
 This native mode supports fixed reference geometry, temperature-dependent
 conductivity, regional power schedules, matching finite-resistance contact,
-and prescribed Neumann/Robin boundaries. Prescribed temperatures, ambient
-radiation, natural/airflow convection and adjoint requests currently refuse
+prescribed Neumann/Robin boundaries and sourced ambient radiation. Prescribed
+temperatures, natural/airflow convection and adjoint requests currently refuse
 for enthalpy storage. The declared curves and card identities create no
 material-query receipts, expansion, phase kinetics or experimental validation.
+
+### Latent storage with ambient radiation
+
+`cooling-enthalpy-radiation.fsim` combines the same explicit synthetic phase
+chart with convection, the sourced 0.85 gray-emissivity fixture, and a 20 W
+startup pulse lasting 0.25 s. The pulse delivers 5 J before the power switches
+off. Both grids land on that switch and follow the remaining cooling window;
+the final stored energy accounts for the heat lost to the exterior.
+
+```bash
+frankensim --json validate data/reference-project/cooling-enthalpy-radiation.fsim
+frankensim --json import data/reference-project/cooling-enthalpy-radiation.fsim \
+  data/reference-project/plate.stl enthalpy-radiation.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-enthalpy-radiation.fsim \
+  enthalpy-radiation.db --materials data/reference-project/aa6061.fsmcdpk \
+  --materials data/reference-project/gray-surface.fsmcdpk
+```
+
+Every radiation trial solves from the same accepted old enthalpy. A step must
+pass both the complete nonlinear residual and the physical storage balance
+using actual radiation, not just a small change in a trial coefficient. The
+enthalpy trajectory's common `net_input_w`, `energy_residual_j` and cumulative
+energy fields use the physical balance, including signed nonlinear radiation.
+Each step's `radiation` object retains the applied and nonlinear heat, original
+convection, physical residual and work. The normal final radiation report keeps
+the exact emissivity card evidence and convection/radiation decomposition.
+
+`transient.radiation` counts all outer trials, Newton updates and Krylov
+iterations against their complete multiplied budgets. Detailed Newton/linear
+histories describe the final inner solve of each accepted step, which is the
+history exposed by the shared owner. The reservoir model uses patch-mean
+temperature; it does not infer enclosure exchange or pointwise T(x)^4
+integration. The independent regular-tetrahedron regressions cover both
+radiative heat loss and heating from a hotter reservoir, plus latent-plateau
+energy and phase accounting.
 
 ## Pulse and duty-cycle heating
 

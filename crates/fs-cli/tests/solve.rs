@@ -41,6 +41,8 @@ mod transient_product;
 
 #[path = "solve/transient_enthalpy.rs"]
 mod transient_enthalpy;
+#[path = "solve/transient_enthalpy_radiation.rs"]
+mod transient_enthalpy_radiation;
 
 #[path = "solve/transient_workload.rs"]
 mod transient_workload;
