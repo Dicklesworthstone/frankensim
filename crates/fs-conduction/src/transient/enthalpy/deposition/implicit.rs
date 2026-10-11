@@ -11,6 +11,8 @@
 //! is debited and credited once. A small algebraic residual is NOT a time,
 //! splitting, spatial, or material-error bound; refine time and cells separately.
 //! All active transfers share a conservative aggregate Biot <= 0.1 gate.
+//! That gate is not a proof of cell uniformity: the caller must justify the
+//! parcel partition and internal diffusion regime for its actual shapes.
 //!
 //! Geometry grows by birth, but existing parcels are not remeshed or deformed.
 //! No glass-transition, crystallization kinetics, stress, healing, adhesion,
@@ -165,11 +167,14 @@ pub struct DepositionStepConfig {
 /// Immutable observation suitable for subsequent temperature-dependent mechanics.
 #[derive(Debug, Clone)]
 pub struct DepositedCell<G> {
+    /// Original arrival declaration, retained unchanged through boundary updates.
     pub birth: MaterialBirth<G>,
     pub birth_time_s: f64,
     /// Incoming reference temperature is retained even after reheating.
     pub reference_temperature_k: f64,
     pub phase: EquilibriumPhaseState,
+    /// Current environment; the original one remains in `birth.environment`.
+    pub environment: Environment,
 }
 
 /// Interface thermal history is deliberately distinct from healing or damage.
@@ -339,7 +344,7 @@ impl<'a, G: Clone> DepositionSimulation<'a, G> {
             report.incoming_enthalpy_j = finite(report.incoming_enthalpy_j
                 + finite(birth.mass_kg * birth.specific_enthalpy_j_kg)?)?;
             self.cells.insert(birth.id, DepositedCell { birth: birth.clone(), birth_time_s: self.time_s,
-                reference_temperature_k: phase.temperature_k(), phase });
+                reference_temperature_k: phase.temperature_k(), phase, environment: birth.environment });
         }
         let mut seen = std::collections::BTreeSet::new();
         for change in &event.contacts {
@@ -374,7 +379,7 @@ impl<'a, G: Clone> DepositionSimulation<'a, G> {
             poll(cx, seen.len())?;
             if !seen.insert(id) { return Err(DepositionError::Invalid("duplicate environment change")); }
             validate_environment(environment)?;
-            self.cells.get_mut(&id).ok_or(DepositionError::Invalid("environment targets unborn cell"))?.birth.environment = environment;
+            self.cells.get_mut(&id).ok_or(DepositionError::Invalid("environment targets unborn cell"))?.environment = environment;
         }
         self.exposed_areas_m2()?;
         finite(self.total_mass_kg())?;
@@ -404,7 +409,7 @@ impl<'a, G: Clone> DepositionSimulation<'a, G> {
         for (&id, cell) in &self.cells {
             poll(cx, environments.len())?;
             let exposed = areas[&id];
-            let environment = cell.birth.environment;
+            let environment = cell.environment;
             let material = self.materials[&cell.birth.material];
             // A completely buried parcel can still have a source. In that case
             // the dummy whole area has exactly zero boundary-transfer coefficients.
