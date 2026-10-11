@@ -73,6 +73,11 @@ jobs:
         run: |
           set -o pipefail
           cargo test --release -p fs-couple --example piano_tune -- --test-threads=1 2>&1 | tee piano-tuning-tests.log
+      - name: Test bandlimited acceleration and anti-alias filtering
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release -p fs-couple --lib pcm_wav::decimate -- --test-threads=1 2>&1 | tee piano-decimator-tests.log
       - name: Test shared Rayleigh propagation
         if: ${{ !cancelled() }}
         run: |

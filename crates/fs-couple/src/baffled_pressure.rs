@@ -18,6 +18,9 @@
 //! This is not the previous arbitrary volume-velocity gain in Pa/(m^3/s).
 //! The optional bandlimited constructors replace linear fractional delays with
 //! a windowed sinc and explicitly account for its 32-sample extra latency.
+//! Differentiating constructors additionally reconstruct acceleration with the
+//! shared bandlimited derivative, retaining high partials without finite-
+//! difference sinc attenuation. All numerical delay is reported, never hidden.
 use crate::pcm_wav::decimate as antialias;
 use fs_math::det;
 
@@ -81,6 +84,8 @@ pub struct BaffledPressure {
     previous_velocity: Vec<f64>,
     acceleration: Vec<f64>,
     decimator: antialias::Decimator,
+    /// Cold choice: the prepared filter consumes velocity, not finite differences.
+    differentiate_velocity: bool,
     /// Fixed delay introduced only by the optional bandlimited kernel.
     interpolation_delay: usize,
     head: usize,
@@ -118,6 +123,39 @@ impl BaffledPressure {
         receiver.set_input_ratio((mechanics_rate / output_rate) as usize)?;
         Ok(receiver)
     }
+    /// Bandlimited acceleration and travel-time reconstruction at one clock.
+    /// The original constructors remain available as finite-difference references.
+    ///
+    /// # Errors
+    /// The same geometry, medium, clock and causal-history admission as `new`.
+    pub fn new_differentiating(surface: &[SurfaceSample], inputs: usize, rate: u32,
+        position_m: [f64; 3], medium: RayleighMedium) -> Result<Self, String> {
+        Self::new_multirate_differentiating(surface, inputs, rate, rate, position_m, medium)
+    }
+
+    /// Bandlimited SI acceleration from EVERY accepted mechanics-frame velocity,
+    /// followed by the existing signed Rayleigh surface/travel-time kernel.
+    /// The derivative is fused with the final anti-alias stage while cold. It
+    /// never filters mechanical forces or changes the loaded surface basis.
+    ///
+    /// At 4x oversampling numerical latency is 44 + 8 + 32 = 84 output frames;
+    /// at 1x it is 48 + 32 = 80. Physical propagation is additional. There is
+    /// no two-sample derivative's implicit half-mechanics-frame time shift.
+    /// Reconstruction is tested through 0.45 of the output rate, not at Nyquist.
+    /// It cannot restore missing structural modes or certify continuum acoustics.
+    ///
+    /// # Errors
+    /// Invalid complete geometry, medium, clocks or bounded history allocation.
+    pub fn new_multirate_differentiating(surface: &[SurfaceSample], inputs: usize,
+        mechanics_rate: u32, output_rate: u32, position_m: [f64; 3],
+        medium: RayleighMedium) -> Result<Self, String> {
+        let mut receiver = Self::new_multirate_bandlimited(surface, inputs, mechanics_rate,
+            output_rate, position_m, medium)?;
+        receiver.differentiate_velocity = true;
+        receiver.set_input_ratio((mechanics_rate / output_rate) as usize)?;
+        Ok(receiver)
+    }
+
     /// Observe a uniform circular outlet's actual volume flow in exterior Pa.
     /// Uses this same surface kernel, not a compact pressure gain. Positive-area
     /// midpoint quadrature retains off-axis travel times and interference.
@@ -161,11 +199,13 @@ impl BaffledPressure {
     }
 
     fn set_input_ratio(&mut self, ratio: usize) -> Result<(), String> {
-        self.decimator = antialias::Decimator::new(ratio, self.modes)?;
+        self.decimator = if self.differentiate_velocity {
+            antialias::Decimator::new_differentiating(ratio, self.modes, self.rate as u32)?
+        } else { antialias::Decimator::new(ratio, self.modes)? };
         self.acceleration = vec![0.0; ratio * self.modes];
         Ok(())
     }
-    /// Anti-alias plus fixed interpolation latency, excluding physical travel.
+    /// Anti-alias, derivative and interpolation latency, excluding physical travel.
     pub fn filter_delay_samples(&self) -> f64 {
         self.decimator.delay_output_frames() + self.interpolation_delay as f64
     }
@@ -204,7 +244,7 @@ impl BaffledPressure {
         let samples=history_frames.checked_mul(modes).ok_or("microphone history size overflow")?;
         Ok(Self { kernels: bins.into_iter().collect(), history: vec![0.0;samples],history_frames,
             previous_velocity:vec![0.0;modes],acceleration:vec![0.0;modes],head:0,modes,rate:f64::from(rate),
-            decimator:antialias::Decimator::new(1,modes)?,interpolation_delay:0,
+            decimator:antialias::Decimator::new(1,modes)?,differentiate_velocity:false,interpolation_delay:0,
             position_m,delay_samples:(first,last) })
     }
     pub fn multiply_adds_per_sample(&self)->usize {
@@ -238,20 +278,25 @@ impl BaffledPressure {
     }
 
     /// Interleaved END velocities from EVERY accepted mechanics substep.
-    /// Difference at mechanics rate, low-pass/decimate acceleration, then apply
-    /// spatial propagation at audio rate. The filter adds explicit causal delay.
+    /// The differentiating image passes velocity to its prepared derivative;
+    /// legacy images first difference at mechanics rate. Both anti-alias before
+    /// spatial propagation at audio rate and retain explicit causal delay.
     /// All candidate values are checked before either delay line is committed.
     pub fn step_trace(&mut self, velocity: &[f64])->Result<f64,String> {
         if velocity.len()!=self.acceleration.len() || velocity.iter().any(|v|!v.is_finite()) {
             return Err("microphone needs the complete finite substep velocity trace".into());
         }
         let ratio=self.decimator.input_frames();
-        let mechanics_rate=self.rate*ratio as f64;
-        for s in 0..ratio { for i in 0..self.modes {
-            let previous=if s==0 {self.previous_velocity[i]} else {velocity[(s-1)*self.modes+i]};
-            self.acceleration[s*self.modes+i]=(velocity[s*self.modes+i]-previous)*mechanics_rate;
-        }}
-        let filtered=self.decimator.preview(&self.acceleration)?;
+        let filtered = if self.differentiate_velocity {
+            self.decimator.preview(velocity)?
+        } else {
+            let mechanics_rate=self.rate*ratio as f64;
+            for s in 0..ratio { for i in 0..self.modes {
+                let previous=if s==0 {self.previous_velocity[i]} else {velocity[(s-1)*self.modes+i]};
+                self.acceleration[s*self.modes+i]=(velocity[s*self.modes+i]-previous)*mechanics_rate;
+            }}
+            self.decimator.preview(&self.acceleration)?
+        };
         let mut pressure=0.0;
         for (delay,weights) in &self.kernels {
             let frame=if self.head>=*delay {self.head-*delay}else{self.head+self.history_frames-*delay};
@@ -454,3 +499,7 @@ mod circular_tests {
         assert!(BaffledPressure::circular_outlet(0.007,48000,high,medium).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "baffled_pressure_differentiating_tests.rs"]
+mod differentiating_tests;

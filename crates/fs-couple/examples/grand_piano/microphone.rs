@@ -1,8 +1,9 @@
 //! Piano surface projection into the shared stationary Rayleigh receiver.
 //! The bank still owns the loaded coordinate map; the shared owner alone owns
 //! acoustic differentiation, filtering, geometry kernels and propagation memory.
-//! Use its bandlimited travel-time image to avoid audio-rate linear-delay
-//! attenuation of upper partials. It adds 32 output samples of declared latency;
+//! Bandlimited acceleration and travel-time reconstruction retain upper partial
+//! amplitude and phase without two-sample differencing or linear-delay droop.
+//! At 4x oversampling the declared numerical delay is 84 output samples;
 //! geometry, signed spatial cancellation and physical pressure gain are unchanged.
 use super::board_geometry::SurfaceSample;
 use super::linear::Bank;
@@ -25,13 +26,13 @@ impl Microphone {
     pub fn new(surface: &[SurfaceSample], bank: &Bank, rate:u32,
         position_m:[f64;3], medium:Medium) -> Result<Self,String> {
         let loaded=Self::surface(surface,bank)?;
-        Ok(Self { receiver:BaffledPressure::new_bandlimited(&loaded,bank.board_count,rate,position_m,
+        Ok(Self { receiver:BaffledPressure::new_differentiating(&loaded,bank.board_count,rate,position_m,
             RayleighMedium {density:medium.density,sound_speed:medium.sound_speed})? })
     }
     pub fn new_multirate(surface:&[SurfaceSample], bank:&Bank, rate:u32,
         position_m:[f64;3], medium:Medium) -> Result<Self,String> {
         let loaded=Self::surface(surface,bank)?;
-        Ok(Self { receiver:BaffledPressure::new_multirate_bandlimited(&loaded,bank.board_count,bank.rate,rate,position_m,
+        Ok(Self { receiver:BaffledPressure::new_multirate_differentiating(&loaded,bank.board_count,bank.rate,rate,position_m,
             RayleighMedium {density:medium.density,sound_speed:medium.sound_speed})? })
     }
 }
@@ -40,7 +41,7 @@ impl Microphone {
 mod tests {
     use super::*;
     #[test]
-    fn played_piano_selects_bandlimited_travel_without_changing_the_loaded_projection() {
+    fn played_piano_selects_bandlimited_acceleration_and_travel_without_changing_the_loaded_projection() {
         let course=super::super::geometry::demonstration_scale().unwrap()[48];
         let board=super::super::board::demonstration();
         let surface=[SurfaceSample {position_m:[0.0;3],area_m2:0.2,
@@ -48,7 +49,7 @@ mod tests {
         let piano=super::super::engine::Instrument::new(vec![course],&board,48_000,4,8,true).unwrap();
         let mic=Microphone::new_multirate(&surface,&piano.bank,48_000,[0.0,0.0,1.0],Medium::air()).unwrap();
         assert_eq!(mic.interpolation_delay_samples(),32);
-        assert_eq!(mic.filter_delay_samples(),76.0);
+        assert_eq!(mic.filter_delay_samples(),84.0);
         let legacy=Microphone::surface(&surface,&piano.bank).unwrap();
         assert_eq!(legacy[0].mode_shape,piano.bank.project_board_shape(&surface[0].mode_shape).unwrap());
     }
