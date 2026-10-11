@@ -1,5 +1,55 @@
 # CONTRACT: fs-conduction
 
+## Growing deposition thermal network (issue #1)
+
+`transient::deposition` accepts a resolved absolute-time schedule with stable
+cell/material/body/segment IDs, incoming kg and J/kg, world-frame metre geometry,
+and explicit thermal interfaces. Birth adds `m*h` once. Contact covers ambient
+surface area; separation and reservoir release restore it. Old enthalpy and
+source correspondence are retained. Interface thermal conductance is not a
+mechanical bond strength. `enthalpy::deposition` binds the existing equilibrium
+phase charts and executor Cx; it does not change the stationary P1 solver.
+
+The executable `examples/deposited_strip.rs` deposits four passes of four cells
+on a declared heated reservoir, cools, and applies a prescribed bed release.
+It prints located temperature/exposure/energy samples and asserts supplied
+mass, total energy closure, and first-pass reheating by the second pass. All
+coefficients are illustrative. It predicts no release displacement or adhesive
+detachment time. The example imports the exact std-only production kernel so
+it can also be compiled directly when workspace dependencies are unavailable.
+
+The sparse control-volume model subcycles forward Euler using a global chart
+temperature-slope CFL bound and lands exactly on every event. A caller law must
+supply a valid bound. Each advance returns an immutable candidate plus incoming
+mass/energy, external heat, actual storage change, signed joule defect and work
+counts. An absolute energy gate, chart domain, cell/link/event/substep budgets,
+or cancellation refusal returns no candidate. Polling occurs every 256 entries
+in thermal loops and between events/steps. Clone checkpoints preserve the event
+cursor and state; bitwise restart equivalence is tested on the same timestep
+grid and ISA. Adding query stops changes the integration grid and can change
+the numerical solution. Schedule construction and cloning are budget-bounded
+but not internally cancellable.
+
+G0/G1/G3 tests cover birth/no preactivation, repeated endpoint idempotence,
+successive-layer reheating and exposure, two-body exchange, analytic lumped
+cooling/time refinement, uniform spatial partition, a nonuniform insulated
+strip cosine-mode diffusion reference with independent spatial refinement
+(and a separately halved time step), latent-plateau energy storage, sources, heterogeneous
+laws, bed release, invalid topology/domain, and failed/cancelled trials.
+The ignored cost test exercises 1,000 timed cells and 999 links; observations
+are hardware-specific, not a performance guarantee. The core is std-only and
+its exact source can be tested with `rustc --edition 2024 --test
+crates/fs-conduction/src/transient/deposition.rs` when sibling repositories
+prevent workspace resolution. This does not compile or validate the Cx/chart
+adapter or the entire workspace.
+
+No claim: automatic mesh/contact generation, conservative remeshing, geometric
+deformation, thermal radiation, crystallization kinetics, viscoelastic history,
+healing, cohesive failure, printer control, or calibrated FDM prediction. Each
+cell is uniform; the caller must justify that approximation and conductances.
+Geometry grows by adding supplied cells and changing interfaces, but does not
+move. This is a useful reduced R1 foundation, not completion of umbrella #1.
+
 > Beads `frankensim-extreal-program-f85xj.5.1`, `.5.3`, `.5.4`, and `.5.6`. The
 > cooling vertical's steady heat-conduction solve, matching-P1 contact rung,
 > first card-backed surface-radiation rung, and receipt-preserving PCB

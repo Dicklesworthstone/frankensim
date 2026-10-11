@@ -11,7 +11,7 @@
 //! Forward Euler is subcycled with a declared maximum step and a monotonicity
 //! bound `dt <= 0.8 m / (max(dT/dh) * sum(outgoing conductance))`. All event
 //! times are hit exactly. No future cell conducts heat. A failed/cancelled
-//! advance publishes no candidate. Cost is sparse, O(cells + links) storage,
+//! advance publishes no candidate. Cost is sparse, O(cells + links + events) storage,
 //! O((cells + links) log(cells)) per substep; no dense global solve or full
 //! history retention. Time and spatial resolution are independent caller
 //! choices. This reduced model needs a uniform-cell/Biot justification and
@@ -28,7 +28,9 @@ pub struct CellId(pub u64);
 pub struct MaterialId(pub u64);
 
 /// Replaceable enthalpy/temperature law. All materials must use a consistent
-/// specific-energy datum for an energy audit to have physical meaning.
+/// specific-energy datum for an energy audit to have physical meaning. `T(h)`
+/// must be continuous and nondecreasing over the admitted domain, and the law
+/// must remain immutable throughout an advance and checkpoint/restart.
 pub trait ThermalLaw {
     /// Temperature in kelvin at specific enthalpy in J/kg. Refuse extrapolation.
     fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError>;
@@ -330,7 +332,7 @@ impl<'a> DepositionSimulation<'a> {
     }
 
     /// Advance to an absolute time, hitting every birth/boundary event exactly.
-    /// `checkpoint` is polled every 256 cells/links and between events/steps;
+    /// `checkpoint` is polled every 256 cells/links in thermal loops and between events/steps;
     /// use the Cx adapter in `enthalpy::deposition` for executor integration.
     /// Only the returned candidate commits aging, births and schedule progress.
     pub fn advance_to(
@@ -400,6 +402,7 @@ impl<'a> DepositionSimulation<'a> {
             audit.substeps += 1;
         }
         audit.stored_energy_change_j = finite(next.energy_j() - initial_energy)?;
+        finite(next.mass_kg())?;
         audit.residual_j =
             finite(audit.stored_energy_change_j - audit.incoming_energy_j - audit.external_heat_j)?;
         if audit.residual_j.abs() > config.energy_tolerance_j {
@@ -804,6 +807,108 @@ mod tests {
         }
         close(final_t[0], final_t[1], 1e-10);
         close(final_t[0], final_t[2], 1e-10);
+    }
+
+    // G1: insulated 1-D strip, cell-centred cosine mode. Unlike the uniform
+    // partition test this exercises a spatial temperature gradient. Conductance
+    // is k*A/dx, mass is rho*A*dx; continuum alpha=k/(rho*cp).
+    #[test]
+    fn nonuniform_strip_spatial_refinement_matches_diffusion_mode() {
+        let length_m = 0.01;
+        let cross_section_m2 = 1e-6;
+        let density_kg_m3 = 1000.0;
+        let conductivity_w_m_k = 0.2;
+        let cp_j_kg_k = 2000.0;
+        let end_s = 10.0;
+        let alpha = conductivity_w_m_k / (density_kg_m3 * cp_j_kg_k);
+        let mut errors = Vec::new();
+        for count in [4, 8, 16] {
+            let dx = length_m / f64::from(count);
+            let mut events = Vec::new();
+            for i in 0..count {
+                let x = (f64::from(i) + 0.5) * dx;
+                let initial_t = 400.0 + 50.0 * (std::f64::consts::PI * x / length_m).cos();
+                let mut c = cell(i as u64, cp_j_kg_k * (initial_t - 300.0));
+                c.mass_kg = density_kg_m3 * cross_section_m2 * dx;
+                c.geometry.start_m = [f64::from(i) * dx, 0.0, 0.0];
+                c.geometry.end_m = [(f64::from(i) + 1.0) * dx, 0.0, 0.0];
+                c.geometry.volume_m3 = cross_section_m2 * dx;
+                c.geometry.surface_area_m2 = 2.0 * cross_section_m2 + 0.004 * dx;
+                events.push(event(0.0, Event::Birth(c)));
+            }
+            for i in 1..count {
+                let mut l = link((i - 1) as u64, i as u64);
+                l.area_m2 = cross_section_m2;
+                l.conductance_w_k = conductivity_w_m_k * cross_section_m2 / dx;
+                events.push(event(0.0, Event::Contact(l)));
+            }
+            let (s, a) = run(&simulation(events.clone()), end_s, 0.001);
+            let (finer_time, _) = run(&simulation(events), end_s, 0.0005);
+            let amplitude =
+                50.0 * (-alpha * (std::f64::consts::PI / length_m).powi(2) * end_s).exp();
+            let mut error: f64 = 0.0;
+            let mut time_change: f64 = 0.0;
+            for i in 0..count {
+                let x = (f64::from(i) + 0.5) * dx;
+                let exact = 400.0 + amplitude * (std::f64::consts::PI * x / length_m).cos();
+                let t = s.temperature_k(CellId(i as u64)).unwrap();
+                error = error.max((t - exact).abs());
+                time_change = time_change
+                    .max((t - finer_time.temperature_k(CellId(i as u64)).unwrap()).abs());
+            }
+            assert!(
+                time_change < error * 0.01,
+                "time error must not mask spatial error"
+            );
+            close(a.residual_j, 0.0, 1e-10);
+            errors.push(error);
+        }
+        for pair in errors.windows(2) {
+            assert!(
+                (3.5..4.5).contains(&(pair[0] / pair[1])),
+                "errors={errors:?}"
+            );
+        }
+    }
+
+    // An independently specified piecewise enthalpy plateau checks that the
+    // network carries h, rather than replacing it by temperature/cp storage.
+    #[test]
+    fn latent_plateau_stores_energy_before_temperature_rises() {
+        struct Plateau;
+        impl ThermalLaw for Plateau {
+            fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+                if !(0.0..=400_000.0).contains(&h) {
+                    return Err(DepositionError::MaterialDomain);
+                }
+                Ok(if h < 100_000.0 {
+                    300.0 + h / 2000.0
+                } else if h <= 200_000.0 {
+                    350.0
+                } else {
+                    350.0 + (h - 200_000.0) / 2000.0
+                })
+            }
+            fn maximum_temperature_slope(&self) -> f64 {
+                0.0005
+            }
+        }
+        let law = Plateau;
+        let mut c = cell(1, 100_000.0);
+        c.boundary.source_w = 10.0;
+        let s = DepositionSimulation::new(
+            vec![event(0.0, Event::Birth(c))],
+            &[(MaterialId(7), &law)],
+            budget(),
+        )
+        .unwrap();
+        let (middle, a) = s.advance_to(5.0, config(0.125), || Ok(())).unwrap();
+        close(middle.temperature_k(CellId(1)).unwrap(), 350.0, 1e-12);
+        close(middle.cells()[&CellId(1)].specific_h_j_kg, 150_000.0, 1e-8);
+        close(a.external_heat_j, 50.0, 1e-10);
+        let (after, a) = middle.advance_to(15.0, config(0.125), || Ok(())).unwrap();
+        close(after.temperature_k(CellId(1)).unwrap(), 375.0, 1e-10);
+        close(a.residual_j, 0.0, 1e-10);
     }
 
     #[test]
