@@ -167,6 +167,53 @@ perforated plate with 460 facets refused on 14 slivers, and it now meshes. See
 `examples/cooling-enclosure/README.md` for receipt anatomy and
 `examples/heated-plate/README.md` for the minimal schema tour.
 
+## A startup pulse with latent-heat storage
+
+`heatsink-fan-enthalpy.fsim` uses the same heatsink, conductivity card, fan,
+vent, leakage bypass and channel as `heatsink-fan-pulse.fsim`. It starts at
+293.15 K, supplies 20 W until 0.25 s, then supplies zero power until 2 s.
+The schedule replaces the static 3 W regional row. The air network remains
+quasi-steady while the solid advances in total specific enthalpy.
+
+The storage data are deliberately synthetic. The AA6061 pack supplies
+conductivity; it does not establish this density, heat capacity or melting
+temperature. With the analytic 52.8 cm³ body volume, the declared reference
+density of 1000 kg/m³ gives 0.0528 kg of fixed mass. The chart uses a
+100 J/(kg K) sensible heat capacity and a 100 J/kg latent interval at
+293.4 K:
+
+| Specific enthalpy (J/kg) | Temperature (K) | Liquid mass fraction |
+|---|---|---|
+| −6000 | 233.15 | 0 |
+| 0 | 293.15 | 0 |
+| 25 | 293.4 | 0 |
+| 125 | 293.4 | 1 |
+| 10600 | 398.15 | 1 |
+
+For scale, an adiabatic energy calculation needs 1.32 J to reach the plateau
+and another 5.28 J to cross it; the declared pulse delivers 5 J. These are
+input arithmetic, not solved temperatures or phase fractions. The computed
+response also includes heat conducted through the body and carried away by
+the fan-driven air. No radiation is declared.
+
+From the repository root, with `frankensim` built:
+
+```bash
+frankensim --json validate examples/heatsink-fan/heatsink-fan-enthalpy.fsim
+frankensim --json import examples/heatsink-fan/heatsink-fan-enthalpy.fsim \
+  examples/heatsink-fan/heatsink.stl heatsink-enthalpy.db --unit m --max-hole-edges 0
+frankensim --json run examples/heatsink-fan/heatsink-fan-enthalpy.fsim \
+  heatsink-enthalpy.db --materials data/reference-project/aa6061.fsmcdpk
+```
+
+Read the retained transient histories for stored-energy changes, liquid mass
+fractions, air heat gain and coupled energy closure. The 0.25 s power switch
+is represented on both time grids; the 15-step cap includes both grids.
+The reported temperature maximum is at the final time. Matching temperature
+on a latent plateau alone does not establish agreement of enthalpy or phase
+fraction. This is an Estimated stationary storage model with fixed geometry
+and reference mass.
+
 ## A chip footprint: heat entering through a declared surface
 
 `heatsink-fan-chip.fsim` is the same project with the 3 W entering where a

@@ -641,7 +641,7 @@ pub(super) fn solve(
     if policy.enthalpy.is_some() {
         return enthalpy::solve(
             cx, spec, problem, interfaces, labels, region_ids, radiation,
-            natural, pressure_pa, linear, deadline,
+            airflow, natural, pressure_pa, linear, deadline,
         );
     }
     let initial_temperature = uniform_initial_temperature(policy)?;

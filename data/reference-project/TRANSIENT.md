@@ -131,10 +131,34 @@ controls. Existing v12 projects migrate with their capacities unchanged.
 
 This native mode supports fixed reference geometry, temperature-dependent
 conductivity, regional power schedules, matching finite-resistance contact,
-prescribed Neumann/Robin boundaries, sourced natural convection and ambient
-radiation. Prescribed temperatures, airflow convection and adjoint requests
-currently refuse for enthalpy storage. The declared curves and card identities create no
+prescribed Neumann/Robin boundaries, sourced natural convection or quasi-steady
+airflow convection, and ambient radiation. Prescribed temperatures and adjoint
+requests currently refuse for enthalpy storage. The declared curves and card identities create no
 material-query receipts, expansion, phase kinetics or experimental validation.
+
+### Fan-cooled phase storage
+
+`examples/heatsink-fan/heatsink-fan-enthalpy.fsim` combines the existing fan,
+vent, channel and sourced conductivity with a synthetic phase-change chart
+and a 20 W startup pulse. Its README gives validate/import/run commands and
+the complete chart. Each time interval uses the existing branch heat-exchange
+solver, with a single unchanged old enthalpy through every airflow, radiation
+and Newton trial.
+
+The accepted solid is checked at the air march's updated Robin references.
+Both its complete nodal energy residual and the independent storage balance
+must pass. The storage balance uses actual air enthalpy gain, any off-path
+convection and nonlinear ambient radiation, each once. Per-step
+`conjugate` evidence retains applied and physical references separately,
+physical residual tolerances, actual heat transfers and the branch exchange.
+The top-level conjugate report describes the last counted solid response.
+
+Airflow stays quasi-steady: the model retains the solved fan flow and
+transport properties throughout the thermal trajectory. It adds no air
+storage or transient fan dynamics. Natural and forced convection remain
+separate native transient modes. Radiation may be combined with either.
+The declared work allowance includes all nested air/radiation/Newton trials,
+and an exhausted tolerance, material domain or budget publishes no endpoint.
 
 ### Hot and cold bodies at the start
 

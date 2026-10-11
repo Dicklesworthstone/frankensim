@@ -51,6 +51,8 @@ mod transient_enthalpy_natural;
 mod transient_enthalpy_conductivity;
 #[path = "solve/transient_enthalpy_initial.rs"]
 mod transient_enthalpy_initial;
+#[path = "solve/transient_enthalpy_conjugate.rs"]
+mod transient_enthalpy_conjugate;
 
 #[path = "solve/transient_workload.rs"]
 mod transient_workload;

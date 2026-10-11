@@ -1562,13 +1562,49 @@ fine-grid final temperature. Coarse/fine enthalpy and phase differences remain
 visible even when both temperatures agree on a plateau; equal temperatures
 do not become a zero-error temporal claim. This is Estimated fixed-domain
 transport, with source attribution rather than authentication of supplied
-phase data. Prescribed temperature, airflow convection and native
-trajectory adjoints are currently refused for this storage model. Expansion,
+phase data. Prescribed temperature and native trajectory adjoints are
+currently refused for this storage model. Expansion,
 motion and phase kinetics are not inferred.
 `data/reference-project/cooling-enthalpy.fsim` and `TRANSIENT.md` give a complete
 synthetic melting example through validate/import/solve/report. Driver version
 57 separates these semantics from older retained solves.
 
+
+Native total enthalpy also supports the existing quasi-steady airflow
+convection path, with optional sourced ambient radiation. The branch-major
+IQN-ILS owner retains the fixed flow, inlet and transport properties. Every
+solid, radiation and air trial receives the same accepted old specific
+enthalpy; only an accepted time step advances storage.
+
+The last counted solid response retains its applied Robin references. A
+separate shared endpoint evaluation uses the air march's updated references
+and actual nonlinear radiation. Acceptance requires the complete nodal
+residual, physical energy residual and a separate actual-air energy balance.
+Air enthalpy gain, off-path convection and radiation each enter storage once.
+The standard branch decomposition describes the applied convection; separate
+physical reference and flux rows describe the endpoint audit. No additional
+solid solve is hidden after acceptance.
+
+The residual target is frozen from the initial enthalpy under explicit
+branch-inlet seed references, labeled
+`initial-enthalpy-with-branch-inlet-seed-boundary`. This seed is a boundary
+guess, not a claim that the old air state is converged. Each air callback
+audits that old state at its applied references and tightens both positive
+Newton tolerances. Air-reference convergence reserves an independent share
+of the nodal residual and joule tolerances. These gates do not replace the
+existing independent branch heat checks.
+
+Per-step and aggregate `transient.conjugate` evidence records air iterations,
+all solid responses, Newton/Krylov work, radiation trials, direct endpoint
+audits, physical energy and actual-air energy. The 100-air-iteration policy
+multiplies the radiation and Newton caps in admission; direct audits are
+bounded by 102 per step. Memory admission includes air staging and retained
+per-segment receipts. Histories expose only the final inner Newton solve of
+each accepted step and label that scope. Mixed natural/forced transient
+convection, enclosure radiation and enthalpy trajectory adjoints still
+refuse. Driver version 65 separates this physical coupling from older
+retained solves. `examples/heatsink-fan/heatsink-fan-enthalpy.fsim` is the
+native fan-cooled synthetic phase-storage example.
 
 Schema v14 optionally declares a conductivity multiplier for each regional
 enthalpy material. `linear-liquid-mass-fraction` interpolates between positive

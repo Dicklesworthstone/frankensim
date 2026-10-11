@@ -41,7 +41,7 @@ edge is valid.
 | Standalone `fs-*` workspaces | 20 (`fs-cmaes-viz-wasm`, `fs-crump-wasm`, `fs-daimler-wasm`, `fs-davinci-wasm`, `fs-demo-physics-wasm`, `fs-edison-wasm`, `fs-flyer-wasm`, `fs-g1-train`, `fs-goddard-wasm`, `fs-heatmap-wasm`, `fs-howe-wasm`, `fs-kamen-wasm`, `fs-lenia-wasm`, `fs-otis-wasm`, `fs-otto-wasm`, `fs-roomba-wasm`, `fs-salisbury-wasm`, `fs-tesla-wasm`, `fs-versatran-wasm`, `fs-wasm`) |
 | Tracked `fs-*` crate directories | 184 |
 | Tracked `CONTRACT.md` files | 184 of 184 |
-| Tracked crate integration-test files | 1185 |
+| Tracked crate integration-test files | 1186 |
 | `fs-*` layer inventory | `UTIL=15`, `L0=7`, `L1=14`, `L2=22`, `L3=42`, `L4=33`, `L5=4`, `L6=46`, `TOOL=1` |
 <!-- END GENERATED FRANKENSIM DOC FACTS -->
 
