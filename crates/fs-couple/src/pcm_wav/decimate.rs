@@ -6,6 +6,9 @@
 //! Passband is 0..0.45 of OUTPUT rate. For half-bands, rejection is specified
 //! at 0.55 output rate and above (foldover into the retained passband), not
 //! in the transition around Nyquist. No future samples or delay compensation.
+//! The optional differentiating image observes velocity as acceleration. Its
+//! derivative is convolved with the final rate-conversion kernel while cold,
+//! not evaluated as a lossy two-sample difference before anti-alias filtering.
 use fs_math::det;
 use std::f64::consts::PI;
 
@@ -13,6 +16,7 @@ use std::f64::consts::PI;
 struct Stage {
     ratio: usize, channels: usize, half: usize, center: f64,
     pairs: Vec<(usize, f64)>, history: Vec<f64>, head: usize,
+    antisymmetric: bool,
 }
 impl Stage {
     fn new(ratio: usize, channels: usize, half: usize, halfband: bool) -> Self {
@@ -34,8 +38,53 @@ impl Stage {
             (value != 0.0).then_some((lag, value))
         }).collect();
         Self { ratio, channels, half, center, pairs,
-            history: vec![0.0; 2 * half * channels], head: 0 }
+            history: vec![0.0; 2 * half * channels], head: 0, antisymmetric: false }
     }
+
+    /// Cold convolution with a bandlimited derivative at THIS stage's input
+    /// clock. sinc'(k)=(-1)^k/k for nonzero integer k. Exact antisymmetry
+    /// annihilates DC; the first moment gives SI gain for a velocity ramp.
+    /// Removing the window's tiny endpoint pedestal makes it continuous at
+    /// its finite support. This is differentiation, not acoustic EQ.
+    fn differentiate(&mut self, half: usize, input_rate: f64) {
+        let mut original = vec![0.0; 2 * self.half + 1];
+        original[self.half] = self.center;
+        for &(lag, weight) in &self.pairs {
+            original[lag] = weight;
+            original[2 * self.half - lag] = weight;
+        }
+        let mut derivative = vec![0.0; 2 * half + 1];
+        let mut moment = 0.0;
+        for offset in 1..half {
+            let x = offset as f64;
+            let phase = PI * x / half as f64;
+            let window = 0.35875 + 0.48829 * det::cos(phase)
+                + 0.14128 * det::cos(2.0 * phase) + 0.01168 * det::cos(3.0 * phase)
+                - (0.35875 - 0.48829 + 0.14128 - 0.01168);
+            let weight = if offset % 2 == 0 { -window / x } else { window / x };
+            derivative[half - offset] = weight;
+            derivative[half + offset] = -weight;
+            moment += 2.0 * x * weight;
+        }
+        for value in &mut derivative { *value *= input_rate / moment; }
+        let next_half = self.half + half;
+        let mut convolution = vec![0.0; 2 * next_half + 1];
+        for (i, a) in original.iter().enumerate() {
+            for (j, b) in derivative.iter().enumerate() { convolution[i + j] += a * b; }
+        }
+        self.half = next_half;
+        self.center = 0.0;
+        // Paired evaluation cancels a constant velocity exactly, rather than
+        // subtracting large nearly equal weighted sums at microphone scale.
+        self.pairs = (0..next_half).filter_map(|lag| {
+            let weight = 0.5 * (convolution[lag] - convolution[2 * next_half - lag]);
+            (weight != 0.0).then_some((lag, weight))
+        }).collect();
+        self.history = vec![0.0; 2 * next_half * self.channels];
+        self.head = 0;
+        self.antisymmetric = true;
+    }
+
     // Negative indices address committed history; nonnegative ones address
     // this candidate input block. Preview never writes the delay line.
     fn frame<'a>(&'a self, input: &'a [f64], index: isize) -> &'a [f64] {
@@ -54,7 +103,7 @@ impl Stage {
                 let a = self.frame(input, end - lag as isize);
                 let b = self.frame(input, end - (2 * self.half - lag) as isize);
                 for ((value, a), b) in out.iter_mut().zip(a).zip(b) {
-                    *value += weight * (a + b);
+                    *value += weight * if self.antisymmetric { a - b } else { a + b };
                 }
             }
         }
@@ -96,6 +145,39 @@ impl Decimator {
         }
         Ok(Self { stages, buffers, pending: false, ratio, channels, delay })
     }
+
+    /// Observe the time derivative of the supplied samples, in units/second.
+    /// `output_rate_hz` names the OUTPUT clock; input frames still arrive at
+    /// `ratio * output_rate_hz`. Geometry and physical amplitude are untouched.
+    ///
+    /// Only the last stage is differentiated, preserving upstream sparse
+    /// half-bands and avoiding a separate high-rate FIR per input channel.
+    /// Extra latency is 48 output frames at ratio one, otherwise 16 divided
+    /// by the final stage's ratio. It is included in `delay_output_frames`.
+    /// The legacy `new` constructor remains an undifferentiated observer.
+    ///
+    /// # Errors
+    /// Invalid counts, zero clock or an unrepresentable mechanical clock.
+    pub fn new_differentiating(ratio: usize, channels: usize, output_rate_hz: u32)
+        -> Result<Self, &'static str> {
+        let mut result = Self::new(ratio, channels)?;
+        if output_rate_hz == 0 || output_rate_hz.checked_mul(ratio as u32).is_none() {
+            return Err("differentiating decimator needs a positive representable sample clock");
+        }
+        if result.stages.is_empty() {
+            // Identity before differentiation; never exposed as a zero-history
+            // runnable stage. The differentiator prepares its entire support.
+            result.stages.push(Stage { ratio: 1, channels, half: 0, center: 1.0,
+                pairs: Vec::new(), history: Vec::new(), head: 0, antisymmetric: false });
+            result.buffers.push(vec![0.0; channels]);
+        }
+        let stage = result.stages.last_mut().expect("derivative stage prepared");
+        let half = if stage.ratio == 1 { 48 } else { 16 };
+        stage.differentiate(half, f64::from(output_rate_hz) * stage.ratio as f64);
+        result.delay += half as f64 / stage.ratio as f64;
+        Ok(result)
+    }
+
     pub fn input_frames(&self) -> usize { self.ratio }
     pub fn delay_output_frames(&self) -> f64 { self.delay }
     pub fn multiplies_per_output_frame(&self) -> usize {
@@ -128,7 +210,10 @@ mod tests {
     use super::*;
     fn full_taps(s: &Stage) -> Vec<f64> {
         let mut h = vec![0.0; 2 * s.half + 1]; h[s.half] = s.center;
-        for &(i, w) in &s.pairs { h[i] = w; h[2 * s.half - i] = w; }
+        for &(i, w) in &s.pairs {
+            h[i] = w;
+            h[2 * s.half - i] = if s.antisymmetric { -w } else { w };
+        }
         h
     }
     #[test]
@@ -202,6 +287,105 @@ mod tests {
             }
             assert!(ripple<0.0001,"ratio {ratio}, ripple {ripple}");
             assert!(alias<0.00001,"ratio {ratio}, foldover {alias}");
+        }
+    }
+
+    #[test]
+    fn differentiating_stream_matches_full_convolution_without_advancing_rejected_trials() {
+        for ratio in 1..=16 {
+            let channels = 2;
+            let input: Vec<f64> = (0..ratio*channels*240)
+                .map(|i| (i as f64*0.137).sin()).collect();
+            let mut d = Decimator::new_differentiating(ratio, channels, 48_000).unwrap();
+            let buffers: Vec<_> = d.buffers.iter().map(|v| v.as_ptr()).collect();
+            let histories: Vec<_> = d.stages.iter().map(|s| s.history.as_ptr()).collect();
+            let mut reference = input.clone();
+            for stage in &d.stages {
+                let h = full_taps(stage);
+                let mut next = Vec::new();
+                for end in (stage.ratio-1..reference.len()/channels).step_by(stage.ratio) {
+                    for c in 0..channels {
+                        next.push(h.iter().take(end+1).enumerate().map(|(lag,w)|
+                            w*reference[(end-lag)*channels+c]).sum::<f64>());
+                    }
+                }
+                reference = next;
+            }
+            for (frame, x) in input.chunks_exact(ratio*channels).enumerate() {
+                d.preview(&vec![999.0; ratio*channels]).unwrap();
+                assert!(d.preview(&vec![f64::NAN; ratio*channels]).is_err());
+                assert!(d.preview(&x[..x.len()-1]).is_err());
+                let out = d.preview(x).unwrap();
+                for (a,b) in out.iter().zip(&reference[frame*channels..(frame+1)*channels]) {
+                    assert!((a-b).abs()<2e-9, "ratio {ratio}: {a} vs {b}");
+                }
+                d.commit();
+            }
+            assert_eq!(buffers, d.buffers.iter().map(|v| v.as_ptr()).collect::<Vec<_>>());
+            assert_eq!(histories, d.stages.iter().map(|s| s.history.as_ptr()).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn differentiating_gain_is_per_second_and_its_delay_is_explicit() {
+        for ratio in 1..=16 {
+            for rate in [8_000, 48_000, 192_000] {
+                let mut d = Decimator::new_differentiating(ratio, 2, rate).unwrap();
+                let base = Decimator::new(ratio, 2).unwrap().delay_output_frames();
+                let factor = if ratio.is_power_of_two() && ratio>1 { 2 } else { ratio };
+                let extra = if ratio==1 { 48.0 } else { 16.0/factor as f64 };
+                assert_eq!(d.delay_output_frames(), base+extra);
+                for frame in 0..240 {
+                    let mut input = Vec::new();
+                    for sub in 0..ratio {
+                        let t = (frame*ratio+sub) as f64 / (rate as f64*ratio as f64);
+                        input.extend([0.75*t, 1.0]);
+                    }
+                    let out = d.preview(&input).unwrap();
+                    if frame>210 {
+                        assert!((out[0]-0.75).abs()<1e-9, "ratio {ratio}, rate {rate}: {}", out[0]);
+                        assert_eq!(out[1], 0.0);
+                    }
+                    d.commit();
+                }
+            }
+        }
+        assert!(Decimator::new_differentiating(1,1,0).is_err());
+        assert!(Decimator::new_differentiating(2,1,u32::MAX).is_err());
+        assert!(Decimator::new_differentiating(17,1,48_000).is_err());
+    }
+
+    #[test]
+    fn differentiating_passband_and_foldover_keep_the_physical_derivative_gain() {
+        for ratio in 1..=16 {
+            let d = Decimator::new_differentiating(ratio, 1, 48_000).unwrap();
+            let response = |frequency: f64| {
+                let mut rate = ratio as f64;
+                let mut gain = 1.0;
+                for stage in &d.stages {
+                    let angle = 2.0*PI*frequency/rate;
+                    let value = if stage.antisymmetric {
+                        2.0*stage.pairs.iter().map(|(lag,w)|
+                            w*((stage.half-lag) as f64*angle).sin()).sum::<f64>()
+                    } else {
+                        stage.center+2.0*stage.pairs.iter().map(|(lag,w)|
+                            w*((stage.half-lag) as f64*angle).cos()).sum::<f64>()
+                    };
+                    gain *= value;
+                    rate /= stage.ratio as f64;
+                }
+                gain/(2.0*PI*frequency*48_000.0)
+            };
+            for i in 1..=512 {
+                let f = 0.45*i as f64/512.0;
+                assert!((response(f)-1.0).abs()<0.0002, "ratio {ratio}, f {f}");
+            }
+            for i in 1..=1024 {
+                let f = 0.5*ratio as f64*i as f64/1024.0;
+                if f>=0.55 && (f-f.round()).abs()<=0.45 {
+                    assert!(response(f).abs()<0.00002, "ratio {ratio}, alias {f}");
+                }
+            }
         }
     }
 }
