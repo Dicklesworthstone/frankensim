@@ -26,6 +26,8 @@ pub mod learning;
 pub mod mf;
 /// Joint-posterior noisy expected improvement for stochastic objectives.
 pub mod noisy;
+/// Marginal noisy improvement beyond simulation jobs that are still running.
+pub mod pending;
 pub mod sparse;
 /// Resumable ask/tell studies for externally executed noisy simulations.
 pub mod study;
