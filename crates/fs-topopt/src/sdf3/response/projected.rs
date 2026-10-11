@@ -4,6 +4,9 @@ use super::*;
 use std::cell::RefCell;
 use fs_ascent::projected_al::{ProjectedAlError,ProjectedAlOptions,ProjectedAlReport,ProjectedAlSample,ProjectedAlState,ProjectedAlStop,ProjectedAlWork};
 
+mod checkpoint;
+pub use checkpoint::ProjectedResponseCheckpoint3;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProjectedResponseOptions3 {
     pub response: ResponseOptions3,
@@ -20,7 +23,7 @@ impl Default for ProjectedResponseOptions3 {
             density_floor: 1e-3, objective_scale: 1.0, optimizer: ProjectedAlOptions::default() }
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedResponseIteration3 {
     pub iteration: usize,
     pub objective: f64,
@@ -45,6 +48,9 @@ fn row(e: &ResponseEvaluation3, iteration: usize, cap: f64) -> ProjectedResponse
     ProjectedResponseIteration3 { iteration, objective: e.objective,
         volume_fraction: e.volume_fraction, constraint_violation: (e.volume_fraction-cap).max(0.0) }
 }
+fn feasible(e: &ResponseEvaluation3, options: ProjectedResponseOptions3) -> bool {
+    (e.volume_fraction - options.volume_cap).max(0.0) <= options.optimizer.tolerance
+}
 
 /// Resumable large-design path for a single material-volume inequality and
 /// exact raw-density bounds. Optimization state uses O(n) vectors; scalar
@@ -57,11 +63,18 @@ fn row(e: &ResponseEvaluation3, iteration: usize, cap: f64) -> ProjectedResponse
 /// accepted fields and spent work; there is no finite-difference or fixed-load
 /// shortcut. PHR descent need not decrease the original objective, and nonlinear
 /// volume feasibility is assessed separately. This is not general sparse SQP.
+///
+/// The least-objective accepted feasible design is retained independently of
+/// the latest AL iterate. Cross-process restoration rebuilds both endpoints
+/// under the original problem and spends its evaluation/linear allowances;
+/// no displacement, gradient, factor or operator from a checkpoint is trusted.
 pub struct ProjectedResponseStudy3<'a,'callback,O: AdaptiveSdf3Elasticity> {
     study: &'a mut CutDensityStudy3<O>, cases: &'a [ResponseCase3<'a>],
     reactions: Option<&'a [&'a [ReactionTarget3<'a>]]>,
     control: &'a mut SolveControl<'callback>, options: ProjectedResponseOptions3,
     state: ProjectedAlState, accepted: ResponseEvaluation3, history: Vec<ProjectedResponseIteration3>,
+    best_feasible: Option<ResponseEvaluation3>,
+    restoration_evaluations: usize,
 }
 impl<'a,'callback,O: AdaptiveSdf3Elasticity> ProjectedResponseStudy3<'a,'callback,O> {
     pub fn new(study: &'a mut CutDensityStudy3<O>, cases: &'a [ResponseCase3<'a>], rho: &[f64],
@@ -103,9 +116,15 @@ impl<'a,'callback,O: AdaptiveSdf3Elasticity> ProjectedResponseStudy3<'a,'callbac
         let accepted = last.expect("accepted initial sample has complete physical evidence");
         study.operator.set_scales(&accepted.scales).expect("evaluated scales are admitted");
         let history = vec![row(&accepted,0,options.volume_cap)];
-        Ok(Self { study,cases,reactions,control,options,state,accepted,history })
+        let best_feasible = feasible(&accepted, options).then(|| accepted.clone());
+        Ok(Self { study,cases,reactions,control,options,state,accepted,history,
+            best_feasible, restoration_evaluations: 0 })
     }
     #[must_use] pub fn accepted(&self) -> &ResponseEvaluation3 { &self.accepted }
+    /// Least-objective ACCEPTED feasible design, including the initial baseline.
+    /// This does not replace the current AL state or claim KKT convergence there.
+    /// Equal objectives retain the earlier incumbent deterministically.
+    #[must_use] pub fn best_feasible(&self) -> Option<&ResponseEvaluation3> { self.best_feasible.as_ref() }
     #[must_use] pub fn study(&self) -> &CutDensityStudy3<O> { self.study }
     #[must_use] pub fn point(&self) -> &[f64] { self.state.point() }
     #[must_use] pub fn evaluations(&self) -> usize { self.state.work().evaluations }
@@ -134,6 +153,10 @@ impl<'a,'callback,O: AdaptiveSdf3Elasticity> ProjectedResponseStudy3<'a,'callbac
                 assert_eq!(accepted.rho,self.state.point(),"accepted physics and projected point must match");
                 self.study.operator.set_scales(&accepted.scales).expect("accepted scales are admitted");
                 self.accepted = accepted;
+                if feasible(&self.accepted, self.options)
+                    && self.best_feasible.as_ref().is_none_or(|best| self.accepted.objective < best.objective) {
+                    self.best_feasible = Some(self.accepted.clone());
+                }
                 self.history.push(row(&self.accepted,self.state.work().iterations,self.options.volume_cap));
                 self.control.checkpoint("response-projected-accepted").map_err(|e|ProjectedAlError::Evaluation(e.into()))?;
             }

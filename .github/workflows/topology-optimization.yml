@@ -47,6 +47,9 @@ jobs:
           persist-credentials: false
       - name: Materialize pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test response recovery and retained feasible designs
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-topopt --features cutfem-marquee --test response_checkpoint_sdf3
       - name: Test embedded reaction physics
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-cutfem --test embedded_reaction3
