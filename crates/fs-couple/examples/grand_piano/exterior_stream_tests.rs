@@ -38,6 +38,8 @@ fn arbitrary_blocks_preserve_pressure_controls_and_passive_feedback_history() {
         let baked=baked(channels);let mut pa=piano(substeps,loaded);let mut pb=piano(substeps,loaded);
         let mut a=ExteriorStream::new(&mut pa,score(events),&baked).unwrap();
         let mut b=ExteriorStream::new(&mut pb,score(events),&baked).unwrap();
+        assert_eq!(a.decimator_delay_frames(),52.0);
+        assert_eq!(b.decimator_delay_frames(),52.0);
         let mut whole=vec![0.;1600*channels];a.render_interleaved_block(&mut whole).unwrap();
         let mut split=vec![0.;whole.len()];let mut start=0;
         for size in [1,7,64,0,127,13,256].into_iter().cycle() {
@@ -81,7 +83,7 @@ fn live_gestures_match_scheduled_events_and_prepared_buffers_survive_empty_block
     let baked=baked(2);let mut pa=piano(4,false);let mut pb=piano(4,false);
     let mut a=ExteriorStream::new(&mut pa,score(EMPTY),&baked).unwrap();
     let mut b=ExteriorStream::new(&mut pb,score("sample,event,key,value\n64,note_on,69,2\n"),&baked).unwrap();
-    let buffers=(a.trace.as_ptr(),a.acceleration.as_ptr(),a.previous.as_ptr(),a.receivers.as_ptr());
+    let buffers=(a.trace.as_ptr(),a.receivers.as_ptr());
     a.render_interleaved_block(&mut[]).unwrap();b.render_block(&mut[]).unwrap();
     assert_eq!(a.sample_position(),0);assert_eq!(b.sample_position(),0);
     let mut silence=[f64::NAN;128];
@@ -94,7 +96,7 @@ fn live_gestures_match_scheduled_events_and_prepared_buffers_survive_empty_block
     assert_eq!(live,scheduled);assert!(live.iter().any(|x|x.abs()>1e-10));
     assert_eq!(a.sample_position(),1264);assert_eq!(b.sample_position(),1264);
     assert_eq!(a.instrument().bank.q,b.instrument().bank.q);
-    assert_eq!(buffers,(a.trace.as_ptr(),a.acceleration.as_ptr(),a.previous.as_ptr(),a.receivers.as_ptr()));
+    assert_eq!(buffers,(a.trace.as_ptr(),a.receivers.as_ptr()));
 }
 
 #[test]
@@ -178,3 +180,49 @@ fn incomplete_receivers_and_clock_overflow_refuse_without_advancing_mechanics() 
     assert_eq!((e.completed_frames,e.sample),(0,u64::MAX));assert_eq!(output,[0.]);
     assert!(stream.failed);assert_eq!(stream.instrument().accounting.input_work_j,0.);
 }
+
+#[test]
+fn continuous_acceleration_reaches_exterior_pressure_without_high_partial_droop() {
+    use std::f64::consts::TAU;
+    // Analytic constant pressure/acceleration gains with integer travel delays.
+    // No fitted response or discrete derivative defines the reference. The
+    // actual receiver runtime still owns both the modal gain and flight history.
+    let gains=[0.8,-0.3];
+    let travel=[144.0,240.0];
+    let baked=Baked {filters:gains.iter().map(|&gain|vec![DiscreteStateSpace {
+        n:0,a:vec![],b:vec![],c:vec![],d:gain,e_leftover:0.0,t_s:1.0/f64::from(RATE),
+    }]).collect(),delays_s:travel.iter().map(|delay|delay/f64::from(RATE)).collect(),
+        maximum_error:0.0,worst_rms_error:0.0};
+    for ratio in [1,3,4,16] {
+        for frequency in [440.0,4800.0,15000.0,21600.0] {
+            let mut decimator=Decimator::new_differentiating(ratio,1,RATE).unwrap();
+            let latency=decimator.delay_output_frames();
+            let mut receivers=baked.runtime().unwrap();
+            let mut trace=vec![0.0;ratio];
+            let omega=TAU*frequency;
+            let (mut error,mut signal)=([0.0;2],[0.0;2]);
+            for frame in 0..2400 {
+                for (sub,value) in trace.iter_mut().enumerate() {
+                    let time=(frame*ratio+sub+1) as f64/(ratio as f64*f64::from(RATE));
+                    *value=(omega*time).sin()/omega;
+                }
+                let pressure=pressure_frame(&mut decimator,&mut receivers,&trace).unwrap();
+                if frame>600 {
+                    let time=(frame+1) as f64/f64::from(RATE);
+                    for channel in 0..2 {
+                        let delayed=time-(travel[channel]+latency)/f64::from(RATE);
+                        let exact=gains[channel]*(omega*delayed).cos();
+                        error[channel]+=(pressure[channel]-exact).powi(2);
+                        signal[channel]+=exact*exact;
+                    }
+                }
+            }
+            for channel in 0..2 {
+                let relative_rms=(error[channel]/signal[channel]).sqrt();
+                assert!(relative_rms<5e-4,
+                    "ratio {ratio}, frequency {frequency}, receiver {channel}: relative RMS {relative_rms}");
+            }
+        }
+    }
+}
+

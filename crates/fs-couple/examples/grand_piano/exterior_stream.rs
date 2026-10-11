@@ -1,8 +1,24 @@
 //! Prepared finite-body pressure blocks sharing one mechanical/control clock.
 //! BEM solves, fitting and allocation precede construction; successful blocks
 //! retain the complete modal/receiver/propagation history without allocating.
+//! The shared bandlimited derivative reconstructs SI acceleration from every
+//! mechanics end-velocity, preserving high partials and the common stereo clock.
 use super::{Baked,Decimator,Instrument,Performance,RATE,Receiver};
 use super::super::audio::BlockError;
+
+/// Apply the prepared velocity-to-acceleration observer and the complete causal
+/// receiver bank. This is also the analytic pressure-test seam: it uses the
+/// same filters, propagation and commit order as every played exterior frame.
+fn pressure_frame(decimator:&mut Decimator,receivers:&mut [Receiver<'_>],trace:&[f64])
+    ->Result<[f64;2],String> {
+    let filtered=decimator.preview(trace).map_err(|e|e.to_string())?;
+    let mut next=[0.;2];
+    for (value,receiver) in next.iter_mut().zip(receivers) {
+        *value=receiver.step(filtered)?;
+    }
+    decimator.commit();
+    Ok(next)
+}
 
 pub struct ExteriorStream<'piano,'baked> {
     piano:&'piano mut Instrument,
@@ -10,8 +26,7 @@ pub struct ExteriorStream<'piano,'baked> {
     receivers:Vec<Receiver<'baked>>,
     decimator:Decimator,
     trace:Vec<f64>,
-    acceleration:Vec<f64>,
-    previous:Vec<f64>,
+    modes:usize,
     mechanical_rate:u32,
     sample:u64,
     failed:bool,
@@ -35,10 +50,10 @@ impl<'piano,'baked> ExteriorStream<'piano,'baked> {
             return Err("exterior stream requires matching mechanical and output clocks".into());
         }
         let receivers=baked.runtime()?;
-        let decimator=Decimator::new(substeps,modes).map_err(|e|e.to_string())?;
+        let decimator=Decimator::new_differentiating(substeps,modes,RATE).map_err(|e|e.to_string())?;
         let mechanical_rate=piano.bank.rate;
         Ok(Self {piano,score,receivers,decimator,trace:vec![0.;trace_len],
-            acceleration:vec![0.;trace_len],previous:vec![0.;modes],mechanical_rate,
+            modes,mechanical_rate,
             sample:0,failed:false})
     }
     pub fn channels(&self)->usize {self.receivers.len()}
@@ -47,27 +62,17 @@ impl<'piano,'baked> ExteriorStream<'piano,'baked> {
     /// Apply physical gestures between blocks. Replacing the prepared bank,
     /// its loaded basis or clocks requires constructing a new stream and bake.
     pub fn instrument_mut(&mut self)->&mut Instrument {self.piano}
-    /// Causal observation latency, in addition to each receiver's flight delay.
+    /// Anti-alias and derivative latency, in addition to each receiver's flight.
+    /// At 4x mechanics this is 52 output frames (44 anti-alias + 8 derivative);
+    /// at 1x it is 48 frames. No finite difference's half-frame shift is hidden.
     pub fn decimator_delay_frames(&self)->f64 {self.decimator.delay_output_frames()}
 
     fn next_frame(&mut self)->Result<[f64;2],String> {
         self.score.dispatch(self.sample,self.piano)?;
         self.piano.step_with_board_trace(&mut self.trace)
             .map_err(|e|format!("mechanics frame {}: {e}",self.sample))?;
-        let modes=self.previous.len();
-        for (frame,out) in self.trace.chunks_exact(modes)
-            .zip(self.acceleration.chunks_exact_mut(modes)) {
-            for i in 0..modes {
-                out[i]=(frame[i]-self.previous[i])*f64::from(self.mechanical_rate);
-                self.previous[i]=frame[i];
-            }
-        }
-        let filtered=self.decimator.preview(&self.acceleration).map_err(|e|e.to_string())?;
-        let mut next=[0.;2];
-        for (value,receiver) in next.iter_mut().zip(&mut self.receivers) {
-            *value=receiver.step(filtered)?;
-        }
-        self.decimator.commit();self.sample+=1;
+        let next=pressure_frame(&mut self.decimator,&mut self.receivers,&self.trace)?;
+        self.sample+=1;
         Ok(next)
     }
 
@@ -106,7 +111,7 @@ impl<'piano,'baked> ExteriorStream<'piano,'baked> {
                 message:"exterior stream is faulted or its sample clock would overflow".into()});
         }
         if self.piano.sample_rate()!=RATE || self.piano.bank.rate!=self.mechanical_rate
-            || self.piano.bank.board_count!=self.previous.len()
+            || self.piano.bank.board_count!=self.modes
             || self.piano.board_trace_len()!=self.trace.len() {
             output.fill(0.);self.failed=true;
             return Err(BlockError {completed_frames:0,sample:self.sample,
@@ -128,3 +133,4 @@ impl<'piano,'baked> ExteriorStream<'piano,'baked> {
 #[cfg(test)]
 #[path="exterior_stream_tests.rs"]
 mod tests;
+

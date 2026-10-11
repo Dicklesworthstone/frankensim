@@ -147,17 +147,26 @@ must be <=0.05 for each mode/receiver. Failed, unstable, improper or nonfinite
 fits refuse instead of relaxing these bounds. These are sampled transfer-fit
 checks including the residual fractional propagation, NOT whole-band or spatial
 convergence certificates. The exact integer delay has unit magnitude. The
-decimator still has its own numerical approximation and declared latency.
+decimator still has its own numerical approximation and declared latency:
+52 output frames at 4x mechanics (44 anti-alias plus 8 derivative), or 48 at 1x.
 
-Every accepted mechanical substep's loaded-board velocity contributes to the
-acceleration trace. One existing causal decimator processes the entire trace;
-both receivers then consume that same output. Each receiver has its own filter
-histories and an integer-sample delay line. No second piano, per-channel gain,
+Every accepted mechanical substep's loaded-board end-velocity enters the shared
+`Decimator::new_differentiating` observer. Its bandlimited derivative reconstructs
+SI acceleration before both receivers consume the same output. This removes
+the former finite difference's high-frequency attenuation and implicit half-
+mechanics-sample phase shift. Each receiver has its own filter histories and an
+integer-sample delay line. No second piano, per-channel gain,
 control clock, future-sample padding or latency compensation is added. Pressure
 is encoded through the existing PCM16 owner with explicit `full-scale-pa` and
 counted clipping; there is no peak normalization.
 
-This avoids the former unchecked two-tap interpolation loss (about 5.1 dB at
+The continuous-acceleration regression drives the actual pressure observer and
+receiver runtime at 440, 4800, 15000 and 21600 Hz, at mechanics ratios 1, 3, 4
+and 16. Both independently delayed receiver channels must remain below 0.0005
+relative RMS error. This checks the numerical observation path; it does not
+establish structural, BEM, whole-render or listening accuracy.
+
+The flight-phase treatment avoids the former unchecked two-tap interpolation loss (about 5.1 dB at
 15 kHz for a half-sample flight delay). Fractional phase now consumes some of
 the requested fit order; insufficient fits refuse under the same error gates.
 The runtime regression checks analytic delayed pressure at 4.8, 15 and 20 kHz
