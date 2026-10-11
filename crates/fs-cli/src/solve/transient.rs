@@ -30,6 +30,7 @@ use super::{
     ladder_target_region, conjugate as airflow, natural as buoyancy, radiation,
 };
 
+mod adjoint;
 mod conjugate;
 mod natural;
 mod workload;
@@ -112,6 +113,9 @@ pub(super) fn requested(spec: &ProjectSpec) -> bool {
 
 /// Refuse incompatible model combinations before meshing or solving.
 pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
+    // Also reject a transient-adjoint output on a steady project; an ignored
+    // report request must never look like a completed derivative calculation.
+    adjoint::requested(spec)?;
     let Some(transient) = policy(spec) else {
         return Ok(());
     };
@@ -155,7 +159,7 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
         .outputs
         .iter()
         .flatten()
-        .any(|output| output.name.contains("adjoint"))
+        .any(|output| output.name.contains("adjoint") && !adjoint::is_output(&output.name))
     {
         return Err(bad(
             "steady nominal adjoints cannot differentiate a transient trajectory",
@@ -169,6 +173,8 @@ struct GridResult {
     endpoint: StepSolution,
     endpoint_dt_s: f64,
     rows: String,
+    /// Present only on an explicitly requested fine-grid derivative path.
+    tape: Option<adjoint::Tape>,
     linear: Vec<LinearSolveEvidence>,
     stored_j: f64,
     net_input_j: f64,
@@ -314,10 +320,14 @@ fn march(
     pressure_pa: f64,
     labels: &[u32],
     goal_region: Option<u32>,
+    retain_adjoint: bool,
     deadline: Option<(Instant, f64)>,
 ) -> Result<GridResult, SolveRefusal> {
     let steps = ends_s.len();
     let mut old = vec![policy.initial_temperature.value; problem.mesh.vertex_count()];
+    let mut tape = if retain_adjoint {
+        Some(adjoint::Tape::new(cx, &old, steps, deadline)?)
+    } else { None };
     let mut rows = Vec::with_capacity(steps);
     let mut evidence = Vec::with_capacity(steps);
     let mut last = None;
@@ -520,6 +530,9 @@ fn march(
             converged_true: endpoint.relative_residual < linear.tolerance,
             stall: None,
         });
+        if let Some(tape) = &mut tape {
+            tape.record(cx, &endpoint.temperature, deadline)?;
+        }
         old.clone_from(&endpoint.temperature);
         endpoint_dt_s = dt;
         last = Some(endpoint);
@@ -530,6 +543,7 @@ fn march(
         endpoint: last.ok_or_else(|| bad("the transient grid has no steps"))?,
         endpoint_dt_s,
         rows: rows.join(","),
+        tape,
         linear: evidence,
         stored_j,
         net_input_j,
@@ -569,6 +583,7 @@ pub(super) fn solve(
 ) -> Result<NativeTransientResult, SolveRefusal> {
     admit(spec)?;
     poll(cx, deadline)?;
+    let objective = adjoint::requested(spec)?;
     let policy = policy(spec).ok_or_else(|| bad("no transient declaration was supplied"))?;
     if labels.len() != problem.mesh.element_count() {
         return Err(bad(
@@ -654,6 +669,13 @@ pub(super) fn solve(
         })
         .and_then(|n| total_steps.checked_mul(row_bytes).and_then(|s| n.checked_add(s)))
         .ok_or_else(|| bad("transient memory estimate overflows"))?;
+    let bytes = if objective.is_some() {
+        bytes.checked_add(adjoint::storage_bytes(problem.mesh.vertex_count(), fine_steps,
+            policy.capacities.len())?).ok_or_else(|| bad("combined forward/adjoint memory estimate overflows"))?
+    } else { bytes };
+    if objective.is_some() && fine_steps.checked_mul(linear.max_iterations).is_none() {
+        return Err(bad("reverse reconstruction and transpose work allowances overflow"));
+    }
     if u64::try_from(bytes).unwrap_or(u64::MAX)
         > spec.budgets.as_ref().map_or(0, |b| b.memory_bytes)
     {
@@ -783,6 +805,7 @@ pub(super) fn solve(
         pressure_pa,
         labels,
         goal_region,
+        false,
         deadline,
     )?;
     let fine = march(
@@ -801,8 +824,20 @@ pub(super) fn solve(
         pressure_pa,
         labels,
         goal_region,
+        objective.is_some(),
         deadline,
     )?;
+    let adjoint_fragment = match objective {
+        Some(objective) => {
+            let tape = fine.tape.as_ref().ok_or_else(|| bad("requested transient adjoint lost its fine history"))?;
+            let derivative = adjoint::finish(cx, &engine, problem, interfaces, &grids.fine,
+                workload.as_ref(), StepConfig { linear, energy_tolerance_j: policy.energy_tolerance.value },
+                nonlinear, labels, region_ids, goal_region.expect("admitted goal region"), tape,
+                objective, deadline)?;
+            format!(",\"adjoint\":{derivative}")
+        }
+        None => String::new(),
+    };
     let coarse_qoi = ladder_functional(
         labels,
         &problem.mesh.complex().tets,
@@ -901,7 +936,7 @@ pub(super) fn solve(
         }
     };
     let receipt = format!(
-        "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"radiation\":{radiation_receipt},\"conjugate\":{airflow_receipt},\"natural\":{natural_receipt},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"radiation\":{radiation_receipt},\"conjugate\":{airflow_receipt},\"natural\":{natural_receipt},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}{adjoint_fragment}}}",
         number(policy.initial_temperature.value)?,
         number(policy.horizon.value)?,
         policy.max_steps,

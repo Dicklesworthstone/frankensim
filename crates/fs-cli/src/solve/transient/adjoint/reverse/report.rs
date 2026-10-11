@@ -1,0 +1,54 @@
+//! Deterministic derivative rows for the retained conduction receipt.
+use super::{Cx, Derivatives, Instant, Objective, SolveRefusal, StepConfig, bad, finite, poll, storage_bytes};
+use super::super::super::{json_string, number};
+
+pub(super) fn render(
+    cx: &Cx<'_>, result: &Derivatives, ends: &[f64], objective: Objective,
+    config: StepConfig, deadline: Option<(Instant, f64)>,
+) -> Result<String, SolveRefusal> {
+    let mut totals = vec![0.0; result.region_names.len()];
+    let mut intervals = Vec::new();
+    let mut start = 0.0;
+    for (i, &end) in ends.iter().enumerate() {
+        poll(cx, deadline)?;
+        let mut rows = Vec::new();
+        for (region, name) in result.region_names.iter().enumerate() {
+            let derivative = result.source_controls[i][region];
+            totals[region] = finite(totals[region] + derivative)?;
+            rows.push(format!("{{\"region\":{},\"dtemperature_ddelivered_watts_k_per_w\":{}}}",
+                json_string(name), number(derivative)?));
+        }
+        intervals.push(format!("{{\"step\":{},\"start_s\":{},\"end_s\":{},\"dtemperature_dsource_multiplier_k\":{},\"regional_power\":[{}]}}",
+            i + 1, number(start)?, number(end)?, number(result.source_multipliers[i])?, rows.join(",")));
+        start = end;
+    }
+    let regional = result.region_names.iter().zip(&totals).map(|(name, &value)| Ok(format!(
+        "{{\"region\":{},\"dtemperature_duniform_added_watts_k_per_w\":{}}}", json_string(name), number(value)?)))
+        .collect::<Result<Vec<_>, SolveRefusal>>()?;
+    let robin = result.ports.iter().enumerate().map(|(i, name)| Ok(format!(
+        "{{\"region\":{},\"dtemperature_dreference_k_per_k\":{},\"dtemperature_dlog_htc_k\":{}}}",
+        json_string(name), number(result.references[i])?, number(result.coefficients[i])?)))
+        .collect::<Result<Vec<_>, SolveRefusal>>()?;
+    let mut initial = Vec::new();
+    let mut initial_uniform = 0.0;
+    for (i, &value) in result.initial.iter().enumerate() {
+        if i % 256 == 0 { poll(cx, deadline)?; }
+        initial.push(number(value)?);
+        initial_uniform = finite(initial_uniform + value)?;
+    }
+    let selected = &result.selected;
+    let time = if selected.state == 0 { 0.0 } else { ends[selected.state - 1] };
+    let iteration_limit = ends.len().checked_mul(config.linear.max_iterations)
+        .ok_or_else(|| bad("reverse iteration allowance overflows"))?;
+    poll(cx, deadline)?;
+    Ok(format!("{{\"schema\":\"fs-cli-native-transient-adjoint-v1\",\"output\":{},\"method\":\"discrete-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_k_per_k\":{},\"dtemperature_dinitial_temperatures\":[{}],\"dtemperature_dcapacity_multiplier_k\":{},\"regional_power\":[{}],\"robin\":[{}],\"intervals\":[{}],\"reconstructed_solid_endpoints\":{},\"reconstruction_krylov_iterations\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_reconstruction_krylov_iterations\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{},\"authority\":\"Estimated\",\"scope\":{}}}",
+        json_string(objective.name()), number(selected.value)?, number(time)?, selected.state,
+        selected.vertex, selected.ties, selected.ties == 1, number(initial_uniform)?, initial.join(","),
+        number(result.capacity)?, regional.join(","), robin.join(","), intervals.join(","), selected.state,
+        result.primal_iterations, result.dual_iterations, number(result.worst_dual)?, ends.len(),
+        config.linear.max_iterations, iteration_limit, iteration_limit,
+        storage_bytes(result.initial.len(), ends.len(), result.region_names.len())?,
+        json_string(SCOPE)))
+}
+
+const SCOPE: &str = "Selected final or earliest sampled-peak nodal branch on the accepted fine time grid, including the initial state for sampled peaks. Ties have no unique maximum derivative. Future controls have zero influence on a selected earlier state. Complete storage and smooth endpoint k(T) tangent with fixed matching contact, geometry, prescribed temperatures and material laws. Regional controls add absolute delivered watts through the same P1 projector, including zero-baseline regions; sum fine-interval derivatives to differentiate a declared workload segment. Robin reference/log(h) controls act throughout. The capacity control scales all regional capacities together. Surface-power, prescribed-temperature, conductivity, contact, geometry and time-grid derivatives are not supplied. Every counted reconstruction must reproduce retained temperatures bit for bit; no physical step, energy total or field is replaced. Radiation, natural and airflow feedback are not approximated by fixed coefficients. Not a continuous-time maximum, error-bound, uncertainty or physical-validation certificate.";
