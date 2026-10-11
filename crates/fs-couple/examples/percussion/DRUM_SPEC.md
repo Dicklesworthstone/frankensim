@@ -35,9 +35,10 @@ cargo run --release -p fs-couple --example percussion -- \
   --strike-position-m 0.06 0.01 > drum.wav
 ```
 
-Existing restrictions remain: distributed cavity and stretching need their
-nonlinear image, not the modal/snare image. Vented exterior radiation is still
-unimplemented, so a cavity neck remains CSV-only. A supplied head must physically
+Distributed cavity pressure supports both numerical images; geometric
+stretching and material history use the joint nonlinear-capable owner. Vented
+audio needs the explicit prescribed-vent option described in VENT_RADIATION.md,
+and a vent cannot be combined with the closed elastic barrel. A supplied head must physically
 contain the unchanged snare span; this option never silently shortens wires,
 retensions them or substitutes a different instrument. `--shell-profile` remains
 the separate cymbal geometry input and cannot be mixed into a drum command.
@@ -59,8 +60,12 @@ mesh,5,32
 band_hz,80,500
 ```
 
-`geometry` gives vibrating radius [m], cavity depth [m], and rigid outer shell
+`geometry` gives vibrating radius [m], cavity depth [m], and outer shell
 radius [m], in that order. The clear radius is not the nominal drum diameter.
+The sidewall is rigid by default. `--elastic-barrel wall.fsb` uses these same
+dimensions for a finite-thickness shell clamped at both hoops, with supplied
+material and damping. See [BARREL.md](BARREL.md) for shared pressure work,
+outer-skin radiation, geometry approximation and input limits.
 Each `head` record gives its name, thickness [m], Young modulus [Pa], Poisson
 ratio, density [kg/m^3], installed isotropic tension [N/m], and nonnegative modal
 damping ratio. The drag coefficient is `2 * ratio * angular_frequency`; zero
@@ -87,9 +92,10 @@ are CSV-only. These checks do not establish modal convergence or full-band sound
 
 This remains a homogeneous isotropic two-film material model with uniform
 installed tension by default, optional equilibrated spatial tensor variation,
-and a rigid cylindrical shell/rim. Elastic shell motion, individual tuning-lug
-mechanics, layered/coated-head identification and measured damping are not
-created by importing a file. The gas properties, distributed-air basis limits,
+and rigid hoops. The cylindrical sidewall remains rigid unless an elastic
+barrel card is supplied. Individual tuning-lug mechanics, layered/coated-head
+identification and measured damping are not created by importing a file.
+The gas properties, distributed-air basis limits,
 striker, tip contact and snare properties remain the existing declared inputs.
 Exterior radiation is the existing one-way, undeformed-boundary calculation;
 it does not add acoustic backreaction or room scattering.

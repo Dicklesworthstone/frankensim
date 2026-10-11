@@ -1,0 +1,7 @@
+# Illustrative homogeneous isotropic wall; not identified maple plies or measured loss.
+# Inner radius, outer radius, depth and azimuths come from the drum specification.
+frankensim-drum-barrel-v1
+material,10000000000,0.30,700,0.005
+axial_intervals,4
+# This wider structural window is for mechanics CSV, not the current audio bake.
+band_hz,40,6000

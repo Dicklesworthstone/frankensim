@@ -68,10 +68,12 @@ rather than silently ignored.
 
 The drum path creates two tensioned films through the existing DKT/prestress
 pencils and couples their signed swept volumes through one sealed-air
-compliance. Its initially resting second head is driven only by that coupling.
-It is **not yet a snare**: no wire bed/rattle or vent is represented, and the
-heads remain linear within their retained basis. Timpani additionally need
-bowl/air eigenmodes and radiation; a volume spring alone does not reproduce them.
+compliance, with optional distributed cavity pressure. The separate snare
+commands retain a physical wire bank coupled to the resonant head. Supplying
+`--elastic-barrel wall.fsb` adds a shell clamped at rigid hoops, with reciprocal
+inner-skin pressure work and outer-skin radiation; see [BARREL.md](BARREL.md).
+Timpani additionally need bowl/air eigenmodes and radiation; a volume spring
+alone does not reproduce them.
 
 All reductions and contacts are generic. A gong changes the supplied shell
 profile/material/supports; a membrane changes actual radius, film and tension.

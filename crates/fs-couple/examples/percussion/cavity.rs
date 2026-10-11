@@ -173,13 +173,25 @@ pub fn build_with_pads(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<
     contacts:Vec<Obstacle>,pads:Vec<fs_couple::render::plate::impact::felt::FeltPad>,
     dampers:Vec<ViscousDamper>,radius:f64,depth:f64,steps:u64,dt_s:f64,
     neck:Option<NeckOptions>,drag_per_s:f64)->Result<(ImpactSystem,InteriorPressure),Error> {
+    build_with_pads_and_barrel(films,modes,bodies,contacts,pads,dampers,radius,depth,
+        steps,dt_s,neck,drag_per_s,None)
+}
+
+/// The optional shell contributes actual inner-skin pressure work at its
+/// original structural addresses, before any acoustic inertia is appended.
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_pads_and_barrel(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
+    contacts:Vec<Obstacle>,pads:Vec<fs_couple::render::plate::impact::felt::FeltPad>,
+    dampers:Vec<ViscousDamper>,radius:f64,depth:f64,steps:u64,dt_s:f64,
+    neck:Option<NeckOptions>,drag_per_s:f64,barrel:Option<(usize,&super::barrel::Prepared)>)
+    ->Result<(ImpactSystem,InteriorPressure),Error> {
     let gate=CancelGate::new_clock_free();
     // Both head ranges remain the original prefix. Include every appended
     // striker before allocating cavity inertia; its coupling row stays zero.
     let structural=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.initial.len()))
         .ok_or("cavity body-count overflow")?;
     let InteriorPressure {coupling,first,second}=compile(films,modes,radius,depth,structural,
-        fs_couple::render::plate::impact::MAX_IMPACT_MODES,neck,drag_per_s,&gate)?;
+        fs_couple::render::plate::impact::MAX_IMPACT_MODES,neck,drag_per_s,barrel,&gate)?;
     let (system,coupling)=coupling.build_with_dampers(bodies,contacts,pads,dampers,config(steps,dt_s),&gate)?;
     Ok((system,InteriorPressure {coupling,first,second}))
 }
@@ -205,11 +217,20 @@ pub fn build_prepared_with_dampers(films:&[TensionedDisk],modes:&[Vec<ModePair>]
 pub fn build_prepared_with_losses(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
     contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,configuration:LinearImpactConfig,
     neck:Option<NeckOptions>,drag_per_s:f64)->Result<(LinearImpactSystem,InteriorPressure),Error> {
+    build_prepared_with_losses_and_barrel(films,modes,bodies,contacts,dampers,radius,depth,
+        configuration,neck,drag_per_s,None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_prepared_with_losses_and_barrel(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
+    contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,configuration:LinearImpactConfig,
+    neck:Option<NeckOptions>,drag_per_s:f64,barrel:Option<(usize,&super::barrel::Prepared)>)
+    ->Result<(LinearImpactSystem,InteriorPressure),Error> {
     let gate=CancelGate::new_clock_free();
     let structural=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.initial.len()))
         .ok_or("prepared cavity body-count overflow")?;
     let InteriorPressure {coupling,first,second}=compile(films,modes,radius,depth,structural,
-        configuration.coupling.max_modes,neck,drag_per_s,&gate)?;
+        configuration.coupling.max_modes,neck,drag_per_s,barrel,&gate)?;
     let (system,coupling)=coupling.build_linear_with_dampers(bodies,contacts,dampers,
         core::f64::consts::PI*radius*radius,configuration,&gate)?;
     eprintln!("mechanical image: prepared modal heads/wires plus simultaneous distributed-air/contact reactions; no wire homogenization or direct gas audio; real-time performance unqualified");
@@ -218,7 +239,8 @@ pub fn build_prepared_with_losses(films:&[TensionedDisk],modes:&[Vec<ModePair>],
 
 #[allow(clippy::too_many_arguments)]
 fn compile(films:&[TensionedDisk],modes:&[Vec<ModePair>],radius:f64,depth:f64,
-    structural:usize,maximum_modes:usize,neck:Option<NeckOptions>,drag_per_s:f64,gate:&CancelGate)
+    structural:usize,maximum_modes:usize,neck:Option<NeckOptions>,drag_per_s:f64,
+    barrel:Option<(usize,&super::barrel::Prepared)>,gate:&CancelGate)
     ->Result<InteriorPressure,Error> {
     validate_drag(drag_per_s)?;
     let heads=1+modes.iter().map(Vec::len).sum::<usize>();
@@ -229,9 +251,17 @@ fn compile(films:&[TensionedDisk],modes:&[Vec<ModePair>],radius:f64,depth:f64,
     let head_coupling=interface(films,modes,&air,gate)?;
     let mut coupling=vec![0.0;structural*air.modes().len()];
     coupling[..head_coupling.len()].copy_from_slice(&head_coupling);
+    if let Some((first,shell))=barrel {
+        if neck.is_some() {return Err("elastic barrel with a sidewall neck requires moving-aperture coupling, which is not implemented".into());}
+        let end=first.checked_add(shell.mode_count()).ok_or("barrel cavity address overflow")?;
+        if first<heads || end>structural {return Err("barrel cavity range overlaps the heads or exceeds the original bodies".into());}
+        let rows=shell.coupling(&air,gate)?;
+        coupling[first*air.modes().len()..end*air.modes().len()].copy_from_slice(&rows);
+    }
     let sampled=air.sample(&[[0.0,0.0,0.0]],8)?;
-    eprintln!("distributed cavity: R={radius}m, depth={depth}m; radial_intervals=32, acoustic_hz={:?}; nonuniform momentum drag={drag_per_s}/s, uniform drag=0; rigid cylindrical sidewall, not calibrated losses",
-        sampled.omegas.iter().map(|w|w/core::f64::consts::TAU).collect::<Vec<_>>());
+    eprintln!("distributed cavity: R={radius}m, depth={depth}m; radial_intervals=32, acoustic_hz={:?}; nonuniform momentum drag={drag_per_s}/s, uniform drag=0; sidewall={}, not calibrated losses",
+        sampled.omegas.iter().map(|w|w/core::f64::consts::TAU).collect::<Vec<_>>(),
+        if barrel.is_some(){"elastic shell with reciprocal pressure work"}else{"rigid cylinder"});
     let damping:Vec<_>=sampled.omegas.iter().map(|w|if *w==0.0 {0.0}else{drag_per_s}).collect();
     let mut compiled=CavityCoupling::new_with_mode_budget(&sampled,structural,&coupling,
         &damping,maximum_modes)?;

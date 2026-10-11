@@ -108,12 +108,21 @@ impl Boundary {
     /// Meshes must match at this reference seam; no remeshing/interpolation hides
     /// a different physical surface. Rim and shell motion is explicitly zero.
     pub fn drum(films: &[TensionedDisk], modes: &[Vec<ModePair>], depth: f64, outer_radius: f64) -> Result<Self, Error> {
+        Self::drum_with_barrel(films,modes,depth,outer_radius,None)
+    }
+
+    /// With an elastic barrel, the bearing annuli join the actual positive
+    /// skin at its clamped end rings. Only that OUTER skin radiates; its inner
+    /// skin works against the separate enclosed pressure field.
+    pub fn drum_with_barrel(films: &[TensionedDisk], modes: &[Vec<ModePair>], depth: f64,
+        outer_radius: f64, barrel: Option<(usize,&super::barrel::Prepared)>) -> Result<Self, Error> {
         if films.len()!=2 || modes.len()!=2 || films[0].mesh.nodes!=films[1].mesh.nodes
             || films[0].mesh.tris!=films[1].mesh.tris || !depth.is_finite() || depth<=0.0
             || !outer_radius.is_finite() || outer_radius<=films[0].spec.radius_m
         { return Err("drum exterior needs two matching films, positive depth and an outer radius beyond their span".into()); }
         let mesh=&films[0].mesh; let n=mesh.nodes.len();
-        let count=modes[0].len().checked_add(modes[1].len()).ok_or("drum mode count overflow")?;
+        let head_count=modes[0].len().checked_add(modes[1].len()).ok_or("drum mode count overflow")?;
+        let count=head_count.checked_add(barrel.map_or(0,|(_,b)|b.mode_count())).ok_or("drum source count overflow")?;
         if count==0 || count>MAX_INPUTS || modes.iter().zip(films).any(|(ms,film)| ms.iter().any(|m|
             m.phi.len()!=film.model.free || m.phi.iter().any(|v| !v.is_finite()))) {
             return Err("drum radiation modes must match their film pencils and input budget".into());
@@ -125,27 +134,47 @@ impl Boundary {
         let edges:Vec<_>=uses.values().filter(|e|e.len()==1).map(|e|e[0]).collect();
         if edges.len()<3 { return Err("drum film has no boundary loop".into()); }
         let mut rim:Vec<_>=edges.iter().flat_map(|&(a,b)|[a,b]).collect(); rim.sort_unstable(); rim.dedup();
+        if let Some((first,shell))=barrel {
+            if shell.radius_m!=films[0].spec.radius_m || shell.outer_radius_m!=outer_radius
+                || shell.depth_m!=depth || shell.azimuths!=rim.len() || first<=head_count
+                || first.checked_add(shell.mode_count()).is_none() {
+                return Err("barrel radiation needs matching drum geometry and a separate structural range".into());
+            }
+        }
         // Long axial strips would underresolve BEM even when the films are fine.
         let requested_axial=(depth/(2.0*std::f64::consts::PI*outer_radius/rim.len() as f64)).ceil().max(1.0);
         if !requested_axial.is_finite() || requested_axial>MAX_PANELS as f64 {
             return Err("drum axial subdivision exceeds its explicit panel budget".into());
         }
-        let axial=requested_axial as usize;
+        let axial=barrel.map_or(requested_axial as usize,|(_,b)|b.axial_intervals);
         let panels=mesh.tris.len().checked_mul(2).and_then(|x|edges.len().checked_mul(4+2*axial).and_then(|r|x.checked_add(r)))
             .ok_or("drum exterior panel count overflow")?;
         if panels>MAX_PANELS { return Err("drum exterior exceeds its explicit panel budget".into()); }
         let mut points:Vec<_>=mesh.nodes.iter().map(|&(x,y)|[x,y,0.5*depth])
             .chain(mesh.nodes.iter().map(|&(x,y)|[x,y,-0.5*depth])).collect();
         let mut rings=Vec::new();
+        let mut shell_indices=barrel.map(|(_,b)|vec![0;b.outer_positions.len()]);
         for level in 0..=axial {
             let mut ring=BTreeMap::new();
-            for &i in &rim {
+            for (angular,&i) in rim.iter().enumerate() {
                 let (x,y)=mesh.nodes[i]; let r=x.hypot(y);
                 if (r-films[0].spec.radius_m).abs()>1e-10*films[0].spec.radius_m {
                     return Err("drum exterior requires one circular film boundary".into());
                 }
                 ring.insert(i,points.len());
-                points.push([outer_radius*x/r,outer_radius*y/r,depth*(0.5-level as f64/axial as f64)]);
+                if let Some((_,shell))=barrel {
+                    // The head generator uses this same angular ordering.
+                    // Refuse mismatches instead of interpolating a different rim.
+                    let theta=core::f64::consts::TAU*angular as f64/shell.azimuths as f64;
+                    if (x/r-theta.cos()).hypot(y/r-theta.sin())>1e-10 {
+                        return Err("barrel and head azimuthal seams disagree".into());
+                    }
+                    let source=(axial-level)*shell.azimuths+angular;
+                    shell_indices.as_mut().expect("barrel index map")[source]=points.len();
+                    points.push(shell.outer_positions[source]);
+                } else {
+                    points.push([outer_radius*x/r,outer_radius*y/r,depth*(0.5-level as f64/axial as f64)]);
+                }
             }
             rings.push(ring);
         }
@@ -157,10 +186,15 @@ impl Boundary {
             indices.extend([[a,ta,tb],[a,tb,b]]);
             let (ba,bb)=(rings[axial][&a],rings[axial][&b]);
             indices.extend([[a+n,bb,ba],[a+n,b+n,bb]]);
-            for level in 0..axial {
+            for level in 0..if barrel.is_some(){0}else{axial} {
                 let (ta,tb,ba,bb)=(rings[level][&a],rings[level][&b],rings[level+1][&a],rings[level+1][&b]);
                 indices.extend([[ta,ba,bb],[ta,bb,tb]]);
             }
+        }
+        let shell_first=indices.len();
+        if let Some((_,shell))=barrel {
+            let map=shell_indices.as_ref().expect("barrel index map");
+            indices.extend(shell.triangles.iter().map(|t|t.map(|i|map[i])));
         }
         check_closed(&indices)?;
         let triangles:Vec<_>=indices.iter().map(|t|t.map(|i|points[i])).collect();
@@ -174,7 +208,14 @@ impl Boundary {
                 at+=1;
             }
         }
-        Ok(Self {triangles,weights,state_modes:(1..=count).collect()})
+        let mut state_modes:Vec<_>=(1..=head_count).collect();
+        if let Some((first,shell))=barrel {
+            for (target,source) in weights[head_count..].iter_mut().zip(&shell.outer_weights) {
+                target[shell_first..].copy_from_slice(source);
+            }
+            state_modes.extend(first..first+shell.mode_count());
+        }
+        Ok(Self {triangles,weights,state_modes})
     }
 }
 fn check_closed(tris:&[[usize;3]])->Result<(),Error> {
@@ -341,6 +382,39 @@ mod tests {
             .map(|((p,n),a)|p.iter().zip(n).map(|(p,n)|p*n).sum::<f64>()*a/3.0).sum();
         let expected=4.0*0.11_f64.powi(2)*(std::f64::consts::PI/4.0).sin()*0.12;
         assert!((volume-expected).abs()<1e-14);
+    }
+    #[test]
+    fn elastic_barrel_radiates_its_real_outer_skin_after_a_complete_wire_prefix() {
+        let films=[film(),film()];let modes=vec![vec![shape(&films[0])],vec![shape(&films[1])]];
+        let drum=crate::drum_spec::Spec {radius_m:0.1,outer_radius_m:0.11,depth_m:0.12,
+            azimuths:8,radial_intervals:2,..crate::drum_spec::Spec::reference()};
+        let material=crate::barrel::Spec {young_pa:2e7,poisson:0.3,density_kg_m3:1000.0,
+            damping_ratio:0.0,axial_intervals:2,band_hz:[0.0,100000.0]};
+        let shell=material.prepare(&drum,1e-7,false).unwrap();
+        let b=Boundary::drum_with_barrel(&films,&modes,drum.depth_m,drum.outer_radius_m,Some((164,&shell))).unwrap();
+        let surface=SpherePanels::from_triangles(b.triangles.clone()).unwrap();
+        assert_eq!(&b.state_modes[..2],&[1,2]);
+        assert_eq!(&b.state_modes[2..],(164..164+shell.mode_count()).collect::<Vec<_>>());
+        let head_panels=2*films[0].mesh.tris.len();
+        let shell_first=b.triangles.len()-shell.triangles.len();
+        assert!(b.weights[2..].iter().all(|row|row[..shell_first].iter().all(|v|*v==0.0)),
+            "clamped bearing annuli and heads must not become shell radiators");
+        assert!(b.weights[..2].iter().all(|row|row[head_panels..].iter().all(|v|*v==0.0)));
+        assert!(b.weights[2..].iter().flatten().any(|v|v.abs()>1e-8));
+        // A positive generalized breathing displacement must have outward
+        // swept volume on BOTH skins, even though only the outer skin radiates.
+        let breathing=(0..shell.mode_count()).max_by(|&a,&b|
+            shell.compression_areas()[a].abs().total_cmp(&shell.compression_areas()[b].abs())).unwrap();
+        let outer_flow:f64=b.weights[2+breathing].iter().zip(surface.areas()).map(|(w,a)|w*a).sum();
+        assert!(outer_flow*(-shell.compression_areas()[breathing])>0.0);
+        // The end directors have a finite-facet radius error. The annuli must
+        // share their actual vertices, instead of creating a second cylinder.
+        let end_vertices=shell.outer_positions[..shell.azimuths].iter()
+            .chain(&shell.outer_positions[shell.axial_intervals*shell.azimuths..]);
+        for point in end_vertices {
+            assert!(b.triangles[head_panels..shell_first].iter().flatten().any(|p|p==point));
+        }
+        assert!(Boundary::drum_with_barrel(&films,&modes,drum.depth_m,drum.outer_radius_m,Some((2,&shell))).is_err());
     }
     #[test]
     fn acceleration_to_bem_velocity_preserves_the_time_convention() {
