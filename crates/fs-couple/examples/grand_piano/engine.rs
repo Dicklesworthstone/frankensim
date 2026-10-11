@@ -444,7 +444,18 @@ impl Instrument {
     }
     pub fn set_una_corda(&mut self,on:bool){self.una_corda=on;}
     pub fn set_sostenuto(&mut self,on:bool){
-        if on&&!self.sostenuto {for h in &mut self.hammers {h.latched=h.held;}}
+        if on&&!self.sostenuto {
+            for (ci,h) in self.hammers.iter_mut().enumerate() {
+                // The rod can catch dampers raised by sustain as well as keys
+                // (Steinway Technical Reference, Grand Dampers, p. 8, step 1).
+                // Moving felt pads must have actually completed their lift;
+                // a new pedal target is not an instantaneous geometry change.
+                let raised=if let Some(dampers)=&self.felt_dampers {
+                    dampers.is_fully_lifted(ci)
+                } else {self.sustain==1.0};
+                h.latched=h.held||raised;
+            }
+        }
         if !on {for h in &mut self.hammers {h.latched=false;}}
         self.sostenuto=on;
     }

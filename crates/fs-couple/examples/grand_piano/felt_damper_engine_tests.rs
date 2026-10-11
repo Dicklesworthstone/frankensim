@@ -122,3 +122,81 @@ fn felt_damper_later_substep_refusal_restores_travel_material_and_axial_state() 
         );
     }
 }
+
+fn pedal_piano() -> Instrument {
+    let c=geometry::demonstration_scale().unwrap()[48];
+    let c=Course{unison:1,detune_cents:0.0,duplex_length_m:0.0,..c};
+    let mut p=Instrument::new(vec![c],&board::demonstration(),48_000,4,12,true).unwrap();
+    // Declared fixture travel: a 1 mm lift at 0.1 m/s takes 10 ms.
+    let pads=DamperSpecification::read(
+        "frankensim-piano-felt-dampers-v1\n\
+         pad,69,0.12,0.14,0.00001,0.004,0,0.001,0.1,1,0,2\n\
+         felt,69,60000,0.2,2.5,3.2,0.1,0.8,300000\n\
+         branch,69,200000,0.002\n",&[c]).unwrap();
+    p.configure_damper_spec(&pads).unwrap();p
+}
+
+#[test]
+fn sostenuto_observes_completed_felt_pad_lift_without_recapturing_later_travel() {
+    let mut p=pedal_piano();
+    assert!(!p.felt_dampers().unwrap().is_fully_lifted(0));
+    assert!(!p.felt_dampers().unwrap().is_fully_lifted(1));
+    p.set_sustain(1.0).unwrap();p.set_sostenuto(true);
+    assert!(!p.hammers[0].latched,"the full-lift command has not moved the pad yet");
+    for _ in 0..240 {p.step().unwrap();}
+    let half=p.felt_dampers().unwrap().pad_height_m(0).unwrap();
+    assert!(half>0.0 && half<0.001);
+    p.set_sostenuto(false);p.set_sostenuto(true);
+    assert!(!p.hammers[0].latched,"partial travel has no identified capture height");
+    for _ in 0..241 {p.step().unwrap();}
+    assert!(p.felt_dampers().unwrap().is_fully_lifted(0));
+    p.set_sostenuto(true);
+    assert!(!p.hammers[0].latched,"the existing capture cannot expand during travel");
+    p.set_sostenuto(false);p.set_sostenuto(true);
+    assert!(p.hammers[0].latched&&!p.hammers[0].held);
+    p.set_sustain(0.0).unwrap();
+    for _ in 0..64 {p.step().unwrap();}
+    assert_eq!(p.felt_dampers().unwrap().pad_height_m(0),Some(0.001));
+    p.set_sostenuto(false);
+    for _ in 0..64 {p.step().unwrap();}
+    assert!(p.felt_dampers().unwrap().pad_height_m(0).unwrap()<0.001);
+    assert_eq!(p.accounting.input_work_j,0.0);
+    assert_eq!(p.energy_j(),0.0);
+}
+
+#[test]
+fn sustained_felt_pad_capture_preserves_ringing_motion_and_release_work() {
+    // G3: sustain and sostenuto produce identical accepted geometry and audio
+    // while raised, then the same finite-speed return and physical damping.
+    let mut captured=pedal_piano();let mut sustained=pedal_piano();
+    for p in [&mut captured,&mut sustained] {
+        p.set_sustain(1.0).unwrap();
+        for _ in 0..600 {p.step().unwrap();}
+        p.note_on(69,1.0).unwrap();
+        for _ in 0..1200 {p.step().unwrap();}
+        p.note_off(69).unwrap();
+    }
+    let history=pads(&captured);let input=captured.accounting.input_work_j;
+    captured.set_sostenuto(true);captured.set_sustain(0.0).unwrap();
+    assert!(captured.hammers[0].latched);
+    assert_eq!(pads(&captured),history);
+    assert_eq!(captured.accounting.input_work_j,input);
+    let mut peak=0.0_f64;
+    for release in [false,true] {
+        if release {captured.set_sostenuto(false);sustained.set_sustain(0.0).unwrap();}
+        for _ in 0..768 {
+            let actual=captured.step().unwrap();
+            assert_eq!(actual,sustained.step().unwrap());peak=peak.max(actual.abs());
+            assert_eq!(captured.bank.q,sustained.bank.q);
+            assert_eq!(captured.bank.v,sustained.bank.v);
+            assert_eq!(pads(&captured),pads(&sustained));
+        }
+    }
+    assert!(peak>1e-10);
+    assert!(captured.accounting.damper_loss_j>0.0);
+    assert_eq!(captured.accounting.damper_loss_j,sustained.accounting.damper_loss_j);
+    assert_eq!(captured.accounting.damper_actuator_work_j,sustained.accounting.damper_actuator_work_j);
+    for p in [&captured,&sustained] {
+        assert!((p.accounting.input_work_j-p.energy_j()-p.accounting.dissipated_j()).abs()<1e-7);
+    }
+}

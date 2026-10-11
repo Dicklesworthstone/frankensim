@@ -138,6 +138,24 @@ There is no output envelope, resonance reset, tail cutoff or pressure gain.
 The original contact solver, loss accounting and failed-sample rollback remain
 in use. Microphones receive the changed physical board velocities.
 
+## Transferring sustain to sostenuto
+
+The rising sostenuto edge also captures dampers already raised by sustain.
+After full sustain, press sostenuto before releasing sustain to preserve the
+ringing strings and their sympathetic response. This follows Steinway's
+*World-Wide Technical Reference Guide*, **Grand Dampers and Sostenuto**, page 8,
+step 1 ([reference copy](https://www.scribd.com/document/894998892/S-S-Technical-Reference-Grand-Dampers-and-Sostenuto)).
+Engaging sustain after sostenuto is already down does not add new captures.
+Equal-sample controls retain file order.
+
+For the point and spatial viscous images, full sustain is the known lifted
+state. For finite-gap felt pads, capture additionally observes actual completed
+pad travel; setting full sustain and immediately pressing sostenuto does not
+capture pads that have not risen yet. Held keys retain their existing idealized
+capture behavior. No rod engagement height is supplied, so partial pedal travel
+does not establish capture. The capture changes damper coupling, preserving
+hammer histories, resonator motion and the existing energy accounting.
+
 ## Silent key depression and selective sympathetic resonance
 
 An SI performance CSV can hold chosen keys open without striking them. Use

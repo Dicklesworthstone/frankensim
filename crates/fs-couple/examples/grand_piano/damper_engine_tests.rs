@@ -120,6 +120,61 @@ fn sostenuto_and_full_sustain_keep_both_damper_images_lifted_until_release() {
     for spatial in [false,true] {check_pedal_lifts(spatial);}
 }
 
+#[test]
+fn sustain_to_sostenuto_transfer_preserves_the_sounding_board_until_release() {
+    // G3: Steinway's sostenuto regulation check, performed on ringing strings.
+    // Capturing the raised dampers must equal leaving sustain fully depressed.
+    for spatial in [false,true] {
+        let mut captured=instrument(spatial);
+        let mut sustained=instrument(spatial);
+        let mut uncaptured=instrument(spatial);
+        for p in [&mut captured,&mut sustained,&mut uncaptured] {
+            p.set_sustain(1.0).unwrap();p.note_on(69,2.0).unwrap();
+            for _ in 0..1200 {p.step().unwrap();}
+            p.note_off(69).unwrap();
+        }
+        let q=captured.bank.q.clone();let v=captured.bank.v.clone();
+        let input=captured.accounting.input_work_j;
+        captured.set_sostenuto(true);
+        assert!(captured.hammers.iter().all(|h|h.latched&&!h.held));
+        assert_eq!(captured.bank.q,q);assert_eq!(captured.bank.v,v);
+        assert_eq!(captured.accounting.input_work_j,input);
+        captured.set_sustain(0.0).unwrap();uncaptured.set_sustain(0.0).unwrap();
+        let mut a=vec![0.0;captured.board_trace_len()];let mut b=a.clone();let mut c=a.clone();
+        let mut changed=0.0_f64;
+        for _ in 0..512 {
+            captured.step_with_board_trace(&mut a).unwrap();
+            sustained.step_with_board_trace(&mut b).unwrap();
+            uncaptured.step_with_board_trace(&mut c).unwrap();
+            assert_eq!(a,b);assert_eq!(captured.bank.q,sustained.bank.q);
+            assert_eq!(captured.bank.v,sustained.bank.v);
+            for (x,y) in a.iter().zip(&c) {changed=changed.max((x-y).abs());}
+        }
+        assert_eq!(captured.accounting.damper_loss_j,0.0);
+        assert!(uncaptured.accounting.damper_loss_j>0.0 && changed>1e-15);
+        captured.set_sostenuto(false);sustained.set_sustain(0.0).unwrap();
+        for _ in 0..128 {
+            assert_eq!(captured.step().unwrap(),sustained.step().unwrap());
+        }
+        assert!(captured.accounting.damper_loss_j>0.0);
+        for p in [&captured,&sustained,&uncaptured] {balance(p);}
+    }
+}
+
+#[test]
+fn sostenuto_capture_is_an_edge_and_does_not_infer_a_half_pedal_threshold() {
+    for spatial in [false,true] {
+        let mut p=instrument(spatial);
+        p.set_sostenuto(true);
+        p.set_sustain(1.0).unwrap();p.set_sostenuto(true);
+        assert!(!p.hammers[0].latched,"later sustain must not change a held capture");
+        p.set_sostenuto(false);p.set_sostenuto(true);
+        assert!(p.hammers[0].latched);
+        p.set_sostenuto(false);p.set_sustain(0.5).unwrap();p.set_sostenuto(true);
+        assert!(!p.hammers[0].latched,"partial drag does not prove a raised damper");
+    }
+}
+
 fn check_pedal_lifts(spatial: bool) {
     let mut p = instrument(spatial); p.note_on(69, 2.0).unwrap();
     for _ in 0..1200 { p.step().unwrap(); }

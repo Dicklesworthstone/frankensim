@@ -493,6 +493,13 @@ impl Prepared {
             .find(|g| g.course == course)
             .map(|g| g.height)
     }
+    /// Known full lift in accepted geometry, for sostenuto capture. The input
+    /// does not identify a rod height, so partial travel cannot imply capture.
+    pub fn is_fully_lifted(&self, course: usize) -> bool {
+        self.groups.iter().any(|g| {
+            g.course == course && g.height >= g.pad.closed_gap_m + g.pad.lift_m
+        })
+    }
     pub fn contact_state(&self, index: usize) -> Option<ContactObservation> {
         let site = self.sites.get(index)?;
         let h = &self.history[index];
