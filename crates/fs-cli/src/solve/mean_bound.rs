@@ -15,13 +15,13 @@ use std::collections::BTreeMap;
 
 pub(super) const OUTPUT: &str = "temperature-volume-mean-bound";
 #[cfg(feature = "thermal-verification")]
-const SCOPE: &str = "Verified numerical interval for the region volume-mean temperature of the nominal linear conduction PDE on the exact published polyhedral mesh domain, with original fixed Dirichlet/Neumann/Robin data and globally declared scalar conductivity. Independent equilibrated primal and dual fluxes include discretization, algebraic residual and outward numerical evaluation. Original material cards and exact selected property receipts are retained; their declarations are not experimental validation. This is not a maximum-temperature bound, material or boundary uncertainty bound, CAD/as-built geometry certificate, nonlinear/coupled/contact bound, or a complete engineering decision. The existing temperature-max requirement and its uncertainty budget are unchanged.";
+const SCOPE: &str = "Verified numerical interval for the region volume-mean temperature of the nominal linear conduction PDE on the exact published polyhedral mesh domain, with original fixed Dirichlet/Neumann/Robin data and globally declared scalar conductivity. Original matching finite-resistance contacts retain separate temperature traces and globally declared scalar resistance; their resistance-weighted jumps enter the continuum majorant. Independent equilibrated primal and dual fluxes include discretization, algebraic residual and outward numerical evaluation. Original material and interface cards and exact selected property receipts are retained; their declarations are not experimental validation. This is not a maximum-temperature bound, material/contact/boundary uncertainty bound, CAD/as-built geometry certificate, nonlinear/nonmatching-contact/convection-feedback bound, or a complete engineering decision. The existing temperature-max requirement and its uncertainty budget are unchanged.";
 
 fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error(
         "cli-solve-mean-bound",
         message,
-        "request a steady no-contact linear model with fixed thermal boundaries and globally declared scalar conductivity; retain bounded material spans when no continuum temperature-range proof exists",
+        "request a steady linear model with fixed thermal boundaries and globally declared scalar conductivity and matching contact resistance; finite source spans require a continuum temperature-range proof",
     )
 }
 
@@ -154,12 +154,7 @@ mod enabled {
             .adjoint_data
             .as_ref()
             .ok_or_else(|| bad("final native operator is absent"))?;
-        if solved.interface_pair_count != 0
-            || data
-                .interfaces
-                .as_ref()
-                .is_some_and(|i| i.surface_count() != 0)
-            || !data.air_paths.is_empty()
+        if !data.air_paths.is_empty()
             || data.natural_goal.is_some()
             || solved.natural_fragment.is_some()
             || solved.conjugate_fragment.is_some()
@@ -167,7 +162,7 @@ mod enabled {
             || !data.radiation_patches.is_empty()
         {
             return Err(bad(
-                "this mean-bound product rung requires no contacts and fixed thermal boundaries; a frozen coupled/nonlinear operator cannot certify the original PDE",
+                "this mean-bound product rung requires fixed thermal boundaries; a frozen coupled/nonlinear operator cannot certify the original PDE",
             ));
         }
         let n = solved.mesh.vertex_count();
@@ -204,6 +199,94 @@ mod enabled {
         }
 
         let library = cards.library();
+        let pair_count = data
+            .interface_surfaces
+            .iter()
+            .try_fold(0usize, |count, surface| {
+                count.checked_add(surface.face_pairs().len())
+            });
+        if pair_count != Some(solved.interface_pair_count)
+            || data.interfaces.as_ref().map_or(0, |i| i.surface_count())
+                != data.interface_surfaces.len()
+        {
+            return Err(bad(
+                "the original contact declarations and published operator disagree",
+            ));
+        }
+        let mut contact_rows = Vec::with_capacity(data.interface_surfaces.len());
+        for surface in &data.interface_surfaces {
+            poll(cx, work)?;
+            let resistance = surface.resistance().ok_or_else(|| {
+                bad("mapped contact resistance requires its own source-validity admission")
+            })?;
+            let binding = spec
+                .interface_cards
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .find(|binding| binding.interface == surface.name())
+                .ok_or_else(|| bad("an original contact card binding is absent"))?;
+            let card = library
+                .interface(&binding.card)
+                .ok_or_else(|| bad("the exact original contact card is absent"))?;
+            if card.content_hash() != resistance.card_identity()
+                || resistance.value_origin() != &fs_conduction::ResistanceValueOrigin::CardClaim
+                || data
+                    .interfaces
+                    .as_ref()
+                    .is_none_or(|i| i.surface_is_nonmatching(surface.name()))
+            {
+                return Err(bad(
+                    "contact verification requires the original matching card-backed resistance",
+                ));
+            }
+            let receipt = resistance.receipt();
+            let claim = card
+                .claims()
+                .claim(receipt.selected)
+                .ok_or_else(|| bad("the selected original contact claim is absent"))?;
+            // A discrete temperature range cannot establish validity of the
+            // unknown continuum trace on either side of the contact.
+            if !matches!(claim.value, fs_matdb::PropertyValue::Scalar { .. })
+                || claim.interpolation != fs_matdb::InterpolationPolicy::ConstantWithinValidity
+                || !claim.validity.bounds().is_empty()
+                || claim.validity.has_typed_axes()
+            {
+                return Err(bad(
+                    "global constant contact resistance requires a scalar ConstantWithinValidity claim with explicitly unconstrained validity; finite spans and sampled/state laws need a continuum validity proof",
+                ));
+            }
+            card.claims().verify_receipt(receipt).map_err(|error| {
+                bad(format!("original contact source receipt refused: {error}"))
+            })?;
+            let receipt_bytes = receipt
+                .to_bytes()
+                .map_err(|error| bad(format!("contact source receipt refused: {error}")))?;
+            let receipt_hex = receipt_bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            let pairs = surface
+                .face_pairs()
+                .iter()
+                .map(|pair| format!("[{},{}]", pair.side_a, pair.side_b))
+                .collect::<Vec<_>>()
+                .join(",");
+            contact_rows.push(format!(
+                concat!(
+                    "{{\"interface\":{},\"card\":{},\"selected_claim\":{},",
+                    "\"receipt\":{},\"receipt_bytes_hex\":{},\"resistance_m2_k_per_w\":{},",
+                    "\"face_pairs\":[{}]}}"
+                ),
+                json_string(surface.name()),
+                json_string(&binding.card),
+                json_string(&receipt.selected.0.to_hex()),
+                json_string(&receipt.content_hash().to_hex()),
+                json_string(&receipt_hex),
+                number(resistance.value_m2_k_per_w())?,
+                pairs,
+            ));
+        }
         let mut models = Vec::with_capacity(ids.len());
         let mut material_rows = Vec::with_capacity(ids.len());
         for (name, &id) in ids {
@@ -311,7 +394,7 @@ mod enabled {
         let result = bound_temperature_region_mean(
             cx,
             problem,
-            &[],
+            &data.interface_surfaces,
             &solved.solution.temperature,
             &cells,
             RegionMeanConfig {
@@ -351,7 +434,7 @@ mod enabled {
                 "\"selected_cells\":{},\"domain_cells\":{},\"region_volume_m3\":{},",
                 "\"primal_energy_error_upper\":{},\"dual_energy_error_upper\":{},",
                 "\"residual_correction_integral\":{},\"remainder_integral_upper\":{},",
-                "\"dual_iterations\":{},\"materials\":[{}],\"scope\":{}}}"
+                "\"dual_iterations\":{},\"materials\":[{}],\"contacts\":[{}],\"scope\":{}}}"
             ),
             json_string(OUTPUT),
             json_string(region),
@@ -371,6 +454,7 @@ mod enabled {
             number(bound.integral.remainder_upper)?,
             result.dual_analysis.dual_iterations,
             material_rows.join(","),
+            contact_rows.join(","),
             json_string(SCOPE)
         ))
     }

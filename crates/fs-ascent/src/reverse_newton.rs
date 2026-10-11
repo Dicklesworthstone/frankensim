@@ -7,7 +7,7 @@ use crate::trust::{TrustRegionProgress, TrustRegionReport, TrustRegionState};
 use fs_exec::Cx;
 use fs_opt::reverse::{HessianError, ReverseError};
 use fs_opt::{Manifold, OptError, ProblemEvaluation, ReverseProblem, ReverseProblemError};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::sync::Arc;
 
 /// Structural, evaluator or cancellation refusal; accepted state remains usable.
@@ -134,7 +134,8 @@ fn domain_trial(error: &ReverseProblemError) -> bool {
 /// callback error, cancellation or insufficient Hessian allowance discards that
 /// staged iteration, not its spent work. No infallible callback placeholder can
 /// be published. Completed rejected trials retain their radius contraction.
-/// The legacy trust kernel and all other study drivers remain unchanged.
+/// Hessian admission belongs to the shared trust kernel: exhaustion never
+/// fabricates a NaN product or marks a resumable study numerically stalled.
 #[derive(Debug, Clone)]
 pub struct ReverseNewtonStudy<'a, 'p> {
     oracle: &'a ReverseProblem<'p>,
@@ -230,8 +231,12 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
                 return Ok(self.report(ReverseNewtonStop::HessianBudget));
             }
             let mut candidate = self.state.clone();
+            // The adapter counts rolled-back attempts too; translate that
+            // remaining allowance into the staged kernel's cumulative count.
+            let kernel_hessian_cap = candidate.report().hv_evals.checked_add(
+                max_hessian_products - self.hv_evals,
+            ).ok_or(ReverseNewtonError::CounterOverflow)?;
             let error = RefCell::new(None);
-            let hessian_limit = Cell::new(false);
             let mut trial = None;
             let packing = &self.packing; let oracle = self.oracle; let accepted = &self.tape;
             let evals = &mut self.evals; let hv_evals = &mut self.hv_evals;
@@ -239,7 +244,7 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
             let progress = {
                 let mut fg = |point: &[f64]| {
                     let refusal = || (f64::NAN, vec![f64::NAN; packing.dim]);
-                    if error.borrow().is_some() || hessian_limit.get() { return refusal(); }
+                    if error.borrow().is_some() { return refusal(); }
                     let Some(next) = evals.checked_add(1) else {
                         *error.borrow_mut() = Some(ReverseNewtonError::CounterOverflow); return refusal();
                     };
@@ -257,8 +262,7 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
                 };
                 let mut hv = |_: &[f64], direction: &[f64]| {
                     let refusal = || vec![f64::NAN; packing.dim];
-                    if error.borrow().is_some() || hessian_limit.get() { return refusal(); }
-                    if *hv_evals >= max_hessian_products { hessian_limit.set(true); return refusal(); }
+                    if error.borrow().is_some() { return refusal(); }
                     *hv_evals += 1;
                     let result = accepted.objective_hessian_vector_product(&packing.unpack(direction), cx)
                         .and_then(|blocks| flatten(blocks, packing.dim));
@@ -267,12 +271,15 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
                         Err(source) => { *error.borrow_mut() = Some(source.into()); refusal() }
                     }
                 };
-                candidate.run(&mut fg, &mut hv, &StopRule::GradNorm(0.0), 1).progress
+                candidate.run_bounded(&mut fg, &mut hv, &StopRule::GradNorm(0.0),
+                    1, kernel_hessian_cap).progress
             };
             // The infallible kernel only saw temporary sentinels. Refuse the
             // entire staged state before it can expose any placeholder result.
             if let Some(error) = error.into_inner() { return Err(error); }
-            if hessian_limit.get() { return Ok(self.report(ReverseNewtonStop::HessianBudget)); }
+            if progress == TrustRegionProgress::HessianBudget {
+                return Ok(self.report(ReverseNewtonStop::HessianBudget));
+            }
             poll(cx)?;
             if let Some((point, tape)) = trial {
                 if candidate.report().x == point { self.tape = tape; }
@@ -281,6 +288,7 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
                 TrustRegionProgress::Stopped(StopReason::IterationCap) => None,
                 TrustRegionProgress::Stopped(reason) => Some(reason),
                 TrustRegionProgress::Paused => return Err(ReverseNewtonError::Cancelled),
+                TrustRegionProgress::HessianBudget => return Ok(self.report(ReverseNewtonStop::HessianBudget)),
             };
             self.state = candidate;
         }

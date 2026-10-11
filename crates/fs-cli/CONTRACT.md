@@ -1438,8 +1438,15 @@ verifier. It retains the original field, source, boundary data, material cards
 and exact pinned property receipts. A global constant representation is
 admitted only from an explicitly unconstrained scalar constant source claim;
 finite material validity spans and flat sampled curves remain refused.
-Transient, nonlinear, radiation, contact and natural/forced-convection
-feedback models require their own bounds and are refused by this producer.
+Matching finite-resistance contacts preserve the original paired faces,
+independent temperature traces and source query receipts. Their
+resistance-weighted temperature jumps enter the existing broken-H1 continuum
+majorant; the selected region is bounded in the complete contacted assembly.
+Contact resistance must likewise come from an explicitly unconstrained scalar
+constant claim. Finite validity spans, sampled/state laws, caller-supplied maps
+and nonmatching contacts require their own source-validity admission.
+Transient, nonlinear, radiation and natural/forced-convection feedback models
+require their own bounds and are refused by this producer.
 Cell and iteration allowances bound work, and cancellation is cooperative;
 no intra-kernel wall-time guarantee is claimed.
 
