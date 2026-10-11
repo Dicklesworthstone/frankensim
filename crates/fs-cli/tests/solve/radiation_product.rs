@@ -433,25 +433,14 @@ fn g1_fsim_radiation_preserves_heterogeneous_contact_heat_path() {
 }
 
 #[test]
-fn g0_fsim_radiation_refuses_adaptive_and_missing_emissivity_claim() {
-    let (cards, card) = emissivity_cards(&fixture_cards(), 0.85);
+fn g0_fsim_radiation_refuses_missing_emissivity_in_base_and_adaptive() {
+    let (cards, _) = emissivity_cards(&fixture_cards(), 0.85);
     let conductivity_only_card = fixture_card_identity().0;
-    for adaptive in [false, true] {
+    for fidelity in ["base", "adaptive"] {
         let bytes = tetra_stl();
         let mut spec = conduction_fixture_project(7, &bytes);
-        declare(
-            &mut spec,
-            if adaptive {
-                &card
-            } else {
-                &conductivity_only_card
-            },
-            "air",
-            293.15,
-        );
-        if adaptive {
-            spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
-        }
+        declare(&mut spec, &conductivity_only_card, "air", 293.15);
+        spec.solver.as_mut().unwrap().fidelity = fidelity.to_string();
         let ledger = Ledger::open(":memory:").unwrap();
         import_fixture(&ledger, &spec, bytes);
         let error = run_solve(
@@ -463,14 +452,7 @@ fn g0_fsim_radiation_refuses_adaptive_and_missing_emissivity_claim() {
             &mut Vec::new(),
         )
         .unwrap_err();
-        assert_eq!(
-            error.code,
-            if adaptive {
-                "cli-solve-conduction-radiation-adaptive"
-            } else {
-                "cli-solve-conduction-radiation-card"
-            }
-        );
+        assert_eq!(error.code, "cli-solve-conduction-radiation-card");
         assert_eq!(error.stage, Some("conduction"));
         assert_eq!(
             stage_receipt_hashes(&ledger, error.run.as_ref().unwrap()).len(),
@@ -478,3 +460,5 @@ fn g0_fsim_radiation_refuses_adaptive_and_missing_emissivity_claim() {
         );
     }
 }
+
+mod adaptive_product;
