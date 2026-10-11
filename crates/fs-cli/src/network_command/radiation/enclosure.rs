@@ -1,7 +1,8 @@
 //! Closed, gray-diffuse patch exchange through the existing radiosity solver.
-//! View factors are supplied, not inferred from this mesh. Each patch emits at
-//! its area-mean temperature and applies a UNIFORM radiative flux. Convection
-//! remains pointwise P1 Robin transfer to the actual air reference.
+//! View factors are supplied or sampled from the exact mesh under declared
+//! work and conservation-projection budgets. Each patch emits at its area-mean
+//! temperature and applies a UNIFORM radiative flux. Convection remains
+//! pointwise P1 Robin transfer to the actual air reference.
 use super::*;
 use fs_conduction::radiation::{GrayDiffuseEnclosure, RadiationSurface, RadiosityReport,
     ViewFactorEvidence, ViewFactorMatrix, ViewFactorTolerance};
@@ -9,6 +10,7 @@ use fs_conduction::radiation::{GrayDiffuseEnclosure, RadiationSurface, Radiosity
 mod transient;
 mod radiosity_adjoint;
 mod sensitivity;
+mod geometry;
 
 #[derive(Debug)]
 struct SurfaceSpec {
@@ -20,14 +22,19 @@ struct SurfaceSpec {
 #[derive(Debug)]
 pub(super) struct Enclosure {
     surfaces: Vec<SurfaceSpec>,
-    factors: ViewFactorMatrix,
-    evidence_json: String,
+    factors: FactorSource,
+}
+
+#[derive(Debug)]
+enum FactorSource {
+    Supplied { matrix: ViewFactorMatrix, evidence_json: String },
+    Generated(geometry::Generation),
 }
 
 impl Enclosure {
     pub(super) fn parse(value: &J, available: &[Surface]) -> Result<Self> {
         object(value, &["surfaces", "view_factors", "row_sum_tolerance",
-            "reciprocity_relative_tolerance", "evidence"], "radiation.enclosure")?;
+            "reciprocity_relative_tolerance", "evidence", "generate_view_factors"], "radiation.enclosure")?;
         let rows = array(get(value,"surfaces")?,"enclosure.surfaces",64)?;
         if rows.len() < 2 { return Err(bad("a closed enclosure needs at least two surfaces")); }
         let mut surfaces = Vec::with_capacity(rows.len());
@@ -44,6 +51,15 @@ impl Enclosure {
             let source = string(get(row,"source")?,"enclosure emissivity source")?;
             surfaces.push(SurfaceSpec { name,epsilon,source });
             areas.push(surface.area);
+        }
+        if let Some(generation) = value.get("generate_view_factors") {
+            for field in ["view_factors", "row_sum_tolerance", "reciprocity_relative_tolerance", "evidence"] {
+                if value.get(field).is_some() {
+                    return Err(bad(format!("enclosure.generate_view_factors cannot be combined with {field}")));
+                }
+            }
+            surfaces.sort_by(|a,b|a.name.cmp(&b.name));
+            return Ok(Self { surfaces, factors: FactorSource::Generated(geometry::Generation::parse(generation)?) });
         }
         let matrix = array(get(value,"view_factors")?,"enclosure.view_factors",rows.len())?;
         if matrix.len()!=rows.len() { return Err(bad("one view-factor row per enclosure surface required")); }
@@ -85,7 +101,7 @@ impl Enclosure {
         let factors = order.iter().map(|&i|order.iter().map(|&j|factors[i][j]).collect()).collect();
         surfaces.sort_by(|a,b|a.name.cmp(&b.name));
         let factors = ViewFactorMatrix::admit(areas,factors,evidence,tolerance).map_err(producer)?;
-        Ok(Self {surfaces,factors,evidence_json})
+        Ok(Self {surfaces,factors:FactorSource::Supplied {matrix:factors,evidence_json}})
     }
 
     pub(super) fn bind(&self, request: &Request, cx: &Cx<'_>) -> Result<GrayDiffuseEnclosure> {
@@ -100,7 +116,18 @@ impl Enclosure {
             surfaces.push(RadiationSurface::new(&request.mesh,spec.name.clone(),
                 |face|surface.faces.contains(&face.vertices),epsilon).map_err(producer)?);
         }
-        GrayDiffuseEnclosure::new(surfaces,self.factors.clone()).map_err(producer)
+        let factors = match &self.factors {
+            FactorSource::Supplied { matrix, .. } => matrix.clone(),
+            FactorSource::Generated(generation) => generation.bind(&request.mesh, &surfaces, cx)?.clone(),
+        };
+        GrayDiffuseEnclosure::new(surfaces,factors).map_err(producer)
+    }
+
+    fn factor_data(&self) -> Result<(&ViewFactorMatrix, &str)> {
+        match &self.factors {
+            FactorSource::Supplied { matrix, evidence_json } => Ok((matrix, evidence_json)),
+            FactorSource::Generated(generation) => generation.factor_data(),
+        }
     }
 
     pub(super) fn evaluate(&self, policy: &Policy, request: &Request, cx: &Cx<'_>,
@@ -197,18 +224,29 @@ impl Enclosure {
 
     pub(super) fn report(&self, report: &RadiosityReport, applied: &[f64], mismatch: f64,
         iterations: Option<usize>, solves: Option<usize>) -> Result<String> {
-        if applied.len()!=self.surfaces.len() {return Err(bad("enclosure report arity mismatch"));}
+        let (factors, evidence_json) = self.factor_data()?;
+        let n = self.surfaces.len();
+        if [applied.len(), report.surface_temperatures_k.len(), report.radiosity_w_m2.len(),
+            report.irradiation_w_m2.len(), report.net_outward_heat_w.len()].iter().any(|&len| len != n)
+            || report.view_factor_identity != factors.identity()
+        {
+            return Err(bad("enclosure report does not match the bound view-factor model"));
+        }
         let rows=self.surfaces.iter().enumerate().map(|(i,s)|Ok(format!(
             "{{\"surface\":{},\"emissivity\":{},\"area_m2\":{},\"mean_temperature_k\":{},\"radiosity_w_m2\":{},\"irradiation_w_m2\":{},\"outward_heat_w\":{},\"applied_heat_w\":{},\"source\":{}}}",
-            quote(&s.name),num(s.epsilon)?,num(self.factors.areas_m2()[i])?,
+            quote(&s.name),num(s.epsilon)?,num(factors.areas_m2()[i])?,
             num(report.surface_temperatures_k[i])?,num(report.radiosity_w_m2[i])?,num(report.irradiation_w_m2[i])?,
             num(report.net_outward_heat_w[i])?,num(applied[i])?,quote(&s.source)))).collect::<Result<Vec<_>>>()?.join(",");
-        let matrix=self.factors.factors().iter().map(|row|numbers(row)).collect::<Result<Vec<_>>>()?.join(",");
-        Ok(format!("{{\"model\":\"closed-gray-diffuse-enclosure\",\"radiative_out_w\":{},\"max_nonlinear_mismatch_w\":{},\"radiosity_residual_w_m2\":{},\"iterations\":{},\"total_solid_solves\":{},\"view_factors\":[{}],\"view_factor_evidence\":{},\"max_reciprocity_residual\":{},\"surfaces\":[{}],\"scope\":\"closed fixed view-factor patch model; each area-mean temperature drives emission and each radiative flux is uniform on its patch; internal exchange, not heat lost to ambient or air; supplied analytic/QMC provenance is retained, not independently verified against mesh geometry; no occlusion computation, pointwise T(x)^4 law, radiation absorption in air, or physical validation\"}}",
+        let matrix=factors.factors().iter().map(|row|numbers(row)).collect::<Result<Vec<_>>>()?.join(",");
+        let scope = match &self.factors {
+            FactorSource::Supplied { .. } => "closed fixed view-factor patch model; each area-mean temperature drives emission and each radiative flux is uniform on its patch; internal exchange, not heat lost to ambient or air; supplied analytic/QMC provenance is retained, not independently verified against mesh geometry; no occlusion computation, pointwise T(x)^4 law, radiation absorption in air, or physical validation",
+            FactorSource::Generated(_) => "closed fixed view-factor patch model; each area-mean temperature drives emission and each radiative flux is uniform on its patch; internal exchange, not heat lost to ambient or air; nominal geometry-sampled visibility with explicit conservation correction; zero sampled losses do not prove geometric closure and empirical standard errors are not calibrated confidence bounds; no pointwise T(x)^4 law, radiation absorption in air, or physical validation",
+        };
+        Ok(format!("{{\"model\":\"closed-gray-diffuse-enclosure\",\"radiative_out_w\":{},\"max_nonlinear_mismatch_w\":{},\"radiosity_residual_w_m2\":{},\"iterations\":{},\"total_solid_solves\":{},\"view_factors\":[{}],\"view_factor_evidence\":{},\"max_reciprocity_residual\":{},\"surfaces\":[{}],\"scope\":{}}}",
             num(report.enclosure_energy_closure_w)?,num(mismatch)?,num(report.linear_residual_max_w_m2)?,
             iterations.map_or_else(||"null".into(),|n|n.to_string()),
-            solves.map_or_else(||"null".into(),|n|n.to_string()),matrix,self.evidence_json,
-            num(report.max_reciprocity_residual)?,rows))
+            solves.map_or_else(||"null".into(),|n|n.to_string()),matrix,evidence_json,
+            num(report.max_reciprocity_residual)?,rows,quote(scope)))
     }
 }
 

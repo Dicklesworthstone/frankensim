@@ -148,3 +148,6 @@ fn incomplete_matrices_and_conflicting_models_refuse() {
 mod uq;
 #[path="cooling_enclosure_radiation/adjoint.rs"]
 mod adjoint;
+
+#[path="cooling_enclosure_radiation/geometry.rs"]
+mod geometry;

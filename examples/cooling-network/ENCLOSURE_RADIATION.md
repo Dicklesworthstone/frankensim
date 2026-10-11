@@ -55,16 +55,118 @@ and 64 patches are admitted. Matrix rows AND columns follow the input surface
 order; the complete system is canonicalized by name before use. Coefficients
 must lie in [0,1], rows must close to one, and area-weighted reciprocity must
 pass the existing fs-conduction admission. Both numerical tolerances must be
-explicitly supplied in [0,1e-8]. No factors are clipped or renormalized to make
-an invalid enclosure pass. Emissivity lies in (0,1].
+explicitly supplied in [0,1e-8]. Supplied factors are not clipped or renormalized
+to make an invalid enclosure pass. Emissivity lies in (0,1].
 
 `evidence` may alternatively be an externally generated QMC matrix's retained
 coordinates: `{"kind":"external-qmc","seed":"73","samples":"100000",
 "generator":"named-generator-and-version"}`. Seed and positive sample count
-are decimal u64 strings. These labels preserve the caller's provenance; this
-command neither runs that sampler nor independently verifies the named formula.
+are decimal u64 strings. These labels preserve the caller's provenance; supplying
+this evidence does not run the named external sampler or independently verify
+its formula.
 No ambient-temperature field exists in a closed enclosure, and missing external
 surfaces cannot be replaced by silently discarding unclosed view-factor rows.
+
+## Generate finite-geometry view factors
+
+Run the complete [heated-cavity example](enclosure-radiation-generated.json):
+
+```bash
+frankensim --json cooling-network \
+  examples/cooling-network/enclosure-radiation-generated.json
+```
+
+This example uses a three-metre cube surrounding a one-metre cubic cavity,
+represented by 156 tetrahedra. Its 26 m3 of solid receives a uniform
+0.2 W/m3 source, for 5.2 W total input. The exterior is adiabatic. Two named
+groups of cavity faces exchange radiation and transfer heat to the existing
+air network with prescribed coefficients of 1 and 2 W/(m2 K). The geometry,
+conductivity, emissivities, heat-transfer coefficients and fan data are
+illustrative; they are not measured hardware or a physically validated model.
+At steady state, the solid and air balances must account for the 5.2 W input,
+while the signed internal radiation transfers sum to zero. No particular
+temperature value or sampling-accuracy bound is asserted.
+
+An enclosure can instead sample visibility from its actual tetrahedral mesh.
+Keep the named surface declarations and replace all four supplied-matrix fields
+(`view_factors`, `row_sum_tolerance`,
+`reciprocity_relative_tolerance` and `evidence`) with:
+
+```json
+"generate_view_factors": {
+  "seed": "41",
+  "samples_per_replicate": 512,
+  "replicates": 4,
+  "max_triangles": 256,
+  "max_ray_triangle_tests": "1000000",
+  "projection": {
+    "max_iterations": 10000,
+    "row_sum_tolerance": 1e-12,
+    "max_abs_adjustment": 0.25
+  }
+}
+```
+
+The two modes are mutually exclusive. Unknown sampling and projection fields
+refuse. The seed and ray/triangle budget are decimal u64 strings;
+`samples_per_replicate` is a positive power of two fitting u32;
+`replicates` lies in 2..=32. The triangle limit lies in 1..=1,000,000.
+These example budgets are illustrative, not a sampling-accuracy guarantee.
+
+Each replicate uses an independent Owen-scrambled Sobol stream. Samples select
+positions uniformly by patch area and directions with the diffuse cosine
+distribution into the outward hemisphere. The first intersected boundary
+triangle determines visibility. Every boundary triangle is opaque, including
+triangles outside the named radiating patches. A first hit on an unassigned
+triangle or on a back face is recorded separately from a ray that escapes the
+mesh; none is reassigned to an unobstructed named patch.
+
+The existing gap examples declare an ideal infinite-plate matrix. Substituting
+the generator into those finite, open geometries is expected to refuse when
+rays escape. To use generated factors for a closed enclosure, the named patches
+must cover the cavity seen by their outward hemispheres. Zero sampled escaped,
+unassigned and back-face rays are necessary for this implementation's closed
+projection; they do not prove geometric closure or watertightness.
+
+Sampling retains its raw matrix and independent-replicate empirical standard
+errors. A separate, explicit projection adjusts area-weighted exchange to
+reciprocity and row closure. Its iteration cap is 1..=100,000, its positive
+row tolerance is at most 1e-8, and `max_abs_adjustment` is an absolute
+view-factor-entry correction budget in [0,1). The projected matrix is admitted
+only if the declared correction and closure limits are met. Missing sampled
+exchange is not silently repaired. These empirical standard errors are not
+calibrated confidence intervals, and the projection is a numerical conservation
+correction rather than an error certificate.
+
+Generation takes place during the first physical bind under the command's
+existing cancellation context and wall deadline. Before sampling, the product
+of patches, replicates, samples per replicate and opaque boundary triangles
+must fit the declared ray/triangle budget. Exceeding this bound or the triangle
+limit returns the existing radiation-budget exit code 6. A successful record is
+retained throughout later steady iterations or transient endpoints for that
+parsed request. Failed or cancelled generation is not retained. The retained
+record is checked against the complete mesh, selected traces and emissivity
+declarations; a newly parsed refined-mesh request generates its own factors.
+
+The result's `radiation.view_factors` is the projected matrix used by the
+radiosity solve. Its `radiation.view_factor_evidence` retains:
+
+- the seed, sampling configuration, declared work limits and actual ray work;
+- exact mesh and estimate identities, canonical surface names and areas;
+- `raw_view_factors`, `empirical_standard_errors` and `hit_counts`;
+- per-surface `escaped_counts`, `unassigned_counts` and `backface_counts`;
+- declared projection limits, actual iterations and maximum entry adjustment.
+
+Counts and u64 work totals use decimal strings, as declared by
+`count_encoding: "decimal-u64-string"`. Matrix axes and count rows follow
+the canonical surface-name order. Per emitting surface, hits plus all three
+loss counts equal `samples_per_surface`.
+
+This path computes nominal finite-mesh visibility and occlusion. It does not
+certify the geometry, calibrate stochastic error, model participating media or
+validate physical material data. Existing temperature and inlet derivatives
+keep the generated matrix fixed; derivatives of geometry or visibility are not
+provided.
 
 ## Numerical and energy coupling
 
@@ -144,7 +246,8 @@ Steady enclosure adjoints and goal-recovery spatial marking are supported, as
 are fixed-grid, fixed-count trajectory adjoints and their sizing consumers.
 Adaptive-time-grid, automatic timestep-selection, periodic-stop and controller
 derivatives still refuse explicitly. There is no frozen-radiosity fallback.
-General view-factor generation, occlusion, participating media, changing geometry,
+Finite-mesh view-factor generation and opaque first-hit occlusion use the optional
+sampling path above. Participating media, changing geometry during a solve,
 continuous-time peak certification and native .fsim lowering are not implemented.
 
 ## Uncertain surface finish
@@ -180,6 +283,13 @@ cargo test -p fs-cli --test cooling_enclosure_transient
 cargo test -p fs-cli --test enclosure_radiosity_adjoint
 cargo test -p fs-cli --bin frankensim uq_command::model::radiation
 ```
+
+The geometry submodule in the enclosure forward test target adds G0 count,
+conservation and refusal checks plus G3 surface-order replay. It exercises a
+closed cavity formed by 156 tetrahedra through the actual command and checks
+the retained raw estimates and correction; the open gap must refuse. The complete
+heated example checks positive temperature rise, the 5.2 W solid and air heat
+balances, and zero net internal radiative export. Run just these additions with `cargo test -p fs-cli --test cooling_enclosure_radiation geometry::`.
 
 The original sixteen enclosure forward/UQ regressions remain. Former missing-
 adjoint checks now exercise the still-unsupported adaptive derivative policy.

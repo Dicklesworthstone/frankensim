@@ -8,8 +8,8 @@
 //! The surroundings are a large isothermal black reservoir with view factor
 //! one; no inter-surface exchange, occlusion or participating medium is modeled.
 //!
-//! Alternatively, `enclosure` selects explicitly supplied closed view factors
-//! and gray-diffuse reflection between solved surfaces. Its uniform patch flux
+//! Alternatively, `enclosure` uses supplied or finite-geometry-generated view
+//! factors and gray-diffuse reflection between solved surfaces. Its uniform patch flux
 //! and internal heat accounting remain distinct from the reservoir model.
 //!
 //! Existing FEM, material, contact, air transport and cancellation producers
