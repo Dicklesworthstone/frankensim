@@ -31,6 +31,8 @@
 pub mod adjoint;
 /// Explicit heterogeneous phase charts and frozen reference densities.
 pub mod heterogeneous;
+/// Growing-cell deposition adapters for existing enthalpy charts and Cx.
+pub mod deposition;
 /// Implicit ambient radiation with immutable enthalpy history and joule gates.
 pub mod radiation;
 pub use radiation::adjoint::{EnthalpyRadiationStepGradient, EnthalpyRadiationStepLinearization};

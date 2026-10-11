@@ -63,6 +63,9 @@ pub mod backward_euler;
 /// Primary-enthalpy storage with stationary nonlinear spatial transport.
 pub mod enthalpy;
 
+/// Conservative, schedule-driven material birth on a sparse thermal cell network.
+pub mod deposition;
+
 use crate::ConductionError;
 use crate::assemble::{
     DofMap, assemble_operator, assemble_operator_with_element_materials, reduce_matrix_and_lift,

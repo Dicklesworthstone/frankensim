@@ -1,0 +1,953 @@
+//! Growing-domain thermal transport for resolved material-extrusion schedules.
+//!
+//! Cells are caller-resolved control volumes, not a slicer or bead-forming law.
+//! Each has one uniform enthalpy and temperature. Internal links exchange the
+//! SAME signed joules on their two sides. Birth adds exactly `mass * h_in`;
+//! previously deposited cells retain their history. Contact and bed areas are
+//! removed from the free surface, including for zero-conductance contacts.
+//! Geometry is fixed between explicit events; no deformation or remeshing is
+//! inferred. Cell, segment, body and material identities survive thermal steps.
+//!
+//! Forward Euler is subcycled with a declared maximum step and a monotonicity
+//! bound `dt <= 0.8 m / (max(dT/dh) * sum(outgoing conductance))`. All event
+//! times are hit exactly. No future cell conducts heat. A failed/cancelled
+//! advance publishes no candidate. Cost is sparse, O(cells + links) storage,
+//! O((cells + links) log(cells)) per substep; no dense global solve or full
+//! history retention. Time and spatial resolution are independent caller
+//! choices. This reduced model needs a uniform-cell/Biot justification and
+//! independently supplied conductances; it is not a validated print predictor.
+
+use std::collections::BTreeMap;
+
+/// Persistent physical cell identity; distinct from its source segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CellId(pub u64);
+
+/// Persistent material identity, never an index into a reordered table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MaterialId(pub u64);
+
+/// Replaceable enthalpy/temperature law. All materials must use a consistent
+/// specific-energy datum for an energy audit to have physical meaning.
+pub trait ThermalLaw {
+    /// Temperature in kelvin at specific enthalpy in J/kg. Refuse extrapolation.
+    fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError>;
+    /// Global upper bound on dT/dh [kg K/J] over the admitted enthalpy domain.
+    /// Must be finite and nonnegative; an underestimated bound invalidates CFL.
+    fn maximum_temperature_slope(&self) -> f64;
+}
+
+/// Declared reservoir contact, independent of mechanical adhesion or strength.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reservoir {
+    /// Covered surface area, m².
+    pub area_m2: f64,
+    /// Total contact conductance, W/K (zero means thermally insulating).
+    pub conductance_w_k: f64,
+    /// Reservoir temperature, K.
+    pub temperature_k: f64,
+}
+
+/// Endpoint environment held constant until an explicit boundary event.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Boundary {
+    /// Free-surface ambient temperature, K.
+    pub ambient_k: f64,
+    /// Free-surface convection coefficient, W/(m² K), including zero.
+    pub htc_w_m2_k: f64,
+    /// Optional bed/support reservoir. Its area is excluded from ambient loss.
+    pub reservoir: Option<Reservoir>,
+    /// Applied total cell heat source, W, positive inward.
+    pub source_w: f64,
+}
+
+/// Located deposition geometry in one caller-declared world frame, SI metres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CellGeometry {
+    /// Centreline start, m.
+    pub start_m: [f64; 3],
+    /// Centreline end, m. Direction supplies a later constitutive material frame.
+    pub end_m: [f64; 3],
+    /// Deposited control-volume volume, m³. Mass is independently supplied.
+    pub volume_m3: f64,
+    /// Total surface area before subtracting contacts, m².
+    pub surface_area_m2: f64,
+}
+
+/// Incoming cell, activated once at its event time. A segment can contain many
+/// cells. Volume and delivered mass imply a reference density; equilibrium
+/// density never silently changes stored mass.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DepositedCell {
+    /// Stable cell identifier.
+    pub id: CellId,
+    /// Application's source segment identifier.
+    pub segment_id: u64,
+    /// Application's body/part/support identifier.
+    pub body_id: u64,
+    /// Explicit material-law identity.
+    pub material_id: MaterialId,
+    /// Delivered mass, kg, strictly positive.
+    pub mass_kg: f64,
+    /// Incoming specific enthalpy, J/kg. Uses the selected law's energy datum.
+    pub specific_h_j_kg: f64,
+    /// Located geometry.
+    pub geometry: CellGeometry,
+    /// Birth-time environment.
+    pub boundary: Boundary,
+}
+
+/// Thermal contact between two active cells. Conductance, geometric contact
+/// and future healing/damage are deliberately separate physical quantities.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThermalLink {
+    /// Stable interface identifier for later bond/contact histories.
+    pub id: u64,
+    /// First incident cell.
+    pub a: CellId,
+    /// Second incident cell.
+    pub b: CellId,
+    /// Covered area on EACH side, m².
+    pub area_m2: f64,
+    /// Total thermal conductance, W/K.
+    pub conductance_w_k: f64,
+}
+
+/// Resolved physical event. Equal-time events execute in supplied order; put
+/// births before their contacts. No printer command interpretation is done.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// Add a new control volume, including incoming mass and energy.
+    Birth(DepositedCell),
+    /// Add a thermal interface and cover its ambient-facing surface areas.
+    Contact(ThermalLink),
+    /// Remove a thermal interface and expose its two surfaces again.
+    Separation(u64),
+    /// Replace endpoint environment, including reservoir removal or fan change.
+    Boundary(CellId, Boundary),
+}
+
+/// One absolute physical time in seconds, nonnegative and finite.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimedEvent {
+    /// Activation/change time, s.
+    pub time_s: f64,
+    /// Resolved change.
+    pub event: Event,
+}
+
+/// Explicit work/memory ceilings for the schedule and each advance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepositionBudget {
+    /// Maximum active cells.
+    pub max_cells: usize,
+    /// Maximum active interfaces.
+    pub max_links: usize,
+    /// Maximum retained resolved schedule events.
+    pub max_events: usize,
+    /// Maximum thermal substeps in one advance (events do not consume steps).
+    pub max_substeps: usize,
+}
+
+/// Timestep and absolute conservation admission, separate from model accuracy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StepConfig {
+    /// Maximum thermal step, s. CFL may reduce it further.
+    pub max_dt_s: f64,
+    /// Maximum stored-minus-incoming-minus-external defect, J.
+    pub energy_tolerance_j: f64,
+}
+
+/// A refusal leaves the original timeline and all material history unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DepositionError {
+    /// Bad units, topology, duplicate IDs, range, or timeline.
+    InvalidInput(&'static str),
+    /// Declared allocation/work ceiling exhausted.
+    Budget(&'static str),
+    /// Caller cancellation gate refused work.
+    Cancelled,
+    /// Constitutive chart refused an enthalpy query.
+    MaterialDomain,
+    /// Finite inputs produced nonfinite arithmetic or stalled time.
+    Arithmetic,
+    /// Absolute conservation gate failed, with signed residual in joules.
+    EnergyBalance(f64),
+}
+
+impl std::fmt::Display for DepositionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "deposition thermal refusal: {self:?}")
+    }
+}
+impl std::error::Error for DepositionError {}
+
+/// Per-advance conservation and cost observations (not physical error bounds).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EnergyAudit {
+    /// Mass added by activated births, kg.
+    pub incoming_mass_kg: f64,
+    /// Energy carried by activated births, J.
+    pub incoming_energy_j: f64,
+    /// Integrated ambient/reservoir/source input, J, positive inward.
+    pub external_heat_j: f64,
+    /// Actual change in stored `sum(m*h)`, J.
+    pub stored_energy_change_j: f64,
+    /// Stored change minus incoming enthalpy minus external input, J.
+    pub residual_j: f64,
+    /// Number of accepted explicit thermal substeps.
+    pub substeps: usize,
+    /// Number of accepted physical events.
+    pub events: usize,
+}
+
+/// Immutable-candidate timeline. Clone is an in-memory checkpoint of the
+/// schedule cursor, active geometry, interfaces and enthalpy, not a history log.
+#[derive(Clone)]
+pub struct DepositionSimulation<'a> {
+    time_s: f64,
+    cursor: usize,
+    schedule: Vec<TimedEvent>,
+    materials: BTreeMap<MaterialId, &'a dyn ThermalLaw>,
+    cells: BTreeMap<CellId, DepositedCell>,
+    links: BTreeMap<u64, ThermalLink>,
+    budget: DepositionBudget,
+}
+
+fn finite(value: f64) -> Result<f64, DepositionError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(DepositionError::Arithmetic)
+    }
+}
+fn nonnegative(value: f64) -> bool {
+    value.is_finite() && value >= 0.0
+}
+fn positive(value: f64) -> bool {
+    value.is_finite() && value > 0.0
+}
+
+impl<'a> DepositionSimulation<'a> {
+    /// Start an empty physical timeline at t=0. Initial bed/support/existing
+    /// material can be declared as births at t=0 with their known enthalpy.
+    /// `advance_to(0)` activates those events without thermal aging.
+    pub fn new(
+        schedule: Vec<TimedEvent>,
+        materials: &[(MaterialId, &'a dyn ThermalLaw)],
+        budget: DepositionBudget,
+    ) -> Result<Self, DepositionError> {
+        if schedule.len() > budget.max_events || materials.len() > budget.max_cells {
+            return Err(DepositionError::Budget("schedule/materials"));
+        }
+        let mut previous = 0.0;
+        for event in &schedule {
+            if !nonnegative(event.time_s) || event.time_s < previous {
+                return Err(DepositionError::InvalidInput(
+                    "events must be ordered in absolute seconds",
+                ));
+            }
+            previous = event.time_s;
+        }
+        let mut laws = BTreeMap::new();
+        for &(id, law) in materials {
+            if !nonnegative(law.maximum_temperature_slope()) || laws.insert(id, law).is_some() {
+                return Err(DepositionError::InvalidInput(
+                    "duplicate material or invalid temperature slope",
+                ));
+            }
+        }
+        Ok(Self {
+            time_s: 0.0,
+            cursor: 0,
+            schedule,
+            materials: laws,
+            cells: BTreeMap::new(),
+            links: BTreeMap::new(),
+            budget,
+        })
+    }
+
+    /// Current accepted physical time, s.
+    #[must_use]
+    pub fn time_s(&self) -> f64 {
+        self.time_s
+    }
+    /// Current material state, located geometry and source correspondence.
+    #[must_use]
+    pub fn cells(&self) -> &BTreeMap<CellId, DepositedCell> {
+        &self.cells
+    }
+    /// Current thermal interfaces, suitable for a later bond-history owner.
+    #[must_use]
+    pub fn links(&self) -> &BTreeMap<u64, ThermalLink> {
+        &self.links
+    }
+    /// Stored reference mass, kg.
+    #[must_use]
+    pub fn mass_kg(&self) -> f64 {
+        self.cells.values().map(|c| c.mass_kg).sum()
+    }
+    /// Stored thermal energy relative to declared material data, J.
+    #[must_use]
+    pub fn energy_j(&self) -> f64 {
+        self.cells
+            .values()
+            .map(|c| c.mass_kg * c.specific_h_j_kg)
+            .sum()
+    }
+    /// Query temperature without retaining every timestep's full field.
+    pub fn temperature_k(&self, id: CellId) -> Result<f64, DepositionError> {
+        let cell = self
+            .cells
+            .get(&id)
+            .ok_or(DepositionError::InvalidInput("inactive cell"))?;
+        let t = self.materials[&cell.material_id].temperature_k(cell.specific_h_j_kg)?;
+        if !positive(t) {
+            return Err(DepositionError::MaterialDomain);
+        }
+        Ok(t)
+    }
+    /// Exposed ambient surface, m², after subtracting current contacts.
+    pub fn exposed_area_m2(&self, id: CellId) -> Result<f64, DepositionError> {
+        let cell = self
+            .cells
+            .get(&id)
+            .ok_or(DepositionError::InvalidInput("inactive cell"))?;
+        let mut area =
+            cell.geometry.surface_area_m2 - cell.boundary.reservoir.map_or(0.0, |r| r.area_m2);
+        for link in self.links.values() {
+            if link.a == id || link.b == id {
+                area -= link.area_m2;
+            }
+        }
+        if !nonnegative(area) {
+            return Err(DepositionError::InvalidInput(
+                "contacts exceed surface area",
+            ));
+        }
+        Ok(area)
+    }
+
+    /// Advance to an absolute time, hitting every birth/boundary event exactly.
+    /// `checkpoint` is polled every 256 cells/links and between events/steps;
+    /// use the Cx adapter in `enthalpy::deposition` for executor integration.
+    /// Only the returned candidate commits aging, births and schedule progress.
+    pub fn advance_to(
+        &self,
+        target_s: f64,
+        config: StepConfig,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, EnergyAudit), DepositionError> {
+        checkpoint()?;
+        if !target_s.is_finite()
+            || target_s < self.time_s
+            || !positive(config.max_dt_s)
+            || !nonnegative(config.energy_tolerance_j)
+        {
+            return Err(DepositionError::InvalidInput(
+                "invalid target, timestep or joule tolerance",
+            ));
+        }
+        let initial_energy = finite(self.energy_j())?;
+        let mut next = self.clone();
+        let mut audit = EnergyAudit {
+            incoming_mass_kg: 0.0,
+            incoming_energy_j: 0.0,
+            external_heat_j: 0.0,
+            stored_energy_change_j: 0.0,
+            residual_j: 0.0,
+            substeps: 0,
+            events: 0,
+        };
+        loop {
+            checkpoint()?;
+            while next.cursor < next.schedule.len()
+                && next.schedule[next.cursor].time_s == next.time_s
+            {
+                checkpoint()?;
+                let event = next.schedule[next.cursor].event.clone();
+                next.apply(event, &mut audit)?;
+                next.cursor += 1;
+                audit.events += 1;
+            }
+            if next.time_s == target_s {
+                break;
+            }
+            let stop = next
+                .schedule
+                .get(next.cursor)
+                .map_or(target_s, |e| e.time_s.min(target_s));
+            if next.cells.is_empty() {
+                next.time_s = stop;
+                continue;
+            }
+            if audit.substeps >= next.budget.max_substeps {
+                return Err(DepositionError::Budget("thermal substeps"));
+            }
+            let dt = next.thermal_step(
+                stop - next.time_s,
+                config.max_dt_s,
+                &mut audit,
+                &mut checkpoint,
+            )?;
+            let time = finite(next.time_s + dt)?;
+            if time <= next.time_s {
+                return Err(DepositionError::Arithmetic);
+            }
+            // Assign the exact endpoint rather than accumulating rounding error.
+            next.time_s = if dt == stop - next.time_s { stop } else { time };
+            audit.substeps += 1;
+        }
+        audit.stored_energy_change_j = finite(next.energy_j() - initial_energy)?;
+        audit.residual_j =
+            finite(audit.stored_energy_change_j - audit.incoming_energy_j - audit.external_heat_j)?;
+        if audit.residual_j.abs() > config.energy_tolerance_j {
+            return Err(DepositionError::EnergyBalance(audit.residual_j));
+        }
+        checkpoint()?;
+        Ok((next, audit))
+    }
+
+    fn apply(&mut self, event: Event, audit: &mut EnergyAudit) -> Result<(), DepositionError> {
+        match event {
+            Event::Birth(cell) => {
+                if self.cells.len() >= self.budget.max_cells {
+                    return Err(DepositionError::Budget("active cells"));
+                }
+                if self.cells.contains_key(&cell.id)
+                    || !self.materials.contains_key(&cell.material_id)
+                    || !positive(cell.mass_kg)
+                    || !positive(cell.geometry.volume_m3)
+                    || !positive(cell.geometry.surface_area_m2)
+                    || !cell
+                        .geometry
+                        .start_m
+                        .iter()
+                        .chain(&cell.geometry.end_m)
+                        .all(|x| x.is_finite())
+                    || cell.geometry.start_m == cell.geometry.end_m
+                    || !cell.specific_h_j_kg.is_finite()
+                {
+                    return Err(DepositionError::InvalidInput(
+                        "invalid birth geometry/mass/material or reused cell ID",
+                    ));
+                }
+                validate_boundary(cell.boundary)?;
+                audit.incoming_mass_kg = finite(audit.incoming_mass_kg + cell.mass_kg)?;
+                audit.incoming_energy_j =
+                    finite(audit.incoming_energy_j + finite(cell.mass_kg * cell.specific_h_j_kg)?)?;
+                let id = cell.id;
+                self.cells.insert(id, cell);
+                self.temperature_k(id)?;
+                self.exposed_area_m2(id)?;
+            }
+            Event::Contact(link) => {
+                if self.links.len() >= self.budget.max_links {
+                    return Err(DepositionError::Budget("active links"));
+                }
+                if self.links.contains_key(&link.id)
+                    || link.a == link.b
+                    || !positive(link.area_m2)
+                    || !nonnegative(link.conductance_w_k)
+                    || !self.cells.contains_key(&link.a)
+                    || !self.cells.contains_key(&link.b)
+                {
+                    return Err(DepositionError::InvalidInput(
+                        "contact requires distinct active cells and a unique ID",
+                    ));
+                }
+                self.links.insert(link.id, link);
+                self.exposed_area_m2(link.a)?;
+                self.exposed_area_m2(link.b)?;
+            }
+            Event::Separation(id) => {
+                if self.links.remove(&id).is_none() {
+                    return Err(DepositionError::InvalidInput("inactive interface"));
+                }
+            }
+            Event::Boundary(id, boundary) => {
+                validate_boundary(boundary)?;
+                self.cells
+                    .get_mut(&id)
+                    .ok_or(DepositionError::InvalidInput("inactive boundary cell"))?
+                    .boundary = boundary;
+                self.exposed_area_m2(id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn thermal_step(
+        &mut self,
+        remaining: f64,
+        max_dt: f64,
+        audit: &mut EnergyAudit,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, DepositionError> {
+        // Per-cell rates and outgoing conductances; no quadratic cell searches.
+        let mut temperatures = BTreeMap::new();
+        let mut rates = BTreeMap::new();
+        let mut outgoing = BTreeMap::new();
+        let mut covered = BTreeMap::new();
+        for (i, (&id, cell)) in self.cells.iter().enumerate() {
+            if i % 256 == 0 {
+                checkpoint()?;
+            }
+            temperatures.insert(id, self.temperature_k(id)?);
+            covered.insert(id, cell.boundary.reservoir.map_or(0.0, |r| r.area_m2));
+            rates.insert(id, 0.0);
+            outgoing.insert(id, 0.0);
+        }
+        for (i, link) in self.links.values().enumerate() {
+            if i % 256 == 0 {
+                checkpoint()?;
+            }
+            let power =
+                finite(link.conductance_w_k * (temperatures[&link.b] - temperatures[&link.a]))?;
+            for (id, sign) in [(link.a, 1.0), (link.b, -1.0)] {
+                let rate = rates.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
+                *rate = finite(*rate + sign * power)?;
+                let g = outgoing.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
+                *g = finite(*g + link.conductance_w_k)?;
+                let area = covered.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
+                *area = finite(*area + link.area_m2)?;
+            }
+        }
+        let mut external_w = 0.0;
+        let mut dt = remaining.min(max_dt);
+        for (i, (&id, cell)) in self.cells.iter().enumerate() {
+            if i % 256 == 0 {
+                checkpoint()?;
+            }
+            let area = cell.geometry.surface_area_m2 - covered[&id];
+            if !nonnegative(area) {
+                return Err(DepositionError::InvalidInput(
+                    "contacts exceed surface area",
+                ));
+            }
+            let ambient_g = finite(area * cell.boundary.htc_w_m2_k)?;
+            let mut g = finite(outgoing[&id] + ambient_g)?;
+            let mut external = finite(
+                cell.boundary.source_w + ambient_g * (cell.boundary.ambient_k - temperatures[&id]),
+            )?;
+            if let Some(r) = cell.boundary.reservoir {
+                g = finite(g + r.conductance_w_k)?;
+                external =
+                    finite(external + r.conductance_w_k * (r.temperature_k - temperatures[&id]))?;
+            }
+            external_w = finite(external_w + external)?;
+            let rate = rates.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
+            *rate = finite(*rate + external)?;
+            let slope = self.materials[&cell.material_id].maximum_temperature_slope();
+            let decay = finite(g * slope / cell.mass_kg)?;
+            if decay > 0.0 {
+                dt = dt.min(0.8 / decay);
+            }
+        }
+        if !positive(dt) {
+            return Err(DepositionError::Arithmetic);
+        }
+        for (i, (&id, cell)) in self.cells.iter_mut().enumerate() {
+            if i % 256 == 0 {
+                checkpoint()?;
+            }
+            cell.specific_h_j_kg =
+                finite(cell.specific_h_j_kg + finite(dt * rates[&id] / cell.mass_kg)?)?;
+            let t = self.materials[&cell.material_id].temperature_k(cell.specific_h_j_kg)?;
+            if !positive(t) {
+                return Err(DepositionError::MaterialDomain);
+            }
+        }
+        audit.external_heat_j = finite(audit.external_heat_j + finite(dt * external_w)?)?;
+        Ok(dt)
+    }
+}
+
+fn validate_boundary(b: Boundary) -> Result<(), DepositionError> {
+    if !positive(b.ambient_k)
+        || !nonnegative(b.htc_w_m2_k)
+        || !b.source_w.is_finite()
+        || b.reservoir.is_some_and(|r| {
+            !nonnegative(r.area_m2) || !nonnegative(r.conductance_w_k) || !positive(r.temperature_k)
+        })
+    {
+        return Err(DepositionError::InvalidInput(
+            "invalid thermal boundary in SI units",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Sensible;
+    impl ThermalLaw for Sensible {
+        fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+            if !(0.0..=1_000_000.0).contains(&h) {
+                return Err(DepositionError::MaterialDomain);
+            }
+            Ok(300.0 + h / 2000.0)
+        }
+        fn maximum_temperature_slope(&self) -> f64 {
+            1.0 / 2000.0
+        }
+    }
+    static LAW: Sensible = Sensible;
+    fn budget() -> DepositionBudget {
+        DepositionBudget {
+            max_cells: 10_000,
+            max_links: 10_000,
+            max_events: 30_000,
+            max_substeps: 100_000,
+        }
+    }
+    fn config(dt: f64) -> StepConfig {
+        StepConfig {
+            max_dt_s: dt,
+            energy_tolerance_j: 1e-8,
+        }
+    }
+    fn boundary(htc: f64) -> Boundary {
+        Boundary {
+            ambient_k: 300.0,
+            htc_w_m2_k: htc,
+            reservoir: None,
+            source_w: 0.0,
+        }
+    }
+    fn cell(id: u64, h: f64) -> DepositedCell {
+        DepositedCell {
+            id: CellId(id),
+            segment_id: id,
+            body_id: 1,
+            material_id: MaterialId(7),
+            mass_kg: 0.001,
+            specific_h_j_kg: h,
+            geometry: CellGeometry {
+                start_m: [0.0, 0.0, id as f64 * 0.0002],
+                end_m: [0.01, 0.0, id as f64 * 0.0002],
+                volume_m3: 1e-6,
+                surface_area_m2: 0.001,
+            },
+            boundary: boundary(0.0),
+        }
+    }
+    fn event(t: f64, event: Event) -> TimedEvent {
+        TimedEvent { time_s: t, event }
+    }
+    fn birth(t: f64, id: u64, h: f64) -> TimedEvent {
+        event(t, Event::Birth(cell(id, h)))
+    }
+    fn link(a: u64, b: u64) -> ThermalLink {
+        ThermalLink {
+            id: a,
+            a: CellId(a),
+            b: CellId(b),
+            area_m2: 0.0002,
+            conductance_w_k: 0.2,
+        }
+    }
+    fn simulation(events: Vec<TimedEvent>) -> DepositionSimulation<'static> {
+        DepositionSimulation::new(events, &[(MaterialId(7), &LAW)], budget()).unwrap()
+    }
+    fn run(
+        sim: &DepositionSimulation<'static>,
+        t: f64,
+        dt: f64,
+    ) -> (DepositionSimulation<'static>, EnergyAudit) {
+        sim.advance_to(t, config(dt), || Ok(())).unwrap()
+    }
+    fn close(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() <= tol, "{a} != {b}");
+    }
+
+    // G0: birth energy is exactly once, incoming reference mass never inferred
+    // from a material's changing equilibrium density, and no cell ages at birth.
+    #[test]
+    fn single_bead_mass_energy_and_no_preactivation() {
+        let sim = simulation(vec![birth(0.75, 1, 400_000.0)]);
+        let (before, a) = run(&sim, 0.5, 9.0);
+        assert!(before.cells().is_empty());
+        assert_eq!(a.incoming_energy_j, 0.0);
+        let (born, a) = run(&before, 0.75, 9.0);
+        close(born.mass_kg(), 0.001, 1e-15);
+        close(born.energy_j(), 400.0, 1e-12);
+        close(born.temperature_k(CellId(1)).unwrap(), 500.0, 1e-12);
+        assert_eq!(a.events, 1);
+        let (same, a) = run(&born, 0.75, 9.0);
+        assert_eq!(a.events, 0);
+        assert_eq!(same.cells(), born.cells());
+    }
+
+    // G1: independent lumped cooling solution; timestep refinement is distinct
+    // from spatial resolution. tau=m cp/(h A)=20 seconds here.
+    #[test]
+    fn single_bead_cooling_matches_exponential_with_first_order_refinement() {
+        let mut c = cell(1, 400_000.0);
+        c.boundary = boundary(100.0);
+        let sim = simulation(vec![event(0.0, Event::Birth(c))]);
+        let exact = 300.0 + 200.0 * (-1.0_f64).exp();
+        let mut errors = Vec::new();
+        for dt in [1.0, 0.5, 0.25] {
+            let (s, a) = run(&sim, 20.0, dt);
+            errors.push((s.temperature_k(CellId(1)).unwrap() - exact).abs());
+            close(
+                a.stored_energy_change_j,
+                a.incoming_energy_j + a.external_heat_j,
+                1e-9,
+            );
+        }
+        assert!((1.9..2.1).contains(&(errors[0] / errors[1])));
+        assert!((1.9..2.1).contains(&(errors[1] / errors[2])));
+    }
+
+    #[test]
+    fn successive_layer_reheats_old_material_and_changes_exposure() {
+        let sim = simulation(vec![
+            birth(0.0, 1, 40_000.0),
+            birth(1.0, 2, 400_000.0),
+            event(1.0, Event::Contact(link(1, 2))),
+            event(3.0, Event::Separation(1)),
+        ]);
+        let (first, _) = run(&sim, 0.9, 0.01);
+        assert_eq!(first.cells().len(), 1);
+        let (second, a) = run(&first, 2.0, 0.01);
+        assert!(second.temperature_k(CellId(1)).unwrap() > first.temperature_k(CellId(1)).unwrap());
+        close(second.exposed_area_m2(CellId(1)).unwrap(), 0.0008, 1e-15);
+        close(second.energy_j(), 440.0, 1e-9);
+        close(a.incoming_energy_j, 400.0, 1e-12);
+        close(a.residual_j, 0.0, 1e-9);
+        assert_eq!(second.cells()[&CellId(1)].segment_id, 1);
+        let (separated, a) = run(&second, 3.0, 0.01);
+        close(separated.exposed_area_m2(CellId(1)).unwrap(), 0.001, 1e-15);
+        close(a.incoming_energy_j, 0.0, 0.0);
+    }
+
+    // G1: independent two-body fixed-domain exchange. Equal capacities C=2 J/K
+    // give a temperature difference decaying as exp(-2 G t/C).
+    #[test]
+    fn fixed_domain_contact_limit_matches_two_body_reference() {
+        let sim = simulation(vec![
+            birth(0.0, 1, 0.0),
+            birth(0.0, 2, 400_000.0),
+            event(0.0, Event::Contact(link(1, 2))),
+        ]);
+        let (s, a) = run(&sim, 10.0, 0.001);
+        let exact = 400.0 - 100.0 * (-2.0_f64).exp();
+        close(s.temperature_k(CellId(1)).unwrap(), exact, 0.004);
+        close(s.energy_j(), 400.0, 1e-8);
+        close(a.external_heat_j, 0.0, 0.0);
+        close(a.residual_j, 0.0, 1e-8);
+    }
+
+    #[test]
+    fn cfl_subcycling_prevents_contact_temperature_overshoot() {
+        let sim = simulation(vec![
+            birth(0.0, 1, 0.0),
+            birth(0.0, 2, 400_000.0),
+            event(0.0, Event::Contact(link(1, 2))),
+        ]);
+        let (s, a) = run(&sim, 100.0, 1000.0);
+        assert!(a.substeps > 1);
+        for id in [CellId(1), CellId(2)] {
+            assert!((300.0..=500.0).contains(&s.temperature_k(id).unwrap()));
+        }
+        close(s.energy_j(), 400.0, 1e-9);
+    }
+
+    #[test]
+    fn bed_release_and_fan_change_hit_exact_timeline() {
+        let mut c = cell(1, 0.0);
+        c.boundary.reservoir = Some(Reservoir {
+            area_m2: 0.0004,
+            conductance_w_k: 0.1,
+            temperature_k: 400.0,
+        });
+        let sim = simulation(vec![
+            event(0.0, Event::Birth(c)),
+            event(0.35, Event::Boundary(CellId(1), boundary(100.0))),
+        ]);
+        let (released, _) = run(&sim, 0.35, 0.2);
+        assert!(released.temperature_k(CellId(1)).unwrap() > 300.0);
+        assert_eq!(released.time_s(), 0.35);
+        close(released.exposed_area_m2(CellId(1)).unwrap(), 0.001, 1e-15);
+        let (cooled, a) = run(&released, 1.0, 0.2);
+        assert!(
+            cooled.temperature_k(CellId(1)).unwrap() < released.temperature_k(CellId(1)).unwrap()
+        );
+        assert!(a.external_heat_j < 0.0);
+    }
+
+    // G3: partitioning a uniform bead changes spatial cell count but not its
+    // mass, energy or temperature. This proves this uniform limit only.
+    #[test]
+    fn uniform_bead_spatial_partition_preserves_solution() {
+        let mut final_t = Vec::new();
+        for count in [1, 2, 8] {
+            let events = (0..count)
+                .map(|id| {
+                    let mut c = cell(id, 400_000.0);
+                    c.mass_kg /= count as f64;
+                    c.geometry.volume_m3 /= count as f64;
+                    c.geometry.surface_area_m2 /= count as f64;
+                    c.boundary = boundary(100.0);
+                    event(0.0, Event::Birth(c))
+                })
+                .collect();
+            let (s, a) = run(&simulation(events), 10.0, 0.05);
+            close(s.mass_kg(), 0.001, 1e-15);
+            close(a.incoming_energy_j, 400.0, 1e-10);
+            final_t.push(s.temperature_k(CellId(0)).unwrap());
+        }
+        close(final_t[0], final_t[1], 1e-10);
+        close(final_t[0], final_t[2], 1e-10);
+    }
+
+    #[test]
+    fn cancelled_trial_and_exhausted_work_do_not_commit_births() {
+        let sim = simulation(vec![birth(0.0, 1, 0.0), birth(0.5, 2, 400_000.0)]);
+        let mut calls = 0;
+        let err = sim.advance_to(1.0, config(0.1), || {
+            calls += 1;
+            if calls > 15 {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(err, Err(DepositionError::Cancelled)));
+        assert_eq!(sim.time_s(), 0.0);
+        assert!(sim.cells().is_empty());
+        let (restarted, a) = run(&sim, 1.0, 0.1);
+        assert_eq!(a.events, 2);
+        close(restarted.mass_kg(), 0.002, 1e-15);
+        let mut limited = sim.clone();
+        limited.budget.max_substeps = 1;
+        assert!(matches!(
+            limited.advance_to(1.0, config(0.1), || Ok(())),
+            Err(DepositionError::Budget("thermal substeps"))
+        ));
+        assert!(limited.cells().is_empty());
+    }
+
+    #[test]
+    fn checkpoint_restart_replays_identical_step_grid() {
+        let sim = simulation(vec![
+            birth(0.0, 1, 40_000.0),
+            birth(1.0, 2, 400_000.0),
+            event(1.0, Event::Contact(link(1, 2))),
+        ]);
+        let (whole, _) = run(&sim, 2.0, 0.125);
+        let (mid, _) = run(&sim, 1.0, 0.125);
+        let checkpoint = mid.clone();
+        let (resumed, _) = run(&checkpoint, 2.0, 0.125);
+        assert_eq!(whole.cells(), resumed.cells());
+        assert_eq!(whole.links(), resumed.links());
+    }
+
+    #[test]
+    fn invalid_topology_mass_units_material_and_history_are_refused() {
+        for events in [
+            vec![birth(1.0, 1, 0.0), birth(0.0, 2, 0.0)],
+            vec![birth(0.0, 1, 0.0), birth(0.0, 1, 0.0)],
+            vec![birth(0.0, 1, 0.0), event(0.0, Event::Contact(link(1, 2)))],
+            vec![birth(0.0, 1, 2_000_000.0)],
+        ] {
+            match DepositionSimulation::new(events, &[(MaterialId(7), &LAW)], budget()) {
+                Err(_) => {}
+                Ok(s) => {
+                    assert!(s.advance_to(2.0, config(0.1), || Ok(())).is_err());
+                    assert!(s.cells().is_empty());
+                }
+            }
+        }
+        for mut c in [cell(1, 0.0), cell(2, 0.0), cell(3, 0.0)] {
+            match c.id.0 {
+                1 => c.mass_kg = 0.0,
+                2 => c.material_id = MaterialId(999),
+                _ => c.geometry.volume_m3 = f64::NAN,
+            }
+            assert!(
+                simulation(vec![event(0.0, Event::Birth(c))])
+                    .advance_to(0.0, config(1.0), || Ok(()))
+                    .is_err()
+            );
+        }
+        let s = simulation(vec![birth(0.0, 1, 0.0)]);
+        assert!(s.advance_to(-1.0, config(1.0), || Ok(())).is_err());
+        assert!(s.advance_to(1.0, config(0.0), || Ok(())).is_err());
+    }
+
+    #[test]
+    fn overlapping_contact_area_is_refused_even_when_insulating() {
+        let mut l = link(1, 2);
+        l.area_m2 = 0.002;
+        l.conductance_w_k = 0.0;
+        let sim = simulation(vec![
+            birth(0.0, 1, 0.0),
+            birth(0.0, 2, 0.0),
+            event(0.0, Event::Contact(l)),
+        ]);
+        assert!(matches!(
+            sim.advance_to(0.0, config(1.0), || Ok(())),
+            Err(DepositionError::InvalidInput(
+                "contacts exceed surface area"
+            ))
+        ));
+    }
+
+    #[test]
+    fn heterogeneous_material_identity_and_source_energy_are_retained() {
+        struct Different;
+        impl ThermalLaw for Different {
+            fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+                Ok(300.0 + h / 1000.0)
+            }
+            fn maximum_temperature_slope(&self) -> f64 {
+                0.001
+            }
+        }
+        let law = Different;
+        let mut c = cell(2, 200_000.0);
+        c.material_id = MaterialId(9);
+        c.boundary.source_w = 2.0;
+        let s = DepositionSimulation::new(
+            vec![birth(0.0, 1, 400_000.0), event(0.0, Event::Birth(c))],
+            &[(MaterialId(7), &LAW), (MaterialId(9), &law)],
+            budget(),
+        )
+        .unwrap();
+        let (s, a) = s.advance_to(2.0, config(0.1), || Ok(())).unwrap();
+        close(a.external_heat_j, 4.0, 1e-12);
+        close(s.energy_j(), 604.0, 1e-9);
+        assert_eq!(s.cells()[&CellId(2)].material_id, MaterialId(9));
+    }
+
+    /// Cost observation, not a hardware-independent performance acceptance.
+    #[test]
+    #[ignore = "run optimized with --ignored --nocapture for schedule cost"]
+    fn representative_layered_strip_cost() {
+        let mut events = Vec::new();
+        for id in 0..1000 {
+            events.push(birth(id as f64 * 0.001, id, 400_000.0));
+            if id > 0 {
+                events.push(event(id as f64 * 0.001, Event::Contact(link(id - 1, id))));
+            }
+        }
+        let start = std::time::Instant::now();
+        let (s, a) = run(&simulation(events), 2.0, 0.001);
+        close(s.mass_kg(), 1.0, 1e-12);
+        close(s.energy_j(), 400_000.0, 1e-8);
+        println!(
+            "1000 cells, {} links, {} steps, {} events: {:?}; residual={} J",
+            s.links().len(),
+            a.substeps,
+            a.events,
+            start.elapsed(),
+            a.residual_j
+        );
+    }
+}
