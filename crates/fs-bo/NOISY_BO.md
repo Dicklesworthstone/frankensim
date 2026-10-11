@@ -144,7 +144,7 @@ all-objective performance guarantee.
 
 ## Resumable external simulation jobs
 
-`fs_bo::study::NoisyStudy` separates fixed-kernel optimization from execution
+`fs_bo::study::NoisyStudy` separates fixed or learned-kernel optimization from execution
 of expensive simulations. It shares the callback driver's initial design,
 greedy acquisition, common random numbers and incumbent selection. Construct
 it with a caller-assigned study ID and the same dimension, initial count,
@@ -202,9 +202,67 @@ mid-acquisition cancellation, and retained singular-model failures. These Rust
 tests and the example remain uncompiled and unexecuted in the authoring
 environment, which has no DSR, RCH or Rust toolchain.
 
-This API is fixed-kernel batch BO, not pending-point/fantasy asynchronous BO.
-It does not yet integrate the learned-kernel driver's state, provide a durable
-checkpoint wire format, coordinate external job leases, or guarantee cross-ISA
-replay. Independent simulations must return the same values and variances for
-matching job identities to reproduce the same study.
+This is batch BO, not pending-point/fantasy asynchronous BO. It does not
+coordinate external job leases or guarantee cross-ISA replay. Independent
+simulations must return the same values and variances for matching job
+identities to reproduce the same study.
+
+### Learned external studies
+
+`NoisyStudy::new_with_learning` accepts the existing `NoisyLearningConfig`.
+Refits follow the synchronous learned driver's cadence, seed policy and warm
+starts; between refits, every new observation still enters the posterior.
+`kernel()` returns the last accepted covariance and `fit_records()` returns
+committed refit records. The original fixed-kernel constructor is unchanged.
+
+A transition commits its learned kernel, refit record, report and next batch
+together. A pause inside fitting or after fitting but during acquisition
+retains the previous kernel and ALL received results. Retrying starts from
+that previous accepted kernel and the same seed. Model attempts stay counted;
+the likelihood counts inside committed records do not claim to include work
+spent on cancelled/discarded fits. Five focused regressions cover learned
+callback parity, partial-state replay, cancellation and policy admission.
+
+### Checkpoint files and actual process restarts
+
+`checkpoint_bytes()` encodes the complete state, including partial responses,
+ordered history, recommendations, work counters, original configuration,
+learning policy and accepted refit records. `NoisyStudy::from_checkpoint(bytes,
+CheckpointLimits { max_bytes, max_evaluations })` restores it without executing
+a simulation, GP fit or acquisition. The evaluation limit caps the entire
+planned job count, not merely observations already present in the file.
+
+The v1 frame uses little-endian integer words and exact IEEE-754 floating-point
+bits. Loading checks the version, lengths before allocation, finite values,
+configuration, batch progression, recommendation indices, refit cadence and
+budget records. Truncated, oversized or inconsistent frames return typed
+errors instead of a partial study. A failed-model batch is still restorable:
+its responses remain available for inspection and a retry retains its error.
+
+An FNV checksum detects accidental corruption; it is NOT authentication, a
+signature or numerical re-verification of stored results. Restore trusted
+checkpoints under the same numerical build/profile. Applications must bind
+external physics versions and secure their storage separately. Schema
+compatibility alone does not guarantee replay after dependency/toolchain changes.
+The library owns no filesystem: use atomic persistence appropriate to the
+application. The example uses a fresh, create-only file and refuses overwrites.
+
+```bash
+# Stop after six initial results, one completed model fit and one adaptive result.
+cargo run -p fs-bo --example external_noisy_design -- \
+  --learn-kernel --checkpoint study.bin
+# A separate process reads the retained state and evaluates the remaining jobs.
+cargo run -p fs-bo --example external_noisy_design -- --resume study.bin
+```
+
+Resume only this example's own trusted files with the same build. Its input
+read is bounded before decoding, and seeds depend on job identity, not process
+or arrival order. The two invocations together retain the original 18-job
+budget; the second process does not repeat the seven received evaluations.
+Six checkpoint regressions cover restarts after every response/advance for
+fixed and learned studies, cancellation/model-failure retention, signed-zero
+bits, corrupted/truncated/versioned frames, resource limits and structural
+rejections even when a checksum is recomputed. These new Rust tests and the
+file example have not been executed in the authoring environment; DSR, RCH
+and the Rust toolchain remain unavailable.
 

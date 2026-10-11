@@ -260,3 +260,140 @@ fn learned_constructor_refuses_invalid_work_policy_and_one_probe_recovers_fixed_
     assert_eq!(learned.work(), fixed.work());
     assert!(learned.fit_records().iter().all(|fit| fit.evaluations == 1));
 }
+
+fn checkpoint_limits() -> CheckpointLimits {
+    CheckpointLimits { max_bytes: 1 << 20, max_evaluations: 1000 }
+}
+
+fn restore(study: &NoisyStudy) -> NoisyStudy {
+    let bytes = study.checkpoint_bytes();
+    let restored = NoisyStudy::from_checkpoint(&bytes, checkpoint_limits()).unwrap();
+    assert_eq!(restored.checkpoint_bytes(), bytes, "canonical exact-bit roundtrip");
+    assert_eq!(restored.report(), study.report());
+    assert_eq!(restored.pending(), study.pending());
+    assert_eq!(restored.work(), study.work());
+    assert_eq!(restored.is_complete(), study.is_complete());
+    assert_same_fits(restored.fit_records(), study.fit_records());
+    restored
+}
+
+#[test]
+fn checkpoint_restarts_fixed_and_learned_studies_after_every_response_and_advance() {
+    for learned in [false, true] {
+        let c = config(); let policy = learning();
+        let mut live = if learned {
+            NoisyStudy::new_with_learning(51, 1, 3, 2, &c, &policy).unwrap()
+        } else { NoisyStudy::new(51, 1, 3, 2, &c) };
+        live = restore(&live);
+        let mut calls = 0;
+        while !live.is_complete() {
+            for job in live.ask().into_iter().rev() {
+                let response = observation(&job.x);
+                live.tell(&job, response).unwrap(); calls += 1;
+                live = restore(&live);
+                assert_eq!(live.tell(&job, response), Ok(TellDisposition::Replayed));
+            }
+            live.advance().unwrap(); live = restore(&live);
+        }
+        assert_eq!(calls, 7);
+        if learned {
+            let expected = crate::learning::minimize_noisy_with_learning(
+                &mut observation, 1, 3, 2, &c, &policy).unwrap();
+            assert_eq!(live.report(), &expected.report);
+            assert_same_fits(live.fit_records(), &expected.fits);
+        } else {
+            assert_eq!(live.report(), &minimize_noisy(&mut observation, 1, 3, 2, &c));
+        }
+    }
+}
+
+#[test]
+fn checkpoint_keeps_cancelled_fit_attempts_and_does_not_reschedule_received_physics() {
+    let mut live = NoisyStudy::new_with_learning(52, 1, 3, 1, &config(), &learning()).unwrap();
+    for job in live.ask() { live.tell(&job, observation(&job.x)).unwrap(); }
+    let mut calls = 0;
+    assert_eq!(live.advance_controlled(&mut || { calls += 1; calls < 4 }), Err(NoisyStudyError::Cancelled));
+    let mut resumed = restore(&live);
+    assert!(resumed.ask().is_empty());
+    assert_eq!(resumed.work().model_fit_attempts, 1);
+    assert_eq!(finish(&mut resumed, false), 2);
+    assert_eq!(finish(&mut live, true), 2);
+    assert_eq!(resumed.report(), live.report());
+    assert_same_fits(resumed.fit_records(), live.fit_records());
+}
+
+#[test]
+fn checkpoint_retains_invalid_model_pending_results_for_inspection() {
+    let mut c = config(); c.bounds = (1.0, 1.0 + f64::EPSILON);
+    let mut live = NoisyStudy::new(53, 1, 3, 0, &c);
+    for job in live.ask() {
+        live.tell(&job, NoisyObservation { value: 1.0, noise_variance: 0.0 }).unwrap();
+    }
+    assert_eq!(live.advance(), Err(NoisyStudyError::InvalidModel));
+    let mut resumed = restore(&live);
+    assert!(resumed.ask().is_empty());
+    assert_eq!(resumed.advance(), Err(NoisyStudyError::InvalidModel));
+    assert_eq!(resumed.pending(), live.pending());
+    assert_eq!(resumed.work().model_fit_attempts, 2);
+}
+
+#[test]
+fn checkpoint_preserves_signed_zero_response_bits_and_large_study_ids() {
+    let mut live = NoisyStudy::new(u64::MAX, 1, 2, 0, &config());
+    let job = live.ask()[0].clone();
+    let response = NoisyObservation { value: -0.0, noise_variance: -0.0 };
+    live.tell(&job, response).unwrap();
+    let mut resumed = restore(&live);
+    assert_eq!(resumed.tell(&job, response), Ok(TellDisposition::Replayed));
+    assert_eq!(resumed.tell(&job, NoisyObservation { value: 0.0, ..response }),
+        Err(NoisyStudyError::ConflictingObservation));
+}
+
+fn reseal(bytes: &mut [u8]) {
+    let end = bytes.len() - 8;
+    let mut sum = 0xcbf29ce484222325u64;
+    for byte in &bytes[..end] { sum = (sum ^ u64::from(*byte)).wrapping_mul(0x100000001b3); }
+    bytes[end..].copy_from_slice(&sum.to_le_bytes());
+}
+
+#[test]
+fn checkpoint_refuses_truncation_corruption_versions_and_caller_limits() {
+    let frame = NoisyStudy::new(54, 1, 3, 1, &config()).checkpoint_bytes();
+    for end in 0..frame.len() {
+        assert!(NoisyStudy::from_checkpoint(&frame[..end], checkpoint_limits()).is_err());
+    }
+    let mut bad = frame.clone(); bad[6] = 2;
+    assert!(matches!(NoisyStudy::from_checkpoint(&bad, checkpoint_limits()), Err(CheckpointError::IncompatibleVersion)));
+    bad = frame.clone(); bad[40] ^= 1;
+    assert!(matches!(NoisyStudy::from_checkpoint(&bad, checkpoint_limits()), Err(CheckpointError::ChecksumMismatch)));
+    let mut limits = checkpoint_limits(); limits.max_bytes = frame.len() - 1;
+    assert!(matches!(NoisyStudy::from_checkpoint(&frame, limits), Err(CheckpointError::LimitExceeded)));
+    limits = checkpoint_limits(); limits.max_evaluations = 4; // full plan is 3 + 1*2
+    assert!(matches!(NoisyStudy::from_checkpoint(&frame, limits), Err(CheckpointError::LimitExceeded)));
+}
+
+#[test]
+fn checkpoint_structural_admission_is_not_only_a_checksum_check() {
+    let frame = NoisyStudy::new(55, 1, 3, 1, &config()).checkpoint_bytes();
+    // v1, dimension one, fixed kernel: these offsets are frozen grammar fields,
+    // not random byte fuzz. Recompute checksum to reach structural admission.
+    for (offset, word) in [(16, 0), (24, 0), (64, f64::NAN.to_bits()),
+        (88, 0), (128, 2), (152, 4), (160, u64::MAX), (168, 0)] {
+        let mut bad = frame.clone(); bad[offset..offset + 8].copy_from_slice(&word.to_le_bytes());
+        reseal(&mut bad);
+        assert!(NoisyStudy::from_checkpoint(&bad, checkpoint_limits()).is_err(), "offset {offset}");
+    }
+    let mut trailing = frame[..frame.len() - 8].to_vec();
+    trailing.extend_from_slice(&[0; 16]); reseal(&mut trailing);
+    assert!(matches!(NoisyStudy::from_checkpoint(&trailing, checkpoint_limits()), Err(CheckpointError::InvalidState)));
+    let mut learned = NoisyStudy::new_with_learning(56, 1, 3, 0, &config(), &learning()).unwrap();
+    finish(&mut learned, false);
+    // Private test-only mutation simulates structurally well-framed stored data
+    // with a wrong refit cadence, zero allowance, or non-finite recommendation.
+    let mut wrong = learned.clone(); wrong.fits[0].after_batches = 1;
+    assert!(NoisyStudy::from_checkpoint(&wrong.checkpoint_bytes(), checkpoint_limits()).is_err());
+    wrong = learned.clone(); wrong.fits[0].evaluations = 0;
+    assert!(NoisyStudy::from_checkpoint(&wrong.checkpoint_bytes(), checkpoint_limits()).is_err());
+    wrong = learned; wrong.report.incumbent_trace[0].mean = f64::INFINITY;
+    assert!(NoisyStudy::from_checkpoint(&wrong.checkpoint_bytes(), checkpoint_limits()).is_err());
+}

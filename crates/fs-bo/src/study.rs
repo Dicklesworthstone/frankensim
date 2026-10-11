@@ -11,6 +11,9 @@ use crate::hyper::{HeteroFitError, fit_heteroscedastic_controlled, zero_noise_du
 use crate::learning::{NoisyFitRecord, NoisyLearningConfig};
 use crate::noisy::{NoisyBoConfig, NoisyBoReport, NoisyObservation};
 
+mod checkpoint;
+pub use checkpoint::{CheckpointError, CheckpointLimits};
+
 /// Stable logical job identity and the exact requested coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NoisyRequest {
@@ -81,9 +84,10 @@ pub struct NoisyStudyWork {
     pub acquisition_batch_attempts: usize,
 }
 
-/// All state needed to pause an in-memory study, including partial responses.
+/// All state needed to pause a study, including partial responses.
 /// `clone()` is an independent checkpoint; it never repeats received physical
-/// evaluations. No persistence format or cross-version replay is claimed.
+/// evaluations. `checkpoint_bytes`/`from_checkpoint` also support process restart
+/// under an unchanged numerical build/profile; cross-build replay is not claimed.
 #[derive(Debug, Clone)]
 pub struct NoisyStudy {
     study_id: u64,
