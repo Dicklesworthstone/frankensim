@@ -11,9 +11,12 @@ const MAX_BYTES: u64 = 65_536;
 /// Sites remain contact quadrature; this disk is not an averaged modal port.
 #[derive(Debug, Clone, Copy)]
 struct Envelope { center_m: [f64;2], radius_m: f64 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairSurface { Upper, Lower }
 #[derive(Debug)]
 pub struct Spec {
     pub surface: Surface,
+    pair_surface: Option<PairSurface>,
     sites: Vec<([f64;2], f64)>,
     envelope: Option<Envelope>,
     jaws: Vec<CompliantJaw>,
@@ -35,7 +38,7 @@ impl Spec {
         if rows.next().map(|(_,s)|s)!=Some("frankensim-compliant-mute-v1") {
             return Err("compliant mute needs frankensim-compliant-mute-v1 header".into());
         }
-        let mut surface=None;let mut sites=Vec::new();let mut envelope=None;
+        let mut surface=None;let mut pair_surface=None;let mut sites=Vec::new();let mut envelope=None;
         let mut jaws:Vec<CompliantJaw>=Vec::new();
         let mut force=[String::new(),String::new()];let mut creep=[Vec::new(),Vec::new()];
         for (line,text) in rows {
@@ -48,6 +51,8 @@ impl Spec {
             match (f[0],f.len()) {
                 ("surface",2) if surface.is_none()=>surface=Some(match f[1] {
                     "shell"=>Surface::Shell,"batter"=>Surface::Batter,"resonant"=>Surface::Resonant,
+                    "upper"=>{pair_surface=Some(PairSurface::Upper);Surface::Shell},
+                    "lower"=>{pair_surface=Some(PairSurface::Lower);Surface::Shell},
                     _=>return Err(bad().into()),
                 }),
                 ("site",4) if sites.len()<4=> {
@@ -92,9 +97,10 @@ impl Spec {
         // one-coordinate row checks cards only; real geometry is lowered later.
         let checks:Vec<_>=sites.iter().map(|(_,area)|PadSite {weights:vec![1.0],area_m2:*area}).collect();
         MovingPads::new(1,&checks,&jaws)?;
-        let result=Self {surface,sites,envelope,jaws,programs};
+        let result=Self {surface,pair_surface,sites,envelope,jaws,programs};
         result.admit_envelope()?;
-        result.admit_command(if surface==Surface::Shell {"splash"}else{"drum"})?;
+        result.admit_command(if pair_surface.is_some() {"hihat"}
+            else if surface==Surface::Shell {"splash"}else{"drum"})?;
         Ok(result)
     }
     pub fn load(path: &str) -> Result<Self, Error> {
@@ -102,7 +108,19 @@ impl Spec {
         Self::parse(&text)
     }
     pub fn jaw_count(&self) -> usize {self.jaws.len()}
+    pub fn pad_count(&self) -> usize {self.jaws.len()*self.sites.len()}
     pub fn admit_command(&self, command: &str) -> Result<(),Error> {
+        let paired=matches!(command,"hihat"|"hihat-wav"|"hihat-mic");
+        if paired || self.pair_surface.is_some() {
+            if !paired || self.pair_surface.is_none() {
+                return Err("paired-cymbal mutes need an explicit upper or lower surface and a hi-hat command".into());
+            }
+            let side=if self.pair_surface==Some(PairSurface::Lower) {PadSide::Positive}else{PadSide::Negative};
+            if self.jaws.len()!=1 || self.jaws[0].side!=side {
+                return Err("paired-cymbal mute must approach the exterior: upper above or lower below; no jaw inside the closing air gap".into());
+            }
+            return Ok(());
+        }
         let shell=matches!(command,"splash"|"splash-wav"|"splash-mic");
         let snare=matches!(command,"snare"|"snare-wav"|"snare-mic"|"snare-off"|"snare-off-wav"|"snare-off-mic");
         let drum=snare || matches!(command,"drum"|"drum-wav"|"drum-mic"|"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic");
@@ -190,6 +208,34 @@ impl Spec {
         structural:usize) -> Result<MovingPads,Error> {
         self.admit_command("drum")?;
         self.compile(muffling::head_ports(&self.locations(),films,modes,structural)?,structural)
+    }
+    pub fn lower_shell(&self) -> Result<bool,Error> {
+        self.admit_command("hihat")?;
+        Ok(self.pair_surface==Some(PairSurface::Lower))
+    }
+    /// The selected shell's outer skin in its local chart. The lower shell is
+    /// rotated by pi about world x, so its local +z is world downward and its
+    /// local y is the negative of the authored world station. The reciprocal
+    /// finite-thickness port retains each site's force moment on the shell.
+    pub fn paired_shell(&self, reduction:&super::ShellReduction,thickness:&[f64],
+        outer_nodes:&[[f64;3]],triangles:&[[usize;3]],start:usize,structural:usize)
+        ->Result<MovingPads,Error>
+    {
+        use fs_plate::shell::reduction::radiation::ShellFace;
+        let lower=self.lower_shell()?;
+        if start.checked_add(reduction.mode_count()).is_none_or(|end|end>structural) {
+            return Err("paired mute surface exceeds the complete shell coordinate range".into());
+        }
+        let sites=self.sites.iter().map(|(p,area)|->Result<_,Error>{
+            let p=if lower {[p[0],-p[1]]}else{*p};
+            let (face,bary)=super::playing::shell_location(outer_nodes,triangles,p)?;
+            let row=reduction.surface_point_port(thickness,face,bary,ShellFace::Positive,
+                [0.,0.,if lower {1.}else{-1.}])?;
+            let mut weights=vec![0.;structural];
+            weights[start..start+row.weights.len()].copy_from_slice(&row.weights);
+            Ok(PadSite{weights,area_m2:*area})
+        }).collect::<Result<Vec<_>,_>>()?;
+        Ok(MovingPads::new(structural,&sites,&self.jaws)?)
     }
     pub fn into_inputs(self, attachment:&Attachment) -> Result<Vec<drive::Input>,Error> {
         if self.programs.len()!=attachment.ports.len() {return Err("missing physical mute jaw ports".into());}

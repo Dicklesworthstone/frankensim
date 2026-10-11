@@ -20,6 +20,7 @@ struct Shell {
     reduction:ShellReduction,
     skin:ShellRadiationSurface,
     inner_nodes:Vec<[f64;3]>,
+    outer_nodes:Vec<[f64;3]>,
 }
 impl Shell {
     fn new(spec:&specimen::Specimen,dt:f64)->Result<Self,Error> {
@@ -29,13 +30,18 @@ impl Shell {
         // The negative skin reverses vertex order; restore SOURCE connectivity
         // before locating contact barycentrics. Do not project onto midsurface XY.
         let mut inner_nodes=vec![[0.;3];mesh.mesh.nodes.len()];
+        let mut outer_nodes=vec![[0.;3];mesh.mesh.nodes.len()];
         for (f,t) in mesh.mesh.tris.iter().enumerate() {
-            for a in 0..3 {inner_nodes[t[a]]=skin.triangles()[2*f+1][2-a];}
+            for a in 0..3 {
+                inner_nodes[t[a]]=skin.triangles()[2*f+1][2-a];
+                outer_nodes[t[a]]=skin.triangles()[2*f][a];
+            }
         }
-        Ok(Self{mesh,reduction,skin,inner_nodes})
+        Ok(Self{mesh,reduction,skin,inner_nodes,outer_nodes})
     }
     fn port(&self,p:[f64;2],face:ShellFace)->Result<fs_plate::shell::reduction::radiation::ShellSurfacePort,Error> {
-        let (f,b)=playing::shell_location(&self.inner_nodes,&self.mesh.mesh.tris,p)?;
+        let nodes=if face==ShellFace::Positive {&self.outer_nodes}else{&self.inner_nodes};
+        let (f,b)=playing::shell_location(nodes,&self.mesh.mesh.tris,p)?;
         Ok(self.reduction.surface_point_port(&self.mesh.nodal_thickness_m,f,b,face,[0.,0.,1.])?)
     }
 }
@@ -115,7 +121,15 @@ fn build_with_mallets(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
 fn build_with_material(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:Stroke,
     second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>,
     shafts:&shaft_playing::Selection,mallets:&mallets::Selection,material:Option<&shell_relaxation::Spec>)->Result<Pair,Error> {
+    build_with_mute(spec,upper,lower,stroke,second,steps,dt,audio,film,shafts,mallets,material,None)
+}
+#[allow(clippy::too_many_arguments)]
+fn build_with_mute(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:Stroke,
+    second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>,
+    shafts:&shaft_playing::Selection,mallets:&mallets::Selection,material:Option<&shell_relaxation::Spec>,
+    mute:Option<&compliant_mute::Spec>)->Result<Pair,Error> {
     mallets.admit("hihat",stroke,second)?;
+    if let Some(mute)=mute {mute.admit_command("hihat")?;}
     if shafts.second.is_some() && second.is_none() {
         return Err("a flexible second stick requires its own strike position".into());
     }
@@ -128,6 +142,10 @@ fn build_with_material(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spe
     // stand contacts or collapse a footprint to admit a second felt head.
     if mallets.first.is_some() && mallets.second.is_some() {
         return Err("paired cymbals admit one four-site felt mallet: twelve mount sites plus two mallets exceed the sixteen-pad limit".into());
+    }
+    let mallet_sites=4*(usize::from(mallets.first.is_some())+usize::from(mallets.second.is_some()));
+    if 12+mallet_sites+mute.map_or(0,compliant_mute::Spec::pad_count)>16 {
+        return Err("paired mute and mallet exceed the sixteen-pad limit with all twelve stand contacts retained".into());
     }
     spec.validate()?;
     if let Some(material)=material {
@@ -148,10 +166,16 @@ fn build_with_material(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spe
     let hi=1..1+upper.reduction.mode_count();
     let lo=hi.end..hi.end+lower.reduction.mode_count();
     let pedal_coord=lo.end;let second_coord=pedal_coord+1;
-    // Append shaft modes after the entire unchanged shell/pedal/stick prefix.
-    // Neither skin source addresses nor existing rigid force coordinates move.
+    // Jaws follow the unchanged shell/pedal/stick prefix; shaft modes follow
+    // jaws. Neither acoustic shell nor existing rigid force addresses move.
     let base=second_coord+usize::from(second.is_some());
-    let mut shaft=shafts.build_with_mallets(base,second_coord,stroke,second,dt,mallets)?;
+    let attachment=mute.map(|mute|{
+        let (shell,start)=if mute.lower_shell()? {(&lower,lo.start)}else{(&upper,hi.start)};
+        mute.paired_shell(&shell.reduction,&shell.mesh.nodal_thickness_m,&shell.outer_nodes,
+            &shell.mesh.mesh.tris,start,base)
+    }).transpose()?;
+    let mut shaft=shafts.build_with_mallets(base+mute.map_or(0,compliant_mute::Spec::jaw_count),
+        second_coord,stroke,second,dt,mallets)?;
     let total=shaft.total;
     if total>fs_couple::render::plate::impact::MAX_IMPACT_MODES {
         return Err("paired cymbals exceed the original complete-state mode ceiling".into());
@@ -220,6 +244,11 @@ fn build_with_material(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spe
     let second_stick=second.map(|(body,contact,port)|{
         bodies.push(body);if let Some(contact)=contact {contacts.push(contact);}port
     });
+    let mute=attachment.map(|a| {
+        let observation=mute.expect("compiled paired mute").observation(a.ports,pads.len());
+        bodies.extend(a.bodies);pads.extend(a.pads);observation
+    });
+    for pad in &mut pads {pad.weights.resize(total,0.);}
     bodies.append(&mut shaft.elastic);
     let flexible_sticks=shaft.ports;
     let system=ImpactSystem::new(bodies,contacts,pads,vec![],config(steps,dt))?;
@@ -229,7 +258,7 @@ fn build_with_material(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spe
         (None,_)=>system,
     };
     let system=match material {Some(material)=>material.attach(system)?,None=>system};
-    Ok(Pair{experiment:Experiment{flexible_sticks:flexible_sticks.clone(),mute:None,system:Mechanics::Reference(system),force:vec![0.;total],
+    Ok(Pair{experiment:Experiment{flexible_sticks:flexible_sticks.clone(),mute,system:Mechanics::Reference(system),force:vec![0.;total],
         stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None},
         pedal,collision:inter,upper_modes:hi,lower_modes:lo,flexible_sticks})
 }
@@ -249,6 +278,10 @@ mod gas_tests;
 #[cfg(test)]
 #[path="hihat_mallet_tests.rs"]
 mod mallet_tests;
+
+#[cfg(test)]
+#[path="hihat_mute_tests.rs"]
+mod mute_tests;
 
 #[cfg(test)]
 #[path="shell_relaxation_pair_tests.rs"]
