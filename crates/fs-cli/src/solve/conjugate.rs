@@ -479,6 +479,60 @@ pub(super) struct ConjugateOutcome {
     config: ConjugateConfig,
 }
 
+/// One complete steady exchange, including the final published solid response.
+/// Off-path convection and radiation are excluded from the air heat account.
+pub(super) struct SteadyExchange {
+    pub solid: super::radiation::SolidSolution,
+    pub outcome: ConjugateOutcome,
+    pub derived: BTreeMap<String, (f64, f64)>,
+    pub solid_solves: usize,
+}
+
+pub(super) fn solve_steady_exchange(
+    cx: &Cx<'_>,
+    path: &ConjugatePath,
+    adaptive: bool,
+    mut solve: impl FnMut(
+        &BTreeMap<String, (f64, f64)>,
+    ) -> Result<super::radiation::SolidSolution, SolveRefusal>,
+) -> Result<SteadyExchange, SolveRefusal> {
+    let coefficients = derived_coefficients(path);
+    let path_targets: BTreeSet<&str> = path.segments.iter()
+        .map(|segment| segment.target.as_str()).collect();
+    let mut solid_solves = 0usize;
+    let outcome = run_exchange(cx, path, adaptive, |_, references| {
+        let derived = references.iter().map(|(target, reference)| {
+            (target.clone(), (coefficients.get(target).copied().unwrap_or(f64::NAN), *reference))
+        }).collect();
+        let solution = solve(&derived)?;
+        solid_solves += 1;
+        path.segments.iter().map(|segment| {
+            solution.convective_robin_fluxes().iter()
+                .find(|flux| flux.region == segment.target)
+                .map(SolidRegionState::from_robin_flux)
+                .ok_or_else(|| conduction_error(
+                    "cli-solve-conduction-airflow-region",
+                    format!("the conduction report carries no Robin decomposition for airflow target `{}`", segment.target),
+                    "report the driver defect; every airflow target lowers to a Robin region",
+                ))
+        }).collect()
+    })?;
+    let derived = path.segments.iter()
+        .zip(outcome.solution.reference_temperatures_k.iter())
+        .map(|(segment, reference)| {
+            (segment.target.clone(), (segment.htc_w_m2_k, *reference))
+        }).collect();
+    let solid = solve(&derived)?;
+    solid_solves += 1;
+    let off_path_w = solid.convective_robin_fluxes().iter()
+        .filter(|flux| !path_targets.contains(flux.region.as_str()))
+        .map(|flux| flux.heat_rate_w).sum();
+    let outcome = cross_check_decomposition(
+        outcome, solid.convective_out_w(), off_path_w,
+    )?;
+    Ok(SteadyExchange { solid, outcome, derived, solid_solves })
+}
+
 /// One common solid callback per iteration, with every branch's Robin rows.
 /// The returned region sequence uses the same flat ordering as the parent
 /// stage's boundary partition. Solid-side typed refusals propagate unchanged.

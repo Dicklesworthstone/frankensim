@@ -1457,6 +1457,37 @@ receipt address as an Estimated statement: its existing structural checker
 does not independently authenticate or reverify the continuum producer.
 Builds without the feature explicitly refuse this output request.
 
+Native steady mixed convection is available without a feature flag in driver
+59. Separate `natural-convection` and `airflow-convection` targets exchange
+heat through the same solid on auto and ladder fidelities. Every natural
+coefficient update encloses a complete existing multi-branch IQN-ILS air
+exchange, including its final solid response and decomposition check. The
+existing conductivity, matching-contact and ambient-radiation solvers remain
+active within each response. This is separate natural reservoirs and forced
+air on disjoint boundary patches, not an empirical combined coefficient for
+one surface or a buoyancy modification of the flow network.
+
+The outer loop allows at most 80 evaluations; each inner air exchange retains
+its 100-iteration cap plus one final solid response. Acceptance requires every
+natural h to change by at most 1e-10 relatively and every natural patch's
+actual `h(T_wall) A (T_wall-T_ambient)` to match its applied Robin heat within
+`max(1e-12 W, 1e-6 * max(|Q_actual|, |Q_applied|))`. Each air branch keeps
+its own independent heat gate. Natural reservoir heat and radiation never
+enter air enthalpy transport. Heated and cooled Churchill-Chu walls retain
+their signed flux; equilibrium and card-domain refusals remain explicit.
+Cancellation and the remaining invocation wall budget are checked between
+bounded responses; failure publishes no partial conduction field.
+
+The `natural_convection.coupling` receipt records outer/inner work and final
+coefficient and natural heat discrepancies. The returned derived boundary is
+the one actually applied to the published field. Inner conductivity/radiation
+work retains its separate existing budgets. Mixed nominal adjoints, adaptive
+goal refinement and transients explicitly refuse; the linear inverse-error
+certificate is unavailable and the whole-model tolerance estimate remains.
+The result retains Estimated authority. `tests/solve/mixed_convection.rs`
+supplies signed-reservoir, independent correlation/energy, radiation
+composition, deterministic replay and unsupported-mode regressions.
+
 Native transient conduction is available without a feature flag through the
 schema-v13 `conduction.transient` declaration. The runnable input and commands
 are in `data/reference-project/cooling-transient.fsim` and `TRANSIENT.md`.

@@ -35,6 +35,8 @@ use fs_qty::QtyAny;
 
 #[path = "solve/radiation_product.rs"]
 mod radiation_product;
+#[path = "solve/mixed_convection.rs"]
+mod mixed_convection;
 
 #[path = "solve/transient_product.rs"]
 mod transient_product;

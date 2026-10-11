@@ -192,7 +192,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// reports phase fractions without inferring latent state from temperature.
 /// Version 58 couples native enthalpy to sourced ambient radiation and retains
 /// the accepted physical residual, nonlinear heat and cumulative trial work.
-pub const SOLVE_DRIVER_VERSION: u32 = 58;
+/// Version 59 closes steady natural and forced convection on distinct surfaces
+/// through the same solid, retaining each reservoir's independent heat account.
+pub const SOLVE_DRIVER_VERSION: u32 = 59;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -6395,6 +6397,8 @@ fn conduction_solve_receipt(
 ) -> Result<ConductionStageProduct, SolveRefusal> {
     transient::admit(spec)?;
     let transient_requested = transient::requested(spec);
+    let mixed_requested = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
+        .is_some_and(natural::has_mixed_boundaries);
     // Output intent is admitted before geometry/numerical work. Propagation
     // vertices must not masquerade as the nominal report or repeat its adjoint.
     let adjoint_requested = nominal_adjoint::requested(spec)?
@@ -6407,13 +6411,23 @@ fn conduction_solve_receipt(
     // retains the last completed pipeline prefix. Successful receipts replay
     // numerically without making their identity depend on replay machine speed.
     let deadline = (!resume
-        && (transient_requested || spec
+        && (transient_requested || mixed_requested || spec
             .solver
             .as_ref()
             .is_some_and(|solver| solver.fidelity == SOLVER_FIDELITY_ADAPTIVE)))
     .then(|| (std::time::Instant::now(), available_wall_s));
     let check_deadline = || if transient_requested {
         transient::check_deadline(deadline)
+    } else if mixed_requested {
+        if deadline.is_some_and(|(started, available_s)|
+            started.elapsed().as_secs_f64() >= available_s)
+        {
+            Err(conduction_error(
+                "cli-solve-conduction-mixed-wall-budget",
+                "mixed steady convection exhausted the remaining solve-time budget between solid responses",
+                "increase budgets.solve-time and rerun; the accepted pipeline prefix remains retained",
+            ))
+        } else { Ok(()) }
     } else {
         adaptive_deadline(deadline)
     };
@@ -6694,6 +6708,7 @@ fn conduction_solve_receipt(
             radiation::SolidSolution,
             SolveRefusal,
         > {
+            check_deadline()?;
             let lowering = conduction_boundary(
                 setup,
                 &mesh,
@@ -6762,13 +6777,6 @@ fn conduction_solve_receipt(
         // Apply a discrepancy vertex to the constitutive law, not only its
         // initial/final Robin row. Every Picard update must retain this scale.
         let natural_laws = natural::natural_laws_scaled(setup, htc_scale)?;
-        if !natural_laws.is_empty() && !laws.is_empty() {
-            return Err(conduction_error(
-                "cli-solve-conduction-natural-with-airflow",
-                "a project mixing natural-convection and airflow-convection laws is not yet supported",
-                "declare one convection regime per project",
-            ));
-        }
         let airflow_path = if laws.is_empty() {
             None
         } else {
@@ -6782,10 +6790,17 @@ fn conduction_solve_receipt(
             // Area pass: lower the partition once with placeholder rows
             // (unit coefficient at the inlet) purely to read each target's
             // retained exterior area; nothing is solved against them.
-            let placeholder: BTreeMap<String, (f64, f64)> = laws
+            let mut placeholder: BTreeMap<String, (f64, f64)> = laws
                 .iter()
                 .map(|law| (law.target.clone(), (1.0, law.inlet_temperature_k)))
                 .collect();
+            if !natural_laws.is_empty() {
+                let pressure_pa = spec.envelope.as_ref().map_or(101_325.0, |e| e.pressure.value);
+                let coefficients = natural::initial_coefficients(&natural_laws, pressure_pa)?;
+                placeholder.extend(natural_laws.iter().map(|law| {
+                    (law.target.clone(), (coefficients[&law.target], law.ambient_k))
+                }));
+            }
             let placeholder_lowering = conduction_boundary(
                 setup,
                 &mesh,
@@ -6862,6 +6877,16 @@ fn conduction_solve_receipt(
             let _ = time.temporal_half_width_k;
             (time.solution, time.conjugate_receipt, time.derived_boundary,
                 airflow_path.as_ref().map_or_else(Vec::new, conjugate::ConjugatePath::air_paths))
+        } else if !laws.is_empty() && !natural_laws.is_empty() {
+            let path = airflow_path.as_ref().expect("declared airflow was lowered");
+            let pressure_pa = spec.envelope.as_ref().map_or(101_325.0, |e| e.pressure.value);
+            let mixed = natural::solve_mixed_steady(
+                &cx, &natural_laws, pressure_pa, path, solve_once,
+            )?;
+            natural_fragment = Some(mixed.natural_receipt);
+            let exchange = mixed.exchange;
+            let fragment = conjugate::receipt_fragment(path, &exchange.outcome)?;
+            (exchange.solid, Some(fragment), exchange.derived, path.air_paths())
         } else if laws.is_empty()
             && !natural_laws.is_empty()
         {
@@ -6935,68 +6960,11 @@ fn conduction_solve_receipt(
             (solve_once(&BTreeMap::new())?, None, BTreeMap::new(), Vec::new())
         } else {
             let path = airflow_path.as_ref().expect("declared airflow was lowered");
-            let coefficients = conjugate::derived_coefficients(path);
-            let path_targets: BTreeSet<&str> = path
-                .segments
-                .iter()
-                .map(|segment| segment.target.as_str())
-                .collect();
-            let states_of = |solution: &radiation::SolidSolution| {
-                path.segments
-                    .iter()
-                    .map(|segment| {
-                        solution
-                            .convective_robin_fluxes()
-                            .iter()
-                            .find(|flux| flux.region == segment.target)
-                            .map(fs_airflow::conjugate::SolidRegionState::from_robin_flux)
-                            .ok_or_else(|| {
-                                conduction_error(
-                                    "cli-solve-conduction-airflow-region",
-                                    format!(
-                                        "the conduction report carries no Robin decomposition for airflow target `{}`",
-                                        segment.target
-                                    ),
-                                    "report the driver defect; every airflow target lowers to a Robin region",
-                                )
-                            })
-                    })
-                    .collect::<Result<Vec<_>, SolveRefusal>>()
-            };
-            let outcome = conjugate::run_exchange(&cx, path, adaptive_requested, |_, references| {
-                let derived: BTreeMap<String, (f64, f64)> = references
-                    .iter()
-                    .map(|(target, reference)| {
-                        (
-                            target.clone(),
-                            (coefficients.get(target).copied().unwrap_or(f64::NAN), *reference),
-                        )
-                    })
-                    .collect();
-                states_of(&solve_once(&derived)?)
-            })?;
-            let converged: BTreeMap<String, (f64, f64)> = path
-                .segments
-                .iter()
-                .zip(outcome.solution.reference_temperatures_k.iter())
-                .map(|(segment, reference)| {
-                    (segment.target.clone(), (segment.htc_w_m2_k, *reference))
-                })
-                .collect();
-            let solution = solve_once(&converged)?;
-            let off_path_w: f64 = solution
-                .convective_robin_fluxes()
-                .iter()
-                .filter(|flux| !path_targets.contains(flux.region.as_str()))
-                .map(|flux| flux.heat_rate_w)
-                .sum();
-            let outcome = conjugate::cross_check_decomposition(
-                outcome,
-                solution.convective_out_w(),
-                off_path_w,
+            let exchange = conjugate::solve_steady_exchange(
+                &cx, path, adaptive_requested, solve_once,
             )?;
-            let fragment = conjugate::receipt_fragment(path, &outcome)?;
-            (solution, Some(fragment), converged, path.air_paths())
+            let fragment = conjugate::receipt_fragment(path, &exchange.outcome)?;
+            (exchange.solid, Some(fragment), exchange.derived, path.air_paths())
         };
         let radiation_fragment = solid.radiation_receipt(radiation.as_ref())?;
         let radiation_patches = solid.radiation_patches();

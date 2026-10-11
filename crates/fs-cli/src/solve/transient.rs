@@ -151,8 +151,8 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
     if has_airflow && has_natural {
         return Err(conduction_error(
             "cli-solve-conduction-natural-with-airflow",
-            "a project mixing natural-convection and airflow-convection laws is not yet supported",
-            "declare one convection regime per project",
+            "transient natural-convection and airflow-convection laws are not yet admitted together",
+            "use the steady mixed-convection solve or declare one convection regime for this transient",
         ));
     }
     if spec

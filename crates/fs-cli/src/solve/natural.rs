@@ -273,6 +273,130 @@ pub(super) fn receipt_fragment(converged: &[Converged], iterations: usize) -> Re
     ))
 }
 
+pub(super) fn has_mixed_boundaries(setup: &ConductionSetup) -> bool {
+    setup.boundaries.iter().any(|row|
+        matches!(row.condition, ThermalBoundaryCondition::NaturalConvection { .. }))
+        && setup.boundaries.iter().any(|row|
+            matches!(row.condition, ThermalBoundaryCondition::AirflowConvection { .. }))
+}
+
+pub(super) struct MixedSteady {
+    pub exchange: super::conjugate::SteadyExchange,
+    pub natural_receipt: String,
+}
+
+/// Picard on each natural coefficient around a COMPLETE shared-solid/air
+/// exchange. Natural reservoirs never enter the air march. Acceptance checks
+/// the actual wall law on the same final field as the air decomposition.
+pub(super) fn solve_mixed_steady(
+    cx: &fs_exec::Cx<'_>,
+    laws: &[NaturalLaw],
+    pressure_pa: f64,
+    path: &super::conjugate::ConjugatePath,
+    mut solve: impl FnMut(
+        &BTreeMap<String, (f64, f64)>,
+    ) -> Result<super::radiation::SolidSolution, SolveRefusal>,
+) -> Result<MixedSteady, SolveRefusal> {
+    let poll = || cx.checkpoint().map_err(|_| conduction_error(
+        "cli-solve-conduction-mixed-cancelled",
+        "the mixed natural/airflow steady solve was cancelled",
+        "resume the accepted pipeline prefix",
+    ));
+    let finite = |value: f64| -> Result<f64, SolveRefusal> {
+        if value.is_finite() { Ok(value) } else { Err(conduction_error(
+            "cli-solve-conduction-nonfinite",
+            "mixed natural/airflow feedback produced nonfinite arithmetic",
+            "inspect the declared wall laws and applied heat rates",
+        )) }
+    };
+    poll()?;
+    if laws.is_empty() || path.segments.is_empty()
+        || laws.iter().any(|law| path.segments.iter().any(|segment| segment.target == law.target))
+    {
+        return Err(conduction_error(
+            "cli-solve-conduction-mixed-targets",
+            "mixed convection requires natural and airflow laws on distinct targets",
+            "partition the exterior into separate natural-reservoir and airflow targets",
+        ));
+    }
+    let config = super::conjugate::exchange_config(false);
+    let mut htc = initial_coefficients(laws, pressure_pa)?;
+    let mut total_air_iterations = 0usize;
+    let mut total_solid_responses = 0usize;
+    for iteration in 1..=MAX_ITERATIONS {
+        poll()?;
+        let natural_rows: BTreeMap<String, (f64, f64)> = laws.iter()
+            .map(|law| (law.target.clone(), (htc[&law.target], law.ambient_k)))
+            .collect();
+        let mut exchange = super::conjugate::solve_steady_exchange(cx, path, false, |air_rows| {
+            let mut derived = natural_rows.clone();
+            derived.extend(air_rows.iter().map(|(target, values)| (target.clone(), *values)));
+            solve(&derived)
+        })?;
+        total_air_iterations += exchange.outcome.solution.iterations;
+        total_solid_responses += exchange.solid_solves;
+        let mut next = BTreeMap::new();
+        let mut converged = Vec::with_capacity(laws.len());
+        let mut worst_relative = 0.0f64;
+        let mut worst_heat_w = 0.0f64;
+        let mut worst_heat_ratio = 0.0f64;
+        for law in laws {
+            poll()?;
+            let flux = exchange.solid.convective_robin_fluxes().iter()
+                .find(|flux| flux.region == law.target)
+                .ok_or_else(|| conduction_error(
+                    "cli-solve-conduction-natural-region",
+                    format!("the conduction report has no Robin decomposition for `{}`", law.target),
+                    "report the driver defect; every natural-convection target lowers to a Robin region",
+                ))?;
+            let point = coefficient(law, flux.mean_wall_temperature_k - law.ambient_k, pressure_pa)?;
+            let applied = htc[&law.target];
+            worst_relative = worst_relative.max(finite((point.htc_w_m2_k - applied).abs() / applied)?);
+            let physical_heat_w = finite(
+                point.htc_w_m2_k * flux.area_m2 * (flux.mean_wall_temperature_k - law.ambient_k),
+            )?;
+            let mismatch_w = finite((physical_heat_w - flux.heat_rate_w).abs())?;
+            // Each natural reservoir has its own scale: a large forced-air
+            // load cannot hide a failed passive-boundary heat gate.
+            let tolerance_w = config.balance_tolerance_w.max(
+                config.balance_relative_tolerance * physical_heat_w.abs().max(flux.heat_rate_w.abs()),
+            );
+            worst_heat_w = worst_heat_w.max(mismatch_w);
+            worst_heat_ratio = worst_heat_ratio.max(finite(mismatch_w / tolerance_w)?);
+            next.insert(law.target.clone(), point.htc_w_m2_k);
+            converged.push(Converged {
+                law: law.clone(), coefficient: point,
+                mean_wall_k: flux.mean_wall_temperature_k, heat_rate_w: flux.heat_rate_w,
+            });
+        }
+        if worst_relative <= TOLERANCE_REL && worst_heat_ratio <= 1.0 {
+            // Retain the rows actually applied to the published field, rather
+            // than silently replacing them with the next coefficient iterate.
+            exchange.derived.extend(natural_rows);
+            let mut natural_receipt = receipt_fragment(&converged, iteration)?;
+            natural_receipt.pop();
+            natural_receipt.push_str(&format!(
+                ",\"coupling\":{{\"method\":\"natural-picard-around-complete-air-exchange\",\"max_outer_iterations\":{MAX_ITERATIONS},\"total_air_iterations\":{total_air_iterations},\"total_solid_responses\":{total_solid_responses},\"max_relative_coefficient_change\":{},\"max_natural_heat_mismatch_w\":{},\"max_natural_heat_gate_ratio\":{},\"scope\":{}}}}}",
+                canonical_f64(worst_relative).expect("finite relative change"),
+                canonical_f64(worst_heat_w).expect("finite heat mismatch"),
+                canonical_f64(worst_heat_ratio).expect("finite heat gate ratio"),
+                json_string("Steady natural reservoirs and forced-air surfaces exchange through the complete shared solid. Each outer iteration closes every air branch; natural heat and radiation remain outside air transport. Counts cover solid responses; inner material/radiation work retains its existing separate caps. No mixed adjoint, adaptive-goal or transient claim."),
+            ));
+            poll()?;
+            return Ok(MixedSteady { exchange, natural_receipt });
+        }
+        if iteration == MAX_ITERATIONS {
+            return Err(conduction_error(
+                "cli-solve-conduction-mixed-unconverged",
+                format!("mixed steady feedback exhausted {MAX_ITERATIONS} outer iterations; relative h change {worst_relative:e}, natural heat mismatch {worst_heat_w:e} W, heat gate ratio {worst_heat_ratio:e}"),
+                "inspect the separate reservoir temperatures, convection cards and solver tolerance; no partial field was published",
+            ));
+        }
+        htc = next;
+    }
+    unreachable!("the nonzero bounded loop returns a solution or refusal")
+}
+
 /// Admit only natural cards whose full coefficient tangent is implemented.
 /// Base and ladder keep their original card surface. Radiation retains its
 /// separate capability gate; no combined-law derivative is inferred here.
@@ -284,6 +408,13 @@ pub(super) fn admit_fidelity(
         solver.fidelity == super::SOLVER_FIDELITY_ADAPTIVE)
     {
         return Ok(());
+    }
+    if has_mixed_boundaries(setup) {
+        return Err(conduction_error(
+            "cli-solve-conduction-mixed-adaptive",
+            "adaptive goals do not yet include combined natural and airflow feedback",
+            "select auto or ladder fidelity for a steady mixed-convection solve",
+        ));
     }
     let laws = natural_laws(setup)?;
     if laws.len() > 64 || laws.iter().any(|law|
