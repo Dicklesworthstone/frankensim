@@ -202,7 +202,15 @@ impl Options {
         Ok(())
     }
     pub fn report(&self, piano: &engine::Instrument) -> String {
-        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} transverse coordinates including duplex; {} contact sites. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {}; nonlinear string extension: {} (selection: {}); retained longitudinal coordinates: {} with fixed axial endpoints; two transverse directions: {} (geometry/drag: {}); reciprocal cavity: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
+        let dampers = if let Some((strings, sites)) = piano.felt_damper_resolution() {
+            format!("finite-gap felt, {strings} speaking-string pads / {sites} contact sites; storage {} J; loss {} J including {} J Prony relaxation; signed actuator work {} J, each included once in combined totals",
+                piano.damper_energy_j(), piano.accounting.damper_loss_j,
+                piano.accounting.damper_relaxation_loss_j, piano.accounting.damper_actuator_work_j)
+        } else if let Some((strings, stations)) = piano.damper_resolution() {
+            format!("spatial viscous, {strings} speaking-string pads / {stations} quadrature stations; loss {} J included in total loss",
+                piano.accounting.damper_loss_j)
+        } else { String::from("point viscous") };
+        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} transverse coordinates including duplex; {} contact sites. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {} (source: {}); nonlinear string extension: {} (selection: {}); retained longitudinal coordinates: {} with fixed axial endpoints; two transverse directions: {} (geometry/drag: {}); reciprocal cavity: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
             piano.bank.rate, self.substeps, self.modes, piano.bank.modes.len(),
             piano.bank.contact_strings.len(), self.hammers.as_deref().unwrap_or("source defaults"),
             if self.rt0425_hammer_dissipation { "RT-0425 per-string K_H and R_H" }
@@ -211,7 +219,7 @@ impl Options {
             if self.rt0425_string_damping { "RT-0425 per-key R_u and eta_u, reduced-mode projection" }
             else { "estimated common law" },
             self.hammer_footprints.as_deref().unwrap_or("point"),
-            self.dampers.as_deref().unwrap_or("point"), piano.bank.has_string_stretching(),
+            dampers, self.dampers.as_deref().unwrap_or("inline or original point image"), piano.bank.has_string_stretching(),
             self.string_stretching.as_deref().unwrap_or("inline or original linear image"),
             piano.bank.longitudinal_mode_count(),
             piano.bank.has_secondary_polarization(),
@@ -225,7 +233,7 @@ impl Options {
 pub struct Controls {
     materials: Vec<hammer_materials::Material>,
     footprints: Option<linear::hammer_footprint::Specification>,
-    dampers: Option<linear::dampers::Specification>,
+    dampers: Option<engine::DamperSpecification>,
     stretching: Option<linear::string_stretching::Specification>,
     polarization: Option<string_polarization::Specification>,
     cavity: Option<cavity::Specification>,
@@ -277,8 +285,8 @@ impl Controls {
         let footprints = footprints.map(|text|
             linear::hammer_footprint::Specification::read(text, courses)).transpose()?;
         let dampers = match dampers {
-            Some("estimated") => Some(linear::dampers::Specification::estimated(courses)?),
-            Some(text) => Some(linear::dampers::Specification::read(text, courses)?),
+            Some("estimated") => Some(engine::DamperSpecification::estimated(courses)?),
+            Some(text) => Some(engine::DamperSpecification::read(text, courses)?),
             None => None,
         };
         Ok(Self { materials, footprints, dampers, stretching: None, polarization: None, cavity: None,
@@ -331,6 +339,9 @@ impl Controls {
             || options.rt0425_hammer_dissipation != self.source_hammer_rates.is_some() {
             return Err("RT-0425 hammer controls were not admitted before structural preparation".into());
         }
+        if options.dampers.is_some() && self.dampers.is_none() {
+            return Err("supplied damper controls were not admitted; no point-drag fallback".into());
+        }
         if options.string_stretching.is_some() && self.stretching.is_none() {
             return Err("supplied string stretching controls were not admitted; no linear fallback".into());
         }
@@ -348,7 +359,7 @@ impl Controls {
             options.substeps, options.modes, true, self.materials,
             Some(engine::ShankGeometry::published()), self.footprints.as_ref(),
             polarization.as_ref().map(string_polarization::Prepared::secondary), options.rt0425_string_damping)?;
-        if let Some(dampers) = &self.dampers { piano.configure_dampers(dampers)?; }
+        if let Some(dampers) = &self.dampers { piano.configure_damper_spec(dampers)?; }
         if let Some(rates) = &self.source_hammer_rates {
             piano.configure_source_hammer_dissipation(rates)?;
         }
@@ -513,6 +524,11 @@ mod tests {
         assert!(Controls::from_texts(&[c], Some(missing), None, None).is_err());
         assert!(Controls::from_texts(&[c], None, Some("frankensim-hammer-footprints-v1\n"), None).is_err());
         assert!(Controls::from_texts(&[c], None, None, Some("frankensim-piano-dampers-v1\n")).is_err());
+        assert!(Controls::from_texts(&[c], None, None, Some("frankensim-piano-felt-dampers-v1\n")).is_err());
+        let pads = Options { dampers: Some("pads.fspd".into()), ..Options::default() };
+        assert!(Controls::from_texts(&[c], None, None, None).unwrap()
+            .instrument(vec![c], &super::super::board::demonstration(), &pads)
+            .err().unwrap().contains("no point-drag fallback"));
         let options = Options { hammers: Some("missing-cards.fsh".into()), ..Options::default() };
         assert!(Controls::load(&options, &[c]).is_err());
     }
@@ -525,3 +541,7 @@ mod stretching_tests;
 #[cfg(test)]
 #[path = "exterior_longitudinal_render_tests.rs"]
 mod longitudinal_tests;
+
+#[cfg(test)]
+#[path = "exterior_felt_damper_render_tests.rs"]
+mod felt_damper_tests;

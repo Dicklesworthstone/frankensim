@@ -101,11 +101,13 @@ It requires --render and works with supplied materials, MIDI and existing pedals
 Published R_H requires the original uniform thickness. Varying thickness applies
 the selected felt/Prony law locally and cannot silently reuse that source rate.
 See HAMMER_FOOTPRINTS.md for SI rows and the parallel-column contact model.
---dampers selects finite-footprint viscous pads instead of the default point
-damper. 'estimated' declares approximate spans and drag; a file must cover
-every scale key with a pad or explicit free row. It requires --render and
-uses existing MIDI/CSV key, sustain and sostenuto controls. See DAMPERS.md.
-This is spatial drag, not falling-pad or hysteretic felt contact mechanics.
+--dampers selects spatial viscous pads or finite-gap wool-felt pads; the file
+header chooses the model. 'estimated' declares only approximate viscous spans
+and drag. A file must cover every scale key with a pad or explicit free row.
+Felt pads additionally require supplied geometry, travel speed and material
+cards. MIDI/CSV key, sustain and sostenuto controls move their contact height;
+felt contact, stored energy and signed actuator work enter the mechanics solve.
+It requires --render. See DAMPERS.md for SI formats and model limits.
 --string-polarization adds both transverse directions of each physical string.
 Its complete per-key file supplies bridge sites, 3-D arms, string/hammer axes
 and lateral damper ratios. The same board solve projects both bridge rows;
@@ -559,14 +561,14 @@ fn prepare_instrument_with_board_damping(scale: Vec<geometry::Course>, modes: &[
     }
     let dampers = match options.dampers.as_deref() {
         None => None,
-        Some("estimated") => Some(linear::dampers::Specification::estimated(&scale)?),
-        Some(path) => Some(linear::dampers::Specification::load(path, &scale)?),
+        Some("estimated") => Some(engine::DamperSpecification::estimated(&scale)?),
+        Some(path) => Some(engine::DamperSpecification::load(path, &scale)?),
     };
     let text = options.hammers.as_ref().map(|path| std::fs::read_to_string(path)
         .map_err(|e| format!("{path}: {e}"))).transpose()?;
     let mut piano = prepare_instrument_with_admitted_materials(scale, modes, options, text.as_deref(), stretching, polarization)?;
     if let Some(c) = physical_damping { piano.configure_bare_board_damping(c)?; }
-    if let Some(spec) = &dampers { piano.configure_dampers(spec)?; }
+    if let Some(spec) = &dampers { piano.configure_damper_spec(spec)?; }
     Ok(piano)
 }
 fn prepare_instrument_with_hammers(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
@@ -876,6 +878,10 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         println!("Spatial viscous dampers: {} speaking-string pads, {} quadrature stations; source {}. No measured pad/action or real-time claim; see DAMPERS.md.",
             strings, cells, options.dampers.as_deref().unwrap_or("supplied"));
     }
+    if let Some((strings,sites)) = piano.felt_damper_resolution() {
+        println!("Finite-gap felt dampers: {strings} speaking-string pads, {sites} independent contact sites; source {}. Supplied finite-speed travel, wool-felt crush and Prony memory, coupled on the mechanics clock; see DAMPERS.md.",
+            options.dampers.as_deref().unwrap_or("supplied"));
+    }
     let surface = if options.diagnostic_volume { None } else { surface };
     let left=options.microphone.unwrap_or([0.675,1.0,1.0]);
     let mut stream = match options.microphone_right {
@@ -978,6 +984,11 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
     if piano.damper_resolution().is_some() {
         println!("Spatial damper loss {:.9} J, already included in component losses; no output-envelope damping.",
             piano.accounting.damper_loss_j);
+    }
+    if piano.felt_damper_resolution().is_some() {
+        println!("Felt damper storage {:.9} J; loss {:.9} J, including {:.9} J Prony relaxation; signed actuator work {:.9} J. Storage, loss and work are already included once in the combined totals.",
+            piano.damper_energy_j(), piano.accounting.damper_loss_j,
+            piano.accounting.damper_relaxation_loss_j, piano.accounting.damper_actuator_work_j);
     }
     Ok(())
 }
@@ -1111,6 +1122,10 @@ mod string_stretching_render_tests;
 #[cfg(test)]
 #[path = "longitudinal_render_tests.rs"]
 mod longitudinal_render_tests;
+
+#[cfg(test)]
+#[path = "felt_damper_render_tests.rs"]
+mod felt_damper_render_tests;
 
 #[cfg(test)]
 #[path = "hammer_footprint_render_tests.rs"]
