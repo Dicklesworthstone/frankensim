@@ -134,25 +134,32 @@ bounded offline rendering image, not a full-band Steinway fidelity claim.
 Before any mechanical step, the existing fs-vfit owner fits one stable proper
 transfer per loaded-board mode and receiver. Only even-index frequency values
 are supplied as fit samples; odd values check the realized digital transfer.
-The adapter removes the guaranteed flight phase, conjugates the negative-time
-BEM convention and Tustin-warps the fit frequencies. It restores physical Pa
+The adapter removes only the whole-sample part of the guaranteed flight phase,
+leaving the fractional phase in the fitted and held-out transfer. It conjugates
+the negative-time BEM convention and Tustin-warps the fit frequencies. It restores physical Pa
 scaling before rendering. A sampled row's peak magnitude normalizes only its
 error metric; it never normalizes the output audio.
 
 Held-out peak-normalized error must be <=0.15 at every odd frequency, and RMS
 must be <=0.05 for each mode/receiver. Failed, unstable, improper or nonfinite
 fits refuse instead of relaxing these bounds. These are sampled transfer-fit
-checks after ideal flight-phase removal, NOT whole-band or spatial convergence
-certificates. Fractional propagation and the decimator have their own numerical
-approximation/latency; their errors are not folded into the fit residual.
+checks including the residual fractional propagation, NOT whole-band or spatial
+convergence certificates. The exact integer delay has unit magnitude. The
+decimator still has its own numerical approximation and declared latency.
 
 Every accepted mechanical substep's loaded-board velocity contributes to the
 acceleration trace. One existing causal decimator processes the entire trace;
 both receivers then consume that same output. Each receiver has its own filter
-histories and existing fractional delay line. No second piano, per-channel gain,
+histories and an integer-sample delay line. No second piano, per-channel gain,
 control clock, future-sample padding or latency compensation is added. Pressure
 is encoded through the existing PCM16 owner with explicit `full-scale-pa` and
 counted clipping; there is no peak normalization.
+
+This avoids the former unchecked two-tap interpolation loss (about 5.1 dB at
+15 kHz for a half-sample flight delay). Fractional phase now consumes some of
+the requested fit order; insufficient fits refuse under the same error gates.
+The runtime regression checks analytic delayed pressure at 4.8, 15 and 20 kHz
+for four fractional offsets, including actual state-space and delay playback.
 
 The report prints the acoustic band, resolution, fit error, propagation and
 filter delays, peak pressure, clipping, and the unchanged mechanical energy

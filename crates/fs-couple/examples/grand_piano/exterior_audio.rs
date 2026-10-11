@@ -19,6 +19,7 @@ pub struct Baked {
     pub maximum_error:f64,
     pub worst_rms_error:f64,
 }
+fn integer_flight_samples(delay_s:f64)->f64 {(delay_s*f64::from(RATE)).floor()}
 fn fit(omega:&[f64],values:&[C64],delay:f64,order:usize)->Result<(DiscreteStateSpace,f64,f64),String> {
     let dt=1./f64::from(RATE);
     if values.len()!=omega.len() || omega.len()<17 || omega.len()>257 || omega.len()%2==0
@@ -29,10 +30,14 @@ fn fit(omega:&[f64],values:&[C64],delay:f64,order:usize)->Result<(DiscreteStateS
         || !(2..=32).contains(&order) || 2*order>(omega.len()+1)/2 {
         return Err("invalid complete exterior transfer, proper-fit or propagation budget".into());
     }
-    // exp(-i omega t): remove only the GUARANTEED exterior flight delay.
+    // exp(-i omega t): peel only complete samples of guaranteed flight. The
+    // residual fractional phase stays in the fitted/held-out transfer. Restoring
+    // a fractional delay with DelayedFilter's linear interpolation would add an
+    // unchecked low-pass (5.1 dB at 15 kHz for a half sample at 48 kHz).
     // Actual 1/r spreading and reactive near-field terms remain in the transfer.
+    let integer_delay_s=integer_flight_samples(delay)*dt;
     let shifted:Vec<_>=omega.iter().zip(values).map(|(w,v)| {
-        let phase = -w*delay;*v*C64::new(det::cos(phase),det::sin(phase))
+        let phase = -w*integer_delay_s;*v*C64::new(det::cos(phase),det::sin(phase))
     }).collect();
     let scale=shifted.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
     if !scale.is_finite() {return Err("exterior transfer scale overflow".into());}
@@ -83,7 +88,7 @@ impl Baked {
         self.filters.iter().zip(&self.delays_s).map(|(filters,&delay)| {
             let dt=1./f64::from(RATE);
             Ok(Receiver {filters:filters.iter().map(|f|f.try_runtime().map_err(|e|e.to_string())).collect::<Result<_,_>>()?,
-                delay:DelayedFilter::new(delay/dt,DigitalFilter {sections:vec![],direct:1.,t_s:dt,prewarp:0.})
+                delay:DelayedFilter::new(integer_flight_samples(delay),DigitalFilter {sections:vec![],direct:1.,t_s:dt,prewarp:0.})
                     .map_err(|e|e.to_string())?})
         }).collect()
     }
@@ -141,7 +146,7 @@ mod tests {
     fn omega()->Vec<f64> {(0..41).map(|i|std::f64::consts::TAU*(40.+i as f64*15.)).collect()}
     #[test]
     fn phase_convention_and_held_out_gate_are_not_training_residuals() {
-        let w=omega();let delay=0.003;
+        let w=omega();let delay=144.5/f64::from(RATE);
         // Independent two-real-pole passive lowpass with known propagation.
         let values:Vec<_>=w.iter().map(|w| {
             let h=C64::new(300.,0.)/C64::new(300.,-*w)+C64::new(700.,0.)/C64::new(700.,-*w);
@@ -150,7 +155,7 @@ mod tests {
         let (filter,m,r)=fit(&w,&values,delay,4).unwrap();
         assert!(m<0.01 && r<0.005);
         for i in (1..w.len()).step_by(2) {
-            let phase=w[i]*delay;
+            let phase=w[i]*integer_flight_samples(delay)/f64::from(RATE);
             let actual=filter.eval(w[i]).unwrap().conj()*C64::new(phase.cos(),phase.sin());
             assert!((actual-values[i]).abs()<0.01);
         }
@@ -158,6 +163,39 @@ mod tests {
         for v in corrupt.iter_mut().skip(1).step_by(2) {*v = -*v;}
         assert!(fit(&w,&corrupt,delay,4).is_err());
         assert!(fit(&w,&values,0.,4).is_err());
+    }
+    #[test]
+    fn fractional_flight_preserves_high_partials_in_the_actual_receiver_runtime() {
+        let rate=f64::from(RATE);
+        let w:Vec<_>=(0..129).map(|i|std::f64::consts::TAU*(100.+i as f64*160.)).collect();
+        // Analytic one-way pressure transfer with constant SI gain and known
+        // travel. No fit coefficients or discrete-delay implementation form
+        // the reference. Both fractional phase and level must reach playback.
+        for fraction in [0.,0.25,0.5,0.875] {
+            let delay=(144.+fraction)/rate;
+            let values:Vec<_>=w.iter().map(|omega| {
+                let phase=omega*delay;C64::new(0.8*phase.cos(),0.8*phase.sin())
+            }).collect();
+            let baked=Baked::from_samples(&Samples {omega:w.clone(),values:vec![vec![values]],
+                delays_s:vec![delay],minimum_ppw:8.,maximum_condition_lower_bound:1.},16)
+                .unwrap_or_else(|error|panic!("fraction={fraction}: {error}"));
+            assert!(baked.maximum_error<0.05 && baked.worst_rms_error<0.025);
+            for frequency in [4800.,15_000.,20_000.] {
+                let mut receivers=baked.runtime().unwrap();
+                let omega=std::f64::consts::TAU*frequency;
+                let (mut error,mut signal)=(0.,0.);
+                for n in 0..4096 {
+                    let time=n as f64/rate;
+                    let pressure=receivers[0].step(&[(omega*time).sin()]).unwrap();
+                    if n>1024 {
+                        let reference=0.8*(omega*(time-delay)).sin();
+                        error+=(pressure-reference).powi(2);signal+=reference.powi(2);
+                    }
+                }
+                let relative_rms=(error/signal).sqrt();
+                assert!(relative_rms<0.05,"fraction={fraction}, frequency={frequency}, error={relative_rms}");
+            }
+        }
     }
     #[test]
     fn zero_transfer_remains_silent_and_nonfinite_samples_never_create_a_filter() {
