@@ -16,8 +16,13 @@
 //! delays have less than one-sample wavefront uncertainty. Mesh quadrature,
 //! structural bandwidth and output sampling still limit acoustic accuracy.
 //! This is not the previous arbitrary volume-velocity gain in Pa/(m^3/s).
+//! The optional bandlimited constructors replace linear fractional delays with
+//! a windowed sinc and explicitly account for its 32-sample extra latency.
 use crate::pcm_wav::decimate as antialias;
 use fs_math::det;
+
+#[path = "baffled_pressure_bandlimited.rs"]
+mod bandlimited;
 
 /// Largest retained input basis (the established observer/decimator limit).
 pub const MAX_RAYLEIGH_INPUTS: usize = 128;
@@ -76,10 +81,13 @@ pub struct BaffledPressure {
     previous_velocity: Vec<f64>,
     acceleration: Vec<f64>,
     decimator: antialias::Decimator,
+    /// Fixed delay introduced only by the optional bandlimited kernel.
+    interpolation_delay: usize,
     head: usize,
     modes: usize,
     rate: f64,
     pub position_m: [f64; 3],
+    /// FIR support, including fractional interpolation taps; not a group delay.
     pub delay_samples: (usize, usize),
 }
 impl BaffledPressure {
@@ -157,7 +165,10 @@ impl BaffledPressure {
         self.acceleration = vec![0.0; ratio * self.modes];
         Ok(())
     }
-    pub fn filter_delay_samples(&self) -> f64 { self.decimator.delay_output_frames() }
+    /// Anti-alias plus fixed interpolation latency, excluding physical travel.
+    pub fn filter_delay_samples(&self) -> f64 {
+        self.decimator.delay_output_frames() + self.interpolation_delay as f64
+    }
     fn from_loaded(surface: &[SurfaceSample], modes: usize, rate: u32,
         position_m: [f64; 3], medium: RayleighMedium) -> Result<Self,String> {
         if !(1..=MAX_RAYLEIGH_INPUTS).contains(&modes) || !(8_000..=192_000).contains(&rate)
@@ -193,7 +204,7 @@ impl BaffledPressure {
         let samples=history_frames.checked_mul(modes).ok_or("microphone history size overflow")?;
         Ok(Self { kernels: bins.into_iter().collect(), history: vec![0.0;samples],history_frames,
             previous_velocity:vec![0.0;modes],acceleration:vec![0.0;modes],head:0,modes,rate:f64::from(rate),
-            decimator:antialias::Decimator::new(1,modes)?,
+            decimator:antialias::Decimator::new(1,modes)?,interpolation_delay:0,
             position_m,delay_samples:(first,last) })
     }
     pub fn multiply_adds_per_sample(&self)->usize {
