@@ -85,7 +85,13 @@ pub(super) fn probe_pair(
     let probe_current = |coarse: &RungSolved, fine: &RungSolved| {
         adaptive_deadline(deadline)?;
         let approximate = adaptive_prolongation(cx, complex, coarse, split, fine)?;
-        let probe = adaptive_probe(cx, coarse, fine, &approximate, region)?;
+        let radiating = fine.adjoint_data.as_ref().is_some_and(|data|
+            data.radiating_boundary.is_some() || !data.radiation_patches.is_empty());
+        let probe = if radiating {
+            super::radiation::adaptive::probe(cx, coarse, fine, &approximate, region, memory_bytes)?
+        } else {
+            adaptive_probe(cx, coarse, fine, &approximate, region)?
+        };
         adaptive_deadline(deadline)?;
         Ok::<_, SolveRefusal>(probe)
     };
@@ -188,12 +194,18 @@ pub(super) fn probe_pair(
                 "report the inconsistent correction counters",
             )
         })?;
+    // This method is a full core FGMRES transpose, not the legacy IQN-ILS
+    // interface iteration. Preserve that distinction in retained evidence.
+    let comparison = if fine.adjoint_data.as_ref().is_some_and(|data| data.radiating_boundary.is_some()) {
+        format!(",\"comparison_model\":\"area-mean-radiation-full-transpose\",\"air_reference_feedback\":{}",
+            fine.adjoint_data.as_ref().is_some_and(|data| !data.air_paths.is_empty()))
+    } else { String::new() };
     let receipt = format!(
         "{{\"status\":{},\"correction_rounds\":{},\"correction_round_limit\":{},\"additional_correction_iterations\":{},\"field_updates\":{},\
          \"discretization_half_width_k\":{},\"pair_allowance_k\":{},\
          \"coarse_bound_k\":{},\"fine_bound_k\":{},\"pair_bound_k\":{},\
          \"coarse_correction_iterations\":{},\"fine_correction_iterations\":{},\
-         \"rule\":\"coarse-plus-fine algebraic bound <= one tenth of the current observed discretization estimate\"}}",
+         \"rule\":\"coarse-plus-fine algebraic bound <= one tenth of the current observed discretization estimate\"{comparison}}}",
         json_string(status),
         rounds,
         MAX_CORRECTION_ROUNDS,

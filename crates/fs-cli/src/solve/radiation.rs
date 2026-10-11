@@ -17,6 +17,8 @@ use super::{SOLVER_FIDELITY_ADAPTIVE, SolveRefusal, conduction_error, parse_clai
 use crate::cards::CardPackSet;
 use crate::import::json_string;
 
+pub(super) mod adaptive;
+
 pub(super) struct LoweredRadiation {
     pub(super) patches: Vec<AmbientRadiationPatch>,
     pub(super) config: AmbientRadiationConfig,
@@ -41,11 +43,14 @@ pub(super) fn lower(
         .solver
         .as_ref()
         .is_some_and(|solver| solver.fidelity == SOLVER_FIDELITY_ADAPTIVE)
+        && setup.boundaries.iter().any(|boundary| matches!(
+            boundary.condition, ThermalBoundaryCondition::NaturalConvection { .. }
+        ))
     {
         return Err(conduction_error(
             "cli-solve-conduction-radiation-adaptive",
-            "adaptive goals do not yet include the total tangent of the area-mean radiation law",
-            "use base or ladder fidelity for declared radiation; an adjoint of frozen Robin coefficients cannot measure this model's goal error",
+            "combined natural-convection/radiation adaptive goals are not yet supplied",
+            "use base or ladder fidelity for this combined law; prescribed convection and fixed-flow air/radiation support adaptive goals",
         ));
     }
     let library = cards.library();
