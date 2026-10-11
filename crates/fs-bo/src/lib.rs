@@ -18,6 +18,8 @@ pub mod acq_grad;
 /// Pending-aware asynchronous campaigns for caller-owned simulation workers.
 pub mod async_study;
 pub mod bo;
+/// Fixed-jitter noisy acquisition with cached baseline factors and latent minima.
+pub mod cached;
 /// Joint latent feasibility and reference-capped noisy design improvement.
 pub mod constrained;
 pub mod gp;

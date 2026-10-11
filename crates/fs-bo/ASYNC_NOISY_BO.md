@@ -89,3 +89,65 @@ model failures, one-worker synchronous parity and pre-work admission. Native
 compilation, these tests and the example remain unverified in the authoring
 runtime, where DSR/RCH/Cargo are absent. Independent Gaussian equation and
 logical-scheduler checks are not execution of the Rust implementation.
+
+## Cached baseline conditioning for larger histories
+
+`refill_cached(diagonal_jitter)` and `refill_cached_controlled(...)` opt into
+baseline caching. The same study state, reservations, observation variances,
+concurrency limits and total budget are used. The ordinary `refill()` entry
+point and its adaptive-jitter numerical policy are unchanged.
+
+```bash
+cargo run -p fs-bo --example asynchronous_noisy_design -- --cached-jitter 1e-8
+cargo test -p fs-bo --lib gp::prepared
+cargo test -p fs-bo --lib cached
+cargo test -p fs-bo --lib async_study
+```
+
+Each cached refill prepares the received-plus-pending latent baseline once.
+It retains training-to-baseline projections, a baseline Cholesky factor and
+the baseline minimum for each common-random-number draw. CMA-ES probes then
+compute only candidate projections, appended factor rows and candidate draws.
+No observation is pruned and no covariance is replaced with independent draws.
+The underlying construction is block Gaussian conditioning, as also used by
+BoTorch's cached-Cholesky noisy acquisitions.
+
+For b distinct baseline points and q candidate points, the repeated factor
+work changes from a full O((b+q)^3) factorization to O(b^2*q+b*q^2+q^3) row
+extension after one O(b^3) baseline factorization. Baseline sampling costs
+O(samples*b^2) once, rather than once per probe. Training projection work and
+dense baseline storage remain; this is not a sparse-GP implementation or a
+measured wall-time speedup claim. The GP and normal bank are borrowed, and the
+candidate factor result holds q*(b+q) entries rather than a second b*b block.
+
+The explicit jitter is a nonnegative POSTERIOR covariance variance in squared
+objective units, applied once per distinct latent coordinate. It is NOT added
+to observation variances. Fixing it is necessary to keep the baseline factor
+independent of candidate locations. Unlike the older joint-posterior path,
+this path neither escalates jitter nor drops correlations if a factor fails.
+It returns a typed refusal; changing the declared jitter for a retry is an
+explicit numerical-policy change. This can change scores and selected designs.
+Retain the API choice and jitter alongside availability sets when replaying;
+cloning a study does not persist arguments supplied to future refill calls.
+
+Custom dispatchers can use `NoisyBoConfig::propose_pending_cached`. For a
+custom search, `cached::CachedNoisyImprovement` provides reusable scoring over
+one fixed bank; duplicate baseline/candidate coordinates, including signed
+zero, use their first occurrence's bank column. A duplicate reserved design
+has exactly zero incremental gain. The lower-level
+`gp::prepared::PreparedPosterior` also exposes candidate-only joint factor rows.
+
+Cancellation checks occur during baseline work, row extension and sampling.
+The current bounded CMA-ES call may finish bookkeeping with inert callbacks,
+but no more posterior work or partial external job proposal is published.
+As before, cancelled/failed numerical attempts stay counted and all received
+simulation results remain retained. A dense factorization or a single training
+triangular solve is still non-preemptible.
+
+Fourteen new tests cover dense/block equivalence across factor panels, exact
+latent identity, sample-column stability, replay, malformed inputs, cancellation,
+stragglers, direct-proposal integration and fixed-jitter refusal/retry. Their
+sources are present, but native execution remains unverified: DSR/RCH/Cargo are
+absent in this authoring runtime. Independent Python checks passed 36 dense
+versus block covariance/factor/acquisition cases; those are equation references,
+not Rust execution or a production performance measurement.

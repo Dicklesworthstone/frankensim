@@ -1,6 +1,7 @@
 //! Simulated external workers with unequal completion times. No real threads,
 //! sleeps or measured performance claim; all objective noise is keyed by job.
 //! cargo run -p fs-bo --example asynchronous_noisy_design
+//! cargo run -p fs-bo --example asynchronous_noisy_design -- --cached-jitter 1e-8
 
 use fs_bo::async_study::AsyncNoisyStudy;
 use fs_bo::noisy::{NoisyBoConfig, NoisyObservation};
@@ -17,6 +18,19 @@ fn simulate(r: &NoisyRequest) -> NoisyObservation {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    let jitter = match arguments.as_slice() {
+        [] => None,
+        [flag, value] if flag == "--cached-jitter" => {
+            let value: f64 = value.parse()?;
+            if !value.is_finite() || value < 0.0 {
+                return Err("cached posterior jitter must be finite and nonnegative".into());
+            }
+            Some(value)
+        }
+        _ => return Err("usage: asynchronous_noisy_design [--cached-jitter variance]".into()),
+    };
+    if let Some(jitter) = jitter { println!("cached_posterior_jitter={jitter:e}"); }
     let c = NoisyBoConfig { bounds: (0.0, 1.0),
         kernel: Kernel { family: Matern::FiveHalves, signal: 0.04, lengthscales: vec![0.25] },
         prior_mean: 0.1, q: 2, mc_samples: 128, acq_starts: 2, acq_evals: 64, seed: 2026 };
@@ -39,7 +53,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (_, request) = running.remove(&id).expect("selected job");
         s.tell(&request, simulate(&request))?;
         completed += 1;
-        let replacements = s.refill()?;
+        let replacements = match jitter {
+            Some(jitter) => s.refill_cached(jitter)?,
+            None => s.refill()?,
+        };
         println!("event={completed} logical_time={now} received={id} new_jobs={replacements} unanswered={}", s.in_flight());
     }
     assert_eq!(completed, 18);

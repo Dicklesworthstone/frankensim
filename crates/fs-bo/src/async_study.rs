@@ -6,6 +6,8 @@
 //! in-flight deduplication and failure retries. No threads or I/O live here.
 
 use crate::gp::Gp;
+use crate::gp::prepared::PreparedError;
+use crate::cached::CachedProposalError;
 use crate::hyper::zero_noise_duplicates;
 use crate::noisy::{NoisyBoConfig, NoisyObservation};
 use crate::pending::PendingProposalError;
@@ -24,6 +26,8 @@ pub enum AsyncStudyError {
     Cancelled,
     /// The bounded search did not return distinct unreserved designs.
     NoNovelCandidate,
+    /// Explicit fixed-jitter cached acquisition refused its posterior.
+    CachedPosterior(PreparedError),
     /// Attempt counters cannot be represented.
     WorkOverflow,
 }
@@ -41,6 +45,17 @@ impl From<PendingProposalError> for AsyncStudyError {
             PendingProposalError::InvalidRequest => Self::InvalidPolicy,
             PendingProposalError::Cancelled => Self::Cancelled,
             PendingProposalError::NoNovelCandidate => Self::NoNovelCandidate,
+        }
+    }
+}
+
+impl From<CachedProposalError> for AsyncStudyError {
+    fn from(error: CachedProposalError) -> Self {
+        match error {
+            CachedProposalError::InvalidRequest => Self::InvalidPolicy,
+            CachedProposalError::Cancelled => Self::Cancelled,
+            CachedProposalError::Posterior(e) => Self::CachedPosterior(e),
+            CachedProposalError::NoNovelCandidate => Self::NoNovelCandidate,
         }
     }
 }
@@ -187,6 +202,27 @@ impl AsyncNoisyStudy {
         self.refill_controlled(&mut || true)
     }
 
+    /// Opt-in cached acquisition with a fixed posterior-jitter variance.
+    /// The baseline factor and latent minima are computed once per refill,
+    /// not for every CMA-ES probe. Existing `refill` behavior is unchanged.
+    /// Retain this explicit jitter and choice of API when replaying decisions.
+    pub fn refill_cached(&mut self, diagonal_jitter: f64) -> Result<usize, AsyncStudyError> {
+        self.refill_cached_controlled(diagonal_jitter, &mut || true)
+    }
+
+    /// Cancellable cached refill. Jitter is validated before any job issuance
+    /// or fit; cached numerical failures retain observations, model and jobs.
+    /// Sample-row/extension checks improve cancellation granularity, but the
+    /// current bounded CMA-ES call may finish with inert callbacks on refusal.
+    pub fn refill_cached_controlled(&mut self, diagonal_jitter: f64,
+        keep_going: &mut dyn FnMut() -> bool) -> Result<usize, AsyncStudyError>
+    {
+        if !diagonal_jitter.is_finite() || diagonal_jitter < 0.0 {
+            return Err(AsyncStudyError::InvalidPolicy);
+        }
+        self.refill_impl(keep_going, Some(diagonal_jitter))
+    }
+
     /// Atomically publish a modeled availability set and its replacement jobs.
     /// Pending designs enter the joint acquisition, never the training values.
     /// Once total issuance reaches the budget, later refills only update the
@@ -202,6 +238,12 @@ impl AsyncNoisyStudy {
     /// Existing GP/acquisition arithmetic assertions remain. All such work
     /// precedes publication of jobs or a new model report.
     pub fn refill_controlled(&mut self, keep_going: &mut dyn FnMut() -> bool)
+        -> Result<usize, AsyncStudyError>
+    {
+        self.refill_impl(keep_going, None)
+    }
+
+    fn refill_impl(&mut self, keep_going: &mut dyn FnMut() -> bool, cached_jitter: Option<f64>)
         -> Result<usize, AsyncStudyError>
     {
         if !keep_going() { return Err(AsyncStudyError::Cancelled); }
@@ -251,8 +293,13 @@ impl AsyncNoisyStudy {
                 .map(|j| j.request.x.clone()).collect();
             self.work.acquisition_batch_attempts = self.work.acquisition_batch_attempts.checked_add(1)
                 .ok_or(AsyncStudyError::WorkOverflow)?;
-            let points = self.config.propose_pending(&gp, &x, &pending, count,
-                issued - self.initial.len(), keep_going)?;
+            let points = if let Some(jitter) = cached_jitter {
+                self.config.propose_pending_cached(&gp, &x, &pending, count,
+                    issued - self.initial.len(), jitter, keep_going)?
+            } else {
+                self.config.propose_pending(&gp, &x, &pending, count,
+                    issued - self.initial.len(), keep_going)?
+            };
             jobs(self.study_id, issued, &points)
         };
         if !keep_going() { return Err(AsyncStudyError::Cancelled); }
@@ -265,3 +312,5 @@ impl AsyncNoisyStudy {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod cached_tests;
