@@ -15,9 +15,9 @@ and mass-normalized shapes. No resonance frequencies are entered as material
 parameters.
 
 Both end rings are clamped to rigid hoops. The heads retain their fixed rims,
-and the existing sticks and wire bank act on those heads. This represents
-air-mediated head/wall interaction. Moving hoops, individual lugs, rimshots,
-ply anisotropy and direct stick/barrel impacts require additional mechanics.
+and the wire bank acts on the resonant head. Sticks can strike the batter head
+or the actual sidewall as described below. Moving hoops, individual lugs,
+rimshots and ply anisotropy require additional mechanics.
 
 ## Use
 
@@ -45,6 +45,47 @@ A hoop-clamped barrel may have no modes in a requested narrow window; that
 refuses instead of changing its material or inventing a low resonance. A
 retained oval or torsional mode may correctly have negligible uniform-volume
 coupling. Distributed pressure can excite additional spatial participation.
+
+## Strike the sidewall
+
+`--barrel-strike AZIMUTH_RAD HEIGHT_BELOW_BATTER_M` moves the first hand's
+contact to the elastic barrel. It requires `--elastic-barrel`; the azimuth is
+in `[-2*pi,2*pi]` radians and the height must lie strictly between the two
+hoops. The first-hand `--strike-position-m` and a first-hand felt mallet are
+refused with this selection. An optional second stick or second mallet still
+plays its separately supplied batter-head position.
+
+```sh
+cargo run --release -p fs-couple --example percussion -- \
+  drum 4096 --analytic-newton --impact-substeps 8 511 \
+  --elastic-barrel crates/fs-couple/examples/percussion/illustrative-barrel.fsb \
+  --barrel-strike 0.3 0.08 --strike-speed-m-s 1.2 \
+  --cavity-modes --cavity-drag-per-s 20 > sidewall-strike.csv
+```
+
+The azimuth locates a point by intersecting a radial ray with the actual
+outer-skin triangles. Strike motion then follows the **inward facet normal**,
+which can differ from the analytical radial direction on a coarse mesh. A
+shared-edge or vertex hit selects the lowest incident facet index and its
+normal once. There is no nearest-node strike, duplicated edge impulse, or
+unmodelled hoop response. The skin projection retains both shell translation
+and the moment of a force applied at the finite thickness offset.
+
+The first stick keeps its supplied speed, 0.2 mm initial exterior clearance,
+inertia and force program. A flexible shaft keeps its complete basis and hand
+force row, now interpreted along this local inward normal. With inward tip
+motion `s` and outward skin motion `u`, contact penetration is `s + u`; the
+existing contact potential supplies both reactions in the shared time step.
+This contact replaces the first hand's head contact. Both heads respond through
+the enclosed pressure and any independently selected second stick. Wall motion
+continues to supply the existing outer acoustic velocity rows.
+
+The hard tip retains the example's explicitly estimated Hertz contact law.
+This is a normal point-contact approximation on the undeformed shell skin,
+without tangential friction, finite-rotation tracking or an inferred finite
+mallet face. A rigid hoop remains a boundary condition, not a radiator. These
+commands illustrate the supported inputs; they are not completed render or
+specimen-fidelity claims.
 
 ## SI format
 
@@ -98,6 +139,9 @@ sampling must remain inside the declared cylindrical cavity. Refinement is
 required to assess geometric and modal convergence for a chosen specimen.
 
 Focused Rust regressions cover skin work, cavity excitation, shared state
-addresses and exterior participation. They require native execution; source
+addresses and exterior participation. Sidewall-strike checks additionally
+cover actual facet location and edge ties, the finite-thickness force moment,
+reciprocal impact, pressure-driven head motion, flexible-shaft excitation and
+failed/cancelled-step rollback. They require native execution; source
 review and independent geometry calculations do not establish solver
 convergence, measured-instrument fidelity or real-time performance.

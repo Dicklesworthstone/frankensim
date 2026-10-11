@@ -34,6 +34,7 @@ mod flexible_sticks;
 mod shaft_playing;
 mod drum_spec;
 mod barrel;
+mod barrel_strike;
 mod sticks;
 mod muffling;
 mod compliant_mute;
@@ -266,11 +267,20 @@ fn drum_with_mallets(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<s
 #[allow(clippy::too_many_arguments)]
 fn drum_with_shafts(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>,supplied:Option<drum_spec::Spec>,second:Option<Stroke>,mufflers:&[muffling::Muffler],drag_per_s:f64,mute:Option<&compliant_mute::Spec>,prescribed_vent:bool,relaxation:Option<&head_relaxation::Spec>,mallets:&mallets::Selection,shafts:&shaft_playing::Selection)->Result<Experiment,Error> {
     drum_with_barrel(steps,dt_s,audio,prepared,snares,stretching,stroke,distributed_cavity,neck,
-        supplied,second,mufflers,drag_per_s,mute,prescribed_vent,relaxation,mallets,shafts,None)
+        supplied,second,mufflers,drag_per_s,mute,prescribed_vent,relaxation,mallets,shafts,None,None)
 }
 #[allow(clippy::too_many_arguments)]
-fn drum_with_barrel(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>,supplied:Option<drum_spec::Spec>,second:Option<Stroke>,mufflers:&[muffling::Muffler],drag_per_s:f64,mute:Option<&compliant_mute::Spec>,prescribed_vent:bool,relaxation:Option<&head_relaxation::Spec>,mallets:&mallets::Selection,shafts:&shaft_playing::Selection,barrel_spec:Option<&barrel::Spec>)->Result<Experiment,Error> {
+fn drum_with_barrel(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>,supplied:Option<drum_spec::Spec>,second:Option<Stroke>,mufflers:&[muffling::Muffler],drag_per_s:f64,mute:Option<&compliant_mute::Spec>,prescribed_vent:bool,relaxation:Option<&head_relaxation::Spec>,mallets:&mallets::Selection,shafts:&shaft_playing::Selection,barrel_spec:Option<&barrel::Spec>,strike:Option<barrel_strike::Spec>)->Result<Experiment,Error> {
     shafts.admit(if snares.is_some(){"snare"}else{"drum"},second,mallets)?;
+    if strike.is_some() {
+        if barrel_spec.is_none() {return Err("--barrel-strike requires --elastic-barrel".into());}
+        if stroke.position_m.is_some() {
+            return Err("--barrel-strike and --strike-position-m select different first-stick targets; supply only one".into());
+        }
+        if mallets.first.is_some() {
+            return Err("barrel strikes need a hard tip; a felt mallet requires a resolved curved sidewall footprint".into());
+        }
+    }
     if barrel_spec.is_some() && neck.is_some() {
         return Err("a flexible drum barrel with a vent needs the pierced shell and moving aperture coupling; this barrel is closed".into());
     }
@@ -301,6 +311,10 @@ fn drum_with_barrel(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<sn
     let radius=spec.radius_m;let depth=spec.depth_m;let pi=std::f64::consts::PI;
     let (films,mode_sets)=spec.prepare(dt_s,audio)?;
     let barrel=barrel_spec.map(|b|b.prepare(&spec,dt_s,audio)).transpose()?;
+    let wall_strike=strike.map(|s|s.port(barrel.as_ref().expect("admitted elastic barrel"))).transpose()?;
+    if let Some(port)=&wall_strike {
+        eprintln!("barrel strike: outer_skin_position_m={:?}; first-stick displacement, velocity and force are positive along the inward facet normal; second stick retains its batter-head station",port.position_m);
+    }
     // Keep the original nearest-node strike for the no-file reference. A new
     // geometry instead gets an interior relative location unless explicitly set.
     let position=stroke.position_m.or_else(||imported.then_some([0.35*radius,0.0]));
@@ -342,7 +356,10 @@ fn drum_with_barrel(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<sn
             // Both head coordinates are positive downward: this signed area
             // integrates COMPRESSION (negative exterior swept volume).
             area[offset+i]=(if head==0 {1.0}else{-1.0})*film.modal_area(&mode.phi)?;
-            if head==0 {contact[offset+i]=-shape;top[offset+i]=shape;}else{bottom[offset+i]=shape;}
+            if head==0 {
+                if wall_strike.is_none() {contact[offset+i]=-shape;}
+                top[offset+i]=shape;
+            }else{bottom[offset+i]=shape;}
         }
         let omegas:Vec<_>=modes.iter().map(|m|m.lambda.sqrt()).collect();
         let potential=if stretching {
@@ -363,6 +380,11 @@ fn drum_with_barrel(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<sn
         eprintln!("head {head}: film_mass_kg={},frequencies_hz={:?}, tension_n_m={}, damping_ratio={}; material authority belongs to the input, not a brand name",
             film.mass_kg,omegas.iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>(),
             spec.heads[head].tension_n_m,spec.heads[head].damping_ratio);
+    }
+    if let Some(port)=&wall_strike {
+        // Inward tip travel and outward wall motion both close the exterior
+        // gap. The same row applies the equal/opposite skin force and moment.
+        contact[barrel_start..base].copy_from_slice(&port.weights);
     }
     // The selected felt face REPLACES its hard-tip contact, never adds to it.
     let mut contacts=if mallets.first.is_some() {Vec::new()}else{vec![elastic_contact(contact)?]};
@@ -404,8 +426,8 @@ fn drum_with_barrel(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<sn
     });
     for pad in &mut pads {pad.weights.resize(n,0.0);}
     // The barrel shares the same compression coordinate as both heads. Its
-    // inner skin supplies pressure work; no direct striker or player force is
-    // added. Keep every wire/jaw address before it and every shaft after it.
+    // inner skin supplies pressure work and an optional outer-skin tip contact
+    // supplies the strike. Keep wires/jaws before it and every shaft after it.
     if let Some(barrel)=&barrel {
         area[barrel_start..base].copy_from_slice(barrel.compression_areas());
         bodies.push(barrel.body());
@@ -488,6 +510,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     let shell_mesh_path=specimen::mesh_option(&mut raw_args)?;
     let drum_path=drum_spec::option(&mut raw_args)?;
     let barrel_spec=barrel::option(&mut raw_args)?;
+    let barrel_strike=barrel_strike::option(&mut raw_args)?;
     let snare_path=snare::spec::option(&mut raw_args)?;
     let carrier_path=snare::carrier::option(&mut raw_args)?;
     let second=sticks::option(&mut raw_args)?;
@@ -533,6 +556,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     specimen::admit_selection(shell_path.as_deref(),shell_mesh_path.as_deref(),&args[0])?;
     drum_spec::admit_command(drum_path.as_deref(),&args[0])?;
     barrel::admit_command(barrel_spec.as_ref(),&args[0])?;
+    barrel_strike::admit_command(barrel_strike.as_ref(),&args[0])?;
     sticks::admit_command(second.is_some(),&args[0])?;
     muffling::admit_command(&mufflers,&args[0])?;
     for spec in &mufflers {
@@ -559,11 +583,11 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     let drag_per_s=cavity_drag.unwrap_or(0.0);
     let experiment=match args[0].as_str(){
         "splash"|"splash-wav"|"splash-mic"=>splash_with_material(steps,dt_s,audio,stroke,supplied_shell,&mufflers,second,compliant_mute.as_ref(),&mallets,&shafts,shell_relaxation.as_ref())?,
-        "drum"|"drum-wav"|"drum-mic"=>drum_with_barrel(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref())?,
-        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_barrel(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref())?,
-        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_barrel(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref())?,
-        "snare"|"snare-wav"|"snare-mic"=>drum_with_barrel(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref())?,
-        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_barrel(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref())?,
+        "drum"|"drum-wav"|"drum-mic"=>drum_with_barrel(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref(),barrel_strike)?,
+        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_barrel(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref(),barrel_strike)?,
+        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_barrel(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref(),barrel_strike)?,
+        "snare"|"snare-wav"|"snare-mic"=>drum_with_barrel(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref(),barrel_strike)?,
+        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_barrel(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref(),barrel_strike)?,
         _=>return Err("unknown experiment".into()),
     };
     let receivers=match microphone_spec {

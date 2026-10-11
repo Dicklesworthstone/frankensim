@@ -154,6 +154,7 @@ impl Spec {
         Ok(Prepared { omegas: reduction.omegas().to_vec(), damping_ratio: self.damping_ratio,
             azimuths, axial_intervals: self.axial_intervals, outer_positions, triangles: mesh.tris,
             outer_weights, inner_points, inner_areas, inner_weights, compression,
+            reduction, nodal_thicknesses: thicknesses,
             radius_m: drum.radius_m, outer_radius_m: drum.outer_radius_m, depth_m: drum.depth_m })
     }
 }
@@ -161,6 +162,10 @@ impl Spec {
 /// Cached physical projections; no independent dynamic state or force clock.
 pub struct Prepared {
     omegas: Vec<f64>, damping_ratio: f64,
+    // Keep the admitted operator for physical point contacts on the same skin.
+    // Its translations AND rotations remain in the pressure/radiation basis.
+    pub(super) reduction: ShellReduction,
+    pub(super) nodal_thicknesses: Vec<f64>,
     pub(super) azimuths: usize,
     pub(super) axial_intervals: usize,
     pub(super) outer_positions: Vec<[f64; 3]>,
@@ -193,7 +198,7 @@ impl Prepared {
     }
 }
 
-fn normal_area(p: [[f64; 3]; 3]) -> Result<([f64; 3], f64), Error> {
+pub(super) fn normal_area(p: [[f64; 3]; 3]) -> Result<([f64; 3], f64), Error> {
     let a: [f64; 3] = core::array::from_fn(|i| p[1][i] - p[0][i]);
     let b: [f64; 3] = core::array::from_fn(|i| p[2][i] - p[0][i]);
     let n = [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
