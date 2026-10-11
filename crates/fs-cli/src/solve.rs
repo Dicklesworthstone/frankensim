@@ -194,7 +194,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// the accepted physical residual, nonlinear heat and cumulative trial work.
 /// Version 59 closes steady natural and forced convection on distinct surfaces
 /// through the same solid, retaining each reservoir's independent heat account.
-pub const SOLVE_DRIVER_VERSION: u32 = 59;
+/// Version 60 couples native total enthalpy to physical natural convection,
+/// including ambient radiation, with immutable history and full endpoint gates.
+pub const SOLVE_DRIVER_VERSION: u32 = 60;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

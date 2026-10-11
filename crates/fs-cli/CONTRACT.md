@@ -1533,7 +1533,7 @@ fine-grid final temperature. Coarse/fine enthalpy and phase differences remain
 visible even when both temperatures agree on a plateau; equal temperatures
 do not become a zero-error temporal claim. This is Estimated fixed-domain
 transport, with source attribution rather than authentication of supplied
-phase data. Prescribed temperature, dynamic convection and native
+phase data. Prescribed temperature, airflow convection and native
 trajectory adjoints are currently refused for this storage model. Expansion,
 motion, phase kinetics and phase-dependent conductivity are not inferred.
 `data/reference-project/cooling-enthalpy.fsim` and `TRANSIENT.md` give a complete
@@ -1561,6 +1561,30 @@ Driver version 58 separates this composition from older retained solves.
 latent-storage pulse example. The model remains radiation from patch-mean
 temperature to fixed reservoirs, without enclosure exchange or pointwise
 integration of T(x)^4.
+
+Declared natural convection also composes with spatial enthalpy and optional
+ambient radiation. The existing sourced correlation evaluates every candidate
+wall state; its original equilibrium and Rayleigh-domain refusals remain.
+Every natural, radiation and Newton trial retains the same physical old
+specific enthalpy. The new shared endpoint evaluator checks the complete
+candidate under updated physical convection and actual nonlinear radiation,
+without imposing an adjoint smoothness condition at a phase-chart corner.
+Publication requires coefficient convergence, a fixed nodal residual target,
+and the original absolute joule-energy gate. The target is fixed from the first
+physically evaluated candidate, so a powered ambient start does not require
+an undefined equilibrium coefficient. Later inner tolerances tighten.
+
+Both grids count all natural iterations and nested radiation/Newton/Krylov
+work; direct endpoint evaluations have a separate bounded allowance. Per-step
+and integrated energy use actual physical convection and signed radiation.
+The retained final field remains the last counted solid response; its applied
+operator is kept distinct from the independently checked physical law. The
+normal `natural_convection` receipt retains the actual final card evaluation.
+`tests/solve/transient_enthalpy_natural.rs` supplies independent sensible and
+latent energy references, both heat directions and refusal-without-field cases.
+`data/reference-project/cooling-enthalpy-natural.fsim` demonstrates passive
+losses during a synthetic melting run. Driver version 60 separates these
+semantics from older retained solves.
 
 The same native declaration also admits ambient gray radiation on its
 prescribed Robin patches, using the existing sourced emissivity cards and

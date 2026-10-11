@@ -131,9 +131,9 @@ controls. Existing v12 projects migrate with their capacities unchanged.
 
 This native mode supports fixed reference geometry, temperature-dependent
 conductivity, regional power schedules, matching finite-resistance contact,
-prescribed Neumann/Robin boundaries and sourced ambient radiation. Prescribed
-temperatures, natural/airflow convection and adjoint requests currently refuse
-for enthalpy storage. The declared curves and card identities create no
+prescribed Neumann/Robin boundaries, sourced natural convection and ambient
+radiation. Prescribed temperatures, airflow convection and adjoint requests
+currently refuse for enthalpy storage. The declared curves and card identities create no
 material-query receipts, expansion, phase kinetics or experimental validation.
 
 ### Latent storage with ambient radiation
@@ -170,6 +170,45 @@ temperature; it does not infer enclosure exchange or pointwise T(x)^4
 integration. The independent regular-tetrahedron regressions cover both
 radiative heat loss and heating from a hotter reservoir, plus latent-plateau
 energy and phase accounting.
+
+### Phase change with natural convection
+
+`cooling-enthalpy-natural.fsim` keeps the synthetic density and phase chart
+of `cooling-enthalpy.fsim`, while replacing insulation with the existing
+Churchill–Chu vertical-plate law at 293.15 K and 0.1 m characteristic length.
+The 5 W heater runs for two seconds. Source energy is 10 J; retained energy
+subtracts the computed passive heat loss at every endpoint. The numerical
+tetrahedron and vertical-plate idealization are educational inputs.
+
+```bash
+frankensim --json validate data/reference-project/cooling-enthalpy-natural.fsim
+frankensim --json import data/reference-project/cooling-enthalpy-natural.fsim \
+  data/reference-project/plate.stl enthalpy-natural.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-enthalpy-natural.fsim \
+  enthalpy-natural.db --materials data/reference-project/aa6061.fsmcdpk
+```
+
+The same boundary declaration can be used with the radiation example:
+
+```lisp
+(natural-convection :target "solid"
+  :characteristic-length 0.1m
+  :ambient-temperature 293.15K
+  :correlation "convection.churchill-chu-vertical-plate")
+```
+
+Each candidate re-evaluates its natural-convection coefficient and its complete
+physical heat equation. A small coefficient change or a closed total energy
+balance alone cannot accept a step. Every internal convection, radiation and
+Newton trial uses unchanged old enthalpy; only a completed physical endpoint
+advances time. This preserves latent storage even when temperature stays fixed.
+
+The existing correlation supports heated and cooled walls in its declared
+Rayleigh domain. A powered body may start at ambient using the existing initial
+coefficient guess, but exact unpowered equilibrium and out-of-domain actual
+states still refuse. `transient.natural` reports both grids' complete work;
+each step retains the physical residual and energy balance. The ordinary
+`natural_convection` receipt retains the final physical card evaluation.
 
 ## Pulse and duty-cycle heating
 
@@ -384,6 +423,6 @@ audit is reported separately; convergence does not trigger an extra solve.
 `transient.natural` aggregates both grids' coefficient iterations, solid
 responses and direct endpoint audits, together with the maximum accepted
 physical energy residual and the fine trajectory's integrated heat balance.
-`conduction.natural` retains the final fine endpoint's physical card receipt.
+`conduction.natural_convection` retains the final fine endpoint's physical card receipt.
 The fifteen-step pulse grid and final-time temperature/QoI scope are the
 same as in the other pulse examples.
