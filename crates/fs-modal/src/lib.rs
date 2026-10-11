@@ -345,6 +345,7 @@ fn lanczos_sweep(
     let mut alphas: Vec<f64> = Vec::new();
     let mut betas: Vec<f64> = Vec::new(); // β_j links v_j → v_{j+1}
     let mut scratch_m = vec![0.0f64; n];
+    let mut operator_scale = 0.0_f64;
 
     // Converged directions in M-image form for deflation.
     let deflate_m: Vec<Vec<f64>> = converged
@@ -426,6 +427,15 @@ fn lanczos_sweep(
             .max(0.0)
             .sqrt();
         iters += 1;
+        // The shifted inverse has units of inverse eigenvalue. An absolute
+        // beta cutoff (formerly 1e-14) mistakes tightly clustered inverse
+        // values in wide acoustic bands for an invariant Krylov subspace.
+        // Scale to the observed tridiagonal coefficients, not max(scale, 1):
+        // that floor would reintroduce dependence on the physical units.
+        operator_scale = operator_scale.max(alpha.abs()).max(beta);
+        let breakdown = beta == 0.0
+            || (operator_scale.is_finite()
+                && beta <= (16.0 * f64::EPSILON) * operator_scale);
 
         // Ritz extraction on the tridiagonal T_j (small dense; j ≤ budget).
         let jn = basis.len();
@@ -461,7 +471,7 @@ fn lanczos_sweep(
         // the total budget for deflation restarts (a single Krylov space
         // provably yields at most one Ritz direction per distinct
         // eigenvalue, so degenerate clusters REQUIRE later sweeps).
-        let stop = beta <= 1e-14 || basis.len() == n || iters == budget || ready.len() >= need;
+        let stop = breakdown || basis.len() == n || iters == budget || ready.len() >= need;
         if stop {
             // Harvest all ready Ritz pairs into problem space.
             for &(_th, ri) in &ready {

@@ -39,6 +39,11 @@ jobs:
       # Keep a failed bootstrap RED. Its known legacy batch-file checkout
       # mismatch must not hide independent native test results after all
       # siblings have been materialized. Missing dependencies still fail Cargo.
+      - name: Test complete acoustic modal windows
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release -p fs-modal -- --test-threads=1 2>&1 | tee piano-modal-tests.log
       - name: Test reinforced crowned-shell mechanics
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-plate --lib shell::stiffened -- --test-threads=1
