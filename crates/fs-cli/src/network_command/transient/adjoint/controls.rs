@@ -7,15 +7,11 @@ use fs_conduction::transient::backward_euler::StepLinearization;
 const MAX_COMPONENT_INTERVAL_ROWS: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct Options {
+pub(in crate::network_command::transient) struct Options {
     components: bool,
     contacts: bool,
 }
 impl Options {
-    pub(super) fn requested(self) -> bool {
-        self.components || self.contacts
-    }
-
     pub(super) fn parse(value: &J) -> Result<Self> {
         Ok(Self {
             components: value.get("component_power").map(|v| boolean(v,"adjoint.component_power"))
@@ -56,7 +52,7 @@ impl Options {
 
     /// Retained accumulator payload and vector headers share the existing
     /// max_checkpoint_bytes allowance. Temporary FEM vectors are workspace.
-    pub(super) fn storage_bytes(self, request: &Request, schedule: &Schedule) -> Result<usize> {
+    pub(in crate::network_command::transient) fn storage_bytes(self, request: &Request, schedule: &Schedule) -> Result<usize> {
         let (components,contacts) = self.dimensions(request,schedule)?;
         let entries = components.checked_mul(schedule.intervals.len())
             .and_then(|n| n.checked_add(contacts))
@@ -68,7 +64,7 @@ impl Options {
     }
 }
 
-pub(super) struct Accumulation {
+pub(in crate::network_command::transient) struct Accumulation {
     components: Option<Vec<f64>>,
     contacts: Option<Vec<f64>>,
     component_count: usize,
@@ -80,7 +76,7 @@ fn zeros(count: usize) -> Result<Vec<f64>> {
     Ok(values)
 }
 impl Accumulation {
-    pub(super) fn new(options: Options, request: &Request, schedule: &Schedule) -> Result<Self> {
+    pub(in crate::network_command::transient) fn new(options: Options, request: &Request, schedule: &Schedule) -> Result<Self> {
         let (component_count,contact_count) = options.dimensions(request,schedule)?;
         let component_entries = component_count.checked_mul(schedule.intervals.len())
             .ok_or_else(|| budget("component-control count overflow"))?;
@@ -96,9 +92,21 @@ impl Accumulation {
     /// C/dt; neither the source nor contact contraction is multiplied by dt.
     pub(super) fn record(&mut self, request: &Request, cx: &Cx<'_>,
         step: &StepLinearization<'_>, interval: usize, lambda: &[f64]) -> Result<()> {
+        let source_density = if self.components.is_some() {
+            step.source_density_pullback(cx,lambda).map_err(producer)?
+        } else { Vec::new() };
+        self.record_pullback(request,cx,&step.primal().temperature,interval,&source_density,lambda)
+    }
+
+    /// Shared physical contractions for either storage owner. The source-density
+    /// pullback already includes its time discretization, and nodal_load is the
+    /// multiplier of a watt-valued residual. For total enthalpy it is dt*lambda_h,
+    /// not the raw joule-residual multiplier; no further dt factor is applied.
+    pub(in crate::network_command::transient) fn record_pullback(&mut self,
+        request: &Request, cx: &Cx<'_>, temperature: &[f64], interval: usize,
+        source_density: &[f64], nodal_load: &[f64]) -> Result<()> {
         poll(cx)?;
         if let Some(values) = self.components.as_mut() {
-            let density = step.source_density_pullback(cx,lambda).map_err(producer)?;
             let map = request.solid_data.component_map.as_ref().ok_or_else(|| bad("missing component map"))?;
             let audit = request.solid_data.power.as_ref().ok_or_else(|| bad("missing component audit"))?;
             let start = interval.checked_mul(self.component_count)
@@ -111,7 +119,7 @@ impl Accumulation {
                 let mut numerator = 0.0;
                 for (index,&vertex) in component.vertices().iter().enumerate() {
                     if index % 512 == 0 { poll(cx)?; }
-                    numerator = finite(numerator + *density.get(vertex)
+                    numerator = finite(numerator + *source_density.get(vertex)
                         .ok_or_else(|| bad("component footprint left the source-density field"))?)?;
                 }
                 // This is the original producer's geometric normalization,
@@ -121,7 +129,7 @@ impl Accumulation {
         }
         if let Some(sums) = self.contacts.as_mut() {
             let contacts = request.contacts.as_ref().ok_or_else(|| bad("missing trajectory contacts"))?;
-            let values = contacts.trajectory_log_resistance_gradients(cx,&step.primal().temperature,lambda)?;
+            let values = contacts.trajectory_log_resistance_gradients(cx,temperature,nodal_load)?;
             if values.len() != sums.len() { return Err(bad("contact-control arity changed")); }
             for (sum,value) in sums.iter_mut().zip(values) { *sum = finite(*sum+value)?; }
         }
@@ -130,7 +138,7 @@ impl Accumulation {
 
     /// No fragment at all when neither control was requested: ordinary
     /// adjoints keep their existing result and do no additional integration.
-    pub(super) fn report_fragment(&self, request: &Request, cx: &Cx<'_>, schedule: &Schedule)
+    pub(in crate::network_command::transient) fn report_fragment(&self, request: &Request, cx: &Cx<'_>, schedule: &Schedule)
         -> Result<String> {
         if self.components.is_none() && self.contacts.is_none() { return Ok(String::new()); }
         let components = match &self.components {

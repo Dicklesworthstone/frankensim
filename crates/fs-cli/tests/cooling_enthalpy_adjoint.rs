@@ -462,7 +462,7 @@ fn mean_wall_replay_and_an_initial_peak_use_the_selected_physical_branch() {
 }
 
 #[test]
-fn exhausted_checkpoints_and_unsupported_controls_publish_no_gradient() {
+fn exhausted_checkpoints_and_controls_without_physical_inputs_publish_no_gradient() {
     for control in ["checkpoint", "component_power", "contact_resistance"] {
         let mut request = request(Some("final"));
         let adjoint = member(member(&mut request, "transient"), "adjoint");

@@ -213,11 +213,23 @@ complete solid/air/radiation feedback and supported Reynolds dependence of
 convection. Declared scalar HTC has zero speed dependence. A convection card
 without an admitted smooth Reynolds derivative leaves the fan derivative
 unavailable (`null`), while the complete forward candidate remains usable.
+Optional `component_power: true` and `contact_resistance: true` use the same
+accepted trajectory and coupled adjoint. Component reports retain the original
+consistent-P1 PowerMap footprints, including overlaps and zero-watt components;
+interval rows differentiate applied watts at every occurrence of that base
+interval. Base-watt rows affect only `power_scale` intervals, leaving explicit
+`component_powers_w` overrides fixed. Contact reports differentiate the persistent
+log resistance through every earlier endpoint. The source-density pullback and
+watt-valued nodal-load multiplier already include the storage discretization;
+these contractions add no timestep factor or per-control solve. Their retained
+accumulators share `max_checkpoint_bytes`. Missing component footprints or
+contact interfaces refuse before trajectory publication. The report keys and
+units match the ordinary fixed-capacity trajectory controls.
+
 Charts, reference densities, conductivity, geometry, fan curves, quadratic
-loss coefficients, convection law data, contact resistance and radiation
-controls remain fixed. The
-`component_power` and `contact_resistance` adjoint options refuse. Material
-slope corners and validity endpoints refuse classical endpoint derivatives;
+loss coefficients, convection law data and radiation controls remain fixed;
+contact resistance is fixed unless its sensitivity is explicitly requested.
+Material slope corners and validity endpoints refuse classical endpoint derivatives;
 plateau interiors are supported. Ties select the existing earliest sampled
 maximum/active-vertex branch without claiming a unique derivative.
 

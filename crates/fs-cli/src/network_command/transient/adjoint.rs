@@ -3,7 +3,7 @@
 //! at a time. Repeated schedules share ONE chronological history. Radiation
 //! replays the accepted inner boundary loop before preparing its total response.
 use super::*;
-mod controls;
+pub(super) mod controls;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Observable { Final, SampledPeak }
@@ -12,7 +12,7 @@ pub(super) enum Observable { Final, SampledPeak }
 pub(super) struct Config {
     pub(super) observable: Observable,
     pub(super) max_checkpoint_bytes: usize,
-    controls: controls::Options,
+    pub(super) controls: controls::Options,
 }
 impl Config {
     pub(super) fn parse(value: &J) -> Result<Self> {
@@ -29,13 +29,6 @@ impl Config {
     pub(super) fn validate_design(self) -> Result<()> {
         if self.observable != Observable::SampledPeak {
             return Err(bad("transient sizing requires adjoint.qoi=sampled-peak; a final-temperature derivative cannot guide a peak constraint"));
-        }
-        Ok(())
-    }
-
-    pub(super) fn admit_enthalpy(self) -> Result<()> {
-        if self.controls.requested() {
-            return Err(bad("enthalpy adjoints currently support initial specific enthalpy, interval power, supported fan speed and inlet temperatures; component-power and contact-resistance controls are not admitted"));
         }
         Ok(())
     }

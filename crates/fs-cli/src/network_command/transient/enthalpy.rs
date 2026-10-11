@@ -358,11 +358,10 @@ impl Config {
                 "enthalpy supports fixed or adaptive schedules and workload/fan sizing without steady design, studies or recirculation modes",
             ));
         }
-        if let Some(adjoint) = schedule.adjoint {
+        if schedule.adjoint.is_some() {
             if schedule.adaptive.is_some() {
                 return Err(bad("enthalpy adjoints require fixed timesteps"));
             }
-            adjoint.admit_enthalpy()?;
             if let Some(repeat) = schedule.repeat {
                 repeat.validate_adjoint()?;
             }

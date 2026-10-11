@@ -1,7 +1,7 @@
 //! Fixed-grid physical h-history transpose with complete endpoint air/radiation
 //! feedback. Replay checks both h and T; no temperature-to-enthalpy inverse is
 //! used for reverse carry, including inside latent plateaus.
-use super::super::adjoint::{Config as AdjointConfig, Observable, seed_initial};
+use super::super::adjoint::{Config as AdjointConfig, Observable, controls, seed_initial};
 use super::*;
 use fs_airflow::graph::thermal::coupled_transport::sensitivity::enthalpy::CoupledEnthalpyLinearization;
 use fs_conduction::transient::enthalpy::adjoint::EnthalpyStepLinearization;
@@ -64,7 +64,6 @@ impl Tape {
         let Some(config) = schedule.adjoint else {
             return Ok(None);
         };
-        config.admit_enthalpy()?;
         if schedule.adaptive.is_some()
             || schedule.power_design.is_some()
             || schedule.fan_speed_design.is_some()
@@ -79,6 +78,7 @@ impl Tape {
         }
         let vertices = request.mesh.vertex_count();
         let regions = request.surfaces.len();
+        let control_bytes = config.controls.storage_bytes(request, schedule)?;
         let planned = schedule
             .total_steps
             .checked_mul(cycles)
@@ -105,10 +105,11 @@ impl Tape {
         let charged_bytes = frame_bytes
             .zip(accumulator_bytes)
             .and_then(|(a, b)| a.checked_add(b))
+            .and_then(|n| n.checked_add(control_bytes))
             .ok_or_else(|| budget("enthalpy adjoint checkpoint size overflow"))?;
         if charged_bytes > config.max_checkpoint_bytes {
             return Err(budget(
-                "enthalpy adjoint h/temperature/reference checkpoints exceed max_checkpoint_bytes",
+                "enthalpy adjoint h/temperature/reference checkpoints and requested controls exceed max_checkpoint_bytes",
             ));
         }
         let mut frames = Vec::new();
@@ -232,6 +233,7 @@ impl Tape {
         let mut powers = vec![0.0; schedule.intervals.len()];
         let mut fan_speeds = vec![request.fan.as_ref().map(|_| 0.0); schedule.intervals.len()];
         let mut inlets = vec![0.0; request.graph.node_count()];
+        let mut controls = controls::Accumulation::new(self.config.controls, request, schedule)?;
         let mut reconstruction = Work::default();
         let mut reconstructed = 0_usize;
         let mut sweeps = 0_usize;
@@ -500,6 +502,14 @@ impl Tape {
                     for (sum, value) in inlets.iter_mut().zip(&gradient.inlets) {
                         *sum = finite(*sum + value)?;
                     }
+                    controls.record_pullback(
+                        request,
+                        cx,
+                        &frame.temperature,
+                        ordinal,
+                        &gradient.solid.source_density,
+                        &gradient.nodal_load,
+                    )?;
                     carry = gradient.solid.previous_specific_enthalpy;
                     reconstructed += 1;
                     sweeps = sweeps
@@ -528,8 +538,9 @@ impl Tape {
         } else {
             None
         };
+        let controls_fragment = controls.report_fragment(request, cx, schedule)?;
         let report = format!(
-            "{{\"method\":\"discrete-backward-euler-coupled-enthalpy-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":{},\"dtemperature_dinitial_specific_enthalpies_k_kg_j\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_j\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"reconstruction_solid_solves\":{},\"adjoint_sweeps\":{},\"adjoint_krylov_iterations\":{},\"max_interface_residual\":{},\"scope\":\"fixed accepted grid and cycle count; final or earliest sampled-maximum branch in global time, no continuous peak bound or unique derivative at ties; full specific-enthalpy history across every cycle, contact, mixed-air and declared ambient-radiation feedback; shared interval controls affect every repeated occurrence and multiply their actual source without division by baseline power; initial h derivatives describe the original initial field and have units K kg/J; inlet controls apply throughout; fan controls include single-bank affinity, capacity transport and supported convection Reynolds response, null when unavailable; fixed reference densities, charts, conductivity/contact laws, geometry, fluid properties and radiation controls; slope corners and validity endpoints refuse classical endpoint derivatives; replay verifies accepted h and T bits and rechecks physical residual/energy gates; checkpoint bytes bound retained h/T/references for all cycles and control accumulators, not total workspace; per-endpoint derivative budgets share the original wall deadline\"}}",
+            "{{\"method\":\"discrete-backward-euler-coupled-enthalpy-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":{},\"dtemperature_dinitial_specific_enthalpies_k_kg_j\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_j\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"reconstruction_solid_solves\":{},\"adjoint_sweeps\":{},\"adjoint_krylov_iterations\":{},\"max_interface_residual\":{}{controls_fragment},\"scope\":\"fixed accepted grid and cycle count; final or earliest sampled-maximum branch in global time, no continuous peak bound or unique derivative at ties; full specific-enthalpy history across every cycle, contact, mixed-air and declared ambient-radiation feedback; shared interval controls affect every repeated occurrence and multiply their actual source without division by baseline power; initial h derivatives describe the original initial field and have units K kg/J; inlet controls apply throughout; fan controls include single-bank affinity, capacity transport and supported convection Reynolds response, null when unavailable; separately requested component and contact controls report their own units and scope; fixed reference densities, charts, conductivity/contact laws, geometry, fluid properties and radiation controls; slope corners and validity endpoints refuse classical endpoint derivatives; replay verifies accepted h and T bits and rechecks physical residual/energy gates; checkpoint bytes bound retained h/T/references for all cycles and control accumulators, not total workspace; per-endpoint derivative budgets share the original wall deadline\"}}",
             quote(match self.config.observable {
                 Observable::Final => "final",
                 Observable::SampledPeak => "sampled-peak",
