@@ -18,7 +18,7 @@ mod conductivity;
 mod conjugate;
 mod natural;
 
-const NO_CLAIM: &str = "Estimated stationary P1 total-enthalpy transport with frozen reference mass and caller-declared equilibrium phase charts. Latent heat is stored only in specific enthalpy; no apparent heat capacity or additional latent account is used. Existing sourced conductivity, finite-resistance contact and prescribed Neumann/Robin boundaries remain active. Declared regional conductivity multipliers use each element's mean nodal liquid mass fraction and the shared exact enthalpy tangent, including phase feedback on latent plateaus. The base tensor retains its temperature dependence and source support; multipliers are declared phenomenological data, not a volume-fraction mixture or validated material claim. Declared ambient radiation uses sourced area-mean gray patches; every trial retains the same old enthalpy and the accepted endpoint passes independent physical residual and nonlinear-heat energy checks. Declared natural convection evaluates the existing card at each candidate wall temperature and requires the complete physical residual and energy balance to close; exact equilibrium and out-of-domain Rayleigh states retain their refusals. Declared quasi-steady airflow uses the existing branch heat-exchange owner and checks the complete endpoint at updated air references, with actual air enthalpy gain, off-path convection and nonlinear radiation counted separately. Natural reservoirs on distinct boundary targets compose with forced-air transport: every air trial encloses the existing natural/radiation endpoint solve while retaining the same accepted old enthalpy. The final physical audit evaluates updated natural coefficients and air references at the counted state; natural-reservoir and radiation heat stay separate from the forced-convective flux sent to air. Every workload switch is represented on both independent time grids. The final field comes only from the completed fine grid. The temperature difference is an assumed-first-order temporal estimate, not a spatial or continuous-time maximum bound; agreement on a latent plateau does not prove convergence of enthalpy or phase fraction. Supplied material-card identities and source text are attribution, not verification of the declared curves. Geometry, reference density and energetic internal variables are fixed. No material motion, density-driven expansion, phase kinetics, enclosure radiation, pointwise T^4 quadrature, airflow storage, time-varying fan dynamics or trajectory adjoint is inferred.";
+const NO_CLAIM: &str = "Estimated stationary P1 total-enthalpy transport with frozen reference mass and caller-declared equilibrium phase charts. Latent heat is stored only in specific enthalpy; no apparent heat capacity or additional latent account is used. Existing sourced conductivity, finite-resistance contact and prescribed Neumann/Robin boundaries remain active. Declared regional conductivity multipliers use each element's mean nodal liquid mass fraction and the shared exact enthalpy tangent, including phase feedback on latent plateaus. The base tensor retains its temperature dependence and source support; multipliers are declared phenomenological data, not a volume-fraction mixture or validated material claim. Declared ambient radiation uses sourced area-mean gray patches; every trial retains the same old enthalpy and the accepted endpoint passes independent physical residual and nonlinear-heat energy checks. Declared natural convection evaluates the existing card at each candidate wall temperature and requires the complete physical residual and energy balance to close; exact equilibrium and out-of-domain Rayleigh states retain their refusals. Declared quasi-steady airflow uses the existing branch heat-exchange owner and checks the complete endpoint at updated air references, with actual air enthalpy gain, off-path convection and nonlinear radiation counted separately. Natural reservoirs on distinct boundary targets compose with forced-air transport: every air trial encloses the existing natural/radiation endpoint solve while retaining the same accepted old enthalpy. The final physical audit evaluates updated natural coefficients and air references at the counted state; natural-reservoir and radiation heat stay separate from the forced-convective flux sent to air. Every workload switch is represented on both independent time grids. The final field comes only from the completed fine grid. The temperature difference is an assumed-first-order temporal estimate, not a spatial or continuous-time maximum bound; agreement on a latent plateau does not prove convergence of enthalpy or phase fraction. Supplied material-card identities and source text are attribution, not verification of the declared curves. Requested final or sampled-peak history derivatives revalidate the accepted fine endpoints and carry the shared exact specific-enthalpy transpose through fixed prescribed boundaries and contact. Reported controls are initial enthalpy, delivered regional power and fixed reference density; coupled-boundary feedback, constitutive calibration and time-grid derivatives are excluded. Geometry, reference density and energetic internal variables are fixed during each forward trajectory. No material motion, density-driven expansion, phase kinetics, enclosure radiation, pointwise T^4 quadrature, airflow storage, time-varying fan dynamics or coupled-boundary trajectory adjoint is inferred.";
 
 /// Storage-specific scope carried by the outer conduction report.
 pub(super) fn no_claim() -> &'static str {
@@ -50,11 +50,7 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
             "native enthalpy supports Neumann, prescribed Robin and checked natural-convection and airflow boundaries; temperature alone does not select latent enthalpy",
         ));
     }
-    if adjoint::requested(spec)?.is_some() {
-        return Err(bad(
-            "native temperature-history adjoints do not differentiate enthalpy storage",
-        ));
-    }
+    adjoint::requested(spec)?;
     Ok(())
 }
 
@@ -249,6 +245,7 @@ fn march(
     pressure_pa: f64,
     labels: &[u32],
     goal_region: Option<u32>,
+    mut tape: Option<&mut adjoint::EnthalpyTape>,
     deadline: Option<(Instant, f64)>,
 ) -> Result<GridResult, SolveRefusal> {
     let mut old = initial.to_vec();
@@ -543,6 +540,9 @@ fn march(
             number(threshold_j)?, endpoint.newton.iterations,
             number(liquid_mass)?, number(liquid_mass / total_mass)?,
         ));
+        if let Some(history) = tape.as_deref_mut() {
+            history.record(cx, &endpoint, deadline)?;
+        }
         old.clone_from(&endpoint.specific_enthalpy_j_kg);
         last = Some(endpoint);
         endpoint_dt_s = dt;
@@ -605,6 +605,7 @@ pub(super) fn solve(
         .enthalpy
         .as_ref()
         .ok_or_else(|| bad("missing enthalpy storage"))?;
+    let objective = adjoint::requested(spec)?;
     let grids = TimeGrids::new(policy)?;
     let total_steps = grids
         .coarse
@@ -671,6 +672,15 @@ pub(super) fn solve(
         .checked_mul(restart)
         .and_then(|v| v.checked_mul(newton.max_linear_cycles))
         .ok_or_else(|| bad("combined enthalpy Krylov allowance overflows"))?;
+    let adjoint_krylov_limit = if objective.is_some() {
+        grids.fine.len().checked_mul(linear.max_iterations)
+            .ok_or_else(|| bad("enthalpy adjoint Krylov allowance overflows"))?
+    } else {
+        0
+    };
+    let total_forward_and_adjoint_krylov_limit = total_krylov_limit
+        .checked_add(adjoint_krylov_limit)
+        .ok_or_else(|| bad("combined enthalpy forward/adjoint work allowance overflows"))?;
     let total_backtrack_evaluation_limit = total_newton_limit
         .checked_mul(storage.max_backtracks as usize + 1)
         .ok_or_else(|| bad("combined enthalpy line-search allowance overflows"))?;
@@ -751,6 +761,15 @@ pub(super) fn solve(
     } else {
         0
     };
+    let adjoint_bytes = if objective.is_some() {
+        adjoint::enthalpy_storage_bytes(
+            n, elements, grids.fine.len(), storage.materials.len(),
+            problem.boundary.conditions().len(), config.max_newton_iterations,
+            linear.max_iterations,
+        )?
+    } else {
+        0
+    };
     // Only the final inner Newton history of each accepted step is retained;
     // discarded air, natural and radiation trials reuse bounded workspace.
     // This is declared-memory admission, not allocator overhead or peak RSS.
@@ -767,6 +786,7 @@ pub(super) fn solve(
         .and_then(|v| v.checked_add(radiation_bytes))
         .and_then(|v| v.checked_add(natural_bytes))
         .and_then(|v| v.checked_add(airflow_bytes))
+        .and_then(|v| v.checked_add(adjoint_bytes))
         .ok_or_else(|| bad("enthalpy memory allowance overflows"))?;
     if u64::try_from(bytes).unwrap_or(u64::MAX)
         > spec
@@ -880,8 +900,23 @@ pub(super) fn solve(
         pressure_pa,
         labels,
         goal_region,
+        None,
         deadline,
     )?;
+    let mut tape = if objective.is_some() {
+        let mut temperatures = Vec::with_capacity(n);
+        for (vertex, &id) in engine.vertex_material_ids().iter().enumerate() {
+            if vertex % 256 == 0 {
+                poll(cx, deadline)?;
+            }
+            temperatures.push(initial_temperatures[id]);
+        }
+        Some(adjoint::EnthalpyTape::new(
+            cx, &initial, &temperatures, grids.fine.len(), deadline,
+        )?)
+    } else {
+        None
+    };
     let fine = march(
         cx,
         &engine,
@@ -897,8 +932,22 @@ pub(super) fn solve(
         pressure_pa,
         labels,
         goal_region,
+        tape.as_mut(),
         deadline,
     )?;
+    let adjoint_fragment = match (objective, tape) {
+        (Some(objective), Some(tape)) => {
+            let derivative = adjoint::finish_enthalpy(
+                cx, &engine, problem, interfaces, &grids.fine, workload.as_ref(),
+                config, linear, labels, region_ids,
+                goal_region.ok_or_else(|| bad("enthalpy adjoint lost its goal region"))?,
+                storage, tape, objective, deadline,
+            )?;
+            format!(",\"adjoint\":{derivative}")
+        }
+        (None, None) => String::new(),
+        _ => return Err(bad("enthalpy adjoint request and retained history disagree")),
+    };
     let coarse_qoi = ladder_functional(
         labels,
         &problem.mesh.complex().tets,
@@ -1040,7 +1089,7 @@ pub(super) fn solve(
         "regional-enthalpy"
     });
     let receipt = format!(
-        "{{\"schema\":\"fs-cli-transient-enthalpy-v1\",\"method\":\"backward-euler-total-enthalpy\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_state\":{initial_state},\"initial_temperature_k\":{initial_temperature_receipt},\"final_time_s\":{},\"coarse_steps\":{},\"fine_steps\":{},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_max_step_s\":{},\"fine_max_step_s\":{},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"materials\":[{}],\"nonlinear\":{{\"method\":\"newton-fgmres\",\"residual_units\":\"J\",\"report_residual_units\":\"W\",\"max_updates_per_step\":{},\"max_backtracks_per_update\":{},\"linear_restart\":{restart},\"max_linear_cycles\":{},\"total_newton_limit\":{total_newton_limit},\"retained_history_update_limit\":{retained_newton_history_limit},\"total_krylov_limit\":{total_krylov_limit},\"total_updates\":{},\"residual_atol_j\":{},\"residual_rtol\":{},\"armijo_c\":0.0001,\"line_search_shrink\":0.5{nonlinear_history_fragment}}}{radiation_receipt}{natural_receipt_fragment}{airflow_receipt_fragment},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"max_specific_enthalpy_difference_j_kg\":{},\"max_liquid_mass_fraction_difference\":{},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"endpoint\":{{\"vertex_order\":\"retained-conduction-mesh\",\"specific_enthalpy_j_kg\":[{}],\"liquid_mass_fraction\":[{}],\"reference_nodal_mass_kg\":[{}]}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"schema\":\"fs-cli-transient-enthalpy-v1\",\"method\":\"backward-euler-total-enthalpy\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_state\":{initial_state},\"initial_temperature_k\":{initial_temperature_receipt},\"final_time_s\":{},\"coarse_steps\":{},\"fine_steps\":{},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_max_step_s\":{},\"fine_max_step_s\":{},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"materials\":[{}],\"nonlinear\":{{\"method\":\"newton-fgmres\",\"residual_units\":\"J\",\"report_residual_units\":\"W\",\"max_updates_per_step\":{},\"max_backtracks_per_update\":{},\"linear_restart\":{restart},\"max_linear_cycles\":{},\"total_newton_limit\":{total_newton_limit},\"retained_history_update_limit\":{retained_newton_history_limit},\"total_krylov_limit\":{total_krylov_limit},\"total_forward_and_adjoint_krylov_limit\":{total_forward_and_adjoint_krylov_limit},\"total_updates\":{},\"residual_atol_j\":{},\"residual_rtol\":{},\"armijo_c\":0.0001,\"line_search_shrink\":0.5{nonlinear_history_fragment}}}{radiation_receipt}{natural_receipt_fragment}{airflow_receipt_fragment}{adjoint_fragment},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"max_specific_enthalpy_difference_j_kg\":{},\"max_liquid_mass_fraction_difference\":{},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"endpoint\":{{\"vertex_order\":\"retained-conduction-mesh\",\"specific_enthalpy_j_kg\":[{}],\"liquid_mass_fraction\":[{}],\"reference_nodal_mass_kg\":[{}]}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         number(policy.horizon.value)?,
         grids.coarse.len(),
         grids.fine.len(),

@@ -133,9 +133,66 @@ controls. Existing v12 projects migrate with their capacities unchanged.
 This native mode supports fixed reference geometry, temperature-dependent
 conductivity, regional power schedules, matching finite-resistance contact,
 prescribed Neumann/Robin boundaries, sourced natural convection or quasi-steady
-airflow convection, and ambient radiation. Prescribed temperatures and adjoint
-requests currently refuse for enthalpy storage. The declared curves and card identities create no
+airflow convection, and ambient radiation. Prescribed temperatures refuse for
+enthalpy storage. Requested trajectory adjoints support prescribed exterior
+laws and fixed contact; radiation, natural-convection and airflow feedback
+remain outside the native enthalpy adjoint scope. The declared curves and card identities create no
 material-query receipts, expansion, phase kinetics or experimental validation.
+
+### Sensitivities through a phase change
+
+`cooling-enthalpy-adjoint.fsim` heats the insulated tetrahedron through its
+latent plateau and requests the existing report output:
+
+```lisp
+(qoi :name "temperature-final-adjoint" :kind "report")
+```
+
+The alternative `temperature-sampled-peak-adjoint` selects the earliest
+largest nodal temperature among the retained fine-grid states, including the
+initial state. Select one report at a time. Both use the existing
+temperature-maximum requirement region. Their selected branch and any tied
+maxima remain explicit in the report.
+
+```bash
+frankensim --json validate data/reference-project/cooling-enthalpy-adjoint.fsim
+frankensim --json import data/reference-project/cooling-enthalpy-adjoint.fsim \
+  data/reference-project/plate.stl enthalpy-adjoint.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-enthalpy-adjoint.fsim \
+  enthalpy-adjoint.db --materials data/reference-project/aa6061.fsmcdpk
+```
+
+The example declares a synthetic 1 kg/m³ reference density, 100 J/(kg K)
+sensible heat capacity and a 60 J/kg latent interval at 293.35 K. It starts
+at zero specific enthalpy, supplies 5 W for four seconds and uses the
+tetrahedron's 1/6 m³ volume. Conservation therefore predicts a final
+specific enthalpy of 120 J/kg and temperature of 293.75 K. Its fine grid
+samples the interior of the plateau, then leaves it before the final time.
+
+For uniform input changes, the independent derivatives are
+0.01 K per J/kg of initial specific enthalpy, 0.24 K per added watt supplied
+throughout the run, and -1.2 K per kg/m³ of reference density. These are
+analytic expectations for this manufactured example, not asserted execution
+results. The uniform temperature maximum may have tied vertices; the report
+identifies the selected nodal branch and does not call a tie a unique
+maximum derivative.
+
+The `transient.adjoint` object uses schema
+`fs-cli-native-enthalpy-adjoint-v1`. It records initial nodal and regional
+enthalpy gradients, absolute regional-power gradients for every fine interval,
+source-multiplier gradients and regional reference-density gradients.
+Absolute-power controls remain available during zero-power intervals.
+Sum the interval derivatives to differentiate a workload segment or a
+power change held throughout the run.
+
+The solver revalidates each retained accepted endpoint before applying the
+shared exact transpose. The reverse state is a specific-enthalpy gradient;
+it never divides by the temperature slope on a latent plateau. A selected
+initial peak has no dependence on future power or reference mass. Requests
+at genuine chart or material derivative corners refuse. These local
+derivatives keep geometry, boundary laws, contact data, chart values and
+the time grid fixed. They supply neither a continuous-time peak derivative
+nor an uncertainty or physical-validation certificate.
 
 ### Fan-cooled phase storage
 

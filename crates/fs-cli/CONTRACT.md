@@ -1562,8 +1562,8 @@ fine-grid final temperature. Coarse/fine enthalpy and phase differences remain
 visible even when both temperatures agree on a plateau; equal temperatures
 do not become a zero-error temporal claim. This is Estimated fixed-domain
 transport, with source attribution rather than authentication of supplied
-phase data. Prescribed temperature and native trajectory adjoints are
-currently refused for this storage model. Expansion,
+phase data. Prescribed temperature is refused for this storage model.
+Native trajectory adjoints are admitted under the scope below. Expansion,
 motion and phase kinetics are not inferred.
 `data/reference-project/cooling-enthalpy.fsim` and `TRANSIENT.md` give a complete
 synthetic melting example through validate/import/solve/report. Driver version
@@ -1601,7 +1601,8 @@ multiplies the radiation and Newton caps in admission; direct audits are
 bounded by 102 per step without natural convection. Memory admission includes
 air staging, retained per-segment receipts and final inner Newton histories
 per accepted endpoint; discarded coupling trials reuse bounded workspace.
-Enclosure radiation and enthalpy trajectory adjoints still refuse. Driver
+Enclosure radiation and enthalpy trajectory adjoints with boundary feedback
+still refuse. Driver
 version 65 separates this physical coupling from older retained solves. `examples/heatsink-fan/heatsink-fan-enthalpy.fsim` is the
 native fan-cooled synthetic phase-storage example.
 
@@ -1625,6 +1626,46 @@ The mixed G1/G3 regressions in `tests/solve/transient_enthalpy_conjugate.rs`
 check signed heat, integrated latent storage and phase fraction against
 independent balances and exercise that input through the native pipeline.
 Air storage, fan dynamics, moving phases and transient adjoints are not inferred.
+
+Driver version 67 admits the existing `temperature-final-adjoint` and
+`temperature-sampled-peak-adjoint` report outputs also support native
+enthalpy trajectories with prescribed exterior laws and fixed matching
+contact. They use the temperature-maximum requirement region and the
+completed fine grid; the peak selector includes the initial state and
+retains its earliest maximizing branch. Tied maxima are marked explicitly.
+
+Only requested adjoints retain full accepted fine endpoints. Storage
+admission includes those checkpoints, source bases, reverse staging and
+derivative rows. The heterogeneous shared `linearize_accepted` owner
+recomputes physical residual, energy, chart and material smoothness before
+each reverse step. Revalidated h, temperature and phase must match their
+retained fields. No nonlinear endpoint is re-solved or replaced, and no
+primal field or energy total comes from the reverse calculation.
+
+The `fs-cli-native-enthalpy-adjoint-v1` object appears under
+`transient.adjoint`. Its controls are initial nodal and regional specific
+enthalpy, absolute regional delivered watts per fine interval, interval
+source multipliers, and regional reference density plus its uniform
+multiplier. The shared source projector is the same one used for forward
+power, including zero-baseline regions. Density differentiation changes
+fixed reference storage mass while holding the phase chart, conductivity,
+contact and geometry fixed; it models no density-driven expansion.
+Initial enthalpy gradients are not labeled initial-temperature gradients.
+
+The reverse carry remains in h coordinates through latent plateaus;
+temperature seeds are pulled back only at the selected objective state.
+A selected initial peak uses a checked local chart slope and has zero
+future source or density influence. The shared transpose checks its true
+residual within the admitted per-solve linear work cap. Reports retain
+revalidated endpoint counts, total dual iterations, worst residual and
+bounded reverse work. Chart/material derivative corners refuse rather than
+inventing a classical gradient. Prescribed boundary parameters, constitutive
+laws, phase multipliers, contact, geometry and the time grid are held fixed.
+Radiation, natural convection and airflow feedback remain explicitly
+unsupported in this native adjoint path. This is a local Estimated
+derivative, without a gradient-error, continuous-peak or validation claim.
+`data/reference-project/cooling-enthalpy-adjoint.fsim` supplies a synthetic
+latent-to-sensible heating example with independent analytic expectations.
 
 Schema v14 optionally declares a conductivity multiplier for each regional
 enthalpy material. `linear-liquid-mass-fraction` interpolates between positive

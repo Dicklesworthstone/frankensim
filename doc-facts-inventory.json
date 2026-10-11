@@ -575,6 +575,7 @@
     "crates/fs-cli/tests/solve.rs",
     "crates/fs-cli/tests/solve/radiation_product.rs",
     "crates/fs-cli/tests/solve/transient_enthalpy.rs",
+    "crates/fs-cli/tests/solve/transient_enthalpy_adjoint.rs",
     "crates/fs-cli/tests/solve/transient_enthalpy_conductivity.rs",
     "crates/fs-cli/tests/solve/transient_enthalpy_conjugate.rs",
     "crates/fs-cli/tests/solve/transient_enthalpy_initial.rs",

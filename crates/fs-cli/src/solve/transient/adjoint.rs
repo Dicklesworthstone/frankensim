@@ -9,6 +9,10 @@ use super::{SolveRefusal, bad, poll};
 
 mod reverse;
 pub(super) use reverse::finish;
+mod enthalpy;
+pub(super) use enthalpy::{
+    EnthalpyTape, finish as finish_enthalpy, storage_bytes as enthalpy_storage_bytes,
+};
 
 #[cfg(test)]
 mod tests;

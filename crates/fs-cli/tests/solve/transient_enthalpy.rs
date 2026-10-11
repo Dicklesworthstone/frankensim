@@ -462,7 +462,7 @@ fn g1_native_enthalpy_shipped_example_runs_through_the_existing_report_stage() {
 
 #[test]
 fn g0_native_enthalpy_refusals_leave_no_published_conduction_field() {
-    for variant in ["domain", "temperature-boundary", "adjoint"] {
+    for variant in ["domain", "temperature-boundary"] {
         let mut spec = project(6.0, 2.0, &[(-1.0, 292.15, 0.0), (2.0, 295.15, 0.0)]);
         if variant == "temperature-boundary" {
             spec.cooling
@@ -475,12 +475,6 @@ fn g0_native_enthalpy_refusals_leave_no_published_conduction_field() {
                 .condition = ThermalBoundaryCondition::FixedTemperature {
                 temperature: QtyAny::new(293.15, dims::TEMPERATURE),
             };
-        } else if variant == "adjoint" {
-            spec.outputs.as_mut().unwrap().push(OutputRequest {
-                name: "temperature-final-adjoint".into(),
-                kind: "report".into(),
-                region: None,
-            });
         }
         let ledger = Ledger::open(":memory:").unwrap();
         import_fixture(&ledger, &spec, tetra_stl());

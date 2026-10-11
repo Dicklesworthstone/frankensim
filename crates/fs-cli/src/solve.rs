@@ -206,7 +206,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// network, with updated-reference physical residual and actual-air heat gates.
 /// Version 66 closes natural reservoirs, forced air and radiation together
 /// over immutable native total-enthalpy history, including latent plateaus.
-pub const SOLVE_DRIVER_VERSION: u32 = 66;
+/// Version 67 differentiates accepted native enthalpy trajectories with exact
+/// history, regional delivered-power and frozen-reference-density pullbacks.
+pub const SOLVE_DRIVER_VERSION: u32 = 67;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
