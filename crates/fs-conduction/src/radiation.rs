@@ -13,14 +13,15 @@
 //!   freezes the resulting face fluxes for one conduction solve and repeats
 //!   until the declared surface-temperature criterion closes.
 //!
-//! General-geometry view-factor generation is not implemented here.  A caller
-//! may provide an analytic or externally generated QMC matrix, but admission
-//! checks row closure, non-negativity, and area-weighted reciprocity before the
-//! matrix can influence a solve.
+//! [`view_factors`] generates finite-geometry factors with bounded, cancellable
+//! diffuse ray sampling and empirical replicate diagnostics. Closed-enclosure
+//! use requires an explicit conservation projection within a caller budget.
+//! Analytic and externally generated matrices remain supported; admission
+//! checks row closure, non-negativity, and area-weighted reciprocity.
 
 use std::collections::BTreeSet;
 
-use fs_blake3::{ContentHash, hash_domain};
+use fs_blake3::{ContentHash, DomainHasher, hash_domain};
 use fs_exec::Cx;
 use fs_matdb::{ClaimId, ClaimSelection, MaterialCard, PropertyUsageReceipt, QueryPoint,
     SelectionPolicy, UncertaintyModel};
@@ -36,6 +37,7 @@ use crate::solve::{
 };
 
 mod ambient;
+pub mod view_factors;
 pub use ambient::{
     AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationPatchReport,
     AmbientRadiationReport, AmbientRadiationSolution, solve_with_ambient_radiation,
@@ -429,7 +431,7 @@ impl LinearizedSurfaceRadiation {
 }
 
 /// Evidence attached to an admitted view-factor matrix.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ViewFactorEvidence {
     /// A named analytic limiting or closed-form geometry.
     Analytic {
@@ -437,8 +439,8 @@ pub enum ViewFactorEvidence {
         geometry: String,
     },
     /// An externally generated randomized/QMC estimate.  This crate validates
-    /// the matrix and retains the generation coordinates; it does not claim to
-    /// implement the geometry sampler.
+    /// the matrix and retains the generation coordinates; it does not claim
+    /// to have checked the external generator's geometry.
     ExternalQmc {
         /// Counter-based seed used by the external generator.
         seed: u64,
@@ -446,6 +448,15 @@ pub enum ViewFactorEvidence {
         samples: u64,
         /// Stable generator/version identifier.
         generator: String,
+    },
+    /// This crate's geometry sampler followed by an explicit bounded
+    /// conservation projection. Discrete closure is not geometric validation.
+    GeometryQmc {
+        /// Identity of exact mesh, patch partition, sampling coordinates and
+        /// all independent replicate hit/loss counts.
+        estimate: ContentHash,
+        /// Actual largest absolute correction of a raw sampled factor.
+        max_abs_adjustment: f64,
     },
 }
 
@@ -510,6 +521,16 @@ impl ViewFactorMatrix {
                     "view-factors",
                     "external-QMC evidence requires a positive sample count and generator identifier",
                     "retain the explicit seed, positive ray count, and generator/version label",
+                ));
+            }
+            ViewFactorEvidence::GeometryQmc { max_abs_adjustment, .. }
+                if !max_abs_adjustment.is_finite()
+                    || !(0.0..1.0).contains(max_abs_adjustment) =>
+            {
+                return Err(radiation_error(
+                    "view-factors",
+                    "geometry-QMC evidence requires a finite factor correction in [0,1)",
+                    "retain the actual bounded conservation projection report",
                 ));
             }
             _ => {}
@@ -768,6 +789,11 @@ fn view_factor_identity(
             bytes.extend_from_slice(&(generator.len() as u64).to_le_bytes());
             bytes.extend_from_slice(generator.as_bytes());
         }
+        ViewFactorEvidence::GeometryQmc { estimate, max_abs_adjustment } => {
+            bytes.push(2);
+            bytes.extend_from_slice(estimate.as_bytes());
+            bytes.extend_from_slice(&max_abs_adjustment.to_bits().to_le_bytes());
+        }
     }
     hash_domain(VIEW_FACTOR_IDENTITY_DOMAIN, &bytes)
 }
@@ -898,20 +924,35 @@ impl RadiationSurface {
 }
 
 fn radiation_mesh_identity(mesh: &ConductionMesh) -> ContentHash {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&(mesh.vertex_count() as u64).to_le_bytes());
-    bytes.extend_from_slice(&(mesh.element_count() as u64).to_le_bytes());
-    for position in mesh.positions() {
+    match radiation_mesh_identity_with_poll(mesh, |_| Ok::<(), std::convert::Infallible>(())) {
+        Ok(identity) => identity,
+        Err(never) => match never {},
+    }
+}
+
+// One canonical byte sequence for existing radiation bindings and cancellable
+// geometry admission. Streaming preserves all existing roots and avoids an
+// unbounded temporary buffer for interior tetrahedra.
+fn radiation_mesh_identity_with_poll<E>(
+    mesh: &ConductionMesh,
+    mut poll: impl FnMut(usize) -> Result<(), E>,
+) -> Result<ContentHash, E> {
+    let mut hasher = DomainHasher::new(RADIATION_MESH_IDENTITY_DOMAIN);
+    hasher.update(&(mesh.vertex_count() as u64).to_le_bytes());
+    hasher.update(&(mesh.element_count() as u64).to_le_bytes());
+    for (index, position) in mesh.positions().iter().enumerate() {
+        if index % 256 == 0 { poll(index)?; }
         for coordinate in position {
-            bytes.extend_from_slice(&coordinate.to_bits().to_le_bytes());
+            hasher.update(&coordinate.to_bits().to_le_bytes());
         }
     }
-    for tet in &mesh.complex().tets {
+    for (index, tet) in mesh.complex().tets.iter().enumerate() {
+        if index % 256 == 0 { poll(index)?; }
         for vertex in tet {
-            bytes.extend_from_slice(&vertex.to_le_bytes());
+            hasher.update(&vertex.to_le_bytes());
         }
     }
-    hash_domain(RADIATION_MESH_IDENTITY_DOMAIN, &bytes)
+    Ok(hasher.finalize())
 }
 
 /// Nonlinear gray-diffuse enclosure with fixed view factors.

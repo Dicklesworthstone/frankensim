@@ -77,11 +77,26 @@ gray-diffuse enclosure solves
 `J_i - (1 - ε_i) Σ_j F_ij J_j = ε_i σ T_i⁴`, then applies
 `q_i = J_i - Σ_j F_ij J_j` as a frozen outward face flux in a declared outer
 fixed point. Emissivity comes from an `fs-matdb` material card; this crate
-generates exactly one closed-form analytic view-factor geometry, the
-two-surface concentric-sphere enclosure. Other view factors are caller-supplied
-and admitted with analytic or external-QMC evidence. These radiation rungs
+generates the closed-form two-surface concentric-sphere geometry and supports
+finite-mesh diffuse view-factor sampling through `radiation::view_factors`.
+Caller-supplied analytic or external-QMC matrices remain admitted with their
+own evidence. These radiation rungs
 retain and enforce the selected emissivity claim's temperature-validity
 interval.
+
+`estimate_diffuse_view_factors` samples area and cosine-weighted outward
+directions using independent Owen-scrambled Sobol replicates. Every boundary
+triangle remains an opaque first-hit obstacle, even when it is not a named
+patch. The raw result retains hit counts, escaped/unassigned/back-facing
+counts, empirical standard errors, actual intersection work, and an identity
+binding the physical mesh, patch partition, seed and replicate counts.
+`project_closed` is separate and explicit: it refuses any sampled loss,
+symmetrizes area-weighted exchange, preserves the symmetric sampled zero
+pattern, and uses bounded symmetric scaling to close rows. Excessive factor
+adjustments, infeasible support and exhausted work refuse. Discrete conservation
+does not establish geometric closure or a confidence bound. The current direct
+triangle scan admits 2..=64 patches, 2..=32 replicates, up to one million
+triangles, power-of-two samples and an explicit total intersection budget.
 
 `solve_with_ambient_radiation` adds the nonlinear area-mean patch law
 `epsilon sigma A (T_mean^4 - T_ambient^4)` to existing named uniform Robin
@@ -172,6 +187,8 @@ diameter.
 | `SurfaceEmissivity` | one dimensionless hemispherical-total emissivity selected from an `fs-matdb` material card; retains material state, card identity, exact property-use receipt, selected claim's optional closed temperature-validity interval, and the source uncertainty statement |
 | `LinearizedSurfaceRadiation` / `LinearizedRadiationPoint` | a declared `4 ε σ T_mean³` Robin coefficient with a caller-chosen departure budget, enforced emissivity-card validity, full `T⁴` comparison, measured point discrepancy, and first-order emissivity-width propagation |
 | `ViewFactorMatrix` / `ViewFactorEvidence` | an admitted closed-enclosure matrix whose row sums, area-weighted reciprocity, tolerances, evidence tag, and content identity are checked and retained; `concentric_spheres` supplies one closed-form two-surface geometry |
+| `DiffuseViewFactorConfig` / `DiffuseViewFactorEstimate` | bounded mesh visibility sampling in `radiation::view_factors`; raw loss-aware factors and empirical replicate errors |
+| `ViewFactorProjection` / `ProjectedViewFactors` | explicit sampled-matrix conservation correction with actual adjustment, work and geometry-QMC evidence retained |
 | `RadiationSurface` / `GrayDiffuseEnclosure` / `RadiosityReport` | named non-overlapping P1 exterior traces, deterministic diffuse-gray radiosity, net heat rates, system residual, and enclosure energy closure |
 | `CoupledRadiationConfig` / `CoupledRadiationSolution` | a budgeted, under-relaxed outer fixed point that applies one uniform frozen radiation flux per named trace to explicit adiabatic-remainder faces |
 | `AmbientRadiationPatch` / `AmbientRadiationConfig` / `AmbientRadiationSolution` | nonlinear ambient patch radiation sharing the original uniform Robin trace, with separate convection/radiation accounting, heterogeneous material and finite contact preserved, independent temperature/watt gates and exact final binding |
@@ -692,6 +709,12 @@ None. Everything here is `[S]` solid work on the default path.
   row closure, self-view, and analytic evidence tag; its companion refusal test
   rejects nonphysical radii, nonrepresentable (underflowing or overflowing)
   areas, and a positive factor that underflows.
+- `tests/geometry_view_factors.rs` — finite-square analytic integral in a
+  rectangular cavity made from real tetrahedral panels, unequal-area
+  conservation projection and radiosity closure, an opaque unassigned blocker,
+  outward escape, named-stream replay, and cancellation/work/refusal cases.
+  These target geometric sampling and discrete algebra, not physical calibration
+  or a certified error interval.
 - `tests/adjoint.rs` — the linear IFT gradient against central differences
   through `fs_adjoint::verify_gradient`, plus G1 manufactured P1 and P2 dual L2
   ladders with per-rung discrete primal/dual identity checks (4 tests).
@@ -789,13 +812,15 @@ authority.
   no k(T) marching.
 - RADIATION IS A SURFACE-ONLY FIRST RUNG. Linearized surface-to-ambient exchange
   and diffuse-gray closed-enclosure exchange are implemented. This crate
-  generates exactly one closed-form geometry, the two-surface concentric-sphere
-  enclosure; it does not generate general view factors from geometry, run its
-  own QMC rays, or validate an external-QMC generator. Other matrices remain
-  caller-supplied and retain their declared seed, sample count, and generator
-  label. There is no participating
-  medium, spectral/specular/semitransparent model, spatially varying
-  emissivity, or self-shadowing geometry query. In particular, the
+  generates a closed-form concentric-sphere matrix and finite-triangle
+  geometry-QMC estimates with explicit opaque first-hit visibility. Sampled
+  losses cannot be redistributed into a closed matrix. Neither zero observed
+  losses, empirical replicate errors nor conservation projection prove closure
+  or bound geometric error. No BVH acceleration, robust-predicate guarantee,
+  external-generator validation, participating medium,
+  spectral/specular/semitransparent model or spatially varying emissivity is
+  provided. The geometry and view factors remain fixed during a solve; no
+  geometric sensitivity follows from the radiosity tangent. In particular, the
   infinite-parallel-plate constructor materializes the analytic limiting value
   `1`; it is an input convenience and admission fixture, not an executing
   view-factor kernel. The linearized departure budget is caller-declared and

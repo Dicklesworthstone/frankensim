@@ -23,6 +23,7 @@ fs-math = { path = "../fs-math" }
 fs-material = { path = "../fs-material" }
 fs-matdb = { path = "../fs-matdb" }
 fs-qty = { path = "../fs-qty" }
+fs-rand = { path = "../fs-rand" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }
