@@ -15,6 +15,7 @@ mod engine;
 mod microphone;
 mod pressure_basis;
 mod audio;
+mod wav_output;
 mod hammer_materials;
 mod string_polarization;
 mod cavity;
@@ -42,7 +43,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--receiver-pressure-csv receivers.csv]
     [--pressure-basis-json basis.json]
     [--sample-rate Hz] [--substeps 1..16] [--modes 1..512]
-    [--pcm-full-scale-pa positive-Pa]
+    [--pcm-full-scale-pa positive-Pa] [--wav-format pcm16|pcm24|float32]
     [--dump-scale strings.csv] [--dump-board board.csv]
 --preset steinway-d reconstructs the published 17-rib Model D drawing, with
 spruce panel, sugar-pine ribs, maple bridges, cut-off bar and 88 bridge stations.
@@ -198,10 +199,14 @@ loaded diagonal reference frequencies for that render. Its columns match
 modal pressure indices; these frequencies are not full coupled instrument poles.
 --diagnostic-volume retains the old volume-velocity observer; --observer-gain
 applies only to that diagnostic, not to physical microphone pressure.
---pcm-full-scale-pa declares the pressure mapped to PCM full scale (default 2 Pa).
+--pcm-full-scale-pa declares the pressure mapped to digital full scale (default 2 Pa).
+--wav-format writes PCM16 (default), PCM24 or Float32 directly from computed
+pressure, preserving quiet decay without an intermediate PCM16/CSV conversion.
+The same explicit pressure scale applies to both channels. Float32 can retain
+finite values beyond +/-1; attenuate them before fixed-point playback.
 All output paths must be fresh, with existing parent directories. Equivalent
 paths through dot components or symlinked parents refuse before preparation.
-An over-range render refuses before writing a clipped WAV; this option changes
+An over-range fixed-point render refuses before writing a clipped WAV; this option changes
 encoding gain, not the mechanics, microphone position, or acoustic calibration.";
 
 #[derive(Debug)]
@@ -225,6 +230,7 @@ struct Options {
     pressure_basis_json: Option<String>,
     note: Option<u8>, velocity: Option<f64>, duration: f64,
     sample_rate: u32, substeps: usize, modes: usize, pcm_full_scale_pa: f64, help: bool,
+    wav_format: wav_output::Format,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -243,7 +249,8 @@ impl Default for Options {
             dump_board: None, bridge_trace_csv: None, modal_pressure_csv: None, receiver_pressure_csv: None,
             pressure_basis_json: None,
             note: None, velocity: None, duration: 6.0,
-            sample_rate: 48_000, substeps: 4, modes: 24, pcm_full_scale_pa: 2.0, help: false }
+            sample_rate: 48_000, substeps: 4, modes: 24, pcm_full_scale_pa: 2.0, help: false,
+            wav_format: wav_output::Format::default() }
     }
 }
 impl Options {
@@ -314,8 +321,12 @@ impl Options {
                 "--substeps" => options.substeps = value.parse().map_err(|_| invalid())?,
                 "--modes" => options.modes = value.parse().map_err(|_| invalid())?,
                 "--pcm-full-scale-pa" => options.pcm_full_scale_pa = value.parse().map_err(|_| invalid())?,
+                "--wav-format" => options.wav_format = wav_output::Format::parse(value)?,
                 _ => return Err(format!("unknown option {flag}\n{USAGE}")),
             }
+        }
+        if seen.contains("--wav-format") && options.render.is_none() {
+            return Err("--wav-format requires --render".into());
         }
         if options.note.is_some_and(|n| !(21..=108).contains(&n))
             || options.velocity.is_some_and(|v| !v.is_finite() || v <= 0.0 || v > 8.0)
@@ -940,8 +951,10 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
     let elapsed = start.elapsed().as_secs_f64();
     let peak = pressure.iter().fold(0.0_f64, |a, p| a.max(p.abs()));
     let seconds = f64::from(count) / f64::from(rate);
-    check_pcm_headroom(peak, options.pcm_full_scale_pa)?;
-    let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav_interleaved(&pressure, rate, channels as u16, options.pcm_full_scale_pa).map_err(|e| e.to_string())?;
+    if options.wav_format != wav_output::Format::Float32 {
+        check_pcm_headroom(peak, options.pcm_full_scale_pa)?;
+    }
+    let wav = options.wav_format.encode(&pressure, rate, channels as u16, options.pcm_full_scale_pa)?;
     write_fresh_output(path, &wav)?;
     if let (Some(csv), Some(velocity)) = (&options.bridge_trace_csv, &bridge_velocity) {
         write_bridge_trace(csv, velocity, &pressure, rate, channels)?;
@@ -964,14 +977,17 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         println!("Loaded pressure basis: {json}; exact projection map and diagonal reference frequencies, not full instrument poles.");
     }
     if stream.microphone().is_some() {
-        println!("Computed half-space pressure in Pa; PCM full scale {} Pa, no peak normalization. Infinite baffle; no room/lid scattering, radiation loading or measured-SPL calibration.", options.pcm_full_scale_pa);
+        println!("Computed half-space pressure in Pa; {} full scale {} Pa, no peak normalization. Infinite baffle; no room/lid scattering, radiation loading or measured-SPL calibration.", options.wav_format.label(), options.pcm_full_scale_pa);
     } else {
         println!("Diagnostic volume-velocity observer, gain {} Pa/(m^3/s); no peak normalization or calibrated SPL claim.", options.observer_gain);
     }
     let piano = stream.instrument();
     println!("{} string modes; {} board modes; {} above-band duplex segments omitted from dynamic retention (static attachment retained).",
         piano.bank.modes.len(), piano.bank.board_count, piano.bank.omitted_duplex_modes);
-    println!("{seconds:.6} s, {channels} channel(s) rendered in {elapsed:.6} s; wall/audio ratio {:.4}; peak {peak:.6} Pa-equivalent; {clips} PCM clips.", elapsed / seconds);
+    println!("{seconds:.6} s, {channels} channel(s) rendered in {elapsed:.6} s; wall/audio ratio {:.4}; peak {peak:.6} Pa-equivalent; {} output, no clipped samples.", elapsed / seconds, options.wav_format.label());
+    if options.wav_format == wav_output::Format::Float32 && peak > options.pcm_full_scale_pa {
+        println!("Float WAV preserves pressure above nominal digital full scale; attenuate before fixed-point playback.");
+    }
     println!("Input {:.9} J; stored {:.9} J; component losses {:.9} J; closure {:.3e} J; worst substep defect {:.3e} J.",
         piano.accounting.input_work_j, piano.energy_j(), piano.accounting.dissipated_j(),
         piano.accounting.input_work_j - piano.energy_j() - piano.accounting.dissipated_j(), piano.accounting.max_balance_error_j);
@@ -1102,6 +1118,10 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(error) = run() { eprintln!("grand_piano: {error}"); std::process::exit(1); }
 }
+
+#[cfg(test)]
+#[path = "wav_output_render_tests.rs"]
+mod wav_output_render_tests;
 
 #[cfg(test)]
 #[path = "cavity_render_tests.rs"]
@@ -1257,6 +1277,20 @@ mod render_tests {
             vec!["--render", "piano.wav", "--pcm-full-scale-pa", "0"],
             vec!["--render", "piano.wav", "--pcm-full-scale-pa", "NaN"]] {
             assert!(options(&args).is_err(), "accepted {args:?}");
+        }
+    }
+    #[test]
+    fn wav_format_requires_a_render_and_an_explicit_supported_encoding() {
+        assert_eq!(options(&[]).unwrap().wav_format, wav_output::Format::Pcm16);
+        for (name, format) in [("pcm16", wav_output::Format::Pcm16),
+            ("pcm24", wav_output::Format::Pcm24), ("float32", wav_output::Format::Float32)] {
+            assert_eq!(options(&["--render", "piano.wav", "--wav-format", name]).unwrap().wav_format, format);
+            assert!(options(&["--wav-format", name]).is_err());
+        }
+        for args in [vec!["--render", "piano.wav", "--wav-format"],
+            vec!["--render", "piano.wav", "--wav-format", "float64"],
+            vec!["--render", "piano.wav", "--wav-format", "pcm24", "--wav-format", "float32"]] {
+            assert!(options(&args).is_err());
         }
     }
     #[test]

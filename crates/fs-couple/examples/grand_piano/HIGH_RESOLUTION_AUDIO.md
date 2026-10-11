@@ -1,9 +1,26 @@
 # Preserve the physical performance in high-resolution audio
 
-`piano_audio` encodes the existing unquantized receiver-pressure CSV as **24-bit
-PCM or 32-bit floating-point WAV**, without rerunning the expensive mechanics.
-It does not up-convert an already quantized WAV. Quiet pressure that rounded to
-zero in the original PCM16 preview can now remain present in the exported file.
+`grand_piano` writes **24-bit PCM or 32-bit floating-point WAV directly from
+computed pressure** with `--wav-format pcm24` or `--wav-format float32`.
+Quiet sustain and decay that rounded to zero in PCM16 can remain present in
+the exported audio. Encoding happens after the same mechanics, acoustic filters
+and sample clock; it does not change the performance.
+
+```sh
+cargo run --release -p fs-couple --example grand_piano -- \
+  --preset steinway-d --sample-rate 48000 --pcm-full-scale-pa 64 \
+  --wav-format pcm24 --render performance-24.wav
+```
+
+Use `--wav-format float32` for floating-point output. The existing
+`--pcm-full-scale-pa` value applies to all three formats, including float, and
+to both stereo channels. Omitting `--wav-format` keeps PCM16. The selector
+requires `--render`; no receiver CSV or intermediate WAV is needed.
+
+## Re-encode an existing unquantized pressure trace
+
+`piano_audio` remains available to encode an existing receiver-pressure CSV
+without rerunning the mechanics. It does not up-convert an already quantized WAV.
 
 ```sh
 cargo run --release -p fs-couple --example grand_piano -- \
@@ -14,8 +31,8 @@ cargo run --release -p fs-couple --example piano_audio -- \
   --format pcm24 --output performance-24.wav
 ```
 
-The first command still writes the original PCM16 preview. Its existing
-headroom check still applies: choose a larger explicit `--pcm-full-scale-pa`
+The first command in this two-step workflow writes a PCM16 preview. Its existing
+headroom check applies: choose a larger explicit `--pcm-full-scale-pa`
 if the modeled peak reaches the declared scale. This only changes preview
 encoding gain; receiver CSV samples remain the actual modeled pascals. The
 number 64 above is an encoding choice, not acoustic calibration or an automatic
@@ -54,6 +71,8 @@ existing in-memory pressure history directly; the old PCM16 APIs are unchanged.
 ```sh
 cargo test -p fs-couple --lib pcm_wav::high_resolution
 cargo test -p fs-couple --example piano_audio
+cargo test -p fs-couple --example grand_piano wav_format
+cargo test -p fs-couple --example grand_piano wav_output
 ```
 
 Six encoder regressions cover exact headers, signed 24-bit packing, padding,
@@ -64,3 +83,12 @@ four format/channel combinations were decoded successfully by SciPy; that is
 format-reference evidence, not execution of the new Rust encoder. Native tests
 and paired listening are still needed. Export precision does not correct
 missing or inaccurate mechanical/acoustic physics.
+
+The direct-render regression compares the exact mono/stereo receiver CSV across
+all three encodings, decodes the actual WAV payload, and requires a physical
+quiet-sample witness retained by PCM24/Float32 but rounded to zero by PCM16.
+Parser checks require a render and reject unknown, missing and duplicate format
+options. The shared encoder-selection checks preserve the existing PCM16 bytes.
+These new Rust tests are authored but were not executed: the execution service
+disconnected during setup. They do not establish a listening or model-fidelity
+claim.
