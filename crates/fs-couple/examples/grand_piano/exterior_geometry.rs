@@ -27,8 +27,8 @@ pub const RATE:u32=48_000;
 pub const MAX_OBJ_BYTES:usize=32*1024*1024;
 pub const MAX_SPEC_BYTES:usize=64*1024;
 pub const MAX_PANELS:usize=2048;
-// Match the existing fs-bem near-field receiver bound; audio remains mono/stereo.
-pub const MAX_HARMONIC_RECEIVERS:usize=64;
+// All harmonic fronts use the kernel's bound; audio remains mono/stereo.
+pub use fs_bem::near_field::MAX_RECEIVERS as MAX_HARMONIC_RECEIVERS;
 const MAX_PROJECTION_WORK:usize=3_000_000;
 // Each Helmholtz worker owns two dense complex matrices and one LU image.
 // Bound their aggregate working set independently of the panel-count gate.
@@ -480,7 +480,8 @@ pub(crate) mod tests {
         }
         assert!(Specification::read(&rows(0)).is_err());
         assert!(Specification::read(&rows(MAX_HARMONIC_RECEIVERS+1)).is_err());
-        for suffix in ["receiver-pattern,64,1,0,0,1\n","receiver-m,NaN,0,1\n"] {
+        let out_of_range_pattern = format!("receiver-pattern,{MAX_HARMONIC_RECEIVERS},1,0,0,1\n");
+        for suffix in [out_of_range_pattern.as_str(), "receiver-m,NaN,0,1\n"] {
             assert!(Specification::read(&format!("{}{suffix}",rows(MAX_HARMONIC_RECEIVERS-1))).is_err());
         }
         assert!(Specification::read(&format!("{}receiver-pattern,3,1,0,0,1\n",rows(3))).is_err());

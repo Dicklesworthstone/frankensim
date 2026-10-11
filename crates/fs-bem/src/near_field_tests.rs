@@ -13,6 +13,17 @@ fn slab() -> SpherePanels {
     SpherePanels::from_triangles(box_triangles([0.,0.,-0.002],[1.,1.,0.004])).unwrap()
 }
 #[test]
+fn receiver_cardinality_admits_the_shared_maximum_and_refuses_empty_or_overflow() {
+    assert_eq!(MAX_RECEIVERS, 64);
+    let body = slab();
+    let points = vec![[0.3, 0.4, 0.022]; MAX_RECEIVERS];
+    let geometry = Geometry::new(&body, &points, 0.01).unwrap();
+    assert_eq!(geometry.points_m(), points.as_slice());
+    assert_eq!(geometry.clearances_m().len(), MAX_RECEIVERS);
+    assert!(Geometry::new(&body, &[], 0.01).is_err());
+    assert!(Geometry::new(&body, &vec![points[0]; MAX_RECEIVERS + 1], 0.01).is_err());
+}
+#[test]
 fn close_exterior_points_inside_the_bounding_sphere_are_admitted_by_actual_surface_distance() {
     let body=slab();let points=[[0.3,0.4,0.022],[0.3,0.4,-0.022]];
     let geometry=Geometry::new(&body,&points,0.01).unwrap();

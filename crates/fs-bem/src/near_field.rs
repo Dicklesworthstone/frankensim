@@ -19,7 +19,9 @@ mod velocity;
 pub use velocity::{FirstOrder, VectorObservation};
 
 const MAX_PANELS: usize = helmholtz::MAX_DENSE_PANELS;
-const MAX_RECEIVERS: usize = 64;
+/// Receiver cardinality shared by near-field geometry and harmonic callers.
+/// Quadrature work remains bounded across the complete receiver array.
+pub const MAX_RECEIVERS: usize = 64;
 const FOUR_PI: f64 = 4. * std::f64::consts::PI;
 type Point = [f64; 3];
 type Triangle = [Point; 3];
