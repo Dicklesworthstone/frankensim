@@ -13,7 +13,7 @@ use fs_matdb::SelectionPolicy;
 use fs_project::ProjectSpec;
 use fs_project::spec::{ConductionSetup, ThermalBoundaryCondition};
 
-use super::{SOLVER_FIDELITY_ADAPTIVE, SolveRefusal, conduction_error, parse_claim_id};
+use super::{SolveRefusal, conduction_error, parse_claim_id};
 use crate::cards::CardPackSet;
 use crate::import::json_string;
 
@@ -32,27 +32,13 @@ struct SurfaceSource {
 }
 
 pub(super) fn lower(
-    spec: &ProjectSpec,
+    _spec: &ProjectSpec,
     setup: &ConductionSetup,
     cards: &CardPackSet,
 ) -> Result<Option<LoweredRadiation>, SolveRefusal> {
     let Some(declaration) = setup.radiation.as_ref() else {
         return Ok(None);
     };
-    if spec
-        .solver
-        .as_ref()
-        .is_some_and(|solver| solver.fidelity == SOLVER_FIDELITY_ADAPTIVE)
-        && setup.boundaries.iter().any(|boundary| matches!(
-            boundary.condition, ThermalBoundaryCondition::NaturalConvection { .. }
-        ))
-    {
-        return Err(conduction_error(
-            "cli-solve-conduction-radiation-adaptive",
-            "combined natural-convection/radiation adaptive goals are not yet supplied",
-            "use base or ladder fidelity for this combined law; prescribed convection and fixed-flow air/radiation support adaptive goals",
-        ));
-    }
     let library = cards.library();
     let mut patches = Vec::with_capacity(declaration.surfaces.len());
     let mut surfaces = Vec::with_capacity(declaration.surfaces.len());
