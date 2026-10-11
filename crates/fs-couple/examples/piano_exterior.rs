@@ -37,6 +37,7 @@ piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj A
     [--modes 1..512] [--substeps 1..16] [--rigid-assembly ASSEMBLY.fspr]
     [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
     [--board-reduction max_modes,keep_low_modes,Hz,...]
+    [--radiation-ports 1..32]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
     [--rt0425-hammer-stiffness] [--rt0425-hammer-dissipation]
     [--rt0425-string-damping]
@@ -46,7 +47,14 @@ piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj A
     [--performance events.csv | --midi performance.mid]
     [--midi-channel 1..16] [--midi-velocity-max-m-s V] [--midi-half-pedal]
     [--note 21..108] [--velocity m/s]
-These playback options apply to both render and render-loaded.
+These playback options apply to both render and render-loaded, except
+--radiation-ports, which explicitly selects acoustic reduction for render-loaded.
+It preserves all admitted board coordinates (up to 128), full microphone
+transfers and the mechanical clock while fitting at most the supplied number
+of radiating combinations. The basis comes from actual loaded surface motion.
+Both the complete lifted complex load and its dissipative part must pass the
+existing training/held-out limits. Insufficient acoustic rank refuses; it does
+not reduce the soundboard, raise the rank automatically or change fit limits.
 --string-polarization uses both transverse directions of each physical string,
 projected from the same full-vector board modes. Every key must supply its
 bridge site, 3-D arm, orthonormal string/hammer frame and lateral damper ratio.
@@ -91,8 +99,9 @@ static/harmonic response directions and the requested exact low modes. Both
 directions of supplied --string-polarization frames guide the basis. Its
 1..16 increasing target frequencies must lie inside that source band. Full
 projected wood damping and the transformed bridge/acoustic motion are shared
-by playback and admittance. Set max_modes <=32 for render-loaded, whose passive
-radiation fit keeps its existing independent budget. Snapshot displacement
+by playback and admittance. Without --radiation-ports, render-loaded requires
+max_modes <=32. Explicit acoustic reduction retains up to 128 board coordinates
+while the passive fitter keeps its independent 32-port budget. Snapshot displacement
 projection error is not a transfer, acoustic or mesh-convergence certificate.
 See grand_piano/BOARD_REDUCTION.md for the explicit format and scope.
 Reduction also accepts crowned shells and uses the equilibrium tangent modes
@@ -143,7 +152,8 @@ one-way comparison. This harmonic image excludes hammer/key-damper contacts.
 render-loaded fits a passive full-matrix BEM load and couples acoustic storage
 into every nonlinear hammer/string/board substep. Acoustic loss is separate from
 wood and felt loss. It requires 33..257 odd frequency samples and at most 32
-complete board modes; failed passive fits REFUSE, never fall back to one-way.
+complete board modes, or up to 128 with explicit --radiation-ports and full-load
+validation. Failed passive fits REFUSE, never fall back to one-way.
 The ordinary render command remains one-way for a controlled comparison.
 response writes complex pressure per mass-normalized modal acceleration in
 exp(-i omega t) convention. response and admittance admit 1..64 receivers,
@@ -197,6 +207,7 @@ struct Scene {
     board:board_geometry::PreparedBoard,
     boundary:Boundary,
     spec:Specification,
+    radiation_ports:Option<usize>,
 }
 fn prepare(board_text:&str,courses:Vec<geometry::Course>,obj:&str,spec:Specification)->Result<Scene,String> {
     let controls=playback::Controls::from_texts(&courses,None,None,None)?;
@@ -263,7 +274,7 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
     } else {bare};
     let boundary=bare.loaded(&piano.bank)?;
     spec.source.push_str(&format!("; {description}"));
-    Ok(Scene {piano,board,boundary,spec})
+    Ok(Scene {piano,board,boundary,spec,radiation_ports:options.radiation_ports})
 }
 /// The sealed chart is below a planar +z board. Its underside cannot also be
 /// an exterior moving source. Full enclosure/volume agreement remains explicit
@@ -386,15 +397,28 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
 /// Admit both acoustic realizations before attaching the load or dispatching
 /// any score event. Loaded and one-way output share the original PCM path.
 fn bake(scene:&mut Scene,loaded:bool)->Result<(exterior_audio::Baked,exterior_geometry::Samples,String),String> {
+    if !loaded && scene.radiation_ports.is_some() {
+        return Err("--radiation-ports requires render-loaded".into());
+    }
     scene.spec.require_audio_receivers()?;
-    let (load,samples)=if loaded {
+    let (load,samples,projection)=if loaded && scene.radiation_ports.is_some() {
+        let (selected,samples)=radiation_fit::prepare_projected(&scene.boundary,&scene.spec,
+            scene.piano.bank.rate,scene.radiation_ports.unwrap())?;
+        (Some(selected.fit),samples,Some((selected.basis,selected.surface_rms_error)))
+    } else if loaded {
         let (fit,samples)=radiation_fit::prepare(&scene.boundary,&scene.spec,scene.piano.bank.rate)?;
-        (Some(fit),samples)
-    } else {(None,scene.boundary.sample(&scene.spec)?)};
+        (Some(fit),samples,None)
+    } else {(None,scene.boundary.sample(&scene.spec)?,None)};
     let baked=exterior_audio::Baked::from_samples(&samples,scene.spec.fit_order)?;
     let report=if let Some(fit)=load {
-        scene.piano.configure_radiation(&fit.model)?;
-        format!("Passive load: {} acoustic coordinates; complex matrix peak/RMS={:.6}/{:.6}; resistance peak/RMS={:.6}/{:.6}. These sampled bounds do not certify time-step or spatial convergence.",
+        let projection_report=if let Some((basis,error))=projection {
+            scene.piano.configure_projected_radiation(&fit.model,&basis)?;
+            format!("Radiation port reduction: {} complete board coordinates retained, {} acoustic ports (requested maximum {}); relative surface-field RMS omission={error:.6e}. All {} board inputs remain in every receiver transfer. Load errors below include projection and fitting against the complete BEM matrices.\n",
+                basis.board_ports(),basis.ports(),scene.radiation_ports.unwrap(),basis.board_ports())
+        } else {
+            scene.piano.configure_radiation(&fit.model)?;String::new()
+        };
+        format!("{projection_report}Passive load: {} acoustic coordinates; complex matrix peak/RMS={:.6}/{:.6}; resistance peak/RMS={:.6}/{:.6}. These sampled bounds do not certify time-step or spatial convergence.",
             fit.model.poles.len(),fit.peak_error,fit.rms_error,fit.resistance_peak_error,fit.resistance_rms_error)
     } else {String::from("One-way exterior reference: no exterior radiation reaction on the mechanics.")};
     Ok((baked,samples,report))
@@ -448,6 +472,9 @@ fn run(args:&[String])->Result<(),String> {
                     (Some(mesh_render::frames(&tail[0])?),playback::Options::parse(&tail[1..])?),
                 _=>return Err(USAGE.into()),
             };
+            if command!="render-loaded" && options.radiation_ports.is_some() {
+                return Err("--radiation-ports requires render-loaded".into());
+            }
             if (options.rt0425_hammer_stiffness || options.rt0425_string_damping)
                 && strings!="steinway-d" {
                 return Err("RT-0425 source laws require the steinway-d source scale".into());
@@ -694,6 +721,10 @@ mod tests {
         assert!(admittance(&board,&courses,&obj,&spec,60).is_err());
     }
 }
+
+#[cfg(test)]
+#[path="grand_piano/radiation_port_render_tests.rs"]
+mod radiation_port_render_tests;
 
 #[cfg(test)]
 #[path="grand_piano/cavity_admittance_tests.rs"]

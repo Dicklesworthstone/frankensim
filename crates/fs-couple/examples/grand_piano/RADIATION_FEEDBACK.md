@@ -18,14 +18,70 @@ The board, explicitly labeled closed outward OBJ skin, receiver positions,
 medium, physical units and provenance use `EXTERIOR_ACOUSTICS.md`. No missing
 cabinet, lid, wood constants or body geometry is manufactured by this command.
 
-Loaded playback adds these explicit limits: retain the **complete** board slice
-with at most 32 modes; use an odd 33..257-frequency grid; resolve every prepared
-acoustic pole below the mechanical Nyquist guard. The fixed wrapper runs at
+Loaded playback adds these explicit limits: without acoustic reduction, retain
+the **complete** board slice with at most 32 modes; with explicit
+`--radiation-ports`, retain up to 128 board coordinates and fit up to 32 acoustic
+ports. Use an odd 33..257-frequency grid and resolve every prepared acoustic
+pole below the mechanical Nyquist guard. The wrapper defaults to
 48 kHz, four mechanics substeps, and at most 24 partials per string. Its off-band
 poles extend to eight times the top fit frequency, so that top frequency must
 be **below 10.8 kHz**. The complete per-string/duplex and geometry admission
 rules still apply. Larger bases are refused, not truncated to fit the budget.
 This is bounded offline rendering, not a real-time performance claim.
+
+## Separate acoustic and structural resolution
+
+`--radiation-ports maximum` selects one through 32 acoustic combinations of the
+complete loaded soundboard. It is accepted only by `render-loaded`:
+
+```sh
+cargo run --release -p fs-couple --example piano_exterior -- \
+  render-loaded settled.fss strings.csv acoustic-body.obj acoustic.fspe \
+  loaded.wav 2 performance.mid --radiation-ports 24
+```
+
+This is an illustrative rank budget, not a validated preset. It composes with
+`--board-reduction`, source string damping, both transverse string directions,
+and the supported cavity and contact controls. The two reductions have distinct
+purposes: soundboard reduction chooses the retained mechanics; acoustic reduction
+chooses combinations through which the passive radiation model acts. Every
+retained structural coordinate and every receiver input remains present.
+
+The actual loaded normal-velocity field on each BEM panel supplies an
+area-weighted Gram matrix. The existing symmetric eigensolver selects its
+dominant independent directions, with deterministic ordering and signs. Their
+orthonormal columns form `Q`. The supplied maximum is a ceiling; exact or
+numerically unresolved surface null directions need no separate acoustic port.
+No frequency sample, microphone position or failed fit changes this basis.
+
+At each frequency the ordinary complete modal BEM solve still supplies both
+the full load `Z` and the full receiver transfer. Only the load presented to the
+existing passive fitter is projected, as `Q^T Z Q`. After fitting, the result is
+lifted back as `Q Z_fit Q^T` and compared against the **original complete** BEM
+matrices. Complex peak/RMS limits remain 5%/2%; Hermitian resistance limits remain
+10%/5%, separately over training and held-out frequencies. These errors include
+both acoustic projection and fitting. A small surface-field omission alone
+cannot admit a model that loses consequential radiation resistance.
+
+An insufficient selected rank refuses. It never increases the requested rank,
+relaxes an error threshold, or discards a mechanical mode. The report includes
+the retained board and acoustic counts, a relative area-weighted surface-field
+omission estimate, and the complete-load errors. Full receiver transfers are
+fitted independently with their existing limits, using every board acceleration.
+
+During playback, the acoustic velocities are `u = Q^T v_board`. The existing
+collective exchange acts on `u`, and only its increment is returned to mechanics:
+`v_board += Q (u_after - u_before)`. Consequently the structural velocity outside
+the acoustic span is preserved. The full board and air candidate states are
+published together after finite and energy checks, with no allocations in the
+half-flows. Acoustic poles retain the same storage, damping, clock and rollback
+as the complete-port path. The shared fitter and exchange retain their existing
+32-port work limits.
+
+Acoustic reduction does not establish high-band mesh convergence, bridge or
+microphone calibration, or real-time performance. Its adequacy remains specific
+to the supplied geometry and frequency band. Harmonic `admittance` continues to
+solve the unfitted complete BEM load for comparison.
 
 ## The load is from the same acoustic solve as the receivers
 

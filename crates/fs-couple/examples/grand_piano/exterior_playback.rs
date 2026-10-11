@@ -26,6 +26,7 @@ pub struct Options {
     pub string_stretching: Option<String>,
     pub string_polarization: Option<String>,
     pub cavity: Option<String>,
+    pub radiation_ports: Option<usize>,
     pub rigid_assembly: Option<String>,
     pub equilibrate_board_mass: bool,
     pub consistent_board_mass: bool,
@@ -41,7 +42,7 @@ impl Default for Options {
             midi_mapping: midi::Mapping::default(), note: None, velocity: None,
             mapping_explicit: false, hammers: None,
             hammer_footprints: None, dampers: None, string_stretching: None, string_polarization: None,
-            rigid_assembly: None, cavity: None,
+            rigid_assembly: None, cavity: None, radiation_ports: None,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
             board_reduction: None,
             rt0425_hammer_stiffness: false,
@@ -93,7 +94,7 @@ impl Options {
                 continue;
             }
             if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers", "--string-stretching", "--string-polarization", "--cavity", "--rigid-assembly",
-                "--board-reduction", "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity"].contains(&flag.as_str()) {
+                "--board-reduction", "--radiation-ports", "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity"].contains(&flag.as_str()) {
                 return Err(format!("unknown exterior playback option {flag}"));
             }
             let value = args.next().filter(|v| !v.is_empty() && !v.starts_with("--"))
@@ -108,6 +109,7 @@ impl Options {
                 "--string-stretching" => result.string_stretching = Some(value.clone()),
                 "--string-polarization" => result.string_polarization = Some(value.clone()),
                 "--cavity" => result.cavity = Some(value.clone()),
+                "--radiation-ports" => result.radiation_ports = Some(value.parse().map_err(|_| invalid())?),
                 "--rigid-assembly" => result.rigid_assembly = Some(value.clone()),
                 "--board-reduction" => result.board_reduction = Some(super::board_geometry::ritz::RitzOptions::parse(value)?),
                 "--performance" => result.performance = Some(value.clone()),
@@ -141,6 +143,9 @@ impl Options {
     }
     pub fn validate_harmonic(&self) -> Result<(), String> {
         self.validate()?;
+        if self.radiation_ports.is_some() {
+            return Err("--radiation-ports requires render-loaded; harmonic analysis uses the complete BEM load".into());
+        }
         let options = self;
         if options.midi.is_some() || options.performance.is_some() || options.note.is_some()
             || options.velocity.is_some() || options.hammers.is_some()
@@ -153,6 +158,9 @@ impl Options {
         Ok(())
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.radiation_ports.is_some_and(|n| !(1..=32).contains(&n)) {
+            return Err("--radiation-ports requires an explicit acoustic rank budget in 1..32".into());
+        }
         if self.consistent_board_mass && self.edge_cubic_board_mass {
             return Err("select at most one of --consistent-board-mass and --edge-cubic-board-mass".into());
         }

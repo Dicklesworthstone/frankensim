@@ -41,9 +41,14 @@ positional arguments by `response`, `admittance`, `render`, and
 `render-loaded`. It composes with the supported board inertia, source string
 damping, supplied polarization, hammer, pedal, and performance controls.
 
-`render-loaded` retains its independent limit of 32 board coordinates for the
-passive radiation realization. Use a reduction budget no greater than 32 for
-that command. BEM panel, frequency-grid, fitting, conditioning, and pressure
+Without acoustic reduction, `render-loaded` accepts at most 32 board coordinates
+for its passive radiation realization. Supplying `--radiation-ports 1..32`
+separately selects a bounded radiating subspace while preserving all retained
+board coordinates, up to 128. The projected passive load must meet the original
+complete BEM matrix and resistance error limits; an insufficient acoustic rank
+refuses. Every receiver still uses all structural inputs. See
+`RADIATION_FEEDBACK.md` for the geometry-derived basis and full-load validation.
+BEM panel, frequency-grid, fitting, conditioning, and pressure
 headroom checks still apply. `response` remains pressure per supplied modal
 acceleration; it is not a bridge-force response. Use `admittance` for the
 force-driven string/board/radiation system.
