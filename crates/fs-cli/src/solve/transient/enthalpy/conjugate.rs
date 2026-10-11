@@ -4,6 +4,9 @@
 //! independent branch heat gates. Applied Robin references stay attached to
 //! the last counted solid response. A separate full endpoint evaluation uses
 //! the air march's updated references, including nonlinear ambient radiation.
+//! Each air callback can also close the existing natural-reservoir law; its
+//! actual coefficients enter that same final audit, while its applied rows
+//! stay attached to the counted solid response.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,6 +20,13 @@ pub(super) struct AirflowStep {
     pub(super) endpoint: EnthalpyStepSolution,
     pub(super) radiation: Option<RadiativeEndpoint>,
     pub(super) radiation_evidence: String,
+    pub(super) natural: Option<NaturalEndpoint>,
+    pub(super) natural_evidence: String,
+    pub(super) natural_iterations: usize,
+    pub(super) natural_solid_solves: usize,
+    pub(super) natural_updates: usize,
+    pub(super) natural_krylov_iterations: usize,
+    pub(super) natural_endpoint_evaluations: usize,
     pub(super) outcome: exchange::ConjugateOutcome,
     pub(super) applied_boundary: ThermalBoundary,
     pub(super) applied_references: BTreeMap<String, f64>,
@@ -27,7 +37,7 @@ pub(super) struct AirflowStep {
     pub(super) nonlinear_updates: usize,
     pub(super) krylov_iterations: usize,
     pub(super) radiation_trials: usize,
-    /// One seed audit, one old-state audit per air trial, one final audit.
+    /// Seed, old-state and final audits, plus every nested natural audit.
     pub(super) endpoint_evaluations: usize,
     pub(super) reference_tolerance_k: f64,
     pub(super) residual_reference: &'static str,
@@ -47,6 +57,9 @@ struct SolidTrial {
     endpoint: EnthalpyStepSolution,
     radiation: Option<RadiativeEndpoint>,
     radiation_evidence: String,
+    natural: Option<NaturalEndpoint>,
+    natural_evidence: String,
+    physical_natural_boundary: Option<ThermalBoundary>,
     applied_boundary: ThermalBoundary,
     applied_references: BTreeMap<String, f64>,
     convective_out_w: f64,
@@ -124,6 +137,8 @@ pub(super) fn advance(
     dt_s: f64,
     config: EnthalpyStepConfig,
     radiation: Option<&radiation::LoweredRadiation>,
+    laws: &[buoyancy::NaturalLaw],
+    pressure_pa: f64,
     path: &exchange::ConjugatePath,
     deadline: Option<(Instant, f64)>,
 ) -> Result<AirflowStep, SolveRefusal> {
@@ -153,11 +168,12 @@ pub(super) fn advance(
             poll(cx, deadline)?;
         }
         if !targets.insert(segment.target.as_str())
+            || laws.iter().any(|law| law.target == segment.target)
             || !(segment.htc_w_m2_k.is_finite() && segment.htc_w_m2_k > 0.0)
             || !(segment.wetted_area_m2.is_finite() && segment.wetted_area_m2 > 0.0)
         {
             return Err(bad(
-                "enthalpy airflow needs distinct positive-area, positive-coefficient targets",
+                "enthalpy airflow needs distinct positive-area, positive-coefficient targets, separate from natural reservoirs",
             ));
         }
         let region = problem
@@ -183,9 +199,13 @@ pub(super) fn advance(
     }
 
     let mut exchange_config = exchange::exchange_config(false);
+    let natural_factor = if laws.is_empty() { 1 } else { buoyancy::MAX_ITERATIONS };
+    let max_natural_iterations = exchange_config.max_iterations.checked_mul(natural_factor)
+        .ok_or_else(|| bad("enthalpy airflow/natural work allowance overflows"))?;
+    let max_natural_endpoint_evaluations = max_natural_iterations.checked_mul(2)
+        .ok_or_else(|| bad("enthalpy airflow/natural audit allowance overflows"))?;
     let radiation_factor = radiation.map_or(1, |lowering| lowering.config.max_iterations);
-    let max_solid_solves = exchange_config
-        .max_iterations
+    let max_solid_solves = max_natural_iterations
         .checked_mul(radiation_factor)
         .ok_or_else(|| bad("enthalpy airflow/radiation work allowance overflows"))?;
     let max_updates = max_solid_solves
@@ -195,13 +215,15 @@ pub(super) fn advance(
         .checked_mul(config.newton.linear_restart)
         .and_then(|value| value.checked_mul(config.newton.max_linear_cycles))
         .ok_or_else(|| bad("enthalpy airflow Krylov allowance overflows"))?;
-    let max_endpoint_evaluations = exchange_config
-        .max_iterations
-        .checked_add(2)
+    let max_endpoint_evaluations = exchange_config.max_iterations.checked_add(2)
+        .and_then(|air| if laws.is_empty() { Some(air) }
+            else { air.checked_add(max_natural_endpoint_evaluations) })
         .ok_or_else(|| bad("enthalpy airflow endpoint allowance overflows"))?;
 
     // This is the same branch-inlet seed used by the shared exchange owner.
     // It is an explicit boundary guess, not an air march at the initial wall.
+    // Natural rows here retain their initial applied coefficients; a powered
+    // ambient start need not evaluate an undefined equilibrium correlation.
     let mut seed_references = BTreeMap::new();
     let mut seed_segments = 0;
     for branch in path.air_paths() {
@@ -279,12 +301,17 @@ pub(super) fn advance(
     let mut nonlinear_updates = 0;
     let mut krylov_iterations = 0;
     let mut radiation_trials = 0;
+    let mut natural_iterations = 0;
+    let mut natural_solid_solves = 0;
+    let mut natural_updates = 0;
+    let mut natural_krylov_iterations = 0;
+    let mut natural_endpoint_evaluations = 0;
     let mut maximum_radiation_energy_residual_j = 0.0_f64;
     let mut last = None;
     let outcome = exchange::run_exchange_with_config(cx, path, exchange_config, |cx, references| {
         poll(cx, deadline)?;
         count(&mut air_iterations, 1, exchange_config.max_iterations)?;
-        let boundary = boundary_at(problem.boundary, &regions, references)?;
+        let mut boundary = boundary_at(problem.boundary, &regions, references)?;
         let trial_problem = ConductionProblem { boundary: &boundary, ..problem };
         count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
         let initial_norm_j = engine
@@ -294,7 +321,51 @@ pub(super) fn advance(
             .map_err(failed)?
             .residual_norm_j;
         let inner = inner_config(config, inner_allowance_j, initial_norm_j)?;
-        let (endpoint, radiation_evidence, radiative) = if let Some(lowering) = radiation {
+        let mut natural_endpoint = None;
+        let mut natural_evidence = "null".to_string();
+        let mut physical_natural_boundary = None;
+        let (endpoint, radiation_evidence, radiative) = if !laws.is_empty() {
+            let mut natural_config = inner;
+            // Reserve room below the original endpoint energy and residual
+            // allowances for the remaining air-reference discrepancy.
+            natural_config.energy_tolerance_j = finite(config.energy_tolerance_j * 0.125)?;
+            let solved = natural::advance(
+                cx, engine, trial_problem, interfaces, old, dt_s, natural_config,
+                radiation, laws, pressure_pa, deadline,
+            )?;
+            natural_evidence = natural_step_row(&solved)?;
+            count(&mut natural_iterations, solved.iterations, max_natural_iterations)?;
+            count(&mut natural_solid_solves, solved.solid_solves, max_solid_solves)?;
+            count(&mut natural_updates, solved.nonlinear_updates, max_updates)?;
+            count(&mut natural_krylov_iterations, solved.krylov_iterations, max_krylov)?;
+            count(&mut natural_endpoint_evaluations, solved.endpoint_evaluations,
+                max_natural_endpoint_evaluations)?;
+            count(&mut endpoint_evaluations, solved.endpoint_evaluations, max_endpoint_evaluations)?;
+            count(&mut solid_solves, solved.solid_solves, max_solid_solves)?;
+            count(&mut nonlinear_updates, solved.nonlinear_updates, max_updates)?;
+            count(&mut krylov_iterations, solved.krylov_iterations, max_krylov)?;
+            count(&mut radiation_trials, solved.radiation_trials, max_solid_solves)?;
+            maximum_radiation_energy_residual_j = maximum_radiation_energy_residual_j
+                .max(solved.maximum_radiation_energy_residual_j);
+            let rows = laws.iter().map(|law| {
+                let region = boundary.region_names().iter()
+                    .position(|name| name == &law.target)
+                    .ok_or_else(|| bad("enthalpy natural target disappeared"))?;
+                let h = *solved.physical_coefficients.get(&law.target)
+                    .ok_or_else(|| bad("enthalpy natural coefficient disappeared"))?;
+                Ok((region, h, law.ambient_k))
+            }).collect::<Result<Vec<_>, SolveRefusal>>()?;
+            physical_natural_boundary = Some(
+                boundary.with_uniform_robin_replacements(&rows).map_err(lower)?,
+            );
+            boundary = solved.applied_boundary;
+            natural_endpoint = Some(NaturalEndpoint {
+                receipt: solved.receipt,
+                applied_coefficients: solved.applied_coefficients,
+                boundary: boundary.clone(),
+            });
+            (solved.endpoint, solved.radiation_evidence, solved.radiation)
+        } else if let Some(lowering) = radiation {
             let solved = engine
                 .advance_with_ambient_radiation(
                     cx, trial_problem, interfaces, old, dt_s, inner,
@@ -354,6 +425,9 @@ pub(super) fn advance(
             endpoint,
             radiation: radiative,
             radiation_evidence,
+            natural: natural_endpoint,
+            natural_evidence,
+            physical_natural_boundary,
             applied_boundary: boundary,
             applied_references: references.clone(),
             convective_out_w,
@@ -386,7 +460,10 @@ pub(super) fn advance(
             }
         }
     }
-    let physical_boundary = boundary_at(problem.boundary, &regions, &physical_references)?;
+    let physical_boundary = boundary_at(
+        last.physical_natural_boundary.as_ref().unwrap_or(problem.boundary),
+        &regions, &physical_references,
+    )?;
     count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
     let physical = engine
         .evaluate_endpoint(
@@ -435,6 +512,10 @@ pub(super) fn advance(
         endpoint: last.endpoint,
         radiation: last.radiation,
         radiation_evidence: last.radiation_evidence,
+        natural: last.natural,
+        natural_evidence: last.natural_evidence,
+        natural_iterations, natural_solid_solves, natural_updates,
+        natural_krylov_iterations, natural_endpoint_evaluations,
         outcome,
         applied_boundary: last.applied_boundary,
         applied_references: last.applied_references,

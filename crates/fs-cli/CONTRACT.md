@@ -1598,13 +1598,33 @@ Per-step and aggregate `transient.conjugate` evidence records air iterations,
 all solid responses, Newton/Krylov work, radiation trials, direct endpoint
 audits, physical energy and actual-air energy. The 100-air-iteration policy
 multiplies the radiation and Newton caps in admission; direct audits are
-bounded by 102 per step. Memory admission includes air staging and retained
-per-segment receipts. Histories expose only the final inner Newton solve of
-each accepted step and label that scope. Mixed natural/forced transient
-convection, enclosure radiation and enthalpy trajectory adjoints still
-refuse. Driver version 65 separates this physical coupling from older
-retained solves. `examples/heatsink-fan/heatsink-fan-enthalpy.fsim` is the
+bounded by 102 per step without natural convection. Memory admission includes
+air staging, retained per-segment receipts and final inner Newton histories
+per accepted endpoint; discarded coupling trials reuse bounded workspace.
+Enclosure radiation and enthalpy trajectory adjoints still refuse. Driver
+version 65 separates this physical coupling from older retained solves. `examples/heatsink-fan/heatsink-fan-enthalpy.fsim` is the
 native fan-cooled synthetic phase-storage example.
+
+Driver 66 closes separate natural reservoirs inside each native enthalpy/air
+callback, including ambient radiation, regional initial states and phase-aware
+conductivity. All trials use the same old specific enthalpy. The final audit
+uses both actual natural coefficients and updated air references at the last
+counted field; the original residual and energy gates remain in force.
+Natural-reservoir and radiation heat remain outside branch air transport.
+Applied boundary rows stay attached to the returned field and are distinct
+from the independently evaluated physical boundary.
+
+Natural work and endpoint audits include all air trials under checked products
+of the 100 air, 80 natural and declared radiation/Newton/Krylov limits. Per-step
+natural/radiation rows describe the final air trial; trajectory counters include
+all trials. The mixed audit limit is 16102 per step, including the seed, every
+old-state audit, all natural audits and the final physical audit. The synthetic
+`data/reference-project/cooling-enthalpy-airflow.fsim` demonstrates a warm
+natural reservoir, a cold radiation reservoir and fan-driven solidification.
+The mixed G1/G3 regressions in `tests/solve/transient_enthalpy_conjugate.rs`
+check signed heat, integrated latent storage and phase fraction against
+independent balances and exercise that input through the native pipeline.
+Air storage, fan dynamics, moving phases and transient adjoints are not inferred.
 
 Schema v14 optionally declares a conductivity multiplier for each regional
 enthalpy material. `linear-liquid-mass-fraction` interpolates between positive

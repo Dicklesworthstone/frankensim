@@ -2,11 +2,14 @@
 //! The imported regular tetrahedron has one uniform thermal mode. Independent
 //! scalar energy roots and exponential air heating therefore check every step
 //! without calling the production enthalpy, radiation or air-march operators.
+//! Mixed-boundary plateaus additionally check signed natural heat, radiation
+//! and fan transport while allowing a nonuniform spatial phase fraction.
 
 use super::*;
 use fs_project::{
     ConductionTransient, TransientEnthalpy, TransientEnthalpyKnot,
-    TransientInitialTemperature, TransientRegionEnthalpy, spec::dims,
+    TransientInitialTemperature, TransientPowerStep, TransientRegionEnthalpy,
+    TransientRegionPower, spec::dims,
 };
 
 #[allow(dead_code)]
@@ -129,8 +132,13 @@ fn run(spec: &ProjectSpec, cards: &CardPackSet, bytes: &[u8]) -> ThermalRun {
 /// Re-derive G = m_dot Cp (1 - exp(-h A / (m_dot Cp))) from the independently
 /// lowered fan/vent flow and the admitted correlation's coefficient.
 fn conductance(exchange: &J) -> f64 {
-    assert_eq!(exchange.str_field("branch"), Some("air"));
-    assert_eq!(exchange.str_field("path"), Some("vent:air"));
+    conductance_for_area(exchange, area_m2(), "air")
+}
+
+fn conductance_for_area(exchange: &J, area: f64, branch: &str) -> f64 {
+    assert_eq!(exchange.str_field("branch"), Some(branch));
+    let path = format!("vent:{branch}");
+    assert_eq!(exchange.str_field("path"), Some(path.as_str()));
     close(n(exchange, "inlet_k"), INLET_K, 0.0);
     close(n(exchange.get("air_properties").unwrap(), "specific_heat_j_kg_k"), AIR_CP, 0.0);
     close(
@@ -146,11 +154,11 @@ fn conductance(exchange: &J) -> f64 {
     assert_eq!(segment.str_field("card"), Some("convection.gnielinski"));
     assert_eq!(segment.get("in_domain"), Some(&J::Bool(true)));
     assert!(n(segment, "reynolds") > 3000.0);
-    close(n(segment, "wetted_area_m2"), area_m2(), 2e-12);
+    close(n(segment, "wetted_area_m2"), area, 2e-12);
     let h = n(segment, "htc_w_m2_k");
     close(h, n(segment, "nusselt") * 0.0263 / 0.02, 1e-12);
     assert!(h > 0.0);
-    let ntu = h * area_m2() / capacity_rate;
+    let ntu = h * area / capacity_rate;
     close(n(segment, "ntu"), ntu, 2e-12);
     close(n(segment, "effectiveness"), -(-ntu).exp_m1(), 2e-12);
     capacity_rate * -(-ntu).exp_m1()
@@ -443,4 +451,215 @@ fn g0_native_enthalpy_airflow_refuses_source_domains_and_exhausted_nested_work()
         assert_eq!(artifacts_of_kind(&ledger, "solve-conduction-solution"), 0,
             "{failure} must not publish an unaccepted enthalpy field");
     }
+}
+
+const MIXED_INITIAL_H: f64 = 5000.0;
+const MIXED_LATENT_H: f64 = 10_000.0;
+const MIXED_HORIZON: f64 = 0.2;
+const MIXED_SWITCH: f64 = 0.075;
+const NATURAL_K: f64 = 350.0;
+const RADIATION_K: f64 = 270.0;
+
+fn mixed_plateau_project(card: &str) -> (ProjectSpec, Vec<u8>) {
+    let (mut spec, bytes) = capacity_project(MIXED_HORIZON);
+    enthalpy(&mut spec, MIXED_INITIAL_H, &[
+        (-1000.0, 233.15, 0.0),
+        (0.0, INITIAL_K, 0.0),
+        (MIXED_LATENT_H, INITIAL_K, 1.0),
+        (11_000.0, 398.15, 1.0),
+    ]);
+    let policy = time(&mut spec);
+    policy.max_step.value = 0.1;
+    policy.max_steps = 16;
+    let model = policy.enthalpy.as_mut().unwrap();
+    model.max_newton_iterations = 8;
+    model.materials[0].reference_density.value = 3.0 / 8.0; // V=8/3: 1 kg.
+    policy.power_schedules = vec![TransientRegionPower {
+        region: "air".into(),
+        source: "declared 20 W pulse ending at 0.075 s; replaces static power".into(),
+        steps: [(MIXED_SWITCH, 20.0), (MIXED_HORIZON, 0.0)]
+            .into_iter().map(|(until, watts)| TransientPowerStep {
+                until: QtyAny::new(until, dims::TIME),
+                watts: QtyAny::new(watts, dims::POWER),
+            }).collect(),
+    }];
+    spec.assembly.as_mut().unwrap().push(EntityDecl::Surface {
+        parent: "enclosure".into(),
+        name: "natural-wall".into(),
+        display: "Separate warm natural-convection reservoir".into(),
+        expect_id: None,
+    });
+    let assignments = spec.assignments.as_mut().unwrap();
+    assignments[0].allow_overlap = true;
+    assignments.push(GeometryAssignment {
+        artifact: "enclosure".into(),
+        target: "natural-wall".into(),
+        length_unit: "m".into(),
+        // The face opposite (1,1,1) lies on x+y+z=-1 and has area 2*sqrt(3).
+        selector: MeshSelector::HalfSpace {
+            normal: [1.0, 1.0, 1.0],
+            offset: -1.0,
+            side: HalfSpaceSide::AtMost,
+            tolerance: 0.0,
+        },
+        allow_overlap: true,
+    });
+    spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .boundaries.push(ThermalBoundary {
+            target: "natural-wall".into(),
+            condition: ThermalBoundaryCondition::NaturalConvection {
+                characteristic_length: QtyAny::new(0.1, dims::LENGTH),
+                ambient_temperature: QtyAny::new(NATURAL_K, dims::TEMPERATURE),
+                correlation: "convection.churchill-chu-vertical-plate".into(),
+            },
+        });
+    radiation_product::declare(&mut spec, card, "natural-wall", RADIATION_K);
+    let radiation = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .radiation.as_mut().unwrap();
+    radiation.relaxation = 1.0;
+    radiation.max_iterations = 24;
+    (spec, bytes)
+}
+
+/// Direct Churchill-Chu law with the stated native air-property constants.
+fn mixed_natural_heat(area: f64) -> f64 {
+    let film = 0.5 * (INITIAL_K + NATURAL_K);
+    let density = 101325.0 / (287.05 * film);
+    let nu = 1.846e-5 / density;
+    let ra = 9.80665 * (INITIAL_K - NATURAL_K).abs() * 0.1_f64.powi(3)
+        / (film * nu * (nu / 0.707));
+    let nusselt = (0.825 + 0.387 * ra.powf(1.0 / 6.0)
+        / (1.0 + (0.492_f64 / 0.707).powf(9.0 / 16.0)).powf(8.0 / 27.0)).powi(2);
+    (0.0263 * nusselt / 0.1) * area * (INITIAL_K - NATURAL_K)
+}
+
+fn check_mixed_plateau(solved: &ThermalRun, air_area: f64, natural_area: f64, branch: &str) {
+    let natural = mixed_natural_heat(natural_area);
+    let radiation = EMISSIVITY * SIGMA * natural_area
+        * (INITIAL_K.powi(4) - RADIATION_K.powi(4));
+    assert!(natural < 0.0 && radiation > 0.0);
+    let mut final_change = 0.0;
+    for grid in ["coarse", "fine"] {
+        let (mut old_time, mut cumulative, mut source_j) = (0.0, 0.0, 0.0);
+        assert!(solved.rows(grid).iter().any(|row| n(row, "time_s") == MIXED_SWITCH));
+        for row in solved.rows(grid) {
+            let coupled = row.get("conjugate").unwrap();
+            let exchange = coupled.get("exchange").unwrap();
+            let g = conductance_for_area(exchange, air_area, branch);
+            let air = g * (INITIAL_K - INLET_K);
+            close(n(exchange, "air_total_w"), air, 3e-6);
+            close(
+                AIR_CP * n(exchange, "mass_flow_kg_s")
+                    * (n(exchange, "outlet_k") - n(exchange, "inlet_k")),
+                air, 3e-6,
+            );
+            close(n(coupled, "air_heat_gain_w"), air, 3e-6);
+            let tolerance = n(exchange, "balance_tolerance_w");
+            assert!(n(exchange, "max_region_imbalance_w").abs() <= tolerance);
+            assert!(n(exchange, "decomposition_residual_w").abs() <= tolerance);
+            assert!(n(coupled, "physical_residual_norm_j")
+                <= n(coupled, "physical_residual_tolerance_j"));
+            assert!(n(coupled, "coupled_energy_residual_j").abs() <= 1e-6);
+            close(n(coupled, "physical_dirichlet_in_w"), 0.0, 0.0);
+            let dt = n(row, "dt_s");
+            close(n(row, "time_s") - old_time, dt, 1e-15);
+            let source = if old_time < MIXED_SWITCH { 20.0 } else { 0.0 };
+            let stored = dt * (source - air - natural - radiation);
+            cumulative += stored;
+            source_j += dt * source;
+            let mean_h = MIXED_INITIAL_H + cumulative; // Each fixture contains 1 kg.
+            assert!(mean_h > 0.0 && mean_h < MIXED_LATENT_H);
+            close(n(row, "source_w"), source, 2e-12);
+            close(n(row, "final_region_max_k"), INITIAL_K, 2e-10);
+            close(n(row, "stored_energy_change_j"), stored, 3e-6);
+            close(n(row, "net_input_w"), source - air - natural - radiation, 3e-6);
+            close(n(row, "mean_liquid_mass_fraction"), mean_h / MIXED_LATENT_H, 2e-9);
+            close(n(row, "liquid_mass_kg"), mean_h / MIXED_LATENT_H, 2e-9);
+            close(n(coupled, "off_path_convective_out_w"), natural, 3e-6);
+            close(n(coupled, "radiative_out_w"), radiation, 3e-6);
+            let laws = row.get("natural").unwrap().get("exchange").unwrap()
+                .get("laws").unwrap().as_array().unwrap();
+            assert_eq!(laws.len(), 1);
+            assert_eq!(laws[0].str_field("target"), Some("natural-wall"));
+            close(n(&laws[0], "mean_wall_k"), INITIAL_K, 2e-10);
+            close(n(&laws[0], "heat_rate_w"), natural, 3e-6);
+            close(n(row.get("radiation").unwrap(), "nonlinear_radiative_out_w"),
+                radiation, 3e-6);
+            old_time = n(row, "time_s");
+        }
+        close(source_j, 20.0 * MIXED_SWITCH, 2e-12);
+        close(old_time, MIXED_HORIZON, 0.0);
+        if grid == "coarse" {
+            final_change = cumulative;
+        } else {
+            close(cumulative, final_change, 3e-6);
+        }
+    }
+    assert!(final_change < 0.0, "the fan-cooled material must partially solidify");
+    let history = solved.transient();
+    let endpoint = history.get("endpoint").unwrap();
+    let masses = values(endpoint, "reference_nodal_mass_kg");
+    let enthalpies = values(endpoint, "specific_enthalpy_j_kg");
+    let fractions = values(endpoint, "liquid_mass_fraction");
+    assert_eq!(masses.len(), 4);
+    assert_eq!(enthalpies.len(), masses.len());
+    assert_eq!(fractions.len(), masses.len());
+    close(masses.iter().sum(), 1.0, 2e-12);
+    for (&h, &fraction) in enthalpies.iter().zip(&fractions) {
+        assert!(h > 0.0 && h < MIXED_LATENT_H);
+        close(fraction, h / MIXED_LATENT_H, 2e-12);
+    }
+    close(
+        masses.iter().zip(&enthalpies)
+            .map(|(mass, h)| mass * (h - MIXED_INITIAL_H)).sum(),
+        final_change, 3e-6,
+    );
+    let energy = history.get("energy").unwrap();
+    close(n(energy, "stored_change_j"), final_change, 3e-6);
+    close(n(energy, "integrated_net_input_j"), final_change, 3e-6);
+    close(n(history.get("workload").unwrap(), "integrated_scheduled_input_j"),
+        20.0 * MIXED_SWITCH, 2e-12);
+    assert_eq!(history.get("temporal_error").unwrap()
+        .get("estimated_half_width_k"), Some(&J::Null));
+    check_final(solved, INITIAL_K, MIXED_HORIZON);
+}
+
+#[test]
+fn g1_native_mixed_enthalpy_keeps_signed_natural_heat_and_radiation_out_of_air() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    let (spec, bytes) = mixed_plateau_project(&card);
+    let solved = run(&spec, &cards, &bytes);
+    check_mixed_plateau(&solved, 0.75 * area_m2(), 0.25 * area_m2(), "air");
+}
+
+#[test]
+fn g1_native_mixed_enthalpy_example_runs_with_committed_material_and_surface_cards() {
+    let decoded = fs_project::parse_sexpr(include_str!(
+        "../../../../data/reference-project/cooling-enthalpy-airflow.fsim"
+    )).unwrap();
+    assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
+    let cards = CardPackSet::admit(vec![
+        raw_pack(
+            CardPackKind::Material, "aa6061.fsmcdpk",
+            include_bytes!("../../../../data/reference-project/aa6061.fsmcdpk").to_vec(),
+        ),
+        raw_pack(
+            CardPackKind::Material, "gray-surface.fsmcdpk",
+            include_bytes!("../../../../data/reference-project/gray-surface.fsmcdpk").to_vec(),
+        ),
+    ]).unwrap();
+    let solved = run(
+        &decoded.spec, &cards,
+        include_bytes!("../../../../data/reference-project/plate.stl"),
+    );
+    assert_eq!(solved.transient().str_field("schema"), Some("fs-cli-transient-enthalpy-v1"));
+    // Unit right tetra: z=0 natural face has area 1/2; the other three faces
+    // provide forced-air area 1+sqrt(3)/2. Density 6 kg/m3 makes its mass 1 kg.
+    check_mixed_plateau(&solved, 1.0 + 0.5 * 3.0_f64.sqrt(), 0.5, "solid");
+    let radiation = solved.receipt.get("radiation").unwrap();
+    let surfaces = radiation.get("surfaces").unwrap().as_array().unwrap();
+    assert_eq!(surfaces.len(), 1);
+    assert_eq!(surfaces[0].str_field("card"),
+        Some("63485429663ba24d53d67a7d3b03ab0611f17f1e3e445e6a1ef4f636093a6e4f"));
+    close(n(&surfaces[0], "emissivity"), EMISSIVITY, 0.0);
 }

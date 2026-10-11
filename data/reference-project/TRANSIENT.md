@@ -58,8 +58,8 @@ v11 transient projects migrate with their existing static power unchanged.
 This product slice supports fixed capacity, constant or temperature-dependent
 conductivity from the bound material card, Dirichlet/Neumann/Robin boundaries,
 matching finite contact, declared ambient radiation, natural convection and
-quasi-steady airflow from the native fan network. Natural convection and
-airflow are separate endpoint modes. A temperature-dependent curve is evaluated at
+quasi-steady airflow from the native fan network. Natural and forced convection
+may occupy distinct boundary patches. A temperature-dependent curve is evaluated at
 each trial endpoint, including its actual conductivity derivative in the
 Newton/FGMRES tangent; the solver never substitutes conductivity at the old
 temperature. Each step starts from unchanged physical history until its
@@ -84,9 +84,10 @@ object and each time-step row. An exhausted numerical budget or
 material-validity boundary refuses the unfinished stage. Constant conductivity
 uses the linear solid response and records `nonlinear: null`.
 
-Spatial ladder/adaptive studies, steady adjoint requests and simultaneous
-natural and airflow-convection boundaries are not admitted together with this
-declaration. Airflow is quasi-steady; its own heat storage and time-varying fan
+Spatial ladder/adaptive studies and steady adjoint requests are not admitted
+with this declaration. Every natural update closes the complete air solve,
+then checks the full physical endpoint and actual air-enthalpy balance.
+Airflow is quasi-steady; its own heat storage and time-varying fan
 dynamics are not modeled. Heat capacity remains temperature independent;
 latent heat and phase changes use the explicit total-enthalpy storage below. Stage
 cancellation retains the preceding
@@ -155,10 +156,45 @@ The top-level conjugate report describes the last counted solid response.
 
 Airflow stays quasi-steady: the model retains the solved fan flow and
 transport properties throughout the thermal trajectory. It adds no air
-storage or transient fan dynamics. Natural and forced convection remain
-separate native transient modes. Radiation may be combined with either.
-The declared work allowance includes all nested air/radiation/Newton trials,
+storage or transient fan dynamics. Separate natural-convection reservoirs
+may exchange with the same stored solid, with optional ambient radiation.
+The declared work allowance includes all nested air/natural/radiation/Newton trials,
 and an exhausted tolerance, material domain or budget publishes no endpoint.
+
+### Natural reservoirs, forced air and phase change together
+
+`data/reference-project/cooling-enthalpy-airflow.fsim` is a small mixed
+example using the existing unit-tetrahedron mesh. Its synthetic 1 kg body
+starts at 330 K and 50% liquid mass fraction on a 10000 J/kg latent plateau.
+A 350 K natural-convection reservoir warms one 0.5 m² face. That face also
+radiates to a 270 K reservoir using the existing gray-surface card; the
+remaining exterior exchanges heat with fan-driven air entering at 293.15 K.
+The 20 W power pulse ends at 0.075 s, and cooling continues through 0.2 s.
+Density, phase data and the fan curve are explicitly educational inputs.
+
+```bash
+frankensim --json validate data/reference-project/cooling-enthalpy-airflow.fsim
+frankensim --json import data/reference-project/cooling-enthalpy-airflow.fsim \
+  data/reference-project/plate.stl enthalpy-airflow.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-enthalpy-airflow.fsim \
+  enthalpy-airflow.db --materials data/reference-project/aa6061.fsmcdpk \
+  --materials data/reference-project/gray-surface.fsmcdpk
+```
+
+The temperature remains on the 330 K plateau while stored enthalpy and liquid
+mass fraction decrease. Inspect `transient.endpoint.specific_enthalpy_j_kg`,
+`liquid_mass_fraction` and integrated energy alongside the temperature field.
+The stored-energy change is the delivered 1.5 J pulse minus air heat, signed
+natural-reservoir heat and radiation integrated over the full trajectory.
+Equal coarse/fine temperatures on a plateau do not prove phase convergence.
+
+Every air callback closes the natural and radiation laws using the same
+accepted old enthalpy. Publication also checks the full nodal residual under
+updated natural coefficients and air references, physical energy closure and
+actual air enthalpy gain. Natural and radiation heat enter the solid balance
+separately from forced convection. Per-step natural/radiation rows describe
+the final air trial; trajectory counters include all trials. The field stays
+attached to its last counted applied boundary, with no hidden final re-solve.
 
 ### Hot and cold bodies at the start
 
@@ -441,7 +477,8 @@ solid stores heat, and neither air storage nor fan acceleration is inferred.
 
 Every air evaluation and inner radiation/Newton solve sees the same accepted
 old solid temperature. The shared IQN-ILS solver has at most 100 airflow
-evaluations per endpoint. It uses the existing branch-local heat gates and
+evaluations per natural trial, or per endpoint without natural convection;
+the natural loop allows at most 80 trials. It uses the existing branch-local heat gates and
 tightens its raw reference-temperature criterion to at most
 `0.01 * energy_tolerance_j / (dt_s * sum(hA))`. A final independent joule gate
 uses actual heat carried away by every air branch, off-path convection,

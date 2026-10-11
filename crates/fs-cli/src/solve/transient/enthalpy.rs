@@ -18,7 +18,7 @@ mod conductivity;
 mod conjugate;
 mod natural;
 
-const NO_CLAIM: &str = "Estimated stationary P1 total-enthalpy transport with frozen reference mass and caller-declared equilibrium phase charts. Latent heat is stored only in specific enthalpy; no apparent heat capacity or additional latent account is used. Existing sourced conductivity, finite-resistance contact and prescribed Neumann/Robin boundaries remain active. Declared regional conductivity multipliers use each element's mean nodal liquid mass fraction and the shared exact enthalpy tangent, including phase feedback on latent plateaus. The base tensor retains its temperature dependence and source support; multipliers are declared phenomenological data, not a volume-fraction mixture or validated material claim. Declared ambient radiation uses sourced area-mean gray patches; every trial retains the same old enthalpy and the accepted endpoint passes independent physical residual and nonlinear-heat energy checks. Declared natural convection evaluates the existing card at each candidate wall temperature and requires the complete physical residual and energy balance to close; exact equilibrium and out-of-domain Rayleigh states retain their refusals. Declared quasi-steady airflow uses the existing branch heat-exchange owner and checks the complete endpoint at updated air references, with actual air enthalpy gain, off-path convection and nonlinear radiation counted separately. Every workload switch is represented on both independent time grids. The final field comes only from the completed fine grid. The temperature difference is an assumed-first-order temporal estimate, not a spatial or continuous-time maximum bound; agreement on a latent plateau does not prove convergence of enthalpy or phase fraction. Supplied material-card identities and source text are attribution, not verification of the declared curves. Geometry, reference density and energetic internal variables are fixed. No material motion, density-driven expansion, phase kinetics, enclosure radiation, pointwise T^4 quadrature, trajectory adjoint is inferred.";
+const NO_CLAIM: &str = "Estimated stationary P1 total-enthalpy transport with frozen reference mass and caller-declared equilibrium phase charts. Latent heat is stored only in specific enthalpy; no apparent heat capacity or additional latent account is used. Existing sourced conductivity, finite-resistance contact and prescribed Neumann/Robin boundaries remain active. Declared regional conductivity multipliers use each element's mean nodal liquid mass fraction and the shared exact enthalpy tangent, including phase feedback on latent plateaus. The base tensor retains its temperature dependence and source support; multipliers are declared phenomenological data, not a volume-fraction mixture or validated material claim. Declared ambient radiation uses sourced area-mean gray patches; every trial retains the same old enthalpy and the accepted endpoint passes independent physical residual and nonlinear-heat energy checks. Declared natural convection evaluates the existing card at each candidate wall temperature and requires the complete physical residual and energy balance to close; exact equilibrium and out-of-domain Rayleigh states retain their refusals. Declared quasi-steady airflow uses the existing branch heat-exchange owner and checks the complete endpoint at updated air references, with actual air enthalpy gain, off-path convection and nonlinear radiation counted separately. Natural reservoirs on distinct boundary targets compose with forced-air transport: every air trial encloses the existing natural/radiation endpoint solve while retaining the same accepted old enthalpy. The final physical audit evaluates updated natural coefficients and air references at the counted state; natural-reservoir and radiation heat stay separate from the forced-convective flux sent to air. Every workload switch is represented on both independent time grids. The final field comes only from the completed fine grid. The temperature difference is an assumed-first-order temporal estimate, not a spatial or continuous-time maximum bound; agreement on a latent plateau does not prove convergence of enthalpy or phase fraction. Supplied material-card identities and source text are attribution, not verification of the declared curves. Geometry, reference density and energetic internal variables are fixed. No material motion, density-driven expansion, phase kinetics, enclosure radiation, pointwise T^4 quadrature, airflow storage, time-varying fan dynamics or trajectory adjoint is inferred.";
 
 /// Storage-specific scope carried by the outer conduction report.
 pub(super) fn no_claim() -> &'static str {
@@ -47,16 +47,7 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
         )
     }) {
         return Err(bad(
-            "native enthalpy supports Neumann, prescribed Robin and checked natural-convection or airflow boundaries; temperature alone does not select latent enthalpy",
-        ));
-    }
-    if setup.boundaries.iter().any(|row| matches!(
-        row.condition, ThermalBoundaryCondition::NaturalConvection { .. },
-    )) && setup.boundaries.iter().any(|row| matches!(
-        row.condition, ThermalBoundaryCondition::AirflowConvection { .. },
-    )) {
-        return Err(bad(
-            "native enthalpy admits natural or airflow convection separately; their mixed physical endpoint is not yet supported for this storage model",
+            "native enthalpy supports Neumann, prescribed Robin and checked natural-convection and airflow boundaries; temperature alone does not select latent enthalpy",
         ));
     }
     if adjoint::requested(spec)?.is_some() {
@@ -152,7 +143,7 @@ fn airflow_step_row(
         ))
     }).collect::<Result<Vec<_>, SolveRefusal>>()?;
     Ok(format!(
-        "{{\"iterations\":{},\"solid_solves\":{},\"krylov_iterations\":{},\"nonlinear_iterations\":{},\"radiation_trials\":{},\"endpoint_evaluations\":{},\"reference_tolerance_k\":{},\"applied_references_k\":{{{}}},\"physical_references_k\":{{{}}},\"residual_reference\":{},\"initial_seed_residual_norm_j\":{},\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},\"physical_energy_residual_j\":{},\"physical_convective_out_w\":{},\"radiative_out_w\":{},\"air_heat_gain_w\":{},\"off_path_convective_out_w\":{},\"coupled_energy_residual_j\":{},\"physical_convective_robin_fluxes\":[{}],\"exchange\":{}}}",
+        "{{\"iterations\":{},\"solid_solves\":{},\"krylov_iterations\":{},\"nonlinear_iterations\":{},\"radiation_trials\":{},\"endpoint_evaluations\":{},\"reference_tolerance_k\":{},\"applied_references_k\":{{{}}},\"physical_references_k\":{{{}}},\"residual_reference\":{},\"initial_seed_residual_norm_j\":{},\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},\"physical_energy_residual_j\":{},\"physical_convective_out_w\":{},\"radiative_out_w\":{},\"physical_dirichlet_in_w\":0,\"air_heat_gain_w\":{},\"off_path_convective_out_w\":{},\"coupled_energy_residual_j\":{},\"physical_convective_robin_fluxes\":[{}],\"exchange\":{}}}",
         solved.outcome.solution.iterations,
         solved.solid_solves,
         solved.krylov_iterations,
@@ -314,7 +305,7 @@ fn march(
         let endpoint = if let Some(path) = airflow {
             let solved = conjugate::advance(
                 cx, engine, step_problem, interfaces, &old, dt, config,
-                radiation, path, deadline,
+                radiation, natural, pressure_pa, path, deadline,
             )?;
             physical = Some((
                 finite(
@@ -337,6 +328,15 @@ fn march(
             maximum_airflow_physical_energy_residual_j =
                 maximum_airflow_physical_energy_residual_j
                     .max(solved.physical_energy_residual_j.abs());
+            natural_iterations += solved.natural_iterations;
+            natural_solid_solves += solved.natural_solid_solves;
+            natural_updates += solved.natural_updates;
+            natural_krylov_iterations += solved.natural_krylov_iterations;
+            natural_endpoint_evaluations += solved.natural_endpoint_evaluations;
+            if !natural.is_empty() {
+                natural_fragment = format!(",\"natural\":{}", solved.natural_evidence);
+            }
+            last_natural = solved.natural;
             if radiation.is_some() {
                 radiation_fragment = format!(",\"radiation\":{}", solved.radiation_evidence);
                 radiation_trials += solved.radiation_trials;
@@ -489,7 +489,9 @@ fn march(
             residuals_w.push(finite(row.residual_before / dt)?);
             linear.push(LinearSolveEvidence {
                 nonlinear_iteration: updates + row.iteration,
-                method: if airflow.is_some() {
+                method: if airflow.is_some() && !natural.is_empty() {
+                    "fgmres-enthalpy-newton-final-mixed-convection-trial"
+                } else if airflow.is_some() {
                     "fgmres-enthalpy-newton-final-airflow-trial"
                 } else if !natural.is_empty() {
                     "fgmres-enthalpy-newton-final-natural-trial"
@@ -647,9 +649,10 @@ pub(super) fn solve(
     };
     let airflow_factor = airflow.map_or(1, |_| airflow::exchange_config(false).max_iterations);
     let radiation_factor = radiation.map_or(1, |lowering| lowering.config.max_iterations);
-    let max_solid_solves_per_step = natural_factor
-        .checked_mul(airflow_factor)
-        .and_then(|v| v.checked_mul(radiation_factor))
+    let max_natural_iterations_per_step = natural_factor.checked_mul(airflow_factor)
+        .ok_or_else(|| bad("combined enthalpy interface allowance overflows"))?;
+    let max_solid_solves_per_step = max_natural_iterations_per_step
+        .checked_mul(radiation_factor)
         .ok_or_else(|| bad("combined enthalpy boundary iteration allowance overflows"))?;
     let total_trial_limit = total_steps
         .checked_mul(max_solid_solves_per_step)
@@ -671,20 +674,30 @@ pub(super) fn solve(
     let total_backtrack_evaluation_limit = total_newton_limit
         .checked_mul(storage.max_backtracks as usize + 1)
         .ok_or_else(|| bad("combined enthalpy line-search allowance overflows"))?;
-    let max_endpoint_evaluations_per_step = if airflow.is_some() {
-        airflow_factor
-            .checked_add(2)
-            .ok_or_else(|| bad("enthalpy airflow endpoint allowance overflows"))?
-    } else if natural.is_empty() {
+    let max_natural_endpoint_evaluations_per_step = if natural.is_empty() {
         0
     } else {
-        natural_factor
-            .checked_mul(2)
+        max_natural_iterations_per_step.checked_mul(2)
             .ok_or_else(|| bad("enthalpy natural endpoint allowance overflows"))?
+    };
+    let total_natural_endpoint_evaluation_limit = total_steps
+        .checked_mul(max_natural_endpoint_evaluations_per_step)
+        .ok_or_else(|| bad("combined enthalpy natural endpoint allowance overflows"))?;
+    let max_endpoint_evaluations_per_step = if airflow.is_some() {
+        // Natural audits occur inside each air callback, alongside the seed,
+        // per-callback old-state audit and final physical air audit.
+        max_natural_endpoint_evaluations_per_step
+            .checked_add(airflow_factor)
+            .and_then(|value| value.checked_add(2))
+            .ok_or_else(|| bad("enthalpy airflow endpoint allowance overflows"))?
+    } else {
+        max_natural_endpoint_evaluations_per_step
     };
     let total_endpoint_evaluation_limit = total_steps
         .checked_mul(max_endpoint_evaluations_per_step)
         .ok_or_else(|| bad("combined enthalpy endpoint allowance overflows"))?;
+    let retained_newton_history_limit = total_steps.checked_mul(config.max_newton_iterations)
+        .ok_or_else(|| bad("retained enthalpy Newton history allowance overflows"))?;
     let knot_count = storage.materials.iter().try_fold(0usize, |count, row| {
         count
             .checked_add(row.knots.len())
@@ -738,16 +751,16 @@ pub(super) fn solve(
     } else {
         0
     };
-    // Same declared-memory admission convention as the existing native time
-    // path: numerical buffers plus sparse staging and retained text/telemetry.
-    // It is not a measurement of allocator overhead or process peak RSS.
+    // Only the final inner Newton history of each accepted step is retained;
+    // discarded air, natural and radiation trials reuse bounded workspace.
+    // This is declared-memory admission, not allocator overhead or peak RSS.
     let bytes = n
         .checked_mul(8 * (2 * restart + 48) + 160)
         .and_then(|v| elements.checked_mul(4096).and_then(|e| v.checked_add(e)))
         .and_then(|v| knot_count.checked_mul(256).and_then(|k| v.checked_add(k)))
         .and_then(|v| total_steps.checked_mul(2048).and_then(|r| v.checked_add(r)))
         .and_then(|v| {
-            total_newton_limit
+            retained_newton_history_limit
                 .checked_mul(160)
                 .and_then(|r| v.checked_add(r))
         })
@@ -944,7 +957,7 @@ pub(super) fn solve(
     };
     let radiation_receipt = if let Some(lowering) = radiation {
         format!(
-            ",\"radiation\":{{\"method\":\"implicit-area-mean-gray-radiation\",\"max_trials_per_step\":{max_solid_solves_per_step},\"max_trials_per_natural_iteration\":{},\"max_trials_per_boundary_iteration\":{},\"max_newton_updates_per_trial\":{},\"max_newton_updates_per_step\":{max_newton_updates_per_step},\"max_krylov_iterations_per_newton_update\":{},\"max_krylov_iterations_per_step\":{max_krylov_iterations_per_step},\"total_trial_limit\":{total_trial_limit},\"total_backtrack_evaluation_limit\":{total_backtrack_evaluation_limit},\"coarse_trials\":{},\"fine_trials\":{},\"total_trials\":{},\"coarse_newton_updates\":{},\"fine_newton_updates\":{},\"total_newton_updates\":{},\"coarse_krylov_iterations\":{},\"fine_krylov_iterations\":{},\"total_krylov_iterations\":{},\"maximum_physical_energy_residual_j\":{},\"history\":\"unchanged-physical-old-specific-enthalpy-in-every-trial\",\"nonlinear_detail\":\"step iteration fields, linear evidence and residual histories retain only the final inner solve; radiation counters include every trial across airflow or natural-convection iterations; step and final residuals and energy use the complete physical endpoint\"}}",
+            ",\"radiation\":{{\"method\":\"implicit-area-mean-gray-radiation\",\"max_trials_per_step\":{max_solid_solves_per_step},\"max_trials_per_natural_iteration\":{},\"max_trials_per_boundary_iteration\":{},\"max_newton_updates_per_trial\":{},\"max_newton_updates_per_step\":{max_newton_updates_per_step},\"max_krylov_iterations_per_newton_update\":{},\"max_krylov_iterations_per_step\":{max_krylov_iterations_per_step},\"total_trial_limit\":{total_trial_limit},\"total_backtrack_evaluation_limit\":{total_backtrack_evaluation_limit},\"coarse_trials\":{},\"fine_trials\":{},\"total_trials\":{},\"coarse_newton_updates\":{},\"fine_newton_updates\":{},\"total_newton_updates\":{},\"coarse_krylov_iterations\":{},\"fine_krylov_iterations\":{},\"total_krylov_iterations\":{},\"maximum_physical_energy_residual_j\":{},\"history\":\"unchanged-physical-old-specific-enthalpy-in-every-trial\",\"nonlinear_detail\":\"step iteration fields, linear evidence and residual histories retain only the final inner solve; radiation counters include every trial across airflow and natural-convection iterations; step and final residuals and energy use the complete physical endpoint\"}}",
             lowering.config.max_iterations,
             lowering.config.max_iterations,
             config.max_newton_iterations,
@@ -971,7 +984,7 @@ pub(super) fn solve(
         String::new()
     } else {
         format!(
-            ",\"natural\":{{\"method\":\"implicit-area-mean-natural-convection\",\"max_iterations_per_step\":{natural_factor},\"max_solid_solves_per_step\":{max_solid_solves_per_step},\"max_newton_updates_per_step\":{max_newton_updates_per_step},\"max_krylov_iterations_per_step\":{max_krylov_iterations_per_step},\"max_endpoint_evaluations_per_step\":{max_endpoint_evaluations_per_step},\"total_endpoint_evaluation_limit\":{total_endpoint_evaluation_limit},\"coarse_iterations\":{},\"fine_iterations\":{},\"total_iterations\":{},\"coarse_solid_solves\":{},\"fine_solid_solves\":{},\"total_solid_solves\":{},\"coarse_newton_updates\":{},\"fine_newton_updates\":{},\"total_newton_updates\":{},\"coarse_krylov_iterations\":{},\"fine_krylov_iterations\":{},\"total_krylov_iterations\":{},\"total_endpoint_evaluations\":{},\"maximum_physical_energy_residual_j\":{},\"history\":\"unchanged-physical-old-specific-enthalpy-in-every-natural-and-radiation-trial\",\"endpoint\":\"last-counted-solid-response-with-independent-full-physical-residual-and-energy-gates\",\"residual_reference\":\"first-physical-candidate-frozen-per-step\",\"equilibrium\":\"existing-card-domain-no-zero-delta-limiting-law\"}}",
+            ",\"natural\":{{\"method\":\"implicit-area-mean-natural-convection\",\"max_iterations_per_step\":{max_natural_iterations_per_step},\"max_iterations_per_air_trial\":{natural_factor},\"max_solid_solves_per_step\":{max_solid_solves_per_step},\"max_newton_updates_per_step\":{max_newton_updates_per_step},\"max_krylov_iterations_per_step\":{max_krylov_iterations_per_step},\"max_endpoint_evaluations_per_step\":{max_natural_endpoint_evaluations_per_step},\"total_endpoint_evaluation_limit\":{total_natural_endpoint_evaluation_limit},\"coarse_iterations\":{},\"fine_iterations\":{},\"total_iterations\":{},\"coarse_solid_solves\":{},\"fine_solid_solves\":{},\"total_solid_solves\":{},\"coarse_newton_updates\":{},\"fine_newton_updates\":{},\"total_newton_updates\":{},\"coarse_krylov_iterations\":{},\"fine_krylov_iterations\":{},\"total_krylov_iterations\":{},\"total_endpoint_evaluations\":{},\"maximum_physical_energy_residual_j\":{},\"history\":\"unchanged-physical-old-specific-enthalpy-in-every-air-natural-and-radiation-trial\",\"endpoint\":\"last-counted-solid-response-with-independent-full-physical-residual-and-energy-gates\",\"residual_reference\":\"first-physical-candidate-frozen-per-natural-solve\",\"equilibrium\":\"existing-card-domain-no-zero-delta-limiting-law\"}}",
             coarse.natural_iterations,
             fine.natural_iterations,
             coarse.natural_iterations + fine.natural_iterations,
@@ -985,16 +998,17 @@ pub(super) fn solve(
             fine.natural_krylov_iterations,
             coarse.natural_krylov_iterations + fine.natural_krylov_iterations,
             coarse.natural_endpoint_evaluations + fine.natural_endpoint_evaluations,
-            number(
-                coarse
-                    .maximum_energy_residual_j
-                    .max(fine.maximum_energy_residual_j)
-            )?,
+            number(if airflow.is_some() {
+                coarse.maximum_airflow_physical_energy_residual_j
+                    .max(fine.maximum_airflow_physical_energy_residual_j)
+            } else {
+                coarse.maximum_energy_residual_j.max(fine.maximum_energy_residual_j)
+            })?,
         )
     };
     let airflow_receipt_fragment = if airflow.is_some() {
         format!(
-            ",\"conjugate\":{{\"method\":\"implicit-total-enthalpy-quasi-steady-airflow\",\"max_iterations_per_step\":{airflow_factor},\"max_solid_solves_per_step\":{max_solid_solves_per_step},\"max_newton_updates_per_step\":{max_newton_updates_per_step},\"max_krylov_iterations_per_step\":{max_krylov_iterations_per_step},\"max_endpoint_evaluations_per_step\":{max_endpoint_evaluations_per_step},\"total_endpoint_evaluation_limit\":{total_endpoint_evaluation_limit},\"coarse_iterations\":{},\"fine_iterations\":{},\"total_iterations\":{},\"coarse_solid_solves\":{},\"fine_solid_solves\":{},\"total_solid_solves\":{},\"coarse_newton_updates\":{},\"fine_newton_updates\":{},\"total_newton_updates\":{},\"coarse_krylov_iterations\":{},\"fine_krylov_iterations\":{},\"total_krylov_iterations\":{},\"total_endpoint_evaluations\":{},\"maximum_physical_energy_residual_j\":{},\"maximum_coupled_energy_residual_j\":{},\"coupled_window_residual_j\":{},\"history\":\"unchanged-physical-old-specific-enthalpy-in-every-airflow-and-radiation-trial\",\"endpoint\":\"last-counted-solid-response-with-full-updated-air-reference-physical-residual-and-energy-gates\",\"residual_reference\":\"initial-enthalpy-with-branch-inlet-seed-boundary\",\"energy\":\"actual-air-enthalpy-gain-plus-off-path-convection-plus-nonlinear-radiation-counted-once\"}}",
+            ",\"conjugate\":{{\"method\":\"implicit-total-enthalpy-quasi-steady-airflow\",\"max_iterations_per_step\":{airflow_factor},\"max_solid_solves_per_step\":{max_solid_solves_per_step},\"max_newton_updates_per_step\":{max_newton_updates_per_step},\"max_krylov_iterations_per_step\":{max_krylov_iterations_per_step},\"max_endpoint_evaluations_per_step\":{max_endpoint_evaluations_per_step},\"total_endpoint_evaluation_limit\":{total_endpoint_evaluation_limit},\"coarse_iterations\":{},\"fine_iterations\":{},\"total_iterations\":{},\"coarse_solid_solves\":{},\"fine_solid_solves\":{},\"total_solid_solves\":{},\"coarse_newton_updates\":{},\"fine_newton_updates\":{},\"total_newton_updates\":{},\"coarse_krylov_iterations\":{},\"fine_krylov_iterations\":{},\"total_krylov_iterations\":{},\"total_endpoint_evaluations\":{},\"maximum_physical_energy_residual_j\":{},\"maximum_coupled_energy_residual_j\":{},\"coupled_window_residual_j\":{},\"history\":\"unchanged-physical-old-specific-enthalpy-in-every-airflow-natural-and-radiation-trial\",\"endpoint\":\"last-counted-solid-response-with-full-updated-air-reference-and-natural-coefficient-physical-residual-and-energy-gates\",\"residual_reference\":\"initial-enthalpy-with-branch-inlet-seed-boundary\",\"energy\":\"actual-air-enthalpy-gain-plus-off-path-convection-plus-nonlinear-radiation-counted-once\",\"nested_evidence\":\"step natural and radiation rows retain the final air trial; trajectory counters include every air trial\"}}",
             coarse.airflow_iterations,
             fine.airflow_iterations,
             coarse.airflow_iterations + fine.airflow_iterations,
@@ -1026,7 +1040,7 @@ pub(super) fn solve(
         "regional-enthalpy"
     });
     let receipt = format!(
-        "{{\"schema\":\"fs-cli-transient-enthalpy-v1\",\"method\":\"backward-euler-total-enthalpy\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_state\":{initial_state},\"initial_temperature_k\":{initial_temperature_receipt},\"final_time_s\":{},\"coarse_steps\":{},\"fine_steps\":{},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_max_step_s\":{},\"fine_max_step_s\":{},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"materials\":[{}],\"nonlinear\":{{\"method\":\"newton-fgmres\",\"residual_units\":\"J\",\"report_residual_units\":\"W\",\"max_updates_per_step\":{},\"max_backtracks_per_update\":{},\"linear_restart\":{restart},\"max_linear_cycles\":{},\"total_newton_limit\":{total_newton_limit},\"total_krylov_limit\":{total_krylov_limit},\"total_updates\":{},\"residual_atol_j\":{},\"residual_rtol\":{},\"armijo_c\":0.0001,\"line_search_shrink\":0.5{nonlinear_history_fragment}}}{radiation_receipt}{natural_receipt_fragment}{airflow_receipt_fragment},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"max_specific_enthalpy_difference_j_kg\":{},\"max_liquid_mass_fraction_difference\":{},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"endpoint\":{{\"vertex_order\":\"retained-conduction-mesh\",\"specific_enthalpy_j_kg\":[{}],\"liquid_mass_fraction\":[{}],\"reference_nodal_mass_kg\":[{}]}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"schema\":\"fs-cli-transient-enthalpy-v1\",\"method\":\"backward-euler-total-enthalpy\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_state\":{initial_state},\"initial_temperature_k\":{initial_temperature_receipt},\"final_time_s\":{},\"coarse_steps\":{},\"fine_steps\":{},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_max_step_s\":{},\"fine_max_step_s\":{},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"materials\":[{}],\"nonlinear\":{{\"method\":\"newton-fgmres\",\"residual_units\":\"J\",\"report_residual_units\":\"W\",\"max_updates_per_step\":{},\"max_backtracks_per_update\":{},\"linear_restart\":{restart},\"max_linear_cycles\":{},\"total_newton_limit\":{total_newton_limit},\"retained_history_update_limit\":{retained_newton_history_limit},\"total_krylov_limit\":{total_krylov_limit},\"total_updates\":{},\"residual_atol_j\":{},\"residual_rtol\":{},\"armijo_c\":0.0001,\"line_search_shrink\":0.5{nonlinear_history_fragment}}}{radiation_receipt}{natural_receipt_fragment}{airflow_receipt_fragment},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"max_specific_enthalpy_difference_j_kg\":{},\"max_liquid_mass_fraction_difference\":{},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"endpoint\":{{\"vertex_order\":\"retained-conduction-mesh\",\"specific_enthalpy_j_kg\":[{}],\"liquid_mass_fraction\":[{}],\"reference_nodal_mass_kg\":[{}]}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         number(policy.horizon.value)?,
         grids.coarse.len(),
         grids.fine.len(),
