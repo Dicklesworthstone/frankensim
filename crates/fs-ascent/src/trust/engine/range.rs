@@ -31,6 +31,7 @@ fn power(exponent: i32) -> f64 {
 // m is bounded by 4. Split extreme powers so a representable subnormal or
 // top-binade answer is not lost by materializing 2^e first.
 fn scale(m: f64, exponent: i32) -> f64 {
+    if m == 0.0 { return m; }
     if exponent > 1023 {
         if exponent > 1025 { return m.signum() * f64::INFINITY; }
         (m * power(exponent - 1023)) * power(1023)
@@ -82,7 +83,7 @@ pub(super) fn to_boundary(p: &mut [f64], d: &[f64], delta: f64) -> bool {
     let root = fs_math::det::sqrt(disc.max(0.0));
     let tau = (-pd + root) / dd;
     if dd.is_normal() && disc.is_normal() && (delta * delta - pp) > 1e-8 * (delta * delta)
-        && tau.is_finite() && tau > 0.0 && (pd <= 0.0 || root >= 2.0 * pd)
+        && tau.is_finite() && tau > 0.0 && (pd <= 0.0 || root - pd > 1e-8 * root)
     {
         let next: Vec<_> = p.iter().zip(d).map(|(&a, &b)| tau.mul_add(b, a)).collect();
         if next.iter().all(|v| v.is_finite()) {

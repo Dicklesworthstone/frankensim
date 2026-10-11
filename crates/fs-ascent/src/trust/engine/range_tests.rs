@@ -3,6 +3,22 @@ use super::*;
 use super::super::{TrustRegionState, TrustRegionProgress, StopRule, StopReason};
 
 #[test]
+fn binary_fallback_scaling_roundtrips_every_exponent_bin_and_signed_zero() {
+    let mask = (1u64 << 52) - 1;
+    for exponent in 0u64..=2046 {
+        for fraction in [0, 1, mask >> 1, mask] {
+            for sign in [0, 1u64 << 63] {
+                let x = f64::from_bits(sign | (exponent << 52) | fraction);
+                let (mantissa, power) = split(x);
+                assert_eq!(scale(mantissa, power).to_bits(), x.to_bits());
+            }
+        }
+    }
+    assert_eq!(scale(0.0, 4096).to_bits(), 0.0f64.to_bits());
+    assert_eq!(scale(-0.0, 4096).to_bits(), (-0.0f64).to_bits());
+}
+
+#[test]
 fn overflowing_curvature_keeps_a_representable_positive_newton_ratio() {
     let (negative, alpha) = curvature(2.0, &[1.0, 1.0], &[1e308, 1e308]);
     assert!(!negative);

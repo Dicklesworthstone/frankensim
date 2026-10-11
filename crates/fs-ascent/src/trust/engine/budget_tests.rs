@@ -131,3 +131,67 @@ fn objective_limits_and_zero_iteration_segments_do_not_spend_hessian_work() {
     assert_eq!(result.progress, TrustRegionProgress::Stopped(StopReason::IterationCap));
     assert_eq!(result.solution.hv_evals, 0);
 }
+
+#[test]
+fn unwinding_and_malformed_callbacks_retain_incumbent_and_charge_every_role() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let initial = TrustRegionState::new(&[0.1, 0.1], &mut fg);
+    let rule = StopRule::GradNorm(1e-12);
+    let mut direct = initial.clone();
+    direct.run(&mut fg, &mut hv, &rule, 10);
+    // Two Krylov calls, the final-model HVP, then the objective/gradient.
+    for malformed in [false, true] {
+        for fail_at in 1..=4 {
+            let mut state = initial.clone();
+            let calls = Cell::new(0);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                state.run_bounded(&mut |x| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == fail_at {
+                        if malformed { return (0.0, Vec::new()); }
+                        panic!("objective callback fault");
+                    }
+                    fg(x)
+                }, &mut |x, v| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == fail_at {
+                        if malformed { return Vec::new(); }
+                        panic!("Hessian callback fault");
+                    }
+                    hv(x, v)
+                }, &StopRule::Budget(2), 10, 3);
+            }));
+            assert!(result.is_err());
+            assert_eq!(calls.get(), fail_at);
+            incumbent_equal(&initial, &state);
+            let spent_hv = fail_at.min(3);
+            let spent_fg = usize::from(fail_at == 4);
+            assert_eq!(state.hv_evals, spent_hv);
+            assert_eq!(state.evals, 1 + spent_fg);
+            let result = state.run_bounded(&mut fg, &mut hv, &rule, 10,
+                spent_hv + direct.hv_evals);
+            assert_eq!(result.progress, TrustRegionProgress::Stopped(StopReason::GradNorm));
+            incumbent_equal(&direct, &state);
+            assert_eq!(state.hv_evals, direct.hv_evals + spent_hv);
+            assert_eq!(state.evals, direct.evals + spent_fg);
+        }
+    }
+}
+
+#[test]
+fn exhausted_counter_ranges_refuse_before_callbacks_in_both_profiles() {
+    let mut state = TrustRegionState::new(&[0.1, 0.1], &mut fg);
+    state.evals = usize::MAX;
+    let result = state.run(&mut |_| panic!("evaluation counter overflow"),
+        &mut |_, _| panic!("evaluation overflow reached Hessian"),
+        &StopRule::GradNorm(0.0), 10);
+    assert_eq!(result.progress, TrustRegionProgress::Stopped(StopReason::Budget));
+    state.evals = 1;
+    state.hv_evals = usize::MAX;
+    let result = state.run(&mut |_| panic!("Hessian limit reached objective"),
+        &mut |_, _| panic!("Hessian counter overflow"),
+        &StopRule::GradNorm(0.0), 10);
+    assert_eq!(result.progress, TrustRegionProgress::HessianBudget);
+    assert_eq!(result.solution.hv_evals, usize::MAX);
+    assert_eq!(result.solution.iters, 0);
+}

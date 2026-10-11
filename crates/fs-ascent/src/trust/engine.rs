@@ -23,9 +23,9 @@ pub struct TrustRegionReport {
     pub grad_norm: f64,
     /// Outer iterations.
     pub iters: usize,
-    /// Function+gradient evaluations.
+    /// Function+gradient attempts, including a callback that unwinds.
     pub evals: usize,
-    /// Hessian-vector products spent.
+    /// Hessian-vector attempts, including a callback that unwinds.
     pub hv_evals: usize,
     /// Steps that hit the boundary via negative curvature.
     pub negative_curvature_hits: usize,
@@ -229,6 +229,12 @@ impl TrustRegionState {
     /// point, radius and history, without refunding products already attempted.
     /// Raising the ceiling resumes from that point and restarts its Krylov solve.
     /// Objective/gradient limits remain the hard `Budget` leaves of `rule`.
+    ///
+    /// Callbacks are charged immediately before invocation. Panics and malformed
+    /// return dimensions still propagate, but leave the accepted point, radius
+    /// and history unchanged and retain all attempted-work counts. A caller
+    /// electing to catch a panic must independently ensure its own callbacks
+    /// remain usable; this engine cannot undo callback side effects.
     pub fn run_bounded(
         &mut self,
         fg: crate::FnGrad<'_>,
@@ -266,7 +272,7 @@ impl TrustRegionState {
             if paused() {
                 break TrustRegionProgress::Paused;
             }
-            if budget.is_some_and(|cap| self.evals >= cap) {
+            if self.evals == usize::MAX || budget.is_some_and(|cap| self.evals >= cap) {
                 break TrustRegionProgress::Stopped(StopReason::Budget);
             }
             let obs = StopObservation {
@@ -315,9 +321,14 @@ impl TrustRegionState {
         let scaled_gradient =
             (scale != 1.0).then(|| self.g.iter().map(|v| v / scale).collect::<Vec<_>>());
         let gradient = scaled_gradient.as_deref().unwrap_or(&self.g);
+        let initial_hv = self.hv_evals;
+        let allowance = max_hessian_products.saturating_sub(initial_hv);
         let step = {
             let xc = self.x.clone();
             let mut hv = |v: &[f64]| {
+                // Steihaug admits this attempt before invoking the closure.
+                // Precharging also survives a panic or a malformed return.
+                self.hv_evals += 1;
                 let mut product = hv_at(&xc, v);
                 if scale != 1.0 {
                     for value in &mut product {
@@ -326,25 +337,24 @@ impl TrustRegionState {
                 }
                 product
             };
-            steihaug(gradient, &mut hv, self.delta, 1e-8,
-                max_hessian_products.saturating_sub(self.hv_evals), paused)
+            steihaug(gradient, &mut hv, self.delta, 1e-8, allowance, paused)
         };
         let (p, _hit, neg, hv_count) = match step {
             Ok(step) => step,
             Err(SteihaugStop::Unusable(hv_count)) => {
-                self.hv_evals += hv_count;
+                debug_assert_eq!(self.hv_evals - initial_hv, hv_count);
                 return IterationOutcome::Complete { usable: false, negative_curvature: false };
             }
             Err(SteihaugStop::Paused(hv_count)) => {
-                self.hv_evals += hv_count;
+                debug_assert_eq!(self.hv_evals - initial_hv, hv_count);
                 return IterationOutcome::Paused;
             }
             Err(SteihaugStop::Budget(hv_count)) => {
-                self.hv_evals += hv_count;
+                debug_assert_eq!(self.hv_evals - initial_hv, hv_count);
                 return IterationOutcome::HessianBudget;
             }
         };
-        self.hv_evals += hv_count;
+        debug_assert_eq!(self.hv_evals - initial_hv, hv_count);
         let complete = |usable| IterationOutcome::Complete { usable, negative_curvature: neg };
         if paused() {
             return IterationOutcome::Paused;
@@ -353,8 +363,8 @@ impl TrustRegionState {
             return IterationOutcome::HessianBudget;
         }
         // Keep the established floating-point operation order on valid runs.
-        let mut hp = hv_at(&self.x, &p);
         self.hv_evals += 1;
+        let mut hp = hv_at(&self.x, &p);
         if paused() {
             return IterationOutcome::Paused;
         }
@@ -384,8 +394,8 @@ impl TrustRegionState {
         if paused() {
             return IterationOutcome::Paused;
         }
-        let (f_new, g_new) = fg(&x_new);
         self.evals += 1;
+        let (f_new, g_new) = fg(&x_new);
         if paused() {
             return IterationOutcome::Paused;
         }
