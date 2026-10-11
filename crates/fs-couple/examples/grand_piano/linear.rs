@@ -222,6 +222,9 @@ pub struct Bank {
     pub rate: u32,
     footprints: Option<hammer_footprint::Prepared>,
     stretching: Option<string_stretching::Prepared>,
+    /// Held work-conjugate loads in the original mass-normalized coordinates.
+    /// Prepared contact owners update this scratch inside the same trial solve.
+    external_force: Option<Vec<f64>>,
     pub omitted_duplex_modes: usize,
     /// Contiguous strings sharing one physical course bridge; prepared cold.
     groups: Vec<std::ops::Range<usize>>,
@@ -446,7 +449,7 @@ impl Bank {
         } }
         Ok(Self { strings,groups,modes,contact_strings,board_count:r,q:vec![0.0;n+r],v:vec![0.0;n+r],
             next_q:vec![0.0;n+r],next_v:vec![0.0;n+r],contact_compliance,
-            free_contact:vec![0.0;nc],rate,footprints:None,stretching:None,omitted_duplex_modes,transition,physical_board_k,
+            free_contact:vec![0.0;nc],rate,footprints:None,stretching:None,external_force:None,omitted_duplex_modes,transition,physical_board_k,
             board_half_damping,board_damping_enabled:damping,bare_board_damping_configured:false,
             damped_board_v:vec![0.0;r],board_pre_loss:0.0,
             diagonal_omega2:oscillator.iter().map(|m|m.angular_frequency_rad_s.powi(2)).collect(),last_modal_loss_j:0.0,
@@ -544,6 +547,58 @@ impl Bank {
             + s.hammer_lift*s.bridge.iter().zip(&q[n..]).map(|(g,x)| g*x).sum::<f64>()
     }
 
+    /// Cold admission of additional force ports. The force is numerical trial
+    /// scratch; its owner retains physical contact and material history.
+    pub(super) fn prepare_external_force(&mut self) {
+        self.external_force = Some(vec![0.0; self.q.len()]);
+    }
+
+    pub(super) fn set_external_force(&mut self, force: &[f64]) -> Result<(), &'static str> {
+        let prepared = self.external_force.as_mut().ok_or("external force ports were not prepared")?;
+        if prepared.len() != force.len() || force.iter().any(|x| !x.is_finite()) {
+            return Err("external force must cover every finite bank coordinate");
+        }
+        prepared.copy_from_slice(force);
+        Ok(())
+    }
+
+    /// Displacement response to a held generalized load in this exact ZOH/
+    /// Schur image. Cold contact preparation uses g_i^T H g_j, including the
+    /// moving bridge and sympathetic strings. No state or clock advances.
+    ///
+    /// Eliminating the string responses gives
+    /// S db = f_b + sum(g * a * bq * f_s / 2), then
+    /// ds = bq * (f_s + a * g^T db / 2). This is the same symmetric H used by
+    /// predict/finish, not an independent contact compliance approximation.
+    pub(super) fn force_response(&self, force: &[f64], out: &mut [f64]) -> Result<(), String> {
+        let n = self.modes.len();
+        let r = self.board_count;
+        if force.len() != n+r || out.len() != n+r || force.iter().any(|x| !x.is_finite()) {
+            return Err("force response needs the complete finite bank coordinates".into());
+        }
+        let mut rhs = force[n..].to_vec();
+        for group in &self.groups {
+            let g = &self.strings[group.start].bridge;
+            let mut reaction = 0.0;
+            for si in group.clone() { for k in self.strings[si].modes.clone() {
+                reaction += 0.5*self.modes[k].a*self.transition[k].bq*force[k];
+            }}
+            for (value, shape) in rhs.iter_mut().zip(g) { *value += shape*reaction; }
+        }
+        for j in 0..r {
+            out[n+j] = (0..r).map(|k| self.schur_inverse[j*r+k]*rhs[k]).sum();
+        }
+        for group in &self.groups {
+            let g = &self.strings[group.start].bridge;
+            let bridge = g.iter().zip(&out[n..]).map(|(g,q)| g*q).sum::<f64>();
+            for si in group.clone() { for k in self.strings[si].modes.clone() {
+                out[k] = self.transition[k].bq*(force[k]+0.5*self.modes[k].a*bridge);
+            }}
+        }
+        if out.iter().any(|x| !x.is_finite()) { return Err("force response overflow".into()); }
+        Ok(())
+    }
+
     /// Prepare the unforced coupled end positions. No allocations.
     pub fn predict(&mut self) {
         if let Some(stretching)=&mut self.stretching {stretching.predict();}
@@ -561,6 +616,10 @@ impl Bank {
                 // state publication. The base exact-ZOH map is unchanged.
                 self.free_q[k]+=t.bq*stretching.force[k];
                 self.free_v[k]+=t.bv*stretching.force[k];
+            }
+            if let Some(force)=&self.external_force {
+                self.free_q[k]+=t.bq*force[k];
+                self.free_v[k]+=t.bv*force[k];
             }
         }
         for j in 0..r { self.board_rhs[j]=self.free_q[n+j]/self.transition[n+j].bq; }
@@ -632,7 +691,8 @@ impl Bank {
                     self.next_q[k]=self.free_q[k]+self.transition[k].bq*f;
                     self.next_v[k]=self.free_v[k]+self.transition[k].bv*f;
                     reaction+=m.a*0.5*(self.q[k]+self.next_q[k]);
-                    let total_f=self.stretching.as_ref().map_or(f,|s|f+s.force[k]);
+                    let mut total_f=self.stretching.as_ref().map_or(f,|s|f+s.force[k]);
+                    if let Some(force)=&self.external_force {total_f+=force[k];}
                     self.last_modal_loss_j+=total_f*(self.next_q[k]-self.q[k])-0.5*(
                         self.next_v[k].powi(2)-self.v[k].powi(2)
                         +self.diagonal_omega2[k]*(self.next_q[k].powi(2)-self.q[k].powi(2)));
@@ -643,7 +703,8 @@ impl Bank {
         for j in 0..r {
             let k=n+j;let f=self.board_rhs[j];
             self.next_v[k]=self.free_v[k]+self.transition[k].bv*f;
-            let total_f=self.stretching.as_ref().map_or(f,|s|f+s.force[k]);
+            let mut total_f=self.stretching.as_ref().map_or(f,|s|f+s.force[k]);
+            if let Some(force)=&self.external_force {total_f+=force[k];}
             self.last_modal_loss_j+=total_f*(self.next_q[k]-self.q[k])-0.5*(
                 self.next_v[k].powi(2)-self.damped_board_v[j].powi(2)
                 +self.diagonal_omega2[k]*(self.next_q[k].powi(2)-self.q[k].powi(2)));
@@ -744,6 +805,62 @@ mod tests {
         let work=(0..nc).map(|i|forces[i]*(b.contact_position(i,&b.next_q)-b.contact_position(i,&b.q))).sum::<f64>();
         let defect=b.energy_at(&b.next_q,&b.next_v)-before+b.last_modal_loss_j-work;
         assert!(defect.abs()<1e-12,"{defect:e}");
+    }
+    #[test]
+    fn generalized_force_response_is_reciprocal_and_matches_contact_ports() {
+        let b=bank(true);let d=b.q.len();let nc=b.contact_strings.len();
+        let a:Vec<_>=(0..d).map(|k|det::sin(0.31*k as f64)).collect();
+        let c:Vec<_>=(0..d).map(|k|det::cos(0.73*k as f64)).collect();
+        let mut ha=vec![0.0;d];let mut hc=vec![0.0;d];
+        b.force_response(&a,&mut ha).unwrap();b.force_response(&c,&mut hc).unwrap();
+        let ahc:f64=a.iter().zip(&hc).map(|(a,h)|a*h).sum();
+        let cha:f64=c.iter().zip(&ha).map(|(c,h)|c*h).sum();
+        assert!((ahc-cha).abs()<1e-20+1e-12*ahc.abs());
+        assert!(a.iter().zip(&ha).map(|(a,h)|a*h).sum::<f64>()>0.0);
+        // Independently extract physical point-displacement rows and compare
+        // against the pre-existing hammer contact compliance owner.
+        let mut unit=vec![0.0;d];let mut g=vec![0.0;d];
+        for j in 0..nc {
+            for k in 0..d {
+                unit[k]=1.0;g[k]=b.contact_position(j,&unit);unit[k]=0.0;
+            }
+            b.force_response(&g,&mut ha).unwrap();
+            for i in 0..nc {
+                assert!((b.contact_position(i,&ha)-b.contact_compliance[i*nc+j]).abs()<1e-15);
+            }
+        }
+        assert!(b.force_response(&a[..d-1],&mut ha).is_err());
+        assert!(b.force_response(&vec![f64::NAN;d],&mut ha).is_err());
+        assert!(b.q.iter().chain(&b.v).all(|x|*x==0.0));
+    }
+    #[test]
+    fn generalized_loads_share_the_hammer_step_and_close_complete_force_work() {
+        for damped in [false,true] {
+            let mut b=bank(damped);let d=b.q.len();let nc=b.contact_strings.len();
+            for k in 0..d {b.q[k]=1e-8*det::sin(k as f64);b.v[k]=1e-4*det::cos(k as f64);}
+            let hammer:Vec<_>=(0..nc).map(|i|0.1*(i+1) as f64).collect();
+            let mut force=vec![0.0;d];let mut response=vec![0.0;d];
+            assert!(b.set_external_force(&force).is_err());
+            b.prepare_external_force();
+            for step in 0..48 {
+                force.fill(0.0);b.set_external_force(&force).unwrap();
+                b.predict();b.finish(&hammer);let free=b.next_q.clone();
+                for (k,f) in force.iter_mut().enumerate() {*f=0.02*det::sin((k+3*step) as f64*0.31);}
+                b.force_response(&force,&mut response).unwrap();
+                b.set_external_force(&force).unwrap();
+                assert!(b.set_external_force(&[f64::NAN]).is_err());
+                assert_eq!(b.external_force.as_deref(),Some(force.as_slice()));
+                let before=b.energy();b.predict();b.finish(&hammer);
+                for k in 0..d {
+                    assert!((b.next_q[k]-free[k]-response[k]).abs()<1e-16);
+                }
+                let work:f64=force.iter().enumerate().map(|(k,f)|f*(b.next_q[k]-b.q[k])).sum::<f64>()
+                    +hammer.iter().enumerate().map(|(i,f)|f*(b.contact_position(i,&b.next_q)-b.contact_position(i,&b.q))).sum::<f64>();
+                let defect=b.next_energy()-before+b.last_modal_loss_j-work;
+                assert!(defect.abs()<1e-12,"held-load work defect {defect:e}");
+                assert!(b.last_modal_loss_j>=-1e-13);b.commit();
+            }
+        }
     }
     #[test]
     fn damper_port_removes_exactly_its_reported_energy(){
