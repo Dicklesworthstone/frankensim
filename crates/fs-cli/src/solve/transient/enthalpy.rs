@@ -622,6 +622,7 @@ pub(super) fn solve(
     let mut curves = Vec::with_capacity(storage.materials.len());
     let mut by_region = BTreeMap::new();
     let mut material_rows = Vec::with_capacity(storage.materials.len());
+    let mut initial_temperatures = Vec::with_capacity(storage.materials.len());
     for (index, row) in storage.materials.iter().enumerate() {
         poll(cx, deadline)?;
         let region = region_ids
@@ -633,12 +634,20 @@ pub(super) fn solve(
         let curve = row
             .phase_curve()
             .map_err(|v| conduction_error(v.code, v.what, v.fix))?;
+        let state = curve.state_at_specific_enthalpy(row.initial_specific_enthalpy.value)
+            .map_err(|error| bad(format!("initial enthalpy for '{}' refuses: {error}", row.region)))?;
+        let initial_temperature = state.temperature_k();
+        if !(initial_temperature.is_finite() && initial_temperature > 0.0) {
+            return Err(bad("regional initial enthalpy must resolve to positive absolute temperature"));
+        }
+        initial_temperatures.push(initial_temperature);
         let phase_conductivity = conductivity::receipt(row)?;
         material_rows.push(format!(
-            "{{\"region\":{},\"material_index\":{index},\"material_card_identity\":{},\"phase_curve_identity\":{},\"source\":{},\"reference_density_kg_m3\":{},\"initial_specific_enthalpy_j_kg\":{}{phase_conductivity}}}",
+            "{{\"region\":{},\"material_index\":{index},\"material_card_identity\":{},\"phase_curve_identity\":{},\"source\":{},\"reference_density_kg_m3\":{},\"initial_specific_enthalpy_j_kg\":{},\"initial_temperature_k\":{}{phase_conductivity}}}",
             json_string(&row.region), json_string(&row.material_card_identity.to_hex()),
             json_string(&curve.identity().to_hex()), json_string(&row.source),
             number(row.reference_density.value)?, number(row.initial_specific_enthalpy.value)?,
+            number(initial_temperature)?,
         ));
         curves.push(curve);
     }
@@ -661,6 +670,20 @@ pub(super) fn solve(
                 .get(label)
                 .ok_or_else(|| bad("a retained element has no declared enthalpy chart"))?,
         );
+    }
+    // Validate the actual regional initial state against the sourced base
+    // conductivity before any time integration or boundary iteration.
+    for (element, &material_id) in assignment.iter().enumerate() {
+        if element % 256 == 0 {
+            poll(cx, deadline)?;
+        }
+        let material = match problem.element_materials {
+            Some(materials) => materials.model_for(element).map_err(lower)?,
+            None => problem.material,
+        };
+        material.temperature_span()
+            .check(initial_temperatures[material_id])
+            .map_err(lower)?;
     }
     let engine = HeterogeneousEnthalpyBackwardEuler::new(cx, problem.mesh, &materials, &assignment,
         EnthalpyBudget { max_vertices: n, max_elements: elements })
@@ -818,9 +841,17 @@ pub(super) fn solve(
             )?,
         )
     };
+    let uniform_initial = policy.initial_temperature.uniform_temperature();
+    let initial_temperature_receipt = uniform_initial
+        .map(|quantity| number(quantity.value)).transpose()?
+        .unwrap_or_else(|| "null".to_string());
+    let initial_state = json_string(if uniform_initial.is_some() {
+        "uniform-temperature"
+    } else {
+        "regional-enthalpy"
+    });
     let receipt = format!(
-        "{{\"schema\":\"fs-cli-transient-enthalpy-v1\",\"method\":\"backward-euler-total-enthalpy\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{},\"fine_steps\":{},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_max_step_s\":{},\"fine_max_step_s\":{},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"materials\":[{}],\"nonlinear\":{{\"method\":\"newton-fgmres\",\"residual_units\":\"J\",\"report_residual_units\":\"W\",\"max_updates_per_step\":{},\"max_backtracks_per_update\":{},\"linear_restart\":{restart},\"max_linear_cycles\":{},\"total_newton_limit\":{total_newton_limit},\"total_krylov_limit\":{total_krylov_limit},\"total_updates\":{},\"residual_atol_j\":{},\"residual_rtol\":{},\"armijo_c\":0.0001,\"line_search_shrink\":0.5{nonlinear_history_fragment}}}{radiation_receipt}{natural_receipt_fragment},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"max_specific_enthalpy_difference_j_kg\":{},\"max_liquid_mass_fraction_difference\":{},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"endpoint\":{{\"vertex_order\":\"retained-conduction-mesh\",\"specific_enthalpy_j_kg\":[{}],\"liquid_mass_fraction\":[{}],\"reference_nodal_mass_kg\":[{}]}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
-        number(policy.initial_temperature.value)?,
+        "{{\"schema\":\"fs-cli-transient-enthalpy-v1\",\"method\":\"backward-euler-total-enthalpy\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_state\":{initial_state},\"initial_temperature_k\":{initial_temperature_receipt},\"final_time_s\":{},\"coarse_steps\":{},\"fine_steps\":{},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_max_step_s\":{},\"fine_max_step_s\":{},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"materials\":[{}],\"nonlinear\":{{\"method\":\"newton-fgmres\",\"residual_units\":\"J\",\"report_residual_units\":\"W\",\"max_updates_per_step\":{},\"max_backtracks_per_update\":{},\"linear_restart\":{restart},\"max_linear_cycles\":{},\"total_newton_limit\":{total_newton_limit},\"total_krylov_limit\":{total_krylov_limit},\"total_updates\":{},\"residual_atol_j\":{},\"residual_rtol\":{},\"armijo_c\":0.0001,\"line_search_shrink\":0.5{nonlinear_history_fragment}}}{radiation_receipt}{natural_receipt_fragment},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"max_specific_enthalpy_difference_j_kg\":{},\"max_liquid_mass_fraction_difference\":{},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"endpoint\":{{\"vertex_order\":\"retained-conduction-mesh\",\"specific_enthalpy_j_kg\":[{}],\"liquid_mass_fraction\":[{}],\"reference_nodal_mass_kg\":[{}]}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         number(policy.horizon.value)?,
         grids.coarse.len(),
         grids.fine.len(),

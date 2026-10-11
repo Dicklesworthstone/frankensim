@@ -13,7 +13,7 @@
 
 use fs_blake3::ContentHash;
 
-use crate::FSIM_VERSION;
+use crate::{FSIM_VERSION, spec::TransientInitialTemperature};
 use crate::wire::{DecodedProject, ProjectError, canonical_hash, parse_sexpr};
 
 /// The named semantic rule a migration applied.
@@ -81,6 +81,9 @@ pub enum MigrationRule {
     /// Version 13 gains optional explicit liquid-mass-fraction conductivity.
     /// Historical enthalpy models retain their existing base conductivity.
     TransientPhaseConductivityV14,
+    /// Version 14 gains explicitly regional initial temperatures derived from
+    /// authored enthalpy states. Historical uniform quantities stay uniform.
+    TransientRegionalInitialTemperatureV15,
 }
 
 impl MigrationRule {
@@ -108,6 +111,7 @@ impl MigrationRule {
             MigrationRule::TransientPowerSchedulesV12 => "transient-power-schedules-v12",
             MigrationRule::TransientEnthalpyV13 => "transient-enthalpy-v13",
             MigrationRule::TransientPhaseConductivityV14 => "transient-phase-conductivity-v14",
+            MigrationRule::TransientRegionalInitialTemperatureV15 => "transient-regional-initial-temperature-v15",
         }
     }
 
@@ -129,6 +133,7 @@ impl MigrationRule {
             MigrationRule::TransientPowerSchedulesV12 => 11,
             MigrationRule::TransientEnthalpyV13 => 12,
             MigrationRule::TransientPhaseConductivityV14 => 13,
+            MigrationRule::TransientRegionalInitialTemperatureV15 => 14,
         }
     }
 }
@@ -242,6 +247,7 @@ pub fn migrate_envelope(
         11 => MigrationRule::TransientPowerSchedulesV12,
         12 => MigrationRule::TransientEnthalpyV13,
         13 => MigrationRule::TransientPhaseConductivityV14,
+        14 => MigrationRule::TransientRegionalInitialTemperatureV15,
         v if v == FSIM_VERSION => {
             return Err(ProjectError {
                 code: "fsim-migration-not-needed",
@@ -285,7 +291,8 @@ pub fn migrate_envelope(
         | MigrationRule::TransientConductionV11
         | MigrationRule::TransientPowerSchedulesV12
         | MigrationRule::TransientEnthalpyV13
-        | MigrationRule::TransientPhaseConductivityV14 => {
+        | MigrationRule::TransientPhaseConductivityV14
+        | MigrationRule::TransientRegionalInitialTemperatureV15 => {
             // The document's internal `versions.schema` field must move with
             // the envelope: the validator admits only the current schema.
             // The rewrite is exactly these two byte strings, never a
@@ -379,6 +386,27 @@ pub fn migrate_envelope(
             code: "fsim-migration-payload",
             detail: format!("schema version {declared_version} predates total-enthalpy storage but its payload declares it"),
             hint: "declare enthalpy models in a current-version project; migration preserves historical heat capacities".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 15
+        && decoded
+            .spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|setup| setup.transient.as_ref())
+            .is_some_and(|transient| {
+                matches!(
+                    transient.initial_temperature,
+                    TransientInitialTemperature::FromRegionalEnthalpy
+                )
+            })
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates regional initial temperatures but its payload declares from-regional-enthalpy"),
+            hint: "declare regional initialization in a current-version project; migration preserves historical uniform temperatures and initial enthalpies".to_string(),
         });
     }
     if declared_version > 0

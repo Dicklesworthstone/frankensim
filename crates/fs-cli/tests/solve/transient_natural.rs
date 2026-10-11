@@ -77,7 +77,8 @@ fn regular_project(initial: f64, ambient: f64, watts: f64) -> (ProjectSpec, Vec<
     transient_product::declaration(&mut spec, 100.0, 1.0);
     spec.power.as_mut().unwrap()[0].watts.value = watts;
     let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
-    setup.transient.as_mut().unwrap().initial_temperature.value = initial;
+    setup.transient.as_mut().unwrap().initial_temperature =
+        fs_project::TransientInitialTemperature::Uniform(QtyAny::new(initial, dims::TEMPERATURE));
     setup.regions[0].seed = [0.0; 3].map(|value| QtyAny::new(value, dims::LENGTH));
     setup.boundaries[0].condition = natural_law(ambient);
     spec.envelope.as_mut().unwrap().ambient_lo.value = ambient;

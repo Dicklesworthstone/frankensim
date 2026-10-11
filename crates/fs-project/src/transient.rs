@@ -3,9 +3,13 @@
 use std::collections::BTreeSet;
 
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
+use fs_qty::QtyAny;
 use fs_scenario::Violation;
 
-use crate::spec::{ConductionTransient, TransientPhaseConductivity, TransientRegionEnthalpy, dims};
+use crate::spec::{
+    ConductionTransient, TransientInitialTemperature, TransientPhaseConductivity,
+    TransientRegionEnthalpy, dims,
+};
 
 fn invalid(code: &'static str, what: impl Into<String>, fix: &str) -> Violation {
     Violation {
@@ -150,6 +154,18 @@ impl TransientRegionEnthalpy {
             format!("enthalpy model for `{}` refuses: {error}", self.region),
             "supply finite monotone phase data and a nonzero card identity; a melting chart must span fully solid through fully liquid",
         ))
+    }
+}
+
+impl TransientInitialTemperature {
+    /// Return the authored uniform quantity, or `None` when every regional
+    /// temperature must be resolved from its declared enthalpy state.
+    #[must_use]
+    pub const fn uniform_temperature(self) -> Option<QtyAny> {
+        match self {
+            Self::Uniform(temperature) => Some(temperature),
+            Self::FromRegionalEnthalpy => None,
+        }
     }
 }
 

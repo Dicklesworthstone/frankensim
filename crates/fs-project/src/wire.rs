@@ -29,7 +29,7 @@ use crate::spec::{
     RadiatingSurface, RequirementDirection, RequirementSeverity, RequirementSource,
     RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, SurfaceOffset,
     ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, TransientEnthalpy,
-    TransientEnthalpyKnot, TransientPhaseConductivity, TransientPowerStep,
+    TransientEnthalpyKnot, TransientInitialTemperature, TransientPhaseConductivity, TransientPowerStep,
     TransientRegionCapacity, TransientRegionEnthalpy, TransientRegionPower, UnitsDoctrine, Vent,
     Versions,
 };
@@ -711,8 +711,12 @@ fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
                 kw("source"), text(&row.source)]));
         }
         declaration.push(kw("transient"));
+        let initial_temperature = match transient.initial_temperature {
+            TransientInitialTemperature::Uniform(temperature) => qty(temperature)?,
+            TransientInitialTemperature::FromRegionalEnthalpy => sym("from-regional-enthalpy"),
+        };
         let mut time = vec![sym("transient"),
-            kw("initial-temperature"), qty(transient.initial_temperature)?,
+            kw("initial-temperature"), initial_temperature,
             kw("horizon"), qty(transient.horizon)?,
             kw("max-step"), qty(transient.max_step)?,
             kw("max-steps"), int(i64::from(transient.max_steps)),
@@ -2876,7 +2880,16 @@ fn read_transient(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionTra
             fix: "declare one sourced capacity per conduction region".to_string() }),
     }
     Some(ConductionTransient {
-        initial_temperature: expect_qty(field(&pairs, "initial-temperature"), "transient.initial-temperature", out),
+        initial_temperature: match field(&pairs, "initial-temperature") {
+            Some(Node { kind: NodeKind::Symbol(value), .. })
+                if value == "from-regional-enthalpy" =>
+            {
+                TransientInitialTemperature::FromRegionalEnthalpy
+            }
+            node => TransientInitialTemperature::Uniform(expect_qty(
+                node, "transient.initial-temperature", out,
+            )),
+        },
         horizon: expect_qty(field(&pairs, "horizon"), "transient.horizon", out),
         max_step: expect_qty(field(&pairs, "max-step"), "transient.max-step", out),
         max_steps,

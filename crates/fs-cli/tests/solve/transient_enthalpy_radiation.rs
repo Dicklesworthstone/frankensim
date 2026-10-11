@@ -106,7 +106,8 @@ fn project(card: &str, reservoir: f64) -> ProjectSpec {
         .regions[0]
         .seed = [0.0; 3].map(|value| QtyAny::new(value, dims::LENGTH));
     let policy = time(&mut spec);
-    policy.initial_temperature.value = INITIAL_K;
+    policy.initial_temperature =
+        fs_project::TransientInitialTemperature::Uniform(QtyAny::new(INITIAL_K, dims::TEMPERATURE));
     policy.capacities.clear();
     policy.enthalpy = Some(TransientEnthalpy {
         max_newton_iterations: 32,

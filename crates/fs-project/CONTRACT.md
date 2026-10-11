@@ -238,10 +238,10 @@ bindings; it runs no solves and admits no scenarios itself.
   single-phase ingress and require strictly increasing temperatures; a
   melting chart spans fully solid to fully liquid. The declared reference
   density is held fixed at every knot for the stationary reference domain.
-  Every initial enthalpy must lie inside its chart and resolve to the common
-  initial temperature within a 64-epsilon relative roundoff allowance; equal
-  plateau temperatures can retain different regional stored energies and
-  phase fractions. Both storage models together refuse rather than adding
+  Every initial enthalpy must lie inside its chart and resolve to a positive
+  absolute temperature. A declared uniform temperature must match each region
+  within a 64-epsilon relative roundoff allowance; equal plateau temperatures
+  can retain different regional stored energies and phase fractions. Both storage models together refuse rather than adding
   latent heat twice. Missing, repeated or unknown regions, invalid dimensions,
   nonfinite data and missing sources refuse before execution. Newton work is
   bounded to 1..=1000 iterations and 0..=64 line-search halvings per iteration;
@@ -272,7 +272,30 @@ bindings; it runs no solves and admits no scenarios itself.
   phase-dependent conductivity refuse. The runnable synthetic
   `cooling-enthalpy-phase-conductivity.fsim` composes this declaration with
   existing enthalpy, startup-pulse, Robin and gray-radiation inputs.
-- `FSIM_VERSION = 14`. Readers refuse other versions
+- `ConductionTransient.initial_temperature` (schema v15, MR20) is
+  `TransientInitialTemperature::Uniform(QtyAny)` or
+  `TransientInitialTemperature::FromRegionalEnthalpy`. A uniform quantity
+  retains the historical `:initial-temperature 300.0K` spelling and requires
+  every enthalpy region to resolve to that same temperature. The explicit
+  `:initial-temperature from-regional-enthalpy` symbol instead uses each
+  region's separately declared initial specific enthalpy and phase chart,
+  allowing a hot body and cold support to start at distinct temperatures.
+  No scalar temperature is ignored and no regional temperature or latent
+  fraction is inferred from another body. The mode is legal only with
+  total-enthalpy storage: constant capacities still require a uniform quantity.
+  Initial enthalpies must remain finite J/kg inside their valid charts, each
+  yielding positive absolute temperature; exact region coverage and all
+  previous storage/source/budget rules remain in force.
+  `uniform_temperature()` on the enum returns the authored quantity or
+  `None` for explicitly regional initialization. Both wire spellings bind the
+  mode and individual initial states. G0 cases in `tests/project.rs` cover
+  unequal initial body states, equal-temperature latent states, invalid
+  storage/mode/units, unchanged uniform semantics and v14 migration.
+  Migration rewrites only the version fields, retaining all historical
+  uniform temperatures and regional enthalpies; pre-v15 payloads declaring
+  regional initialization refuse. Actual heat exchange, conductivity-domain
+  checks and conservation remain execution responsibilities.
+- `FSIM_VERSION = 15`. Readers refuse other versions
   (`fsim-unsupported-version`); `migrate_envelope` is the only path from an
   older envelope, applies a registered `MigrationRule`, and returns a
   `ProjectMigrationReceipt` (old/new hashes + rule, `verifies()`). The

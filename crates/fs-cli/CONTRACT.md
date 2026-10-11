@@ -1491,7 +1491,7 @@ composition, deterministic replay and unsupported-mode regressions.
 Native transient conduction is available without a feature flag through the
 schema-v13 `conduction.transient` declaration. The runnable input and commands
 are in `data/reference-project/cooling-transient.fsim` and `TRANSIENT.md`.
-Both backward-Euler grids start from the declared initial temperature; their
+Both backward-Euler grids start from the declared initial state; their
 combined step cap includes the coarse and nested fine solves. The ordinary
 field, thermal QoIs and requirement margin describe the fine final-time
 state. Temporal comparison is separate from the unknown spatial error, and
@@ -1513,6 +1513,23 @@ is added. A temperature plateau preserves the declared liquid mass fraction
 through its enthalpy coordinate. Pure solid and pure liquid charts are also
 admitted. Distinct regional charts require separate interface vertices and a
 declared contact law; shared-vertex mixtures are explicitly refused.
+
+Schema v15 permits `:initial-temperature from-regional-enthalpy` for this
+storage model. Every body starts from its own declared specific enthalpy,
+resolved through its own chart; separate bodies may start at different
+temperatures. The historical kelvin quantity remains a uniform-temperature
+assertion and must agree with every regional enthalpy. Constant-capacity
+storage still requires that quantity. No initial temperature or latent state
+is inferred from an ambient reservoir or contact neighbor.
+
+Initial regional temperatures are checked against the sourced base
+conductivity before time integration. The enthalpy receipt names
+`initial_state`, records the actual initial temperature on every material
+row, and uses `initial_temperature_k: null` at the top level for regional
+mode. Both grids restart from the same physical enthalpy vector. Matching
+contact transfers heat between the bodies without adding an external energy
+source. Driver version 62 distinguishes this initialization and receipt
+semantics from older retained solves.
 
 Every coarse and fine grid starts from the original regional enthalpies.
 Each accepted endpoint uses actual endpoint conductivity and the original

@@ -136,6 +136,53 @@ radiation. Prescribed temperatures, airflow convection and adjoint requests
 currently refuse for enthalpy storage. The declared curves and card identities create no
 material-query receipts, expansion, phase kinetics or experimental validation.
 
+### Hot and cold bodies at the start
+
+Schema v15 adds an explicit regional initialization mode:
+
+```lisp
+:initial-temperature from-regional-enthalpy
+```
+
+Use it inside `transient` with the existing per-region enthalpy declarations.
+Each body's chart and `:initial-specific-enthalpy` determine its initial
+temperature and phase fraction. A kelvin quantity such as
+`:initial-temperature 300.0K` still asserts that every regional enthalpy
+resolves to that same temperature. Regional mode is admitted only with
+total-enthalpy storage; fixed-capacity projects keep their uniform quantity.
+
+`examples/contact-pair/hot-cold-enthalpy.fsim` reuses the two existing
+one-metre cubes and sourced finite-resistance contact. The bodies start at
+300 K and 350 K with synthetic reference densities of 10 and 20 kg/m³ and
+a common synthetic heat capacity of 10 J/(kg K), expressed through their
+enthalpy charts. Both exterior boundaries are insulated and external power
+is zero.
+
+```bash
+frankensim --json validate examples/contact-pair/hot-cold-enthalpy.fsim
+frankensim --json import examples/contact-pair/hot-cold-enthalpy.fsim \
+  examples/contact-pair/cold-body.stl examples/contact-pair/hot-body.stl \
+  hot-cold.db --unit m --max-hole-edges 0
+frankensim --json solve examples/contact-pair/hot-cold-enthalpy.fsim hot-cold.db \
+  --materials data/reference-project/aa6061.fsmcdpk \
+  --interfaces examples/contact-pair/cold-hot.fsintpk
+```
+
+The total reference mass is 30 kg. With `h = 10*(T - 300)` J/kg, the
+initial total enthalpy is 10,000 J and remains constant during internal
+contact exchange. The retained cold-to-hot orientation reports negative
+contact heat while the cold body warms and the hot body cools. These are
+conservation expectations, not experimental validation or a claim that the
+bodies reach equilibrium in the two-second horizon.
+
+The trajectory receipt records `initial_state: "regional-enthalpy"`,
+`initial_temperature_k: null` at the top level, and the actual initial
+temperature on each material row. Every initial body temperature is checked
+against its sourced conductivity domain before marching. The coarse and
+fine trajectories start independently from the same declared enthalpy field.
+The native contact regression checks the mass-weighted energy independently,
+signed interface heat, nodal temperature/enthalpy consistency and replay.
+
 ### Latent storage with ambient radiation
 
 `cooling-enthalpy-radiation.fsim` combines the same explicit synthetic phase

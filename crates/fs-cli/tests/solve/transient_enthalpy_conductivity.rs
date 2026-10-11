@@ -91,7 +91,8 @@ fn project(cards: &CardPackSet, multipliers: Option<(f64, f64)>) -> ProjectSpec 
         reference_temperature: QtyAny::new(AMBIENT_K, dims::TEMPERATURE),
     };
     let time = setup.transient.as_mut().unwrap();
-    time.initial_temperature.value = AMBIENT_K;
+    time.initial_temperature = fs_project::TransientInitialTemperature::Uniform(
+        QtyAny::new(AMBIENT_K, dims::TEMPERATURE));
     time.horizon.value = HORIZON;
     time.max_step.value = 0.5;
     time.energy_tolerance.value = 1e-8;

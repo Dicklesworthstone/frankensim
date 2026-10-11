@@ -51,7 +51,8 @@ fn regular_project() -> (ProjectSpec, Vec<u8>) {
     let mut spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
     transient_product::declaration(&mut spec, 100.0, 1.0);
     let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
-    setup.transient.as_mut().unwrap().initial_temperature.value = INITIAL_K;
+    setup.transient.as_mut().unwrap().initial_temperature =
+        fs_project::TransientInitialTemperature::Uniform(QtyAny::new(INITIAL_K, dims::TEMPERATURE));
     setup.regions[0].seed = [0.0; 3].map(|value| QtyAny::new(value, dims::LENGTH));
     spec.solver.as_mut().unwrap().tolerance_rel = 1e-12;
     (spec, bytes)

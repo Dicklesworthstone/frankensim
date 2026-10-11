@@ -133,7 +133,8 @@ fn project(initial: f64, ambient: f64, watts: f64) -> ProjectSpec {
     spec.envelope.as_mut().unwrap().ambient_hi.value = ambient;
     spec.solver.as_mut().unwrap().tolerance_rel = 1e-12;
     let policy = time(&mut spec);
-    policy.initial_temperature.value = initial;
+    policy.initial_temperature =
+        fs_project::TransientInitialTemperature::Uniform(QtyAny::new(initial, dims::TEMPERATURE));
     policy.capacities.clear();
     policy.enthalpy = Some(TransientEnthalpy {
         max_newton_iterations: 32,

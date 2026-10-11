@@ -77,7 +77,8 @@ fn regular_project(card: &str, reservoir: f64) -> (ProjectSpec, Vec<u8>) {
     let bytes = regular_tetra_stl();
     let mut spec = conduction_fixture_project(7, &bytes);
     transient_product::declaration(&mut spec, 100.0, 1.0);
-    time(&mut spec).initial_temperature.value = INITIAL_K;
+    time(&mut spec).initial_temperature = fs_project::TransientInitialTemperature::Uniform(
+        QtyAny::new(INITIAL_K, fs_project::spec::dims::TEMPERATURE));
     spec.cooling
         .as_mut()
         .unwrap()

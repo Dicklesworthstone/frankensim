@@ -775,9 +775,10 @@ pub struct TransientRegionEnthalpy {
     pub source: String,
     /// Positive reference density in kg/m³, fixed for this stationary domain.
     pub reference_density: QtyAny,
-    /// Uniform initial specific enthalpy in this region, in J/kg. It must
-    /// resolve to the transient's initial temperature; plateau fractions are
-    /// determined by this value, never inferred from temperature alone.
+    /// Uniform initial specific enthalpy in this region, in J/kg. With a
+    /// uniform initial temperature it must resolve to that declared value.
+    /// Regional initialization derives temperature and plateau fraction from
+    /// this value, never from another region or a scalar temperature alone.
     pub initial_specific_enthalpy: QtyAny,
     /// Between 2 and 4096 knots with strictly increasing enthalpy and
     /// nondecreasing temperature/fraction. A single-phase chart is all solid
@@ -825,6 +826,21 @@ pub struct TransientRegionPower {
     pub steps: Vec<TransientPowerStep>,
 }
 
+/// Physical initial-temperature declaration for transient conduction (schema v15).
+///
+/// A uniform quantity remains an assertion that every regional initial enthalpy
+/// resolves to that temperature. The explicit regional mode derives temperature
+/// from each region's declared initial enthalpy and is admitted only with
+/// total-enthalpy storage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransientInitialTemperature {
+    /// One positive finite absolute temperature in kelvin for the entire mesh.
+    Uniform(QtyAny),
+    /// Use each region's initial enthalpy and phase chart, including distinct
+    /// body temperatures and different latent-plateau phase fractions.
+    FromRegionalEnthalpy,
+}
+
 /// Fixed-horizon backward-Euler cooling (schema v11).
 ///
 /// The producer executes a grid bounded by `max_step`, then its nested half
@@ -833,8 +849,9 @@ pub struct TransientRegionPower {
 /// on spatial error, unsampled peaks, or missing physical uncertainty.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConductionTransient {
-    /// Uniform physical initial temperature, K.
-    pub initial_temperature: QtyAny,
+    /// Explicit uniform temperature or temperature from each regional
+    /// enthalpy state. Constant-capacity storage requires a uniform quantity.
+    pub initial_temperature: TransientInitialTemperature,
     /// Positive final physical time, s.
     pub horizon: QtyAny,
     /// Largest coarse-grid step, s.
@@ -2077,8 +2094,30 @@ impl ProjectSpec {
         transient: &ConductionTransient,
         out: &mut Vec<Violation>,
     ) {
+        match transient.initial_temperature {
+            TransientInitialTemperature::Uniform(temperature) => {
+                if temperature.dims != dims::TEMPERATURE
+                    || !temperature.value.is_finite()
+                    || temperature.value <= 0.0
+                {
+                    out.push(violation(
+                        "project-conduction-transient-quantity",
+                        "transient.initial-temperature must be a positive finite absolute temperature in K",
+                        "declare a physical uniform temperature or explicitly derive it from regional enthalpy",
+                    ));
+                }
+            }
+            TransientInitialTemperature::FromRegionalEnthalpy => {
+                if transient.enthalpy.is_none() {
+                    out.push(violation(
+                        "project-conduction-transient-initial-temperature-mode",
+                        "from-regional-enthalpy requires explicitly declared total-enthalpy storage",
+                        "declare one initial enthalpy and phase chart per region, or use a uniform temperature with constant capacities",
+                    ));
+                }
+            }
+        }
         for (name, quantity, dimension) in [
-            ("initial-temperature", transient.initial_temperature, dims::TEMPERATURE),
             ("horizon", transient.horizon, dims::TIME),
             ("max-step", transient.max_step, dims::TIME),
             ("energy-tolerance", transient.energy_tolerance, dims::ENERGY),
@@ -2162,18 +2201,27 @@ impl ProjectSpec {
                     Ok(curve) => {
                         let initial = material.initial_specific_enthalpy;
                         let state = curve.state_at_specific_enthalpy(initial.value);
-                        let temperature = transient.initial_temperature.value;
                         if initial.dims != dims::SPECIFIC_ENTHALPY
                             || !initial.value.is_finite()
                             || !state.as_ref().is_ok_and(|state| {
-                                (state.temperature_k() - temperature).abs()
-                                    <= 64.0 * f64::EPSILON * temperature.abs().max(1.0)
+                                let temperature = state.temperature_k();
+                                temperature.is_finite()
+                                    && temperature > 0.0
+                                    && match transient.initial_temperature {
+                                        TransientInitialTemperature::Uniform(declared) => {
+                                            (temperature - declared.value).abs()
+                                                <= 64.0
+                                                    * f64::EPSILON
+                                                    * declared.value.abs().max(1.0)
+                                        }
+                                        TransientInitialTemperature::FromRegionalEnthalpy => true,
+                                    }
                             })
                         {
                             out.push(violation(
                                 "project-conduction-transient-enthalpy-initial-state",
-                                format!("initial enthalpy for `{}` must be finite J/kg inside its chart and resolve to the declared initial temperature", material.region),
-                                "declare each region's initial enthalpy explicitly, including its phase fraction on a latent plateau",
+                                format!("initial enthalpy for `{}` must be finite J/kg inside its chart, resolve to a positive temperature, and match any declared uniform initial temperature", material.region),
+                                "declare each region's initial enthalpy explicitly; use from-regional-enthalpy for distinct body temperatures",
                             ));
                         }
                     }

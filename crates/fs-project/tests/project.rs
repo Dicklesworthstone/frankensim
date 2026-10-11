@@ -2220,7 +2220,7 @@ fn transient_project() -> ProjectSpec {
     let mut spec = reference_project();
     let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     setup.transient = Some(fs_project::ConductionTransient {
-        initial_temperature: kelvin(293.15),
+        initial_temperature: fs_project::TransientInitialTemperature::Uniform(kelvin(293.15)),
         horizon: QtyAny::new(10.0, fs_project::spec::dims::TIME),
         max_step: QtyAny::new(1.0, fs_project::spec::dims::TIME),
         max_steps: 30,
@@ -2432,7 +2432,7 @@ fn enthalpy_project() -> ProjectSpec {
         .transient
         .as_mut()
         .unwrap();
-    time.initial_temperature = kelvin(300.0);
+    time.initial_temperature = fs_project::TransientInitialTemperature::Uniform(kelvin(300.0));
     time.enthalpy = Some(fs_project::TransientEnthalpy {
         materials: time
             .capacities
@@ -3016,5 +3016,230 @@ fn g0_v13_migration_preserves_storage_and_refuses_hidden_phase_conductivity() {
         assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
     }
     let hidden = down(&print_sexpr(&phase_conductivity_project()).unwrap());
+    assert_eq!(parse_sexpr_migrating(&hidden).unwrap_err().code, "fsim-migration-payload");
+}
+
+fn regional_initial_project() -> ProjectSpec {
+    let mut project = enthalpy_project();
+    let time = project
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap();
+    time.initial_temperature = fs_project::TransientInitialTemperature::FromRegionalEnthalpy;
+    let materials = &mut time.enthalpy.as_mut().unwrap().materials;
+    // The same chart gives a solid body at 295 K and a liquid body at 305 K.
+    // Their temperatures and phases follow the separately declared energies.
+    materials[0].initial_specific_enthalpy.value = 50.0;
+    materials[1].initial_specific_enthalpy.value = 250.0;
+    project
+}
+
+#[test]
+fn g0_regional_initialization_round_trips_distinct_body_states() {
+    let project = regional_initial_project();
+    assert!(project.validate().is_empty(), "{:?}", project.validate());
+    let sexpr = print_sexpr(&project).unwrap();
+    assert!(sexpr.contains(":initial-temperature from-regional-enthalpy :horizon "));
+    let decoded = parse_sexpr(&sexpr).unwrap();
+    let json = parse_json(&print_json(&project).unwrap()).unwrap();
+    assert_eq!(decoded.spec, project);
+    assert_eq!(json.spec, project);
+    assert_eq!(decoded.hash(), json.hash());
+    let time = project
+        .cooling
+        .as_ref()
+        .unwrap()
+        .conduction
+        .as_ref()
+        .unwrap()
+        .transient
+        .as_ref()
+        .unwrap();
+    assert_eq!(time.initial_temperature.uniform_temperature(), None);
+    for (index, material) in time.enthalpy.as_ref().unwrap().materials.iter().enumerate() {
+        let state = material
+            .phase_curve()
+            .unwrap()
+            .state_at_specific_enthalpy(material.initial_specific_enthalpy.value)
+            .unwrap();
+        assert_eq!(state.temperature_k(), [295.0, 305.0][index]);
+        assert_eq!(state.liquid_mass_fraction(), [0.0, 1.0][index]);
+    }
+
+    let mut changed = project.clone();
+    changed
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap()
+        .enthalpy
+        .as_mut()
+        .unwrap()
+        .materials[0]
+        .initial_specific_enthalpy.value = 75.0;
+    assert_ne!(
+        decoded.hash(),
+        parse_sexpr(&print_sexpr(&changed).unwrap()).unwrap().hash()
+    );
+
+    // Explicit regional mode also preserves distinct phase fractions when
+    // both bodies start at the same temperature on the latent plateau.
+    let uniform = enthalpy_project();
+    let mut plateau = uniform.clone();
+    plateau
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap()
+        .initial_temperature = fs_project::TransientInitialTemperature::FromRegionalEnthalpy;
+    assert!(plateau.validate().is_empty(), "{:?}", plateau.validate());
+    let plateau_text = print_sexpr(&plateau).unwrap();
+    assert_eq!(parse_sexpr(&plateau_text).unwrap().spec, plateau);
+    assert_eq!(uniform.cooling.as_ref().unwrap().conduction.as_ref().unwrap()
+        .transient.as_ref().unwrap().enthalpy,
+        plateau.cooling.as_ref().unwrap().conduction.as_ref().unwrap()
+        .transient.as_ref().unwrap().enthalpy);
+    assert_ne!(canonical_hash(plateau_text.as_bytes()),
+        canonical_hash(print_sexpr(&uniform).unwrap().as_bytes()));
+}
+
+#[test]
+fn g0_regional_initialization_retains_storage_state_and_unit_admission() {
+    use fs_project::{TransientInitialTemperature, spec::dims};
+
+    let mut capacity = transient_project();
+    capacity
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap()
+        .initial_temperature = TransientInitialTemperature::FromRegionalEnthalpy;
+    assert!(capacity.validate().iter().any(|row|
+        row.code == "project-conduction-transient-initial-temperature-mode"));
+
+    for initial in [
+        QtyAny::new(50.0, dims::ENERGY),
+        QtyAny::new(f64::NAN, dims::SPECIFIC_ENTHALPY),
+        QtyAny::new(f64::INFINITY, dims::SPECIFIC_ENTHALPY),
+        QtyAny::new(-1.0, dims::SPECIFIC_ENTHALPY),
+        QtyAny::new(301.0, dims::SPECIFIC_ENTHALPY),
+    ] {
+        let mut project = regional_initial_project();
+        project
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .transient
+            .as_mut()
+            .unwrap()
+            .enthalpy
+            .as_mut()
+            .unwrap()
+            .materials[0]
+            .initial_specific_enthalpy = initial;
+        let findings = project.validate();
+        assert!(findings.iter().any(|row|
+            row.code == "project-conduction-transient-enthalpy-initial-state"),
+            "{initial:?}: {findings:?}");
+    }
+
+    let mut project = regional_initial_project();
+    let time = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap();
+    time.initial_temperature = TransientInitialTemperature::Uniform(kelvin(300.0));
+    assert_eq!(time.initial_temperature.uniform_temperature(), Some(kelvin(300.0)));
+    assert!(project.validate().iter().any(|row|
+        row.code == "project-conduction-transient-enthalpy-initial-state"));
+
+    for temperature in [
+        QtyAny::new(300.0, dims::LENGTH),
+        kelvin(0.0),
+        kelvin(-1.0),
+        kelvin(f64::NAN),
+        kelvin(f64::INFINITY),
+    ] {
+        let mut project = transient_project();
+        project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .transient.as_mut().unwrap().initial_temperature =
+            TransientInitialTemperature::Uniform(temperature);
+        assert!(project.validate().iter().any(|row|
+            row.code == "project-conduction-transient-quantity"));
+    }
+
+    let mut missing = regional_initial_project();
+    missing.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap().enthalpy.as_mut().unwrap().materials.pop();
+    assert!(missing.validate().iter().any(|row|
+        row.code == "project-conduction-transient-enthalpy-coverage"));
+
+    let valid = print_sexpr(&regional_initial_project()).unwrap();
+    for replacement in [
+        ":initial-temperature from-regions",
+        ":initial-temperature \"from-regional-enthalpy\"",
+        "",
+    ] {
+        let malformed = valid.replacen(
+            ":initial-temperature from-regional-enthalpy", replacement, 1);
+        assert_ne!(malformed, valid);
+        assert!(parse_sexpr(&malformed).is_err(), "{malformed}");
+    }
+}
+
+#[test]
+fn g0_v14_migration_preserves_uniform_initial_state_and_refuses_regional_payload() {
+    let down = |text: &str| {
+        text.replacen(
+            &format!("(fsim-project :version {FSIM_VERSION}"),
+            "(fsim-project :version 14",
+            1,
+        )
+        .replacen(
+            &format!("(versions :schema {FSIM_VERSION}"),
+            "(versions :schema 14",
+            1,
+        )
+    };
+    for project in [
+        transient_project(),
+        enthalpy_project(),
+        phase_conductivity_project(),
+    ] {
+        let current = print_sexpr(&project).unwrap();
+        let old = down(&current);
+        let migrated = parse_sexpr_migrating(&old).unwrap();
+        assert_eq!(migrated.decoded.spec, project);
+        let time = migrated.decoded.spec.cooling.as_ref().unwrap().conduction.as_ref().unwrap()
+            .transient.as_ref().unwrap();
+        assert!(time.initial_temperature.uniform_temperature().is_some());
+        let receipt = migrated.migration.unwrap();
+        assert_eq!((receipt.source_version, receipt.target_version), (14, FSIM_VERSION));
+        assert_eq!(receipt.rule.label(), "transient-regional-initial-temperature-v15");
+        assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
+    }
+    let hidden = down(&print_sexpr(&regional_initial_project()).unwrap());
     assert_eq!(parse_sexpr_migrating(&hidden).unwrap_err().code, "fsim-migration-payload");
 }

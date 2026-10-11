@@ -1,9 +1,9 @@
-(fsim-project :version 14
+(fsim-project :version 15
   (metadata :name "cooling-natural-radiation-reference" :created "2026-10-11"
     :context-of-use "manufactured passive-cooling reference; a vertical-plate correlation acts on the existing tetrahedron area-mean; no experimental validation"
     :intended-decision "exercise adaptive natural-convection and radiation cooling"
     :decision-gate "scoping-estimate" :consequence "advisory")
-  (versions :schema 14
+  (versions :schema 15
     :constellation "0000000000000000000000000000000000000000000000000000000000000000"
     :workspace "913922bdf20e6609bffcaabdcc806e6b65788dda")
   (seeds :root 0x7)

@@ -73,6 +73,12 @@ fn lower(error: ConductionError) -> SolveRefusal {
     }
 }
 
+fn uniform_initial_temperature(policy: &ConductionTransient) -> Result<f64, SolveRefusal> {
+    policy.initial_temperature.uniform_temperature()
+        .map(|quantity| quantity.value)
+        .ok_or_else(|| bad("regional initial temperatures require explicit total-enthalpy storage"))
+}
+
 fn number(value: f64) -> Result<String, SolveRefusal> {
     canonical_f64(value).ok_or_else(|| bad("transient evidence contains nonfinite arithmetic"))
 }
@@ -334,7 +340,7 @@ fn march(
     deadline: Option<(Instant, f64)>,
 ) -> Result<GridResult, SolveRefusal> {
     let steps = ends_s.len();
-    let mut old = vec![policy.initial_temperature.value; problem.mesh.vertex_count()];
+    let mut old = vec![uniform_initial_temperature(policy)?; problem.mesh.vertex_count()];
     let mut tape = if retain_adjoint {
         Some(adjoint::Tape::new(cx, &old, steps, deadline)?)
     } else { None };
@@ -638,6 +644,7 @@ pub(super) fn solve(
             natural, pressure_pa, linear, deadline,
         );
     }
+    let initial_temperature = uniform_initial_temperature(policy)?;
     let grids = TimeGrids::new(policy)?;
     let coarse_steps = grids.coarse.len();
     let fine_steps = grids.fine.len();
@@ -743,7 +750,7 @@ pub(super) fn solve(
         temperature_dependent |= material.is_temperature_dependent();
         material
             .temperature_span()
-            .check(policy.initial_temperature.value)
+            .check(initial_temperature)
             .map_err(lower)?;
     }
     // The source-bound material selects the numerical path. Newton tolerances
@@ -953,7 +960,7 @@ pub(super) fn solve(
     };
     let receipt = format!(
         "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"radiation\":{radiation_receipt},\"conjugate\":{airflow_receipt},\"natural\":{natural_receipt},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}{adjoint_fragment}}}",
-        number(policy.initial_temperature.value)?,
+        number(initial_temperature)?,
         number(policy.horizon.value)?,
         policy.max_steps,
         uniform_step(coarse_steps)?,

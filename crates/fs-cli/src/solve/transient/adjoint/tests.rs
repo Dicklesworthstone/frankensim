@@ -42,7 +42,8 @@ fn project(input: Inputs, output: Option<&str>) -> ProjectSpec {
         }
     };
     let time = setup.transient.as_mut().unwrap();
-    time.initial_temperature.value = input.initial;
+    time.initial_temperature = fs_project::TransientInitialTemperature::Uniform(
+        QtyAny::new(input.initial, fs_project::spec::dims::TEMPERATURE));
     time.horizon.value = 4.0;
     time.max_step.value = 0.5;
     time.max_steps = 1000;

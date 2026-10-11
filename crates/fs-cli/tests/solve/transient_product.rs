@@ -11,7 +11,8 @@ use json::JsonValue as J;
 pub(super) fn declaration(spec: &mut ProjectSpec, capacity: f64, horizon: f64) {
     let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     setup.transient = Some(ConductionTransient {
-        initial_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+        initial_temperature: fs_project::TransientInitialTemperature::Uniform(
+            QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE)),
         horizon: QtyAny::new(horizon, fs_project::spec::dims::TIME),
         max_step: QtyAny::new(0.5, fs_project::spec::dims::TIME),
         max_steps: 600,
@@ -242,7 +243,9 @@ pub(super) fn driven_face_project(bytes: &[u8]) -> ProjectSpec {
         allow_overlap: true,
     });
     let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
-    setup.transient.as_mut().unwrap().initial_temperature.value = 300.0;
+    setup.transient.as_mut().unwrap().initial_temperature =
+        fs_project::TransientInitialTemperature::Uniform(
+            QtyAny::new(300.0, fs_project::spec::dims::TEMPERATURE));
     setup.adiabatic_remainder = true;
     setup.boundaries = vec![ThermalBoundary {
         target: "driven-face".to_string(),

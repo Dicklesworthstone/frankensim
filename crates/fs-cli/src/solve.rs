@@ -198,7 +198,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// including ambient radiation, with immutable history and full endpoint gates.
 /// Version 61 applies declared regional liquid-fraction conductivity in native
 /// enthalpy transport while retaining the sourced base tensor and exact tangent.
-pub const SOLVE_DRIVER_VERSION: u32 = 61;
+/// Version 62 initializes each declared body from its regional enthalpy state,
+/// preserving explicit uniform-temperature assertions and initial source validity.
+pub const SOLVE_DRIVER_VERSION: u32 = 62;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

@@ -56,7 +56,10 @@ pub const STUDY_FSIM_VERSION: u32 = 1;
 /// Version 14 adds optional sourced conductivity multipliers linear in liquid
 /// mass fraction per enthalpy region. Earlier projects retain their existing
 /// base conductivity; migration never infers a phase-dependent scaling law.
-pub const FSIM_VERSION: u32 = 14;
+/// Version 15 adds explicit regional initialization from each declared
+/// enthalpy state. Existing temperature quantities remain uniform assertions;
+/// migration never creates temperature differences between regions.
+pub const FSIM_VERSION: u32 = 15;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,
@@ -91,7 +94,7 @@ pub use spec::{
     RadiatingSurface, RequirementDirection, RequirementSeverity, RequirementSource,
     RequirementSourceKind, RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings,
     SurfaceOffset, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, TransientEnthalpy,
-    TransientEnthalpyKnot, TransientPhaseConductivity, TransientPowerStep,
+    TransientEnthalpyKnot, TransientInitialTemperature, TransientPhaseConductivity, TransientPowerStep,
     TransientRegionCapacity, TransientRegionEnthalpy, TransientRegionPower, UnitsDoctrine, Vent,
     Versions, requirement_source_reviews,
 };
