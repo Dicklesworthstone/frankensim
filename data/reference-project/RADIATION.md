@@ -41,14 +41,42 @@ The admitted law is `epsilon sigma A (T_mean^4 - T_reservoir^4)` for each
 named exterior convection patch. A positive secant coefficient acts on the
 pointwise P1 Robin trace and is iterated until both temperature and heat
 criteria close. Emissivity stays fixed at its declared card query temperature.
-Base and uniform `ladder` fidelity support this law, including heterogeneous
-conductivity and fixed contact resistance. `adaptive` fidelity explicitly
-refuses it until the complete radiative tangent enters the goal calculation.
-This first product port does not model enclosure exchange, occlusion or a
-participating medium.
+Base, uniform `ladder`, and goal-oriented `adaptive` fidelity support this law,
+including heterogeneous conductivity and fixed contact resistance. Adaptive
+comparisons re-evaluate BOTH fields' complete natural or fixed-flow convection
+and radiation laws before solving the total transposed tangent. See
+`docs/NATIVE_ADAPTIVE_RADIATION.md` for scope and retained error semantics.
+Enclosure exchange, occlusion and participating media are not modeled here.
 
-The existing test-fixture mechanism can regenerate exactly the two radiation
-files without rewriting the original reference:
+## Passive cooling with adaptive refinement
+
+`cooling-natural-radiation.fsim` uses the same geometry and two material packs,
+but declares no fan network. Its coefficient comes from the Churchill-Chu
+vertical-plate card at the area-mean wall temperature, 0.1 m characteristic
+length, and declared pressure. It selects adaptive refinement, keeping natural
+convection and radiation in one complete goal tangent. This deliberately
+synthetic application of an isothermal-plate correlation to a tetrahedron
+is an integration example, not a validated passive-cooling design.
+
+```bash
+frankensim --json validate data/reference-project/cooling-natural-radiation.fsim
+frankensim --json import data/reference-project/cooling-natural-radiation.fsim \
+  data/reference-project/plate.stl passive-radiation.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-natural-radiation.fsim passive-radiation.db \
+  --materials data/reference-project/aa6061.fsmcdpk \
+  --materials data/reference-project/gray-surface.fsmcdpk
+```
+
+Inspect `adaptive.history` for the actual enriched mesh comparisons and
+`natural_coefficient_feedback: true`. The signed linear, nonlinear and
+maximum-relocation contributions reconstruct the observed change. A
+converged comparison remains Estimated; rigorous nonlinear algebraic and
+continuum error certificates are not inferred. Native execution of this
+new example and its regressions is still required; no measured temperature
+or runtime is quoted here.
+
+The existing test-fixture mechanism can regenerate exactly the original two
+radiation files without rewriting the original reference or the passive variant:
 
 ```bash
 cargo test -p fs-cli --test solve -- \
