@@ -2,6 +2,11 @@
 //! The spatial P1 enthalpy solver remains stationary; this adapter uses its
 //! existing material-chart owner, not a second phase or heat-capacity model.
 
+/// Implicit, radiation-capable parcel transport using the existing nonlinear
+/// enthalpy and conservative finite-contact solvers. Its aggregate Biot gate
+/// refuses outside the isothermal regime; it is not a growing spatial P1 solve.
+pub mod implicit;
+
 use fs_exec::Cx;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 
