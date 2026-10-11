@@ -3,7 +3,7 @@
 //! radiation use the same finite-thickness translation/rotation kinematics.
 use std::io::Read;
 use fs_exec::CancelGate;
-use fs_plate::shell::{ShellMesh, ShellSupport, assemble_shell, modes_shell};
+use fs_plate::shell::{ShellMesh, ShellSupport, assemble_shell, assemble_shell_sections, modes_shell};
 use fs_plate::shell::reduction::{ReductionBudget, ShellReduction};
 use fs_plate::shell::reduction::radiation::ShellFace;
 use fs_couple::render::plate::impact::cavity::cylinder::CylindricalCavity;
@@ -11,11 +11,37 @@ use fs_couple::vibroacoustic::{StructuralModes, assemble_coupling};
 use super::{BodyPotential, Error, ImpactBody, drum_spec};
 
 pub const HEADER: &str = "frankensim-drum-barrel-v1";
+pub const ORTHOTROPIC_HEADER: &str = "frankensim-drum-barrel-v2";
+
+/// Homogeneous through-thickness constitutive data. A laminate's independent
+/// membrane, coupling and bending tensors cannot be inferred from these values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Material {
+    Isotropic { young_pa: f64, poisson: f64 },
+    Orthotropic {
+        young_1_pa: f64, young_2_pa: f64, poisson_12: f64, shear_12_pa: f64,
+        /// Material axis 1, from the upward barrel axis toward increasing
+        /// azimuth, on the actual facet tangent plane. Radians, in [-pi, pi].
+        grain_angle_rad: f64,
+    },
+}
+impl Material {
+    fn section(self, thickness: f64, density: f64, local_angle: f64)
+        -> Result<fs_plate::PlateSection, Error>
+    {
+        Ok(match self {
+            Self::Isotropic { young_pa, poisson } =>
+                fs_plate::PlateSection::isotropic(young_pa, poisson, thickness, density)?,
+            Self::Orthotropic { young_1_pa, young_2_pa, poisson_12, shear_12_pa, .. } =>
+                fs_plate::PlateSection::orthotropic_plane_stress_at_angle(
+                    young_1_pa, young_2_pa, poisson_12, shear_12_pa, thickness, density, local_angle)?,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Spec {
-    pub young_pa: f64,
-    pub poisson: f64,
+    pub material: Material,
     pub density_kg_m3: f64,
     pub damping_ratio: f64,
     pub axial_intervals: usize,
@@ -47,26 +73,36 @@ pub fn admit_command(spec: Option<&Spec>, command: &str) -> Result<(), Error> {
 impl Spec {
     pub fn read(text: &str) -> Result<Self, Error> {
         if text.len() > 16_384 { return Err("barrel specification exceeds 16 KiB".into()); }
-        let (mut header, mut material, mut mesh, mut band) = (false, None, None, None);
+        let (mut header, mut material, mut mesh, mut band) = (None, None, None, None);
         for (line, raw) in text.lines().enumerate() {
             let row = raw.split('#').next().unwrap_or("").trim();
             if row.is_empty() { continue; }
-            if !header {
-                if row != HEADER { return Err("expected frankensim-drum-barrel-v1".into()); }
-                header = true; continue;
+            if header.is_none() {
+                header = Some(match row {
+                    HEADER => false, ORTHOTROPIC_HEADER => true,
+                    _ => return Err("expected frankensim-drum-barrel-v1 or frankensim-drum-barrel-v2".into()),
+                });
+                continue;
             }
             let fields: Vec<_> = row.split(',').map(str::trim).collect();
             match fields.as_slice() {
-                ["material", e, nu, rho, zeta] if material.is_none() => {
-                    material = Some([e.parse()?, nu.parse()?, rho.parse()?, zeta.parse()?]);
+                ["material", e, nu, rho, zeta] if header == Some(false) && material.is_none() => {
+                    material = Some((Material::Isotropic { young_pa: e.parse()?, poisson: nu.parse()? },
+                        rho.parse()?, zeta.parse()?));
+                }
+                ["orthotropic", e1, e2, nu12, g12, rho, zeta, angle]
+                    if header == Some(true) && material.is_none() => {
+                    material = Some((Material::Orthotropic { young_1_pa: e1.parse()?, young_2_pa: e2.parse()?,
+                        poisson_12: nu12.parse()?, shear_12_pa: g12.parse()?, grain_angle_rad: angle.parse()? },
+                        rho.parse()?, zeta.parse()?));
                 }
                 ["axial_intervals", n] if mesh.is_none() => { mesh = Some(n.parse()?); }
                 ["band_hz", low, high] if band.is_none() => { band = Some([low.parse()?, high.parse()?]); }
                 _ => return Err(format!("barrel specification line {}: unknown, repeated or malformed record", line + 1).into()),
             }
         }
-        let [young_pa, poisson, density_kg_m3, damping_ratio] = material.ok_or("barrel material record is required")?;
-        let spec = Self { young_pa, poisson, density_kg_m3, damping_ratio,
+        let (material, density_kg_m3, damping_ratio) = material.ok_or("barrel material record is required")?;
+        let spec = Self { material, density_kg_m3, damping_ratio,
             axial_intervals: mesh.ok_or("barrel axial_intervals record is required")?,
             band_hz: band.ok_or("barrel band_hz record is required")? };
         spec.validate()?;
@@ -74,7 +110,12 @@ impl Spec {
     }
 
     fn validate(self) -> Result<(), Error> {
-        fs_plate::PlateSection::isotropic(self.young_pa, self.poisson, 0.001, self.density_kg_m3)?;
+        self.material.section(0.001, self.density_kg_m3, 0.0)?;
+        if let Material::Orthotropic { grain_angle_rad, .. } = self.material {
+            if !grain_angle_rad.is_finite() || grain_angle_rad.abs() > core::f64::consts::PI {
+                return Err("barrel grain angle must be finite radians in [-pi, pi]".into());
+            }
+        }
         if !self.damping_ratio.is_finite() || self.damping_ratio < 0.0
             || !(2..=32).contains(&self.axial_intervals)
             || self.band_hz.iter().any(|v| !v.is_finite()) || self.band_hz[0] < 0.0
@@ -83,6 +124,35 @@ impl Spec {
             return Err("barrel needs passive finite damping, 2..32 axial intervals and an increasing finite frequency window".into());
         }
         Ok(())
+    }
+
+    /// Rotate the material into EACH actual element frame. The two triangles
+    /// on a rectangular barrel strip generally have different first edges;
+    /// reusing one local D would rotate the grain at every diagonal.
+    fn sections(&self, mesh: &ShellMesh, thickness: f64) -> Result<Vec<fs_plate::PlateSection>, Error> {
+        let Material::Orthotropic { grain_angle_rad, .. } = self.material else {
+            return Ok(vec![self.material.section(thickness, self.density_kg_m3, 0.0)?; mesh.tris.len()]);
+        };
+        let (sin, cos) = grain_angle_rad.sin_cos();
+        let mut sections = Vec::with_capacity(mesh.tris.len());
+        for facet in 0..mesh.tris.len() {
+            let frame = mesh.facet(facet)?.frame;
+            let normal = frame[2];
+            let mut axial: [f64; 3] = core::array::from_fn(|i|
+                if i == 2 { 1.0 - normal[2]*normal[i] } else { -normal[2]*normal[i] });
+            let length = dot(axial, axial).sqrt();
+            if !length.is_finite() || length <= 1e-12 {
+                return Err("barrel grain needs a resolved axial direction in every facet".into());
+            }
+            for x in &mut axial { *x /= length; }
+            // z x outward-normal follows increasing cylinder azimuth. The
+            // angle is defined in physical space, independent of edge order.
+            let hoop = cross(axial, normal);
+            let grain = core::array::from_fn(|i| cos*axial[i] + sin*hoop[i]);
+            let angle = dot(grain, frame[1]).atan2(dot(grain, frame[0]));
+            sections.push(self.material.section(thickness, self.density_kg_m3, angle)?);
+        }
+        Ok(sections)
     }
 
     pub fn prepare(&self, drum: &drum_spec::Spec, dt_s: f64, audio: bool) -> Result<Prepared, Error> {
@@ -113,16 +183,19 @@ impl Spec {
             triangles.extend([[a, b, d], [a, d, c]]);
         }}
         let mesh = ShellMesh::new(nodes, triangles)?;
-        let section = fs_plate::PlateSection::isotropic(self.young_pa, self.poisson, thickness, self.density_kg_m3)?;
+        let sections = self.sections(&mesh, thickness)?;
         let clamps: Vec<_> = (0..azimuths).chain(count - azimuths..count).collect();
-        let model = assemble_shell(&mesh, &section, &clamps, ShellSupport::Clamped)?;
+        let model = match self.material {
+            Material::Isotropic { .. } => assemble_shell(&mesh, &sections[0], &clamps, ShellSupport::Clamped)?,
+            Material::Orthotropic { .. } => assemble_shell_sections(&mesh, &sections, &clamps, ShellSupport::Clamped)?,
+        };
         let omega = self.band_hz.map(|f| core::f64::consts::TAU * f);
         let modes = modes_shell(&model, (omega[0].powi(2), omega[1].powi(2)),
             &fs_plate::SliceOptions::default())?.modes;
         if modes.is_empty() || modes.len() > 63 {
             return Err("barrel window must contain 1..63 modes; no missing modes are invented or returned modes dropped".into());
         }
-        let reduction = ShellReduction::new(&mesh, &vec![section; facets], &model, &modes,
+        let reduction = ShellReduction::new(&mesh, &sections, &model, &modes,
             ReductionBudget { max_modes: 63, max_facet_modes: 65_536, relative_tolerance: 1e-5 })?;
         let thicknesses = vec![thickness; count];
         let outer_positions = reduction.surface_positions(&thicknesses, ShellFace::Positive)?;
@@ -157,6 +230,11 @@ impl Spec {
             reduction, nodal_thicknesses: thicknesses,
             radius_m: drum.radius_m, outer_radius_m: drum.outer_radius_m, depth_m: drum.depth_m })
     }
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 { a[0]*b[0] + a[1]*b[1] + a[2]*b[2] }
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
 }
 
 /// Cached physical projections; no independent dynamic state or force clock.

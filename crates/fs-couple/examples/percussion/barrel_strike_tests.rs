@@ -9,7 +9,7 @@ fn drum() -> drum_spec::Spec {
     d
 }
 fn material() -> barrel::Spec {
-    barrel::Spec {young_pa:2e7,poisson:0.3,density_kg_m3:1000.0,damping_ratio:0.0,
+    barrel::Spec {material:barrel::Material::Isotropic {young_pa:2e7,poisson:0.3},density_kg_m3:1000.0,damping_ratio:0.0,
         axial_intervals:2,band_hz:[0.0,100000.0]}
 }
 

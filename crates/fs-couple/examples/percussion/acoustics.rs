@@ -388,7 +388,7 @@ mod tests {
         let films=[film(),film()];let modes=vec![vec![shape(&films[0])],vec![shape(&films[1])]];
         let drum=crate::drum_spec::Spec {radius_m:0.1,outer_radius_m:0.11,depth_m:0.12,
             azimuths:8,radial_intervals:2,..crate::drum_spec::Spec::reference()};
-        let material=crate::barrel::Spec {young_pa:2e7,poisson:0.3,density_kg_m3:1000.0,
+        let material=crate::barrel::Spec {material:crate::barrel::Material::Isotropic {young_pa:2e7,poisson:0.3},density_kg_m3:1000.0,
             damping_ratio:0.0,axial_intervals:2,band_hz:[0.0,100000.0]};
         let shell=material.prepare(&drum,1e-7,false).unwrap();
         let b=Boundary::drum_with_barrel(&films,&modes,drum.depth_m,drum.outer_radius_m,Some((164,&shell))).unwrap();

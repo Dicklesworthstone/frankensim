@@ -17,7 +17,8 @@ parameters.
 Both end rings are clamped to rigid hoops. The heads retain their fixed rims,
 and the wire bank acts on the resonant head. Sticks can strike the batter head
 or the actual sidewall as described below. Moving hoops, individual lugs,
-rimshots and ply anisotropy require additional mechanics.
+rimshots and layered laminate mechanics require additional operators. A
+homogeneous direction-dependent material is supported as described below.
 
 ## Use
 
@@ -103,6 +104,66 @@ viscous coefficient `2 * damping_ratio * angular_frequency`. Zero means
 zero intrinsic wall loss. It leaves head, contact, felt, wire, shaft and
 acoustic losses independent.
 
+### Homogeneous orthotropic material
+
+Version 2 supplies independent stiffness along and across the material grain,
+plus its in-plane shear modulus and physical orientation:
+
+```text
+frankensim-drum-barrel-v2
+orthotropic,12000000000,800000000,0.35,650000000,650,0.005,0
+axial_intervals,4
+band_hz,40,3000
+```
+
+The seven values after `orthotropic` are `E1` [Pa], `E2` [Pa], `nu12`, `G12`
+[Pa], density [kg/m³], modal damping ratio, and grain angle [rad]. All are
+required. The supplied constants describe one homogeneous plane-stress
+material through the wall thickness. Reciprocity gives `nu21 = nu12*E2/E1`;
+the reduced compliance must be positive definite. In particular, the
+orthotropic Poisson ratio is checked through `1 - nu12*nu21 > 0`, rather
+than replacing it with an isotropic Poisson bound. No missing modulus is
+derived from an instrument name.
+
+At zero angle, material axis 1 follows the barrel axis upward, toward the
+batter head. Positive angles turn toward increasing cylinder azimuth; at
+`pi/2`, axis 1 follows the hoop. Angles must lie in `[-pi,pi]`. The axis is
+projected into each actual shell facet and then expressed in that facet's
+local element frame. This matters because the two triangles of a barrel
+strip have different first-edge directions: assigning one unrotated local
+matrix everywhere would make the physical grain jump at mesh diagonals.
+
+The existing `PlateSection::orthotropic_plane_stress_at_angle` owner supplies
+the transformed constitutive matrix, including bending/twisting coupling.
+`assemble_shell_sections` and `ShellReduction` receive the same section set.
+The material therefore changes the wall eigenmodes and its response to head
+pressure or a sidewall strike. Thickness, mass geometry, contact position,
+cavity volume and external force programs retain their physical definitions.
+
+The tracked `illustrative-orthotropic-barrel.fsb` is a synthetic research
+declaration, not measured wood data. For example:
+
+```sh
+cargo run --release -p fs-couple --example percussion -- \
+  drum 4096 --analytic-newton --impact-substeps 8 511 \
+  --elastic-barrel crates/fs-couple/examples/percussion/illustrative-orthotropic-barrel.fsb \
+  --barrel-strike 0.3 0.08 --strike-speed-m-s 1.2 \
+  --cavity-modes > orthotropic-wall-strike.csv
+```
+
+Its 3 kHz structural window is for mechanics CSV and exceeds the current
+40..1640 Hz wall-audio admission. The command has not been natively rendered.
+The original version 1 isotropic files remain accepted with their original
+material law. Version 1 accepts `material`; version 2 accepts `orthotropic`.
+Mixing the two records or omitting a v2 constant refuses.
+
+This image uses the homogeneous relation `A = 12*D/thickness²`. A stacked
+ply laminate generally has independent membrane and bending tensors and may
+also couple stretching to bending. Those tensors, inter-ply slip, glue layers,
+grain variation through thickness and wood moisture dependence are not
+inferred by version 2. Supplying an equivalent homogeneous material does not
+establish a laminate or specimen-fidelity claim.
+
 The bounded preparation accepts 2..32 axial divisions, at most 512 nodes and
 1,024 facets, and a complete window of 1..63 wall modes. Combined mechanical,
 acoustic source and panel budgets also apply; scalar input limits do not
@@ -142,6 +203,9 @@ Focused Rust regressions cover skin work, cavity excitation, shared state
 addresses and exterior participation. Sidewall-strike checks additionally
 cover actual facet location and edge ties, the finite-thickness force moment,
 reciprocal impact, pressure-driven head motion, flexible-shaft excitation and
-failed/cancelled-step rollback. They require native execution; source
+failed/cancelled-step rollback. Orthotropic fixtures check principal-axis
+energy in every actual facet frame, signed grain-angle conventions, the exact
+isotropic limit, and changed modal frequencies and radial point compliance
+with unchanged geometry. They require native execution; source
 review and independent geometry calculations do not establish solver
 convergence, measured-instrument fidelity or real-time performance.
