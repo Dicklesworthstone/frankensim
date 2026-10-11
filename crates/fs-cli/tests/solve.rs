@@ -60,6 +60,8 @@ mod transient_radiation;
 mod transient_conjugate;
 #[path = "solve/transient_natural.rs"]
 mod transient_natural;
+#[path = "solve/transient_mixed.rs"]
+mod transient_mixed;
 
 const REFERENCE_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
 

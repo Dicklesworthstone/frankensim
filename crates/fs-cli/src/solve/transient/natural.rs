@@ -3,7 +3,10 @@
 //! The existing card owner supplies h at the candidate area-mean wall
 //! temperature. The shared backward-Euler evaluator independently reassembles
 //! the complete physical endpoint, including k(T), contact and optional
-//! radiation, before an h fixed point can publish a new temperature.
+//! radiation, before an h fixed point can publish a new temperature. Optional
+//! forced-air transport is solved completely inside each h trial; its physical
+//! references enter the outer residual, while natural reservoir heat remains
+//! separate from air enthalpy and accepted storage history.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
@@ -14,8 +17,13 @@ use fs_conduction::transient::backward_euler::{
 use fs_conduction::{ConductionProblem, RobinFlux, ThermalBoundary, ThermalInterfaces};
 use fs_exec::Cx;
 
-use super::super::{conduction_error, natural as boundary_law, radiation, SolveRefusal};
-use super::{bad, lower, nonlinear_row, poll, radiation_row, RadiativeEndpoint};
+use super::super::{
+    conduction_error, conjugate as exchange, natural as boundary_law, radiation, SolveRefusal,
+};
+use super::{
+    airflow_row, bad, conjugate, lower, nonlinear_row, poll, radiation_row,
+    AirflowEndpoint, RadiativeEndpoint,
+};
 
 pub(super) struct NaturalStep {
     pub(super) endpoint: StepSolution,
@@ -46,6 +54,19 @@ pub(super) struct NaturalStep {
     pub(super) physical_dirichlet_in_w: f64,
     pub(super) physical_convective_out_w: f64,
     pub(super) physical_radiative_out_w: f64,
+    /// Final counted air exchange; cumulative work includes every h trial.
+    pub(super) airflow: Option<AirflowEndpoint>,
+    pub(super) airflow_evidence: String,
+    pub(super) airflow_iterations: usize,
+    /// Actual air enthalpy replaces on-path Robin heat in this second gate.
+    pub(super) coupled_net_input_w: f64,
+    pub(super) coupled_energy_residual_j: f64,
+}
+
+struct AirflowTrial {
+    endpoint: AirflowEndpoint,
+    evidence: String,
+    air_heat_gain_w: f64,
 }
 
 fn finite(value: f64, what: &str) -> Result<f64, SolveRefusal> {
@@ -93,6 +114,7 @@ pub(super) fn advance(
     step_config: StepConfig,
     nonlinear: Option<NonlinearStepConfig>,
     radiation: Option<&radiation::LoweredRadiation>,
+    airflow: Option<&exchange::ConjugatePath>,
     laws: &[boundary_law::NaturalLaw],
     pressure_pa: f64,
     deadline: Option<(Instant, f64)>,
@@ -118,6 +140,18 @@ pub(super) fn advance(
             )))?;
         regions.push(region);
     }
+    let mut air_regions = Vec::new();
+    if let Some(path) = airflow {
+        for segment in &path.segments {
+            if names.contains(segment.target.as_str()) {
+                return Err(bad("natural and forced convection require distinct boundary targets"));
+            }
+            let region = problem.boundary.region_names().iter()
+                .position(|name| name == &segment.target)
+                .ok_or_else(|| bad("mixed transient airflow target is absent from the solid boundary"))?;
+            air_regions.push((region, segment.htc_w_m2_k));
+        }
+    }
     let mut coefficients = boundary_law::initial_coefficients(laws, pressure_pa)?;
     let mut predictor = old.to_vec();
     for &(vertex, prescribed) in problem.boundary.dirichlet() {
@@ -131,8 +165,11 @@ pub(super) fn advance(
     if let Some(policy) = nonlinear {
         policy.validate().map_err(lower)?;
     }
-    let max_solid_solves = boundary_law::MAX_ITERATIONS.checked_mul(radiation_factor)
-        .ok_or_else(|| bad("natural-convection/radiation work allowance overflows"))?;
+    let airflow_factor = airflow.map_or(1, |_| exchange::exchange_config(false).max_iterations);
+    let max_airflow_iterations = boundary_law::MAX_ITERATIONS.checked_mul(airflow_factor)
+        .ok_or_else(|| bad("mixed transient interface work allowance overflows"))?;
+    let max_solid_solves = max_airflow_iterations.checked_mul(radiation_factor)
+        .ok_or_else(|| bad("natural-convection/airflow/radiation work allowance overflows"))?;
     let max_krylov = max_solid_solves.checked_mul(step_config.linear.max_iterations)
         .ok_or_else(|| bad("natural-convection Krylov allowance overflows"))?;
     let max_updates = max_solid_solves.checked_mul(nonlinear.map_or(0, |p| p.max_iterations))
@@ -153,6 +190,7 @@ pub(super) fn advance(
     let mut nonlinear_backtracks = 0;
     let mut radiation_trials = 0;
     let mut endpoint_evaluations = 0;
+    let mut airflow_iterations = 0;
     let mut maximum_physical_energy_residual_j = 0.0_f64;
     let mut physical_target: Option<f64> = None;
     for iteration in 1..=boundary_law::MAX_ITERATIONS {
@@ -162,8 +200,7 @@ pub(super) fn advance(
                 .ok_or_else(|| bad("natural-convection trial lost an applied coefficient"))?;
             Ok((region, h, law.ambient_k))
         }).collect::<Result<Vec<_>, SolveRefusal>>()?;
-        let boundary = problem.boundary.with_uniform_robin_replacements(&replacements).map_err(lower)?;
-        let trial_problem = ConductionProblem { boundary: &boundary, ..problem };
+        let mut boundary = problem.boundary.with_uniform_robin_replacements(&replacements).map_err(lower)?;
         let mut inner_step = step_config;
         let mut inner_nonlinear = nonlinear;
         if let Some(target) = physical_target {
@@ -171,7 +208,8 @@ pub(super) fn advance(
             // natural law at old=ambient. The physical target never changes.
             count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
             let initial = engine.evaluate_prescribed_endpoint(
-                cx, trial_problem, interfaces, old, &predictor, dt_s, step_config, patches,
+                cx, ConductionProblem { boundary: &boundary, ..problem },
+                interfaces, old, &predictor, dt_s, step_config, patches,
             ).map_err(lower)?;
             if let Some(policy) = inner_nonlinear.as_mut() {
                 policy.residual_atol_j = policy.residual_atol_j.min(target * 0.125);
@@ -192,9 +230,48 @@ pub(super) fn advance(
                     }
                 }
             }
+            if airflow.is_some() {
+                // The air owner's reference mismatch uses at most 1% of this
+                // joule allowance. Reserve <= 1/8 of the fixed physical
+                // residual target for the sum of those interface discrepancies.
+                inner_step.energy_tolerance_j =
+                    (step_config.energy_tolerance_j * 0.125).min(target * 12.5);
+                if !(inner_step.energy_tolerance_j.is_finite()
+                    && inner_step.energy_tolerance_j > 0.0)
+                {
+                    return Err(bad("mixed transient inner energy allowance is not representable"));
+                }
+            }
         }
+        let trial_problem = ConductionProblem { boundary: &boundary, ..problem };
+        let mut air_trial = None;
         let (endpoint, nonlinear_evidence, radiation_evidence, radiative) =
-            if let Some(lowering) = radiation {
+            if let Some(path) = airflow {
+                let solved = conjugate::advance(
+                    cx, engine, trial_problem, interfaces, old, dt_s, inner_step,
+                    inner_nonlinear, radiation, path, deadline,
+                )?;
+                count(&mut airflow_iterations, solved.outcome.solution.iterations, max_airflow_iterations)?;
+                count(&mut solid_solves, solved.solid_solves, max_solid_solves)?;
+                count(&mut radiation_trials, solved.radiation_trials, max_solid_solves)?;
+                count(&mut krylov_iterations, solved.krylov_iterations, max_krylov)?;
+                count(&mut nonlinear_updates, solved.nonlinear_updates, max_updates)?;
+                count(&mut nonlinear_backtracks, solved.nonlinear_backtracks, max_backtracks)?;
+                maximum_physical_energy_residual_j = maximum_physical_energy_residual_j
+                    .max(solved.maximum_physical_energy_residual_j);
+                let evidence = airflow_row(path, &solved)?;
+                boundary = solved.applied_boundary;
+                air_trial = Some(AirflowTrial {
+                    endpoint: AirflowEndpoint {
+                        outcome: solved.outcome,
+                        applied_references: solved.applied_references,
+                        boundary: boundary.clone(),
+                    },
+                    evidence,
+                    air_heat_gain_w: solved.air_heat_gain_w,
+                });
+                (solved.endpoint, solved.nonlinear_evidence, solved.radiation_evidence, solved.radiation)
+            } else if let Some(lowering) = radiation {
                 let solved = engine.advance_prescribed_with_ambient_radiation(
                     cx, trial_problem, interfaces, old, dt_s, inner_step, inner_nonlinear,
                     &lowering.patches, lowering.config,
@@ -257,7 +334,17 @@ pub(super) fn advance(
             physical_rows.push((region, point.htc_w_m2_k, law.ambient_k));
             points.push(point);
         }
-        let physical_boundary = problem.boundary.with_uniform_robin_replacements(&physical_rows)
+        if let Some(air) = &air_trial {
+            let references = &air.endpoint.outcome.solution.reference_temperatures_k;
+            if references.len() != air_regions.len() {
+                return Err(bad("mixed transient air references do not match the boundary partition"));
+            }
+            // These are the actual air-law references evaluated at this same
+            // wall field, not the references used by the counted solid solve.
+            physical_rows.extend(air_regions.iter().zip(references)
+                .map(|(&(region, h), &reference)| (region, h, reference)));
+        }
+        let physical_boundary = boundary.with_uniform_robin_replacements(&physical_rows)
             .map_err(lower)?;
         count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
         let physical = engine.evaluate_prescribed_endpoint(
@@ -282,10 +369,35 @@ pub(super) fn advance(
                 target
             }
         };
+        let coupled_net_input_w = if let (Some(path), Some(air)) = (airflow, &air_trial) {
+            // Never feed natural reservoir heat or radiation into air enthalpy.
+            let mut off_path_w = 0.0;
+            for flux in &physical.convective_robin_fluxes {
+                if !path.segments.iter().any(|segment| segment.target == flux.region) {
+                    off_path_w = finite(off_path_w + flux.heat_rate_w, "physical off-path heat")?;
+                }
+            }
+            finite(
+                physical.source_w + physical.dirichlet_in_w - physical.neumann_out_w
+                    - off_path_w - air.air_heat_gain_w - physical.radiation_out_w,
+                "full coupled net input",
+            )?
+        } else {
+            finite(
+                physical.source_w + physical.dirichlet_in_w - physical.neumann_out_w
+                    - physical.convective_out_w - physical.radiation_out_w,
+                "physical net input",
+            )?
+        };
+        let coupled_energy_residual_j = finite(
+            endpoint.stored_energy_change_j - dt_s * coupled_net_input_w,
+            "full coupled energy residual",
+        )?;
         poll(cx, deadline)?;
         if worst_change <= boundary_law::TOLERANCE_REL
             && physical.residual_norm_j <= target
             && physical.energy_residual_j.abs() <= step_config.energy_tolerance_j
+            && coupled_energy_residual_j.abs() <= step_config.energy_tolerance_j
         {
             let converged = laws.iter().zip(points).map(|(law, coefficient)| {
                 let flux = physical.convective_robin_fluxes.iter()
@@ -298,6 +410,8 @@ pub(super) fn advance(
                 })
             }).collect::<Result<Vec<_>, SolveRefusal>>()?;
             let receipt = boundary_law::receipt_fragment(&converged, iteration)?;
+            let (airflow, airflow_evidence) = air_trial
+                .map_or((None, "null".to_string()), |air| (Some(air.endpoint), air.evidence));
             return Ok(NaturalStep {
                 endpoint, nonlinear_evidence, radiation_evidence, radiation: radiative,
                 applied_boundary: boundary, applied_coefficients: coefficients,
@@ -312,13 +426,15 @@ pub(super) fn advance(
                 physical_dirichlet_in_w: physical.dirichlet_in_w,
                 physical_convective_out_w: physical.convective_out_w,
                 physical_radiative_out_w: physical.radiation_out_w,
+                airflow, airflow_evidence, airflow_iterations,
+                coupled_net_input_w, coupled_energy_residual_j,
             });
         }
         if iteration == boundary_law::MAX_ITERATIONS {
             return Err(conduction_error(
                 "cli-solve-conduction-transient-natural-unconverged",
                 format!(
-                    "natural convection exhausted {iteration} iterations: relative h change {worst_change:.4e}, physical residual {:.4e} J against {target:.4e} J, energy residual {:.4e} J against {:.4e} J",
+                    "natural convection exhausted {iteration} iterations: relative h change {worst_change:.4e}, physical residual {:.4e} J against {target:.4e} J, physical energy residual {:.4e} J and full coupled energy residual {coupled_energy_residual_j:.4e} J against {:.4e} J",
                     physical.residual_norm_j, physical.energy_residual_j, step_config.energy_tolerance_j,
                 ),
                 "inspect the card regime and numerical tolerances; no partial thermal endpoint is published",

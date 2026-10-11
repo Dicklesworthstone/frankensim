@@ -174,16 +174,14 @@ fn g3_mixed_convection_keeps_radiation_out_of_both_convective_heat_accounts() {
 }
 
 #[test]
-fn g0_mixed_unimplemented_tangents_and_time_paths_refuse_before_solving() {
+fn g0_mixed_adaptive_goal_refuses_before_solving() {
     let bytes = tetra_stl();
     for (mode, expected_code) in [
         ("adaptive", "cli-solve-conduction-mixed-adaptive"),
-        ("transient", "cli-solve-conduction-natural-with-airflow"),
     ] {
         let mut spec = project(&bytes, 300.0);
         match mode {
             "adaptive" => spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string(),
-            "transient" => transient_product::declaration(&mut spec, 100.0, 1.0),
             _ => unreachable!(),
         }
         let ledger = Ledger::open(":memory:").unwrap();
@@ -196,7 +194,7 @@ fn g0_mixed_unimplemented_tangents_and_time_paths_refuse_before_solving() {
             &fixture_cards(),
             &mut Vec::new(),
         )
-        .expect_err("an unimplemented coupled derivative or time model must refuse");
+        .expect_err("an unimplemented coupled adaptive goal must refuse");
         assert_eq!(refusal.code, expected_code, "{refusal:?}");
     }
 }

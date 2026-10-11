@@ -200,7 +200,7 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// enthalpy transport while retaining the sourced base tensor and exact tangent.
 /// Version 62 initializes each declared body from its regional enthalpy state,
 /// preserving explicit uniform-temperature assertions and initial source validity.
-pub const SOLVE_DRIVER_VERSION: u32 = 63;
+pub const SOLVE_DRIVER_VERSION: u32 = 64;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

@@ -1482,8 +1482,8 @@ The `natural_convection.coupling` receipt records outer/inner work and final
 coefficient and natural heat discrepancies. The returned derived boundary is
 the one actually applied to the published field. Inner conductivity/radiation
 work retains its separate existing budgets. Mixed adaptive goal refinement
-and transients explicitly refuse; the linear inverse-error certificate is
-unavailable and the whole-model tolerance estimate remains.
+explicitly refuses; the linear inverse-error certificate is unavailable and
+the whole-model tolerance estimate remains.
 The result retains Estimated authority.
 
 Driver 63 admits steady mixed nominal adjoints through the existing complete
@@ -1695,8 +1695,9 @@ existing Churchill–Chu card and signed area-mean wall law. The initial
 coefficient guess permits powered startup from ambient; each solved
 candidate must satisfy the actual law and its Rayleigh domain. Exact
 equilibrium and out-of-domain Rayleigh numbers retain the owner's named
-refusals. Natural and airflow-convection boundaries in the same transient
-remain explicitly unadmitted.
+refusals. Driver 64 also admits distinct natural and airflow-convection
+boundaries in the same transient, with each natural update enclosing a
+complete quasi-steady air exchange.
 
 Every natural trial holds the accepted old field fixed. Acceptance requires
 relative h convergence at 1e-10, the full physical free residual and the
@@ -1716,6 +1717,22 @@ operator; `conduction.natural` retains the final physical card receipt.
 energy residual and fine integrated heat balance.
 `data/reference-project/cooling-passive-pulse.fsim` is the complete synthetic
 passive pulse input. Its final-time temperature scope remains explicit.
+
+For mixed transient cooling, the outer endpoint evaluator reassembles the
+full nodal residual under both the actual natural coefficients and the actual
+air-law reference temperatures. It also gates storage against actual branch
+air enthalpy, off-path reservoir heat, radiation and the prescribed-node storage
+reaction. Each natural trial retains the same accepted old temperature;
+coefficient or scalar heat convergence alone cannot admit a field. After the
+first candidate, inner air and solid tolerances reserve room under the fixed
+physical residual target. The checked work products include all nested natural,
+air, radiation and nonlinear responses. The final air row describes its last
+natural trial, while trajectory counters include every trial without counting
+solid work twice. No air storage, fan dynamics or transient adjoint is inferred.
+Three G1/G3 native regressions in `tests/solve/transient_mixed.rs` compare a
+nonuniform P1 endpoint with an independent implicit scalar reference, covering
+both natural heat directions, serial air heating, prescribed startup storage,
+k(T), radiation, deterministic replay and refusals without partial fields.
 
 Optional `power-schedules` supply absolute delivered watts for named volume
 regions, replacing their static `power` rows without applying duty factors
