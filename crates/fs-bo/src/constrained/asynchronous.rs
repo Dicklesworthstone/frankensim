@@ -4,6 +4,7 @@ use super::bo::{condition_controlled, recommend};
 use super::{ConstrainedBoConfig, ConstrainedBoError, ConstrainedBoReport,
     ConstrainedObservation, ConstrainedProposalError, ConstrainedRecommendation};
 use crate::study::{NoisyRequest, NoisyStudyError, NoisyStudyWork, TellDisposition};
+use crate::gp::Kernel;
 
 /// A simulation's complete objective and constraints, retained together.
 #[derive(Debug, Clone, PartialEq)]
@@ -30,8 +31,8 @@ pub struct AsyncConstrainedModelReport {
 pub enum AsyncConstrainedError {
     /// Invalid total-job budget or in-flight allowance.
     InvalidPolicy,
-    /// Async learning cadence is not declared here; a learning request refuses
-    /// rather than silently freezing or rescheduling any output's kernel.
+    /// The fixed-kernel constructor refuses a learning request. Select
+    /// new_with_learning to explicitly use model-update-based refit cadence.
     LearningUnsupported,
     /// Request identity or duplicate-delivery conflict.
     Delivery(NoisyStudyError),
@@ -67,7 +68,8 @@ impl From<ConstrainedProposalError> for AsyncConstrainedError {
 
 /// Pending-aware constrained design search over caller-owned simulation jobs.
 ///
-/// Each GP retains a fixed declared kernel/prior and per-observation variance.
+/// Each GP retains its declared prior and per-observation variance. Kernels
+/// stay fixed by default; new_with_learning opts into bounded per-output fits.
 /// Candidate evaluations may violate constraints: the recommendation threshold
 /// is not a safe-exploration guarantee. Outputs are modeled independently.
 ///
@@ -84,6 +86,10 @@ pub struct AsyncConstrainedStudy {
     jobs: Vec<PendingConstrainedEvaluation>,
     model_report: Option<AsyncConstrainedModelReport>,
     work: NoisyStudyWork,
+    kernels: Vec<Kernel>,
+    model_updates: usize,
+    likelihood_evaluations: usize,
+    posterior_only_fits: usize,
 }
 
 fn jobs(study_id: u64, first: usize, points: &[Vec<f64>]) -> Vec<PendingConstrainedEvaluation> {
@@ -110,17 +116,58 @@ impl AsyncConstrainedStudy {
     pub fn new(study_id: u64, dim: usize, n_init: usize, max_evaluations: usize,
         max_in_flight: usize, config: &ConstrainedBoConfig) -> Result<Self, AsyncConstrainedError>
     {
+        Self::initialize(study_id, dim, n_init, max_evaluations, max_in_flight, config, false)
+    }
+
+    /// Opt into per-output kernel learning without a complete-batch barrier.
+    ///
+    /// Each configured refit_every counts successful model updates on NEW
+    /// received-job availability sets: first update is zero, then one, two,
+    /// etc. It does not count arrivals, issued batches or refused attempts.
+    /// Repeated refills on the same data may reserve more jobs, but only
+    /// recondition the accepted kernels; they do not retrain or advance cadence.
+    ///
+    /// Each output warm-starts its own last accepted kernel and keeps its
+    /// declared mean and original noise variances. Kernels and the new report
+    /// commit only together with a complete proposal. Clone retains this state.
+    /// No pending result is used as a training target, even for refitting.
+    pub fn new_with_learning(study_id: u64, dim: usize, n_init: usize,
+        max_evaluations: usize, max_in_flight: usize, config: &ConstrainedBoConfig)
+        -> Result<Self, AsyncConstrainedError>
+    {
+        Self::initialize(study_id, dim, n_init, max_evaluations, max_in_flight, config, true)
+    }
+
+    fn initialize(study_id: u64, dim: usize, n_init: usize, max_evaluations: usize,
+        max_in_flight: usize, config: &ConstrainedBoConfig, allow_learning: bool)
+        -> Result<Self, AsyncConstrainedError>
+    {
         if n_init == 0 || max_evaluations < n_init || max_in_flight == 0
             || u32::try_from(max_evaluations).is_err()
         { return Err(AsyncConstrainedError::InvalidPolicy); }
         config.validate(dim, max_evaluations, 0)?;
-        if config.objective_learning.is_some() || config.constraints.iter().any(|c| c.learning.is_some()) {
+        if !allow_learning && (config.objective_learning.is_some()
+            || config.constraints.iter().any(|c| c.learning.is_some())) {
             return Err(AsyncConstrainedError::LearningUnsupported);
+        }
+        // There can be at most one distinct nonempty received set per result.
+        // Admit the worst-case total learning work without pretending q jobs
+        // arrive together or multiplying the physical-job budget by q.
+        let mut fit_work = 0usize;
+        for learning in std::iter::once(config.objective_learning.as_ref())
+            .chain(config.constraints.iter().map(|c| c.learning.as_ref())).flatten()
+        {
+            let stages = 1 + (max_evaluations - 1) / learning.refit_every;
+            fit_work = stages.checked_mul(learning.fit.max_evaluations)
+                .and_then(|n| fit_work.checked_add(n))
+                .ok_or(AsyncConstrainedError::InvalidPolicy)?;
         }
         let initial = config.search.initial_design(dim, n_init);
         let issued = jobs(study_id, 0, &initial[..n_init.min(max_in_flight)]);
         Ok(Self { study_id, config: config.clone(), initial, max_evaluations,
-            max_in_flight, jobs: issued, model_report: None, work: NoisyStudyWork::default() })
+            max_in_flight, jobs: issued, model_report: None, work: NoisyStudyWork::default(),
+            kernels: config.initial_kernels(), model_updates: 0,
+            likelihood_evaluations: 0, posterior_only_fits: 0 })
     }
 
     /// Read unanswered jobs. This is not a dispatch/lease operation: callers
@@ -143,6 +190,22 @@ impl AsyncConstrainedStudy {
     /// proposals. These are neither covariance-factorization nor physics counts.
     #[must_use]
     pub fn work(&self) -> NoisyStudyWork { self.work }
+    /// Last accepted objective kernel followed by constraint kernels. A failed
+    /// transition cannot expose partially refitted models through this view.
+    #[must_use]
+    pub fn kernels(&self) -> &[Kernel] { &self.kernels }
+    /// Number of accepted, distinct received-data revisions. The next new set
+    /// uses this number as its zero-based learning-stage ordinal.
+    #[must_use]
+    pub fn model_updates(&self) -> usize { self.model_updates }
+    /// Likelihood probes from COMMITTED learning stages only; discarded or
+    /// cancelled passes remain visible through work().model_fit_attempts.
+    #[must_use]
+    pub fn likelihood_evaluations(&self) -> usize { self.likelihood_evaluations }
+    /// Ordinary conditioning fits from committed passes, including fixed
+    /// outputs and extra reservations made without receiving any new data.
+    #[must_use]
+    pub fn posterior_only_fits(&self) -> usize { self.posterior_only_fits }
     /// All reserved results must receive a final model update. A valid final
     /// model can still have no recommended feasible design.
     #[must_use]
@@ -188,8 +251,9 @@ impl AsyncConstrainedStudy {
     /// not a complete batch. All unanswered designs enter the joint feasible
     /// acquisition. Final-budget refills still incorporate late results.
     ///
-    /// Continuation checks occur around and between output fits and between
-    /// greedy acquisition slots. A single fit or slot search is non-preemptible.
+    /// Continuation checks occur around and between output fits, inside learned
+    /// gradient/search work and between greedy acquisition slots. A dense
+    /// factorization or a slot search remains non-preemptible.
     /// Cancellation/failure retains all received results and the previous model
     /// report; attempts remain counted. Selection ordinals depend on the number
     /// of already issued adaptive jobs, never failed proposal attempts.
@@ -213,7 +277,8 @@ impl AsyncConstrainedStudy {
         let received: Vec<usize> = self.jobs.iter().enumerate()
             .filter_map(|(i, j)| j.observation.as_ref().map(|_| i)).collect();
         let count = free.min(self.config.search.q);
-        if count == 0 && self.model_report.as_ref().is_some_and(|r| r.observed_evaluations == received) {
+        let new_data = self.model_report.as_ref().is_none_or(|r| r.observed_evaluations != received);
+        if count == 0 && !new_data {
             return Ok(0);
         }
         if received.is_empty() {
@@ -227,8 +292,14 @@ impl AsyncConstrainedStudy {
         };
         self.work.model_fit_attempts = self.work.model_fit_attempts.checked_add(1)
             .ok_or(AsyncConstrainedError::WorkOverflow)?;
-        let mut kernels = self.config.initial_kernels();
-        let models = condition_controlled(&mut trial, &self.config, &mut kernels, 0, keep_going)?
+        let mut kernels = self.kernels.clone();
+        let mut conditioning = self.config.clone();
+        if !new_data {
+            conditioning.objective_learning = None;
+            for output in &mut conditioning.constraints { output.learning = None; }
+        }
+        let models = condition_controlled(&mut trial, &conditioning, &mut kernels,
+            self.model_updates, keep_going)?
             .ok_or(AsyncConstrainedError::Cancelled)?;
         let report = AsyncConstrainedModelReport { observed_evaluations: received,
             recommendation: recommend(&models, &trial.x, &self.config)? };
@@ -243,9 +314,19 @@ impl AsyncConstrainedStudy {
         };
         if !keep_going() { return Err(AsyncConstrainedError::Cancelled); }
         let count = next.len();
+        let model_updates = self.model_updates.checked_add(usize::from(new_data))
+            .ok_or(AsyncConstrainedError::WorkOverflow)?;
+        let likelihood_evaluations = self.likelihood_evaluations.checked_add(trial.likelihood_evaluations)
+            .ok_or(AsyncConstrainedError::WorkOverflow)?;
+        let posterior_only_fits = self.posterior_only_fits.checked_add(trial.posterior_only_fits)
+            .ok_or(AsyncConstrainedError::WorkOverflow)?;
         self.jobs.reserve(count); // allocation, if needed, precedes publication
         self.jobs.extend(next);
         self.model_report = Some(report);
+        self.kernels = kernels;
+        self.model_updates = model_updates;
+        self.likelihood_evaluations = likelihood_evaluations;
+        self.posterior_only_fits = posterior_only_fits;
         Ok(count)
     }
 }

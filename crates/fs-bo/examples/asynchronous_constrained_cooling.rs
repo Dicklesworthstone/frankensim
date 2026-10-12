@@ -1,11 +1,14 @@
 //! Synthetic fan power, temperature and sound limits with unequal job durations.
 //! No threads/sleeps and no measured hardware or timing-performance claim.
 //! cargo run -p fs-bo --example asynchronous_constrained_cooling
+//! cargo run -p fs-bo --example asynchronous_constrained_cooling -- --learn-kernels
 use fs_bo::{Kernel, Matern};
 use fs_bo::constrained::{AsyncConstrainedStudy, ConstrainedBoConfig,
     ConstrainedObservation, OutcomeConstraint};
 use fs_bo::noisy::{NoisyBoConfig, NoisyObservation};
 use fs_bo::study::NoisyRequest;
+use fs_bo::hyper::HeteroFitConfig;
+use fs_bo::learning::NoisyLearningConfig;
 use std::collections::BTreeMap;
 
 fn kernel(signal: f64) -> Kernel {
@@ -23,7 +26,14 @@ fn simulate(request: &NoisyRequest) -> ConstrainedObservation {
         constraints: vec![noisy(350.0 - 80.0 * speed, 1.5), noisy(45.0 + 35.0 * speed, 1.0)] }
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = ConstrainedBoConfig {
+    let mut args = std::env::args().skip(1);
+    let learn = match args.next().as_deref() {
+        None => false,
+        Some("--learn-kernels") => true,
+        _ => return Err("usage: asynchronous_constrained_cooling [--learn-kernels]".into()),
+    };
+    if args.next().is_some() { return Err("unexpected extra argument".into()); }
+    let mut config = ConstrainedBoConfig {
         search: NoisyBoConfig { bounds: (0.0, 1.0), kernel: kernel(100.0), prior_mean: 10.0,
             q: 2, mc_samples: 128, acq_starts: 2, acq_evals: 64, seed: 2026 },
         objective_learning: None,
@@ -32,7 +42,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             OutcomeConstraint { kernel: kernel(100.0), prior_mean: 55.0, upper_bound: 70.0, learning: None },
         ], reference: 25.0, recommendation_probability: 0.9,
     };
-    let mut study = AsyncConstrainedStudy::new(2026, 1, 6, 18, 3, &config)?;
+    let mut study = if learn {
+        let policy = NoisyLearningConfig { refit_every: 2,
+            fit: HeteroFitConfig { lengthscale_bounds: vec![(0.05, 2.0)],
+                signal_bounds: (1e-4, 1000.0), starts: 1, max_iterations: 12,
+                max_evaluations: 24, gradient_tolerance: 1e-7, seed: 2026 } };
+        config.objective_learning = Some(policy.clone());
+        config.constraints[0].learning = Some(NoisyLearningConfig { refit_every: 3, ..policy });
+        // The sound model remains fixed while power and temperature learn.
+        AsyncConstrainedStudy::new_with_learning(2026, 1, 6, 18, 3, &config)?
+    } else {
+        AsyncConstrainedStudy::new(2026, 1, 6, 18, 3, &config)?
+    };
     let mut running: BTreeMap<usize, (u64, NoisyRequest)> = BTreeMap::new();
     let mut now = 0u64;
     let mut completed = 0;
@@ -64,5 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("No evaluated design meets the modeled joint-feasibility threshold.");
     }
     println!("Synthetic model estimates; physical evaluations are not guaranteed feasible.");
+    println!("model_updates={} committed_likelihood_probes={} committed_conditioning_fits={}",
+        study.model_updates(), study.likelihood_evaluations(), study.posterior_only_fits());
     Ok(())
 }

@@ -200,3 +200,143 @@ fn g0_async_learning_and_bad_budgets_refuse_before_any_jobs_are_created() {
     c.objective_learning = None; c.constraints[0].learning = Some(learning);
     assert!(matches!(AsyncConstrainedStudy::new(1, 1, 2, 4, 2, &c), Err(AsyncConstrainedError::LearningUnsupported)));
 }
+
+fn learned_config() -> ConstrainedBoConfig {
+    let mut c = config();
+    let policy = crate::learning::NoisyLearningConfig { refit_every: 2,
+        fit: crate::hyper::HeteroFitConfig { lengthscale_bounds: vec![(0.05, 2.0)],
+            signal_bounds: (0.01, 2.0), starts: 1, max_iterations: 5,
+            max_evaluations: 8, gradient_tolerance: 1e-7, seed: 713 } };
+    c.objective_learning = Some(policy.clone());
+    c.constraints[0].learning = Some(crate::learning::NoisyLearningConfig {
+        refit_every: 3, ..policy
+    });
+    c
+}
+
+fn kernel_bits(kernels: &[Kernel]) -> Vec<u64> {
+    kernels.iter().flat_map(|k| std::iter::once(k.signal.to_bits())
+        .chain(k.lengthscales.iter().map(|x| x.to_bits()))).collect()
+}
+
+#[test]
+fn g3_async_output_learning_follows_data_revisions_and_exact_warm_starts() {
+    let c = learned_config();
+    let mut s = AsyncConstrainedStudy::new_with_learning(41, 1, 4, 4, 4, &c).unwrap();
+    let requests = s.ask();
+    let mut kernels = c.initial_kernels();
+    let mut reference = ConstrainedBoReport { x: Vec::new(), observations: Vec::new(),
+        recommendations: Vec::new(), fits: Vec::new(), likelihood_evaluations: 0, posterior_only_fits: 0 };
+    for (stage, id) in [2, 0, 3, 1].into_iter().enumerate() {
+        receive(&mut s, &requests[id]);
+        reference.x = s.jobs().iter().filter(|j| j.observation.is_some())
+            .map(|j| j.request.x.clone()).collect();
+        reference.observations = s.jobs().iter().filter_map(|j| j.observation.clone()).collect();
+        let models = condition_controlled(&mut reference, &c, &mut kernels, stage,
+            &mut || true).unwrap().unwrap();
+        assert_eq!(s.refill(), Ok(0));
+        assert_eq!(s.model_updates(), stage + 1);
+        assert_eq!(kernel_bits(s.kernels()), kernel_bits(&kernels));
+        assert_eq!(s.model_report().unwrap().recommendation, recommend(&models, &reference.x, &c).unwrap());
+        assert_eq!(s.likelihood_evaluations(), reference.likelihood_evaluations);
+        assert_eq!(s.posterior_only_fits(), reference.posterior_only_fits);
+    }
+    assert_eq!(reference.fits.iter().map(|r| (r.fit.after_batches, r.output)).collect::<Vec<_>>(),
+        vec![(0, 0), (0, 1), (2, 0), (3, 1)]);
+    assert!(reference.fits.iter().any(|r| r.fit.lml > r.fit.initial_lml), "learning is active");
+    assert!(s.is_complete());
+    assert!(s.likelihood_evaluations() <= 4 * 8);
+}
+
+#[test]
+fn g3_one_worker_learned_async_trajectory_matches_synchronous_learning() {
+    let mut c = learned_config(); c.search.q = 1;
+    let reference = minimize_constrained(&mut evaluate, 1, 3, 2, &c).unwrap();
+    let mut s = AsyncConstrainedStudy::new_with_learning(43, 1, 3, 5, 1, &c).unwrap();
+    while !s.is_complete() {
+        let request = s.ask()[0].clone(); receive(&mut s, &request); s.refill().unwrap();
+    }
+    assert_eq!(s.jobs().iter().map(|j| j.request.x.clone()).collect::<Vec<_>>(), reference.x);
+    assert_eq!(s.jobs().iter().map(|j| j.observation.clone().unwrap()).collect::<Vec<_>>(), reference.observations);
+    assert_eq!(&s.model_report().unwrap().recommendation, reference.recommendations.last().unwrap());
+    assert_eq!(s.likelihood_evaluations(), reference.likelihood_evaluations);
+    assert_eq!(s.posterior_only_fits(), reference.posterior_only_fits);
+    assert_eq!(s.model_updates(), 3);
+}
+
+#[test]
+fn g0_same_data_refills_do_not_retrain_or_advance_the_learning_schedule() {
+    let mut c = learned_config(); c.search.q = 1;
+    c.objective_learning.as_mut().unwrap().refit_every = 1;
+    c.constraints[0].learning.as_mut().unwrap().refit_every = 1;
+    let mut s = AsyncConstrainedStudy::new_with_learning(47, 1, 2, 6, 4, &c).unwrap();
+    for request in s.ask() { receive(&mut s, &request); }
+    assert_eq!(s.refill(), Ok(1));
+    let kernels = kernel_bits(s.kernels());
+    let learning_work = s.likelihood_evaluations();
+    let conditioning = s.posterior_only_fits();
+    assert!(learning_work > 0);
+    assert_eq!(s.refill(), Ok(1));
+    assert_eq!(s.model_updates(), 1);
+    assert_eq!(s.likelihood_evaluations(), learning_work);
+    assert_eq!(s.posterior_only_fits(), conditioning + 2);
+    assert_eq!(kernel_bits(s.kernels()), kernels);
+    assert_eq!(s.model_report().unwrap().observed_evaluations, vec![0, 1]);
+    assert_eq!(s.jobs().len(), 4);
+}
+
+#[test]
+fn g4_cancelled_learning_or_selection_preserves_accepted_kernels_and_cadence() {
+    let c = learned_config();
+    let mut s = AsyncConstrainedStudy::new_with_learning(53, 1, 3, 7, 3, &c).unwrap();
+    for request in s.ask().into_iter().skip(1) { receive(&mut s, &request); }
+    let mut clean = s.clone();
+    let pending = s.jobs().to_vec();
+    let kernels = kernel_bits(s.kernels());
+    let mut checks = 0;
+    assert_eq!(s.refill_controlled(&mut || { checks += 1; checks < 4 }),
+        Err(AsyncConstrainedError::Cancelled)); // inside first learner's gradient
+    assert_eq!(checks, 4);
+    assert_eq!(kernel_bits(s.kernels()), kernels);
+    assert_eq!(s.model_updates(), 0);
+    assert_eq!(s.likelihood_evaluations(), 0);
+    assert_eq!(s.jobs(), pending.as_slice());
+
+    // Count the real fit boundaries, then refuse after one candidate slot.
+    let mut trial = ConstrainedBoReport {
+        x: pending.iter().filter(|j| j.observation.is_some()).map(|j| j.request.x.clone()).collect(),
+        observations: pending.iter().filter_map(|j| j.observation.clone()).collect(),
+        recommendations: Vec::new(), fits: Vec::new(), likelihood_evaluations: 0, posterior_only_fits: 0,
+    };
+    let mut fit_checks = 0;
+    let _models = condition_controlled(&mut trial, &c, &mut c.initial_kernels(), 0,
+        &mut || { fit_checks += 1; true }).unwrap().unwrap();
+    checks = 0;
+    assert_eq!(s.refill_controlled(&mut || { checks += 1; checks < fit_checks + 5 }),
+        Err(AsyncConstrainedError::Cancelled));
+    assert_eq!(s.jobs(), pending.as_slice());
+    assert_eq!(kernel_bits(s.kernels()), kernels);
+    assert_eq!(s.model_updates(), 0);
+    assert!(s.model_report().is_none());
+    assert_eq!(s.work().model_fit_attempts, 2);
+    assert_eq!(s.work().acquisition_batch_attempts, 1);
+    s.refill().unwrap(); clean.refill().unwrap();
+    assert_eq!(s.jobs(), clean.jobs());
+    assert_eq!(s.model_report(), clean.model_report());
+    assert_eq!(kernel_bits(s.kernels()), kernel_bits(clean.kernels()));
+    assert_eq!(s.model_updates(), clean.model_updates());
+    assert_eq!(s.likelihood_evaluations(), clean.likelihood_evaluations());
+}
+
+#[test]
+fn g0_async_learning_work_is_admitted_over_the_whole_received_data_budget() {
+    let mut c = learned_config();
+    c.constraints[0].learning = None;
+    c.objective_learning.as_mut().unwrap().fit.max_evaluations = usize::MAX;
+    assert!(matches!(AsyncConstrainedStudy::new_with_learning(59, 1, 2, 4, 2, &c),
+        Err(AsyncConstrainedError::InvalidPolicy)));
+    c.objective_learning.as_mut().unwrap().fit.max_evaluations = 8;
+    c.objective_learning.as_mut().unwrap().refit_every = 0;
+    assert!(matches!(AsyncConstrainedStudy::new_with_learning(59, 1, 2, 4, 2, &c),
+        Err(AsyncConstrainedError::Model(ConstrainedBoError::InvalidConfig))));
+}

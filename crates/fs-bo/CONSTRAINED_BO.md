@@ -118,10 +118,11 @@ that the Rust sources compile or pass their tests.
 acquisition and recommendation rule while allowing simulation jobs to finish
 independently. Its constructor takes the study ID, dimension, initial Sobol
 count, total reservation budget, maximum unanswered jobs and an existing
-`ConstrainedBoConfig`. This asynchronous API requires fixed kernels: any
+`ConstrainedBoConfig`. The default constructor requires fixed kernels: any
 `objective_learning` or constraint `learning` request returns
 `LearningUnsupported` before job generation, rather than silently ignoring it.
-The existing synchronous learned-kernel driver is unchanged.
+Use `new_with_learning` for the explicit asynchronous learning policy below.
+The existing synchronous learned-kernel driver's cadence is unchanged.
 
 ```bash
 cargo run -p fs-bo --example asynchronous_constrained_cooling
@@ -165,7 +166,7 @@ fails. Exact duplicate proposals refuse without an unbudgeted fallback search.
 Clone checkpoints include partial arrivals. Reordering deliveries without a
 refill between them has no effect; different decision-time availability sets
 can intentionally change future designs. This API adds no durable checkpoint
-format, learned asynchronous model policy, external job leases, output
+format, external job leases, output
 cross-covariance, runtime/censoring correction or physical safety guarantee.
 Candidate simulations can violate constraints, regardless of the probability
 threshold used to recommend completed designs.
@@ -178,3 +179,42 @@ utility, pending infeasibility, stragglers, simultaneous limits, late-result
 recommendation changes, complete-output admission, partial-fit cancellation,
 model failures, checkpoint replay and work caps. Native compilation and these
 Rust tests remain unverified in the authoring runtime (no DSR, RCH or Cargo).
+
+### Learning models as asynchronous results arrive
+
+`AsyncConstrainedStudy::new_with_learning` accepts the existing per-output
+learning configurations with an explicit different clock: `refit_every` counts
+**successful model updates on distinct received-job sets**, not issued batches
+or individual response deliveries. The first modeled set is stage zero. An
+output with cadence two learns at stages zero, two, four, and so on; another
+output may learn at cadence three or remain fixed. Between those stages every
+output still conditions on all available real observations.
+
+An additional refill on an unchanged received set can issue more work when
+`search.q` is smaller than the available concurrency, but does not retrain or
+advance this clock. A late arrival counts as new data even after all evaluation
+slots have been issued. Each output starts from its own last accepted kernel;
+pending outcomes never enter its fitting targets. Original observation noise
+and prior means remain unchanged. The constructor checks the maximum possible
+learning work over the entire physical-result budget before issuing any jobs.
+
+`kernels()` exposes the accepted objective covariance followed by constraint
+covariances. `model_updates()` exposes the accepted data-revision count.
+`likelihood_evaluations()` and `posterior_only_fits()` count committed fitting
+work only; cancelled or discarded passes remain represented by `work()`'s
+attempt counters, not by a claim that their likelihood probes were counted.
+Cancellation inside a learner or after fitting but during candidate selection
+retains the accepted kernels, cadence, results, and report together. A clone
+includes all of this state. A dense factorization remains non-preemptible.
+
+```bash
+cargo run -p fs-bo --example asynchronous_constrained_cooling -- --learn-kernels
+```
+
+This mode learns power and temperature on different schedules while leaving
+ the sound kernel fixed; it retains the 18-job reservation budget. Five added
+regressions check per-output cadence and warm starts, one-worker synchronous
+learning parity, unchanged-data refills, cancellation/clone replay, and total
+learning-work admission. Native compilation and execution remain unverified.
+Learning is point estimation, not hyperparameter marginalization, correction
+for outcome-dependent completion times, or a physical-feasibility guarantee.

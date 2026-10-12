@@ -1,7 +1,7 @@
 //! Closed-loop constrained q-NEI with independent, optionally learned outputs.
 use super::{ConstraintModel, q_feasible_noisy_improvement};
 use crate::gp::{Gp, Kernel};
-use crate::hyper::{HeteroFitError, fit_heteroscedastic, zero_noise_duplicates};
+use crate::hyper::{HeteroFitError, fit_heteroscedastic_controlled, zero_noise_duplicates};
 use crate::learning::{NoisyFitRecord, NoisyLearningConfig};
 use crate::noisy::{NoisyBoConfig, NoisyObservation, joint_normal_bank};
 
@@ -204,7 +204,8 @@ fn condition(report: &mut ConstrainedBoReport, c: &ConstrainedBoConfig, kernels:
 }
 
 // Callers own the trial report/kernels: a refused pass must not publish them.
-// One individual fit is not preemptible; checks separate output fits.
+// Dense factorizations are not preemptible; learned fits also poll their own
+// search/gradient boundaries. An unconditional hook preserves the batch path.
 pub(super) fn condition_controlled(report: &mut ConstrainedBoReport, c: &ConstrainedBoConfig,
     kernels: &mut [Kernel], stage: usize, keep_going: &mut dyn FnMut() -> bool)
     -> Result<Option<Vec<Gp>>, ConstrainedBoError>
@@ -222,7 +223,13 @@ pub(super) fn condition_controlled(report: &mut ConstrainedBoReport, c: &Constra
             let mut fit = learning.fit.clone();
             fit.seed ^= c.search.seed ^ (stage as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
                 ^ (output as u64).wrapping_mul(0xD1B5_4A32_D192_ED03);
-            let trained = fit_heteroscedastic(&report.x, &y, &noise, &kernels[output], &fit).map_err(failure)?;
+            let trained = match fit_heteroscedastic_controlled(
+                &report.x, &y, &noise, &kernels[output], &fit, keep_going,
+            ) {
+                Ok(trained) => trained,
+                Err(HeteroFitError::Cancelled) => return Ok(None),
+                Err(source) => return Err(failure(source)),
+            };
             kernels[output] = trained.model.kernel.clone();
             report.likelihood_evaluations += trained.evaluations;
             report.fits.push(OutputFitRecord { output, fit: NoisyFitRecord {
