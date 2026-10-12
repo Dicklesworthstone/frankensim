@@ -1,4 +1,4 @@
-//! Explicit first-order physics bindings for scalar PDE study residuals.
+//! Explicit physics bindings for scalar PDE study residuals.
 //!
 //! The IR owns composition; the bound model owns the solve, its adjoint, and
 //! its numerical/work admission. Binding does not turn provider assertions
@@ -73,7 +73,8 @@ impl std::error::Error for PhysicsError {}
 /// not adjoint correctness or a continuum error bound. Providers must enforce
 /// their own primal/adjoint solve tolerances and work/memory caps and propagate
 /// cancellation. Arbitrary provider panics or side effects are not contained.
-/// Second-order derivatives are deliberately NOT implied by this contract.
+/// Second-order derivatives require the separate, explicit [`PhysicsHessian`]
+/// capability. Existing first-order providers need not implement it.
 pub trait PhysicsModel: core::fmt::Debug {
     /// Static scientific meaning of this binding.
     fn signature(&self) -> PhysicsSignature<'_>;
@@ -85,6 +86,36 @@ pub trait PhysicsModel: core::fmt::Debug {
         point: &[f64],
         cx: Option<&Cx<'_>>,
     ) -> Result<PhysicsSample, PhysicsError>;
+
+    /// Optional total second-order derivative of this SAME scalar model.
+    /// Returning `None` preserves the first-order-only refusal. This capability
+    /// and the model meaning must remain fixed for the binding lifetime.
+    fn second_order(&self) -> Option<&dyn PhysicsHessian> { None }
+}
+
+/// Explicit ambient Hessian action for a bound, solved scalar study.
+///
+/// The result is `d(gradient(point))[direction]` in the binding's declared
+/// coordinates. It must include implicit state/adjoint dependence, not just
+/// explicit parameter terms or a Gauss--Newton approximation. The IR supplies
+/// the outer composition terms itself; providers must not add them twice.
+///
+/// Reusing immutable primal/adjoint linearizations is encouraged. A cache must
+/// be keyed to the supplied point, NOT the last evaluated trial: rejected
+/// trials and cloned Newton studies can revisit older accepted points. Solves,
+/// attempted-work/memory ceilings and cancellation remain provider-owned.
+/// No finite-difference fallback, global Hessian definiteness, derivative
+/// certificate, provider panic containment or side-effect rollback is implied.
+pub trait PhysicsHessian: core::fmt::Debug {
+    /// Apply the scalar study Hessian at `point` to `direction`. Both slices
+    /// have the admitted parameter count and contain only finite values.
+    /// Return exactly that many finite components or the original typed error.
+    fn hessian_vector_product(
+        &self,
+        point: &[f64],
+        direction: &[f64],
+        cx: Option<&Cx<'_>>,
+    ) -> Result<Vec<f64>, PhysicsError>;
 }
 
 /// Explicit association with one PDE node. Multiple nodes may share a model,
