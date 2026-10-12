@@ -146,7 +146,20 @@ impl Default for AmbientRadiationConfig {
 }
 
 impl AmbientRadiationConfig {
-    pub(crate) fn validate(self) -> Result<(), ConductionError> {
+    /// Admit outer controls before a downstream coupled solver starts work.
+    /// This checks configuration only, not patch validity or convergence.
+    ///
+    /// # Errors
+    /// Refuses non-finite/out-of-range tolerances, zero iterations, a zero
+    /// combined heat allowance, or relaxation outside (0, 1].
+    ///
+    /// ```
+    /// use fs_conduction::radiation::AmbientRadiationConfig;
+    /// let valid = AmbientRadiationConfig::default();
+    /// assert!(valid.validate().is_ok());
+    /// assert!(AmbientRadiationConfig { max_iterations: 0, ..valid }.validate().is_err());
+    /// ```
+    pub fn validate(self) -> Result<(), ConductionError> {
         if self.max_iterations == 0
             || !(self.temperature_tolerance_k.is_finite() && self.temperature_tolerance_k > 0.0)
             || !(self.balance_tolerance_w.is_finite() && self.balance_tolerance_w >= 0.0)
@@ -207,7 +220,7 @@ pub struct AmbientRadiationReport {
     pub krylov_iterations: usize,
     /// Maximum raw surface-temperature update on the accepted iterate, K.
     pub max_temperature_change_k: f64,
-    /// Maximum patch applied/nonlinear heat mismatch, W.
+    /// Maximum patch applied/nonlinear heat mismatch on the accepted iterate, W.
     pub max_heat_mismatch_w: f64,
     /// Exact bounded controls used for this solve.
     pub config: AmbientRadiationConfig,
