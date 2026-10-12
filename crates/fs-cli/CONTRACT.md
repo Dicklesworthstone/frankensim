@@ -1730,6 +1730,39 @@ implicit recurrences and fresh physical-control perturbations. Their unequal
 natural/radiative reservoirs exercise both weighted-reference contributions.
 `cooling-natural-radiative-adjoint.fsim` supplies a synthetic native example.
 
+Native heat-capacity adjoints also admit quasi-steady airflow, including
+multiple segments per branch and composition with distinct natural traces and
+shared ambient-radiation traces. The accepted endpoint binds the complete
+`C/dt + J(T)` transpose with every upstream air-reference derivative and the
+weighted-reference derivative on a radiating air port. The same watt-coordinate
+multiplier drives history, regional power, capacity, natural/radiative
+parameters, branch inlet temperatures and independent absolute fan-bank speeds;
+no extra timestep factor or primal solve enters these contractions.
+
+Air controls use the existing `convection.air_inlets` and `fan_banks` identities
+and derivative fields described below. Inlet edits hold the hydraulic density
+envelope, pressure and transport properties fixed. Available fan coordinates
+include hydraulic flow, heat-capacity rate, smooth in-domain Reynolds/card
+dependence and downstream air response. An unavailable bank retains its
+identity and explicit unsupported reason throughout the selected prefix;
+neither partial derivatives nor substitute zeros are reported. Derived air
+ports are omitted from fixed-Robin control rows. Initial sampled peaks have
+zero future controls and require no transpose.
+
+Every consumed air endpoint rechecks its actual marched references, complete
+physical residual and separate actual-air energy balance against the original
+accepted target and joule tolerance. The outer natural target remains
+authoritative when it encloses air/radiation. Revalidation preserves the
+counted field and applied-operator evidence without replacing either.
+Admission bounds 64 Robin ports and 64 fan banks, four nodal feedback factors
+per port, the bounded reference/control workspace and the fine target tape
+before either integration grid runs. No dense nodal Jacobian is allocated.
+Existing `tests/solve/transient_conjugate.rs` adds independent uniform
+backward-Euler/exponential-air and Gnielinski/absolute-speed derivatives, fresh
+native physical-control probes, unchanged-field and initial-peak checks, and
+a nonuniform two-segment air/natural/radiation control direction. Radiation on
+the downstream air wall exercises the weighted off-diagonal reference terms.
+
 Driver 69 retains the radiative parameter owner alongside its bound reference
 storage. The shared combined pullback solves one complete physical transpose
 and contracts h, source, density, emissivity and reservoir controls with that
@@ -1766,9 +1799,9 @@ The shared typed Robin attachment adds the signed natural wall derivative,
 including film-density dependence, and the complete branch-major upstream air
 reference matrix to the already complete enthalpy/radiation tangent. The same
 multiplier contracts initial h, regional watts, reference density and existing
-radiative parameters. Driver 76 admits capacity-storage natural adjoints;
-capacity-storage airflow adjoints remain unsupported;
-other natural cards require their own differentiated constitutive law.
+radiative parameters. Capacity-storage natural and airflow adjoints are
+admitted under the complete endpoint transpose described above; other natural
+cards require their own differentiated constitutive law.
 Driver 72 adds physical reservoir, branch-inlet and independent fan-speed
 controls under the scope below. Geometry and transport properties are fixed.
 `transient.adjoint.convection` names the method, port counts, original-target
@@ -2000,7 +2033,9 @@ first candidate, inner air and solid tolerances reserve room under the fixed
 physical residual target. The checked work products include all nested natural,
 air, radiation and nonlinear responses. The final air row describes its last
 natural trial, while trajectory counters include every trial without counting
-solid work twice. No air storage, fan dynamics or transient adjoint is inferred.
+solid work twice. No air storage or fan dynamics is inferred. The explicit
+transient-adjoint report uses the accepted physical target and complete mixed
+boundary transpose described above.
 Three G1/G3 native regressions in `tests/solve/transient_mixed.rs` compare a
 nonuniform P1 endpoint with an independent implicit scalar reference, covering
 both natural heat directions, serial air heating, prescribed startup storage,

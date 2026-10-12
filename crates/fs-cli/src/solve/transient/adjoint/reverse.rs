@@ -4,6 +4,8 @@ use std::time::Instant;
 use fs_conduction::{ConductionProblem, PowerMap, ScalarField, ThermalBc, ThermalInterfaces};
 use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
 use fs_exec::Cx;
+use fs_project::ProjectSpec;
+use crate::solve::conjugate::ConjugatePath;
 use crate::solve::radiation::LoweredRadiation;
 use crate::solve::natural::NaturalLaw;
 use super::{Objective, Selected, Tape, finite, select, storage_bytes};
@@ -12,6 +14,8 @@ use super::super::{SolveRefusal, Workload, bad, lower, poll};
 mod report;
 mod radiation;
 mod natural;
+mod air;
+mod air_controls;
 
 pub(in crate::solve::transient) struct NaturalCoupling<'a> {
     pub(in crate::solve::transient) laws: &'a [NaturalLaw],
@@ -29,6 +33,14 @@ pub(in crate::solve::transient) fn radiation_storage_bytes(
 ) -> Result<usize, SolveRefusal> {
     usize::try_from(radiation::storage_bytes(n, ports, patches)?)
         .map_err(|_| bad("native capacity radiation workspace does not fit this platform"))
+}
+
+pub(in crate::solve::transient) fn airflow_storage_bytes(
+    spec: &ProjectSpec, n: usize, ports: usize, path: &ConjugatePath,
+) -> Result<usize, SolveRefusal> {
+    air::storage_bytes(n, ports, path.segments.len())?
+        .checked_add(air_controls::storage_bytes(spec, path.segments.len())?)
+        .ok_or_else(|| bad("native capacity airflow workspace overflows"))
 }
 
 struct Derivatives {
@@ -64,11 +76,12 @@ fn dot(cx: &Cx<'_>, a: &[f64], b: &[f64], deadline: Option<(Instant, f64)>)
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::solve::transient) fn finish(
-    cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
+    cx: &Cx<'_>, spec: &ProjectSpec, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>, ends_s: &[f64], workload: Option<&Workload<'_>>,
     config: StepConfig, nonlinear: Option<NonlinearStepConfig>, labels: &[u32],
     region_ids: &BTreeMap<String, u32>, goal_region: u32,
-    radiation: Option<&LoweredRadiation>, natural: Option<&NaturalCoupling<'_>>, tape: &Tape,
+    radiation: Option<&LoweredRadiation>, natural: Option<&NaturalCoupling<'_>>,
+    airflow: Option<&ConjugatePath>, tape: &Tape,
     objective: Objective, deadline: Option<(Instant, f64)>,
 ) -> Result<String, SolveRefusal> {
     poll(cx, deadline)?;
@@ -77,7 +90,7 @@ pub(in crate::solve::transient) fn finish(
         || labels.len() != problem.mesh.element_count() {
         return Err(bad("transient adjoint mesh, trajectory or time-grid identity differs"));
     }
-    let coupled = radiation.is_some() || natural.is_some();
+    let coupled = radiation.is_some() || natural.is_some() || airflow.is_some();
     if coupled && tape.physical_targets_j.len() != ends_s.len()
         || !coupled && !tape.physical_targets_j.is_empty()
     {
@@ -127,22 +140,36 @@ pub(in crate::solve::transient) fn finish(
     let natural_workspace = natural.map(|coupling|
         natural_storage_bytes(n, ports.len(), coupling.laws.len()))
         .transpose()?.unwrap_or(0);
+    let air_workspace = airflow.map(|path|
+        airflow_storage_bytes(spec, n, ports.len(), path))
+        .transpose()?.unwrap_or(0);
+    // This report field is a subset of the natural/air allowances already
+    // charged above; it does not add a second charge to the admitted total.
+    let natural_control_bytes = natural.map_or(0, |coupling| coupling.laws.len() * 2048);
+    let control_workspace_bytes = airflow.map(|path|
+        air_controls::storage_bytes(spec, path.segments.len()))
+        .transpose()?.unwrap_or(0).checked_add(natural_control_bytes)
+        .ok_or_else(|| bad("native capacity cooling-control workspace overflows"))?;
     let additional_storage_bytes = storage_bytes(n, ends_s.len(), names.len())?
         .checked_add(radiation_workspace)
         .and_then(|value| value.checked_add(natural_workspace))
+        .and_then(|value| value.checked_add(air_workspace))
         .ok_or_else(|| bad("native capacity adjoint total workspace overflows"))?;
     let patch_count = radiation.map_or(0, |lowering| lowering.patches.len());
     let mut emissivities = vec![0.0; patch_count];
     let mut reservoirs = vec![0.0; patch_count];
     let mut natural_ambients = vec![0.0; natural.map_or(0, |coupling| coupling.laws.len())];
+    let mut air_controls = airflow.map(|path| air_controls::Controls::new(cx, spec, path, deadline))
+        .transpose()?;
     let fixed_ports: Vec<usize> = ports.iter().enumerate().filter_map(|(index, &name)| {
         let owned = natural.is_some_and(|coupling|
-            coupling.laws.iter().any(|law| law.target == name));
+            coupling.laws.iter().any(|law| law.target == name))
+            || airflow.is_some_and(|path| path.segments.iter().any(|segment| segment.target == name));
         (!owned).then_some(index)
     }).collect();
     let feedback_entry_cap = n.checked_mul(ports.len()).and_then(|v| v.checked_mul(4))
         .ok_or_else(|| bad("capacity cooling feedback entry count overflows"))?;
-    let zero_feedback = if natural.is_some() {
+    let zero_feedback = if natural.is_some() || airflow.is_some() {
         vec![0.0; ports.len() * ports.len()]
     } else {
         Vec::new()
@@ -169,15 +196,55 @@ pub(in crate::solve::transient) fn finish(
         let natural_bound = natural.map(|coupling| natural::bind(
             cx, step_problem, expected, coupling.laws, coupling.pressure_pa, &ports, deadline,
         )).transpose()?;
-        let convection_problem = ConductionProblem {
+        let natural_problem = ConductionProblem {
             boundary: natural_bound.as_ref().map_or(step_problem.boundary, |bound| &bound.boundary),
             ..step_problem
         };
-        let bound = radiation.map(|lowering| radiation::bind(
-            cx, engine, convection_problem, interfaces, &tape.states[index], expected,
-            dt, config, lowering, tape.physical_targets_j[index], &ports,
-            natural_bound.as_ref().map(|bound| bound.h_mean_slopes.as_slice()), deadline,
+        let air_bound = airflow.map(|path| air::bind(
+            cx, natural_problem, expected, path, &ports, deadline,
         )).transpose()?;
+        let convection_problem = ConductionProblem {
+            boundary: air_bound.as_ref().map_or(natural_problem.boundary, |bound| &bound.boundary),
+            ..natural_problem
+        };
+        // Revalidate the actual physical endpoint before assembling a tangent.
+        // A whole-body heat balance cannot detect cancelling nodal defects.
+        // This single audit keeps original convection, gray radiation, and
+        // actual transported air heat distinct; no primal solve is repeated.
+        let physical = if coupled {
+            let audit = engine.evaluate_prescribed_endpoint(
+                cx, convection_problem, interfaces, &tape.states[index], expected, dt, config,
+                radiation.map(|lowering| lowering.patches.as_slice()),
+            ).map_err(lower)?;
+            let target = tape.physical_targets_j[index];
+            if !target.is_finite() || target <= 0.0
+                || !audit.residual_norm_j.is_finite() || audit.residual_norm_j > target
+                || !audit.energy_residual_j.is_finite()
+                || audit.energy_residual_j.abs() > config.energy_tolerance_j
+            {
+                return Err(bad(format!(
+                    "capacity cooling endpoint fails its retained physical target: residual {} J / {target} J, energy {} J / {} J",
+                    audit.residual_norm_j, audit.energy_residual_j, config.energy_tolerance_j,
+                )));
+            }
+            if let Some(bound) = &air_bound {
+                bound.check_air_energy(&audit, dt, config.energy_tolerance_j)?;
+            }
+            Some(audit)
+        } else {
+            None
+        };
+        let bound = if let Some(lowering) = radiation {
+            Some(radiation::bind(
+                cx, convection_problem, expected, config, lowering, &ports,
+                natural_bound.as_ref().map(|bound| bound.h_mean_slopes.as_slice()),
+                air_bound.as_ref().map(|bound| bound.reference_feedback.as_slice()),
+                physical.ok_or_else(|| bad("capacity radiation lost its physical endpoint audit"))?,
+                deadline,
+            )?)
+        } else {
+            None
+        };
         let step = if coupled {
             let boundary = bound.as_ref().map_or(convection_problem.boundary, |bound| &bound.boundary);
             engine.linearize_prescribed_endpoint(
@@ -215,12 +282,16 @@ pub(in crate::solve::transient) fn finish(
                 }
                 physical.convection
             },
-            None => match &natural_bound {
-                Some(bound) => step.pullback_with_robin_feedback(
-                    cx, &bound.h_mean_slopes, &zero_ports, &zero_feedback, &carry, feedback_entry_cap,
-                ).map_err(lower)?,
-                None => step.pullback(cx, &carry, &zero_ports, &zero_ports).map_err(lower)?,
+            None if natural_bound.is_some() || air_bound.is_some() => {
+                let h_slopes = natural_bound.as_ref()
+                    .map_or(zero_ports.as_slice(), |bound| bound.h_mean_slopes.as_slice());
+                let reference_feedback = air_bound.as_ref()
+                    .map_or(zero_feedback.as_slice(), |bound| bound.reference_feedback.as_slice());
+                step.pullback_with_robin_feedback(
+                    cx, h_slopes, &zero_ports, reference_feedback, &carry, feedback_entry_cap,
+                ).map_err(lower)?
             },
+            None => step.pullback(cx, &carry, &zero_ports, &zero_ports).map_err(lower)?,
         };
         if !gradient.relative_residual.is_finite() || gradient.relative_residual >= config.linear.tolerance {
             return Err(bad("native transient transpose failed its recomputed residual gate"));
@@ -234,6 +305,9 @@ pub(in crate::solve::transient) fn finish(
                 *total = finite(*total + value)?;
             }
         }
+        if let Some(controls) = &mut air_controls {
+            controls.add(cx, spec, convection_problem, expected, &ports, &gradient, deadline)?;
+        }
         let density_bar = step.source_density_pullback(cx, &gradient.nodal_load).map_err(lower)?;
         for (region, basis) in bases.iter().enumerate() {
             source_controls[index][region] = dot(cx, &density_bar, basis, deadline)?;
@@ -241,7 +315,8 @@ pub(in crate::solve::transient) fn finish(
         source_multipliers[index] = step.source_multiplier_pullback(cx, &gradient.nodal_load).map_err(lower)?;
         capacities = finite(capacities + step.capacity_multiplier_pullback(cx, &gradient.nodal_load).map_err(lower)?)?;
         for i in 0..ports.len() {
-            if natural_bound.as_ref().is_some_and(|bound| bound.owns_region(ports[i])) {
+            if natural_bound.as_ref().is_some_and(|bound| bound.owns_region(ports[i]))
+                || air_bound.as_ref().is_some_and(|bound| bound.owns_region(ports[i])) {
                 continue;
             }
             references[i] = finite(references[i] + gradient.references[i])?;
@@ -256,9 +331,29 @@ pub(in crate::solve::transient) fn finish(
     }
     let reconstructed_steps = if coupled { 0 } else { selected.state };
     let revalidated_steps = if coupled { selected.state } else { 0 };
-    let convection = natural.map(|coupling|
+    let natural_fields = natural.map(|coupling|
         natural::fragment(coupling.laws, &natural_ambients, selected.state))
         .transpose()?.unwrap_or_default();
+    let air_fields = air_controls.as_ref().map(|controls| controls.fragment(selected.state))
+        .transpose()?.unwrap_or_default();
+    let convection = if natural.is_some() || airflow.is_some() {
+        let method = if airflow.is_some() {
+            "complete-capacity-cooling-tangent"
+        } else {
+            "complete-natural-capacity-tangent"
+        };
+        let parameters = if airflow.is_some() {
+            "independent-natural-reservoirs-air-inlets-and-absolute-fan-bank-speeds-throughout-trajectory"
+        } else {
+            "independent-natural-reservoir-temperatures-throughout-trajectory"
+        };
+        format!(
+            ",\"convection\":{{\"method\":\"{method}\",\"control_steps\":{},\"control_workspace_bytes\":{control_workspace_bytes},\"residual_target\":\"original-accepted-forward-physical-tolerance\",\"parameters\":\"{parameters}\"{natural_fields}{air_fields}}}",
+            selected.state,
+        )
+    } else {
+        String::new()
+    };
     let radiation = radiation.map(|lowering|
         radiation::fragment(lowering, &emissivities, &reservoirs, selected.state))
         .transpose()?.unwrap_or_default();

@@ -29,12 +29,12 @@ nonlinear conductivity tangent and fixed matching contact. The old physical
 field is never overwritten, including when the first prescribed-temperature
 endpoint differs from the initial temperature. With prescribed exterior laws,
 a reverse reconstruction must reproduce its retained forward temperatures bit
-for bit before its derivative can be used. Natural-convection and
+for bit before its derivative can be used. Natural-convection, forced-air and
 ambient-radiation endpoints instead bind the saved field directly under the
 original forward physical residual target and energy tolerance. Their complete
-transpose includes the changing convection/radiation coefficients and weighted
-reservoir references. Both paths retain
-their iteration, material-range and cancellation checks.
+transpose includes the changing convection/radiation coefficients, weighted
+reservoir references and each air segment's upstream wall dependence. Both
+paths retain their iteration, material-range and cancellation checks.
 
 The subreport contains nodal and uniform initial-temperature derivatives,
 a derivative with respect to a common multiplier on all regional heat
@@ -86,7 +86,8 @@ Each surface parameter remains constant throughout the selected prefix and
 is independent even when two surfaces share a card. Emissivity directions
 must remain inside (0, 1]; at one, only nonpositive increments are feasible.
 The `robin` rows refer to original prescribed convective coefficients and
-references; natural laws use the physical reservoir controls below. Radiation is never counted as heat delivered to an air stream.
+references; natural and forced-air laws use the physical cooling controls
+below. Radiation is never counted as heat delivered to an air stream.
 
 `revalidated_solid_endpoints` counts consumed radiation endpoints.
 `reconstructed_solid_endpoints` and reconstruction Krylov work are zero on
@@ -138,6 +139,60 @@ compare hot and cold histories against independent physical recurrences and
 fresh project/card perturbations. Distinct natural and radiative reservoirs
 ensure the tests exercise both weighted-reference feedback terms.
 
+### Quasi-steady airflow with natural convection and radiation
+
+Driver 78 heat-capacity trajectory adjoints also admit the existing quasi-steady air
+branches, including multiple streamwise segments and composition with natural
+convection and ambient radiation. Natural and forced-air laws occupy distinct
+boundary traces; radiation may share either trace. Every air segment's
+reference depends on its own and upstream wall temperatures. The full
+transpose retains this directed feedback, including the radiation weighting
+of a shared air port's combined reference.
+
+The forward airflow owner checks the counted endpoint at actual marched air
+references against a fixed physical residual target. It separately checks
+storage against actual branch enthalpy gain, off-path convection, radiation
+and prescribed-temperature reactions. The reverse pass repeats these physical
+checks at the saved field using the original accepted target. When natural
+convection encloses the air solve, its outer physical target remains the
+authority. No endpoint is re-solved, and neither inner frozen coefficients nor
+applied air references substitute for the physical law.
+
+The existing initial-temperature, regional-power and capacity controls use
+this same complete multiplier. The `robin` array excludes derived air ports.
+The additional physical controls appear in `transient.adjoint.convection`:
+
+| Array | Independent coordinate | Derivative field |
+| --- | --- | --- |
+| `air_inlets` | One branch's absolute supply temperature | `dtemperature_dinlet_temperature_k_per_k` |
+| `fan_banks` | One bank's absolute speed ratio | `dtemperature_dspeed_ratio_k` when available |
+
+The inlet controls hold pressure, the hydraulic density envelope and frozen
+air properties fixed. Fan controls include each bank's hydraulic response,
+heat-capacity rate, smooth in-domain convection-card dependence and downstream
+air transport. Each available bank retains its identity and nominal ratio;
+an unsupported coordinate retains `status: "unsupported"` and its reason.
+Unsupported results never become partial derivatives or substitute zeros.
+Natural-reservoir and radiative controls compose with these air controls in
+the same selected trajectory. The [physical cooling control semantics](#physical-cooling-controls)
+below apply to both storage paths.
+
+Admission bounds all Robin ports and fan banks to 64 each, the full transpose
+to four nodal factors per Robin port, and the branch/reference/control
+workspace before either forward grid starts. It does not allocate a dense
+nodal Jacobian. Only one active reverse endpoint and aggregate physical
+controls are needed in addition to the fine-temperature/target tape. An
+initial sampled peak has zero future air, fan and reservoir influence.
+
+The native regressions in `tests/solve/transient_conjugate.rs` compare the
+complete uniform trajectory against an independent backward-Euler recurrence,
+exponential air law and Gnielinski/absolute-speed derivative at a nonunit
+speed. Fresh native initial, power, capacity, inlet, fan, emissivity and
+reservoir probes check those controls. A nonuniform two-segment case places
+radiation on the downstream air wall and uses a distinct natural reservoir,
+exercising upstream feedback through the combined Robin reference. Both paths
+check unchanged forward fields and the initial-peak zero-control rule.
+
 ## Total-enthalpy storage and coupled cooling
 
 Projects declaring `transient.enthalpy` use the total-enthalpy reverse path.
@@ -188,7 +243,8 @@ The fine-grid selection and tie rules above apply unchanged.
 
 ### Physical cooling controls
 
-The following arrays appear inside `transient.adjoint.convection`:
+The following arrays appear inside `transient.adjoint.convection` for both
+heat-capacity and total-enthalpy storage:
 
 | Array | Parameter identity | Derivative field |
 | --- | --- | --- |
@@ -263,12 +319,11 @@ solve is introduced.
 
 ## Scope and budgets
 
-The capacity-storage path supports prescribed or in-domain Churchill–Chu
-natural convection with optional ambient radiation, constant declared heat
-capacities, static or scheduled volumetric sources, smooth heterogeneous
-conductivity and fixed matching contact. Coupled airflow still requires the
-total-enthalpy path described above. Prescribed temperatures are held fixed,
-not returned as controls.
+The capacity-storage path supports prescribed convection, in-domain
+Churchill–Chu natural convection and quasi-steady airflow, with optional
+ambient radiation, constant declared heat capacities, static or scheduled
+volumetric sources, smooth heterogeneous conductivity and fixed matching
+contact. Prescribed temperatures are held fixed, not returned as controls.
 The capacity-storage path does not return conductivity or contact controls.
 Neither path differentiates geometry, surface power, time-grid changes,
 constitutive knots or latent-heat parameters.
@@ -281,7 +336,8 @@ All reverse work shares the original wall deadline and cancellation context.
 The additional fine-state tape, source bases, scratch and output estimate is
 added to the forward memory admission before either grid executes; this is
 not an allocator/RSS certificate. Without the output request there is no tape
-or reverse solve, and forward receipt bytes remain unchanged.
+or reverse solve. Enabling the output preserves the accepted forward fields
+and physical history.
 
 Derivatives are Estimated discrete sensitivities, not continuum-error,
 uncertainty, compliance or experimental-validation certificates.
@@ -293,6 +349,7 @@ cargo test -p fs-conduction --test backward_euler_prescribed_adjoint
 cargo test -p fs-conduction --test ambient_radiation accepted_radiative_endpoint_adjoint
 cargo test -p fs-cli --test solve transient_radiation
 cargo test -p fs-cli --test solve transient_natural
+cargo test -p fs-cli --test solve transient_conjugate
 cargo test -p fs-cli --lib native_transient_adjoint
 cargo test -p fs-conduction --test enthalpy_adjoint robin_feedback
 cargo test -p fs-conduction --test enthalpy_radiation robin_feedback
@@ -307,7 +364,11 @@ then exercise a manufactured mesh at the existing lowering seam: exact
 insulated heating, zero-source controls, a pulse whose peak precedes the
 final state, nonlinear conductivity, capacity and Robin derivatives,
 initial-state peaks, repeated output, default-path equivalence, and invalid
-or incomplete history refusal. They are not a full imported-geometry CLI test.
+or incomplete history refusal. These original producer tests are not a full
+imported-geometry CLI test. The capacity-air regressions additionally import
+native tetrahedral fixtures and exercise the full flow/conduction pipeline,
+including independent uniform trajectory and absolute fan-speed derivatives,
+fresh physical-control probes and nonuniform upstream-air/radiation feedback.
 The coupled enthalpy cases add independent heated/cooled natural-reservoir
 oracles, fixed-envelope inlet differences, absolute fan-speed differences at
 a nonunit ratio, latent-history inlet propagation, initial-peak zero controls,

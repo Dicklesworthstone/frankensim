@@ -473,3 +473,298 @@ fn g0_native_transient_airflow_refusals_preserve_the_stage_prefix_without_an_end
         );
     }
 }
+
+
+fn request_air_adjoint(spec: &mut ProjectSpec, name: &str) {
+    spec.outputs.as_mut().unwrap().push(OutputRequest {
+        name: name.into(), kind: "report".into(), region: None,
+    });
+}
+
+fn final_k(solved: &ThermalRun) -> f64 {
+    solved.temperature.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+}
+
+fn air_control<'a>(adjoint: &'a J, list: &str, key: &str, name: &str) -> &'a J {
+    adjoint.get("convection").unwrap().get(list).unwrap().as_array().unwrap()
+        .iter().find(|row| row.str_field(key) == Some(name)).unwrap()
+}
+
+fn set_air_inlet(spec: &mut ProjectSpec, value: f64) {
+    for row in &mut spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries {
+        if let ThermalBoundaryCondition::AirflowConvection { inlet_temperature, .. } =
+            &mut row.condition
+        {
+            inlet_temperature.value = value;
+        }
+    }
+}
+
+fn set_air_speed(spec: &mut ProjectSpec, speed: f64) {
+    let banks = &mut spec.cooling.as_mut().unwrap().fan_system.as_mut().unwrap().banks;
+    assert_eq!(banks.len(), 1);
+    assert_eq!(banks[0].bank_id, "fixture-bank");
+    banks[0].speed_ratio = speed;
+}
+
+fn air_gradients(adjoint: &J, radiative: bool) -> [f64; 7] {
+    assert!(adjoint.get("robin").unwrap().as_array().unwrap().is_empty(),
+        "derived air references and coefficients are not prescribed Robin controls");
+    let power = &adjoint.get("regional_power").unwrap().as_array().unwrap()[0];
+    let inlet = air_control(adjoint, "air_inlets", "branch", "air");
+    let fan = air_control(adjoint, "fan_banks", "bank", "fixture-bank");
+    assert_eq!(fan.str_field("status"), Some("available"));
+    let mut values = [
+        n(adjoint, "dtemperature_duniform_initial_k_per_k"),
+        n(power, "dtemperature_duniform_added_watts_k_per_w"),
+        n(adjoint, "dtemperature_dcapacity_multiplier_k"),
+        n(inlet, "dtemperature_dinlet_temperature_k_per_k"),
+        n(fan, "dtemperature_dspeed_ratio_k"), 0.0, 0.0,
+    ];
+    if radiative {
+        let surface = &adjoint.get("radiation").unwrap()
+            .get("surfaces").unwrap().as_array().unwrap()[0];
+        values[5] = n(surface, "dtemperature_demissivity_k");
+        values[6] = n(surface, "dtemperature_dreservoir_temperature_k_per_k");
+    }
+    values
+}
+
+/// Independent uniform BE recurrence with the exact exponential air law.
+/// Single-bank affinity and fixed quadratic losses give Q proportional to
+/// absolute speed. The Gnielinski formula supplies its analytic h elasticity.
+fn air_trajectory_derivatives(rows: &[J], speed: f64, reservoir: Option<f64>) -> [f64; 7] {
+    let mut old = INITIAL_K;
+    let mut derivative = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    for row in rows {
+        let exchange = row.get("conjugate").unwrap().get("exchange").unwrap();
+        let segment = &exchange.get("segments").unwrap().as_array().unwrap()[0];
+        let re = n(segment, "reynolds");
+        let z = 0.79 * re.ln() - 1.64;
+        let a = 1.0 / (8.0 * z * z);
+        let correction = 12.7 * a.sqrt() * (0.707_f64.powf(2.0 / 3.0) - 1.0);
+        let h = a * (re - 1000.0) * 0.707 / (1.0 + correction) * 0.0263 / 0.02;
+        close(h, n(segment, "htc_w_m2_k"), 1e-10 * h);
+        let capacity_rate = n(exchange, "mass_flow_kg_s") * AIR_CP;
+        let ntu = h * area_m2() / capacity_rate;
+        let conductance = capacity_rate * -(-ntu).exp_m1();
+        let friction_elasticity = -1.58 / z;
+        let h_elasticity = friction_elasticity + re / (re - 1000.0)
+            - 0.5 * correction / (1.0 + correction) * friction_elasticity;
+        let conductance_speed = (conductance
+            + capacity_rate * (-ntu).exp() * ntu * (h_elasticity - 1.0)) / speed;
+        let dt = n(row, "dt_s");
+        let storage = CAPACITY_J_K / dt;
+        let radiation = |temperature: f64| reservoir.map_or(0.0, |ambient|
+            EMISSIVITY * SIGMA * area_m2() * (temperature.powi(4) - ambient.powi(4)));
+        let temperature = bisect(200.0, 450.0, |temperature|
+            storage * (temperature - old) + conductance * (temperature - INLET_K)
+                + radiation(temperature) - 5.0);
+        close(temperature, n(row, "final_region_max_k"), 4e-8);
+        let jacobian = storage + conductance + reservoir.map_or(0.0, |_|
+            4.0 * EMISSIVITY * SIGMA * area_m2() * temperature.powi(3));
+        let direct = [
+            0.0, 1.0, -storage * (temperature - old), conductance,
+            -conductance_speed * (temperature - INLET_K),
+            reservoir.map_or(0.0, |ambient|
+                -SIGMA * area_m2() * (temperature.powi(4) - ambient.powi(4))),
+            reservoir.map_or(0.0, |ambient|
+                4.0 * EMISSIVITY * SIGMA * area_m2() * ambient.powi(3)),
+        ];
+        for (gradient, rhs) in derivative.iter_mut().zip(direct) {
+            *gradient = (storage * *gradient + rhs) / jacobian;
+        }
+        old = temperature;
+    }
+    derivative
+}
+
+#[test]
+fn g3_native_capacity_air_adjoint_matches_implicit_trajectory_and_physical_controls() {
+    let speed = 1.2; // The project control is absolute speed, not log(speed).
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    for reservoir in [None, Some(350.0)] {
+        let (mut spec, bytes) = regular_project();
+        set_air_speed(&mut spec, speed);
+        if let Some(ambient) = reservoir {
+            radiation_product::declare(&mut spec, &card, "air", ambient);
+        }
+        let plain = run(&spec, &cards, &bytes);
+        let mut requested = spec.clone();
+        request_air_adjoint(&mut requested, "temperature-final-adjoint");
+        let solved = run(&requested, &cards, &bytes);
+        assert_eq!(plain.temperature, solved.temperature);
+        let adjoint = solved.transient().get("adjoint").unwrap();
+        close(n(adjoint, "value_k"), final_k(&plain), 0.0);
+        close(n(adjoint, "reconstructed_solid_endpoints"), 0.0, 0.0);
+        close(n(adjoint, "reconstruction_krylov_iterations"), 0.0, 0.0);
+        close(n(adjoint, "revalidated_solid_endpoints"), solved.rows("fine").len() as f64, 0.0);
+        let actual = air_gradients(adjoint, reservoir.is_some());
+        let expected = air_trajectory_derivatives(solved.rows("fine"), speed, reservoir);
+        for (&actual, &expected) in actual.iter().zip(&expected) {
+            close(actual, expected, 4e-7 * expected.abs().max(1.0));
+        }
+        assert!(actual[0] > 0.0 && actual[0] < 1.0);
+        assert!(actual[1] > 0.0 && actual[3] > 0.0 && actual[4] < 0.0);
+        let count = if reservoir.is_some() { 7 } else { 5 };
+        for (control, &derivative) in actual[..count].iter().enumerate() {
+            let epsilon = if control == 4 { 0.0005 } else { 0.001 };
+            let evaluate = |delta: f64| {
+                let mut probe = spec.clone();
+                let mut emissivity = EMISSIVITY;
+                match control {
+                    0 => probe.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                        .transient.as_mut().unwrap().initial_temperature =
+                        fs_project::TransientInitialTemperature::Uniform(
+                            QtyAny::new(INITIAL_K + delta, dims::TEMPERATURE)),
+                    1 => probe.power.as_mut().unwrap()[0].watts.value += delta,
+                    2 => {
+                        for row in &mut probe.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                            .transient.as_mut().unwrap().capacities {
+                            row.volumetric_heat_capacity.value *= 1.0 + delta;
+                        }
+                    },
+                    3 => set_air_inlet(&mut probe, INLET_K + delta),
+                    4 => set_air_speed(&mut probe, speed + delta),
+                    5 => emissivity += delta,
+                    6 => probe.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                        .radiation.as_mut().unwrap().surfaces[0].reservoir_temperature.value += delta,
+                    _ => unreachable!(),
+                }
+                let (probe_cards, probe_card) =
+                    radiation_product::emissivity_cards(&fixture_cards(), emissivity);
+                if reservoir.is_some() {
+                    probe.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                        .radiation.as_mut().unwrap().surfaces[0].card = probe_card;
+                }
+                assert_eq!(probe.envelope, spec.envelope);
+                final_k(&run(&probe, &probe_cards, &bytes))
+            };
+            close(derivative, (evaluate(epsilon) - evaluate(-epsilon)) / (2.0 * epsilon),
+                3e-5 * derivative.abs().max(1.0));
+        }
+    }
+}
+
+#[test]
+fn g1_native_capacity_air_initial_peak_has_zero_future_controls() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    let (mut spec, bytes) = regular_project();
+    radiation_product::declare(&mut spec, &card, "air", 270.0);
+    request_air_adjoint(&mut spec, "temperature-sampled-peak-adjoint");
+    let solved = run(&spec, &cards, &bytes);
+    let adjoint = solved.transient().get("adjoint").unwrap();
+    close(n(adjoint, "state_index"), 0.0, 0.0);
+    close(n(adjoint, "value_k"), INITIAL_K, 0.0);
+    close(n(adjoint, "adjoint_krylov_iterations"), 0.0, 0.0);
+    assert_eq!(air_gradients(adjoint, true), [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    for interval in adjoint.get("intervals").unwrap().as_array().unwrap() {
+        close(n(interval, "dtemperature_dsource_multiplier_k"), 0.0, 0.0);
+        for region in interval.get("regional_power").unwrap().as_array().unwrap() {
+            close(n(region, "dtemperature_ddelivered_watts_k_per_w"), 0.0, 0.0);
+        }
+    }
+}
+
+
+fn mixed_adjoint_project(card: &str) -> (ProjectSpec, Vec<u8>) {
+    let bytes = tetra_stl();
+    let mut spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    transient_product::declaration(&mut spec, 100.0, 0.5);
+    spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap().initial_temperature =
+        fs_project::TransientInitialTemperature::Uniform(
+            QtyAny::new(INITIAL_K, dims::TEMPERATURE));
+    spec.solver.as_mut().unwrap().tolerance_rel = 1e-12;
+    spec.assignments.as_mut().unwrap()[0].allow_overlap = true;
+    for (name, normal) in [
+        ("upstream-wall", [1.0, 0.0, 0.0]),
+        ("natural-wall", [0.0, 0.0, 1.0]),
+    ] {
+        spec.assembly.as_mut().unwrap().push(EntityDecl::Surface {
+            parent: "enclosure".into(), name: name.into(), display: name.into(), expect_id: None,
+        });
+        spec.assignments.as_mut().unwrap().push(GeometryAssignment {
+            artifact: "enclosure".into(), target: name.into(), length_unit: "m".into(),
+            selector: MeshSelector::HalfSpace {
+                normal, offset: 0.0, side: HalfSpaceSide::AtMost, tolerance: 0.0,
+            },
+            allow_overlap: true,
+        });
+    }
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    let first = setup.boundaries[0].condition.clone();
+    if let ThermalBoundaryCondition::AirflowConvection { order, .. } =
+        &mut setup.boundaries[0].condition { *order = 1; }
+    setup.boundaries.push(ThermalBoundary { target: "upstream-wall".into(), condition: first });
+    setup.boundaries.push(ThermalBoundary {
+        target: "natural-wall".into(),
+        condition: ThermalBoundaryCondition::NaturalConvection {
+            characteristic_length: QtyAny::new(0.1, dims::LENGTH),
+            ambient_temperature: QtyAny::new(350.0, dims::TEMPERATURE),
+            correlation: "convection.churchill-chu-vertical-plate".into(),
+        },
+    });
+    // Radiation on the downstream air port exercises its combined Robin
+    // reference's off-diagonal response to the upstream wall.
+    radiation_product::declare(&mut spec, card, "air", 270.0);
+    let radiation = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .radiation.as_mut().unwrap();
+    radiation.max_iterations = 24;
+    radiation.relaxation = 1.0;
+    set_air_speed(&mut spec, 1.2);
+    (spec, bytes)
+}
+
+#[test]
+fn g3_native_capacity_mixed_adjoint_keeps_upstream_air_and_independent_reservoir_controls() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    let (spec, bytes) = mixed_adjoint_project(&card);
+    let plain = run(&spec, &cards, &bytes);
+    let mut requested = spec.clone();
+    request_air_adjoint(&mut requested, "temperature-final-adjoint");
+    let solved = run(&requested, &cards, &bytes);
+    assert_eq!(plain.temperature, solved.temperature);
+    let minimum = solved.temperature.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(final_k(&solved) - minimum > 0.01);
+    let air = solved.receipt.get("conjugate").unwrap();
+    let segments = air.get("segments").unwrap().as_array().unwrap();
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].str_field("target"), Some("upstream-wall"));
+    assert_eq!(segments[1].str_field("target"), Some("air"));
+    close(n(&segments[0], "air_out_k"), n(&segments[1], "air_in_k"), 1e-12);
+    assert!(n(&segments[1], "air_in_k") > INLET_K + 0.1);
+    assert!(n(solved.receipt.get("radiation").unwrap(), "nonlinear_radiative_out_w") > 0.0);
+    let natural = &solved.receipt.get("natural_convection").unwrap()
+        .get("laws").unwrap().as_array().unwrap()[0];
+    assert!(n(natural, "heat_rate_w") < 0.0);
+    let adjoint = solved.transient().get("adjoint").unwrap();
+    let gradients = air_gradients(adjoint, true);
+    let ambient = air_control(adjoint, "natural_reservoirs", "target", "natural-wall");
+    let direction = 2.0 * gradients[0] + 3.0 * gradients[1] + 0.04 * gradients[2]
+        + 0.3 * gradients[3] + 0.02 * gradients[4] + 0.015 * gradients[5]
+        + 0.4 * gradients[6] + 0.5 * n(ambient, "dtemperature_dambient_temperature_k_per_k");
+    let evaluate = |delta: f64| {
+        let (probe_cards, probe_card) =
+            radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY + 0.015 * delta);
+        let mut probe = mixed_adjoint_project(&probe_card).0;
+        let setup = probe.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        let time = setup.transient.as_mut().unwrap();
+        time.initial_temperature = fs_project::TransientInitialTemperature::Uniform(
+            QtyAny::new(INITIAL_K + 2.0 * delta, dims::TEMPERATURE));
+        for row in &mut time.capacities { row.volumetric_heat_capacity.value *= 1.0 + 0.04 * delta; }
+        let boundary = setup.boundaries.iter_mut().find(|row| row.target == "natural-wall").unwrap();
+        let ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. } =
+            &mut boundary.condition else { panic!("expected natural wall") };
+        ambient_temperature.value += 0.5 * delta;
+        setup.radiation.as_mut().unwrap().surfaces[0].reservoir_temperature.value += 0.4 * delta;
+        probe.power.as_mut().unwrap()[0].watts.value += 3.0 * delta;
+        set_air_inlet(&mut probe, INLET_K + 0.3 * delta);
+        set_air_speed(&mut probe, 1.2 + 0.02 * delta);
+        assert_eq!(probe.envelope, spec.envelope);
+        final_k(&run(&probe, &probe_cards, &bytes))
+    };
+    let epsilon = 0.01;
+    close(direction, (evaluate(epsilon) - evaluate(-epsilon)) / (2.0 * epsilon),
+        3e-5 * direction.abs().max(1.0));
+}

@@ -425,6 +425,7 @@ fn march(
                 nonlinear, radiation, path, deadline,
             )?;
             conjugate_row = airflow_row(path, &solved)?;
+            physical_target_j = Some(solved.physical_residual_tolerance_j);
             airflow_iterations += solved.outcome.solution.iterations;
             airflow_solid_solves += solved.solid_solves;
             airflow_endpoint_evaluations += solved.endpoint_evaluations;
@@ -725,6 +726,11 @@ pub(super) fn solve(
                 problem.mesh.vertex_count(), ports, natural.len(),
             )?).ok_or_else(|| bad("combined natural-convection adjoint memory estimate overflows"))?;
         }
+        if let Some(path) = airflow {
+            additional = additional.checked_add(adjoint::airflow_storage_bytes(
+                spec, problem.mesh.vertex_count(), ports, path,
+            )?).ok_or_else(|| bad("combined airflow adjoint memory estimate overflows"))?;
+        }
         bytes.checked_add(additional)
             .ok_or_else(|| bad("combined forward/adjoint memory estimate overflows"))?
     } else { bytes };
@@ -894,10 +900,10 @@ pub(super) fn solve(
             let natural_coupling = natural_requested.then_some(adjoint::NaturalCoupling {
                 laws: natural, pressure_pa,
             });
-            let derivative = adjoint::finish(cx, &engine, problem, interfaces, &grids.fine,
+            let derivative = adjoint::finish(cx, spec, &engine, problem, interfaces, &grids.fine,
                 workload.as_ref(), StepConfig { linear, energy_tolerance_j: policy.energy_tolerance.value },
                 nonlinear, labels, region_ids, goal_region.expect("admitted goal region"),
-                radiation, natural_coupling.as_ref(), tape, objective, deadline)?;
+                radiation, natural_coupling.as_ref(), airflow, tape, objective, deadline)?;
             format!(",\"adjoint\":{derivative}")
         }
         None => String::new(),

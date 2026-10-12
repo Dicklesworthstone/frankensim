@@ -185,7 +185,7 @@ pub(super) fn fragment(
         ));
     }
     Ok(format!(
-        ",\"convection\":{{\"method\":\"complete-natural-capacity-tangent\",\"control_steps\":{step_count},\"residual_target\":\"original-accepted-forward-physical-tolerance\",\"parameters\":\"independent-natural-reservoir-temperatures-throughout-trajectory\",\"natural_reservoirs\":[{}]}}",
+        ",\"natural_control_steps\":{step_count},\"natural_reservoirs\":[{}]",
         rows.join(","),
     ))
 }

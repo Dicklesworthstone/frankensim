@@ -10,7 +10,7 @@ use super::{SolveRefusal, bad, poll};
 
 mod reverse;
 pub(super) use reverse::{
-    NaturalCoupling, finish, natural_storage_bytes, radiation_storage_bytes,
+    NaturalCoupling, finish, airflow_storage_bytes, natural_storage_bytes, radiation_storage_bytes,
 };
 mod enthalpy;
 pub(super) use enthalpy::{
@@ -53,11 +53,6 @@ pub(super) fn requested(spec: &ProjectSpec) -> Result<Option<Objective>, SolveRe
         let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
             .filter(|setup| setup.transient.is_some())
             .ok_or_else(|| bad("a transient adjoint report requires finite-time conduction"))?;
-        let enthalpy = setup.transient.as_ref().is_some_and(|time| time.enthalpy.is_some());
-        if !enthalpy && setup.boundaries.iter().any(|b| matches!(
-            b.condition, ThermalBoundaryCondition::AirflowConvection { .. })) {
-            return Err(bad("native capacity-storage adjoints do not yet differentiate airflow feedback; use total-enthalpy storage for the complete air path"));
-        }
         if setup.boundaries.iter().any(|b| matches!(
             &b.condition, ThermalBoundaryCondition::NaturalConvection { correlation, .. }
                 if correlation != crate::solve::natural::DIFFERENTIABLE_CARD)) {

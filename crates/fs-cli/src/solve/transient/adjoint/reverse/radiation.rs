@@ -4,10 +4,10 @@
 //! feedback belongs to the temperature transpose; parameter bars are then
 //! mapped back to the two independent reservoirs and the sourced emissivity.
 use std::collections::BTreeSet;
-use fs_conduction::{ConductionProblem, ScalarField, ThermalBc, ThermalBoundary, ThermalInterfaces};
+use fs_conduction::{ConductionProblem, ScalarField, ThermalBc, ThermalBoundary};
 use fs_conduction::adjoint::RobinGradient;
 use fs_conduction::radiation::AmbientRadiationGradient;
-use fs_conduction::transient::backward_euler::{BackwardEuler, StepConfig};
+use fs_conduction::transient::backward_euler::{EndpointEvaluation, StepConfig};
 use crate::solve::radiation::LoweredRadiation;
 use super::{Cx, Instant, SolveRefusal, bad, finite, lower, poll};
 use super::super::super::{json_string, number};
@@ -66,18 +66,16 @@ pub(in crate::solve::transient) fn storage_bytes(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn bind(
-    cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
-    interfaces: Option<&ThermalInterfaces>, old: &[f64], accepted: &[f64],
-    dt_s: f64, config: StepConfig, lowering: &LoweredRadiation,
-    physical_tolerance_j: f64, regions: &[&str],
-    convection_mean_slopes: Option<&[f64]>, deadline: Option<(Instant, f64)>,
+    cx: &Cx<'_>, problem: ConductionProblem<'_>, accepted: &[f64],
+    config: StepConfig, lowering: &LoweredRadiation, regions: &[&str],
+    convection_mean_slopes: Option<&[f64]>, convection_reference_feedback: Option<&[f64]>,
+    audit: EndpointEvaluation, deadline: Option<(Instant, f64)>,
 ) -> Result<Bound, SolveRefusal> {
     poll(cx, deadline)?;
     let n = problem.mesh.vertex_count();
     storage_bytes(n, regions.len(), lowering.patches.len())?;
-    if old.len() != n || accepted.len() != n
+    if accepted.len() != n
         || lowering.surface_labels().len() != lowering.patches.len()
-        || !physical_tolerance_j.is_finite() || physical_tolerance_j <= 0.0
     {
         return Err(bad("capacity radiation binding lost its field, source or physical target"));
     }
@@ -87,6 +85,15 @@ pub(super) fn bind(
         }
         for &slope in slopes { finite(slope)?; }
     }
+    if let Some(feedback) = convection_reference_feedback {
+        if feedback.len() != regions.len() * regions.len() {
+            return Err(bad("capacity radiation lost its air-reference feedback layout"));
+        }
+        for &value in feedback { finite(value)?; }
+    }
+    let mut reference_feedback = convection_reference_feedback.map_or_else(
+        || vec![0.0; regions.len() * regions.len()], |feedback| feedback.to_vec(),
+    );
     let mut seen = BTreeSet::new();
     for &region in regions {
         if !seen.insert(region) {
@@ -108,21 +115,8 @@ pub(super) fn bind(
             return Err(bad("capacity radiation needs positive accepted absolute temperatures"));
         }
     }
-    // Reassemble actual gray heat AND the free nodal balance with the original
-    // convection kept separate. A closed total energy alone is insufficient.
-    let audit = engine.evaluate_prescribed_endpoint(
-        cx, problem, interfaces, old, accepted, dt_s, config, Some(&lowering.patches),
-    ).map_err(lower)?;
-    if !audit.residual_norm_j.is_finite() || audit.residual_norm_j > physical_tolerance_j
-        || !audit.energy_residual_j.is_finite()
-        || audit.energy_residual_j.abs() > config.energy_tolerance_j
-    {
-        return Err(bad(format!(
-            "capacity radiation endpoint fails its retained physical target: residual {} J / {} J, energy {} J / {} J",
-            audit.residual_norm_j, physical_tolerance_j,
-            audit.energy_residual_j, config.energy_tolerance_j,
-        )));
-    }
+    // The shared reverse owner audited the actual gray heat, full free nodal
+    // balance and any transported air energy at this unchanged endpoint.
     let boundary = audit.combined_boundary;
     if boundary.region_names() != problem.boundary.region_names() {
         return Err(bad("capacity radiation changed physical boundary identities"));
@@ -188,6 +182,14 @@ pub(super) fn bind(
         {
             return Err(bad("capacity radiation derivative differs from the actual accepted boundary"));
         }
+        // The combined reference is hc/H times the original air reference.
+        // Scale the whole row, including upstream walls, exactly once.
+        for source in 0..regions.len() {
+            let entry = port * regions.len() + source;
+            reference_feedback[entry] = finite(
+                reference_feedback[entry] * (point.convection_h / combined_h),
+            )?;
+        }
         let convection_wall_partial = h_mean_slopes[port];
         h_mean_slopes[port] = finite(convection_wall_partial + wall_partial)?;
         local_reference_slopes[port] = finite(
@@ -208,7 +210,7 @@ pub(super) fn bind(
     poll(cx, deadline)?;
     Ok(Bound {
         boundary, h_mean_slopes, local_reference_slopes,
-        reference_feedback: vec![0.0; regions.len() * regions.len()],
+        reference_feedback,
         max_feedback_entries, nodes: n, dual_tolerance: config.linear.tolerance,
         regions: regions.iter().map(|name| (*name).to_owned()).collect(), physical, radiative,
     })

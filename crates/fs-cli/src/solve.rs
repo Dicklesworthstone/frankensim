@@ -228,7 +228,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// heat-capacity adjoints with independent physical natural-reservoir controls.
 /// Version 77 requires the full capacity-storage airflow endpoint residual at
 /// actual marched references, with an original target and counted physical audits.
-pub const SOLVE_DRIVER_VERSION: u32 = 77;
+/// Version 78 includes complete streamwise airflow feedback and physical inlet
+/// and independent fan-bank speed controls in capacity-storage trajectory adjoints.
+pub const SOLVE_DRIVER_VERSION: u32 = 78;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
