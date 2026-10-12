@@ -6,7 +6,7 @@ use crate::stop::{StopObservation, StopReason, StopRule};
 use crate::trust::{KrylovOptions, PreconditionerError, TrustRegionProgress, TrustRegionReport, TrustRegionState};
 use fs_exec::Cx;
 use fs_opt::reverse::{HessianError, ReverseError};
-use fs_opt::{Manifold, OptError, ProblemEvaluation, ReverseProblem, ReverseProblemError};
+use fs_opt::{AugmentedLagrangian, Manifold, OptError, ProblemEvaluation, ReverseProblem, ReverseProblemError};
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -117,18 +117,25 @@ fn flatten(blocks: Vec<Vec<f64>>, n: usize) -> Result<Vec<f64>, ReverseProblemEr
 }
 
 fn sample<'a, 'p>(
-    oracle: &'a ReverseProblem<'p>, packing: &Packing, point: &[f64], cx: Option<&Cx<'_>>,
-) -> Result<(Arc<ProblemEvaluation<'a, 'p>>, Vec<f64>), ReverseProblemError> {
+    oracle: &'a ReverseProblem<'p>, packing: &Packing, point: &[f64],
+    augmentation: Option<&AugmentedLagrangian<'_>>, cx: Option<&Cx<'_>>,
+) -> Result<(Arc<ProblemEvaluation<'a, 'p>>, f64, Vec<f64>), ReverseProblemError> {
     let bindings = packing.unpack(point);
     let tape = match cx {
         Some(cx) => oracle.evaluate_cancellable(&bindings, cx)?,
         None => oracle.evaluate(&bindings)?,
     };
-    let gradient = match cx {
-        Some(cx) => tape.objective_gradient_cancellable(cx)?,
-        None => tape.objective_gradient()?,
+    let (value, gradient) = match augmentation {
+        Some(model) => model.value_gradient(&tape, cx)?,
+        None => {
+            let gradient = match cx {
+                Some(cx) => tape.objective_gradient_cancellable(cx)?,
+                None => tape.objective_gradient()?,
+            };
+            (tape.objective_value(), gradient)
+        }
     };
-    Ok((Arc::new(tape), flatten(gradient, packing.dim)?))
+    Ok((Arc::new(tape), value, flatten(gradient, packing.dim)?))
 }
 
 fn domain_trial(error: &ReverseProblemError) -> bool {
@@ -161,6 +168,7 @@ pub struct ReverseNewtonStudy<'a, 'p> {
     rejected: usize,
     last_rejection: Option<ReverseProblemError>,
     numerical_stop: Option<StopReason>,
+    augmentation: Option<AugmentedLagrangian<'a>>,
 }
 
 impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
@@ -169,8 +177,33 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
     pub fn new(oracle: &'a ReverseProblem<'p>, point: &[f64], cx: Option<&Cx<'_>>)
         -> Result<Self, ReverseNewtonError>
     {
+        Self::new_impl(oracle, point, None, cx)
+    }
+
+    /// Bind an explicit, frozen augmented objective. Unlike `new`, this entry
+    /// point admits constraints, but it does NOT run multiplier updates or
+    /// certify feasibility. `snapshot().f`, history and StopRule refer to the
+    /// augmented subproblem; use `objective_value` for the original objective.
+    /// The same Newton kernel, work ceilings and preconditioning APIs apply.
+    pub fn new_augmented(oracle: &'a ReverseProblem<'p>, point: &[f64],
+        augmentation: AugmentedLagrangian<'a>, cx: Option<&Cx<'_>>,
+    ) -> Result<Self, ReverseNewtonError> {
+        Self::new_impl(oracle, point, Some(augmentation), cx)
+    }
+
+    fn new_impl(oracle: &'a ReverseProblem<'p>, point: &[f64],
+        augmentation: Option<AugmentedLagrangian<'a>>, cx: Option<&Cx<'_>>,
+    ) -> Result<Self, ReverseNewtonError> {
         poll(cx)?;
-        if !oracle.problem().constraints().is_empty() { return Err(ReverseNewtonError::ConstraintsUnsupported); }
+        if let Some(model) = &augmentation {
+            if !core::ptr::eq(model.problem(), oracle.problem()) {
+                return Err(ReverseProblemError::Augmentation {
+                    index: None, what: "Newton augmentation belongs to another problem",
+                }.into());
+            }
+        } else if !oracle.problem().constraints().is_empty() {
+            return Err(ReverseNewtonError::ConstraintsUnsupported);
+        }
         for (variable, declaration) in oracle.problem().vars().iter().enumerate() {
             if !matches!(declaration.manifold, Manifold::Rn { .. }) {
                 return Err(ReverseNewtonError::NonEuclidean { variable });
@@ -182,11 +215,11 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
         }
         let evaluation_limit = oracle.problem().budget().limit.maximum().map_or(
             usize::MAX, |cap| usize::try_from(cap.get()).unwrap_or(usize::MAX));
-        let (tape, gradient) = sample(oracle, &packing, point, cx)?;
-        let state = TrustRegionState::new(point, &mut |_| (tape.objective_value(), gradient.clone()));
+        let (tape, value, gradient) = sample(oracle, &packing, point, augmentation.as_ref(), cx)?;
+        let state = TrustRegionState::new(point, &mut |_| (value, gradient.clone()));
         poll(cx)?;
         Ok(Self { oracle, packing, tape, state, evaluation_limit, evals: 1, hv_evals: 0,
-            preconditioner_evals: 0, rejected: 0, last_rejection: None, numerical_stop: None })
+            preconditioner_evals: 0, rejected: 0, last_rejection: None, numerical_stop: None, augmentation })
     }
 
     /// Snapshot without graph evaluation; counts cover rolled-back work too.
@@ -195,6 +228,32 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
         report.evals = self.evals; report.hv_evals = self.hv_evals;
         report
     }
+    /// Original signed weighted objective, never the penalty value.
+    pub fn objective_value(&self) -> f64 { self.tape.objective_value() }
+    /// Original equality/less-than-zero residuals from the accepted tape.
+    pub fn constraint_values(&self) -> &[f64] { self.tape.constraint_values() }
+    /// Frozen augmented objective, when explicitly selected at construction.
+    pub fn augmentation(&self) -> Option<&AugmentedLagrangian<'a>> { self.augmentation.as_ref() }
+
+    // Reweight the accepted tape without re-running physics. A different
+    // merit requires fresh radius/history/stop state, not old model ratios.
+    // Global attempted-work counters and inexact Krylov policy survive.
+    fn retarget_augmented(&mut self, model: AugmentedLagrangian<'a>, cx: Option<&Cx<'_>>)
+        -> Result<(), ReverseNewtonError>
+    {
+        poll(cx)?;
+        let (value, gradient) = model.value_gradient(&self.tape, cx)?;
+        let gradient = flatten(gradient, self.packing.dim)?;
+        let point = self.state.report().x;
+        let mut state = TrustRegionState::new(&point, &mut |_| (value, gradient.clone()));
+        state.set_krylov_options(self.state.krylov_options());
+        poll(cx)?;
+        self.state = state;
+        self.augmentation = Some(model);
+        self.numerical_stop = None;
+        Ok(())
+    }
+
     /// Trust radius after the last complete outer iteration.
     pub fn radius(&self) -> f64 { self.state.radius() }
     /// Accepted gradient, in packed Euclidean coordinates.
@@ -293,6 +352,7 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
             if inverse.is_some() && self.preconditioner_evals >= max_preconditioner_applications {
                 return Ok(self.report(ReverseNewtonStop::PreconditionerBudget));
             }
+            let augmentation = self.augmentation.as_ref();
             let mut candidate = self.state.clone();
             // The adapter counts rolled-back attempts too; translate that
             // remaining allowance into the staged kernel's cumulative count.
@@ -318,9 +378,9 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
                         *error.borrow_mut() = Some(ReverseNewtonError::CounterOverflow); return refusal();
                     };
                     *evals = next;
-                    match sample(oracle, packing, point, cx) {
-                        Ok((tape, gradient)) => {
-                            let f = tape.objective_value(); trial = Some((point.to_vec(), tape));
+                    match sample(oracle, packing, point, augmentation, cx) {
+                        Ok((tape, f, gradient)) => {
+                            trial = Some((point.to_vec(), tape));
                             (f, gradient)
                         }
                         Err(source) if domain_trial(&source) => {
@@ -333,8 +393,11 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
                     let refusal = || vec![f64::NAN; packing.dim];
                     if error.borrow().is_some() { return refusal(); }
                     *hv_evals += 1;
-                    let result = accepted.objective_hessian_vector_product(&packing.unpack(direction), cx)
-                        .and_then(|blocks| flatten(blocks, packing.dim));
+                    let direction = packing.unpack(direction);
+                    let result = match augmentation {
+                        Some(model) => model.hessian_vector_product(accepted, &direction, cx),
+                        None => accepted.objective_hessian_vector_product(&direction, cx),
+                    }.and_then(|blocks| flatten(blocks, packing.dim));
                     match result {
                         Ok(product) => product,
                         Err(source) => { *error.borrow_mut() = Some(source.into()); refusal() }
@@ -390,3 +453,7 @@ impl<'a, 'p> ReverseNewtonStudy<'a, 'p> {
         unreachable!("inclusive loop returns at its final boundary")
     }
 }
+
+mod augmented;
+pub use augmented::{AugmentedNewtonBudget, AugmentedNewtonOptions, AugmentedNewtonReport,
+    AugmentedNewtonStop, AugmentedNewtonStudy};

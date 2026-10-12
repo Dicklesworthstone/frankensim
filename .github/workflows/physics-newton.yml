@@ -25,7 +25,7 @@ jobs:
         run: cargo test --release -p fs-conduction --test conductivity_hessian
       - name: Test real thermal Newton and retained optimizer integrations
         if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-ascent --features conduction-design --test conductivity_newton --test reverse_newton
+        run: cargo test --release -p fs-ascent --features conduction-design --test augmented_newton --test conductivity_newton --test reverse_newton
       - name: Run the physical conductivity design example
         if: ${{ !cancelled() }}
         run: cargo run --release -p fs-ascent --features conduction-design --example conductivity_newton
