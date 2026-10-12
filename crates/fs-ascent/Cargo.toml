@@ -119,3 +119,7 @@ required-features = ["conduction-design"]
 [[example]]
 name = "conductivity_newton"
 required-features = ["conduction-design"]
+
+[[example]]
+name = "constrained_conductivity"
+required-features = ["conduction-design"]

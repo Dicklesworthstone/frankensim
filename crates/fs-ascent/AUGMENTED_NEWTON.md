@@ -68,3 +68,26 @@ For an externally controlled multiplier strategy,
 subproblem, including the existing preconditioned entry points. Its stop
 rules and `snapshot().f` refer to the augmented merit, never KKT convergence.
 The original `ReverseNewtonStudy::new` still refuses constrained problems.
+
+## Physical conductivity design
+
+```sh
+cargo run --release -p fs-ascent --features conduction-design --example constrained_conductivity
+cargo test --release -p fs-ascent --features conduction-design --test constrained_conductivity
+```
+
+The example minimizes a native anisotropic P1 temperature-rise objective with
+mild log-coordinate regularization, subject to an explicitly declared
+`mean(exp(x)) <= 1.5` conductivity-multiplier allowance. This is a coefficient
+resource constraint, not a manufactured-material or physical volume claim.
+It prints the original constraint residual and candidate multipliers with
+KKT diagnostics, including when a budget or inner stall prevents convergence.
+
+The physical regressions independently solve both directions of the design
+problem: minimum temperature subject to a conductivity allowance, and minimum
+conductivity subject to a temperature ceiling. They use a uniform coefficient
+reduction over the actual native PDE, whose inverse scaling law supplies an
+independent known optimum; first/second derivatives still run native
+primal/adjoint/sensitivity solves. Fresh thermal solves check the reported
+outputs. Physical-budget repair and split continuation exercise the same
+accepted-state path, not a synthetic Hessian callback.
