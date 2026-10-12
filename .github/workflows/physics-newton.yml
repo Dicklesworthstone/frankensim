@@ -17,6 +17,9 @@ jobs:
           persist-credentials: false
       - name: Materialize pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test native structural compliance Hessians
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-topopt --test compliance_hessian
       - name: Test live IR physics composition and retained first-order behavior
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-opt --test augmented_lagrangian --test physics_hessian --test physics_bindings --test hessian_products

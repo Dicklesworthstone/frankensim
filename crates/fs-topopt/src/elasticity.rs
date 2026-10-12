@@ -11,6 +11,8 @@ use fs_material::{IsotropicElastic, SmallStrainLaw};
 use fs_rep_mesh::TetComplex;
 use fs_solver::LinearOp;
 
+pub mod second_order;
+
 /// The density-elasticity problem on a tet complex: per-cell 12×12
 /// unit-modulus stiffness blocks + Dirichlet mask on vector dofs.
 pub struct DensityElasticity {
