@@ -1,0 +1,25 @@
+name: Physics Newton
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  physical-hessians:
+    if: contains(github.event.head_commit.message, '[physics-newton]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test live IR physics composition and retained first-order behavior
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-opt --test physics_hessian --test physics_bindings --test hessian_products
+      - name: Test native thermal second-order adjoints
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-conduction --test conductivity_hessian
