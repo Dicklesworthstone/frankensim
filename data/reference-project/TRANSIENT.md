@@ -209,7 +209,25 @@ The existing `aa6061.fsmcdpk` fixture also supplies its gray-surface card.
 The report retains initial-enthalpy, regional and interval-power, source
 multiplier and reference-density gradients. Its optional `radiation` row
 identifies the complete nonlinear area-mean tangent and additional bounded
-workspace. Emissivity, reservoir temperature and the card query remain fixed.
+workspace. It also exposes per-surface emissivity and reservoir-temperature
+controls under `transient.adjoint.radiation.surfaces`; the card query, selected
+claim/support and time grid remain fixed.
+
+Each surface row identifies the declared name and boundary target, nominal
+emissivity and reservoir kelvin, material card, property-use receipt and query
+temperature. `dtemperature_demissivity_k` is the selected temperature change
+per unit absolute emissivity. `dtemperature_dreservoir_temperature_k_per_k`
+is the change per kelvin of that reservoir. Both controls are held throughout
+the trajectory and accumulated only over the selected reverse prefix.
+Sharing a material card does not merge separate surface controls. An initial
+sampled peak has zero sensitivity to either future boundary input.
+
+Emissivity must remain in (0,1]; at a nominal value of one, only decreases are
+feasible. A reservoir must remain above absolute zero, but need not lie inside
+the wall-material support interval. These are local gray-model sensitivities
+at the sourced nominal value, not derivatives of the card's immutable source
+record or a propagation of measurement uncertainty. Fresh source-data edits
+require a newly admitted material card.
 
 The reverse solve includes the derivative of the full physical radiation
 law at each accepted endpoint; it does not freeze the coefficient used by

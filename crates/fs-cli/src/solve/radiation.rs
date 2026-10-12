@@ -31,6 +31,13 @@ struct SurfaceSource {
     emissivity: SurfaceEmissivity,
 }
 
+impl LoweredRadiation {
+    /// Immutable user-facing identities in the same order as the bound patches.
+    pub(super) fn surface_labels(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
+        self.surfaces.iter().map(|source| (source.name.as_str(), source.target.as_str()))
+    }
+}
+
 pub(super) fn lower(
     _spec: &ProjectSpec,
     setup: &ConductionSetup,

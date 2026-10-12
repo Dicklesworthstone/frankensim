@@ -210,7 +210,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// history, regional delivered-power and frozen-reference-density pullbacks.
 /// Version 68 retains complete ambient-radiation feedback in native enthalpy
 /// history, power and reference-density trajectory adjoints.
-pub const SOLVE_DRIVER_VERSION: u32 = 68;
+/// Version 69 adds sourced per-surface emissivity and reservoir-temperature
+/// trajectory controls through the same complete enthalpy transpose.
+pub const SOLVE_DRIVER_VERSION: u32 = 69;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

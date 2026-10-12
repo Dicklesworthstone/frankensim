@@ -16,6 +16,7 @@ use fs_exec::Cx;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 
 use super::adjoint::{EnthalpyAdjointError, EnthalpyStepGradient, EnthalpyStepLinearization};
+use super::{EnthalpyRadiationStepGradient, EnthalpyRadiationStepLinearization};
 use super::{
     EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution,
     finite, poll,
@@ -437,7 +438,41 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         accepted: EnthalpyStepSolution,
         max_feedback_entries: usize,
     ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
-        let radiative = self.inner.linearize_accepted_with_ambient_radiation(
+        Ok(self.linearize_accepted_parameters_with_ambient_radiation(
+            cx,
+            problem,
+            interfaces,
+            old_h,
+            dt_s,
+            config,
+            patches,
+            accepted,
+            max_feedback_entries,
+        )?.into_storage())
+    }
+
+    /// Bind reference-storage and radiation-parameter derivatives together.
+    ///
+    /// The returned owner reuses one physical transpose for history, source,
+    /// reference density, reservoir temperature, emissivity and dt controls.
+    /// All controls refer to the same revalidated endpoint and immutable
+    /// history. Original convection, phase charts and geometry remain fixed.
+    /// The same physical residual, energy, smoothness and feedback-entry gates
+    /// as the ambient-radiation binder apply; no new primal solve is performed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_accepted_parameters_with_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        patches: &[crate::AmbientRadiationPatch],
+        accepted: EnthalpyStepSolution,
+        max_feedback_entries: usize,
+    ) -> Result<HeterogeneousEnthalpyRadiationStepLinearization<'m>, EnthalpyAdjointError> {
+        let inner = self.inner.linearize_accepted_with_ambient_radiation(
             cx,
             problem,
             interfaces,
@@ -448,7 +483,8 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             accepted,
             max_feedback_entries,
         )?;
-        self.bind_linearization(cx, old_h, radiative.into_transport())
+        let density = self.bind_reference_density(cx, old_h, inner.primal())?;
+        Ok(HeterogeneousEnthalpyRadiationStepLinearization { inner, density })
     }
 
     /// Advance closed enclosure exchange with heterogeneous charts and the
@@ -524,6 +560,39 @@ pub struct HeterogeneousEnthalpyStepGradient {
 #[derive(Debug)]
 pub struct HeterogeneousEnthalpyStepLinearization<'m> {
     inner: EnthalpyStepLinearization<'m>,
+    density: ReferenceDensityLinearization<'m>,
+}
+
+/// Physical storage and radiative-parameter derivatives from one transpose.
+/// The spatial source/history multiplier is stored only once, in `storage`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeterogeneousEnthalpyRadiationStepGradient {
+    /// History, P1 source and bound element/material reference-density controls.
+    pub storage: HeterogeneousEnthalpyStepGradient,
+    /// Derivative per second of dt, holding endpoint source/boundary data fixed.
+    /// A schedule or horizon derivative requires its separate data chain rule.
+    pub time_step_s: f64,
+    /// Radiating regions in the original patch declaration order.
+    pub radiation_regions: Vec<String>,
+    /// Derivative per kelvin of each black-reservoir temperature, including
+    /// coefficient and explicit reference-temperature changes.
+    pub reservoir_temperatures: Vec<f64>,
+    /// Derivative per unit absolute hemispherical emissivity; the source claim
+    /// and query support are fixed. At epsilon=1 only feasible directions apply.
+    pub emissivities: Vec<f64>,
+}
+
+/// Rechecked radiative endpoint with bound storage and parameter derivatives.
+/// Both radiation metadata and reference-density history belong to this exact
+/// endpoint; callers cannot combine them with an unrelated tangent or state.
+#[derive(Debug)]
+pub struct HeterogeneousEnthalpyRadiationStepLinearization<'m> {
+    inner: EnthalpyRadiationStepLinearization<'m>,
+    density: ReferenceDensityLinearization<'m>,
+}
+
+#[derive(Debug)]
+struct ReferenceDensityLinearization<'m> {
     mesh: &'m ConductionMesh,
     specific_enthalpy_change: Vec<f64>,
     element_material_ids: Vec<usize>,
@@ -573,9 +642,18 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
         old_h: &[f64],
         inner: EnthalpyStepLinearization<'m>,
     ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        let density = self.bind_reference_density(cx, old_h, inner.primal())?;
+        Ok(HeterogeneousEnthalpyStepLinearization { inner, density })
+    }
+
+    fn bind_reference_density(
+        &self,
+        cx: &Cx<'_>,
+        old_h: &[f64],
+        primal: &EnthalpyStepSolution,
+    ) -> Result<ReferenceDensityLinearization<'m>, EnthalpyAdjointError> {
         let mut specific_enthalpy_change = Vec::with_capacity(old_h.len());
-        for (vertex, (&new, &old)) in inner
-            .primal()
+        for (vertex, (&new, &old)) in primal
             .specific_enthalpy_j_kg
             .iter()
             .zip(old_h)
@@ -587,8 +665,7 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
             specific_enthalpy_change.push(finite(new - old)?);
         }
         poll(cx, old_h.len())?;
-        Ok(HeterogeneousEnthalpyStepLinearization {
-            inner,
+        Ok(ReferenceDensityLinearization {
             mesh: self.inner.mesh,
             specific_enthalpy_change,
             element_material_ids: self.element_material_ids.clone(),
@@ -619,6 +696,92 @@ impl HeterogeneousEnthalpyStepLinearization<'_> {
         cx: &Cx<'_>,
         direction: &[f64],
     ) -> Result<Vec<f64>, EnthalpyAdjointError> {
+        self.density.apply_jacobian(cx, direction)
+    }
+
+    /// Solve the physical transpose once, then return source/history gradients
+    /// and `-lambda^T R_rho` for both element and shared material densities.
+    ///
+    /// For each tetrahedron, `dJ/drho_e = -(V_e/4) sum_i lambda_i*(h_i-h_old_i)`.
+    /// Every term uses the bound primal history. No residual is divided by a
+    /// density or a temperature slope, so latent-plateau storage remains valid.
+    /// No partial result is published after cancellation or nonfinite arithmetic.
+    pub fn pullback(
+        &self,
+        cx: &Cx<'_>,
+        seed: &[f64],
+        config: LinearConfig,
+    ) -> Result<HeterogeneousEnthalpyStepGradient, EnthalpyAdjointError> {
+        let transport = self.inner.pullback(cx, seed, config)?;
+        self.density.pullback(cx, transport)
+    }
+}
+
+impl<'m> HeterogeneousEnthalpyRadiationStepLinearization<'m> {
+    /// Rechecked physical endpoint with chart-resolved phase fields.
+    #[must_use]
+    pub fn primal(&self) -> &EnthalpyStepSolution {
+        self.inner.primal()
+    }
+
+    /// Shared endpoint Jacobian and temperature pullback, including complete
+    /// nonlinear radiation feedback in specific-enthalpy coordinates.
+    #[must_use]
+    pub const fn transport(&self) -> &EnthalpyStepLinearization<'m> {
+        self.inner.transport()
+    }
+
+    /// Retain h/source/reference-density derivatives while discarding only
+    /// the additional radiation-parameter metadata. No state feedback is lost.
+    #[must_use]
+    pub fn into_storage(self) -> HeterogeneousEnthalpyStepLinearization<'m> {
+        HeterogeneousEnthalpyStepLinearization {
+            inner: self.inner.into_transport(),
+            density: self.density,
+        }
+    }
+
+    /// Apply the bound reference-density residual Jacobian at fixed h history.
+    pub fn apply_reference_density_jacobian(
+        &self,
+        cx: &Cx<'_>,
+        direction: &[f64],
+    ) -> Result<Vec<f64>, EnthalpyAdjointError> {
+        self.density.apply_jacobian(cx, direction)
+    }
+
+    /// Solve the complete radiative transpose once. Contract radiation controls
+    /// and the bound reference-density controls with that same multiplier.
+    pub fn pullback(
+        &self,
+        cx: &Cx<'_>,
+        seed: &[f64],
+        config: LinearConfig,
+    ) -> Result<HeterogeneousEnthalpyRadiationStepGradient, EnthalpyAdjointError> {
+        let EnthalpyRadiationStepGradient {
+            transport,
+            time_step_s,
+            radiation_regions,
+            reservoir_temperatures,
+            emissivities,
+        } = self.inner.pullback(cx, seed, config)?;
+        let storage = self.density.pullback(cx, transport)?;
+        Ok(HeterogeneousEnthalpyRadiationStepGradient {
+            storage,
+            time_step_s,
+            radiation_regions,
+            reservoir_temperatures,
+            emissivities,
+        })
+    }
+}
+
+impl ReferenceDensityLinearization<'_> {
+    fn apply_jacobian(
+        &self,
+        cx: &Cx<'_>,
+        direction: &[f64],
+    ) -> Result<Vec<f64>, EnthalpyAdjointError> {
         poll(cx, 0)?;
         if direction.len() != self.mesh.element_count() {
             return Err(EnthalpyAdjointError::InvalidInput(
@@ -642,20 +805,13 @@ impl HeterogeneousEnthalpyStepLinearization<'_> {
         Ok(output)
     }
 
-    /// Solve the physical transpose once, then return source/history gradients
-    /// and `-lambda^T R_rho` for both element and shared material densities.
-    ///
-    /// For each tetrahedron, `dJ/drho_e = -(V_e/4) sum_i lambda_i*(h_i-h_old_i)`.
-    /// Every term uses the bound primal history. No residual is divided by a
-    /// density or a temperature slope, so latent-plateau storage remains valid.
-    /// No partial result is published after cancellation or nonfinite arithmetic.
-    pub fn pullback(
+    // This multiplier comes only from the paired private transport owner.
+    // Move it into the result so all controls report one transpose solve.
+    fn pullback(
         &self,
         cx: &Cx<'_>,
-        seed: &[f64],
-        config: LinearConfig,
+        transport: EnthalpyStepGradient,
     ) -> Result<HeterogeneousEnthalpyStepGradient, EnthalpyAdjointError> {
-        let transport = self.inner.pullback(cx, seed, config)?;
         let mut element_reference_density = Vec::with_capacity(self.mesh.element_count());
         let mut material_reference_density = vec![0.0; self.material_count];
         for (element, &material) in self.element_material_ids.iter().enumerate() {

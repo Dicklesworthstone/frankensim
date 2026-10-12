@@ -1200,6 +1200,23 @@ authority.
   with k(T), hot/cold reservoirs, history/source parity, the genuine transpose,
   unused-record aggregation and density derivatives against fresh perturbed
   nonlinear solves.
+- `HeterogeneousEnthalpyBackwardEuler::linearize_accepted_parameters_with_ambient_radiation`
+  retains both reference-storage binding and physical radiation metadata in
+  `HeterogeneousEnthalpyRadiationStepLinearization`. Its pullback runs exactly
+  one complete radiative transpose, then moves that multiplier into the shared
+  private reference-density contraction. The result contains `storage`
+  (history, P1 source, element/material density and one Krylov report), plus dt,
+  radiating-region names, reservoir-temperature and absolute-emissivity
+  derivatives. Original convection, charts, geometry and material parameters
+  remain fixed; dt holds endpoint data fixed and does not imply a schedule or
+  horizon derivative. Radiative controls include the coefficient/reference
+  chain rule, while density changes only the declared reference storage.
+  `into_storage` drops the extra control metadata while retaining all state
+  feedback. The existing fixed-radiation-parameter storage binder uses this
+  same owner and remains source-compatible. The existing radiative storage
+  regression checks exact parity of all combined gradients and the single
+  reported transpose with the separate physical owners; independent nonlinear
+  perturbations remain the controls' numerical reference.
 - `EnthalpyStepLinearization::robin_response` binds original uniform convection
   ports to that same checked enthalpy endpoint. The producer retains the exact
   convection boundary; a radiative binder restores the original boundary after

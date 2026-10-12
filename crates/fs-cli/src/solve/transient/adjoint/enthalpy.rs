@@ -5,8 +5,13 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError;
-use fs_conduction::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyBackwardEuler;
+use fs_conduction::transient::enthalpy::adjoint::{
+    EnthalpyAdjointError, EnthalpyStepLinearization,
+};
+use fs_conduction::transient::enthalpy::heterogeneous::{
+    HeterogeneousEnthalpyBackwardEuler, HeterogeneousEnthalpyRadiationStepLinearization,
+    HeterogeneousEnthalpyStepLinearization,
+};
 use fs_conduction::transient::enthalpy::{
     EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution,
 };
@@ -23,6 +28,25 @@ use super::super::{SolveRefusal, Workload, bad, json_string, lower, number, poll
 // Forward native enthalpy also admits at most 24 Arnoldi columns. Keep the
 // transpose within the same bounded column scale before allocating its basis.
 const REVERSE_RESTART_LIMIT: usize = 24;
+
+// Two accumulated surface controls and bounded JSON rows, independent of the
+// number of fine steps. The ordinary radiation allowance covers active core
+// parameter scratch, source metadata and face records.
+const RADIATION_PARAMETER_BYTES_PER_SURFACE: usize = 2 * std::mem::size_of::<f64>() + 2048;
+
+enum BoundEndpoint<'m> {
+    Prescribed(HeterogeneousEnthalpyStepLinearization<'m>),
+    Radiative(HeterogeneousEnthalpyRadiationStepLinearization<'m>),
+}
+
+impl BoundEndpoint<'_> {
+    fn transport(&self) -> &EnthalpyStepLinearization<'_> {
+        match self {
+            Self::Prescribed(step) => step.transport(),
+            Self::Radiative(step) => step.transport(),
+        }
+    }
+}
 
 fn failed(error: EnthalpyAdjointError) -> SolveRefusal {
     match error {
@@ -78,6 +102,7 @@ fn feedback_entries(n: usize, patches: usize) -> Result<usize, SolveRefusal> {
 /// One active physical radiation revalidation: two retained nodal factors per
 /// patch, temporary nodal fields, disjoint boundary faces and patch metadata.
 /// Radiation declarations are immutable and need no per-checkpoint copies.
+/// Aggregate emissivity/reservoir controls and result rows are charged once.
 pub(in crate::solve::transient) fn radiation_storage_bytes(
     n: usize, elements: usize, patches: usize,
 ) -> Result<usize, SolveRefusal> {
@@ -85,6 +110,9 @@ pub(in crate::solve::transient) fn radiation_storage_bytes(
         .and_then(|v| n.checked_mul(96).and_then(|b| v.checked_add(b)))
         .and_then(|v| elements.checked_mul(1024).and_then(|b| v.checked_add(b)))
         .and_then(|v| patches.checked_mul(4096).and_then(|b| v.checked_add(b)))
+        .and_then(|v| patches.checked_mul(RADIATION_PARAMETER_BYTES_PER_SURFACE)
+            .and_then(|b| v.checked_add(b)))
+        .and_then(|v| v.checked_add(2 * std::mem::size_of::<Vec<f64>>()))
         .filter(|&v| isize::try_from(v).is_ok())
         .ok_or_else(|| bad("enthalpy radiation adjoint workspace allowance overflows"))
 }
@@ -395,6 +423,9 @@ pub(in crate::solve::transient) fn finish(
     for _ in ends_s { source_controls.push(zeros(names.len())?); }
     let mut multipliers = zeros(ends_s.len())?;
     let mut densities = zeros(storage.materials.len())?;
+    let surface_count = radiation.map_or(0, |lowering| lowering.patches.len());
+    let mut emissivity_controls = zeros(surface_count)?;
+    let mut reservoir_controls = zeros(surface_count)?;
     let mut carry = zeros(n)?;
     let mut dual_iterations = 0usize;
     let mut worst_dual = 0.0_f64;
@@ -440,17 +471,17 @@ pub(in crate::solve::transient) fn finish(
             // The original convection boundary and physical old h are passed
             // unchanged. The shared binder rebuilds radiation at this endpoint
             // and retains its complete mean-dependent feedback in the tangent.
-            engine.linearize_accepted_storage_with_ambient_radiation(
+            BoundEndpoint::Radiative(engine.linearize_accepted_parameters_with_ambient_radiation(
                 cx, step_problem, interfaces, old_h, dt, config,
                 &lowering.patches, endpoint, max_feedback_entries,
-            )
+            ).map_err(failed)?)
         } else {
-            engine.linearize_accepted(
+            BoundEndpoint::Prescribed(engine.linearize_accepted(
                 cx, step_problem, interfaces, old_h, dt, config, endpoint,
-            )
-        }.map_err(failed)?;
+            ).map_err(failed)?)
+        };
         let expected = &temperature.states[index + 1];
-        for (vertex, (&actual, &expected)) in step.primal().temperature.iter().zip(expected).enumerate() {
+        for (vertex, (&actual, &expected)) in step.transport().primal().temperature.iter().zip(expected).enumerate() {
             if vertex % 256 == 0 { poll(cx, deadline)?; }
             if actual.to_bits() != expected.to_bits() {
                 return Err(bad(format!(
@@ -465,7 +496,34 @@ pub(in crate::solve::transient) fn finish(
         }
         // This seed is an h cotangent. Multiplying history carry by dT/dh again
         // would incorrectly erase energy sensitivity on a latent plateau.
-        let gradient = step.pullback(cx, &carry, linear).map_err(failed)?;
+        let gradient = match step {
+            BoundEndpoint::Prescribed(step) => step.pullback(cx, &carry, linear).map_err(failed)?,
+            BoundEndpoint::Radiative(step) => {
+                // The radiative owner contracts its parameters and reference
+                // storage with ONE checked physical transpose multiplier.
+                let gradient = step.pullback(cx, &carry, linear).map_err(failed)?;
+                let lowering = radiation.ok_or_else(|| bad("radiative enthalpy controls lost their source"))?;
+                if gradient.radiation_regions.len() != surface_count
+                    || gradient.emissivities.len() != surface_count
+                    || gradient.reservoir_temperatures.len() != surface_count
+                {
+                    return Err(bad("radiative enthalpy parameter layout differs"));
+                }
+                for (surface, patch) in lowering.patches.iter().enumerate() {
+                    poll(cx, deadline)?;
+                    if gradient.radiation_regions[surface] != patch.region() {
+                        return Err(bad("radiative enthalpy control order differs from its bound surfaces"));
+                    }
+                    emissivity_controls[surface] = finite(
+                        emissivity_controls[surface] + gradient.emissivities[surface],
+                    )?;
+                    reservoir_controls[surface] = finite(
+                        reservoir_controls[surface] + gradient.reservoir_temperatures[surface],
+                    )?;
+                }
+                gradient.storage
+            }
+        };
         if !gradient.transport.relative_residual.is_finite()
             || gradient.transport.relative_residual >= linear.tolerance
             || gradient.material_reference_density.len() != densities.len()
@@ -538,10 +596,43 @@ pub(in crate::solve::transient) fn finish(
         json_string(name), number(value)?,
     ))).collect::<Result<Vec<_>, SolveRefusal>>()?;
     let selected_time = if selected.state == 0 { 0.0 } else { ends_s[selected.state - 1] };
-    let radiation_fragment = radiation.map(|lowering| format!(
-        ",\"radiation\":{{\"method\":\"complete-area-mean-gray-enthalpy-tangent\",\"patch_count\":{},\"max_feedback_entries\":{max_feedback_entries},\"additional_workspace_bytes\":{radiation_workspace},\"parameters\":\"fixed-emissivity-reservoir-temperature-and-query-support\"}}",
-        lowering.patches.len(),
-    )).unwrap_or_default();
+    let radiation_fragment = radiation.map(|lowering| -> Result<String, SolveRefusal> {
+        if lowering.surface_labels().len() != surface_count {
+            return Err(bad("radiative enthalpy surface identities differ from the bound patches"));
+        }
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(surface_count)
+            .map_err(|_| bad("radiative enthalpy control-row allocation refused"))?;
+        for (surface, ((name, target), patch)) in lowering.surface_labels()
+            .zip(&lowering.patches).enumerate()
+        {
+            poll(cx, deadline)?;
+            if target != patch.region() {
+                return Err(bad("radiative enthalpy surface identity order differs"));
+            }
+            let emissivity = patch.emissivity();
+            let directions = if emissivity.value() == 1.0 {
+                "nonpositive-at-emissivity-one"
+            } else {
+                "two-sided-within-zero-exclusive-one-inclusive"
+            };
+            rows.push(format!(
+                "{{\"name\":{},\"target\":{},\"card\":{},\"material_state\":{},\"emissivity_receipt\":{},\"emissivity\":{},\"query_temperature_k\":{},\"reservoir_temperature_k\":{},\"dtemperature_demissivity_k\":{},\"dtemperature_dreservoir_temperature_k_per_k\":{},\"emissivity_feasible_directions\":{}}}",
+                json_string(name), json_string(target),
+                json_string(&emissivity.card_identity().to_hex()),
+                json_string(emissivity.material_state()),
+                json_string(&emissivity.receipt().content_hash().to_hex()),
+                number(emissivity.value())?, number(emissivity.temperature_k())?,
+                number(patch.ambient_temperature_k())?,
+                number(emissivity_controls[surface])?, number(reservoir_controls[surface])?,
+                json_string(directions),
+            ));
+        }
+        Ok(format!(
+            ",\"radiation\":{{\"method\":\"complete-area-mean-gray-enthalpy-tangent\",\"patch_count\":{},\"max_feedback_entries\":{max_feedback_entries},\"additional_workspace_bytes\":{radiation_workspace},\"parameters\":\"absolute-per-surface-emissivity-and-reservoir-temperature-throughout-trajectory\",\"surfaces\":[{}]}}",
+            lowering.patches.len(), rows.join(","),
+        ))
+    }).transpose()?.unwrap_or_default();
     poll(cx, deadline)?;
     Ok(format!(
         "{{\"schema\":\"fs-cli-native-enthalpy-adjoint-v1\",\"output\":{},\"method\":\"discrete-total-enthalpy-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_per_j\":{},\"dtemperature_dinitial_specific_enthalpy_k_kg_per_j\":[{}],\"dtemperature_dreference_density_multiplier_k\":{},\"regional_storage\":[{}],\"regional_power\":[{}],\"intervals\":[{}],\"revalidated_solid_endpoints\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_restart_columns_per_linear_solve\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{}{radiation_fragment},\"authority\":\"Estimated\",\"scope\":{}}}",
@@ -554,4 +645,4 @@ pub(in crate::solve::transient) fn finish(
     ))
 }
 
-const SCOPE: &str = "Selected final or earliest sampled-peak nodal branch on the accepted fine grid, including the initial state for sampled peaks. Exact ties have no unique maximum derivative. Only the selected prefix is reversed; future interval controls are zero. Each consumed endpoint is independently revalidated through the physical heterogeneous enthalpy balance, energy gate, chart smoothness and complete k(T)/phase-conductivity tangent; no nonlinear endpoint is re-solved or replaced. Initial controls are additive nodal or regional specific-enthalpy offsets, not initial temperatures. Native input edits must preserve initial-temperature/enthalpy consistency or use from-regional-enthalpy. Reference-density controls change frozen storage mass while holding initial enthalpy, charts, conductivity laws and geometry fixed; the multiplier scales all regional reference densities together. Regional power controls add absolute delivered watts through the same P1 source projector, including zero-baseline intervals; sum interval derivatives for one declared workload segment. Prescribed Neumann/Robin data, matching contacts, phase-law parameters and the time grid are fixed, with no derivatives reported for them. Declared ambient radiation uses its complete nonlinear area-mean state feedback in the same h/source/reference-density transpose; emissivity, reservoir temperature, source claim and query support are fixed controls in this report. An isothermal plateau has zero direct temperature sensitivity while h history carry remains energetic. Chart/domain endpoints and slope-changing branches refuse classical derivatives. No apparent heat capacity, moving geometry, density-driven expansion, natural-convection or airflow-feedback derivative, continuous-time maximum, uncertainty or physical-validation certificate is supplied.";
+const SCOPE: &str = "Selected final or earliest sampled-peak nodal branch on the accepted fine grid, including the initial state for sampled peaks. Exact ties have no unique maximum derivative. Only the selected prefix is reversed; future interval controls are zero. Each consumed endpoint is independently revalidated through the physical heterogeneous enthalpy balance, energy gate, chart smoothness and complete k(T)/phase-conductivity tangent; no nonlinear endpoint is re-solved or replaced. Initial controls are additive nodal or regional specific-enthalpy offsets, not initial temperatures. Native input edits must preserve initial-temperature/enthalpy consistency or use from-regional-enthalpy. Reference-density controls change frozen storage mass while holding initial enthalpy, charts, conductivity laws and geometry fixed; the multiplier scales all regional reference densities together. Regional power controls add absolute delivered watts through the same P1 source projector, including zero-baseline intervals; sum interval derivatives for one declared workload segment. Prescribed Neumann/Robin data, matching contacts, phase-law parameters and the time grid are fixed, with no derivatives reported for them. Declared ambient radiation uses its complete nonlinear area-mean state feedback in the same h/source/reference-density transpose; the report also differentiates independent absolute surface emissivities and reservoir temperatures held throughout the selected trajectory. Each surface retains its name, target, sourced nominal value, card and usage-receipt identities; sharing a card does not merge controls. Query temperature, selected source claim/support and time grid remain fixed. Emissivity is restricted to (0,1], with only nonpositive feasible increments at one, and reservoirs require positive absolute kelvin. These parameter derivatives are not uncertainty propagation or derivatives of immutable card content. An isothermal plateau has zero direct temperature sensitivity while h history carry remains energetic. Chart/domain endpoints and slope-changing branches refuse classical derivatives. No apparent heat capacity, moving geometry, density-driven expansion, natural-convection or airflow-feedback derivative, continuous-time maximum, uncertainty or physical-validation certificate is supplied.";

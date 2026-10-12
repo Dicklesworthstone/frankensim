@@ -1663,8 +1663,8 @@ inventing a classical gradient. Prescribed boundary parameters, constitutive
 laws, phase multipliers, contact, geometry and the time grid are held fixed.
 Natural convection and airflow feedback remain explicitly unsupported in
 this native adjoint path. Driver 68 includes complete ambient-radiation
-state feedback while its emissivity, reservoir temperature and query support
-remain fixed. This is a local Estimated
+state feedback. Driver 69 also returns per-surface emissivity and reservoir
+temperature controls, with query temperature and source support held fixed. This is a local Estimated
 derivative, without a gradient-error, continuous-peak or validation claim.
 `data/reference-project/cooling-enthalpy-adjoint.fsim` supplies a synthetic
 latent-to-sensible heating example with independent analytic expectations.
@@ -1684,6 +1684,28 @@ reservoirs against independent scalar roots and fresh perturbed native
 solves, a frozen-secant negative control, latent-to-sensible history and an
 initial sampled peak. `cooling-enthalpy-radiation-adjoint.fsim` supplies the
 native radiative sensitivity example.
+
+Driver 69 retains the radiative parameter owner alongside its bound reference
+storage. The shared combined pullback solves one complete physical transpose
+and contracts h, source, density, emissivity and reservoir controls with that
+same multiplier. The native report sums the two surface controls over the
+selected prefix; future steps and an initial sampled peak contribute zero.
+`transient.adjoint.radiation.surfaces` preserves declaration order and gives
+each surface's name, target, nominal emissivity and reservoir temperature,
+card and property-usage receipt identities, fixed query temperature,
+`dtemperature_demissivity_k` and
+`dtemperature_dreservoir_temperature_k_per_k`. Surfaces sharing a card retain
+independent coefficients. These controls perturb the absolute model inputs
+throughout the trajectory; they do not differentiate the immutable source
+record or propagate its uncertainty. Emissivity remains in (0,1], so a nominal
+value of one reports only nonpositive feasible increments. Reservoirs require
+positive kelvin and may lie outside the wall-property support interval.
+The time grid remains fixed; no horizon or time-step control is reported.
+Memory admission adds two aggregate arrays, their headers and bounded surface
+rows, independent of fine-step count. The existing radiative trajectory tests
+compare both controls to independent analytic derivatives and fresh native
+solves with new immutable emissivity packs, including latent-to-sensible
+history and an initial sampled peak.
 
 Schema v14 optionally declares a conductivity multiplier for each regional
 enthalpy material. `linear-liquid-mass-fraction` interpolates between positive

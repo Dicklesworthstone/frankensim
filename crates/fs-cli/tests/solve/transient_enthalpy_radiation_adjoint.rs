@@ -180,6 +180,8 @@ struct Oracle {
     enthalpies: Vec<f64>,
     initial: f64,
     density: f64,
+    emissivity: f64,
+    reservoir: f64,
     power_intervals: Vec<f64>,
     frozen_initial: f64,
 }
@@ -191,6 +193,8 @@ fn oracle(input: Inputs) -> Oracle {
     let mut old = input.initial_h;
     let mut initial = 1.0;
     let mut density = 0.0;
+    let mut emissivity = 0.0;
+    let mut reservoir = 0.0;
     let mut power_intervals = vec![0.0; 4];
     let mut frozen_initial = 1.0;
     let mut temperatures = Vec::new();
@@ -221,6 +225,13 @@ fn oracle(input: Inputs) -> Oracle {
             * (HTC + 4.0 * EMISSIVITY * SIGMA * temperature.powi(3)) * slope;
         initial *= mass / diagonal;
         density = (mass * density - VOLUME * (h - old)) / diagonal;
+        // The declarations are constant over the trajectory, so their direct
+        // residual partials accumulate at every consumed time step. A plateau
+        // has zero T'(h), but retains both boundary inputs in its h history.
+        emissivity = (mass * emissivity - dt * SIGMA * area
+            * (temperature.powi(4) - input.reservoir.powi(4))) / diagonal;
+        reservoir = (mass * reservoir + dt * 4.0 * EMISSIVITY * SIGMA * area
+            * input.reservoir.powi(3)) / diagonal;
         for derivative in &mut power_intervals[..index] {
             *derivative *= mass / diagonal;
         }
@@ -240,6 +251,8 @@ fn oracle(input: Inputs) -> Oracle {
         temperatures, enthalpies,
         initial: final_slope * initial,
         density: final_slope * density,
+        emissivity: final_slope * emissivity,
+        reservoir: final_slope * reservoir,
         power_intervals,
         frozen_initial: final_slope * frozen_initial,
     }
@@ -255,6 +268,49 @@ fn density_gradient(gradient: &J) -> f64 {
 
 fn power_gradient(gradient: &J) -> f64 {
     n(region(gradient, "regional_power"), "dtemperature_duniform_added_watts_k_per_w")
+}
+
+fn radiation_surface(row: &J) -> &J {
+    let surfaces = row.get("radiation").unwrap().get("surfaces").unwrap()
+        .as_array().unwrap();
+    assert_eq!(surfaces.len(), 1);
+    &surfaces[0]
+}
+
+fn check_radiation_controls(solved: &ThermalRun, expected: &Oracle, input: Inputs) {
+    let surface = radiation_surface(solved.adjoint());
+    assert_eq!(surface.str_field("name"), Some("gray-exterior"));
+    assert_eq!(surface.str_field("target"), Some("air"));
+    close(n(surface, "emissivity"), EMISSIVITY, 0.0);
+    close(n(surface, "reservoir_temperature_k"), input.reservoir, 0.0);
+    let emissivity = n(surface, "dtemperature_demissivity_k");
+    let reservoir = n(surface, "dtemperature_dreservoir_temperature_k_per_k");
+    close(emissivity, expected.emissivity, 2e-6);
+    close(reservoir, expected.reservoir, 2e-7);
+    assert_eq!(emissivity > 0.0, input.reservoir > INITIAL_K);
+    assert!(reservoir > 0.0);
+
+    // Edit actual native declarations and query newly admitted immutable
+    // emissivity packs. Neither an accepted patch nor a derived Robin row is
+    // modified. Geometry, reference mass, initial h, sources and grid stay fixed.
+    let source_card = radiation_surface(&solved.receipt).str_field("card").unwrap();
+    let evaluate = |delta: f64| {
+        let changed_emissivity = EMISSIVITY + 0.02 * delta;
+        let (cards, card) = radiation_product::emissivity_cards(
+            &fixture_cards(), changed_emissivity,
+        );
+        assert_ne!(card.as_str(), source_card);
+        let changed = Inputs { reservoir: input.reservoir + 0.5 * delta, ..input };
+        let trial = run(changed, &cards, &card, None);
+        let retained = radiation_surface(&trial.receipt);
+        assert_eq!(retained.str_field("card"), Some(card.as_str()));
+        close(n(retained, "emissivity"), changed_emissivity, 0.0);
+        close(n(retained, "ambient_temperature_k"), changed.reservoir, 0.0);
+        trial.final_temperature()
+    };
+    let step = 0.02;
+    let difference = (evaluate(step) - evaluate(-step)) / (2.0 * step);
+    close(0.02 * emissivity + 0.5 * reservoir, difference, 3e-6);
 }
 
 fn check_final(solved: &ThermalRun, expected: &Oracle, input: Inputs) {
@@ -297,6 +353,7 @@ fn check_final(solved: &ThermalRun, expected: &Oracle, input: Inputs) {
         close(n(interval, "dtemperature_dsource_multiplier_k"),
             input.power * derivative, 2e-8);
     }
+    check_radiation_controls(solved, expected, input);
 }
 
 #[test]
@@ -367,6 +424,13 @@ fn g1_native_radiative_initial_peak_has_no_future_source_or_storage_mass_effect(
     close(density_gradient(gradient), 0.0, 0.0);
     close(power_gradient(gradient), 0.0, 0.0);
     close(n(gradient, "dtemperature_dreference_density_multiplier_k"), 0.0, 0.0);
+    let surface = radiation_surface(gradient);
+    assert_eq!(surface.str_field("name"), Some("gray-exterior"));
+    assert_eq!(surface.str_field("target"), Some("air"));
+    close(n(surface, "emissivity"), EMISSIVITY, 0.0);
+    close(n(surface, "reservoir_temperature_k"), 270.0, 0.0);
+    close(n(surface, "dtemperature_demissivity_k"), 0.0, 0.0);
+    close(n(surface, "dtemperature_dreservoir_temperature_k_per_k"), 0.0, 0.0);
     for interval in gradient.get("intervals").unwrap().as_array().unwrap() {
         close(n(interval, "dtemperature_dsource_multiplier_k"), 0.0, 0.0);
         close(n(region(interval, "regional_power"),

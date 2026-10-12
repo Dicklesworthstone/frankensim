@@ -290,6 +290,12 @@ fn radiative_storage_density_pullbacks_match_re_solved_physics() {
                     &patches, accepted.clone(), 8,
                 )
                 .unwrap();
+            let parameters = stepper
+                .linearize_accepted_parameters_with_ambient_radiation(
+                    cx, fixture.problem(&source), None, &OLD, DT, config(),
+                    &patches, accepted.clone(), 8,
+                )
+                .unwrap();
             let storage = stepper
                 .linearize_accepted_storage_with_ambient_radiation(
                     cx, fixture.problem(&source), None, &OLD, DT, config(),
@@ -298,11 +304,22 @@ fn radiative_storage_density_pullbacks_match_re_solved_physics() {
                 .unwrap();
             let seed = storage.transport().temperature_pullback(cx, &GOAL).unwrap();
             let gradient = storage.pullback(cx, &seed, linear()).unwrap();
-            // Converting to the storage owner preserves every history/source
-            // derivative and the physical radiation multiplier bit-for-bit.
+            // Combined storage/parameter controls share the exact physical
+            // multiplier and iteration count of one radiative transpose solve.
+            let radiative_gradient = radiative.pullback(cx, &seed, linear()).unwrap();
+            let combined = parameters.pullback(cx, &seed, linear()).unwrap();
+            assert_eq!(gradient.transport, radiative_gradient.transport);
+            assert_eq!(combined.storage, gradient);
+            assert_eq!(combined.time_step_s, radiative_gradient.time_step_s);
+            assert_eq!(combined.radiation_regions, radiative_gradient.radiation_regions);
             assert_eq!(
-                gradient.transport,
-                radiative.pullback(cx, &seed, linear()).unwrap().transport,
+                combined.reservoir_temperatures,
+                radiative_gradient.reservoir_temperatures,
+            );
+            assert_eq!(combined.emissivities, radiative_gradient.emissivities);
+            assert_eq!(
+                parameters.into_storage().pullback(cx, &seed, linear()).unwrap(),
+                gradient,
             );
             assert_eq!(gradient.element_reference_density.len(), 1);
             assert_eq!(gradient.material_reference_density.len(), 2);
