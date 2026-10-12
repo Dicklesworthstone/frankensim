@@ -57,9 +57,11 @@ pub(super) fn parse(root: &Node, projected: Option<&continuation::ProjectedContr
     let adaptive = match &field(fields, "type")?.kind {
         NodeKind::Symbol(kind) if kind == "elasticity-dwr" => None,
         NodeKind::Symbol(kind) if kind == "elasticity-adaptive-dwr" => {
-            if !matches!(projected, Some(continuation::ProjectedControls::Volume(_))) {
+            // solve_limit already requires an explicit weighted-sum family in
+            // stress mode. The existing finish path checks endpoint feasibility.
+            if projected.is_none() {
                 return Err(fail("cli-study-adaptive-assessment",
-                    "adaptive final assessment currently requires a projected-volume endpoint"));
+                    "adaptive final assessment requires a projected-volume or weighted projected-stress endpoint"));
             }
             Some(adaptive::parse(fields)?)
         }

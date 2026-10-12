@@ -10,6 +10,9 @@ pub(in super::super) fn run(
     expected_cases: &[SampledStressEvaluation], terminal: &'static str,
     mut control: impl FnMut(WeightedComplianceDwrStage) -> ControlFlow<&'static str>,
 ) -> (&'static str, Option<FinalAssessment>) {
+    if spec.adaptive_dwr.is_some() {
+        return run_adaptive(spec, phi, expected, expected_cases, terminal, control);
+    }
     let assessed = (|| {
         let Some(continuation::ProjectedControls::Stress(policy)) = &spec.projected
             else { return Err("missing weighted-sum load family".into()) };
@@ -44,6 +47,39 @@ pub(in super::super) fn run(
             (status, Some(FinalAssessment::Refused { reason, max_solves: max_solves(spec) }))
         }
     }
+}
+
+fn run_adaptive(spec: &ElasticitySpec, phi: &GridSdf, expected: Design,
+    expected_cases: &[SampledStressEvaluation], terminal: &'static str,
+    mut control: impl FnMut(WeightedComplianceDwrStage) -> ControlFlow<&'static str>)
+    -> (&'static str, Option<FinalAssessment>)
+{
+    let prepared = (|| -> std::result::Result<Vec<fs_topols::RobustLoadCase>, String> {
+        let Some(continuation::ProjectedControls::Stress(policy)) = &spec.projected
+            else { return Err("adaptive stress assessment requires a weighted load family".into()) };
+        let cases = policy.dwr_cases(spec).map_err(|error| error.message)?;
+        if cases.len() != expected_cases.len() || expected_cases.iter().any(|case|
+            case.snapshot != expected.snapshot || case.volume.to_bits() != expected.volume.to_bits()) {
+            return Err("adaptive assessment received different or incomplete retained designs".into());
+        }
+        Ok(cases)
+    })();
+    let cases = match prepared {
+        Ok(cases) => cases,
+        Err(reason) => return ("numerical-failure", Some(FinalAssessment::Refused {
+            reason, max_solves: max_solves(spec),
+        })),
+    };
+    let compliances: Vec<_> = expected_cases.iter().map(|case| case.compliance).collect();
+    adaptive::run(spec, phi, expected, &cases, &compliances, terminal, |stage| {
+        // Existing callbacks repeat for each complete adaptive round. No new
+        // optimizer or work-counter owner is introduced by final assessment.
+        control(match stage {
+            fs_topols::adaptive_dwr::AdaptiveDwrStage::BeforeCase { case, .. } =>
+                WeightedComplianceDwrStage::BeforeCase { case },
+            _ => WeightedComplianceDwrStage::BeforePublish,
+        })
+    })
 }
 
 pub(super) fn json(a: &WeightedComplianceDwrAssessment) -> String {
@@ -86,3 +122,7 @@ pub(super) fn html(a: &WeightedComplianceDwrAssessment) -> String {
         a.cases.len(), a.coarse_compliance, a.level, a.enriched_compliance, a.level + 1,
         a.eta_signed, a.absolute_indicator_sum)
 }
+
+#[cfg(test)]
+#[path = "multi_load/adaptive_tests.rs"]
+mod adaptive_tests;
