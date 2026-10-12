@@ -54,6 +54,8 @@ pub mod checkpoint;
 pub mod design_regions;
 pub mod evaluated;
 pub mod fim;
+/// Signed-DWR improvement screening inside the existing projected optimizer.
+pub mod goal_resolution;
 pub mod gridsdf;
 pub mod guarded;
 pub mod optimize;
