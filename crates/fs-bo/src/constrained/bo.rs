@@ -125,7 +125,7 @@ impl ConstrainedBoConfig {
                 OutputPolicy { initial: &c.kernel, prior: c.prior_mean, learning: c.learning.as_ref() })).collect()
     }
 
-    fn validate(&self, dim: usize, n_init: usize, iters: usize) -> Result<(), ConstrainedBoError> {
+    pub(super) fn validate(&self, dim: usize, n_init: usize, iters: usize) -> Result<(), ConstrainedBoError> {
         let bad = ConstrainedBoError::InvalidConfig;
         let s = &self.search;
         let (lo, hi) = s.bounds;
@@ -162,29 +162,56 @@ impl ConstrainedBoConfig {
         }
         Ok(())
     }
+
+    pub(super) fn initial_kernels(&self) -> Vec<Kernel> {
+        self.outputs().iter().map(|p| (*p.initial).clone()).collect()
+    }
+
+    // Admission shared by callback evaluations and externally delivered jobs.
+    pub(super) fn validate_observation(&self, observed: &ConstrainedObservation,
+        evaluation: usize) -> Result<(), ConstrainedBoError>
+    {
+        if observed.constraints.len() != self.constraints.len() {
+            return Err(ConstrainedBoError::OutputCount { evaluation,
+                expected: self.constraints.len(), actual: observed.constraints.len() });
+        }
+        for (output, (value, policy)) in std::iter::once(&observed.objective)
+            .chain(&observed.constraints).zip(self.outputs()).enumerate()
+        {
+            if !value.value.is_finite() || !(value.value - policy.prior).is_finite()
+                || !value.noise_variance.is_finite() || value.noise_variance < 0.0
+            {
+                return Err(ConstrainedBoError::Observation { evaluation, output });
+            }
+        }
+        Ok(())
+    }
 }
 
 fn observe(f: &mut dyn FnMut(&[f64]) -> ConstrainedObservation, x: &[f64], c: &ConstrainedBoConfig,
     evaluation: usize) -> Result<ConstrainedObservation, ConstrainedBoError>
 {
     let observed = f(x);
-    if observed.constraints.len() != c.constraints.len() {
-        return Err(ConstrainedBoError::OutputCount { evaluation, expected: c.constraints.len(), actual: observed.constraints.len() });
-    }
-    for (output, (value, policy)) in std::iter::once(&observed.objective).chain(&observed.constraints).zip(c.outputs()).enumerate() {
-        if !value.value.is_finite() || !(value.value - policy.prior).is_finite()
-            || !value.noise_variance.is_finite() || value.noise_variance < 0.0 {
-            return Err(ConstrainedBoError::Observation { evaluation, output });
-        }
-    }
+    c.validate_observation(&observed, evaluation)?;
     Ok(observed)
 }
 
 fn condition(report: &mut ConstrainedBoReport, c: &ConstrainedBoConfig, kernels: &mut [Kernel], stage: usize)
     -> Result<Vec<Gp>, ConstrainedBoError>
 {
+    condition_controlled(report, c, kernels, stage, &mut || true)
+        .map(|models| models.expect("unconditional continuation"))
+}
+
+// Callers own the trial report/kernels: a refused pass must not publish them.
+// One individual fit is not preemptible; checks separate output fits.
+pub(super) fn condition_controlled(report: &mut ConstrainedBoReport, c: &ConstrainedBoConfig,
+    kernels: &mut [Kernel], stage: usize, keep_going: &mut dyn FnMut() -> bool)
+    -> Result<Option<Vec<Gp>>, ConstrainedBoError>
+{
     let mut models = Vec::new();
     for (output, policy) in c.outputs().into_iter().enumerate() {
+        if !keep_going() { return Ok(None); }
         let observed: Vec<_> = report.observations.iter().map(|o|
             if output == 0 { o.objective } else { o.constraints[output - 1] }).collect();
         let y: Vec<_> = observed.iter().map(|o| o.value - policy.prior).collect();
@@ -213,10 +240,11 @@ fn condition(report: &mut ConstrainedBoReport, c: &ConstrainedBoConfig, kernels:
         };
         models.push(model);
     }
-    Ok(models)
+    if !keep_going() { return Ok(None); }
+    Ok(Some(models))
 }
 
-fn recommend(models: &[Gp], x: &[Vec<f64>], c: &ConstrainedBoConfig)
+pub(super) fn recommend(models: &[Gp], x: &[Vec<f64>], c: &ConstrainedBoConfig)
     -> Result<Option<ConstrainedRecommendation>, ConstrainedBoError>
 {
     let mut best: Option<ConstrainedRecommendation> = None;
@@ -280,6 +308,38 @@ fn argmax(acq: &dyn Fn(&[f64]) -> f64, dim: usize, s: &NoisyBoConfig, seed: u64)
     best.expect("admitted nonzero starts").1
 }
 
+// The same point-major/output-minor bank and arithmetic serve synchronous
+// batches and pending-aware proposals. Callers validate all shapes first.
+pub(super) fn select_batch(models: &[Gp], baseline: &[Vec<f64>], count: usize,
+    selection: usize, c: &ConstrainedBoConfig, keep_going: &mut dyn FnMut() -> bool)
+    -> Option<Vec<Vec<f64>>>
+{
+    if !keep_going() { return None; }
+    let s = &c.search;
+    let dim = s.kernel.lengthscales.len();
+    let outputs = c.constraints.len() + 1;
+    let seed = s.seed ^ 0x434E_4549 ^ (selection as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let width = (baseline.len() + count) * outputs;
+    let bank = joint_normal_bank(s.mc_samples, width, seed);
+    let constraints: Vec<_> = c.constraints.iter().enumerate().map(|(j, c)|
+        ConstraintModel { gp: &models[j + 1], upper_bound: c.upper_bound - c.prior_mean }).collect();
+    let mut batch: Vec<Vec<f64>> = Vec::new();
+    for slot in 0..count {
+        if !keep_going() { return None; }
+        let active_width = (baseline.len() + slot + 1) * outputs;
+        let mut prefix = Vec::with_capacity(s.mc_samples * active_width);
+        for row in bank.chunks_exact(width) { prefix.extend_from_slice(&row[..active_width]); }
+        let candidate = argmax(&|input| {
+            let mut trial = batch.clone(); trial.push(input.to_vec());
+            q_feasible_noisy_improvement(&models[0], &constraints, baseline, &trial,
+                c.reference - s.prior_mean, &prefix)
+        }, dim, s, seed ^ (slot as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+        batch.push(candidate);
+    }
+    if !keep_going() { return None; }
+    Some(batch)
+}
+
 /// Optimize an objective subject to independently modeled noisy upper outcomes.
 ///
 /// On success exactly `n_init + iters * search.q` callbacks are made. Every
@@ -312,7 +372,7 @@ pub fn minimize_constrained(
     config.validate(dim, n_init, iters)?;
     let s = &config.search;
     let (lo, hi) = s.bounds;
-    let mut kernels: Vec<Kernel> = config.outputs().iter().map(|p| (*p.initial).clone()).collect();
+    let mut kernels = config.initial_kernels();
     let mut report = ConstrainedBoReport { x: Vec::new(), observations: Vec::new(), recommendations: Vec::new(),
         fits: Vec::new(), likelihood_evaluations: 0, posterior_only_fits: 0 };
     let sobol = fs_rand::qmc::Sobol::scrambled(dim, s.seed);
@@ -325,25 +385,9 @@ pub fn minimize_constrained(
     }
     let mut models = condition(&mut report, config, &mut kernels, 0)?;
     report.recommendations.push(recommend(&models, &report.x, config)?);
-    let outputs = config.constraints.len() + 1;
     for iteration in 0..iters {
-        let seed = s.seed ^ 0x434E_4549 ^ (iteration as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        let width = (report.x.len() + s.q) * outputs;
-        let bank = joint_normal_bank(s.mc_samples, width, seed);
-        let constraints: Vec<_> = config.constraints.iter().enumerate().map(|(j, c)|
-            ConstraintModel { gp: &models[j + 1], upper_bound: c.upper_bound - c.prior_mean }).collect();
-        let mut batch: Vec<Vec<f64>> = Vec::new();
-        for slot in 0..s.q {
-            let active_width = (report.x.len() + slot + 1) * outputs;
-            let mut prefix = Vec::with_capacity(s.mc_samples * active_width);
-            for row in bank.chunks_exact(width) { prefix.extend_from_slice(&row[..active_width]); }
-            let candidate = argmax(&|input| {
-                let mut trial = batch.clone(); trial.push(input.to_vec());
-                q_feasible_noisy_improvement(&models[0], &constraints, &report.x, &trial,
-                    config.reference - s.prior_mean, &prefix)
-            }, dim, s, seed ^ (slot as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
-            batch.push(candidate);
-        }
+        let batch = select_batch(&models, &report.x, s.q, iteration, config, &mut || true)
+            .expect("unconditional continuation");
         for input in batch {
             report.observations.push(observe(f, &input, config, report.x.len())?);
             report.x.push(input);

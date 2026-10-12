@@ -11,6 +11,8 @@ mod bo;
 pub use bo::{ConstrainedBoConfig, ConstrainedBoError, ConstrainedBoReport,
     ConstrainedObservation, ConstrainedRecommendation, OutcomeConstraint,
     OutputFitRecord, minimize_constrained};
+mod pending;
+pub use pending::ConstrainedProposalError;
 
 /// One modeled upper constraint, `g(x) <= upper_bound`.
 ///
