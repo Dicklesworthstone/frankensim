@@ -1,6 +1,7 @@
 //! Opt-in reverse differentiation of the accepted native fine time grid.
-//! Reconstruction must reproduce the retained endpoint before any derivative
-//! is returned. Forward temperatures, energy and decisions remain unchanged.
+//! Ordinary reconstruction must reproduce the retained endpoint. Coupled
+//! radiation binds the retained field under its original physical residual
+//! target. Forward temperatures, energy and decisions remain unchanged.
 
 use std::time::Instant;
 use fs_exec::Cx;
@@ -8,7 +9,7 @@ use fs_project::{ProjectSpec, ThermalBoundaryCondition};
 use super::{SolveRefusal, bad, poll};
 
 mod reverse;
-pub(super) use reverse::finish;
+pub(super) use reverse::{finish, radiation_storage_bytes};
 mod enthalpy;
 pub(super) use enthalpy::{
     EnthalpyTape, finish as finish_enthalpy, storage_bytes as enthalpy_storage_bytes,
@@ -61,9 +62,6 @@ pub(super) fn requested(spec: &ProjectSpec) -> Result<Option<Objective>, SolveRe
                 if correlation != crate::solve::natural::DIFFERENTIABLE_CARD)) {
             return Err(bad("native natural-convection enthalpy adjoints require the differentiated Churchill-Chu vertical-plate card"));
         }
-        if setup.radiation.is_some() && !enthalpy {
-            return Err(bad("native capacity-storage adjoints do not yet differentiate radiation; total-enthalpy storage has its own complete radiative endpoint owner"));
-        }
         if setup.regions.len() > 64 || setup.boundaries.len() > 64 {
             return Err(bad("native transient adjoints admit at most 64 volume regions and boundary laws"));
         }
@@ -86,6 +84,9 @@ pub(super) fn storage_bytes(n: usize, steps: usize, regions: usize) -> Result<us
     states.checked_mul(n).and_then(|v| v.checked_mul(8))
         .and_then(|b| states.checked_mul(std::mem::size_of::<Vec<f64>>())
             .and_then(|v| b.checked_add(v)))
+        .and_then(|b| steps.checked_mul(std::mem::size_of::<f64>())
+            .and_then(|v| v.checked_add(std::mem::size_of::<Vec<f64>>()))
+            .and_then(|v| b.checked_add(v)))
         .and_then(|b| regions.checked_add(24).and_then(|r| r.checked_mul(n))
             .and_then(|v| v.checked_mul(8)).and_then(|v| b.checked_add(v)))
         .and_then(|b| regions.checked_mul(192).and_then(|r| r.checked_add(1024))
@@ -95,6 +96,9 @@ pub(super) fn storage_bytes(n: usize, steps: usize, regions: usize) -> Result<us
 
 pub(super) struct Tape {
     states: Vec<Vec<f64>>,
+    /// Actual accepted physical targets for coupled endpoints, in step order.
+    /// Empty on ordinary reconstruction and on the enthalpy temperature tape.
+    physical_targets_j: Vec<f64>,
     n: usize,
     limit: usize,
 }
@@ -105,9 +109,28 @@ impl Tape {
         let limit = steps.checked_add(1).ok_or_else(|| bad("adjoint state count overflows"))?;
         let mut states = Vec::new();
         states.try_reserve_exact(limit).map_err(|_| bad("adjoint checkpoint allocation refused"))?;
-        let mut tape = Self { states, n: initial.len(), limit };
+        let mut tape = Self { states, physical_targets_j: Vec::new(), n: initial.len(), limit };
         tape.record(cx, initial, deadline)?;
         Ok(tape)
+    }
+
+    /// Retain a coupled endpoint and the unchanged physical acceptance target.
+    /// Allocation and field admission finish before either history is appended.
+    pub(super) fn record_physical(&mut self, cx: &Cx<'_>, values: &[f64],
+        physical_target_j: f64, deadline: Option<(Instant, f64)>) -> Result<(), SolveRefusal> {
+        poll(cx, deadline)?;
+        if !(physical_target_j.is_finite() && physical_target_j > 0.0)
+            || self.physical_targets_j.len().checked_add(1) != Some(self.states.len())
+        {
+            return Err(bad("coupled adjoint physical target or checkpoint order differs"));
+        }
+        if self.physical_targets_j.is_empty() {
+            self.physical_targets_j.try_reserve_exact(self.limit.saturating_sub(1))
+                .map_err(|_| bad("coupled adjoint physical-target allocation refused"))?;
+        }
+        self.record(cx, values, deadline)?;
+        self.physical_targets_j.push(physical_target_j);
+        Ok(())
     }
 
     pub(super) fn record(&mut self, cx: &Cx<'_>, values: &[f64],

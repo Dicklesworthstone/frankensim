@@ -432,3 +432,163 @@ fn g0_native_transient_radiation_refuses_exhausted_trials_and_surface_domain_esc
         );
     }
 }
+
+
+fn request_adjoint(spec: &mut ProjectSpec, name: &str) {
+    spec.outputs.as_mut().unwrap().push(fs_project::OutputRequest {
+        name: name.to_string(), kind: "report".to_string(), region: None,
+    });
+}
+
+/// Independent uniform-mode tangent of the complete implicit step. Controls
+/// are initial K, added W, capacity multiplier, log(h), convection reference K,
+/// absolute emissivity, and radiation reservoir K, held through the history.
+fn uniform_radiation_derivatives(rows: &[J], reservoir: f64) -> [f64; 7] {
+    let area = area_m2();
+    let mut old = INITIAL_K;
+    let mut derivative = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    for row in rows {
+        let dt = n(row, "dt_s");
+        let temperature = uniform_step(old, dt, reservoir, true);
+        let capacity = CAPACITY_J_K / dt;
+        let jacobian = capacity + 10.0 * area
+            + 4.0 * EMISSIVITY * SIGMA * area * temperature.powi(3);
+        let direct = [
+            0.0,
+            1.0,
+            -capacity * (temperature - old),
+            -10.0 * area * (temperature - AMBIENT_K),
+            10.0 * area,
+            -SIGMA * area * (temperature.powi(4) - reservoir.powi(4)),
+            4.0 * EMISSIVITY * SIGMA * area * reservoir.powi(3),
+        ];
+        for (gradient, rhs) in derivative.iter_mut().zip(direct) {
+            *gradient = (capacity * *gradient + rhs) / jacobian;
+        }
+        old = temperature;
+    }
+    derivative
+}
+
+fn reported_radiation_derivatives(adjoint: &J) -> [f64; 7] {
+    let power = adjoint.get("regional_power").unwrap().as_array().unwrap();
+    let robin = adjoint.get("robin").unwrap().as_array().unwrap();
+    let surfaces = adjoint.get("radiation").unwrap()
+        .get("surfaces").unwrap().as_array().unwrap();
+    assert_eq!(power.len(), 1);
+    assert_eq!(robin.len(), 1);
+    assert_eq!(surfaces.len(), 1);
+    assert_eq!(surfaces[0].str_field("target"), Some("air"));
+    close(n(&surfaces[0], "emissivity"), EMISSIVITY, 0.0);
+    [
+        n(adjoint, "dtemperature_duniform_initial_k_per_k"),
+        n(&power[0], "dtemperature_duniform_added_watts_k_per_w"),
+        n(adjoint, "dtemperature_dcapacity_multiplier_k"),
+        n(&robin[0], "dtemperature_dlog_htc_k"),
+        n(&robin[0], "dtemperature_dreference_k_per_k"),
+        n(&surfaces[0], "dtemperature_demissivity_k"),
+        n(&surfaces[0], "dtemperature_dreservoir_temperature_k_per_k"),
+    ]
+}
+
+#[test]
+fn g3_native_capacity_radiation_adjoint_matches_complete_trajectory_and_fresh_controls() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    for reservoir in [270.0, 350.0] {
+        let (mut spec, bytes) = regular_project(&card, reservoir);
+        spec.solver.as_mut().unwrap().tolerance_rel = 1e-12;
+        let plain = run(&spec, &cards, &bytes);
+        let mut requested = spec.clone();
+        request_adjoint(&mut requested, "temperature-final-adjoint");
+        let solved = run(&requested, &cards, &bytes);
+        assert_eq!(solved.temperature, plain.temperature,
+            "the derivative must bind the accepted field without replacing any endpoint");
+        let adjoint = solved.transient().get("adjoint").unwrap();
+        close(n(adjoint, "value_k"), plain.final_k(), 0.0);
+        close(n(adjoint, "time_s"), 1.0, 0.0);
+        close(n(adjoint, "reconstructed_solid_endpoints"), 0.0, 0.0);
+        close(n(adjoint, "reconstruction_krylov_iterations"), 0.0, 0.0);
+        let surface = &adjoint.get("radiation").unwrap()
+            .get("surfaces").unwrap().as_array().unwrap()[0];
+        close(n(surface, "ambient_temperature_k"), reservoir, 0.0);
+        let actual = reported_radiation_derivatives(adjoint);
+        let expected = uniform_radiation_derivatives(solved.rows("fine"), reservoir);
+        for (&actual, &expected) in actual.iter().zip(&expected) {
+            close(actual, expected, 2e-7 * expected.abs().max(1.0));
+        }
+        assert!(actual[6] > 0.0, "warming either black reservoir heats the solid");
+        assert_eq!(actual[5].is_sign_positive(), reservoir > plain.final_k(),
+            "emissivity strengthens the signed physical radiation exchange");
+
+        // Each probe passes through a fresh project, mesh import and forward
+        // trajectory. The emissivity probe supplies its own immutable card.
+        let step = 1e-3_f64;
+        for (control, &derivative) in actual.iter().enumerate() {
+            let mut endpoints = Vec::new();
+            for delta in [-step, step] {
+                let mut probe = spec.clone();
+                let mut emissivity = EMISSIVITY;
+                match control {
+                    0 => time(&mut probe).initial_temperature =
+                        fs_project::TransientInitialTemperature::Uniform(
+                            QtyAny::new(INITIAL_K + delta, dims::TEMPERATURE)),
+                    1 => probe.power.as_mut().unwrap()[0].watts.value += delta,
+                    2 => {
+                        for row in &mut time(&mut probe).capacities {
+                            row.volumetric_heat_capacity.value *= 1.0 + delta;
+                        }
+                    }
+                    3 | 4 => {
+                        let setup = probe.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+                        let ThermalBoundaryCondition::Convection {
+                            coefficient, reference_temperature,
+                        } = &mut setup.boundaries[0].condition else {
+                            panic!("the oracle requires an original prescribed convection row");
+                        };
+                        if control == 3 {
+                            coefficient.value *= delta.exp();
+                        } else {
+                            reference_temperature.value += delta;
+                        }
+                    }
+                    5 => emissivity += delta,
+                    6 => {
+                        probe.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                            .radiation.as_mut().unwrap().surfaces[0].reservoir_temperature.value += delta;
+                    }
+                    _ => unreachable!(),
+                }
+                let (probe_cards, probe_card) =
+                    radiation_product::emissivity_cards(&fixture_cards(), emissivity);
+                probe.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                    .radiation.as_mut().unwrap().surfaces[0].card = probe_card;
+                endpoints.push(run(&probe, &probe_cards, &bytes).final_k());
+            }
+            let finite_difference = (endpoints[1] - endpoints[0]) / (2.0 * step);
+            close(derivative, finite_difference, 2e-5 * derivative.abs().max(1.0));
+        }
+    }
+}
+
+#[test]
+fn g1_native_capacity_radiation_initial_peak_has_zero_future_controls() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    let (mut spec, bytes) = regular_project(&card, 270.0);
+    spec.power.as_mut().unwrap()[0].watts.value = 0.0;
+    request_adjoint(&mut spec, "temperature-sampled-peak-adjoint");
+    let solved = run(&spec, &cards, &bytes);
+    let adjoint = solved.transient().get("adjoint").unwrap();
+    close(n(adjoint, "value_k"), INITIAL_K, 0.0);
+    close(n(adjoint, "time_s"), 0.0, 0.0);
+    close(n(adjoint, "state_index"), 0.0, 0.0);
+    close(n(adjoint, "reconstructed_solid_endpoints"), 0.0, 0.0);
+    close(n(adjoint, "adjoint_krylov_iterations"), 0.0, 0.0);
+    let actual = reported_radiation_derivatives(adjoint);
+    assert_eq!(actual, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    for interval in adjoint.get("intervals").unwrap().as_array().unwrap() {
+        close(n(interval, "dtemperature_dsource_multiplier_k"), 0.0, 0.0);
+        for row in interval.get("regional_power").unwrap().as_array().unwrap() {
+            close(n(row, "dtemperature_ddelivered_watts_k_per_w"), 0.0, 0.0);
+        }
+    }
+}

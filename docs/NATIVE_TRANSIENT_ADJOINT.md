@@ -27,10 +27,13 @@ the separate final-time scalar requirement or promote its uncertainty budget.
 Each reverse endpoint uses `C/dt + J(T_new)`, including the full smooth
 nonlinear conductivity tangent and fixed matching contact. The old physical
 field is never overwritten, including when the first prescribed-temperature
-endpoint differs from the initial temperature. A reverse reconstruction must
-reproduce its retained forward temperatures bit for bit before its derivative
-can be used; the reconstructed solve and transpose each keep their residual,
-iteration and cancellation checks.
+endpoint differs from the initial temperature. With prescribed exterior laws,
+a reverse reconstruction must reproduce its retained forward temperatures bit
+for bit before its derivative can be used. Ambient-radiation endpoints instead
+bind the saved field directly under the original forward physical residual
+target and energy tolerance. Their complete transpose includes the changing
+radiative coefficient and weighted reservoir reference. Both paths retain
+their iteration, material-range and cancellation checks.
 
 The subreport contains nodal and uniform initial-temperature derivatives,
 a derivative with respect to a common multiplier on all regional heat
@@ -52,6 +55,50 @@ requires no reverse solves. Ties are reported through `active_ties`; the
 selected earliest-state/smallest-vertex branch is deterministic but does not
 become a unique derivative of a nonsmooth maximum. This is not a claim about
 peaks between time samples.
+
+### Ambient radiation
+
+Driver 75 admits sourced gray ambient radiation with heat-capacity storage.
+The accepted field, source history, prescribed-temperature reactions and
+forward energy totals remain unchanged. The reverse pass reassembles the
+actual radiation law at each consumed endpoint and checks the physical
+tolerance retained from that endpoint's forward solve. It performs no
+replacement primal solve.
+
+The complete Jacobian includes the radiation secant's dependence on the
+area-mean wall temperature and the combined convection/radiation reference.
+The consistent pointwise Robin trace is retained, including nonuniform wall
+temperatures. The same residual-checked multiplier drives initial temperature,
+regional power, capacity, original convection and radiation controls; the
+existing capacity-coordinate pullbacks do not receive another timestep factor.
+
+`transient.adjoint.radiation.surfaces` preserves the declared surface order,
+name, target, card, material state, emissivity usage receipt and query
+temperature. Each row supplies:
+
+| Control | Derivative field |
+| --- | --- |
+| Absolute hemispherical emissivity | `dtemperature_demissivity_k` |
+| Black-reservoir temperature | `dtemperature_dreservoir_temperature_k_per_k` |
+
+Each surface parameter remains constant throughout the selected prefix and
+is independent even when two surfaces share a card. Emissivity directions
+must remain inside (0, 1]; at one, only nonpositive increments are feasible.
+The `robin` rows still refer to the original convective coefficient and
+reference. Radiation is never counted as heat delivered to an air stream.
+
+`revalidated_solid_endpoints` counts consumed radiation endpoints.
+`reconstructed_solid_endpoints` and reconstruction Krylov work are zero on
+this path. The admitted workspace includes at most four nodal factor vectors
+per Robin port, bounded parameter rows and one active endpoint workspace,
+with at most 64 ports. The full physical targets are retained with the
+temperature tape. An initial sampled peak has zero future boundary influence.
+
+`data/reference-project/cooling-radiative-adjoint.fsim` requests a final
+temperature adjoint for the existing synthetic startup-pulse model.
+`tests/solve/transient_radiation.rs` compares all seven physical controls
+against independent implicit scalar recurrences and fresh native project/card
+perturbations for hotter and cooler radiation reservoirs.
 
 ## Total-enthalpy storage and coupled cooling
 
@@ -178,10 +225,11 @@ solve is introduced.
 
 ## Scope and budgets
 
-The capacity-storage path supports fixed exterior laws, constant declared heat
-capacities, static or scheduled volumetric sources, smooth heterogeneous
-conductivity and fixed matching contact. Radiation, natural convection and
-coupled airflow require the total-enthalpy path described above. Prescribed temperatures are held fixed, not returned as controls.
+The capacity-storage path supports prescribed exterior convection with optional
+ambient radiation, constant declared heat capacities, static or scheduled
+volumetric sources, smooth heterogeneous conductivity and fixed matching
+contact. Natural convection and coupled airflow require the total-enthalpy
+path described above. Prescribed temperatures are held fixed, not returned as controls.
 The capacity-storage path does not return conductivity or contact controls.
 Neither path differentiates geometry, surface power, time-grid changes,
 constitutive knots or latent-heat parameters.
@@ -203,6 +251,8 @@ uncertainty, compliance or experimental-validation certificates.
 
 ```sh
 cargo test -p fs-conduction --test backward_euler_prescribed_adjoint
+cargo test -p fs-conduction --test ambient_radiation accepted_radiative_endpoint_adjoint
+cargo test -p fs-cli --test solve transient_radiation
 cargo test -p fs-cli --lib native_transient_adjoint
 cargo test -p fs-conduction --test enthalpy_adjoint robin_feedback
 cargo test -p fs-conduction --test enthalpy_radiation robin_feedback

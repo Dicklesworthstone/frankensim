@@ -1681,12 +1681,32 @@ source and regional reference-density controls use the same physical
 transpose. Admission additionally bounds `2 * vertices * patches` feedback
 entries, at most 64 patches, and one active radiation workspace. The optional
 `transient.adjoint.radiation` row records this method, feedback cap and
-additional workspace. Capacity-storage radiation adjoints still refuse.
+additional workspace. Capacity-storage radiation adjoints are admitted by driver 75 below.
 `tests/solve/transient_enthalpy_radiation_adjoint.rs` covers hot and cold
 reservoirs against independent scalar roots and fresh perturbed native
 solves, a frozen-secant negative control, latent-to-sensible history and an
 initial sampled peak. `cooling-enthalpy-radiation-adjoint.fsim` supplies the
 native radiative sensitivity example.
+
+Driver 75 admits ambient-radiation history adjoints for native heat-capacity
+storage. Each forward radiation endpoint retains its original physical
+residual target alongside the accepted temperature. The reverse pass audits
+the actual gray-radiation residual and energy, then binds the same unchanged
+field to `C/dt + J(T)` without another primal solve. Complete mean-dependent
+coefficient and weighted-reference factors enter the true transpose; the
+consistent Robin face trace is preserved. All initial-temperature, regional
+absolute-power, common-capacity, original-convection, emissivity and reservoir
+controls use the same complete multiplier in watt residual coordinates.
+`revalidated_solid_endpoints` counts consumed physical audits; reconstructed
+endpoints and reconstruction Krylov iterations are zero. Surface source and
+parameter identities use the same `radiation.surfaces` fields described below.
+Admission additionally bounds four nodal factors per Robin port, one active
+endpoint workspace, aggregate control rows and a scalar target per fine step.
+The existing `tests/solve/transient_radiation.rs` checks all seven controls
+against independent scalar implicit derivatives and fresh native perturbations
+for both radiation heat signs, exact forward-field preservation and zero
+future influence at an initial sampled peak. The synthetic
+`cooling-radiative-adjoint.fsim` example requests the new native report.
 
 Driver 69 retains the radiative parameter owner alongside its bound reference
 storage. The shared combined pullback solves one complete physical transpose

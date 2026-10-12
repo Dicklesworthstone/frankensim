@@ -4,10 +4,19 @@ use std::time::Instant;
 use fs_conduction::{ConductionProblem, PowerMap, ScalarField, ThermalBc, ThermalInterfaces};
 use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
 use fs_exec::Cx;
+use crate::solve::radiation::LoweredRadiation;
 use super::{Objective, Selected, Tape, finite, select, storage_bytes};
 use super::super::{SolveRefusal, Workload, bad, lower, poll};
 
 mod report;
+mod radiation;
+
+pub(in crate::solve::transient) fn radiation_storage_bytes(
+    n: usize, ports: usize, patches: usize,
+) -> Result<usize, SolveRefusal> {
+    usize::try_from(radiation::storage_bytes(n, ports, patches)?)
+        .map_err(|_| bad("native capacity radiation workspace does not fit this platform"))
+}
 
 struct Derivatives {
     selected: Selected,
@@ -22,6 +31,10 @@ struct Derivatives {
     primal_iterations: usize,
     dual_iterations: usize,
     worst_dual: f64,
+    reconstructed_steps: usize,
+    revalidated_steps: usize,
+    additional_storage_bytes: usize,
+    radiation: String,
 }
 
 fn dot(cx: &Cx<'_>, a: &[f64], b: &[f64], deadline: Option<(Instant, f64)>)
@@ -40,7 +53,8 @@ pub(in crate::solve::transient) fn finish(
     cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>, ends_s: &[f64], workload: Option<&Workload<'_>>,
     config: StepConfig, nonlinear: Option<NonlinearStepConfig>, labels: &[u32],
-    region_ids: &BTreeMap<String, u32>, goal_region: u32, tape: &Tape,
+    region_ids: &BTreeMap<String, u32>, goal_region: u32,
+    radiation: Option<&LoweredRadiation>, tape: &Tape,
     objective: Objective, deadline: Option<(Instant, f64)>,
 ) -> Result<String, SolveRefusal> {
     poll(cx, deadline)?;
@@ -48,6 +62,11 @@ pub(in crate::solve::transient) fn finish(
     if tape.n != n || tape.states.len() != ends_s.len() + 1
         || labels.len() != problem.mesh.element_count() {
         return Err(bad("transient adjoint mesh, trajectory or time-grid identity differs"));
+    }
+    if radiation.is_some() && tape.physical_targets_j.len() != ends_s.len()
+        || radiation.is_none() && !tape.physical_targets_j.is_empty()
+    {
+        return Err(bad("capacity adjoint lost its original physical acceptance targets"));
     }
     let mut selected_vertices = vec![false; n];
     let mut volumes = BTreeMap::<u32, f64>::new();
@@ -87,6 +106,15 @@ pub(in crate::solve::transient) fn finish(
         .filter_map(|(i, condition)| matches!(condition, ThermalBc::Robin { .. })
             .then_some(problem.boundary.region_names()[i].as_str())).collect();
     if ports.len() > 64 { return Err(bad("transient adjoint exceeds 64 boundary controls")); }
+    let radiation_workspace = radiation.map(|lowering|
+        radiation_storage_bytes(n, ports.len(), lowering.patches.len()))
+        .transpose()?.unwrap_or(0);
+    let additional_storage_bytes = storage_bytes(n, ends_s.len(), names.len())?
+        .checked_add(radiation_workspace)
+        .ok_or_else(|| bad("native capacity adjoint total workspace overflows"))?;
+    let patch_count = radiation.map_or(0, |lowering| lowering.patches.len());
+    let mut emissivities = vec![0.0; patch_count];
+    let mut reservoirs = vec![0.0; patch_count];
     let mut carry = vec![0.0; n];
     carry[selected.vertex] = 1.0;
     let mut source_controls = vec![vec![0.0; names.len()]; ends_s.len()];
@@ -105,9 +133,21 @@ pub(in crate::solve::transient) fn finish(
         let source = workload.map(|history|
             history.source(cx, problem.mesh, labels, start, deadline)).transpose()?;
         let step_problem = ConductionProblem { source: source.as_ref().unwrap_or(problem.source), ..problem };
-        let step = engine.linearize_prescribed_step(cx, step_problem, interfaces,
-            &tape.states[index], dt, config, nonlinear, &ports).map_err(lower)?;
         let expected = &tape.states[index + 1];
+        let bound = radiation.map(|lowering| radiation::bind(
+            cx, engine, step_problem, interfaces, &tape.states[index], expected,
+            dt, config, lowering, tape.physical_targets_j[index], &ports, deadline,
+        )).transpose()?;
+        let step = match &bound {
+            Some(bound) => engine.linearize_prescribed_endpoint(
+                cx, ConductionProblem { boundary: &bound.boundary, ..step_problem },
+                interfaces, &tape.states[index], expected, dt, config,
+                tape.physical_targets_j[index], &ports,
+            ),
+            None => engine.linearize_prescribed_step(
+                cx, step_problem, interfaces, &tape.states[index], dt, config, nonlinear, &ports,
+            ),
+        }.map_err(lower)?;
         if step.temperature().len() != expected.len() { return Err(bad("adjoint reconstruction changed field shape")); }
         for (v, (&actual, &expected)) in step.temperature().iter().zip(expected).enumerate() {
             if v % 256 == 0 { poll(cx, deadline)?; }
@@ -115,7 +155,26 @@ pub(in crate::solve::transient) fn finish(
                 return Err(bad(format!("transient adjoint reconstruction diverged at state {}, vertex {v}", index + 1)));
             }
         }
-        let gradient = step.pullback(cx, &carry, &zero_ports, &zero_ports).map_err(lower)?;
+        let gradient = match &bound {
+            Some(bound) => {
+                let combined = step.pullback_with_robin_feedback(
+                    cx, &bound.h_mean_slopes, &bound.local_reference_slopes,
+                    &bound.reference_feedback, &carry, bound.max_feedback_entries,
+                ).map_err(lower)?;
+                let physical = bound.remap_gradient(cx, combined, deadline)?;
+                if physical.emissivities.len() != patch_count
+                    || physical.reservoir_temperatures.len() != patch_count
+                {
+                    return Err(bad("capacity radiation control layout changed during reverse traversal"));
+                }
+                for i in 0..patch_count {
+                    emissivities[i] = finite(emissivities[i] + physical.emissivities[i])?;
+                    reservoirs[i] = finite(reservoirs[i] + physical.reservoir_temperatures[i])?;
+                }
+                physical.convection
+            },
+            None => step.pullback(cx, &carry, &zero_ports, &zero_ports).map_err(lower)?,
+        };
         if !gradient.relative_residual.is_finite() || gradient.relative_residual >= config.linear.tolerance {
             return Err(bad("native transient transpose failed its recomputed residual gate"));
         }
@@ -136,10 +195,16 @@ pub(in crate::solve::transient) fn finish(
             .ok_or_else(|| bad("adjoint iteration count overflows"))?;
         worst_dual = worst_dual.max(gradient.relative_residual);
     }
+    let reconstructed_steps = if radiation.is_none() { selected.state } else { 0 };
+    let revalidated_steps = if radiation.is_some() { selected.state } else { 0 };
+    let radiation = radiation.map(|lowering|
+        radiation::fragment(lowering, &emissivities, &reservoirs, selected.state))
+        .transpose()?.unwrap_or_default();
     let result = Derivatives {
         selected, initial: carry, region_names: names, source_controls, source_multipliers,
         capacity: capacities, ports: ports.iter().map(|s| (*s).to_owned()).collect(),
         references, coefficients, primal_iterations, dual_iterations, worst_dual,
+        reconstructed_steps, revalidated_steps, additional_storage_bytes, radiation,
     };
     report::render(cx, &result, ends_s, objective, config, deadline)
 }

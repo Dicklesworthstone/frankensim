@@ -375,6 +375,7 @@ fn march(
         let mut radiative_row = "null".to_string();
         let mut conjugate_row = "null".to_string();
         let mut natural_evidence = "null".to_string();
+        let mut physical_target_j = None;
         let (endpoint, nonlinear_evidence, krylov_iterations) = if !natural.is_empty() {
             let solved = natural::advance(
                 cx, engine, step_problem, interfaces, &old, dt, config,
@@ -442,6 +443,7 @@ fn march(
                 &radiation.patches, radiation.config,
             ).map_err(lower)?;
             radiative_row = radiation_row(&solved)?;
+            physical_target_j = Some(solved.physical_residual_tolerance_j);
             let nonlinear_evidence = solved.nonlinear.as_ref()
                 .map(nonlinear_row).transpose()?.unwrap_or_else(|| "null".to_string());
             radiation_trials += solved.radiation.iterations;
@@ -547,7 +549,10 @@ fn march(
             stall: None,
         });
         if let Some(tape) = &mut tape {
-            tape.record(cx, &endpoint.temperature, deadline)?;
+            match physical_target_j {
+                Some(target) => tape.record_physical(cx, &endpoint.temperature, target, deadline)?,
+                None => tape.record(cx, &endpoint.temperature, deadline)?,
+            }
         }
         old.clone_from(&endpoint.temperature);
         endpoint_dt_s = dt;
@@ -693,8 +698,18 @@ pub(super) fn solve(
         .and_then(|n| total_steps.checked_mul(row_bytes).and_then(|s| n.checked_add(s)))
         .ok_or_else(|| bad("transient memory estimate overflows"))?;
     let bytes = if objective.is_some() {
-        bytes.checked_add(adjoint::storage_bytes(problem.mesh.vertex_count(), fine_steps,
-            policy.capacities.len())?).ok_or_else(|| bad("combined forward/adjoint memory estimate overflows"))?
+        let mut additional = adjoint::storage_bytes(problem.mesh.vertex_count(), fine_steps,
+            policy.capacities.len())?;
+        if let Some(lowering) = radiation {
+            let ports = problem.boundary.conditions().iter()
+                .filter(|condition| matches!(condition, fs_conduction::ThermalBc::Robin { .. }))
+                .count();
+            additional = additional.checked_add(adjoint::radiation_storage_bytes(
+                problem.mesh.vertex_count(), ports, lowering.patches.len(),
+            )?).ok_or_else(|| bad("combined radiative adjoint memory estimate overflows"))?;
+        }
+        bytes.checked_add(additional)
+            .ok_or_else(|| bad("combined forward/adjoint memory estimate overflows"))?
     } else { bytes };
     if objective.is_some() && fine_steps.checked_mul(linear.max_iterations).is_none() {
         return Err(bad("reverse reconstruction and transpose work allowances overflow"));
@@ -856,8 +871,8 @@ pub(super) fn solve(
             let tape = fine.tape.as_ref().ok_or_else(|| bad("requested transient adjoint lost its fine history"))?;
             let derivative = adjoint::finish(cx, &engine, problem, interfaces, &grids.fine,
                 workload.as_ref(), StepConfig { linear, energy_tolerance_j: policy.energy_tolerance.value },
-                nonlinear, labels, region_ids, goal_region.expect("admitted goal region"), tape,
-                objective, deadline)?;
+                nonlinear, labels, region_ids, goal_region.expect("admitted goal region"),
+                radiation, tape, objective, deadline)?;
             format!(",\"adjoint\":{derivative}")
         }
         None => String::new(),
