@@ -1062,3 +1062,45 @@ fn g1_native_natural_radiative_reverse_retains_latent_history_and_surface_contro
     close(0.02 * emissivity + 0.5 * reservoir,
         (radiation_probe(epsilon) - radiation_probe(-epsilon)) / (2.0 * epsilon), 4e-6);
 }
+
+
+#[test]
+fn g1_native_natural_enthalpy_adjoint_keeps_the_accepted_physical_residual_target() {
+    let initial_k = 330.0;
+    let area = 8.0 * 3.0_f64.sqrt();
+    let (initial_htc, initial_slope) = actual_natural_coefficient(initial_k);
+    let input = Inputs {
+        power: area * initial_htc * (initial_k - INLET_K),
+        ..Inputs::hot()
+    };
+    let (mut spec, bytes) = uniform_project(input, true);
+    // The true wall is stationary. The forward owner's 10 K starting
+    // coefficient nevertheless gives its first physical candidate a finite
+    // residual scale, which must remain authoritative for the retained state.
+    spec.solver.as_mut().unwrap().tolerance_rel = 1e-8;
+    time(&mut spec).energy_tolerance.value = 2e-8;
+    let cards = fixture_cards();
+    let forward = run(&spec, &bytes, &cards, None);
+    let first = &forward.transient().get("fine").unwrap().as_array().unwrap()[0];
+    let physical = first.get("natural").unwrap();
+    let h = n(physical.get("physical_coefficients_w_m2_k").unwrap(), "air");
+    let residual = n(physical, "physical_residual_norm_j");
+    let retained_target = n(physical, "physical_residual_tolerance_j");
+    let newton = forward.transient().get("nonlinear").unwrap();
+    // Four equal nodal flux residuals give norm2 = |total residual| / 2.
+    // Rebinding the endpoint coefficient at old h produces a different scale.
+    let frozen_old_residual = 0.5 * 0.25 * (area * h * (initial_k - INLET_K) - input.power).abs();
+    let rebound_target = n(newton, "residual_atol_j")
+        .max(n(newton, "residual_rtol") * frozen_old_residual);
+    assert!(residual <= retained_target);
+    assert!(residual > 4.0 * rebound_target,
+        "the fixture must distinguish the accepted physical target: residual={residual}, retained={retained_target}, rebound={rebound_target}");
+    let solved = run(&spec, &bytes, &cards, Some(FINAL));
+    assert_eq!(solved.temperature, forward.temperature,
+        "requesting derivatives must preserve the accepted trajectory");
+    close(n(solved.adjoint(), "revalidated_solid_endpoints"), 4.0, 0.0);
+    let mass = input.density * VOLUME;
+    let dq_dt = area * (initial_htc + (initial_k - INLET_K) * initial_slope);
+    let expected_initial = (mass / (mass + 0.25 * dq_dt / CP)).powi(4) / CP;
+    close(gradients(solved.adjoint())[0], expected_initial, 3e-7);
+}

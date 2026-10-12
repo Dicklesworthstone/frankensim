@@ -245,6 +245,8 @@ pub(super) fn coefficient_partials(
 
 /// Re-evaluate the physical card and its two partials at one accepted wall.
 /// Nominal trajectories differentiate the unscaled, in-domain card only.
+/// Both controls require admitted adjacent representable temperatures: five
+/// bounded card queries on success, with the other temperature held fixed.
 pub(super) fn differentiated_coefficient(
     law: &NaturalLaw, wall_k: f64, pressure_pa: f64,
 ) -> Result<(Coefficient, [f64; 2]), SolveRefusal> {
@@ -256,6 +258,17 @@ pub(super) fn differentiated_coefficient(
         ));
     }
     let value = coefficient(law, wall_k - law.ambient_k, pressure_pa)?;
+    // A nominal point alone cannot admit a classical two-sided partial at a
+    // positivity, equilibrium or correlation-domain boundary. Reuse the
+    // actual card owner for both neighborhoods, including its film density.
+    for nearby_wall in [wall_k.next_down(), wall_k.next_up()] {
+        coefficient(law, nearby_wall - law.ambient_k, pressure_pa)?;
+    }
+    for nearby_ambient in [law.ambient_k.next_down(), law.ambient_k.next_up()] {
+        let mut nearby_law = law.clone();
+        nearby_law.ambient_k = nearby_ambient;
+        coefficient(&nearby_law, wall_k - nearby_ambient, pressure_pa)?;
+    }
     let partials = coefficient_partials(law.length_m, wall_k, law.ambient_k, value.htc_w_m2_k)?;
     Ok((value, partials))
 }
@@ -507,6 +520,60 @@ mod tests {
         // At a fixed ambient, density changes with the SIGNED film state.
         let same_ambient_hot = coefficient(&law(305.0), 10.0, 101325.0).unwrap();
         assert!(cold.htc_w_m2_k > same_ambient_hot.htc_w_m2_k);
+    }
+
+    #[test]
+    fn differentiated_card_checks_both_temperature_controls_and_film_density() {
+        for ambient in [290.0, 320.0] {
+            for delta in [-80.0, -25.0, -1.0, 1.0, 25.0, 80.0] {
+                for pressure in [80_000.0, 101_325.0] {
+                    let input = law(ambient);
+                    let wall = ambient + delta;
+                    let (point, [dw, da]) =
+                        differentiated_coefficient(&input, wall, pressure).unwrap();
+                    let evaluate = |tw: f64, ta: f64| {
+                        let mut nearby = input.clone();
+                        nearby.ambient_k = ta;
+                        coefficient(&nearby, tw - ta, pressure).unwrap().htc_w_m2_k
+                    };
+                    assert_eq!(point.htc_w_m2_k.to_bits(), evaluate(wall, ambient).to_bits());
+                    let step = 1e-3;
+                    let expected_w =
+                        (evaluate(wall + step, ambient) - evaluate(wall - step, ambient))
+                            / (2.0 * step);
+                    let expected_a =
+                        (evaluate(wall, ambient + step) - evaluate(wall, ambient - step))
+                            / (2.0 * step);
+                    for (actual, expected) in [(dw, expected_w), (da, expected_a)] {
+                        assert!((actual - expected).abs() < 2e-6 * expected.abs().max(1e-3),
+                            "{actual:e} vs {expected:e}; wall {wall}, ambient {ambient}, pressure {pressure}");
+                    }
+                    // Freezing film density would incorrectly make da = -dw.
+                    assert!(dw + da < 0.0, "both partials must retain film-density feedback");
+                }
+            }
+        }
+        assert!(differentiated_coefficient(&law(300.0), 300.0, 101_325.0).is_err());
+        let mut unsupported = law(300.0);
+        unsupported.card = CorrelationId::Gnielinski;
+        assert!(differentiated_coefficient(&unsupported, 310.0, 101_325.0).is_err());
+        unsupported = law(300.0);
+        unsupported.htc_multiplier = 1.1;
+        assert!(differentiated_coefficient(&unsupported, 310.0, 101_325.0).is_err());
+        let mut outside = law(300.0);
+        outside.length_m = 1.0e9;
+        assert!(differentiated_coefficient(&outside, 290.0, 101_325.0).is_err());
+
+        // These nominal card points are valid, but one adjacent wall or
+        // reservoir is not. Each claimed two-sided control must refuse.
+        let mut wall_edge = law(300.0);
+        wall_edge.length_m = 60.0;
+        let wall = wall_edge.ambient_k.next_up();
+        assert!(coefficient(&wall_edge, wall - wall_edge.ambient_k, 101_325.0).is_ok());
+        assert!(differentiated_coefficient(&wall_edge, wall, 101_325.0).is_err());
+        let ambient_edge = law(f64::from_bits(1));
+        assert!(coefficient(&ambient_edge, 300.0 - ambient_edge.ambient_k, 101_325.0).is_ok());
+        assert!(differentiated_coefficient(&ambient_edge, 300.0, 101_325.0).is_err());
     }
 
     #[test]
