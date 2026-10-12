@@ -8,6 +8,8 @@ use fs_topols::projected::ProjectedSetupStage;
 mod mesh;
 #[path = "volume/origin.rs"]
 mod origin;
+#[path = "volume/goal.rs"]
+mod goal;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Controls {
@@ -15,6 +17,7 @@ pub(crate) struct Controls {
     search: ProjectedSettings,
     regions: Vec<DesignRegion>,
     resolution: Option<mesh::ResolutionPolicy>,
+    goal: Option<goal::DwrGatePolicy>,
     refine_from: Option<ContentHash>,
 }
 
@@ -35,6 +38,7 @@ impl Controls {
             },
             regions: regions::parse_regions(fields)?,
             resolution: mesh::parse(fields)?,
+            goal: goal::parse(fields)?,
             refine_from: origin::parse_ref(fields)?,
         };
         let a = policy.area;
@@ -46,6 +50,12 @@ impl Controls {
             || !(0.0..1.0).contains(&s.min_relative_improvement)
             || !(1..=60_000).contains(&s.poll_iters)
         { return Err(malformed("projected-volume requires area tolerance in (0,0.01], positive shift, 3..=64 area evaluations, 1..=16 candidates, contraction (0,1), relative decrease [0,1), and 1..=60000 CG polling iterations")); }
+        if let Some(goal) = policy.goal {
+            goal.validate(1, s.max_candidates).map_err(|error| malformed(&error.to_string()))?;
+            if policy.resolution.is_some() {
+                return Err(malformed("goal-check and mesh-check cannot be combined; neither declared gate may be silently bypassed"));
+            }
+        }
         // The parent canonical comparison refuses unknown, duplicate, reordered
         // and stress/load-family fields instead of silently ignoring them.
         Ok(policy)
@@ -59,7 +69,7 @@ impl Controls {
         let _ = writeln!(out, "    :max-candidates {}", self.search.max_candidates);
         let _ = writeln!(out, "    :contraction {}", canonical_float(self.search.contraction));
         let _ = writeln!(out, "    :min-relative-improvement {}", canonical_float(self.search.min_relative_improvement));
-        if self.regions.is_empty() && self.resolution.is_none() && self.refine_from.is_none() {
+        if self.regions.is_empty() && self.resolution.is_none() && self.goal.is_none() && self.refine_from.is_none() {
             let _ = writeln!(out, "    :cg-poll-iters {})", self.search.poll_iters);
         } else {
             let _ = writeln!(out, "    :cg-poll-iters {}", self.search.poll_iters);
@@ -67,6 +77,7 @@ impl Controls {
                 let _ = writeln!(out, "    :refine-from \"study-{}\"", hash.to_hex());
             }
             if let Some(policy) = self.resolution { mesh::canonical(policy, out); }
+            if let Some(policy) = self.goal { goal::canonical(policy, out); }
             if self.regions.is_empty() { let _ = writeln!(out, "  )"); }
             else { regions::canonical(&self.regions, out); }
         }
@@ -119,6 +130,7 @@ pub(crate) struct VolumeEvidence {
     attempts: Vec<usize>,
     refusals: Vec<String>,
     mesh: Option<mesh::LastCheck>,
+    goal: Option<goal::GoalEvidence>,
     origin: Option<origin::Origin>,
     // Retains a completed search across interruption of its final assessment.
     optimizer_terminal: Option<&'static str>,
@@ -142,6 +154,7 @@ impl VolumeEvidence {
             self.attempts.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
             self.refusals.iter().map(|s| quoted(s)).collect::<Vec<_>>().join(","), reduction,
             regions::json_field(&self.policy.regions) + &mesh::field(self.policy.resolution, self.mesh.as_ref())
+                + &goal::field(self.policy.goal, self.goal.as_ref())
                 + &self.origin.as_ref().map_or_else(String::new, origin::Origin::json_field)
                 + &self.optimizer_terminal.map_or_else(String::new,
                     |status| format!(",\"optimizer_terminal\":{status:?}")))
@@ -151,6 +164,7 @@ impl VolumeEvidence {
             self.policy.area.target, self.policy.area.tolerance, self.baseline.compliance,
             self.current().compliance, self.policy.regions.len())
             + &mesh::html(self.policy.resolution, self.mesh.as_ref())
+            + &goal::html(self.policy.goal, self.goal.as_ref())
             + &self.origin.as_ref().map_or_else(String::new, origin::Origin::html)
     }
     fn read(value: &JsonValue, report: &OptimizeReport, policy: &Controls) -> Result<Self> {
@@ -201,6 +215,7 @@ impl VolumeEvidence {
         let previous = accepted.get(accepted.len().saturating_sub(2)).copied()
             .filter(|_| accepted.len() >= 2).unwrap_or(baseline);
         let mesh = mesh::read(value, policy, previous, current, accepted.len())?;
+        let goal = goal::read(value, policy, previous, current, accepted.len())?;
         let origin = origin::read(value, policy)?;
         let optimizer_terminal = match value.get("optimizer_terminal") {
             None => None,
@@ -210,7 +225,7 @@ impl VolumeEvidence {
             _ => return Err(malformed("invalid projected-volume optimizer terminal")),
         };
         let evidence = Self { policy: policy.clone(), baseline, accepted, attempts: counts,
-            refusals, mesh, origin, optimizer_terminal };
+            refusals, mesh, goal, origin, optimizer_terminal };
         // Recompute rather than trusting the retained headline improvement.
         let expected = document(evidence.json().as_bytes())?;
         if value.get("relative_reduction") != expected.get("relative_reduction") {
@@ -226,6 +241,7 @@ enum VolumeStage {
     Setup(ProjectedSetupStage),
     Update(ProjectedStage),
     Mesh(mesh::MeshCheckStage),
+    Goal(goal::DwrCheckStage),
     Origin(origin::Stage),
     Assessment(fs_topols::ComplianceDwrStage),
 }
@@ -288,6 +304,13 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     if let Some(policy) = policy.resolution {
         policy.validate(settings(spec, spec.steps).level).map_err(|e| malformed(&e.to_string()))?;
     }
+    if let Some(goal) = policy.goal {
+        goal.validate(settings(spec, spec.steps).level, policy.search.max_candidates)
+            .map_err(|error| malformed(&error.to_string()))?;
+        if spec.memory_bytes < 256 * 1024 * 1024 {
+            return Err(malformed("in-loop elasticity DWR requires at least 256 MiB admitted memory"));
+        }
+    }
     let start = Instant::now();
     let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
         projected: None, volume: None, final_dwr: None };
@@ -317,6 +340,10 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             check.baseline.rungs[0].level != settings(spec, spec.steps).level) {
             return Err(malformed("retained mesh-check levels differ from the study"));
         }
+        if retained.goal.as_ref().and_then(|goal| goal.last.as_ref()).is_some_and(|check|
+            check.baseline.level != settings(spec, spec.steps).level) {
+            return Err(malformed("retained DWR-check level differs from the study"));
+        }
         if retained.origin.as_ref().is_some_and(|origin|
             origin.fine_level != settings(spec, spec.steps).level) {
             return Err(malformed("retained refinement level differs from the study"));
@@ -325,19 +352,23 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             !spec.final_dwr || (terminal == "completed" && report.rows.len() != spec.steps)) {
             return Err(malformed("retained optimizer terminal disagrees with the assessment request or update count"));
         }
+        let goal_failed = retained.goal.as_ref().is_some_and(|goal| goal.failure.is_some());
         let status = match old.value.str_field("status") {
             Some("running") => "running", Some("completed") => "completed",
             Some("cancelled") => "cancelled", Some("budget-exhausted") => "budget-exhausted",
             Some("no-feasible-descent") => "no-feasible-descent",
-            Some("numerical-failure") if spec.final_dwr && retained.optimizer_terminal.is_some() => "numerical-failure",
+            Some("numerical-failure") if goal_failed || (spec.final_dwr && retained.optimizer_terminal.is_some()) => "numerical-failure",
             Some("mesh-unresolved") if retained.mesh.as_ref().is_some_and(|c| c.outcome == "baseline-unresolved") => "mesh-unresolved",
             _ => return Err(malformed("unknown projected-volume terminal")),
         };
+        if goal_failed && status != "numerical-failure" {
+            return Err(malformed("DWR failure contradicts the retained study status"));
+        }
         consumed = old.value.f64_field("consumed_wall_s").filter(|v| v.is_finite() && *v >= 0.0)
             .ok_or_else(|| malformed("invalid retained projected-volume wall charge"))?;
         evidence.volume = Some(retained);
         last = Some(Outcome { pointer: format!("study-{}", old.hash.to_hex()), receipt: old.bytes.clone(), status });
-        if matches!(status, "completed" | "no-feasible-descent" | "mesh-unresolved") {
+        if matches!(status, "completed" | "no-feasible-descent" | "mesh-unresolved") || goal_failed {
             return last.ok_or_else(|| malformed("terminal volume-only state has no receipt"));
         }
         if let Some(terminal) = evidence.volume.as_ref().and_then(|value| value.optimizer_terminal) {
@@ -403,6 +434,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         };
         evidence.volume = Some(VolumeEvidence { policy: policy.clone(), baseline: state.current().into(),
             accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None,
+            goal: policy.goal.map(|_| goal::GoalEvidence::default()),
             origin: Some(origin), optimizer_terminal: None });
         state
     } else {
@@ -429,6 +461,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         };
         evidence.volume = Some(VolumeEvidence { policy: policy.clone(), baseline: state.current().into(),
             accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None,
+            goal: policy.goal.map(|_| goal::GoalEvidence::default()),
             origin: None, optimizer_terminal: None });
         state
     };
@@ -461,7 +494,40 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
                 consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
                 .map_err(|error| retained_error(error, last.as_ref()));
         }
-        let progress = if let Some(resolution) = policy.resolution {
+        let progress = if let Some(dwr) = policy.goal {
+            evidence.volume.as_mut().and_then(|v| v.goal.as_mut())
+                .ok_or_else(|| malformed("missing declared DWR work accounting"))?.begin(dwr)?;
+            // Reserve the whole attempt durably before either DWR solve. A crash
+            // or cancellation can only overcharge, never erase started work.
+            let charged = persist(spec, ledger, state.checkpoint().geometry(), &report, "running",
+                consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
+                .map_err(|error| retained_error(error, last.as_ref()))?;
+            predecessor = charged.pointer.strip_prefix("study-").and_then(ContentHash::from_hex);
+            last = Some(charged);
+            let checked = state.advance_one_dwr_controlled(dwr, |stage| {
+                observe(VolumeStage::Goal(stage));
+                match stopped(gate, start, consumed, spec) {
+                    Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+                }
+            });
+            match checked {
+                Ok(ControlFlow::Break(status)) => ControlFlow::Break(status),
+                Ok(ControlFlow::Continue(checked)) => {
+                    let (progress, check) = goal::LastCheck::capture(checked)
+                        .map_err(|error| retained_error(error, last.as_ref()))?;
+                    evidence.volume.as_mut().and_then(|v| v.goal.as_mut())
+                        .ok_or_else(|| malformed("missing DWR history"))?.last = Some(check);
+                    ControlFlow::Continue(Some(progress))
+                }
+                Err(error) => {
+                    evidence.volume.as_mut().and_then(|v| v.goal.as_mut())
+                        .ok_or_else(|| malformed("missing DWR failure history"))?.failure = Some(error.to_string());
+                    return persist(spec, ledger, state.checkpoint().geometry(), &report, "numerical-failure",
+                        consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
+                        .map_err(|error| retained_error(error, last.as_ref()));
+                }
+            }
+        } else if let Some(resolution) = policy.resolution {
             let checked = state.advance_one_resolution_controlled(resolution, |stage| {
                 observe(VolumeStage::Mesh(stage));
                 match stopped(gate, start, consumed, spec) {
