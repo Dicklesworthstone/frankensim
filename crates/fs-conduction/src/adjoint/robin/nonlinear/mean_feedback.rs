@@ -10,7 +10,7 @@ use fs_sparse::Csr;
 
 use super::super::{
     ConductionError, ConductionProblem, Cx, DofMap, LinearConfig, RobinGradient,
-    RobinResponse, ThermalInterfaces, add, admit_linear,
+    RobinPort, RobinResponse, ThermalInterfaces, add, admit_linear,
     assemble_operator_scaled_with_interfaces, bind_ports, checked, failed,
     invalid, poll, reduce, true_residual, vector,
 };
@@ -186,6 +186,62 @@ impl RobinResponse {
         if primal_residual >= linear.tolerance { return Err(failed(0, primal_residual, linear)); }
         let (jacobian, tangent) = super::prepare(cx, problem, interfaces, temperature, &dofs)?;
         if !tangent.smooth { return Err(invalid("mean-HTC feedback cannot choose a derivative at a material kink")); }
+        Self::pullback_bound_feedback(cx, &jacobian, &tangent.transpose, &dofs,
+            &ports, linear, temperature, slopes_w_m2_k2, reference_slopes,
+            reference_feedback, nodal_weights)
+    }
+
+    /// The backward-Euler owner has already checked its physical endpoint.
+    /// Reuse the same low-rank operator with that owner's C/dt + J(T), without
+    /// applying a steady residual gate to a state that is storing energy.
+    pub(crate) fn pullback_endpoint_with_mean_feedback(
+        &self, cx: &Cx<'_>, slopes_w_m2_k2: &[f64], reference_slopes: &[f64],
+        reference_feedback: &[f64], nodal_weights: &[f64], max_feedback_entries: usize,
+    ) -> Result<RobinGradient, ConductionError> {
+        poll(cx, 0)?;
+        admit_linear(self.linear)?;
+        let n = self.temperature.len();
+        let m = self.ports.len();
+        if self.linear.restart == 0 || m > 64
+            || n.checked_mul(4).and_then(|v| v.checked_mul(m))
+                .is_none_or(|v| v > max_feedback_entries)
+        {
+            return Err(invalid("endpoint Robin feedback needs a positive restart and at most 64 regions within its factor-entry budget"));
+        }
+        vector(cx, slopes_w_m2_k2, m)?;
+        vector(cx, reference_slopes, m)?;
+        vector(cx, reference_feedback, m*m)?;
+        vector(cx, nodal_weights, n)?;
+        let fallback_transpose;
+        let transpose = match &self.nonlinear {
+            Some(tangent) => {
+                if !tangent.smooth {
+                    return Err(invalid("endpoint Robin feedback cannot choose a derivative at a material kink"));
+                }
+                &tangent.transpose
+            }
+            None => {
+                fallback_transpose = fs_sparse::ops::transpose(&self.matrix);
+                &fallback_transpose
+            }
+        };
+        poll(cx, 0)?;
+        Self::pullback_bound_feedback(cx, &self.matrix, transpose, &self.dofs,
+            &self.ports, self.linear, &self.temperature, slopes_w_m2_k2,
+            reference_slopes, Some(reference_feedback), nodal_weights)
+    }
+
+    // Both checked producers use the same consistent trace factors, true
+    // transpose, rounded-multiplier residual check and control contractions.
+    #[allow(clippy::too_many_arguments)]
+    fn pullback_bound_feedback(
+        cx: &Cx<'_>, jacobian: &Csr, transpose: &Csr, dofs: &DofMap,
+        ports: &[RobinPort], linear: LinearConfig, temperature: &[f64],
+        slopes_w_m2_k2: &[f64], reference_slopes: &[f64],
+        reference_feedback: Option<&[f64]>, nodal_weights: &[f64],
+    ) -> Result<RobinGradient, ConductionError> {
+        let n = temperature.len();
+        let factors = if reference_feedback.is_some() { 4 } else { 2 };
         let mut updates = Vec::with_capacity(ports.len()*factors/2);
         for ((port, &slope), &reference_slope) in ports.iter().zip(slopes_w_m2_k2).zip(reference_slopes) {
             let mut left = zeros(n)?;
@@ -229,14 +285,14 @@ impl RobinResponse {
                 updates.push(Update { left: dofs.gather(&left), right });
             }
         }
-        let op = FeedbackOp { forward: &jacobian, reverse: &tangent.transpose,
+        let op = FeedbackOp { forward: jacobian, reverse: transpose,
             updates: &updates, transposed: true };
         let rhs = dofs.gather(nodal_weights);
         let scale = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         let mut lambda = zeros(n)?;
         let (relative_residual, iterations) = if scale == 0.0 { (0.0, 0) } else {
             let rhs: Vec<_> = rhs.iter().map(|v| v / scale).collect();
-            let pre = crate::solve::spd_preconditioner(&tangent.transpose);
+            let pre = crate::solve::spd_preconditioner(transpose);
             let restart = linear.restart.min(dofs.n()).min(32);
             let mut state = FgmresState::new(&rhs, restart);
             while state.rel_residual() >= linear.tolerance && state.iters < linear.max_iterations {

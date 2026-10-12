@@ -298,3 +298,109 @@ fn radiative_transient_refuses_overflow_bad_binding_validity_and_cancellation() 
         assert_eq!(old, [300.0; 4]);
     });
 }
+
+
+#[test]
+fn accepted_radiative_endpoint_adjoint_preserves_history_and_physical_gates() {
+    with_cx(|cx| {
+        let mesh = tet();
+        let fixed = 330.0;
+        let ambient = 300.0;
+        let boundary = driven_boundary(&mesh, fixed);
+        let material = ConductivityModel::isotropic(
+            ConductivityTable::declared_curve(vec![(250.0, 15.0), (500.0, 40.0)]).unwrap(),
+        );
+        let source = ScalarField::Uniform(0.0);
+        let old = [300.0; 4];
+        let engine = BackwardEuler::uniform(
+            cx, &mesh, VolumetricHeatCapacity::declared(15.0).unwrap(),
+        ).unwrap();
+        let problem = ConductionProblem {
+            mesh: &mesh, boundary: &boundary, material: &material,
+            source: &source, element_materials: None,
+        };
+        let patches = [patch(0.8, ambient)];
+        let forward = engine.advance_prescribed_with_ambient_radiation(
+            cx, problem, None, &old, DT, step_controls(),
+            Some(NonlinearStepConfig::default()), &patches,
+            AmbientRadiationConfig::default(),
+        ).unwrap();
+        let temperature = &forward.conduction.temperature;
+        // Rebind the actual accepted patch mean, not the last frozen outer
+        // secant. This audit does not run another primal solver.
+        let evaluated = engine.evaluate_prescribed_endpoint(
+            cx, problem, None, &old, temperature, DT, step_controls(), Some(&patches),
+        ).unwrap();
+        let bound_problem = ConductionProblem {
+            boundary: &evaluated.combined_boundary, ..problem
+        };
+        let response = engine.linearize_prescribed_endpoint(
+            cx, bound_problem, None, &old, temperature, DT, step_controls(),
+            forward.physical_residual_tolerance_j, &["cooler"],
+        ).unwrap();
+        assert_eq!(response.temperature(), temperature);
+        assert_eq!(response.primal().krylov_iterations, 0);
+        assert_eq!(old, [300.0; 4]);
+        let mean = (temperature[0] + 2.0*fixed)/3.0;
+        let hr = patches[0].secant_coefficient_w_m2_k(mean).unwrap();
+        let [hr_wall, hr_ambient] = patches[0].secant_partials_w_m2_k2(mean).unwrap();
+        let h = 5.0 + hr;
+        let reference = (5.0/h)*300.0 + (hr/h)*ambient;
+        let reference_slope = (hr_wall/h)*(ambient-reference);
+        let weights = [1.0, 0.0, 0.0, 0.0];
+        let gradient = response.pullback_with_robin_feedback(
+            cx, &[hr_wall], &[reference_slope], &[0.0], &weights, 16,
+        ).unwrap();
+        assert!(gradient.relative_residual < step_controls().linear.tolerance);
+        assert_eq!(&gradient.nodal_load[1..], &[0.0; 3]);
+        let epsilon = 1e-3;
+        // The scalar oracle uses fourth powers and the one-free-node physical
+        // residual, independent of the production secant and rank update.
+        let jacobian = (residual(temperature[0]+epsilon, old[0], fixed, ambient, true)
+            - residual(temperature[0]-epsilon, old[0], fixed, ambient, true))
+            / (2.0*epsilon*DT);
+        let close = |actual: f64, expected: f64| {
+            assert!((actual-expected).abs() < 1e-7*expected.abs().max(1.0),
+                "{actual:e} != {expected:e}");
+        };
+        close(gradient.nodal_load[0], 1.0/jacobian);
+        let history = response.previous_temperature_pullback(cx, &gradient.nodal_load).unwrap();
+        close(history[0], CAPACITY_PER_NODE/DT/jacobian);
+        assert_eq!(&history[1..], &[0.0; 3]);
+        close(response.capacity_multiplier_pullback(cx, &gradient.nodal_load).unwrap(),
+            -CAPACITY_PER_NODE*(temperature[0]-old[0])/DT/jacobian);
+        let density = response.source_density_pullback(cx, &gradient.nodal_load).unwrap();
+        close(density.iter().sum(), 1.0/(24.0*jacobian));
+        let coefficient_bar = gradient.log_htc[0]
+            + gradient.references[0]*(ambient-reference);
+        let ambient_bar = gradient.references[0]*(hr/h) + coefficient_bar*(hr_ambient/h);
+        close(ambient_bar, (oracle(old[0], fixed, ambient+epsilon, true)
+            - oracle(old[0], fixed, ambient-epsilon, true))/(2.0*epsilon));
+        let frozen = response.pullback(cx, &weights, &[0.0], &[0.0]).unwrap();
+        assert!((frozen.nodal_load[0]-gradient.nodal_load[0]).abs() > 1e-5,
+            "the nonuniform trace must distinguish the complete radiative derivative");
+        assert!(response.pullback_with_robin_feedback(
+            cx, &[hr_wall], &[reference_slope], &[0.0], &weights, 15,
+        ).is_err());
+        assert!(response.pullback_with_robin_feedback(
+            cx, &[hr_wall], &[reference_slope], &[], &weights, 16,
+        ).is_err());
+        let zero = response.pullback_with_robin_feedback(
+            cx, &[hr_wall], &[reference_slope], &[0.0], &[0.0; 4], 16,
+        ).unwrap();
+        assert_eq!(zero.iterations, 0);
+        assert_eq!(zero.nodal_load, vec![0.0; 4]);
+        let mut wrong = temperature.clone();
+        wrong[0] += 0.01;
+        assert!(engine.linearize_prescribed_endpoint(
+            cx, bound_problem, None, &old, &wrong, DT, step_controls(),
+            forward.physical_residual_tolerance_j, &["cooler"],
+        ).is_err());
+        for tolerance in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(engine.linearize_prescribed_endpoint(
+                cx, bound_problem, None, &old, temperature, DT, step_controls(),
+                tolerance, &["cooler"],
+            ).is_err());
+        }
+    });
+}

@@ -1015,6 +1015,30 @@ authority.
   Component uncertainty is a conservative arithmetic sum of stated
   half-widths, not a probabilistic convolution, and no correlation between
   components is modelled.
+- `BackwardEuler::linearize_prescribed_endpoint` binds a retained capacity-storage
+  endpoint without another primal solve. It reassembles the physical free-node
+  residual `C(T-T_old)+dt(K(T)T-b)` at the supplied actual Robin values and
+  enforces the caller's fixed accepted target in joules and unchanged energy
+  budget. Prescribed temperatures, nonlinear conductivity, regional assignment
+  and matching contact remain in that physical assembly. The accepted field
+  is retained bit-for-bit; no replacement state or hidden tolerance widening
+  is allowed. Its zero primal iterations/inner residual mean no primal Krylov
+  solve ran, not that the physical residual is exactly zero.
+- `StepLinearization::pullback_with_robin_feedback` uses the same consistent
+  P1 low-rank Robin factors, bounded nonsymmetric FGMRES and rounded-multiplier
+  residual check as the steady mean-feedback owner, applied to `C/dt+J(T)`.
+  Local coefficient/reference slopes and a row-major cross-reference matrix
+  retain their exact selected-port order; diagonal cross entries add to local
+  reference slopes and must not duplicate them. The complete watt-residual
+  multiplier feeds existing history, P1 source and capacity-scale pullbacks
+  directly, without another factor of dt. Combined convection/radiation rows
+  require their physical owner to map Robin reference/log-h partials back to
+  original controls. At most 64 ports and four nodal factors per port fit the
+  explicit entry cap; this is not an RSS bound or derivative of a correlation,
+  geometry, material law or hydraulic model. The existing radiative transient
+  test checks a nonuniform trace with k(T), a prescribed-temperature jump,
+  independent fourth-power scalar sensitivities, retained-field identity and
+  refusal of invalid physical endpoints and undersized derivative budgets.
 - `transient::enthalpy::EnthalpyBackwardEuler` evolves a spatial specific-enthalpy
   field on the existing P1 tetrahedral mesh. It reuses the existing conductivity,
   source, Neumann, Robin and finite-contact assembly; temperature-dependent k(T)

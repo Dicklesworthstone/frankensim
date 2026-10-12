@@ -73,6 +73,9 @@ pub struct StepSolution {
     /// the linear path, or the worst normalized inner residual over nonlinear
     /// Newton corrections. The linear gate includes correction rescaling.
     /// Final absolute-temperature rounding is checked by the separate energy gate.
+    /// A retained-endpoint linearization performs no primal Krylov solve and
+    /// records zero here; its actual absolute physical residual is independently
+    /// checked before the response is bound.
     pub relative_residual: f64,
     /// Total Krylov iterations for this solid response.
     pub krylov_iterations: usize,

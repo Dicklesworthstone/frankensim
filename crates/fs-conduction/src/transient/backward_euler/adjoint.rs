@@ -10,7 +10,7 @@ use super::*;
 use crate::adjoint::robin::RobinResponse;
 use crate::assemble::assemble_jacobian_with_optional_interfaces;
 
-/// A newly solved transient endpoint and its owned response operator.
+/// A residual- and energy-checked transient endpoint and its response operator.
 /// Dereferencing exposes the same Robin tangent/adjoint operations as the
 /// steady producer, without representing this state as a steady solution.
 pub struct StepLinearization<'a> {
@@ -84,9 +84,85 @@ impl BackwardEuler<'_> {
         self.linearize_primal(cx, problem, interfaces, old, dt_s, config, regions, primal)
     }
 
-    // Both admission policies share exactly one endpoint-Jacobian and source
-    // projection implementation. Only a successful in-crate producer reaches
-    // this helper; a caller-constructed StepSolution is never accepted.
+    /// Bind the actual retained prescribed endpoint without another primal solve.
+    ///
+    /// The caller supplies the complete Robin law values evaluated at
+    /// `candidate`, including any combined convection/radiation coefficients,
+    /// and the fixed physical residual target accepted by its forward owner.
+    /// This method independently reassembles C(T - T_old) + dt(K(T)T - b),
+    /// requires its free-node norm to be at most `residual_tolerance_j`, and
+    /// checks the unchanged energy budget. Prescribed endpoint temperatures,
+    /// material ranges and matching contacts use the same production audit as
+    /// the forward endpoint owner. No candidate or history value is changed.
+    ///
+    /// The returned response contains C/dt + J(T) at this exact field. For
+    /// state-dependent boundary laws, call
+    /// [`StepLinearization::pullback_with_robin_feedback`] with their actual
+    /// coefficient and reference derivatives; the ordinary Robin pullback
+    /// holds those boundary values fixed. Radiative reservoirs and convection
+    /// controls must remain separately composed by their physical owner.
+    ///
+    /// No Krylov primal solve runs: the primal iteration count and its inner
+    /// relative-residual field are zero. Those fields do not replace the
+    /// independently checked absolute physical residual and energy gates.
+    /// The returned owner borrows only this capacity engine, not the supplied
+    /// candidate, boundary or law arrays.
+    ///
+    /// # Errors
+    ///
+    /// Refuses invalid fields, budgets, material/contact data, a retained
+    /// endpoint exceeding either physical gate, invalid selected Robin ports,
+    /// or cancellation. Material kinks refuse derivative requests, as for a
+    /// newly solved endpoint. No hidden replacement solve or widened target
+    /// is attempted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_prescribed_endpoint<'a>(
+        &'a self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], candidate: &[f64],
+        dt_s: f64, config: StepConfig, residual_tolerance_j: f64, regions: &[&str],
+    ) -> Result<StepLinearization<'a>, ConductionError> {
+        poll(cx, 0)?;
+        if !residual_tolerance_j.is_finite() || residual_tolerance_j <= 0.0 {
+            return Err(invalid("retained endpoint needs a positive finite physical residual target in joules"));
+        }
+        let evaluation = self.evaluate_prescribed_endpoint(
+            cx, problem, interfaces, old, candidate, dt_s, config, None,
+        )?;
+        if evaluation.residual_norm_j > residual_tolerance_j {
+            return Err(invalid(&format!(
+                "retained endpoint residual {} J exceeds {residual_tolerance_j} J",
+                evaluation.residual_norm_j,
+            )));
+        }
+        if evaluation.energy_residual_j.abs() > config.energy_tolerance_j {
+            return Err(invalid(&format!(
+                "retained endpoint energy residual {} J exceeds {} J",
+                evaluation.energy_residual_j, config.energy_tolerance_j,
+            )));
+        }
+        let contact_fluxes = match interfaces {
+            Some(interfaces) => interfaces.fluxes(candidate)?,
+            None => Vec::new(),
+        };
+        let primal = StepSolution {
+            temperature: candidate.to_vec(),
+            robin_fluxes: evaluation.convective_robin_fluxes,
+            contact_fluxes,
+            source_w: evaluation.source_w,
+            neumann_out_w: evaluation.neumann_out_w,
+            robin_out_w: evaluation.convective_out_w,
+            dirichlet_in_w: evaluation.dirichlet_in_w,
+            stored_energy_change_j: evaluation.stored_energy_change_j,
+            energy_residual_j: evaluation.energy_residual_j,
+            relative_residual: 0.0,
+            krylov_iterations: 0,
+        };
+        self.linearize_primal(cx, problem, interfaces, old, dt_s, config, regions, primal)
+    }
+
+    // All entry points share one endpoint-Jacobian and source projection.
+    // Only an in-crate residual- and energy-checked state reaches this helper;
+    // a caller-constructed StepSolution is never accepted.
     #[allow(clippy::too_many_arguments)]
     fn linearize_primal<'a>(
         &'a self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
@@ -128,6 +204,44 @@ impl StepLinearization<'_> {
     /// The actual residual- and energy-checked transient primal.
     #[must_use]
     pub const fn primal(&self) -> &StepSolution { &self.primal }
+
+    /// Differentiate a nodal-temperature goal through complete mean-Robin feedback.
+    ///
+    /// All arrays follow the selected port order. `htc_wall_derivatives`
+    /// supplies dh_i/dmean_i in W/(m² K²); `reference_wall_derivatives`
+    /// supplies the local dref_i/dmean_i in K/K. The flat row-major m-by-m
+    /// `reference_feedback` supplies ADDITIONAL dref_i/dmean_j entries.
+    /// Diagonal entries add to the local reference slope: never supply the
+    /// same derivative twice. Unselected boundary values remain fixed.
+    ///
+    /// The response uses the same consistent P1 face mass and area means as
+    /// the Robin owner. Its full nonsymmetric C/dt + J(T) + feedback operator
+    /// is transposed by the existing bounded FGMRES path. The returned physical
+    /// multiplier is checked again after rescaling; no new primal solve runs.
+    /// At most 64 ports and four nodal factor vectors per port must fit
+    /// `max_feedback_entries`. This cap is not a total-memory estimate.
+    ///
+    /// Reference and log(h) entries are independent partials of the BOUND
+    /// Robin rows. A combined convection/radiation law must map them back to
+    /// its original physical controls. Feed `nodal_load` directly into the
+    /// history, source and capacity pullbacks below: C/dt is already in the
+    /// Jacobian, so multiplying those contractions by dt again is incorrect.
+    ///
+    /// # Errors
+    ///
+    /// Refuses malformed/nonfinite controls, a material kink, exhausted
+    /// storage/work allowances, a failed complete transpose residual, or
+    /// cancellation. A zero goal does not bypass law or budget admission.
+    pub fn pullback_with_robin_feedback(
+        &self, cx: &Cx<'_>, htc_wall_derivatives: &[f64],
+        reference_wall_derivatives: &[f64], reference_feedback: &[f64],
+        nodal_weights: &[f64], max_feedback_entries: usize,
+    ) -> Result<crate::adjoint::robin::RobinGradient, ConductionError> {
+        self.response.pullback_endpoint_with_mean_feedback(
+            cx, htc_wall_derivatives, reference_wall_derivatives,
+            reference_feedback, nodal_weights, max_feedback_entries,
+        )
+    }
 
     fn multiplier(&self, cx: &Cx<'_>, values: &[f64]) -> Result<Vec<f64>, ConductionError> {
         if values.len() != self.old.len() {
