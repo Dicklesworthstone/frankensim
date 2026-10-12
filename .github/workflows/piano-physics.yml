@@ -39,6 +39,9 @@ jobs:
       # Keep a failed bootstrap RED. Its known legacy batch-file checkout
       # mismatch must not hide independent native test results after all
       # siblings have been materialized. Missing dependencies still fail Cargo.
+      - name: Test consistent soundboard kinetic energy
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-plate --lib edge_cubic -- --test-threads=1
       - name: Test complete acoustic modal windows
         if: ${{ !cancelled() }}
         run: |

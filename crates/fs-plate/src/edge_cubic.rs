@@ -2,6 +2,9 @@
 //! One Bernstein owner supplies panel inertia, reciprocal point/volume maps,
 //! and analytic physical rotations; the DKT stiffness field is unchanged.
 
+#[path = "edge_cubic_kinetic.rs"]
+mod kinetic;
+
 /// Degree-three Bernstein displacement coefficients (three vertices, six
 /// edge controls, one interior control) as linear forms in `(w, wx, wy)`.
 /// On each edge, the curve is the cubic Hermite interpolant of its endpoints
