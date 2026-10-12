@@ -13,6 +13,9 @@ pub use bo::{ConstrainedBoConfig, ConstrainedBoError, ConstrainedBoReport,
     OutputFitRecord, minimize_constrained};
 mod pending;
 pub use pending::ConstrainedProposalError;
+mod asynchronous;
+pub use asynchronous::{AsyncConstrainedError, AsyncConstrainedModelReport,
+    AsyncConstrainedStudy, PendingConstrainedEvaluation};
 
 /// One modeled upper constraint, `g(x) <= upper_bound`.
 ///

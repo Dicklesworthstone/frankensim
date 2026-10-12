@@ -111,3 +111,70 @@ DSR, RCH, Cargo and rustc are absent. Independent Python references passed 2,000
 finite-draw utility identities, and a sampled feasible Gaussian utility agreed
 with its analytical value within 1.2e-7. Those equation checks do not establish
 that the Rust sources compile or pass their tests.
+
+## Constrained external workers without a batch barrier
+
+`AsyncConstrainedStudy` reuses the same outcome models, feasible-utility
+acquisition and recommendation rule while allowing simulation jobs to finish
+independently. Its constructor takes the study ID, dimension, initial Sobol
+count, total reservation budget, maximum unanswered jobs and an existing
+`ConstrainedBoConfig`. This asynchronous API requires fixed kernels: any
+`objective_learning` or constraint `learning` request returns
+`LearningUnsupported` before job generation, rather than silently ignoring it.
+The existing synchronous learned-kernel driver is unchanged.
+
+```bash
+cargo run -p fs-bo --example asynchronous_constrained_cooling
+cargo test -p fs-bo --lib constrained
+```
+
+`ask()` reads unanswered jobs; it does not dispatch or lease them. Callers keep
+an in-flight ID set. `tell()` accepts a complete `ConstrainedObservation` in
+configuration order, preserving every outcome and its own variance. Wrong
+output counts, invalid values, foreign/modified requests or conflicting retries
+never accept the objective alone, overwrite a constraint, or release a slot.
+Identical deliveries remain idempotent. Failed external simulations stay
+unanswered for caller-owned retry; no fake failure outcome enters a GP.
+
+`refill()` issues initial designs as slots free up. Once all initial designs
+have been issued, replacements need only one received complete output vector;
+other initial/adaptive jobs may still be running. Each output GP is fitted only
+to received observations in logical job order. Pending designs enter all
+outputs' joint latent draws as additional baseline designs. Replacement utility
+is therefore the feasible gain beyond received AND pending designs. A pending
+design with an excellent objective but violated constraints contributes no
+feasible utility. `ConstrainedBoConfig::propose_pending` exposes this selection
+step for custom dispatchers using externally supplied centered output models.
+
+Each reservation immediately consumes the total budget. Unanswered jobs count
+against the concurrency cap; `search.q` separately caps adaptive jobs per
+refill. A late result still enters the model after the issuance budget is
+exhausted. `is_complete()` requires a final model update, but a completed study
+may legitimately have no recommended feasible design. In
+`AsyncConstrainedModelReport`, a recommendation's `observation_index` indexes
+`observed_evaluations`; that entry is the logical job ID into `jobs()`.
+
+A refill publishes its complete multi-output recommendation and replacement
+set together. Cancellation between output fits or greedy search slots retains
+all results, previous model report and existing reservations. Work counters
+include refused passes: `model_fit_attempts` counts multi-output passes, not
+individual Cholesky factorizations. One fit or one slot's search cannot be
+preempted here. No partial objective model is published when a constraint model
+fails. Exact duplicate proposals refuse without an unbudgeted fallback search.
+
+Clone checkpoints include partial arrivals. Reordering deliveries without a
+refill between them has no effect; different decision-time availability sets
+can intentionally change future designs. This API adds no durable checkpoint
+format, learned asynchronous model policy, external job leases, output
+cross-covariance, runtime/censoring correction or physical safety guarantee.
+Candidate simulations can violate constraints, regardless of the probability
+threshold used to recommend completed designs.
+
+The example uses synthetic fan-power, temperature and sound responses with a
+logical-time worker queue and a deliberately slow initial job. It is not CFD,
+acoustic validation or a wall-clock benchmark. Four new proposal regressions
+and nine asynchronous regressions cover shared-driver parity, joint feasible
+utility, pending infeasibility, stragglers, simultaneous limits, late-result
+recommendation changes, complete-output admission, partial-fit cancellation,
+model failures, checkpoint replay and work caps. Native compilation and these
+Rust tests remain unverified in the authoring runtime (no DSR, RCH or Cargo).
