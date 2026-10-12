@@ -18,6 +18,10 @@ const TEMPERAMENT_FIRST: u8 = 60;
 const TEMPERAMENT_LAST: u8 = 71;
 const OCTAVE: usize = 12;
 
+/// Register-specific multi-partial octave policies, using the same physical scale.
+#[path = "partial_tuning.rs"]
+pub mod partials;
+
 /// Retune a scale transactionally, preserving its order and every non-tension
 /// field. A4 must be finite and in the front doors' existing 430..450 Hz range.
 ///
@@ -30,6 +34,20 @@ const OCTAVE: usize = 12;
 /// Returns an error for an invalid reference, invalid/duplicate course, missing
 /// octave neighbour, or an unrepresentable positive-tension frequency match.
 pub fn tune(courses: &mut [Course], concert_a_hz: f64) -> Result<(), String> {
+    tune_octaves(courses, concert_a_hz, |course, neighbour, upper| {
+        if upper {
+            at_partial(course, 1, neighbour.partial_hz(2, neighbour.tension_n))
+        } else {
+            at_partial(course, 2, neighbour.partial_hz(1, neighbour.tension_n))
+        }
+    })
+}
+
+// Shared transactional scale admission and outward traversal. A policy changes
+// only the octave tension solve, never anchors, geometry or missing-key rules.
+fn tune_octaves(courses: &mut [Course], concert_a_hz: f64,
+    mut match_octave: impl FnMut(Course, Course, bool) -> Result<Course, String>)
+    -> Result<(), String> {
     if !concert_a_hz.is_finite() || !(430.0..=450.0).contains(&concert_a_hz) {
         return Err("stretch tuning requires finite A4 in 430..450 Hz".into());
     }
@@ -62,7 +80,7 @@ pub fn tune(courses: &mut [Course], concert_a_hz: f64) -> Result<(), String> {
                 "stretch tuning key {} requires supplied octave neighbour {}",
                 course.midi, course.midi - 12,
             ))?;
-            prepared[index] = Some(at_partial(course, 1, lower.partial_hz(2, lower.tension_n))?);
+            prepared[index] = Some(match_octave(course, lower, true)?);
         }
     }
     for index in (0..first_anchor).rev() {
@@ -71,7 +89,7 @@ pub fn tune(courses: &mut [Course], concert_a_hz: f64) -> Result<(), String> {
                 "stretch tuning key {} requires supplied octave neighbour {}",
                 course.midi, course.midi + 12,
             ))?;
-            prepared[index] = Some(at_partial(course, 2, upper.partial_hz(1, upper.tension_n))?);
+            prepared[index] = Some(match_octave(course, upper, false)?);
         }
     }
 
