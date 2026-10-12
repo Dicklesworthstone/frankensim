@@ -6,6 +6,8 @@ use crate::robust_resolution::{MultiLoadMeshCandidate, MultiLoadMeshProgress, Mu
     MultiLoadResolutionReport, MultiLoadResolutionRung, MultiLoadResolutionStage};
 use crate::SampledStressEvaluation;
 
+mod goal;
+
 fn rung(level: u32, stress: &RobustSampledStressEvaluation) -> MultiLoadResolutionRung {
     MultiLoadResolutionRung { level, cases: (0..stress.case_compliances.len()).map(|case|
         SampledStressEvaluation {

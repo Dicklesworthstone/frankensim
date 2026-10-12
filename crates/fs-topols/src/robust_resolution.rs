@@ -11,6 +11,9 @@ use crate::projected_stress::resolution::{StressResolutionReport, StressResoluti
 use crate::resolution::ResolutionPolicy;
 use crate::robust_descent::{MultiLoadProjectedProgress, MultiLoadProjectedStage};
 
+/// Signed-DWR gain checks for independent weighted-load compliance descent.
+pub mod goal;
+
 /// Actual independently solved responses, in the original load declaration order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiLoadResolutionRung {
