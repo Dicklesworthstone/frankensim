@@ -6,6 +6,8 @@ use super::{ConstrainedBoConfig, ConstrainedBoError, ConstrainedBoReport,
 use crate::study::{NoisyRequest, NoisyStudyError, NoisyStudyWork, TellDisposition};
 use crate::gp::Kernel;
 
+mod checkpoint;
+
 /// A simulation's complete objective and constraints, retained together.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingConstrainedEvaluation {
@@ -75,7 +77,8 @@ impl From<ConstrainedProposalError> for AsyncConstrainedError {
 ///
 /// Clone is an in-memory checkpoint. Replay requires identical observations
 /// and availability sets at refill time, not just the optimizer seed. This
-/// adds no filesystem, worker threads, durable format, or job-lease protocol.
+/// owns no filesystem, worker threads, or job-lease protocol. checkpoint_bytes
+/// and from_checkpoint also retain this state across process restarts.
 #[derive(Debug, Clone)]
 pub struct AsyncConstrainedStudy {
     study_id: u64,
