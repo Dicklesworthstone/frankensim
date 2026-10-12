@@ -102,9 +102,21 @@ fn radiation_goal_uses_both_physical_states_and_has_quadratic_remainder() {
                 if let Some(old) = previous { assert!(remainder < 0.35*old && remainder > 0.15*old,
                     "halving field difference must quarter the remainder: {old:e} -> {remainder:e}"); }
                 previous = Some(remainder);
-                let frozen = RobinResponse::compare_mean_robin_goal_at(cx,
-                    ConductionProblem { boundary: &physical.combined_boundary, ..problem }, None,
-                    comparison_config(), reference, &approximate, &[], &[], &[], &weights, 0).unwrap();
+                // Keep the physical residual at BOTH states and freeze only
+                // the radiation feedback in the reference tangent. Freezing
+                // both laws instead compares two self-consistent models whose
+                // estimates agree to first order, masking a missing derivative.
+                let combined = |temperature: &[f64]| {
+                    let wall = mean(&mesh, temperature, 1.0);
+                    let hr = patches[0].secant_coefficient_w_m2_k(wall).unwrap();
+                    let h = 5.0 + hr;
+                    [h, (5.0 / h) * 300.0 + (hr / h) * reservoir]
+                };
+                let [h, r] = combined(reference);
+                let other = combined(&approximate);
+                let frozen = RobinResponse::compare_mean_robin_goal_at(cx, problem, None,
+                    comparison_config(), reference, &approximate, &["right"],
+                    &[[h, r, 0.0, 0.0]], &[other], &weights, 2*n).unwrap();
                 assert!((report.signed_residual_change-frozen.signed_residual_change).abs() > 1e-3*step,
                     "the fixture must detect freezing the radiation law");
                 let scaled: Vec<_> = weights.iter().map(|v| -3.0*v).collect();
