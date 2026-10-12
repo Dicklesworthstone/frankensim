@@ -19,7 +19,7 @@ jobs:
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
       - name: Test native structural compliance Hessians and constrained Newton
         if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-topopt --features newton-design --test compliance_hessian --test compliance_newton
+        run: cargo test --release -p fs-topopt --features newton-design --test compliance_hessian --test compliance_newton --test simp_hessian
       - name: Run native constrained structural sizing
         if: ${{ !cancelled() }}
         run: cargo run --release -p fs-topopt --features newton-design --example constrained_elasticity

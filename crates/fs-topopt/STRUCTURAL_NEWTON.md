@@ -34,7 +34,7 @@ disables cooperative cancellation, not work admission.
 ## End-to-end example and tests
 
 ```bash
-cargo test --release -p fs-topopt --test compliance_hessian
+cargo test --release -p fs-topopt --test compliance_hessian --test simp_hessian
 cargo test --release -p fs-topopt --features newton-design --test compliance_newton
 cargo run --release -p fs-topopt --features newton-design --example constrained_elasticity
 ```
@@ -51,12 +51,39 @@ in both objective and constraint roles, independently re-solve the returned
 physical designs, and check budget recovery and split continuation. Dense
 assembly and finite differences are confined to verification tests.
 
+## Raw-density compliance and physical-volume curvature
+
+`simp_second_order::SimpComplianceGoal` separately composes the native physical
+Hessian with the existing Helmholtz filter, Heaviside projection and SIMP map.
+It retains both the first and second pointwise chain coefficients. For the
+native filter F and combined projection/SIMP map m, its action is
+
+```text
+H_raw v = F^T (m' * H_modulus(m' * Fv) + m'' * Fv * g_modulus)
+```
+
+`volume_value_gradient` and `volume_hessian_vector_product` use actual cell-volume
+weights and projection derivatives only; stiffness penalization is not physical
+volume. The raw compliance product costs one filter, one tangent per active load,
+and one transpose filter. Volume curvature costs two filter solves and no
+elastic solve. All consume the same `SolveControl`, including cancelled or
+rejected work. Zero products and the beta-zero linear-volume Hessian avoid solves.
+
+This API requires projected densities strictly inside `(1e-12, 1)` and refuses
+SIMP clamp/floor points rather than asserting a smooth Hessian there. The existing
+first-order pipeline's endpoint behavior is unchanged. It supplies raw-density
+operator products, not a box-constrained topology optimizer or a new IR adapter.
+The `simp_hessian` test target compares against the existing first-order pipeline
+at three continuation settings on unequal-volume tetrahedra, independently checks
+physical-volume derivatives, and exercises cancellation and exhausted budgets.
+
 ## Scope
 
-This is fixed-mesh linear-elastic stiffness sizing with homogeneous supports and
-fixed dead loads. It is not a raw-density SIMP/filter/projection Hessian, shape
-optimization, compliance under follower loads, stress certification, nonlinear
-material optimization or a global/continuum optimum certificate. A numerical
+These paths use fixed-mesh linear elasticity with homogeneous supports and fixed
+dead loads. The log-stiffness IR adapter remains distinct from the raw-density
+operator API. Neither implements shape optimization, follower loads, stress
+certification, nonlinear material optimization or a global/continuum optimum
+certificate. A numerical
 KKT residual does not close those obligations. Global memory admission and
 serialized process checkpoints are not implemented here.
 

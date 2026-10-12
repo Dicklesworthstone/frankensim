@@ -107,6 +107,10 @@ impl DensityFilter {
         }
     }
 
+    /// Number of cell-density coordinates in this immutable filter.
+    #[must_use]
+    pub fn cells(&self) -> usize { self.cells.len() }
+
     /// Filter radius used to assemble the immutable Helmholtz operator.
     #[must_use]
     pub const fn radius(&self) -> f64 {
@@ -256,6 +260,16 @@ pub fn heaviside_derivative(rho_tilde: f64, beta: f64, eta: f64) -> f64 {
     let denom = tanh(beta * eta) + tanh(beta * (1.0 - eta));
     let t = tanh(beta * (rho_tilde - eta));
     beta * (1.0 - t * t) / denom
+}
+
+/// Closed-form curvature of the SAME projection and strict tanh branches.
+#[must_use]
+pub fn heaviside_second_derivative(rho_tilde: f64, beta: f64, eta: f64) -> f64 {
+    let first = heaviside_derivative(rho_tilde, beta, eta);
+    if beta <= f64::EPSILON || first == 0.0 { return 0.0; }
+    let t = tanh(beta * (rho_tilde - eta));
+    if t == 0.0 { return 0.0; }
+    (-2.0 * t) * (beta * first)
 }
 
 fn assert_valid_projection_inputs(rho_tilde: f64, beta: f64, eta: f64) {
