@@ -87,8 +87,12 @@ trajectory. Radiation surfaces also carry absolute emissivity and reservoir-
 temperature derivatives with their source identities. Every control uses the
 same complete coupled transpose. Initial h carry remains energetic across a
 latent plateau even when the instantaneous temperature slope is zero.
-Natural reservoir temperatures, branch inlets, flow rates, constitutive
-parameters, contact and geometry remain fixed in this report.
+Driver 72 also returns natural-reservoir temperatures, independently supplied
+air inlets, and absolute fan-bank speed ratios. These parameters remain
+constant through the selected trajectory; they are accumulated using the
+same complete multiplier at every consumed endpoint. Constitutive parameters,
+contact, geometry, pressure, the hydraulic density envelope and transport
+properties remain fixed.
 
 `transient.adjoint.convection` records the physical coupling method, natural
 and air port counts, original-target rechecks, and the additional workspace.
@@ -96,6 +100,43 @@ At most 64 convection ports are admitted. Convection adds at most four nodal
 factor vectors per port; radiation adds two per patch. Their factors operate
 on the sparse enthalpy Jacobian without allocating a dense nodal matrix.
 The fine-grid selection and tie rules above apply unchanged.
+
+### Physical cooling controls
+
+The following arrays appear inside `transient.adjoint.convection`:
+
+| Array | Parameter identity | Derivative field |
+| --- | --- | --- |
+| `natural_reservoirs` | Boundary `target` and `ambient_temperature_k` | `dtemperature_dambient_temperature_k_per_k` |
+| `air_inlets` | Air `branch` and `inlet_temperature_k` | `dtemperature_dinlet_temperature_k_per_k` |
+| `fan_banks` | Fan `bank` and `speed_ratio` | `dtemperature_dspeed_ratio_k` when available |
+
+A natural ambient derivative includes both its explicit Robin reference and
+the coefficient's signed ambient/film-density partial. An inlet derivative
+changes the branch supply temperature while retaining the hydraulic density
+envelope, pressure and frozen transport properties. When editing a native
+input for comparison, update every airflow declaration for that branch to the
+same inlet temperature; do not change the envelope with it.
+
+Fan derivatives include the hydraulic operating-point response, heat-capacity
+rate, the convection card's Reynolds dependence, and the resulting downstream
+air references. They differentiate one bank's absolute `speed_ratio` while
+holding other banks' ratios fixed. They are not logarithmic-speed derivatives
+or a common multiplier on all banks. The same retained hydraulic equations
+supply series/parallel bank derivatives without another operating solve.
+
+Each fan row reports `status: "available"` with its derivative, or
+`status: "unsupported"` with an explicit `reason`. A missing physical
+differential never becomes a partial derivative or an invented zero. A bank
+that is unsupported at any consumed endpoint remains unsupported for the
+trajectory. An initial-state selected peak has zero boundary influence,
+because no future residual enters that observation.
+
+`control_steps` equals the number of consumed endpoints in the selected
+prefix. The aggregate arrays and bounded hydraulic scratch are charged once
+in `control_workspace_bytes`; no control tape grows with the number of fine
+steps. At most 64 fan banks are admitted, in addition to the convection-port
+limit above.
 
 ## Scope and budgets
 
@@ -124,6 +165,8 @@ uncertainty, compliance or experimental-validation certificates.
 ```sh
 cargo test -p fs-conduction --test backward_euler_prescribed_adjoint
 cargo test -p fs-cli --lib native_transient_adjoint
+cargo test -p fs-conduction --test enthalpy_adjoint robin_feedback
+cargo test -p fs-conduction --test enthalpy_radiation robin_feedback
 cargo test -p fs-cli --test solve transient_enthalpy_convection_adjoint
 ```
 
@@ -135,5 +178,9 @@ insulated heating, zero-source controls, a pulse whose peak precedes the
 final state, nonlinear conductivity, capacity and Robin derivatives,
 initial-state peaks, repeated output, default-path equivalence, and invalid
 or incomplete history refusal. They are not a full imported-geometry CLI test.
-Native compilation and execution of these new regressions remain pending;
-no passing Rust result is asserted here.
+The coupled enthalpy cases add independent heated/cooled natural-reservoir
+oracles, fixed-envelope inlet differences, absolute fan-speed differences at
+a nonunit ratio, latent-history inlet propagation, initial-peak zero controls,
+explicit unsupported bank reasons, and a spatial two-segment air/natural/
+radiation control direction. Native execution of these new regressions remains
+pending; no passing Rust result is asserted here.

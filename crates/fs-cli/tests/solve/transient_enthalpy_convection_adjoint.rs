@@ -194,6 +194,73 @@ fn gradients(gradient: &J) -> [f64; 3] {
     ]
 }
 
+fn convection_control<'a>(gradient: &'a J, list: &str, key: &str, name: &str) -> &'a J {
+    gradient
+        .get("convection")
+        .unwrap()
+        .get(list)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row.str_field(key) == Some(name))
+        .unwrap()
+}
+
+fn set_natural_ambient(spec: &mut ProjectSpec, target: &str, ambient: f64) {
+    let boundary = spec
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .boundaries
+        .iter_mut()
+        .find(|row| row.target == target)
+        .unwrap();
+    let ThermalBoundaryCondition::NaturalConvection {
+        ambient_temperature,
+        ..
+    } = &mut boundary.condition
+    else {
+        panic!("expected natural-convection target")
+    };
+    ambient_temperature.value = ambient;
+}
+
+fn set_air_inlet(spec: &mut ProjectSpec, inlet: f64) {
+    let mut count = 0;
+    for boundary in &mut spec
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .boundaries
+    {
+        if let ThermalBoundaryCondition::AirflowConvection {
+            branch,
+            inlet_temperature,
+            ..
+        } = &mut boundary.condition
+        {
+            assert_eq!(branch, "air");
+            inlet_temperature.value = inlet;
+            count += 1;
+        }
+    }
+    assert!(count > 0);
+}
+
+fn set_fan_speed(spec: &mut ProjectSpec, speed: f64) {
+    let system = spec.cooling.as_mut().unwrap().fan_system.as_mut().unwrap();
+    assert_eq!(system.banks.len(), 1);
+    assert_eq!(system.banks[0].bank_id, "fixture-bank");
+    system.banks[0].speed_ratio = speed;
+}
+
 fn check_final(solved: &ThermalRun, horizon: f64) {
     let gradient = solved.adjoint();
     assert_eq!(gradient.str_field("output"), Some(FINAL));
@@ -225,9 +292,9 @@ fn check_final(solved: &ThermalRun, horizon: f64) {
     );
 }
 
-/// h, dQ/dT and the incorrect derivative obtained by freezing density.
+/// h, dQ/dT, the incorrect frozen-density derivative, and dQ/dTa.
 /// Ra = C |T-Ta| / Tf^3: one film factor is beta and two are from nu^2.
-fn natural_law(wall: f64) -> (f64, f64, f64) {
+fn natural_law(wall: f64) -> (f64, f64, f64, f64) {
     let film = 0.5 * (wall + INLET_K);
     let delta = wall - INLET_K;
     assert!(delta.abs() > 0.1);
@@ -242,7 +309,8 @@ fn natural_law(wall: f64) -> (f64, f64, f64) {
     let area = 8.0 * 3.0_f64.sqrt();
     let full = area * (h + delta * dh_dlog_ra * (1.0 / delta - 1.5 / film));
     let fixed_density = area * (h + delta * dh_dlog_ra * (1.0 / delta - 0.5 / film));
-    (h, full, fixed_density)
+    let ambient = area * (-h + delta * dh_dlog_ra * (-1.0 / delta - 1.5 / film));
+    (h, full, fixed_density, ambient)
 }
 
 struct NaturalOracle {
@@ -251,6 +319,7 @@ struct NaturalOracle {
     intervals: Vec<f64>,
     frozen_h_initial: f64,
     frozen_density_initial: f64,
+    ambient: f64,
 }
 
 fn natural_oracle(input: Inputs) -> NaturalOracle {
@@ -262,6 +331,7 @@ fn natural_oracle(input: Inputs) -> NaturalOracle {
     let mut intervals = vec![0.0; 4];
     let mut frozen_h_initial = 1.0;
     let mut frozen_density_initial = 1.0;
+    let mut ambient = 0.0;
     let mut temperatures = Vec::new();
     for index in 0..4 {
         let residual = |h: f64| {
@@ -287,11 +357,12 @@ fn natural_oracle(input: Inputs) -> NaturalOracle {
         }
         let h = 0.5 * (low + high);
         let t = BASE_K + h / CP;
-        let (htc, dq_dt, fixed_density) = natural_law(t);
+        let (htc, dq_dt, fixed_density, dq_dambient) = natural_law(t);
         let diagonal = mass + dt * dq_dt / CP;
         derivative[0] *= mass / diagonal;
         derivative[1] = (mass * derivative[1] + dt) / diagonal;
         derivative[2] = (mass * derivative[2] - VOLUME * (h - old)) / diagonal;
+        ambient = (mass * ambient - dt * dq_dambient) / diagonal;
         for previous in &mut intervals[..index] {
             *previous *= mass / diagonal;
         }
@@ -313,6 +384,7 @@ fn natural_oracle(input: Inputs) -> NaturalOracle {
         intervals,
         frozen_h_initial: frozen_h_initial / CP,
         frozen_density_initial: frozen_density_initial / CP,
+        ambient: ambient / CP,
     }
 }
 
@@ -373,13 +445,44 @@ fn g1_native_natural_enthalpy_adjoint_differentiates_heated_and_cooled_film_prop
             (perturb(epsilon) - perturb(-epsilon)) / (2.0 * epsilon),
             4e-6,
         );
+        let reservoir = convection_control(solved.adjoint(), "natural_reservoirs", "target", "air");
+        close(n(reservoir, "ambient_temperature_k"), INLET_K, 0.0);
+        let ambient = n(reservoir, "dtemperature_dambient_temperature_k_per_k");
+        close(ambient, expected.ambient, 3e-7);
+        assert!(ambient > 0.0);
+        let evaluate_ambient = |delta: f64| {
+            let mut changed = spec.clone();
+            set_natural_ambient(&mut changed, "air", INLET_K + delta);
+            // A reservoir control does not alter the hydraulic operating point.
+            assert_eq!(changed.envelope, spec.envelope);
+            run(&changed, &bytes, &cards, None).final_temperature()
+        };
+        close(
+            ambient,
+            (evaluate_ambient(epsilon) - evaluate_ambient(-epsilon)) / (2.0 * epsilon),
+            4e-6,
+        );
+        if initial_k > INLET_K {
+            let peak = run(&spec, &bytes, &cards, Some(PEAK));
+            close(n(peak.adjoint(), "state_index"), 0.0, 0.0);
+            close(
+                n(
+                    convection_control(peak.adjoint(), "natural_reservoirs", "target", "air"),
+                    "dtemperature_dambient_temperature_k_per_k",
+                ),
+                0.0,
+                0.0,
+            );
+        }
     }
 }
 
 #[test]
 fn g1_native_forced_air_enthalpy_controls_match_fresh_initial_power_and_density_resolves() {
     let input = Inputs::hot();
-    let (spec, bytes) = uniform_project(input, false);
+    let (mut spec, bytes) = uniform_project(input, false);
+    let speed = 1.2; // Distinguish an absolute-speed derivative from a logarithmic one.
+    set_fan_speed(&mut spec, speed);
     let cards = fixture_cards();
     let solved = run(&spec, &bytes, &cards, Some(FINAL));
     check_final(&solved, 1.0);
@@ -394,7 +497,8 @@ fn g1_native_forced_air_enthalpy_controls_match_fresh_initial_power_and_density_
                 1 => changed.power += delta,
                 _ => changed.density += delta,
             }
-            let changed_spec = uniform_project(changed, false).0;
+            let mut changed_spec = uniform_project(changed, false).0;
+            set_fan_speed(&mut changed_spec, speed);
             // Changing initial h cannot re-gauge the constitutive chart.
             assert_eq!(
                 time(&mut changed_spec.clone())
@@ -414,6 +518,37 @@ fn g1_native_forced_air_enthalpy_controls_match_fresh_initial_power_and_density_
             4e-6,
         );
     }
+    let inlet = convection_control(solved.adjoint(), "air_inlets", "branch", "air");
+    close(n(inlet, "inlet_temperature_k"), INLET_K, 0.0);
+    let inlet_gradient = n(inlet, "dtemperature_dinlet_temperature_k_per_k");
+    assert!(inlet_gradient > 0.0);
+    let fan = convection_control(solved.adjoint(), "fan_banks", "bank", "fixture-bank");
+    assert_eq!(fan.str_field("status"), Some("available"));
+    close(n(fan, "speed_ratio"), speed, 0.0);
+    let fan_gradient = n(fan, "dtemperature_dspeed_ratio_k");
+    assert!(fan_gradient < 0.0);
+    for control in ["inlet", "speed"] {
+        let evaluate = |delta: f64| {
+            let mut changed = spec.clone();
+            if control == "inlet" {
+                set_air_inlet(&mut changed, INLET_K + delta);
+            } else {
+                set_fan_speed(&mut changed, speed + delta);
+            }
+            assert_eq!(changed.envelope, spec.envelope);
+            run(&changed, &bytes, &cards, None).final_temperature()
+        };
+        let (epsilon, expected) = if control == "inlet" {
+            (0.02, inlet_gradient)
+        } else {
+            (0.0005, fan_gradient)
+        };
+        close(
+            expected,
+            (evaluate(epsilon) - evaluate(-epsilon)) / (2.0 * epsilon),
+            1e-5,
+        );
+    }
     let peak = run(&spec, &bytes, &cards, Some(PEAK));
     close(n(peak.adjoint(), "time_s"), 0.0, 0.0);
     close(n(peak.adjoint(), "value_k"), 330.0, 1e-12);
@@ -424,6 +559,50 @@ fn g1_native_forced_air_enthalpy_controls_match_fresh_initial_power_and_density_
     {
         close(actual, expected, 1e-12);
     }
+    close(
+        n(
+            convection_control(peak.adjoint(), "air_inlets", "branch", "air"),
+            "dtemperature_dinlet_temperature_k_per_k",
+        ),
+        0.0,
+        0.0,
+    );
+    let peak_fan = convection_control(peak.adjoint(), "fan_banks", "bank", "fixture-bank");
+    assert_eq!(peak_fan.str_field("status"), Some("available"));
+    close(n(peak_fan, "dtemperature_dspeed_ratio_k"), 0.0, 0.0);
+
+    // The same physical operating point at a declared domain endpoint has
+    // no two-sided speed derivative. Keep its bank and explicit reason.
+    let mut endpoint_spec = spec.clone();
+    endpoint_spec
+        .cooling
+        .as_mut()
+        .unwrap()
+        .fan_system
+        .as_mut()
+        .unwrap()
+        .banks[0]
+        .speed_ratio_domain
+        .0 = speed;
+    let endpoint = run(&endpoint_spec, &bytes, &cards, Some(FINAL));
+    close(
+        endpoint.final_temperature(),
+        solved.final_temperature(),
+        1e-12,
+    );
+    let unavailable = convection_control(endpoint.adjoint(), "fan_banks", "bank", "fixture-bank");
+    assert_eq!(unavailable.str_field("status"), Some("unsupported"));
+    assert!(
+        unavailable
+            .str_field("reason")
+            .unwrap()
+            .contains("interior")
+    );
+    assert!(
+        unavailable
+            .get("dtemperature_dspeed_ratio_k")
+            .is_none_or(|value| matches!(value, J::Null))
+    );
 }
 
 #[test]
@@ -465,15 +644,17 @@ fn g1_native_air_feedback_adjoint_carries_plateau_history_into_later_sensible_co
     let fine = solved.transient().get("fine").unwrap().as_array().unwrap();
     let mut old_h = initial_h;
     let mut initial_derivative = 1.0;
+    let mut inlet_derivative = 0.0;
     for (index, row) in fine.iter().enumerate() {
         let next_on_plateau = old_h - plateau_loss_h;
-        let h = if next_on_plateau > 0.0 {
-            next_on_plateau
+        let diagonal = if next_on_plateau > 0.0 {
+            mass
         } else {
-            let diagonal = mass + dt * conductance / CP;
-            initial_derivative *= mass / diagonal;
-            mass * next_on_plateau / diagonal
+            mass + dt * conductance / CP
         };
+        initial_derivative *= mass / diagonal;
+        inlet_derivative = (mass * inlet_derivative + dt * conductance) / diagonal;
+        let h = mass * next_on_plateau / diagonal;
         let temperature = if h > 0.0 { 330.0 } else { 330.0 + h / CP };
         close(n(row, "final_region_max_k"), temperature, 5e-8);
         close(
@@ -510,6 +691,21 @@ fn g1_native_air_feedback_adjoint_carries_plateau_history_into_later_sensible_co
     close(
         expected,
         (evaluate(epsilon) - evaluate(-epsilon)) / (2.0 * epsilon),
+        4e-6,
+    );
+    let inlet = n(
+        convection_control(solved.adjoint(), "air_inlets", "branch", "air"),
+        "dtemperature_dinlet_temperature_k_per_k",
+    );
+    close(inlet, inlet_derivative / CP, 3e-7);
+    let evaluate_inlet = |delta: f64| {
+        let mut changed = spec.clone();
+        set_air_inlet(&mut changed, INLET_K + delta);
+        run(&changed, &bytes, &cards, None).final_temperature()
+    };
+    close(
+        inlet,
+        (evaluate_inlet(0.02) - evaluate_inlet(-0.02)) / 0.04,
         4e-6,
     );
 }
@@ -634,6 +830,56 @@ fn g3_native_mixed_enthalpy_adjoint_includes_upstream_air_and_radiative_feedback
         2.0 * derivative[0] + 3.0 * derivative[1] + 0.4 * derivative[2],
         (evaluate(epsilon) - evaluate(-epsilon)) / (2.0 * epsilon),
         8e-6,
+    );
+    let gradient = solved.adjoint();
+    let reservoir = convection_control(gradient, "natural_reservoirs", "target", "natural-wall");
+    let inlet = convection_control(gradient, "air_inlets", "branch", "air");
+    let fan = convection_control(gradient, "fan_banks", "bank", "fixture-bank");
+    close(n(reservoir, "ambient_temperature_k"), 350.0, 0.0);
+    close(n(inlet, "inlet_temperature_k"), INLET_K, 0.0);
+    assert_eq!(fan.str_field("status"), Some("available"));
+    let radiation = &gradient
+        .get("radiation")
+        .unwrap()
+        .get("surfaces")
+        .unwrap()
+        .as_array()
+        .unwrap()[0];
+    assert_eq!(radiation.str_field("target"), Some("natural-wall"));
+    let control_direction = 0.5 * n(reservoir, "dtemperature_dambient_temperature_k_per_k")
+        + 0.3 * n(inlet, "dtemperature_dinlet_temperature_k_per_k")
+        + 0.02 * n(fan, "dtemperature_dspeed_ratio_k")
+        + 0.015 * n(radiation, "dtemperature_demissivity_k")
+        + 0.4 * n(radiation, "dtemperature_dreservoir_temperature_k_per_k");
+    let evaluate_controls = |delta: f64| {
+        let (changed_cards, changed_card) =
+            radiation_product::emissivity_cards(&fixture_cards(), 0.85 + 0.015 * delta);
+        let mut changed = mixed_project(input, &changed_card).0;
+        set_natural_ambient(&mut changed, "natural-wall", 350.0 + 0.5 * delta);
+        // Every segment of the same branch declares the same external inlet;
+        // the second segment's actual inlet must still come from the march.
+        set_air_inlet(&mut changed, INLET_K + 0.3 * delta);
+        set_fan_speed(&mut changed, 1.0 + 0.02 * delta);
+        changed
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .radiation
+            .as_mut()
+            .unwrap()
+            .surfaces[0]
+            .reservoir_temperature
+            .value = 270.0 + 0.4 * delta;
+        assert_eq!(changed.envelope, spec.envelope);
+        run(&changed, &bytes, &changed_cards, None).final_temperature()
+    };
+    close(
+        control_direction,
+        (evaluate_controls(epsilon) - evaluate_controls(-epsilon)) / (2.0 * epsilon),
+        1e-5,
     );
 }
 

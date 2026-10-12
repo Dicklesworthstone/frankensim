@@ -1724,7 +1724,8 @@ reference matrix to the already complete enthalpy/radiation tangent. The same
 multiplier contracts initial h, regional watts, reference density and existing
 radiative parameters. Capacity-storage natural/air adjoints remain unsupported;
 other natural cards require their own differentiated constitutive law.
-Convection parameters, flow, geometry and transport properties are fixed.
+Driver 72 adds physical reservoir, branch-inlet and independent fan-speed
+controls under the scope below. Geometry and transport properties are fixed.
 `transient.adjoint.convection` names the method, port counts, original-target
 rechecks and bounded workspace. Additional low-rank factors are capped by
 `4 * vertices * convection_ports`, plus existing radiative factors; at most
@@ -1733,6 +1734,36 @@ rechecks and bounded workspace. Additional low-rank factors are capped by
 natural histories with independent scalar derivatives, forced-air controls
 with fresh native finite differences, and mixed natural/two-segment-air/
 radiation histories with a coupled finite difference.
+
+Driver 72 accumulates constant-through-trajectory convection parameters with
+that same completed joule-residual multiplier, scaled by each endpoint's
+duration exactly once. `transient.adjoint.convection.natural_reservoirs`
+retains each target, nominal ambient kelvin and
+`dtemperature_dambient_temperature_k_per_k`; it includes the explicit
+reference and full signed ambient/film-density coefficient partial.
+`air_inlets` retains each independently supplied branch, nominal inlet kelvin
+and `dtemperature_dinlet_temperature_k_per_k`. This inlet control holds the
+hydraulic density envelope, pressure and transport properties fixed and changes
+all inlet declarations on that branch consistently.
+
+`fan_banks` retains declaration order, bank identity and nominal speed ratio.
+Each available row reports `dtemperature_dspeed_ratio_k` for one absolute bank
+speed, including its retained hydraulic flow response, capacity rate,
+in-domain Reynolds coefficient derivative and downstream air response.
+Series/parallel bank coordinates are independent; other bank speeds, passive
+loss geometry and fan-curve data remain fixed. Unsupported coordinates retain
+`status: "unsupported"` and their reason, with no partial or substitute zero.
+If any consumed endpoint lacks a bank differential, its trajectory row stays
+unsupported. An initial selected peak has zero boundary influence.
+
+`control_steps` covers exactly the selected reverse prefix. At most 64 fan
+banks are admitted; aggregate arrays and bounded curve scratch are included in
+`control_workspace_bytes` before integration, independently of history length.
+The coupled enthalpy regressions also compare ambient-only and inlet-only
+perturbations, an absolute fan-speed perturbation at a nonunit nominal ratio,
+latent-history inlet propagation and a joint mixed natural/inlet/fan/radiation
+direction. These tests preserve the physical density envelope during inlet
+edits and check explicit unsupported fan-domain endpoint reasons.
 
 Schema v14 optionally declares a conductivity multiplier for each regional
 enthalpy material. `linear-liquid-mass-fraction` interpolates between positive

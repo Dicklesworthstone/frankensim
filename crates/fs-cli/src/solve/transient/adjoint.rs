@@ -14,6 +14,7 @@ pub(super) use enthalpy::{
     EnthalpyTape, finish as finish_enthalpy, storage_bytes as enthalpy_storage_bytes,
     radiation_storage_bytes as enthalpy_radiation_storage_bytes,
     convection_storage_bytes as enthalpy_convection_storage_bytes,
+    control_storage_bytes as enthalpy_control_storage_bytes,
 };
 
 #[cfg(test)]

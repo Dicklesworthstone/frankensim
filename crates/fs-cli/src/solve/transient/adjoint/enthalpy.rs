@@ -19,7 +19,7 @@ use fs_conduction::{
     ConductionError, ConductionProblem, LinearConfig, PowerMap, ScalarField, ThermalInterfaces,
 };
 use fs_exec::Cx;
-use fs_project::TransientEnthalpy;
+use fs_project::{ProjectSpec, TransientEnthalpy};
 use fs_solver::NewtonReport;
 
 use super::{Objective, Tape, finite, select};
@@ -28,6 +28,7 @@ use super::super::{SolveRefusal, Workload, airflow, bad, buoyancy, json_string,
 
 mod convection;
 pub(in crate::solve::transient) use convection::storage_bytes as convection_storage_bytes;
+pub(in crate::solve::transient) use convection::control_storage_bytes;
 
 // Forward native enthalpy also admits at most 24 Arnoldi columns. Keep the
 // transpose within the same bounded column scale before allocating its basis.
@@ -297,6 +298,7 @@ fn initial_slope(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(in crate::solve::transient) fn finish(
     cx: &Cx<'_>,
+    spec: &ProjectSpec,
     engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
@@ -349,6 +351,7 @@ pub(in crate::solve::transient) fn finish(
         feedback_entries(n, lowering.patches.len())).transpose()?.unwrap_or(0);
     let convection_ports = convection::ports(natural, airflow)?;
     let convection_workspace = convection_storage_bytes(n, elements, convection_ports)?;
+    let control_workspace = control_storage_bytes(spec, convection_ports)?;
     let combined_feedback_entries = max_feedback_entries
         .checked_add(convection::feedback_entries(n, convection_ports)?)
         .ok_or_else(|| bad("combined enthalpy boundary-feedback allowance overflows"))?;
@@ -358,6 +361,7 @@ pub(in crate::solve::transient) fn finish(
         linear.max_iterations,
     )?.checked_add(radiation_workspace)
         .and_then(|v| v.checked_add(convection_workspace))
+        .and_then(|v| v.checked_add(control_workspace))
         .filter(|&v| isize::try_from(v).is_ok())
         .ok_or_else(|| bad("combined enthalpy adjoint storage allowance overflows"))?;
     let mut start = 0.0;
@@ -451,6 +455,7 @@ pub(in crate::solve::transient) fn finish(
     let mut carry = zeros(n)?;
     let mut dual_iterations = 0usize;
     let mut worst_dual = 0.0_f64;
+    let mut convection_controls = convection::Controls::new(cx, spec, natural, airflow, deadline)?;
     let EnthalpyTape { temperature, mut accepted, initial_h, mut physical_tolerances_j } = tape;
     if selected.state == 0 {
         carry[selected.vertex] = initial_slope(
@@ -598,6 +603,13 @@ pub(in crate::solve::transient) fn finish(
         {
             return Err(bad("enthalpy transpose failed its residual or material-layout gate"));
         }
+        match (convection_controls.as_mut(), feedback.as_ref()) {
+            (Some(controls), Some(bound)) => controls.add(
+                cx, spec, step_problem, expected, bound, dt, &gradient.transport.adjoint, deadline,
+            )?,
+            (None, None) => {},
+            _ => return Err(bad("enthalpy physical boundary controls lost their bound endpoint")),
+        }
         for (region, basis) in bases.iter().enumerate() {
             source_controls[index][region] = dot(
                 cx, &gradient.transport.source_density, basis, deadline,
@@ -701,8 +713,10 @@ pub(in crate::solve::transient) fn finish(
             lowering.patches.len(), rows.join(","),
         ))
     }).transpose()?.unwrap_or_default();
+    let controls_fragment = convection_controls.as_ref()
+        .map(|controls| controls.fragment(selected.state)).transpose()?.unwrap_or_default();
     let convection_fragment = if convection_ports == 0 { String::new() } else { format!(
-        ",\"convection\":{{\"method\":\"complete-natural-and-streamwise-air-enthalpy-feedback\",\"natural_ports\":{},\"air_ports\":{},\"max_combined_feedback_entries\":{combined_feedback_entries},\"additional_workspace_bytes\":{convection_workspace},\"physical_endpoint_rechecks\":{},\"residual_target\":\"original-accepted-forward-physical-tolerance\",\"air_energy\":\"actual-air-enthalpy-gain-with-separate-natural-and-radiation-reservoirs\"}}",
+        ",\"convection\":{{\"method\":\"complete-natural-and-streamwise-air-enthalpy-feedback\",\"natural_ports\":{},\"air_ports\":{},\"max_combined_feedback_entries\":{combined_feedback_entries},\"additional_workspace_bytes\":{convection_workspace},\"control_workspace_bytes\":{control_workspace},\"physical_endpoint_rechecks\":{},\"residual_target\":\"original-accepted-forward-physical-tolerance\",\"air_energy\":\"actual-air-enthalpy-gain-with-separate-natural-and-radiation-reservoirs\"{controls_fragment}}}",
         natural.len(), airflow.map_or(0, |path| path.segments.len()), selected.state,
     ) };
     poll(cx, deadline)?;
@@ -717,4 +731,4 @@ pub(in crate::solve::transient) fn finish(
     ))
 }
 
-const SCOPE: &str = "Selected final or earliest sampled-peak nodal branch on the accepted fine grid, including the initial state for sampled peaks. Exact ties have no unique maximum derivative. Only the selected prefix is reversed; future interval controls are zero. Each consumed endpoint is independently revalidated through the physical heterogeneous enthalpy balance, energy gate, chart smoothness and complete k(T)/phase-conductivity tangent; no nonlinear endpoint is re-solved or replaced. Initial controls are additive nodal or regional specific-enthalpy offsets, not initial temperatures. Native input edits must preserve initial-temperature/enthalpy consistency or use from-regional-enthalpy. Reference-density controls change frozen storage mass while holding initial enthalpy, charts, conductivity laws and geometry fixed; the multiplier scales all regional reference densities together. Regional power controls add absolute delivered watts through the same P1 source projector, including zero-baseline intervals; sum interval derivatives for one declared workload segment. Prescribed Neumann/Robin data, matching contacts, phase-law parameters and the time grid are fixed, with no derivatives reported for them. Declared ambient radiation uses its complete nonlinear area-mean state feedback in the same h/source/reference-density transpose; the report also differentiates independent absolute surface emissivities and reservoir temperatures held throughout the selected trajectory. Each surface retains its name, target, sourced nominal value, card and usage-receipt identities; sharing a card does not merge controls. Query temperature, selected source claim/support and time grid remain fixed. Emissivity is restricted to (0,1], with only nonpositive feasible increments at one, and reservoirs require positive absolute kelvin. These parameter derivatives are not uncertainty propagation or derivatives of immutable card content. An isothermal plateau has zero direct temperature sensitivity while h history carry remains energetic. Chart/domain endpoints and slope-changing branches refuse classical derivatives. Natural convection retains the complete signed wall and film-density derivative of the in-domain Churchill-Chu vertical-plate law. Quasi-steady air retains the complete upstream-to-downstream reference-temperature feedback of each independent branch at fixed flow and transport properties. Both compose with radiation, phase conductivity and energetic history in the same physical transpose; each coupled endpoint also passes its original forward residual target and actual-air energy gate. Natural reservoir temperatures, branch inlets and flow controls remain fixed in this report. No apparent heat capacity, moving geometry, density-driven expansion, continuous-time maximum, uncertainty or physical-validation certificate is supplied.";
+const SCOPE: &str = "Selected final or earliest sampled-peak nodal branch on the accepted fine grid, including the initial state for sampled peaks. Exact ties have no unique maximum derivative. Only the selected prefix is reversed; future interval controls are zero. Each consumed endpoint is independently revalidated through the physical heterogeneous enthalpy balance, energy gate, chart smoothness and complete k(T)/phase-conductivity tangent; no nonlinear endpoint is re-solved or replaced. Initial controls are additive nodal or regional specific-enthalpy offsets, not initial temperatures. Native input edits must preserve initial-temperature/enthalpy consistency or use from-regional-enthalpy. Reference-density controls change frozen storage mass while holding initial enthalpy, charts, conductivity laws and geometry fixed; the multiplier scales all regional reference densities together. Regional power controls add absolute delivered watts through the same P1 source projector, including zero-baseline intervals; sum interval derivatives for one declared workload segment. Prescribed Neumann/Robin data, matching contacts, phase-law parameters and the time grid are fixed, with no derivatives reported for them. Declared ambient radiation uses its complete nonlinear area-mean state feedback in the same h/source/reference-density transpose; the report also differentiates independent absolute surface emissivities and reservoir temperatures held throughout the selected trajectory. Each surface retains its name, target, sourced nominal value, card and usage-receipt identities; sharing a card does not merge controls. Query temperature, selected source claim/support and time grid remain fixed. Emissivity is restricted to (0,1], with only nonpositive feasible increments at one, and reservoirs require positive absolute kelvin. These parameter derivatives are not uncertainty propagation or derivatives of immutable card content. An isothermal plateau has zero direct temperature sensitivity while h history carry remains energetic. Chart/domain endpoints and slope-changing branches refuse classical derivatives. Natural convection retains the complete signed wall and film-density derivative of the in-domain Churchill-Chu vertical-plate law. Quasi-steady air retains the complete upstream-to-downstream reference-temperature feedback of each independent branch at fixed flow and transport properties. Both compose with radiation, phase conductivity and energetic history in the same physical transpose; each coupled endpoint also passes its original forward residual target and actual-air energy gate. Natural-reservoir and independently prescribed air-inlet temperatures are absolute kelvin controls held throughout the selected trajectory. Each natural ambient control includes both its explicit Robin reference and its full film-density/coefficient partial. Independent fan-bank controls differentiate absolute speed ratios through the same retained hydraulic point, capacity rates, smooth in-domain correlation coefficients and downstream air transport; unsupported bank coordinates retain their identities and reasons instead of partial or zero derivatives. Air transport properties, pressure, the hydraulic density envelope, fixed loss geometry and fan-curve data remain fixed. At an initial sampled peak every boundary control has zero influence because no future endpoint contributes. No apparent heat capacity, moving geometry, density-driven expansion, continuous-time maximum, uncertainty or physical-validation certificate is supplied.";

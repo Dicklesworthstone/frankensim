@@ -222,6 +222,11 @@ pub(super) struct ConjugatePath {
 }
 
 impl ConjugatePath {
+    /// Physical branch identities in the same order as `air_paths`.
+    pub(super) fn branch_names(&self) -> Vec<&str> {
+        self.branches.iter().map(|branch| branch.branch.as_str()).collect()
+    }
+
     /// Preserve the independently supplied paths in the same branch-major
     /// order as the solid's Robin rows for the coupled goal linearization.
     pub(super) fn air_paths(&self) -> Vec<AirPath> {

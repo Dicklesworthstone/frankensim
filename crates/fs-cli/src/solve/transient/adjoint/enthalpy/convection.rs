@@ -15,11 +15,16 @@ use super::{
     zeros,
 };
 
+mod controls;
+pub(super) use controls::Controls;
+pub(in crate::solve::transient) use controls::storage_bytes as control_storage_bytes;
+
 pub(super) struct Bound {
     pub(super) boundary: ThermalBoundary,
     pub(super) names: Vec<String>,
     pub(super) references: Vec<Vec<f64>>,
     pub(super) wall_slopes: Vec<f64>,
+    ambient_slopes: Vec<f64>,
     air_regions: BTreeSet<String>,
     air_heat_w: Option<f64>,
 }
@@ -180,11 +185,13 @@ pub(super) fn bind(
         .try_reserve_exact(count)
         .map_err(|_| bad("enthalpy convection boundary allocation refused"))?;
     let mut wall_slopes = zeros(count)?;
+    let mut ambient_slopes = zeros(count)?;
     for (index, law) in natural.iter().enumerate() {
         poll(cx, deadline)?;
         let (coefficient, partials) =
             buoyancy::differentiated_coefficient(law, means[index], pressure_pa)?;
         wall_slopes[index] = partials[0];
+        ambient_slopes[index] = partials[1];
         replacements.push((regions[index], coefficient.htc_w_m2_k, law.ambient_k));
     }
     let mut references = Vec::new();
@@ -260,6 +267,7 @@ pub(super) fn bind(
         names,
         references,
         wall_slopes,
+        ambient_slopes,
         air_regions,
         air_heat_w,
     }))

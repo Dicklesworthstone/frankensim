@@ -32,7 +32,7 @@ mod air_inlet;
 mod contractions;
 mod contact_controls;
 mod coupled_thermal;
-mod fan_speed;
+pub(in crate::solve) mod fan_speed;
 mod material_controls;
 mod mixed_feedback;
 mod natural_feedback;
