@@ -2,6 +2,7 @@
 use super::*;
 use fs_topols::WeightedComplianceDwrStage;
 use fs_topols::robust_resolution::MultiLoadMeshStage;
+use fs_topols::robust_resolution::goal::MultiLoadDwrStage;
 
 fn stopped(gate: &CancelGate, start: Instant, consumed: f64, spec: &ElasticitySpec) -> Option<&'static str> {
     stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s)
@@ -19,6 +20,7 @@ fn retain(spec: &ElasticitySpec, ledger: &Ledger, owner: &MultiLoadProjectedOpti
     let history = retained.family.as_mut().expect("independent load history");
     history.capture(owner);
     mesh::validate_terminal(history, &retained.policy, status, settings(spec, spec.steps).level)?;
+    goal::validate_terminal(history, &retained.policy, status, settings(spec, spec.steps).level)?;
     persist(spec, ledger, owner.geometry(), report, status, wall, predecessor, evidence)
 }
 
@@ -48,6 +50,7 @@ fn finish(spec: &ElasticitySpec, ledger: &Ledger, phi: &GridSdf,
     }
     let history = retained.family.as_mut().ok_or_else(|| malformed("missing final independent cases"))?;
     mesh::validate_terminal(history, &retained.policy, terminal, settings(spec, spec.steps).level)?;
+    goal::validate_terminal(history, &retained.policy, terminal, settings(spec, spec.steps).level)?;
     let expected_cases = history.accepted.last().unwrap_or(&history.baseline).clone();
     history.optimizer_terminal = Some(terminal);
     let pending = persist(spec, ledger, phi, report, "running",
@@ -89,9 +92,19 @@ pub(super) fn drive_assessment_observed(spec: &ElasticitySpec, ledger: &Ledger, 
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn drive_mesh_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
+    gate: &CancelGate, prior: Option<&Loaded>, observe: impl FnMut(MultiLoadProjectedStage),
+    observe_assessment: impl FnMut(WeightedComplianceDwrStage),
+    observe_mesh: impl FnMut(MultiLoadMeshStage)) -> Result<Outcome>
+{
+    drive_goal_observed(spec, ledger, cap, gate, prior, observe, observe_assessment, observe_mesh, |_| {})
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn drive_goal_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     gate: &CancelGate, prior: Option<&Loaded>, mut observe: impl FnMut(MultiLoadProjectedStage),
     mut observe_assessment: impl FnMut(WeightedComplianceDwrStage),
-    mut observe_mesh: impl FnMut(MultiLoadMeshStage)) -> Result<Outcome>
+    mut observe_mesh: impl FnMut(MultiLoadMeshStage),
+    mut observe_goal: impl FnMut(MultiLoadDwrStage)) -> Result<Outcome>
 {
     if ledger.in_transaction() { return Err(malformed("multi-load study requires its own ledger transaction")); }
     let policy = stress_controls(spec)?;
@@ -99,6 +112,7 @@ pub(super) fn drive_mesh_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: O
         resolution.validate(settings(spec, spec.steps).level).map_err(|error| malformed(&error.to_string()))?;
     }
     let family = policy.family.as_ref().ok_or_else(|| malformed("missing independent load family"))?;
+    goal::validate(spec, policy, family)?;
     let cases = family.cases(spec)?;
     let start = Instant::now();
     let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
@@ -147,6 +161,7 @@ pub(super) fn drive_mesh_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: O
             _ => return Err(malformed("unknown multi-load study terminal")),
         };
         mesh::validate_terminal(history, policy, status, settings(spec, spec.steps).level)?;
+        goal::validate_terminal(history, policy, status, settings(spec, spec.steps).level)?;
         consumed = old.value.f64_field("consumed_wall_s").filter(|value| value.is_finite() && *value >= 0.0)
             .ok_or_else(|| malformed("invalid retained multi-load wall charge"))?;
         last = Some(Outcome { pointer: format!("study-{}", old.hash.to_hex()), receipt: old.bytes.clone(), status });
@@ -163,10 +178,11 @@ pub(super) fn drive_mesh_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: O
                 predecessor, &mut evidence, &mut observe_assessment)
                 .map_err(|error| retained_error(error, last.as_ref()));
         }
-        // A mesh-checked update needs a fresh fine baseline and one complete
-        // coarse/fine candidate family. Recovery cannot refund these charges.
-        let minimum_update_solves = cases.len() * policy.resolution
-            .map_or(1, |resolution| 1 + 2 * resolution.extra_levels as usize);
+        // A goal-checked update needs 2*N baseline plus 3*N candidate slots.
+        // Mesh checks retain their original complete-grid-family requirement.
+        let minimum_update_solves = cases.len() * if family.goal.is_some() { 5 } else {
+            policy.resolution.map_or(1, |resolution| 1 + 2 * resolution.extra_levels as usize)
+        };
         if status == "budget-exhausted"
             && (family.max_solves - history.solves < minimum_update_solves || report.rows.len() == spec.steps) {
             return last.ok_or_else(|| malformed("missing terminal receipt"));
@@ -255,7 +271,7 @@ pub(super) fn drive_mesh_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: O
         evidence.projected = Some(ConstraintEvidence {
             policy: policy.clone(), baseline: combined, accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None,
             family: Some(History { cases, baseline, accepted: Vec::new(), checkpoint: Vec::new(),
-                solves: owner.solves_started(), recovery_solves: 0, optimizer_terminal: None, mesh: None }),
+                solves: owner.solves_started(), recovery_solves: 0, optimizer_terminal: None, mesh: None, goal: None }),
         });
         owner
     };
@@ -289,7 +305,27 @@ pub(super) fn drive_mesh_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: O
             return retain(spec, ledger, &owner, &report, status, consumed + start.elapsed().as_secs_f64(),
                 predecessor, &mut evidence).map_err(|error| retained_error(error, last.as_ref()));
         }
-        let progress = if let Some(resolution) = policy.resolution {
+        let progress = if let Some(goal_policy) = family.goal {
+            match owner.advance_one_dwr_polling(goal_policy, policy.search.poll_iters, |stage| {
+                observe_goal(stage);
+                if let MultiLoadDwrStage::Optimizer(stage) = stage { observe(stage); }
+                match stopped(gate, start, consumed, spec) {
+                    Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+                }
+            }) {
+                Err(error) => Err(error),
+                Ok(ControlFlow::Break(status)) => Ok(ControlFlow::Break(status)),
+                Ok(ControlFlow::Continue(progress)) => {
+                    let (progress, check) = goal::LastCheck::capture(progress)
+                        .map_err(|error| retained_error(error, last.as_ref()))?;
+                    if let Some(check) = check {
+                        evidence.projected.as_mut().expect("constrained history").family.as_mut()
+                            .expect("load history").goal = Some(check);
+                    }
+                    Ok(ControlFlow::Continue(progress))
+                }
+            }
+        } else if let Some(resolution) = policy.resolution {
             match owner.advance_one_resolution_polling(resolution, policy.search.poll_iters, |stage| {
                 observe_mesh(stage);
                 if let MultiLoadMeshStage::Optimizer(stage) = stage { observe(stage); }
@@ -326,7 +362,7 @@ pub(super) fn drive_mesh_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: O
         let progress = match progress {
             Ok(progress) => progress,
             Err(error) => {
-                // A failed fine baseline may have started several real solves.
+                // A failed assessment may have started several real solves.
                 // Keep the unchanged accepted state AND the owner's work count,
                 // as on interrupted candidates and failed checkpoint recovery.
                 let charged = retain(spec, ledger, &owner, &report, "running",

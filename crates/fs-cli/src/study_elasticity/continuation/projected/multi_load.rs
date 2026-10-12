@@ -17,6 +17,9 @@ pub(super) use driver::drive;
 #[path = "multi_load/mesh.rs"]
 mod mesh;
 
+#[path = "multi_load/goal.rs"]
+mod goal;
+
 #[path = "multi_load/restoration.rs"]
 pub(super) mod restoration;
 
@@ -26,6 +29,7 @@ pub(super) struct LoadFamily {
     max_solves: usize,
     max_recovery_solves: usize,
     restoration_reduction: Option<f64>,
+    goal: Option<fs_topols::robust_resolution::goal::MultiLoadDwrPolicy>,
     additional: Vec<RobustLoadCase>,
 }
 
@@ -57,11 +61,15 @@ pub(super) fn parse(fields: &[Node]) -> Result<Option<LoadFamily>> {
     if restoration_reduction.is_some_and(|value| !(0.0..1.0).contains(&value)) {
         return Err(malformed("stress-restoration-reduction must be finite and lie in [0,1)"));
     }
+    let goal_policy = goal::parse(fields)?;
+    if goal_policy.is_some() && (aggregate != RobustAggregate::WeightedSum || restoration_reduction.is_some()) {
+        return Err(malformed("DWR gain checks require weighted-sum and no stress-restoration policy"));
+    }
     let additional = list(field(fields, "additional")?, "additional loads")?;
-    if additional.len() > 15 || (additional.is_empty() && restoration_reduction.is_none())
+    if additional.len() > 15 || (additional.is_empty() && restoration_reduction.is_none() && goal_policy.is_none())
         || !(1..=100_000).contains(&max_solves)
         || max_solves < additional.len() + 1 || max_recovery_solves > 100_000
-    { return Err(malformed("load-family requires 1..=15 additional cases (zero only with explicit restoration), a complete baseline allowance within 100000 solves, and 0..=100000 recovery solves")); }
+    { return Err(malformed("load-family requires up to 15 additional cases (zero only with restoration or goal-check), a complete baseline allowance within 100000 solves, and 0..=100000 recovery solves")); }
     let additional = additional.iter().map(|node| {
         let fields = list(node, "load case")?;
         if !fields.first().is_some_and(|node|
@@ -73,7 +81,8 @@ pub(super) fn parse(fields: &[Node]) -> Result<Option<LoadFamily>> {
         RobustLoadCase::new(DesignBoxEdge::Right, band[0], band[1], traction, weight)
             .map_err(|error| malformed(&error.to_string()))
     }).collect::<Result<Vec<_>>>()?;
-    Ok(Some(LoadFamily { aggregate, max_solves, max_recovery_solves, restoration_reduction, additional }))
+    Ok(Some(LoadFamily { aggregate, max_solves, max_recovery_solves, restoration_reduction,
+        goal: goal_policy, additional }))
 }
 
 impl LoadFamily {
@@ -90,6 +99,7 @@ impl LoadFamily {
             history.cases.len(), aggregate_name(self.aggregate), history.solves, self.max_solves,
             history.recovery_solves, self.max_recovery_solves)
             + &mesh::html(resolution, history.mesh.as_ref())
+            + &goal::html(self.goal, history.goal.as_ref())
     }
 
     pub(super) fn canonical(&self, out: &mut String) {
@@ -100,6 +110,7 @@ impl LoadFamily {
         if let Some(reduction) = self.restoration_reduction {
             let _ = writeln!(out, "      :stress-restoration-reduction {}", canonical_float(reduction));
         }
+        if let Some(policy) = self.goal { goal::canonical(policy, out); }
         let _ = writeln!(out, "      :additional (");
         for case in &self.additional {
             let [a, b] = case.interval();
@@ -208,6 +219,7 @@ pub(super) struct History {
     // Separates a finished optimizer from an interrupted final assessment.
     optimizer_terminal: Option<&'static str>,
     mesh: Option<mesh::LastCheck>,
+    goal: Option<goal::LastCheck>,
 }
 
 impl History {
@@ -226,7 +238,8 @@ impl History {
             quoted(aggregate_name(family.aggregate)), cases_json(&self.cases), states_json(&self.baseline),
             self.accepted.iter().map(|row| states_json(row)).collect::<Vec<_>>().join(","),
             self.solves, family.max_solves, self.recovery_solves, family.max_recovery_solves,
-            quoted(&hex(&self.checkpoint)), terminal, mesh::field(resolution, self.mesh.as_ref()))
+            quoted(&hex(&self.checkpoint)), terminal,
+            mesh::field(resolution, self.mesh.as_ref()) + &goal::field(family.goal, self.goal.as_ref()))
     }
 
     pub(super) fn read(value: &JsonValue, baseline: &SampledStressEvaluation,
@@ -292,7 +305,8 @@ impl History {
             },
         };
         let mesh = mesh::read(value, policy, &cases, &baseline, &accepted)?;
-        Ok(Some(Self { cases, baseline, accepted, checkpoint, solves, recovery_solves, optimizer_terminal, mesh }))
+        let goal = goal::read(value, policy, &cases, &baseline, &accepted)?;
+        Ok(Some(Self { cases, baseline, accepted, checkpoint, solves, recovery_solves, optimizer_terminal, mesh, goal }))
     }
 }
 
