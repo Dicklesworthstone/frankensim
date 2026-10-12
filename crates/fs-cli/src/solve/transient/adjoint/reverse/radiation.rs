@@ -69,7 +69,8 @@ pub(super) fn bind(
     cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>, old: &[f64], accepted: &[f64],
     dt_s: f64, config: StepConfig, lowering: &LoweredRadiation,
-    physical_tolerance_j: f64, regions: &[&str], deadline: Option<(Instant, f64)>,
+    physical_tolerance_j: f64, regions: &[&str],
+    convection_mean_slopes: Option<&[f64]>, deadline: Option<(Instant, f64)>,
 ) -> Result<Bound, SolveRefusal> {
     poll(cx, deadline)?;
     let n = problem.mesh.vertex_count();
@@ -79,6 +80,12 @@ pub(super) fn bind(
         || !physical_tolerance_j.is_finite() || physical_tolerance_j <= 0.0
     {
         return Err(bad("capacity radiation binding lost its field, source or physical target"));
+    }
+    if let Some(slopes) = convection_mean_slopes {
+        if slopes.len() != regions.len() {
+            return Err(bad("capacity radiation lost its natural coefficient slope layout"));
+        }
+        for &slope in slopes { finite(slope)?; }
     }
     let mut seen = BTreeSet::new();
     for &region in regions {
@@ -121,7 +128,9 @@ pub(super) fn bind(
         return Err(bad("capacity radiation changed physical boundary identities"));
     }
     let mut physical = Vec::with_capacity(regions.len());
-    let mut h_mean_slopes = vec![0.0; regions.len()];
+    let mut h_mean_slopes = convection_mean_slopes.map_or_else(
+        || vec![0.0; regions.len()], |slopes| slopes.to_vec(),
+    );
     let mut local_reference_slopes = vec![0.0; regions.len()];
     for &name in regions {
         poll(cx, deadline)?;
@@ -179,10 +188,16 @@ pub(super) fn bind(
         {
             return Err(bad("capacity radiation derivative differs from the actual accepted boundary"));
         }
-        h_mean_slopes[port] = wall_partial;
+        let convection_wall_partial = h_mean_slopes[port];
+        h_mean_slopes[port] = finite(convection_wall_partial + wall_partial)?;
         local_reference_slopes[port] = finite(
             (wall_partial / combined_h) * (reservoir - combined_reference),
         )?;
+        if convection_wall_partial != 0.0 {
+            local_reference_slopes[port] = finite(local_reference_slopes[port]
+                + (convection_wall_partial / combined_h)
+                    * (point.convection_reference - combined_reference))?;
+        }
         radiative.push(RadiativePort {
             port, region: patch.region().to_owned(), secant, reservoir_partial,
             reservoir, emissivity: patch.emissivity().value(),

@@ -9,7 +9,9 @@ use fs_project::{ProjectSpec, ThermalBoundaryCondition};
 use super::{SolveRefusal, bad, poll};
 
 mod reverse;
-pub(super) use reverse::{finish, radiation_storage_bytes};
+pub(super) use reverse::{
+    NaturalCoupling, finish, natural_storage_bytes, radiation_storage_bytes,
+};
 mod enthalpy;
 pub(super) use enthalpy::{
     EnthalpyTape, finish as finish_enthalpy, storage_bytes as enthalpy_storage_bytes,
@@ -53,14 +55,13 @@ pub(super) fn requested(spec: &ProjectSpec) -> Result<Option<Objective>, SolveRe
             .ok_or_else(|| bad("a transient adjoint report requires finite-time conduction"))?;
         let enthalpy = setup.transient.as_ref().is_some_and(|time| time.enthalpy.is_some());
         if !enthalpy && setup.boundaries.iter().any(|b| matches!(
-            b.condition, ThermalBoundaryCondition::NaturalConvection { .. }
-                | ThermalBoundaryCondition::AirflowConvection { .. })) {
-            return Err(bad("native capacity-storage adjoints require prescribed convection laws; use total-enthalpy storage for complete natural and airflow feedback"));
+            b.condition, ThermalBoundaryCondition::AirflowConvection { .. })) {
+            return Err(bad("native capacity-storage adjoints do not yet differentiate airflow feedback; use total-enthalpy storage for the complete air path"));
         }
-        if enthalpy && setup.boundaries.iter().any(|b| matches!(
+        if setup.boundaries.iter().any(|b| matches!(
             &b.condition, ThermalBoundaryCondition::NaturalConvection { correlation, .. }
                 if correlation != crate::solve::natural::DIFFERENTIABLE_CARD)) {
-            return Err(bad("native natural-convection enthalpy adjoints require the differentiated Churchill-Chu vertical-plate card"));
+            return Err(bad("native natural-convection adjoints require the differentiated Churchill-Chu vertical-plate card"));
         }
         if setup.regions.len() > 64 || setup.boundaries.len() > 64 {
             return Err(bad("native transient adjoints admit at most 64 volume regions and boundary laws"));

@@ -382,6 +382,9 @@ fn march(
                 nonlinear, radiation, airflow, natural, pressure_pa, deadline,
             )?;
             natural_evidence = natural_row(&solved)?;
+            // The outer natural owner accepted the complete physical model.
+            // An inner radiation target belongs to its frozen natural trial.
+            physical_target_j = Some(solved.physical_residual_tolerance_j);
             natural_iterations += solved.iterations;
             natural_solid_solves += solved.solid_solves;
             natural_endpoint_evaluations += solved.endpoint_evaluations;
@@ -700,13 +703,18 @@ pub(super) fn solve(
     let bytes = if objective.is_some() {
         let mut additional = adjoint::storage_bytes(problem.mesh.vertex_count(), fine_steps,
             policy.capacities.len())?;
+        let ports = problem.boundary.conditions().iter()
+            .filter(|condition| matches!(condition, fs_conduction::ThermalBc::Robin { .. }))
+            .count();
         if let Some(lowering) = radiation {
-            let ports = problem.boundary.conditions().iter()
-                .filter(|condition| matches!(condition, fs_conduction::ThermalBc::Robin { .. }))
-                .count();
             additional = additional.checked_add(adjoint::radiation_storage_bytes(
                 problem.mesh.vertex_count(), ports, lowering.patches.len(),
             )?).ok_or_else(|| bad("combined radiative adjoint memory estimate overflows"))?;
+        }
+        if natural_requested {
+            additional = additional.checked_add(adjoint::natural_storage_bytes(
+                problem.mesh.vertex_count(), ports, natural.len(),
+            )?).ok_or_else(|| bad("combined natural-convection adjoint memory estimate overflows"))?;
         }
         bytes.checked_add(additional)
             .ok_or_else(|| bad("combined forward/adjoint memory estimate overflows"))?
@@ -869,10 +877,13 @@ pub(super) fn solve(
     let adjoint_fragment = match objective {
         Some(objective) => {
             let tape = fine.tape.as_ref().ok_or_else(|| bad("requested transient adjoint lost its fine history"))?;
+            let natural_coupling = natural_requested.then_some(adjoint::NaturalCoupling {
+                laws: natural, pressure_pa,
+            });
             let derivative = adjoint::finish(cx, &engine, problem, interfaces, &grids.fine,
                 workload.as_ref(), StepConfig { linear, energy_tolerance_j: policy.energy_tolerance.value },
                 nonlinear, labels, region_ids, goal_region.expect("admitted goal region"),
-                radiation, tape, objective, deadline)?;
+                radiation, natural_coupling.as_ref(), tape, objective, deadline)?;
             format!(",\"adjoint\":{derivative}")
         }
         None => String::new(),

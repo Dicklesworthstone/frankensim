@@ -464,3 +464,210 @@ fn g0_native_transient_natural_refuses_equilibrium_actual_domain_escape_and_exha
         );
     }
 }
+
+
+const ADJOINT_RADIATION_RESERVOIR_K: f64 = 305.0;
+
+fn request_natural_adjoint(spec: &mut ProjectSpec, name: &str) {
+    spec.outputs.as_mut().unwrap().push(fs_project::OutputRequest {
+        name: name.to_string(), kind: "report".to_string(), region: None,
+    });
+}
+
+fn natural_final_k(solved: &ThermalRun) -> f64 {
+    n(solved.rows("fine").last().unwrap(), "final_region_max_k")
+}
+
+/// Differentiate the independent Churchill-Chu formula above, including
+/// signed wall departure and ideal-gas film density. The actual trajectories
+/// stay away from equilibrium; its limiting value is only a bisection aid.
+fn coefficient_derivatives(wall: f64, ambient: f64) -> (f64, f64, f64) {
+    let (h, _, nusselt) = coefficient(wall, ambient, LENGTH_M);
+    let exponent = (1.0 - 0.825 / nusselt.sqrt()) / 3.0;
+    let film = 0.5 * (wall + ambient);
+    let delta = wall - ambient;
+    (
+        h,
+        h * exponent * (1.0 / delta - 1.5 / film),
+        h * exponent * (-1.0 / delta - 1.5 / film),
+    )
+}
+
+/// Controls are initial K, added W, capacity multiplier, natural ambient K,
+/// absolute emissivity and independent radiation reservoir K. All act over
+/// the selected trajectory, not only its last endpoint.
+fn natural_trajectory_derivatives(
+    rows: &[J], initial: f64, radiative: bool,
+) -> [f64; 6] {
+    let area = area_m2();
+    let mut old = initial;
+    let mut derivative = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    for row in rows {
+        let dt = n(row, "dt_s");
+        let temperature = bisect(250.0, 360.0, |t| {
+            let h = coefficient(t, AMBIENT_K, LENGTH_M).0;
+            CAPACITY_J_K * (t - old) / dt + area * h * (t - AMBIENT_K)
+                + if radiative {
+                    EMISSIVITY * SIGMA * area * (t.powi(4) - ADJOINT_RADIATION_RESERVOIR_K.powi(4))
+                } else { 0.0 }
+                - 5.0
+        });
+        let (h, wall_partial, ambient_partial) =
+            coefficient_derivatives(temperature, AMBIENT_K);
+        let capacity = CAPACITY_J_K / dt;
+        let jacobian = capacity + area * (h + wall_partial * (temperature - AMBIENT_K))
+            + if radiative {
+                4.0 * EMISSIVITY * SIGMA * area * temperature.powi(3)
+            } else { 0.0 };
+        let direct = [
+            0.0,
+            1.0,
+            -capacity * (temperature - old),
+            area * (h - ambient_partial * (temperature - AMBIENT_K)),
+            if radiative { -SIGMA * area * (temperature.powi(4) - ADJOINT_RADIATION_RESERVOIR_K.powi(4)) }
+                else { 0.0 },
+            if radiative { 4.0 * EMISSIVITY * SIGMA * area * ADJOINT_RADIATION_RESERVOIR_K.powi(3) }
+                else { 0.0 },
+        ];
+        for (gradient, rhs) in derivative.iter_mut().zip(direct) {
+            *gradient = (capacity * *gradient + rhs) / jacobian;
+        }
+        old = temperature;
+    }
+    derivative
+}
+
+fn natural_adjoint_derivatives(adjoint: &J, radiative: bool) -> [f64; 6] {
+    let power = adjoint.get("regional_power").unwrap().as_array().unwrap();
+    assert!(adjoint.get("robin").unwrap().as_array().unwrap().is_empty(),
+        "a natural boundary must expose its physical reservoir control, not frozen-law Robin controls");
+    let reservoirs = adjoint.get("convection").unwrap()
+        .get("natural_reservoirs").unwrap().as_array().unwrap();
+    assert_eq!(power.len(), 1);
+    assert_eq!(reservoirs.len(), 1);
+    assert_eq!(reservoirs[0].str_field("target"), Some("air"));
+    close(n(&reservoirs[0], "ambient_temperature_k"), AMBIENT_K, 0.0);
+    let mut values = [
+        n(adjoint, "dtemperature_duniform_initial_k_per_k"),
+        n(&power[0], "dtemperature_duniform_added_watts_k_per_w"),
+        n(adjoint, "dtemperature_dcapacity_multiplier_k"),
+        n(&reservoirs[0], "dtemperature_dambient_temperature_k_per_k"),
+        0.0,
+        0.0,
+    ];
+    if radiative {
+        let surfaces = adjoint.get("radiation").unwrap()
+            .get("surfaces").unwrap().as_array().unwrap();
+        assert_eq!(surfaces.len(), 1);
+        close(n(&surfaces[0], "ambient_temperature_k"), ADJOINT_RADIATION_RESERVOIR_K, 0.0);
+        values[4] = n(&surfaces[0], "dtemperature_demissivity_k");
+        values[5] = n(&surfaces[0], "dtemperature_dreservoir_temperature_k_per_k");
+    }
+    values
+}
+
+#[test]
+fn g3_native_capacity_natural_adjoint_differentiates_hot_cold_and_radiative_histories() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    for initial in [330.0, 280.0] {
+        for radiative in [false, true] {
+            let (mut spec, bytes) = regular_project(initial, AMBIENT_K, 5.0);
+            if radiative {
+                radiation_product::declare(&mut spec, &card, "air", ADJOINT_RADIATION_RESERVOIR_K);
+            }
+            let plain = run(&spec, &cards, &bytes);
+            let mut requested = spec.clone();
+            request_natural_adjoint(&mut requested, "temperature-final-adjoint");
+            let solved = run(&requested, &cards, &bytes);
+            assert_eq!(solved.temperature, plain.temperature);
+            let adjoint = solved.transient().get("adjoint").unwrap();
+            close(n(adjoint, "value_k"), natural_final_k(&plain), 0.0);
+            close(n(adjoint, "reconstructed_solid_endpoints"), 0.0, 0.0);
+            close(n(adjoint, "reconstruction_krylov_iterations"), 0.0, 0.0);
+            let actual = natural_adjoint_derivatives(adjoint, radiative);
+            let expected = natural_trajectory_derivatives(solved.rows("fine"), initial, radiative);
+            for (&actual, &expected) in actual.iter().zip(&expected) {
+                close(actual, expected, 4e-7 * expected.abs().max(1.0));
+            }
+            assert!(actual[3] > 0.0,
+                "the ambient derivative must include both its reference and coefficient effects");
+            if radiative {
+                assert_eq!(actual[4].is_sign_positive(),
+                    ADJOINT_RADIATION_RESERVOIR_K > natural_final_k(&plain));
+                assert!(actual[5] > 0.0);
+            }
+            for row in solved.rows("fine") {
+                let natural = row.get("natural").unwrap();
+                assert!(n(natural, "physical_residual_norm_j")
+                    <= n(natural, "physical_residual_tolerance_j"));
+            }
+
+            // Perturb independent physical controls through fresh native
+            // projects. The radiative reservoir is held fixed when the
+            // natural ambient moves. Their distinct nominal values exercise
+            // the combined Robin reference's wall-temperature derivative.
+            let step = 1e-3_f64;
+            let count = if radiative { 6 } else { 4 };
+            for (control, &derivative) in actual[..count].iter().enumerate() {
+                let mut endpoints = Vec::new();
+                for delta in [-step, step] {
+                    let mut probe = spec.clone();
+                    let mut emissivity = EMISSIVITY;
+                    let setup = probe.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+                    match control {
+                        0 => setup.transient.as_mut().unwrap().initial_temperature =
+                            fs_project::TransientInitialTemperature::Uniform(
+                                QtyAny::new(initial + delta, dims::TEMPERATURE)),
+                        1 => probe.power.as_mut().unwrap()[0].watts.value += delta,
+                        2 => {
+                            for row in &mut setup.transient.as_mut().unwrap().capacities {
+                                row.volumetric_heat_capacity.value *= 1.0 + delta;
+                            }
+                        }
+                        3 => {
+                            let ThermalBoundaryCondition::NaturalConvection {
+                                ambient_temperature, ..
+                            } = &mut setup.boundaries[0].condition else {
+                                panic!("the oracle requires a natural-convection row");
+                            };
+                            ambient_temperature.value += delta;
+                        }
+                        4 => emissivity += delta,
+                        5 => setup.radiation.as_mut().unwrap().surfaces[0]
+                            .reservoir_temperature.value += delta,
+                        _ => unreachable!(),
+                    }
+                    let (probe_cards, probe_card) =
+                        radiation_product::emissivity_cards(&fixture_cards(), emissivity);
+                    if radiative {
+                        probe.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                            .radiation.as_mut().unwrap().surfaces[0].card = probe_card;
+                    }
+                    endpoints.push(natural_final_k(&run(&probe, &probe_cards, &bytes)));
+                }
+                let finite_difference = (endpoints[1] - endpoints[0]) / (2.0 * step);
+                close(derivative, finite_difference, 3e-5 * derivative.abs().max(1.0));
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_native_capacity_natural_initial_peak_has_no_future_reservoir_influence() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    for radiative in [false, true] {
+        let (mut spec, bytes) = regular_project(330.0, AMBIENT_K, 0.0);
+        if radiative {
+            radiation_product::declare(&mut spec, &card, "air", ADJOINT_RADIATION_RESERVOIR_K);
+        }
+        request_natural_adjoint(&mut spec, "temperature-sampled-peak-adjoint");
+        let solved = run(&spec, &cards, &bytes);
+        let adjoint = solved.transient().get("adjoint").unwrap();
+        close(n(adjoint, "value_k"), 330.0, 0.0);
+        close(n(adjoint, "state_index"), 0.0, 0.0);
+        close(n(adjoint, "time_s"), 0.0, 0.0);
+        close(n(adjoint, "adjoint_krylov_iterations"), 0.0, 0.0);
+        assert_eq!(natural_adjoint_derivatives(adjoint, radiative),
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+}

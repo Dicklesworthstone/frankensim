@@ -1708,6 +1708,28 @@ for both radiation heat signs, exact forward-field preservation and zero
 future influence at an initial sampled peak. The synthetic
 `cooling-radiative-adjoint.fsim` example requests the new native report.
 
+Driver 76 extends native heat-capacity adjoints to the in-domain Churchill-Chu
+vertical-plate natural law, alone or with ambient radiation. The actual
+coefficient is rebound at the saved Robin wall mean, including signed
+wall/ambient and film-density dependence. Combined radiation receives both
+coefficient slopes and both weighted-reference terms. Reverse admission uses
+the outer natural endpoint's original physical target, never a nested frozen
+radiation target, and the same physical energy tolerance. The complete
+watt-coordinate multiplier feeds every history, power, capacity and cooling
+control without another timestep factor or primal solve.
+`transient.adjoint.convection.natural_reservoirs` reports independent target
+and ambient identities with `dtemperature_dambient_temperature_k_per_k`;
+the parameter changes both the explicit reference and natural coefficient.
+Natural ports are omitted from ordinary fixed-Robin control rows. Correlation
+data, pressure and geometry remain fixed, and unavailable derivatives at
+equilibrium or domain endpoints retain explicit refusal. An initial sampled
+peak keeps zero future controls. Storage admission charges one bounded active
+natural-law workspace before either grid executes. Existing native natural
+tests compare hot/cold histories, with and without radiation, to independent
+implicit recurrences and fresh physical-control perturbations. Their unequal
+natural/radiative reservoirs exercise both weighted-reference contributions.
+`cooling-natural-radiative-adjoint.fsim` supplies a synthetic native example.
+
 Driver 69 retains the radiative parameter owner alongside its bound reference
 storage. The shared combined pullback solves one complete physical transpose
 and contracts h, source, density, emissivity and reservoir controls with that
@@ -1744,7 +1766,8 @@ The shared typed Robin attachment adds the signed natural wall derivative,
 including film-density dependence, and the complete branch-major upstream air
 reference matrix to the already complete enthalpy/radiation tangent. The same
 multiplier contracts initial h, regional watts, reference density and existing
-radiative parameters. Capacity-storage natural/air adjoints remain unsupported;
+radiative parameters. Driver 76 admits capacity-storage natural adjoints;
+capacity-storage airflow adjoints remain unsupported;
 other natural cards require their own differentiated constitutive law.
 Driver 72 adds physical reservoir, branch-inlet and independent fan-speed
 controls under the scope below. Geometry and transport properties are fixed.

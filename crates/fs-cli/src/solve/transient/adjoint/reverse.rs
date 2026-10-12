@@ -5,11 +5,24 @@ use fs_conduction::{ConductionProblem, PowerMap, ScalarField, ThermalBc, Thermal
 use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
 use fs_exec::Cx;
 use crate::solve::radiation::LoweredRadiation;
+use crate::solve::natural::NaturalLaw;
 use super::{Objective, Selected, Tape, finite, select, storage_bytes};
 use super::super::{SolveRefusal, Workload, bad, lower, poll};
 
 mod report;
 mod radiation;
+mod natural;
+
+pub(in crate::solve::transient) struct NaturalCoupling<'a> {
+    pub(in crate::solve::transient) laws: &'a [NaturalLaw],
+    pub(in crate::solve::transient) pressure_pa: f64,
+}
+
+pub(in crate::solve::transient) fn natural_storage_bytes(
+    n: usize, ports: usize, natural_ports: usize,
+) -> Result<usize, SolveRefusal> {
+    natural::storage_bytes(n, ports, natural_ports)
+}
 
 pub(in crate::solve::transient) fn radiation_storage_bytes(
     n: usize, ports: usize, patches: usize,
@@ -35,6 +48,7 @@ struct Derivatives {
     revalidated_steps: usize,
     additional_storage_bytes: usize,
     radiation: String,
+    convection: String,
 }
 
 fn dot(cx: &Cx<'_>, a: &[f64], b: &[f64], deadline: Option<(Instant, f64)>)
@@ -54,7 +68,7 @@ pub(in crate::solve::transient) fn finish(
     interfaces: Option<&ThermalInterfaces>, ends_s: &[f64], workload: Option<&Workload<'_>>,
     config: StepConfig, nonlinear: Option<NonlinearStepConfig>, labels: &[u32],
     region_ids: &BTreeMap<String, u32>, goal_region: u32,
-    radiation: Option<&LoweredRadiation>, tape: &Tape,
+    radiation: Option<&LoweredRadiation>, natural: Option<&NaturalCoupling<'_>>, tape: &Tape,
     objective: Objective, deadline: Option<(Instant, f64)>,
 ) -> Result<String, SolveRefusal> {
     poll(cx, deadline)?;
@@ -63,8 +77,9 @@ pub(in crate::solve::transient) fn finish(
         || labels.len() != problem.mesh.element_count() {
         return Err(bad("transient adjoint mesh, trajectory or time-grid identity differs"));
     }
-    if radiation.is_some() && tape.physical_targets_j.len() != ends_s.len()
-        || radiation.is_none() && !tape.physical_targets_j.is_empty()
+    let coupled = radiation.is_some() || natural.is_some();
+    if coupled && tape.physical_targets_j.len() != ends_s.len()
+        || !coupled && !tape.physical_targets_j.is_empty()
     {
         return Err(bad("capacity adjoint lost its original physical acceptance targets"));
     }
@@ -109,12 +124,29 @@ pub(in crate::solve::transient) fn finish(
     let radiation_workspace = radiation.map(|lowering|
         radiation_storage_bytes(n, ports.len(), lowering.patches.len()))
         .transpose()?.unwrap_or(0);
+    let natural_workspace = natural.map(|coupling|
+        natural_storage_bytes(n, ports.len(), coupling.laws.len()))
+        .transpose()?.unwrap_or(0);
     let additional_storage_bytes = storage_bytes(n, ends_s.len(), names.len())?
         .checked_add(radiation_workspace)
+        .and_then(|value| value.checked_add(natural_workspace))
         .ok_or_else(|| bad("native capacity adjoint total workspace overflows"))?;
     let patch_count = radiation.map_or(0, |lowering| lowering.patches.len());
     let mut emissivities = vec![0.0; patch_count];
     let mut reservoirs = vec![0.0; patch_count];
+    let mut natural_ambients = vec![0.0; natural.map_or(0, |coupling| coupling.laws.len())];
+    let fixed_ports: Vec<usize> = ports.iter().enumerate().filter_map(|(index, &name)| {
+        let owned = natural.is_some_and(|coupling|
+            coupling.laws.iter().any(|law| law.target == name));
+        (!owned).then_some(index)
+    }).collect();
+    let feedback_entry_cap = n.checked_mul(ports.len()).and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| bad("capacity cooling feedback entry count overflows"))?;
+    let zero_feedback = if natural.is_some() {
+        vec![0.0; ports.len() * ports.len()]
+    } else {
+        Vec::new()
+    };
     let mut carry = vec![0.0; n];
     carry[selected.vertex] = 1.0;
     let mut source_controls = vec![vec![0.0; names.len()]; ends_s.len()];
@@ -134,19 +166,29 @@ pub(in crate::solve::transient) fn finish(
             history.source(cx, problem.mesh, labels, start, deadline)).transpose()?;
         let step_problem = ConductionProblem { source: source.as_ref().unwrap_or(problem.source), ..problem };
         let expected = &tape.states[index + 1];
-        let bound = radiation.map(|lowering| radiation::bind(
-            cx, engine, step_problem, interfaces, &tape.states[index], expected,
-            dt, config, lowering, tape.physical_targets_j[index], &ports, deadline,
+        let natural_bound = natural.map(|coupling| natural::bind(
+            cx, step_problem, expected, coupling.laws, coupling.pressure_pa, &ports, deadline,
         )).transpose()?;
-        let step = match &bound {
-            Some(bound) => engine.linearize_prescribed_endpoint(
-                cx, ConductionProblem { boundary: &bound.boundary, ..step_problem },
+        let convection_problem = ConductionProblem {
+            boundary: natural_bound.as_ref().map_or(step_problem.boundary, |bound| &bound.boundary),
+            ..step_problem
+        };
+        let bound = radiation.map(|lowering| radiation::bind(
+            cx, engine, convection_problem, interfaces, &tape.states[index], expected,
+            dt, config, lowering, tape.physical_targets_j[index], &ports,
+            natural_bound.as_ref().map(|bound| bound.h_mean_slopes.as_slice()), deadline,
+        )).transpose()?;
+        let step = if coupled {
+            let boundary = bound.as_ref().map_or(convection_problem.boundary, |bound| &bound.boundary);
+            engine.linearize_prescribed_endpoint(
+                cx, ConductionProblem { boundary, ..convection_problem },
                 interfaces, &tape.states[index], expected, dt, config,
                 tape.physical_targets_j[index], &ports,
-            ),
-            None => engine.linearize_prescribed_step(
+            )
+        } else {
+            engine.linearize_prescribed_step(
                 cx, step_problem, interfaces, &tape.states[index], dt, config, nonlinear, &ports,
-            ),
+            )
         }.map_err(lower)?;
         if step.temperature().len() != expected.len() { return Err(bad("adjoint reconstruction changed field shape")); }
         for (v, (&actual, &expected)) in step.temperature().iter().zip(expected).enumerate() {
@@ -173,10 +215,24 @@ pub(in crate::solve::transient) fn finish(
                 }
                 physical.convection
             },
-            None => step.pullback(cx, &carry, &zero_ports, &zero_ports).map_err(lower)?,
+            None => match &natural_bound {
+                Some(bound) => step.pullback_with_robin_feedback(
+                    cx, &bound.h_mean_slopes, &zero_ports, &zero_feedback, &carry, feedback_entry_cap,
+                ).map_err(lower)?,
+                None => step.pullback(cx, &carry, &zero_ports, &zero_ports).map_err(lower)?,
+            },
         };
         if !gradient.relative_residual.is_finite() || gradient.relative_residual >= config.linear.tolerance {
             return Err(bad("native transient transpose failed its recomputed residual gate"));
+        }
+        if let Some(bound) = &natural_bound {
+            let ambient = bound.ambient_partials(cx, &gradient, deadline)?;
+            if ambient.len() != natural_ambients.len() {
+                return Err(bad("capacity natural controls changed during reverse traversal"));
+            }
+            for (total, value) in natural_ambients.iter_mut().zip(ambient) {
+                *total = finite(*total + value)?;
+            }
         }
         let density_bar = step.source_density_pullback(cx, &gradient.nodal_load).map_err(lower)?;
         for (region, basis) in bases.iter().enumerate() {
@@ -185,6 +241,9 @@ pub(in crate::solve::transient) fn finish(
         source_multipliers[index] = step.source_multiplier_pullback(cx, &gradient.nodal_load).map_err(lower)?;
         capacities = finite(capacities + step.capacity_multiplier_pullback(cx, &gradient.nodal_load).map_err(lower)?)?;
         for i in 0..ports.len() {
+            if natural_bound.as_ref().is_some_and(|bound| bound.owns_region(ports[i])) {
+                continue;
+            }
             references[i] = finite(references[i] + gradient.references[i])?;
             coefficients[i] = finite(coefficients[i] + gradient.log_htc[i])?;
         }
@@ -195,16 +254,21 @@ pub(in crate::solve::transient) fn finish(
             .ok_or_else(|| bad("adjoint iteration count overflows"))?;
         worst_dual = worst_dual.max(gradient.relative_residual);
     }
-    let reconstructed_steps = if radiation.is_none() { selected.state } else { 0 };
-    let revalidated_steps = if radiation.is_some() { selected.state } else { 0 };
+    let reconstructed_steps = if coupled { 0 } else { selected.state };
+    let revalidated_steps = if coupled { selected.state } else { 0 };
+    let convection = natural.map(|coupling|
+        natural::fragment(coupling.laws, &natural_ambients, selected.state))
+        .transpose()?.unwrap_or_default();
     let radiation = radiation.map(|lowering|
         radiation::fragment(lowering, &emissivities, &reservoirs, selected.state))
         .transpose()?.unwrap_or_default();
     let result = Derivatives {
         selected, initial: carry, region_names: names, source_controls, source_multipliers,
-        capacity: capacities, ports: ports.iter().map(|s| (*s).to_owned()).collect(),
-        references, coefficients, primal_iterations, dual_iterations, worst_dual,
-        reconstructed_steps, revalidated_steps, additional_storage_bytes, radiation,
+        capacity: capacities, ports: fixed_ports.iter().map(|&i| ports[i].to_owned()).collect(),
+        references: fixed_ports.iter().map(|&i| references[i]).collect(),
+        coefficients: fixed_ports.iter().map(|&i| coefficients[i]).collect(),
+        primal_iterations, dual_iterations, worst_dual,
+        reconstructed_steps, revalidated_steps, additional_storage_bytes, radiation, convection,
     };
     report::render(cx, &result, ends_s, objective, config, deadline)
 }

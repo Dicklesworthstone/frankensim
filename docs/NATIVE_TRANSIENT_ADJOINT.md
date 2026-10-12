@@ -29,10 +29,11 @@ nonlinear conductivity tangent and fixed matching contact. The old physical
 field is never overwritten, including when the first prescribed-temperature
 endpoint differs from the initial temperature. With prescribed exterior laws,
 a reverse reconstruction must reproduce its retained forward temperatures bit
-for bit before its derivative can be used. Ambient-radiation endpoints instead
-bind the saved field directly under the original forward physical residual
-target and energy tolerance. Their complete transpose includes the changing
-radiative coefficient and weighted reservoir reference. Both paths retain
+for bit before its derivative can be used. Natural-convection and
+ambient-radiation endpoints instead bind the saved field directly under the
+original forward physical residual target and energy tolerance. Their complete
+transpose includes the changing convection/radiation coefficients and weighted
+reservoir references. Both paths retain
 their iteration, material-range and cancellation checks.
 
 The subreport contains nodal and uniform initial-temperature derivatives,
@@ -84,8 +85,8 @@ temperature. Each row supplies:
 Each surface parameter remains constant throughout the selected prefix and
 is independent even when two surfaces share a card. Emissivity directions
 must remain inside (0, 1]; at one, only nonpositive increments are feasible.
-The `robin` rows still refer to the original convective coefficient and
-reference. Radiation is never counted as heat delivered to an air stream.
+The `robin` rows refer to original prescribed convective coefficients and
+references; natural laws use the physical reservoir controls below. Radiation is never counted as heat delivered to an air stream.
 
 `revalidated_solid_endpoints` counts consumed radiation endpoints.
 `reconstructed_solid_endpoints` and reconstruction Krylov work are zero on
@@ -99,6 +100,43 @@ temperature adjoint for the existing synthetic startup-pulse model.
 `tests/solve/transient_radiation.rs` compares all seven physical controls
 against independent implicit scalar recurrences and fresh native project/card
 perturbations for hotter and cooler radiation reservoirs.
+
+### Natural convection with optional radiation
+
+Driver 76 also admits the existing Churchill–Chu vertical-plate natural
+convection law for heat-capacity trajectory adjoints. Heated and cooled walls
+use the signed wall departure and film-density feedback from the same
+correlation as the forward solver. Natural surfaces can radiate to separate
+reservoirs in the same simulation.
+
+The reverse pass evaluates each natural coefficient at the accepted Robin
+wall mean. If radiation is present, both laws contribute to the combined
+coefficient and weighted-reference derivative. It retains the **outer natural
+solver's** physical acceptance target; the target from an inner frozen-natural
+radiation trial is not substituted. The accepted temperature and energy
+history remain unchanged.
+
+`transient.adjoint.convection.natural_reservoirs` gives each natural
+boundary's `target`, nominal `ambient_temperature_k`, and
+`dtemperature_dambient_temperature_k_per_k`. This derivative includes both
+the explicit reservoir reference and the natural coefficient's ambient and
+film-density dependence. Pressure, geometry, characteristic length, transport
+properties and correlation data remain fixed. Each natural reservoir is an
+independent control, even when several surfaces use the same card.
+
+Natural-law ports are omitted from the ordinary fixed-`robin` control rows.
+Their effect on initial temperature, regional power, capacity and radiative
+parameters still enters through the complete coupled transpose. An initial
+sampled peak returns zero future reservoir influence without solving a
+transpose. Equilibrium and unsupported correlation or validity-domain
+derivatives retain their explicit refusals.
+
+`data/reference-project/cooling-natural-radiative-adjoint.fsim` combines
+synthetic heat storage, natural cooling and a distinct gray-radiation
+reservoir. The native regressions in `tests/solve/transient_natural.rs`
+compare hot and cold histories against independent physical recurrences and
+fresh project/card perturbations. Distinct natural and radiative reservoirs
+ensure the tests exercise both weighted-reference feedback terms.
 
 ## Total-enthalpy storage and coupled cooling
 
@@ -225,11 +263,12 @@ solve is introduced.
 
 ## Scope and budgets
 
-The capacity-storage path supports prescribed exterior convection with optional
-ambient radiation, constant declared heat capacities, static or scheduled
-volumetric sources, smooth heterogeneous conductivity and fixed matching
-contact. Natural convection and coupled airflow require the total-enthalpy
-path described above. Prescribed temperatures are held fixed, not returned as controls.
+The capacity-storage path supports prescribed or in-domain Churchill–Chu
+natural convection with optional ambient radiation, constant declared heat
+capacities, static or scheduled volumetric sources, smooth heterogeneous
+conductivity and fixed matching contact. Coupled airflow still requires the
+total-enthalpy path described above. Prescribed temperatures are held fixed,
+not returned as controls.
 The capacity-storage path does not return conductivity or contact controls.
 Neither path differentiates geometry, surface power, time-grid changes,
 constitutive knots or latent-heat parameters.
@@ -253,6 +292,7 @@ uncertainty, compliance or experimental-validation certificates.
 cargo test -p fs-conduction --test backward_euler_prescribed_adjoint
 cargo test -p fs-conduction --test ambient_radiation accepted_radiative_endpoint_adjoint
 cargo test -p fs-cli --test solve transient_radiation
+cargo test -p fs-cli --test solve transient_natural
 cargo test -p fs-cli --lib native_transient_adjoint
 cargo test -p fs-conduction --test enthalpy_adjoint robin_feedback
 cargo test -p fs-conduction --test enthalpy_radiation robin_feedback
