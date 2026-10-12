@@ -80,6 +80,94 @@ dispersion. The Model D table remains an approximate source-derived model;
 exporting its tuned tensions does not make it a measured instrument. This does
 not address the separate high-frequency soundboard/receiver-attack gap.
 
+## Register-specific multi-partial tuning
+
+`piano_tune` also accepts independent `--bass-octave-weights` and
+`--treble-octave-weights`. Each takes four comma-separated, finite, nonnegative
+weights for lower:upper partial pairs **2:1, 4:2, 6:3 and 8:4**, respectively.
+At least one weight must be positive. Scaling all four weights by the same
+positive factor does not change the policy. Each register defaults to
+`1,0,0,0`, preserving the original 2:1 arithmetic. Here “bass” means keys below
+C4 and “treble” means keys above B4; the temperament octave stays fixed.
+
+For example, the following explicitly blends 4:2 and 6:3 below C4 and keeps
+2:1 above B4. These weights are a user-selected objective, **not** a calibrated
+Model D recommendation or evidence of a universally preferable tuning.
+
+```sh
+cargo run --release -p fs-couple --example piano_tune -- \
+  --preset steinway-d --concert-pitch 440 \
+  --bass-octave-weights 0,1,1,0 --treble-octave-weights 1,0,0,0 \
+  --tuning-band 20000 --output voiced-scale.csv
+cargo run --release -p fs-couple --example grand_piano -- \
+  --preset steinway-d --scale voiced-scale.csv --render voiced-piano.wav
+```
+
+Do **not** add `--concert-pitch` **or** `--stretch-tuning` to the renderer when
+using this exported scale: either would replace the prepared tensions. The
+new weight/band flags belong to `piano_tune`; the renderer continues to consume
+its ordinary scale CSV. The same import route applies to exterior commands.
+All key, pedal, hammer, board and acoustic behavior remains in the existing
+renderer rather than a separate instrument or output filter.
+
+### Objective and physical solve
+
+For each octave the already-tuned neighbour is held fixed. If `n` is the upper
+partial number, define `beat_n = f_lower(2*n) - f_upper(n)`. Mixed weights
+minimize the fundamental-equivalent mean squared mismatch
+
+```text
+J(T) = sum_n w_n * (beat_n(T)/n)^2 / sum_n w_n
+```
+
+Only one course's positive **tension** is solved at each outward step. The
+frequency owner still computes every partial from that tension, length, mass
+and bending rigidity. Neither an assigned oscillator frequency nor a fixed
+key-number correction is introduced. A one-pair policy uses the exact existing
+partial solve; mixed policies use the monotone derivative of this convex
+objective, with bounded bisection and a final stationarity check through the
+physical frequency owner. They preserve all non-tension fields, input order,
+the anchored octave, transactional failure and repeatable preparation.
+
+The optional `--tuning-band` is a finite positive ceiling in Hz on the
+**neighbour's target partial**. Pairs above it are excluded and the remaining
+weights renormalized. An octave with no retained positive-weight target is an
+error, not a silent fallback. This is not a claim that the final response is
+bandlimited, a renderer sample-rate setting or a soundboard validity bound.
+Omitting the flag admits all explicitly weighted targets.
+
+The API `stretch_tuning::partials::tune` returns every solved octave's signed
+pair mismatches, with excluded/zero-weight pairs marked `None`, and
+`sqrt(J)` in Hz. The CLI prints the chosen weights, target band, pair count and
+largest reported weighted RMS mismatch. These are frequency comparisons,
+**not** perceptual roughness or loudness measurements. The CSV contains the
+complete resulting physical scale, not just the report or a set of MIDI notes.
+
+This is a sequence of local adjacent-octave fits, not a simultaneous global
+keyboard optimization, fifth/twelfth temperament fit, measured tuning curve,
+loaded-board calibration or listening-quality guarantee. Arbitrary weights
+can widen some intervals or trade one partial's beating for another's. Compare
+explicit policies on the same performance and mechanics before selecting one.
+
+### Multi-partial checks
+
+Nine additional core regressions cover all four individual pair policies,
+mixed-objective stationarity and candidate comparisons, exact default parity,
+physical invariants, order/idempotence, flexible strings, band exclusions and
+transactional refusal. Four CLI regressions cover actual scale preparation,
+CSV round trips, option admission and exclusive output after successful tuning.
+
+An independent Python/SciPy reference checked 3,648 octave solves across 48
+full-scale configurations: both supplied scales, four A4 references and six
+weight policies. Mixed tensions agree with an independent unscaled Brent
+solution and improve the declared local objective over the individual-pair
+candidates. This is a separate numerical reference, **not execution of the
+Rust tests** or a listening result. For one source-scale C1:C2 fixture with
+its upper neighbour held fixed, equal 4:2/6:3 weights reduce that specific RMS
+metric from approximately 0.04370 to 0.01809 Hz relative to a 2:1-only solution.
+The comparison does not establish a corresponding percentage improvement in
+sound quality or accuracy against a real piano.
+
 ## Focused checks
 
 ```sh

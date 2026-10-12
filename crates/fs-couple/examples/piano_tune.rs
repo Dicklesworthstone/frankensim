@@ -10,22 +10,32 @@ mod steinway_scale;
 mod stretch_tuning;
 
 use std::io::Write;
+use stretch_tuning::partials::{OctaveWeights, Profile, OctaveReport};
 
 const USAGE: &str = "piano_tune [--preset steinway-d | --scale strings.csv]
-    [--concert-pitch 430..450] --output tuned.csv
+    [--concert-pitch 430..450] [--bass-octave-weights w21,w42,w63,w84]
+    [--treble-octave-weights w21,w42,w63,w84] [--tuning-band max_partial_hz]
+    --output tuned.csv
 Default source: the explicitly estimated demonstration scale. Default A4: 440 Hz.
 Preserves length, mass, EI, unison spread and contact geometry; changes tension.
-C4..B4 remains equal tempered. Outside it, lower second and upper first partials
-match. This is a declared 2:1 octave policy, not a measured tuning curve.
+C4..B4 remains equal tempered. Defaults match lower second and upper first partials.
+Explicit register weights blend 2:1, 4:2, 6:3 and 8:4 partial matches by minimizing
+weighted squared beat/n in physical Hz. Weights must be nonnegative, not all zero.
+The optional tuning band excludes neighbour target partials above its ceiling;
+an octave with no admitted weighted target refuses. This is not a measured curve.
 Existing output files refuse. Render the result with grand_piano --scale tuned.csv
-without --concert-pitch, which would replace the stretch with equal temperament.";
+without --concert-pitch or --stretch-tuning, which would replace this preparation.";
 
 #[derive(Debug)]
-struct Options { scale: Option<String>, preset: bool, concert_a: f64, output: String }
+struct Options {
+    scale: Option<String>, preset: bool, concert_a: f64, output: String,
+    tuning: Profile,
+}
 impl Options {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut seen = std::collections::BTreeSet::new();
         let (mut scale, mut preset, mut concert_a, mut output) = (None, false, 440.0, None);
+        let mut tuning = Profile::default();
         let mut args = args.iter();
         while let Some(flag) = args.next() {
             if !seen.insert(flag.as_str()) { return Err(format!("duplicate option {flag}")); }
@@ -38,6 +48,10 @@ impl Options {
                 "--concert-pitch" => concert_a = value.parse::<f64>()
                     .map_err(|_| "invalid concert pitch")?,
                 "--output" => output = Some(value.clone()),
+                "--bass-octave-weights" => tuning.bass = OctaveWeights::parse(value)?,
+                "--treble-octave-weights" => tuning.treble = OctaveWeights::parse(value)?,
+                "--tuning-band" => tuning.max_partial_hz = Some(value.parse::<f64>()
+                    .map_err(|_| "invalid tuning band")?),
                 _ => return Err(format!("unknown option {flag}")),
             }
         }
@@ -45,32 +59,42 @@ impl Options {
         if !concert_a.is_finite() || !(430.0..=450.0).contains(&concert_a) {
             return Err("concert pitch must be finite and in 430..450 Hz".into());
         }
+        if tuning.max_partial_hz.is_some_and(|hz| !hz.is_finite() || hz <= 0.0) {
+            return Err("tuning band must be finite and positive".into());
+        }
         let output = output.filter(|s| !s.is_empty()).ok_or("--output is required")?;
-        Ok(Self { scale, preset, concert_a, output })
+        Ok(Self { scale, preset, concert_a, output, tuning })
     }
-    fn prepare(&self) -> Result<Vec<geometry::Course>, String> {
+    fn prepare(&self) -> Result<(Vec<geometry::Course>, Vec<OctaveReport>), String> {
         let mut courses = match &self.scale {
             Some(path) => geometry::read_scale(&std::fs::read_to_string(path)
                 .map_err(|e| format!("read {path}: {e}"))?)?,
             None if self.preset => steinway_scale::courses()?,
             None => geometry::demonstration_scale()?,
         };
-        stretch_tuning::tune(&mut courses, self.concert_a)?;
-        Ok(courses)
+        let report = stretch_tuning::partials::tune(&mut courses, self.concert_a, self.tuning)?;
+        Ok((courses, report))
     }
 }
 
 fn run(options: &Options) -> Result<(), String> {
     // Complete all physical validation before creating the destination. Exclusive
     // creation also refuses input/output aliases, existing files and symlinks.
-    let courses = options.prepare()?;
+    let (courses, report) = options.prepare()?;
     let text = geometry::write_scale(&courses);
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
         .open(&options.output).map_err(|e| format!("create {}: {e}", options.output))?;
     file.write_all(text.as_bytes()).and_then(|()| file.sync_all())
         .map_err(|e| format!("write {}: {e}", options.output))?;
-    println!("Prepared {} courses at A4={} Hz with physical 2:1 octave stretch: {}",
-        courses.len(), options.concert_a, options.output);
+    println!("Prepared {} courses at A4={} Hz; bass weights {:?}, treble weights {:?}: {}",
+        courses.len(), options.concert_a, options.tuning.bass.values(),
+        options.tuning.treble.values(), options.output);
+    println!("Checked {} octave pairs against the declared physical partial objective; target band {:?} Hz",
+        report.len(), options.tuning.max_partial_hz);
+    if let Some(worst) = report.iter().max_by(|a,b| a.weighted_rms_hz.total_cmp(&b.weighted_rms_hz)) {
+        println!("Largest weighted RMS beat/n: {:.9e} Hz at MIDI {}:{}; signed beats {:?} Hz",
+            worst.weighted_rms_hz, worst.lower_midi, worst.lower_midi+12, worst.signed_beats_hz);
+    }
     Ok(())
 }
 
@@ -119,8 +143,8 @@ mod tests {
     #[test]
     fn both_scales_match_octaves_and_roundtrip_as_renderer_input() {
         for preset in [false, true] {
-            let options = Options { preset, scale: None, concert_a: 442.0, output: String::new() };
-            let courses = options.prepare().unwrap();
+            let options = Options { preset, scale: None, concert_a: 442.0, output: String::new(), tuning: Profile::default() };
+            let (courses, _) = options.prepare().unwrap();
             assert_eq!(geometry::read_scale(&geometry::write_scale(&courses)).unwrap(), courses);
             assert!((courses[48].partial_hz(1, courses[48].tension_n) / 442.0 - 1.0).abs() < 1e-11);
             for lower in 0..76 {
@@ -137,8 +161,12 @@ mod tests {
         let path = dir.join("retained.csv");
         std::fs::write(&path, "retain me").unwrap();
         let options = Options { scale: None, preset: false, concert_a: 440.0,
-            output: path.to_str().unwrap().to_owned() };
+            output: path.to_str().unwrap().to_owned(), tuning: Profile::default() };
         assert!(run(&options).is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "retain me");
     }
 }
+
+#[cfg(test)]
+#[path = "grand_piano/partial_tuning_cli_tests.rs"]
+mod partial_tuning_cli_tests;
