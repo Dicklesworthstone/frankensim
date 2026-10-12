@@ -58,6 +58,8 @@ pub(super) struct NaturalStep {
     pub(super) airflow: Option<AirflowEndpoint>,
     pub(super) airflow_evidence: String,
     pub(super) airflow_iterations: usize,
+    /// Initial/final physical air audits across every natural-coefficient trial.
+    pub(super) airflow_endpoint_evaluations: usize,
     /// Actual air enthalpy replaces on-path Robin heat in this second gate.
     pub(super) coupled_net_input_w: f64,
     pub(super) coupled_energy_residual_j: f64,
@@ -168,6 +170,9 @@ pub(super) fn advance(
     let airflow_factor = airflow.map_or(1, |_| exchange::exchange_config(false).max_iterations);
     let max_airflow_iterations = boundary_law::MAX_ITERATIONS.checked_mul(airflow_factor)
         .ok_or_else(|| bad("mixed transient interface work allowance overflows"))?;
+    let max_airflow_endpoint_evaluations = boundary_law::MAX_ITERATIONS
+        .checked_mul(airflow.map_or(0, |_| 2))
+        .ok_or_else(|| bad("mixed transient airflow audit allowance overflows"))?;
     let max_solid_solves = max_airflow_iterations.checked_mul(radiation_factor)
         .ok_or_else(|| bad("natural-convection/airflow/radiation work allowance overflows"))?;
     let max_krylov = max_solid_solves.checked_mul(step_config.linear.max_iterations)
@@ -191,6 +196,7 @@ pub(super) fn advance(
     let mut radiation_trials = 0;
     let mut endpoint_evaluations = 0;
     let mut airflow_iterations = 0;
+    let mut airflow_endpoint_evaluations = 0;
     let mut maximum_physical_energy_residual_j = 0.0_f64;
     let mut physical_target: Option<f64> = None;
     for iteration in 1..=boundary_law::MAX_ITERATIONS {
@@ -252,6 +258,8 @@ pub(super) fn advance(
                     inner_nonlinear, radiation, path, deadline,
                 )?;
                 count(&mut airflow_iterations, solved.outcome.solution.iterations, max_airflow_iterations)?;
+                count(&mut airflow_endpoint_evaluations, solved.endpoint_evaluations,
+                    max_airflow_endpoint_evaluations)?;
                 count(&mut solid_solves, solved.solid_solves, max_solid_solves)?;
                 count(&mut radiation_trials, solved.radiation_trials, max_solid_solves)?;
                 count(&mut krylov_iterations, solved.krylov_iterations, max_krylov)?;
@@ -426,7 +434,7 @@ pub(super) fn advance(
                 physical_dirichlet_in_w: physical.dirichlet_in_w,
                 physical_convective_out_w: physical.convective_out_w,
                 physical_radiative_out_w: physical.radiation_out_w,
-                airflow, airflow_evidence, airflow_iterations,
+                airflow, airflow_evidence, airflow_iterations, airflow_endpoint_evaluations,
                 coupled_net_input_w, coupled_energy_residual_j,
             });
         }

@@ -226,7 +226,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// ambient-radiation feedback and original-convection/emissivity/reservoir controls.
 /// Version 76 includes natural-convection and combined radiative feedback in
 /// heat-capacity adjoints with independent physical natural-reservoir controls.
-pub const SOLVE_DRIVER_VERSION: u32 = 76;
+/// Version 77 requires the full capacity-storage airflow endpoint residual at
+/// actual marched references, with an original target and counted physical audits.
+pub const SOLVE_DRIVER_VERSION: u32 = 77;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

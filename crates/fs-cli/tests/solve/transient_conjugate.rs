@@ -102,6 +102,15 @@ fn checked_coupling(row: &J) -> &J {
     assert!(n(coupled, "solid_solves") >= iterations);
     close(n(row, "krylov_iterations"), n(coupled, "krylov_iterations"), 0.0);
     assert!(n(coupled, "coupled_energy_residual_j").abs() <= 1e-6);
+    let physical_target = n(coupled, "physical_residual_tolerance_j");
+    let physical_residual = n(coupled, "physical_residual_norm_j");
+    assert!(physical_target.is_finite() && physical_target > 0.0);
+    assert!(physical_residual.is_finite() && physical_residual >= 0.0
+        && physical_residual <= physical_target);
+    assert!(n(coupled, "physical_energy_residual_j").abs() <= 1e-6);
+    // The actual predictor and accepted field are audited directly;
+    // intervening reference changes use the analytic load bound.
+    close(n(coupled, "endpoint_evaluations"), 2.0, 0.0);
     let tolerance = n(exchange, "balance_tolerance_w");
     assert!(n(exchange, "max_region_imbalance_w").abs() <= tolerance);
     assert!(n(exchange, "decomposition_residual_w").abs() <= tolerance);

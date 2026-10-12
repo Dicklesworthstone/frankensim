@@ -1940,10 +1940,20 @@ The raw reference tolerance is additionally bounded by one percent of the
 declared energy tolerance divided by `dt * sum(hA)`. An independent endpoint
 joule gate replaces on-path Robin heat with actual air enthalpy gain and
 retains off-path convection, nonlinear radiation, physical prescribed
-reaction and storage. Radiation is excluded from the air budget.
+reaction and storage. Radiation is excluded from the air budget. The physical
+free-residual target is fixed from the initial predictor evaluated at actual
+marched air references, including the new prescribed-temperature endpoint lift.
+Inner solid tolerances and reference convergence reserve room under that fixed
+target. Acceptance audits the counted candidate under its actual air/radiation
+law without another primal solve; convergence of the applied-reference exchange
+alone cannot admit the endpoint.
 
 Per-step `conjugate` evidence retains the applied references, exchange receipt,
-actual-air coupled energy residual and every nested numerical work count.
+physical residual and its original target, actual-air coupled energy residual
+and every nested numerical work count. Each air solve adds exactly two direct
+endpoint audits; intermediate reference-load changes use a conservative norm
+bound. Nested natural iterations accumulate the air audit count separately
+from natural-owned endpoint evaluations.
 `transient.conjugate` retains trajectory totals and the full product of the
 airflow, radiation and solid-response work caps; `conduction.conjugate`
 retains the final fine endpoint. Airflow is quasi-steady at the fixed retained

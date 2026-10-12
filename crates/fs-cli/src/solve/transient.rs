@@ -37,7 +37,7 @@ mod natural;
 mod workload;
 use workload::{TimeGrids, Workload};
 
-pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. Declared ambient radiation uses the shared area-mean gray-patch model with an independent endpoint residual and energy gate; every coupling trial retains the same physical history. Declared airflow uses quasi-steady branch transport at the retained flow-network operating point, with solid storage and a separate full coupled energy gate. Declared natural convection evaluates its admitted card at each endpoint and checks the full physical free residual and energy balance; exact equilibrium and out-of-domain Rayleigh states remain refused. Natural reservoirs and forced-air paths on distinct patches compose through the same stored solid: every natural update encloses a complete air solve, and the outer endpoint is independently checked under actual natural coefficients and actual air-law references with a separate air-enthalpy energy gate. The final air row describes its last natural iteration; natural and trajectory counters include all nested responses without advancing physical history. No airflow storage, time-varying fan dynamics, enclosure radiation, latent heat or transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
+pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. Declared ambient radiation uses the shared area-mean gray-patch model with an independent endpoint residual and energy gate; every coupling trial retains the same physical history. Declared airflow uses quasi-steady branch transport at the retained flow-network operating point, with solid storage, a full nodal residual gate at actual marched references and a separate actual-air energy gate. Declared natural convection evaluates its admitted card at each endpoint and checks the full physical free residual and energy balance; exact equilibrium and out-of-domain Rayleigh states remain refused. Natural reservoirs and forced-air paths on distinct patches compose through the same stored solid: every natural update encloses a complete air solve, and the outer endpoint is independently checked under actual natural coefficients and actual air-law references with a separate air-enthalpy energy gate. The final air row describes its last natural iteration; natural and trajectory counters include all nested responses without advancing physical history. No airflow storage, time-varying fan dynamics, enclosure radiation, latent heat or transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
 
 pub(super) struct NativeTransientResult {
     pub(super) solution: radiation::SolidSolution,
@@ -187,6 +187,7 @@ struct GridResult {
     airflow: Option<AirflowEndpoint>,
     airflow_iterations: usize,
     airflow_solid_solves: usize,
+    airflow_endpoint_evaluations: usize,
     natural: Option<NaturalEndpoint>,
     natural_iterations: usize,
     natural_solid_solves: usize,
@@ -265,7 +266,7 @@ fn airflow_row(
         })
         .collect::<Result<Vec<_>, SolveRefusal>>()?;
     Ok(format!(
-        "{{\"air_heat_gain_w\":{},\"off_path_convective_out_w\":{},\"radiative_out_w\":{},\"physical_dirichlet_in_w\":{},\"coupled_energy_residual_j\":{},\"solid_solves\":{},\"krylov_iterations\":{},\"nonlinear_iterations\":{},\"nonlinear_backtracks\":{},\"radiation_trials\":{},\"reference_tolerance_k\":{},\"applied_references_k\":{{{}}},\"exchange\":{}}}",
+        "{{\"air_heat_gain_w\":{},\"off_path_convective_out_w\":{},\"radiative_out_w\":{},\"physical_dirichlet_in_w\":{},\"coupled_energy_residual_j\":{},\"solid_solves\":{},\"krylov_iterations\":{},\"nonlinear_iterations\":{},\"nonlinear_backtracks\":{},\"radiation_trials\":{},\"reference_tolerance_k\":{},\"endpoint_evaluations\":{},\"initial_physical_residual_norm_j\":{},\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},\"physical_energy_residual_j\":{},\"applied_references_k\":{{{}}},\"exchange\":{}}}",
         number(solved.air_heat_gain_w)?,
         number(solved.off_path_convective_out_w)?,
         number(solved.radiation_out_w)?,
@@ -273,7 +274,10 @@ fn airflow_row(
         number(solved.coupled_energy_residual_j)?,
         solved.solid_solves, solved.krylov_iterations, solved.nonlinear_updates,
         solved.nonlinear_backtracks, solved.radiation_trials,
-        number(solved.reference_tolerance_k)?, references.join(","),
+        number(solved.reference_tolerance_k)?, solved.endpoint_evaluations,
+        number(solved.initial_physical_residual_norm_j)?,
+        number(solved.physical_residual_norm_j)?, number(solved.physical_residual_tolerance_j)?,
+        number(solved.physical_energy_residual_j)?, references.join(","),
         airflow::receipt_fragment(path, &solved.outcome)?,
     ))
 }
@@ -346,6 +350,7 @@ fn march(
     let mut last_airflow = None;
     let mut airflow_iterations = 0;
     let mut airflow_solid_solves = 0;
+    let mut airflow_endpoint_evaluations = 0;
     let mut last_natural = None;
     let mut natural_iterations = 0;
     let mut natural_solid_solves = 0;
@@ -403,6 +408,7 @@ fn march(
                 // These are the same solves counted by natural_solid_solves,
                 // presented under both owning interfaces, never summed twice.
                 airflow_solid_solves += solved.solid_solves;
+                airflow_endpoint_evaluations += solved.airflow_endpoint_evaluations;
             }
             last_airflow = solved.airflow;
             radiative_row = solved.radiation_evidence;
@@ -421,6 +427,7 @@ fn march(
             conjugate_row = airflow_row(path, &solved)?;
             airflow_iterations += solved.outcome.solution.iterations;
             airflow_solid_solves += solved.solid_solves;
+            airflow_endpoint_evaluations += solved.endpoint_evaluations;
             nonlinear_updates += solved.nonlinear_updates;
             nonlinear_backtracks += solved.nonlinear_backtracks;
             radiation_trials += solved.radiation_trials;
@@ -580,6 +587,7 @@ fn march(
         airflow: last_airflow,
         airflow_iterations,
         airflow_solid_solves,
+        airflow_endpoint_evaluations,
         natural: last_natural,
         natural_iterations,
         natural_solid_solves,
@@ -690,7 +698,8 @@ pub(super) fn solve(
     let bytes = problem
         .mesh
         .vertex_count()
-        .checked_mul(if natural_requested { 192 } else { 128 })
+        .checked_mul((if natural_requested { 192 } else { 128 })
+            + if airflow.is_some() { 64 } else { 0 })
         .and_then(|n| {
             problem
                 .mesh
@@ -809,6 +818,10 @@ pub(super) fn solve(
         natural_factor.checked_mul(2)
             .ok_or_else(|| bad("natural endpoint evaluation allowance overflows"))?
     } else { 0 };
+    let max_airflow_endpoint_evaluations_per_step = if airflow.is_some() {
+        natural_factor.checked_mul(2)
+            .ok_or_else(|| bad("airflow endpoint evaluation allowance overflows"))?
+    } else { 0 };
     let max_airflow_iterations_per_step = airflow_factor.checked_mul(natural_factor)
         .ok_or_else(|| bad("coupled interface iteration allowance overflows"))?;
     let max_solid_solves_per_step = max_airflow_iterations_per_step.checked_mul(radiation_factor)
@@ -826,6 +839,7 @@ pub(super) fn solve(
     let max_backtracks_per_update = nonlinear.map_or(0, |config| config.line_search.max_backtracks);
     if max_solid_solves_per_step.checked_mul(total_steps).is_none()
         || max_endpoint_evaluations_per_step.checked_mul(total_steps).is_none()
+        || max_airflow_endpoint_evaluations_per_step.checked_mul(total_steps).is_none()
         || max_krylov_per_step.checked_mul(total_steps).is_none()
         || max_updates_per_step
             .checked_mul(total_steps)
@@ -944,8 +958,10 @@ pub(super) fn solve(
     let airflow_receipt = if airflow.is_some() {
         let total_iterations = coarse.airflow_iterations + fine.airflow_iterations;
         let total_solid_solves = coarse.airflow_solid_solves + fine.airflow_solid_solves;
+        let total_endpoint_evaluations =
+            coarse.airflow_endpoint_evaluations + fine.airflow_endpoint_evaluations;
         format!(
-            "{{\"method\":\"quasi-steady-branch-iqn-ils\",\"storage\":\"solid-only\",\"max_iterations_per_step\":{max_airflow_iterations_per_step},\"max_iterations_per_natural_iteration\":{airflow_factor},\"max_solid_solves_per_step\":{max_solid_solves_per_step},\"max_krylov_iterations_per_step\":{max_krylov_per_step},\"coarse_iterations\":{},\"fine_iterations\":{},\"total_iterations\":{total_iterations},\"coarse_solid_solves\":{},\"fine_solid_solves\":{},\"total_solid_solves\":{total_solid_solves},\"maximum_coupled_energy_residual_j\":{},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{}}},\"history\":\"unchanged-physical-old-temperature-in-every-natural-air-and-radiation-trial\",\"endpoint\":\"last-counted-solid-response-at-retained-applied-references\",\"flow\":\"retained-steady-operating-point\"}}",
+            "{{\"method\":\"quasi-steady-branch-iqn-ils\",\"storage\":\"solid-only\",\"max_iterations_per_step\":{max_airflow_iterations_per_step},\"max_iterations_per_natural_iteration\":{airflow_factor},\"max_solid_solves_per_step\":{max_solid_solves_per_step},\"max_krylov_iterations_per_step\":{max_krylov_per_step},\"coarse_iterations\":{},\"fine_iterations\":{},\"total_iterations\":{total_iterations},\"coarse_solid_solves\":{},\"fine_solid_solves\":{},\"total_solid_solves\":{total_solid_solves},\"max_endpoint_evaluations_per_step\":{max_airflow_endpoint_evaluations_per_step},\"total_endpoint_evaluations\":{total_endpoint_evaluations},\"maximum_coupled_energy_residual_j\":{},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{}}},\"history\":\"unchanged-physical-old-temperature-in-every-natural-air-and-radiation-trial\",\"endpoint\":\"last-counted-solid-response-with-independent-actual-air-reference-physical-residual-and-energy-gates\",\"flow\":\"retained-steady-operating-point\"}}",
             coarse.airflow_iterations, fine.airflow_iterations,
             coarse.airflow_solid_solves, fine.airflow_solid_solves,
             number(coarse.maximum_coupled_energy_residual_j
