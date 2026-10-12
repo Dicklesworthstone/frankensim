@@ -104,6 +104,10 @@ pub struct AdaptiveDwrReport {
     pub grid: Quadtree,
     /// In declared case order. The signed indicators belong to `grid` only.
     pub estimates: Vec<ElasticityDwrEstimate>,
+    /// Unweighted compliances on the ORIGINAL grid, in declared case order.
+    /// Retained separately so a consumer can bind every original response even
+    /// after refinement; equal weighted sums must not conceal changed cases.
+    pub initial_case_compliances: Vec<f64>,
     /// Geometry identity and area on the ORIGINAL optimization grid.
     pub snapshot: u64,
     pub original_area: f64,
@@ -154,6 +158,7 @@ pub fn assess_adaptive_dwr_controlled<B>(
     if !original_area.is_finite() || original_area <= 0.0 { return Err(invalid("invalid original area")); }
     let mut rows = Vec::new();
     rows.try_reserve_exact(policy.max_rounds).map_err(|_| invalid("adaptive history allocation refused"))?;
+    let mut initial_case_compliances = Vec::new();
     let mut solves = 0usize;
     for round in 0..policy.max_rounds {
         let mut estimates = Vec::with_capacity(cases.len());
@@ -177,6 +182,9 @@ pub fn assess_adaptive_dwr_controlled<B>(
                 BoundaryTraction::EdgeBand { support, value: &traction })?);
         }
         let (row, indicators) = summarize(&grid, cases, &estimates, policy)?;
+        if round == 0 {
+            initial_case_compliances = estimates.iter().map(|e| e.j_primal).collect();
+        }
         let tolerance_met = row.correction_magnitude.max(row.observed_change) <= row.tolerance;
         rows.push(row);
         if let ControlFlow::Break(reason) = control(AdaptiveDwrStage::RoundComplete(round)) {
@@ -209,7 +217,8 @@ pub fn assess_adaptive_dwr_controlled<B>(
                 return Ok(ControlFlow::Break(reason));
             }
             return Ok(ControlFlow::Continue(AdaptiveDwrReport {
-                stop, rows, grid, estimates, snapshot: snapshot(phi), original_area, assessed_area, solves,
+                stop, rows, grid, estimates, initial_case_compliances,
+                snapshot: snapshot(phi), original_area, assessed_area, solves,
             }));
         }
     }

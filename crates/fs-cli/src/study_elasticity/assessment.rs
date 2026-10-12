@@ -1,21 +1,23 @@
-//! Explicit final-design DWR assessment. The two bounded solves run only after
-//! the actual optimizer endpoint has been durably retained. This includes a
-//! feasible projected baseline when the search accepts no update. A stop at
-//! either phase boundary retains the same geometry with assessment pending.
+//! Explicit final-design DWR assessment. Bounded solves run only after the
+//! actual optimizer endpoint has been durably retained. A stop retains the
+//! same geometry with assessment pending; retry never replays optimization.
 
 use super::*;
 use fs_topols::{ComplianceDwrAssessment, ComplianceDwrStage};
+use fs_topols::adaptive_dwr::AdaptiveDwrPolicy;
 use std::ops::ControlFlow;
 
-// This file is itself included through #[path], so a bare `mod multi_load;`
-// would resolve beside it (study_elasticity/multi_load.rs), not in assessment/.
+// This file is itself included through #[path], so nested paths are explicit.
 #[path = "assessment/multi_load.rs"]
 mod multi_load;
 pub(super) use multi_load::run as run_multi_load;
+#[path = "assessment/adaptive.rs"]
+mod adaptive;
 
 pub(super) enum FinalAssessment {
     Estimated(ComplianceDwrAssessment),
     Weighted(fs_topols::WeightedComplianceDwrAssessment),
+    Adaptive(Box<adaptive::Assessment>),
     Refused { reason: String, max_solves: usize },
 }
 
@@ -31,30 +33,57 @@ fn solve_limit(projected: Option<&continuation::ProjectedControls>) -> Result<us
 }
 
 pub(super) fn max_solves(spec: &ElasticitySpec) -> usize {
-    solve_limit(spec.projected.as_ref()).expect("admitted assessment mode")
+    let per_round = solve_limit(spec.projected.as_ref()).expect("admitted assessment mode");
+    per_round * spec.adaptive_dwr.map_or(1, |policy| policy.max_rounds)
 }
 
-pub(super) fn parse(root: &Node, projected: Option<&continuation::ProjectedControls>) -> Result<bool> {
+pub(super) fn canonical(spec: &ElasticitySpec, out: &mut String) {
+    if let Some(policy) = spec.adaptive_dwr {
+        adaptive::canonical(policy, max_solves(spec), out);
+    } else if spec.final_dwr {
+        let _ = writeln!(out, "  (assessment :type elasticity-dwr :max-solves-per-attempt {})", max_solves(spec));
+    }
+}
+
+pub(super) fn parse(root: &Node, projected: Option<&continuation::ProjectedControls>)
+    -> Result<(bool, Option<AdaptiveDwrPolicy>)>
+{
     let Some(fields) = list(root, "study root")?.iter().find_map(|node| {
         let NodeKind::List(fields) = &node.kind else { return None };
         fields.first().is_some_and(|node| matches!(&node.kind,
             NodeKind::Symbol(name) if name == "assessment")).then_some(fields)
-    }) else { return Ok(false) };
-    let max_solves = solve_limit(projected)?;
-    if !matches!(&field(fields, "type")?.kind, NodeKind::Symbol(kind) if kind == "elasticity-dwr")
-        || integer_node(field(fields, "max-solves-per-attempt")?, "assessment.max-solves-per-attempt")? != max_solves
-    {
+    }) else { return Ok((false, None)) };
+    let per_round = solve_limit(projected)?;
+    let adaptive = match &field(fields, "type")?.kind {
+        NodeKind::Symbol(kind) if kind == "elasticity-dwr" => None,
+        NodeKind::Symbol(kind) if kind == "elasticity-adaptive-dwr" => {
+            if !matches!(projected, Some(continuation::ProjectedControls::Volume(_))) {
+                return Err(fail("cli-study-adaptive-assessment",
+                    "adaptive final assessment currently requires a projected-volume endpoint"));
+            }
+            Some(adaptive::parse(fields)?)
+        }
+        _ => return Err(fail("cli-study-elasticity-assessment",
+            "assessment type must be elasticity-dwr or elasticity-adaptive-dwr")),
+    };
+    let max_solves = per_round * adaptive.map_or(1, |p| p.max_rounds);
+    if integer_node(field(fields, "max-solves-per-attempt")?, "assessment.max-solves-per-attempt")? != max_solves {
         return Err(fail("cli-study-elasticity-assessment",
-            format!("final assessment requires (assessment :type elasticity-dwr :max-solves-per-attempt {max_solves}); each independent load requires two solves")));
+            format!("final assessment requires exactly {max_solves} solves per attempt; each declared round requires two solves for every independent load")));
     }
-    Ok(true)
+    Ok((true, adaptive))
 }
 
 pub(super) fn validate(spec: &ElasticitySpec) -> Result<()> {
-    if spec.final_dwr && spec.memory_bytes < 256 * 1024 * 1024
-    {
+    if spec.final_dwr && spec.memory_bytes < 256 * 1024 * 1024 {
         return Err(fail("cli-study-elasticity-assessment",
             "final elasticity DWR requires at least 256 MiB admitted memory; independent cases are assessed sequentially, retaining indicators but not displacement states"));
+    }
+    if let Some(policy) = spec.adaptive_dwr {
+        if !spec.final_dwr { return Err(fail("cli-study-adaptive-assessment", "adaptive policy requires a final assessment")); }
+        policy.validate(spec.base.physics.as_ref().expect("validated physics").mesh_level,
+            solve_limit(spec.projected.as_ref())? / 2)
+            .map_err(|e| fail("cli-study-adaptive-assessment", e.to_string()))?;
     }
     Ok(())
 }
@@ -85,6 +114,9 @@ pub(super) fn run(
     terminal: &'static str,
     mut control: impl FnMut(ComplianceDwrStage) -> ControlFlow<&'static str>,
 ) -> (&'static str, Option<FinalAssessment>) {
+    if spec.adaptive_dwr.is_some() {
+        return adaptive::run_single(spec, phi, expected, terminal, control);
+    }
     let assessed = fs_topols::assess_compliance_dwr_controlled(
         phi, fixture(spec), settings(spec, spec.steps), &mut control,
     ).map_err(|error| error.to_string()).and_then(|outcome| match outcome {
@@ -122,6 +154,7 @@ pub(super) fn json(assessment: Option<&FinalAssessment>, requested_solves: Optio
     let a = match a {
         FinalAssessment::Estimated(a) => a,
         FinalAssessment::Weighted(a) => return multi_load::json(a),
+        FinalAssessment::Adaptive(a) => return adaptive::json(a),
         FinalAssessment::Refused { reason, max_solves } => return format!(
             ",\"goal_error_assessment\":{{\"status\":\"refused\",\"method\":\"elasticity-compliance-dwr\",\"reason\":{},\"max_solves_per_attempt\":{max_solves}}}",
             quoted(reason),
@@ -144,6 +177,7 @@ pub(super) fn html(assessment: Option<&FinalAssessment>, requested: bool) -> Str
             else { String::new() };
     };
     if let FinalAssessment::Weighted(a) = a { return multi_load::html(a); }
+    if let FinalAssessment::Adaptive(a) = a { return adaptive::html(a); }
     let FinalAssessment::Estimated(a) = a else {
         return "<p>Final compliance goal-error assessment: refused. The retained JSON reports the numerical reason; accepted geometry is unchanged.</p>".into();
     };

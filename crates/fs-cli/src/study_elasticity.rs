@@ -115,6 +115,7 @@ struct ElasticitySpec {
     id: ContentHash,
     projected: Option<continuation::ProjectedControls>,
     final_dwr: bool,
+    adaptive_dwr: Option<fs_topols::adaptive_dwr::AdaptiveDwrPolicy>,
 }
 
 fn list<'a>(node: &'a Node, what: &'static str) -> Result<&'a [Node]> {
@@ -157,7 +158,6 @@ fn number(node: &Node, what: &'static str) -> Result<f64> {
     }
     Ok(value)
 }
-
 fn integer_node(node: &Node, what: &'static str) -> Result<usize> {
     match node.kind {
         NodeKind::Int(value) if value >= 0 => usize::try_from(value)
@@ -276,9 +276,7 @@ fn canonical(spec: &ElasticitySpec) -> String {
     } else {
         let _ = writeln!(out, "    :steps {})", spec.steps);
     }
-    if spec.final_dwr {
-        let _ = writeln!(out, "  (assessment :type elasticity-dwr :max-solves-per-attempt {})", assessment::max_solves(spec));
-    }
+    assessment::canonical(spec, &mut out);
     let _ = writeln!(out, ")");
     out
 }
@@ -338,7 +336,7 @@ fn parse(source: &str) -> Result<ElasticitySpec> {
         .ok_or_else(|| fail("cli-study-elasticity-budget", "max-iterations is required"))?;
     let projected = continuation::parse_controls(optimizer_fields,
         base.constraints.as_ref().expect("validated constraints").volume_fraction)?;
-    let final_dwr = assessment::parse(&root, projected.as_ref())?;
+    let (final_dwr, adaptive_dwr) = assessment::parse(&root, projected.as_ref())?;
     let mut parsed = ElasticitySpec {
         base,
         canonical: String::new(),
@@ -361,6 +359,7 @@ fn parse(source: &str) -> Result<ElasticitySpec> {
         id: ContentHash([0; 32]),
         projected,
         final_dwr,
+        adaptive_dwr,
     };
     validate_model(&parsed)?;
     parsed.canonical = canonical(&parsed);
