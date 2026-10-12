@@ -3,6 +3,8 @@
 //! would change the functional and lose heat transfer through other components.
 use super::*;
 
+mod comparison;
+
 /// An explicit, nonempty union of complete tetrahedra in the caller's mesh.
 /// This is selection admission, not a geometry or material certificate. The
 /// caller must preserve the original element numbering when reusing it.
