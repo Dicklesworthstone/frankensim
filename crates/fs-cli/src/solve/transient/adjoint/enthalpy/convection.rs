@@ -157,11 +157,15 @@ pub(super) fn bind(
         else {
             continue;
         };
-        areas[index] = finite(areas[index] + face.area)?;
+        // Reproduce the forward Robin report's P1 mean in its original
+        // face/vertex order. A differently rounded trace can change the
+        // physical natural coefficient or air march during revalidation.
+        let mut wall_sum = 0.0;
         for &vertex in &face.vertices {
-            means[index] =
-                finite(means[index] + face.area / 3.0 * finite(temperature[vertex as usize])?)?;
+            wall_sum = finite(wall_sum + finite(temperature[vertex as usize])?)?;
         }
+        areas[index] = finite(areas[index] + face.area)?;
+        means[index] = finite(face.area.mul_add(wall_sum / 3.0, means[index]))?;
     }
     for (area, mean) in areas.iter().zip(&mut means) {
         if *area <= 0.0 {
@@ -169,7 +173,7 @@ pub(super) fn bind(
                 "enthalpy convection derivative has an empty physical trace",
             ));
         }
-        *mean = finite(*mean / *area)?;
+        *mean = finite(*mean * (1.0 / *area))?;
     }
     let mut replacements = Vec::new();
     replacements

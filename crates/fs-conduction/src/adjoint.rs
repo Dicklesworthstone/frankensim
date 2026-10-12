@@ -498,3 +498,6 @@ pub use robin::goal::{
     RobinGoalFeedback, RobinGoalLinearization, analyze_linear_goal, analyze_linear_maximum,
     compare_discrete_goal,
 };
+
+/// Retained linear thermal goals and implicit second-order design derivatives.
+pub mod second_order;

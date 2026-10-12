@@ -214,7 +214,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// trajectory controls through the same complete enthalpy transpose.
 /// Version 70 retains complete natural-convection and streamwise air feedback
 /// in native enthalpy trajectory adjoints, including the original endpoint gates.
-pub const SOLVE_DRIVER_VERSION: u32 = 70;
+/// Version 71 preserves the original physical acceptance target and wall means
+/// while binding complete convective enthalpy trajectory adjoints.
+pub const SOLVE_DRIVER_VERSION: u32 = 71;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

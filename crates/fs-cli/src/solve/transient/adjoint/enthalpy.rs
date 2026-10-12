@@ -499,6 +499,7 @@ pub(in crate::solve::transient) fn finish(
             boundary: feedback.as_ref().map_or(problem.boundary, |bound| &bound.boundary),
             ..source_problem
         };
+        let mut endpoint_config = config;
         if let Some(bound) = &feedback {
             // The physical target belongs to the accepted forward solve.
             // Reconstructing a target from old h with endpoint-frozen boundary
@@ -515,6 +516,12 @@ pub(in crate::solve::transient) fn finish(
                 return Err(bad("coupled enthalpy adjoint endpoint failed its original physical residual or energy gate"));
             }
             bound.check_air_energy(&physical, dt, config.energy_tolerance_j)?;
+            // These independent gates have enforced the retained physical
+            // target. The shared binder reconstructs its initial residual
+            // with endpoint-frozen convection, so that different scale must
+            // not introduce a tighter target for this accepted endpoint.
+            endpoint_config.newton.absolute_tolerance = config
+                .newton.absolute_tolerance.max(physical_tolerance_j);
             poll(cx, deadline)?;
         }
         let mut step = if let Some(lowering) = radiation {
@@ -522,12 +529,12 @@ pub(in crate::solve::transient) fn finish(
             // unchanged. The shared binder rebuilds radiation at this endpoint
             // and retains its complete mean-dependent feedback in the tangent.
             BoundEndpoint::Radiative(engine.linearize_accepted_parameters_with_ambient_radiation(
-                cx, step_problem, interfaces, old_h, dt, config,
+                cx, step_problem, interfaces, old_h, dt, endpoint_config,
                 &lowering.patches, endpoint, max_feedback_entries,
             ).map_err(failed)?)
         } else {
             BoundEndpoint::Prescribed(engine.linearize_accepted(
-                cx, step_problem, interfaces, old_h, dt, config, endpoint,
+                cx, step_problem, interfaces, old_h, dt, endpoint_config, endpoint,
             ).map_err(failed)?)
         };
         if let Some(bound) = &feedback {
