@@ -20,6 +20,7 @@ mod wav_output;
 mod hammer_materials;
 mod string_polarization;
 mod cavity;
+mod rayleigh_loading;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d] [--board board.csv | --board-geometry panel.fsb|panel.fss]
@@ -30,6 +31,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--dampers estimated | point | pads.fspd] [--string-stretching axial.fspx]
     [--string-polarization bridge-frames.fspp]
     [--cavity enclosure.fspc]
+    [--rayleigh-loading sides,min_hz,max_hz,samples]
     [--concert-pitch 430..450 | --stretch-tuning 430..450 | --raw-tensions]
     [--mesh-divisions 4..32] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--board-reduction SPEC]
@@ -195,7 +197,18 @@ at (0.675,1,1) metres in the mesh coordinate system. --microphone moves it.
 --microphone-right adds a second spatial receiver and writes left/right stereo
 from one mechanical performance. The original/default microphone is left;
 no panning, duplicated mono, peak normalization or second physics run. See STEREO.md.
-This assumes an infinite baffle, with no lid/room scattering or air backreaction.
+This assumes an infinite baffle, with no lid/room scattering.
+--rayleigh-loading adds physical air backreaction to a flat geometric pressure
+render. Supply sides,min_hz,max_hz,samples: one or two independent half-spaces,
+an explicit frequency band and an odd sample count from 33 to 257. The band
+must cover the loaded board reference frequencies and stay below 45% of the
+output rate. The full reciprocal Rayleigh impedance is fitted by the existing
+passive owner and coupled on the mechanics clock. Supplied wood damping is
+treated as intrinsic; the front microphone remains a one-side observation.
+Two-sided loading excludes a sealed --cavity below the board. Crowned shells,
+diagnostic-volume output and unsupported work/rate/fit budgets refuse.
+Absent this option, pressure observation has no air backreaction. See
+RAYLEIGH_LOADING.md for quadrature, fitting and finite-band limitations.
 Pressure uses every mechanics substep and causal anti-alias filtering before
 output-rate propagation. At 4x oversampling the filter adds 44 audio samples of
 latency, in addition to acoustic travel time. Histories persist across blocks.
@@ -241,6 +254,7 @@ struct Options {
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
     board_band_hz: f64, observer_gain: f64,
     board_reduction: Option<board_geometry::ritz::RitzOptions>,
+    rayleigh_loading: Option<rayleigh_loading::Options>,
     microphone: Option<[f64; 3]>, microphone_right: Option<[f64; 3]>, diagnostic_volume: bool,
     acoustic_refinement_levels: usize,
     dump_scale: Option<String>, dump_board: Option<String>,
@@ -261,7 +275,7 @@ impl Default for Options {
             midi: None, midi_mapping: midi::Mapping::default(),
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
-            board_reduction: None,
+            board_reduction: None, rayleigh_loading: None,
             microphone: None, microphone_right: None, diagnostic_volume: false,
             acoustic_refinement_levels: 0,
             dump_board: None, bridge_trace_csv: None, modal_pressure_csv: None, receiver_pressure_csv: None,
@@ -303,6 +317,7 @@ impl Options {
                 "--string-stretching" => options.string_stretching = Some(value.clone()),
                 "--string-polarization" => options.string_polarization = Some(value.clone()),
                 "--cavity" => options.cavity = Some(value.clone()),
+                "--rayleigh-loading" => options.rayleigh_loading = Some(rayleigh_loading::Options::parse(value)?),
                 "--concert-pitch" => options.concert_pitch = Some(value.parse().map_err(|_| invalid())?),
                 "--stretch-tuning" => options.stretch_tuning = Some(value.parse().map_err(|_| invalid())?),
                 "--mesh-divisions" => options.mesh_divisions = value.parse().map_err(|_| invalid())?,
@@ -426,6 +441,15 @@ impl Options {
             return Err("MIDI controls require --midi, channel 1..16 and finite maximum hammer velocity in (0,8] m/s".into());
         }
         let geometric = options.preset.is_some() || options.board_geometry.is_some();
+        if let Some(load) = &options.rayleigh_loading {
+            if !geometric || options.render.is_none() || options.diagnostic_volume {
+                return Err("--rayleigh-loading requires a flat geometric pressure --render".into());
+            }
+            load.validate_clock(options.sample_rate, options.sample_rate * options.substeps as u32)?;
+            if load.sides == 2 && options.cavity.is_some() {
+                return Err("two-sided Rayleigh loading conflicts with a sealed cavity below the board; use one exterior side".into());
+            }
+        }
         if let Some(reduction) = &options.board_reduction {
             if !geometric || options.render.is_none() || options.dump_board.is_some() {
                 return Err("--board-reduction requires a geometric --render and excludes --dump-board; modal CSV cannot preserve full damping".into());
@@ -902,6 +926,13 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         piano.configure_cavity(&cavity.loaded(&piano.bank)?)?;
         println!("{}", cavity.report());
     }
+    if let Some(options) = &options.rayleigh_loading {
+        let load = rayleigh_loading::prepare(
+            surface.ok_or("Rayleigh loading requires the played geometric surface")?,
+            &piano.bank, options, fs_bem::helmholtz::Medium::air(), piano.sample_rate())?;
+        piano.configure_radiation(&load.model)?;
+        println!("{}", load.report);
+    }
     let bridge_row = observed_course.map(|course| {
         piano.bank.strings.iter().find(|s|
             s.course == course && s.member == 0 && s.polarization == 0 && !s.duplex)
@@ -1014,7 +1045,8 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         println!("Loaded pressure basis: {json}; exact projection map and diagonal reference frequencies, not full instrument poles.");
     }
     if stream.microphone().is_some() {
-        println!("Computed half-space pressure in Pa; {} full scale {} Pa, no peak normalization. Infinite baffle; no room/lid scattering, radiation loading or measured-SPL calibration.", options.wav_format.label(), options.pcm_full_scale_pa);
+        println!("Computed half-space pressure in Pa; {} full scale {} Pa, no peak normalization. Infinite baffle; no room/lid scattering or measured-SPL calibration. Air backreaction: {}.", options.wav_format.label(), options.pcm_full_scale_pa,
+            if options.rayleigh_loading.is_some() { "explicit passive Rayleigh load" } else { "absent" });
     } else {
         println!("Diagnostic volume-velocity observer, gain {} Pa/(m^3/s); no peak normalization or calibrated SPL claim.", options.observer_gain);
     }
@@ -1031,6 +1063,10 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         piano.accounting.input_work_j - piano.energy_j() - piano.accounting.dissipated_j(), piano.accounting.max_balance_error_j);
     println!("Felt loss {:.9} J, including {:.9} J time-dependent relaxation; shank damping {:.9} J.",
         piano.accounting.felt_loss_j, piano.accounting.felt_relaxation_loss_j, piano.accounting.shank_loss_j);
+    if options.rayleigh_loading.is_some() {
+        println!("Radiation storage {:.9} J; passive radiation loss {:.9} J, each included once in the combined balance.",
+            piano.radiation_energy_j(), piano.accounting.radiation_loss_j);
+    }
     if piano.has_cavity() {
         println!("Cavity storage {:.9} J; explicit air momentum loss {:.9} J, each included once in the combined balance.",
             piano.cavity_energy_j(), piano.accounting.cavity_loss_j);
@@ -1081,6 +1117,10 @@ fn run() -> Result<(), String> {
         (Some(p), _) => Some(p.geometry.clone()),
         _ => None,
     };
+    if options.rayleigh_loading.is_some()
+        && geometry_text.as_deref().is_some_and(crowned_board::is_crowned) {
+        return Err("Rayleigh loading requires a flat FSB board; a crowned shell cannot be flattened for physical backreaction".into());
+    }
     let (modes, board_source, surface, polarization, physical_damping, cavity) = if let Some(text) = &geometry_text {
         let start = std::time::Instant::now();
         let source_ports = polarization.as_ref().map(|spec| spec.source_ports(&scale)).transpose()?;
@@ -1160,6 +1200,10 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(error) = run() { eprintln!("grand_piano: {error}"); std::process::exit(1); }
 }
+
+#[cfg(test)]
+#[path = "rayleigh_loading_render_tests.rs"]
+mod rayleigh_loading_render_tests;
 
 #[cfg(test)]
 #[path = "wav_output_render_tests.rs"]
