@@ -135,8 +135,9 @@ conductivity, regional power schedules, matching finite-resistance contact,
 prescribed Neumann/Robin boundaries, sourced natural convection or quasi-steady
 airflow convection, and ambient radiation. Prescribed temperatures refuse for
 enthalpy storage. Requested trajectory adjoints support prescribed exterior
-laws and fixed contact; radiation, natural-convection and airflow feedback
-remain outside the native enthalpy adjoint scope. The declared curves and card identities create no
+laws, fixed contact and complete ambient-radiation state feedback;
+natural-convection and airflow feedback remain outside the native enthalpy
+adjoint scope. The declared curves and card identities create no
 material-query receipts, expansion, phase kinetics or experimental validation.
 
 ### Sensitivities through a phase change
@@ -193,6 +194,31 @@ at genuine chart or material derivative corners refuse. These local
 derivatives keep geometry, boundary laws, contact data, chart values and
 the time grid fixed. They supply neither a continuous-time peak derivative
 nor an uncertainty or physical-validation certificate.
+
+### Sensitivities with radiative cooling
+
+`cooling-enthalpy-radiation-adjoint.fsim` starts a synthetic sensible-storage
+body at 330 K with a 270 K gray radiation reservoir, prescribed convection
+to 293.15 K and 5 W of heating. It requests `temperature-final-adjoint` on
+the one-second fine trajectory. The material card supplies conductivity;
+the declared density and enthalpy chart are manufactured example data.
+
+Use the same validate/import/solve commands above with the radiative project
+filename and a separate ledger, such as `enthalpy-radiation-adjoint.db`.
+The existing `aa6061.fsmcdpk` fixture also supplies its gray-surface card.
+The report retains initial-enthalpy, regional and interval-power, source
+multiplier and reference-density gradients. Its optional `radiation` row
+identifies the complete nonlinear area-mean tangent and additional bounded
+workspace. Emissivity, reservoir temperature and the card query remain fixed.
+
+The reverse solve includes the derivative of the full physical radiation
+law at each accepted endpoint; it does not freeze the coefficient used by
+the nonlinear forward iteration. The independent regular-tetrahedron tests
+cover both heating and cooling reservoirs, and a latent history that later
+leaves its plateau. Those tests also compare to fresh perturbed solves and
+explicitly distinguish the full tangent from a frozen radiation coefficient.
+These are local discrete derivatives on the reported grid, with the same
+branch, support and validation limits as the non-radiative enthalpy report.
 
 ### Fan-cooled phase storage
 

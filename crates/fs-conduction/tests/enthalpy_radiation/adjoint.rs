@@ -246,6 +246,97 @@ fn total_radiative_enthalpy_gradients_match_perturbed_physics_and_transpose() {
     });
 }
 
+/// G1/G3: changing only reference storage must include the physical radiative
+/// feedback, even when nodal enthalpy charts have different local slopes.
+#[test]
+fn radiative_storage_density_pullbacks_match_re_solved_physics() {
+    let fixture = Fixture::new();
+    with_cx(|cx| {
+        let source = ScalarField::nodal("heat density", 4, SOURCE.to_vec()).unwrap();
+        let assigned = |density| {
+            HeterogeneousEnthalpyBackwardEuler::new(
+                cx,
+                &fixture.mesh,
+                &[
+                    ReferenceEnthalpyMaterial {
+                        curve: &fixture.curve,
+                        reference_density_kg_m3: 3.0 * RHO,
+                    },
+                    ReferenceEnthalpyMaterial {
+                        curve: &fixture.curve,
+                        reference_density_kg_m3: density,
+                    },
+                ],
+                &[1],
+                EnthalpyBudget { max_elements: 2, ..budget() },
+            )
+            .unwrap()
+        };
+        for ambient in [300.0, 500.0] {
+            let patches = [patch(ambient, 520.0)];
+            let solve = |density| {
+                assigned(density)
+                    .advance_with_ambient_radiation(
+                        cx, fixture.problem(&source), None, &OLD, DT, config(),
+                        &patches, radiation_config(),
+                    )
+                    .unwrap()
+            };
+            let stepper = assigned(RHO);
+            let accepted = solve(RHO).conduction;
+            let radiative = stepper
+                .linearize_accepted_with_ambient_radiation(
+                    cx, fixture.problem(&source), None, &OLD, DT, config(),
+                    &patches, accepted.clone(), 8,
+                )
+                .unwrap();
+            let storage = stepper
+                .linearize_accepted_storage_with_ambient_radiation(
+                    cx, fixture.problem(&source), None, &OLD, DT, config(),
+                    &patches, accepted, 8,
+                )
+                .unwrap();
+            let seed = storage.transport().temperature_pullback(cx, &GOAL).unwrap();
+            let gradient = storage.pullback(cx, &seed, linear()).unwrap();
+            // Converting to the storage owner preserves every history/source
+            // derivative and the physical radiation multiplier bit-for-bit.
+            assert_eq!(
+                gradient.transport,
+                radiative.pullback(cx, &seed, linear()).unwrap().transport,
+            );
+            assert_eq!(gradient.element_reference_density.len(), 1);
+            assert_eq!(gradient.material_reference_density.len(), 2);
+            assert_eq!(gradient.material_reference_density[0], 0.0);
+            assert_eq!(
+                gradient.material_reference_density[1],
+                gradient.element_reference_density[0],
+            );
+            let expected = five_point(0.01, |delta| {
+                solve(RHO + delta).conduction.temperature.iter()
+                    .zip(GOAL).map(|(t, w)| w * (t - 350.0)).sum()
+            });
+            agree(
+                gradient.material_reference_density[1],
+                expected,
+                "radiative reference density",
+            );
+            let direction = [0.3];
+            let density_action = storage
+                .apply_reference_density_jacobian(cx, &direction).unwrap();
+            agree(
+                -dot(&gradient.transport.adjoint, &density_action),
+                direction[0] * gradient.element_reference_density[0],
+                "radiative storage residual transpose",
+            );
+            let u = [0.2, -0.5, 0.7, 0.3];
+            let v = [-1.0, 0.1, 0.6, 0.8];
+            let jv = storage.transport().apply_jacobian(cx, &v).unwrap();
+            let jtu = storage.transport().apply_jacobian_transpose(cx, &u).unwrap();
+            assert!((dot(&u, &jv) - dot(&jtu, &v)).abs() < 1e-12);
+        }
+    });
+}
+
 #[test]
 fn latent_plateau_keeps_enthalpy_controls_and_zero_temperature_sensitivity() {
     let mesh = regular_tet();

@@ -1183,6 +1183,23 @@ authority.
   conductivity for both hot and cold reservoirs. It also checks transpose
   identities, true returned dual residuals, exact latent-interior controls,
   facade/tape parity and tampered-primal/budget/cancellation refusals.
+- `HeterogeneousEnthalpyBackwardEuler::linearize_accepted_storage_with_ambient_radiation`
+  binds that same physical radiative endpoint to its declared reference-storage
+  assignments. It returns `HeterogeneousEnthalpyStepLinearization`, retaining
+  the complete sparse-plus-low-rank radiation tangent through `into_transport`
+  and the existing history, P1 source and element/material reference-density
+  pullbacks. The density derivative holds initial specific enthalpy, charts,
+  geometry, conductivity and radiation parameters fixed; it changes only
+  `rho0 * V / 4` storage masses. Unused material records receive zero. The
+  old-state difference and material assignments are bound by the storage owner,
+  so an unrelated tangent or history cannot be attached to these controls.
+  No additional nonlinear solve is performed. The existing physical residual,
+  energy, smoothness, cancellation and feedback-entry gates remain in force.
+  This entry point does not return dt, reservoir or emissivity controls.
+  `tests/enthalpy_radiation/adjoint.rs` checks nonuniform mixed-phase storage
+  with k(T), hot/cold reservoirs, history/source parity, the genuine transpose,
+  unused-record aggregation and density derivatives against fresh perturbed
+  nonlinear solves.
 - `EnthalpyStepLinearization::robin_response` binds original uniform convection
   ports to that same checked enthalpy endpoint. The producer retains the exact
   convection boundary; a radiative binder restores the original boundary after

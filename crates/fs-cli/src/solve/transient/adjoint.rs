@@ -12,6 +12,7 @@ pub(super) use reverse::finish;
 mod enthalpy;
 pub(super) use enthalpy::{
     EnthalpyTape, finish as finish_enthalpy, storage_bytes as enthalpy_storage_bytes,
+    radiation_storage_bytes as enthalpy_radiation_storage_bytes,
 };
 
 #[cfg(test)]
@@ -46,10 +47,14 @@ pub(super) fn requested(spec: &ProjectSpec) -> Result<Option<Objective>, SolveRe
         let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
             .filter(|setup| setup.transient.is_some())
             .ok_or_else(|| bad("a transient adjoint report requires finite-time conduction"))?;
-        if setup.radiation.is_some() || setup.boundaries.iter().any(|b| matches!(
+        if setup.boundaries.iter().any(|b| matches!(
             b.condition, ThermalBoundaryCondition::NaturalConvection { .. }
                 | ThermalBoundaryCondition::AirflowConvection { .. })) {
-            return Err(bad("native transient adjoints require prescribed exterior laws; radiation, natural and airflow feedback are not approximated by fixed coefficients"));
+            return Err(bad("native transient adjoints require prescribed convection laws; natural and airflow feedback are not approximated by fixed coefficients"));
+        }
+        let enthalpy = setup.transient.as_ref().is_some_and(|time| time.enthalpy.is_some());
+        if setup.radiation.is_some() && !enthalpy {
+            return Err(bad("native capacity-storage adjoints do not yet differentiate radiation; total-enthalpy storage has its own complete radiative endpoint owner"));
         }
         if setup.regions.len() > 64 || setup.boundaries.len() > 64 {
             return Err(bad("native transient adjoints admit at most 64 volume regions and boundary laws"));

@@ -411,6 +411,46 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         )
     }
 
+    /// Recheck an ambient-radiation endpoint and bind its reference-storage
+    /// derivatives to this model's exact material assignments and history.
+    ///
+    /// The full physical radiation tangent, including its mean-temperature
+    /// feedback, is retained in the shared transport linearization. History,
+    /// source and element/material reference-density pullbacks use that same
+    /// checked transpose. Radiation parameters and dt are held fixed; callers
+    /// needing their controls can use the separate radiative linearization.
+    /// No additional nonlinear endpoint solve is performed.
+    ///
+    /// `problem.boundary` must contain original convection, without radiation
+    /// already folded into it. The physical residual, energy, chart and
+    /// emissivity-support gates and two-vector feedback cap are unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_accepted_storage_with_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        patches: &[crate::AmbientRadiationPatch],
+        accepted: EnthalpyStepSolution,
+        max_feedback_entries: usize,
+    ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        let radiative = self.inner.linearize_accepted_with_ambient_radiation(
+            cx,
+            problem,
+            interfaces,
+            old_h,
+            dt_s,
+            config,
+            patches,
+            accepted,
+            max_feedback_entries,
+        )?;
+        self.bind_linearization(cx, old_h, radiative.into_transport())
+    }
+
     /// Advance closed enclosure exchange with heterogeneous charts and the
     /// same fixed reference masses, contacts and phase conductivity laws.
     #[allow(clippy::too_many_arguments)]

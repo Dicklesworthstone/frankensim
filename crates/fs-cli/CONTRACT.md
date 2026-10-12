@@ -1661,11 +1661,29 @@ revalidated endpoint counts, total dual iterations, worst residual and
 bounded reverse work. Chart/material derivative corners refuse rather than
 inventing a classical gradient. Prescribed boundary parameters, constitutive
 laws, phase multipliers, contact, geometry and the time grid are held fixed.
-Radiation, natural convection and airflow feedback remain explicitly
-unsupported in this native adjoint path. This is a local Estimated
+Natural convection and airflow feedback remain explicitly unsupported in
+this native adjoint path. Driver 68 includes complete ambient-radiation
+state feedback while its emissivity, reservoir temperature and query support
+remain fixed. This is a local Estimated
 derivative, without a gradient-error, continuous-peak or validation claim.
 `data/reference-project/cooling-enthalpy-adjoint.fsim` supplies a synthetic
 latent-to-sensible heating example with independent analytic expectations.
+
+For ambient radiation, the heterogeneous shared
+`linearize_accepted_storage_with_ambient_radiation` owner revalidates the
+original nonlinear residual and energy before retaining the complete
+area-mean radiation tangent. The original convection boundary is supplied
+once; no converged radiation coefficient is frozen or reapplied. History,
+source and regional reference-density controls use the same physical
+transpose. Admission additionally bounds `2 * vertices * patches` feedback
+entries, at most 64 patches, and one active radiation workspace. The optional
+`transient.adjoint.radiation` row records this method, feedback cap and
+additional workspace. Capacity-storage radiation adjoints still refuse.
+`tests/solve/transient_enthalpy_radiation_adjoint.rs` covers hot and cold
+reservoirs against independent scalar roots and fresh perturbed native
+solves, a frozen-secant negative control, latent-to-sensible history and an
+initial sampled peak. `cooling-enthalpy-radiation-adjoint.fsim` supplies the
+native radiative sensitivity example.
 
 Schema v14 optionally declares a conductivity multiplier for each regional
 enthalpy material. `linear-liquid-mass-fraction` interpolates between positive

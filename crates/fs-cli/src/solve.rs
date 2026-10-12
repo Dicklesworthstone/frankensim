@@ -208,7 +208,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// over immutable native total-enthalpy history, including latent plateaus.
 /// Version 67 differentiates accepted native enthalpy trajectories with exact
 /// history, regional delivered-power and frozen-reference-density pullbacks.
-pub const SOLVE_DRIVER_VERSION: u32 = 67;
+/// Version 68 retains complete ambient-radiation feedback in native enthalpy
+/// history, power and reference-density trajectory adjoints.
+pub const SOLVE_DRIVER_VERSION: u32 = 68;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
