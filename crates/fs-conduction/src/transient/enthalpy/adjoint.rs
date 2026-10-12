@@ -6,7 +6,7 @@
 //! the spatial `J_h` already includes temperature-column scaling and any
 //! declared phase-conductivity chain rule. The shared bounded FGMRES solver
 //! sees its explicit transpose action and the exact diagonal Jacobi inverse.
-//! The ambient-radiation binder can retain physical rank-one feedback terms;
+//! Radiation and declared Robin state laws can retain rank-one feedback terms;
 //! these participate in both actions, Jacobi and all history/source pullbacks.
 //!
 //! Geometry, reference masses, chart, conductivity laws, interfaces and time
@@ -158,7 +158,7 @@ pub struct EnthalpyStepGradient {
 }
 
 /// An accepted, rechecked endpoint with an owned sparse physical tangent and
-/// optional retained mean-radiation feedback factors.
+/// optional retained radiation and declared mean-convection feedback factors.
 /// Only the immutable mesh is borrowed; step-local source/boundary fields may
 /// be dropped. A caller can retain a bounded vector of these for a small
 /// full-storage reverse sweep without retaining any Newton/Krylov iteration.
@@ -171,9 +171,11 @@ pub struct EnthalpyStepLinearization<'m> {
     masses: Vec<f64>,
     inverse_diagonal: Vec<f64>,
     dt: f64,
-    // Only the physical ambient-radiation binder installs these updates.
+    // Physical radiation binders and the typed Robin-law attachment own these.
     // They are in residual-joule/enthalpy coordinates, after chart scaling.
     feedback: Vec<EnthalpyFeedback>,
+    // One typed attachment also owns the physical convective-heat seed chain.
+    robin_feedback: Option<robin::RobinStateFeedback>,
     // Retained by the checked producer. Radiation restores its ORIGINAL
     // convection boundary after preparing the complete physical tangent.
     convection_boundary: crate::ThermalBoundary,
@@ -329,6 +331,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             inverse_diagonal,
             dt: dt_s,
             feedback: Vec::new(),
+            robin_feedback: None,
             convection_boundary: problem.boundary.clone(),
         })
     }

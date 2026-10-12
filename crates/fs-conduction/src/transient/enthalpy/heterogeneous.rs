@@ -16,11 +16,11 @@ use fs_exec::Cx;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 
 use super::adjoint::{EnthalpyAdjointError, EnthalpyStepGradient, EnthalpyStepLinearization};
-use super::{EnthalpyRadiationStepGradient, EnthalpyRadiationStepLinearization};
 use super::{
     EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution,
     finite, poll,
 };
+use super::{EnthalpyRadiationStepGradient, EnthalpyRadiationStepLinearization};
 use crate::{
     ConductionMesh, ConductionProblem, LinearConfig, ThermalInterfaces, assemble::ASSEMBLY_TILE,
 };
@@ -323,8 +323,14 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         patches: Option<&[crate::AmbientRadiationPatch]>,
     ) -> Result<super::EnthalpyEndpointEvaluation, EnthalpyError> {
         self.inner.evaluate_endpoint(
-            cx, problem, interfaces, old_specific_h, candidate_specific_h,
-            dt_s, config, patches,
+            cx,
+            problem,
+            interfaces,
+            old_specific_h,
+            candidate_specific_h,
+            dt_s,
+            config,
+            patches,
         )
     }
 
@@ -438,17 +444,19 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         accepted: EnthalpyStepSolution,
         max_feedback_entries: usize,
     ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
-        Ok(self.linearize_accepted_parameters_with_ambient_radiation(
-            cx,
-            problem,
-            interfaces,
-            old_h,
-            dt_s,
-            config,
-            patches,
-            accepted,
-            max_feedback_entries,
-        )?.into_storage())
+        Ok(self
+            .linearize_accepted_parameters_with_ambient_radiation(
+                cx,
+                problem,
+                interfaces,
+                old_h,
+                dt_s,
+                config,
+                patches,
+                accepted,
+                max_feedback_entries,
+            )?
+            .into_storage())
     }
 
     /// Bind reference-storage and radiation-parameter derivatives together.
@@ -502,7 +510,14 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         radiation_config: crate::AmbientRadiationConfig,
     ) -> Result<super::enclosure::EnthalpyEnclosureStepSolution, EnthalpyError> {
         self.inner.advance_with_enclosure_radiation(
-            cx, problem, interfaces, old_h, dt_s, config, enclosure, radiation_config,
+            cx,
+            problem,
+            interfaces,
+            old_h,
+            dt_s,
+            config,
+            enclosure,
+            radiation_config,
         )
     }
 
@@ -653,12 +668,7 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
         primal: &EnthalpyStepSolution,
     ) -> Result<ReferenceDensityLinearization<'m>, EnthalpyAdjointError> {
         let mut specific_enthalpy_change = Vec::with_capacity(old_h.len());
-        for (vertex, (&new, &old)) in primal
-            .specific_enthalpy_j_kg
-            .iter()
-            .zip(old_h)
-            .enumerate()
-        {
+        for (vertex, (&new, &old)) in primal.specific_enthalpy_j_kg.iter().zip(old_h).enumerate() {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(cx, vertex)?;
             }
@@ -675,6 +685,28 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
 }
 
 impl HeterogeneousEnthalpyStepLinearization<'_> {
+    /// Attach original convective wall feedback without detaching the bound
+    /// reference-density history. Ordering, units and the total nodal-factor
+    /// cap are those of [`EnthalpyStepLinearization::with_robin_feedback`].
+    /// All source, history and density controls retain one complete multiplier.
+    pub fn with_robin_feedback(
+        mut self,
+        cx: &Cx<'_>,
+        regions: &[&str],
+        reference_derivatives: &[Vec<f64>],
+        htc_wall_derivatives: &[f64],
+        max_feedback_entries: usize,
+    ) -> Result<Self, EnthalpyAdjointError> {
+        self.inner = self.inner.with_robin_feedback(
+            cx,
+            regions,
+            reference_derivatives,
+            htc_wall_derivatives,
+            max_feedback_entries,
+        )?;
+        Ok(self)
+    }
+
     /// Shared exact endpoint Jacobian, transpose, temperature pullback and
     /// accepted primal. Retains the existing checked sparse-action interface.
     #[must_use]
@@ -718,6 +750,28 @@ impl HeterogeneousEnthalpyStepLinearization<'_> {
 }
 
 impl<'m> HeterogeneousEnthalpyRadiationStepLinearization<'m> {
+    /// Attach original convection laws to the full radiation/storage tangent.
+    /// [`EnthalpyStepLinearization::with_robin_feedback`] defines the matrix
+    /// ordering, units and total nodal-factor cap. Radiation parameters and
+    /// reference-density controls remain bound to this endpoint and one dual.
+    pub fn with_robin_feedback(
+        mut self,
+        cx: &Cx<'_>,
+        regions: &[&str],
+        reference_derivatives: &[Vec<f64>],
+        htc_wall_derivatives: &[f64],
+        max_feedback_entries: usize,
+    ) -> Result<Self, EnthalpyAdjointError> {
+        self.inner = self.inner.with_robin_feedback(
+            cx,
+            regions,
+            reference_derivatives,
+            htc_wall_derivatives,
+            max_feedback_entries,
+        )?;
+        Ok(self)
+    }
+
     /// Rechecked physical endpoint with chart-resolved phase fields.
     #[must_use]
     pub fn primal(&self) -> &EnthalpyStepSolution {

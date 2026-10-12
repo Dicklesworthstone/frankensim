@@ -2,6 +2,9 @@
 
 mod support;
 
+#[path = "enthalpy_adjoint/robin_feedback.rs"]
+mod robin_feedback;
+
 use fs_blake3::ContentHash;
 use fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError;
 use fs_conduction::transient::enthalpy::{

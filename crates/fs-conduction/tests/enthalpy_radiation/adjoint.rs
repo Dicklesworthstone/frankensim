@@ -1,5 +1,8 @@
 //! Actual perturbed nonlinear solves, not differentiation of a frozen secant.
 
+#[path = "adjoint/robin_feedback.rs"]
+mod robin_feedback;
+
 use super::*;
 use fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError;
 use fs_conduction::transient::enthalpy::heterogeneous::{

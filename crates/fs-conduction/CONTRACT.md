@@ -1233,6 +1233,27 @@ authority.
   terms enter the controls. All other material/chart/geometry parameters stay
   fixed. Only convection rows are exposed to the air coupling owner; radiation
   is retained inside the solid Jacobian and never counted as air heat.
+- `with_robin_feedback` consumes any of the uniform, heterogeneous, radiation,
+  or combined enthalpy linearization owners to attach declared convection-law
+  derivatives at that accepted endpoint. A bounded matrix gives each original
+  convective reference's derivative with respect to the selected area-mean
+  wall temperatures; one slope per port gives its own wall-dependent HTC.
+  Exact consistent P1 rank-one updates complete both tangent actions and
+  Jacobi, retaining all conductivity, phase and radiation feedback. Columns
+  carry `dT/dh`, including exact latent-plateau zeros. Physical convection-heat
+  objective seeds also include the attached laws. History, P1 source,
+  reference-density and radiation-parameter controls use the same completed
+  transpose; conversion between owners preserves the feedback. Returned
+  original-reference and log-HTC controls remain independent parameter
+  partials at fixed wall means. The caller owns physical law evaluation and
+  its derivatives; attaching a finite derivative is not validation of its
+  constitutive accuracy or acceptance of a different primal endpoint. One
+  attachment admits at most 64 unique original ports and an explicit total
+  factor-entry cap: `4 * vertices * convection_ports` plus existing radiation
+  factors. Shape, ownership, nonfinite arithmetic, work and cancellation
+  refusals precede publication. The focused Robin-feedback regressions check
+  full nonlinear re-solves, physical heat objectives, tangent transposes,
+  latent carry, storage-density and shared radiation-reservoir derivatives.
 - The Biot-gated `LumpedEnthalpyBody` admits equilibrium solid-liquid phase
   change and latent heat on a caller-supplied, bounded specific-enthalpy curve.
   It couples constant internal power with convection and surface radiation and

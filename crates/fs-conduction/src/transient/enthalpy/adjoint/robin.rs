@@ -10,6 +10,15 @@ use crate::assemble::ASSEMBLY_TILE;
 use crate::{LinearConfig, RobinFlux};
 use fs_exec::Cx;
 
+mod feedback;
+
+#[derive(Debug)]
+pub(super) struct RobinStateFeedback {
+    ports: Vec<RobinPort>,
+    reference_derivatives: Vec<Vec<f64>>,
+    htc_wall_derivatives: Vec<f64>,
+}
+
 /// Complete endpoint history/source derivatives and convection controls.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnthalpyRobinGradient {
@@ -121,6 +130,9 @@ impl<'m> EnthalpyRobinResponse<'_, 'm> {
     /// CONVECTIVE heat-rate seeds. h carry is added after multiplying the
     /// temperature seed by dT/dh, retaining latent energy sensitivity exactly.
     /// One complete physical transpose solve owns all returned derivatives.
+    /// Attached Robin state laws contribute their complete heat-rate objective
+    /// chain as well as the residual tangent. Control rows remain independent
+    /// original-reference and coefficient partials at fixed wall temperature.
     /// No boundary, Krylov or nonlinear iteration is differentiated.
     #[allow(clippy::too_many_arguments)]
     pub fn pullback(
@@ -149,6 +161,9 @@ impl<'m> EnthalpyRobinResponse<'_, 'm> {
                     seed[vertex] = finite(seed[vertex] + weight)?;
                 }
             }
+        }
+        if let Some(feedback) = &self.step.robin_feedback {
+            feedback.add_heat_seed(cx, &self.ports, heat_weights, self.temperature(), &mut seed)?;
         }
         let mut seed = self.step.temperature_pullback(cx, &seed)?;
         for (index, (value, &carry)) in seed.iter_mut().zip(h_weights).enumerate() {

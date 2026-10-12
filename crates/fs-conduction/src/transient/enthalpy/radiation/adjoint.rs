@@ -302,6 +302,29 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
 }
 
 impl<'m> EnthalpyRadiationStepLinearization<'m> {
+    /// Attach consumer-owned ORIGINAL convection state laws while retaining
+    /// every radiation parameter and the same accepted endpoint. See
+    /// [`EnthalpyStepLinearization::with_robin_feedback`] for ordering, units,
+    /// caller obligations and the total factor-entry budget. All controls
+    /// continue to use one complete transpose solve.
+    pub fn with_robin_feedback(
+        mut self,
+        cx: &Cx<'_>,
+        regions: &[&str],
+        reference_derivatives: &[Vec<f64>],
+        htc_wall_derivatives: &[f64],
+        max_feedback_entries: usize,
+    ) -> Result<Self, EnthalpyAdjointError> {
+        self.transport = self.transport.with_robin_feedback(
+            cx,
+            regions,
+            reference_derivatives,
+            htc_wall_derivatives,
+            max_feedback_entries,
+        )?;
+        Ok(self)
+    }
+
     /// Rechecked endpoint with the physical combined convection/radiation rows.
     #[must_use]
     pub fn primal(&self) -> &EnthalpyStepSolution {
