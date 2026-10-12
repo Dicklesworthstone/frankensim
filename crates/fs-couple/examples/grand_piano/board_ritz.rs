@@ -28,8 +28,10 @@ pub struct RitzOptions {
     pub keep_low_modes: usize,
     /// Positive, strictly increasing harmonic samples; statics are implicit.
     pub sample_hz: Vec<f64>,
-    /// Optional relative driving-point compliance tolerance on the explicit
-    /// source-pole/midpoint/seed grid. This is not a continuous-band bound.
+    /// Optional complex bridge-transfer tolerance on the explicit source-pole,
+    /// midpoint and seed grid. Cross transfers are normalized by the geometric
+    /// mean of the source driving-point magnitudes, not by a near-zero transfer.
+    /// This is not a continuous-band bound.
     pub transfer_tolerance: Option<f64>,
 }
 
@@ -74,9 +76,12 @@ impl RitzOptions {
 pub struct AdaptiveResponseReport {
     pub tolerance: f64,
     pub max_relative_driving_point_error: f64,
+    /// Maximum |H_reduced(i,j)-H_source(i,j)| /
+    /// (sqrt(|H_source(i,i)|)*sqrt(|H_source(j,j)|)), including the diagonal.
+    pub max_normalized_transfer_error: f64,
     /// Exact finite grid checked, including zero-frequency compliance.
     pub evaluation_hz: Vec<f64>,
-    /// Every admitted force port was checked at its own driving point.
+    /// Every reciprocal transfer between admitted force ports was checked.
     pub port_count: usize,
     pub enrichment_rounds: usize,
 }
@@ -95,8 +100,8 @@ pub struct RitzBasis {
     /// Nonzero static, harmonic-real and harmonic-imaginary snapshots, before
     /// rank selection. Duplicate directions still count as supplied snapshots.
     pub snapshot_count: usize,
-    /// Driving-point checks only: no cross-port, receiver, mesh-convergence,
-    /// or continuous-frequency transfer certificate is implied.
+    /// Bridge-transfer checks only: no receiver, mesh-convergence, or
+    /// continuous-frequency transfer certificate is implied.
     pub adaptive_response: Option<AdaptiveResponseReport>,
 }
 

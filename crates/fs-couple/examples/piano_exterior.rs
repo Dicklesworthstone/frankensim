@@ -114,11 +114,12 @@ FSPE board-band-hz, then retains at most 128 coordinates using bridge
 static/harmonic response directions and the requested exact low modes. Both
 directions of supplied --string-polarization frames guide the basis. Its
 1..16 increasing target frequencies must lie inside that source band. Adaptive
-selection checks actual complex driving-point bridge compliance at source
-resonances, midpoints, static and seed frequencies, then adds response directions
-until the requested relative tolerance is met. Insufficient rank or work budget
-refuses. This finite source-model grid does not certify cross-port,
-continuous-band or acoustic accuracy. Full projected wood damping and the transformed bridge/acoustic motion are shared
+selection checks actual complex compliance between every admitted bridge-port
+pair at source resonances, midpoints, static and seed frequencies. Errors use
+the geometric mean of the source driving-point magnitudes, preserving relative
+diagonal checks and signed cross-bridge transfer. Insufficient rank or work
+budget refuses. This finite source-model grid does not certify continuous-band
+or acoustic accuracy. Full projected wood damping and the transformed bridge/acoustic motion are shared
 by playback and admittance. Without --radiation-ports, render-loaded requires
 max_modes <=32. Explicit acoustic reduction retains up to 128 board coordinates
 while the passive fitter keeps its independent 32-port budget. Snapshot displacement
@@ -322,9 +323,9 @@ fn board_reduction_report(board:&board_geometry::PreparedBoard)->String {
         report.source_modes,board.modes.len(),report.protected_low_modes,report.sample_hz,
         report.snapshot_count,report.max_relative_snapshot_error);
     if let Some(check)=&report.adaptive_response {
-        writeln!(out,"# adaptive bridge response: maximum_relative_complex_driving_point_error={:.17e}, tolerance={:.17e}, force_ports={}, enrichment_rounds={}; finite-grid source-model comparison only; no cross-port, continuous-band, acoustic or mesh-convergence certificate",
-            check.max_relative_driving_point_error,check.tolerance,check.port_count,check.enrichment_rounds).unwrap();
-        writeln!(out,"# adaptive driving-point evaluation frequencies Hz: {:?}",check.evaluation_hz).unwrap();
+        writeln!(out,"# adaptive bridge response: maximum_relative_complex_driving_point_error={:.17e}, maximum_normalized_complex_bridge_transfer_error={:.17e}, tolerance={:.17e}, force_ports={}, enrichment_rounds={}; finite-grid source-model comparison only; no continuous-band, acoustic or mesh-convergence certificate",
+            check.max_relative_driving_point_error,check.max_normalized_transfer_error,check.tolerance,check.port_count,check.enrichment_rounds).unwrap();
+        writeln!(out,"# adaptive bridge-transfer evaluation frequencies Hz: {:?}",check.evaluation_hz).unwrap();
     }
     for (i,(lo,hi)) in report.source_frequency_intervals_hz.iter().enumerate() {
         writeln!(out,"# source FE mode {i}: [{lo:.17e},{hi:.17e}] Hz").unwrap();

@@ -161,11 +161,13 @@ It retains at most max_modes (1..128), including keep_low_modes exact low modes.
 the remaining basis at every admitted primary bridge and both directions of
 each supplied --string-polarization frame. Targets must lie within
 --board-band-hz; that source band is never widened implicitly. Adaptive selection
-checks actual complex driving-point bridge compliance at source resonances,
-midpoints, static and seed frequencies, enriching until the relative tolerance
-is met. Insufficient rank or work budget refuses preparation. The check covers
-this finite grid of the supplied source model, not continuous-band, cross-port
-or acoustic accuracy. Full projected wood damping, bridge motion and the
+checks actual complex compliance between every pair of admitted bridge ports
+at source resonances, midpoints, static and seed frequencies. Each error is
+scaled by the geometric mean of the source driving-point magnitudes, including
+the original relative error on the diagonal. Enrichment continues until the
+tolerance is met; insufficient rank or work budget refuses preparation. This
+finite source-model grid does not certify continuous-band or acoustic accuracy.
+Full projected wood damping, bridge motion and the
 radiating field stay in the same basis.
 For supplied downbearing, reduction uses the solved equilibrium tangent modes.
 This requires --render and excludes --dump-board: modal CSV cannot preserve the
@@ -1140,8 +1142,8 @@ fn run() -> Result<(), String> {
                 report.source_modes, prepared.modes.len(), report.protected_low_modes,
                 report.snapshot_count, report.sample_hz, report.max_relative_snapshot_error);
             if let Some(check) = &report.adaptive_response {
-                println!("Adaptive bridge response: maximum relative complex driving-point compliance error {:.9e} <= {:.9e}; {} frequencies, {} force ports, {} enrichment rounds. Finite-grid source-model comparison; no cross-port, continuous-band, acoustic or mesh-convergence certificate.",
-                    check.max_relative_driving_point_error, check.tolerance,
+                println!("Adaptive bridge response: maximum relative complex driving-point error {:.9e}; maximum normalized complex bridge-transfer error {:.9e} <= {:.9e}; {} frequencies, {} force ports, {} enrichment rounds. Finite-grid source-model comparison; no continuous-band, acoustic or mesh-convergence certificate.",
+                    check.max_relative_driving_point_error, check.max_normalized_transfer_error, check.tolerance,
                     check.evaluation_hz.len(), check.port_count, check.enrichment_rounds);
             }
             for (i, interval) in report.source_frequency_intervals_hz.iter().enumerate() {

@@ -21,8 +21,8 @@ Both piano frontends accept:
 - Frequencies: 1 through 16 finite, positive, strictly increasing values in Hz.
   Static response is included automatically. Each frequency must lie within the
   explicitly selected source board band.
-- `adaptive` adds a requested relative complex driving-point compliance
-  tolerance, finite and strictly between zero and one. The frequency list
+- `adaptive` adds a requested normalized complex bridge-transfer tolerance,
+  finite and strictly between zero and one. The frequency list
   supplies initial response directions; the actual check also includes static
   response, every distinct source resonance and the intervening midpoints.
 
@@ -93,18 +93,19 @@ The explicit adaptive form checks the actual Galerkin transfer instead:
 --board-reduction adaptive,96,24,0.05,800,1600,2400
 ```
 
-Here 0.05 requests at most 5% relative **complex** driving-point error at
-every evaluated frequency and admitted bridge force port. It accounts for
-amplitude and phase together. The 96-coordinate budget, 24 exact low modes
+Here 0.05 requests at most 5% normalized **complex** transfer error at
+every evaluated frequency and every pair of admitted bridge force ports.
+It accounts for amplitude and phase together, including transfer between
+different keys and supplied string polarizations. The 96-coordinate budget, 24 exact low modes
 and caller's source band remain explicit. This example is a preparation
 request, not evidence that a particular 2600 Hz geometry meets it.
 
-For a force column `b`, the source and reduced compliance are
+For force columns `b_i` and `b_j`, the source and reduced compliance are
 
 ```text
-H(omega)   = b^T [diag(lambda) - omega^2 I - i omega diag(c)]^-1 b
-H_r(omega) = (Q^T b)^T [K_r - omega^2 I - i omega C_r]^-1 (Q^T b)
-error      = |H_r - H| / |H|
+H_ij(omega)   = b_i^T [diag(lambda) - omega^2 I - i omega diag(c)]^-1 b_j
+H_r,ij(omega) = (Q^T b_i)^T [K_r - omega^2 I - i omega C_r]^-1 (Q^T b_j)
+error_ij      = |H_r,ij - H_ij| / (sqrt(|H_ii|) sqrt(|H_jj|))
 ```
 
 The real-valued transpose here preserves the physical force/velocity port;
@@ -113,10 +114,34 @@ the **complete** projected stiffness and damping, including off-diagonal
 terms. One factorization from the existing `fs_la::eigen_complex` owner is
 shared by all bridge ports at each frequency.
 
+On the diagonal, this is the original relative driving-point error. Away
+from it, the source driving points provide a scale even when a cross transfer
+is zero or nearly cancels. No arbitrary pressure, force or damping floor is
+introduced, and independently rescaling or reversing a port leaves the
+normalized error unchanged. A silent zero port must stay exactly silent.
+All reciprocal pairs are checked with their signed complex response; matching
+only the response at the struck key can miss motion transmitted to another
+key, which matters for sympathetic excitation and the radiating board field.
+
+A four-mode regression makes this distinction concrete: its two-coordinate
+model has 5% driving-point error throughout the checked grid, satisfying a
+6% request, while its normalized cross-bridge error exceeds 200% near a
+158.114 Hz antiresonance. The complete transfer check refuses that reduction;
+four coordinates recover both diagonal and cross responses below 1e-11 error.
+Reversing and independently rescaling ports preserves the decision. These are
+analytic source-model tests, not measured piano transfer data. The focused
+native Ritz closure passed all 11 tests with the pinned compiler and the actual
+`fs-math` and `fs-la` complex-LU implementations; a full example build was not run.
+
 Preparation starts with the protected low modes and seed responses, evaluates
 the full finite grid, and enriches the basis with real and imaginary source
-responses at the worst frequency/port pairs. Every successful final sweep
-checks all admitted primary bridges and any supplied secondary directions.
+responses at the worst frequency/drive-port pairs. Multiple failed receiver
+ports for the same drive and frequency use one enrichment candidate. Every
+successful final sweep checks the full reciprocal transfer matrix for all
+admitted primary bridges and any supplied secondary directions. Cross-transfer
+checks reuse the existing factorization and solves, without retaining an
+all-frequency matrix of port pairs. Their source and projection work is charged
+against the same explicit preparation budget.
 It never drops a difficult frequency or bridge from the check to obtain
 acceptance. Insufficient independent directions, retained rank or bounded
 preparation work refuse the requested reduction before playback. No damping
@@ -124,7 +149,7 @@ floor or relaxed tolerance is inserted.
 
 This is a comparison with the supplied **finite source model**, at a reported
 finite set of frequencies. It does not certify response between those points,
-transfer from one bridge to another, a string-loaded resonance, receiver
+a string-loaded resonance, receiver
 pressure, modes outside the source band, or agreement with a real Model D.
 The same final nodal field still supplies all bridges and acoustic outputs;
 this option improves structural response selection without inventing a

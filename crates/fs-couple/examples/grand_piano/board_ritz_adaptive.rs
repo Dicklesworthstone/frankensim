@@ -1,7 +1,7 @@
-//! Adaptive Ritz enrichment against the supplied source model's driving points.
-//! Each sweep checks every admitted port at statics, every distinct source pole,
-//! adjacent source-frequency midpoints, and explicit seeds. The finite grid is
-//! not a cross-port, receiver, mesh, or continuous-band accuracy certificate.
+//! Adaptive Ritz enrichment against the supplied source bridge-transfer matrix.
+//! Each sweep checks every reciprocal port pair at statics, every distinct source
+//! pole, adjacent source-frequency midpoints, and explicit seeds. The finite grid
+//! is not a receiver, mesh, or continuous-band accuracy certificate.
 
 use fs_la::eigen_complex::lu_complex;
 use fs_math::c64::C64;
@@ -81,8 +81,11 @@ fn grid(lambda: &[f64], damping: &[f64], seeds: &[f64]) -> Result<Vec<Frequency>
 fn finite(z: C64) -> bool { z.re.is_finite() && z.im.is_finite() }
 
 fn relative_error(got: C64, expected: C64) -> Result<f64,String> {
+    error_at_scale(got,expected,expected.abs())
+}
+
+fn error_at_scale(got: C64, expected: C64, reference: f64) -> Result<f64,String> {
     let absolute=(got-expected).abs();
-    let reference=expected.abs();
     if !absolute.is_finite() || !reference.is_finite() {
         return Err("adaptive compliance error magnitude is not representable".into());
     }
@@ -94,6 +97,19 @@ fn relative_error(got: C64, expected: C64) -> Result<f64,String> {
         return Err("adaptive relative compliance error is not representable".into());
     }
     Ok(relative)
+}
+
+/// A cross transfer may vanish or change sign at an antiresonance. Its own
+/// magnitude is therefore not a suitable denominator. Driving-point magnitudes
+/// give a force-unit invariant scale without inventing a compliance floor.
+fn transfer_error(got: C64, expected: C64, source_i: C64, source_j: C64)
+    -> Result<f64,String> {
+    let first=source_i.abs();let second=source_j.abs();
+    if !first.is_finite() || !second.is_finite() {
+        return Err("adaptive compliance error magnitude is not representable".into());
+    }
+    // Taking roots separately avoids overflowing or underflowing |Hii|*|Hjj|.
+    error_at_scale(got,expected,first.sqrt()*second.sqrt())
 }
 
 /// Both source and reduced compliances are multiplied by the same positive
@@ -139,16 +155,18 @@ struct Miss { error: f64, frequency: usize, port: usize }
 
 fn sweep(responses: &Responses, ports: &[Vec<f64>], columns: &[Vec<f64>],
     k: &[f64], c: &[f64], tolerance: f64, work: &mut Work)
-    -> Result<(f64,Vec<Miss>),String> {
+    -> Result<(f64,f64,Vec<Miss>),String> {
     let n=ports[0].len();let r=columns.len();let p=ports.len();
     let rank=r as u64;
+    let pairs=p as u64*(p as u64-1)/2;
     work.charge(n as u64*rank*p as u64 + responses.points.len() as u64*
-        (2*rank*rank*rank+4*p as u64*rank*rank+8*rank*rank))?;
+        (2*rank*rank*rank+4*p as u64*rank*rank+8*rank*rank+
+            pairs*(4*n as u64+4*rank+32)+32*p as u64))?;
     let forces: Vec<Vec<f64>>=ports.iter().map(|port|
         columns.iter().map(|q|dot(port,q)).collect()).collect();
     let mut matrix=vec![C64::ZERO;r*r];let mut rhs=vec![C64::ZERO;r];
     let mut misses: Vec<Miss>=Vec::with_capacity(ENRICHMENT_POINTS);
-    let mut maximum=0.0_f64;
+    let mut maximum_driving=0.0_f64;let mut maximum_transfer=0.0_f64;
     for (fi,point) in responses.points.iter().enumerate() {
         for row in 0..r {for col in 0..r {
             matrix[row*r+col]=C64::new(
@@ -168,17 +186,39 @@ fn sweep(responses: &Responses, ports: &[Vec<f64>], columns: &[Vec<f64>],
             if !finite(got) { return Err("adaptive reduced compliance overflow".into()); }
             let expected=responses.compliance[fi*p+pi];
             let relative=relative_error(got,expected)?;
-            maximum=maximum.max(relative);
-            if relative>tolerance {
-                let position=misses.iter().position(|old|relative>old.error).unwrap_or(misses.len());
+            maximum_driving=maximum_driving.max(relative);
+            let mut drive_error=relative;
+            // Reciprocity permits checking one triangle. Reuse this driven
+            // response for every output port; no extra solve or all-frequency
+            // transfer-matrix cache is needed.
+            for pj in pi+1..p {
+                let mut cross_got=C64::ZERO;let mut cross_expected=C64::ZERO;
+                for (&b,&q) in forces[pj].iter().zip(&rhs) {
+                    cross_got=cross_got+q.scale(b);
+                }
+                for i in 0..n {
+                    cross_expected=cross_expected+
+                        responses.inverse[fi*n+i].scale(ports[pi][i]*ports[pj][i]);
+                }
+                if !finite(cross_got) || !finite(cross_expected) {
+                    return Err("adaptive bridge transfer overflow".into());
+                }
+                drive_error=drive_error.max(transfer_error(cross_got,cross_expected,
+                    expected,responses.compliance[fi*p+pj])?);
+            }
+            maximum_transfer=maximum_transfer.max(drive_error);
+            // Aggregate output-port misses before enrichment: a driven source
+            // response is useful once per frequency, even if many outputs fail.
+            if drive_error>tolerance {
+                let position=misses.iter().position(|old|drive_error>old.error).unwrap_or(misses.len());
                 if position<ENRICHMENT_POINTS {
-                    misses.insert(position,Miss {error:relative,frequency:fi,port:pi});
+                    misses.insert(position,Miss {error:drive_error,frequency:fi,port:pi});
                     if misses.len()>ENRICHMENT_POINTS { misses.pop(); }
                 }
             }
         }
     }
-    Ok((maximum,misses))
+    Ok((maximum_driving,maximum_transfer,misses))
 }
 
 fn append_response(responses: &Responses, point: usize, port: &[f64], columns: &mut Vec<Vec<f64>>,
@@ -244,7 +284,7 @@ pub(super) fn build(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
     loop {
         work.charge(4*n as u64*columns.len() as u64*columns.len() as u64)?;
         let (stiffness,physical_damping)=projected_forms(lambda,damping,&columns)?;
-        let (error,misses)=sweep(&responses,&normalized_ports,&columns,
+        let (driving_error,error,misses)=sweep(&responses,&normalized_ports,&columns,
             &stiffness,&physical_damping,tolerance,&mut work)?;
         if error<=tolerance {
             work.charge(snapshots.len() as u64*n as u64*(2*columns.len() as u64+2))?;
@@ -257,13 +297,14 @@ pub(super) fn build(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
             return Ok(RitzBasis {columns,stiffness,damping:physical_damping,
                 max_relative_snapshot_error:snapshot_error,snapshot_count:snapshots.len(),
                 adaptive_response:Some(AdaptiveResponseReport {tolerance,
-                    max_relative_driving_point_error:error,
+                    max_relative_driving_point_error:driving_error,
+                    max_normalized_transfer_error:error,
                     evaluation_hz:responses.points.iter().map(|point|point.hz).collect(),
                     port_count:ports.len(),enrichment_rounds:rounds})});
         }
         let worst=misses.first().ok_or("adaptive bridge response error is not representable")?;
         if columns.len()==target {
-            return Err(format!("adaptive bridge driving-point tolerance {tolerance} unmet: relative error {error} at {} Hz, port {}, with {target} retained modes",
+            return Err(format!("adaptive bridge transfer tolerance {tolerance} unmet: normalized error {error} at {} Hz, driven port {}, with {target} retained modes",
                 responses.points[worst.frequency].hz,worst.port));
         }
         let previous=columns.len();
@@ -273,7 +314,7 @@ pub(super) fn build(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
             if columns.len()==target {break;}
         }
         if columns.len()==previous {
-            return Err(format!("adaptive bridge driving-point tolerance {tolerance} unmet: relative error {error}; response enrichment has no independent direction"));
+            return Err(format!("adaptive bridge transfer tolerance {tolerance} unmet: normalized error {error}; response enrichment has no independent direction"));
         }
         rounds+=1;
     }
@@ -290,18 +331,25 @@ mod tests {
         (k,c)
     }
     fn compliance(k: &[f64], c: &[f64], port: &[f64], hz: f64) -> C64 {
+        transfer(k,c,port,port,hz)
+    }
+    fn transfer(k: &[f64], c: &[f64], drive: &[f64], receiver: &[f64], hz: f64) -> C64 {
         let omega=TAU*hz;
-        port.iter().enumerate().fold(C64::ZERO,|sum,(i,b)|
-            sum+C64::from_re(b*b)/C64::new(k[i]-omega*omega,-omega*c[i]))
+        drive.iter().zip(receiver).enumerate().fold(C64::ZERO,|sum,(i,(a,b))|
+            sum+C64::from_re(a*b)/C64::new(k[i]-omega*omega,-omega*c[i]))
     }
     fn reduced_compliance(basis: &RitzBasis, port: &[f64], hz: f64) -> C64 {
+        reduced_transfer(basis,port,port,hz)
+    }
+    fn reduced_transfer(basis: &RitzBasis, drive: &[f64], receiver: &[f64], hz: f64) -> C64 {
         let r=basis.columns.len();let omega=TAU*hz;
-        let force:Vec<_>=basis.columns.iter().map(|q|dot(port,q)).collect();
+        let force:Vec<_>=basis.columns.iter().map(|q|dot(drive,q)).collect();
+        let output:Vec<_>=basis.columns.iter().map(|q|dot(receiver,q)).collect();
         let matrix:Vec<_>=(0..r*r).map(|i|C64::new(
             basis.stiffness[i]-if i/r==i%r {omega*omega} else {0.0},-omega*basis.damping[i])).collect();
         let mut rhs:Vec<_>=force.iter().map(|&b|C64::from_re(b)).collect();
         lu_complex(&matrix,r).unwrap().solve(&mut rhs);
-        rhs.iter().zip(force).fold(C64::ZERO,|sum,(&q,b)|sum+q.scale(b))
+        rhs.iter().zip(output).fold(C64::ZERO,|sum,(&q,b)|sum+q.scale(b))
     }
 
     #[test]
@@ -318,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn high_band_enrichment_checks_every_driving_point_and_preserves_physics() {
+    fn high_band_enrichment_checks_every_transfer_and_preserves_physics() {
         let (k,mut c)=source(&[100.0,350.0,900.0,1000.0,1100.0,2200.0,2400.0]);
         for (i,value) in c.iter_mut().enumerate() { *value*=1.0+0.17*i as f64; }
         // The second port owns two high modes absent from the first. The final
@@ -332,11 +380,14 @@ mod tests {
         assert_eq!(basis.columns[0],vec![1.,0.,0.,0.,0.,0.,0.]);
         assert!(basis.columns[1..].iter().all(|q|q[0]==0.0));
         assert!(report.max_relative_driving_point_error<=report.tolerance);
-        for &hz in &report.evaluation_hz {for port in &ports {
-            let exact=compliance(&k,&c,port,hz);
-            let relative=(reduced_compliance(&basis,port,hz)-exact).abs()/exact.abs();
+        assert!(report.max_normalized_transfer_error<=report.tolerance);
+        for &hz in &report.evaluation_hz {for drive in &ports {for receiver in &ports {
+            let exact=transfer(&k,&c,drive,receiver,hz);
+            let scale=compliance(&k,&c,drive,hz).abs().sqrt()*
+                compliance(&k,&c,receiver,hz).abs().sqrt();
+            let relative=(reduced_transfer(&basis,drive,receiver,hz)-exact).abs()/scale;
             assert!(relative<=report.tolerance,"{hz}Hz: {relative}");
-        }}
+        }}}
         for (i,a) in basis.columns.iter().enumerate() {for (j,b) in basis.columns.iter().enumerate() {
             assert!((dot(a,b)-if i==j {1.0} else {0.0}).abs()<2e-13);
             let r=basis.columns.len();
@@ -346,6 +397,65 @@ mod tests {
             assert!((basis.damping[i*r+j]-expected).abs()<1e-11);
         }}
         assert_eq!(basis.columns,bridge_basis(&k,&c,&ports,&options).unwrap().columns);
+    }
+
+    #[test]
+    fn diagonal_pass_cannot_hide_signed_cross_bridge_antiresonance() {
+        let (k,_)=source(&[100.,100.,200.,200.]);
+        let c=vec![0.02*TAU*100.;4];
+        let strong=0.95_f64.sqrt();let weak=0.05_f64.sqrt();
+        // The first drive's static/harmonic seeds span only modes 0 and 2.
+        // Each other drive loses exactly 5% of its SELF compliance at every
+        // frequency. Between the two resonances, however, their omitted cross
+        // contributions add while self contributions nearly cancel.
+        let ports=vec![vec![1.,0.,1.,0.],vec![strong,weak,strong,weak],
+            vec![strong,weak,strong,-weak],vec![0.;4]];
+        let mut options=RitzOptions {max_modes:2,keep_low_modes:0,
+            sample_hz:vec![100.*2.5_f64.sqrt()],transfer_tolerance:Some(0.06)};
+        let mut work=Work(0);
+        let responses=Responses::new(&k,&c,&ports,&options.sample_hz,&mut work).unwrap();
+        let columns=vec![vec![1.,0.,0.,0.],vec![0.,0.,1.,0.]];
+        let (projected_k,projected_c)=projected_forms(&k,&c,&columns).unwrap();
+        let (diagonal,cross,misses)=sweep(&responses,&ports,&columns,
+            &projected_k,&projected_c,0.06,&mut work).unwrap();
+        assert!((diagonal-0.05).abs()<2e-12,"{diagonal}");
+        assert!(cross>2.0,"cross error {cross} hidden by diagonal error {diagonal}");
+        for (i,miss) in misses.iter().enumerate() {
+            assert!(misses[..i].iter().all(|other|
+                other.frequency!=miss.frequency || other.port!=miss.port));
+        }
+        let refusal=bridge_basis(&k,&c,&ports,&options).unwrap_err();
+        assert!(refusal.contains("bridge transfer tolerance") && refusal.contains("unmet"),"{refusal}");
+        options.max_modes=4;
+        let recovered=bridge_basis(&k,&c,&ports,&options).unwrap();
+        let report=recovered.adaptive_response.as_ref().unwrap();
+        assert!(report.max_relative_driving_point_error<1e-11);
+        assert!(report.max_normalized_transfer_error<1e-11);
+        let probe=options.sample_hz[0];
+        let exact=transfer(&k,&c,&ports[1],&ports[2],probe);
+        let got=reduced_transfer(&recovered,&ports[1],&ports[2],probe);
+        assert!((got-exact).abs()<1e-11*exact.abs());
+        // Signed force-unit changes must not bypass the same admission.
+        let scaled:Vec<Vec<_>>=ports.iter().zip([-1e100,1e-100,-3e75,1.])
+            .map(|(port,scale)|port.iter().map(|b|b*scale).collect()).collect();
+        options.max_modes=2;
+        assert!(bridge_basis(&k,&c,&scaled,&options).is_err());
+        options.max_modes=4;
+        assert!(bridge_basis(&k,&c,&scaled,&options).unwrap().adaptive_response
+            .unwrap().max_normalized_transfer_error<1e-11);
+    }
+
+    #[test]
+    fn cross_transfer_scale_preserves_zero_ports_and_extreme_finite_units() {
+        assert_eq!(transfer_error(C64::ZERO,C64::ZERO,C64::ZERO,C64::ONE).unwrap(),0.0);
+        assert_eq!(transfer_error(C64::ONE,C64::ZERO,C64::ZERO,C64::ONE).unwrap(),f64::INFINITY);
+        assert_eq!(transfer_error(C64::ONE,C64::ZERO,C64::ONE,C64::ONE).unwrap(),1.0);
+        for magnitude in [1e-200,1e200] {
+            let value=C64::from_re(magnitude);
+            assert!((transfer_error(value,C64::ZERO,value,value).unwrap()-1.0).abs()<1e-14);
+        }
+        let huge=C64::new(f64::MAX,f64::MAX);
+        assert!(transfer_error(C64::ZERO,C64::ZERO,huge,C64::ONE).is_err());
     }
 
     #[test]
