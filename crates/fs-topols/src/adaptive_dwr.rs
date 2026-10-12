@@ -15,6 +15,9 @@ use fs_cutfem::{BoundaryTraction, CellKey, CutElasticity, CutFemError,
 use fs_dwr::ElasticityDwrEstimate;
 use fs_material::IsotropicElastic;
 
+/// Shared-grid local refinement of a proposed design's compliance gain.
+pub mod gain;
+
 /// Work/accuracy controls. Cell caps cover the entire background, including void.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AdaptiveDwrPolicy {
@@ -122,19 +125,9 @@ fn snapshot(phi: &GridSdf) -> u64 {
         0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3))
 }
 
-/// Locally refine until measured goal sensitivity fits the requested tolerance or
-/// an explicit bound stops progress. No geometry projection, redistancing, load
-/// aggregation before equilibrium, or interpolated displacement is performed.
-///
-/// A break returns no partial report and never changes the input. The caller
-/// must charge interrupted work and retain its accepted design independently.
-/// At most 2*cases*max_rounds solves are attempted, each capped at 60000 iterations.
-/// Grids are capped BEFORE each split, including all 2:1 balance closure splits.
-/// This is goal-driven background refinement, not optimization or a stress check.
-pub fn assess_adaptive_dwr_controlled<B>(
-    phi: &GridSdf, cases: &[RobustLoadCase], settings: OptimizeSettings,
-    policy: AdaptiveDwrPolicy, mut control: impl FnMut(AdaptiveDwrStage) -> ControlFlow<B>,
-) -> Result<ControlFlow<B, AdaptiveDwrReport>, CutFemError> {
+// Shared unchanged physical admission for final assessment and paired gain work.
+fn prepare(phi: &GridSdf, cases: &[RobustLoadCase], settings: OptimizeSettings,
+    policy: AdaptiveDwrPolicy) -> Result<IsotropicElastic, CutFemError> {
     policy.validate(settings.level, cases.len())?;
     if phi.n() != 1usize << settings.level || phi.nodes().iter().any(|v| !v.is_finite())
         || !settings.youngs.is_finite() || settings.youngs <= 0.0
@@ -153,6 +146,42 @@ pub fn assess_adaptive_dwr_controlled<B>(
         || !ratio.is_finite() || ratio > MAX_PLANE_STRAIN_STIFFNESS_RATIO {
         return Err(invalid("adaptive DWR material is outside the canonical plane-strain regime"));
     }
+    Ok(material)
+}
+
+// One canonical problem definition for both adaptive consumers. Every estimate
+// still calls the original vector CutFEM/DWR implementation, never a new solver.
+fn estimate_case(grid: &Quadtree, phi: &GridSdf, material: &IsotropicElastic,
+    case: RobustLoadCase) -> Result<ElasticityDwrEstimate, CutFemError> {
+    let clamp = |x: f64, _: f64| x < 1e-9;
+    let problem = CutElasticity {
+        grid, sdf: phi, material, nitsche_beta: 20.0, ghost_gamma: 0.5,
+        stabilization_scaling: CutStabilizationScaling::LongitudinalModulus,
+        quad_depth: 2, clamp: Some(&clamp), boundary_traction: None,
+        traction_free_interface: true, solver_tol: 1e-12, solver_max_iters: 60_000,
+    };
+    let [a, b] = case.interval();
+    let support = EdgeBand::new(case.edge(), a, b).map_err(|e| invalid(e.to_string()))?;
+    let traction = |_: f64, _: f64| case.traction();
+    fs_dwr::estimate_elasticity_compliance_with_boundary_traction(
+        &problem, &|_, _| [0.0, 0.0], &|_, _| [0.0, 0.0],
+        BoundaryTraction::EdgeBand { support, value: &traction })
+}
+
+/// Locally refine until measured goal sensitivity fits the requested tolerance or
+/// an explicit bound stops progress. No geometry projection, redistancing, load
+/// aggregation before equilibrium, or interpolated displacement is performed.
+///
+/// A break returns no partial report and never changes the input. The caller
+/// must charge interrupted work and retain its accepted design independently.
+/// At most 2*cases*max_rounds solves are attempted, each capped at 60000 iterations.
+/// Grids are capped BEFORE each split, including all 2:1 balance closure splits.
+/// This is goal-driven background refinement, not optimization or a stress check.
+pub fn assess_adaptive_dwr_controlled<B>(
+    phi: &GridSdf, cases: &[RobustLoadCase], settings: OptimizeSettings,
+    policy: AdaptiveDwrPolicy, mut control: impl FnMut(AdaptiveDwrStage) -> ControlFlow<B>,
+) -> Result<ControlFlow<B, AdaptiveDwrReport>, CutFemError> {
+    let material = prepare(phi, cases, settings, policy)?;
     let mut grid = Quadtree::with_room(settings.level, policy.max_level);
     let original_area = material_volume(&grid, phi);
     if !original_area.is_finite() || original_area <= 0.0 { return Err(invalid("invalid original area")); }
@@ -162,24 +191,12 @@ pub fn assess_adaptive_dwr_controlled<B>(
     let mut solves = 0usize;
     for round in 0..policy.max_rounds {
         let mut estimates = Vec::with_capacity(cases.len());
-        let clamp = |x: f64, _: f64| x < 1e-9;
-        let problem = CutElasticity {
-            grid: &grid, sdf: phi, material: &material, nitsche_beta: 20.0, ghost_gamma: 0.5,
-            stabilization_scaling: CutStabilizationScaling::LongitudinalModulus,
-            quad_depth: 2, clamp: Some(&clamp), boundary_traction: None,
-            traction_free_interface: true, solver_tol: 1e-12, solver_max_iters: 60_000,
-        };
         for (case_index, case) in cases.iter().enumerate() {
             if let ControlFlow::Break(reason) = control(AdaptiveDwrStage::BeforeCase { round, case: case_index }) {
                 return Ok(ControlFlow::Break(reason));
             }
-            let [a, b] = case.interval();
-            let support = EdgeBand::new(case.edge(), a, b).map_err(|e| invalid(e.to_string()))?;
-            let traction = |_: f64, _: f64| case.traction();
             solves += 2;
-            estimates.push(fs_dwr::estimate_elasticity_compliance_with_boundary_traction(
-                &problem, &|_, _| [0.0, 0.0], &|_, _| [0.0, 0.0],
-                BoundaryTraction::EdgeBand { support, value: &traction })?);
+            estimates.push(estimate_case(&grid, phi, &material, *case)?);
         }
         let (row, indicators) = summarize(&grid, cases, &estimates, policy)?;
         if round == 0 {
