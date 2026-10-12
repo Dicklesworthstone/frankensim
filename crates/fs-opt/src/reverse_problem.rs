@@ -37,6 +37,10 @@ pub enum ReverseProblemError {
         /// Exact invalid multiplier bits.
         bits: u64,
     },
+    /// Invalid augmentation policy, units, or problem identity.
+    Augmentation { index: Option<usize>, what: &'static str },
+    /// An augmented value, multiplier or derivative became non-finite.
+    NonFiniteAugmentation { index: usize, bits: u64 },
     /// Combined root-count arithmetic cannot be represented.
     SizeOverflow,
 }
@@ -75,6 +79,8 @@ impl core::fmt::Display for ReverseProblemError {
             Self::SeedNonFinite { index, bits } => {
                 write!(f, "constraint multiplier {index} is non-finite ({bits:#018x})")
             }
+            Self::Augmentation { index, what } => write!(f, "invalid augmentation at {index:?}: {what}"),
+            Self::NonFiniteAugmentation { index, bits } => write!(f, "non-finite augmentation at {index}: {bits:#018x}"),
             Self::SizeOverflow => write!(f, "reverse problem root count overflow"),
         }
     }
@@ -434,3 +440,6 @@ impl ProblemEvaluation<'_, '_> {
         Ok(self.tape.hessian_vector_product(&seeds, direction, cx)?)
     }
 }
+
+mod augmented;
+pub use augmented::AugmentedLagrangian;

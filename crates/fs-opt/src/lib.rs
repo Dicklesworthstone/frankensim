@@ -45,7 +45,7 @@ mod reverse_problem;
 mod serial;
 
 pub use product_ops::ProductDifferentialError;
-pub use reverse_problem::{ProblemEvaluation, ReverseProblem, ReverseProblemError};
+pub use reverse_problem::{AugmentedLagrangian, ProblemEvaluation, ReverseProblem, ReverseProblemError};
 pub use admission::{
     ADMISSION_SCHEMA_VERSION, AdmissionCaps, AdmissionReport, AdmissionViolation, ProblemAdmission,
 };

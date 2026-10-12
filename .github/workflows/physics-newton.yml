@@ -19,7 +19,7 @@ jobs:
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
       - name: Test live IR physics composition and retained first-order behavior
         if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-opt --test physics_hessian --test physics_bindings --test hessian_products
+        run: cargo test --release -p fs-opt --test augmented_lagrangian --test physics_hessian --test physics_bindings --test hessian_products
       - name: Test native thermal second-order adjoints
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-conduction --test conductivity_hessian
