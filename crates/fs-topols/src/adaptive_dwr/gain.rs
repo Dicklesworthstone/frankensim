@@ -100,6 +100,28 @@ pub struct AdaptiveGainReport {
     pub solves: usize,
 }
 
+/// Interleave the original candidate search with actual adaptive pair solves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveDescentStage {
+    Optimizer(crate::robust_descent::MultiLoadProjectedStage),
+    Candidate { index: usize, stage: AdaptiveGainStage },
+}
+
+/// Complete comparison or numerical refusal for one coarse-admissible candidate.
+#[derive(Debug, Clone)]
+pub struct AdaptiveDescentCandidate {
+    pub index: usize,
+    pub report: Option<AdaptiveGainReport>,
+    pub refusal: Option<String>,
+}
+
+/// Original optimizer outcome plus the comparisons made before publication.
+#[derive(Debug, Clone)]
+pub struct AdaptiveDescentUpdate {
+    pub progress: crate::robust_descent::MultiLoadProjectedProgress,
+    pub candidates: Vec<AdaptiveDescentCandidate>,
+}
+
 // Public estimate fields are data, not provenance. Only the actual producer
 // below constructs rows used to admit an optimizer update.
 fn changes(values: impl Iterator<Item = (f64, [f64; 3], [f64; 3])>)

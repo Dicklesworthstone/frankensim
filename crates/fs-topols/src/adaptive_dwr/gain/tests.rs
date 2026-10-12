@@ -142,3 +142,23 @@ fn projected_adaptive_gain_invalid_controls_refuse_before_any_callback() {
     }
     assert_eq!(policy().max_solves(2), Some(16));
 }
+
+#[test]
+fn projected_adaptive_gain_accepts_a_real_same_area_redistribution() {
+    let baseline = GridSdf::from_fn(16, &|_, y| (y - 0.5).abs() - 0.35);
+    // The tapered beam moves material toward the clamp, keeping area 0.7.
+    let candidate = GridSdf::from_fn(16, &|x, y| (y - 0.5).abs() - (0.45 - 0.2 * x));
+    let cases = [RobustLoadCase::new(DesignBoxEdge::Right, 0.375, 0.625,
+        [0.0, -1.0], 1.0).unwrap()];
+    let p = AdaptiveGainPolicy { refinement: AdaptiveDwrPolicy {
+        absolute_tolerance: 1e6, ..policy().refinement },
+        max_error_fraction: 0.99, area_tolerance: 0.002 };
+    let ControlFlow::Continue(report) = compare_adaptive_designs_controlled(
+        &baseline, &candidate, &cases, OptimizeSettings { level: 4, volfrac: 0.7,
+            ..OptimizeSettings::default() }, p, 0.0,
+        |_| ControlFlow::<()>::Continue(())).unwrap() else { panic!("not cancelled") };
+    assert_eq!(report.stop, AdaptiveGainStop::ResolvedGain);
+    let last = report.rows.last().unwrap();
+    assert!(last.admissible && last.coarse_gain > 0.0 && last.enriched_gain > 0.0);
+    assert!(last.areas_match);
+}
