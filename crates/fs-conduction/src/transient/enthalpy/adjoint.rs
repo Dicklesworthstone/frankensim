@@ -9,13 +9,14 @@
 //! Radiation and declared Robin state laws can retain rank-one feedback terms;
 //! these participate in both actions, Jacobi and all history/source pullbacks.
 //!
-//! Geometry, reference masses, chart, conductivity laws, interfaces and time
-//! step are frozen. The base pullback also fixes boundary data; `robin_response`
-//! explicitly selects convective references and coefficients. Source derivatives describe the P1
+//! Geometry, reference masses, chart, interfaces and time step are frozen.
+//! The base pullback fixes conductivity and boundary data; separate contractions
+//! explicitly select full effective conductivity scales or, via `robin_response`,
+//! convective references and coefficients. Source derivatives describe the P1
 //! nodal source field, including a uniform source represented by equal nodal
-//! values. No derivative of solver iterations, phase-law parameters, material
-//! parameters, moving geometry or chart selection is inferred. Chart corners
-//! and validity endpoints refuse classical two-sided derivatives; a latent
+//! values. No derivative of solver iterations, phase-law parameters, individual
+//! tensor entries or table knots, moving geometry or chart selection is inferred.
+//! Chart corners and validity endpoints refuse classical two-sided derivatives; a latent
 //! plateau interior has exactly zero temperature sensitivity.
 
 use std::{cell::RefCell, fmt};
@@ -29,6 +30,7 @@ use fs_sparse::Csr;
 /// Convection-only response of the checked total-enthalpy endpoint.
 pub mod robin;
 pub use robin::{EnthalpyRobinGradient, EnthalpyRobinResponse};
+mod conductivity;
 
 use super::{
     EnthalpyBackwardEuler, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution, StepContext,
@@ -179,6 +181,9 @@ pub struct EnthalpyStepLinearization<'m> {
     // Retained by the checked producer. Radiation restores its ORIGINAL
     // convection boundary after preparing the complete physical tangent.
     convection_boundary: crate::ThermalBoundary,
+    // Four local K_eff*T loads per element, at this accepted constitutive state.
+    // Sources, Robin rows and contact conductances are excluded.
+    conductive_loads: Vec<[f64; 4]>,
 }
 
 #[derive(Debug)]
@@ -308,6 +313,10 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         {
             return Err(EnthalpyAdjointError::MaterialKink);
         }
+        let conductive_loads = {
+            let phase_scales = context.phase_scales(&primal.specific_enthalpy_j_kg)?;
+            conductivity::element_loads(cx, problem, &primal.temperature, phase_scales.as_deref())?
+        };
         let mut inverse_diagonal = Vec::with_capacity(n);
         for row in 0..n {
             if row % ASSEMBLY_TILE == 0 {
@@ -333,6 +342,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             feedback: Vec::new(),
             robin_feedback: None,
             convection_boundary: problem.boundary.clone(),
+            conductive_loads,
         })
     }
 }

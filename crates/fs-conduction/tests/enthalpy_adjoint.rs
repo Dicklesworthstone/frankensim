@@ -6,6 +6,7 @@ mod support;
 mod robin_feedback;
 
 use fs_blake3::ContentHash;
+use fs_conduction::material::LiquidMassFractionConductivity;
 use fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError;
 use fs_conduction::transient::enthalpy::{
     EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyError, EnthalpyStepConfig,
@@ -311,6 +312,62 @@ fn nonlinear_history_and_nodal_source_gradients_match_five_point_differences() {
         for vertex in [1, 2] {
             assert!(gradient.previous_specific_enthalpy[vertex].abs() < 1e-12);
             assert!(gradient.source_density[vertex].abs() > 1e-4);
+        }
+    });
+}
+
+
+#[test]
+fn effective_conductivity_scales_match_resolved_mixed_phase_nonlinear_controls() {
+    let fixture = Fixture::new();
+    let source = ScalarField::nodal("nodal deposition", 4, SOURCE.to_vec()).unwrap();
+    with_cx(|cx| {
+        for (solid, liquid) in [(1.0, 1.0), (0.4, 2.5)] {
+            let law = LiquidMassFractionConductivity::declared(solid, liquid).unwrap();
+            let stepper = fixture.stepper(cx).with_phase_conductivity(cx, vec![law]).unwrap();
+            let response = stepper
+                .linearize_step(cx, fixture.problem(&source), None, &OLD, DT, config())
+                .unwrap();
+            let seed = response.temperature_pullback(cx, &WEIGHTS).unwrap();
+            let gradient = response.pullback(cx, &seed, linear()).unwrap();
+            let actual = response.conductivity_scale_pullback(cx, &gradient.adjoint, 1).unwrap();
+            assert_eq!(actual.len(), 1);
+            assert!(actual[0].abs() > 1e-5);
+            let evaluate = |scale: f64| {
+                let scaled = ConductivityModel::isotropic(
+                    ConductivityTable::declared_curve(
+                        vec![(300.0, 2.0 * scale), (450.0, 5.0 * scale)],
+                    ).unwrap(),
+                );
+                let problem = ConductionProblem { material: &scaled, ..fixture.problem(&source) };
+                let solved = stepper.advance(cx, problem, None, &OLD, DT, config()).unwrap();
+                solved.temperature.iter().zip(WEIGHTS)
+                    .map(|(t, weight)| weight * (t - 350.0)).sum::<f64>()
+            };
+            let epsilon = 0.001;
+            let fd = (-evaluate(1.0 + 2.0 * epsilon) + 8.0 * evaluate(1.0 + epsilon)
+                - 8.0 * evaluate(1.0 - epsilon) + evaluate(1.0 - 2.0 * epsilon))
+                / (12.0 * epsilon);
+            assert!((actual[0] - fd).abs() < 1e-7 * (1.0 + fd.abs()),
+                "phase multipliers ({solid}, {liquid}): adjoint={}, FD={fd}", actual[0]);
+            assert_eq!(actual, response.conductivity_scale_pullback(cx, &gradient.adjoint, 1).unwrap());
+            assert!(response.conductivity_scale_pullback(cx, &gradient.adjoint, 0).is_err());
+            assert!(response.conductivity_scale_pullback(cx, &[1.0; 3], 1).is_err());
+            assert!(response.conductivity_scale_pullback(cx, &[f64::NAN; 4], 1).is_err());
+            with_cancelled_cx(|cancelled| {
+                assert!(response.conductivity_scale_pullback(cancelled, &gradient.adjoint, 1).is_err());
+            });
+
+            // A nonzero enthalpy dual on a uniform-temperature latent state
+            // must still give zero conductivity sensitivity, even with f'(h).
+            let zero = ScalarField::Uniform(0.0);
+            let uniform = stepper
+                .linearize_step(cx, fixture.problem(&zero), None, &[200.0; 4], DT, config())
+                .unwrap();
+            let dual = uniform.pullback(cx, &WEIGHTS, linear()).unwrap();
+            assert!(dual.adjoint.iter().any(|value| value.abs() > 1.0));
+            let constant = uniform.conductivity_scale_pullback(cx, &dual.adjoint, 1).unwrap();
+            assert!(constant[0].is_finite() && constant[0].abs() < 1e-10);
         }
     });
 }

@@ -1140,8 +1140,8 @@ authority.
   and cancellation gates precede gradient publication. Smooth chart knots
   and plateau interiors are admitted; temperature slope corners, chart
   validity endpoints and conductivity slope/validity boundaries refuse an
-  ordinary two-sided gradient. No chart, density, conductivity-parameter,
-  geometry, boundary-control or phase-fraction derivative is inferred.
+  ordinary two-sided gradient. No chart, density, individual tensor-entry or
+  table-knot, geometry, boundary-control or phase-fraction derivative is inferred.
   `tests/enthalpy_adjoint.rs` checks nonuniform-slope transpose identities,
   nonlinear history/source derivatives against five-point forward differences,
   zero temperature sensitivity on a latent plateau, differentiability policy,
@@ -1151,6 +1151,23 @@ authority.
   localized heater pulses from temperature histories using the existing SQP
   optimizer. The example's synthetic observations and numerical recovery are
   separate from experimental material validation.
+- `EnthalpyStepLinearization::conductivity_scale_pullback` contracts the same
+  complete joule-residual multiplier into independent element conductivity
+  scales. The accepted binder retains four local conductive loads per element
+  from the production element temperature, assigned tensor, stiffness and
+  typed phase multiplier at mean nodal liquid mass fraction. The result is
+  `-dt * lambda_e^T * (K_eff,e*T_e)`, already including dt, in mesh element
+  order. It differentiates a scale of the full effective tensor/curve, with
+  phase-law settings and material identities fixed; the existing transpose
+  already carries k(T), phase, contact, natural/air and radiation feedback.
+  Summing element entries gives a regional scale derivative. No second
+  state derivative, material query or solve is performed by the pullback.
+  The owner retains 32 bytes per element; temporary typed phase scales during
+  binding and the bounded output during pullback each use 8 bytes per element
+  at separate times, plus vector headers. Allocation-size, element-cap,
+  finite-full-dual and cancellation checks precede publication. The mixed-phase
+  nonlinear test in `tests/enthalpy_adjoint.rs` compares this control with fresh
+  perturbed solves and checks uniform-temperature, cap and refusal behavior.
 - `linearize_step_with_ambient_radiation` and
   `linearize_accepted_with_ambient_radiation` bind total physical derivatives
   of that same radiative enthalpy endpoint, including through the heterogeneous
