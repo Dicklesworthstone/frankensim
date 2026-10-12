@@ -80,9 +80,11 @@ fn cubic_bridge_frames_use_the_existing_cubic_field_inside_a_structural_triangle
 
 #[test]
 fn supplied_frames_drive_lateral_strings_through_the_same_felt_pedals_and_stereo_clock() {
-    for (cubic, reduced) in [(false,false),(true,false),(false,true),(true,true)] {
+    for (cubic, reduced, oblique) in [(false,false,false),(true,false,false),
+        (false,true,false),(true,true,false),(false,false,true)] {
     let frame_path = input(&frames());
-    let face_path = input("frankensim-hammer-footprints-v1\nspan,69,0.008,2\n");
+    let face = "frankensim-hammer-footprints-v1\nspan,69,0.008,2\n";
+    let face_path = input(&if oblique {format!("{face}normal,69,0.8,0.6\n")} else {face.into()});
     let hammer_path = input("frankensim-hammer-materials-v1\nfelt,69,400000,0.2,2.5,3.2,0.25,0.8,2500000\n");
     let mut o = options(&["--preset", "steinway-d", "--board-geometry", "panel.fsb",
         "--render", "p.wav", "--modes", "12", "--string-polarization", &frame_path,
@@ -115,6 +117,7 @@ fn supplied_frames_drive_lateral_strings_through_the_same_felt_pedals_and_stereo
     let b = prepare_instrument_with_board_damping(vec![c], &board.modes, &o, Some(&stretch),
         Some(&projected), board.physical_damping.as_deref()).unwrap();
     o.string_polarization = None;
+    if oblique {o.hammer_footprints=Some(input(face));}
     let old = prepare_instrument_with_board_damping(vec![c], &board.modes, &o, Some(&stretch),
         None, board.physical_damping.as_deref()).unwrap();
     assert_eq!(a.hammer_contact_count(), old.hammer_contact_count());

@@ -112,7 +112,7 @@ pub struct Instrument {
     contact_areas:Vec<f64>,
     // Immutable authored contact geometry. Static recession is excluded from
     // the force/displacement projection but included in every felt overlap.
-    contact_thickness_m:Vec<f64>,contact_recession_m:Vec<f64>,
+    contact_thickness_m:Vec<f64>,contact_recession_m:Vec<f64>,contact_hammer_projection:Vec<f64>,
     source_rate_n_s_m_p:Vec<f64>,
     contact_solver:Option<contact_solver::Prepared>,
     spatial_dampers:Option<dampers::Prepared>,
@@ -214,8 +214,8 @@ impl Instrument {
     /// explicit lateral/vertical damper ratios in [0,10], course order.
     /// The source geometry owns direction/orthogonality; no bridge ratio or
     /// lateral drag is inferred from the vertical mode or a material name.
-    /// Finite hammer faces still apply ONLY vertical normal contact, with the
-    /// original total area and shank mass. None retains the one-plane image.
+    /// A supplied fixed face normal may load both planes, with the original
+    /// total area, trajectory and shank mass. None retains the one-plane image.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_transverse_contact_geometry(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
         modes_per_string:usize,damping:bool,materials:Vec<(WoolFelt,GeneralizedMaxwell)>,
@@ -265,6 +265,7 @@ impl Instrument {
         let contact_thickness_m:Vec<f64>=bank.contact_strings.iter().enumerate().map(|(i,&si)|
             bank.contact_felt_thickness_m(i).unwrap_or(courses[bank.strings[si].course].felt_thickness_m)).collect();
         let contact_recession_m:Vec<f64>=(0..nc).map(|i|bank.contact_recession_m(i)).collect();
+        let contact_hammer_projection:Vec<f64>=(0..nc).map(|i|bank.contact_hammer_projection(i)).collect();
         for (i,&si) in bank.contact_strings.iter().enumerate() {
             let thickness=contact_thickness_m[i];let recession=contact_recession_m[i];
             let maximum=thickness*laws[bank.strings[si].course].eps_densify;
@@ -288,19 +289,19 @@ impl Instrument {
         }).collect();
         let contacts:Vec<_>=bank.contact_strings.iter().enumerate().map(|(i,&si)| Contact {
             state:laws[bank.strings[si].course].initial_state(),memory:relaxation::Memory::default(),
-            overlap:-CATCH_DISTANCE-contact_recession_m[i],force:0.0,enabled:true,
+            overlap:-CATCH_DISTANCE*contact_hammer_projection[i]-contact_recession_m[i],force:0.0,enabled:true,
         }).collect();
         let mut contact_h=bank.contact_compliance.clone();
         for i in 0..nc {for j in 0..nc {
             let ci=bank.strings[bank.contact_strings[i]].course;
             let cj=bank.strings[bank.contact_strings[j]].course;
-            if ci==cj {contact_h[i*nc+j]+=hammer_models[ci].compliance();}
+            if ci==cj {contact_h[i*nc+j]+=contact_hammer_projection[i]*contact_hammer_projection[j]*hammer_models[ci].compliance();}
         }}
         Ok(Self {saved_q:bank.q.clone(),saved_v:bank.v.clone(),saved_hammers:hammers.clone(),
             saved_contacts:contacts.clone(),hammer_next:hammers.clone(),hammer_free:vec![0.0;courses.len()],
             jack_force:vec![0.0;courses.len()],rest_force:vec![0.0;courses.len()],
             source_rate_n_s_m_p:vec![0.0;nc],
-            bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,contact_thickness_m,contact_recession_m,contact_solver,spatial_dampers:None,felt_dampers:None,transverse_damper_ratio,radiation:None,cavity:None,output_rate:rate,substeps,sustain:0.0,
+            bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,contact_thickness_m,contact_recession_m,contact_hammer_projection,contact_solver,spatial_dampers:None,felt_dampers:None,transverse_damper_ratio,radiation:None,cavity:None,output_rate:rate,substeps,sustain:0.0,
             sostenuto:false,una_corda:false,last_damped_midi:88,damper_drag_ns_m:0.4,
             accounting:Accounting::default(),contact_h,force:vec![0.0;nc],gap:vec![0.0;nc],
             active:Vec::with_capacity(nc)})
@@ -477,6 +478,11 @@ impl Instrument {
                     +self.creep[c].deformation(&self.contacts[c].memory);
                 let mut clear=x+free-0.002;
                 if self.contact_recession_m[c]!=0.0 {clear+=self.contact_recession_m[c];}
+                if self.contact_hammer_projection[c]!=1.0 {
+                    // Keep the 2 mm launch clearance along the existing crown
+                    // trajectory, projecting only the physical contact plane.
+                    clear=(x+free+self.contact_recession_m[c])/self.contact_hammer_projection[c]-0.002;
+                }
                 launch=launch.min(clear);
             }
         }
@@ -485,7 +491,7 @@ impl Instrument {
     fn reset_overlaps(&mut self,ci:usize) {
         let y=self.hammer_models[ci].position(&self.hammers[ci].motion);
         for c in 0..self.contacts.len(){if self.bank.strings[self.bank.contact_strings[c]].course==ci {
-            self.contacts[c].overlap=y-self.bank.contact_position(c,&self.bank.q)-self.contact_recession_m[c];self.contacts[c].force=0.0;
+            self.contacts[c].overlap=self.contact_hammer_projection[c]*y-self.bank.contact_position(c,&self.bank.q)-self.contact_recession_m[c];self.contacts[c].force=0.0;
         }}
     }
 
@@ -626,7 +632,7 @@ impl Instrument {
         self.hammer_next.copy_from_slice(&self.hammers);
         let mut shank_loss=0.0;let mut jack_work=0.0;
         for (i,h) in self.hammer_next.iter_mut().enumerate(){if h.active {
-            let force=(0..nc).filter(|&c|self.bank.strings[self.bank.contact_strings[c]].course==i).map(|c|self.force[c]).sum::<f64>();
+            let force=(0..nc).filter(|&c|self.bank.strings[self.bank.contact_strings[c]].course==i).map(|c|self.contact_hammer_projection[c]*self.force[c]).sum::<f64>();
             let model=&mut self.hammer_models[i];
             let (motion,loss)=model.advance(&self.hammers[i].motion,self.rest_force[i]-force,
                 self.jack_force[i]).map_err(Error::Contact)?;
@@ -636,7 +642,7 @@ impl Instrument {
         let mut felt_loss=0.0;let mut relaxation_loss=0.0;
         for i in 0..nc {
             let ci=self.bank.strings[self.bank.contact_strings[i]].course;let thickness=self.contact_thickness_m[i];
-            let end=self.hammer_models[ci].position(&self.hammer_next[ci].motion)-self.bank.contact_position(i,&self.bank.next_q)-self.contact_recession_m[i];
+            let end=self.contact_hammer_projection[i]*self.hammer_models[ci].position(&self.hammer_next[ci].motion)-self.bank.contact_position(i,&self.bank.next_q)-self.contact_recession_m[i];
             let material=&self.creep[i];let old=&self.contacts[i];
             let (memory,viscous)=material.advance(&old.memory,self.force[i]);
             relaxation_loss+=viscous;felt_loss+=viscous;

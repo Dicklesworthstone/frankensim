@@ -75,10 +75,11 @@ The optional FSB stiffener-mass row accepts lumped, consistent-hermite or
 consistent-eccentric. The last adds the supplied bending rotary and offset
 centroid inertia to Hermite translation; it does not infer torsional polar inertia.
 These opt-in corrections have not passed a perceptual similarity gate.
---acoustic-refinement-levels uniformly subdivides flat P1 radiating triangles
-for Rayleigh integration only. It preserves the structural mesh, modes and
-bridge mechanics. Level 0 is unchanged; the 120000-point receiver budget still
-applies. Crowned/cubic fields and diagnostic-volume output are excluded.
+--acoustic-refinement-levels uniformly subdivides flat radiating triangles for
+Rayleigh integration, evaluating the same P1 or edge-cubic displacement field
+at every new point. It preserves the structural mesh, modes and bridge mechanics.
+Level 0 is unchanged; the 120000-point receiver budget still applies.
+Crowned fields and diagnostic-volume output are excluded.
 It uses Chabassier/Durufle's wrapped-string MODEL table (84 notes plus four
 estimated extensions), separate per-key hammer force and relaxation cards, and
 published shank geometry reduced to rigid rotation plus one bending coordinate.
@@ -104,10 +105,13 @@ EVERY key. Profiles supply one to four ordered sites with longitudinal offsets,
 face recession, local felt thickness and positive fractions of the original area.
 Sites engage according to their gaps and retain independent felt/Prony histories
 while sharing the hammer. Point/span thickness still comes from the scale.
+An optional normal,key,primary,secondary row supplies a unit felt-face normal.
+An oblique normal requires --string-polarization; the existing hammer trajectory
+is preserved and contact work projects into both transverse string directions.
 It requires --render and works with supplied materials, MIDI and existing pedals.
 Published R_H requires the original uniform thickness. Varying thickness applies
 the selected felt/Prony law locally and cannot silently reuse that source rate.
-See HAMMER_FOOTPRINTS.md for SI rows and the parallel-column contact model.
+See HAMMER_FOOTPRINTS.md for SI rows and the fixed-normal contact model.
 --dampers selects spatial viscous pads or finite-gap wool-felt pads; the file
 header chooses the model. The steinway-d preset defaults to the existing
 estimated finite-width viscous pads, removing the point image's artificial
@@ -211,9 +215,11 @@ Two-sided loading excludes a sealed --cavity below the board. Crowned shells,
 diagnostic-volume output and unsupported work/rate/fit budgets refuse.
 Absent this option, pressure observation has no air backreaction. See
 RAYLEIGH_LOADING.md for quadrature, fitting and finite-band limitations.
-Pressure uses every mechanics substep and causal anti-alias filtering before
-output-rate propagation. At 4x oversampling the filter adds 44 audio samples of
-latency, in addition to acoustic travel time. Histories persist across blocks.
+Pressure uses every mechanics substep with bandlimited acceleration and
+anti-alias filtering before output-rate propagation. At 4x oversampling the
+numerical delay is 84 audio samples (52 differentiation/decimation plus 32
+fractional-flight interpolation), in addition to acoustic travel time.
+Histories persist across blocks.
 --bridge-trace-csv requires --note or an isolated --performance and geometric pressure. It
 writes that key's modeled vertical bridge velocity, a centered-difference
 acceleration, and the left pressure sample on the same output clock. The
@@ -469,9 +475,8 @@ impl Options {
             return Err("--cavity requires a complete nonempty specification and a geometric render; modal CSV has no cavity interface".into());
         }
         if options.acoustic_refinement_levels > 3 || (seen.contains("--acoustic-refinement-levels")
-            && (!geometric || options.render.is_none() || options.diagnostic_volume
-                || options.edge_cubic_board_mass)) {
-            return Err("--acoustic-refinement-levels requires a flat P1 geometric pressure render and levels 0..3".into());
+            && (!geometric || options.render.is_none() || options.diagnostic_volume)) {
+            return Err("--acoustic-refinement-levels requires a flat P1 or edge-cubic geometric pressure render and levels 0..3".into());
         }
         if options.equilibrate_board_mass && !geometric {
             return Err("--equilibrate-board-mass requires a flat geometric board".into());
@@ -1563,11 +1568,14 @@ mod render_tests {
         let refined=options(&["--preset","steinway-d","--render","p.wav",
             "--acoustic-refinement-levels","2"]).unwrap();
         assert_eq!(refined.acoustic_refinement_levels,2);
+        let cubic=options(&["--preset","steinway-d","--render","p.wav",
+            "--acoustic-refinement-levels","2","--edge-cubic-board-mass"]).unwrap();
+        assert_eq!(cubic.acoustic_refinement_levels,2);
+        assert!(cubic.edge_cubic_board_mass);
         for args in [vec!["--acoustic-refinement-levels","1"],
             vec!["--render","p.wav","--acoustic-refinement-levels","1"],
             vec!["--preset","steinway-d","--render","p.wav","--acoustic-refinement-levels","4"],
             vec!["--preset","steinway-d","--render","p.wav","--acoustic-refinement-levels","1","--diagnostic-volume"],
-            vec!["--preset","steinway-d","--render","p.wav","--acoustic-refinement-levels","1","--edge-cubic-board-mass"],
             vec!["--preset","steinway-d","--render","p.wav","--acoustic-refinement-levels","1","--acoustic-refinement-levels","2"]] {
             assert!(options(&args).is_err(),"accepted {args:?}");
         }

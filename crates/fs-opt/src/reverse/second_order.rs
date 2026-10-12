@@ -2,6 +2,7 @@
 //! The primal tape is reused: no finite differences and no dense Hessian.
 
 use super::{ReverseError, ReverseEvaluation, Slot, accumulate, capacity, poll, tick, zeros};
+use super::physics::PhysicsError;
 use crate::{Expr, NodeId, OptError, children};
 use fs_exec::Cx;
 
@@ -16,6 +17,8 @@ pub enum HessianError {
     DirectionLength { variable: usize, expected: usize, actual: usize },
     /// A direction component was not finite.
     NonFiniteDirection { variable: usize, component: usize, bits: u64 },
+    /// An explicit physics Hessian provider returned the wrong number of lanes.
+    PhysicsProductLength { node: NodeId, expected: usize, actual: usize },
     /// A local derivative or directional accumulation was not finite.
     NonFiniteDerivative { node: NodeId, component: usize, bits: u64 },
 }
@@ -33,6 +36,7 @@ impl core::fmt::Display for HessianError {
             Self::DirectionCount { expected, actual } => write!(f, "Hessian product needs {expected} direction blocks, received {actual}"),
             Self::DirectionLength { variable, expected, actual } => write!(f, "Hessian direction {variable} needs {expected} coordinates, received {actual}"),
             Self::NonFiniteDirection { variable, component, bits } => write!(f, "Hessian direction {variable}:{component} is non-finite ({bits:#018x})"),
+            Self::PhysicsProductLength { node, expected, actual } => write!(f, "physics node {} needs {expected} Hessian components, received {actual}", node.0),
             Self::NonFiniteDerivative { node, component, bits } => write!(f, "node {} has a non-finite second-order derivative at {component} ({bits:#018x})", node.0),
         }
     }
@@ -139,6 +143,11 @@ impl ReverseEvaluation<'_, '_> {
     /// Seeds are held constant. Directions and results use variable declaration
     /// order and point storage, NOT manifold retraction parameters. This is not
     /// a Riemannian Hessian: differentiating the manifold pullback is separate.
+    /// Bound physics requires an explicit `PhysicsHessian` capability. Each
+    /// participating PDE node uses its retained gradient for the forward action
+    /// and at most one provider Hessian action in the reverse sweep. This keeps
+    /// both `outer_gradient * inner_Hv` and `outer_Hessian * inner_gradient`
+    /// terms, including shared nodes and mixed algebraic/physical objectives.
     ///
     /// Reuses this immutable primal tape. One directional forward sweep and one
     /// differentiated reverse sweep require three scalar workspaces of the
@@ -189,10 +198,14 @@ impl ReverseEvaluation<'_, '_> {
             poll(cx)?;
             if active[node.0 as usize] {
                 if matches!(program.problem.expr(node)?, Expr::PdeResidual { .. }) {
-                    return Err(OptError::Unevaluable {
-                        node: node.0,
-                        kind: "bound physics supplies first-order derivatives, not a Hessian action",
-                    }.into());
+                    let index = program.physics.binary_search_by_key(&node, |binding| binding.node)
+                        .expect("compiled physics node has a binding");
+                    if program.physics[index].model.second_order().is_none() {
+                        return Err(OptError::Unevaluable {
+                            node: node.0,
+                            kind: "bound physics supplies first-order derivatives, not a Hessian action",
+                        }.into());
+                    }
                 }
                 for child in children(program.problem.expr(node)?) { active[child.0 as usize] = true; }
             }
@@ -206,6 +219,18 @@ impl ReverseEvaluation<'_, '_> {
             poll(cx)?;
             if !active[node.0 as usize] || matches!(program.problem.expr(node)?, Expr::Var(_)) { continue; }
             let output = program.slots[node.0 as usize];
+            if let Ok(index) = program.physics.binary_search_by_key(&node, |binding| binding.node) {
+                let binding = &program.physics[index];
+                let input = program.variables[binding.variable.0 as usize];
+                let mut sum = 0.0;
+                for i in 0..input.len {
+                    tick(i, cx)?;
+                    sum = finite(sum + self.values[binding.gradient.start + i]
+                        * tangent[input.start + i], node, i)?;
+                }
+                tangent[output.start] = sum;
+                continue;
+            }
             for lane in 0..output.len {
                 tick(lane, cx)?;
                 let mut sum = 0.0;
@@ -222,6 +247,47 @@ impl ReverseEvaluation<'_, '_> {
             poll(cx)?;
             if !active[node.0 as usize] { continue; }
             let output = program.slots[node.0 as usize];
+            if let Ok(index) = program.physics.binary_search_by_key(&node, |binding| binding.node) {
+                let binding = &program.physics[index];
+                let input = program.variables[binding.variable.0 as usize];
+                let bar = adjoint[output.start];
+                let dot_bar = product[output.start];
+                if bar == 0.0 && dot_bar == 0.0 { continue; }
+                // If the outer first derivative vanishes, only the outer
+                // curvature term survives. Do not spend a physical solve on 0*Hv.
+                let local = if bar == 0.0 { None } else {
+                    poll(cx)?;
+                    let action = binding.model.second_order().ok_or(OptError::Unevaluable {
+                        node: node.0, kind: "bound physics Hessian capability changed",
+                    })?;
+                    let values = action.hessian_vector_product(
+                        &self.values[input.start..input.start + input.len],
+                        &tangent[input.start..input.start + input.len], cx,
+                    ).map_err(|source| match source {
+                        PhysicsError::Cancelled => ReverseError::Evaluation(OptError::Cancelled),
+                        source => ReverseError::Physics { node, source },
+                    })?;
+                    poll(cx)?;
+                    if values.len() != input.len {
+                        return Err(HessianError::PhysicsProductLength {
+                            node, expected: input.len, actual: values.len(),
+                        });
+                    }
+                    Some(values)
+                };
+                for i in 0..input.len {
+                    tick(i, cx)?;
+                    let first = self.values[binding.gradient.start + i];
+                    let second = match &local {
+                        Some(values) => bar * finite(values[i], node, i)?,
+                        None => 0.0,
+                    };
+                    accumulate(&mut product, input, i,
+                        finite(dot_bar * first + second, node, i)?, node)?;
+                    accumulate(&mut adjoint, input, i, bar * first, node)?;
+                }
+                continue;
+            }
             for lane in 0..output.len {
                 tick(lane, cx)?;
                 let bar = adjoint[output.start + lane];

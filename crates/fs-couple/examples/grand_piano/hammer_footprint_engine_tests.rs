@@ -42,6 +42,53 @@ fn same_history(a:&Instrument,b:&Instrument){
     assert_eq!(a.accounting.dissipated_j(),b.accounting.dissipated_j());
 }
 
+fn directed(normal:&str,span:bool)->Instrument {
+    let c=geometry::demonstration_scale().unwrap()[48];let board=board::demonstration();
+    let face=if span {"span,69,0.008,2"}else{"point,69"};
+    let text=format!("{}\n{face}\n{normal}\n",hammer_footprint::HEADER);
+    let spec=hammer_footprint::Specification::read(&text,&[c]).unwrap();
+    // No lateral bridge motion: any secondary attack must come directly from
+    // the one felt contact, not sympathetic transfer through the soundboard.
+    let secondary=vec![vec![0.;board.len()]];
+    Instrument::new_with_demonstration_geometry(vec![c],&board,48_000,4,12,true,
+        Some(&spec),Some((&secondary,&[0.35]))).unwrap()
+}
+
+#[test]
+fn oblique_felt_attack_directly_excites_secondary_strings_with_one_hammer_work_balance(){
+    for span in [false,true] {
+        let mut positive=directed("normal,69,0.8,0.6",span);
+        let mut negative=directed("normal,69,0.8,-0.6",span);
+        let mut primary=directed("normal,69,1,0",span);
+        let mut original=directed("",span);
+        for p in [&mut positive,&mut negative,&mut primary,&mut original] {p.note_on(69,2.).unwrap();}
+        assert_eq!(positive.hammers.len(),1);assert_eq!(positive.contacts.len(),original.contacts.len());
+        assert_eq!(positive.accounting.input_work_j,original.accounting.input_work_j);
+        let mut lateral_peak=0.0_f64;
+        for _ in 0..1200 {
+            positive.step().unwrap();negative.step().unwrap();
+            assert_eq!(primary.step().unwrap(),original.step().unwrap());
+            for s in &positive.bank.strings {
+                for k in s.modes.clone() {
+                    if s.polarization==1 {
+                        lateral_peak=lateral_peak.max(positive.bank.q[k].abs());
+                        assert!((positive.bank.q[k]+negative.bank.q[k]).abs()<1e-13);
+                        assert_eq!(primary.bank.q[k],0.);
+                    } else {assert!((positive.bank.q[k]-negative.bank.q[k]).abs()<1e-13);}
+                }
+            }
+            let crown=positive.hammer_models[0].position(&positive.hammers[0].motion);
+            for (i,c) in positive.contacts.iter().enumerate() {
+                assert_eq!(c.overlap,0.8*crown-positive.bank.contact_position(i,&positive.bank.q)
+                    -positive.contact_recession_m[i]);
+            }
+        }
+        assert!(lateral_peak>1e-9,"an oblique strike must launch lateral vibration directly");
+        assert!(positive.contacts.iter().any(|c|c.state.eps_max>0.));
+        same_history(&primary,&original);balance(&positive);balance(&negative);balance(&primary);
+    }
+}
+
 #[test]
 fn profile_thickness_scales_local_creep_and_recession_keeps_the_rest_unloaded(){
     let mut p=profiled(true);let point=instrument(false,false);

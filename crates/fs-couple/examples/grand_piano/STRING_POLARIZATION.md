@@ -109,11 +109,16 @@ the explicit source and runtime budgets and the scope of projection error.
 
 ## Played behavior and limits
 
-The original hammer/felt solver drives the primary direction only. Each key
+Without a supplied oblique normal, the hammer/felt solver drives the primary
+direction only. Each key
 still has one hammer and its original total contact area; finite hammer faces
 keep their existing independent contact memories. Source or supplied hammer
 materials, shank mechanics, repeated strikes and una corda continue through the
-same engine. The lateral response comes from physical board/string coupling.
+same engine. Lateral response comes from physical board/string coupling and,
+when supplied, a fixed `normal` row in `--hammer-footprints`. That row projects
+the existing felt force into both transverse directions while retaining the
+primary hammer trajectory and its projected force reaction. No lateral angle
+is inferred from the string frame; see [HAMMER_FOOTPRINTS.md](HAMMER_FOOTPRINTS.md).
 
 Key release, sustain travel, half pedal and sostenuto apply the explicitly
 supplied lateral drag through the existing point or spatial damper flow.
