@@ -11,6 +11,9 @@ description = "Density-based topology optimization: SIMP with Helmholtz filterin
 layer = "L4"
 
 [dependencies]
+fs-exec = { path = "../fs-exec", optional = true }
+fs-opt = { path = "../fs-opt", optional = true }
+fs-qty = { path = "../fs-qty", optional = true }
 fs-cutfem = { path = "../fs-cutfem", optional = true }
 fs-dwr = { path = "../fs-dwr", optional = true }
 fs-ivl = { path = "../fs-ivl", optional = true }
@@ -29,6 +32,8 @@ fs-spectral = { path = "../fs-spectral" }
 fs-rand = { path = "../fs-rand" }
 
 [features]
+# Live-IR structural Newton design; only existing workspace crates are used.
+newton-design = ["dep:fs-exec", "dep:fs-opt", "dep:fs-qty"]
 # [F]-gated per the Ambition-Tag rule (bead b7d0).
 cutfem-marquee = ["dep:fs-cutfem", "dep:fs-dwr", "dep:fs-ivl"]
 
@@ -120,3 +125,11 @@ required-features = ["cutfem-marquee"]
 [[test]]
 name = "response_checkpoint_sdf3"
 required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "compliance_newton"
+required-features = ["newton-design"]
+
+[[example]]
+name = "constrained_elasticity"
+required-features = ["newton-design"]

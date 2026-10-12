@@ -122,7 +122,15 @@ fn gather(el: &DensityElasticity, tet: &[u32; 4], x: &[f64]) -> [f64; 12] {
 fn finite(value: f64, what: &'static str) -> Result<f64, ComplianceError> {
     if value.is_finite() { Ok(value) } else { Err(ComplianceError::NonFinite(what)) }
 }
-fn norm(x: &[f64]) -> f64 { x.iter().fold(0.0, |n, &v| n.hypot(v)) }
+fn norm(x: &[f64]) -> f64 {
+    // Scaled sum of squares avoids overflow in the squares. The strict sqrt
+    // keeps this acceptance gate independent of platform libm.
+    if x.iter().any(|v| !v.is_finite()) { return f64::NAN; }
+    let scale = x.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    if scale == 0.0 || !scale.is_finite() { return scale; }
+    let sum: f64 = x.iter().map(|v| { let q = v / scale; q * q }).sum();
+    scale * fs_math::det::sqrt(sum)
+}
 
 impl<'a> ComplianceGoal<'a> {
     /// Prepare all original load cases at the exact supplied modulus point.

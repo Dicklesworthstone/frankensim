@@ -21,6 +21,8 @@
 //! `sdf3_goal` drives refinement with enriched goal-weighted residuals.
 //! Composed continuum certification remains a separate obligation.
 
+#[cfg(feature = "newton-design")]
+pub mod compliance_newton;
 pub mod continuation;
 pub mod control;
 pub mod eigenfreq;
