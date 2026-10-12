@@ -50,6 +50,8 @@
 //! - [`projected_stress`]: sampled-stress admission at every same-area update,
 //!   bounded candidate retries and exact continuation of a feasible design.
 
+/// Locally adaptive background-grid assessment on an unchanged material design.
+pub mod adaptive_dwr;
 pub mod checkpoint;
 pub mod design_regions;
 pub mod evaluated;
