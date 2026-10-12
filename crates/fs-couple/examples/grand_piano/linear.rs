@@ -559,8 +559,16 @@ impl Bank {
         let n = self.modes.len();
         if let Some(p) = &self.footprints {
             let p = &p.points[contact];
-            return s.modes.clone().zip(&p.shape).map(|(k,g)| g*q[k]).sum::<f64>()
+            let primary = s.modes.clone().zip(&p.shape).map(|(k,g)| g*q[k]).sum::<f64>()
                 + p.lift*s.bridge.iter().zip(&q[n..]).map(|(g,x)|g*x).sum::<f64>();
+            let mut displacement = p.normal[0]*primary;
+            if let Some(side) = p.secondary {
+                let s = &self.strings[side];
+                let lateral = s.modes.clone().zip(&p.shape).map(|(k,g)| g*q[k]).sum::<f64>()
+                    + p.lift*s.bridge.iter().zip(&q[n..]).map(|(g,x)|g*x).sum::<f64>();
+                displacement += p.normal[1]*lateral;
+            }
+            return displacement;
         }
         s.modes.clone().map(|k| self.modes[k].hammer_shape*q[k]).sum::<f64>()
             + s.hammer_lift*s.bridge.iter().zip(&q[n..]).map(|(g,x)| g*x).sum::<f64>()

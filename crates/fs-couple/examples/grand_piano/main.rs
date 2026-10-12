@@ -105,10 +105,13 @@ EVERY key. Profiles supply one to four ordered sites with longitudinal offsets,
 face recession, local felt thickness and positive fractions of the original area.
 Sites engage according to their gaps and retain independent felt/Prony histories
 while sharing the hammer. Point/span thickness still comes from the scale.
+An optional normal,key,primary,secondary row supplies a unit felt-face normal.
+An oblique normal requires --string-polarization; the existing hammer trajectory
+is preserved and contact work projects into both transverse string directions.
 It requires --render and works with supplied materials, MIDI and existing pedals.
 Published R_H requires the original uniform thickness. Varying thickness applies
 the selected felt/Prony law locally and cannot silently reuse that source rate.
-See HAMMER_FOOTPRINTS.md for SI rows and the parallel-column contact model.
+See HAMMER_FOOTPRINTS.md for SI rows and the fixed-normal contact model.
 --dampers selects spatial viscous pads or finite-gap wool-felt pads; the file
 header chooses the model. The steinway-d preset defaults to the existing
 estimated finite-width viscous pads, removing the point image's artificial

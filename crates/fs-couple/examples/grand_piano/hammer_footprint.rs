@@ -1,4 +1,6 @@
 //! Finite longitudinal hammer faces in the unchanged moving-bridge basis.
+//! A supplied fixed normal can project the same contact into both transverse
+//! string directions while the hammer retains its original trajectory.
 //!
 //! Each quadrature site is a separate work-conjugate contact, not an averaged
 //! displacement passed to one nonlinear felt law. This module owns only cold
@@ -14,8 +16,9 @@ const MAX_CONTACTS: usize = 88 * 3 * 4;
 const MAX_SHAPE_TERMS: usize = MAX_CONTACTS * super::MAX_STRING_MODES;
 pub const HEADER: &str = "frankensim-hammer-footprints-v1";
 
-/// Authored quadrature on a face whose compression columns remain parallel to
-/// the original hammer direction. Geometry is supplied, never inferred.
+/// Authored quadrature on a face whose compression columns share one fixed
+/// normal, parallel to the original hammer direction unless supplied otherwise.
+/// Geometry is supplied, never inferred.
 #[derive(Clone, Copy, Debug)]
 pub struct ProfileSite {
     /// Longitudinal offset from the scale's strike station [m].
@@ -35,6 +38,17 @@ pub enum Footprint {
     /// course thickness and positive Gauss area weights remain unchanged.
     Span { length_m: f64, sites: usize },
     Profile(Vec<ProfileSite>),
+    /// Fixed frictionless contact normal in the supplied primary/secondary
+    /// string frame. The wrapped face must be Point, Span or Profile.
+    Oriented { normal: [f64; 2], face: Box<Footprint> },
+}
+impl Footprint {
+    fn geometry(&self) -> (&Self, [f64; 2]) {
+        match self {
+            Self::Oriented { normal, face } => (face, *normal),
+            _ => (self, [1.0, 0.0]),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -42,14 +56,16 @@ pub struct Specification { pub footprints: BTreeMap<u8, Footprint> }
 impl Specification {
     /// Complete per-key point/span/profile selection. A profile is followed by
     /// 1..4 explicit `site,key,offset_m,recession_m,thickness_m,area_fraction`
-    /// rows in increasing offset order. No geometry or weight normalization.
+    /// rows in increasing offset order. Optional `normal,key,primary,secondary`
+    /// rows supply a fixed unit normal. No geometry or weight normalization.
     pub fn read(text: &str, courses: &[Course]) -> Result<Self, String> {
         if text.len() as u64 > MAX_BYTES { return Err("hammer footprint file exceeds 64 KiB".into()); }
         let mut footprints: BTreeMap<u8, Footprint> = BTreeMap::new(); let mut header = false;
+        let mut normals = BTreeMap::new();
         for (line, raw) in text.lines().enumerate() {
             let row = raw.split('#').next().unwrap_or("").trim();
             if row.is_empty() { continue; }
-            let error = || format!("hammer footprint line {}: expected point,key; span,key,length_m,sites; profile,key; or site,key,offset_m,recession_m,thickness_m,area_fraction", line + 1);
+            let error = || format!("hammer footprint line {}: expected point,key; span,key,length_m,sites; profile,key; site,key,offset_m,recession_m,thickness_m,area_fraction; or normal,key,primary,secondary", line + 1);
             if !header {
                 if row != HEADER { return Err(error()); }
                 header = true; continue;
@@ -57,6 +73,15 @@ impl Specification {
             let fields: Vec<_> = row.split(',').map(str::trim).collect();
             if !matches!(fields.len(), 2 | 4 | 6) { return Err(error()); }
             let key = fields[1].parse::<u8>().map_err(|_| error())?;
+            if fields[0] == "normal" {
+                if fields.len() != 4 { return Err(error()); }
+                let normal = [fields[2].parse::<f64>().map_err(|_| error())?,
+                    fields[3].parse::<f64>().map_err(|_| error())?];
+                if normals.insert(key, normal).is_some() {
+                    return Err(format!("duplicate hammer normal key {key}"));
+                }
+                continue;
+            }
             if fields[0] == "site" {
                 if fields.len() != 6 { return Err(error()); }
                 let Some(Footprint::Profile(sites)) = footprints.get_mut(&key) else {
@@ -83,6 +108,10 @@ impl Specification {
             if footprints.insert(key, footprint).is_some() { return Err(format!("duplicate hammer footprint key {key}")); }
         }
         if !header { return Err("missing hammer footprint header".into()); }
+        for (key, normal) in normals {
+            let face = footprints.get_mut(&key).ok_or_else(|| format!("hammer normal key {key} has no footprint"))?;
+            *face = Footprint::Oriented { normal, face: Box::new(std::mem::replace(face, Footprint::Point)) };
+        }
         let result = Self { footprints }; result.validate(courses)?; Ok(result)
     }
 
@@ -101,6 +130,12 @@ impl Specification {
         for c in courses {
             c.validate()?;
             let entry = self.footprints.get(&c.midi).ok_or_else(|| format!("missing hammer footprint key {}", c.midi))?;
+            let (entry, normal) = entry.geometry();
+            if matches!(entry, Footprint::Oriented { .. })
+                || normal.iter().any(|v| !v.is_finite()) || normal[0] <= 0.0
+                || (normal[0]*normal[0] + normal[1]*normal[1] - 1.0).abs() > 1e-10 {
+                return Err(format!("key {}: hammer normal must be a finite unit vector with positive primary component on one point/span/profile face", c.midi));
+            }
             if let Footprint::Span { length_m, sites } = entry {
                 let centre = c.strike_fraction * c.length_m;
                 let left = centre - 0.5 * length_m;
@@ -155,6 +190,7 @@ fn quadrature(sites: usize) -> Vec<(f64, f64)> {
 pub(super) struct Point {
     pub shape: Vec<f64>, pub lift: f64, pub fraction: f64,
     pub recession_m: f64, pub thickness_m: f64,
+    pub normal: [f64; 2], pub secondary: Option<usize>,
 }
 pub(super) struct Prepared {
     pub points: Vec<Point>,
@@ -171,8 +207,14 @@ impl Prepared {
             for c in self.ranges[si].clone() {
                 if force[c] == 0.0 { continue; }
                 let p = &self.points[c];
-                self.bridge_force[si] += p.lift * force[c];
-                for (k,g) in s.modes.clone().zip(&p.shape) { self.modal_force[k] += g * force[c]; }
+                let primary = p.normal[0] * force[c];
+                self.bridge_force[si] += p.lift * primary;
+                for (k,g) in s.modes.clone().zip(&p.shape) { self.modal_force[k] += g * primary; }
+                if let Some(side) = p.secondary {
+                    let lateral = p.normal[1] * force[c];
+                    self.bridge_force[side] += p.lift * lateral;
+                    for (k,g) in strings[side].modes.clone().zip(&p.shape) { self.modal_force[k] += g * lateral; }
+                }
             }
         }
     }
@@ -190,8 +232,8 @@ impl Bank {
             max_modes,damping,spec,None)
     }
 
-    /// Project the same primary-plane face after completing both directional
-    /// string mass forms. The extra polarization has no duplicate felt sites.
+    /// Project the face after completing both directional string mass forms.
+    /// An oblique normal requires this second plane, without duplicate felt.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_hammer_footprints_and_transverse_bridge(courses: &[Course], board: &[super::BoardMode],
         rate: u32, band_hz: f64, max_modes: usize, damping: bool,
@@ -222,17 +264,27 @@ impl Bank {
             || self.strings.iter().any(|s| s.course >= courses.len()) {
             return Err("hammer footprints require a fresh unconfigured bank and its original course order".into());
         }
-        if spec.footprints.values().all(|p| matches!(p, Footprint::Point)) { return Ok(()); }
+        if spec.footprints.values().all(|p| {
+            let (face, normal) = p.geometry();
+            matches!(face, Footprint::Point) && normal == [1.0, 0.0]
+        }) { return Ok(()); }
         let mut points = Vec::new(); let mut contacts = Vec::new();
         let mut ranges = Vec::with_capacity(self.strings.len()); let mut terms = 0usize;
         for (si, s) in self.strings.iter().enumerate() {
             let first = points.len();
             if s.contact.is_some() {
                 let c = &courses[s.course];
-                match &spec.footprints[&c.midi] {
+                let (face, normal) = spec.footprints[&c.midi].geometry();
+                let secondary = if normal[1] != 0.0 {
+                    Some(self.strings.iter().position(|side| side.course == s.course
+                        && side.member == s.member && !side.duplex && side.polarization == 1)
+                        .ok_or_else(|| format!("key {}: oblique hammer normal requires the second string polarization", c.midi))?)
+                } else { None };
+                match face {
                     Footprint::Point => {
                         points.push(Point { shape: s.modes.clone().map(|k| self.modes[k].hammer_shape).collect(),
-                            lift: s.hammer_lift, fraction: 1.0, recession_m: 0.0, thickness_m: c.felt_thickness_m });
+                            lift: s.hammer_lift, fraction: 1.0, recession_m: 0.0, thickness_m: c.felt_thickness_m,
+                            normal, secondary });
                         contacts.push(si);
                     }
                     Footprint::Span { length_m, sites } => {
@@ -251,7 +303,7 @@ impl Bank {
                                 return Err("hammer footprint projection overflow".into());
                             }
                             points.push(Point { shape, lift, fraction, recession_m: 0.0,
-                                thickness_m: c.felt_thickness_m }); contacts.push(si);
+                                thickness_m: c.felt_thickness_m, normal, secondary }); contacts.push(si);
                         }
                     }
                     Footprint::Profile(sites) => {
@@ -264,10 +316,11 @@ impl Bank {
                                 return Err("hammer profile projection overflow".into());
                             }
                             points.push(Point { shape, lift, fraction: p.area_fraction,
-                                recession_m: p.recession_m, thickness_m: p.thickness_m });
+                                recession_m: p.recession_m, thickness_m: p.thickness_m, normal, secondary });
                             contacts.push(si);
                         }
                     }
+                    Footprint::Oriented { .. } => return Err("nested hammer normals are unsupported".into()),
                 }
             }
             let end = points.len();
@@ -282,12 +335,21 @@ impl Bank {
                 let p = &points[i];
                 let lift = p.lift + s.modes.clone().zip(&p.shape).map(|(k,g)|
                     0.5*self.modes[k].a*self.transition[k].bq*g).sum::<f64>();
-                for j in 0..r { w[i*r+j] = lift*s.bridge[j]; }
+                for j in 0..r { w[i*r+j] = (p.normal[0]*lift)*s.bridge[j]; }
+                if let Some(side) = p.secondary {
+                    for j in 0..r { w[i*r+j] += (p.normal[1]*lift)*self.strings[side].bridge[j]; }
+                }
                 // Different stations on the SAME string share its direct
                 // displacement compliance as well as its reciprocal board.
                 for j in ranges[si].clone().filter(|j| *j >= i) {
-                    let value: f64 = s.modes.clone().zip(p.shape.iter().zip(&points[j].shape))
+                    let mut value: f64 = s.modes.clone().zip(p.shape.iter().zip(&points[j].shape))
                         .map(|(k,(a,b))| self.transition[k].bq*a*b).sum();
+                    value *= p.normal[0]*points[j].normal[0];
+                    if let Some(side) = p.secondary {
+                        value += p.normal[1]*points[j].normal[1]*self.strings[side].modes.clone()
+                            .zip(p.shape.iter().zip(&points[j].shape))
+                            .map(|(k,(a,b))| self.transition[k].bq*a*b).sum::<f64>();
+                    }
                     compliance[i*nc+j] = value; compliance[j*nc+i] = value;
                 }
             }
@@ -331,6 +393,12 @@ impl Bank {
     /// Point-only banks retain the source course thickness at the engine.
     pub fn contact_felt_thickness_m(&self, c: usize) -> Option<f64> {
         self.footprints.as_ref().map(|p| p.points[c].thickness_m)
+    }
+
+    /// Projection of the unchanged hammer trajectory onto the felt normal.
+    /// The same factor must multiply hammer displacement and force reaction.
+    pub fn contact_hammer_projection(&self, c: usize) -> f64 {
+        self.footprints.as_ref().map_or(1.0, |p| p.points[c].normal[0])
     }
 }
 

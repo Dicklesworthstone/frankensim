@@ -38,6 +38,58 @@ fn footprint_input_is_complete_physical_and_quadrature_conserves_area() {
 }
 
 #[test]
+fn oblique_normal_requires_supplied_unit_geometry_and_both_string_planes() {
+    let c=courses();
+    let text=format!("{HEADER}\npoint,69\nnormal,69,0.8,-0.6\n");
+    let selection=Specification::read(&text,&c).unwrap();
+    for invalid in [text.replace("0.8,-0.6","0,1"),text.replace("0.8,-0.6","-0.8,0.6"),
+        text.replace("0.8,-0.6","0.8,0.7"),text.replace("0.8,-0.6","NaN,0"),
+        text.replace("normal,69","normal,68"),format!("{text}normal,69,1,0\n")] {
+        assert!(Specification::read(&invalid,&c).is_err(),"accepted {invalid}");
+    }
+    let board=board::demonstration();
+    let error=Bank::new_with_hammer_footprints(&c,&board,192_000,21_600.,12,false,&selection)
+        .err().unwrap();
+    assert!(error.contains("second string polarization"));
+    // An explicit primary normal is the same point image, without requiring
+    // an unused second plane or silently changing the old force arithmetic.
+    let primary=Specification::read(&text.replace("0.8,-0.6","1,0"),&c).unwrap();
+    let b=Bank::new_with_hammer_footprints(&c,&board,192_000,21_600.,12,false,&primary).unwrap();
+    let old=bank(false,false);
+    assert!(b.footprints.is_none());assert_eq!(b.contact_compliance,old.contact_compliance);
+}
+
+#[test]
+fn oblique_profile_preserves_reciprocal_compliance_and_actual_two_plane_work() {
+    let c=courses();let board=board::demonstration();
+    let text=format!("{HEADER}\nprofile,69\nsite,69,-0.003,0.0001,0.008,0.4\nsite,69,0.002,0,0.008,0.6\nnormal,69,0.8,-0.6\n");
+    let selection=Specification::read(&text,&c).unwrap();
+    let lateral=vec![(0..board.len()).map(|i|0.03*(i+1) as f64).collect()];
+    let mut b=Bank::new_with_hammer_footprints_and_transverse_bridge(&c,&board,
+        192_000,21_600.,12,true,&selection,Some(&lateral)).unwrap();
+    let nc=b.contact_strings.len();assert_eq!(nc,2*c[0].unison);
+    assert!(b.strings.iter().filter(|s|s.polarization==1).all(|s|s.contact.is_none()));
+    let mut force=vec![0.;nc];
+    for j in 0..nc {
+        force[j]=1.;b.predict();b.finish(&force);
+        for i in 0..nc {
+            let measured=b.contact_position(i,&b.next_q)-b.free_contact[i];
+            assert!((measured-b.contact_compliance[i*nc+j]).abs()<1e-14);
+            assert_eq!(b.contact_compliance[i*nc+j],b.contact_compliance[j*nc+i]);
+        }
+        force[j]=0.;
+    }
+    for k in 0..b.q.len() {b.q[k]=1e-7*(k as f64).sin();b.v[k]=0.001*(k as f64).cos();}
+    for tick in 0..100 {
+        for (i,f) in force.iter_mut().enumerate() {*f=0.1*((i+tick) as f64).sin();}
+        let before=b.energy();b.predict();b.finish(&force);
+        let work:f64=(0..nc).map(|i|force[i]*(b.contact_position(i,&b.next_q)-b.contact_position(i,&b.q))).sum();
+        let defect=b.energy_at(&b.next_q,&b.next_v)-before+b.last_modal_loss_j-work;
+        assert!(defect.abs()<1e-11,"oblique string/board work defect {defect:e}");b.commit();
+    }
+}
+
+#[test]
 fn authored_profile_requires_complete_ordered_geometry_and_conserved_area() {
     let c=courses();
     let one=format!("{HEADER}\nprofile,69\nsite,69,0,0,0.008,1\n");

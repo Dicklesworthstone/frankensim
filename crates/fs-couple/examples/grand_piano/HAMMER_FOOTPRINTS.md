@@ -87,6 +87,39 @@ The engaged set changes through actual unilateral contact, without an imposed
 area envelope. They do not resolve a continuous three-dimensional crown,
 rotating contact normals, lateral friction or a full hammer action.
 
+### Fixed oblique contact normal
+
+An optional `normal,key,n_primary,n_secondary` row supplies one fixed normal
+for every site and unison member of that key's point, span or profile:
+
+```text
+frankensim-hammer-footprints-v1
+span,69,0.008,2
+normal,69,0.8,0.6
+```
+
+The illustrative normal above is not measured Model D geometry. Components are
+in the orthonormal primary/secondary frame supplied by `--string-polarization`.
+They must be finite, have squared length one within `1e-10`, and have a strictly
+positive primary component. They are never normalized or inferred. Duplicate
+normal rows and normals without a matching face refuse. A nonzero secondary
+component requires the actual second string polarization; a one-plane bank
+refuses it. Omitting this row, or explicitly supplying `1,0`, preserves the
+existing primary contact and its arithmetic.
+
+This is a fixed frictionless face normal, while the hammer crown continues on
+its existing primary trajectory with the same shank, gravity, jack and catch.
+For crown coordinate `y`, local transverse string displacement `(u,v)`, normal
+`(a,b)` and recession `r`, the overlap is `a*y - a*u - b*v - r`. One existing
+scalar felt force `F` loads the string by `(a*F,b*F)` and reacts on the hammer
+by `-a*F`. Both moving-bridge lifts participate in the same force projection;
+the hammer contribution to contact compliance is multiplied by `a*a`.
+Consequently the actual string, hammer and felt work balance closes without
+an extra gain, lateral force envelope, duplicate contact history or added mass.
+The supplied normal can directly excite lateral string vibration, including
+when the lateral bridge port itself is zero. It does not model face rotation,
+tangential friction or lateral motion of the hammer mechanism.
+
 ```sh
 # faces.fshp must cover every key in the supplied strings.csv.
 cargo run --release -p fs-couple --example grand_piano -- \
@@ -161,12 +194,17 @@ cargo test --release -p fs-couple --example grand_piano footprint_render_tests -
 cargo test --release -p fs-couple --example grand_piano hammer_profile_render_tests -- --test-threads=1
 ```
 
-Seven bank tests cover complete input, span quadrature, authored profile
+Bank tests cover complete input, span quadrature, authored profile
 geometry, nodal contact, reciprocal compliance, actual force/work closure and
-original point parity. Nine engine tests additionally exercise area and local
+original point parity. Oblique profiles additionally check dense impulse
+compliance with both bridge directions and actual two-plane work closure.
+Engine tests exercise area and local
 thickness scaling, unloaded rest, progressive crown engagement with nonlinear
 string stretching, independent material history, una corda, re-strikes,
-transactional refusal, published-rate admission and jack drive. Frontend tests
+transactional refusal, published-rate admission and jack drive. Direct oblique
+attacks check lateral excitation with a zero lateral bridge port, reflected
+normal symmetry, complete hammer work and exact explicit-primary parity.
+Frontend tests
 exercise supplied geometry and actual MIDI/CSV-to-stereo-to-PCM playback on one
 physical timeline. These checks require native execution; syntax parsing does
 not establish Rust compilation, passing dynamics, measured realism or acoustic

@@ -12,7 +12,8 @@ fn adaptive_bridge_accuracy_survives_tail_rotation_and_full_physical_damping() {
     let mass=[1.0_f64,1.7,0.8,2.3,1.2,0.65,1.9,1.4];
     let n=frequency.len();
     let damping_ratio=0.15;
-    let ports=vec![vec![0.7,1.0,-0.6,0.8,-0.4,0.3,-0.12,0.04]];
+    let ports=vec![vec![0.7,1.0,-0.6,0.8,-0.4,0.3,-0.12,0.04],
+        vec![1.04,1.31,-0.81,1.18,-0.59,0.51,-0.138,0.047]];
     let source=SliceReport {
         window:(0.0,(TAU*1400.0).powi(2)),below_low:0,below_high:n,expected:n,
         modes:frequency.iter().enumerate().map(|(i,hz)| {
@@ -54,13 +55,16 @@ fn adaptive_bridge_accuracy_survives_tail_rotation_and_full_physical_damping() {
     }}
     assert!(off_diagonal>1e-5,"mixed-tail loss must retain off-diagonal terms");
 
-    let mut maximum=0.0_f64;
+    let mut maximum=0.0_f64;let mut maximum_transfer=0.0_f64;
     let mut diagonalized_error=0.0_f64;
     let mut damping_response_change=0.0_f64;
-    for port in &ports {
+    let projected_ports:Vec<Vec<f64>>=ports.iter().map(|port| {
         let physical_force:Vec<_>=port.iter().zip(mass).map(|(g,m)|g*m.sqrt()).collect();
-        let force:Vec<_>=reduced.modes.iter().map(|mode|mode.phi.iter()
-            .zip(&physical_force).map(|(phi,f)|phi*f).sum::<f64>()).collect();
+        reduced.modes.iter().map(|mode|mode.phi.iter()
+            .zip(&physical_force).map(|(phi,f)|phi*f).sum::<f64>()).collect()
+    }).collect();
+    for (drive,port) in ports.iter().enumerate() {
+        let force=&projected_ports[drive];
         for &hz in &report.evaluation_hz {
             let omega=TAU*hz;
             let exact=source.modes.iter().zip(port).fold(C64::ZERO,|sum,(mode,g)| {
@@ -79,22 +83,41 @@ fn adaptive_bridge_accuracy_survives_tail_rotation_and_full_physical_damping() {
                 }}
                 let mut response:Vec<_>=force.iter().map(|f|C64::new(*f,0.0)).collect();
                 lu_complex(&dynamic,r).unwrap().solve(&mut response);
-                let compliance=force.iter().zip(response)
+                let compliance=force.iter().zip(&response)
                     .fold(C64::ZERO,|sum,(g,x)|sum+x.scale(*g));
                 let error=(compliance-exact).abs()/exact.abs();
                 if diagonal_only {
                     diagonalized_error=diagonalized_error.max(error);
                     damping_response_change=damping_response_change.max((compliance-full_compliance).abs()/exact.abs());
-                } else {maximum=maximum.max(error);full_compliance=compliance;}
+                } else {
+                    maximum=maximum.max(error);full_compliance=compliance;
+                    for (receive,receiver) in ports.iter().enumerate() {
+                        let transfer=projected_ports[receive].iter().zip(&response)
+                            .fold(C64::ZERO,|sum,(g,x)|sum+x.scale(*g));
+                        let mut expected=C64::ZERO;let mut self_response=C64::ZERO;
+                        for ((mode,a),b) in source.modes.iter().zip(port).zip(receiver) {
+                            let divisor=C64::new(mode.lambda-omega*omega,
+                                -omega*2.0*damping_ratio*mode.lambda.sqrt());
+                            expected=expected+C64::from_re(a*b)/divisor;
+                            self_response=self_response+C64::from_re(b*b)/divisor;
+                        }
+                        let scale=exact.abs().sqrt()*self_response.abs().sqrt();
+                        maximum_transfer=maximum_transfer.max((transfer-expected).abs()/scale);
+                    }
+                }
             }
         }
     }
-    eprintln!("adaptive final projection: source={n}, retained={r}, checked={}, rounds={}, full error={maximum:e}, report={:e}, diagonal-only={diagonalized_error:e}, offdiag C={off_diagonal:e}, damping response change={damping_response_change:e}",
-        report.evaluation_hz.len(),report.enrichment_rounds,report.max_relative_driving_point_error);
+    eprintln!("adaptive final projection: source={n}, retained={r}, checked={}, rounds={}, self error={maximum:e}, complete transfer={maximum_transfer:e}, report={:e}, diagonal-only={diagonalized_error:e}, offdiag C={off_diagonal:e}, damping response change={damping_response_change:e}",
+        report.evaluation_hz.len(),report.enrichment_rounds,report.max_normalized_transfer_error);
     assert!(damping_response_change>1e-5, "fixture must detect loss of physical cross-damping");
     assert!(maximum<=report.tolerance+1e-9,
         "final physical driving-point error {maximum} exceeds {}",report.tolerance);
     assert!((maximum-report.max_relative_driving_point_error).abs()<1e-8,
         "pre-rotation report must describe final K, C and physical ports");
+    assert!(maximum_transfer<=report.tolerance+1e-9,
+        "final physical transfer error {maximum_transfer} exceeds {}",report.tolerance);
+    assert!((maximum_transfer-report.max_normalized_transfer_error).abs()<1e-8,
+        "complete transfer report must describe the final nodal basis and full damping");
 }
 

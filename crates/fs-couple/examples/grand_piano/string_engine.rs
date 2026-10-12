@@ -45,7 +45,7 @@ impl Instrument {
         self.force.fill(0.0);
         for c in 0..nc {
             let ci=self.bank.strings[self.bank.contact_strings[c]].course;
-            self.gap[c]=self.hammer_free[ci]-self.bank.free_contact[c]-self.contact_recession_m[c];
+            self.gap[c]=self.contact_hammer_projection[c]*self.hammer_free[ci]-self.bank.free_contact[c]-self.contact_recession_m[c];
             if self.hammers[ci].active&&self.contacts[c].enabled {
                 self.active.push(c);self.force[c]=self.contacts[c].force;
             }
