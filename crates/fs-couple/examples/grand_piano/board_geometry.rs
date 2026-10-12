@@ -53,6 +53,8 @@ pub struct BoardGeometry {
     chart: PlateChart,
     stiffeners: Vec<Stiffener>,
     stiffener_mass: StiffenerMass,
+    /// Exact analytic rotations of the selected edge-cubic panel field.
+    consistent_rotary_mass: bool,
     supports: AssemblyOptions,
     bridge_sites: Vec<BridgeSite>,
     /// Authored or measured modal damping ratio, not a fitted geometry result.
@@ -136,6 +138,7 @@ impl BoardGeometry {
     /// - fixed,node (explicit supports; no inferred rim constraint)
     /// - stiffener,E_Pa,G_Pa,A_m2,I_m4,J_m4,eccentricity_m,rho_kg_m3,node0,node1,...
     /// - stiffener-mass,lumped|consistent-hermite|consistent-eccentric (optional; default lumped)
+    /// - panel-rotary-mass,lumped|consistent-cubic (optional; default lumped)
     /// - bridge,midi,triangle_id,bary0,bary1,bary2
     /// - damping,dimensionless_ratio
     /// - pretension,N_per_m (uniform nonnegative membrane tension, NOT crown)
@@ -149,6 +152,7 @@ impl BoardGeometry {
         let mut sections = Vec::new();
         let mut stiffeners = Vec::new();
         let mut stiffener_mass = None;
+        let mut consistent_rotary_mass = None;
         let mut sites = Vec::new();
         let mut fixed = BTreeSet::new();
         let mut keys = BTreeSet::new();
@@ -222,6 +226,14 @@ impl BoardGeometry {
                         };
                         once(&mut stiffener_mass, value, "stiffener-mass")?;
                     }
+                    ("panel-rotary-mass", 2) => {
+                        let value = match f[1] {
+                            "lumped" => false,
+                            "consistent-cubic" => true,
+                            _ => return Err("panel-rotary-mass must be lumped or consistent-cubic".into()),
+                        };
+                        once(&mut consistent_rotary_mass, value, "panel-rotary-mass")?;
+                    }
                     ("bridge", 6) => {
                         let key = index(&f, 1)?;
                         if !(21..=108).contains(&key) || !keys.insert(key) {
@@ -276,6 +288,7 @@ impl BoardGeometry {
         Ok(Self {
             provenance: source.ok_or("missing source authority/attribution")?, chart, stiffeners,
             stiffener_mass: stiffener_mass.unwrap_or_default(),
+            consistent_rotary_mass: consistent_rotary_mass.unwrap_or(false),
             supports: AssemblyOptions {
                 support: support.ok_or("missing support type")?,
                 pretension: pretension.ok_or("missing explicit pretension (use zero for none)")?,
@@ -413,6 +426,9 @@ impl BoardGeometry {
         reduction_options: Option<&ritz::RitzOptions>,
         source_frames: Option<&[motion::SourceBridgeFrame]>,
     ) -> Result<PreparedBoard, String> {
+        if self.consistent_rotary_mass && !edge_cubic_transverse_mass {
+            return Err("consistent-cubic panel rotary mass requires the edge-cubic board mass/motion image".into());
+        }
         if consistent_transverse_mass && edge_cubic_transverse_mass {
             return Err("choose one transverse panel mass law".into());
         }
@@ -443,9 +459,15 @@ impl BoardGeometry {
         } else {
             TransverseMass::Lumped
         };
-        let model = self.chart.assemble_with_mass(
-            &self.stiffeners, &self.supports, transverse_mass, self.stiffener_mass,
-        ).map_err(|e| e.to_string())?;
+        let model = if self.consistent_rotary_mass {
+            self.chart.assemble_edge_cubic_kinetic_mass(
+                &self.stiffeners, &self.supports, self.stiffener_mass,
+            )
+        } else {
+            self.chart.assemble_with_mass(
+                &self.stiffeners, &self.supports, transverse_mass, self.stiffener_mass,
+            )
+        }.map_err(|e| e.to_string())?;
         if model.free == 0 { return Err("all soundboard degrees of freedom are constrained".into()); }
         let modal_options = SliceOptions {
             mass_diagonal_equilibration: mass_equilibrated,
@@ -586,7 +608,12 @@ impl BoardGeometry {
             }
         }
         if edge_cubic_transverse_mass {
-            if self.stiffener_mass == StiffenerMass::Lumped {
+            if self.consistent_rotary_mass {
+                provenance.push_str("; exact edge-cubic panel translation and analytic-gradient rotary inertia; shared cubic bridge/surface fields");
+                if self.stiffener_mass == StiffenerMass::Lumped {
+                    provenance.push_str("; lumped beam inertia");
+                }
+            } else if self.stiffener_mass == StiffenerMass::Lumped {
                 provenance.push_str("; opt-in cubic edge-compatible panel mass and bridge/surface fields; lumped rotary/beam inertia");
             } else if self.stiffener_mass == StiffenerMass::ConsistentEccentric {
                 provenance.push_str("; opt-in cubic edge-compatible panel mass and bridge/surface fields; lumped panel rotary inertia");
@@ -1409,3 +1436,7 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+#[path = "board_kinetic_tests.rs"]
+mod kinetic_tests;

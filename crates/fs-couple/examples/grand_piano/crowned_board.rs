@@ -113,6 +113,7 @@ impl CrownedBoard {
                     if row!=SHAPE || shape {return Err("declare rectangular beam sections exactly once".into());}
                     shape=true;
                 }
+                "panel-rotary-mass" => return Err("panel-rotary-mass selects flat edge-cubic inertia; crowned shells use their own six-DOF kinetic field".into()),
                 "stiffener-mass" => return Err("stiffener-mass selects flat plate beam inertia; crowned shells use their own six-DOF beam mass law".into()),
                 "bridge_arm" => {
                     if f.len()!=5 {return Err("bridge_arm needs key,dx,dy,dz in metres".into());}
