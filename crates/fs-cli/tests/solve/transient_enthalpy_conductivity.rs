@@ -69,7 +69,7 @@ fn cards(conductivity: f64) -> CardPackSet {
     .unwrap()
 }
 
-fn project(cards: &CardPackSet, multipliers: Option<(f64, f64)>) -> ProjectSpec {
+pub(super) fn project(cards: &CardPackSet, multipliers: Option<(f64, f64)>) -> ProjectSpec {
     let bytes = tetra_stl();
     let mut spec = transient_product::driven_face_project(&bytes);
     rebind_to(&mut spec, cards);

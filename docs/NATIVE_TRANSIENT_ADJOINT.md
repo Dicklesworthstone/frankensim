@@ -90,9 +90,9 @@ latent plateau even when the instantaneous temperature slope is zero.
 Driver 72 also returns natural-reservoir temperatures, independently supplied
 air inlets, and absolute fan-bank speed ratios. These parameters remain
 constant through the selected trajectory; they are accumulated using the
-same complete multiplier at every consumed endpoint. Constitutive parameters,
+same complete multiplier at every consumed endpoint. These cooling coordinates hold constitutive parameters,
 contact, geometry, pressure, the hydraulic density envelope and transport
-properties remain fixed.
+properties fixed.
 
 `transient.adjoint.convection` records the physical coupling method, natural
 and air port counts, original-target rechecks, and the additional workspace.
@@ -138,14 +138,53 @@ in `control_workspace_bytes`; no control tape grows with the number of fine
 steps. At most 64 fan banks are admitted, in addition to the convection-port
 limit above.
 
+### Material and contact controls
+
+Driver 74 adds `transient.adjoint.material_controls` for the same selected
+temperature observation. These controls remain constant through the consumed
+trajectory and use the complete, residual-checked physical multiplier at each
+endpoint.
+
+| Array | Independent coordinate | Derivative field |
+| --- | --- | --- |
+| `conductivity_regions` | One scale on a volume region's entire conductivity tensor/curve, evaluated at one | `dtemperature_dconductivity_multiplier_k` |
+| `contact_interfaces` | One scale on every face resistance of a named matching interface, evaluated at one | `dtemperature_dresistance_multiplier_k` |
+
+A conductivity scale multiplies the existing `K(T)` and its declared phase
+multiplier together. The retained element partial uses the actual accepted
+temperature and mean nodal liquid mass fraction. Temperature and phase
+feedback already belong to the complete state Jacobian; the parameter
+contraction does not apply them a second time. Regional sums follow the
+retained element labels and preserve anisotropic tensors and nonlinear curves.
+
+A contact scale preserves each interface's resistance map and the independent
+temperatures on its two traces. It uses the consistent P1 face mass matrix,
+including nonuniform temperature and multiplier jumps. Separate interfaces
+remain independent even when they share a material card. Contact geometry,
+pairing, pressure, finish, and constitutive selection remain fixed.
+
+The rows retain their material/interface identities. Derivatives are in
+kelvin per dimensionless scale at one, which also equals the logarithmic-scale
+derivative at zero. They are not absolute conductivity/resistance derivatives,
+edits to material cards, or propagated material uncertainty. An initial
+sampled peak returns zero for every material and contact control. Each array
+admits at most 64 declared coordinates.
+
+Only one set of four conductive-load entries per element, one element result
+vector, a contact multiplier vector, and bounded aggregate rows are needed.
+Their additional workspace is admitted before forward integration and does
+not grow with the number of accepted steps. No additional state or transpose
+solve is introduced.
+
 ## Scope and budgets
 
 The capacity-storage path supports fixed exterior laws, constant declared heat
 capacities, static or scheduled volumetric sources, smooth heterogeneous
 conductivity and fixed matching contact. Radiation, natural convection and
 coupled airflow require the total-enthalpy path described above. Prescribed temperatures are held fixed, not returned as controls.
-Geometry, conductivity parameters, contact resistance, surface power,
-time-grid changes and latent heat are not differentiated by this path.
+The capacity-storage path does not return conductivity or contact controls.
+Neither path differentiates geometry, surface power, time-grid changes,
+constitutive knots or latent-heat parameters.
 
 The forward coarse/fine step cap remains a physical integration cap. The
 optional derivative adds at most one reconstruction and one transpose per
@@ -168,6 +207,7 @@ cargo test -p fs-cli --lib native_transient_adjoint
 cargo test -p fs-conduction --test enthalpy_adjoint robin_feedback
 cargo test -p fs-conduction --test enthalpy_radiation robin_feedback
 cargo test -p fs-cli --test solve transient_enthalpy_convection_adjoint
+cargo test -p fs-cli --test solve transient_enthalpy_material_adjoint
 ```
 
 The core regressions compare linear/nonlinear prescribed launches and their
@@ -182,5 +222,7 @@ The coupled enthalpy cases add independent heated/cooled natural-reservoir
 oracles, fixed-envelope inlet differences, absolute fan-speed differences at
 a nonunit ratio, latent-history inlet propagation, initial-peak zero controls,
 explicit unsupported bank reasons, and a spatial two-segment air/natural/
-radiation control direction. Native execution of these new regressions remains
+radiation control direction. The material-control regressions perturb fresh conductivity and contact cards,
+including nonlinear conductivity through a latent-to-sensible history and
+unequal-temperature bodies. Native execution of these new regressions remains
 pending; no passing Rust result is asserted here.

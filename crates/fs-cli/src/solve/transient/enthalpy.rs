@@ -775,6 +775,10 @@ pub(super) fn solve(
             .and_then(|value| adjoint::enthalpy_control_storage_bytes(
                 spec, natural.len().checked_add(airflow.map_or(0, |path| path.segments.len()))?,
             ).ok().and_then(|extra| value.checked_add(extra)))
+            .and_then(|value| adjoint::enthalpy_material_control_storage_bytes(
+                n, elements, spec.materials.as_deref().unwrap_or(&[]).len(),
+                spec.interface_cards.as_deref().unwrap_or(&[]).len(),
+            ).ok().and_then(|extra| value.checked_add(extra)))
             .ok_or_else(|| bad("combined enthalpy forward/adjoint storage allowance overflows"))?
     } else {
         0

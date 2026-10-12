@@ -1660,8 +1660,10 @@ future source or density influence. The shared transpose checks its true
 residual within the admitted per-solve linear work cap. Reports retain
 revalidated endpoint counts, total dual iterations, worst residual and
 bounded reverse work. Chart/material derivative corners refuse rather than
-inventing a classical gradient. Prescribed boundary parameters, constitutive
-laws, phase multipliers, contact, geometry and the time grid are held fixed.
+inventing a classical gradient. Those history/source/density coordinates hold
+prescribed boundary parameters, constitutive laws, phase multipliers, contact,
+geometry and the time grid fixed. Additional material and contact coordinates
+are supplied by driver 74 under the scope below.
 Driver 70 includes full natural-convection and airflow feedback in this
 native adjoint path. Driver 68 includes complete ambient-radiation
 state feedback. Driver 69 also returns per-surface emissivity and reservoir
@@ -1764,6 +1766,28 @@ perturbations, an absolute fan-speed perturbation at a nonunit nominal ratio,
 latent-history inlet propagation and a joint mixed natural/inlet/fan/radiation
 direction. These tests preserve the physical density envelope during inlet
 edits and check explicit unsupported fan-domain endpoint reasons.
+
+Driver 74 also returns `transient.adjoint.material_controls` from the same
+complete endpoint multipliers. `conductivity_regions` scales each declared
+volume region's whole effective conductivity tensor/curve at one, including
+its retained phase multiplier, and reports
+`dtemperature_dconductivity_multiplier_k`. The shared enthalpy owner retains
+the four local conductive-load entries at the accepted temperature and mean
+nodal liquid mass fraction; the existing full state tangent already owns
+temperature/phase feedback. Labels aggregate element partials without volume
+normalization or merging regions that share a card.
+
+`contact_interfaces` reports `dtemperature_dresistance_multiplier_k` for
+one scale on all retained face resistances of each named matching interface.
+It preserves resistance maps, independent trace temperatures, consistent P1
+mass integration, original card identity and face-pair count. Contact geometry,
+pairing and constitutive selection remain fixed. Both coordinate families
+hold their positive scales through the selected prefix, with reference value
+one (logarithmic reference zero) and kelvin derivative units. Initial selected
+peaks have zero material/contact influence. These are model sensitivities,
+not absolute property derivatives, card mutations or material uncertainty.
+One bounded active element/contact workspace and aggregate report are charged
+before integration; no per-step parameter tape or extra transpose is added.
 
 Schema v14 optionally declares a conductivity multiplier for each regional
 enthalpy material. `linear-liquid-mass-fraction` interpolates between positive

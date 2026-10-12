@@ -299,7 +299,7 @@ fn g1_native_enthalpy_adjoint_initial_sampled_peak_has_no_future_control_effect(
     }
 }
 
-fn contact_project(delta: f64) -> ProjectSpec {
+pub(super) fn contact_project(delta: f64) -> ProjectSpec {
     let mut spec = multi_region_contact_project();
     install_storage(&mut spec, vec![
         material("cold", 10.0 + 0.3 * delta, delta, false),

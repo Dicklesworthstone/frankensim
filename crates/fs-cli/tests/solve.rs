@@ -59,6 +59,8 @@ mod transient_enthalpy_adjoint;
 mod transient_enthalpy_radiation_adjoint;
 #[path = "solve/transient_enthalpy_convection_adjoint.rs"]
 mod transient_enthalpy_convection_adjoint;
+#[path = "solve/transient_enthalpy_material_adjoint.rs"]
+mod transient_enthalpy_material_adjoint;
 
 #[path = "solve/transient_workload.rs"]
 mod transient_workload;
@@ -268,6 +270,10 @@ fn interface_pack_bytes() -> Vec<u8> {
 }
 
 fn interface_pack_bytes_with_peak(peak: Option<f64>) -> Vec<u8> {
+    interface_pack_bytes_with_resistance_and_peak(0.1, peak)
+}
+
+fn interface_pack_bytes_with_resistance_and_peak(resistance: f64, peak: Option<f64>) -> Vec<u8> {
     use fs_evidence::ValidityDomain;
     use fs_matdb::{
         ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedInterfacePack, NormalizedPack,
@@ -300,18 +306,18 @@ fn interface_pack_bytes_with_peak(peak: Option<f64>) -> Vec<u8> {
             ),
             value: peak.map_or(
                 PropertyValue::Scalar {
-                    value: 0.1,
+                    value: resistance,
                     dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
                 },
                 |peak| PropertyValue::Curve {
                     abscissa: "T".to_owned(),
                     abscissa_dims: fs_conduction::TEMPERATURE_DIMS,
                     knots: vec![
-                        (200.0, 0.1),
-                        (295.0, 0.1),
+                        (200.0, resistance),
+                        (295.0, resistance),
                         (300.0, peak),
-                        (305.0, 0.1),
-                        (450.0, 0.1),
+                        (305.0, resistance),
+                        (450.0, resistance),
                     ],
                     dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
                 },
