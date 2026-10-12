@@ -124,6 +124,97 @@ fn geometrically_similar_radiators_preserve_physical_area_scaling() {
     assert!((result - base.scale(9.0)).abs() / result.abs() < 2e-13);
 }
 
+fn complete_bending_surface() -> Vec<AreaSample> {
+    let (nx, ny) = (20, 12);
+    let (width, height) = (0.7, 0.4);
+    let mut cells = Vec::new();
+    for row in 0..ny {
+        for column in 0..nx {
+            let x = (column as f64 + 0.5) / nx as f64;
+            let y = (row as f64 + 0.5) / ny as f64;
+            cells.push(AreaSample {
+                position_m: [width * x, height * y],
+                area_m2: width * height / (nx * ny) as f64,
+                mode_shape: (0..128).map(|mode| {
+                    let sign = if mode % 3 == 0 { -1.0 } else { 1.0 };
+                    sign * det::sin(PI * (mode % 16 + 1) as f64 * x)
+                        * det::sin(PI * (mode / 16 + 1) as f64 * y)
+                }).collect(),
+            });
+        }
+    }
+    cells
+}
+
+#[test]
+fn full_structural_basis_retains_every_high_index_cross_load() {
+    let cells = complete_bending_surface();
+    let omega = TAU * 360.0;
+    let full = PreparedSurface::new(&cells).unwrap().impedance(omega, medium()).unwrap();
+    assert_eq!(full.len(), 128 * 128);
+    for row in 0..128 {
+        assert!(full[row * 128 + row].abs() > 0.0, "missing field {row}");
+        for column in 0..128 {
+            assert_eq!(full[row * 128 + column], full[column * 128 + row]);
+        }
+    }
+    // Independent integrals of widely separated fields expose a retained
+    // 32-field prefix or diagonal-only expansion of the physical operator.
+    let selected = [0, 31, 32, 63, 95, 127];
+    let mut selected_cells = cells;
+    for cell in &mut selected_cells {
+        cell.mode_shape = selected.iter().map(|&mode| cell.mode_shape[mode]).collect();
+    }
+    let direct = PreparedSurface::new(&selected_cells).unwrap().impedance(omega, medium()).unwrap();
+    let scale = full.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+    for (row, &i) in selected.iter().enumerate() {
+        for (column, &j) in selected.iter().enumerate() {
+            assert!((full[i * 128 + j] - direct[row * selected.len() + column]).abs() < 2e-12 * scale);
+        }
+    }
+    assert!(full[31 * 128 + 127].abs() > 1e-4 * scale, "high-field cross load vanished");
+}
+
+#[test]
+fn acoustic_port_projection_matches_independent_surface_field_projection() {
+    let cells = complete_bending_surface();
+    let prepared = PreparedSurface::new(&cells).unwrap();
+    let ports = 4;
+    // Orthonormal cosine columns mix ALL 128 signed structural fields. The
+    // result is compared to newly integrated projected physical surface fields,
+    // not to another algebraic implementation of the same matrix projection.
+    let columns: Vec<Vec<f64>> = (0..ports).map(|port| {
+        (0..128).map(|mode| {
+            det::sqrt(2.0 / 128.0)
+                * det::cos(PI * (mode as f64 + 0.5) * (port + 1) as f64 / 128.0)
+        }).collect()
+    }).collect();
+    let mut projected_cells = cells;
+    for cell in &mut projected_cells {
+        cell.mode_shape = columns.iter().map(|column| {
+            cell.mode_shape.iter().zip(column).map(|(shape, weight)| shape * weight).sum()
+        }).collect();
+    }
+    let projected = PreparedSurface::new(&projected_cells).unwrap();
+    for hz in [40.0, 900.0] {
+        let full = prepared.impedance(TAU * hz, medium()).unwrap();
+        let direct = projected.impedance(TAU * hz, medium()).unwrap();
+        let scale = direct.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+        for row in 0..ports {
+            for column in 0..ports {
+                let mut congruence = C64::ZERO;
+                for i in 0..128 {
+                    for j in 0..128 {
+                        congruence = congruence + full[i * 128 + j].scale(columns[row][i] * columns[column][j]);
+                    }
+                }
+                assert!((direct[row * ports + column] - congruence).abs() < 2e-11 * scale,
+                    "projected field work differs at {hz} Hz, ({row}, {column})");
+            }
+        }
+    }
+}
+
 #[test]
 fn invalid_or_unresolved_area_fields_refuse() {
     let good = disc(0.1, 2);
@@ -142,3 +233,17 @@ fn invalid_or_unresolved_area_fields_refuse() {
     }
     assert!(prepared.impedance(100.0, Medium { density: f64::INFINITY, sound_speed: 343.0 }).is_err());
 }
+
+#[test]
+fn expanded_fields_refuse_excess_work_before_geometry_allocation() {
+    let cell = AreaSample { position_m: [0.0, 0.0], area_m2: 1e-4, mode_shape: Vec::new() };
+    let mut oversized = vec![cell; MAX_DENSE_PANELS];
+    oversized[0].mode_shape = vec![1.0; MAX_MODAL_RAYLEIGH_FIELDS];
+    assert!(matches!(PreparedSurface::new(&oversized), Err(HelmholtzError::BadParameter {
+        what: "Rayleigh loading exceeds the per-frequency modal work limit"
+    })));
+    let mut excess_fields = disc(0.1, 1);
+    for cell in &mut excess_fields { cell.mode_shape = vec![1.0; MAX_MODAL_RAYLEIGH_FIELDS + 1]; }
+    assert!(PreparedSurface::new(&excess_fields).is_err());
+}
+

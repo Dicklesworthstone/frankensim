@@ -9,8 +9,16 @@ use super::{HelmholtzError, Medium, MAX_DENSE_PANELS, MIN_PANELS_PER_WAVELENGTH,
 use fs_math::{c64::C64, det};
 use core::f64::consts::PI;
 
-/// The existing passive acoustic load admits up to 32 complete velocity ports.
-pub const MAX_MODAL_RAYLEIGH_FIELDS: usize = 32;
+/// Complete structural velocity fields retained by the loading integral.
+/// Downstream passive realizations may project these fields into fewer acoustic
+/// ports; that reduction must not remove coordinates from this physical matrix.
+pub const MAX_MODAL_RAYLEIGH_FIELDS: usize = 128;
+
+/// Bound on `cells^2 * modes + cells * modes^2` per frequency. This admits every
+/// previous 32-field/8192-cell case while bounding the cost of larger modal
+/// spaces. A caller preparing many frequencies must additionally bound its
+/// complete sweep. No cells or fields are silently discarded to meet this cap.
+pub const MAX_MODAL_RAYLEIGH_WORK: u64 = 2_200_000_000;
 
 /// One positive-area quadrature cell on the radiator's plane, in SI units.
 #[derive(Clone, Debug)]
@@ -39,9 +47,19 @@ fn invalid(what: &'static str) -> HelmholtzError {
     HelmholtzError::BadParameter { what }
 }
 
+fn reserved<T>(capacity: usize, what: &'static str) -> Result<Vec<T>, HelmholtzError> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(capacity)
+        .map_err(|_| HelmholtzError::AllocationFailed { what })?;
+    Ok(values)
+}
+
 impl PreparedSurface {
     /// Retain every supplied cell and mode. Coincident cells refuse: their
     /// distinct physical self integrals cannot be inferred from area alone.
+    /// The complete geometry and one impedance evaluation use less than
+    /// 281 MiB at the independent cell/field caps; every reservation is fallible.
+    /// The modal work cap is checked before any geometry storage is allocated.
     pub fn new(samples: &[AreaSample]) -> Result<Self, HelmholtzError> {
         let count = samples.len();
         if count == 0 || count > MAX_DENSE_PANELS {
@@ -49,11 +67,16 @@ impl PreparedSurface {
         }
         let modes = samples[0].mode_shape.len();
         if !(1..=MAX_MODAL_RAYLEIGH_FIELDS).contains(&modes) {
-            return Err(invalid("Rayleigh loading requires 1..32 complete modal fields"));
+            return Err(invalid("Rayleigh loading requires 1..128 complete modal fields"));
         }
-        let mut areas = Vec::with_capacity(count);
-        let mut radii = Vec::with_capacity(count);
-        let mut weighted_shape = Vec::with_capacity(count * modes);
+        let cells = count as u64;
+        let fields = modes as u64;
+        if cells * fields * (cells + fields) > MAX_MODAL_RAYLEIGH_WORK {
+            return Err(invalid("Rayleigh loading exceeds the per-frequency modal work limit"));
+        }
+        let mut areas = reserved(count, "complete Rayleigh cell areas")?;
+        let mut radii = reserved(count, "complete Rayleigh cell radii")?;
+        let mut weighted_shape = reserved(count * modes, "complete Rayleigh weighted shapes")?;
         let mut maximum_radius_m = 0.0_f64;
         for cell in samples {
             if !cell.area_m2.is_finite() || cell.area_m2 <= 0.0
@@ -78,10 +101,7 @@ impl PreparedSurface {
             }
         }
         let pairs = count * (count - 1) / 2;
-        let mut distances = Vec::new();
-        distances.try_reserve_exact(pairs).map_err(|_| HelmholtzError::AllocationFailed {
-            what: "complete Rayleigh pair distances",
-        })?;
+        let mut distances = reserved(pairs, "complete Rayleigh pair distances")?;
         for i in 0..count {
             for j in i + 1..count {
                 let a = samples[i].position_m;
@@ -131,7 +151,8 @@ impl PreparedSurface {
         if !prefactor.im.is_finite() {
             return Err(invalid("Rayleigh pressure scale exceeds finite numerical range"));
         }
-        let mut pressure = vec![C64::ZERO; self.count * self.modes];
+        let mut pressure = reserved(self.count * self.modes, "complete Rayleigh pressure fields")?;
+        pressure.resize(self.count * self.modes, C64::ZERO);
         for i in 0..self.count {
             let phase = k * self.radii[i];
             // rho*c*(1-exp(i*k*a))/A is the existing disc integral after
@@ -160,7 +181,8 @@ impl PreparedSurface {
                 }
             }
         }
-        let mut result = vec![C64::ZERO; self.modes * self.modes];
+        let mut result = reserved(self.modes * self.modes, "complete Rayleigh modal impedance")?;
+        result.resize(self.modes * self.modes, C64::ZERO);
         for row in 0..self.modes {
             for column in row..self.modes {
                 let mut value = C64::ZERO;
@@ -181,3 +203,4 @@ impl PreparedSurface {
 #[cfg(test)]
 #[path = "rayleigh_modal_tests.rs"]
 mod tests;
+
