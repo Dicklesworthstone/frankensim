@@ -5,13 +5,12 @@
 
 use super::{bad, finite, lower, poll, ConductionProblem, Cx, ProjectSpec,
     RungSolved, SolveRefusal};
-use super::super::conjugate::AIR_THERMAL_CONDUCTIVITY_W_M_K;
 use fs_conduction::{ScalarField, ThermalBc};
 use fs_conduction::adjoint::{RobinGradient, RobinResponse};
 use fs_project::ThermalBoundaryCondition;
 use std::collections::BTreeMap;
 
-pub(super) const CARD: &str = "convection.churchill-chu-vertical-plate";
+pub(super) const CARD: &str = super::super::natural::DIFFERENTIABLE_CARD;
 
 /// At fixed pressure, geometry and frozen transport properties:
 /// Ra is proportional to |Tw-Ta|/Tfilm^3 and Nu=(0.825+x)^2, x~Ra^(1/6).
@@ -24,17 +23,7 @@ pub(super) const CARD: &str = "convection.churchill-chu-vertical-plate";
 pub(super) fn partials(length: f64, wall: f64, ambient: f64, h: f64)
     -> Result<[f64; 2], SolveRefusal>
 {
-    if ![length, wall, ambient, h].iter().all(|v| v.is_finite() && *v > 0.0)
-        || wall == ambient { return Err(bad("natural adjoint needs a finite non-equilibrium wall and positive retained law values")); }
-    let delta = finite(wall-ambient)?;
-    let film = finite(ambient+0.5*delta)?;
-    let nu = finite(h*length/AIR_THERMAL_CONDUCTIVITY_W_M_K)?;
-    let exponent = finite((1.0-0.825/fs_math::det::sqrt(nu))/3.0)?;
-    if !(exponent > 0.0 && exponent < 1.0/3.0) {
-        return Err(bad("retained natural coefficient is outside the Churchill-Chu differential branch"));
-    }
-    Ok([finite(h*exponent*(1.0/delta-1.5/film))?,
-        finite(h*exponent*(-1.0/delta-1.5/film))?])
+    super::super::natural::coefficient_partials(length, wall, ambient, h)
 }
 
 pub(super) fn pullback(

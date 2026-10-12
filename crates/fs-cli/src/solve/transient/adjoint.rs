@@ -13,6 +13,7 @@ mod enthalpy;
 pub(super) use enthalpy::{
     EnthalpyTape, finish as finish_enthalpy, storage_bytes as enthalpy_storage_bytes,
     radiation_storage_bytes as enthalpy_radiation_storage_bytes,
+    convection_storage_bytes as enthalpy_convection_storage_bytes,
 };
 
 #[cfg(test)]
@@ -47,12 +48,17 @@ pub(super) fn requested(spec: &ProjectSpec) -> Result<Option<Objective>, SolveRe
         let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
             .filter(|setup| setup.transient.is_some())
             .ok_or_else(|| bad("a transient adjoint report requires finite-time conduction"))?;
-        if setup.boundaries.iter().any(|b| matches!(
+        let enthalpy = setup.transient.as_ref().is_some_and(|time| time.enthalpy.is_some());
+        if !enthalpy && setup.boundaries.iter().any(|b| matches!(
             b.condition, ThermalBoundaryCondition::NaturalConvection { .. }
                 | ThermalBoundaryCondition::AirflowConvection { .. })) {
-            return Err(bad("native transient adjoints require prescribed convection laws; natural and airflow feedback are not approximated by fixed coefficients"));
+            return Err(bad("native capacity-storage adjoints require prescribed convection laws; use total-enthalpy storage for complete natural and airflow feedback"));
         }
-        let enthalpy = setup.transient.as_ref().is_some_and(|time| time.enthalpy.is_some());
+        if enthalpy && setup.boundaries.iter().any(|b| matches!(
+            &b.condition, ThermalBoundaryCondition::NaturalConvection { correlation, .. }
+                if correlation != crate::solve::natural::DIFFERENTIABLE_CARD)) {
+            return Err(bad("native natural-convection enthalpy adjoints require the differentiated Churchill-Chu vertical-plate card"));
+        }
         if setup.radiation.is_some() && !enthalpy {
             return Err(bad("native capacity-storage adjoints do not yet differentiate radiation; total-enthalpy storage has its own complete radiative endpoint owner"));
         }

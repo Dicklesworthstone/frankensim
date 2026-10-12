@@ -1601,9 +1601,9 @@ multiplies the radiation and Newton caps in admission; direct audits are
 bounded by 102 per step without natural convection. Memory admission includes
 air staging, retained per-segment receipts and final inner Newton histories
 per accepted endpoint; discarded coupling trials reuse bounded workspace.
-Enclosure radiation and enthalpy trajectory adjoints with boundary feedback
-still refuse. Driver
-version 65 separates this physical coupling from older retained solves. `examples/heatsink-fan/heatsink-fan-enthalpy.fsim` is the
+Enclosure radiation still refuses. Driver 70 adds enthalpy trajectory
+adjoints with the complete natural and air boundary feedback described below.
+Driver version 65 separates this physical coupling from older retained solves. `examples/heatsink-fan/heatsink-fan-enthalpy.fsim` is the
 native fan-cooled synthetic phase-storage example.
 
 Driver 66 closes separate natural reservoirs inside each native enthalpy/air
@@ -1625,7 +1625,8 @@ natural reservoir, a cold radiation reservoir and fan-driven solidification.
 The mixed G1/G3 regressions in `tests/solve/transient_enthalpy_conjugate.rs`
 check signed heat, integrated latent storage and phase fraction against
 independent balances and exercise that input through the native pipeline.
-Air storage, fan dynamics, moving phases and transient adjoints are not inferred.
+Air storage, fan dynamics and moving phases are not inferred. Native enthalpy
+trajectory adjoints are admitted under the scope below.
 
 Driver version 67 admits the existing `temperature-final-adjoint` and
 `temperature-sampled-peak-adjoint` report outputs also support native
@@ -1661,8 +1662,8 @@ revalidated endpoint counts, total dual iterations, worst residual and
 bounded reverse work. Chart/material derivative corners refuse rather than
 inventing a classical gradient. Prescribed boundary parameters, constitutive
 laws, phase multipliers, contact, geometry and the time grid are held fixed.
-Natural convection and airflow feedback remain explicitly unsupported in
-this native adjoint path. Driver 68 includes complete ambient-radiation
+Driver 70 includes full natural-convection and airflow feedback in this
+native adjoint path. Driver 68 includes complete ambient-radiation
 state feedback. Driver 69 also returns per-surface emissivity and reservoir
 temperature controls, with query temperature and source support held fixed. This is a local Estimated
 derivative, without a gradient-error, continuous-peak or validation claim.
@@ -1706,6 +1707,32 @@ rows, independent of fine-step count. The existing radiative trajectory tests
 compare both controls to independent analytic derivatives and fresh native
 solves with new immutable emissivity packs, including latent-to-sensible
 history and an initial sampled peak.
+
+Driver 70 completes the native total-enthalpy reverse path for in-domain
+Churchill–Chu natural convection and independently supplied quasi-steady air
+branches, including their composition with ambient radiation and phase-aware
+conductivity. Each consumed checkpoint retains the original forward physical
+residual target. The reverse reconstructs actual card coefficients and air
+references at the unchanged accepted temperatures, checks the full physical
+residual against that retained target, and independently checks both physical
+energy and actual-air enthalpy gain with natural/radiative heat kept separate.
+No nonlinear solve, history update or convergence-target relaxation occurs.
+
+The shared typed Robin attachment adds the signed natural wall derivative,
+including film-density dependence, and the complete branch-major upstream air
+reference matrix to the already complete enthalpy/radiation tangent. The same
+multiplier contracts initial h, regional watts, reference density and existing
+radiative parameters. Capacity-storage natural/air adjoints remain unsupported;
+other natural cards require their own differentiated constitutive law.
+Convection parameters, flow, geometry and transport properties are fixed.
+`transient.adjoint.convection` names the method, port counts, original-target
+rechecks and bounded workspace. Additional low-rank factors are capped by
+`4 * vertices * convection_ports`, plus existing radiative factors; at most
+64 physical convection ports are admitted. Tests in
+`tests/solve/transient_enthalpy_convection_adjoint.rs` compare heated/cooled
+natural histories with independent scalar derivatives, forced-air controls
+with fresh native finite differences, and mixed natural/two-segment-air/
+radiation histories with a coupled finite difference.
 
 Schema v14 optionally declares a conductivity multiplier for each regional
 enthalpy material. `linear-liquid-mass-fraction` interpolates between positive

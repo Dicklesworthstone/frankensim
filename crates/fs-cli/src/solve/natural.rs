@@ -29,6 +29,8 @@ pub(super) mod adaptive;
 pub(super) const TOLERANCE_REL: f64 = 1e-10;
 /// Fixed-point iteration budget (the map contracts by about 1/4 per step).
 pub(super) const MAX_ITERATIONS: usize = 80;
+/// The native natural-convection law with an admitted classical derivative.
+pub(super) const DIFFERENTIABLE_CARD: &str = "convection.churchill-chu-vertical-plate";
 /// Initial wall-to-ambient difference the first coefficient is evaluated at.
 const INITIAL_DELTA_T_K: f64 = 10.0;
 /// Standard gravity, m/s².
@@ -208,6 +210,54 @@ pub(super) fn coefficient(
         ));
     }
     Ok(Coefficient { htc_w_m2_k: htc, rayleigh, nusselt: nu_value })
+}
+
+/// Complete wall and reservoir partials of the declared vertical-plate law.
+/// Ra is proportional to |Tw-Ta|/Tfilm^3 at fixed pressure and transport data.
+/// Its signed difference and BOTH film-density derivatives remain active.
+pub(super) fn coefficient_partials(
+    length: f64, wall: f64, ambient: f64, h: f64,
+) -> Result<[f64; 2], SolveRefusal> {
+    let bad = |message| conduction_error(
+        "cli-solve-conduction-natural-derivative", message,
+        "use an interior, non-equilibrium Churchill-Chu state with positive physical law values",
+    );
+    let finite = |value: f64| if value.is_finite() { Ok(value) } else {
+        Err(bad("natural-convection derivative arithmetic is nonfinite"))
+    };
+    if ![length, wall, ambient, h].iter().all(|v| v.is_finite() && *v > 0.0)
+        || wall == ambient
+    {
+        return Err(bad("natural adjoint needs a finite non-equilibrium wall and positive retained law values"));
+    }
+    let delta = finite(wall - ambient)?;
+    let film = finite(ambient + 0.5 * delta)?;
+    let nu = finite(h * length / AIR_THERMAL_CONDUCTIVITY_W_M_K)?;
+    let exponent = finite((1.0 - 0.825 / fs_math::det::sqrt(nu)) / 3.0)?;
+    if !(exponent > 0.0 && exponent < 1.0 / 3.0) {
+        return Err(bad("retained natural coefficient is outside the Churchill-Chu differential branch"));
+    }
+    Ok([
+        finite(h * exponent * (1.0 / delta - 1.5 / film))?,
+        finite(h * exponent * (-1.0 / delta - 1.5 / film))?,
+    ])
+}
+
+/// Re-evaluate the physical card and its two partials at one accepted wall.
+/// Nominal trajectories differentiate the unscaled, in-domain card only.
+pub(super) fn differentiated_coefficient(
+    law: &NaturalLaw, wall_k: f64, pressure_pa: f64,
+) -> Result<(Coefficient, [f64; 2]), SolveRefusal> {
+    if law.card != CorrelationId::ChurchillChuVerticalPlate || law.htc_multiplier != 1.0 {
+        return Err(conduction_error(
+            "cli-solve-conduction-natural-derivative",
+            "native natural adjoints require the nominal Churchill-Chu vertical-plate law",
+            "declare the differentiated natural-convection card without a discrepancy multiplier",
+        ));
+    }
+    let value = coefficient(law, wall_k - law.ambient_k, pressure_pa)?;
+    let partials = coefficient_partials(law.length_m, wall_k, law.ambient_k, value.htc_w_m2_k)?;
+    Ok((value, partials))
 }
 
 /// The first coefficient of every law, at the initial difference.
