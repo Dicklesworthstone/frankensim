@@ -72,6 +72,10 @@ use crate::panel3d::SpherePanels;
 mod cbie_geometry;
 pub use cbie_geometry::PreparedCbieGeometry;
 
+/// Reciprocal Rayleigh loading of complete planar modal velocity fields.
+#[path = "rayleigh_modal.rs"]
+pub mod rayleigh_modal;
+
 /// Dense-LU work cap: a complex dense system above this panel count is
 /// refused rather than silently thrashing (n^2 * 16 bytes; 8192 panels
 /// is already a 1 GiB matrix). The FMM path is the recorded follow-up.
@@ -3309,3 +3313,4 @@ mod tests {
         assert!(err.to_string().contains("FS-BEM-HELM-BAD-PARAMETER"));
     }
 }
+
