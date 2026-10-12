@@ -636,3 +636,183 @@ fn g3_native_mixed_enthalpy_adjoint_includes_upstream_air_and_radiative_feedback
         8e-6,
     );
 }
+
+
+/// The admitted forward card supplies Nu; this independent derivative uses
+/// Ra proportional to |Tw-Ta|/Tfilm^3 and never calls the adjoint implementation.
+fn actual_natural_coefficient(wall: f64) -> (f64, f64) {
+    use fs_convection::{CorrelationId, CorrelationInputs, ThermalConductivity, evaluate};
+    let delta = wall - INLET_K;
+    let film = INLET_K + 0.5 * delta;
+    let density = 101325.0 / (287.05 * film);
+    let kinematic = 1.846e-5 / density;
+    let rayleigh = 9.80665 * delta.abs() * 0.1_f64.powi(3)
+        / (film * kinematic * (kinematic / 0.707));
+    let card = evaluate(
+        CorrelationId::ChurchillChuVerticalPlate,
+        CorrelationInputs::natural(rayleigh, 0.707),
+    ).unwrap();
+    assert!(card.evidence().model.in_domain);
+    let h = card.heat_transfer_coefficient(
+        ThermalConductivity::new(0.0263), fs_qty::Length::new(0.1),
+    ).unwrap().value.value();
+    let exponent = (1.0 - 0.825 / card.evidence().value.sqrt()) / 3.0;
+    (h, h * exponent * (1.0 / delta - 1.5 / film))
+}
+
+/// Uniform imported-tetra balance with a 0..300 J/kg latent interval at 330 K.
+/// Derivative coordinates are initial h, power, density, emissivity, reservoir.
+fn natural_radiative_phase_oracle(
+    input: Inputs, emissivity: f64, reservoir: f64,
+) -> (Vec<[f64; 2]>, [f64; 5], f64) {
+    let sigma = 5.670_374_419e-8;
+    let area = 8.0 * 3.0_f64.sqrt();
+    let mass = input.density * VOLUME;
+    let dt = 0.25;
+    let state = |h: f64| {
+        if h < 0.0 {
+            (330.0 + h / CP, 1.0 / CP)
+        } else if h < 300.0 {
+            (330.0, 0.0)
+        } else {
+            (330.0 + (h - 300.0) / CP, 1.0 / CP)
+        }
+    };
+    let mut old_h = input.initial_h;
+    let mut derivatives = [1.0, 0.0, 0.0, 0.0, 0.0];
+    let mut frozen_initial = 1.0;
+    let mut endpoints = Vec::new();
+    let mut final_slope = 0.0;
+    for _ in 0..4 {
+        let balance = |h: f64| {
+            let (t, _) = state(h);
+            let convection = area * actual_natural_coefficient(t).0 * (t - INLET_K);
+            let radiation = emissivity * sigma * area * (t.powi(4) - reservoir.powi(4));
+            mass * (h - old_h) + dt * (convection + radiation - input.power)
+        };
+        // All bracket states stay within the source chart and above ambient.
+        let (mut low, mut high) = (-100.0, 900.0);
+        assert!(balance(low) < 0.0 && balance(high) > 0.0);
+        for _ in 0..100 {
+            let middle = 0.5 * (low + high);
+            if balance(middle) > 0.0 { high = middle; } else { low = middle; }
+        }
+        let h = 0.5 * (low + high);
+        let (t, slope) = state(h);
+        let (htc, wall_slope) = actual_natural_coefficient(t);
+        let radiation_slope = 4.0 * emissivity * sigma * area * t.powi(3);
+        let convection_slope = area * (htc + (t - INLET_K) * wall_slope);
+        let diagonal = mass + dt * (convection_slope + radiation_slope) * slope;
+        let forcing = [
+            0.0,
+            dt,
+            -VOLUME * (h - old_h),
+            -dt * sigma * area * (t.powi(4) - reservoir.powi(4)),
+            4.0 * dt * emissivity * sigma * area * reservoir.powi(3),
+        ];
+        for (derivative, rhs) in derivatives.iter_mut().zip(forcing) {
+            *derivative = (mass * *derivative + rhs) / diagonal;
+        }
+        // Omit only natural h'(T), retaining the exact radiation derivative.
+        frozen_initial *= mass / (mass + dt * (area * htc + radiation_slope) * slope);
+        endpoints.push([h, t]);
+        old_h = h;
+        final_slope = slope;
+    }
+    for derivative in &mut derivatives { *derivative *= final_slope; }
+    (endpoints, derivatives, frozen_initial * final_slope)
+}
+
+#[test]
+fn g1_native_natural_radiative_reverse_retains_latent_history_and_surface_controls() {
+    let input = Inputs { initial_h: 80.0, ..Inputs::hot() };
+    let run_phase = |input: Inputs, emissivity: f64, reservoir: f64, output: Option<&str>| {
+        // A fresh immutable pack and binding are built for every emissivity probe.
+        let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), emissivity);
+        let (mut spec, bytes) = uniform_project(input, true);
+        let policy = time(&mut spec).enthalpy.as_mut().unwrap();
+        policy.max_newton_iterations = 8;
+        policy.max_backtracks = 12;
+        policy.materials[0].knots = [
+            (CP * (233.15 - 330.0), 233.15, 0.0),
+            (0.0, 330.0, 0.0),
+            (300.0, 330.0, 1.0),
+            (300.0 + CP * (398.15 - 330.0), 398.15, 1.0),
+        ].into_iter().map(|(h, temperature, fraction)| TransientEnthalpyKnot {
+            specific_enthalpy: QtyAny::new(h, dims::SPECIFIC_ENTHALPY),
+            temperature: QtyAny::new(temperature, dims::TEMPERATURE),
+            liquid_mass_fraction: fraction,
+        }).collect();
+        radiation_product::declare(&mut spec, &card, "air", reservoir);
+        let radiation = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .radiation.as_mut().unwrap();
+        radiation.surfaces[0].query_temperature.value = 330.0;
+        radiation.max_iterations = 24;
+        radiation.relaxation = 1.0;
+        run(&spec, &bytes, &cards, output)
+    };
+    let surface = |receipt: &J| -> J {
+        let surfaces = receipt.get("radiation").unwrap().get("surfaces").unwrap()
+            .as_array().unwrap();
+        assert_eq!(surfaces.len(), 1);
+        surfaces[0].clone()
+    };
+    let (expected_states, expected, frozen_initial) =
+        natural_radiative_phase_oracle(input, 0.85, 400.0);
+    let solved = run_phase(input, 0.85, 400.0, Some(FINAL));
+    check_final(&solved, 1.0);
+    assert_eq!(solved.temperature.len(), 4, "the balance assumes one regular tetra");
+    for (row, &[h, temperature]) in solved.transient().get("fine").unwrap()
+        .as_array().unwrap().iter().zip(&expected_states)
+    {
+        close(n(row, "final_region_max_k"), temperature, 5e-8);
+        close(n(row, "mean_liquid_mass_fraction"), (h / 300.0).clamp(0.0, 1.0), 2e-8);
+        let natural = row.get("natural").unwrap();
+        assert!(n(natural, "physical_residual_norm_j")
+            <= n(natural, "physical_residual_tolerance_j"));
+        close(n(natural.get("physical_coefficients_w_m2_k").unwrap(), "air"),
+            actual_natural_coefficient(temperature).0, 2e-8);
+    }
+    assert!(expected_states[..3].iter().all(|[h, t]| *h > 0.0 && *h < 300.0 && *t == 330.0));
+    assert!(expected_states[3][0] > 300.0);
+    assert!(expected[0] > 0.08, "stored latent history must reach the final sensible state");
+    assert!((expected[0] - frozen_initial).abs() > 1e-3);
+    for (&actual, &reference) in gradients(solved.adjoint()).iter().zip(&expected[..3]) {
+        close(actual, reference, 3e-7);
+    }
+    let controls = surface(solved.adjoint());
+    assert_eq!(controls.str_field("target"), Some("air"));
+    close(n(&controls, "emissivity"), 0.85, 0.0);
+    close(n(&controls, "reservoir_temperature_k"), 400.0, 0.0);
+    let emissivity = n(&controls, "dtemperature_demissivity_k");
+    let reservoir = n(&controls, "dtemperature_dreservoir_temperature_k_per_k");
+    close(emissivity, expected[3], 2e-6);
+    close(reservoir, expected[4], 2e-7);
+    let epsilon = 0.02;
+    let material_probe = |delta: f64| {
+        let changed = Inputs {
+            initial_h: input.initial_h + 2.0 * delta,
+            power: input.power + 3.0 * delta,
+            density: input.density + 0.4 * delta,
+        };
+        let trial = run_phase(changed, 0.85, 400.0, None);
+        close(n(region(trial.transient(), "materials"), "initial_temperature_k"), 330.0, 0.0);
+        trial.final_temperature()
+    };
+    let actual = gradients(solved.adjoint());
+    close(2.0 * actual[0] + 3.0 * actual[1] + 0.4 * actual[2],
+        (material_probe(epsilon) - material_probe(-epsilon)) / (2.0 * epsilon), 4e-6);
+    let source_card = surface(&solved.receipt).str_field("card").unwrap().to_string();
+    let radiation_probe = |delta: f64| {
+        let changed_emissivity = 0.85 + 0.02 * delta;
+        let changed_reservoir = 400.0 + 0.5 * delta;
+        let trial = run_phase(input, changed_emissivity, changed_reservoir, None);
+        let retained = surface(&trial.receipt);
+        assert_ne!(retained.str_field("card").unwrap(), source_card);
+        close(n(&retained, "emissivity"), changed_emissivity, 0.0);
+        close(n(&retained, "ambient_temperature_k"), changed_reservoir, 0.0);
+        trial.final_temperature()
+    };
+    close(0.02 * emissivity + 0.5 * reservoir,
+        (radiation_probe(epsilon) - radiation_probe(-epsilon)) / (2.0 * epsilon), 4e-6);
+}
