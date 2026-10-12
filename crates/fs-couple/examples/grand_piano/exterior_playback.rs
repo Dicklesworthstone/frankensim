@@ -14,6 +14,7 @@ pub use score::Score;
 pub struct Options {
     pub substeps: usize,
     pub modes: usize,
+    pub stretch_tuning: Option<f64>,
     pub wav_format: Option<super::wav_output::Format>,
     pub midi: Option<String>,
     pub performance: Option<String>,
@@ -39,7 +40,7 @@ pub struct Options {
 }
 impl Default for Options {
     fn default() -> Self {
-        Self { substeps: 4, modes: super::linear::MAX_STRING_MODES, wav_format: None, midi: None, performance: None,
+        Self { substeps: 4, modes: super::linear::MAX_STRING_MODES, stretch_tuning: None, wav_format: None, midi: None, performance: None,
             midi_mapping: midi::Mapping::default(), note: None, velocity: None,
             mapping_explicit: false, hammers: None,
             hammer_footprints: None, dampers: None, string_stretching: None, string_polarization: None,
@@ -51,6 +52,19 @@ impl Default for Options {
     }
 }
 impl Options {
+    /// Resolve physical tuning once, before admitting control cards or preparing
+    /// any string, structural or acoustic state. Absent selection preserves the
+    /// supplied tensions, including the source preset's rounded values.
+    pub fn prepare_scale(&self, mut courses: Vec<Course>) -> Result<Vec<Course>, String> {
+        if let Some(reference) = self.stretch_tuning {
+            super::stretch_tuning::tune(&mut courses, reference)?;
+        }
+        Ok(courses)
+    }
+    pub fn tuning_report(&self) -> String {
+        self.stretch_tuning.map_or_else(|| "input tensions preserved".to_owned(), |f|
+            format!("A4={f} Hz, C4..B4 first-partial equal temperament and outward 2:1 stiff-string octave matching; only physical tension changed"))
+    }
     /// The caller knows whether the scale is the concert preset. Supplied
     /// scales and explicit point/pad selections retain their own approximation.
     /// Apply only to playback; harmonic analysis has no key-damper state.
@@ -103,7 +117,7 @@ impl Options {
                 continue;
             }
             if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers", "--string-stretching", "--string-polarization", "--cavity", "--rigid-assembly",
-                "--board-reduction", "--radiation-ports", "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity", "--wav-format"].contains(&flag.as_str()) {
+                "--board-reduction", "--radiation-ports", "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity", "--wav-format", "--stretch-tuning"].contains(&flag.as_str()) {
                 return Err(format!("unknown exterior playback option {flag}"));
             }
             let value = args.next().filter(|v| !v.is_empty() && !v.starts_with("--"))
@@ -112,6 +126,7 @@ impl Options {
             match flag.as_str() {
                 "--modes" => result.modes = super::geometry::parse_partial_budget(value)?,
                 "--substeps" => result.substeps = value.parse().map_err(|_| invalid())?,
+                "--stretch-tuning" => result.stretch_tuning = Some(value.parse().map_err(|_| invalid())?),
                 "--wav-format" => result.wav_format = Some(super::wav_output::Format::parse(value)?),
                 "--hammers" => result.hammers = Some(value.clone()),
                 "--hammer-footprints" => result.hammer_footprints = Some(value.clone()),
@@ -166,11 +181,14 @@ impl Options {
             || options.string_stretching.is_some()
             || options.rt0425_hammer_stiffness
             || options.rt0425_hammer_dissipation {
-            return Err("harmonic controls accept resolution, board inertia/reduction, rigid assembly, string polarization, intrinsic string damping and cavity; hammer, pedal, score and nonlinear-extension controls require playback".into());
+            return Err("harmonic controls accept resolution, board inertia/reduction, rigid assembly, stretch tuning, string polarization, intrinsic string damping and cavity; hammer, pedal, score and nonlinear-extension controls require playback".into());
         }
         Ok(())
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.stretch_tuning.is_some_and(|f| !f.is_finite() || !(430.0..=450.0).contains(&f)) {
+            return Err("stretch tuning requires finite A4 in 430..450 Hz".into());
+        }
         if self.radiation_ports.is_some_and(|n| !(1..=32).contains(&n)) {
             return Err("--radiation-ports requires an explicit acoustic rank budget in 1..32".into());
         }
@@ -395,6 +413,50 @@ mod tests {
         Options::parse(&args.iter().map(|s| String::from(*s)).collect::<Vec<_>>())
     }
     fn course() -> Course { steinway_scale::courses().unwrap()[48] }
+    #[test]
+    fn stretch_tuning_is_shared_by_playback_and_harmonic_scale_preparation() {
+        let source=steinway_scale::courses().unwrap();
+        assert_eq!(Options::default().prepare_scale(source.clone()).unwrap(),source);
+        let selected=parse(&["--stretch-tuning","440"]).unwrap();
+        let harmonic=Options::harmonic(&["--stretch-tuning".into(),"440".into()]).unwrap();
+        let tuned=selected.prepare_scale(source.clone()).unwrap();
+        assert_eq!(harmonic.prepare_scale(source.clone()).unwrap(),tuned);
+        assert!(selected.tuning_report().contains("2:1"));
+        for (old,new) in source.iter().zip(&tuned) {
+            assert_eq!(*old,Course {tension_n:old.tension_n,..*new});
+        }
+        for index in 0..76 {
+            let lower=&tuned[index];let upper=&tuned[index+12];
+            assert!((lower.partial_hz(2,lower.tension_n)/upper.partial_hz(1,upper.tension_n)-1.0).abs()<1e-11);
+        }
+        assert!((tuned[48].partial_hz(1,tuned[48].tension_n)/440.0-1.0).abs()<1e-11);
+        // This is the same admission order as response/render/render-loaded:
+        // tension first, then materials/geometry, then the actual string bank.
+        let played=vec![tuned[27],tuned[48],tuned[63]];
+        let options=Options {modes:4,..selected};
+        let piano=Controls::load(&options,&played).unwrap()
+            .instrument(played.clone(),&super::super::board::demonstration(),&options).unwrap();
+        for port in piano.bank.strings.iter().filter(|p|!p.duplex) {
+            let c=&played[port.course];
+            let cents=(port.member as f64-0.5*(c.unison-1) as f64)*c.detune_cents;
+            let tension=c.tension_at_cents(cents).unwrap();
+            for (partial,index) in port.modes.clone().enumerate() {
+                let actual=piano.bank.modes[index].omega/std::f64::consts::TAU;
+                assert!((actual/c.partial_hz(partial+1,tension)-1.0).abs()<1e-11);
+            }
+        }
+    }
+    #[test]
+    fn invalid_stretch_tuning_reference_or_missing_octave_geometry_refuses() {
+        for args in [vec!["--stretch-tuning"],vec!["--stretch-tuning","NaN"],
+            vec!["--stretch-tuning","429.9"],vec!["--stretch-tuning","450.1"],
+            vec!["--stretch-tuning","440","--stretch-tuning","442"]] {
+            assert!(parse(&args).is_err(),"accepted {args:?}");
+        }
+        let bass=steinway_scale::courses().unwrap()[0];
+        let options=parse(&["--stretch-tuning","440"]).unwrap();
+        assert!(options.prepare_scale(vec![bass]).unwrap_err().contains("requires supplied octave neighbour"));
+    }
     fn felt(stress: f64) -> String {
         format!("frankensim-hammer-materials-v1\nfelt,69,{stress},0.2,2.5,3.2,0.25,0.8,2500000\nbranch,69,2000000,0.0002\n")
     }

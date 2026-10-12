@@ -8,6 +8,7 @@ mod board_geometry;
 mod crowned_board;
 mod steinway_d;
 mod steinway_scale;
+mod stretch_tuning;
 mod performance;
 use performance::midi;
 mod felt;
@@ -29,7 +30,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--dampers estimated | point | pads.fspd] [--string-stretching axial.fspx]
     [--string-polarization bridge-frames.fspp]
     [--cavity enclosure.fspc]
-    [--concert-pitch 430..450 | --raw-tensions]
+    [--concert-pitch 430..450 | --stretch-tuning 430..450 | --raw-tensions]
     [--mesh-divisions 4..32] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--board-reduction SPEC]
     [--performance events.csv] [--observer-gain Pa/(m^3/s)]
@@ -84,8 +85,11 @@ from its dimensions/material. This is a linearized reduction, not the full actio
 Lengths, effective winding mass and EI remain fixed. Preset tensions are tuned
 to A4=440 Hz by default to compensate rounded source values; --raw-tensions
 preserves the published table. --concert-pitch tunes first partials by changing
-physical tension, not oscillator frequencies. This is not a stretch-tuning fit.
-An explicit --scale always supplies the geometry/masses; absent --concert-pitch,
+physical tension, not oscillator frequencies. --stretch-tuning instead anchors
+C4..B4 at the selected A4 and matches actual stiff-string 2:1 octave partials
+outward across the supplied scale. It excludes --concert-pitch/--raw-tensions.
+This is a declared octave policy, not a measured or perceptual tuning fit.
+An explicit --scale always supplies the geometry/masses; absent either tuning option,
 its tensions are preserved even with a preset. Preset hammer voicing still applies
 unless --hammers supplies a complete per-key WoolFelt/Prony material file.
 --hammers requires --render and a card for every key in the supplied scale, not
@@ -230,7 +234,7 @@ struct Options {
     hammers: Option<String>, hammer_footprints: Option<String>, dampers: Option<String>,
     string_stretching: Option<String>, string_polarization: Option<String>, cavity: Option<String>,
     midi: Option<String>, midi_mapping: midi::Mapping,
-    concert_pitch: Option<f64>, raw_tensions: bool,
+    concert_pitch: Option<f64>, stretch_tuning: Option<f64>, raw_tensions: bool,
     rt0425_bridge_contacts: bool, rt0425_hammer_stiffness: bool,
     rt0425_hammer_dissipation: bool, rt0425_string_damping: bool,
     equilibrate_board_mass: bool, consistent_board_mass: bool, edge_cubic_board_mass: bool,
@@ -249,7 +253,7 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self { render: None, scale: None, board: None, board_geometry: None,
-            performance: None, preset: None, hammers: None, hammer_footprints: None, dampers: None, concert_pitch: None, raw_tensions: false,
+            performance: None, preset: None, hammers: None, hammer_footprints: None, dampers: None, concert_pitch: None, stretch_tuning: None, raw_tensions: false,
             rt0425_bridge_contacts: false, rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false, rt0425_string_damping: false,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
@@ -300,6 +304,7 @@ impl Options {
                 "--string-polarization" => options.string_polarization = Some(value.clone()),
                 "--cavity" => options.cavity = Some(value.clone()),
                 "--concert-pitch" => options.concert_pitch = Some(value.parse().map_err(|_| invalid())?),
+                "--stretch-tuning" => options.stretch_tuning = Some(value.parse().map_err(|_| invalid())?),
                 "--mesh-divisions" => options.mesh_divisions = value.parse().map_err(|_| invalid())?,
                 "--dump-geometry" => options.dump_geometry = Some(value.clone()),
                 "--dump-obj" => options.dump_obj = Some(value.clone()),
@@ -349,9 +354,14 @@ impl Options {
             || !(1..=16).contains(&options.substeps) || !(1..=linear::MAX_STRING_MODES).contains(&options.modes) {
             return Err("render control outside its finite admitted range".into());
         }
-        if options.concert_pitch.is_some_and(|f| !f.is_finite() || !(430.0..=450.0).contains(&f))
-            || (options.raw_tensions && (options.preset.is_none() || options.concert_pitch.is_some())) {
-            return Err("concert pitch must be 430..450 Hz; --raw-tensions requires a preset and excludes --concert-pitch".into());
+        if [options.concert_pitch, options.stretch_tuning].into_iter().flatten()
+            .any(|f| !f.is_finite() || !(430.0..=450.0).contains(&f)) {
+            return Err("concert pitch and stretch tuning require finite A4 in 430..450 Hz".into());
+        }
+        if (options.concert_pitch.is_some() && options.stretch_tuning.is_some())
+            || (options.raw_tensions && (options.preset.is_none()
+                || options.concert_pitch.is_some() || options.stretch_tuning.is_some())) {
+            return Err("select at most one of --concert-pitch, --stretch-tuning and --raw-tensions; --raw-tensions requires a preset".into());
         }
         if options.board.is_some() && (options.board_geometry.is_some() || options.preset.is_some()) {
             return Err("modal board CSV excludes a preset and geometric board; --board-geometry may override a preset board".into());
@@ -501,8 +511,17 @@ impl Options {
         Ok(options)
     }
     fn tuning_hz(&self) -> Option<f64> {
+        if self.stretch_tuning.is_some() { return None; }
         self.concert_pitch.or_else(||
             (self.preset.is_some() && self.scale.is_none() && !self.raw_tensions).then_some(440.0))
+    }
+    fn tuning_report(&self) -> String {
+        if let Some(f) = self.stretch_tuning {
+            format!("tensions adjusted to A4={f} Hz, C4..B4 first-partial equal temperament and outward 2:1 stiff-string octave matching; L, mass, EI and contact geometry preserved")
+        } else {
+            self.tuning_hz().map_or_else(|| "input tensions preserved".to_owned(),
+                |f| format!("tensions adjusted to A4={f} Hz first-partial equal temperament; L, mass and EI preserved"))
+        }
     }
     fn uses_preset_board(&self) -> bool {
         self.preset.is_some() && self.board_geometry.is_none()
@@ -546,7 +565,9 @@ fn selected_scale(text: Option<&str>, options: &Options) -> Result<Vec<geometry:
     let mut scale = if text.is_none() && options.preset.is_some() {
         steinway_scale::courses()?
     } else { load_scale(text)? };
-    if let Some(reference) = options.tuning_hz() {
+    if let Some(reference) = options.stretch_tuning {
+        stretch_tuning::tune(&mut scale, reference)?;
+    } else if let Some(reference) = options.tuning_hz() {
         for c in &mut scale {
             let target = reference * fs_math::det::pow(2.0, (f64::from(c.midi) - 69.0) / 12.0);
             let cents = 1200.0 * fs_math::det::ln(target / c.partial_hz(1, c.tension_n))
@@ -1042,8 +1063,7 @@ fn run() -> Result<(), String> {
     let scale_source = options.scale.as_deref().unwrap_or(if options.preset.is_some() {
         "RT-0425 Appendix A wrapped-string MODEL: 84 published courses plus four estimated extensions"
     } else { "ESTIMATED demonstration" });
-    let tuning_source = options.tuning_hz().map_or_else(|| "input tensions preserved".to_owned(),
-        |f| format!("tensions adjusted to A4={f} Hz first-partial equal temperament; L, mass and EI preserved"));
+    let tuning_source = options.tuning_report();
     let preset = options.uses_preset_board().then(|| if options.rt0425_bridge_contacts {
         steinway_d::build_with_rt0425_contacts(options.mesh_divisions)
     } else { steinway_d::build(options.mesh_divisions) }).transpose()?;
@@ -1764,6 +1784,57 @@ mod render_tests {
             vec!["--raw-tensions"],vec!["--preset","steinway-d","--raw-tensions","--concert-pitch","442"]] {
             assert!(options(&args).is_err());
         }
+    }
+    #[test]
+    fn stretch_selection_preserves_geometry_and_reaches_the_played_string_bank() {
+        let o=options(&["--preset","steinway-d","--stretch-tuning","442"]).unwrap();
+        assert_eq!(o.tuning_hz(),None);
+        assert!(o.tuning_report().contains("2:1"));
+        let source=steinway_scale::courses().unwrap();
+        let tuned=selected_scale(None,&o).unwrap();
+        let equal=selected_scale(None,&options(&["--preset","steinway-d","--concert-pitch","442"]).unwrap()).unwrap();
+        let mut before=0.0_f64;let mut after=0.0_f64;
+        for (a,b) in source.iter().zip(&tuned) {
+            assert_eq!(*a,geometry::Course {tension_n:a.tension_n,..*b});
+        }
+        for index in 0..76 {
+            let mismatch=|s:&[geometry::Course]| (s[index].partial_hz(2,s[index].tension_n)
+                /s[index+12].partial_hz(1,s[index+12].tension_n)-1.0).abs();
+            before=before.max(mismatch(&equal));after=after.max(mismatch(&tuned));
+        }
+        assert!(before>1e-4 && after<1e-10);
+        // Prepared playback receives the new physical tension, not a frequency
+        // override. Verify every retained speaking partial, including unisons.
+        let played=vec![tuned[27],tuned[48],tuned[63]];
+        let mut render_options=o;render_options.modes=4;
+        let piano=prepare_instrument(played.clone(),&board::demonstration(),&render_options).unwrap();
+        for port in piano.bank.strings.iter().filter(|p|!p.duplex) {
+            let c=&played[port.course];
+            let cents=(port.member as f64-0.5*(c.unison-1) as f64)*c.detune_cents;
+            let tension=c.tension_at_cents(cents).unwrap();
+            for (partial,index) in port.modes.clone().enumerate() {
+                let actual=piano.bank.modes[index].omega/std::f64::consts::TAU;
+                let expected=c.partial_hz(partial+1,tension);
+                assert!((actual/expected-1.0).abs()<1e-11);
+            }
+        }
+        assert!((tuned[48].partial_hz(1,tuned[48].tension_n)/442.0-1.0).abs()<1e-11);
+        let imported=options(&["--preset","steinway-d","--scale","source.csv","--stretch-tuning","442"]).unwrap();
+        assert_eq!(selected_scale(Some(&geometry::write_scale(&source)),&imported).unwrap(),tuned);
+    }
+    #[test]
+    fn stretch_selection_rejects_conflicting_or_invalid_tuning_before_preparation() {
+        for args in [vec!["--stretch-tuning"],vec!["--stretch-tuning","NaN"],
+            vec!["--stretch-tuning","429.9"],vec!["--stretch-tuning","450.1"],
+            vec!["--stretch-tuning","440","--stretch-tuning","442"],
+            vec!["--stretch-tuning","440","--concert-pitch","440"],
+            vec!["--preset","steinway-d","--stretch-tuning","440","--raw-tensions"]] {
+            assert!(options(&args).is_err(),"accepted {args:?}");
+        }
+        let o=options(&["--stretch-tuning","440"]).unwrap();
+        let missing=vec![geometry::demonstration_scale().unwrap()[0]];
+        assert!(selected_scale(Some(&geometry::write_scale(&missing)),&o).unwrap_err()
+            .contains("requires supplied octave neighbour"));
     }
     #[test]
     fn source_hammer_cards_are_used_by_the_render_preparation_path() {

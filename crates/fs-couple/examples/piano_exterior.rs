@@ -8,6 +8,7 @@
 #[path="grand_piano/crowned_board.rs"] mod crowned_board;
 #[path="grand_piano/steinway_d.rs"] mod steinway_d;
 #[path="grand_piano/steinway_scale.rs"] mod steinway_scale;
+#[path="grand_piano/stretch_tuning.rs"] mod stretch_tuning;
 #[path="grand_piano/performance.rs"] mod performance;
 #[path="grand_piano/felt.rs"] mod felt;
 #[path="grand_piano/engine.rs"] mod engine;
@@ -36,6 +37,7 @@ piano_exterior response BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUST
 piano_exterior render BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
 piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
     [--modes auto|1..512] [--substeps 1..16] [--rigid-assembly ASSEMBLY.fspr]
+    [--stretch-tuning 430..450]
     [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
     [--board-reduction SPEC]
     [--radiation-ports 1..32]
@@ -57,6 +59,13 @@ of radiating combinations. The basis comes from actual loaded surface motion.
 Both the complete lifted complex load and its dissipative part must pass the
 existing training/held-out limits. Insufficient acoustic rank refuses; it does
 not reduce the soundboard, raise the rank automatically or change fit limits.
+--stretch-tuning selects A4 in Hz and changes physical string tensions before
+control cards, structural modes or acoustic loads are prepared. C4..B4 anchors
+first-partial equal temperament; outward octaves match the actual lower second
+partial to the upper first partial. When omitted, all supplied tensions are
+preserved, including the steinway-d source table. Length, mass, EI and contact
+geometry remain unchanged. See grand_piano/STRETCH_TUNING.md for the declared
+2:1 policy and sparse-scale requirements; this is not a perceptual calibration.
 --string-polarization uses both transverse directions of each physical string,
 projected from the same full-vector board modes. Every key must supply its
 bridge site, 3-D arm, orthonormal string/hammer frame and lateral damper ratio.
@@ -79,7 +88,7 @@ The RT-0425 string flag requires the steinway-d scale and projects published
 per-key R_u and eta_u onto the existing reduced string modes; it is opt-in.
 response and admittance also accept --modes/--substeps, --rigid-assembly,
 --equilibrate-board-mass, either flat-board mass option, --board-reduction,
---string-polarization and --rt0425-string-damping after the output path. Admittance retains both
+--stretch-tuning, --string-polarization and --rt0425-string-damping after the output path. Admittance retains both
 transverse string directions and the selected intrinsic loss law from playback.
 Its applied bridge force and reported bridge velocity remain in the primary
 hammer direction; secondary strings react through the same board. The response
@@ -473,13 +482,13 @@ fn run(args:&[String])->Result<(),String> {
             if !(21..=108).contains(&drive) {return Err("admittance drive key outside 21..108".into());}
             if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
             let spec=Specification::read(&read_bounded(spec,exterior_geometry::MAX_SPEC_BYTES)?)?;
-            let courses=scale(strings)?;
+            let courses=options.prepare_scale(scale(strings)?)?;
             if !courses.iter().any(|c|c.midi==drive) {return Err("admittance drive key is absent from the scale".into());}
             let board=read_bounded(board,8*1024*1024)?;
             let (obj,continuous)=section_skin::read_body(obj)?;
             let csv=admittance_controlled_body(&board,&courses,obj.as_deref(),&spec,drive,&options,damping,continuous)?;
-            publish(output,csv.as_bytes())?;
-            println!("Written {output}: radiation-loaded bridge mobility and pressure per 1 N peak, all retained strings and physical loss channels. No time-domain feedback or measured-fidelity claim.");
+            publish(output,format!("# String tuning: {}\n{csv}",options.tuning_report()).as_bytes())?;
+            println!("String tuning: {}.\nWritten {output}: radiation-loaded bridge mobility and pressure per 1 N peak, all retained strings and physical loss channels. No time-domain feedback or measured-fidelity claim.",options.tuning_report());
             Ok(())
         }
         [command,board,strings,obj,spec,output,tail @ ..] if command=="response" || command=="render" || command=="render-loaded"=>{
@@ -509,7 +518,8 @@ fn run(args:&[String])->Result<(),String> {
             if command=="render-loaded" && spec.frequencies<33 {
                 return Err("render-loaded requires at least 33 odd-grid frequencies".into());
             }
-            let courses=scale(strings)?;let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
+            let courses=options.prepare_scale(scale(strings)?)?;
+            let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
             // Score admission precedes structural/BEM preparation and all writes.
             let score=frames.map(|n|options.score(&keys,n as u64)).transpose()?;
             let controls=playback::Controls::load(&options,&courses)?;
@@ -524,12 +534,13 @@ fn run(args:&[String])->Result<(),String> {
                 publish(output,&audio.wav)?;
                 let physical_report=options.report(&scene.piano);
                 print!("{}",board_reduction_report(&scene.board));
-                println!("{}\n{score_report}\n{physical_report}\n{load_report}\nAcoustic source: {}. Structural source: {}.\nBand {:?} Hz; {} panels, {} closed components, minimum panels/wavelength={}, conditioning lower bound={}. Written {output}.",
-                    audio.report,scene.spec.source,scene.board.provenance,scene.spec.band_hz,
+                println!("{}\nString tuning: {}.\n{score_report}\n{physical_report}\n{load_report}\nAcoustic source: {}. Structural source: {}.\nBand {:?} Hz; {} panels, {} closed components, minimum panels/wavelength={}, conditioning lower bound={}. Written {output}.",
+                    audio.report,options.tuning_report(),scene.spec.source,scene.board.provenance,scene.spec.band_hz,
                     scene.boundary.surface.areas().len(),scene.boundary.components,samples.minimum_ppw,samples.maximum_condition_lower_bound);
             } else {
-                let csv=response(&scene)?;publish(output,csv.as_bytes())?;
-                println!("Written {output}: finite-body pressure from actual structural modes and supplied acoustic geometry; no measured-fidelity claim.");
+                let csv=response(&scene)?;
+                publish(output,format!("# String tuning: {}\n{csv}",options.tuning_report()).as_bytes())?;
+                println!("String tuning: {}.\nWritten {output}: finite-body pressure from actual structural modes and supplied acoustic geometry; no measured-fidelity claim.",options.tuning_report());
             }
             Ok(())
         }

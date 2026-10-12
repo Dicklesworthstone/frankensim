@@ -1,9 +1,40 @@
 # Physical octave stretch
 
-Prepare an octave-stretched physical scale, then play it through the existing
-piano. The tuner changes string tensions, not oscillator frequencies or output
-processing. Length, linear density, bending rigidity, unison spread, and hammer
-and duplex geometry remain unchanged.
+Select octave stretch directly when playing the piano or preparing exterior
+acoustics. The existing tuner changes string tensions, not oscillator frequencies
+or output processing. Length, linear density, bending rigidity, unison spread,
+and hammer and duplex geometry remain unchanged.
+
+```sh
+cargo run --release -p fs-couple --example grand_piano -- \
+  --preset steinway-d --stretch-tuning 440 --render stretched.wav
+cargo run --release -p fs-couple --example piano_exterior -- \
+  render-loaded board.fsb steinway-d body.obj acoustics.fspe stretched.wav 6 \
+  --stretch-tuning 440
+```
+
+`--stretch-tuning` requires an explicit A4 reference from 430 to 450 Hz. The
+same option is available for exterior `render`, `render-loaded`, `response`
+and `admittance`; place it after the command's positional arguments. The board,
+body and acoustic files in the example must be supplied physical inputs.
+Tuning finishes before control cards, string modes, bridge coupling, soundboard
+reduction or exterior loading are prepared. MIDI and CSV performances then play
+that same physical scale. Response/admittance CSV comments and playback reports
+record the selected policy. A prescribed-motion `response` still reports
+pressure per modal acceleration, not force-driven structural response.
+
+Defaults are unchanged: the `grand_piano` preset compensates the rounded source
+tensions to first-partial equal temperament at A4=440 Hz, and its explicit
+`--scale` preserves supplied tensions. Exterior commands preserve supplied/source
+tensions unless stretch is explicitly selected. In `grand_piano`, stretch
+excludes both `--concert-pitch` and `--raw-tensions` so an equal-temperament pass
+cannot silently discard it. The similarly named `--string-stretching` is a
+separate nonlinear axial-extension control, which can compose with this static
+tension preparation.
+
+## Exporting a prepared scale
+
+The standalone tuner remains useful for inspection and reuse:
 
 ```sh
 cargo run --release -p fs-couple --example piano_tune -- \
@@ -20,9 +51,9 @@ before output creation; an existing destination is never overwritten.
 Do **not** pass `--concert-pitch` to the renderer for this prepared scale: that
 existing option would retune its first partials to equal temperament, discarding
 the stretch. An explicit scale otherwise preserves its tensions, including with
-`--preset steinway-d`. The main renderer's flags and defaults are unchanged;
-`--stretch-tuning` is not a renderer flag. MIDI, pedals and both existing acoustic
-render paths continue consuming the same physical scale format.
+`--preset steinway-d`. The renderer also accepts `--stretch-tuning` directly;
+the exported CSV route remains optional. MIDI, pedals and both acoustic render
+paths consume the same physical scale format.
 
 ## Declared tuning policy
 
@@ -53,12 +84,17 @@ not address the separate high-frequency soundboard/receiver-attack gap.
 
 ```sh
 cargo test -p fs-couple --example piano_tune
+cargo test -p fs-couple --example grand_piano stretch_selection
+cargo test -p fs-couple --example piano_exterior stretch_tuning
 ```
 
 Tests cover the 76 octave pairs, anchored temperament, zero-rigidity limit,
 positive-rigidity stretch direction, idempotence, unchanged non-tension fields,
 unison tension offsets, unordered/sparse scales, rollback, both built-in scales,
-CSV round trips and CLI/output refusal. Native execution is still required in
+CSV round trips and CLI/output refusal. Frontend tests cover option conflicts,
+unchanged default tensions, source/imported scale parity, tuning before control
+preparation, and actual prepared Bank partials across bass, anchor and treble
+courses including unison tensions. Full frontend execution is still required in
 an environment with the workspace toolchain and dependencies. For listening,
 use the same performance, mechanics/acoustic settings and pressure full-scale
 in both renders; numerical octave matching is not a perceptual quality claim.
