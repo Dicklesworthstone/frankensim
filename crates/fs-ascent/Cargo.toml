@@ -17,6 +17,8 @@ equilibrium-design = ["dep:fs-couple"]
 transient-design = ["dep:fs-time", "dep:fs-blake3"]
 # Spatial state reconstruction through the existing conduction producer.
 conduction-assimilation = ["transient-design", "dep:fs-conduction"]
+# Exact physical conductivity Hessians for the live reverse-IR Newton study.
+conduction-design = ["dep:fs-conduction"]
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3", optional = true }
@@ -109,3 +111,11 @@ required-features = ["transient-design"]
 [[example]]
 name = "conduction_assimilate"
 required-features = ["conduction-assimilation"]
+
+[[test]]
+name = "conductivity_newton"
+required-features = ["conduction-design"]
+
+[[example]]
+name = "conductivity_newton"
+required-features = ["conduction-design"]
