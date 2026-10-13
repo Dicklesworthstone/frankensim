@@ -6,6 +6,9 @@
 //! physical grid and marks original-grid cells. --refit also rebuilds the
 //! marked cells and runs one fresh fitting phase with the same update cap.
 //! Both phases and the probe share the original total Krylov/geometry budgets.
+//! --adapt-rounds N instead runs the reusable error-driven campaign on at most
+//! N grids. --response-tol, --objective-tol and --volume-tol control its separate
+//! numerical stopping tests; no tolerance pass implies continuum certification.
 //! Defaults are declared design targets, NOT measured/calibrated specimen data.
 //! All dimensions are reference/dimensionless: E=1, nu=0, strain=0.02, slab
 //! thickness=0.66, unit cross-section, projected volume cap=0.5. Reaction sign
@@ -23,6 +26,8 @@ use fs_topopt::{SimpParams,SolveBudget,SolveControl};
 use fs_topopt::sdf3::CutDensityStudy3;
 use fs_topopt::sdf3::response::{ReactionTarget3,ResponseCase3,ResponseTarget3,ProjectedResponseStudy3,ProjectedResponseOptions3};
 use fs_topopt::sdf3::response::refinement::{ReferenceResponseCase3,ReferenceResponseTarget3,ResponseRefinementOptions3};
+#[path = "reaction_response_sdf3/adaptive.rs"]
+mod adaptive;
 struct Slab;
 impl CutSdf3 for Slab {
     fn value(&self,p:[f64;3])->f64{(p[0]-0.17)*(p[0]-0.83)}
@@ -37,13 +42,15 @@ fn motion(p:[f64;3],_:[f64;3])->[f64;3]{[0.02*(p[0]-0.17),0.0,0.0]}
 fn right(_:[f64;3],n:[f64;3])->[f64;3]{if n[0]>0.0{[1.0,0.0,0.0]}else{[0.0;3]}}
 fn main()->Result<(),Box<dyn std::error::Error>>{
     let mut args:Vec<_>=std::env::args().skip(1).collect();
+    let adaptive = adaptive::parse(&mut args)?;
     let refit=args.last().is_some_and(|s|s=="--refit");
     let estimate=refit||args.last().is_some_and(|s|s=="--estimate");if estimate {let _=args.pop();}
-    if args.len()>3{return Err("usage: reaction_response_sdf3 [UPDATES [KRYLOV [TARGET_REACTION]]] [--estimate|--refit]".into());}
+    if args.len()>3{return Err("usage: reaction_response_sdf3 [UPDATES [KRYLOV [TARGET_REACTION]]] [--estimate|--refit|--adapt-rounds N [--response-tol X] [--objective-tol X] [--volume-tol X]]".into());}
     let steps=args.first().map_or(Ok(40),|s|s.parse::<usize>())?;
     let iterations=args.get(1).map_or(Ok(250000),|s|s.parse::<usize>())?;
     let target=args.get(2).map_or(Ok(0.0012),|s|s.parse::<f64>())?;
     if !target.is_finite(){return Err("reaction target must be finite".into());}
+    if let Some(config) = adaptive { return adaptive::run(steps, iterations, target, config); }
     let mut gp=|_|ControlFlow::Continue(());let mut geometry=QuadratureControl3::new(QuadratureOptions3::default(),&mut gp)?;
     let tree=Octree3::uniform(1,4,4096)?;
     let op=AdaptiveElasticity3::build_with_embedded_dirichlet(HexCell::try_new([0.0;3],[1.0;3])?,

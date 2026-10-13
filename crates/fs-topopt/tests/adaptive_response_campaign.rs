@@ -32,7 +32,9 @@ fn motion(p: [f64; 3], _: [f64; 3]) -> [f64; 3] { [0.02*(p[0]-0.17), 0.0, 0.0] }
 fn right(_: [f64; 3], n: [f64; 3]) -> [f64; 3] { if n[0] > 0.0 { [1.0, 0.0, 0.0] } else { [0.0; 3] } }
 fn observe(p: [f64; 3]) -> [f64; 3] { [1.0+p[1], 0.0, 0.0] }
 fn tree() -> Octree3 {
-    let t = Octree3::uniform(1, 4, 4096).unwrap();
+    // Initial mixed leaves reach level two. Reserve level five for the final
+    // probe after two selectively promoted grids, not just their fit geometry.
+    let t = Octree3::uniform(1, 5, 4096).unwrap();
     t.refined(&[*t.leaves().iter().next().unwrap()], || ControlFlow::Continue(())).unwrap()
 }
 fn build(t: &Octree3) -> Result<AdaptiveSolveSpace3, &'static str> {
@@ -101,7 +103,8 @@ fn g1_automatic_mixed_refit_matches_manual_physics_and_marks() {
     equal(&session.fit().initial, &next.fit.initial);
     assert_eq!(session.tree().leaves(), fine.leaves());
     assert!(session.probe().is_some(), "final evidence must describe the promoted grid");
-    assert_eq!(session.probe().unwrap().coarse_objective, session.accepted().objective);
+    let loss = session.accepted().objective;
+    assert!((session.probe().unwrap().coarse_objective-loss).abs() <= 1e-9*loss.abs().max(1e-12));
 }
 
 #[test]

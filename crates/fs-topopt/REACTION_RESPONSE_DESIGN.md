@@ -148,3 +148,71 @@ volume restoration, input admission, cancellation and work accounting,
 source/evaluation consistency, and displacement-only parity. Native execution
 must be checked in the reaction workflow; source checks alone are not a Rust
 build or a numerical-validation result.
+
+## Error-driven mixed-response campaigns
+
+`--adapt-rounds` runs the reusable library campaign rather than the one-shot
+refit. The count is a maximum of **2..=4 total retained grids**, including the
+initial grid. Tolerances are independent, finite and nonnegative:
+
+```sh
+cargo run -p fs-topopt --features cutfem-marquee --release \
+  --example reaction_response_sdf3 -- 40 250000 0.0012 \
+  --adapt-rounds 3 --response-tol 0.001 --objective-tol 0.001 --volume-tol 0.0001
+```
+
+The same 250000-iteration Krylov allowance covers every fit, restoration, probe
+and rejected trial. Geometry uses one cumulative quadrature control, a 4096-leaf
+background cap, and maximum level five to reserve room for the final probe.
+Per-grid updates, two-mark cap and 0.5 marking target remain separate controls;
+partial marking coverage is reported. Default tolerances are the values in the
+command above. Do not combine this mode with `--estimate` or `--refit`.
+
+A stop requires all of: absolute squared-loss change divided by the fixed
+optimizer objective scale; **each** displacement and force/moment change divided
+by its observation scale; and absolute numerical volume-fraction change. The
+largest displacement and reaction discrepancies are reported separately.
+Even zero-weight observations are checked. Equal squared losses on two grids
+can hide opposite observation errors; a small total-loss change alone never
+passes this stopping policy. This is a numerical two-grid comparison, **not a
+continuum error bound**, KKT stationarity test or unique parameter-recovery test.
+
+The campaign probes every active source leaf, then refits only selected source
+leaves plus balance closure. The probe inherits physical stiffness; the refit
+inherits raw controls and rebuilds the original filter/SIMP law. Protected solid
+and void cells inherit labels through the checked parent map. The best feasible
+accepted endpoint is retained even when the final augmented-Lagrangian iterate
+has a worse objective or violates the nonlinear volume constraint. Optimizer
+stops and KKT residuals still describe that final AL iterate; `selected_latest`
+reports whether it is also the retained feasible design.
+
+The library owner is `sdf3::response::adaptive::AdaptiveResponseStudy3`. Construct
+it with an existing study and matching background, immutable reference cases,
+optional parallel reaction slices, starting raw controls, explicit options and
+a solve control. Call `run(additional_refinements, build, control)` with the same
+control and a geometry factory returning an elasticity backend for the requested
+`Probe` or `Refit` tree. Capture the same bounded quadrature control in that
+factory. Geometry, supports, material and pure experiment laws remain fixed.
+
+`run` caches complete probes across pauses and clears them at every promotion.
+It checks the final retained grid even when the refinement allowance is reached;
+a zero-refit call can therefore spend work on a probe. `TwoGridToleranceMet`,
+`RefinementLimit`, `Paused` and `NoRefinementSignal` are distinct outcomes. A
+failed tolerance test with no residual marks is not silently converted into an
+accuracy pass: offset and measure transfers are not invented local indicators.
+
+Before promotion, failures leave the source intact and retain any completed
+candidate in `unpromoted()`. Cancellation after the atomic promotion leaves the
+complete new grid, fields and history aligned. `accepted()` returns the selected
+feasible endpoint; `fit()` retains its baseline, latest AL point, best feasible
+point and actual optimizer outcome. `probe()` only describes the current source.
+The example prints promoted-round summaries and retained fields before returning
+late errors; candidate failures never overwrite the source output.
+
+Focused native targets are `adaptive_response_campaign` (nine integration
+regressions), the campaign's two policy unit tests, and the reaction example's
+three argument tests. They cover manual/automatic equivalence, segmented replay,
+cancelling loss changes, material masks, promotion cancellation, factory refusal,
+input admission and legacy parity. They are authored but not locally executed:
+DSR, RCH and Cargo are absent in the editing environment. Use the repository's
+DSR lane for native verification; lexical and source checks are not compilation.
