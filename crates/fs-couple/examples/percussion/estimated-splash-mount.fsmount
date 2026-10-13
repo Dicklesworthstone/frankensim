@@ -1,0 +1,19 @@
+# Illustrative finite-mass support for estimated-splash.profile.
+# NOT measured Zildjian stand geometry, mass, stiffness, drag or felt data.
+# Coordinates share the shell's reference frame. Both backings translate in Z.
+frankensim-felt-mount-v1
+# mass_kg, ground_K_N/m, ground_R_Ns/m, initial_Z_m, initial_V_m/s
+carrier,0.4,3200,8,0,0
+# backing_Z_m, felt_thickness_m, prior_maximum_compression_strain
+upper,0.0280,0.006,0.05
+lower,0.0150,0.006,0.05
+# reference_stress_Pa, reference_strain, loading_p, unloading_q, crush, densify
+felt,30000,0.2,2.2,3,0.15,0.7
+# WHOLE-WASHER series Kelvin stiffness/viscosity; apportioned by site area.
+creep,4500,24
+# x_m,y_m,loaded_projected_area_m2: 3-point declared area quadrature per face.
+# Area totals the same illustrative OD30/ID13 mm annulus as the legacy example.
+# No claim that three points resolve its continuous contact-pressure field.
+site,0.012,0,0.00019137535248117825
+site,-0.006,0.010392304845413264,0.00019137535248117825
+site,-0.006,-0.010392304845413264,0.00019137535248117825

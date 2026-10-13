@@ -30,6 +30,7 @@ mod playing;
 mod specimen;
 mod shell_prepare;
 mod rocking;
+mod mounting;
 mod hihat;
 #[path="hihat_sticks.rs"]
 mod flexible_sticks;
@@ -110,6 +111,10 @@ fn splash_with_material(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Opt
 }
 #[allow(clippy::too_many_arguments)]
 fn splash_with_rocking(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option<specimen::Specimen>,mufflers:&[muffling::Muffler],second:Option<Stroke>,mute:Option<&compliant_mute::Spec>,mallets:&mallets::Selection,shafts:&shaft_playing::Selection,material:Option<&shell_relaxation::Spec>,rocking:Option<f64>)->Result<Experiment,Error> {
+    splash_with_mount(steps,dt_s,audio,stroke,supplied,mufflers,second,mute,mallets,shafts,material,rocking,None)
+}
+#[allow(clippy::too_many_arguments)]
+fn splash_with_mount(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option<specimen::Specimen>,mufflers:&[muffling::Muffler],second:Option<Stroke>,mute:Option<&compliant_mute::Spec>,mallets:&mallets::Selection,shafts:&shaft_playing::Selection,material:Option<&shell_relaxation::Spec>,rocking:Option<f64>,mount:Option<&mounting::Spec>)->Result<Experiment,Error> {
     shafts.admit("splash",second,mallets)?;
     mallets.admit("splash",stroke,second)?;
     muffling::admit_command(mufflers,"splash")?;
@@ -180,7 +185,9 @@ fn splash_with_rocking(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Opti
     }).transpose()?;
     let mut contact=shaft.tip_row(0,stick_weight)?;
     for (i,b) in port.iter().enumerate(){contact[1+i]=-b;}
+    let mounted=mount.map(|spec|spec.compile(&shell,&reduction,1,n)).transpose()?;
     let mut pads=Vec::new();
+    if mounted.is_none() {
     // Estimated felt annulus: OD30mm/ID13mm,6mm thickness,three loaded patches
     // on each face. NOT published Zildjian dimensions or material coefficients.
     let area=pi*(0.015_f64.powi(2)-0.0065_f64.powi(2))/3.0;
@@ -198,6 +205,8 @@ fn splash_with_rocking(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Opti
                 creep:vec![KelvinBranch{stiffness_n_m:1500.0,viscosity_n_s_m:8.0}]});
         }
     }
+    }
+    let mount_body=mounted.map(|m|{pads=m.pads;m.body});
     eprintln!("shell input={}, mass_kg={},modes={},facets={},max_edge_m={},band_hz={lower}..{upper}; stand felt, stick and contact remain estimated; no calibration or full-band claim",
         if imported {specimen.input_label()}else{"estimated splash"},shell.mass_kg,reduction.mode_count(),shell.mesh.tris.len(),shell.max_edge_m);
     eprintln!("modal frequencies_hz={:?}",reduction.omegas().iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>());
@@ -208,7 +217,7 @@ fn splash_with_rocking(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Opti
     // loss. Stand felt, mufflers, shafts and acoustic feedback retain their loss.
     if material.is_some() {body.damping_per_s.fill(0.);}
     let mut bodies=vec![stick,body];
-    // A selected felt face REPLACES its Hertz contact. Preserve all six stand
+    // A selected felt face REPLACES its Hertz contact. Keep all selected stand
     // histories first; each following mallet site has its own material history.
     let mut contacts=if mallets.first.is_some(){Vec::new()}else{vec![elastic_contact(contact)?]};
     let second_stick=second.map(|(body,contact,port)|{bodies.push(body);if let Some(c)=contact{contacts.push(c);}port});
@@ -217,13 +226,21 @@ fn splash_with_rocking(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Opti
         let observation=mute.expect("compiled mute specification").observation(a.ports,pads.len());
         bodies.extend(a.bodies);pads.extend(a.pads);observation
     });
-    // Stand/mute/other-hand mallet rows do not act directly on shaft flexure.
-    for pad in &mut pads {pad.weights.resize(n,0.0);}
+    // Append the ONE shared carrier after every original rigid/elastic body.
+    // Existing contact, drive, observer and BEM source coordinates never move.
     bodies.append(&mut shaft.elastic);
+    let total=n+usize::from(mount_body.is_some());
+    if let Some(body)=mount_body {
+        contacts=contacts.iter().map(|contact|mounting::extend_contact(contact,n,total)).collect::<Result<_,_>>()?;
+        bodies.push(body);
+    }
+    // Do not truncate the mounted pads' carrier coefficient to the old extent.
+    for pad in &mut pads {pad.weights.resize(total,0.0);}
+    for damper in &mut dampers {damper.weights.resize(total,0.0);}
     let system=ImpactSystem::new_with_dampers(bodies,contacts,pads,vec![],dampers,config(steps,dt_s))?;
     let system=match material {Some(material)=>material.attach(system)?,None=>system};
-    let mut a=vec![0.0];a.extend(port);a.resize(n,0.0);let b=shaft.tip_row(0,stick_weight)?;
-    Ok(Experiment{flexible_sticks:shaft.ports,mute,system:Mechanics::Reference(system),force:vec![0.0;n],stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None})
+    let mut a=vec![0.0];a.extend(port);a.resize(total,0.0);let mut b=shaft.tip_row(0,stick_weight)?;b.resize(total,0.0);
+    Ok(Experiment{flexible_sticks:shaft.ports,mute,system:Mechanics::Reference(system),force:vec![0.0;total],stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None})
 }
 fn drum(steps:u64,dt_s:f64,audio:bool,prepared:bool)->Result<Experiment,Error> {
     drum_with_wires(steps,dt_s,audio,prepared,None)
@@ -524,6 +541,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     let head_relaxation_path=head_relaxation::option(&mut raw_args)?;
     let shell_relaxation_path=shell_relaxation::option(&mut raw_args)?;
     let rocking=rocking::option(&mut raw_args)?;
+    let mount_path=mounting::option(&mut raw_args)?;
     let prescribed_vent=acoustics::aperture::option(&mut raw_args)?;
     let radiation_spec=acoustics::stereo::radiation_spec::option(&mut raw_args)?;
     let radiation_feedback=acoustics::stereo::feedback::option(&mut raw_args)?;
@@ -554,13 +572,15 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     }
     let driven=playing_force.is_some() || second_force.is_some() || compliant_mute.is_some() || carrier_path.is_some();
     let (args,stroke)=playing::parse(raw_args)?;
-    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --head-stretching enables both nonlinear heads on snare[-off][-wav|-mic] without dropping wires or loss (see NONLINEAR_SNARE.md); --snare-spec wires.fsn supplies bank geometry, tension, damping, contact and optional wire stretching (see SNARE_SPEC.md); --snare-carrier input.fsc adds force-driven moving supports without resetting the wires (see SNARE_CARRIER.md); --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --analytic-newton selects its analytic storage tangents (see ANALYTIC.md); --impact-substeps DEPTH ATTEMPTS adds bounded hard-impact recovery without changing the output clock (see SUBSTEPS.md); --cavity-modes adds distributed enclosed air to all drum/snare commands; --chamber-profile input.fscp replaces the cylinder with supplied inner/outer geometry (see CHAMBER.md); --cavity-drag-per-s D supplies nonuniform acoustic momentum drag, and --cavity-neck radius_m length_eff_m resistance_Pa_s_m3 azimuth_rad z_m adds a vent to any drum/snare mechanics CSV (see CAVITY.md and SNARE_CAVITY.md); --drum-spec instrument.fsd supplies geometry, independent head materials/tensions/losses and the mesh/window (see DRUM_SPEC.md); --head-relaxation material.fshr supplies hereditary bending with zero separate head damping (see HEAD_RELAXATION.md); --shell-relaxation material.fssr supplies proportional cymbal bending memory with explicit intrinsic-loss replacement (see SHELL_RELAXATION.md); --microphone-right X,Y,Z adds a physical stereo receiver to -mic commands (see STEREO.md); --microphone-spec input.frm supplies geometry-aware close/directional microphones (see MICROPHONES.md); --compliant-mute file.fsm adds moving felt-pad squeeze/retract mechanics (see COMPLIANT_MUTE.md); --prescribed-vent-radiation adds explicit one-way neck-flow BEM radiation to a vented drum/snare audio command (see VENT_RADIATION.md); --shell-mesh input.fss supplies an explicit 3D shell and thickness/material fields; export-shell-mesh OUTPUT.fss [INPUT.profile] exports a profile before modal preparation (see SHELL_MESH.md); --radiation-spec input.fra selects the acoustic band, source-preserving boundary refinement and fitting/work limits (see RADIATION_BAND.md); --mallet-spec and --second-mallet-spec replace hard tips with supplied finite-area felt faces (see MALLETS.md); --radiation-feedback couples a passive BEM load into nonlinear-capable pressure playback (see RADIATION_FEEDBACK.md); --flexible-stick and --second-flexible-stick supply physical shaft geometry and hand/tip stations (see FLEXIBLE_STICKS.md)".into());}
+    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --head-stretching enables both nonlinear heads on snare[-off][-wav|-mic] without dropping wires or loss (see NONLINEAR_SNARE.md); --snare-spec wires.fsn supplies bank geometry, tension, damping, contact and optional wire stretching (see SNARE_SPEC.md); --snare-carrier input.fsc adds force-driven moving supports without resetting the wires (see SNARE_CARRIER.md); --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --analytic-newton selects its analytic storage tangents (see ANALYTIC.md); --impact-substeps DEPTH ATTEMPTS adds bounded hard-impact recovery without changing the output clock (see SUBSTEPS.md); --cavity-modes adds distributed enclosed air to all drum/snare commands; --chamber-profile input.fscp replaces the cylinder with supplied inner/outer geometry (see CHAMBER.md); --cavity-drag-per-s D supplies nonuniform acoustic momentum drag, and --cavity-neck radius_m length_eff_m resistance_Pa_s_m3 azimuth_rad z_m adds a vent to any drum/snare mechanics CSV (see CAVITY.md and SNARE_CAVITY.md); --drum-spec instrument.fsd supplies geometry, independent head materials/tensions/losses and the mesh/window (see DRUM_SPEC.md); --head-relaxation material.fshr supplies hereditary bending with zero separate head damping (see HEAD_RELAXATION.md); --shell-relaxation material.fssr supplies proportional cymbal bending memory with explicit intrinsic-loss replacement (see SHELL_RELAXATION.md); --microphone-right X,Y,Z adds a physical stereo receiver to -mic commands (see STEREO.md); --microphone-spec input.frm supplies geometry-aware close/directional microphones (see MICROPHONES.md); --compliant-mute file.fsm adds moving felt-pad squeeze/retract mechanics (see COMPLIANT_MUTE.md); --prescribed-vent-radiation adds explicit one-way neck-flow BEM radiation to a vented drum/snare audio command (see VENT_RADIATION.md); --mount-spec input.fsmount replaces fixed stand pads with geometry-derived felt on one finite-mass carrier (see MOUNTING.md); --shell-mesh input.fss supplies an explicit 3D shell and thickness/material fields; export-shell-mesh OUTPUT.fss [INPUT.profile] exports a profile before modal preparation (see SHELL_MESH.md); --radiation-spec input.fra selects the acoustic band, source-preserving boundary refinement and fitting/work limits (see RADIATION_BAND.md); --mallet-spec and --second-mallet-spec replace hard tips with supplied finite-area felt faces (see MALLETS.md); --radiation-feedback couples a passive BEM load into nonlinear-capable pressure playback (see RADIATION_FEEDBACK.md); --flexible-stick and --second-flexible-stick supply physical shaft geometry and hand/tip stations (see FLEXIBLE_STICKS.md)".into());}
     if let Some(spec)=&microphone_spec {spec.admit_command(&args[0],args.len()>3,right_microphone.is_some())?;}
     acoustics::stereo::feedback::admit_command(radiation_feedback,&args[0],neck.is_some())?;
     head_relaxation::admit_command(head_relaxation_path.is_some(),&args[0])?;
     let head_relaxation=head_relaxation_path.as_deref().map(head_relaxation::Spec::load).transpose()?;
     shell_relaxation::admit_command(shell_relaxation_path.is_some(),&args[0])?;
     rocking::admit_command(rocking,&args[0])?;
+    mounting::admit_command(mount_path.is_some(),&args[0])?;
+    let mount=mount_path.as_deref().map(mounting::Spec::load).transpose()?;
     let shell_relaxation=shell_relaxation_path.as_deref().map(|path|shell_relaxation::Spec::load(path,false)).transpose()?;
     let mallets=mallets::Selection::load(mallet_paths)?;
     mallets.admit(&args[0],stroke,second)?;
@@ -614,7 +634,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     let chamber=chamber_path.as_deref().map(chamber::Spec::load).transpose()?;
     let drag_per_s=cavity_drag.unwrap_or(0.0);
     let experiment=match args[0].as_str(){
-        "splash"|"splash-wav"|"splash-mic"=>splash_with_rocking(steps,dt_s,audio,stroke,supplied_shell,&mufflers,second,compliant_mute.as_ref(),&mallets,&shafts,shell_relaxation.as_ref(),rocking)?,
+        "splash"|"splash-wav"|"splash-mic"=>splash_with_mount(steps,dt_s,audio,stroke,supplied_shell,&mufflers,second,compliant_mute.as_ref(),&mallets,&shafts,shell_relaxation.as_ref(),rocking,mount.as_ref())?,
         "drum"|"drum-wav"|"drum-mic"=>drum_with_chamber(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref(),barrel_strike,chamber.as_ref())?,
         "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_chamber(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref(),barrel_strike,chamber.as_ref())?,
         "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_chamber(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref(),barrel_strike,chamber.as_ref())?,
@@ -622,6 +642,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
         "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_chamber(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets,&shafts,barrel_spec.as_ref(),barrel_strike,chamber.as_ref())?,
         _=>return Err("unknown experiment".into()),
     };
+    let mount_port=mount.as_ref().map(|spec|spec.port(experiment.force.len())).transpose()?;
     let receivers=match microphone_spec {
         Some(spec)=>spec.into_receivers(),
         None=>match right_microphone {
@@ -681,6 +702,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     if let Some(mute)=&experiment.mute {mute.header(&mut out)?;}
     shaft_playing::header(&experiment,&mut out)?;
     if rocking.is_some() {rocking::header(&mut out,"cymbal")?;}
+    if mount_port.is_some() {mounting::header(&mut out)?;}
     writeln!(out)?;
     for _ in 0..steps {
         let f=experiment.system.step(&experiment.force,&gate)?;let x=experiment.system.state();
@@ -734,6 +756,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
         if let Some(mute)=&experiment.mute {mute.row(&experiment.system,&mut out)?;}
         shaft_playing::row(&experiment,&mut out)?;
         if rocking.is_some() {rocking::row(&experiment.system,1,false,&mut out)?;}
+        if let Some(port)=mount_port {mounting::row(port,x,&mut out)?;}
         writeln!(out)?;
     }
     out.flush()?;Ok(())

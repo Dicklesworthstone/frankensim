@@ -109,9 +109,9 @@ fn carrier_felt_and_creep_share_prepared_rollback_and_accepted_time() {
 #[test]
 fn carrier_mass_changes_the_coupled_response_not_just_a_readout() {
     let mut c=carrier();c.mass_kg=0.04;
-    let (mut light,_)=system(c,false,150);let (mut heavy,_)=system(carrier(),false,150);
+    let (mut light,_)=system(c,false,300);let (mut heavy,_)=system(carrier(),false,300);
     let gate=CancelGate::new_clock_free();
-    for _ in 0..150 {light.step(&[0.0,0.0],&gate).unwrap();heavy.step(&[0.0,0.0],&gate).unwrap();}
+    for _ in 0..300 {light.step(&[0.0,0.0],&gate).unwrap();heavy.step(&[0.0,0.0],&gate).unwrap();}
     assert!((light.state()[0]-heavy.state()[0]).abs()>1e-8);
     assert!((light.state()[1]-heavy.state()[1]).abs()>1e-7);
 }
