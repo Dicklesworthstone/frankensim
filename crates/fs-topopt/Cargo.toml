@@ -153,3 +153,7 @@ required-features = ["cutfem-marquee"]
 [[example]]
 name = "worst_load_sdf3"
 required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "binary_response_sdf3"
+required-features = ["cutfem-marquee"]

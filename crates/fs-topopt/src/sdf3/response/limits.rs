@@ -13,6 +13,8 @@
 use super::*;
 use fs_cutfem::elastic3::adaptive::dirichlet::PrescribedMotion3;
 
+mod physical;
+pub mod binary;
 pub mod design;
 pub mod refinement;
 
@@ -173,34 +175,8 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         let result = (|| {
             let prepared = self.operator.prepare_elasticity(control)?;
             let op = self.operator.adaptive();
-            let mut displacements = Vec::with_capacity(cases.len());
-            let mut measurements = Vec::with_capacity(cases.len());
-            let mut residuals = Vec::with_capacity(cases.len());
-            let mut all = Vec::new();
-            for case in cases {
-                control.checkpoint("response-limits-case")?;
-                let mut rhs: Vec<f64> = case.force.iter().enumerate()
-                    .map(|(i, &f)| if op.fixed()[i/3] { 0.0 } else { f }).collect();
-                if let Some(g) = case.prescribed {
-                    let lifting = op.prescribed_displacement_load(g, || poll(control))?;
-                    for (r, b) in rhs.iter_mut().zip(lifting) { *r = finite(*r+b)?; }
-                }
-                let u = checked_solve_preconditioned(&self.operator, &prepared, &rhs, 1e-11,
-                    "response-limits-primal", control)?;
-                let mut values = Vec::with_capacity(case.limits.len());
-                let mut row = Vec::with_capacity(case.limits.len());
-                for limit in case.limits {
-                    control.checkpoint("response-limits-measure")?;
-                    let value = finite(match limit.response {
-                        BoundedResponse3::Displacement(q) => dot(q, &u),
-                        BoundedResponse3::Reaction(mode) =>
-                            op.embedded_reaction(&u, case.prescribed, mode, || poll(control))?.value,
-                    })?;
-                    let r = finite(limit.sense.sign()*finite(value-limit.bound)?/limit.scale)?;
-                    values.push(value); row.push(r); all.push(r);
-                }
-                displacements.push(u); measurements.push(values); residuals.push(row);
-            }
+            let physical::LimitPrimals3 { displacements, measurements, residuals, all } =
+                self.response_limit_primals(cases, &prepared, control)?;
             control.checkpoint("response-limits-aggregate")?;
             let (constraint, worst_residual, weights) = aggregate(&all, options.sharpness)?;
             let mut local = vec![0.0; self.cells()];
