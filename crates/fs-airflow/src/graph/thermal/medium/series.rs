@@ -3,6 +3,10 @@
 //! There is one inlet and one conserved mass/capacity rate. A local wall region
 //! is not a fresh coolant supply. Material properties remain frozen; this does
 //! not infer entrance development, phase validity or hydraulic redistribution.
+//! The explicit [`enthalpy`] march instead consumes a source-backed liquid
+//! caloric chart, while retaining the same frozen hydraulic and convection data.
+
+pub mod enthalpy;
 
 use fs_convection::{
     CorrelationId, CorrelationRobinBoundary, HeatTransferCoefficient,
@@ -74,7 +78,7 @@ impl<'a> FrozenFlowMedium<'a> {
         // The existing path owner checks duplicate/invalid region names and
         // total exchange area/capacity. Do not implement a second admission rule.
         let path = AirPath::new(inlet.value(), mass_flow, state.specific_heat_j_kg_k(), segments)?;
-        Ok(MaterialFlowPath { medium: self, exchanges, path })
+        Ok(MaterialFlowPath { medium: self, exchanges, path, mass_flow_kg_per_s: mass_flow })
     }
 }
 
@@ -121,8 +125,12 @@ pub struct MaterialFlowPath<'a> {
     medium: FrozenFlowMedium<'a>,
     exchanges: Vec<MaterialHeatExchange<'a>>,
     path: AirPath,
+    mass_flow_kg_per_s: f64,
 }
 impl<'a> MaterialFlowPath<'a> {
+    /// One conserved mass flow used by the complete path, kg/s.
+    #[must_use]
+    pub const fn mass_flow_kg_per_s(&self) -> f64 { self.mass_flow_kg_per_s }
     /// The complete path, directly accepted by existing conjugate solvers.
     #[must_use]
     pub const fn path(&self) -> &AirPath { &self.path }
