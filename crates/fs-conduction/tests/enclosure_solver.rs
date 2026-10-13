@@ -5,7 +5,7 @@ use fs_conduction::{
     CoupledRadiationConfig, GrayDiffuseEnclosure, InitialGuess, LinearConfig,
     Nonlinearity, RadiationSurface, ScalarField, SolveConfig, StopRule,
     SurfaceEmissivity, ThermalBc, ThermalBoundary, ThermalBoundaryBuilder,
-    ViewFactorMatrix, EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY,
+    ViewFactorMatrix, ViewFactorEvidence, ViewFactorTolerance, EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY,
     solve_with_gray_diffuse_enclosure,
 };
 use fs_conduction::fixtures::{box_grid, on_box_face};
@@ -15,7 +15,7 @@ use fs_matdb::{
     PropertyKey, PropertyValue, Provenance, SelectionPolicy, UncertaintyModel,
 };
 use fs_rep_mesh::TetComplex;
-use support::with_cx;
+use support::{with_cx, with_cancelled_cx};
 
 // Deliberately reuse the existing radiation test's declared two-slab model.
 // These factors are an algebraic fixture, not a finite-geometry visibility claim.
@@ -78,3 +78,23 @@ fn two_slab_boundary(mesh: &ConductionMesh) -> ThermalBoundary {
 
 #[path = "enclosure_solver/solid_acceptance.rs"]
 mod solid_acceptance;
+
+fn opposite_surfaces() -> (ConductionMesh, RadiationSurface, RadiationSurface) {
+    opposite_surfaces_with_emissivities(emissivity("left", 0.8, "matte-left"),
+        emissivity("right", 0.6, "matte-right"))
+}
+
+fn opposite_surfaces_with_emissivities(
+    left_emissivity: SurfaceEmissivity, right_emissivity: SurfaceEmissivity,
+) -> (ConductionMesh, RadiationSurface, RadiationSurface) {
+    let (complex, positions) = box_grid([2, 2, 2], [1.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).unwrap();
+    let left = RadiationSurface::new(&mesh, "left", |f| on_box_face(f.centroid[0], 0.0),
+        left_emissivity).unwrap();
+    let right = RadiationSurface::new(&mesh, "right", |f| on_box_face(f.centroid[0], 1.0),
+        right_emissivity).unwrap();
+    (mesh, left, right)
+}
+
+#[path = "enclosure_solver/prepared.rs"]
+mod prepared;

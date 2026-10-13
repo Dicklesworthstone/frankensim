@@ -37,6 +37,8 @@ use crate::solve::{
 };
 
 mod ambient;
+mod prepared;
+pub use prepared::PreparedRadiosity;
 pub mod view_factors;
 pub use ambient::{
     AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationPatchReport,
@@ -1041,11 +1043,30 @@ impl GrayDiffuseEnclosure {
         &self.view_factors
     }
 
+    /// Factor the immutable enclosure once for repeated temperature solves.
+    ///
+    /// Reuses the original radiosity equations, pivot policy, and report.
+    /// Preparation and subsequent applications retain Cx cancellation checks.
+    /// Use `solve` for a single evaluation; coupled iteration uses this reusable
+    /// operator so it does not repeat a cubic factorization at every step.
+    pub fn prepare_radiosity(&self, cx: &Cx<'_>) -> Result<PreparedRadiosity<'_>, ConductionError> {
+        PreparedRadiosity::new(cx, self)
+    }
+
     /// Solve `J_i - (1-eps_i) sum_j F_ij J_j = eps_i sigma T_i^4`.
     pub fn solve(
         &self,
         cx: &Cx<'_>,
         surface_temperatures_k: &[f64],
+    ) -> Result<RadiosityReport, ConductionError> {
+        self.solve_with_factors(cx, surface_temperatures_k, None)
+    }
+
+    fn solve_with_factors(
+        &self,
+        cx: &Cx<'_>,
+        surface_temperatures_k: &[f64],
+        factors: Option<&prepared::DenseRadiosityFactorization>,
     ) -> Result<RadiosityReport, ConductionError> {
         let n = self.surfaces.len();
         if surface_temperatures_k.len() != n {
@@ -1078,7 +1099,10 @@ impl GrayDiffuseEnclosure {
             rhs[i] =
                 emissivity * STEFAN_BOLTZMANN_W_M2_K4 * fourth_power(surface_temperatures_k[i]);
         }
-        let radiosity_w_m2 = solve_dense(cx, &matrix, &rhs)?;
+        let radiosity_w_m2 = match factors {
+            Some(factors) => factors.solve(cx, &rhs)?,
+            None => solve_dense(cx, &matrix, &rhs)?,
+        };
         let mut irradiation_w_m2 = vec![0.0; n];
         let mut net_outward_flux_w_m2 = vec![0.0; n];
         let mut net_outward_heat_w = vec![0.0; n];
@@ -1262,6 +1286,7 @@ pub fn solve_with_gray_diffuse_enclosure(
     require_enclosure_solid_residual(cx, &conduction)?;
     let mut driving_temperatures =
         enclosure.surface_temperatures(problem.mesh, &conduction.temperature)?;
+    let prepared = enclosure.prepare_radiosity(cx)?;
     let mut update_history = Vec::new();
 
     for iteration in 0..coupling_config.max_iterations {
@@ -1269,7 +1294,7 @@ pub fn solve_with_gray_diffuse_enclosure(
             stage: "radiation-coupling",
             at: iteration,
         })?;
-        let radiosity = enclosure.solve(cx, &driving_temperatures)?;
+        let radiosity = prepared.solve(cx, &driving_temperatures)?;
         let rows = enclosure
             .surfaces
             .iter()
