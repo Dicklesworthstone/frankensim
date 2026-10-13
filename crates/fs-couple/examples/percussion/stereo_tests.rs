@@ -171,7 +171,7 @@ fn wider_radiation_band_uses_real_bem_and_independently_audited_receiver_filters
     // measured cymbal. It tests the full wider-band BEM -> digital filter path.
     b.weights[0].fill(1.0);
     let spec=radiation_spec::Spec {band_hz:[40.0,8000.0],training_intervals:64,max_order:24,
-        subdivisions:2,max_panels:64,max_dense_work:1_000_000_000};
+        subdivisions:2,max_panels:64,max_dense_work:1_000_000_000,..Default::default()};
     let receivers=[Receiver::FinitePoint([0.0,0.0,0.12]),Receiver::FinitePoint([0.1,0.0,0.08])];
     let gate=CancelGate::new_clock_free();let result=bake_receivers_with_spec(&b,&receivers,spec,&gate).unwrap();
     assert_eq!(result.len(),2);assert_eq!(result[0].filters.len(),1);

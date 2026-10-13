@@ -109,9 +109,10 @@ fn reciprocal_geometry<'a>(surface:&'a SpherePanels,k_max:f64,spec:radiation_spe
 fn bake_scene_image(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
     gate:&CancelGate,load:bool,reciprocal:bool)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
     if gate.is_requested() {return Err("radiation preparation cancelled".into());}
-    if reciprocal && !load {
-        return Err("coupled vent Galerkin playback requires its matching mechanical load".into());
-    }
+    // A vent can require the reciprocal image independently of file selection.
+    // Ordinary one-way and loaded sources can now select it as well. Never
+    // reinterpret a refused collocation solution or switch after a failed fit.
+    let reciprocal=reciprocal || spec.image==radiation_spec::Image::Reciprocal;
     if load {feedback::admit_boundary(boundary,spec)?;}
     let count=boundary.weights.len();let panels=boundary.triangles.len();
     let (prepared_panels,work)=spec.work(panels,count,receivers.len())?;
@@ -182,8 +183,10 @@ fn bake_scene_image(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec
                     values[channel][input][index]=observation.response(channel,solution)?;
                 }
             }
-            let traces:Vec<&[C64]>=solutions.iter().map(|s|s.pressure.as_slice()).collect();
-            impedances[index]=feedback::project_pressures(&surface,&refined.weights,&traces,w)?;
+            if load {
+                let traces:Vec<&[C64]>=solutions.iter().map(|s|s.pressure.as_slice()).collect();
+                impedances[index]=feedback::project_pressures(&surface,&refined.weights,&traces,w)?;
+            }
             continue;
         }
         // Independent bounded receiver quadrature, prepared ONCE per frequency.
@@ -313,3 +316,7 @@ fn render_baked_with_gate(experiment:&mut Experiment,frames:usize,full_scale_pa:
 #[cfg(test)]
 #[path = "stereo_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "reciprocal_playback_tests.rs"]
+mod reciprocal_playback_tests;

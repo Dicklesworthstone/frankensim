@@ -96,7 +96,7 @@ fn file_selected_near_microphones_render_real_bem_fields_with_one_mechanical_clo
     let spec=Spec::parse("frankensim-microphones-v1\nnear_field,0.001,0.000001,14,2000000\nreceiver,0,0,0.025\nreceiver,0.05,0,0.04\npattern,0,0.5,0,0,-1\npattern,1,0,-1,0,0").unwrap();
     let receivers=spec.into_receivers();
     let band=acoustics::stereo::radiation_spec::Spec {band_hz:[40.0,400.0],training_intervals:16,
-        max_order:8,subdivisions:0,max_panels:80,max_dense_work:100_000_000};
+        max_order:8,subdivisions:0,max_panels:80,max_dense_work:100_000_000,..Default::default()};
     let gate=CancelGate::new_clock_free();
     for loaded in [false,true] {
         let (mut actual,mut independent,bake)=if loaded {

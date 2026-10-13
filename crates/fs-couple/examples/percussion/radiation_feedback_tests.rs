@@ -9,7 +9,7 @@ fn boundary()->Boundary {
 }
 fn spec()->radiation_spec::Spec {
     radiation_spec::Spec{band_hz:[40.,400.],training_intervals:16,max_order:8,subdivisions:0,
-        max_panels:80,max_dense_work:100_000_000}
+        max_panels:80,max_dense_work:100_000_000,..Default::default()}
 }
 fn experiment(frames:u64)->Experiment {
     let mut body=ImpactBody::free_mass(1.,0.,0.0001).unwrap().0;
