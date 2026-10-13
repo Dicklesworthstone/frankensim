@@ -13,6 +13,7 @@ use fs_dwr::elasticity3::reaction::{AffineGoalEstimate3, AffineMotionGoal3,
 use fs_dwr::elasticity3::response::EquilibriumLoad3;
 use crate::sdf3_goal::GoalRefinementError3;
 
+pub mod adaptive;
 mod refit;
 pub use refit::{MinimumMaterialRefit3, ReferenceMinimumMaterialFit3};
 
