@@ -3,6 +3,7 @@
 //! Preparation changes scratch ownership, not the constitutive model or basis.
 //! Both execution paths finish through the same physical acceptance gate below.
 mod substeps;
+mod momentum;
 pub use substeps::{ImpactSubstepConfig, ImpactSubstepReport, SubsteppedImpactSystem};
 use std::ops::Deref;
 use std::cell::RefCell;
@@ -18,8 +19,8 @@ use super::tangent::BodyTangents;
 ///
 /// Construction allocates; stepping does not allocate in this host or its solver.
 /// The supplied storage callbacks must independently avoid allocation. This is
-/// finite-difference Newton or analytic Newton with exact acoustic-pair
-/// condensation. This is NOT a measured hard-real-time contract.
+/// finite-difference Newton or analytic Newton with exact acoustic-pair or
+/// canonical-momentum condensation. This is NOT a measured hard-real-time contract.
 /// The model, basis, timestep, contact, Kelvin memory and felt conditioning are
 /// unchanged. Only accepted steps update physical history and the sample counter.
 pub struct PreparedImpactSystem {
@@ -40,9 +41,7 @@ impl ImpactSystem {
     /// Returns the numerical owner's workspace preparation refusal.
     pub fn prepare(self) -> Result<PreparedImpactSystem, ImpactError> {
         let mut workspace = StepWorkspace::new(&self.system).map_err(ImpactError::PreparedSolve)?;
-        if let Some(air)=&self.radiation {
-            workspace.set_condensed_pairs(&air.state_pairs()).map_err(ImpactError::PreparedSolve)?;
-        }
+        momentum::prepare_plan(&self, &mut workspace)?;
         let candidate = vec![0.0; self.x.len()];
         let output = vec![0.0; self.modes];
         let histories = self.histories.borrow().clone();
@@ -53,8 +52,10 @@ impl ImpactSystem {
 
     /// Prepare the same system using analytic storage tangents for Newton.
     /// Retains the complete Gonzalez energy correction, physical acceptance
-    /// gates, and all current state/history. Independent acoustic pairs are
-    /// eliminated from the factorization, not the physical equation or state.
+    /// gates, and all current state/history. Independent acoustic pairs or
+    /// canonical momenta are eliminated from the factorization, not the physical
+    /// equation or state. Momentum selection leaves all displacement and material
+    /// memory coupled; cross-velocity damping keeps the full solve by default.
     /// No difference probes, split acoustic updates, or new time integrator.
     ///
     /// # Errors
@@ -139,6 +140,9 @@ impl PreparedImpactSystem {
     /// time, force ports, felt and material history remain untouched. Changing
     /// the plan allocates and belongs outside a real-time callback.
     ///
+    /// This replaces the current elimination plan; false selects full dense LU.
+    /// On a model without radiation, use `set_momentum_condensation` to restore
+    /// the momentum plan. The two selections are not silently combined.
     /// A failed pair solve falls back to full dense LU on the same Jacobian;
     /// no coupling, acoustic pole or Gonzalez correction is dropped.
     pub fn set_radiation_condensation(&mut self, enabled: bool) -> Result<(), ImpactError> {
@@ -147,8 +151,9 @@ impl PreparedImpactSystem {
         self.workspace.set_condensed_pairs(&pairs).map_err(ImpactError::PreparedSolve)
     }
 
-    /// Planned dense border dimension when using analytic acoustic condensation.
-    /// Full state storage and all acoustic histories still exist.
+    /// Planned dense border dimension for the selected analytic elimination.
+    /// Includes the scalar Gonzalez correction. Full physical state and all
+    /// material/acoustic histories still exist; this is not a timing claim.
     pub fn condensed_newton_dimension(&self) -> Option<usize> {
         if self.analytic_newton {self.workspace.condensed_dimension()} else {None}
     }
