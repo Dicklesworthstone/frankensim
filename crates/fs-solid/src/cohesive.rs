@@ -29,6 +29,9 @@ use fs_solver::{LinearOp, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, N
 /// Geometry-backed matching P1 interfaces and displacement transfer.
 pub mod p1;
 
+/// Thermal shrinkage and Maxwell history driving a restrained cohesive joint.
+pub mod thermal_joint;
+
 /// One sparse column of a local displacement-jump map.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JumpTerm {
