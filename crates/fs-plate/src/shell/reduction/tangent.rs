@@ -35,8 +35,105 @@ impl ShellReduction {
             }
         }
     }
+
+    /// Assemble the exact row-major potential Hessian using caller-owned n-by-3
+    /// strain-gradient scratch. Each facet's strain/stress is evaluated once for
+    /// all columns. Material and geometric stiffness are both retained; negative
+    /// tangent curvature is not clipped. The linear DKT remainder is counted once.
+    /// No heap allocation, dense quartic tensor, altered modal basis or new law.
+    /// This O(facets*n^2) kernel may round differently from repeated actions.
+    /// Invalid dimensions/nonfinite input fills `out` with NaN; callers must
+    /// reject nonfinite trial results before numerical or physical publication.
+    pub fn hessian_matrix(&self, q: &[f64], out: &mut [f64], strain_gradients: &mut [[f64;3]]) {
+        let n=self.mode_count();
+        if q.len()!=n || n.checked_mul(n)!=Some(out.len()) || strain_gradients.len()!=n
+            || q.iter().any(|v|!v.is_finite()) {
+            out.fill(f64::NAN);return;
+        }
+        out.copy_from_slice(&self.remainder);
+        for f in &self.facets {
+            let (strain,dx,dy)=Self::strain(f,q);
+            let stress=mul(&f.membrane,strain);
+            for (b,s) in strain_gradients.iter_mut().zip(&f.strains) {
+                *b=[s.linear[0]+dot(dx,s.dx),s.linear[1]+dot(dy,s.dy),
+                    s.linear[2]+dot(dy,s.dx)+dot(dx,s.dy)];
+            }
+            for i in 0..n {
+                let stress_direction=mul(&f.membrane,strain_gradients[i]);
+                let a=&f.strains[i];
+                for j in 0..=i {
+                    let b=&f.strains[j];
+                    let second=[dot(a.dx,b.dx),dot(a.dy,b.dy),dot(a.dx,b.dy)+dot(a.dy,b.dx)];
+                    let tangent=dot(strain_gradients[j],stress_direction)+dot(second,stress);
+                    out[i*n+j]+=tangent;
+                    if i!=j {out[j*n+i]+=tangent;}
+                }
+            }
+        }
+    }
 }
 
 // Material-memory consumers need the physical flexural part of this tangent.
 #[path = "bending.rs"]
 mod bending;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::{Facet,ModeStrain};
+
+    fn specimen(n:usize)->ShellReduction {
+        let facets=(0..3).map(|f|Facet {
+            membrane:[4.0,0.4,0.0, 0.4,3.0,0.0, 0.0,0.0,1.2],
+            strains:(0..n).map(|i| {
+                let t=(1+i+5*f) as f64;
+                let dx=[0.2*t.sin(),0.1*(0.8*t).cos(),0.3*(0.6*t).sin()];
+                let dy=[0.1*(1.1*t).cos(),0.3*t.sin(),0.2*(0.4*t).cos()];
+                ModeStrain {dx,dy,linear:[dx[0],dy[1],dx[1]+dy[0]]}
+            }).collect(),
+        }).collect();
+        let mut remainder=vec![0.0;n*n];for i in 0..n {remainder[i*n+i]=1.0+i as f64;}
+        ShellReduction {omegas:vec![1.0;n],remainder,facets,translations:vec![],rotations:vec![],
+            reference_positions:vec![],section_thicknesses:vec![],nodes:0,triangles:vec![],
+            area_normals:vec![],rigid_motion:None}
+    }
+
+    #[test]
+    fn g0_batched_shell_tangent_matches_metric_energy_gradient_and_original_actions() {
+        for n in [1,3,8] {
+            let law=specimen(n);let mut matrix=vec![0.0;n*n];let mut scratch=vec![[0.0;3];n];
+            for scale in [0.0,0.01,0.4] {
+                let q:Vec<_>=(0..n).map(|i|scale*(i as f64+0.3).sin()).collect();
+                law.hessian_matrix(&q,&mut matrix,&mut scratch);
+                for col in 0..n {
+                    let mut d=vec![0.0;n];d[col]=1.0;let mut product=vec![0.0;n];
+                    law.hessian_vector(&q,&d,&mut product);
+                    let mut plus=q.clone();let mut minus=q.clone();plus[col]+=1e-6;minus[col]-=1e-6;
+                    let mut gp=vec![0.0;n];let mut gm=vec![0.0;n];
+                    law.gradient(&plus,&mut gp);law.gradient(&minus,&mut gm);
+                    for row in 0..n {
+                        let actual=matrix[row*n+col];let size=1.0+actual.abs();
+                        assert!((actual-product[row]).abs()<2e-13*size);
+                        assert!((actual-(gp[row]-gm[row])/2e-6).abs()<2e-8*size);
+                        assert_eq!(actual.to_bits(),matrix[col*n+row].to_bits());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g0_shell_geometric_stiffness_is_not_replaced_with_a_positive_surrogate() {
+        let mut law=specimen(1);law.remainder[0]=0.0;
+        law.facets=vec![Facet {membrane:[1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0],
+            strains:vec![ModeStrain {dx:[1.0,0.0,0.0],dy:[0.0;3],linear:[1.0,0.0,0.0]}]}];
+        let mut matrix=[0.0];let mut scratch=[[0.0;3]];
+        law.hessian_matrix(&[-0.5],&mut matrix,&mut scratch);
+        assert_eq!(matrix[0],-0.125); // (1+q)^2 + (q + q^2/2)
+        law.hessian_matrix(&[0.0],&mut matrix,&mut scratch);assert_eq!(matrix[0],1.0);
+        law.hessian_matrix(&[f64::NAN],&mut matrix,&mut scratch);assert!(matrix[0].is_nan());
+        law.hessian_matrix(&[0.0],&mut matrix,&mut []);assert!(matrix[0].is_nan());
+        law.hessian_matrix(&[],&mut matrix,&mut scratch);assert!(matrix[0].is_nan());
+        law.hessian_matrix(&[0.0],&mut [],&mut scratch);
+    }
+}
