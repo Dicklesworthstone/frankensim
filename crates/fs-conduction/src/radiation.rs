@@ -1259,6 +1259,7 @@ pub fn solve_with_gray_diffuse_enclosure(
     coupling_config.validate()?;
     enclosure.validate_for(problem.mesh)?;
     let mut conduction = run_conduction(cx, problem, interfaces, conduction_config.clone())?;
+    require_enclosure_solid_residual(cx, &conduction)?;
     let mut driving_temperatures =
         enclosure.surface_temperatures(problem.mesh, &conduction.temperature)?;
     let mut update_history = Vec::new();
@@ -1288,6 +1289,7 @@ pub fn solve_with_gray_diffuse_enclosure(
             ..problem
         };
         let next = run_conduction(cx, next_problem, interfaces, next_config)?;
+        require_enclosure_solid_residual(cx, &next)?;
         let actual_temperatures =
             enclosure.surface_temperatures(problem.mesh, &next.temperature)?;
         for (surface, &temperature_k) in enclosure.surfaces.iter().zip(&actual_temperatures) {
@@ -1338,6 +1340,31 @@ pub fn solve_with_gray_diffuse_enclosure(
         ),
         "increase the declared budget, reduce relaxation, or use a monolithic nonlinear radiation operator",
     ))
+}
+
+// General conduction may stop on a caller-declared small step. That is not
+// sufficient for an enclosure equilibrium: neither the initial field nor a
+// radiation-loaded iterate may bypass the original solid residual gate.
+fn require_enclosure_solid_residual(
+    cx: &Cx<'_>,
+    solution: &ConductionSolution,
+) -> Result<(), ConductionError> {
+    cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+        stage: "radiation-solid-acceptance",
+        at: solution.report.iterations,
+    })?;
+    let residual = solution.report.final_residual;
+    let threshold = solution.report.residual_threshold;
+    if !residual.is_finite() || !threshold.is_finite()
+        || residual < 0.0 || threshold < 0.0 || residual > threshold
+    {
+        return Err(radiation_error(
+            "enclosure-solid",
+            format!("inner solid stopped without meeting its residual gate: residual {residual} W, threshold {threshold} W"),
+            "disable premature step-only convergence or provide sufficient original solid/linear iterations; a small outer update is not equilibrium",
+        ));
+    }
+    Ok(())
 }
 
 fn run_conduction(
