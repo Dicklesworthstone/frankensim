@@ -517,7 +517,12 @@ pub fn assimilate_observation_batch(
     } else {
         let whitened = whiten_observations(&available, &batch.cholesky, cx)?;
         let factor = FactorBelief::from_belief(prior, cx)?;
-        let (updated, diagnostics) = assimilate_sequence(&factor, &whitened, cx)?.into_parts();
+        let (updated, diagnostics) = assimilate_sequence(&factor, &whitened.active, cx)?.into_parts();
+        let diagnostics = diagnostics.with_whitening_rows(
+            whitened.active_rows,
+            whitened.state_independent_rows,
+            whitened.constant_misfit,
+        )?;
         (updated.to_belief(cx)?, Some(diagnostics))
     };
     let mut result = build_result(prior, batch, Some(posterior), BatchOutcome::Updated, cx)?;
@@ -591,14 +596,22 @@ fn strict_cholesky(matrix: &[Vec<f64>], cx: &Cx<'_>) -> Result<Vec<Vec<f64>>, As
     Ok(lower)
 }
 
+struct WhitenedObservations {
+    active: Vec<Observation>,
+    active_rows: Vec<usize>,
+    state_independent_rows: Vec<usize>,
+    constant_misfit: f64,
+}
+
 fn whiten_observations(
     observations: &[&Observation],
     lower: &[Vec<f64>],
     cx: &Cx<'_>,
-) -> Result<Vec<Observation>, AssimError> {
+) -> Result<WhitenedObservations, AssimError> {
     let state_dim = observations[0].operator().len();
     let mut values = vec![0.0; observations.len()];
     let mut operators = vec![vec![0.0; state_dim]; observations.len()];
+    let mut nonzero_before_scaling = vec![false; observations.len()];
     for row in 0..observations.len() {
         cx.checkpoint().map_err(|_| {
             robust_cancelled(
@@ -625,6 +638,7 @@ fn whiten_observations(
                 coefficient =
                     (-lower[row][prior]).mul_add(prior_operators[prior][component], coefficient);
             }
+            nonzero_before_scaling[row] |= coefficient != 0.0;
             *output = coefficient / lower[row][row];
             if !output.is_finite() {
                 return Err(AssimError::NonFiniteComputation {
@@ -634,14 +648,49 @@ fn whiten_observations(
         }
     }
 
-    operators
-        .into_iter()
-        .zip(values)
-        .enumerate()
-        .map(|(index, (operator, value))| {
-            Observation::new(operator, value, 1.0, format!("robust-whitened-{index:03}"))
-        })
-        .collect()
+    // Keep ALL transformed values until the triangular solve is complete:
+    // a state-independent intermediate row can still whiten a later value.
+    let mut active = Vec::with_capacity(observations.len());
+    let mut active_rows = Vec::with_capacity(observations.len());
+    let mut state_independent_rows = Vec::new();
+    let mut constant = 0.0_f64;
+    let mut correction = 0.0_f64;
+    for (index, (operator, value)) in operators.into_iter().zip(values).enumerate() {
+        cx.checkpoint().map_err(|_| {
+            robust_cancelled("whitened row classification", index as u128, observations.len() as u128)
+        })?;
+        if operator.iter().all(|coefficient| *coefficient == 0.0) {
+            // Do not silently relabel scaling underflow as state independence.
+            // A zero first row can only arise this way: input H is nonzero.
+            if nonzero_before_scaling[index] {
+                return Err(AssimError::ZeroObservationOperator);
+            }
+            let term = value * value;
+            let next = constant + term;
+            correction += if constant.abs() >= term.abs() {
+                (constant - next) + term
+            } else {
+                (term - next) + constant
+            };
+            constant = next;
+            state_independent_rows.push(index);
+        } else {
+            active.push(Observation::new(
+                operator, value, 1.0, format!("robust-whitened-{index:03}"),
+            )?);
+            active_rows.push(index);
+        }
+    }
+    let constant_misfit = constant + correction;
+    if !constant_misfit.is_finite() {
+        return Err(AssimError::NonFiniteComputation {
+            stage: "state-independent whitened residual",
+        });
+    }
+    if active.is_empty() {
+        return Err(AssimError::ZeroObservationOperator);
+    }
+    Ok(WhitenedObservations { active, active_rows, state_independent_rows, constant_misfit })
 }
 
 fn build_result(

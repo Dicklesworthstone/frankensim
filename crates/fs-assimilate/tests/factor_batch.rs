@@ -163,3 +163,72 @@ fn sequence_does_not_reissue_scalar_poll_or_cost_budgets() {
     }
     assert_eq!(prior, saved);
 }
+
+#[test]
+fn state_independent_middle_row_is_kept_in_whitening_and_joint_diagnostics() {
+    with_cx(&CancelGate::new(), Budget::INFINITE, |cx| {
+        // L = [[1,0,0],[1,1,0],[0,1,1]], so whitening H=[1,1,1]
+        // gives [1,0,1], and whitening y=[2,5,7] gives [2,3,4].
+        let records = [2.0, 5.0, 7.0].into_iter().enumerate().map(|(i, value)| {
+            RobustObservation::available(point_sensor(0, 1, value, if i == 0 { 1.0 } else { 2.0 }, format!("row-{i}")).unwrap())
+        }).collect();
+        let batch = ObservationBatch::new(records, vec![vec![1.0, 1.0, 0.0], vec![1.0, 2.0, 1.0], vec![0.0, 1.0, 2.0]], cx).unwrap();
+        let result = assimilate_observation_batch(&Belief::scalar(0.0, 1.0).unwrap(), &batch, cx).unwrap();
+        let posterior = result.posterior().unwrap();
+        close(posterior.mean()[0], 2.0);
+        close(posterior.variance(0).unwrap(), 1.0 / 3.0);
+        let diagnostics = result.factor_diagnostics().unwrap();
+        assert_eq!(diagnostics.receipts().len(), 2);
+        assert_eq!(diagnostics.updated_row_indices(), &[0, 2]);
+        assert_eq!(diagnostics.state_independent_row_indices(), &[1]);
+        assert_eq!(diagnostics.state_independent_misfit(), 9.0);
+        close(diagnostics.joint_misfit_before(), 29.0);
+        close(diagnostics.joint_misfit_after(), 13.0);
+        // The audit counts actual readings, not informative whitened rows.
+        assert_eq!(result.audit().effective_dof(), 3);
+    });
+}
+
+#[test]
+fn tiny_nonzero_whitened_sensitivity_is_not_thresholded_away() {
+    with_cx(&CancelGate::new(), Budget::INFINITE, |cx| {
+        let epsilon = 2.0_f64.powi(-40);
+        let records = vec![
+            RobustObservation::available(Observation::new(vec![1.0], 2.0, 1.0, "row-a").unwrap()),
+            RobustObservation::available(Observation::new(vec![1.0 + epsilon], 5.0, 2.0, "row-b").unwrap()),
+        ];
+        let batch = ObservationBatch::new(records, vec![vec![1.0, 1.0], vec![1.0, 2.0]], cx).unwrap();
+        let result = assimilate_observation_batch(&Belief::scalar(0.0, 1.0).unwrap(), &batch, cx).unwrap();
+        let diagnostics = result.factor_diagnostics().unwrap();
+        assert_eq!(diagnostics.receipts().len(), 2);
+        assert_eq!(diagnostics.updated_row_indices(), &[0, 1]);
+        assert!(diagnostics.state_independent_row_indices().is_empty());
+        close(result.posterior().unwrap().mean()[0], (2.0 + 3.0 * epsilon) / (2.0 + epsilon * epsilon));
+    });
+}
+
+#[test]
+fn whitening_that_erases_all_coefficients_by_underflow_still_refuses() {
+    with_cx(&CancelGate::new(), Budget::INFINITE, |cx| {
+        let records = vec![
+            RobustObservation::available(Observation::new(vec![f64::from_bits(1)], 0.0, 1.0e308, "tiny-row").unwrap()),
+            RobustObservation::available(Observation::new(vec![1.0], 0.0, 1.0, "normal-row").unwrap()),
+        ];
+        let batch = ObservationBatch::new(records, vec![vec![1.0e308, 0.25], vec![0.25, 1.0]], cx).unwrap();
+        let prior = Belief::scalar(0.0, 1.0).unwrap();
+        assert_eq!(assimilate_observation_batch(&prior, &batch, cx), Err(AssimError::ZeroObservationOperator));
+    });
+}
+
+#[test]
+fn overflow_in_a_state_independent_residual_never_publishes_a_posterior() {
+    with_cx(&CancelGate::new(), Budget::INFINITE, |cx| {
+        let records = vec![
+            RobustObservation::available(point_sensor(0, 1, 0.0, 1.0, "row-a").unwrap()),
+            RobustObservation::available(point_sensor(0, 1, f64::MAX, 2.0, "row-b").unwrap()),
+        ];
+        let batch = ObservationBatch::new(records, vec![vec![1.0, 1.0], vec![1.0, 2.0]], cx).unwrap();
+        let prior = Belief::scalar(0.0, 1.0).unwrap();
+        assert!(matches!(assimilate_observation_batch(&prior, &batch, cx), Err(AssimError::NonFiniteComputation { .. })));
+    });
+}

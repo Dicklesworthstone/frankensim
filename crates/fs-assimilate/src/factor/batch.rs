@@ -20,6 +20,9 @@ use crate::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct FactorBatchDiagnostics {
     receipts: Vec<ContractionReceipt>,
+    updated_row_indices: Vec<usize>,
+    state_independent_row_indices: Vec<usize>,
+    state_independent_misfit: f64,
     joint_misfit_before: f64,
     joint_misfit_after: f64,
 }
@@ -29,6 +32,47 @@ impl FactorBatchDiagnostics {
     #[must_use]
     pub fn receipts(&self) -> &[ContractionReceipt] {
         &self.receipts
+    }
+
+    /// Row indices aligned with `receipts()`. For a correlated batch these
+    /// refer to the ordered whitened rows, not to individual physical sensors.
+    #[must_use]
+    pub fn updated_row_indices(&self) -> &[usize] {
+        &self.updated_row_indices
+    }
+
+    /// Rows whose computed whitened operator is exactly zero. They add a
+    /// constant likelihood residual but no state update. This numerical
+    /// distinction is not an exact covariance-rank or information certificate.
+    #[must_use]
+    pub fn state_independent_row_indices(&self) -> &[usize] {
+        &self.state_independent_row_indices
+    }
+
+    /// Constant squared whitened residual included in BOTH joint misfits.
+    #[must_use]
+    pub const fn state_independent_misfit(&self) -> f64 {
+        self.state_independent_misfit
+    }
+
+    pub(crate) fn with_whitening_rows(
+        mut self,
+        updated_rows: Vec<usize>,
+        independent_rows: Vec<usize>,
+        constant_misfit: f64,
+    ) -> Result<Self, AssimError> {
+        debug_assert_eq!(updated_rows.len(), self.receipts.len());
+        self.joint_misfit_before += constant_misfit;
+        self.joint_misfit_after += constant_misfit;
+        if !self.joint_misfit_before.is_finite() || !self.joint_misfit_after.is_finite() {
+            return Err(AssimError::NonFiniteComputation {
+                stage: "joint whitened residual",
+            });
+        }
+        self.updated_row_indices = updated_rows;
+        self.state_independent_row_indices = independent_rows;
+        self.state_independent_misfit = constant_misfit;
+        Ok(self)
     }
 
     /// Full-batch weighted residual at the original prior mean.
@@ -112,13 +156,21 @@ pub fn assimilate_sequence(
     let plan = WorkPlan::checked(0, m, 0, diagnostics, updates, 0, 0)?;
     let mut progress = WorkProgress::new(cx, plan)?;
     progress.checkpoint("factor batch admission")?;
-    for observation in observations {
+    let mut updated_row_indices = Vec::new();
+    updated_row_indices.try_reserve_exact(observations.len()).map_err(|_| {
+        AssimError::AllocationRefused {
+            stage: "factor batch row indices",
+            requested_bytes: m * core::mem::size_of::<usize>() as u128,
+        }
+    })?;
+    for (index, observation) in observations.iter().enumerate() {
         if observation.operator().len() != n {
             return Err(AssimError::DimMismatch {
                 state: n,
                 operator: observation.operator().len(),
             });
         }
+        updated_row_indices.push(index);
         progress.records("factor batch dimensions", 1)?;
     }
     let mut receipts = Vec::new();
@@ -141,6 +193,9 @@ pub fn assimilate_sequence(
         belief,
         diagnostics: FactorBatchDiagnostics {
             receipts,
+            updated_row_indices,
+            state_independent_row_indices: Vec::new(),
+            state_independent_misfit: 0.0,
             joint_misfit_before,
             joint_misfit_after,
         },

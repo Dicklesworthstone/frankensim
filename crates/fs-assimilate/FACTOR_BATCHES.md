@@ -38,3 +38,13 @@ exercises a 128-state/40-observation batch beyond the dense cubic-work cap.
 `groups::jacobian` constructs these full observation covariances from signed
 measurement sensitivities and a multivariate nuisance model. See
 `SHARED_NOISE_JACOBIANS.md` and the runnable `shared_calibration` example.
+
+A valid correlated model can produce an exactly zero operator in a computed
+whitened row, even though every physical observation operator is nonzero.
+Those rows no longer invalidate the batch: their constant squared residual is
+included in both joint misfits, but they do not invoke a scalar state update.
+All transformed values remain available to whiten later rows. Diagnostics
+expose the updated and state-independent row indices in whitened declaration
+order; the physical observation audit still counts all accepted readings.
+There is no small-coefficient threshold, rank certificate, or silent acceptance
+of an operator erased entirely by division underflow.
