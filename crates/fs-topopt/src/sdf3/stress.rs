@@ -24,6 +24,12 @@ use super::*;
 use crate::SolveWork;
 use fs_cutfem::elastic3::{ElasticityError3, stress::BulkStressPoint3};
 use std::ops::ControlFlow;
+use fs_cutfem::elastic3::adaptive::dirichlet::PrescribedMotion3;
+
+/// One optional pure, reference-configuration embedded displacement law per
+/// independent load case. None keeps that case's existing homogeneous support.
+/// Strong box clamps remain homogeneous even when embedded motion is supplied.
+pub type StressMotions3<'a> = [Option<&'a PrescribedMotion3<'a>>];
 
 #[path = "stress/measure.rs"]
 mod measure;
@@ -105,6 +111,8 @@ pub struct StressEvaluation3 {
     pub displacements: Vec<Vec<f64>>,
     /// One adjoint of the whole aggregate per independent load case.
     pub adjoints: Vec<Vec<f64>>,
+    /// External force work f^T u only. With prescribed motion this is neither
+    /// total strain energy nor actuator work; the Nitsche lifting is excluded.
     pub case_compliances: Vec<f64>,
     pub point_count: usize,
     pub work: SolveWork,
@@ -145,6 +153,18 @@ pub(super) fn admit<O: Sdf3Elasticity>(
         return Err(StressError3::Invalid(
             "invalid stress design or independent loads",
         ));
+    }
+    Ok(())
+}
+pub(super) fn admit_motions<O: Sdf3Elasticity>(study: &CutDensityStudy3<O>,
+    loads: &[LoadCase<'_>], motions: Option<&StressMotions3<'_>>) -> Result<(), StressError3> {
+    if let Some(motions) = motions {
+        if motions.len() != loads.len() {
+            return Err(StressError3::Invalid("one prescribed-motion entry per stress load required"));
+        }
+        if motions.iter().any(Option::is_some) && study.operator.embedded_dirichlet_penalty().is_none() {
+            return Err(StressError3::Invalid("stress motion requires retained embedded support"));
+        }
     }
     Ok(())
 }
@@ -235,7 +255,34 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         measure: StressMeasure3,
         control: &mut SolveControl<'_>,
     ) -> Result<StressEvaluation3, StressError3> {
+        self.evaluate_stress_family(rho, loads, None, options, measure, control)
+    }
+
+    /// Stress under independent external forces AND prescribed embedded motion.
+    /// Integrate b_g at every evaluated material state, then include z^T db_g/ds
+    /// alongside -z^T dK/ds u in the exact stress adjoint. Treating b_g as a
+    /// frozen force gives an incorrect density derivative. The existing stress
+    /// integration, relaxation/peak measure and density pullback are shared.
+    ///
+    /// All-None motions preserve the old arithmetic and work boundaries. Both
+    /// success and returned errors restore incoming scales. Each design prepares
+    /// once for all primal/adjoint solves. Motion laws must be pure and density
+    /// independent on the reference support; follower loads are not supported.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_stress_with_prescribed_motion(&mut self, rho: &[f64],
+        loads: &[LoadCase<'_>], motions: &StressMotions3<'_>, options: StressOptions3,
+        measure: StressMeasure3, control: &mut SolveControl<'_>)
+        -> Result<StressEvaluation3, StressError3> {
+        self.evaluate_stress_family(rho, loads, Some(motions), options, measure, control)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_stress_family(&mut self, rho: &[f64], loads: &[LoadCase<'_>],
+        motions: Option<&StressMotions3<'_>>, options: StressOptions3,
+        measure: StressMeasure3, control: &mut SolveControl<'_>)
+        -> Result<StressEvaluation3, StressError3> {
         admit(self, rho, loads, options)?;
+        admit_motions(self, loads, motions)?;
         control.checkpoint("sdf3-stress-evaluation")?;
         let design = self.design(rho, control)?;
         let previous = self.operator.scales().to_vec();
@@ -280,12 +327,21 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             let mut nonzero_weighted_force = false;
             for (case, load) in loads.iter().enumerate() {
                 control.checkpoint("sdf3-stress-primal")?;
-                let rhs: Vec<f64> = load
+                let mut rhs: Vec<f64> = load
                     .force
                     .iter()
                     .enumerate()
                     .map(|(i, &f)| if self.operator.fixed()[i / 3] { 0.0 } else { f })
                     .collect();
+                let motion = motions.and_then(|entries| entries[case]);
+                if let Some(g) = motion {
+                    control.checkpoint("sdf3-stress-motion-load")?;
+                    let lifting = self.operator.prescribed_displacement_load(g, || poll(control))?;
+                    for (i, (r, b)) in rhs.iter_mut().zip(lifting).enumerate() {
+                        if i % 192 == 0 { control.checkpoint("sdf3-stress-motion-load")?; }
+                        *r = finite(*r+b)?;
+                    }
+                }
                 nonzero_weighted_force |= measure.includes(weights[case]) && rhs.iter().any(|f| *f != 0.0);
                 let u = checked_solve_preconditioned(
                     &self.operator,
@@ -295,7 +351,13 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                     "sdf3-stress-primal",
                     control,
                 )?;
-                let compliance = finite(rhs.iter().zip(&u).map(|(f, u)| f * u).sum())?;
+                let compliance = if motion.is_some() {
+                    // b_g^T u is not external work or an actuator-energy law.
+                    finite(load.force.iter().zip(&u).enumerate().map(|(i, (f, u))|
+                        if self.operator.fixed()[i/3] { 0.0 } else { f*u }).sum())?
+                } else {
+                    finite(rhs.iter().zip(&u).map(|(f, u)| f * u).sum())?
+                };
                 let data =
                     self.operator
                         .bulk_stress(&u, options.max_points - point_count, || poll(control))?;
@@ -416,6 +478,15 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                         * power(r, self.params.penal - 1.0);
                     *value -= dsimp * contraction;
                 }
+                if let Some(g) = motions.and_then(|entries| entries[case]) {
+                    control.checkpoint("sdf3-stress-motion-pullback")?;
+                    let lifting = self.operator.prescribed_displacement_scale_work(g, &z, || poll(control))?;
+                    for (i, ((value, &r), b)) in local.iter_mut().zip(&design.projected).zip(lifting).enumerate() {
+                        if i % 64 == 0 { control.checkpoint("sdf3-stress-motion-pullback")?; }
+                        let dsimp = (1.0-self.params.e_min)*self.params.penal*power(r, self.params.penal-1.0);
+                        *value = finite(*value+dsimp*b)?;
+                    }
+                }
                 adjoints.push(z);
             }
             for (value, slope) in local.iter_mut().zip(&design.slope) {
@@ -461,3 +532,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
 #[cfg(test)]
 #[path = "stress/peak_tests.rs"]
 mod peak_tests;
+
+#[cfg(test)]
+#[path = "stress/motion_tests.rs"]
+mod motion_tests;

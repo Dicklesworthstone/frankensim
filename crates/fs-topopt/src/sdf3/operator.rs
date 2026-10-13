@@ -4,6 +4,7 @@ use std::ops::ControlFlow;
 use fs_cutfem::elastic3::{CutElasticity3,ElasticityError3};
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
 use fs_cutfem::elastic3::stress::BulkStressPoint3;
+use fs_cutfem::elastic3::adaptive::dirichlet::PrescribedMotion3;
 use fs_cutfem::elastic3::adaptive::enrichment::precondition::{AdaptivePrepared3, AdaptivePreconditionError3, AdaptiveSolveSpace3, AdaptiveSetupWork3};
 use fs_solver::op::{LinearOp, two_level::TwoLevelError, multilevel::MultilevelError};
 use fs_sparse::precond::{IdentityPrecond, Precond};
@@ -41,6 +42,14 @@ pub trait Sdf3Elasticity: LinearOp + sealed::Sealed {
     /// Pull back reference-material stress cotangents through the physical Q1 map.
     fn reference_bulk_stress_pullback(&self, derivatives: &[[f64; 6]], checkpoint: impl FnMut() -> ControlFlow<()>)
         -> Result<Vec<f64>, ElasticityError3>;
+    /// Existing embedded support method; None means no prescribed-motion path.
+    fn embedded_dirichlet_penalty(&self) -> Option<f64>;
+    /// Current-material Nitsche lifting in the operator's actual DOF order.
+    fn prescribed_displacement_load(&self, motion: &PrescribedMotion3<'_>, checkpoint: impl FnMut() -> ControlFlow<()>)
+        -> Result<Vec<f64>, ElasticityError3>;
+    /// z^T db_g/dscale for the SAME retained support and constraint map.
+    fn prescribed_displacement_scale_work(&self, motion: &PrescribedMotion3<'_>, z: &[f64], checkpoint: impl FnMut() -> ControlFlow<()>)
+        -> Result<Vec<f64>, ElasticityError3>;
     /// Each shared active face once, with normal center separation.
     fn filter_edges(&self)->Vec<(usize,usize,f64)>;
 }
@@ -59,6 +68,11 @@ impl Sdf3Elasticity for CutElasticity3 {
         -> Result<Vec<BulkStressPoint3>,ElasticityError3> {CutElasticity3::bulk_stress(self,u,max_points,checkpoint)}
     fn reference_bulk_stress_pullback(&self,derivatives:&[[f64;6]],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {CutElasticity3::reference_bulk_stress_pullback(self,derivatives,checkpoint)}
+    fn embedded_dirichlet_penalty(&self)->Option<f64> {CutElasticity3::embedded_dirichlet_penalty(self)}
+    fn prescribed_displacement_load(&self,motion:&PrescribedMotion3<'_>,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<f64>,ElasticityError3> {CutElasticity3::prescribed_displacement_load(self,motion,checkpoint)}
+    fn prescribed_displacement_scale_work(&self,motion:&PrescribedMotion3<'_>,z:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<f64>,ElasticityError3> {CutElasticity3::prescribed_displacement_scale_work(self,motion,z,checkpoint)}
     fn filter_edges(&self)->Vec<(usize,usize,f64)> {
         // Preserve the original Cartesian neighbor and insertion order.
         let keys=self.cell_keys();
@@ -88,6 +102,11 @@ impl Sdf3Elasticity for AdaptiveElasticity3 {
         -> Result<Vec<BulkStressPoint3>,ElasticityError3> {AdaptiveElasticity3::bulk_stress(self,u,max_points,checkpoint)}
     fn reference_bulk_stress_pullback(&self,derivatives:&[[f64;6]],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::reference_bulk_stress_pullback(self,derivatives,checkpoint)}
+    fn embedded_dirichlet_penalty(&self)->Option<f64> {AdaptiveElasticity3::embedded_dirichlet_penalty(self)}
+    fn prescribed_displacement_load(&self,motion:&PrescribedMotion3<'_>,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::prescribed_displacement_load(self,motion,checkpoint)}
+    fn prescribed_displacement_scale_work(&self,motion:&PrescribedMotion3<'_>,z:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::prescribed_displacement_scale_work(self,motion,z,checkpoint)}
     fn filter_edges(&self)->Vec<(usize,usize,f64)> {AdaptiveElasticity3::filter_edges(self).to_vec()}
 }
 impl Sdf3Elasticity for AdaptiveSolveSpace3 {
@@ -134,6 +153,11 @@ impl Sdf3Elasticity for AdaptiveSolveSpace3 {
         -> Result<Vec<BulkStressPoint3>,ElasticityError3> {self.elasticity().bulk_stress(u,max_points,checkpoint)}
     fn reference_bulk_stress_pullback(&self,derivatives:&[[f64;6]],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {self.elasticity().reference_bulk_stress_pullback(derivatives,checkpoint)}
+    fn embedded_dirichlet_penalty(&self)->Option<f64> {self.elasticity().embedded_dirichlet_penalty()}
+    fn prescribed_displacement_load(&self,motion:&PrescribedMotion3<'_>,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<f64>,ElasticityError3> {self.elasticity().prescribed_displacement_load(motion,checkpoint)}
+    fn prescribed_displacement_scale_work(&self,motion:&PrescribedMotion3<'_>,z:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<f64>,ElasticityError3> {self.elasticity().prescribed_displacement_scale_work(motion,z,checkpoint)}
     fn filter_edges(&self)->Vec<(usize,usize,f64)> {self.elasticity().filter_edges().to_vec()}
 }
 
