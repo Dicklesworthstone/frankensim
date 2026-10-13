@@ -10,6 +10,10 @@ use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
 
 type FitError = ProjectedAlError<ResponseError3>;
 
+mod campaign;
+pub use campaign::{AdaptiveResponseBuild3, AdaptiveResponseChange3, AdaptiveResponseError3,
+    AdaptiveResponseOptions3, AdaptiveResponseRound3, AdaptiveResponseStop3, AdaptiveResponseStudy3};
+
 /// Complete accepted fitting prefix on ONE grid. Initializing the grid can
 /// fail before this exists. Once initialization succeeds, an interrupted run
 /// returns its error in `outcome` alongside the last accepted physical state.
@@ -18,6 +22,9 @@ pub struct ReferenceResponseFit3 {
     /// New-grid baseline, not prolonged coarse displacements or old loss values.
     pub initial: ResponseEvaluation3,
     pub accepted: ResponseEvaluation3,
+    /// Least-objective accepted feasible point, not necessarily the final AL
+    /// iterate. Keeping this does not certify stationarity at that point.
+    pub best_feasible: Option<ResponseEvaluation3>,
     pub history: Vec<ProjectedResponseIteration3>,
     /// Iteration/evaluation limits and stalls are not convergence. A successful
     /// optimizer return does not itself assert nonlinear volume feasibility.
@@ -160,6 +167,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         let outcome = session.run(steps);
         Ok(ReferenceResponseFit3 {
             initial, accepted: session.accepted().clone(), history: session.history().to_vec(),
+            best_feasible: session.best_feasible().cloned(),
             outcome, work: session.work(),
         })
     }

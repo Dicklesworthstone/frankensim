@@ -133,3 +133,7 @@ required-features = ["newton-design"]
 [[example]]
 name = "constrained_elasticity"
 required-features = ["newton-design"]
+
+[[test]]
+name = "adaptive_response_campaign"
+required-features = ["cutfem-marquee"]
