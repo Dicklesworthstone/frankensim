@@ -94,3 +94,6 @@ fn marginal_uses_tail_factor_columns_and_operations_refuse_exhausted_budgets() {
         });
     }
 }
+
+#[path = "shared_design/batch.rs"]
+mod batch;

@@ -51,6 +51,6 @@ jobs:
             cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
           fi
       - name: Test the actual crate, factor kernels, and correlated batches
-        run: cargo test -p fs-assimilate --test factor --test robust --test factor_batch --test shared_noise --example shared_calibration
+        run: cargo test -p fs-assimilate --test factor --test robust --test factor_batch --test shared_noise --test shared_design --example shared_calibration
       - name: Run the model-bearing calibration example
         run: cargo run -p fs-assimilate --example shared_calibration

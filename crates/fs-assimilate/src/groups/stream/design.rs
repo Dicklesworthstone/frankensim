@@ -290,3 +290,6 @@ fn finite(value: f64) -> Result<f64, AssimError> {
     if value.is_finite() { Ok(value) }
     else { Err(AssimError::NonFiniteComputation { stage: "shared probe prediction" }) }
 }
+
+/// Joint, budgeted acquisition planning without measured outcomes.
+pub mod batch;
