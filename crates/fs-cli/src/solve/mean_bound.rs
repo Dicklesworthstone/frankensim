@@ -119,7 +119,7 @@ mod enabled {
             return Err(conduction_error(
                 "cli-solve-cancelled",
                 "the requested continuum volume-mean bound was cancelled",
-                "resume the completed pipeline prefix; no partial bound was published",
+                "resume the accepted pipeline prefix; no partial bound was published",
             ));
         }
         Ok(())
@@ -425,9 +425,9 @@ mod enabled {
         let material_validity = match material_domain {
             None => "{\"method\":\"global-constant-source\"}".to_string(),
             Some(proof) => format!(
-                "{{\"method\":\"continuum-slab-comparison\",\"continuum_temperature_range_k\":{},\"retained_material_domain_k\":{},\"axis\":{},\"reverse\":{},\"comparison_attempts\":{}}}",
+                "{{\"method\":\"continuum-slab-comparison\",\"continuum_temperature_range_k\":{},\"retained_material_domain_k\":{},\"axis\":{},\"reverse\":{},\"two_sided\":{},\"comparison_attempts\":{}}}",
                 interval(proof.range[0], proof.range[1])?, interval(proof.span[0], proof.span[1])?,
-                proof.axis, proof.reverse, proof.attempts,
+                proof.axis, proof.reverse, proof.two_sided, proof.attempts,
             ),
         };
         let bound = &result.bound;

@@ -17,8 +17,10 @@ pub struct SlabValidatedRegionMean {
     pub material_temperature_span: TemperatureSpan,
     /// Axis of the independently checked comparison slab, 0, 1 or 2.
     pub axis: usize,
-    /// True when the cooling end is the low-coordinate end of this axis.
+    /// Requested direction; only affects the fallback one-ended comparison.
     pub reverse: bool,
+    /// Both axis ends were fully cooled and entered the sharper comparison.
+    pub two_sided: bool,
     /// Completed directional barrier attempts; only the accepted one leads to a dual.
     pub comparison_attempts: usize,
 }
@@ -59,7 +61,9 @@ fn constant_extension(model: &ConductivityModel) -> Result<ConductivityModel> {
 /// As with the underlying verifier, conforming non-overlapping volume geometry
 /// is a caller obligation. Supplied boundary rows must belong to this mesh.
 ///
-/// `axis` and `reverse` explicitly select the proposed barrier; unsupported
+/// `axis` and `reverse` select the proposed direction. If both ends have
+/// complete Dirichlet/Robin coverage, both enter the barrier; otherwise the
+/// original one-ended comparison uses `reverse`. Unsupported
 /// geometry or a barrier wider than material validity yields no bound. It does
 /// not prove that the physical solution actually leaves the validity domain.
 /// This is a nominal PDE bound, not a material-uncertainty or physical certificate.
@@ -75,7 +79,9 @@ pub fn bound_temperature_region_mean_with_slab_validity(
 
 /// Try an explicit ordered family of at most six distinct slab directions.
 /// Only unsupported barriers or ranges wider than material validity advance to
-/// another direction. All other errors propagate immediately. Admission and
+/// another direction. Fully cooled ends select the two-sided barrier once per
+/// axis, independent of direction. There are still at most six comparisons.
+/// All other errors propagate immediately. Admission and
 /// constant-extension assembly are shared; at most ONE dual/majorant is run.
 /// The accepted axis and number of completed attempts are retained in the result.
 #[allow(clippy::too_many_arguments)]
@@ -119,12 +125,24 @@ pub fn bound_temperature_region_mean_with_slab_directions(
     // The original binder rejects undeclared contacts; an empty contact list
     // cannot silently turn independent coincident traces into continuity.
     let (admitted, interfaces) = contact::admit_contacts(cx, extended, &[], config.flux)?;
+    let both_ends = two_sided_axes(cx, problem, &admitted)?;
+    let mut tried_two_sided = [false; 3];
     let mut accepted = None;
     let mut comparison_attempts = 0;
     for &(axis, reverse) in directions {
         poll(cx)?;
-        let range = match admitted.problem(problem.mesh.positions()).slab_temperature_range(
-            temperature, axis, reverse, config.flux, || cx.checkpoint().is_ok()) {
+        let two_sided = both_ends[axis];
+        if two_sided && tried_two_sided[axis] { continue; }
+        tried_two_sided[axis] |= two_sided;
+        let equation = admitted.problem(problem.mesh.positions());
+        let attempt = if two_sided {
+            equation.slab_temperature_range_two_sided(temperature, axis, config.flux,
+                || cx.checkpoint().is_ok())
+        } else {
+            equation.slab_temperature_range(temperature, axis, reverse, config.flux,
+                || cx.checkpoint().is_ok())
+        };
+        let range = match attempt {
             Ok(range) => range,
             Err(TetError::Unsupported(_)) => { comparison_attempts += 1; continue; }
             Err(error) => return Err(error.into()),
@@ -133,10 +151,10 @@ pub fn bound_temperature_region_mean_with_slab_directions(
         if let TemperatureSpan::Sampled { low, high } = span {
             if range.lo < low || range.hi > high { continue; }
         }
-        accepted = Some((range, axis, reverse));
+        accepted = Some((range, axis, reverse, two_sided));
         break;
     }
-    let (range, axis, reverse) = accepted.ok_or_else(|| unsupported(
+    let (range, axis, reverse, two_sided) = accepted.ok_or_else(|| unsupported(
         "finite spans require a slab barrier inside the original material temperature validity"))?;
     poll(cx)?;
     let region = bound_field(cx, extended, &admitted, &interfaces,
@@ -144,6 +162,37 @@ pub fn bound_temperature_region_mean_with_slab_directions(
     poll(cx)?;
     Ok(SlabValidatedRegionMean {
         region, continuum_temperature_range_k: [range.lo, range.hi],
-        material_temperature_span: span, axis, reverse, comparison_attempts,
+        material_temperature_span: span, axis, reverse, two_sided, comparison_attempts,
     })
+}
+
+// Strategy selection only: the verifier independently checks geometry, complete
+// end coverage, coefficients and every original boundary before returning a
+// range. This never converts a failed physical/numerical check into acceptance.
+fn two_sided_axes(
+    cx: &Cx<'_>, problem: ConductionProblem<'_>, admitted: &Admitted,
+) -> Result<[bool; 3]> {
+    let positions = problem.mesh.positions();
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for chunk in positions.chunks(256) {
+        poll(cx)?;
+        for p in chunk { for d in 0..3 { lo[d] = lo[d].min(p[d]); hi[d] = hi[d].max(p[d]); } }
+    }
+    let mut seen = [[false; 2]; 3];
+    let mut cooled = [[true; 2]; 3];
+    for chunk in admitted.boundary.chunks(256) {
+        poll(cx)?;
+        for face in chunk { for axis in 0..3 {
+            for (end, location) in [lo[axis], hi[axis]].into_iter().enumerate() {
+                if face.vertices.iter().all(|&v| positions[v][axis] == location) {
+                    seen[axis][end] = true;
+                    cooled[axis][end] &= matches!(face.condition,
+                        BoundaryCondition::Dirichlet(_) | BoundaryCondition::Robin { .. });
+                }
+            }
+        }}
+    }
+    poll(cx)?;
+    Ok([0, 1, 2].map(|axis| (0..2).all(|end| seen[axis][end] && cooled[axis][end])))
 }

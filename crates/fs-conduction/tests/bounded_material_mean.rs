@@ -180,3 +180,57 @@ fn directional_search_reuses_admission_and_runs_only_the_accepted_dual() {
         }
     });
 }
+
+#[test]
+fn both_cooled_ends_establish_a_finite_domain_that_one_end_cannot() {
+    with_cx(|cx| {
+        let mesh=mesh(); let material=material(297.0,303.0,10.0);
+        let boundary=ThermalBoundaryBuilder::new(&mesh)
+            .region("ends",|f| on_box_face(f.centroid[0],0.0) || on_box_face(f.centroid[0],0.1),
+                ThermalBc::robin(20.0,300.0).unwrap()).unwrap()
+            .adiabatic_remainder().finish().unwrap();
+        let cells=(0..mesh.element_count()).collect::<Vec<_>>();
+        for density in [-1000.0,1000.0] {
+            let source=ScalarField::Uniform(density);
+            let problem=ConductionProblem {mesh:&mesh,boundary:&boundary,material:&material,
+                element_materials:None,source:&source};
+            let solved=fs_conduction::solve(cx,problem,solve_config()).unwrap();
+            let saved=solved.temperature.clone();
+            let checked=bound(cx,problem,&solved.temperature,&cells,0,false,config(&mesh)).unwrap();
+            assert!(checked.two_sided); assert_eq!(checked.comparison_attempts,1);
+            let [lo,hi]=checked.continuum_temperature_range_k;
+            assert!(lo>=297.0 && hi<=303.0);
+            let exact_peak=300.0+density*(0.1/40.0+0.01/80.0);
+            assert!(lo<=exact_peak && exact_peak<=hi);
+            let exact_mean=300.0+density*(0.1/40.0+0.01/120.0);
+            assert!(checked.region.bound.enclosure.lo<=exact_mean);
+            assert!(checked.region.bound.enclosure.hi>=exact_mean);
+            assert_eq!(solved.temperature,saved);
+        }
+        assert!(material.tensor_at(304.0).is_err());
+    });
+}
+
+#[test]
+fn fully_cooled_axis_is_checked_once_before_trying_a_shorter_axis() {
+    use fs_conduction::verification::region::material_range::
+        bound_temperature_region_mean_with_slab_directions as search;
+    with_cx(|cx| {
+        let mesh=mesh(); let material=material(299.0,301.0,10.0);
+        let boundary=ThermalBoundaryBuilder::new(&mesh)
+            .region("all", |_|true,ThermalBc::robin(20.0,300.0).unwrap()).unwrap()
+            .adiabatic_remainder().finish().unwrap();
+        let source=ScalarField::Uniform(1000.0);
+        let problem=ConductionProblem {mesh:&mesh,boundary:&boundary,material:&material,
+            element_materials:None,source:&source};
+        let cells=(0..mesh.element_count()).collect::<Vec<_>>();
+        let temperature=vec![300.0;mesh.vertex_count()];
+        // x gives 302.625 K; y gives 300.505 K. Reversing a two-ended
+        // comparison repeats the same equation and must not spend another try.
+        let checked=search(cx,problem,&temperature,&cells,
+            &[(0,false),(0,true),(1,false)],config(&mesh)).unwrap();
+        assert!(checked.two_sided); assert_eq!(checked.axis,1);
+        assert_eq!(checked.comparison_attempts,2);
+        assert!(checked.continuum_temperature_range_k[1]<300.5050001);
+    });
+}

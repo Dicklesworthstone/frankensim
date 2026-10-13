@@ -60,6 +60,7 @@ pub(super) struct MaterialDomainProof {
     pub(super) span: [f64; 2],
     pub(super) axis: usize,
     pub(super) reverse: bool,
+    pub(super) two_sided: bool,
     pub(super) attempts: usize,
 }
 
@@ -92,7 +93,8 @@ pub(super) fn bound(
     };
     Ok((checked.region, Some(MaterialDomainProof {
         range: checked.continuum_temperature_range_k, span: [low, high],
-        axis: checked.axis, reverse: checked.reverse, attempts: checked.comparison_attempts,
+        axis: checked.axis, reverse: checked.reverse, two_sided: checked.two_sided,
+        attempts: checked.comparison_attempts,
     })))
 }
 
