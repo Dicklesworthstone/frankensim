@@ -28,6 +28,8 @@
 //! simplicial H(div)-family bead and is a recorded no-claim.
 
 pub mod beamcol;
+/// Spatial thermoviscoelastic gravity sag of anchored deposited roads.
+pub mod bridge;
 /// Quasistatic cohesive interface failure and structural load redistribution.
 pub mod cohesive;
 #[cfg(feature = "contact")]
