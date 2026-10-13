@@ -4,10 +4,11 @@
 use super::{spec::Spec, Error};
 use fs_couple::{modal_acoustic_time::ModalAcousticState,
     render::plate::impact::{BodyPotential, ImpactBody, ImpactConfig, PreparedImpactSystem,
-        cavity::{CavityCoupling, meridian::{Budget, MeridianCavity}},
+        cavity::{CavityCoupling, meridian::{Budget, MeridianCavity,
+            end_disk::{DiskPort, EndDisk, InterfaceBudget}}},
         compliant::{CompliantJaw, PadSide, PadSite, striker::FeltStriker},
         felt::KelvinBranch, membrane::MembranePotential},
-    vibroacoustic::{AcousticMedium, CavityModes, StructuralModes, assemble_coupling}};
+    vibroacoustic::{AcousticMedium, CavityModes}};
 use fs_exec::CancelGate;
 use fs_material::fiber::WoolFelt;
 use fs_plate::{ModePair, shell::{head::TensionedDisk, profile::ProfileBudget,
@@ -49,37 +50,13 @@ pub fn footprint(film: &TensionedDisk, centre: [f64;2], radius: f64) -> Result<V
         [centre[0]-r,centre[1]], [centre[0],centre[1]-r]])
 }
 /// Signed OUTWARD head displacement; the mechanical coordinate is downward.
-/// Air shapes, norms and overlaps all come from the SAME meridional basis.
+/// The shared end-disk owner retains the same pressure basis and work columns.
 pub fn interface(film: &TensionedDisk, modes: &[ModePair], air: &MeridianCavity,
     gate: &CancelGate) -> Result<(CavityModes, Vec<f64>), Error> {
-    let n = modes.len()+1;
-    let count = film.mesh.tris.len()*3;
-    if count*n > 1_000_000 { return Err("head/air overlap budget exceeded".into()); }
-    let z = air.profile().last().ok_or("empty chamber")?.z_m;
-    let mut points = Vec::with_capacity(count);
-    let mut areas = Vec::with_capacity(count);
-    let mut shapes = vec![vec![0.0;count];n];
-    for tri in &film.mesh.tris {
-        if gate.is_requested() { return Err("head/air assembly cancelled".into()); }
-        let p = tri.map(|i| film.mesh.nodes[i]);
-        let area = ((p[1].0-p[0].0)*(p[2].1-p[0].1)-(p[2].0-p[0].0)*(p[1].1-p[0].1))/2.0;
-        if !area.is_finite() || area <= 0.0 { return Err("invalid oriented head triangle".into()); }
-        for bary in [[2.0/3.0,1.0/6.0,1.0/6.0],[1.0/6.0,2.0/3.0,1.0/6.0],[1.0/6.0,1.0/6.0,2.0/3.0]] {
-            let at = points.len();
-            points.push([p.iter().zip(bary).map(|(p,b)| p.0*b).sum(),
-                p.iter().zip(bary).map(|(p,b)| p.1*b).sum(), z]);
-            areas.push(area/3.0);
-            for (j,m) in modes.iter().enumerate() {
-                shapes[j+1][at] = -tri.iter().zip(bary).map(|(&node,b)|
-                    b*film.model.dof_map[3*node].map_or(0.0, |i| m.phi[i])).sum::<f64>();
-            }
-        }
-    }
-    let sampled = air.sample(&points, 1_000_000, gate)?;
-    let solid = StructuralModes { omegas: std::iter::once(0.0).chain(modes.iter().map(|m| m.lambda.sqrt())).collect(),
-        shapes, loss_factor: 0.0 };
-    let overlaps = assemble_coupling(&solid, &sampled, &areas)?;
-    Ok((sampled,overlaps))
+    let result = air.end_disk_interface(film, modes,
+        DiskPort {end: EndDisk::Upper, first_mode: 1, structural_modes: modes.len()+1, positive_z: -1.0},
+        InterfaceBudget {maximum_points: 12_288, maximum_terms: 1_000_000}, gate)?;
+    Ok((result.cavity, result.overlaps))
 }
 impl Model {
     pub fn new(spec: &Spec, steps: u64, gate: &CancelGate) -> Result<Self, Error> {

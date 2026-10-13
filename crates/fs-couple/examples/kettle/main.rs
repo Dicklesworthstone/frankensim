@@ -6,6 +6,7 @@ use fs_exec::CancelGate;
 type Error = Box<dyn std::error::Error>;
 mod spec;
 mod model;
+mod exterior;
 #[cfg(test)]
 mod tests;
 
