@@ -3,7 +3,8 @@
 //! Minimize a declared weighted squared log-change from the original losses,
 //! subject to a mean or explicitly smoothed peak limit and multiplier bounds.
 //! Every sample re-solves hydraulics, flow-derived convection and the coupled
-//! solid. The objective is a design-change penalty, NOT a manufacturing cost.
+//! solid. The base cost penalizes design changes; an optional term charges
+//! nominal fan air power. Neither term is a manufacturing-cost model.
 //! A feasible incumbent is independently replayed before publication; terminal
 //! optimizer KKT diagnostics are never attributed to a different incumbent.
 
@@ -16,10 +17,11 @@ use fs_math::det;
 use std::ops::ControlFlow;
 
 mod fan_control;
+mod power;
 use fan_control::FanControl;
 
 const SCHEMA: &str = "frankensim.cooling-resistance-design.v1";
-const HELP: &str = "Usage: frankensim [--json] cooling-network resistance-design <model.json> <design.json>\n\nRequires --features cooling-design. Optimize bounded branch-resistance\nmultipliers and optional fan_speed_control against a mean or hotspot limit,\nusing complete\nhydraulic/convection/solid adjoints. The model must set objective.gradient=true.\nMaximum selectors require explicit maximum_smoothing_k in the design policy;\nthe smooth upper envelope and actual selected peak must both pass on replay.\nSee examples/cooling-network/RESISTANCE_DESIGN.md.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-network resistance-design <model.json> <design.json>\n\nRequires --features cooling-design. Optimize bounded branch-resistance\nmultipliers and optional fan_speed_control against a mean or hotspot limit,\nusing complete hydraulic/convection/solid adjoints. Optional air_power_cost\nadds a declared weight on nominal fan air power. The model must set objective.gradient=true.\nMaximum selectors require explicit maximum_smoothing_k in the design policy;\nthe smooth upper envelope and actual selected peak must both pass on replay.\nSee examples/cooling-network/RESISTANCE_DESIGN.md.\n";
 
 #[derive(Debug)]
 struct Control {
@@ -35,6 +37,7 @@ struct Control {
 struct Specification {
     controls: Vec<Control>,
     fan_control: Option<FanControl>,
+    air_power_weight: f64,
     limit: f64,
     scale: f64,
     maximum_smoothing_k: Option<f64>,
@@ -58,7 +61,7 @@ impl Specification {
         let root = J::parse(text).map_err(bad_parse)?;
         object(&root, &["schema", "temperature_limit_k", "temperature_scale_k", "controls",
             "max_evaluations", "max_iterations", "max_multiplier_updates", "max_backtracks",
-            "kkt_tolerance", "maximum_smoothing_k", "fan_speed_control"], "resistance design")?;
+            "kkt_tolerance", "maximum_smoothing_k", "fan_speed_control", "air_power_cost"], "resistance design")?;
         if get(&root, "schema")?.as_str() != Some(SCHEMA) { return Err(bad("unsupported resistance-design schema")); }
         let maximum_smoothing_k = root.get("maximum_smoothing_k")
             .map(|value| positive(value, "maximum_smoothing_k")).transpose()?;
@@ -86,6 +89,7 @@ impl Specification {
         }
         let fan_control = root.get("fan_speed_control")
             .map(|value| FanControl::parse(value, request)).transpose()?;
+        let air_power_weight = power::parse(root.get("air_power_cost"), request)?;
         let evaluations = count(get(&root, "max_evaluations")?, "max_evaluations", 4096)?;
         if evaluations < 2 { return Err(bad("max_evaluations must reserve initialization and final physical replay")); }
         let tolerance = positive(get(&root, "kkt_tolerance")?, "kkt_tolerance")?;
@@ -101,7 +105,7 @@ impl Specification {
             min_spectral_step: 1e-8, max_spectral_step: 1e8,
         };
         options.validate::<Failure>(controls.len() + usize::from(fan_control.is_some())).map_err(optimizer_error)?;
-        Ok(Self { controls, fan_control, maximum_smoothing_k,
+        Ok(Self { controls, fan_control, air_power_weight, maximum_smoothing_k,
             limit: positive(get(&root, "temperature_limit_k")?, "temperature_limit_k")?,
             scale: positive(get(&root, "temperature_scale_k")?, "temperature_scale_k")?,
             evaluations,
@@ -196,8 +200,10 @@ fn evaluate(
         constraint_gradient.push(finite(partial / design.scale)?);
     }
     let constraint = finite((value.objective - design.limit) / design.scale)?;
+    let mut sample = ProjectedAlSample { objective, gradient, constraint, constraint_gradient };
+    power::add_cost(request, &flow, design, cx, &mut sample)?;
     poll(cx)?;
-    Ok((ProjectedAlSample { objective, gradient, constraint, constraint_gradient }, flow, value))
+    Ok((sample, flow, value))
 }
 
 #[derive(Debug)]
@@ -256,10 +262,11 @@ fn solve(mut request: Request, design: Specification, cx: &Cx<'_>) -> Result<Str
     let fan_control = design.fan_control.as_ref()
         .map(|control| control.render(&request, best.point[design.controls.len()], design.controls.len()))
         .transpose()?.unwrap_or_else(|| "null".into());
+    let air_power_cost = power::render(&request, &flow, design.air_power_weight)?;
     let constraint_detail = format!("\"constraint_form\":{},\"selected_temperature_k\":{},\"selected_constraint_temperature_k\":{},\"maximum_smoothing_k\":{}",
         quote(if design.maximum_smoothing_k.is_some() { "smooth-maximum-upper-envelope" } else { "area-mean" }),
         num(physical.objective_state.physical_value())?, num(physical.objective)?, optional(design.maximum_smoothing_k)?);
-    let result = format!("{prefix},\"resistance_design\":{{\"schema\":{},\"status\":{},\"selected_cost\":{},\"temperature_limit_k\":{},\"temperature_scale_k\":{},\"initial_temperature_k\":{},\"controls\":[{}],\"fan_speed_control\":{fan_control},{constraint_detail},\"complete_evaluations\":{},\"replay_evaluations\":1,\"total_solid_solves\":{},\"optimizer_terminal\":{{\"stop\":{},\"point_log_multipliers\":{},\"cost\":{},\"scaled_constraint\":{},\"stationarity\":{},\"feasibility\":{},\"complementarity\":{},\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{}}},\"policy\":\"projected-al-resistance-v1; weighted squared log-change cost; initial penalty 10, maximum penalty 1e10, initial inner tolerance max(kkt_tolerance,0.01), spectral steps [1e-8,1e8]\",\"search_claim\":\"independently replayed nominally feasible selected temperature design; peak designs require both the explicit upper envelope and actual selected discrete maximum to pass; feasible-incumbent is not optimizer convergence; terminal KKT diagnostics belong only to the terminal point; no global optimum, continuum-temperature, hardware, geometry-realizability or uncertainty guarantee\"}}}}\n",
+    let result = format!("{prefix},\"resistance_design\":{{\"schema\":{},\"status\":{},\"selected_cost\":{},\"temperature_limit_k\":{},\"temperature_scale_k\":{},\"initial_temperature_k\":{},\"controls\":[{}],\"fan_speed_control\":{fan_control},\"air_power_cost\":{air_power_cost},{constraint_detail},\"complete_evaluations\":{},\"replay_evaluations\":1,\"total_solid_solves\":{},\"optimizer_terminal\":{{\"stop\":{},\"point_log_multipliers\":{},\"cost\":{},\"scaled_constraint\":{},\"stationarity\":{},\"feasibility\":{},\"complementarity\":{},\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{}}},\"policy\":\"projected-al-resistance-v1; weighted squared log-change plus optional declared fan air-power cost; initial penalty 10, maximum penalty 1e10, initial inner tolerance max(kkt_tolerance,0.01), spectral steps [1e-8,1e8]\",\"search_claim\":\"independently replayed nominally feasible selected temperature design; peak designs require both the explicit upper envelope and actual selected discrete maximum to pass; feasible-incumbent is not optimizer convergence; terminal KKT diagnostics belong only to the terminal point; no global optimum, continuum-temperature, hardware, geometry-realizability or uncertainty guarantee\"}}}}\n",
         quote(SCHEMA), quote(if converged { "locally-converged" } else { "feasible-incumbent" }),
         num(replayed.objective)?, num(design.limit)?, num(design.scale)?, optional(initial_temperature)?, controls,
         evaluations, solid_solves, quote(&format!("{:?}", report.stop)), numbers(state.point())?,

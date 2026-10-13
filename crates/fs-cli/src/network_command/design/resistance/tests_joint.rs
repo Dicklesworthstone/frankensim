@@ -109,3 +109,4 @@ fn speed_only_design_keeps_all_resistances_fixed() {
     });
 }
 
+mod power_tests;
