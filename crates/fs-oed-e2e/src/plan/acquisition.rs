@@ -101,3 +101,6 @@ impl MeasurementStudy {
         Ok(acquired)
     }
 }
+
+/// Explicit seeded-noise provider for synthetic acquisition experiments.
+pub mod simulation;
