@@ -13,6 +13,9 @@ use fs_dwr::elasticity3::reaction::{AffineGoalEstimate3, AffineMotionGoal3,
 use fs_dwr::elasticity3::response::EquilibriumLoad3;
 use crate::sdf3_goal::GoalRefinementError3;
 
+mod refit;
+pub use refit::{MinimumMaterialRefit3, ReferenceMinimumMaterialFit3};
+
 /// One pure observation law, independently integrated on each grid. No nodal
 /// observation is interpolated; a reaction retains its material dependence.
 #[derive(Clone, Copy)]

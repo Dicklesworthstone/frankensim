@@ -155,3 +155,6 @@ fn bound_direction_changes_do_not_cancel_marking_and_identical_runs_replay() {
     let mass:f64=x.marking_mass.values().sum();assert!(mass>0.0);
     assert!(!x.fine_feasible(f64::NAN));
 }
+
+#[path = "response_limit_refinement/refit.rs"]
+mod refit;

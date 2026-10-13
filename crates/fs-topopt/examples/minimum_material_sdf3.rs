@@ -2,6 +2,9 @@
 //! cargo run -p fs-topopt --features cutfem-marquee --release \
 //!   --example minimum_material_sdf3 -- 80 250000 0.0012 0.003
 //! Arguments: accepted updates, cumulative Krylov iterations, min/max reaction.
+//! Optional --estimate checks every limit on an enriched physical grid;
+//! --refit also selectively rebuilds marked cells and restarts material design.
+//! All phases retain the original cumulative geometry and linear-work budgets.
 //! Two independent extension/compression experiments on a dimensionless slab.
 //! E=1, nu=0, imposed axial strain +/-0.02. Bounds are declared design limits,
 //! not calibrated specimen data. No continuum, unique-recovery or actuator-work claim.
@@ -17,6 +20,8 @@ use fs_topopt::{SimpParams, SolveBudget, SolveControl};
 use fs_topopt::sdf3::CutDensityStudy3;
 use fs_topopt::sdf3::response::limits::*;
 use fs_topopt::sdf3::response::limits::design::*;
+#[path = "minimum_material_sdf3/adaptive.rs"]
+mod adaptive;
 struct Slab;
 impl CutSdf3 for Slab {
     fn value(&self, p: [f64; 3]) -> f64 { (p[0]-0.17)*(p[0]-0.83) }
@@ -33,8 +38,11 @@ fn motion(p: [f64; 3], _: [f64; 3]) -> [f64; 3] { [0.02*(p[0]-0.17), 0.0, 0.0] }
 fn compression(p: [f64; 3], n: [f64; 3]) -> [f64; 3] { motion(p, n).map(|v| -v) }
 fn right(_: [f64; 3], n: [f64; 3]) -> [f64; 3] { if n[0] > 0.0 { [1.0, 0.0, 0.0] } else { [0.0; 3] } }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() > 4 { return Err("usage: minimum_material_sdf3 [UPDATES [KRYLOV [MIN_REACTION [MAX_REACTION]]]]".into()); }
+    let mut args: Vec<_> = std::env::args().skip(1).collect();
+    let refit = args.last().is_some_and(|s| s == "--refit");
+    let estimate = refit || args.last().is_some_and(|s| s == "--estimate");
+    if estimate { let _ = args.pop(); }
+    if args.len() > 4 { return Err("usage: minimum_material_sdf3 [UPDATES [KRYLOV [MIN_REACTION [MAX_REACTION]]]] [--estimate|--refit]".into()); }
     let steps = args.first().map_or(Ok(80), |s| s.parse::<usize>())?;
     let budget = args.get(1).map_or(Ok(250000), |s| s.parse::<usize>())?;
     let lo = args.get(2).map_or(Ok(0.0012), |s| s.parse::<f64>())?;
@@ -42,8 +50,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !lo.is_finite() || !hi.is_finite() || lo <= 0.0 || lo >= hi { return Err("require finite 0 < MIN_REACTION < MAX_REACTION".into()); }
     let mut gp = |_| ControlFlow::Continue(());
     let mut geometry = QuadratureControl3::new(QuadratureOptions3::default(), &mut gp)?;
+    let tree = Octree3::uniform(1, 4, 4096)?;
     let op = AdaptiveElasticity3::build_with_embedded_dirichlet(HexCell::try_new([0.0; 3], [1.0; 3])?,
-        &Octree3::uniform(1, 4, 4096)?, &Slab, &IsotropicElastic::new(1.0, 0.0, 1.0)?, &|_| false, &|_, _| true,
+        &tree, &Slab, &IsotropicElastic::new(1.0, 0.0, 1.0)?, &|_| false, &|_, _| true,
         ElasticityOptions3::default(), Default::default(), Default::default(), &mut geometry)?;
     let force = op.body_load(&|_| [0.0; 3], || ControlFlow::Continue(()))?;
     let q = op.body_load(&|_| [1.0, 0.0, 0.0], || ControlFlow::Continue(()))?;
@@ -83,6 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         selected.volume_fraction, selected.rho == session.accepted().rho, options.limits.sharpness, session.work());
     let report = outcome?;
     eprintln!("latest_al_stop={:?}; latest_al_kkt={:?}; selected_endpoint_stationarity_not_claimed=true", report.stop, report.kkt);
-    let _selected = session.into_best_feasible()?;
+    let selected = session.into_best_feasible()?;
+    if estimate {
+        adaptive::run(&mut study, &tree, &selected, &cases, options, steps, refit, &mut geometry, &mut control)?;
+    }
     Ok(())
 }
