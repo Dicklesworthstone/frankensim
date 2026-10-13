@@ -7,6 +7,8 @@
 //! --adapt-rounds N runs repeated checked refits; --response-tol and
 //! --volume-tol select its numerical change thresholds (not continuum bounds).
 //! --binary independently checks thresholded endpoints after the gray fit.
+//! --checkpoint-dir NEW_DIR saves each accepted fixed-grid state; optionally
+//! --resume FILE restores it with original bounds, executable and spent budgets.
 //! All phases retain the original cumulative geometry and linear-work budgets.
 //! Two independent extension/compression experiments on a dimensionless slab.
 //! E=1, nu=0, imposed axial strain +/-0.02. Bounds are declared design limits,
@@ -29,6 +31,8 @@ mod adaptive;
 mod campaign;
 #[path = "minimum_material_sdf3/binary.rs"]
 mod binary;
+#[path = "minimum_material_sdf3/restart.rs"]
+mod restart;
 struct Slab;
 impl CutSdf3 for Slab {
     fn value(&self, p: [f64; 3]) -> f64 { (p[0]-0.17)*(p[0]-0.83) }
@@ -46,6 +50,7 @@ fn compression(p: [f64; 3], n: [f64; 3]) -> [f64; 3] { motion(p, n).map(|v| -v) 
 fn right(_: [f64; 3], n: [f64; 3]) -> [f64; 3] { if n[0] > 0.0 { [1.0, 0.0, 0.0] } else { [0.0; 3] } }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args: Vec<_> = std::env::args().skip(1).collect();
+    let restart = restart::parse(&mut args)?;
     let binary = args.last().is_some_and(|s| s == "--binary");
     if binary {
         let _ = args.pop();
@@ -57,12 +62,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let refit = args.last().is_some_and(|s| s == "--refit");
     let estimate = refit || args.last().is_some_and(|s| s == "--estimate");
     if estimate { let _ = args.pop(); }
-    if args.len() > 4 { return Err("usage: minimum_material_sdf3 [UPDATES [KRYLOV [MIN_REACTION [MAX_REACTION]]]] [--binary|--estimate|--refit|--adapt-rounds N [--response-tol X] [--volume-tol X]]".into()); }
+    if args.len() > 4 { return Err("usage: minimum_material_sdf3 [UPDATES [KRYLOV [MIN_REACTION [MAX_REACTION]]]] [--binary|--estimate|--refit|--adapt-rounds N [--response-tol X] [--volume-tol X]|--checkpoint-dir NEW_DIR [--resume FILE]]".into()); }
     let steps = args.first().map_or(Ok(80), |s| s.parse::<usize>())?;
     let budget = args.get(1).map_or(Ok(250000), |s| s.parse::<usize>())?;
     let lo = args.get(2).map_or(Ok(0.0012), |s| s.parse::<f64>())?;
     let hi = args.get(3).map_or(Ok(0.003), |s| s.parse::<f64>())?;
     if !lo.is_finite() || !hi.is_finite() || lo <= 0.0 || lo >= hi { return Err("require finite 0 < MIN_REACTION < MAX_REACTION".into()); }
+    if let Some(config) = restart { return restart::run(steps, budget, lo, hi, config); }
     if let Some(config) = campaign { return campaign::run(steps, budget, lo, hi, config); }
     let mut gp = |_| ControlFlow::Continue(());
     let mut geometry = QuadratureControl3::new(QuadratureOptions3::default(), &mut gp)?;

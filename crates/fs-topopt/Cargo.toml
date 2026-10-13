@@ -29,6 +29,7 @@ fs-sparse = { path = "../fs-sparse" }
 fs-spectral = { path = "../fs-spectral" }
 
 [dev-dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-rand = { path = "../fs-rand" }
 
 [features]
