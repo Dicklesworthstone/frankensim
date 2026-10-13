@@ -89,3 +89,72 @@ impl<'a> DepositionSimulation<'a> {
         Ok((next, observer, audit))
     }
 }
+
+/// Checked replacement of one current thermal contact at the accepted time.
+/// `None` means absent/open. The expected value prevents a stale mechanical
+/// proposal from overwriting a changed area, conductance or endpoint binding.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContactUpdate {
+    pub id: u64,
+    pub expected: Option<ThermalLink>,
+    pub replacement: Option<ThermalLink>,
+}
+
+impl DepositionSimulation<'_> {
+    /// Apply a complete same-time contact change without advancing heat or
+    /// consuming scheduled events. Process events due now with `advance_to`
+    /// first. All expected contacts are checked against the original state;
+    /// duplicate IDs refuse. Only the returned candidate changes interfaces.
+    ///
+    /// Removing all changed contacts before adding replacements allows a
+    /// conservative area repartition without transient double coverage. Existing
+    /// contact/cell/area admission is reused. Mass, enthalpy and time are untouched;
+    /// no mechanical work is silently injected as heat. Cost is bounded by the
+    /// event and active-link budgets, with existing O(links) area checks per add.
+    pub fn replace_contacts(
+        &self,
+        updates: &[ContactUpdate],
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        checkpoint()?;
+        if updates.len() > self.budget.max_events {
+            return Err(DepositionError::Budget("contact updates"));
+        }
+        if self.schedule.get(self.cursor).is_some_and(|e| e.time_s <= self.time_s) {
+            return Err(DepositionError::InvalidInput("process due scheduled events before contact updates"));
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for update in updates {
+            checkpoint()?;
+            if !ids.insert(update.id)
+                || update.expected.is_some_and(|link| link.id != update.id)
+                || update.replacement.is_some_and(|link| link.id != update.id)
+            {
+                return Err(DepositionError::InvalidInput("duplicate or inconsistent contact update identity"));
+            }
+            if self.links.get(&update.id).copied() != update.expected {
+                return Err(DepositionError::InvalidInput("stale thermal contact update"));
+            }
+        }
+        let mut next = self.clone();
+        let mut audit = EnergyAudit { incoming_mass_kg: 0.0, incoming_energy_j: 0.0,
+            external_heat_j: 0.0, stored_energy_change_j: 0.0, residual_j: 0.0,
+            substeps: 0, events: 0 };
+        for update in updates {
+            checkpoint()?;
+            if update.expected != update.replacement && update.expected.is_some() {
+                next.apply(Event::Separation(update.id), &mut audit)?;
+            }
+        }
+        for update in updates {
+            checkpoint()?;
+            if update.expected != update.replacement {
+                if let Some(link) = update.replacement {
+                    next.apply(Event::Contact(link), &mut audit)?;
+                }
+            }
+        }
+        checkpoint()?;
+        Ok(next)
+    }
+}

@@ -8,6 +8,8 @@
 pub mod implicit;
 /// Bond development driven by actual explicit-deposition substeps and contacts.
 pub mod bonding;
+/// Staggered cohesive opening/reclosure changes actual thermal contact.
+pub mod fracture;
 
 use fs_exec::Cx;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;

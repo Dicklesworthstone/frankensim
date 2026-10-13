@@ -19,8 +19,10 @@
 
 use std::collections::BTreeMap;
 
+// Keep the std-only kernel testable as a standalone crate as well as a module.
+#[path = "deposition/observe.rs"]
 mod observe;
-pub use observe::DepositionObserver;
+pub use observe::{ContactUpdate, DepositionObserver};
 
 /// Persistent physical cell identity; distinct from its source segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -657,7 +659,7 @@ mod tests {
         assert!(second.temperature_k(CellId(1)).unwrap() > first.temperature_k(CellId(1)).unwrap());
         close(second.exposed_area_m2(CellId(1)).unwrap(), 0.0008, 1e-15);
         close(second.energy_j(), 440.0, 1e-9);
-        close(a.incoming_energy_j, 400.0, 1e-12);
+        close(a.incoming_energy_j, 400_000.0 * 0.001, 1e-12);
         close(a.residual_j, 0.0, 1e-9);
         assert_eq!(second.cells()[&CellId(1)].segment_id, 1);
         let (separated, a) = run(&second, 3.0, 0.01);

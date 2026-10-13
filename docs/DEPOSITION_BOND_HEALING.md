@@ -64,8 +64,11 @@ compression stiffness and metre separation limit.
 `freeze_bond` carries the actual area, cell IDs, dose and mapping into a fresh
 mechanical stage. A separated or never-contacted interface refuses. Never use
 this handoff to reset existing cohesive damage. Concurrent healing/fracture,
-thermal conductance updates from damage, fracture-heat feedback and a coupled
-thermodynamic balance are not implemented.
+fracture-heat feedback and a coupled thermodynamic balance are not implemented.
+The separate `fracture::FractureCooling` stage now consumes real cohesive
+endpoints and changes the following thermal interval's contact. It can import
+existing damage; reclosure restores only the explicitly supplied thermal
+conductance, never a mechanical bond. See the staged coupling below.
 
 ## Execution and numerical scope
 
@@ -89,3 +92,47 @@ primal/audit parity, contact windows and area partition, equal-time recontact,
 strength/fracture handoff, atomic refusals and same-grid replay. Native Rust
 execution is unverified in this editing environment. Independent Python/SciPy
 checks accompany the patch but do not substitute for compiling these tests.
+
+## Cohesive failure changes subsequent cooling
+
+```sh
+cargo test -p fs-conduction --lib fracture
+cargo run -p fs-couple --example debonded_cooling
+```
+
+`fracture::FractureCooling` binds existing cohesive points, original thermal
+links and explicit `ContactPolicy` values. Intact/partially damaged patches
+keep the bonded conductance. After complete failure, a normal opening threshold
+removes the link and restores ambient-facing area on both cells. A separate
+closure threshold permits frictionless thermal recontact, with an independently
+supplied W/K conductance. Damage and dissipated fracture energy remain intact.
+Shear failure at a closed normal gap changes conductance without fabricating
+lost area. Excessive tangential travel refuses the fixed-area approximation.
+Threshold hysteresis is a declared numerical closure model, not a contact theorem.
+
+Advance heat with the accepted closure, stage a mechanical equilibrium using
+those temperatures where supported, and call `synchronize` at the exact thermal
+endpoint with one `(interface_id, CohesivePoint)` per binding. Commit the staged
+mechanical result only after synchronization succeeds. The owner reproduces
+constitutive increments against retained history and checks exact law identity;
+it does not solve equilibrium again. Lost damage, unreported intermediate
+excursions, wrong IDs/time, stale thermal links and cancellation refuse without
+publishing a partial interface update. Scheduled changes of mechanically owned
+links also refuse, including same-time remove/reinsert sequences. Unrelated
+births and thermal boundary changes continue normally.
+
+The `debonded_cooling` example actually solves the existing `fs-solid` cohesive
+operator under a compliant actuator, opens and recloses the interface, and
+reports force balance, damage, both cell temperatures and changed exposure.
+All inputs are synthetic. The example stages heat, mechanics and contact before
+publishing their common endpoint. Its mechanical coefficients stay fixed: no
+thermoviscoelastic feedback or calibrated detachment time is claimed. The
+contact classification governs the next thermal interval; a missed within-step
+opening is not retroactively corrected. Refine physical coupling times to
+resolve events. Full geometry motion, new contact search, simultaneous healing,
+fracture heating and a closed thermodynamic balance remain outside this stage.
+
+Eight additional Rust regressions cover analytical contact/no-contact cooling,
+independent reclosure conductance without healing, shear/partial damage,
+cohort/history/time/area refusals, scheduled ownership conflicts, cancellation,
+area partition and restart. Native execution remains unverified here.
