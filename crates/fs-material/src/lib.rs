@@ -22,6 +22,7 @@ pub mod liquid;
 pub mod elastic;
 pub mod fiber;
 pub mod gas;
+pub mod gas_mixture;
 pub mod moist_air;
 pub mod graph;
 /// Contact-temperature history and explicit strength handoff for polymer welding.
