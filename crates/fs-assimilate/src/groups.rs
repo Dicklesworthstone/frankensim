@@ -31,6 +31,9 @@ use crate::{AssimError, Belief, Cx, Observation, assimilate_all};
 /// Full nuisance covariance and signed observation Jacobians.
 pub mod jacobian;
 
+/// Streaming assimilation that retains shared nuisance cross-covariance.
+pub mod stream;
+
 /// A bounded dataset-row identity token (same leaf grammar as instrument
 /// identities).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -231,7 +234,8 @@ impl GroupedBatch {
     #[must_use]
     pub fn covariance(&self) -> Vec<Vec<f64>> {
         let n = self.records.len();
-        let mut covariance = vec![vec![0.0; n]; n];
+        let mut covariance = vec![vec![0.0; n];
+        n];
         for (i, record) in self.records.iter().enumerate() {
             let shared: f64 = self
                 .sources

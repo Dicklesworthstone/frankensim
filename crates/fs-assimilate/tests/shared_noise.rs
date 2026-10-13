@@ -177,3 +177,6 @@ fn bounded_projection_refuses_exhausted_budgets_and_nonfinite_products() {
         assert!(matches!(JacobianBatch::new(model, vec![row], cx), Err(AssimError::NonFiniteComputation { .. })));
     });
 }
+
+#[path = "shared_noise/stream.rs"]
+mod stream;
