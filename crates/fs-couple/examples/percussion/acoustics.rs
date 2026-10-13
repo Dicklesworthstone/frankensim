@@ -38,6 +38,8 @@ const MAX_RMS_ERROR: f64 = 0.05;
 pub mod aperture;
 #[path="paired_radiation.rs"]
 mod paired_radiation;
+#[path="chamber/boundary.rs"]
+mod chamber_boundary;
 
 /// Circular mouths on the unrolled cylinder, including across facet seams.
 #[path = "curved_aperture.rs"]

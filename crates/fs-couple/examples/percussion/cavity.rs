@@ -93,7 +93,7 @@ pub fn admit_drag_command(drag:Option<f64>,distributed:bool,command:&str)->Resul
 }
 
 /// Cached interior observations, not an exterior microphone or extra force.
-pub struct InteriorPressure {pub coupling:CavityCoupling,first:Vec<f64>,second:Vec<f64>}
+pub struct InteriorPressure {pub coupling:CavityCoupling,pub(super) first:Vec<f64>,pub(super) second:Vec<f64>}
 impl InteriorPressure {
     pub fn uniform_pressure(&self,state:&[f64])->Result<f64,Error> {
         let mut pressure=[0.0;8];
