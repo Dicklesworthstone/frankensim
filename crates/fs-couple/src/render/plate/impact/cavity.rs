@@ -21,6 +21,8 @@ use fs_exec::CancelGate;
 
 /// Geometry-derived cylindrical pressure basis, using the existing eigensolver.
 pub mod cylinder;
+/// Meridional P1/Fourier modes of a profile-defined axisymmetric chamber.
+pub mod meridian;
 /// Passive pressure/velocity exchange around an existing mechanical step.
 pub mod exchange;
 /// Passive inertial openings coupled to the same distributed pressure field.
