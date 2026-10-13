@@ -1,6 +1,7 @@
 //! Smooth worst-load compliance on the real three-field CutFEM design map.
 //! References are performance scales, NOT probabilities. Every declared load
 //! is solved independently. The existing weighted-sum APIs remain unchanged.
+pub mod optimize;
 use super::{RobustEvaluation3, RobustOptions3};
 use super::super::{CutDensityStudy3, Sdf3Elasticity, failure};
 use crate::gradient_check::{GradientCheckOptions, GradientSample, MultiLoadGradientCheck, audit_design_map};

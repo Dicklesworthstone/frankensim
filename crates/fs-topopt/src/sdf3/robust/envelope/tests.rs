@@ -18,7 +18,7 @@ impl CutSdf3 for Slab {
         let d = if a == HeightAxis::Z { 1.0 } else { 0.0 }; Interval::new(d, d)
     }
 }
-fn fixture(beta: f64) -> (CutDensityStudy3, Vec<f64>, Vec<f64>) {
+pub(super) fn fixture(beta: f64) -> (CutDensityStudy3, Vec<f64>, Vec<f64>) {
     let mut poll = |_| ControlFlow::Continue(());
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll).unwrap();
     let op = CutElasticity3::build(HexCell::try_new([0.0;3], [1.0;3]).unwrap(), [2;3], &Slab,
