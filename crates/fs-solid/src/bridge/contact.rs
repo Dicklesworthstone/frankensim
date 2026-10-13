@@ -3,6 +3,9 @@
 
 use super::{Bridge, Error, finite, poll, positive};
 
+/// Finite-nozzle sweeps against the frozen, actually deformed top surface.
+pub mod nozzle;
+
 /// A centered straight footprint in the same local WORLD x-z frame as the beam.
 #[derive(Debug, Clone, Copy)]
 pub struct Pass {
