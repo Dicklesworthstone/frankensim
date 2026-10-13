@@ -152,3 +152,6 @@ fn g5_protected_regions_and_identical_designs_replay_without_geometry_changes() 
     assert_eq!(a.projected_rho[0], 1.0); assert_eq!(a.projected_rho[1], 0.0);
     assert_eq!(s.operator().elasticity().nodes(), nodes);
 }
+
+#[path = "response_limits_sdf3/design.rs"]
+mod design;

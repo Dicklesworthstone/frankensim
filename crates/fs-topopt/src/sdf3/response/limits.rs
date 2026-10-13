@@ -13,6 +13,8 @@
 use super::*;
 use fs_cutfem::elastic3::adaptive::dirichlet::PrescribedMotion3;
 
+pub mod design;
+
 /// Physical scalar whose value is bounded. Observation laws remain fixed in
 /// the reference configuration and must use the current grid's DOF ordering.
 #[derive(Clone, Copy)]
