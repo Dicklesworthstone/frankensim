@@ -481,7 +481,6 @@ impl AdmittedLinearSolver {
 }
 
 /// Apply algorithm-specific admission rules to a retained finding.
-#[must_use]
 pub fn admit_linear_solver(
     kind: LinearSolverKind,
     verified: VerifiedLinearSystem,
@@ -689,7 +688,7 @@ impl FgmresState {
         if n != self.x.len() || rhs.len() != n {
             control.progress.set(SolverRunProgress::DimensionMismatch {
                 expected: self.x.len(),
-                actual: if n != self.x.len() { n } else { rhs.len() },
+                actual: if n == self.x.len() { rhs.len() } else { n },
             });
             return control.finish(report);
         }
@@ -1244,7 +1243,6 @@ impl<P: NonlinearProblem> FlexiblePreconditioner for PreconditionerAt<'_, P> {
 
 impl NewtonKrylovState {
     /// Evaluate and retain the initial residual.
-    #[must_use]
     pub fn new<P: NonlinearProblem>(
         problem: &P,
         x: Vec<f64>,
