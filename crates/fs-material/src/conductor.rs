@@ -1,8 +1,9 @@
-//! Source-resolved uniform DC conductor primitive.
+//! Source-resolved bulk and uniform DC conductor primitives.
 //!
-//! The adapter consumes exactly one bulk electrical-resistivity claim and a
-//! caller-owned uniform length and cross-section. It does not choose a metal,
-//! solve a circuit, add contact resistance, or claim temperature evolution.
+//! Bulk resistivity belongs to the material state, not to a chosen geometry.
+//! Spatial solvers consume [`ResolvedConductorState`]; lumped conductors lower
+//! that same state with explicit length and cross-section. Neither path chooses
+//! a metal, adds contact resistance, or infers a temperature-evolution law.
 
 use core::fmt;
 
@@ -27,6 +28,84 @@ pub enum OhmicDrive {
     Current(f64),
     /// Prescribed signed potential difference [V], with `I = V/R`.
     Voltage(f64),
+}
+
+/// Geometry-independent isotropic DC conductor state with source-use evidence.
+///
+/// Resolve again at each changed physical state. This object is immutable and
+/// does not extrapolate a temperature coefficient from one sampled resistivity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedConductorState {
+    material: ResolvedMaterialStatePoint,
+    resistivity_ohm_m: f64,
+}
+
+impl ResolvedConductorState {
+    /// Exact source-resolved material bundle, including its usage receipt.
+    #[must_use]
+    pub const fn material(&self) -> &ResolvedMaterialStatePoint {
+        &self.material
+    }
+
+    /// Isotropic bulk resistivity [ohm m], suitable for spatial current balance.
+    #[must_use]
+    pub const fn resistivity_ohm_m(&self) -> f64 {
+        self.resistivity_ohm_m
+    }
+
+    /// Lower this same resolved state to a uniform lumped resistor.
+    ///
+    /// Geometry is supplied at the resolved state; no thermal expansion or
+    /// contact resistance is inferred. The source bundle is moved intact.
+    ///
+    /// # Errors
+    /// Non-finite/non-positive geometry or unrepresentable resistance.
+    pub fn into_uniform_conductor(
+        self,
+        length_m: f64,
+        area_m2: f64,
+    ) -> Result<ResolvedConductor, ConductorError> {
+        validate_geometry(length_m, area_m2)?;
+        let resistance_ohm =
+            uniform_resistance_ohm(self.resistivity_ohm_m, length_m, area_m2)?;
+        Ok(ResolvedConductor {
+            material: self.material,
+            length_m,
+            area_m2,
+            resistance_ohm,
+        })
+    }
+}
+
+/// Resolve bulk resistivity without inventing a unit wire or solver geometry.
+///
+/// Only `electrical_resistivity` is requested. Its dimensions, numerical domain,
+/// claim selection, complete query point and source support are checked by the
+/// common material state-point owner. A new temperature, pressure or composition
+/// requires a new query; missing support is a refusal, not a fallback metal.
+///
+/// # Errors
+/// Missing, ambiguous, wrong-unit, inadmissible or out-of-domain properties, or
+/// an incomplete/foreign property pin plan. No partial state is returned.
+pub fn resolve_conductor_state(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+) -> Result<ResolvedConductorState, ConductorError> {
+    let requirement = ScalarPropertyRequirement::try_new(
+        ELECTRICAL_RESISTIVITY_PROPERTY,
+        ELECTRICAL_RESISTIVITY_DIMS,
+        ScalarAdmissibility::StrictlyPositive,
+    )?;
+    let material = resolve_material_state_point(card, point, &[requirement], selection)?;
+    let resistivity_ohm_m = material
+        .property(ELECTRICAL_RESISTIVITY_PROPERTY)
+        .expect("the sole required conductor property was resolved")
+        .value_si();
+    Ok(ResolvedConductorState {
+        material,
+        resistivity_ohm_m,
+    })
 }
 
 /// A uniform conductor resolved from one source-supported material state.
@@ -77,7 +156,7 @@ impl ResolvedConductor {
     }
 }
 
-/// Refusal from source-resolved uniform conductor construction or evaluation.
+/// Refusal from source-resolved conductor construction or evaluation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConductorError {
     /// The material card could not supply one admissible resistivity claim.
@@ -116,6 +195,20 @@ impl From<MaterialStatePointError> for ConductorError {
     fn from(source: MaterialStatePointError) -> Self {
         Self::MaterialState(source)
     }
+}
+
+fn validate_geometry(length_m: f64, area_m2: f64) -> Result<(), ConductorError> {
+    if !(length_m.is_finite() && length_m > 0.0) {
+        return Err(ConductorError::InvalidInput {
+            quantity: "length_m",
+        });
+    }
+    if !(area_m2.is_finite() && area_m2 > 0.0) {
+        return Err(ConductorError::InvalidInput {
+            quantity: "area_m2",
+        });
+    }
+    Ok(())
 }
 
 fn uniform_resistance_ohm(
@@ -195,33 +288,10 @@ pub fn resolve_uniform_conductor(
     length_m: f64,
     area_m2: f64,
 ) -> Result<ResolvedConductor, ConductorError> {
-    if !(length_m.is_finite() && length_m > 0.0) {
-        return Err(ConductorError::InvalidInput {
-            quantity: "length_m",
-        });
-    }
-    if !(area_m2.is_finite() && area_m2 > 0.0) {
-        return Err(ConductorError::InvalidInput {
-            quantity: "area_m2",
-        });
-    }
-    let requirement = ScalarPropertyRequirement::try_new(
-        ELECTRICAL_RESISTIVITY_PROPERTY,
-        ELECTRICAL_RESISTIVITY_DIMS,
-        ScalarAdmissibility::StrictlyPositive,
-    )?;
-    let material = resolve_material_state_point(card, point, &[requirement], selection)?;
-    let resistivity_ohm_m = material
-        .property(ELECTRICAL_RESISTIVITY_PROPERTY)
-        .expect("the sole required conductor property was resolved")
-        .value_si();
-    let resistance_ohm = uniform_resistance_ohm(resistivity_ohm_m, length_m, area_m2)?;
-    Ok(ResolvedConductor {
-        material,
-        length_m,
-        area_m2,
-        resistance_ohm,
-    })
+    // Preserve the established geometry-first admission order while delegating
+    // all material resolution and lowering to the common bulk-state path.
+    validate_geometry(length_m, area_m2)?;
+    resolve_conductor_state(card, point, selection)?.into_uniform_conductor(length_m, area_m2)
 }
 
 #[cfg(test)]
