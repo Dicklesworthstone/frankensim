@@ -8,6 +8,8 @@
 //! rescales a measured fan/pump curve or assumes a liquid cannot boil.
 
 pub mod convection;
+pub mod series;
+pub use series::{FlowHeatSection, MaterialFlowPath, MaterialHeatExchange, MAX_MATERIAL_FLOW_SECTIONS};
 
 use fs_convection::{
     CorrelationError, CorrelationId, CorrelationRobinBoundary,
