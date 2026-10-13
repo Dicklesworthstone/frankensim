@@ -2,8 +2,9 @@
 //! The formula, group point and domain stay with their physical owner.
 
 use super::{
-    CorrelationError, CorrelationId, CorrelationInputs, NusseltEvaluation,
-    ProvenanceHash, ThermalDirection, det, evaluate,
+    CorrelationError, CorrelationId, CorrelationInputs, CorrelationRobinBoundary, Evidence,
+    HeatTransferCoefficient, Length, NusseltEvaluation, ProvenanceHash, Temperature,
+    ThermalConductivity, ThermalDirection, det, evaluate,
 };
 
 const INPUT_AXES: [&str; 5] = ["Re", "Pr", "L_over_Dh", "aspect_ratio", "Ra"];
@@ -191,6 +192,93 @@ fn input_elasticity(
 }
 
 impl NusseltEvaluation {
+    /// Convert `Nu` to typed `h = Nu k/L`, retaining available input partials.
+    ///
+    /// Existing `dNu/dx` entries become `dh/dx = (k/L) dNu/dx`. Two additional
+    /// absolute SI partials are returned: `k` means fluid conductivity in
+    /// W/(m K), and `L` means characteristic length in metres. These hold the
+    /// dimensionless inputs fixed; they are NOT total derivatives with respect
+    /// to a geometry or fluid-property change. For example, changing a duct
+    /// diameter may also change Re and L_over_Dh. Its total derivative must
+    /// include those input-chain-rule terms separately.
+    ///
+    /// Absent correlation partials stay absent, including for the developing
+    /// table and validity-axis endpoints. The direct k and L partials remain
+    /// available there because they do not move the correlation's group point.
+    /// Call `CorrelationInputs::evaluate_with_sensitivities` first to obtain
+    /// correlation input partials; a primal-only evaluation supplies only k/L
+    /// conversion partials. This is an opt-in alternative to
+    /// `heat_transfer_coefficient`, which returns primal-only evidence.
+    ///
+    /// # Errors
+    /// The ordinary dimensional conversion's admission errors, or a nonfinite
+    /// partial. The numerical/model evidence is not promoted by differentiation.
+    pub fn heat_transfer_coefficient_with_sensitivities(
+        &self,
+        conductivity: ThermalConductivity,
+        characteristic_length: Length,
+    ) -> Result<Evidence<HeatTransferCoefficient>, CorrelationError> {
+        let mut coefficient = self.heat_transfer_coefficient(conductivity, characteristic_length)?;
+        self.attach_dimensional_sensitivities(&mut coefficient, conductivity, characteristic_length)?;
+        Ok(coefficient)
+    }
+
+    /// Lower a sensitivity-bearing coefficient into a conduction Robin row.
+    ///
+    /// The coefficient evidence stays paired with the admitted boundary. Its
+    /// `d_qoi` entries describe h, not heat flux, temperature, or a solved QoI.
+    /// Reference temperature is held fixed; no zero total temperature or flow
+    /// sensitivity is implied. The ordinary Robin admission gate still runs.
+    ///
+    /// # Errors
+    /// Invalid dimensional inputs, Robin admission failure, or nonfinite
+    /// derivative arithmetic.
+    pub fn robin_boundary_with_sensitivities(
+        &self,
+        conductivity: ThermalConductivity,
+        characteristic_length: Length,
+        reference_temperature: Temperature,
+    ) -> Result<CorrelationRobinBoundary, CorrelationError> {
+        let mut boundary = self.robin_boundary(conductivity, characteristic_length, reference_temperature)?;
+        self.attach_dimensional_sensitivities(
+            &mut boundary.coefficient, conductivity, characteristic_length,
+        )?;
+        Ok(boundary)
+    }
+
+    fn attach_dimensional_sensitivities(
+        &self,
+        coefficient: &mut Evidence<HeatTransferCoefficient>,
+        conductivity: ThermalConductivity,
+        characteristic_length: Length,
+    ) -> Result<(), CorrelationError> {
+        let k = conductivity.value();
+        let length = characteristic_length.value();
+        let mut sensitivity = self.evidence.sensitivity.clone();
+        for derivative in sensitivity.d_qoi.values_mut() {
+            *derivative = finite_derivative(
+                *derivative * k / length, "dimensional input derivative",
+            )?;
+        }
+        sensitivity.d_qoi.insert("k".to_string(), finite_derivative(
+            self.evidence.value / length, "conductivity derivative",
+        )?);
+        sensitivity.d_qoi.insert("L".to_string(), finite_derivative(
+            -coefficient.value.value() / length, "characteristic length derivative",
+        )?);
+        // Keep parameter scales in provenance, even when different k,L pairs
+        // produce the same h. Such pairs have different dimensional partials.
+        let mut parameters = Vec::with_capacity(16);
+        parameters.extend_from_slice(&k.to_bits().to_le_bytes());
+        parameters.extend_from_slice(&length.to_bits().to_le_bytes());
+        coefficient.provenance = ProvenanceHash::chain(
+            "convection-dimensional-sensitivities-v1",
+            &[coefficient.provenance, ProvenanceHash::of_bytes(&parameters)],
+        );
+        coefficient.sensitivity = sensitivity;
+        Ok(())
+    }
+
     /// `d ln(Nu) / d ln(Re)` at fixed Pr, length ratio, aspect and heat-flow
     /// direction. At fixed geometry/fluid properties this is also dln(h)/dln(Re).
     ///
@@ -425,5 +513,138 @@ mod tests {
         let natural = evaluate(CorrelationId::ChurchillChuVerticalPlate,
             CorrelationInputs::natural(1e6,0.72)).unwrap();
         assert_eq!(natural.reynolds_elasticity().unwrap(),None);
+    }
+}
+
+#[cfg(test)]
+mod dimensional_tests {
+    use super::*;
+
+    fn nominal() -> NusseltEvaluation {
+        CorrelationInputs::forced(1_000.0, 0.72).with_length_ratio(200.0)
+            .evaluate_with_sensitivities(CorrelationId::CircularDuctHausen).unwrap()
+    }
+
+    #[test]
+    fn typed_coefficient_scales_the_input_partials_and_preserves_primal_evidence() {
+        let value = nominal();
+        let k = ThermalConductivity::new(0.026);
+        let length = Length::new(0.01);
+        let primal = value.heat_transfer_coefficient(k, length).unwrap();
+        let sensitive = value.heat_transfer_coefficient_with_sensitivities(k, length).unwrap();
+        assert_eq!(sensitive.value, primal.value);
+        assert_eq!(sensitive.qoi, primal.qoi);
+        assert_eq!(sensitive.numerical, primal.numerical);
+        assert_eq!(sensitive.statistical, primal.statistical);
+        assert_eq!(sensitive.model, primal.model);
+        assert_eq!(sensitive.adjoint_ref, primal.adjoint_ref);
+        assert_ne!(sensitive.provenance, primal.provenance);
+        for (axis, derivative) in &value.evidence().sensitivity.d_qoi {
+            assert_eq!(sensitive.sensitivity.d_qoi[axis], derivative * k.value() / length.value());
+        }
+        assert_eq!(sensitive.sensitivity.d_qoi["k"], value.evidence().value / length.value());
+        assert_eq!(sensitive.sensitivity.d_qoi["L"], -sensitive.value.value() / length.value());
+    }
+
+    #[test]
+    fn combined_input_and_dimensional_direction_matches_full_evaluator() {
+        // Move Re, Pr, L/Dh, k and L together. This checks the *sum* of the
+        // chain-rule terms, including Hausen's dependent Graetz group.
+        let step = 1e-5_f64;
+        let rates = [0.7, -0.2, 0.3, 0.4, -0.5];
+        let run = |t: f64| {
+            CorrelationInputs::forced(1_000.0 * (rates[0] * t).exp(), 0.72 * (rates[1] * t).exp())
+                .with_length_ratio(200.0 * (rates[2] * t).exp())
+                .evaluate_with_sensitivities(CorrelationId::CircularDuctHausen).unwrap()
+                .heat_transfer_coefficient_with_sensitivities(
+                    ThermalConductivity::new(0.026 * (rates[3] * t).exp()),
+                    Length::new(0.01 * (rates[4] * t).exp()),
+                ).unwrap()
+        };
+        let nominal = run(0.0);
+        let values = [1_000.0, 0.72, 200.0, 0.026, 0.01];
+        let mut predicted = 0.0;
+        for (i, axis) in ["Re", "Pr", "L_over_Dh", "k", "L"].into_iter().enumerate() {
+            predicted += nominal.sensitivity.d_qoi[axis] * values[i] * rates[i];
+        }
+        let observed = (run(step).value.value() - run(-step).value.value()) / (2.0 * step);
+        assert!((predicted - observed).abs() < 1e-8 * nominal.value.value());
+    }
+
+    #[test]
+    fn robin_lowering_keeps_the_exact_coefficient_sensitivities() {
+        let value = nominal();
+        let k = ThermalConductivity::new(0.026);
+        let length = Length::new(0.01);
+        let temperature = Temperature::new(293.15);
+        let primal = value.robin_boundary(k, length, temperature).unwrap();
+        let sensitive = value.robin_boundary_with_sensitivities(k, length, temperature).unwrap();
+        let coefficient = value.heat_transfer_coefficient_with_sensitivities(k, length).unwrap();
+        assert_eq!(sensitive.coefficient(), &coefficient);
+        assert_eq!(sensitive.boundary_condition(), primal.boundary_condition());
+        assert_eq!(sensitive.reference_temperature(), temperature);
+        assert!(!sensitive.coefficient().sensitivity.d_qoi.contains_key("temperature"));
+    }
+
+    #[test]
+    fn missing_model_partials_stay_missing_after_dimensional_conversion() {
+        let k = ThermalConductivity::new(0.026);
+        let length = Length::new(0.01);
+        for ratio in [24.0, 200.0] {
+            let table = CorrelationInputs::forced(1_000.0, 0.72)
+                .with_length_ratio(ratio).with_aspect_ratio(0.5)
+                .evaluate_with_sensitivities(CorrelationId::RectangularDuctLaminarCwtDevelopingPr072)
+                .unwrap();
+            let h = table.heat_transfer_coefficient_with_sensitivities(k, length).unwrap();
+            assert_eq!(h.sensitivity.d_qoi.len(), 2);
+            assert!(h.sensitivity.d_qoi.contains_key("k"));
+            assert!(h.sensitivity.d_qoi.contains_key("L"));
+        }
+        let endpoint = CorrelationInputs::forced(20_000.0, 0.5).with_length_ratio(100.0)
+            .evaluate_with_sensitivities(CorrelationId::Gnielinski).unwrap();
+        let h = endpoint.heat_transfer_coefficient_with_sensitivities(k, length).unwrap();
+        assert!(!h.sensitivity.d_qoi.contains_key("Pr"));
+        assert!(h.sensitivity.d_qoi.contains_key("Re"));
+
+        let primal = evaluate(CorrelationId::CircularDuctHausen,
+            CorrelationInputs::forced(1_000.0, 0.72).with_length_ratio(200.0)).unwrap();
+        assert_eq!(primal.heat_transfer_coefficient_with_sensitivities(k, length)
+            .unwrap().sensitivity.d_qoi.len(), 2);
+    }
+
+    #[test]
+    fn dimensional_provenance_distinguishes_equal_h_with_different_parameter_scales() {
+        let value = nominal();
+        let run = |scale| value.heat_transfer_coefficient_with_sensitivities(
+            ThermalConductivity::new(0.025 * scale), Length::new(0.125 * scale),
+        ).unwrap();
+        let first = run(1.0);
+        let second = run(2.0);
+        assert_eq!(first.value.value().to_bits(), second.value.value().to_bits());
+        assert_ne!(first.provenance, second.provenance);
+        assert_ne!(first.sensitivity.d_qoi["k"], second.sensitivity.d_qoi["k"]);
+        assert_eq!(first, run(1.0));
+    }
+
+    #[test]
+    fn dimensional_and_boundary_refusals_are_not_bypassed() {
+        let value = nominal();
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(value.heat_transfer_coefficient_with_sensitivities(
+                ThermalConductivity::new(invalid), Length::new(0.01),
+            ).is_err());
+            assert!(value.heat_transfer_coefficient_with_sensitivities(
+                ThermalConductivity::new(0.026), Length::new(invalid),
+            ).is_err());
+        }
+        assert!(value.robin_boundary_with_sensitivities(
+            ThermalConductivity::new(0.026), Length::new(0.01), Temperature::new(f64::NAN),
+        ).is_err());
+        // h is representable but its conductivity partial is not.
+        let k = ThermalConductivity::new(1e-200);
+        let length = Length::new(1e-308);
+        assert!(value.heat_transfer_coefficient(k, length).is_ok());
+        assert!(matches!(value.heat_transfer_coefficient_with_sensitivities(k, length),
+            Err(CorrelationError::NonFiniteResult { .. })));
     }
 }
