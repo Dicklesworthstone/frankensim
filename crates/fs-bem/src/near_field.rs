@@ -17,6 +17,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path="near_field_velocity.rs"]
 mod velocity;
 pub use velocity::{FirstOrder, VectorObservation};
+// The same near-field kernels, with three linearly interpolated source values.
+// Only the reciprocal owner binds these rows to its P1/P0 solution identity.
+pub(crate) mod linear;
 
 const MAX_PANELS: usize = helmholtz::MAX_DENSE_PANELS;
 /// Receiver cardinality shared by near-field geometry and harmonic callers.
@@ -205,6 +208,24 @@ impl Integral {
         self.error_s+=b.error_s;self.error_d+=b.error_d;
         self.gradient.add(b.gradient);
     }
+    fn accumulate(&mut self,sample:&Kernel,jac:f64,with_velocity:bool)->Result<(),HelmholtzError> {
+        self.s=self.s+sample.g.scale(jac);self.d=self.d+sample.dg.scale(jac);
+        if with_velocity {self.gradient.accumulate(sample.k,sample.g,sample.delta,
+            sample.r,sample.normal,jac)?;}
+        self.abs_s+=jac/(FOUR_PI*sample.r);
+        self.abs_d+=jac/(FOUR_PI*sample.r)*(1./sample.r).hypot(sample.k)*sample.projection.abs();
+        Ok(())
+    }
+}
+// One kernel calculation serves either the original P0 moment or all three
+// P1 moments. Weighting a density must not change the Green-field convention.
+struct Kernel { k:f64,g:C64,dg:C64,delta:Point,r:f64,normal:Point,projection:f64 }
+fn kernel(k:f64,delta:Point,normal:Point)->Result<Kernel,HelmholtzError> {
+    let r=norm(delta);
+    if !r.is_finite() || r<=0. {return Err(bad("unresolved near-field integration point"));}
+    let phase=k*r;let g=C64::new(det::cos(phase),det::sin(phase)).scale(1./(FOUR_PI*r));
+    let projection=dot(normal,delta)/r;let dg=g*C64::new(1./r,-k).scale(projection);
+    Ok(Kernel{k,g,dg,delta,r,normal,projection})
 }
 struct Work { options:Options, evaluations:usize }
 const X4:[f64;4]=[0.06943184420297371,0.33000947820757187,0.6699905217924281,0.9305681557970262];
@@ -220,14 +241,10 @@ fn rule(k:f64,x:Point,t:Triangle,normal:Point,nodes:&[f64],weights:&[f64],work:&
     let u=sub(t[1],t[0]);let v=sub(t[2],t[1]);let area2=norm(cross(u,sub(t[2],t[0])));
     let mut out=Integral::default();
     for (&a,&wa) in nodes.iter().zip(weights) {for (&b,&wb) in nodes.iter().zip(weights) {
-        let y=std::array::from_fn(|c|t[0][c]+a*u[c]+a*b*v[c]);let delta=sub(x,y);let r=norm(delta);
-        if !r.is_finite() || r<=0. {return Err(bad("unresolved near-field integration point"));}
-        let phase=k*r;let g=C64::new(det::cos(phase),det::sin(phase)).scale(1./(FOUR_PI*r));
-        let projection=dot(normal,delta)/r;let dg=g*C64::new(1./r,-k).scale(projection);
+        let y=std::array::from_fn(|c|t[0][c]+a*u[c]+a*b*v[c]);
+        let sample=kernel(k,sub(x,y),normal)?;
         let jac=wa*wb*area2*a;
-        out.s=out.s+g.scale(jac);out.d=out.d+dg.scale(jac);
-        if with_velocity {out.gradient.accumulate(k,g,delta,r,normal,jac)?;}
-        out.abs_s+=jac/(FOUR_PI*r);out.abs_d+=jac/(FOUR_PI*r)*(1./r).hypot(k)*projection.abs();
+        out.accumulate(&sample,jac,with_velocity)?;
     }}
     if ![out.s.re,out.s.im,out.d.re,out.d.im,out.abs_s,out.abs_d].iter().all(|v|v.is_finite()) {
         return Err(bad("nonfinite near-field quadrature"));

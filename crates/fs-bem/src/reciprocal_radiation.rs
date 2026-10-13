@@ -33,6 +33,8 @@ mod geometry;
 use geometry::*;
 mod field;
 pub use field::Solution;
+mod receivers;
+pub use receivers::{ReceiverGeometry,PreparedReceivers};
 
 /// Explicit cold storage/work ceilings; no mechanical modes are truncated.
 #[derive(Debug,Clone,Copy)]

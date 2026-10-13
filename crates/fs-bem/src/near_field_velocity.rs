@@ -7,8 +7,8 @@ use super::*;
 // grad_x D=-(G''-G'/r)(n_y.u)u-(G'/r)n_y.
 #[derive(Clone,Copy,Default)]
 pub(super) struct Derivative {
-    s:[C64;3], d:[C64;3], abs_s:[f64;3], abs_d:[f64;3],
-    error_s:[f64;3], error_d:[f64;3],
+    pub(super) s:[C64;3], pub(super) d:[C64;3], abs_s:[f64;3], abs_d:[f64;3],
+    pub(super) error_s:[f64;3], pub(super) error_d:[f64;3],
 }
 impl Derivative {
     pub(super) fn accumulate(&mut self,k:f64,g:C64,delta:Point,r:f64,normal:Point,jac:f64) -> Result<(),HelmholtzError> {
