@@ -6,8 +6,9 @@
 //! not a differentiation of the primal iteration history. Storage is O(V+E).
 //!
 //! These are local derivatives of the declared nominal quadratic model, not
-//! interval certificates, uncertainty propagation, fan-curve sensitivities, or
-//! coupled thermal adjoints. Zero-flow branches are explicitly refused; no
+//! interval certificates, uncertainty propagation, or coupled thermal adjoints.
+//! Fan-driven derivatives are available through `solve_with_fan_linearized`.
+//! Zero-flow branches are explicitly refused; no
 //! epsilon resistance or artificial derivative regularization is introduced.
 
 use core::fmt;
@@ -23,6 +24,9 @@ use super::{
     FixedPressure, GraphError, GraphSolution, GraphSolveConfig, LossGraph, Sum,
     checkpoint, finite, periodic_checkpoint,
 };
+
+mod fan;
+pub use fan::{GraphFanGradient, GraphFanLinearization, GraphFanSensitivityError, GraphFanTangent};
 
 /// Derivative of a dimensionless objective with respect to pressure (1/Pa).
 pub type PressureWeight = Qty<1, -1, 2, 0, 0, 0>;
@@ -142,6 +146,17 @@ impl LossGraph {
         checkpoint(cx)?;
         sensitivity.validate()?;
         let solution = self.solve(boundaries, primal, cx)?;
+        self.linearize_accepted(solution, sensitivity, cx)
+    }
+
+    // Private admission seam: callers here own the accepted primal solve. Never
+    // expose this for externally assembled or mutated GraphSolution values.
+    fn linearize_accepted(
+        &self, solution: GraphSolution, sensitivity: GraphSensitivityConfig, cx: &Cx<'_>,
+    ) -> Result<GraphLinearization<'_>, GraphSensitivityError> {
+        checkpoint(cx)?;
+        sensitivity.validate()?;
+        let boundaries = &solution.boundaries;
         let mut fixed = vec![false; self.node_count()];
         for (index, boundary) in boundaries.iter().enumerate() {
             periodic_checkpoint(index, cx)?;
