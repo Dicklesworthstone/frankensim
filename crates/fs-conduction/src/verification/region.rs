@@ -8,6 +8,9 @@ use crate::adjoint::{LinearGoalAnalysis, LinearGoalAnalysisConfig, LinearGoalAna
 pub use fs_solver::goal::GoalResidualLimits;
 pub use fs_verify::tet::{RegionMeanBound, RegionMeanSelection};
 
+/// Finite material domains admitted by an independent continuum comparison.
+pub mod material_range;
+
 /// Independent physical-dual, matrix-analysis and flux-reconstruction limits.
 /// No stability-proposal solves are needed for this continuum majorant.
 #[derive(Debug, Clone, Copy)]
