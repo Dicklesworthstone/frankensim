@@ -6,6 +6,9 @@
 use super::*;
 use fs_math::det;
 
+#[cfg(feature = "cooling-design")]
+pub(super) mod resistance;
+
 #[derive(Debug)]
 pub(super) struct DesignRequest {
     surface: String,

@@ -22,6 +22,13 @@ pub(super) struct HydraulicGradient {
     iterations: usize,
 }
 
+#[cfg(feature = "cooling-design")]
+impl CoolingGradient {
+    pub(in crate::network_command) fn log_resistance(&self, branch: usize) -> Option<f64> {
+        self.hydraulic.as_ref()?.log_resistances.get(branch).copied()
+    }
+}
+
 impl HydraulicGradient {
     pub(super) fn render(&self) -> Result<String> {
         Ok(format!("{{\"status\":\"available\",\"method\":\"coupled-thermal-hydraulic-adjoint\",\"branch_order\":[{}],\"dobjective_dflow_k_s_m3\":{},\"dobjective_dlog_resistance_k\":{},\"boundary_nodes\":[{}],\"dobjective_dboundary_pressure_k_pa\":{},\"dobjective_dlog_fan_speed_ratio_k\":{},\"dobjective_dfan_curve_pressure_k_pa\":{},\"hydraulic_linear_relative_residual\":{},\"hydraulic_linear_iterations\":{},\"scope\":\"local selected temperature objective; moving hydraulic equilibrium, junction mixing, shared-solid feedback and admitted flow-derived convection; fixed geometry, material laws, loads and fluid properties; branch-flow weights are an intermediate chain-rule quantity, not independently feasible controls; no uncertainty, continuum-error or finite-design-change bound\"}}",

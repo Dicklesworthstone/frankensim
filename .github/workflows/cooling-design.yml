@@ -1,0 +1,30 @@
+name: Cooling resistance design
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-airflow/**'
+      - 'crates/fs-cli/src/network_command*'
+      - 'crates/fs-cli/src/network_command/**'
+      - 'crates/fs-cli/Cargo.toml'
+      - 'crates/fs-ascent/src/projected_al.rs'
+      - '.github/workflows/cooling-design.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  resistance-design:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test actual hydraulic derivatives and coupled resistance design
+        run: |
+          cargo test -p fs-airflow --lib graph::sensitivity::
+          cargo test -p fs-cli --features cooling-design --bin frankensim network_command::design::resistance::tests

@@ -54,6 +54,8 @@ fs-uq = { path = "../fs-uq" }
 fs-viz = { path = "../fs-viz" }
 
 [features]
+# Bounded resistance sizing with the existing projected AL optimizer.
+cooling-design = ["dep:fs-ascent"]
 # Explicit nominal linear continuum bounds retain the verifier's feature gate.
 thermal-verification = ["fs-conduction/thermal-verification"]
 # The numerical 3-D CutFEM study retains the underlying frontier feature gate.
