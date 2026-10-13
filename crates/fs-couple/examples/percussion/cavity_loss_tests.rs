@@ -4,7 +4,7 @@ use super::super::{Mechanics, Stroke, drum_with_cavity_loss, drum_with_mufflers,
 use fs_couple::render::plate::impact::ImpactError;
 
 fn neck() -> NeckOptions {
-    NeckOptions { radius_m:0.005, effective_length_m:0.012, resistance_pa_s_m3:5000.0,
+    NeckOptions { exterior_load:false, radius_m:0.005, effective_length_m:0.012, resistance_pa_s_m3:5000.0,
         azimuth_rad:0.4, axial_position_m:0.08 }
 }
 fn stroke() -> Stroke { Stroke { speed_m_s:2.0, position_m:Some([0.06,0.01]) } }

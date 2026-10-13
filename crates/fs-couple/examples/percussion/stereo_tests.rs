@@ -19,7 +19,7 @@ fn right_microphone_preserves_playing_inputs_and_refuses_implicit_mode_changes()
         let mut args:Vec<_>=text.split_whitespace().map(String::from).collect();let old=args.clone();
         assert!(option(&mut args).is_err());assert_eq!(args,old);
     }
-    let neck=crate::cavity::NeckOptions {radius_m:0.005,effective_length_m:0.012,
+    let neck=crate::cavity::NeckOptions {exterior_load:false,radius_m:0.005,effective_length_m:0.012,
         resistance_pa_s_m3:1000.0,azimuth_rad:0.4,axial_position_m:0.08};
     assert!(crate::cavity::admit_neck_command(Some(neck),true,"snare-mic").is_err());
 }
@@ -203,7 +203,7 @@ fn acoustic_budget_cancellation_and_neck_band_refusals_never_advance_mechanics()
     assert_eq!(e.system.state(),before);
     gate.request();assert!(render_receivers_with_spec(&mut e,4,20.0,&receiver,radiation_spec::Spec::default(),&gate).is_err());
     assert_eq!(e.system.state(),before);
-    let neck=crate::cavity::NeckOptions {radius_m:0.003,effective_length_m:0.008,
+    let neck=crate::cavity::NeckOptions {exterior_load:false,radius_m:0.003,effective_length_m:0.008,
         resistance_pa_s_m3:1000.0,azimuth_rad:0.4,axial_position_m:0.08};
     let e=crate::drum_with_radiation(16,MECHANICAL_DT,false,true,None,false,crate::Stroke::default(),
         true,Some(neck),None,None,&[],0.0,None,false).unwrap();

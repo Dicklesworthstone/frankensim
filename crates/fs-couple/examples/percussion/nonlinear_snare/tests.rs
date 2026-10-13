@@ -111,7 +111,7 @@ fn nonlinear_snare_keeps_cavity_two_player_ports_refinement_and_exact_retry() {
     }
     assert!(work>0.0 && pressure>0.0);
     // The new head law is not an aperture-radiation implementation.
-    let neck=cavity::NeckOptions {radius_m:0.005,effective_length_m:0.012,resistance_pa_s_m3:5000.0,
+    let neck=cavity::NeckOptions {exterior_load:false,radius_m:0.005,effective_length_m:0.012,resistance_pa_s_m3:5000.0,
         azimuth_rad:0.4,axial_position_m:0.08};
     assert!(drum_with_cavity_loss(2,acoustics::MECHANICAL_DT,true,false,Some(wires()),true,
         Stroke::default(),true,Some(neck),Some(specimen()),None,&[],0.0).is_err());

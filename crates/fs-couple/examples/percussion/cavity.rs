@@ -27,6 +27,9 @@ pub fn admit_command(distributed:bool,command:&str)->Result<(),Error> {
 /// All neck physics and position are explicit; this is not a measured drum card.
 #[derive(Debug,Clone,Copy,PartialEq)]
 pub struct NeckOptions {
+    /// The supplied impedance excludes exterior radiation; a coupled audio
+    /// command must attach that missing load before any playing begins.
+    pub exterior_load:bool,
     pub radius_m:f64,
     pub effective_length_m:f64,
     pub resistance_pa_s_m3:f64,
@@ -35,26 +38,31 @@ pub struct NeckOptions {
 }
 
 pub fn neck_option(args:&mut Vec<String>)->Result<Option<NeckOptions>,Error> {
-    let mut positions=args.iter().enumerate().filter(|(_,v)|v.as_str()=="--cavity-neck");
+    let mut positions=args.iter().enumerate().filter(|(_,v)|
+        matches!(v.as_str(),"--cavity-neck"|"--cavity-neck-internal"));
     let Some((start,_))=positions.next() else {return Ok(None);};
     if positions.next().is_some() || args.len()-start<6 {
-        return Err("--cavity-neck needs one radius_m length_eff_m resistance_Pa_s_m3 azimuth_rad z_m declaration".into());
+        return Err("choose one --cavity-neck or --cavity-neck-internal declaration: radius_m length_m resistance_Pa_s_m3 azimuth_rad z_m".into());
     }
     let mut values=[0.0_f64;5];
     for (value,text) in values.iter_mut().zip(&args[start+1..start+6]) {*value=text.parse()?;}
     if values.iter().any(|v|!v.is_finite()) || values[0]<=0.0 || values[1]<=0.0 || values[2]<0.0 {
         return Err("neck needs positive finite radius/length, passive resistance and finite wall coordinates".into());
     }
-    let neck=NeckOptions {radius_m:values[0],effective_length_m:values[1],
+    let neck=NeckOptions {exterior_load:args[start]=="--cavity-neck-internal",
+        radius_m:values[0],effective_length_m:values[1],
         resistance_pa_s_m3:values[2],azimuth_rad:values[3],axial_position_m:values[4]};
     args.drain(start..start+6);
     Ok(Some(neck))
 }
 
 pub fn admit_neck_command(neck:Option<NeckOptions>,distributed:bool,command:&str)->Result<(),Error> {
+    if neck.is_some_and(|n|n.exterior_load) {
+        return Err("an internal-only neck requires --coupled-vent-radiation on a drum/snare pressure command".into());
+    }
     if neck.is_some() && (!distributed || !matches!(command,
         "drum"|"drum-stretch"|"drum-modal"|"snare"|"snare-off")) {
-        return Err("--cavity-neck requires --cavity-modes and drum/snare mechanics CSV; vented exterior radiation is not implemented, so WAV/microphone export is refused".into());
+        return Err("a bare --cavity-neck requires --cavity-modes and drum/snare mechanics CSV; audio also needs an explicit one-way or coupled vent-radiation selection".into());
     }
     Ok(())
 }
@@ -226,6 +234,9 @@ pub fn build_prepared_with_losses_and_barrel(films:&[TensionedDisk],modes:&[Vec<
     contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,configuration:LinearImpactConfig,
     neck:Option<NeckOptions>,drag_per_s:f64,barrel:Option<(usize,&super::barrel::Prepared)>)
     ->Result<(LinearImpactSystem,InteriorPressure),Error> {
+    if neck.is_some_and(|n|n.exterior_load) {
+        return Err("an exterior-loaded neck requires the joint impact owner, not the linear-only modal image".into());
+    }
     let gate=CancelGate::new_clock_free();
     let structural=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.initial.len()))
         .ok_or("prepared cavity body-count overflow")?;
@@ -269,13 +280,17 @@ fn compile(films:&[TensionedDisk],modes:&[Vec<ModePair>],radius:f64,depth:f64,
         let averages=air.sidewall_averages(SidewallAperture {radius_m:neck.radius_m,
             azimuth_rad:neck.azimuth_rad,axial_position_m:neck.axial_position_m,
             radial_rings:8,angular_points:32,maximum_terms:2048},gate)?;
-        compiled=compiled.with_necks(vec![CavityNeck {
+        let necks=vec![CavityNeck {
             area_m2:core::f64::consts::PI*neck.radius_m*neck.radius_m,
             effective_length_m:neck.effective_length_m,resistance_pa_s_m3:neck.resistance_pa_s_m3,
             pressure_shape_averages:averages,initial_volume_m3:0.0,initial_flow_m3_s:0.0,
-        }],gate)?;
-        eprintln!("compact neck: radius={}m, effective_length={}m, resistance={}Pa*s/m^3, azimuth={}rad, z={}m; 8x32 wall-area quadrature; zero-gauge reservoir; parameters are declarations, not calibrated losses; exterior audio refused",
-            neck.radius_m,neck.effective_length_m,neck.resistance_pa_s_m3,neck.azimuth_rad,neck.axial_position_m);
+        }];
+        compiled=if neck.exterior_load {compiled.with_necks_for_exterior_load(necks,gate)?}
+            else {compiled.with_necks(necks,gate)?};
+        eprintln!("compact neck: radius={}m, declared_length={}m, resistance={}Pa*s/m^3, azimuth={}rad, z={}m; 8x32 wall-area quadrature; {}; no inferred end correction or calibrated losses",
+            neck.radius_m,neck.effective_length_m,neck.resistance_pa_s_m3,neck.azimuth_rad,neck.axial_position_m,
+            if neck.exterior_load {"internal-only impedance, exterior load required before playback"}
+                else {"effective impedance into a zero-gauge reservoir"});
     }
     let first=air.values_at([0.4*radius,0.2*radius,0.0])?;
     let second=air.values_at([-0.4*radius,-0.2*radius,depth])?;
@@ -375,7 +390,7 @@ mod tests {
     #[test]
     fn finite_neck_changes_struck_stretching_heads_and_pressure_contains_outward_slug_volume() {
         let stroke=super::super::Stroke {speed_m_s:4.0,position_m:Some([0.06,0.01])};
-        let neck=NeckOptions {radius_m:0.005,effective_length_m:0.012,resistance_pa_s_m3:1000.0,
+        let neck=NeckOptions {exterior_load:false,radius_m:0.005,effective_length_m:0.012,resistance_pa_s_m3:1000.0,
             azimuth_rad:0.4,axial_position_m:0.08};
         let mut sealed=super::super::drum_with_air(256,2e-6,false,false,None,true,stroke,true,None).unwrap();
         let mut vented=super::super::drum_with_air(256,2e-6,false,false,None,true,stroke,true,Some(neck)).unwrap();

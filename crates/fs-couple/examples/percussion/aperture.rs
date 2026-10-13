@@ -1,5 +1,6 @@
 //! A prescribed volume-flow aperture on the existing closed exterior BEM mesh.
-//! This is a Neumann source boundary, not radiation feedback on the neck.
+//! This supplies the Neumann source/work rows. Feedback is attached separately
+//! by the selected acoustic scene; the geometry never invents a neck impedance.
 use super::{Boundary, Error, MAX_INPUTS, MAX_PANELS, check_closed};
 use fs_couple::render::plate::impact::cavity::neck::NeckRadiationPort;
 use std::collections::BTreeMap;
@@ -19,9 +20,7 @@ fn area(t: [Point; 3])->f64 {
 
 /// Explicit model selection. A bare vent/audio request still refuses.
 pub fn option(args:&mut Vec<String>)->Result<bool,Error> {
-    let n=args.iter().filter(|a|a.as_str()=="--prescribed-vent-radiation").count();
-    if n>1 {return Err("--prescribed-vent-radiation may be supplied only once".into());}
-    args.retain(|a|a!="--prescribed-vent-radiation");Ok(n==1)
+    crate::vented::radiation_option(args)
 }
 
 // Identify a planar vertical wall strip by its two exact XY endpoint addresses.
@@ -177,7 +176,7 @@ impl Boundary {
         let indices:Vec<_>=triangles.iter().map(|t|t.map(|p| {let next=ids.len();*ids.entry(key(p)).or_insert(next)})).collect();
         check_closed(&indices)?;
         let mut state_modes=self.state_modes;state_modes.push(port.coordinate);
-        eprintln!("prescribed-flow aperture: nominal_area_m2={}, polygon_area_m2={}, added_source_coordinate={}; existing head sources and actual neck volume flow, no radiation backreaction or added end correction",port.area_m2,patch.area_m2,port.coordinate);
+        eprintln!("neck-flow aperture: nominal_area_m2={}, polygon_area_m2={}, added_source_coordinate={}; existing head sources and actual neck volume flow; feedback belongs to the selected acoustic scene, no geometry-added end correction",port.area_m2,patch.area_m2,port.coordinate);
         Ok(Self {triangles,weights,state_modes})
     }
 }

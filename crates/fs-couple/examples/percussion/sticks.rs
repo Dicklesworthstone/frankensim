@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn nonlinear_two_stick_heads_keep_distinct_distributed_air_and_neck_coordinates() {
-        let neck = super::super::cavity::NeckOptions {radius_m:0.005,effective_length_m:0.012,
+        let neck = super::super::cavity::NeckOptions {exterior_load:false,radius_m:0.005,effective_length_m:0.012,
             resistance_pa_s_m3:1000.0,azimuth_rad:0.4,axial_position_m:0.08};
         let mut compact = drum_with_sticks(128,2e-6,false,false,None,true,primary(),
             false,None,None,Some(secondary())).unwrap();
