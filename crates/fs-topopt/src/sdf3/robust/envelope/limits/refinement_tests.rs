@@ -147,3 +147,6 @@ fn cancellation_and_budget_exhaustion_return_no_partially_assessed_family() {
 
 #[path = "refit_tests.rs"]
 mod refit;
+
+#[path = "campaign_tests.rs"]
+mod campaign;
