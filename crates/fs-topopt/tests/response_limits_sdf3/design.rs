@@ -82,3 +82,6 @@ fn g0_an_infeasible_stop_cannot_produce_a_feasible_material_design() {
     let mut bad = MinimumMaterialOptions3::default(); bad.volume_scale = f64::NAN;
     assert!(matches!(MinimumMaterialStudy3::new(&mut s, &cases, &rho, bad, &mut c), Err(ProjectedAlError::Invalid(_))));
 }
+
+#[path = "checkpoint.rs"]
+mod checkpoint;

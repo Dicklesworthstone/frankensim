@@ -5,6 +5,9 @@ use std::cell::RefCell;
 use fs_ascent::projected_al::{ProjectedAlError, ProjectedAlOptions, ProjectedAlReport,
     ProjectedAlSample, ProjectedAlState, ProjectedAlStop, ProjectedAlWork};
 
+mod checkpoint;
+pub use checkpoint::{MinimumMaterialCheckpoint3, MinimumMaterialEndpoint3, MinimumMaterialLimit3};
+
 #[derive(Debug, Clone, Copy)]
 pub struct MinimumMaterialOptions3 {
     pub limits: ResponseLimitOptions3,
@@ -33,13 +36,16 @@ fn row(e: &ResponseLimitEvaluation3, iteration: usize) -> MinimumMaterialIterati
     MinimumMaterialIteration3 { iteration, volume_fraction: e.volume_fraction,
         constraint: e.constraint, worst_residual: e.worst_residual }
 }
+fn optimization_sample(e: &ResponseLimitEvaluation3, options: MinimumMaterialOptions3) -> ProjectedAlSample {
+    ProjectedAlSample { objective: e.volume_fraction/options.volume_scale,
+        gradient: e.volume_gradient.iter().map(|g| g/options.volume_scale).collect(),
+        constraint: e.constraint, constraint_gradient: e.constraint_gradient.clone() }
+}
 fn sample<O: AdaptiveSdf3Elasticity>(study: &mut CutDensityStudy3<O>, cases: &[ResponseLimitCase3<'_>],
     rho: &[f64], options: MinimumMaterialOptions3, last: &mut Option<ResponseLimitEvaluation3>,
     control: &mut SolveControl<'_>) -> Result<Option<ProjectedAlSample>, ResponseError3> {
     let e = study.evaluate_response_limits(rho, cases, options.limits, control)?;
-    let s = ProjectedAlSample { objective: e.volume_fraction/options.volume_scale,
-        gradient: e.volume_gradient.iter().map(|g| g/options.volume_scale).collect(),
-        constraint: e.constraint, constraint_gradient: e.constraint_gradient.clone() };
+    let s = optimization_sample(&e, options);
     *last = Some(e); Ok(Some(s))
 }
 
@@ -69,6 +75,7 @@ pub struct MinimumMaterialStudy3<'a, 'callback, O: AdaptiveSdf3Elasticity> {
     accepted: ResponseLimitEvaluation3,
     best_feasible: Option<ResponseLimitEvaluation3>,
     history: Vec<MinimumMaterialIteration3>,
+    restoration_evaluations: usize,
 }
 impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callback, O> {
     pub fn new(study: &'a mut CutDensityStudy3<O>, cases: &'a [ResponseLimitCase3<'a>], rho: &[f64],
@@ -96,7 +103,7 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
         study.operator.set_scales(&accepted.scales).expect("evaluated scales are admitted");
         let best_feasible = accepted.feasible(options.optimizer.tolerance).then(|| accepted.clone());
         let history = vec![row(&accepted, 0)];
-        Ok(Self { study, cases, control, options, state, accepted, best_feasible, history })
+        Ok(Self { study, cases, control, options, state, accepted, best_feasible, history, restoration_evaluations: 0 })
     }
     #[must_use] pub fn accepted(&self) -> &ResponseLimitEvaluation3 { &self.accepted }
     #[must_use] pub fn best_feasible(&self) -> Option<&ResponseLimitEvaluation3> { self.best_feasible.as_ref() }
