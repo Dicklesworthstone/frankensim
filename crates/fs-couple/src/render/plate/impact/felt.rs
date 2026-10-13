@@ -109,3 +109,6 @@ mod tests {
         assert!(p.path_energy(0.5,&h)-p.recovered(0.5,&next)>0.0);
     }
 }
+
+/// Shared finite-inertia backings for geometry-derived, preloaded felt supports.
+pub mod mount;
