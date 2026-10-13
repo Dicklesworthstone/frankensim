@@ -15,6 +15,8 @@
 //! material/model cards), fs-qty, and fs-math.
 
 pub mod calibrate;
+/// Irreversible mixed-mode cohesive interfaces with work and fracture accounting.
+pub mod cohesive;
 pub mod conductor;
 pub mod liquid;
 pub mod elastic;
