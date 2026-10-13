@@ -1041,3 +1041,6 @@ fn emissivity_query_uses_absolute_temperature_dimensions() {
         "wrong-dimensional emissivity must refuse with the declared temperature dimensions"
     );
 }
+
+#[path = "radiation/material_assignment.rs"]
+mod material_assignment;
