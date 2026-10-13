@@ -178,7 +178,8 @@ fn feedback_admission_never_hides_a_different_model_or_consumes_playing_time() {
     let mut dup=vec!["--radiation-feedback".into();2];let before=dup.clone();assert!(option(&mut dup).is_err());assert_eq!(dup,before);
     for name in ["splash-mic","drum-stretch-wav","snare-mic","hihat-wav"]{admit_command(true,name,false).unwrap();}
     for name in ["splash","drum","drum-modal-mic","hihat"]{assert!(admit_command(true,name,false).is_err());}
-    assert!(admit_command(true,"drum-mic",true).is_err());
+    admit_command(true,"drum-mic",true).unwrap();
+    assert!(admit_command(true,"splash-mic",true).is_err());
     let e=experiment(4);let before=e.system.state().to_vec();let gate=CancelGate::new_clock_free();gate.request();
     assert!(bake_scene_with_spec(e.acoustics.as_ref().unwrap(),&[Receiver::FinitePoint([0.,0.,0.12])],spec(),&gate,true).is_err());
     assert_eq!(e.system.state(),before);

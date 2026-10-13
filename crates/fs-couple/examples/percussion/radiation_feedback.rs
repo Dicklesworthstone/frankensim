@@ -10,10 +10,12 @@ pub fn option(args:&mut Vec<String>)->Result<bool,Error> {
     args.retain(|s|s!="--radiation-feedback");Ok(count==1)
 }
 pub fn admit_command(selected:bool,command:&str,has_neck:bool)->Result<(),Error> {
-    if selected && (has_neck || !matches!(command,"splash-wav"|"splash-mic"|"drum-wav"|"drum-mic"|
+    if selected && (!matches!(command,"splash-wav"|"splash-mic"|"drum-wav"|"drum-mic"|
         "drum-stretch-wav"|"drum-stretch-mic"|"snare-wav"|"snare-mic"|"snare-off-wav"|"snare-off-mic"|
-        "hihat-wav"|"hihat-mic")) {
-        return Err("radiation feedback needs a nonlinear-capable pressure command without a neck; no modal-image conversion or duplicated vent end correction".into());
+        "hihat-wav"|"hihat-mic") || (has_neck && !matches!(command,
+            "drum-wav"|"drum-mic"|"drum-stretch-wav"|"drum-stretch-mic"|
+            "snare-wav"|"snare-mic"|"snare-off-wav"|"snare-off-mic"))) {
+        return Err("radiation feedback needs a nonlinear-capable pressure command; necks require the coupled vent selection and internal-only impedance".into());
     }
     Ok(())
 }
@@ -75,20 +77,42 @@ fn admit_instrument(e:&Experiment)->Result<(),Error> {
         Mechanics::Reference(s) if s.samples()==0 && s.radiation_observation().is_none()=>{},
         _=>return Err("attach radiation before playing/numerical preparation; linear-only modal/snare images refuse instead of silently converting".into()),
     }
-    if e.air.as_ref().is_some_and(|a|a.coupling.neck_count()!=0) {
-        return Err("vented feedback requires separating neck end correction from exterior radiation loading".into());
+    if let Some(air)=&e.air {
+        let boundary=e.acoustics.as_ref().ok_or("missing exterior feedback boundary")?;
+        // This refuses effective-length necks, omitted/duplicate mouth columns,
+        // and accidental radiation from interior standing-wave coordinates.
+        air.coupling.admit_exterior_sources(&boundary.state_modes)?;
     }
     Ok(())
 }
-pub(crate) fn prepare(mut e:Experiment,frames:usize,scale:f64,receivers:&[Receiver],
+// Cold attachment uses the same map that produced both impedance and pressure.
+// Kept separate from fitting so the mechanics seam can also be checked against
+// an explicitly declared passive test load, without substituting one in playback.
+fn attach_model(mut e:Experiment,model:&Model,sources:&[usize])->Result<Experiment,Error> {
+    admit_instrument(&e)?;
+    if e.acoustics.as_ref().is_none_or(|b|b.state_modes.as_slice()!=sources) {
+        return Err("radiation load lost the source map used for boundary work".into());
+    }
+    let Mechanics::Reference(system)=e.system else {unreachable!("admitted before preparation")};
+    let system=match &e.air {
+        Some(air)=>air.coupling.attach_exterior_radiation(system,model,sources,256)?,
+        None=>system.with_radiation_load(model,sources,256)?,
+    };
+    e.system=Mechanics::Reference(system);
+    Ok(e)
+}
+pub(crate) fn prepare(e:Experiment,frames:usize,scale:f64,receivers:&[Receiver],
     spec:radiation_spec::Spec,gate:&CancelGate)->Result<(Experiment,Prepared),Error> {
     admit_instrument(&e)?;admit_render(&e,frames,scale)?;
+    // Feedback must respect the SAME compact-neck chart as one-way observation,
+    // including user-selected bands beyond the aperture builder's default band.
+    spec.admit_necks(&e)?;
     let boundary=e.acoustics.as_ref().ok_or("missing feedback boundary")?;
     let sources=boundary.state_modes.clone();
     let (baked,model)=bake_scene_with_spec(boundary,receivers,spec,gate,true)?;
     if gate.is_requested() {return Err("radiation feedback cancelled before attachment".into());}
-    let Mechanics::Reference(system)=e.system else {unreachable!("admitted before preparation")};
-    e.system=Mechanics::Reference(system.with_radiation_load(&model.ok_or("missing admitted feedback model")?,&sources,256)?);
+    let model=model.ok_or("missing admitted feedback model")?;
+    let e=attach_model(e,&model,&sources)?;
     Ok((e,Prepared{baked,sources}))
 }
 fn observation(s:&Mechanics)->Option<RadiationObservation> {
@@ -113,3 +137,7 @@ impl Prepared {
 #[cfg(test)]
 #[path="radiation_feedback_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="radiation_feedback_vent_tests.rs"]
+mod vent_tests;

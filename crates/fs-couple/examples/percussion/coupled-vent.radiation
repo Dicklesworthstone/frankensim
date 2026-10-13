@@ -1,0 +1,8 @@
+frankensim-radiation-preparation-v1
+# A bounded 40..500 Hz demonstration, not full-band instrument certification.
+band_hz,40,500
+training_intervals,20
+max_order,8
+subdivisions,0
+max_panels,4096
+max_dense_work,1000000000000
