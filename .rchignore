@@ -2,3 +2,15 @@
 scratch/piano-quadrature-20261004/local-diagnostic-prepared-sources/
 # This 1.03 GB executable is a local controller, not a remote benchmark input.
 scratch/piano-quadrature-20261004/frep-blocker-20261008/rch-recovery-headroom-client
+# Beads publication preimages stay local. The paired solver/piano consumers
+# read none of these; their declared scripts and all16 source archives remain.
+scratch/piano-quadrature-20261004/frep-blocker-20261008/tracker-before*.jsonl
+scratch/piano-quadrature-20261004/frep-blocker-20261008/*metadata-before.jsonl
+scratch/piano-quadrature-20261004/frep-blocker-20261008/solver-comment-before.jsonl
+scratch/piano-quadrature-20261004/frep-blocker-20261008/mt-cwsya-before-claim.jsonl
+scratch/piano-quadrature-20261004/frep-blocker-20261008/**/metadata-before.jsonl
+scratch/piano-quadrature-20261004/frep-blocker-20261008/**/*-metadata-before.jsonl
+scratch/piano-quadrature-20261004/frep-blocker-20261008/**/tracker-before.jsonl
+scratch/piano-quadrature-20261004/frep-blocker-20261008/**/metadata-after.jsonl
+scratch/piano-quadrature-20261004/frep-blocker-20261008/**/launcher-progress.before.jsonl
+scratch/piano-quadrature-20261004/frep-blocker-20261008/**/launcher-progress.after.jsonl
