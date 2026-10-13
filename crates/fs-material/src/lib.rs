@@ -21,6 +21,8 @@ pub mod conductor;
 pub mod liquid;
 pub mod elastic;
 pub mod fiber;
+/// Shared gas/liquid transport for material-driven flow and heat consumers.
+pub mod fluid_transport;
 pub mod gas;
 pub mod gas_mixture;
 pub mod moist_air;
