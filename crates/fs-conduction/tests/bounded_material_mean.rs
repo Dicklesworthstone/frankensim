@@ -157,3 +157,26 @@ fn unsupported_physics_and_original_budgets_do_not_produce_a_bound() {
         bound(cx, problem, &temperature, &cells, 0, false, config(&mesh))),
         Err(ConductionBoundError::Verification(TetError::Cancelled))));
 }
+
+#[test]
+fn directional_search_reuses_admission_and_runs_only_the_accepted_dual() {
+    use fs_conduction::verification::region::material_range::
+        bound_temperature_region_mean_with_slab_directions as search;
+    with_cx(|cx| {
+        let mesh=mesh(); let boundary=boundary(&mesh,true);
+        let material=material(290.0,310.0,10.0); let source=ScalarField::Uniform(1000.0);
+        let problem=ConductionProblem {mesh:&mesh,boundary:&boundary,material:&material,
+            element_materials:None,source:&source};
+        let temperature=fs_conduction::solve(cx,problem,solve_config()).unwrap().temperature;
+        let cells=(0..mesh.element_count()).collect::<Vec<_>>();
+        let direct=bound(cx,problem,&temperature,&cells,0,true,config(&mesh)).unwrap();
+        let family=search(cx,problem,&temperature,&cells,&[(1,false),(0,false),(0,true)],config(&mesh)).unwrap();
+        assert_eq!(family.comparison_attempts,3);
+        assert_eq!(family.region.dual_temperature,direct.region.dual_temperature);
+        assert_eq!(family.region.dual_analysis.dual_iterations,direct.region.dual_analysis.dual_iterations);
+        assert_eq!(family.region.bound.enclosure,direct.region.bound.enclosure);
+        for directions in [vec![],vec![(0,true),(0,true)],vec![(3,false)]] {
+            assert!(search(cx,problem,&temperature,&cells,&directions,config(&mesh)).is_err());
+        }
+    });
+}

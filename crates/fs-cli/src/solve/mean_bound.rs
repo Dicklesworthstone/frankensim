@@ -4,6 +4,7 @@
 //! original final field is passed to the existing equilibrated primal/dual
 //! producer. Only a genuinely global scalar source law can supply unbounded
 //! coefficient validity; neither flat sampled data nor a small nodal range do.
+//! Finite scalar-constant cards require a separate whole-continuum slab proof.
 
 use super::{
     EvidenceWork, ProjectSpec, RungSolved, SolveRefusal, conduction_error,
@@ -15,13 +16,15 @@ use std::collections::BTreeMap;
 
 pub(super) const OUTPUT: &str = "temperature-volume-mean-bound";
 #[cfg(feature = "thermal-verification")]
-const SCOPE: &str = "Verified numerical interval for the region volume-mean temperature of the nominal linear conduction PDE on the exact published polyhedral mesh domain, with original fixed Dirichlet/Neumann/Robin data and globally declared scalar conductivity. Original matching finite-resistance contacts retain separate temperature traces and globally declared scalar resistance; their resistance-weighted jumps enter the continuum majorant. Independent equilibrated primal and dual fluxes include discretization, algebraic residual and outward numerical evaluation. Original material and interface cards and exact selected property receipts are retained; their declarations are not experimental validation. This is not a maximum-temperature bound, material/contact/boundary uncertainty bound, CAD/as-built geometry certificate, nonlinear/nonmatching-contact/convection-feedback bound, or a complete engineering decision. The existing temperature-max requirement and its uncertainty budget are unchanged.";
+mod material_range;
+#[cfg(feature = "thermal-verification")]
+const SCOPE: &str = "Verified numerical interval for the region volume-mean temperature of the nominal linear conduction PDE on the exact published polyhedral mesh domain, with original fixed Dirichlet/Neumann/Robin data and constant scalar conductivity. Material validity is either globally declared or independently established by the retained whole-continuum slab comparison; the latter does not support contact. Original matching finite-resistance contacts retain separate temperature traces and globally declared scalar resistance; their resistance-weighted jumps enter the continuum majorant. Independent equilibrated primal and dual fluxes include discretization, algebraic residual and outward numerical evaluation. Original material and interface cards and exact selected property receipts are retained; their declarations are not experimental validation. The primary enclosure bounds the mean, not the error of the selected maximum. This is not a material/contact/boundary uncertainty bound, CAD/as-built geometry certificate, nonlinear/nonmatching-contact/convection-feedback bound, or a complete engineering decision. The existing temperature-max requirement and its uncertainty budget are unchanged.";
 
 fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error(
         "cli-solve-mean-bound",
         message,
-        "request a steady linear model with fixed thermal boundaries and globally declared scalar conductivity and matching contact resistance; finite source spans require a continuum temperature-range proof",
+        "request steady fixed thermal boundaries and constant scalar conductivity; finite spans require an admitted no-contact slab continuum range, while matching contacts require globally constant material and resistance claims",
     )
 }
 
@@ -103,11 +106,11 @@ mod enabled {
     use super::super::{canonical_f64, json_string};
     use super::*;
     use fs_conduction::verification::region::{
-        GoalResidualLimits, RegionMeanConfig, bound_temperature_region_mean,
+        GoalResidualLimits, RegionMeanConfig,
     };
     use fs_conduction::verification::{ConductionBoundError, FluxBudget, TetError};
     use fs_conduction::{
-        ConductionProblem, ConductivityModel, ConductivityTable, ElementMaterials, MaterialId,
+        ConductionProblem, ElementMaterials, MaterialId,
         MaterialTable,
     };
 
@@ -317,14 +320,9 @@ mod enabled {
                     "native conductivity changed source claims across its sampled span",
                 ));
             }
-            let constant = ConductivityTable::from_unbounded_constant_claim(
-                card.claims(),
-                fs_project::THERMAL_CONDUCTIVITY_PROPERTY,
-                binding.temp_lo.value,
-                selected,
-            )
-            .map_err(lower)?;
-            let receipt = &constant.receipts()[0];
+            let (model, receipt) = material_range::constant_model(
+                card.claims(), native, binding.temp_lo.value, selected,
+            )?;
             let receipt_bytes = receipt
                 .to_bytes()
                 .map_err(|e| bad(format!("constant source receipt refused: {e}")))?;
@@ -332,25 +330,28 @@ mod enabled {
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>();
-            let conductivity = constant.eval(binding.temp_lo.value).map_err(lower)?;
+            let conductivity = model.tensor_at(binding.temp_lo.value).map_err(lower)?[0][0];
+            let temperature_domain = match model.temperature_span() {
+                fs_conduction::TemperatureSpan::Unbounded => "null".to_string(),
+                fs_conduction::TemperatureSpan::Sampled { low, high } => interval(low, high)?,
+            };
             material_rows.push(format!(
                 concat!(
                     "{{\"region\":{},\"card\":{},\"selected_claim\":{},",
-                    "\"receipt\":{},\"receipt_bytes_hex\":{},\"conductivity_w_m_k\":{}}}"
+                    "\"receipt\":{},\"receipt_bytes_hex\":{},\"conductivity_w_m_k\":{},\"temperature_domain_k\":{}}}"
                 ),
                 json_string(name),
                 json_string(&binding.card),
                 json_string(&selected.0.to_hex()),
                 json_string(&receipt.content_hash().to_hex()),
                 json_string(&receipt_hex),
-                number(conductivity)?
+                number(conductivity)?, temperature_domain
             ));
-            let model = ConductivityModel::isotropic(constant);
             if model.tensor_at(binding.temp_lo.value).map_err(lower)?
                 != native.tensor_at(binding.temp_lo.value).map_err(lower)?
             {
                 return Err(bad(
-                    "the globally constant source law does not equal the original native conductivity",
+                    "the retained constant source law does not equal the original native conductivity",
                 ));
             }
             models.push((MaterialId(id), model));
@@ -391,7 +392,7 @@ mod enabled {
             element_materials: Some(&materials),
             source: &data.source,
         };
-        let result = bound_temperature_region_mean(
+        let (result, material_domain) = material_range::bound(
             cx,
             problem,
             &data.interface_surfaces,
@@ -421,6 +422,14 @@ mod enabled {
             error => bad(format!("continuum region-mean producer refused: {error}")),
         })?;
         poll(cx, work)?;
+        let material_validity = match material_domain {
+            None => "{\"method\":\"global-constant-source\"}".to_string(),
+            Some(proof) => format!(
+                "{{\"method\":\"continuum-slab-comparison\",\"continuum_temperature_range_k\":{},\"retained_material_domain_k\":{},\"axis\":{},\"reverse\":{},\"comparison_attempts\":{}}}",
+                interval(proof.range[0], proof.range[1])?, interval(proof.span[0], proof.span[1])?,
+                proof.axis, proof.reverse, proof.attempts,
+            ),
+        };
         let bound = &result.bound;
         let difference = bound.enclosure.sub(bound.candidate_mean);
         let error_upper = difference.lo.abs().max(difference.hi.abs());
@@ -434,7 +443,7 @@ mod enabled {
                 "\"selected_cells\":{},\"domain_cells\":{},\"region_volume_m3\":{},",
                 "\"primal_energy_error_upper\":{},\"dual_energy_error_upper\":{},",
                 "\"residual_correction_integral\":{},\"remainder_integral_upper\":{},",
-                "\"dual_iterations\":{},\"materials\":[{}],\"contacts\":[{}],\"scope\":{}}}"
+                "\"dual_iterations\":{},\"materials\":[{}],\"contacts\":[{}],\"material_validity\":{},\"scope\":{}}}"
             ),
             json_string(OUTPUT),
             json_string(region),
@@ -455,6 +464,7 @@ mod enabled {
             result.dual_analysis.dual_iterations,
             material_rows.join(","),
             contact_rows.join(","),
+            material_validity,
             json_string(SCOPE)
         ))
     }

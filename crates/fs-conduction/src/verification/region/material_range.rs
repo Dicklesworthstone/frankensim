@@ -19,6 +19,8 @@ pub struct SlabValidatedRegionMean {
     pub axis: usize,
     /// True when the cooling end is the low-coordinate end of this axis.
     pub reverse: bool,
+    /// Completed directional barrier attempts; only the accepted one leads to a dual.
+    pub comparison_attempts: usize,
 }
 
 fn constant_extension(model: &ConductivityModel) -> Result<ConductivityModel> {
@@ -67,8 +69,24 @@ pub fn bound_temperature_region_mean_with_slab_validity(
     cx: &Cx<'_>, problem: ConductionProblem<'_>, temperature: &[f64],
     cells: &[usize], axis: usize, reverse: bool, config: RegionMeanConfig,
 ) -> Result<SlabValidatedRegionMean> {
+    bound_temperature_region_mean_with_slab_directions(cx, problem, temperature,
+        cells, &[(axis, reverse)], config)
+}
+
+/// Try an explicit ordered family of at most six distinct slab directions.
+/// Only unsupported barriers or ranges wider than material validity advance to
+/// another direction. All other errors propagate immediately. Admission and
+/// constant-extension assembly are shared; at most ONE dual/majorant is run.
+/// The accepted axis and number of completed attempts are retained in the result.
+#[allow(clippy::too_many_arguments)]
+pub fn bound_temperature_region_mean_with_slab_directions(
+    cx: &Cx<'_>, problem: ConductionProblem<'_>, temperature: &[f64],
+    cells: &[usize], directions: &[(usize, bool)], config: RegionMeanConfig,
+) -> Result<SlabValidatedRegionMean> {
     let selected = selection(cx, problem, cells, config)?;
-    if axis >= 3 { return Err(TetError::Invalid("comparison axis must be 0, 1 or 2").into()); }
+    if directions.is_empty() || directions.len() > 6 || directions.iter().enumerate()
+        .any(|(i, direction)| direction.0 >= 3 || directions[..i].contains(direction))
+    { return Err(TetError::Invalid("one to six distinct slab directions with axes 0, 1 or 2 required").into()); }
     let ne = problem.mesh.element_count();
     let n = problem.mesh.vertex_count();
     if ne > config.flux.max_cells || n > config.flux.max_cells.saturating_mul(4) {
@@ -101,19 +119,31 @@ pub fn bound_temperature_region_mean_with_slab_validity(
     // The original binder rejects undeclared contacts; an empty contact list
     // cannot silently turn independent coincident traces into continuity.
     let (admitted, interfaces) = contact::admit_contacts(cx, extended, &[], config.flux)?;
-    let range = admitted.problem(problem.mesh.positions()).slab_temperature_range(
-        temperature, axis, reverse, config.flux, || cx.checkpoint().is_ok())?;
-    if let TemperatureSpan::Sampled { low, high } = span {
-        if range.lo < low || range.hi > high {
-            return Err(unsupported("slab barrier does not establish the original material temperature validity"));
+    let mut accepted = None;
+    let mut comparison_attempts = 0;
+    for &(axis, reverse) in directions {
+        poll(cx)?;
+        let range = match admitted.problem(problem.mesh.positions()).slab_temperature_range(
+            temperature, axis, reverse, config.flux, || cx.checkpoint().is_ok()) {
+            Ok(range) => range,
+            Err(TetError::Unsupported(_)) => { comparison_attempts += 1; continue; }
+            Err(error) => return Err(error.into()),
+        };
+        comparison_attempts += 1;
+        if let TemperatureSpan::Sampled { low, high } = span {
+            if range.lo < low || range.hi > high { continue; }
         }
+        accepted = Some((range, axis, reverse));
+        break;
     }
+    let (range, axis, reverse) = accepted.ok_or_else(|| unsupported(
+        "finite spans require a slab barrier inside the original material temperature validity"))?;
     poll(cx)?;
     let region = bound_field(cx, extended, &admitted, &interfaces,
         temperature, &selected, config)?;
     poll(cx)?;
     Ok(SlabValidatedRegionMean {
         region, continuum_temperature_range_k: [range.lo, range.hi],
-        material_temperature_span: span, axis, reverse,
+        material_temperature_span: span, axis, reverse, comparison_attempts,
     })
 }
