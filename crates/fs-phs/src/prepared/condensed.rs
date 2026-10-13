@@ -1,19 +1,30 @@
 //! Exact block elimination for a bordered Jacobian plus one rank-one update.
 //!
 //! Gonzalez's energy correction stays in an extra scalar border. Factor each
-//! independent pair and the equilibrated border once, then reuse those factors
-//! for bounded iterative refinement against the ORIGINAL full equation. Neither
-//! physical coordinates nor Newton/energy tolerances are rescaled or relaxed.
+//! independent scalar/pair and the equilibrated border once, then reuse those
+//! factors for bounded iterative refinement against the ORIGINAL full equation.
+//! Neither physical coordinates nor Newton/energy tolerances are rescaled.
 use super::{PreparedStepError, dimensions, norm, zeroed};
 use crate::PhsError;
 use fs_la::LuWorkspace;
 
 const MAX_REFINEMENTS: usize = 2;
 
+#[derive(Debug, Clone, Copy)]
+struct Leaf {
+    indices: [usize; 2],
+    width: usize,
+    // First response row. Scalar leaves do not reserve a fictitious second state.
+    start: usize,
+}
+impl Leaf {
+    fn coordinates(&self) -> &[usize] { &self.indices[..self.width] }
+}
+
 #[derive(Debug)]
 pub(super) struct Condensation {
     n: usize,
-    pairs: Vec<[usize; 2]>,
+    leaves: Vec<Leaf>,
     retained: Vec<usize>,
     owner: Vec<usize>,
     pub(super) left: Vec<f64>,
@@ -52,30 +63,43 @@ fn scale_binary(mut x: f64, mut shift: i32) -> f64 {
 
 impl Condensation {
     pub(super) fn new(n: usize, pairs: &[[usize; 2]]) -> Result<Self, PhsError> {
-        if pairs.is_empty() || pairs.len().checked_mul(2).is_none_or(|size| size > n) {
-            return Err(dimensions("condensed Newton pair count"));
-        }
+        Self::with_singletons(n, pairs, &[])
+    }
+
+    fn with_singletons(n: usize, pairs: &[[usize; 2]], singletons: &[usize]) -> Result<Self, PhsError> {
+        let removed=pairs.len().checked_mul(2).and_then(|v|v.checked_add(singletons.len()))
+            .filter(|&size|size>0 && size<=n)
+            .ok_or_else(||dimensions("condensed Newton leaf count"))?;
         let mut owner = Vec::new();
         owner.try_reserve_exact(n).map_err(|_| dimensions("condensed Newton index capacity"))?;
         owner.resize(n, usize::MAX);
+        let mut leaves = Vec::new();
         let mut leaf_lu = Vec::new();
-        leaf_lu.try_reserve_exact(pairs.len()).map_err(|_| dimensions("condensed leaf capacity"))?;
-        for (p, pair) in pairs.iter().enumerate() {
-            for &index in pair {
+        let count=pairs.len()+singletons.len(); // bounded by removed above
+        leaves.try_reserve_exact(count).map_err(|_| dimensions("condensed leaf capacity"))?;
+        leaf_lu.try_reserve_exact(count).map_err(|_| dimensions("condensed leaf capacity"))?;
+        let mut start=0;
+        for (indices,width) in pairs.iter().copied().map(|p|(p,2))
+            .chain(singletons.iter().map(|&i|([i,0],1))) {
+            for &index in &indices[..width] {
                 if index >= n || owner[index] != usize::MAX {
-                    return Err(dimensions("condensed Newton needs disjoint in-range pairs"));
+                    return Err(dimensions("condensed Newton needs disjoint in-range leaves"));
                 }
-                owner[index] = p;
+                owner[index] = leaves.len();
             }
-            leaf_lu.push(LuWorkspace::new(2).map_err(|_| dimensions("condensed leaf LU capacity"))?);
+            leaves.push(Leaf {indices,width,start});
+            start+=width;
+            leaf_lu.push(LuWorkspace::new(width).map_err(|_| dimensions("condensed leaf LU capacity"))?);
         }
-        let retained: Vec<_> = (0..n).filter(|&i| owner[i] == usize::MAX).collect();
+        let mut retained=Vec::new();
+        retained.try_reserve_exact(n-removed).map_err(|_|dimensions("condensed retained capacity"))?;
+        retained.extend((0..n).filter(|&i|owner[i]==usize::MAX));
         let k = retained.len().checked_add(1).ok_or_else(|| dimensions("condensed border extent"))?;
         let entries = k.checked_mul(k).ok_or_else(|| dimensions("condensed matrix extent"))?;
-        let response_size = k.checked_add(1).and_then(|v| v.checked_mul(2*pairs.len()))
+        let response_size = k.checked_add(1).and_then(|v| v.checked_mul(removed))
             .ok_or_else(|| dimensions("condensed responses extent"))?;
         Ok(Self {
-            n, pairs: pairs.to_vec(), retained, owner,
+            n, leaves, retained, owner,
             left: zeroed(n)?, right: zeroed(n)?, flow: zeroed(n)?, scaled_left: zeroed(n)?, scaled_right: zeroed(n)?,
             matrix: zeroed(entries)?,
             rhs: zeroed(k)?, solution: zeroed(k)?, responses: zeroed(response_size)?,
@@ -148,9 +172,9 @@ impl Condensation {
     where F: FnMut() -> Result<(), PreparedStepError> {
         let n=self.n; let k=self.dimension(); let last=k-1;
         // Exact sparsity: a subnormal off-block coefficient still needs full LU.
-        for pair in &self.pairs {
+        for leaf in &self.leaves {
             poll()?;
-            for &row in pair { for col in 0..n {
+            for &row in leaf.coordinates() { for col in 0..n {
                 if self.owner[col]!=usize::MAX && self.owner[col]!=self.owner[row]
                     && base[row*n+col]!=0.0 { return Ok(false); }
             }}
@@ -163,24 +187,32 @@ impl Condensation {
         self.matrix[last*k+last]=1.0;
         // Augment y=scaled_right^T*x. Keep D^-1 F, NOT a formed inverse. Reuse each
         // original pivoted factor for all border columns and every later RHS.
-        for (p,&[a,b]) in self.pairs.iter().enumerate() {
+        for (p,leaf) in self.leaves.iter().enumerate() {
             poll()?;
-            let d=[base[a*n+a],base[a*n+b],base[b*n+a],base[b*n+b]];
-            if self.leaf_lu[p].factor(&d).is_err() { return Ok(false); }
+            let mut d=[0.0;4];
+            for (i,&row) in leaf.coordinates().iter().enumerate() {
+                for (j,&col) in leaf.coordinates().iter().enumerate() {d[i*leaf.width+j]=base[row*n+col];}
+            }
+            if self.leaf_lu[p].factor(&d[..leaf.width*leaf.width]).is_err() { return Ok(false); }
             for j in 0..k {
-                let input=if j==last { [self.scaled_left[a],self.scaled_left[b]] }
-                    else { let col=self.retained[j]; [base[a*n+col],base[b*n+col]] };
+                let mut input=[0.0;2];
+                for (side,&row) in leaf.coordinates().iter().enumerate() {
+                    input[side]=if j==last {self.scaled_left[row]} else {base[row*n+self.retained[j]]};
+                }
                 let mut response=[0.0;2];
-                if self.leaf_lu[p].solve_factored_into(&input,&mut response).is_err() { return Ok(false); }
-                for side in 0..2 { self.responses[(2*p+side)*(k+1)+j]=response[side]; }
+                if self.leaf_lu[p].solve_factored_into(&input[..leaf.width],&mut response[..leaf.width]).is_err() { return Ok(false); }
+                for side in 0..leaf.width { self.responses[(leaf.start+side)*(k+1)+j]=response[side]; }
             }
             for i in 0..k {
-                let e=if i==last { [-self.scaled_right[a],-self.scaled_right[b]] }
-                    else { let row=self.retained[i]; [base[row*n+a],base[row*n+b]] };
+                let mut e=[0.0;2];
+                for (side,&col) in leaf.coordinates().iter().enumerate() {
+                    e[side]=if i==last {-self.scaled_right[col]} else {base[self.retained[i]*n+col]};
+                }
                 for j in 0..k {
                     let at=i*k+j;
-                    self.matrix[at]=(-e[0]).mul_add(self.responses[2*p*(k+1)+j],self.matrix[at]);
-                    self.matrix[at]=(-e[1]).mul_add(self.responses[(2*p+1)*(k+1)+j],self.matrix[at]);
+                    for side in 0..leaf.width {
+                        self.matrix[at]=(-e[side]).mul_add(self.responses[(leaf.start+side)*(k+1)+j],self.matrix[at]);
+                    }
                 }
             }
         }
@@ -217,16 +249,18 @@ impl Condensation {
         let n=self.n; let k=self.dimension(); let last=k-1;
         self.rhs.fill(0.0);
         for (i,&row) in self.retained.iter().enumerate() { self.rhs[i]=self.error[row]; }
-        for (p,&[a,b]) in self.pairs.iter().enumerate() {
+        for (p,leaf) in self.leaves.iter().enumerate() {
             poll()?;
+            let mut input=[0.0;2];
+            for (side,&row) in leaf.coordinates().iter().enumerate() {input[side]=self.error[row];}
             let mut response=[0.0;2];
-            if self.leaf_lu[p].solve_factored_into(&[self.error[a],self.error[b]],&mut response).is_err() { return Ok(false); }
-            for side in 0..2 { self.responses[(2*p+side)*(k+1)+k]=response[side]; }
+            if self.leaf_lu[p].solve_factored_into(&input[..leaf.width],&mut response[..leaf.width]).is_err() { return Ok(false); }
+            for side in 0..leaf.width { self.responses[(leaf.start+side)*(k+1)+k]=response[side]; }
             for i in 0..k {
-                let e=if i==last { [-self.scaled_right[a],-self.scaled_right[b]] }
-                    else { let row=self.retained[i]; [base[row*n+a],base[row*n+b]] };
-                self.rhs[i]=(-e[0]).mul_add(response[0],self.rhs[i]);
-                self.rhs[i]=(-e[1]).mul_add(response[1],self.rhs[i]);
+                for (side,&col) in leaf.coordinates().iter().enumerate() {
+                    let e=if i==last {-self.scaled_right[col]} else {base[self.retained[i]*n+col]};
+                    self.rhs[i]=(-e).mul_add(response[side],self.rhs[i]);
+                }
             }
         }
         for (b,scale) in self.rhs.iter_mut().zip(&self.row_scale) { *b/=scale; }
@@ -234,10 +268,10 @@ impl Condensation {
         if self.border_lu.solve_factored_into(&self.rhs,&mut self.solution).is_err() { return Ok(false); }
         for (x,scale) in self.solution.iter_mut().zip(&self.col_scale) { *x/=scale; }
         for (i,&row) in self.retained.iter().enumerate() { self.correction[row]=self.solution[i]; }
-        for (p,pair) in self.pairs.iter().enumerate() {
+        for leaf in &self.leaves {
             poll()?;
-            for (side,&row) in pair.iter().enumerate() {
-                let start=(2*p+side)*(k+1);
+            for (side,&row) in leaf.coordinates().iter().enumerate() {
+                let start=(leaf.start+side)*(k+1);
                 let mut value=self.responses[start+k];
                 for j in 0..k { value=(-self.responses[start+j]).mul_add(self.solution[j],value); }
                 self.correction[row]=value;
@@ -276,6 +310,35 @@ impl Condensation {
     }
 }
 
+impl super::StepWorkspace {
+    /// Eliminate independent scalar coordinates and/or state pairs in analytic Newton.
+    ///
+    /// This extends `set_condensed_pairs` without assuming coordinates are canonical
+    /// momenta, acoustic states, or material memory. Scalar leaves are useful for
+    /// separable kinetic energy: all nonlinear displacements and history remain
+    /// in the border. Pairs and scalars must be mutually disjoint. Their actual
+    /// off-block Jacobian entries must be EXACTLY zero on every Newton update.
+    /// In particular, coupled momentum/radiation variables cannot be declared
+    /// independent just because each set separately permits elimination.
+    ///
+    /// The complete Gonzalez correction remains a scalar border. Every original
+    /// state is recovered; unsuitable structure, singular leaf factors or failed
+    /// backward error use full LU of the same Jacobian. Finite-difference stepping
+    /// ignores this plan. Both slices empty disables it. Preparation allocates;
+    /// successful/refused stepping uses only prepared scratch. A failed replacement
+    /// retains the previous plan. This is not a real-time timing certificate.
+    pub fn set_condensed_leaves(&mut self, pairs: &[[usize; 2]], singletons: &[usize]) -> Result<(), PhsError> {
+        let next=if pairs.is_empty() && singletons.is_empty() {None}
+            else {Some(Condensation::with_singletons(self.n,pairs,singletons)?)};
+        self.flow.set_column_traversal(next.is_some())?;
+        self.condensation=next;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[path="condensed_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path="scalar_condensed_tests.rs"]
+mod scalar_tests;
