@@ -26,6 +26,8 @@ use fs_material::thermovisco::{Energy, ThermoMaxwell};
 pub mod contact;
 /// Solved unilateral support reactions on the same history-dependent beam.
 pub mod supports;
+/// Equal-and-opposite contact forces between deformable neighbouring roads.
+pub mod neighbours;
 
 /// Fixed transverse restraints; both allow free axial thermal contraction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

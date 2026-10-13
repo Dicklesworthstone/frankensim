@@ -136,24 +136,8 @@ impl<'a> Bridge<'a> {
             }
         }
         let ordered: Vec<_> = ordered.into_values().collect();
-        let load = self.load_field(gravity_m_s2, additional_downward_n_m, &[], cancelled)?;
-        let mut free_curvature = Vec::with_capacity(n);
-        let mut roots = Vec::with_capacity(n);
-        for (cell, &moment) in self.cells.iter().zip(&load.moments) {
-            poll(cancelled)?;
-            let mut t = BTreeMap::new();
-            for &layer in cell.section.layers().keys() {
-                let value = *temperatures_k.get(&(cell.id, layer)).ok_or(Error::Invalid("missing layer temperature"))?;
-                t.insert(layer, value);
-            }
-            let response = cell.section.bending_response(target_s, &t,
-                || if cancelled() { Err(crate::deposition::Error::Cancelled) } else { Ok(()) })
-                .map_err(|error| super::Error::Section { cell: cell.id, error })?;
-            free_curvature.push(finite(response.zero_moment_curvature_per_m + response.compliance_per_n_m2*moment)?);
-            let root = finite(fs_math::det::sqrt(response.compliance_per_n_m2/cell.length_m()))?;
-            positive(root)?;
-            roots.push(root);
-        }
+        let Prediction { free_curvature, roots } = predict(self, target_s, temperatures_k,
+            gravity_m_s2, additional_downward_n_m, cancelled)?;
         let mut factor = Vec::with_capacity(p);
         let mut free_gaps = Vec::with_capacity(p);
         for stop in &ordered {
@@ -202,13 +186,51 @@ impl<'a> Bridge<'a> {
 // Exact integral of a cell's constant curvature, satisfying the built-in
 // support conditions. Units m2. This is the adjoint of the point-force moment
 // transfer, not a fitted Green function or finite-difference beam probe.
-fn curvature_basis(support: Support, length: f64, start: f64, h: f64, x: f64) -> f64 {
+pub(super) fn curvature_basis(support: Support, length: f64, start: f64, h: f64, x: f64) -> f64 {
     let s = (x-start).max(0.0);
     let primitive = if s < h { 0.5*s*s } else { h*(s-0.5*h) };
     match support {
         Support::CantileverLeft => primitive,
         Support::SimplySupported => primitive-x*h*((length-start-0.5*h)/length),
     }
+}
+
+// Shared by rigid-stop and deformable-neighbour contact. This is the SAME
+// implicit section response, not a second beam or constitutive approximation.
+pub(super) struct Prediction {
+    pub free_curvature: Vec<f64>,
+    pub roots: Vec<f64>,
+}
+pub(super) fn predict(beam: &Bridge<'_>, target_s: f64,
+    temperatures_k: &BTreeMap<(u64, u64), f64>, gravity_m_s2: f64,
+    additional_downward_n_m: &[f64], cancelled: &mut impl FnMut() -> bool,
+) -> Result<Prediction, super::Error> {
+    positive(finite(target_s-beam.time_s)?)?;
+    let n = beam.cells.len();
+    let layers = beam.cells[0].section.layers().len();
+    if layers == 0 || Some(temperatures_k.len()) != n.checked_mul(layers) {
+        return Err(super::Error::Invalid("born span and complete endpoint temperatures required"));
+    }
+    let load = beam.load_field(gravity_m_s2, additional_downward_n_m, &[], cancelled)?;
+    let mut free_curvature = Vec::with_capacity(n);
+    let mut roots = Vec::with_capacity(n);
+    for (cell, &moment) in beam.cells.iter().zip(&load.moments) {
+        poll(cancelled)?;
+        let mut t = BTreeMap::new();
+        for &layer in cell.section.layers().keys() {
+            let value = *temperatures_k.get(&(cell.id, layer))
+                .ok_or(super::Error::Invalid("missing layer temperature"))?;
+            t.insert(layer, value);
+        }
+        let response = cell.section.bending_response(target_s, &t,
+            || if cancelled() { Err(crate::deposition::Error::Cancelled) } else { Ok(()) })
+            .map_err(|error| super::Error::Section { cell: cell.id, error })?;
+        free_curvature.push(finite(response.zero_moment_curvature_per_m + response.compliance_per_n_m2*moment)?);
+        let root = finite(fs_math::det::sqrt(response.compliance_per_n_m2/cell.length_m()))?;
+        positive(root)?;
+        roots.push(root);
+    }
+    Ok(Prediction { free_curvature, roots })
 }
 
 #[cfg(test)]
