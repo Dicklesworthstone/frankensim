@@ -17,6 +17,9 @@ use crate::vibroacoustic::{AcousticMedium, CavityModes};
 use fs_exec::CancelGate;
 use core::f64::consts::{PI, TAU};
 
+/// Actual film end-cap pressure work, with explicit structural addresses.
+pub mod end_disk;
+
 /// One physical profile station. Straight segments between stations are the
 /// actual supplied geometry, not samples silently fitted to a hemisphere.
 #[derive(Clone, Copy, Debug, PartialEq)]
