@@ -118,7 +118,11 @@ fn supplied_snare_off_audio_construction_preserves_head_projections_and_appends_
 fn unsupported_stretching_or_vented_snare_audio_is_not_silently_downgraded() {
     let wires = Some(SnareSet::reference(false)); let stroke = Stroke::default();
     assert!(crate::drum_with_air(1, 2e-6, false, true, wires, true, stroke, true, None).is_err());
-    assert!(crate::drum_with_air(1, 2e-6, false, false, wires, false, stroke, true, None).is_err());
+    // The joint owner now admits linear heads and wires too; selecting it must
+    // not require changing the actual head constitutive law to stretching.
+    let joint=crate::drum_with_air(1, 2e-6, false, false, wires, false, stroke, true, None).unwrap();
+    assert!(matches!(&joint.system,Mechanics::Reference(_)));
+    assert!(joint.system.membrane_observation(1).is_none());
     let neck = NeckOptions { exterior_load:false, radius_m: 0.005, effective_length_m: 0.012,
         resistance_pa_s_m3: 1000.0, azimuth_rad: 0.4, axial_position_m: 0.08 };
     for command in ["drum-modal-wav", "snare-off-mic", "snare-wav", "snare-mic"] {

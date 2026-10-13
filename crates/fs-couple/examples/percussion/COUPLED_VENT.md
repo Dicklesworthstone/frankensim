@@ -32,10 +32,47 @@ From the workspace root, this selects both stretching heads and a bounded
 ```
 
 The run still has to pass its native modal, contact, BEM resolution, multiport
-passivity and independent fit-audit gates. This command and the new integration regressions have not been
-executed in the editing environment, which lacks Cargo/Rust. A declared band is
-not a convergence result; failed fitting does not switch to prescribed flow or
-invent a replacement impedance.
+passivity and independent fit-audit gates. Native run 38391471556 passed the
+cavity/neck mechanics but refused the collocated head-mouth power matrix; it did
+not validate coupled-vent audio. The variational source image below targets that
+failure without loosening the power check. The native reciprocal-core test step
+passed on commit `0c8af3ac`; this playback integration still needs its own native
+result. A declared band is not a convergence result; failed fitting does not
+switch to prescribed flow or invent a replacement impedance.
+
+## Reciprocal source discretization
+
+Coupled vents now use `fs_bem::reciprocal_radiation`: continuous linear pressure
+on the retained triangle vertices and constant auxiliary single-layer density
+on each panel. The mixed symmetric Galerkin operator uses weak surface curls,
+analytic static triangle moments and regular Helmholtz quadrature. Its outgoing
+part is integrated with positive antipodal plane-wave quadrature. Reciprocity
+and discrete outgoing-flux balance come from this operator, not a symmetrized
+impedance, clipped power eigenvalues or added damping.
+
+Both source work and receiver pressure use that same P1/P0 solution. Panel mean
+pressure is valid for work against the prescribed constant normal velocity; it
+is **not** passed to a different constant-pressure field representation. The
+auxiliary density is not labelled as physical mouth velocity. Every source also
+checks the mixed solve residual and surface work against outgoing sound flux.
+The existing full Hermitian multiport check and all load/observer fit audits are
+unchanged. Unvented feedback and prescribed-flow one-way rendering retain their
+existing collocation image.
+
+This first variational image admits a band below the enclosing slab's interior
+Dirichlet bound; it does not replace Burton-Miller at resonant frequencies. The
+example caps pressure-plus-density unknowns at 4096 and retained geometry at
+256 MiB, and charges the whole frequency sweep against `max_dense_work`. Angular
+refinement 0..2 is selected from the declared band and boundary extent, never
+from the sign of a failed power eigenvalue. Mesh and angular convergence remain
+required. Independent Python sphere checks reduced impedance error from
+8.3..10.7% on 20 panels to 2.3..3.0% on 80; those are equation checks, not native
+drum validation or error bounds for an arbitrary instrument.
+
+Finite-point and far-field receivers are supported. Adaptive/directional
+`--microphone-spec` receivers on this coupled-vent image explicitly refuse until
+their P1/P0 derivative/integration path is implemented; no old P0 observer is
+silently substituted. Their unvented and one-way paths remain available.
 
 ## One physical source map and one playing clock
 
@@ -83,8 +120,9 @@ checked against the requested acoustic upper frequency, not only the cavity
 basis or the default observer window.
 
 The current mouth must lie inside one fixed planar sidewall strip. Moving
-apertures and elastic barrels with necks remain refused. The boundary, modal,
-source-count, fit-order, pole, time-step and work limits are unchanged. Turbulent
+apertures and elastic barrels with necks remain refused. The modal, source-count,
+fit-order, pole and time-step limits are unchanged; the variational preparation
+has the additional explicit bounds above. Turbulent
 jets, finite-amplitude exterior flow, measured material/neck identification,
 full-band convergence and real-time qualification remain outside this increment.
 
@@ -93,6 +131,7 @@ full-band convergence and real-time qualification remain outside this increment.
 ```sh
 cargo test --release -p fs-couple --example percussion coupled_selection -- --test-threads=1
 cargo test --release -p fs-couple --example percussion feedback:: -- --test-threads=1
+cargo test --release -p fs-bem --lib reciprocal_radiation
 ```
 
 The new checks cover explicit declaration/admission, omitted and duplicate mouth
@@ -101,4 +140,4 @@ two-stick stretching-head/snare/cavity/neck composition, work-conjugate exterior
 pressure, total energy and refusal/retry. Two checks additionally execute actual
 BEM projection and loaded stereo PCM preparation. The declared passive-load
 fixture isolates mechanical coupling; it is not evidence that the separate BEM
-fit succeeds. Native execution of all these checks is still required.
+fit succeeds. The new playback integration still requires native execution.

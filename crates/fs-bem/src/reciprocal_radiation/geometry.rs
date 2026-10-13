@@ -26,11 +26,13 @@ pub(super) struct Facet {
     pub gradient: [Point;3], pub curl: [Point;3], pub samples: [Sample;16],
 }
 impl Facet {
-    fn new(triangle: [Point;3], ids: [usize;3]) -> Result<Self,HelmholtzError> {
-        let raw=cross(sub(triangle[1],triangle[0]),sub(triangle[2],triangle[0]));
-        let size=norm(raw); let area=0.5*size;
-        if !area.is_finite() || area<=0.0 { return Err(bad("degenerate reciprocal boundary facet")); }
-        let normal=raw.map(|v|v/size);
+    fn new(triangle: [Point;3], ids: [usize;3], area:f64, normal:Point) -> Result<Self,HelmholtzError> {
+        // Preserve the geometry owner's exact area/normal bytes: the caller's
+        // work projection uses these same areas, not a separately rounded norm.
+        let size=2.0*area;
+        if !size.is_finite() || area<=0.0 || normal.iter().any(|v|!v.is_finite()) {
+            return Err(bad("degenerate reciprocal boundary facet"));
+        }
         let gradient=core::array::from_fn(|i|cross(normal,
             sub(triangle[(i+2)%3],triangle[(i+1)%3])).map(|v|v/size));
         let curl=gradient.map(|g|cross(normal,g));
@@ -50,7 +52,7 @@ pub(super) fn facets(surface:&SpherePanels) -> Result<(Vec<Facet>,usize,Point,f6
     let mut edges=BTreeMap::<(usize,usize),Vec<(usize,usize)>>::new();
     let mut lower=[f64::INFINITY;3]; let mut upper=[f64::NEG_INFINITY;3];
     let mut out=Vec::with_capacity(triangles.len());
-    for &triangle in triangles {
+    for (index,&triangle) in triangles.iter().enumerate() {
         if triangle.iter().flatten().any(|v|!v.is_finite() || v.abs()>1e9) {return Err(bad("nonfinite reciprocal boundary"));}
         let ids=triangle.map(|p| {
             for d in 0..3 {lower[d]=lower[d].min(p[d]);upper[d]=upper[d].max(p[d]);}
@@ -58,7 +60,7 @@ pub(super) fn facets(surface:&SpherePanels) -> Result<(Vec<Facet>,usize,Point,f6
             *nodes.entry(key).or_insert(next)
         });
         for a in 0..3 {let i=ids[a];let j=ids[(a+1)%3];edges.entry((i.min(j),i.max(j))).or_default().push((i,j));}
-        out.push(Facet::new(triangle,ids)?);
+        out.push(Facet::new(triangle,ids,surface.areas()[index],surface.normals()[index])?);
     }
     if out.len()<4 || edges.values().any(|e|e.len()!=2 || e[0]!=(e[1].1,e[1].0)) {
         return Err(bad("reciprocal radiation requires an oriented closed conforming surface"));

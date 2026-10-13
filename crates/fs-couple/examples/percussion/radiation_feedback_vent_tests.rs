@@ -140,11 +140,16 @@ fn mouth_bem_pressure_transposes_into_the_same_head_and_neck_work_coordinates() 
     let omega=core::f64::consts::TAU*250.;let medium=Medium::air();
     let fields=acceleration_fields(&boundary.weights,omega);
     let refs:Vec<_>=fields.iter().map(Vec::as_slice).collect();
-    let solutions=solve_radiation_batch(&surface,omega/medium.sound_speed,medium,
-        &refs,Formulation::PlainCbie).unwrap();
-    let z=project(&surface,&boundary.weights,&solutions,omega).unwrap();
+    let geometry=reciprocal_geometry(&surface,omega/medium.sound_speed,band(),refs.len(),1,
+        &CancelGate::new_clock_free()).unwrap();
+    let solutions=geometry.solve_batch(omega/medium.sound_speed,medium,&refs,||false).unwrap();
+    let traces:Vec<&[C64]>=solutions.iter().map(|s|s.pressure.as_slice()).collect();
+    let z=project_pressures(&surface,&boundary.weights,&traces,omega).unwrap();
     let n=boundary.weights.len();let mut cross_reaction=false;
+    let scale=z.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
+    for i in 0..n {for j in 0..n {assert!((z[i*n+j]-z[j*n+i]).abs()<1e-9*scale);}}
     for (source,solution) in solutions.iter().enumerate() {
+        assert!(solution.flux_balance<1e-8);
         let mouth_pressure=solution.pressure.iter().zip(row).zip(surface.areas())
             .fold(C64::ZERO,|sum,((p,b),a)|sum+p.scale(b*a/volume_weight))
             *C64::new(0.,-omega);

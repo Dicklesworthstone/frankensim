@@ -51,16 +51,24 @@ fn admit_power(z:&[C64],n:usize)->Result<(),Error> {
 /// A real shape row is used once to drive velocity and once to transpose work.
 pub(super) fn project(surface:&SpherePanels,rows:&[Vec<f64>],solutions:&[RadiationSolution],omega:f64)
     ->Result<Vec<C64>,Error> {
+    let traces:Vec<&[C64]>=solutions.iter().map(|s|s.pressure.as_slice()).collect();
+    project_pressures(surface,rows,&traces,omega)
+}
+// Both acoustic images return panel mean pressure for work against the same
+// P0 velocity rows. Only the work projection is shared; their field observers
+// must retain their own basis. The full Hermitian admission is unchanged.
+pub(super) fn project_pressures(surface:&SpherePanels,rows:&[Vec<f64>],pressures:&[&[C64]],omega:f64)
+    ->Result<Vec<C64>,Error> {
     let n=rows.len();let panels=surface.areas().len();
-    if !(1..=32).contains(&n) || solutions.len()!=n || !omega.is_finite() || omega<=0.
+    if !(1..=32).contains(&n) || pressures.len()!=n || !omega.is_finite() || omega<=0.
         || rows.iter().any(|b|b.len()!=panels||b.iter().any(|x|!x.is_finite()))
-        || solutions.iter().any(|s|s.pressure.len()!=panels) {
+        || pressures.iter().any(|p|p.len()!=panels) {
         return Err("radiation load projection lost its full physical boundary basis".into());
     }
     let mut z=vec![C64::ZERO;n*n];
-    for (j,solution) in solutions.iter().enumerate() {for (i,row) in rows.iter().enumerate() {
+    for (j,pressure) in pressures.iter().enumerate() {for (i,row) in rows.iter().enumerate() {
         let mut force=C64::ZERO;
-        for ((p,area),b) in solution.pressure.iter().zip(surface.areas()).zip(row) {force=force+p.scale(area*b);}
+        for ((p,area),b) in pressure.iter().zip(surface.areas()).zip(row) {force=force+p.scale(area*b);}
         z[i*n+j]=force*C64::new(0.,-omega);
     }}
     admit_power(&z,n)?;Ok(z)
@@ -109,7 +117,8 @@ pub(crate) fn prepare(e:Experiment,frames:usize,scale:f64,receivers:&[Receiver],
     spec.admit_necks(&e)?;
     let boundary=e.acoustics.as_ref().ok_or("missing feedback boundary")?;
     let sources=boundary.state_modes.clone();
-    let (baked,model)=bake_scene_with_spec(boundary,receivers,spec,gate,true)?;
+    let reciprocal=e.air.as_ref().is_some_and(|a|a.coupling.neck_count()>0);
+    let (baked,model)=bake_scene_image(boundary,receivers,spec,gate,true,reciprocal)?;
     if gate.is_requested() {return Err("radiation feedback cancelled before attachment".into());}
     let model=model.ok_or("missing admitted feedback model")?;
     let e=attach_model(e,&model,&sources)?;

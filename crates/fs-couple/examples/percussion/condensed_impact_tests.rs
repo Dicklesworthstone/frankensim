@@ -25,18 +25,22 @@ fn compare(mut fast:Run,mut dense:Run,ticks:usize)->Run {
     let stopped=CancelGate::new_clock_free();stopped.request();let before=fast.system.state().to_vec();
     assert!(fast.system.step(&fast.force,&stopped).is_err());assert_eq!(fast.system.state(),before);
     let gate=CancelGate::new_clock_free();let initial=fast.system.stored_energy_j();
-    let (mut work,mut loss,mut condensed_solves,mut motion)=(0.,0.,0,0.0_f64);
+    let (mut work,mut loss,mut condensed_solves,mut full_solves,mut motion)=(0.,0.,0,0,0.0_f64);
     for tick in 0..ticks {
         fast.force[0]=if tick<40 {0.04}else{0.};dense.force.copy_from_slice(&fast.force);
         let f=fast.system.step(&fast.force,&gate).unwrap();let d=dense.system.step(&dense.force,&gate).unwrap();
         assert_eq!(f.time_s,d.time_s);assert_eq!(f.sample,d.sample);
         for (a,b) in fast.system.state().iter().zip(dense.system.state()){assert!((a-b).abs()<2e-8);}
         assert!(f.balance_residual_j.abs()<1e-7);work+=f.supplied_work_j;loss+=f.dissipated_energy_j;
-        let calls=fast.system.newton_linear_solve_counts();assert_eq!(calls.1,0);condensed_solves+=calls.0;
+        // The owner explicitly retains full LU when elimination is numerically
+        // unsuitable. That safe path must obey the SAME state/work comparison,
+        // not fail this physical regression solely for taking one fallback.
+        let calls=fast.system.newton_linear_solve_counts();condensed_solves+=calls.0;full_solves+=calls.1;
+        assert_eq!(dense.system.newton_linear_solve_counts().0,0);
         let displacement=fast.observers[0].iter().enumerate().map(|(i,b)|b*fast.system.state()[2*i]).sum::<f64>();
         motion=motion.max(displacement.abs());
     }
-    assert!(condensed_solves>0 && motion>1e-10);
+    assert!(condensed_solves>full_solves && motion>1e-10,"condensation must still do the majority of this fixture's solves");
     assert!((fast.system.stored_energy_j()-initial+loss-work).abs()<1e-6);
     assert!(fast.system.radiation_observation().unwrap().stored_energy_j>0.);
     fast

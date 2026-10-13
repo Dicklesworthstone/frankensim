@@ -78,7 +78,40 @@ fn band_formulation(surface:&SpherePanels,k_max:f64)->Formulation {
 // complete force/velocity matrix. One-way callers never construct a load.
 fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
     gate:&CancelGate,load:bool)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
+    bake_scene_image(boundary,receivers,spec,gate,load,false)
+}
+
+// Preparation is shared with the collocation image, but a reciprocal source
+// must keep its own P1/P0 pressure representation all the way to each receiver.
+// Never manufacture a P0 RadiationSolution from its area-mean work traces.
+fn reciprocal_geometry<'a>(surface:&'a SpherePanels,k_max:f64,spec:radiation_spec::Spec,
+    sources:usize,samples:usize,gate:&CancelGate)->Result<fs_bem::reciprocal_radiation::Prepared<'a>,Error> {
+    if samples==0 {return Err("reciprocal radiation needs a nonempty frequency grid".into());}
+    let triangles=surface.triangles().ok_or("reciprocal radiation needs actual triangles")?;
+    let mut low=[f64::INFINITY;3];let mut high=[f64::NEG_INFINITY;3];
+    for p in triangles.iter().flatten() {for d in 0..3 {low[d]=low[d].min(p[d]);high[d]=high[d].max(p[d]);}}
+    let width:[f64;3]=core::array::from_fn(|i|(high[i]-low[i]).next_up());
+    let diameter=width[0].hypot(width[1]).hypot(width[2]);
+    let angular_refinement=(0..=2_u32).find(|r|k_max*diameter<=4.0*f64::from(1_u32<<*r))
+        .ok_or("reciprocal acoustic band exceeds the angular quadrature budget")?;
+    let per_frequency=spec.max_dense_work/(samples as u64);
+    let geometry=fs_bem::reciprocal_radiation::Prepared::new(surface,k_max,
+        fs_bem::reciprocal_radiation::Budget {maximum_unknowns:4096,
+            maximum_cache_bytes:256*1024*1024,maximum_work:per_frequency,angular_refinement},
+        ||gate.is_requested())?;
+    let work=geometry.frequency_work(sources)?;
+    if work>per_frequency {return Err("reciprocal radiation sweep exceeds the declared work budget".into());}
+    eprintln!("reciprocal P1/P0 radiation: unknowns={}, cache_bytes={}, angular_refinement={angular_refinement}, sweep_work_units={}; variational source and observation, no impedance repair",
+        geometry.unknowns(),geometry.cache_bytes(),work*samples as u64);
+    Ok(geometry)
+}
+
+fn bake_scene_image(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
+    gate:&CancelGate,load:bool,reciprocal:bool)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
     if gate.is_requested() {return Err("radiation preparation cancelled".into());}
+    if reciprocal && (!load || receivers.iter().any(|r|matches!(r,Receiver::NearField(_)))) {
+        return Err("coupled vent Galerkin playback needs a load and finite/far pressure receivers; adaptive/directional P1 observers are not implemented".into());
+    }
     if load {feedback::admit_boundary(boundary,spec)?;}
     let count=boundary.weights.len();let panels=boundary.triangles.len();
     let (prepared_panels,work)=spec.work(panels,count,receivers.len())?;
@@ -115,7 +148,7 @@ fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_
     // panel budget also bounds this extra storage (16 * max_panels^2 bytes).
     // Preflight the highest frequency before allocating/integrating that table;
     // each frequency retains its own dynamic quadrature, matrix and shared LU.
-    let geometry=if formulation==Formulation::PlainCbie {
+    let geometry=if !reciprocal && formulation==Formulation::PlainCbie {
         let bytes=spec.max_panels.checked_mul(spec.max_panels)
             .and_then(|n|n.checked_mul(core::mem::size_of::<(f64,f64)>()))
             .ok_or("radiation static-geometry cache budget overflow")?;
@@ -124,15 +157,39 @@ fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_
         eprintln!("radiation static geometry: cache_bytes={}, byte_budget={bytes}; reused across all {} frequency operators",prepared.cache_bytes(),omega.len());
         Some(prepared)
     }else{None};
+    let reciprocal=if reciprocal {Some(reciprocal_geometry(&surface,
+        omega[omega.len()-1]/medium.sound_speed,spec,count,omega.len(),gate)?)}else{None};
+    let mut maximum_backward_residual=0.0_f64;let mut maximum_flux_defect=0.0_f64;
     // Solve the highest frequency first: the BEM owner's wavelength guard can
     // reject an underresolved band before spending work on its lower samples.
     for index in (0..omega.len()).rev() {
         if gate.is_requested() {return Err("radiation preparation cancelled".into());}
         let w=omega[index];let k=w/medium.sound_speed;
-        // Independent bounded receiver quadrature, prepared ONCE per frequency.
-        let observation=observations.prepare(k,gate)?;
         let fields=acceleration_fields(&refined.weights,w);
         let field_refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
+        if let Some(geometry)=&reciprocal {
+            let solutions=geometry.solve_batch(k,medium,&field_refs,||gate.is_requested())?;
+            for (input,solution) in solutions.iter().enumerate() {
+                ppw=ppw.min(solution.panels_per_wavelength);
+                maximum_backward_residual=maximum_backward_residual.max(solution.backward_residual);
+                maximum_flux_defect=maximum_flux_defect.max(solution.flux_balance);
+                for (channel,&receiver) in receivers.iter().enumerate() {
+                    if gate.is_requested() {return Err("reciprocal observation cancelled".into());}
+                    values[channel][input][index]=match receiver {
+                        Receiver::FarField(position)=>shift_to_enclosing_sphere(
+                            solution.far_field(position)?,w,radius/medium.sound_speed),
+                        Receiver::FinitePoint(position)=>shift_to_enclosing_sphere(
+                            solution.pressure_at(position)?,w,-observations.delay(channel)),
+                        Receiver::NearField(_)=>unreachable!("admitted before source work"),
+                    };
+                }
+            }
+            let traces:Vec<&[C64]>=solutions.iter().map(|s|s.pressure.as_slice()).collect();
+            impedances[index]=feedback::project_pressures(&surface,&refined.weights,&traces,w)?;
+            continue;
+        }
+        // Independent bounded receiver quadrature, prepared ONCE per frequency.
+        let observation=observations.prepare(k,gate)?;
         // Geometry, factorization and all source-mode solves are independent of
         // the observation point. Do not repeat them per microphone.
         let solutions=if let Some(prepared)=&geometry {
@@ -172,8 +229,11 @@ fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_
                 report.order,report.attempts,report.selection_maximum,report.selection_rms,report.audit_maximum,report.audit_rms);
             bake.filters.push(filter);
         }
-        eprintln!("receiver {channel} BEM bake: panels={prepared_panels}, inputs={count}, band_hz={:?}, training={}, order_selection={}, independent_audit={}, min_panels_per_wavelength={ppw}, condition_lower_bound_max={condition}, max_error={maximum}, worst_input_rms={rms}",
+        eprintln!("receiver {channel} BEM bake: panels={prepared_panels}, inputs={count}, band_hz={:?}, training={}, order_selection={}, independent_audit={}, min_panels_per_wavelength={ppw}, max_error={maximum}, worst_input_rms={rms}",
             spec.band_hz,spec.training_intervals+1,spec.training_intervals,2*spec.training_intervals);
+        if reciprocal.is_some() {
+            eprintln!("reciprocal source diagnostics: maximum_backward_residual={maximum_backward_residual}, maximum_flux_defect={maximum_flux_defect}; no condition-number bound claimed");
+        }else{eprintln!("collocation condition_lower_bound_max={condition}");}
         eprintln!("receiver={:?}; independent causal filters from shared source solves; linear undeformed acoustics, passive_feedback={load}; propagation_delay_s={}, pressure_gain={}",
             receivers[channel],bake.propagation_delay_s,bake.pressure_gain);
     }
