@@ -1,6 +1,7 @@
 //! Minimum dilated material subject to ALL declared eroded compliance caps.
 //! The smooth maximum is a conservative numerical surrogate, not an average.
 pub mod start;
+pub mod refinement;
 use super::{EnvelopeEvaluation3, EnvelopeGradientCheck3, LoadEnvelope3,
     RobustOptions3, controlled_envelope_gradient_check};
 use super::optimize::EnvelopeDesignPoint3;
