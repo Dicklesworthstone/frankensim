@@ -37,6 +37,8 @@ pub mod radiation;
 pub mod linear;
 /// Statically relaxed geometric stretching of prestressed films.
 pub mod membrane;
+/// Force-driven uniform edge strain, coupled to the original nonlinear head.
+pub mod dilation;
 /// Geometric tension modulation of fixed-end filaments, using fs-nlmodal.
 pub mod string;
 /// Finite-mass translating supports with reciprocal string inertia and motion.
@@ -58,6 +60,8 @@ pub enum BodyPotential {
     Shell(ShellReduction),
     /// Geometry-owned planar-film stretching, not an authored pitch bend.
     Membrane(membrane::MembranePotential),
+    /// Original nonlinear film with an additional finite-inertia radial edge.
+    Dilation(dilation::DilationPotential),
     /// Fixed-end Kirchhoff--Carrier filament with its original EI and modal basis.
     String(string::StringPotential),
     /// Wires carried by one moving support, with exact kinetic cross terms.
@@ -67,13 +71,13 @@ pub enum BodyPotential {
     Linear(Vec<f64>),
 }
 impl BodyPotential {
-    fn count(&self)->usize {match self {Self::Shell(s)=>s.mode_count(),Self::Membrane(s)=>s.reduction().mode_count(),Self::String(s)=>s.mode_count(),Self::SupportedStrings(s)=>s.mode_count(),Self::Linear(w)=>w.len()}}
-    fn omegas(&self)->&[f64] {match self {Self::Shell(s)=>s.omegas(),Self::Membrane(s)=>s.reduction().omegas(),Self::String(s)=>s.omegas(),Self::SupportedStrings(s)=>s.clock_bounds(),Self::Linear(w)=>w}}
+    fn count(&self)->usize {match self {Self::Shell(s)=>s.mode_count(),Self::Membrane(s)=>s.reduction().mode_count(),Self::Dilation(s)=>s.reduction().mode_count(),Self::String(s)=>s.mode_count(),Self::SupportedStrings(s)=>s.mode_count(),Self::Linear(w)=>w.len()}}
+    fn omegas(&self)->&[f64] {match self {Self::Shell(s)=>s.omegas(),Self::Membrane(s)=>s.reduction().omegas(),Self::Dilation(s)=>s.clock_bounds(),Self::String(s)=>s.omegas(),Self::SupportedStrings(s)=>s.clock_bounds(),Self::Linear(w)=>w}}
     fn potential(&self,q:&[f64])->f64 {match self {
-        Self::Shell(s)=>s.potential(q),Self::Membrane(s)=>s.reduction().potential(q),Self::String(s)=>s.potential(q),Self::SupportedStrings(s)=>s.potential(q),Self::Linear(w)=>w.iter().zip(q).map(|(w,q)|0.5*(w*q).powi(2)).sum(),
+        Self::Shell(s)=>s.potential(q),Self::Membrane(s)=>s.reduction().potential(q),Self::Dilation(s)=>s.reduction().potential(q),Self::String(s)=>s.potential(q),Self::SupportedStrings(s)=>s.potential(q),Self::Linear(w)=>w.iter().zip(q).map(|(w,q)|0.5*(w*q).powi(2)).sum(),
     }}
     fn gradient(&self,q:&[f64],g:&mut[f64]) {match self {
-        Self::Shell(s)=>s.gradient(q,g),Self::Membrane(s)=>s.reduction().gradient(q,g),Self::String(s)=>s.gradient(q,g),Self::SupportedStrings(s)=>s.gradient(q,g),Self::Linear(w)=>{for ((g,w),q) in g.iter_mut().zip(w).zip(q) {*g=w*w*q;}}
+        Self::Shell(s)=>s.gradient(q,g),Self::Membrane(s)=>s.reduction().gradient(q,g),Self::Dilation(s)=>s.reduction().gradient(q,g),Self::String(s)=>s.gradient(q,g),Self::SupportedStrings(s)=>s.gradient(q,g),Self::Linear(w)=>{for ((g,w),q) in g.iter_mut().zip(w).zip(q) {*g=w*w*q;}}
     }}
 }
 /// One body in the concatenated mechanical basis.
@@ -366,6 +370,20 @@ impl ImpactSystem {
         let (_,offset,support)=self.supports.iter().find(|(index,_,_)|*index==body)?;
         support.observe_interleaved(&self.x,*offset).ok()
     }
+    /// Physical radial force address and canonical weight for an actuated film.
+    /// Head, contact and acoustic source indices retain their original prefix.
+    pub fn dilation_force_port(&self,body:usize)->Option<(usize,f64)> {
+        let BodyPotential::Dilation(film)=self.mechanical.bodies.get(body)? else {return None;};
+        let offset=self.mechanical.bodies[..body].iter().map(BodyPotential::count).sum::<usize>();
+        Some((offset+film.reduction().rim_coordinate(),film.reduction().force_weight()))
+    }
+    /// Uniform edge motion/tension of one original body, without advancing time.
+    pub fn dilation_observation(&self,body:usize)->Option<dilation::DilationObservation> {
+        let BodyPotential::Dilation(film)=self.mechanical.bodies.get(body)? else {return None;};
+        let offset=self.mechanical.bodies[..body].iter().map(BodyPotential::count).sum::<usize>();
+        let n=film.reduction().mode_count();let mut q=[0.0;MAX_IMPACT_MODES];
+        for i in 0..n {q[i]=self.x[2*(offset+i)];}film.observe(&q[..n]).ok()
+    }
     /// Copy one accepted material history, not a new fitted material.
     #[must_use]
     pub fn felt_history(&self,pad:usize)->Option<WoolFeltState> {self.histories.borrow().get(pad).cloned()}
@@ -421,6 +439,10 @@ impl MechanicalStorage {
             if let BodyPotential::Shell(shell)=body {
                 for (i,value) in q[..n].iter_mut().enumerate() {*value=state[2*(offset+i)];}
                 shell.rigid_rotation(&q[..n]).map_err(|e|ImpactError::Owner(e.to_string()))?;
+            }
+            if let BodyPotential::Dilation(film)=body {
+                for (i,value) in q[..n].iter_mut().enumerate() {*value=state[2*(offset+i)];}
+                film.observe(&q[..n])?;
             }
             offset+=n;
         }

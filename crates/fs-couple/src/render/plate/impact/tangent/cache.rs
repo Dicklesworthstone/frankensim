@@ -25,7 +25,7 @@ impl BodyTangents {
     pub(in crate::render::plate::impact) fn new(owner:Rc<MechanicalStorage>)->Self {
         let mut maximum=0usize;
         let entries=owner.bodies.iter().map(|body| {
-            if matches!(body,BodyPotential::Shell(_)|BodyPotential::Membrane(_)) {
+            if matches!(body,BodyPotential::Shell(_)|BodyPotential::Membrane(_)|BodyPotential::Dilation(_)) {
                 let n=body.count();maximum=maximum.max(n);
                 Some(BodyMatrix {point:vec![0.0;n],matrix:vec![0.0;n*n],valid:false})
             }else{None}
@@ -57,6 +57,7 @@ impl BodyTangents {
             match body {
                 BodyPotential::Shell(s)=>s.hessian_matrix(q,&mut entry.matrix,&mut self.scratch[..n]),
                 BodyPotential::Membrane(s)=>s.reduction().hessian_matrix(q,&mut entry.matrix,&mut self.scratch[..n]),
+                BodyPotential::Dilation(s)=>s.reduction().hessian_matrix(q,&mut entry.matrix,&mut self.scratch[..n]),
                 _=>return false, // Layout and owner are immutable after preparation.
             }
             if entry.matrix.iter().any(|v|!v.is_finite()) {return false;}
