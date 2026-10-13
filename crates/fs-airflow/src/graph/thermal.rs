@@ -18,6 +18,7 @@
 
 pub mod transport;
 pub mod coupled_transport;
+pub mod medium;
 
 use std::collections::BTreeSet;
 

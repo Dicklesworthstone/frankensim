@@ -26,6 +26,8 @@ fs-ivl = { path = "../fs-ivl" }
 # transfer that replaces the Refine1d demonstrator.
 fs-ladder = { path = "../fs-ladder" }
 fs-math = { path = "../fs-math" }
+# One resolved medium supplies hydraulics, convection and transported heat.
+fs-material = { path = "../fs-material" }
 fs-qty = { path = "../fs-qty" }
 fs-regime = { path = "../fs-regime" }
 # Reuse checked matrix-free CG for implicit hydraulic derivatives.
@@ -37,7 +39,6 @@ fs-alloc = { path = "../fs-alloc" }
 # Test-only authority for the declared base-to-fin bondline cards in the
 # plate-fin end-to-end fixture.
 fs-matdb = { path = "../fs-matdb" }
-fs-material = { path = "../fs-material" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 
 [lints]
