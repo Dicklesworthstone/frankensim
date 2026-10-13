@@ -145,3 +145,7 @@ required-features = ["cutfem-marquee"]
 [[example]]
 name = "minimum_material_sdf3"
 required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "response_limit_refinement"
+required-features = ["cutfem-marquee"]
