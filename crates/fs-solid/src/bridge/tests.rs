@@ -1,7 +1,7 @@
 use super::*;
 use fs_material::thermovisco::{Limits, ThermalKnot};
 
-fn material(e0: f64, branches: Vec<(f64, f64)>) -> ThermoMaxwell {
+pub(super) fn material(e0: f64, branches: Vec<(f64, f64)>) -> ThermoMaxwell {
     ThermoMaxwell::new(e0, branches, [300.0, 500.0].into_iter().map(|temperature_k| ThermalKnot {
         temperature_k, modulus_scale: 1.0, relaxation_scale: 1.0,
         free_strain: (temperature_k-300.0)*1e-5,
@@ -10,7 +10,7 @@ fn material(e0: f64, branches: Vec<(f64, f64)>) -> ThermoMaxwell {
 fn geometry() -> LayerGeometry {
     LayerGeometry { area_m2: 1e-6, centroid_z_m: 0.0, thickness_m: 0.001 }
 }
-fn config() -> Config {
+pub(super) fn config() -> Config {
     Config { section: deposition::Config { force_tolerance_n: 1e-7, moment_tolerance_nm: 1e-9,
         energy_tolerance_j: 1e-8, max_strain: 0.03, max_rotation_rad: 0.1 },
         maximum_deflection_m: 0.001 }
@@ -19,13 +19,13 @@ fn empty(n: u32, support: Support) -> Bridge<'static> {
     Bridge::new(&(0..n).map(|i| (u64::from(i), 0.02/f64::from(n))).collect::<Vec<_>>(), support,
         Budget { max_cells: 128, max_layers_per_cell: 8, max_branch_states: 4096 }).unwrap()
 }
-fn birth<'a>(n: u32, support: Support, law: &'a ThermoMaxwell) -> Bridge<'a> {
+pub(super) fn birth<'a>(n: u32, support: Support, law: &'a ThermoMaxwell) -> Bridge<'a> {
     // Empty sections borrow no law, so their covariant lifetime can be shortened.
     let bridge: Bridge<'a> = empty(n, support);
     bridge.deposit_bonded_layer(7, geometry(), 1200.0, law,
         &(0..n).map(|i| (u64::from(i), 300.0)).collect(), &mut || false).unwrap()
 }
-fn temperatures(bridge: &Bridge<'_>, t: f64) -> BTreeMap<(u64, u64), f64> {
+pub(super) fn temperatures(bridge: &Bridge<'_>, t: f64) -> BTreeMap<(u64, u64), f64> {
     bridge.cells().iter().flat_map(|cell| cell.section().layers().keys()
         .map(move |&layer| ((cell.id(), layer), t))).collect()
 }
@@ -119,7 +119,7 @@ fn near_maxwell_fluid_limit_retains_elastic_jump_plus_viscous_creep() {
             config(),&mut || false).unwrap().0;
     }
     let sag = -state.deformed_position_m(state.length_m()/2.0,0.0).unwrap()[1];
-    // E_eq remains positive: this is the short-retardation-time viscous limit,
+    // E_eq remains positive: this is a time window below the retardation time,
     // not an admitted zero-stiffness liquid or large-deformation strand model.
     near(sag/(11.0*r.maximum_sag_m),1.0,2e-5);
 }

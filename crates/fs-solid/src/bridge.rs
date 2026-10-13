@@ -21,6 +21,9 @@ use crate::deposition::{self, AxialControl, BendingControl, Control, LayerGeomet
 use fs_exec::Cx;
 use fs_material::thermovisco::{Energy, ThermoMaxwell};
 
+/// Later-pass footprint capture on the actual deformed surface.
+pub mod contact;
+
 /// Fixed transverse restraints; both allow free axial thermal contraction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Support {
@@ -190,8 +193,7 @@ impl<'a> Bridge<'a> {
         }
         if !touches { return Err(Error::Invalid("perfectly bonded layers must share a section face")); }
         if (top-bottom).max(width) > self.length_m/10.0 {
-            return Err(Error::Regime("beam span must be at least ten times section depth and width"));
-        }
+            return Err(Error::Regime("beam span must be at least ten times section depth and width")); }
         let mut next = self.clone();
         for cell in &mut next.cells {
             poll(cancelled)?;
@@ -218,8 +220,7 @@ impl<'a> Bridge<'a> {
     }
     fn locate(&self, x: f64) -> Result<(&Cell<'a>, f64), Error> {
         if !x.is_finite() || x < 0.0 || x > self.length_m || self.cells[0].section.layers().is_empty() {
-            return Err(Error::Invalid("query needs a born span and an in-range reference position"));
-        }
+            return Err(Error::Invalid("query needs a born span and an in-range reference position")); }
         let index = self.cells.partition_point(|cell| cell.start_m <= x).saturating_sub(1);
         let cell = &self.cells[index];
         Ok((cell, x-cell.start_m))
@@ -229,7 +230,7 @@ impl<'a> Bridge<'a> {
     /// by `(axial_cell_id, layer_id)`. `additional_downward_n_m` has one signed
     /// dead line load per axial cell. Gravity acts on every born reference mass.
     /// No born material, guessed temperature, or partial successful history can
-    /// leak from a refused call. O(cells*layers*branches) work and retained state;
+    /// leak from a refused call. Work is linear in cells for a fixed section size;
     /// no dense global matrix. Refine spatial cells and thermal/time steps separately.
     pub fn advance_controlled(&self, target_s: f64, temperatures_k: &BTreeMap<(u64, u64), f64>,
         gravity_m_s2: f64, additional_downward_n_m: &[f64], config: Config,
@@ -242,8 +243,7 @@ impl<'a> Bridge<'a> {
         let layers = self.cells[0].section.layers().len();
         let expected = count.checked_mul(layers).ok_or(Error::Budget)?;
         if layers == 0 || temperatures_k.len() != expected || additional_downward_n_m.len() != count {
-            return Err(Error::Invalid("born span, complete temperatures and one line load per cell required"));
-        }
+            return Err(Error::Invalid("born span, complete temperatures and one line load per cell required")); }
         let mut loads = Vec::with_capacity(count);
         let mut weight = 0.0;
         let mut first_moment = 0.0;
@@ -328,8 +328,7 @@ impl<'a> Bridge<'a> {
             work = finite(work-q*(cell.integral_height()-old.integral_height()))?;
         }
         if max_abs > config.maximum_deflection_m || rotation > config.section.max_rotation_rad {
-            return Err(Error::Regime("integrated shape exceeds the declared deflection/rotation range"));
-        }
+            return Err(Error::Regime("integrated shape exceeds the declared deflection/rotation range")); }
         next.time_s = target_s;
         let work_defect = finite(work-energy.mechanical_work)?;
         let storage = finite(next.stored_energy_j()-self.stored_energy_j())?;
