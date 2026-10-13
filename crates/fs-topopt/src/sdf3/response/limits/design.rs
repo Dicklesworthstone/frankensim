@@ -7,6 +7,8 @@ use fs_ascent::projected_al::{ProjectedAlError, ProjectedAlOptions, ProjectedAlR
 
 mod checkpoint;
 pub use checkpoint::{MinimumMaterialCheckpoint3, MinimumMaterialEndpoint3, MinimumMaterialLimit3};
+mod wire;
+pub use wire::{MinimumMaterialCodecBudget3, MinimumMaterialCodecError3};
 
 #[derive(Debug, Clone, Copy)]
 pub struct MinimumMaterialOptions3 {

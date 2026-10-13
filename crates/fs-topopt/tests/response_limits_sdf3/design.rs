@@ -85,3 +85,6 @@ fn g0_an_infeasible_stop_cannot_produce_a_feasible_material_design() {
 
 #[path = "checkpoint.rs"]
 mod checkpoint;
+
+#[path = "wire.rs"]
+mod wire;
