@@ -174,3 +174,6 @@ impl MeasurementProvider for GaussianMeasurementSimulator {
         self.sample(request, cx).map(|sample| sample.outcome)
     }
 }
+
+/// Resumable stochastic studies through the production ask/acquire/update path.
+pub mod study;
