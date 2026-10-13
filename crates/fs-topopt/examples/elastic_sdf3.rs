@@ -9,6 +9,8 @@
 //! octree background refinement and freshly checked transfers between stages.
 //! Prefix --stress-design to minimize projected material under a declared
 //! relaxed von Mises aggregate cap, retaining the best feasible solved design.
+//! Prefix --robust-design to minimize eroded compliance under a dilated-volume
+//! cap, exporting all three realization fields and their accepted history.
 //! The curved design domain is z < 0.7 + 0.1*x*(1-x) inside the unit box.
 //! This field is implicit, not an exact distance function. The two dead body
 //! loads are independent. No continuum, manufacturing or optimality claim.
@@ -26,6 +28,8 @@ use fs_topopt::sdf3::continuation::controlled_gradient_checked_sdf3_continuation
 mod adaptive;
 #[path = "elastic_sdf3/stress.rs"]
 mod stress;
+#[path = "elastic_sdf3/robust.rs"]
+mod robust;
 
 struct CurvedCantilever;
 impl CutSdf3 for CurvedCantilever {
@@ -46,12 +50,14 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
     let continuation=args.first().is_some_and(|arg|arg=="--continuation");
     let adapt=args.first().is_some_and(|arg|arg=="--adaptive-continuation");
     let stress=args.first().is_some_and(|arg|arg=="--stress-design");
-    if continuation || adapt || stress {args.remove(0);}
-    if args.len()>2 {return Err("usage: elastic_sdf3 [--continuation|--adaptive-continuation|--stress-design] [UPDATES_PER_STAGE [TOTAL_KRYLOV_ITERATIONS]]".into());}
-    let updates=args.first().map_or(Ok(if stress {200}else{5}),|s|s.parse::<usize>())?;
+    let robust=args.first().is_some_and(|arg|arg=="--robust-design");
+    if continuation || adapt || stress || robust {args.remove(0);}
+    if args.len()>2 {return Err("usage: elastic_sdf3 [--continuation|--adaptive-continuation|--stress-design|--robust-design] [UPDATES_PER_STAGE [TOTAL_KRYLOV_ITERATIONS]]".into());}
+    let updates=args.first().map_or(Ok(if stress || robust {200}else{5}),|s|s.parse::<usize>())?;
     let iterations=args.get(1).map_or(Ok(250_000),|s|s.parse::<usize>())?;
     if adapt {return adaptive::run(updates,iterations);}
     if stress {return stress::run(updates,iterations);}
+    if robust {return robust::run(updates,iterations);}
     let mut poll=|_|ControlFlow::Continue(());
     let mut quadrature=QuadratureControl3::new(QuadratureOptions3::default(),&mut poll)?;
     let op=CutElasticity3::build(HexCell::try_new([0.0;3],[1.0;3])?,[4,2,2],&CurvedCantilever,

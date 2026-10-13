@@ -12,6 +12,9 @@
 //! SIMP/filter/projection model stay fixed. Neither evaluations nor numerical
 //! gradient checks change the caller's nominal model or incoming scales.
 
+mod optimize;
+pub use optimize::{RobustDesignIteration3, RobustDesignOptions3, RobustDesignPoint3, RobustDesignStudy3};
+
 use super::{CutDensityEvaluation3, CutDensityStudy3, Sdf3Elasticity, assert_loads, failure};
 use crate::gradient_check::{GradientCheckOptions, GradientSample, MultiLoadGradientCheck, audit_design_map};
 use crate::pipeline::LoadCase;
@@ -26,11 +29,14 @@ impl Default for RobustOptions3 {
     fn default() -> Self { Self { threshold_offset: 0.1 } }
 }
 impl RobustOptions3 {
+    fn valid(self, params: SimpParams) -> bool {
+        self.threshold_offset.is_finite() && self.threshold_offset >= 0.0
+            && params.eta - self.threshold_offset > 0.0
+            && params.eta + self.threshold_offset < 1.0
+    }
     fn assert_valid(self, params: SimpParams) {
         params.assert_valid();
-        assert!(self.threshold_offset.is_finite() && self.threshold_offset >= 0.0
-            && params.eta - self.threshold_offset > 0.0
-            && params.eta + self.threshold_offset < 1.0,
+        assert!(self.valid(params),
             "robust thresholds must lie strictly inside (0,1)");
     }
 }

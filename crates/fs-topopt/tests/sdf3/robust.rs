@@ -3,6 +3,8 @@ use super::*;
 use fs_topopt::sdf3::PhysicalRegion3;
 use fs_topopt::sdf3::robust::{RobustOptions3, controlled_sdf3_robust_gradient_check};
 
+mod optimize;
+
 #[test]
 fn zero_offset_matches_nominal_fields_gradients_and_independent_loads() {
     let (mut study, y, z) = fixture(SimpParams::default());
