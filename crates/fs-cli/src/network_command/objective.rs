@@ -8,7 +8,7 @@ use super::*;
 mod envelope;
 use envelope::Envelope;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) enum Objective {
     MeanWall(String),
     Maximum { kind: &'static str, region: Option<String>, vertices: Vec<usize>, smoothing_k: Option<f64> },

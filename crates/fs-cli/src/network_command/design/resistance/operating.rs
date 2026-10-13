@@ -17,13 +17,14 @@ struct Loads {
     audit: Option<PowerAudit>,
     map: Option<PowerMap>,
     inlets: Vec<TransportInlet>,
+    objective: objective::Objective,
 }
 
 impl Loads {
     fn capture(request: &Request) -> Self {
         Self { uniform: request.source, nodal: request.solid_data.nodal_source.clone(),
             audit: request.solid_data.power.clone(), map: request.solid_data.component_map.clone(),
-            inlets: request.inlets.clone() }
+            inlets: request.inlets.clone(), objective: request.objective.clone() }
     }
 
     fn install(&self, request: &mut Request) {
@@ -32,6 +33,7 @@ impl Loads {
         request.solid_data.power.clone_from(&self.audit);
         request.solid_data.component_map.clone_from(&self.map);
         request.inlets.clone_from(&self.inlets);
+        request.objective = self.objective.clone();
     }
 
     // Absolute component watts are a new declared load case. Unlisted rows
@@ -107,13 +109,13 @@ impl Loads {
 }
 
 #[derive(Debug)]
-struct Case { name: String, loads: Loads }
+struct Case { name: String, loads: Loads, limit: f64 }
 
 #[derive(Debug)]
 pub(super) struct Cases { smoothing_k: f64, cases: Vec<Case> }
 
 impl Cases {
-    pub(super) fn parse(value: &J, request: &Request) -> Result<Self> {
+    pub(super) fn parse(value: &J, request: &Request, limit: f64, peak_smoothing: Option<f64>) -> Result<Self> {
         object(value, &["smoothing_k", "power_relative_tolerance", "cases"], "operating_envelope")?;
         let smoothing_k = positive(get(value, "smoothing_k")?, "operating_envelope.smoothing_k")?;
         let tolerance = number(get(value, "power_relative_tolerance")?, "power_relative_tolerance")?;
@@ -121,10 +123,13 @@ impl Cases {
         let rows = array(get(value, "cases")?, "operating_envelope.cases", 7)?;
         if rows.is_empty() { return Err(bad("operating_envelope requires at least one additional case")); }
         let baseline = Loads::capture(request);
-        let mut cases = vec![Case { name: "nominal".into(), loads: baseline.clone() }];
+        let mut nominal = baseline.clone();
+        prepare_objective(&mut nominal.objective, peak_smoothing)?;
+        let mut cases = vec![Case { name: "nominal".into(), loads: nominal, limit }];
         let mut names = BTreeSet::from(["nominal".to_string()]);
         for row in rows {
-            object(row, &["name", "source_multiplier", "component_powers_w", "inlet_temperatures"], "operating case")?;
+            object(row, &["name", "source_multiplier", "component_powers_w", "inlet_temperatures",
+                "objective", "temperature_limit_k", "maximum_smoothing_k"], "operating case")?;
             let name = string(get(row, "name")?, "case.name")?;
             if !names.insert(name.clone()) { return Err(bad("case names must be unique; nominal is reserved")); }
             let factor = row.get("source_multiplier").map(|v| number(v, "source_multiplier")).transpose()?.unwrap_or(1.0);
@@ -146,13 +151,33 @@ impl Cases {
                     source.temperature = fs_qty::Temperature::new(positive(get(inlet, "temperature_k")?, "case temperature_k")?);
                 }
             }
-            cases.push(Case { name, loads });
+            if let Some(selection) = row.get("objective") {
+                // This is a requirement selector, not a second gradient switch.
+                object(selection, &["mean_wall_region", "max_wall_region", "max_solid_temperature", "max_vertices"], "case objective")?;
+                loads.objective = objective::Objective::parse(selection, &request.surfaces, &request.mesh)?;
+            }
+            let local_smoothing = row.get("maximum_smoothing_k")
+                .map(|value| positive(value, "case maximum_smoothing_k")).transpose()?;
+            if loads.objective.is_mean() && local_smoothing.is_some() {
+                return Err(bad("a case mean cannot declare maximum_smoothing_k"));
+            }
+            prepare_objective(&mut loads.objective, local_smoothing.or(peak_smoothing))?;
+            let limit = row.get("temperature_limit_k").map(|value| positive(value, "case temperature_limit_k"))
+                .transpose()?.unwrap_or(limit);
+            cases.push(Case { name, loads, limit });
         }
         finite(smoothing_k * det::ln(cases.len() as f64))?;
         Ok(Self { smoothing_k, cases })
     }
 
     pub(super) fn len(&self) -> usize { self.cases.len() }
+}
+
+fn prepare_objective(objective: &mut objective::Objective, smoothing: Option<f64>) -> Result<()> {
+    if !objective.is_mean() {
+        objective.enable_upper_envelope(smoothing.ok_or_else(|| bad("each peak case requires explicit or inherited maximum_smoothing_k"))?)?;
+    }
+    Ok(())
 }
 
 /// Values and complete sample gradients for EVERY case, retained for replay.
@@ -162,6 +187,7 @@ pub(super) struct Signature {
     sample: ProjectedAlSample,
     constraint_temperature: f64,
     actual_temperature: f64,
+    limit: f64,
 }
 
 pub(super) struct Candidate {
@@ -222,25 +248,27 @@ fn evaluate_inner(
     let mut rendered = Vec::new();
     for index in 0..count {
         poll(cx)?;
-        let name = if let Some(cases) = &design.operating_envelope {
+        let (name, limit) = if let Some(cases) = &design.operating_envelope {
             let case = &cases.cases[index];
             case.loads.install(request);
-            case.name.as_str()
-        } else { "nominal" };
-        let (sample, flow, physical) = evaluate(request, original, design, point, cx)?;
+            (case.name.as_str(), case.limit)
+        } else { ("nominal", design.limit) };
+        let (mut sample, flow, physical) = evaluate(request, original, design, point, cx)?;
+        sample.constraint = finite((physical.objective - limit) / design.scale)?;
         let actual = physical.objective_state.physical_value();
         physical_max = physical_max.max(actual);
-        all_pass &= design.passes(&physical);
+        all_pass &= physical.objective <= limit && actual <= limit;
         solid_solves = solid_solves.checked_add(physical.coupled.iterations)
             .ok_or_else(|| bad("operating-case work count overflow"))?;
-        signatures.push(Signature { sample, constraint_temperature: physical.objective, actual_temperature: actual });
+        signatures.push(Signature { sample, constraint_temperature: physical.objective, actual_temperature: actual, limit });
         if render_cases && design.operating_envelope.is_some() {
             let mut output = render(request, &flow, &physical)?;
             if let Some(fan) = &request.fan { output = fan.attach(output, &flow, fan.speed_ratio)?; }
             let inlets = request.inlets.iter().map(|inlet| Ok(format!(
                 "{{\"node\":{},\"temperature_k\":{}}}", inlet.node, num(inlet.temperature.value())?
             ))).collect::<Result<Vec<_>>>()?.join(",");
-            rendered.push(format!("{{\"name\":{},\"inlets\":[{inlets}],\"result\":{}}}", quote(name), output.trim_end()));
+            rendered.push(format!("{{\"name\":{},\"temperature_limit_k\":{},\"inlets\":[{inlets}],\"result\":{}}}",
+                quote(name), num(limit)?, output.trim_end()));
         }
         if index == 0 { nominal = Some((flow, physical)); }
     }
@@ -254,10 +282,14 @@ fn evaluate_inner(
                 return Err(producer("operating cases changed the shared hydraulic design cost"));
             }
         }
-        let values: Vec<_> = signatures.iter().map(|s| s.constraint_temperature).collect();
-        let (temperature, weights) = envelope(&values, cases.smoothing_k)?;
-        constraint_temperature = temperature;
-        sample.constraint = finite((temperature - design.limit) / design.scale)?;
+        // Different requirements are compared by excess over THEIR OWN
+        // limits. An absolute-temperature maximum would hide a cooler but
+        // tighter-limited component, and averaging would hide any violation.
+        let values = signatures.iter().map(|s| finite(s.constraint_temperature - s.limit))
+            .collect::<Result<Vec<_>>>()?;
+        let (excess, weights) = envelope(&values, cases.smoothing_k)?;
+        constraint_temperature = finite(design.limit + excess)?;
+        sample.constraint = finite(excess / design.scale)?;
         sample.constraint_gradient.fill(0.0);
         for (signature, weight) in signatures.iter().zip(&weights) {
             poll(cx)?;
@@ -265,10 +297,10 @@ fn evaluate_inner(
                 *gradient = finite(*gradient + finite(weight * partial)?)?;
             }
         }
-        all_pass &= temperature <= design.limit;
+        all_pass &= excess <= 0.0;
         if render_cases {
-            Some(format!("{{\"reported_top_level_case\":\"nominal\",\"smoothing_k\":{},\"constraint_temperature_k\":{},\"maximum_actual_temperature_k\":{},\"analytic_case_bias_bound_k\":{},\"case_weights\":{},\"scaled_constraint_gradient\":{},\"cases\":[{}],\"scope\":\"finite declared operating cases, nominal always included; unnormalized upper envelope; not a probability, unsampled-load guarantee or continuum bound\"}}",
-                num(cases.smoothing_k)?, num(temperature)?, num(physical_max)?,
+            Some(format!("{{\"reported_top_level_case\":\"nominal\",\"smoothing_k\":{},\"constraint_temperature_k\":{},\"constraint_excess_k\":{},\"maximum_actual_temperature_k\":{},\"analytic_case_bias_bound_k\":{},\"case_weights\":{},\"scaled_constraint_gradient\":{},\"cases\":[{}],\"scope\":\"finite declared operating cases, nominal always included; unnormalized upper envelope of own-limit excesses; constraint_temperature_k is nominal-limit plus excess, not a case temperature; not a probability, unsampled-load guarantee or continuum bound\"}}",
+                num(cases.smoothing_k)?, num(constraint_temperature)?, num(excess)?, num(physical_max)?,
                 num(cases.smoothing_k * det::ln(count as f64))?, numbers(&weights)?, numbers(&sample.constraint_gradient)?, rendered.join(",")))
         } else { None }
     } else { None };

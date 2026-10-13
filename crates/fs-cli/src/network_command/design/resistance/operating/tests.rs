@@ -178,7 +178,7 @@ fn component_cases_move_heat_between_footprints_without_changing_geometry() {
     let value = J::parse(r#"{"smoothing_k":0.02,"power_relative_tolerance":1e-12,"cases":[
         {"name":"chip-only","component_powers_w":{"chip":1,"memory":0}},
         {"name":"memory-only","component_powers_w":{"chip":0,"memory":1}}]}"#).unwrap();
-    let cases = Cases::parse(&value, &request).unwrap();
+    let cases = Cases::parse(&value, &request, 1000.0, None).unwrap();
     for (index, name) in [(1, "chip"), (2, "memory")] {
         let loads = &cases.cases[index].loads;
         close(loads.audit.as_ref().unwrap().delivered_total_w(), 1.0, 1e-12);
@@ -197,7 +197,7 @@ fn component_cases_move_heat_between_footprints_without_changing_geometry() {
     }
     let mixed = J::parse(r#"{"smoothing_k":0.02,"power_relative_tolerance":1e-12,"cases":[
         {"name":"ambiguous","source_multiplier":1,"component_powers_w":{"chip":1}}]}"#).unwrap();
-    assert!(Cases::parse(&mixed, &request).is_err());
+    assert!(Cases::parse(&mixed, &request, 1000.0, None).is_err());
 }
 
 #[test]
@@ -212,5 +212,135 @@ fn failed_case_sweep_restores_nominal_sources_and_supplies() {
         assert!(evaluate_candidate(&mut request, &original, &design, &[0.0;2], cx, true).is_err());
         assert_eq!(request.inlets[0].temperature.value(), 300.0);
         close(request.solid_data.power.as_ref().unwrap().delivered_total_w(), 1.0, 1e-12);
+    });
+}
+
+fn requirement_policy(limit: f64, local_limit: f64, evaluations: usize) -> String {
+    format!(r#"{{"schema":"frankensim.cooling-resistance-design.v1",
+        "temperature_limit_k":{limit},"temperature_scale_k":0.1,
+        "controls":[{{"branch":"first-stream","minimum_multiplier":0.25,"maximum_multiplier":4,"weight":1}},
+                    {{"branch":"fresh-bypass","minimum_multiplier":0.25,"maximum_multiplier":4,"weight":0.3}}],
+        "max_evaluations":{evaluations},"max_iterations":80,"max_multiplier_updates":40,
+        "max_backtracks":24,"kkt_tolerance":0.000001,
+        "operating_envelope":{{"smoothing_k":0.02,"power_relative_tolerance":1e-12,"cases":[
+          {{"name":"chip","objective":{{"max_vertices":[4,7]}},"maximum_smoothing_k":0.03,
+            "source_multiplier":1.2,"temperature_limit_k":{local_limit}}},
+          {{"name":"sink","objective":{{"mean_wall_region":"last-face"}},
+            "source_multiplier":0.7,"temperature_limit_k":{local_limit}}}]}}}}"#)
+}
+
+#[test]
+fn mixed_requirements_use_their_own_seeds_limits_and_replay_reports() {
+    with_cx(|cx| {
+        let mut request = model();
+        let original = request.graph.clone();
+        let design = Specification::parse(&requirement_policy(1000.0, 900.0, 6), &request).unwrap();
+        let candidate = evaluate_candidate(&mut request, &original, &design, &[0.0;2], cx, true).unwrap();
+        assert!(candidate.passes);
+        assert!(request.objective.is_mean());
+        assert_eq!(request.objective.region(), Some("first-face"));
+        let report = J::parse(candidate.report.as_ref().unwrap()).unwrap();
+        let cases = report.get("cases").unwrap().as_array().unwrap();
+        assert_eq!(cases[0].f64_field("temperature_limit_k"), Some(1000.0));
+        assert_eq!(cases[1].f64_field("temperature_limit_k"), Some(900.0));
+        let chip = cases[1].path(&["result","objective"]).unwrap();
+        assert_eq!(chip.str_field("kind"), Some("smooth_upper_envelope"));
+        assert_eq!(chip.str_field("maximum_selection"), Some("max_vertices"));
+        assert_eq!(chip.f64_field("maximum_smoothing_k"), Some(0.03));
+        let sink = cases[2].path(&["result","objective"]).unwrap();
+        assert_eq!(sink.str_field("kind"), Some("mean_wall_region"));
+        assert_eq!(sink.str_field("region"), Some("last-face"));
+        close(candidate.signatures[1].sample.constraint,
+            (candidate.signatures[1].constraint_temperature-900.0)/0.1, 1e-14);
+        let output = J::parse(&solve(request, design, cx).unwrap()).unwrap();
+        assert!(output.path(&["resistance_design","operating_envelope","cases"]).unwrap().as_array().unwrap()
+            .iter().all(|row| row.path(&["result","solid_temperatures_k"]).is_some()));
+    });
+}
+
+#[test]
+fn cooler_component_with_a_tighter_limit_cannot_hide_behind_absolute_temperature() {
+    with_cx(|cx| {
+        let mut request = model();
+        let original = request.graph.clone();
+        let mut design = Specification::parse(&requirement_policy(1000.0, 900.0, 240), &request).unwrap();
+        let first = evaluate_candidate(&mut request, &original, &design, &[0.0;2], cx, false).unwrap();
+        assert!(first.signatures[2].constraint_temperature < first.signatures[1].constraint_temperature);
+        // All other requirements pass comfortably, while the cooler sink has
+        // a positive margin. The hottest absolute temperature is irrelevant.
+        let cases = &mut design.operating_envelope.as_mut().unwrap().cases;
+        cases[1].limit = first.signatures[1].constraint_temperature + 1.0;
+        cases[2].limit = first.signatures[2].constraint_temperature - 0.01;
+        let candidate = evaluate_candidate(&mut request, &original, &design, &[0.0;2], cx, true).unwrap();
+        assert!(!candidate.passes);
+        assert!(candidate.sample.constraint >= 0.099999);
+        let report = J::parse(candidate.report.as_ref().unwrap()).unwrap();
+        assert!(report.f64_field("constraint_excess_k").unwrap() > 0.0);
+        let weights = report.get("case_weights").unwrap().as_array().unwrap();
+        assert!(weights[2].as_f64().unwrap() > 0.999);
+        // Check every physical control, with the case limits held fixed.
+        for index in 0..2 {
+            let mut plus=[0.0;2]; plus[index]=1e-3;
+            let mut minus=[0.0;2]; minus[index]=-1e-3;
+            let a = evaluate_candidate(&mut request,&original,&design,&plus,cx,false).unwrap();
+            let b = evaluate_candidate(&mut request,&original,&design,&minus,cx,false).unwrap();
+            close(candidate.sample.constraint_gradient[index], (a.sample.constraint-b.sample.constraint)/0.002, 3e-4);
+        }
+    });
+}
+
+#[test]
+fn mixed_objective_admission_does_not_invent_smoothing_or_disable_gradients() {
+    let request = model();
+    let text = requirement_policy(1000.0, 900.0, 6);
+    for (from, to) in [
+        (",\"maximum_smoothing_k\":0.03", ""),
+        ("\"temperature_limit_k\":900", "\"temperature_limit_k\":0"),
+        ("\"max_vertices\":[4,7]", "\"max_vertices\":[]"),
+        ("\"max_vertices\":[4,7]", "\"max_vertices\":[4,7],\"gradient\":false"),
+        ("\"mean_wall_region\":\"last-face\"", "\"mean_wall_region\":\"unknown\""),
+        ("\"name\":\"sink\"", "\"name\":\"sink\",\"maximum_smoothing_k\":0.1"),
+    ] {
+        assert!(text.contains(from));
+        assert!(Specification::parse(&text.replace(from,to), &request).is_err(), "{to}");
+    }
+    // A mean case under a peak nominal must not inherit peak semantics. A
+    // peak case without its own tau deliberately inherits the declared tau.
+    let mut request = model();
+    request.objective = objective::Objective::parse(&J::parse(r#"{"max_solid_temperature":true}"#).unwrap(),
+        &request.surfaces,&request.mesh).unwrap();
+    let value = J::parse(r#"{"smoothing_k":0.02,"power_relative_tolerance":1e-12,"cases":[
+        {"name":"mean","objective":{"mean_wall_region":"first-face"}},
+        {"name":"peak","objective":{"max_vertices":[4]}}]}"#).unwrap();
+    let cases = Cases::parse(&value,&request,1000.0,Some(0.04)).unwrap();
+    assert!(cases.cases[1].loads.objective.is_mean());
+    match &cases.cases[2].loads.objective {
+        objective::Objective::Maximum { smoothing_k, .. } => assert_eq!(*smoothing_k,Some(0.04)),
+        _ => panic!("peak case lost its selection"),
+    }
+}
+
+#[test]
+fn optimizer_replays_a_nontrivial_design_against_each_component_requirement() {
+    with_cx(|cx| {
+        let mut request = model();
+        let original = request.graph.clone();
+        let mut design = Specification::parse(&requirement_policy(1000.0,900.0,720),&request).unwrap();
+        let initial=evaluate_candidate(&mut request,&original,&design,&[0.0;2],cx,false).unwrap();
+        let improved=evaluate_candidate(&mut request,&original,&design,&[-0.7,0.7],cx,false).unwrap();
+        assert!(improved.signatures[1].constraint_temperature < initial.signatures[1].constraint_temperature);
+        let limit=0.5*(improved.signatures[1].constraint_temperature+initial.signatures[1].constraint_temperature);
+        design.operating_envelope.as_mut().unwrap().cases[1].limit=limit;
+        request.graph=original;
+        let result=J::parse(&solve(request,design,cx).unwrap()).unwrap();
+        let design=result.get("resistance_design").unwrap();
+        assert!(design.f64_field("selected_cost").unwrap()>0.0);
+        assert!(design.f64_field("complete_evaluations").unwrap()<=720.0);
+        for case in design.path(&["operating_envelope","cases"]).unwrap().as_array().unwrap() {
+            let limit=case.f64_field("temperature_limit_k").unwrap();
+            let objective=case.path(&["result","objective"]).unwrap();
+            assert!(objective.f64_field("value_k").unwrap()<=limit);
+            if let Some(actual)=objective.f64_field("actual_maximum_k") { assert!(actual<=limit); }
+        }
     });
 }

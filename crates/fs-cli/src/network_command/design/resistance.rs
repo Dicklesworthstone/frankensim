@@ -93,8 +93,9 @@ impl Specification {
             .map(|value| FanControl::parse(value, request)).transpose()?;
         let air_power_weight = power::parse(root.get("air_power_cost"), request)?;
         let evaluations = count(get(&root, "max_evaluations")?, "max_evaluations", 4096)?;
+        let limit = positive(get(&root, "temperature_limit_k")?, "temperature_limit_k")?;
         let operating_envelope = root.get("operating_envelope")
-            .map(|value| operating::Cases::parse(value, request)).transpose()?;
+            .map(|value| operating::Cases::parse(value, request, limit, maximum_smoothing_k)).transpose()?;
         let cases = operating_envelope.as_ref().map_or(1, operating::Cases::len);
         if evaluations < 2 * cases {
             return Err(bad("max_evaluations must reserve every initialization case and every final replay case"));
@@ -115,7 +116,7 @@ impl Specification {
         };
         options.validate::<Failure>(controls.len() + usize::from(fan_control.is_some())).map_err(optimizer_error)?;
         Ok(Self { controls, fan_control, air_power_weight, operating_envelope, maximum_smoothing_k,
-            limit: positive(get(&root, "temperature_limit_k")?, "temperature_limit_k")?,
+            limit,
             scale: positive(get(&root, "temperature_scale_k")?, "temperature_scale_k")?,
             evaluations,
             iterations: count(get(&root, "max_iterations")?, "max_iterations", 4096)?, options })
@@ -151,7 +152,10 @@ impl Specification {
             branches[control.branch].loss.resistance = LossResistance::new(control.baseline * multiplier);
         }
         let graph = LossGraph::new(original.node_count(), branches).map_err(producer)?;
-        if let Some(tau) = self.maximum_smoothing_k { request.objective.enable_upper_envelope(tau)?; }
+        // Operating cases install their own admitted objective and smoothing.
+        if self.operating_envelope.is_none() {
+            if let Some(tau) = self.maximum_smoothing_k { request.objective.enable_upper_envelope(tau)?; }
+        }
         if let Some(speed) = speed {
             request.fan.as_mut().ok_or_else(|| bad("joint design lost its fan drive"))?.speed_ratio = speed;
         }
