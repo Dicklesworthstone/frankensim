@@ -18,6 +18,7 @@ mod reaction;
 pub use reaction::ReactionTarget3;
 pub mod adaptive;
 pub mod refinement;
+pub mod limits;
 pub use design::{ResponseDesignIteration3, ResponseDesignOptions3, ResponseDesignStudy3};
 pub use projected::{ProjectedResponseCheckpoint3, ProjectedResponseIteration3, ProjectedResponseOptions3, ProjectedResponseStudy3};
 
@@ -145,7 +146,7 @@ fn admit_family<O: AdaptiveSdf3Elasticity>(study: &CutDensityStudy3<O>, cases: &
             positive |= target.weight > 0.0;
         }
         for target in reaction_targets {
-            if !target.target.is_finite() || !target.scale.is_finite() || target.scale <= 0.0
+            if !target.target.is_finite() || target.scale <= 0.0 || !target.scale.is_finite()
                 || !target.weight.is_finite() || target.weight < 0.0 {
                 return Err(invalid("invalid reaction target, scale or weight"));
             }
