@@ -36,13 +36,43 @@ jobs:
       - name: Materialize pinned dependencies
         run: |
           if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
-            # The pinned NumPy .bat checks out with different line endings.
-            # Restore ONLY this known blob in the fresh CI sibling, then rerun
-            # all original pin/cleanliness checks. No verifier is bypassed.
-            file=legacy_numpy_code/numpy/doc/make.bat
-            expected=bf42cca10b732e4277a3737f605b00d30b82b69c
-            test "$(git -C ../franken_numpy rev-parse "HEAD:$file")" = "$expected"
-            git -C ../franken_numpy cat-file blob "$expected" > "../franken_numpy/$file"
+            # Repair only the known line-ending transformation in the fresh,
+            # still-marked pinned clone. Keep raw bytes AND the index unchanged
+            # by Git's text filters; git-add would normalize the index instead.
+            python3 - <<'PY'
+          import json, pathlib, stat, subprocess
+          root = pathlib.Path('../franken_numpy')
+          name = 'legacy_numpy_code/numpy/doc/make.bat'
+          expected = 'bf42cca10b732e4277a3737f605b00d30b82b69c'
+          def git(*args):
+              return subprocess.check_output(['git', '-C', str(root), *args])
+          pin = next(r['git_head'] for r in json.loads(pathlib.Path('constellation.lock').read_text())['libraries'] if r['lib'] == 'franken_numpy')
+          if git('rev-parse', 'HEAD').decode().strip() != pin or git('config', '--local', '--get', 'frankensim.bootstrapIncomplete').strip() != b'true':
+              raise SystemExit('not the incomplete pinned NumPy checkout')
+          if git('rev-parse', 'HEAD:' + name).decode().strip() != expected or git('rev-parse', ':' + name).decode().strip() != expected:
+              raise SystemExit('unexpected committed or staged source; refusing repair')
+          for path in [root, root / '.git', *(root / name).parents][:-1]:
+              if path.is_symlink() or not path.is_dir():
+                  raise SystemExit('redirected or non-directory source path')
+          path = root / name
+          if not stat.S_ISREG(path.lstat().st_mode):
+              raise SystemExit('expected an ordinary tracked source file')
+          raw = git('cat-file', 'blob', expected)
+          actual = path.read_bytes()
+          if actual.replace(b'\r\n', b'\n') != raw.replace(b'\r\n', b'\n'):
+              raise SystemExit('not a line-ending-only discrepancy; refusing repair')
+          info = root / '.git' / 'info'
+          if info.is_symlink() or (info.exists() and not info.is_dir()):
+              raise SystemExit('invalid Git info directory')
+          info.mkdir(exist_ok=True)
+          with (info / 'attributes').open('x') as attributes:
+              attributes.write(name + ' -text -filter -ident -working-tree-encoding\n')
+          path.write_bytes(raw)
+          if path.read_bytes() != raw or git('rev-parse', ':' + name).decode().strip() != expected:
+              raise SystemExit('repair changed the pinned source or index')
+          if git('status', '--porcelain=v1', '--untracked-files=no', '--', name).strip():
+              raise SystemExit('exact-source repair did not clear the checkout discrepancy')
+          PY
             cargo run --manifest-path tools/bootstrap/Cargo.toml
           fi
       - name: Test checked CG and immutable-history cooling
