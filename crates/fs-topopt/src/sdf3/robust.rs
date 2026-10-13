@@ -14,6 +14,7 @@
 
 pub mod continuation;
 pub mod goal;
+pub mod refit;
 mod optimize;
 pub use optimize::{RobustDesignIteration3, RobustDesignOptions3, RobustDesignPoint3, RobustDesignStudy3};
 
