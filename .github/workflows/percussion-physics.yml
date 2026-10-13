@@ -19,7 +19,7 @@ jobs:
       - name: Retain the exact mechanical source for failure reproduction
         run: >-
           git archive --format=tar.gz -o percussion-source.tar.gz HEAD
-          crates/fs-phs crates/fs-couple crates/fs-plate crates/fs-material
+          crates/fs-phs crates/fs-couple crates/fs-plate crates/fs-material crates/fs-bem
           crates/fs-dcontact crates/fs-la crates/fs-flux crates/fs-tribo .beads/issues.jsonl
           COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md
           COMPREHENSIVE_PLAN_FOR_OPTIMAL_MUSIC_ORIENTED_BUILDING_BLOCKS.md
@@ -38,6 +38,9 @@ jobs:
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
       # Keep provenance failures red, but report actual compiler/test results
       # independently. A legacy NumPy .bat EOL check must not hide these results.
+      - name: Test reciprocal acoustic work and outgoing pressure
+        if: ${{ !cancelled() }}
+        run: set -o pipefail; cargo test --release -p fs-bem --lib reciprocal_radiation 2>&1 | tee percussion-reciprocal.log
       - name: Test curved-shell motion and nonlinear reduction
         if: ${{ !cancelled() }}
         run: set -o pipefail; cargo test --release -p fs-plate --lib --test shell_reduction --test percussion_shell 2>&1 | tee percussion-shell.log

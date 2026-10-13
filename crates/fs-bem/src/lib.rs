@@ -225,6 +225,8 @@ pub mod panel3d;
 pub mod radiation_bake;
 /// Geometry-derived resonance-exclusion policy for the existing radiation solver.
 pub mod radiation_policy;
+/// Work-conjugate P1/P0 radiation for reciprocal acoustic feedback.
+pub mod reciprocal_radiation;
 pub mod wake2d;
 
 pub use panel2d::{
