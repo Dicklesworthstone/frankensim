@@ -4,6 +4,13 @@ use super::*;
 fn power_cost_uses_both_product_rule_terms_without_changing_thermal_gradients() {
     with_cx(|cx| {
         let mut request = model(true);
+        // dP/dln(speed)=3P is an exact-equilibrium identity, not an identity
+        // for an operating point accepted with the example's 1e-6 Pa residual.
+        // Resolve the primal more tightly than the unchanged derivative check.
+        request.limits.flow = 1e-14;
+        let fan = request.fan.as_mut().unwrap();
+        fan.config.absolute_flow_tolerance = VolumetricFlowRate::new(1e-14);
+        fan.config.absolute_pressure_tolerance = Pressure::new(1e-11);
         let original = request.graph.clone();
         let text = policy(303.0, true, false);
         let plain = Specification::parse(&text, &request).unwrap();
@@ -14,6 +21,11 @@ fn power_cost_uses_both_product_rule_terms_without_changing_thermal_gradients() 
         let (sample, flow, _) = evaluate(&mut request, &original, &design, &point, cx).unwrap();
         assert_eq!(sample.constraint, unweighted.constraint);
         assert_eq!(sample.constraint_gradient, unweighted.constraint_gradient);
+        let fan = request.fan.as_ref().unwrap();
+        let bank = fan.bank(fan.speed_ratio).unwrap();
+        let fan_pressure = bank.pressure_at(flow.node_outflows[fan.inlet]).unwrap().value();
+        let network_pressure = flow.pressures[fan.inlet].value() - flow.pressures[fan.outlet].value();
+        assert!((fan_pressure - network_pressure).abs() <= 1e-11);
         let air_power = power::value(&request, &flow).unwrap();
         close(sample.objective - unweighted.objective, 10.0 * air_power, 1e-12);
         close(sample.gradient[2] - unweighted.gradient[2], 30.0 * air_power, 1e-10);
