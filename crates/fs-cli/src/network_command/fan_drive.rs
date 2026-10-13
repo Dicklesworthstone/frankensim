@@ -13,9 +13,9 @@ pub(super) struct FanDrive {
     arrangement: FanArrangement,
     pub speed_ratio: f64,
     pub inlet: usize,
-    outlet: usize,
+    pub(super) outlet: usize,
     temperature_k: f64,
-    config: GraphFanConfig,
+    pub(super) config: GraphFanConfig,
 }
 
 impl FanDrive {

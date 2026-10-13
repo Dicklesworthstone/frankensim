@@ -11,12 +11,15 @@ use super::*;
 use fs_airflow::graph::thermal::coupled_transport::sensitivity::CoupledObjective;
 use fs_convection::NusseltEvaluation;
 
+mod hydraulics;
+
 /// Retain old conditional controls together with the new total speed control.
 /// Deref preserves existing internal consumers of the conditional gradient.
 #[derive(Debug)]
 pub(super) struct CoolingGradient {
     thermal: CoupledGradient,
     speed: Option<SpeedGradient>,
+    hydraulic: Option<hydraulics::HydraulicGradient>,
 }
 
 impl std::ops::Deref for CoolingGradient {
@@ -36,6 +39,13 @@ impl CoolingGradient {
         match &self.speed {
             Some(SpeedGradient::Available { total, .. }) => Some(*total),
             _ => None,
+        }
+    }
+
+    pub(super) fn hydraulic_json(&self) -> Result<String> {
+        match &self.hydraulic {
+            Some(gradient) => gradient.render(),
+            None => Ok("{\"status\":\"unavailable\",\"reason\":\"individual hydraulic controls require a once-through steady evaluation, nonzero flows and reservoir exchanges, and admitted smooth fan/convection derivatives; conditional gradients are retained\"}".into()),
         }
     }
 
@@ -62,13 +72,13 @@ pub(super) fn from_flow_response(
     thermal: CoupledGradient, log_flow_scale: f64,
 ) -> Result<CoolingGradient> {
     poll(cx)?;
-    if request.fan.is_none() { return Ok(CoolingGradient { thermal, speed: None }); }
+    if request.fan.is_none() { return Ok(CoolingGradient { thermal, speed: None, hydraulic: None }); }
     let Some(convection) = convection_contribution(cx, names, derivations, &thermal.log_htc)? else {
-        return Ok(CoolingGradient { thermal, speed: Some(SpeedGradient::Unavailable) });
+        return Ok(CoolingGradient { thermal, speed: Some(SpeedGradient::Unavailable), hydraulic: None });
     };
     let total = checked(log_flow_scale + convection)?;
     Ok(CoolingGradient { thermal,
-        speed: Some(SpeedGradient::Available { flow: log_flow_scale, convection, total }) })
+        speed: Some(SpeedGradient::Available { flow: log_flow_scale, convection, total }), hydraulic: None })
 }
 
 /// Complete fan affinity for a physical endpoint/history gradient without
@@ -118,6 +128,9 @@ pub(super) fn pullback(
     names: &[&str],
     derivations: &[convection::Derived],
 ) -> Result<CoolingGradient> {
+    if let Some(gradient) = hydraulics::try_pullback(request, cx, binding, objective, names, derivations)? {
+        return Ok(gradient);
+    }
     let config = InterfaceSolveConfig {
         max_iterations: request.limits.derivative,
         absolute_tolerance: request.limits.relative,
@@ -127,7 +140,7 @@ pub(super) fn pullback(
     if request.fan.is_none() {
         return Ok(CoolingGradient {
             thermal: binding.pullback_iqn(cx, objective, config, acceleration::POLICY).map_err(producer)?,
-            speed: None,
+            speed: None, hydraulic: None,
         });
     }
     let mut slopes = BTreeMap::new();
@@ -136,7 +149,7 @@ pub(super) fn pullback(
         let Some(slope) = reynolds_elasticity(&derived.nu)? else {
             return Ok(CoolingGradient {
                 thermal: binding.pullback_iqn(cx, objective, config, acceleration::POLICY).map_err(producer)?,
-                speed: Some(SpeedGradient::Unavailable),
+                speed: Some(SpeedGradient::Unavailable), hydraulic: None,
             });
         };
         slopes.insert(derived.surface.as_str(), slope);
@@ -157,7 +170,7 @@ pub(super) fn pullback(
     poll(cx)?;
     Ok(CoolingGradient {
         thermal: result.thermal,
-        speed: Some(SpeedGradient::Available { flow: result.log_flow_scale, convection, total }),
+        speed: Some(SpeedGradient::Available { flow: result.log_flow_scale, convection, total }), hydraulic: None,
     })
 }
 

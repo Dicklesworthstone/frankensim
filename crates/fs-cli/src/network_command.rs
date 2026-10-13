@@ -471,7 +471,7 @@ fn render(request: &Request, flow: &GraphSolution, evaluated: &Evaluation) -> Re
         optional(evaluated.gradient.as_ref().map(|g| g.interface_residual))?))
         .and_then(|result| {
             let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("internal result framing mismatch"))?;
-            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{},\"convection\":[{}],\"contacts\":{},\"contact_sensitivities\":{},\"coupling_solver\":{},\"fan_speed_sensitivity\":{},\"gradient_scope\":\"steady thermal inlet, effective-coefficient and named contact-resistance sensitivities at fixed hydraulics, geometry, material laws and fluid properties; fan_speed_sensitivity separately includes fan/flow/convection response when available; no channel-geometry or transient adjoint\"}}\n",
+            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{},\"convection\":[{}],\"contacts\":{},\"contact_sensitivities\":{},\"coupling_solver\":{},\"fan_speed_sensitivity\":{},\"hydraulic_sensitivity\":{},\"gradient_scope\":\"steady thermal inlet, effective-coefficient and named contact-resistance sensitivities at fixed hydraulics, geometry, material laws and fluid properties; fan_speed_sensitivity and hydraulic_sensitivity separately include hydraulic/flow/convection response when available; no channel-geometry or transient adjoint\"}}\n",
                 request.solid_data.render(request.conductivity, request.source)?,
                 request.objective.render(&evaluated.objective_state, &request.mesh)?,
                 evaluated.gradient.as_ref().map(|g| numbers(&g.inlets)).transpose()?.unwrap_or_else(|| "null".into()),
@@ -479,7 +479,8 @@ fn render(request: &Request, flow: &GraphSolution, evaluated: &Evaluation) -> Re
                 request.contacts.as_ref().map(|contacts| contacts.render(&evaluated.contact_fluxes)).transpose()?.unwrap_or_else(|| "[]".into()),
                 request.contacts.as_ref().map(|contacts| contacts.sensitivity_json(&evaluated.temperatures, evaluated.gradient.as_deref())).transpose()?.unwrap_or_else(|| "null".into()),
                 acceleration::render(request.limits.relaxation, evaluated.gradient.is_some())?,
-                evaluated.gradient.as_ref().map(fan_gradient::CoolingGradient::speed_json).transpose()?.unwrap_or_else(|| "null".into())))
+                evaluated.gradient.as_ref().map(fan_gradient::CoolingGradient::speed_json).transpose()?.unwrap_or_else(|| "null".into()),
+                evaluated.gradient.as_ref().map(fan_gradient::CoolingGradient::hydraulic_json).transpose()?.unwrap_or_else(|| "null".into())))
         })
         .and_then(|result| recirculation::attach(result, request, evaluated))
 }
