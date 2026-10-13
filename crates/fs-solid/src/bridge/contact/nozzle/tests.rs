@@ -78,3 +78,43 @@ fn cancelled_incomplete_or_invalid_queries_return_no_clearance_claim() {
     }
     assert_eq!(beam,before);
 }
+
+#[test]
+fn timed_path_checks_all_moves_with_one_budget_and_retains_the_first_bad_segment() {
+    let law = material(1e8,vec![]); let beam = birth(4,Support::SimplySupported,&law);
+    let points = [PathPoint { time_s:0.0,tip_m:[-0.01,0.001] },
+        PathPoint { time_s:1.0,tip_m:[-0.01,0.00049] },
+        PathPoint { time_s:2.0,tip_m:[0.03,0.00049] },
+        PathPoint { time_s:3.0,tip_m:[0.03,0.001] }];
+    let p = sweep([0.0,0.0],[0.0,0.0]).profile;
+    let cfg = PathConfig { max_segments:3,max_cell_visits:12,required_clearance_m:0.0 };
+    let report = beam.nozzle_path_clearance(&points,p,cfg,&mut || false).unwrap();
+    assert_eq!(report.first_interfering_segment,Some(1));
+    assert_eq!(report.checked_segments,3); assert_eq!(report.checked_cell_visits,12);
+    let hit = report.minimum.unwrap(); assert_eq!(hit.segment,1);
+    assert!(hit.time_s>1.0 && hit.time_s<2.0); near(hit.clearance.gap_m,-1e-5);
+    assert!(beam.nozzle_path_clearance(&points,p,PathConfig { max_cell_visits:11,..cfg },&mut || false).is_err());
+    let mut invalid = points; invalid[3].time_s=1.5;
+    assert!(beam.nozzle_path_clearance(&invalid,p,cfg,&mut || false).is_err());
+    let mut total=0;
+    beam.nozzle_path_clearance(&points,p,cfg,&mut || { total+=1; false }).unwrap();
+    let mut count=0;
+    assert!(beam.nozzle_path_clearance(&points,p,cfg,&mut || { count+=1; count==total }).is_err());
+    assert_eq!(beam.time_s(),0.0);
+}
+
+#[test]
+fn holds_reversals_and_partitioned_motion_keep_the_same_minimum_gap() {
+    let law = material(1e8,vec![]); let beam = birth(4,Support::SimplySupported,&law);
+    let p = sweep([0.0,0.0],[0.0,0.0]).profile;
+    let a = PathPoint { time_s:0.0,tip_m:[-0.01,0.00049] };
+    let b = PathPoint { time_s:2.0,tip_m:[0.03,0.00049] };
+    let mid = PathPoint { time_s:1.0,tip_m:[0.01,0.00049] };
+    let hold = PathPoint { time_s:3.0,..b };
+    let back = PathPoint { time_s:4.0,..a };
+    let cfg = PathConfig { max_segments:4,max_cell_visits:16,required_clearance_m:0.0 };
+    let simple = beam.nozzle_path_clearance(&[a,b],p,cfg,&mut || false).unwrap();
+    let complex = beam.nozzle_path_clearance(&[a,mid,b,hold,back],p,cfg,&mut || false).unwrap();
+    near(simple.minimum.unwrap().clearance.gap_m,complex.minimum.unwrap().clearance.gap_m);
+    assert_eq!(complex.checked_segments,4);
+}

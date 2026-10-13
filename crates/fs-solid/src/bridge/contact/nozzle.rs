@@ -44,7 +44,80 @@ pub struct Report {
     pub checked_cells: usize,
 }
 
+/// One planned tip position; each consecutive pair defines an affine segment.
+#[derive(Debug, Clone, Copy)]
+pub struct PathPoint {
+    pub time_s: f64,
+    pub tip_m: [f64; 2],
+}
+#[derive(Debug, Clone, Copy)]
+pub struct PathConfig {
+    pub max_segments: usize,
+    /// Sum of cell visits over the WHOLE path, not a fresh allowance per move.
+    pub max_cell_visits: usize,
+    pub required_clearance_m: f64,
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PathWitness {
+    pub segment: usize,
+    pub time_s: f64,
+    pub clearance: Witness,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathReport {
+    pub minimum: Option<PathWitness>,
+    /// Earliest violating segment in input order, NOT an exact first-impact time.
+    pub first_interfering_segment: Option<usize>,
+    pub checked_segments: usize,
+    pub checked_cell_visits: usize,
+}
+
 impl Bridge<'_> {
+    /// Check a complete time-ordered motion path against this FROZEN snapshot.
+    /// Holds, vertical moves and reversals are supported. Every segment is
+    /// examined; a first detected interference does not truncate the path.
+    /// A late refusal/cancellation returns no partial-clearance report. Neither
+    /// mechanical state nor machine motion is advanced by this geometry query.
+    /// Material evolution during the proposed path needs another snapshot and
+    /// an independently resolved coupling timeline, not interpolation here.
+    pub fn nozzle_path_clearance(&self, points: &[PathPoint], profile: Profile,
+        config: PathConfig, cancelled: &mut impl FnMut() -> bool) -> Result<PathReport, Error> {
+        poll(cancelled)?;
+        let segments = points.len().checked_sub(1).filter(|&n| n > 0)
+            .ok_or(Error::Invalid("a nozzle path requires at least two timed positions"))?;
+        let visits = segments.checked_mul(self.cells.len()).ok_or(Error::Budget)?;
+        if segments > config.max_segments || visits > config.max_cell_visits { return Err(Error::Budget); }
+        for (i, point) in points.iter().enumerate() {
+            poll(cancelled)?;
+            if !point.time_s.is_finite() || point.time_s < 0.0
+                || (i > 0 && point.time_s <= points[i-1].time_s) {
+                return Err(Error::Invalid("nozzle path times must be finite, nonnegative and strictly increasing"));
+            }
+            for v in point.tip_m { finite(v)?; }
+        }
+        let mut minimum: Option<PathWitness> = None;
+        let mut first_interfering_segment = None;
+        for (segment, pair) in points.windows(2).enumerate() {
+            poll(cancelled)?;
+            let sweep = Sweep { start_m: pair[0].tip_m, end_m: pair[1].tip_m,
+                profile, required_clearance_m: config.required_clearance_m };
+            let report = self.nozzle_clearance(sweep, self.cells.len(), cancelled)?;
+            if report.interferes && first_interfering_segment.is_none() { first_interfering_segment = Some(segment); }
+            if let Some(clearance) = report.minimum {
+                let fraction = clearance.sweep_fraction;
+                let time_s = if fraction == 1.0 { pair[1].time_s }
+                    else { finite(pair[0].time_s+fraction*(pair[1].time_s-pair[0].time_s))? };
+                if minimum.is_none_or(|old| clearance.gap_m < old.clearance.gap_m
+                    || (clearance.gap_m == old.clearance.gap_m && time_s < old.time_s)) {
+                    minimum = Some(PathWitness { segment, time_s, clearance });
+                }
+            }
+        }
+        poll(cancelled)?;
+        Ok(PathReport { minimum, first_interfering_segment, checked_segments: segments,
+            checked_cell_visits: visits })
+    }
+
     /// Minimize clearance over the entire sweep and finite footprint. Neither
     /// endpoint-only motion checks nor centreline-only tool checks are used.
     /// Returns penetration as an observation rather than refusing its geometry.

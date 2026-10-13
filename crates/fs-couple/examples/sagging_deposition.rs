@@ -9,6 +9,7 @@ use fs_conduction::transient::deposition::{Boundary, CellGeometry, CellId, Conta
 use fs_material::thermovisco::{Limits, ThermalKnot, ThermoMaxwell};
 use fs_solid::bridge::{Bridge, Budget, Config, Support};
 use fs_solid::bridge::contact::{ContactFootprint, Pass};
+use fs_solid::bridge::contact::nozzle::{PathConfig, PathPoint, Profile};
 use fs_solid::bridge::supports::{self, Stop};
 use fs_solver::orthant::GramOrthantConfig;
 use fs_solid::deposition::{self, LayerGeometry};
@@ -25,7 +26,8 @@ impl ThermalLaw for Sensible {
 #[derive(Debug)]
 struct Summary { sag_m: f64, flat_area_m2: f64, contact_area_m2: f64,
     sagged_old_mean_k: f64, flat_old_mean_k: f64, thermal_residual_j: f64,
-    supported_sag_m: f64, support_force_n: f64, supported_contact_m2: f64, supported_old_mean_k: f64 }
+    supported_sag_m: f64, support_force_n: f64, supported_contact_m2: f64, supported_old_mean_k: f64,
+    nozzle_free_gap_m: f64, nozzle_supported_gap_m: f64 }
 
 fn run() -> Result<Summary,Box<dyn Error>> {
     const N: usize = 16;
@@ -98,6 +100,19 @@ fn run() -> Result<Summary,Box<dyn Error>> {
     let actual = bridge.next_pass_contact(pass,N,&mut || false)?;
     let counterfactual = flat.next_pass_contact(pass,N,&mut || false)?;
     let propped_contact = supported.next_pass_contact(pass,N,&mut || false)?;
+    // A deliberately low planned pass: supported material can obstruct a path
+    // that clears the sagged road. Check the whole finite tool, not only its tip.
+    // Geometry is frozen at 5 s; these times label the planned motion only.
+    let path = [PathPoint { time_s: 5.0, tip_m: [0.008,0.00045] },
+        PathPoint { time_s: 5.02, tip_m: [0.012,0.00045] }];
+    let nozzle = Profile { flat_radius_m: 0.0002, outer_radius_m: 0.0008, flank_slope: 0.5 };
+    let limits = PathConfig { max_segments: 1, max_cell_visits: N, required_clearance_m: 1e-6 };
+    let free_path = bridge.nozzle_path_clearance(&path,nozzle,limits,&mut || false)?;
+    let supported_path = supported.nozzle_path_clearance(&path,nozzle,limits,&mut || false)?;
+    assert_eq!(free_path.first_interfering_segment,None);
+    assert_eq!(supported_path.first_interfering_segment,Some(0));
+    let nozzle_free_gap_m = free_path.minimum.ok_or("no free-road footprint")?.clearance.gap_m;
+    let nozzle_supported_gap_m = supported_path.minimum.ok_or("no supported-road footprint")?.clearance.gap_m;
     let area = |footprint: &ContactFootprint| footprint.rows.iter().map(|r| r.reference_area_m2).sum::<f64>();
     let updates = |footprint: &ContactFootprint| footprint.rows.iter().filter(|r| r.reference_area_m2>0.0)
         .map(|row| ContactUpdate { id: 1000+row.cell_id,expected: None,replacement: Some(ThermalLink {
@@ -126,7 +141,8 @@ fn run() -> Result<Summary,Box<dyn Error>> {
     Ok(Summary { sag_m: sag,flat_area_m2: area(&counterfactual),contact_area_m2: area(&actual),
         sagged_old_mean_k,flat_old_mean_k,
         thermal_residual_j: residual.abs().max(flat_residual.abs()).max(supported_residual.abs()),
-        supported_sag_m, support_force_n, supported_contact_m2: area(&propped_contact), supported_old_mean_k })
+        supported_sag_m, support_force_n, supported_contact_m2: area(&propped_contact), supported_old_mean_k,
+        nozzle_free_gap_m, nozzle_supported_gap_m })
 }
 fn main() -> Result<(),Box<dyn Error>> {
     let s = run()?;
@@ -135,6 +151,8 @@ fn main() -> Result<(),Box<dyn Error>> {
     println!("supported_sag_m={:.8e}; roller_force_n={:.8e}; supported_contact_m2={:.8e}; supported_old_mean_k={:.8}",
         s.supported_sag_m, s.support_force_n, s.supported_contact_m2, s.supported_old_mean_k);
     println!("synthetic bounded beam/thermal example; no adhesion or contact-force qualification");
+    println!("planned_nozzle_minimum_gap_m: free={:.8e}; supported={:.8e}; frozen top-surface query, not impact dynamics",
+        s.nozzle_free_gap_m, s.nozzle_supported_gap_m);
     Ok(())
 }
 #[cfg(test)]
@@ -148,5 +166,7 @@ mod tests {
         assert!(s.support_force_n > 0.0 && s.supported_sag_m < s.sag_m);
         assert!(s.supported_contact_m2 > s.contact_area_m2);
         assert!(s.supported_old_mean_k > s.sagged_old_mean_k);
+        assert!(s.nozzle_free_gap_m > 1e-6);
+        assert!(s.nozzle_supported_gap_m < 0.0);
     }
 }
