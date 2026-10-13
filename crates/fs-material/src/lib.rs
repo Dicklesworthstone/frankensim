@@ -24,6 +24,8 @@ pub mod fiber;
 pub mod gas;
 pub mod moist_air;
 pub mod graph;
+/// Contact-temperature history and explicit strength handoff for polymer welding.
+pub mod healing;
 pub mod hyper;
 pub mod identifiability;
 pub mod iso9613;
