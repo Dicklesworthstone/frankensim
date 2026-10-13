@@ -513,3 +513,6 @@ pub fn verify_decision_plan(
         allocation_matches,
     })
 }
+
+/// Production sensing: outcome-free recommendations and actual measurement updates.
+pub mod measurement;
