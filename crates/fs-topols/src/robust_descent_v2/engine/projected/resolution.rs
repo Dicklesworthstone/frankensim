@@ -74,8 +74,9 @@ impl MultiLoadProjectedOptimizer {
     /// code. Fine displacement fields are independently solved, never interpolated;
     /// the level set is prolonged without changing loads, material or area target.
     /// Zero-weight loads remain mandatory. A bad baseline returns measurements
-    /// without geometry search. This lane requires an installed stress limit and
-    /// does not combine with stress restoration.
+    /// without geometry search. With explicit stress restoration, every grid
+    /// instead reduces its worst unweighted excess while preserving numerical
+    /// resolution and area. Restoration ends only when every grid is feasible.
     ///
     /// ALL actual case starts, including failed/interrupted fine solves, spend
     /// `max_solves`. A complete grid/load family must fit before each candidate.
@@ -90,9 +91,10 @@ impl MultiLoadProjectedOptimizer {
         let settings = self.kernel.settings;
         policy.validate(settings.level)?;
         let limit = self.stress_limit.ok_or_else(|| invalid("multi-load mesh checks require an installed sampled stress limit"))?;
-        if poll_iters == 0 || self.restoration_reduction.is_some() {
-            return Err(invalid("mesh-checked multi-load descent requires positive polling and no stress-restoration policy"));
+        if poll_iters == 0 {
+            return Err(invalid("mesh-checked multi-load descent requires positive polling"));
         }
+        let restoration = self.restoration_reduction.filter(|_| self.is_restoring_stress());
         if self.next_iteration == settings.iterations {
             return Ok(ControlFlow::Continue(MultiLoadMeshProgress::IterationLimit));
         }
@@ -111,7 +113,12 @@ impl MultiLoadProjectedOptimizer {
             ControlFlow::Continue(report) => report,
             ControlFlow::Break(reason) => return Ok(ControlFlow::Break(reason)),
         };
-        if let Some(reason) = baseline.refusal(policy, settings.volfrac, limit, &loads)? {
+        let refusal = if restoration.is_some() {
+            baseline.resolution_refusal(policy, settings.volfrac, &loads)?
+        } else {
+            baseline.refusal(policy, settings.volfrac, limit, &loads)?
+        };
+        if let Some(reason) = refusal {
             return Ok(ControlFlow::Continue(MultiLoadMeshProgress::UnresolvedBaseline { baseline, reason }));
         }
         let decrease = self.controls.min_relative_improvement;
@@ -125,8 +132,12 @@ impl MultiLoadProjectedOptimizer {
                 let (report, refusal) = match result {
                     Ok(ControlFlow::Break(reason)) => return Ok(ControlFlow::Break(reason)),
                     Ok(ControlFlow::Continue(report)) => {
-                        let refusal = report.comparison_refusal(&baseline, policy, settings.volfrac,
-                            limit, &loads, aggregate, decrease)?;
+                        let refusal = match restoration {
+                            Some(reduction) => report.restoration_comparison_refusal(&baseline,
+                                policy, settings.volfrac, limit, &loads, reduction)?,
+                            None => report.comparison_refusal(&baseline, policy, settings.volfrac,
+                                limit, &loads, aggregate, decrease)?,
+                        };
                         (Some(report), refusal)
                     }
                     Err(error) => (None, Some(format!("independent-load mesh solve: {error}"))),
@@ -145,3 +156,6 @@ impl MultiLoadProjectedOptimizer {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod restoration_tests;

@@ -27,9 +27,24 @@ impl StressResolutionReport {
     pub fn refusal(&self, policy: ResolutionPolicy, target: f64, limit: SampledStressLimit)
         -> Result<Option<String>, CutFemError>
     {
+        let limit = SampledStressLimit::new(limit.max_von_mises, limit.absolute_tolerance)?;
+        self.check_resolution(policy, target, Some(limit))
+    }
+
+    /// Check finite complete measurements and observed compliance/area resolution,
+    /// WITHOUT declaring stress feasibility. Restoration uses this gate before
+    /// separately testing measured excess reduction against the immutable limit.
+    pub fn resolution_refusal(&self, policy: ResolutionPolicy, target: f64)
+        -> Result<Option<String>, CutFemError>
+    {
+        self.check_resolution(policy, target, None)
+    }
+
+    fn check_resolution(&self, policy: ResolutionPolicy, target: f64,
+        limit: Option<SampledStressLimit>) -> Result<Option<String>, CutFemError>
+    {
         let first = self.rungs.first().ok_or_else(|| refused("empty stress-resolution report"))?;
         policy.validate(first.level)?;
-        let limit = SampledStressLimit::new(limit.max_von_mises, limit.absolute_tolerance)?;
         if !target.is_finite() || !(0.0..=1.0).contains(&target) || target == 0.0
             || self.rungs.len() != policy.extra_levels as usize + 1
         { return Err(refused("invalid stress-resolution target or missing grid levels")); }
@@ -45,7 +60,8 @@ impl StressResolutionReport {
         // Check stress first so a finer-grid violation is never reported merely
         // as compliance underresolution, and never silently repairs the limit.
         for rung in &self.rungs {
-            if rung.evaluation.sampled_max_von_mises > limit.admitted_max() {
+            if let Some(limit) = limit.filter(|limit|
+                rung.evaluation.sampled_max_von_mises > limit.admitted_max()) {
                 return Ok(Some(format!("level {} sampled von Mises stress {:.17e} exceeds unchanged admitted limit {:.17e}",
                     rung.level, rung.evaluation.sampled_max_von_mises, limit.admitted_max())));
             }

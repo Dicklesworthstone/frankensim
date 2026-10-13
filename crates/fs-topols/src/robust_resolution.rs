@@ -14,6 +14,8 @@ use crate::robust_descent::{MultiLoadProjectedProgress, MultiLoadProjectedStage}
 /// Signed-DWR gain checks for independent weighted-load compliance descent.
 pub mod goal;
 
+mod restoration;
+
 /// Actual independently solved responses, in the original load declaration order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiLoadResolutionRung {
@@ -41,6 +43,22 @@ impl MultiLoadResolutionReport {
     pub fn refusal(&self, policy: ResolutionPolicy, target: f64,
         limit: SampledStressLimit, loads: &[RobustLoadCase]) -> Result<Option<String>, CutFemError>
     {
+        let limit = SampledStressLimit::new(limit.max_von_mises, limit.absolute_tolerance)?;
+        self.check_resolution(policy, target, Some(limit), loads)
+    }
+
+    /// Complete per-load numerical resolution checks, not stress feasibility.
+    /// Intended for explicit restoration, whose excess-reduction gate is separate.
+    pub fn resolution_refusal(&self, policy: ResolutionPolicy, target: f64,
+        loads: &[RobustLoadCase]) -> Result<Option<String>, CutFemError>
+    {
+        self.check_resolution(policy, target, None, loads)
+    }
+
+    fn check_resolution(&self, policy: ResolutionPolicy, target: f64,
+        limit: Option<SampledStressLimit>, loads: &[RobustLoadCase])
+        -> Result<Option<String>, CutFemError>
+    {
         let first = self.rungs.first().ok_or_else(|| invalid("empty multi-load mesh assessment"))?;
         policy.validate(first.level)?;
         if !(1..=64).contains(&loads.len()) || !loads.iter().any(|case| case.weight() > 0.0)
@@ -57,7 +75,11 @@ impl MultiLoadResolutionReport {
         for case in 0..loads.len() {
             let column = StressResolutionReport { rungs: self.rungs.iter().map(|rung|
                 StressResolutionRung { level: rung.level, evaluation: rung.cases[case].clone() }).collect() };
-            if let Some(reason) = column.refusal(policy, target, limit)? {
+            let reason = match limit {
+                Some(limit) => column.refusal(policy, target, limit)?,
+                None => column.resolution_refusal(policy, target)?,
+            };
+            if let Some(reason) = reason {
                 return Ok(Some(format!("load case {case}: {reason}")));
             }
         }
