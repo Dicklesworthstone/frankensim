@@ -23,6 +23,8 @@ pub struct Model {
     pub tip_weight: f64,
     pub pickup: Vec<f64>,
     pub force: Vec<f64>,
+    tensioner: Option<super::tuning::Tensioner>,
+    edge_port: Option<(usize,f64)>,
 }
 pub fn rim(film: &TensionedDisk) -> Vec<(usize, usize)> {
     let mut edges = BTreeMap::<(usize, usize), Vec<(usize, usize)>>::new();
@@ -69,7 +71,15 @@ impl Model {
     where F: FnOnce(&TensionedDisk, &[ModePair])
         -> Result<Option<fs_couple::render::plate::impact::radiation::Model>, Error>
     {
+        Self::with_tensioner(spec,steps,gate,None,bake)
+    }
+    pub fn with_tensioner<F>(spec:&Spec,steps:u64,gate:&CancelGate,
+        tensioner:Option<super::tuning::Tensioner>,bake:F)->Result<Self,Error>
+    where F:FnOnce(&TensionedDisk,&[ModePair])
+        ->Result<Option<fs_couple::render::plate::impact::radiation::Model>,Error>
+    {
         spec.validate()?;
+        if let Some(t)=&tensioner {t.admit(steps)?;}
         if steps == 0 || gate.is_requested() { return Err("positive step budget and uncancelled preparation required".into()); }
         let film = TensionedDisk::new(spec.head, ProfileBudget {
             max_nodes: 2048, max_triangles: 4096, max_feature_evaluations: 100_000 })?;
@@ -77,27 +87,40 @@ impl Model {
             ((TAU*spec.head_band_hz[0]).powi(2),(TAU*spec.head_band_hz[1]).powi(2)),
             &fs_plate::SliceOptions::default())?.modes;
         if modes.is_empty() || modes.len() > 32 { return Err("head window must contain 1..32 complete modes; none are truncated".into()); }
-        let n = modes.len()+1;
+        let head_end=modes.len()+1;
+        let n=head_end+usize::from(tensioner.is_some());
         let air = MeridianCavity::new(spec.profile.clone(), AcousticMedium { rho0: spec.air[0], c0: spec.air[1] },
             Budget { radial_intervals: spec.air_mesh[0], maximum_azimuthal_order: spec.air_mesh[1],
                 maximum_frequency_hz: spec.air_maximum_hz, maximum_modes: 8, maximum_nodes: 512,
                 maximum_matrix_entries: 2_000_000, relative_tolerance: 1e-7 }, gate)?;
-        let (basis,overlaps) = interface(&film,&modes,&air,gate)?;
+        let (basis,mut overlaps) = interface(&film,&modes,&air,gate)?;
+        // Fixed-reference radial edge motion sweeps no cavity volume directly.
+        // Preserve all old head rows; append a zero actuator row BEFORE gas inertia.
+        overlaps.resize(n*basis.omegas.len(),0.0);
         let drag: Vec<_> = basis.omegas.iter().map(|w| if *w == 0.0 {0.0} else {spec.air[2]}).collect();
         let coupling = CavityCoupling::new(&basis,n,&overlaps,&drag)?;
         let mut fixed: Vec<_> = rim(&film).iter().flat_map(|&(a,b)| [a,b]).collect();
         fixed.sort_unstable(); fixed.dedup();
-        let potential = MembranePotential::from_pencil(&film.mesh,&film.section,&film.model,&modes,&fixed,
-            MembraneReductionBudget { max_modes: 32, max_nodes: 2048, max_facet_pairs: 2_000_000,
-                max_solve_entries: 16_000_000, relative_tolerance: 1e-6 },spec.maximum_slope)?;
-        let head = ImpactBody { potential: BodyPotential::Membrane(potential),
-            initial: vec![ModalAcousticState::default();modes.len()],
-            damping_per_s: modes.iter().map(|m| 2.0*spec.head_damping_ratio*m.lambda.sqrt()).collect() };
+        let budget=MembraneReductionBudget {max_modes:32,max_nodes:2048,max_facet_pairs:2_000_000,
+            max_solve_entries:16_000_000,relative_tolerance:1e-6};
+        let mut damping:Vec<_>=modes.iter().map(|m|2.0*spec.head_damping_ratio*m.lambda.sqrt()).collect();
+        let potential=match &tensioner {
+            Some(t)=>{
+                let law=fs_couple::render::plate::impact::dilation::DilationPotential::from_disk(&film,&modes,t.config,budget)?;
+                damping.push(t.drag_n_s_m/t.config.effective_mass_kg);
+                BodyPotential::Dilation(law)
+            },
+            None=>BodyPotential::Membrane(MembranePotential::from_pencil(&film.mesh,&film.section,
+                &film.model,&modes,&fixed,budget,spec.maximum_slope)?),
+        };
+        let head=ImpactBody {potential,initial:vec![ModalAcousticState::default();n-1],damping_per_s:damping};
         let m = spec.mallet; let f = spec.felt;
         let points = footprint(&film,[m[5],m[6]],m[1])?;
         let face = fs_couple::render::plate::impact::linear::wire::film_shapes(&film,&modes,&points)?;
-        let sites: Vec<_> = face.into_iter().map(|shapes| PadSite {
-            weights: std::iter::once(0.0).chain(shapes).collect(), area_m2: PI*m[1]*m[1]/4.0 }).collect();
+        let sites:Vec<_>=face.into_iter().map(|shapes| {
+            let mut weights:Vec<_>=std::iter::once(0.0).chain(shapes).collect();weights.resize(n,0.0);
+            PadSite {weights,area_m2:PI*m[1]*m[1]/4.0}
+        }).collect();
         let jaw = CompliantJaw { side: PadSide::Negative, mass_kg: m[0], drag_n_s_m: 0.0,
             initial_gap_m: m[3], initial_velocity_m_s: m[4], thickness_m: m[2],
             law: WoolFelt::new(f[0],f[1],f[2],f[3],f[4],f[5])?, prior_maximum_strain: f[6],
@@ -109,13 +132,26 @@ impl Model {
                 energy_absolute_tolerance_j: 1e-9, energy_relative_tolerance: 1e-6,
                 maximum_generalized_force: 1e6 },gate)?;
         let reference = match bake(&film,&modes)? {
-            Some(load) => cavity.attach_exterior_radiation(reference,&load,&(1..n).collect::<Vec<_>>(),256)?,
+            Some(load) => cavity.attach_exterior_radiation(reference,&load,&(1..head_end).collect::<Vec<_>>(),256)?,
             None => reference,
         };
         if gate.is_requested() { return Err("kettle preparation cancelled before publication".into()); }
+        let edge_port=reference.dilation_force_port(1);
+        if tensioner.is_some()!=edge_port.is_some() {return Err("lost edge force coordinate during composition".into());}
         let force = vec![0.0;cavity.total_modes()];
         let pickup = fs_couple::render::plate::impact::linear::wire::film_shapes(&film,&modes,&[[m[5],m[6]]])?.remove(0);
-        Ok(Self { mechanics: reference.prepare_analytic()?, cavity, air, film, modes, tip_weight, pickup, force })
+        Ok(Self { mechanics: reference.prepare_analytic()?, cavity, air, film, modes, tip_weight, pickup, force, tensioner, edge_port })
+    }
+    /// Exact-sample force assignment enters the SAME accepted mechanical tick.
+    /// Force scratch is restored on both success and refusal; sample/history
+    /// publication remains owned by PreparedImpactSystem, never by a scheduler.
+    pub fn step(&mut self,gate:&CancelGate)->Result<fs_couple::render::plate::impact::ImpactFrame,Error> {
+        if let (Some(t),Some((index,weight)))=(&self.tensioner,self.edge_port) {
+            let previous=self.force[index];
+            self.force[index]=previous+t.force_n(self.mechanics.samples())*weight;
+            let result=self.mechanics.step(&self.force,gate);self.force[index]=previous;
+            Ok(result?)
+        } else {Ok(self.mechanics.step(&self.force,gate)?)}
     }
     pub fn head_displacement(&self) -> f64 {
         self.pickup.iter().enumerate().map(|(j,b)| b*self.mechanics.state()[2*(j+1)]).sum()

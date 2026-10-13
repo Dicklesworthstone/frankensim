@@ -193,7 +193,7 @@ pub fn render(model:&mut Model,bake:&Bake,spec:&Spec,settings:Settings,frames:us
     let mut pressure=Vec::with_capacity(frames);
     for _ in 0..frames {
         for frame in block.chunks_exact_mut(count) {
-            model.mechanics.step(&model.force,gate)?;
+            model.step(gate)?;
             for (j,(value,previous)) in frame.iter_mut().zip(&mut previous).enumerate() {
                 let v=model.mechanics.state()[2*(j+1)+1];
                 *value=(v-*previous)*f64::from(spec.rate_hz); *previous=v;

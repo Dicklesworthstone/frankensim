@@ -134,3 +134,12 @@ they do not infer copper thickness. The `--wav` path deliberately does not use
 that approximation: `boundary.rs` uses the separately supplied outer stations,
 rigid annulus and the original world coordinates. Its source fields and receiver
 coordinates must never be mixed with the translated comparison geometry.
+
+## Physical tensioning while the head rings
+
+[Force-driven edge actuation](TENSIONER.md) adds an explicit effective inertia,
+extra hardware stiffness, drag and sample-timed radial forces to the original
+nonlinear head. The head reacts back on that coordinate, and its input work is
+included in the shared energy ledger. Both CSV and coupled WAV use the same
+trajectory. This is a small-strain uniform-edge image, not measured pedal or
+hoop geometry; the unselected fixed-rim model remains unchanged.
