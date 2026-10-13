@@ -32,6 +32,9 @@
 //! strict `fs-math` exponential, and the requirement adapter depends only on
 //! lower-layer types.
 
+/// Full-menu, outcome-integrated decision value for correlated Gaussian sensing.
+pub mod knowledge_gradient;
+
 /// Semantic version of the decision algebra. Bump this whenever a change can
 /// alter opportunity-loss result bits, best/runner-up selection, uncertainty
 /// composition, or the Gaussian helper semantics.
@@ -638,7 +641,7 @@ pub enum Recommendation {
     Act {
         /// The action id.
         action: String,
-        /// Its decision value per cost.
+        /// Its decision value per unit cost.
         value_per_cost: f64,
     },
     /// Stop — the decision is already robust (EVPI below the threshold).
