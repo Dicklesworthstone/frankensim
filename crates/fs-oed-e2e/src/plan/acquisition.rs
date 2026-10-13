@@ -118,3 +118,6 @@ impl MeasurementStudy {
 
 /// Explicit seeded-noise provider for synthetic acquisition experiments.
 pub mod simulation;
+
+/// Persistent acquisition allowances and single-use, pre-I/O reservations.
+pub mod budget;
