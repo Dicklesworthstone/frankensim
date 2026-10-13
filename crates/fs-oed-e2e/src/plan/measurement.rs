@@ -191,7 +191,7 @@ pub struct MeasurementStudy {
 }
 impl MeasurementStudy {
     /// Admit the complete menu, canonicalize once, and evaluate the initial EVPI.
-    pub fn new(mut alternatives: Vec<MeasurementAlternative>, threshold: ObjectiveValue,
+    pub fn new(alternatives: Vec<MeasurementAlternative>, threshold: ObjectiveValue,
         max_readings: usize, cx: &Cx<'_>) -> Result<Self, MeasurementError> {
         if alternatives.is_empty() { return Err(OedError::NoCandidates.into()); }
         if alternatives.len() > MAX_CAMPAIGN_CANDIDATES {
@@ -201,6 +201,14 @@ impl MeasurementStudy {
             return Err(OedError::TooManySensors { count: max_readings, max: MAX_CAMPAIGN_SENSORS }.into());
         }
         let (plan, shape, mut progress) = work(&alternatives, cx)?;
+        Self::new_planned(alternatives, threshold, max_readings, plan, shape, &mut progress, cx)
+    }
+
+    // Checkpoint recovery reuses these exact operations with ONE accountant
+    // instead of replenishing the budget for each replayed measurement.
+    fn new_planned(mut alternatives: Vec<MeasurementAlternative>, threshold: ObjectiveValue,
+        max_readings: usize, plan: CampaignWorkPlan, shape: ByteShape,
+        progress: &mut CampaignProgress<'_>, cx: &Cx<'_>) -> Result<Self, MeasurementError> {
         progress.checkpoint(cx, plan, "measurement study admission")?;
         let spec = alternatives[0].prior.spec();
         let cost_spec = alternatives[0].cost.spec();
@@ -245,7 +253,7 @@ impl MeasurementStudy {
         progress.charge_bytes("measurement declarations", shape.records() + shape.sum_name + 256)?;
         let mut study = Self { alternatives, beliefs, threshold, score_spec, max_readings,
             updates: reserve(max_readings)?, evpi: 0.0, history: hash.finalize() };
-        study.evpi = study.menu(None, &mut progress, plan, shape, cx)?.full_opportunity_loss_checked()?;
+        study.evpi = study.menu(None, progress, plan, shape, cx)?.full_opportunity_loss_checked()?;
         progress.charge_bytes("initial measurement EVPI", shape.full_scan())?;
         progress.checkpoint(cx, plan, "measurement study publication")?;
         Ok(study)
@@ -287,10 +295,15 @@ impl MeasurementStudy {
     /// This is the existing nine-node SensorForge rule, not variance-only ranking.
     pub fn recommend(&self, cx: &Cx<'_>) -> Result<MeasurementDecision, MeasurementError> {
         let (plan, shape, mut progress) = work(&self.alternatives, cx)?;
+        self.recommend_planned(plan, shape, &mut progress, cx)
+    }
+
+    fn recommend_planned(&self, plan: CampaignWorkPlan, shape: ByteShape,
+        progress: &mut CampaignProgress<'_>, cx: &Cx<'_>) -> Result<MeasurementDecision, MeasurementError> {
         progress.checkpoint(cx, plan, "measurement recommendation")?;
         if self.evpi <= self.threshold.value() { return Ok(MeasurementDecision::Stop(MeasurementStop::ThresholdReached)); }
         if self.updates.len() == self.max_readings { return Ok(MeasurementDecision::Stop(MeasurementStop::ReadingLimit)); }
-        let menu = self.menu(None, &mut progress, plan, shape, cx)?;
+        let menu = self.menu(None, progress, plan, shape, cx)?;
         let mut actions = reserve(self.alternatives.len())?;
         for (alternative, belief) in self.alternatives.iter().zip(&self.beliefs) {
             let prior = belief.variance(0).map_err(OedError::BeliefInvariant)?;
@@ -301,7 +314,7 @@ impl MeasurementStudy {
         }
         progress.advance(self.alternatives.len() as u128);
         progress.charge_bytes("measurement actions", shape.action_construction())?;
-        let recommendation = recommend_with_cancellation(&menu, &actions, self.evpi, self.threshold.value(), plan, shape, &mut progress, cx)?;
+        let recommendation = recommend_with_cancellation(&menu, &actions, self.evpi, self.threshold.value(), plan, shape, progress, cx)?;
         let Recommendation::Act { action, value_per_cost } = recommendation else {
             return Ok(MeasurementDecision::Stop(MeasurementStop::NoUsefulAction));
         };
@@ -326,6 +339,14 @@ impl MeasurementStudy {
         self.check_current(request)?;
         if outcome.request != request.identity { return Err(MeasurementError::RequestMismatch); }
         let (plan, shape, mut progress) = work(&self.alternatives, cx)?;
+        self.assimilate_planned(request, outcome, plan, shape, &mut progress, cx)
+    }
+
+    fn assimilate_planned(&mut self, request: &MeasurementRequest, outcome: &MeasurementOutcome,
+        plan: CampaignWorkPlan, shape: ByteShape, progress: &mut CampaignProgress<'_>,
+        cx: &Cx<'_>) -> Result<&MeasurementUpdate, MeasurementError> {
+        self.check_current(request)?;
+        if outcome.request != request.identity { return Err(MeasurementError::RequestMismatch); }
         progress.checkpoint(cx, plan, "actual measurement admission")?;
         let mut instrument_hash = DomainHasher::new("org.frankensim.sensorforge.measurement-instrument.v1");
         instrument_hash.update(request.identity.as_bytes()); field(&mut instrument_hash, outcome.instrument.as_bytes());
@@ -335,7 +356,7 @@ impl MeasurementStudy {
             "sensor_count", 0.0, (self.updates.len() + 1) as f64, cx, &mut progress.polls_remaining)
             .map_err(|source| OedError::Assimilation { candidate: request.alternative.name.clone(), source })?;
         progress.advance(2);
-        let next_evpi = self.menu(Some((request.index, posterior.belief())), &mut progress, plan, shape, cx)?.full_opportunity_loss_checked()?;
+        let next_evpi = self.menu(Some((request.index, posterior.belief())), progress, plan, shape, cx)?.full_opportunity_loss_checked()?;
         progress.charge_bytes("actual measurement EVPI", shape.full_scan())?;
         let mean = posterior.belief().component_mean(0).map_err(OedError::BeliefInvariant)?;
         let variance = posterior.belief().variance(0).map_err(OedError::BeliefInvariant)?;
@@ -401,3 +422,6 @@ fn reserve<T>(count: usize) -> Result<Vec<T>, MeasurementError> {
 }
 fn number(hash: &mut DomainHasher, value: f64) { hash.update(&canonicalize_zero(value).to_le_bytes()); }
 fn field(hash: &mut DomainHasher, value: &[u8]) { hash.update(&(value.len() as u64).to_le_bytes()); hash.update(value); }
+
+/// Bounded storage transport and numerical replay of actual measurement studies.
+pub mod checkpoint;

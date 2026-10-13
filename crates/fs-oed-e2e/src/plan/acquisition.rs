@@ -36,6 +36,20 @@ impl AcquiredMeasurement {
     }
     #[must_use]
     pub fn into_parts(self) -> (MeasurementRequest, MeasurementOutcome) { (self.request, self.outcome) }
+
+    /// Encode a completed acquisition BEFORE applying it. Store these bytes
+    /// durably with the source study checkpoint; no provider or I/O is called.
+    pub fn to_checkpoint(&self, cx: &Cx<'_>) -> Result<Vec<u8>, MeasurementError> {
+        super::measurement::checkpoint::acquisition_to_checkpoint(self, cx)
+    }
+
+    /// Recover an unapplied acquisition against its restored source study.
+    /// Rechecks the current request; a stale or already-applied reading refuses.
+    /// This never calls the provider, even when a previous application failed.
+    pub fn from_checkpoint(study: &MeasurementStudy, bytes: &[u8], cx: &Cx<'_>) -> Result<Self, MeasurementError> {
+        let (request, outcome) = super::measurement::checkpoint::acquisition_from_checkpoint(study, bytes, cx)?;
+        Ok(Self { request, outcome })
+    }
 }
 
 /// Distinguish failure before I/O, a provider error, and a real reading retained
