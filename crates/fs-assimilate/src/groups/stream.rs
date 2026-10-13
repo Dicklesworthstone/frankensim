@@ -310,3 +310,6 @@ fn number(hash: &mut DomainHasher, value: f64, progress: &mut WorkProgress<'_, '
     hash.update(&canonical_f64_bits(value).to_le_bytes());
     progress.hash_bytes("shared stream identity", 8)
 }
+
+/// Outcome-free sensor planning under the retained joint posterior.
+pub mod design;

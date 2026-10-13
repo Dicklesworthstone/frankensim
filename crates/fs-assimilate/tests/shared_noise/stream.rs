@@ -212,3 +212,6 @@ fn admitted_singular_nuisance_keeps_its_null_direction() {
         assert_eq!(stream.joint().variance(2), Some(0.25));
     });
 }
+
+#[path = "stream/design.rs"]
+mod design;
