@@ -151,3 +151,33 @@ fn cancellation_never_publishes_a_feasible_but_incomplete_run() {
         assert_eq!(solve(request, design, &cx).unwrap_err().code, "cooling-network-cancelled");
     });
 }
+
+
+#[test]
+fn command_dispatch_reaches_resistance_help_and_checks_two_file_arity() {
+    let command = crate::network_command::run(
+        &[OsString::from("resistance-design"), OsString::from("--help")], true);
+    assert_eq!(command.exit_code, exit::SUCCESS);
+    assert!(command.stderr.is_empty());
+    let help = J::parse(&command.stdout).unwrap();
+    assert_eq!(help.str_field("schema"), Some(SCHEMA));
+    assert!(help.str_field("help").unwrap().contains("<model.json> <design.json>"));
+    let missing = crate::network_command::run(
+        &[OsString::from("resistance-design")], true);
+    assert_eq!(missing.exit_code, exit::USAGE);
+    assert!(missing.stdout.is_empty());
+    assert!(J::parse(&missing.stderr).is_ok());
+}
+
+#[test]
+fn checked_in_resistance_example_has_an_admitted_model_and_control_policy() {
+    let request = Request::parse(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/cooling-network/resistance-model.json"))).unwrap();
+    let design = Specification::parse(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/cooling-network/resistance-design.json")), &request).unwrap();
+    assert_eq!(design.controls.len(), 2);
+    assert_eq!(design.controls[0].name, "first-stream");
+    assert_eq!(design.controls[1].name, "fresh-bypass");
+    assert_eq!(design.evaluations, 240);
+    assert!(request.gradient && request.objective.is_mean());
+}

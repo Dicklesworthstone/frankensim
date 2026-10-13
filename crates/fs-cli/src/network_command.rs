@@ -45,7 +45,7 @@ const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-network.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-network.result.v1";
 const NO_CLAIM: &str = "nominal fixed-geometry solid model; hydraulics and convection coefficients frozen within each thermal solve; caller-declared constant isotropic/anisotropic or bounded scalar k(T) materials and frozen fluid properties; k(T) transients require explicit Newton/Armijo settings and temperature-independent heat capacity; coefficients declared or derived from validity-gated duct correlations, without coupled boundary-layer evolution; explicit matching-P1 contacts have fixed caller-declared resistance; component sources use nodal P1 support; maxima concern the discrete field only; optional prescribed adiabatic return has its own reported scope; no CFD, solved return-duct hydraulics, fan heating, nonmatching contact, enclosure-radiation, uncertainty certification, certified mesh-error or experimental-validation claim; optional steady surface-mean ambient radiation has its own reported scope; not a .fsim or ledger-backed solve";
-const HELP: &str = "Usage: frankensim [--json] cooling-network <request.json>\n\nSolve a prescribed-pressure or fan-driven network and heterogeneous solid,\nincluding component heating, directional conductivity, bounded scalar k(T),\nfinite-resistance thermal contacts, downstream mixing and declared or\nflow-derived duct convection. Compute mean/peak temperatures, conditional\nthermal gradients (including contact resistance), and effective-h or full\nfan-speed target searches. All quantities use coherent SI. Transient k(T)\nrequires explicit transient.nonlinear settings; heat capacity remains constant.\nOptional mesh_convergence runs successive steady meshes with preserved P1\nsource fields; repeated agreement is measured, not a continuum error bound.\nOptional radiation adds steady surface-mean gray T^4 exchange with declared\nisothermal surroundings on convecting surfaces; gradients and nested mesh,\ntransient or design consumers with radiation currently refuse.\nOptional recirculation solves imposed adiabatic exhaust-to-supply feedback;\nboundary temperatures then denote fresh makeup.\nRequest schema: frankensim.cooling-network.v1.\n\nSee examples/cooling-network/README.md, MATERIAL_COOLING.md, FAN_COOLING.md,\nNONLINEAR_TRANSIENT_COOLING.md, CONTACT_COOLING.md, MESH_CONVERGENCE.md,\nRECIRCULATED_COOLING.md and RADIATIVE_COOLING.md. Results are nominal estimates,\nnot validated hardware or ledger-backed .fsim runs.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-network <request.json>\n       frankensim [--json] cooling-network resistance-design <model.json> <design.json>\n       (resistance-design requires --features cooling-design)\n\nSolve a prescribed-pressure or fan-driven network and heterogeneous solid,\nincluding component heating, directional conductivity, bounded scalar k(T),\nfinite-resistance thermal contacts, downstream mixing and declared or\nflow-derived duct convection. Compute mean/peak temperatures, conditional\nthermal gradients (including contact resistance), and effective-h or full\nfan-speed target searches. All quantities use coherent SI. Transient k(T)\nrequires explicit transient.nonlinear settings; heat capacity remains constant.\nOptional mesh_convergence runs successive steady meshes with preserved P1\nsource fields; repeated agreement is measured, not a continuum error bound.\nOptional radiation adds steady surface-mean gray T^4 exchange with declared\nisothermal surroundings on convecting surfaces; gradients and nested mesh,\ntransient or design consumers with radiation currently refuse.\nOptional recirculation solves imposed adiabatic exhaust-to-supply feedback;\nboundary temperatures then denote fresh makeup.\nRequest schema: frankensim.cooling-network.v1.\n\nSee examples/cooling-network/README.md, MATERIAL_COOLING.md, FAN_COOLING.md,\nNONLINEAR_TRANSIENT_COOLING.md, CONTACT_COOLING.md, MESH_CONVERGENCE.md,\nRECIRCULATED_COOLING.md and RADIATIVE_COOLING.md. Results are nominal estimates,\nnot validated hardware or ledger-backed .fsim runs.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 #[derive(Debug)]
@@ -528,6 +528,13 @@ fn diagnostic(code: u8, failure: Failure, json_mode: bool) -> CommandOutput {
 }
 
 pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
+    if args.first().is_some_and(|arg| arg == "resistance-design") {
+        #[cfg(feature = "cooling-design")]
+        return design::resistance::run(&args[1..], json_mode);
+        #[cfg(not(feature = "cooling-design"))]
+        return diagnostic(exit::REFUSED, Failure { code: "cooling-design-feature",
+            message: "resistance-design requires a build with --features cooling-design".into() }, json_mode);
+    }
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         return CommandOutput { exit_code: exit::SUCCESS, stdout: if json_mode {
             format!("{{\"schema\":{},\"help\":{}}}\n", quote(RESULT_SCHEMA), quote(HELP))
@@ -576,3 +583,15 @@ pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, not(feature = "cooling-design")))]
+mod resistance_design_feature_tests {
+    use super::*;
+    #[test]
+    fn disabled_resistance_design_is_an_explicit_feature_refusal() {
+        let output = run(&[OsString::from("resistance-design"), OsString::from("--help")], true);
+        assert_eq!(output.exit_code, exit::REFUSED);
+        assert!(output.stdout.is_empty());
+        assert_eq!(J::parse(&output.stderr).unwrap().str_field("code"), Some("cooling-design-feature"));
+    }
+}
