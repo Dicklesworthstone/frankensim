@@ -171,3 +171,6 @@ fn actual_instrument_and_noise_declarations_are_bound_to_history() {
         assert_ne!(a.updates()[0].assimilation_color(), b.updates()[0].assimilation_color());
     });
 }
+
+#[path = "measurement/acquisition.rs"]
+mod acquisition;

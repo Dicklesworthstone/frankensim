@@ -516,3 +516,6 @@ pub fn verify_decision_plan(
 
 /// Production sensing: outcome-free recommendations and actual measurement updates.
 pub mod measurement;
+
+/// External measurement providers and retained acquisitions for numerical retry.
+pub mod acquisition;
