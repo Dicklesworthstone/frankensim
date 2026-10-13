@@ -77,7 +77,7 @@ fn preparation_and_reuse_keep_cancellation_and_singular_limit_refusals() {
     });
 }
 
-/// The pre-change coupling arithmetic, with one fresh radiosity factorization
+/// The same physical acceptance, with one fresh radiosity factorization
 /// per iteration. This comparison intentionally uses the existing public
 /// producers, not a surrogate thermal model or a copied dense factorization.
 fn fresh_factor_coupling(
@@ -90,6 +90,7 @@ fn fresh_factor_coupling(
     let mut conduction = fs_conduction::solve(cx, problem, cfg.clone()).unwrap();
     let mut driving = means(&conduction.temperature);
     let mut history = Vec::new();
+    let mut equilibrium_checks = 0usize;
     for iteration in 0..outer.max_iterations {
         let radiosity = enclosure.solve(cx, &driving).unwrap();
         let rows = enclosure.surfaces().iter().zip(&radiosity.net_outward_flux_w_m2)
@@ -108,11 +109,17 @@ fn fresh_factor_coupling(
         let threshold = outer.surface_temperature_rtol.mul_add(scale, outer.surface_temperature_atol_k);
         history.push(update);
         if update <= threshold {
-            return fs_conduction::CoupledRadiationSolution {
-                conduction,
-                radiation: fs_conduction::CoupledRadiationReport { iterations: iteration+1,
-                    surface_update_history_k: history, final_threshold_k: threshold, radiosity },
-            };
+            let equilibrium = super::equilibrium::actual_equilibrium(
+                cx, problem, enclosure, &conduction, &radiosity);
+            equilibrium_checks += 1;
+            if equilibrium.residual_w <= equilibrium.residual_threshold_w {
+                return fs_conduction::CoupledRadiationSolution {
+                    conduction,
+                    radiation: fs_conduction::CoupledRadiationReport { iterations: iteration+1,
+                        surface_update_history_k: history, final_threshold_k: threshold, radiosity,
+                        equilibrium, equilibrium_checks },
+                };
+            }
         }
         for (old, new) in driving.iter_mut().zip(actual) {
             *old = outer.relaxation.mul_add(new, (1.0-outer.relaxation)* *old);

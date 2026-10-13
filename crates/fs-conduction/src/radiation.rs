@@ -11,7 +11,8 @@
 //! - [`GrayDiffuseEnclosure`] solves the opaque, gray, diffuse radiosity
 //!   equations for an admitted view-factor matrix.  The outer coupling driver
 //!   freezes the resulting face fluxes for one conduction solve and repeats
-//!   until the declared surface-temperature criterion closes.
+//!   until both the surface-temperature criterion and the reassembled
+//!   nonlinear solid residual pass their original tolerances.
 //!
 //! [`view_factors`] generates finite-geometry factors with bounded, cancellable
 //! diffuse ray sampling and empirical replicate diagnostics. Closed-enclosure
@@ -38,7 +39,9 @@ use crate::solve::{
 
 mod ambient;
 mod prepared;
+mod equilibrium;
 pub use prepared::PreparedRadiosity;
+pub use equilibrium::EnclosureEquilibriumReport;
 pub mod view_factors;
 pub use ambient::{
     AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationPatchReport,
@@ -1208,7 +1211,7 @@ pub struct CoupledRadiationConfig {
     /// Surface-temperature absolute tolerance, K.
     pub surface_temperature_atol_k: f64,
     /// Under-relaxation applied to the temperatures that drive the next
-    /// radiosity solve, in `(0, 1].
+    /// radiosity solve, in `(0, 1]`.
     pub relaxation: f64,
     /// Outer-iteration budget.
     pub max_iterations: usize,
@@ -1257,6 +1260,11 @@ pub struct CoupledRadiationReport {
     pub final_threshold_k: f64,
     /// Last radiosity solve whose fluxes were applied to conduction.
     pub radiosity: RadiosityReport,
+    /// Actual final-state radiation and full nonlinear free-equilibrium check.
+    pub equilibrium: EnclosureEquilibriumReport,
+    /// Number of extra final-state residual assemblies, including failed checks.
+    /// These are not additional physical solid solves or Krylov iterations.
+    pub equilibrium_checks: usize,
 }
 
 /// Coupled conduction field plus enclosure evidence.
@@ -1271,7 +1279,11 @@ pub struct CoupledRadiationSolution {
 /// Couple a gray-diffuse enclosure to steady conduction with a declared outer
 /// fixed point. Radiation faces must be part of the base boundary's explicit
 /// adiabatic remainder; this prevents accidental replacement of Dirichlet,
-/// Neumann, or convective rows.
+/// Neumann, or convective rows. A candidate must pass the declared surface
+/// update test AND the original solid residual threshold after radiation is
+/// recomputed at that candidate and the complete nonlinear equations are
+/// reassembled. A failed final-state check continues the same bounded loop;
+/// it never relaxes the inner tolerance or spends an uncounted solid solve.
 pub fn solve_with_gray_diffuse_enclosure(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
@@ -1288,6 +1300,8 @@ pub fn solve_with_gray_diffuse_enclosure(
         enclosure.surface_temperatures(problem.mesh, &conduction.temperature)?;
     let prepared = enclosure.prepare_radiosity(cx)?;
     let mut update_history = Vec::new();
+    let mut equilibrium_checks = 0usize;
+    let mut last_equilibrium_residual = None;
 
     for iteration in 0..coupling_config.max_iterations {
         cx.checkpoint().map_err(|_| ConductionError::Cancelled {
@@ -1340,15 +1354,23 @@ pub fn solve_with_gray_diffuse_enclosure(
         update_history.push(update);
         conduction = next;
         if update <= threshold {
-            return Ok(CoupledRadiationSolution {
-                conduction,
-                radiation: CoupledRadiationReport {
-                    iterations: iteration + 1,
-                    surface_update_history_k: update_history,
-                    final_threshold_k: threshold,
-                    radiosity,
-                },
-            });
+            let equilibrium = equilibrium::check(cx, problem, interfaces, enclosure,
+                &prepared, &conduction, &actual_temperatures, &radiosity)?;
+            equilibrium_checks += 1;
+            last_equilibrium_residual = Some(equilibrium.residual_w);
+            if equilibrium.residual_w <= equilibrium.residual_threshold_w {
+                return Ok(CoupledRadiationSolution {
+                    conduction,
+                    radiation: CoupledRadiationReport {
+                        iterations: iteration + 1,
+                        surface_update_history_k: update_history,
+                        final_threshold_k: threshold,
+                        radiosity,
+                        equilibrium,
+                        equilibrium_checks,
+                    },
+                });
+            }
         }
         for (driving, actual) in driving_temperatures.iter_mut().zip(actual_temperatures) {
             *driving = coupling_config
@@ -1359,7 +1381,7 @@ pub fn solve_with_gray_diffuse_enclosure(
     Err(radiation_error(
         "coupling",
         format!(
-            "surface-temperature fixed point did not converge in {} iterations; final update was {} K",
+            "surface-temperature fixed point did not converge in {} iterations; final update was {} K; nonlinear residual after {equilibrium_checks} final-state checks: {last_equilibrium_residual:?} W",
             coupling_config.max_iterations,
             update_history.last().copied().unwrap_or(f64::INFINITY)
         ),

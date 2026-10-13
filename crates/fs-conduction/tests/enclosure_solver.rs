@@ -98,3 +98,6 @@ fn opposite_surfaces_with_emissivities(
 
 #[path = "enclosure_solver/prepared.rs"]
 mod prepared;
+
+#[path = "enclosure_solver/equilibrium.rs"]
+mod equilibrium;
