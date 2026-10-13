@@ -144,3 +144,6 @@ fn cancellation_and_budget_exhaustion_return_no_partially_assessed_family() {
     assert_eq!(control.work().linear_iterations, 1);
     assert_eq!(study.operator().scales(), scales);
 }
+
+#[path = "refit_tests.rs"]
+mod refit;
