@@ -10,6 +10,11 @@
 //! does not localize a fracture time inside the preceding step, solve mechanical
 //! equilibrium, move geometry, or model fracture heating. Fixed local frames,
 //! small tangential travel and uniform original contact area are explicit limits.
+//! The opt-in [`prescribed`] path instead resolves switching times inside an
+//! explicitly supplied straight separation segment before advancing its heat.
+
+/// Event-resolved heat transfer for explicitly prescribed separation histories.
+pub mod prescribed;
 
 use std::collections::BTreeMap;
 use fs_exec::Cx;

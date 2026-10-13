@@ -36,6 +36,19 @@ impl<'a> DepositionSimulation<'a> {
     /// coupling never changes thermal stepping, event ordering or arithmetic.
     pub fn advance_observed<O: DepositionObserver>(
         &self, observer: &O, target_s: f64, config: StepConfig,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, O, EnergyAudit), O::Error> {
+        self.advance_observed_limited(observer, target_s, config, self.budget.max_substeps, checkpoint)
+    }
+
+    /// The same thermal/observer operation with an additional per-invocation
+    /// substep allowance. Event-splitting owners pass their remaining shared
+    /// allowance here instead of renewing the whole thermal budget at each cut.
+    /// This can only tighten the stored ceiling, never alter it. Zero still
+    /// admits same-time events or movement through an empty interval, but not
+    /// a thermal step. Work refusal occurs BEFORE the next thermal evaluation.
+    pub fn advance_observed_limited<O: DepositionObserver>(
+        &self, observer: &O, target_s: f64, config: StepConfig, max_substeps: usize,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, O, EnergyAudit), O::Error> {
         checkpoint()?;
@@ -65,7 +78,7 @@ impl<'a> DepositionSimulation<'a> {
             if next.time_s == target_s { break; }
             let stop = next.schedule.get(next.cursor).map_or(target_s, |e| e.time_s.min(target_s));
             if next.cells.is_empty() { next.time_s = stop; continue; }
-            if audit.substeps >= next.budget.max_substeps {
+            if audit.substeps >= next.budget.max_substeps.min(max_substeps) {
                 return Err(DepositionError::Budget("thermal substeps").into());
             }
             let start_s = next.time_s;
