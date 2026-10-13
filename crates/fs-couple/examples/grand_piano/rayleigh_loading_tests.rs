@@ -30,6 +30,25 @@ fn fixture() -> (Bank, Vec<SurfaceSample>) {
 fn medium() -> Medium { Medium { density: 1.2, sound_speed: 343.0 } }
 
 #[test]
+fn unsupported_complete_port_count_refuses_before_the_rayleigh_sweep() {
+    let count = MAX_PORTS + 1;
+    assert!(count <= MAX_MODAL_RAYLEIGH_FIELDS,
+        "fixture must fit the kernel while exceeding the passive realization");
+    let course = steinway_scale::courses().unwrap().into_iter().find(|c| c.midi == 69).unwrap();
+    let course = Course { unison: 1, duplex_length_m: 0.0, ..course };
+    let board: Vec<_> = (0..count).map(|i| BoardMode {
+        frequency_hz: 250.0 + i as f64, damping_ratio: 0.0,
+        bridge: [0.0; 88], volume: 0.0,
+    }).collect();
+    let bank = Bank::new(&[course], &board, 192_000, 8_000.0, 20, false).unwrap();
+    let surface = [SurfaceSample { position_m: [0.0, 0.0, 0.0],
+        area_m2: 0.001, mode_shape: vec![1.0; count] }];
+    let error = prepare(&surface, &bank, &Options::parse("1,40,500,65").unwrap(),
+        medium(), 48_000).err().expect("unsupported full image must refuse");
+    assert_eq!(error, format!("Rayleigh loading retains 1..{MAX_PORTS} complete board modes and 1..{} area samples; reduce the supplied physical image explicitly", fs_bem::helmholtz::MAX_DENSE_PANELS));
+}
+
+#[test]
 fn complete_loaded_projection_reaches_the_actual_passive_fit() {
     let (bank, surface) = fixture();
     let options = Options::parse("1,40,500,65").unwrap();

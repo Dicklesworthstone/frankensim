@@ -3,7 +3,7 @@
 //! the existing passive load fitter and the existing mechanical air exchange.
 use super::{board_geometry::SurfaceSample, engine::radiation::Model, linear::Bank};
 use fs_bem::helmholtz::{Medium, rayleigh_modal::{AreaSample, PreparedSurface, MAX_MODAL_RAYLEIGH_FIELDS}};
-use fs_couple::render::plate::impact::radiation::fit;
+use fs_couple::render::plate::impact::radiation::{fit, MAX_PORTS};
 use fs_math::det;
 use std::f64::consts::TAU;
 
@@ -99,9 +99,12 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
     output_rate: u32) -> Result<PreparedLoad, String> {
     options.validate_clock(output_rate, bank.rate)?;
     let modes = bank.board_count;
-    if !(1..=MAX_MODAL_RAYLEIGH_FIELDS).contains(&modes) || surface.is_empty()
+    // The numerical kernel may admit more fields than the downstream passive
+    // realization. Refuse that complete image before preparing its sweep.
+    let maximum_fields = MAX_MODAL_RAYLEIGH_FIELDS.min(MAX_PORTS);
+    if !(1..=maximum_fields).contains(&modes) || surface.is_empty()
         || surface.len() > fs_bem::helmholtz::MAX_DENSE_PANELS {
-        return Err("Rayleigh loading retains 1..32 complete board modes and 1..8192 area samples; reduce the supplied physical image explicitly".into());
+        return Err(format!("Rayleigh loading retains 1..{maximum_fields} complete board modes and 1..{} area samples; reduce the supplied physical image explicitly", fs_bem::helmholtz::MAX_DENSE_PANELS));
     }
     let count = surface.len() as u64;
     let sweep_terms = count.checked_mul(count).and_then(|v| v.checked_mul(modes as u64))

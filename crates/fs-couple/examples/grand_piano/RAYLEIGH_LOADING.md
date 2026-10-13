@@ -61,8 +61,12 @@ existing mechanical-rate guard. At 48 kHz with four substeps, the upper endpoint
 must therefore be below 10.8 kHz. Broadband excitation can still reach outside
 the sampled band; the fitted load has no validated accuracy there.
 
-The initial capability admits up to 32 complete board modes, 8,192 area samples
-and 64 billion cell-mode-frequency visits. It caches the spatial pair distances
+The piano path admits up to 32 complete board modes, 8,192 area samples
+and 64 billion cell-mode-frequency visits. The numerical Rayleigh kernel can
+retain 128 fields, but the shared passive fitter and runtime model still admit
+32 complete velocity ports. The frontend checks their common limit before
+preparing any impedance sweep. A larger physical image remains unsupported;
+no board fields are removed to fit the smaller realization. It caches the spatial pair distances
 and projects each frequency in `O(cells^2*modes + cells*modes^2)` work. No acoustic
 port reduction or automatic spatial coarsening is performed. Preparation is
 offline work, with no real-time claim.

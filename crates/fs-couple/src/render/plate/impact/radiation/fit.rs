@@ -2,10 +2,9 @@
 //! A fixed damped-resonator dictionary and PSD residue matrices preserve all
 //! signed cross-port terms. This is a restricted passive fit, not general MIMO
 //! vector fitting. Inadequate data/basis refuses; no entrywise repair or gain EQ.
-use super::{Model,Pole};
+use super::{Model,Pole,MAX_PORTS};
 use fs_math::{c64::C64,det};
 const TERMS:usize=32;
-const MAX_PORTS:usize=32;
 const SWEEPS:usize=256;
 
 pub struct Fit {
@@ -169,6 +168,24 @@ pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
 mod tests {
     use super::*;
     fn grid()->Vec<f64> {(0..65).map(|i|std::f64::consts::TAU*(40.+360.*i as f64/64.)).collect()}
+    #[test]
+    fn fit_and_model_share_the_complete_port_capacity() {
+        let omega = grid();
+        for ports in [0, MAX_PORTS, MAX_PORTS + 1] {
+            let data = vec![vec![C64::ZERO; ports * ports]; omega.len()];
+            let result = fit(&omega, &data, ports);
+            let model = Model { ports, poles: vec![Pole {
+                omega: omega[0], zeta: 0.2, coupling: vec![0.0; ports],
+            }] };
+            assert_eq!(model.validate().is_ok(), ports == MAX_PORTS,
+                "model capacity at {ports} complete ports");
+            if ports == MAX_PORTS {
+                result.unwrap().model.validate().unwrap();
+            } else {
+                assert!(result.is_err(), "accepted {ports} complete ports");
+            }
+        }
+    }
     #[test]
     fn signed_cross_port_resonances_fit_without_entrywise_passivity() {
         let omega=grid();let dictionary=dictionary(omega[0],omega[64]);
