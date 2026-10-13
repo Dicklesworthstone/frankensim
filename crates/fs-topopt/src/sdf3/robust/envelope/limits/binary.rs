@@ -9,6 +9,9 @@ use crate::sdf3::{CutDensityStudy3, Design3, Sdf3Elasticity, checked_solve_preco
 use crate::sdf3::robust::RobustOptions3;
 use crate::sdf3::robust::envelope::EnvelopeValue3;
 use crate::{EvaluationStop, SimpParams, SolveControl, SolveWork};
+mod scan;
+pub use scan::{BinaryComplianceCandidate3, BinaryComplianceScan3, BinaryComplianceScanOptions3, BinaryComplianceScanStop3};
+
 
 #[derive(Debug, Clone, Copy)]
 pub struct BinaryComplianceOptions3 {
