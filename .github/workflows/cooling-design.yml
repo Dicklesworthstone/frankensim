@@ -23,7 +23,35 @@ jobs:
         with:
           persist-credentials: false
       - name: Materialize pinned dependencies
-        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+        run: |
+          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
+            python3 - <<'PYCODE'
+          import json, pathlib, subprocess
+          root = pathlib.Path('../franken_numpy')
+          pin = next(r for r in json.loads(pathlib.Path('constellation.lock').read_text())['libraries'] if r['lib'] == 'franken_numpy')['git_head']
+          def git(*args):
+              return subprocess.check_output(['git', '-C', str(root), *args])
+          if git('rev-parse', 'HEAD').decode().strip() != pin or git('config', '--local', '--get', 'frankensim.bootstrapIncomplete').strip() != b'true':
+              raise SystemExit('not the incomplete pinned clone; refusing repair')
+          name = 'legacy_numpy_code/numpy/doc/make.bat'
+          path = root / name
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit('expected an ordinary tracked batch file')
+          raw = git('cat-file', 'blob', pin + ':' + name)
+          actual = path.read_bytes()
+          if actual == raw or actual.replace(b'\r\n', b'\n') != raw.replace(b'\r\n', b'\n'):
+              raise SystemExit('not a line-ending-only checkout discrepancy')
+          attributes = pathlib.Path(git('rev-parse', '--absolute-git-dir').decode().strip()) / 'info/attributes'
+          attributes.parent.mkdir(parents=True, exist_ok=True)
+          with attributes.open('a') as stream:
+              stream.write('\n' + name + ' -text\n')
+          path.write_bytes(raw)
+          git('add', '--', name)
+          if git('rev-parse', ':' + name).strip() != git('rev-parse', pin + ':' + name).strip() or path.read_bytes() != raw:
+              raise SystemExit('restoration changed the locked source or index')
+          PYCODE
+            cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
+          fi
       - name: Test actual hydraulic derivatives and coupled resistance design
         run: |
           cargo test -p fs-airflow --lib graph::sensitivity::

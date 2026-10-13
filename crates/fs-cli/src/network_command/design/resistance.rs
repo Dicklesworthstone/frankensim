@@ -15,8 +15,11 @@ use fs_ascent::projected_al::{
 use fs_math::det;
 use std::ops::ControlFlow;
 
+mod fan_control;
+use fan_control::FanControl;
+
 const SCHEMA: &str = "frankensim.cooling-resistance-design.v1";
-const HELP: &str = "Usage: frankensim [--json] cooling-network resistance-design <model.json> <design.json>\n\nRequires --features cooling-design. Optimize bounded branch-resistance\nmultipliers against a mean or hotspot temperature limit, using complete\nhydraulic/convection/solid adjoints. The model must set objective.gradient=true.\nMaximum selectors require explicit maximum_smoothing_k in the design policy;\nthe smooth upper envelope and actual selected peak must both pass on replay.\nSee examples/cooling-network/RESISTANCE_DESIGN.md.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-network resistance-design <model.json> <design.json>\n\nRequires --features cooling-design. Optimize bounded branch-resistance\nmultipliers and optional fan_speed_control against a mean or hotspot limit,\nusing complete\nhydraulic/convection/solid adjoints. The model must set objective.gradient=true.\nMaximum selectors require explicit maximum_smoothing_k in the design policy;\nthe smooth upper envelope and actual selected peak must both pass on replay.\nSee examples/cooling-network/RESISTANCE_DESIGN.md.\n";
 
 #[derive(Debug)]
 struct Control {
@@ -31,6 +34,7 @@ struct Control {
 #[derive(Debug)]
 struct Specification {
     controls: Vec<Control>,
+    fan_control: Option<FanControl>,
     limit: f64,
     scale: f64,
     maximum_smoothing_k: Option<f64>,
@@ -54,7 +58,7 @@ impl Specification {
         let root = J::parse(text).map_err(bad_parse)?;
         object(&root, &["schema", "temperature_limit_k", "temperature_scale_k", "controls",
             "max_evaluations", "max_iterations", "max_multiplier_updates", "max_backtracks",
-            "kkt_tolerance", "maximum_smoothing_k"], "resistance design")?;
+            "kkt_tolerance", "maximum_smoothing_k", "fan_speed_control"], "resistance design")?;
         if get(&root, "schema")?.as_str() != Some(SCHEMA) { return Err(bad("unsupported resistance-design schema")); }
         let maximum_smoothing_k = root.get("maximum_smoothing_k")
             .map(|value| positive(value, "maximum_smoothing_k")).transpose()?;
@@ -80,11 +84,13 @@ impl Specification {
             controls.push(Control { branch, name, baseline, minimum, maximum,
                 weight: positive(get(row, "weight")?, "control.weight")? });
         }
+        let fan_control = root.get("fan_speed_control")
+            .map(|value| FanControl::parse(value, request)).transpose()?;
         let evaluations = count(get(&root, "max_evaluations")?, "max_evaluations", 4096)?;
         if evaluations < 2 { return Err(bad("max_evaluations must reserve initialization and final physical replay")); }
         let tolerance = positive(get(&root, "kkt_tolerance")?, "kkt_tolerance")?;
         let options = ProjectedAlOptions {
-            max_dimension: 64,
+            max_dimension: 65,
             max_evaluations: evaluations - 1,
             max_multiplier_updates: count(get(&root, "max_multiplier_updates")?, "max_multiplier_updates", 4096)?,
             max_backtracks: count(get(&root, "max_backtracks")?, "max_backtracks", 64)?,
@@ -94,17 +100,31 @@ impl Specification {
             inner_tolerance: tolerance.max(1e-2),
             min_spectral_step: 1e-8, max_spectral_step: 1e8,
         };
-        options.validate::<Failure>(controls.len()).map_err(optimizer_error)?;
-        Ok(Self { controls, maximum_smoothing_k,
+        options.validate::<Failure>(controls.len() + usize::from(fan_control.is_some())).map_err(optimizer_error)?;
+        Ok(Self { controls, fan_control, maximum_smoothing_k,
             limit: positive(get(&root, "temperature_limit_k")?, "temperature_limit_k")?,
             scale: positive(get(&root, "temperature_scale_k")?, "temperature_scale_k")?,
             evaluations,
             iterations: count(get(&root, "max_iterations")?, "max_iterations", 4096)?, options })
     }
 
+    fn dimension(&self) -> usize { self.controls.len() + usize::from(self.fan_control.is_some()) }
+
+    fn bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        let mut lower: Vec<_> = self.controls.iter().map(|c| det::ln(c.minimum)).collect();
+        let mut upper: Vec<_> = self.controls.iter().map(|c| det::ln(c.maximum)).collect();
+        if let Some(fan) = &self.fan_control {
+            let (lo, hi) = fan.bounds();
+            lower.push(lo);
+            upper.push(hi);
+        }
+        (lower, upper)
+    }
+
     fn install(&self, request: &mut Request, original: &LossGraph, point: &[f64]) -> Result<()> {
-        if point.len() != self.controls.len() { return Err(bad("resistance design coordinate shape changed")); }
-        if let Some(tau) = self.maximum_smoothing_k { request.objective.enable_upper_envelope(tau)?; }
+        if point.len() != self.dimension() { return Err(bad("resistance design coordinate shape changed")); }
+        let speed = self.fan_control.as_ref()
+            .map(|control| control.candidate(request, point[self.controls.len()])).transpose()?;
         let mut branches = original.branches().to_vec();
         for (control, &coordinate) in self.controls.iter().zip(point) {
             if !coordinate.is_finite() || coordinate < det::ln(control.minimum)
@@ -115,7 +135,12 @@ impl Specification {
             let multiplier = det::exp(coordinate).clamp(control.minimum, control.maximum);
             branches[control.branch].loss.resistance = LossResistance::new(control.baseline * multiplier);
         }
-        request.graph = LossGraph::new(original.node_count(), branches).map_err(producer)?;
+        let graph = LossGraph::new(original.node_count(), branches).map_err(producer)?;
+        if let Some(tau) = self.maximum_smoothing_k { request.objective.enable_upper_envelope(tau)?; }
+        if let Some(speed) = speed {
+            request.fan.as_mut().ok_or_else(|| bad("joint design lost its fan drive"))?.speed_ratio = speed;
+        }
+        request.graph = graph;
         Ok(())
     }
 
@@ -162,6 +187,14 @@ fn evaluate(
         gradient.push(finite(control.weight * x)?);
         constraint_gradient.push(finite(partial / design.scale)?);
     }
+    if let Some(control) = &design.fan_control {
+        let x = point[design.controls.len()];
+        let partial = derivative.log_speed()
+            .ok_or_else(|| bad("fan-speed derivative unavailable at a joint-design trial; no frozen-flow fallback"))?;
+        objective = finite(objective + 0.5 * control.weight * x * x)?;
+        gradient.push(finite(control.weight * x)?);
+        constraint_gradient.push(finite(partial / design.scale)?);
+    }
     let constraint = finite((value.objective - design.limit) / design.scale)?;
     poll(cx)?;
     Ok((ProjectedAlSample { objective, gradient, constraint, constraint_gradient }, flow, value))
@@ -175,8 +208,7 @@ struct Incumbent { point: Vec<f64>, sample: ProjectedAlSample }
 fn solve(mut request: Request, design: Specification, cx: &Cx<'_>) -> Result<String> {
     poll(cx)?;
     let original = request.graph.clone();
-    let lower: Vec<_> = design.controls.iter().map(|c| det::ln(c.minimum)).collect();
-    let upper: Vec<_> = design.controls.iter().map(|c| det::ln(c.maximum)).collect();
+    let (lower, upper) = design.bounds();
     let mut incumbent: Option<Incumbent> = None;
     let mut initial_temperature = None;
     let mut evaluations = 0_usize;
@@ -195,7 +227,7 @@ fn solve(mut request: Request, design: Specification, cx: &Cx<'_>) -> Result<Str
             { incumbent = Some(Incumbent { point: point.to_vec(), sample: sample.clone() }); }
             Ok(Some(sample))
         };
-        let mut state = ProjectedAlState::try_new(&vec![0.0; design.controls.len()], &lower, &upper,
+        let mut state = ProjectedAlState::try_new(&vec![0.0; design.dimension()], &lower, &upper,
             design.options, &mut sample, |work| checkpoint(cx, work)).map_err(optimizer_error)?;
         let report = state.try_run(design.iterations, &mut sample, |work| checkpoint(cx, work))
             .map_err(optimizer_error)?;
@@ -221,10 +253,13 @@ fn solve(mut request: Request, design: Specification, cx: &Cx<'_>) -> Result<Str
             quote(&c.name), num(c.baseline)?, num(resistance)?, num(resistance / c.baseline)?, num(x)?,
             num(c.minimum)?, num(c.maximum)?, num(c.weight)?))
     }).collect::<Result<Vec<_>>>()?.join(",");
+    let fan_control = design.fan_control.as_ref()
+        .map(|control| control.render(&request, best.point[design.controls.len()], design.controls.len()))
+        .transpose()?.unwrap_or_else(|| "null".into());
     let constraint_detail = format!("\"constraint_form\":{},\"selected_temperature_k\":{},\"selected_constraint_temperature_k\":{},\"maximum_smoothing_k\":{}",
         quote(if design.maximum_smoothing_k.is_some() { "smooth-maximum-upper-envelope" } else { "area-mean" }),
         num(physical.objective_state.physical_value())?, num(physical.objective)?, optional(design.maximum_smoothing_k)?);
-    let result = format!("{prefix},\"resistance_design\":{{\"schema\":{},\"status\":{},\"selected_cost\":{},\"temperature_limit_k\":{},\"temperature_scale_k\":{},\"initial_temperature_k\":{},\"controls\":[{}],{constraint_detail},\"complete_evaluations\":{},\"replay_evaluations\":1,\"total_solid_solves\":{},\"optimizer_terminal\":{{\"stop\":{},\"point_log_multipliers\":{},\"cost\":{},\"scaled_constraint\":{},\"stationarity\":{},\"feasibility\":{},\"complementarity\":{},\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{}}},\"policy\":\"projected-al-resistance-v1; weighted squared log-change cost; initial penalty 10, maximum penalty 1e10, initial inner tolerance max(kkt_tolerance,0.01), spectral steps [1e-8,1e8]\",\"search_claim\":\"independently replayed nominally feasible selected temperature design; peak designs require both the explicit upper envelope and actual selected discrete maximum to pass; feasible-incumbent is not optimizer convergence; terminal KKT diagnostics belong only to the terminal point; no global optimum, continuum-temperature, hardware, geometry-realizability or uncertainty guarantee\"}}}}\n",
+    let result = format!("{prefix},\"resistance_design\":{{\"schema\":{},\"status\":{},\"selected_cost\":{},\"temperature_limit_k\":{},\"temperature_scale_k\":{},\"initial_temperature_k\":{},\"controls\":[{}],\"fan_speed_control\":{fan_control},{constraint_detail},\"complete_evaluations\":{},\"replay_evaluations\":1,\"total_solid_solves\":{},\"optimizer_terminal\":{{\"stop\":{},\"point_log_multipliers\":{},\"cost\":{},\"scaled_constraint\":{},\"stationarity\":{},\"feasibility\":{},\"complementarity\":{},\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{}}},\"policy\":\"projected-al-resistance-v1; weighted squared log-change cost; initial penalty 10, maximum penalty 1e10, initial inner tolerance max(kkt_tolerance,0.01), spectral steps [1e-8,1e8]\",\"search_claim\":\"independently replayed nominally feasible selected temperature design; peak designs require both the explicit upper envelope and actual selected discrete maximum to pass; feasible-incumbent is not optimizer convergence; terminal KKT diagnostics belong only to the terminal point; no global optimum, continuum-temperature, hardware, geometry-realizability or uncertainty guarantee\"}}}}\n",
         quote(SCHEMA), quote(if converged { "locally-converged" } else { "feasible-incumbent" }),
         num(replayed.objective)?, num(design.limit)?, num(design.scale)?, optional(initial_temperature)?, controls,
         evaluations, solid_solves, quote(&format!("{:?}", report.stop)), numbers(state.point())?,
@@ -288,3 +323,6 @@ pub(in crate::network_command) fn run(args: &[OsString], json_mode: bool) -> Com
 mod tests;
 #[cfg(test)]
 mod tests_peak;
+
+#[cfg(test)]
+mod tests_joint;
