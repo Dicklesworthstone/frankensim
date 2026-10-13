@@ -6,6 +6,8 @@
 /// enthalpy and conservative finite-contact solvers. Its aggregate Biot gate
 /// refuses outside the isothermal regime; it is not a growing spatial P1 solve.
 pub mod implicit;
+/// Bond development driven by actual explicit-deposition substeps and contacts.
+pub mod bonding;
 
 use fs_exec::Cx;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;

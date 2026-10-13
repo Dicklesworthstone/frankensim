@@ -19,6 +19,9 @@
 
 use std::collections::BTreeMap;
 
+mod observe;
+pub use observe::DepositionObserver;
+
 /// Persistent physical cell identity; distinct from its source segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CellId(pub u64);
@@ -339,77 +342,10 @@ impl<'a> DepositionSimulation<'a> {
         &self,
         target_s: f64,
         config: StepConfig,
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, EnergyAudit), DepositionError> {
-        checkpoint()?;
-        if !target_s.is_finite()
-            || target_s < self.time_s
-            || !positive(config.max_dt_s)
-            || !nonnegative(config.energy_tolerance_j)
-        {
-            return Err(DepositionError::InvalidInput(
-                "invalid target, timestep or joule tolerance",
-            ));
-        }
-        let initial_energy = finite(self.energy_j())?;
-        let mut next = self.clone();
-        let mut audit = EnergyAudit {
-            incoming_mass_kg: 0.0,
-            incoming_energy_j: 0.0,
-            external_heat_j: 0.0,
-            stored_energy_change_j: 0.0,
-            residual_j: 0.0,
-            substeps: 0,
-            events: 0,
-        };
-        loop {
-            checkpoint()?;
-            while next.cursor < next.schedule.len()
-                && next.schedule[next.cursor].time_s == next.time_s
-            {
-                checkpoint()?;
-                let event = next.schedule[next.cursor].event.clone();
-                next.apply(event, &mut audit)?;
-                next.cursor += 1;
-                audit.events += 1;
-            }
-            if next.time_s == target_s {
-                break;
-            }
-            let stop = next
-                .schedule
-                .get(next.cursor)
-                .map_or(target_s, |e| e.time_s.min(target_s));
-            if next.cells.is_empty() {
-                next.time_s = stop;
-                continue;
-            }
-            if audit.substeps >= next.budget.max_substeps {
-                return Err(DepositionError::Budget("thermal substeps"));
-            }
-            let dt = next.thermal_step(
-                stop - next.time_s,
-                config.max_dt_s,
-                &mut audit,
-                &mut checkpoint,
-            )?;
-            let time = finite(next.time_s + dt)?;
-            if time <= next.time_s {
-                return Err(DepositionError::Arithmetic);
-            }
-            // Assign the exact endpoint rather than accumulating rounding error.
-            next.time_s = if dt == stop - next.time_s { stop } else { time };
-            audit.substeps += 1;
-        }
-        audit.stored_energy_change_j = finite(next.energy_j() - initial_energy)?;
-        finite(next.mass_kg())?;
-        audit.residual_j =
-            finite(audit.stored_energy_change_j - audit.incoming_energy_j - audit.external_heat_j)?;
-        if audit.residual_j.abs() > config.energy_tolerance_j {
-            return Err(DepositionError::EnergyBalance(audit.residual_j));
-        }
-        checkpoint()?;
-        Ok((next, audit))
+        self.advance_observed(&(), target_s, config, checkpoint)
+            .map(|(state, (), audit)| (state, audit))
     }
 
     fn apply(&mut self, event: Event, audit: &mut EnergyAudit) -> Result<(), DepositionError> {
@@ -487,7 +423,7 @@ impl<'a> DepositionSimulation<'a> {
         max_dt: f64,
         audit: &mut EnergyAudit,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
-    ) -> Result<f64, DepositionError> {
+    ) -> Result<(f64, BTreeMap<CellId, f64>), DepositionError> {
         // Per-cell rates and outgoing conductances; no quadratic cell searches.
         let mut temperatures = BTreeMap::new();
         let mut rates = BTreeMap::new();
@@ -563,7 +499,7 @@ impl<'a> DepositionSimulation<'a> {
             }
         }
         audit.external_heat_j = finite(audit.external_heat_j + finite(dt * external_w)?)?;
-        Ok(dt)
+        Ok((dt, temperatures))
     }
 }
 
