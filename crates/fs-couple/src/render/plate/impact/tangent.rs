@@ -3,6 +3,8 @@ use std::rc::Rc;
 use fs_material::fiber::Uniaxial;
 use fs_phs::Storage;
 use super::{BodyPotential, MechanicalStorage, ImpactSystem, MAX_IMPACT_MODES};
+mod cache;
+pub(super) use cache::BodyTangents;
 
 // Storage and its derivative share the SAME immutable geometry/contact owner
 // and RefCell history. No duplicate shell mesh, mode basis or material state.
@@ -24,6 +26,14 @@ impl BodyPotential {
 }
 impl MechanicalStorage {
     fn hessian_vector(&self,x:&[f64],direction:&[f64],out:&mut[f64])->bool {
+        self.hessian_vector_using(x,direction,out,|index,q,d,out| {
+            self.bodies[index].hessian_vector(q,d,out);
+            out.iter().all(|v|v.is_finite())
+        })
+    }
+
+    fn hessian_vector_using<F>(&self,x:&[f64],direction:&[f64],out:&mut[f64],mut body_action:F)->bool
+    where F:FnMut(usize,&[f64],&[f64],&mut[f64])->bool {
         let expected=2*self.modes+self.pads.iter().map(|p|p.spec.creep.len()).sum::<usize>();
         if x.len()!=expected || direction.len()!=expected || out.len()!=expected
             || x.iter().chain(direction).any(|v|!v.is_finite()) {return false;}
@@ -33,10 +43,10 @@ impl MechanicalStorage {
         // Mechanical potentials do not depend on momentum. Skip whole bodies
         // with a zero directional displacement, not tiny nonzero couplings.
         let mut offset=0;
-        for body in &self.bodies {
+        for (index,body) in self.bodies.iter().enumerate() {
             let end=offset+body.count();
             if d[offset..end].iter().any(|d|*d!=0.0) {
-                body.hessian_vector(&q[offset..end],&d[offset..end],&mut hd[offset..end]);
+                if !body_action(index,&q[offset..end],&d[offset..end],&mut hd[offset..end]) {return false;}
             }
             offset=end;
         }
@@ -66,13 +76,26 @@ impl MechanicalStorage {
 }
 impl ImpactSystem {
     pub(super) fn hessian_vector(&self,x:&[f64],d:&[f64],out:&mut[f64])->bool {
+        self.hessian_vector_using(x,d,out,None)
+    }
+
+    pub(super) fn hessian_vector_cached(&self,x:&[f64],d:&[f64],out:&mut[f64],cache:&mut BodyTangents)->bool {
+        if !cache.belongs_to(&self.mechanical) {return false;}
+        self.hessian_vector_using(x,d,out,Some(cache))
+    }
+
+    fn hessian_vector_using(&self,x:&[f64],d:&[f64],out:&mut[f64],cache:Option<&mut BodyTangents>)->bool {
         let base=self.relaxation.as_ref().map_or(self.x.len(),|memory|memory.base_dim)
             .min(self.radiation.as_ref().map_or(self.x.len(),|air|air.base_dim))
             .min(self.gas_film.as_ref().map_or(self.x.len(),|gas|gas.base_dim));
         if x.len()!=self.x.len() || d.len()!=x.len() || out.len()!=x.len()
             || x.iter().chain(d).any(|v|!v.is_finite()) {return false;}
         if !self.contact.hessian_vector_with(&x[..base],&d[..base],&mut out[..base],
-            |x,d,out|self.mechanical.hessian_vector(x,d,out)) {return false;}
+            |x,d,out|match cache {
+                Some(cache)=>self.mechanical.hessian_vector_using(x,d,out,
+                    |index,q,d,out|cache.apply(index,q,d,out)),
+                None=>self.mechanical.hessian_vector(x,d,out),
+            }) {return false;}
         out[base..].fill(0.0);
         if let Some(memory)=&self.relaxation {memory.add_hessian(d,out);}
         if let Some(air)=&self.radiation {air.add_hessian(d,out);}

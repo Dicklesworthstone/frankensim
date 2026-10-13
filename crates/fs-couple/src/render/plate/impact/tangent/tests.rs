@@ -6,6 +6,7 @@ use crate::modal_acoustic_time::ModalAcousticState;
 use fs_dcontact::{ContactStorage,Obstacle};
 use fs_exec::CancelGate;
 use fs_material::fiber::WoolFelt;
+mod batched;
 
 fn config()->ImpactConfig {ImpactConfig {dt_s:2e-6,max_steps:2000,maximum_energy_j:20.0,
     energy_absolute_tolerance_j:1e-10,energy_relative_tolerance:1e-7,maximum_generalized_force:1e4}}

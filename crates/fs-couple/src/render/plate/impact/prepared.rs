@@ -5,11 +5,14 @@
 mod substeps;
 pub use substeps::{ImpactSubstepConfig, ImpactSubstepReport, SubsteppedImpactSystem};
 use std::ops::Deref;
+use std::cell::RefCell;
+use std::rc::Rc;
 use fs_exec::CancelGate;
 use fs_material::fiber::{Uniaxial, WoolFeltState};
 use fs_phs::{PreparedStepError, PreparedStepRecord, StepWorkspace};
 use super::{ImpactError, ImpactFrame, ImpactSystem, invalid};
 use super::audio::ImpactSource;
+use super::tangent::BodyTangents;
 
 /// Persistent nonlinear mechanics with reusable solver and material-trial buffers.
 ///
@@ -26,6 +29,8 @@ pub struct PreparedImpactSystem {
     output: Vec<f64>,
     histories: Vec<WoolFeltState>,
     analytic_newton: bool,
+    body_tangents: RefCell<BodyTangents>,
+    batched_body_tangents: bool,
 }
 
 impl ImpactSystem {
@@ -41,7 +46,9 @@ impl ImpactSystem {
         let candidate = vec![0.0; self.x.len()];
         let output = vec![0.0; self.modes];
         let histories = self.histories.borrow().clone();
-        Ok(PreparedImpactSystem { inner: self, workspace, candidate, output, histories, analytic_newton: false })
+        let body_tangents=RefCell::new(BodyTangents::new(Rc::clone(&self.mechanical)));
+        Ok(PreparedImpactSystem { inner: self, workspace, candidate, output, histories,
+            analytic_newton: false, body_tangents, batched_body_tangents: true })
     }
 
     /// Prepare the same system using analytic storage tangents for Newton.
@@ -111,6 +118,21 @@ impl PreparedImpactSystem {
     /// the same equation and use the same physical acceptance gate.
     pub fn set_analytic_newton(&mut self, enabled: bool) { self.analytic_newton=enabled; }
 
+    /// Reuse each shell/film's exact tangent across analytic Newton columns.
+    /// Enabled at preparation. Only identical body displacement bits reuse a
+    /// matrix; no time extrapolation or approximate stiffness is introduced.
+    /// Contact, felt, material-memory and acoustic terms are evaluated live.
+    /// Disabling selects the original per-direction owner actions for comparison.
+    /// This switch neither allocates nor changes physical state/history/time.
+    /// Finite-difference stepping ignores it. Rounding/iteration counts may differ.
+    pub fn set_batched_body_tangents(&mut self, enabled: bool) { self.batched_body_tangents=enabled; }
+
+    /// (Body matrix assemblies, body matrix actions) in the most recent solver
+    /// attempt. Excludes contact, felt, acoustic work, residuals and LU; these
+    /// counts are not timing. Substepped output reports its last internal attempt.
+    /// Counts saturate at usize::MAX; state/history acceptance is independent.
+    pub fn body_tangent_work_counts(&self) -> (usize, usize) { self.body_tangents.borrow().counts() }
+
     /// Enable/disable exact acoustic-pair elimination for analytic Newton.
     /// Enabled at preparation when radiation memory exists. Finite-difference
     /// execution ignores the plan. This is a numerical choice: state, accepted
@@ -174,8 +196,14 @@ impl PreparedImpactSystem {
             return Err(invalid("external generalized force shape or ceiling failed"));
         }
         let before = inner.stored_energy_j();
+        let cache=&self.body_tangents;
+        cache.borrow_mut().reset_counts();
+        let batched=self.batched_body_tangents;
+        let action=|x:&[f64],d:&[f64],out:&mut[f64]| {
+            if batched {inner.hessian_vector_cached(x,d,out,&mut cache.borrow_mut())}
+            else {inner.hessian_vector(x,d,out)}
+        };
         let ledger = if inner.has_nonlinear_dissipation() {
-            let action=|x:&[f64],d:&[f64],out:&mut[f64]|inner.hessian_vector(x,d,out);
             let tangent=|x:&[f64],e:&[f64],dx:&[f64],de:&[f64],out:&mut[f64]|
                 inner.dissipative_flow_tangent_into(x,e,dx,de,out);
             self.workspace.step_into_dissipative_controlled(
@@ -188,7 +216,7 @@ impl PreparedImpactSystem {
             self.workspace.step_into_analytic_controlled(
                 &inner.system, &inner.x, external, inner.config.dt_s,
                 &mut self.candidate, &mut self.output,
-                &|x,d,out|inner.hessian_vector(x,d,out), || gate.is_requested(),
+                &action, || gate.is_requested(),
             )
         } else {
             self.workspace.step_into_controlled(
