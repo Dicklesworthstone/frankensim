@@ -161,12 +161,19 @@ fn mouth_bem_pressure_transposes_into_the_same_head_and_neck_work_coordinates() 
 }
 
 #[test]
-fn vent_feedback_bakes_real_stereo_pressure_from_one_loaded_mechanical_trajectory() {
+fn vent_feedback_bakes_close_directional_stereo_from_one_loaded_mechanical_trajectory() {
     let frames=96;let original=drum(frames as u64,true);
     let prefix=original.system.state().to_vec();let gate=CancelGate::new_clock_free();
-    let (loaded,observer)=prepare(original,frames,20.,&receivers(),band(),&gate).unwrap();
+    let microphones=crate::acoustics::receivers::input::Spec::parse(
+        include_str!("coupled-vent-microphones.frm")).unwrap();
+    microphones.admit_command("snare-mic",false,false).unwrap();
+    let microphones=microphones.into_receivers();
+    assert!(matches!(microphones[0],Receiver::NearField(m) if m.pressure_fraction()==0.5));
+    assert!(matches!(microphones[1],Receiver::NearField(m) if m.pressure_fraction()==1.));
+    let (loaded,observer)=prepare(original,frames,20.,&microphones,band(),&gate).unwrap();
     assert_eq!(&loaded.system.state()[..prefix.len()],prefix);
     assert_eq!(observer.baked.len(),2);
+    assert!(observer.baked.iter().all(|b|b.propagation_delay_s==0. && b.pressure_gain==1.));
     assert_eq!(observer.sources.last(),Some(&loaded.air.as_ref().unwrap().coupling
         .neck_radiation_port(0).unwrap().coordinate));
     let initial=owner(&loaded.system).stored_energy_j();let mut loaded=prepared(loaded);

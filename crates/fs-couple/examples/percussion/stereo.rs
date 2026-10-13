@@ -109,8 +109,8 @@ fn reciprocal_geometry<'a>(surface:&'a SpherePanels,k_max:f64,spec:radiation_spe
 fn bake_scene_image(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
     gate:&CancelGate,load:bool,reciprocal:bool)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
     if gate.is_requested() {return Err("radiation preparation cancelled".into());}
-    if reciprocal && (!load || receivers.iter().any(|r|matches!(r,Receiver::NearField(_)))) {
-        return Err("coupled vent Galerkin playback needs a load and finite/far pressure receivers; adaptive/directional P1 observers are not implemented".into());
+    if reciprocal && !load {
+        return Err("coupled vent Galerkin playback requires its matching mechanical load".into());
     }
     if load {feedback::admit_boundary(boundary,spec)?;}
     let count=boundary.weights.len();let panels=boundary.triangles.len();
@@ -159,6 +159,7 @@ fn bake_scene_image(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec
     }else{None};
     let reciprocal=if reciprocal {Some(reciprocal_geometry(&surface,
         omega[omega.len()-1]/medium.sound_speed,spec,count,omega.len(),gate)?)}else{None};
+    let reciprocal_observations=reciprocal.as_ref().map(|source|observations.reciprocal(source,gate)).transpose()?;
     let mut maximum_backward_residual=0.0_f64;let mut maximum_flux_defect=0.0_f64;
     // Solve the highest frequency first: the BEM owner's wavelength guard can
     // reject an underresolved band before spending work on its lower samples.
@@ -168,20 +169,17 @@ fn bake_scene_image(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec
         let fields=acceleration_fields(&refined.weights,w);
         let field_refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
         if let Some(geometry)=&reciprocal {
+            // A close/directional receiver integrates the full P1/P0 field,
+            // shared across all sources. Invalid quadrature refuses cold.
+            let observation=reciprocal_observations.as_ref().ok_or("missing reciprocal receiver scene")?.prepare(k,gate)?;
             let solutions=geometry.solve_batch(k,medium,&field_refs,||gate.is_requested())?;
             for (input,solution) in solutions.iter().enumerate() {
                 ppw=ppw.min(solution.panels_per_wavelength);
                 maximum_backward_residual=maximum_backward_residual.max(solution.backward_residual);
                 maximum_flux_defect=maximum_flux_defect.max(solution.flux_balance);
-                for (channel,&receiver) in receivers.iter().enumerate() {
+                for channel in 0..receivers.len() {
                     if gate.is_requested() {return Err("reciprocal observation cancelled".into());}
-                    values[channel][input][index]=match receiver {
-                        Receiver::FarField(position)=>shift_to_enclosing_sphere(
-                            solution.far_field(position)?,w,radius/medium.sound_speed),
-                        Receiver::FinitePoint(position)=>shift_to_enclosing_sphere(
-                            solution.pressure_at(position)?,w,-observations.delay(channel)),
-                        Receiver::NearField(_)=>unreachable!("admitted before source work"),
-                    };
+                    values[channel][input][index]=observation.response(channel,solution)?;
                 }
             }
             let traces:Vec<&[C64]>=solutions.iter().map(|s|s.pressure.as_slice()).collect();
@@ -263,7 +261,7 @@ pub(crate) fn render_receivers_with_spec(experiment:&mut Experiment,frames:usize
     spec.admit_necks(experiment)?;
     let baked=bake_receivers_with_spec(experiment.acoustics.as_ref().unwrap(),receivers,spec,gate)?;
     if gate.is_requested() {return Err("radiation preparation cancelled before mechanics".into());}
-    render_baked_with_gate(experiment,frames,full_scale_pa,&baked,gate)
+    render_baked_with_gate(experiment,frames,full_scale_pa,baked.as_slice(),gate)
 }
 
 // Private so callers cannot replace geometry/BEM admission with an authored

@@ -90,6 +90,21 @@ construct their same mechanical model. `--radiation-feedback` keeps its existing
 restrictions and source addresses. Explicit prescribed vent-flow source columns
 remain source columns; a microphone never becomes an extra mechanical mode.
 
+Coupled vent playback also accepts this file through its reciprocal P1/P0
+boundary solution. Near-field integration retains the three original pressure
+shape values, the constant auxiliary density, and their analytic spatial
+derivatives. Its receiver rows are bound to the same source, frequency and
+medium as the load, and reused across modal right-hand sides. No old P0 field
+is manufactured from panel-average pressure. The original collocation observer
+remains in use on unvented and prescribed-flow paths.
+
+`coupled-vent-microphones.frm` supplies an illustrative close cardioid/omni pair
+for the nominal drum. Use it with `--coupled-vent-radiation`, the required
+`--cavity-neck-internal` declaration and a resolved `--radiation-spec` band;
+see `COUPLED_VENT.md`. Source discretization and fit errors are not bounded by
+the local microphone quadrature tolerance, and the microphones still exert no
+force on the instrument. The new route needs its own native render validation.
+
 ## Timing, amplitude and limits
 
 The nearest triangle distance provides a lower bound on flight time. When it

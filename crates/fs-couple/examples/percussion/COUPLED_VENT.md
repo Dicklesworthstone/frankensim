@@ -69,10 +69,32 @@ required. Independent Python sphere checks reduced impedance error from
 8.3..10.7% on 20 panels to 2.3..3.0% on 80; those are equation checks, not native
 drum validation or error bounds for an arbitrary instrument.
 
-Finite-point and far-field receivers are supported. Adaptive/directional
-`--microphone-spec` receivers on this coupled-vent image explicitly refuse until
-their P1/P0 derivative/integration path is implemented; no old P0 observer is
-silently substituted. Their unvented and one-way paths remain available.
+Finite-point, far-field and adaptive/directional `--microphone-spec` receivers
+use that same P1/P0 source. The adaptive path integrates each original vertex
+shape and its analytic spatial derivative; it never substitutes panel means or
+treats auxiliary density as normal velocity. Original barycentric coordinates
+survive every integration subdivision. Pressure and derivative components have
+separate discrepancy checks under the existing per-receiver work/depth limits.
+Prepared rows are reused for all modal sources at a frequency. Geometry and
+source identity, cancellation, exterior winding and actual clearance still
+refuse invalid requests before playing.
+
+For close miking, replace `--microphone-right` in the command above with:
+
+```text
+--microphone-spec crates/fs-couple/examples/percussion/coupled-vent-microphones.frm
+```
+
+That file declares a cardioid 7.45 mm above the reference batter head and an
+omni 7.45 mm below its resonant head. Their positions/axes are inputs, not
+calibrated microphone capsules. The cardioid uses the calculated fluid particle
+velocity, including its reactive near-field component, with no assumed source
+direction or distance-based EQ. Both channels observe one loaded trajectory.
+No artificial two-sample latency is inserted at these short clearances; the
+physical propagation stays in the fitted transfer. The existing band, passive
+load and independent observer-fit checks still apply. The new core/routing
+regressions and extended close-stereo render test require native execution;
+this declaration is not evidence of a completed render or instrument fidelity.
 
 ## One physical source map and one playing clock
 

@@ -121,3 +121,69 @@ fn geometry_quadrature_and_work_refusals_publish_no_mechanical_step() {
     assert_eq!(before,e.system.state());
     assert_eq!(SUBSTEPS,16); // The receiver never selected a different mechanics clock.
 }
+
+#[test]
+fn reciprocal_directional_receivers_retain_linear_pressure_and_do_not_change_surface_work() {
+    let mut b=box_boundary();let surface=SpherePanels::from_triangles(b.triangles.clone()).unwrap();
+    b.weights.push(surface.normals().iter().map(|n|n[2]).collect());
+    let medium=Medium::air();let gate=CancelGate::new_clock_free();let dt=1.0/f64::from(OUTPUT_RATE);
+    let point=[0.005,0.0,0.008];
+    let receivers=[near(point,0.5,[0.,0.,-1.]),near(point,0.5,[0.,0.,1.])];
+    let scene=Scene::new(&surface,&receivers,radius(&b),medium,dt,&gate).unwrap();
+    assert_eq!(scene.delay(0),0.);assert_eq!(scene.gain(0),1.);
+    let owner=reciprocal::Prepared::new(&surface,core::f64::consts::TAU*1000./medium.sound_speed,
+        reciprocal::Budget {maximum_unknowns:128,maximum_cache_bytes:4*1024*1024,
+            maximum_work:100_000_000,angular_refinement:0},||false).unwrap();
+    let observers=scene.reciprocal(&owner,&gate).unwrap();
+    // Legacy finite/far observation must retain its original operation graph.
+    let legacy=[Receiver::FinitePoint([0.08,0.05,0.12]),Receiver::FarField([0.1,-0.04,0.12])];
+    let old=Scene::new(&surface,&legacy,radius(&b),medium,dt,&gate).unwrap();
+    let old_observers=old.reciprocal(&owner,&gate).unwrap();
+    for hz in [80.,320.,1000.] {
+        let w=core::f64::consts::TAU*hz;let k=w/medium.sound_speed;
+        let fields=acceleration_fields(&b.weights,w);
+        let solutions=owner.solve_batch(k,medium,&[&fields[0],&fields[1]],||false).unwrap();
+        let frequency=observers.prepare(k,&gate).unwrap();
+        let old_frequency=old_observers.prepare(k,&gate).unwrap();
+        let direct=owner.receivers(&[point],0.001).unwrap()
+            .prepare(k,medium,options(),true,||false).unwrap();
+        for solution in &solutions {
+            let before=solution.pressure.clone();let power=solution.surface_power;
+            let actual=direct.evaluate_velocity(solution).unwrap();
+            let a=frequency.response(0,solution).unwrap();let rear=frequency.response(1,solution).unwrap();
+            let p=actual.scalar.pressure[0];
+            assert!((a+rear-p).abs()<1e-10*p.abs().max(1e-20));
+            let expected=FirstOrder::new(0.5,[0.,0.,-1.]).unwrap()
+                .observe(p,actual.particle_velocity_m_s[0],medium).unwrap();
+            assert_eq!(a,expected);
+            assert_eq!(solution.pressure,before);assert_eq!(solution.surface_power,power);
+            assert_eq!(old_frequency.response(0,solution).unwrap(),shift_to_enclosing_sphere(
+                solution.pressure_at(legacy[0].position()).unwrap(),w,-old.delay(0)));
+            assert_eq!(old_frequency.response(1,solution).unwrap(),shift_to_enclosing_sphere(
+                solution.far_field(legacy[1].position()).unwrap(),w,radius(&b)/medium.sound_speed));
+        }
+    }
+}
+
+#[test]
+fn reciprocal_microphone_work_refusal_and_cancellation_leave_the_frequency_scene_reusable() {
+    let b=box_boundary();let surface=SpherePanels::from_triangles(b.triangles.clone()).unwrap();
+    let medium=Medium::air();let gate=CancelGate::new_clock_free();let dt=1.0/f64::from(OUTPUT_RATE);
+    let owner=reciprocal::Prepared::new(&surface,1.,reciprocal::Budget {maximum_unknowns:128,
+        maximum_cache_bytes:4*1024*1024,maximum_work:100_000_000,angular_refinement:0},||false).unwrap();
+    let low=Receiver::NearField(Microphone::new([0.005,0.,0.008],0.001,
+        Options {maximum_kernel_evaluations:80,..options()},FirstOrder::default()).unwrap());
+    let rs=[low];let scene=Scene::new(&surface,&rs,radius(&b),medium,dt,&gate).unwrap();
+    assert!(scene.reciprocal(&owner,&gate).unwrap().prepare(1.,&gate).is_err());
+    let rs=[near([0.005,0.,0.008],1.,[0.,0.,-1.])];
+    let scene=Scene::new(&surface,&rs,radius(&b),medium,dt,&gate).unwrap();
+    let prepared=scene.reciprocal(&owner,&gate).unwrap();
+    let fields=acceleration_fields(&b.weights,medium.sound_speed);
+    let solution=owner.solve_batch(1.,medium,&[&fields[0]],||false).unwrap().remove(0);
+    let first=prepared.prepare(1.,&gate).unwrap().response(0,&solution).unwrap();
+    let cancelled=CancelGate::new_clock_free();cancelled.request();
+    assert!(scene.reciprocal(&owner,&cancelled).is_err());
+    assert!(prepared.prepare(1.,&cancelled).is_err());
+    let retry=prepared.prepare(1.,&gate).unwrap().response(0,&solution).unwrap();
+    assert_eq!(first,retry);
+}

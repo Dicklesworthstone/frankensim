@@ -4,6 +4,7 @@
 use super::{Error, Receiver, Medium, RadiationSolution, SpherePanels, C64,
     receiver_response, shift_to_enclosing_sphere};
 use fs_bem::near_field::{FirstOrder, Geometry, Options, Prepared};
+use fs_bem::reciprocal_radiation as reciprocal;
 use fs_exec::CancelGate;
 
 #[path="microphone_spec.rs"]
@@ -105,6 +106,20 @@ impl<'a> Scene<'a> {
         }
         Ok(Frequency {scene:self, rows})
     }
+    /// Bind adaptive receivers to the actual P1/P0 source once for the sweep.
+    /// Existing gains and causal phase peeling remain those admitted above.
+    pub(super) fn reciprocal<'s,'p>(&'s self, owner:&'p reciprocal::Prepared<'a>,
+        gate:&CancelGate)->Result<ReciprocalScene<'s,'p,'a>,Error> {
+        let mut geometry=Vec::with_capacity(self.receivers.len());
+        for &receiver in self.receivers {
+            if gate.is_requested() {return Err("reciprocal microphone geometry cancelled".into());}
+            geometry.push(match receiver {
+                Receiver::NearField(mic)=>Some(owner.receivers(&[mic.position_m],mic.minimum_clearance_m)?),
+                _=>None,
+            });
+        }
+        Ok(ReciprocalScene {scene:self,geometry})
+    }
 }
 
 pub(super) struct Frequency<'s, 'a> {scene:&'s Scene<'a>, rows:Vec<Option<Prepared<'a>>>}
@@ -123,6 +138,52 @@ impl Frequency<'_, '_> {
             }
             (_,None)=>receiver_response(s.surface,solution,s.medium,s.receivers[channel],s.radius,s.delays[channel]),
             _=>Err("unprepared microphone response".into()),
+        }
+    }
+}
+
+pub(super) struct ReciprocalScene<'s,'p,'a> {
+    scene:&'s Scene<'a>,geometry:Vec<Option<reciprocal::ReceiverGeometry<'p,'a>>>,
+}
+impl<'s,'p,'a> ReciprocalScene<'s,'p,'a> {
+    /// Refine the near-field kernels once per frequency, not per source RHS.
+    /// No P0 observer is prepared for this source representation.
+    pub(super) fn prepare(&self,k:f64,gate:&CancelGate)->Result<ReciprocalFrequency<'s,'p,'a>,Error> {
+        let mut rows=Vec::with_capacity(self.scene.receivers.len());
+        for (&receiver,geometry) in self.scene.receivers.iter().zip(&self.geometry) {
+            if gate.is_requested() {return Err("reciprocal microphone integration cancelled".into());}
+            rows.push(match (receiver,geometry) {
+                (Receiver::NearField(mic),Some(g))=>Some(g.prepare(k,self.scene.medium,mic.quadrature,
+                    mic.pressure_fraction()!=1.,||gate.is_requested())?),
+                (_,None)=>None,
+                _=>return Err("reciprocal microphone geometry and source disagree".into()),
+            });
+        }
+        Ok(ReciprocalFrequency {scene:self.scene,rows})
+    }
+}
+pub(super) struct ReciprocalFrequency<'s,'p,'a> {
+    scene:&'s Scene<'a>,rows:Vec<Option<reciprocal::PreparedReceivers<'p,'a>>>,
+}
+impl ReciprocalFrequency<'_,'_,'_> {
+    pub(super) fn response(&self,channel:usize,solution:&reciprocal::Solution<'_,'_>)
+        ->Result<C64,Error> {
+        let scene=self.scene;let w=solution.k*scene.medium.sound_speed;
+        match (scene.receivers[channel],&self.rows[channel]) {
+            (Receiver::NearField(mic),Some(row))=>{
+                let pressure=if mic.pressure_fraction()==1. {
+                    row.evaluate(solution)?.pressure[0]
+                }else{
+                    let field=row.evaluate_velocity(solution)?;
+                    mic.pattern.observe(field.scalar.pressure[0],field.particle_velocity_m_s[0],scene.medium)?
+                };
+                Ok(shift_to_enclosing_sphere(pressure,w,-scene.delays[channel]))
+            }
+            (Receiver::FarField(position),None)=>Ok(shift_to_enclosing_sphere(
+                solution.far_field(position)?,w,scene.radius/scene.medium.sound_speed)),
+            (Receiver::FinitePoint(position),None)=>Ok(shift_to_enclosing_sphere(
+                solution.pressure_at(position)?,w,-scene.delays[channel])),
+            _=>Err("unprepared reciprocal microphone response".into()),
         }
     }
 }
