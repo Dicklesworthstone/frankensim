@@ -2,11 +2,13 @@
 //!
 //! The implementation deliberately reuses `assimilate_all`: an exactly
 //! diagonal observation covariance takes the existing path unchanged, while a
-//! correlated covariance is whitened into ordinary scalar observations. This
-//! keeps one owner for Joseph covariance updates and posterior PSD admission.
+//! correlated covariance is whitened into factor-form scalar observations.
+//! A correlated batch retains its UD factor until final dense publication.
 
 use fs_blake3::DomainHasher;
 use fs_exec::Cx;
+
+use crate::factor::{FactorBelief, batch::{FactorBatchDiagnostics, assimilate_sequence}};
 
 use super::{
     AssimError, Belief, Observation, assimilate_all, canonical_f64_bits, canonicalize_zero,
@@ -426,6 +428,7 @@ impl ObservationAudit {
 pub struct RobustAssimilation {
     posterior: Option<Belief>,
     audit: ObservationAudit,
+    factor_diagnostics: Option<FactorBatchDiagnostics>,
 }
 
 impl RobustAssimilation {
@@ -433,6 +436,14 @@ impl RobustAssimilation {
     #[must_use]
     pub fn posterior(&self) -> Option<&Belief> {
         self.posterior.as_ref()
+    }
+
+    /// Factor-row evidence and full-batch misfit for a correlated update.
+    /// `None` on the unchanged diagonal path or an audited refusal. Scalar
+    /// verdicts do not certify the supplied correlation model.
+    #[must_use]
+    pub fn factor_diagnostics(&self) -> Option<&FactorBatchDiagnostics> {
+        self.factor_diagnostics.as_ref()
     }
 
     /// Complete immutable disposition audit.
@@ -448,7 +459,8 @@ impl RobustAssimilation {
 /// return a fail-closed audited refusal with no posterior. An exactly diagonal
 /// covariance delegates the original observations to [`assimilate_all`]
 /// unchanged. A correlated covariance is deterministically Cholesky-whitened
-/// and then uses that same scalar Joseph path.
+/// and updated in UD factor form, with one factorization and one checked dense
+/// reconstruction for the entire batch. No Joseph update runs in its row loop.
 pub fn assimilate_observation_batch(
     prior: &Belief,
     batch: &ObservationBatch,
@@ -489,14 +501,27 @@ pub fn assimilate_observation_batch(
         );
     }
 
-    let posterior = if batch.diagonal {
+    // Whitening indexes every operator by the prior state dimension. Check
+    // ALL rows first, including longer rows that would otherwise be truncated.
+    for observation in &available {
+        if observation.operator().len() != prior.dim() {
+            return Err(AssimError::DimMismatch {
+                state: prior.dim(),
+                operator: observation.operator().len(),
+            });
+        }
+    }
+    let (posterior, factor_diagnostics) = if batch.diagonal {
         let observations: Vec<Observation> = available.into_iter().cloned().collect();
-        assimilate_all(prior, &observations, cx)?
+        (assimilate_all(prior, &observations, cx)?, None)
     } else {
         let whitened = whiten_observations(&available, &batch.cholesky, cx)?;
-        assimilate_all(prior, &whitened, cx)?
+        let factor = FactorBelief::from_belief(prior, cx)?;
+        let (updated, diagnostics) = assimilate_sequence(&factor, &whitened, cx)?.into_parts();
+        (updated.to_belief(cx)?, Some(diagnostics))
     };
-    let result = build_result(prior, batch, Some(posterior), BatchOutcome::Updated, cx)?;
+    let mut result = build_result(prior, batch, Some(posterior), BatchOutcome::Updated, cx)?;
+    result.factor_diagnostics = factor_diagnostics;
     cx.checkpoint()
         .map_err(|_| robust_cancelled("robust publication", 1, 2))?;
     Ok(result)
@@ -650,6 +675,7 @@ fn build_result(
     let receipt_id = audit_receipt(prior, batch, posterior.as_ref(), outcome, &entries, cx)?;
     Ok(RobustAssimilation {
         posterior,
+        factor_diagnostics: None,
         audit: ObservationAudit {
             entries,
             outcome,

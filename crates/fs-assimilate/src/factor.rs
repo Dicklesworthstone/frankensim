@@ -43,6 +43,9 @@ use crate::{
     checked_work_mul,
 };
 
+/// Factor-retaining sequences and checked dense publication.
+pub mod batch;
+
 /// Contraction authority attached to one factor-form scalar update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractionState {
@@ -600,6 +603,25 @@ pub fn assimilate_scalar(
     obs: &Observation,
     cx: &Cx<'_>,
 ) -> Result<FactorAssimilation, AssimError> {
+    if obs.operator().len() != prior.dim() {
+        return Err(AssimError::DimMismatch {
+            state: prior.dim(),
+            operator: obs.operator().len(),
+        });
+    }
+    let plan = factor_update_work_plan(prior.dim())?;
+    let mut progress = WorkProgress::new(cx, plan)?;
+    assimilate_scalar_planned(prior, obs, &mut progress)
+}
+
+// Shared by scalar and batch entry points: a batch never reissues its work or
+// poll allowance between whitened rows.
+#[allow(clippy::too_many_lines)]
+fn assimilate_scalar_planned(
+    prior: &FactorBelief,
+    obs: &Observation,
+    progress: &mut WorkProgress<'_, '_>,
+) -> Result<FactorAssimilation, AssimError> {
     let n = prior.dim();
     if obs.operator().len() != n {
         return Err(AssimError::DimMismatch {
@@ -607,15 +629,13 @@ pub fn assimilate_scalar(
             operator: obs.operator().len(),
         });
     }
-    let plan = factor_update_work_plan(n)?;
-    let mut progress = WorkProgress::new(cx, plan)?;
     progress.checkpoint("initial")?;
 
     let h = obs.operator();
     let noise = obs.noise_var();
 
     // f = U^T h (f_i = sum_{j<=i} u_{j,i} h_j, u_{i,i} = 1); g = D f.
-    let mut f = try_f64_vec(n, "factor sensitivity", &mut progress)?;
+    let mut f = try_f64_vec(n, "factor sensitivity", progress)?;
     for i in 0..n {
         let mut total = h[i];
         for (j, h_j) in h.iter().enumerate().take(i) {
@@ -629,7 +649,7 @@ pub fn assimilate_scalar(
         }
         f[i] = total;
     }
-    let mut g = try_f64_vec(n, "factor scaled sensitivity", &mut progress)?;
+    let mut g = try_f64_vec(n, "factor scaled sensitivity", progress)?;
     for (slot, (f_i, d_i)) in g.iter_mut().zip(f.iter().zip(&prior.diag)) {
         *slot = f_i * d_i;
         progress.scalar("factor-update", 1)?;
@@ -644,7 +664,7 @@ pub fn assimilate_scalar(
     // a_j is nondecreasing in exact arithmetic because f_j g_j = d_j f_j^2
     // is non-negative; a non-finite or non-positive point value refuses,
     // while the interval chain drives the receipt verdict only.
-    let mut alpha = try_f64_vec(n + 1, "factor alpha chain", &mut progress)?;
+    let mut alpha = try_f64_vec(n + 1, "factor alpha chain", progress)?;
     let mut alpha_ivl = vec![Interval::point(noise); n + 1];
     alpha[0] = noise;
     for j in 0..n {
@@ -668,7 +688,7 @@ pub fn assimilate_scalar(
     // Kalman gain FIRST: K = U g / a_n with the PRIOR factor,
     // (U g)_i = sum_{k>=i} u_{i,k} g_k. The downdate below rewrites `upper`
     // in place, so any gain computed after it would silently use U'.
-    let mut gain = try_f64_vec(n, "factor gain", &mut progress)?;
+    let mut gain = try_f64_vec(n, "factor gain", progress)?;
     for i in 0..n {
         let mut total = g[i];
         for (k, g_k) in g.iter().enumerate().skip(i + 1) {
@@ -691,7 +711,7 @@ pub fn assimilate_scalar(
         &prior.mean,
         "observation prediction",
         "factor-update",
-        &mut progress,
+        progress,
     )?;
     let innovation = obs.value() - predicted;
     progress.scalar("factor-update", 1)?;
@@ -714,7 +734,7 @@ pub fn assimilate_scalar(
     // Factor downdate with per-pivot interval ratios.
     let mut diag = prior.diag.clone();
     let mut upper = prior.upper.clone();
-    let mut b = try_f64_vec(n, "factor update scratch", &mut progress)?;
+    let mut b = try_f64_vec(n, "factor update scratch", progress)?;
     b.copy_from_slice(&g);
     let mut max_pivot_ratio = 0.0_f64;
     let mut first_expanding_pivot = None;
@@ -783,9 +803,9 @@ pub fn assimilate_scalar(
         &g,
         "prior measurement variance",
         "factor-receipt",
-        &mut progress,
+        progress,
     )?;
-    let mut f_post = try_f64_vec(n, "posterior sensitivity", &mut progress)?;
+    let mut f_post = try_f64_vec(n, "posterior sensitivity", progress)?;
     for i in 0..n {
         let mut total = h[i];
         for j in 0..i {
@@ -799,7 +819,7 @@ pub fn assimilate_scalar(
         }
         f_post[i] = total;
     }
-    let mut scaled_post = try_f64_vec(n, "posterior scaled sensitivity", &mut progress)?;
+    let mut scaled_post = try_f64_vec(n, "posterior scaled sensitivity", progress)?;
     for (slot, (f_i, d_i)) in scaled_post.iter_mut().zip(f_post.iter().zip(&diag)) {
         *slot = f_i * d_i;
         progress.scalar("factor-receipt", 1)?;
@@ -809,7 +829,7 @@ pub fn assimilate_scalar(
         &scaled_post,
         "posterior measurement variance",
         "factor-receipt",
-        &mut progress,
+        progress,
     )?;
 
     let identity_enclosure = (chain - Interval::point(noise)) * Interval::point(noise) / chain;
@@ -829,7 +849,7 @@ pub fn assimilate_scalar(
         &mean,
         "posterior prediction",
         "factor-receipt",
-        &mut progress,
+        progress,
     )?;
     let posterior_residual = obs.value() - posterior_prediction;
     let misfit_after = posterior_residual * posterior_residual / noise;

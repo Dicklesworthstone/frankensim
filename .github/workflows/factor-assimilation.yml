@@ -1,0 +1,24 @@
+name: Factor assimilation
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-assimilate/**'
+      - '.github/workflows/factor-assimilation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  factor-batches:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test the actual crate, factor kernels, and correlated batches
+        run: cargo test -p fs-assimilate --test factor --test robust --test factor_batch
