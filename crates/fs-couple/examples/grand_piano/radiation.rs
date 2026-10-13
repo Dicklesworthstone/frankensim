@@ -21,13 +21,19 @@ pub const MAX_AIR_STATES: usize = 1024;
 
 // Shared positive-real model; collective exchange does not alter its impedance.
 pub use fs_couple::render::plate::impact::radiation::{Model,Pole};
+use fs_couple::render::plate::impact::radiation::fit::{Fit,fit};
 
 #[path = "radiation_ports.rs"]
 mod ports;
 pub use ports::PortBasis;
-pub(crate) use ports::{geometry_basis, fit_projected};
-#[cfg(test)]
-pub(crate) use ports::validate_complete_fit;
+pub(crate) use ports::{geometry_basis, validate_complete_fit};
+
+pub(crate) fn fit_projected(omega:&[f64],data:&[Vec<C64>],basis:&PortBasis)->Result<Fit,String> {
+    let projected=data.iter().map(|row|basis.project_impedance(row)).collect::<Result<Vec<_>,_>>()?;
+    let mut fitted=fit(omega,&projected,basis.ports())?;
+    validate_complete_fit(omega,data,basis,&mut fitted)?;
+    Ok(fitted)
+}
 
 #[derive(Clone, Copy, Default)]
 struct Free { xx:f64, xp:f64, px:f64, pp:f64 }

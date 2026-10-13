@@ -6,7 +6,7 @@
 //! This is a coordinate map; only comparison with the complete physical load
 //! can establish whether a truncated acoustic space is adequate.
 use fs_math::c64::C64;
-use fs_couple::render::plate::impact::radiation::{MAX_PORTS, fit::{Fit, fit}};
+use fs_couple::render::plate::impact::radiation::{MAX_PORTS, fit::Fit};
 
 #[derive(Clone, Debug)]
 pub struct PortBasis {
@@ -229,11 +229,4 @@ pub(crate) fn validate_complete_fit(omega:&[f64],data:&[Vec<C64>],basis:&PortBas
     fitted.peak_error=peak;fitted.rms_error=rms;
     fitted.resistance_peak_error=rp;fitted.resistance_rms_error=rr;
     Ok(())
-}
-
-pub(crate) fn fit_projected(omega:&[f64],data:&[Vec<C64>],basis:&PortBasis)->Result<Fit,String> {
-    let projected=data.iter().map(|row|basis.project_impedance(row)).collect::<Result<Vec<_>,_>>()?;
-    let mut fitted=fit(omega,&projected,basis.ports())?;
-    validate_complete_fit(omega,data,basis,&mut fitted)?;
-    Ok(fitted)
 }
