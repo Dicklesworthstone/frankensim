@@ -81,9 +81,70 @@ Marking uses real hierarchical residual contributions. Reaction-offset and
 volume-measure transfers remain separate rather than becoming invented local
 indicators. Empty marks do not certify accuracy. The original displacement-only
 entry point still rejects reaction-bearing results instead of dropping targets.
-Automatic reaction-aware adaptive refitting is not yet connected.
 
 These numerical two-grid differences are not continuum-force bounds, physical
 actuator energy, follower loads, shape derivatives or unique identification.
 The focused native reaction workflow includes the relevant Rust tests; check
 its individual test results separately from dependency-bootstrap status.
+
+## Selective adaptive refitting
+
+Use `--refit` instead of `--estimate` for one complete fit/estimate/mark/refit
+cycle with the same mixed force and displacement targets:
+
+```sh
+cargo run -p fs-topopt --features cutfem-marquee --release \
+  --example reaction_response_sdf3 -- 40 250000 0.0012 --refit
+```
+
+The update cap applies separately to the coarse and fine optimizer phases. The
+single cumulative Krylov allowance and geometry control are NOT reset. The
+uniformly enriched error probe is discarded; only the two marked original
+leaves (or fewer, plus octree balancing) are selectively rebuilt for fitting.
+The marking fraction and whether its 0.5 target was met are reported even when
+the two-mark cap permits only partial coverage. No marks cause an explicit
+refit refusal, not an accuracy or convergence claim.
+
+The new candidate inherits **raw** densities and then rebuilds its own filter
+and projection. Actual fine-grid volume is restored with the optimizer's
+specified density floor before its first physical baseline. A fresh optimizer
+starts at iteration zero; coarse gradients, multipliers, spectral steps and
+primal/adjoint fields are not transferred into its history. Reference force
+and displacement observations are reintegrated, and reaction modes are evaluated
+with current fine material on every trial. This is a new discrete design
+problem, unlike the fixed-material error probe.
+
+Fine-phase CSV blocks are prefixed `refit_`. They contain the new baseline and
+accepted history, force/displacement measurements, inherited and feasible-start
+raw densities, and accepted raw/projected densities. Diagnostics separate the
+coarse-to-new-baseline loss jump from fine-phase optimization. A late fit error
+is propagated **after** emitting the last aligned accepted fine prefix. A
+successful optimizer return is still checked separately for volume feasibility;
+iteration/evaluation limits are never labeled as convergence.
+
+For programmatic use, `fit_reference_responses_with_reactions` accepts reference
+cases, one reaction-target slice per case, raw densities, projected options,
+a phase step allowance, and the shared solve control.
+`refit_reference_responses_with_reactions` additionally takes an explicitly
+built candidate `CutDensityStudy3`, source accepted evaluation, and transfer-term
+budget. It borrows the source immutably and returns a separate candidate with
+its initial/accepted fields, inherited/starting densities, history, work, and
+`fit.outcome`. Initialization failure returns `Err`; interruption after a valid
+baseline remains in `fit.outcome` with the accepted prefix. Inspect both outcome
+and volume feasibility before replacing the source study.
+
+Reaction-only cases are supported. Empty reaction rows use the same legacy
+arithmetic. Missing rows, excessive total observations, invalid targets and
+absent embedded supports are rejected before reference-law callbacks or solves.
+The displacement-only refit entry refuses reaction-bearing evidence rather
+than silently dropping force objectives. Only raw-design provenance is checked
+for transfer; cached coarse objectives do not enter the new fit. Keeping SDF,
+support/observation laws, target values and units consistent remains a caller
+obligation, not something inferred from callback pointers.
+
+Seven additional tests in `reaction_response_sdf3::adaptive` exercise real
+marked-grid refitting, nodal/reference optimizer equivalence, reaction-only
+volume restoration, input admission, cancellation and work accounting,
+source/evaluation consistency, and displacement-only parity. Native execution
+must be checked in the reaction workflow; source checks alone are not a Rust
+build or a numerical-validation result.

@@ -3,7 +3,9 @@
 //!   --example reaction_response_sdf3 -- 40 250000 0.0012 --estimate
 //! Arguments: accepted updates, total Krylov budget, target axial reaction.
 //! Optional --estimate compares the complete mixed objective on an enriched
-//! physical grid and marks original-grid cells. It does not refit that grid.
+//! physical grid and marks original-grid cells. --refit also rebuilds the
+//! marked cells and runs one fresh fitting phase with the same update cap.
+//! Both phases and the probe share the original total Krylov/geometry budgets.
 //! Defaults are declared design targets, NOT measured/calibrated specimen data.
 //! All dimensions are reference/dimensionless: E=1, nu=0, strain=0.02, slab
 //! thickness=0.66, unit cross-section, projected volume cap=0.5. Reaction sign
@@ -35,15 +37,17 @@ fn motion(p:[f64;3],_:[f64;3])->[f64;3]{[0.02*(p[0]-0.17),0.0,0.0]}
 fn right(_:[f64;3],n:[f64;3])->[f64;3]{if n[0]>0.0{[1.0,0.0,0.0]}else{[0.0;3]}}
 fn main()->Result<(),Box<dyn std::error::Error>>{
     let mut args:Vec<_>=std::env::args().skip(1).collect();
-    let estimate=args.last().is_some_and(|s|s=="--estimate");if estimate {let _=args.pop();}
-    if args.len()>3{return Err("usage: reaction_response_sdf3 [UPDATES [KRYLOV [TARGET_REACTION]]] [--estimate]".into());}
+    let refit=args.last().is_some_and(|s|s=="--refit");
+    let estimate=refit||args.last().is_some_and(|s|s=="--estimate");if estimate {let _=args.pop();}
+    if args.len()>3{return Err("usage: reaction_response_sdf3 [UPDATES [KRYLOV [TARGET_REACTION]]] [--estimate|--refit]".into());}
     let steps=args.first().map_or(Ok(40),|s|s.parse::<usize>())?;
     let iterations=args.get(1).map_or(Ok(250000),|s|s.parse::<usize>())?;
     let target=args.get(2).map_or(Ok(0.0012),|s|s.parse::<f64>())?;
     if !target.is_finite(){return Err("reaction target must be finite".into());}
     let mut gp=|_|ControlFlow::Continue(());let mut geometry=QuadratureControl3::new(QuadratureOptions3::default(),&mut gp)?;
+    let tree=Octree3::uniform(1,4,4096)?;
     let op=AdaptiveElasticity3::build_with_embedded_dirichlet(HexCell::try_new([0.0;3],[1.0;3])?,
-        &Octree3::uniform(1,4,4096)?,&Slab,&IsotropicElastic::new(1.0,0.0,1.0)?,&|_|false,&|_,_|true,
+        &tree,&Slab,&IsotropicElastic::new(1.0,0.0,1.0)?,&|_|false,&|_,_|true,
         ElasticityOptions3::default(),Default::default(),Default::default(),&mut geometry)?;
     let force=op.body_load(&|_|[0.0;3],||ControlFlow::Continue(()))?;
     let q=op.body_load(&|_|[1.0,0.0,0.0],||ControlFlow::Continue(()))?;
@@ -81,6 +85,41 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
         eprintln!("coarse_loss={:.17e}; enriched_loss={:.17e}; two_grid_change={:.17e}; reaction_offset_change={offset:.17e}; identity_defect={:.3e}; marked={:?}; marking_fraction={:.6}; target_met={}; work={:?}; continuum_certified=false",
             evidence.coarse_objective,evidence.fine_objective,evidence.correction(),evidence.identity_relative_defect,
             marks.marked,marks.achieved_fraction,marks.target_met,evidence.work);
+        if refit {
+            if marks.marked.is_empty() {
+                return Err("no residual marks for adaptive refit; this does not certify continuum accuracy".into());
+            }
+            // Keep the globally enriched error probe separate. Rebuild only the
+            // selected original leaves (plus required balancing) for DESIGN.
+            let next_tree=tree.refined(&marks.marked,||ControlFlow::Continue(()))?;
+            let next=AdaptiveElasticity3::build_with_embedded_dirichlet(HexCell::try_new([0.0;3],[1.0;3])?,
+                &next_tree,&Slab,&IsotropicElastic::new(1.0,0.0,1.0)?,&|_|false,&|_,_|true,
+                ElasticityOptions3::default(),Default::default(),Default::default(),&mut geometry)?;
+            let candidate=CutDensityStudy3::new(AdaptiveSolveSpace3::jacobi(next,100_000_000),0.15,SimpParams::default());
+            let refined=study.refit_reference_responses_with_reactions(candidate,&accepted,&laws,&family,
+                options,steps,2_000_000,&mut control)?;
+            // Emit the retained fine prefix BEFORE propagating late cancellation
+            // or exhaustion. Phase-local rows are not spliced into coarse descent.
+            println!("refit_iteration,objective,volume_fraction,constraint_violation");
+            for row in &refined.fit.history {
+                println!("{},{:.17e},{:.17e},{:.17e}",row.iteration,row.objective,row.volume_fraction,row.constraint_violation);
+            }
+            let fine_accepted=&refined.fit.accepted;
+            let violation=(fine_accepted.volume_fraction-options.volume_cap).max(0.0);
+            println!("refit_reaction,target_reaction,refit_displacement_integral");
+            println!("{:.17e},{target:.17e},{:.17e}",fine_accepted.reaction_responses[0][0],fine_accepted.responses[0][0]);
+            println!("refit_cell,inherited_raw_density,starting_raw_density,accepted_raw_density,projected_density");
+            for i in 0..refined.study.cells() {
+                println!("{i},{:.17e},{:.17e},{:.17e},{:.17e}",refined.inherited_rho[i],refined.starting_rho[i],
+                    fine_accepted.rho[i],fine_accepted.projected_rho[i]);
+            }
+            eprintln!("phase=marked-refit; coarse_cells={}; fine_cells={}; new_baseline_loss={:.17e}; transfer_loss_change={:.17e}; accepted_loss={:.17e}; volume_violation={violation:.9e}; work={:?}; continuum_certified=false",
+                study.cells(),refined.study.cells(),refined.fit.initial.objective,
+                refined.fit.initial.objective-accepted.objective,fine_accepted.objective,refined.fit.work);
+            let report=refined.fit.outcome?;
+            eprintln!("phase=marked-refit; stop={:?}; numerical_kkt={:?}; source_design_preserved=true",report.stop,report.kkt);
+            if violation>options.optimizer.tolerance {return Err("refitted design still violates volume cap".into());}
+        }
     }
     Ok(())
 }
