@@ -4,8 +4,7 @@
 use super::{spec::Spec, Error};
 use fs_couple::{modal_acoustic_time::ModalAcousticState,
     render::plate::impact::{BodyPotential, ImpactBody, ImpactConfig, PreparedImpactSystem,
-        cavity::{CavityCoupling, meridian::{Budget, MeridianCavity,
-            end_disk::{DiskPort, EndDisk, InterfaceBudget}}},
+        cavity::{CavityCoupling, meridian::{Budget, MeridianCavity}},
         compliant::{CompliantJaw, PadSide, PadSite, striker::FeltStriker},
         felt::KelvinBranch, membrane::MembranePotential},
     vibroacoustic::{AcousticMedium, CavityModes}};
@@ -50,16 +49,26 @@ pub fn footprint(film: &TensionedDisk, centre: [f64;2], radius: f64) -> Result<V
         [centre[0]-r,centre[1]], [centre[0],centre[1]-r]])
 }
 /// Signed OUTWARD head displacement; the mechanical coordinate is downward.
-/// The shared end-disk owner retains the same pressure basis and work columns.
+/// Air shapes, norms and overlaps all come from the SAME meridional basis.
 pub fn interface(film: &TensionedDisk, modes: &[ModePair], air: &MeridianCavity,
     gate: &CancelGate) -> Result<(CavityModes, Vec<f64>), Error> {
-    let result = air.end_disk_interface(film, modes,
-        DiskPort {end: EndDisk::Upper, first_mode: 1, structural_modes: modes.len()+1, positive_z: -1.0},
-        InterfaceBudget {maximum_points: 12_288, maximum_terms: 1_000_000}, gate)?;
-    Ok((result.cavity, result.overlaps))
+    use fs_couple::render::plate::impact::cavity::meridian::end_disk::{
+        DiskPort, EndDisk, InterfaceBudget};
+    let interface = air.end_disk_interface(film,modes,DiskPort {
+        end: EndDisk::Upper, first_mode: 1, structural_modes: modes.len()+1, positive_z: -1.0 },
+        InterfaceBudget { maximum_points: 12_288, maximum_terms: 1_000_000 },gate)?;
+    Ok((interface.cavity,interface.overlaps))
 }
 impl Model {
     pub fn new(spec: &Spec, steps: u64, gate: &CancelGate) -> Result<Self, Error> {
+        Self::with_exterior(spec,steps,gate,|_,_| Ok(None))
+    }
+    /// Prepare the acoustic scene before playing, then bind its SAME modal
+    /// addresses to the shared reciprocal radiation-storage owner.
+    pub fn with_exterior<F>(spec: &Spec, steps: u64, gate: &CancelGate, bake: F) -> Result<Self, Error>
+    where F: FnOnce(&TensionedDisk, &[ModePair])
+        -> Result<Option<fs_couple::render::plate::impact::radiation::Model>, Error>
+    {
         spec.validate()?;
         if steps == 0 || gate.is_requested() { return Err("positive step budget and uncancelled preparation required".into()); }
         let film = TensionedDisk::new(spec.head, ProfileBudget {
@@ -99,6 +108,11 @@ impl Model {
             ImpactConfig { dt_s: 1.0/f64::from(spec.rate_hz), max_steps: steps, maximum_energy_j: 20.0,
                 energy_absolute_tolerance_j: 1e-9, energy_relative_tolerance: 1e-6,
                 maximum_generalized_force: 1e6 },gate)?;
+        let reference = match bake(&film,&modes)? {
+            Some(load) => cavity.attach_exterior_radiation(reference,&load,&(1..n).collect::<Vec<_>>(),256)?,
+            None => reference,
+        };
+        if gate.is_requested() { return Err("kettle preparation cancelled before publication".into()); }
         let force = vec![0.0;cavity.total_modes()];
         let pickup = fs_couple::render::plate::impact::linear::wire::film_shapes(&film,&modes,&[[m[5],m[6]]])?.remove(0);
         Ok(Self { mechanics: reference.prepare_analytic()?, cavity, air, film, modes, tip_weight, pickup, force })

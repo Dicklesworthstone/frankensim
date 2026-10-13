@@ -1,22 +1,37 @@
 //! Profile-defined, single-headed sealed chamber using the existing physics owners.
 //! cargo run --release -p fs-couple --example kettle -- instrument.fsk 4096
-//! Output is mechanics/internal pressure, NOT microphone audio. See README.md.
+//! Default output is mechanical CSV; --wav selects coupled exterior pressure.
 use std::io::Write;
 use fs_exec::CancelGate;
 type Error = Box<dyn std::error::Error>;
 mod spec;
 mod model;
 mod exterior;
+mod boundary;
+mod audio;
 #[cfg(test)]
 mod tests;
 
 fn main() -> Result<(), Error> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 2 { return Err("usage: kettle SPEC.fsk MECHANICAL_STEPS".into()); }
+    if args.len() != 2 && args.len() != 11 { return Err("usage: kettle SPEC.fsk COUNT [--wav FULL_SCALE_PA MIN_HZ MAX_HZ INTERVALS ORDER X_M Y_M Z_M]".into()); }
     let spec = spec::Spec::load(&args[0])?;
     let steps: u64 = args[1].parse()?;
     if steps > 10_000_000 { return Err("at most ten million requested mechanical steps".into()); }
     let gate = CancelGate::new_clock_free();
+    if args.len()==11 {
+        let settings=audio::Settings::read(&args[2..],&spec)?;
+        if steps==0 || steps>480_000 { return Err("audio count must be 1..480000 output frames".into()); }
+        let ticks=steps.checked_mul(u64::from(spec.rate_hz/audio::OUTPUT_RATE)).ok_or("audio clock overflow")?;
+        let mut baked=None;
+        let mut model=model::Model::with_exterior(&spec,ticks,&gate,|film,modes| {
+            let (load,observer)=audio::bake(&spec,film,modes,settings,&gate)?;
+            baked=Some(observer); Ok(Some(load))
+        })?;
+        let wav=audio::render(&mut model,&baked.ok_or("missing acoustic bake")?,&spec,settings,steps as usize,&gate)?;
+        std::io::stdout().lock().write_all(&wav)?;
+        return Ok(());
+    }
     let mut model = model::Model::new(&spec,steps,&gate)?;
     eprintln!("supplied single-head chamber: volume_m3={}, head_mass_kg={}, head_modes={}, air_modes={}, rate_hz={}; rigid wall, nonlinear stretching, independent felt histories; no calibration or real-time claim",
         model.air.volume_m3(), model.film.mass_kg, model.modes.len(), model.cavity.cavity_modes(),spec.rate_hz);

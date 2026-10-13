@@ -13,9 +13,9 @@ fn specification_preserves_geometry_and_refuses_incomplete_or_duplicate_data() {
     let s=spec();
     assert_eq!(s.head.radius_m,0.3302); assert_eq!(s.profile.len(),9);
     let text=include_str!("illustrative-parabolic.fsk");
-    for changed in [text.replace("head_mesh,4,32",""),format!("{text}\nrate_hz,500000"),
+    for changed in [text.replace("head_mesh,4,32",""),format!("{text}\nrate_hz,768000"),
         text.replace("station,0,0","station,0,0.01"), text.replace("air,1.2,343,0","air,1.2,NaN,0"),
-        text.replace("rate_hz,500000","rate_hz,0"),format!("{text}\nunknown,2")] {
+        text.replace("rate_hz,768000","rate_hz,0"),format!("{text}\nunknown,2")] {
         assert!(Spec::read(&changed).is_err());
     }
 }
@@ -32,8 +32,8 @@ fn uniform_overlap_is_signed_actual_head_area_and_one_bulk_storage() {
     let m=Model::new(&s,1,&gate).unwrap();
     let (air,overlap)=model::interface(&m.film,&m.modes,&m.air,&gate).unwrap();
     assert_eq!(air.omegas,vec![0.0]);
-    assert_eq!(m.cavity.total_modes(),1+m.modes.len());
-    assert_eq!(overlap[0],0.0);
+    assert_eq!(m.cavity.total_modes(),1+m.modes.len()); // no fake zero-mode inertia
+    assert_eq!(overlap[0],0.0); // mallet never directly pumps the air
     for (i,mode) in m.modes.iter().enumerate() {
         let area=m.film.modal_area(&mode.phi).unwrap();
         assert!((overlap[i+1]+area).abs()<1e-12);
@@ -68,4 +68,32 @@ fn nonlinear_head_air_and_felt_preserve_history_on_cancel_and_force_refusal() {
     assert!(moved); assert!(a.mechanics.felt_history(0).unwrap().eps_max>0.0);
     let before=a.mechanics.state().to_vec();
     assert!(a.mechanics.step(&a.force,&gate).is_err()); assert_eq!(a.mechanics.state(),before);
+}
+#[test]
+fn an_explicit_zero_exterior_load_preserves_the_unloaded_model_exactly() {
+    use fs_couple::render::plate::impact::radiation::{Model as Load,Pole};
+    let s=uniform();let gate=CancelGate::new_clock_free();
+    let mut a=Model::new(&s,40,&gate).unwrap();
+    let mut b=Model::with_exterior(&s,40,&gate,|_,modes|Ok(Some(Load {
+        ports:modes.len(),poles:vec![Pole {omega:1000.0,zeta:0.2,coupling:vec![0.0;modes.len()]}]
+    }))).unwrap();
+    for _ in 0..40 {
+        a.mechanics.step(&a.force,&gate).unwrap(); b.mechanics.step(&b.force,&gate).unwrap();
+        assert_eq!(a.mechanics.state(),b.mechanics.state());
+    }
+}
+#[test]
+fn passive_exterior_memory_joins_the_same_impact_and_rollback() {
+    use fs_couple::render::plate::impact::radiation::{Model as Load,Pole};
+    let s=uniform();let gate=CancelGate::new_clock_free();
+    // Declared passive fixture tests composition; it is not a BEM sound model.
+    let mut a=Model::with_exterior(&s,800,&gate,|_,modes|Ok(Some(Load {
+        ports:modes.len(),poles:vec![Pole {omega:1000.0,zeta:0.2,coupling:vec![100.0;modes.len()]}]
+    }))).unwrap();
+    let initial=a.mechanics.stored_energy_j();let mut loss=0.0;
+    for _ in 0..800 { loss+=a.mechanics.step(&a.force,&gate).unwrap().dissipated_energy_j; }
+    assert!((a.mechanics.stored_energy_j()+loss-initial).abs()<1e-6);
+    assert!(a.mechanics.radiation_observation().unwrap().stored_energy_j>0.0);
+    let state=a.mechanics.state().to_vec();let cancelled=CancelGate::new_clock_free();cancelled.request();
+    assert!(a.mechanics.step(&a.force,&cancelled).is_err());assert_eq!(a.mechanics.state(),state);
 }

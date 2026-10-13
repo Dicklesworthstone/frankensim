@@ -64,6 +64,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: >-
           set -o pipefail; cargo test --release -p fs-couple --lib render::plate::impact:: 2>&1 | tee percussion-audio.log
+      - name: Test profile-driven kettle and coupled exterior pressure
+        if: ${{ !cancelled() }}
+        run: set -o pipefail; cargo test --release -p fs-couple --example kettle -- --test-threads=1 2>&1 | tee percussion-kettle.log
       - name: Test the actual percussion construction
         if: ${{ !cancelled() }}
         run: set -o pipefail; cargo test --release -p fs-couple --example percussion -- --test-threads=1 2>&1 | tee percussion-example.log

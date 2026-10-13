@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, io::Read};
 #[derive(Clone, Debug)]
 pub struct Spec {
     pub profile: Vec<Station>,
+    pub exterior: Vec<Station>,
     pub head: TensionedDiskSpec,
     pub head_band_hz: [f64; 2],
     pub head_damping_ratio: f64,
@@ -43,14 +44,16 @@ impl Spec {
         if lines.next() != Some("frankensim-kettle-v1") { return Err("expected frankensim-kettle-v1".into()); }
         let mut rows = BTreeMap::new();
         let mut profile = Vec::new();
+        let mut exterior = Vec::new();
         let mut creep = Vec::new();
         for line in lines {
             let fields: Vec<_> = line.split(',').map(str::trim).collect();
             match fields[0] {
-                "station" => {
+                "station" | "outer_station" => {
                     let [z_m, radius_m] = scalars(&fields[1..])?;
-                    profile.push(Station { z_m, radius_m });
-                    if profile.len() > 64 { return Err("at most 64 wall stations".into()); }
+                    let target = if fields[0] == "station" { &mut profile } else { &mut exterior };
+                    target.push(Station { z_m, radius_m });
+                    if target.len() > 64 { return Err("at most 64 wall stations".into()); }
                 }
                 "creep" => {
                     creep.push(scalars(&fields[1..])?);
@@ -65,11 +68,11 @@ impl Spec {
                 _ => return Err(format!("unknown kettle record: {}", fields[0]).into()),
             }
         }
-        let row = |key| -> Result<&Vec<&str>, Error> {
+        let row = |key: &str| -> Result<&Vec<&str>, Error> {
             rows.get(key).ok_or_else(|| format!("missing {key} record").into())
         };
         let [thickness_m, young_pa, poisson, density_kg_m3, tension_n_m, head_damping_ratio] = scalars(row("head")?)?;
-        let counts = |key| -> Result<[usize; 2], Error> {
+        let counts = |key: &str| -> Result<[usize; 2], Error> {
             let r = row(key)?;
             if r.len() != 2 { return Err("mesh requires two integer counts".into()); }
             Ok([r[0].parse()?, r[1].parse()?])
@@ -80,7 +83,7 @@ impl Spec {
         let result = Self {
             head: TensionedDiskSpec { radius_m: profile.last().ok_or("missing chamber profile")?.radius_m,
                 thickness_m, young_pa, poisson, density_kg_m3, tension_n_m, radial_intervals, azimuths },
-            profile, head_band_hz: scalars(row("head_band_hz")?)?, head_damping_ratio,
+            profile, exterior, head_band_hz: scalars(row("head_band_hz")?)?, head_damping_ratio,
             maximum_slope: scalars::<1>(row("maximum_slope")?)?[0], air: scalars(row("air")?)?,
             air_mesh: counts("air_mesh")?, air_maximum_hz: scalars::<1>(row("air_maximum_hz")?)?[0],
             rate_hz: rate[0].parse()?, mallet: scalars(row("mallet")?)?, felt: scalars(row("felt")?)?, creep,
@@ -119,6 +122,34 @@ impl Spec {
             || self.creep.len() > 4 || self.creep.iter().flatten().any(|v| !v.is_finite() || *v <= 0.0)
         { return Err("invalid physical mallet, felt history or Kelvin data".into()); }
         fs_material::fiber::WoolFelt::new(self.felt[0], self.felt[1], self.felt[2], self.felt[3], self.felt[4], self.felt[5])?;
+        if !self.exterior.is_empty() { self.validate_exterior()?; }
+        Ok(())
+    }
+    /// Separate physical outer wall; no automatic uniform-thickness offset.
+    pub fn validate_exterior(&self) -> Result<(), Error> {
+        let wall = &self.exterior;
+        if wall.len() < 3 || wall.len() > 64 || self.profile.len() < 3
+            || wall[0].radius_m != 0.0 || wall[0].z_m >= self.profile[0].z_m
+            || wall.iter().any(|p| !p.z_m.is_finite() || !p.radius_m.is_finite() || p.radius_m < 0.0)
+            || wall[1..].iter().any(|p| p.radius_m <= 0.0)
+            || wall.windows(2).any(|p| p[1].z_m <= p[0].z_m)
+            || wall.last().unwrap().z_m != self.profile.last().unwrap().z_m
+            || wall.last().unwrap().radius_m <= self.head.radius_m
+        { return Err("audio needs an explicit closed outer wall below the inner bottom and beyond the head rim, at the same top plane".into()); }
+        // Difference of two affine radial graphs is affine on each common
+        // interval: checking the union of their knots proves enclosure there.
+        let radius = |profile: &[Station], z: f64| -> Option<f64> {
+            profile.windows(2).find(|p| p[0].z_m <= z && z <= p[1].z_m).map(|p| {
+                let t = (z-p[0].z_m)/(p[1].z_m-p[0].z_m);
+                (1.0-t)*p[0].radius_m+t*p[1].radius_m
+            })
+        };
+        for p in self.profile.iter().chain(wall) {
+            if let Some(inner) = radius(&self.profile,p.z_m) {
+                let outer = radius(wall,p.z_m).ok_or("outer wall does not cover inner chamber")?;
+                if !outer.is_finite() || outer <= inner { return Err("outer wall intersects or enters the supplied inner chamber".into()); }
+            }
+        }
         Ok(())
     }
 }
