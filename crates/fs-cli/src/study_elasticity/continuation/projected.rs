@@ -60,9 +60,6 @@ pub(crate) fn parse_controls(fields: &[Node], target: f64) -> Result<Option<Cont
         family: multi_load::parse(fields)?,
         resolution: stress_mesh::parse(fields)?,
     };
-    if controls.resolution.is_some() && restoration::reduction(&controls).is_some() {
-        return Err(malformed("multi-load mesh checks do not yet combine with stress restoration"));
-    }
     let a = controls.area;
     let s = controls.search;
     if !(a.tolerance > 0.0 && a.tolerance <= 0.01 && a.max_shift > 0.0)

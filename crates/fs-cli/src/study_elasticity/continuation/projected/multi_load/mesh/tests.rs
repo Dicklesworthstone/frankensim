@@ -32,10 +32,13 @@ fn native_mesh_family_is_explicit_and_restoration_is_not_silently_ignored() {
     assert_eq!(policy.resolution.unwrap().extra_levels, 1);
     assert_eq!(policy.family.as_ref().unwrap().additional[0].weight(), 0.0);
     for (from, to) in [(":extra-levels 1", ":extra-levels 3"),
-        (":relative-compliance-tolerance 0.05", ":relative-compliance-tolerance 1.0"),
-        (":max-recovery-solves 64", ":max-recovery-solves 64 :stress-restoration-reduction 0.01")] {
+        (":relative-compliance-tolerance 0.05", ":relative-compliance-tolerance 1.0")] {
         assert!(parse_study(&EXAMPLE.replace(from, to)).is_err(), "{to}");
     }
+    let restoring = parse_study(&EXAMPLE.replace(":max-recovery-solves 64",
+        ":max-recovery-solves 64 :stress-restoration-reduction 0.01")).unwrap();
+    assert_eq!(parse_study(&restoring.canonical).unwrap().id, restoring.id);
+    assert_eq!(stress_controls(&restoring).unwrap().family.as_ref().unwrap().restoration_reduction, Some(0.01));
     assert!(parse_study(&EXAMPLE.replace("weighted-sum", "worst-weighted-case")).is_ok());
 }
 
@@ -213,3 +216,6 @@ fn public_study_export_and_source_free_resume_preserve_all_load_grid_measurement
     assert_eq!(again.exit_code, out.exit_code);
     assert_eq!(again.stdout, out.stdout);
 }
+
+#[path = "restoration_tests.rs"]
+mod restoration_mesh;

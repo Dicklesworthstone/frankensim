@@ -69,7 +69,7 @@ pub(super) fn field(policy: Option<ResolutionPolicy>, check: Option<&LastCheck>)
 
 pub(super) fn html(policy: Option<ResolutionPolicy>, check: Option<&LastCheck>) -> String {
     let Some(policy) = policy else { return String::new() };
-    let mut out = format!("<h2>Mesh-checked independent loads</h2><p>{} additional grids. Every case, including zero-weight cases, must pass the unchanged sampled stress limit and its own compliance-resolution tolerance. The declared aggregate must improve at every grid. These are observed numerical checks, not continuous stress or error certificates.</p>", policy.extra_levels);
+    let mut out = format!("<h2>Mesh-checked independent loads</h2><p>{} additional grids. Every case, including zero-weight cases, must pass its own compliance-resolution tolerance. In explicit stress restoration, every infeasible grid must reduce its worst unweighted stress excess; already-feasible grids stay feasible. Restoration cannot end until all grids pass the unchanged stress limit. Otherwise, the declared aggregate must improve at every grid while preserving stress feasibility. These are observed numerical checks, not continuous stress or error certificates.</p>", policy.extra_levels);
     let Some(check) = check else { out.push_str("<p>No complete mesh assessment retained yet.</p>"); return out };
     let _ = write!(out, "<p>Last complete check: {}; {} candidates assessed.</p><table><tr><th>Level</th><th>Case</th><th>Baseline J</th><th>Baseline sampled Pa</th><th>Accepted J</th><th>Accepted sampled Pa</th></tr>", check.outcome, check.checked);
     for (i, rung) in check.baseline.rungs.iter().enumerate() {
@@ -147,7 +147,14 @@ pub(super) fn read(value: &JsonValue, policy: &Controls, cases: &[RobustLoadCase
         || baseline.rungs[0].cases.iter().zip(expected).any(|(a, b)| !same(a, b)) {
         return Err(malformed("load-family mesh baseline disagrees with accepted history"));
     }
-    let refused = baseline.refusal(p, policy.area.target, policy.stress, cases).map_err(|e| malformed(&e.to_string()))?;
+    // Infer the phase from the bound baseline, not from a caller-written label.
+    // This is the same phase decision as the live numerical owner.
+    let reduction = restoration::reduction(policy).filter(|_| baseline.rungs[0].cases.iter()
+        .any(|case| case.sampled_max_von_mises > policy.stress.admitted_max()));
+    let refused = match reduction {
+        Some(_) => baseline.resolution_refusal(p, policy.area.target, cases),
+        None => baseline.refusal(p, policy.area.target, policy.stress, cases),
+    }.map_err(|e| malformed(&e.to_string()))?;
     if outcome == "baseline-unresolved" {
         if checked != 0 || refused.is_none() || refused != reason {
             return Err(malformed("unresolved load family lacks its measured refusal"));
@@ -157,10 +164,15 @@ pub(super) fn read(value: &JsonValue, policy: &Controls, cases: &[RobustLoadCase
     }
     if let Some(candidate) = &candidate {
         let aggregate = policy.family.as_ref().ok_or_else(|| malformed("missing load policy"))?.aggregate;
+        let refusal = match reduction {
+            Some(reduction) => candidate.restoration_comparison_refusal(&baseline, p,
+                policy.area.target, policy.stress, cases, reduction),
+            None => candidate.comparison_refusal(&baseline, p, policy.area.target,
+                policy.stress, cases, aggregate, policy.search.min_relative_improvement),
+        }.map_err(|e| malformed(&e.to_string()))?;
         if accepted.is_empty() || checked == 0
             || candidate.rungs[0].cases.iter().zip(current).any(|(a, b)| !same(a, b))
-            || candidate.comparison_refusal(&baseline, p, policy.area.target, policy.stress, cases,
-                aggregate, policy.search.min_relative_improvement).map_err(|e| malformed(&e.to_string()))?.is_some() {
+            || refusal.is_some() {
             return Err(malformed("accepted load family violates its finer-grid gates"));
         }
     }
