@@ -13,6 +13,8 @@ use fs_topopt::sdf3::{CutDensityStudy3, controlled_sdf3_optimality_criteria};
 mod continuation;
 #[path = "sdf3/robust.rs"]
 mod robust;
+#[path = "sdf3/robust_continuation.rs"]
+mod robust_continuation;
 
 struct Slab;
 impl CutSdf3 for Slab {
@@ -46,7 +48,7 @@ fn full_chain_compliance_and_volume_gradients_match_each_coordinate_difference()
             let fd=(plus.objective.compliance-minus.objective.compliance)/(2.0*h);
             let vd=(plus.volume_fraction-minus.volume_fraction)/(2.0*h);
             assert!((fd-exact.objective.gradient[i]).abs()/fd.abs()<2e-4,"p={penal} beta={beta} cell={i}");
-            assert!((vd-exact.volume_gradient[i]).abs()/vd.abs()<2e-5);
+            assert!((vd-exact.volume_gradient[i]).abs()/vd.abs()<2e-5,"p={penal} beta={beta} cell={i}");
         }
     }
 }

@@ -12,6 +12,7 @@
 //! SIMP/filter/projection model stay fixed. Neither evaluations nor numerical
 //! gradient checks change the caller's nominal model or incoming scales.
 
+pub mod continuation;
 mod optimize;
 pub use optimize::{RobustDesignIteration3, RobustDesignOptions3, RobustDesignPoint3, RobustDesignStudy3};
 
