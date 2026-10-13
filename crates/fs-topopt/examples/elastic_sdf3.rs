@@ -13,6 +13,8 @@
 //! cap, exporting all three realization fields and their accepted history.
 //! Prefix --robust-continuation to sharpen that model with checked feasible
 //! stage transfers, then estimate eroded compliance on a refined octree.
+//! Prefix --robust-adaptive to complete two selective refinement/refit cycles
+//! after robust continuation, keeping dilated-volume feasibility on each grid.
 //! The curved design domain is z < 0.7 + 0.1*x*(1-x) inside the unit box.
 //! This field is implicit, not an exact distance function. The two dead body
 //! loads are independent. No continuum, manufacturing or optimality claim.
@@ -34,6 +36,8 @@ mod stress;
 mod robust;
 #[path = "elastic_sdf3/robust_continuation.rs"]
 mod robust_continuation;
+#[path = "elastic_sdf3/robust_adaptive.rs"]
+mod robust_adaptive;
 
 struct CurvedCantilever;
 impl CutSdf3 for CurvedCantilever {
@@ -56,14 +60,16 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
     let stress=args.first().is_some_and(|arg|arg=="--stress-design");
     let robust=args.first().is_some_and(|arg|arg=="--robust-design");
     let robust_cont=args.first().is_some_and(|arg|arg=="--robust-continuation");
-    if continuation || adapt || stress || robust || robust_cont {args.remove(0);}
-    if args.len()>2 {return Err("usage: elastic_sdf3 [--continuation|--adaptive-continuation|--stress-design|--robust-design|--robust-continuation] [UPDATES_PER_STAGE [TOTAL_KRYLOV_ITERATIONS]]".into());}
-    let updates=args.first().map_or(Ok(if stress || robust || robust_cont {200}else{5}),|s|s.parse::<usize>())?;
+    let robust_adapt=args.first().is_some_and(|arg|arg=="--robust-adaptive");
+    if continuation || adapt || stress || robust || robust_cont || robust_adapt {args.remove(0);}
+    if args.len()>2 {return Err("usage: elastic_sdf3 [--continuation|--adaptive-continuation|--stress-design|--robust-design|--robust-continuation|--robust-adaptive] [UPDATES_PER_STAGE [TOTAL_KRYLOV_ITERATIONS]]".into());}
+    let updates=args.first().map_or(Ok(if stress || robust || robust_cont || robust_adapt {200}else{5}),|s|s.parse::<usize>())?;
     let iterations=args.get(1).map_or(Ok(250_000),|s|s.parse::<usize>())?;
     if adapt {return adaptive::run(updates,iterations);}
     if stress {return stress::run(updates,iterations);}
     if robust {return robust::run(updates,iterations);}
     if robust_cont {return robust_continuation::run(updates,iterations);}
+    if robust_adapt {return robust_adaptive::run(updates,iterations);}
     let mut poll=|_|ControlFlow::Continue(());
     let mut quadrature=QuadratureControl3::new(QuadratureOptions3::default(),&mut poll)?;
     let op=CutElasticity3::build(HexCell::try_new([0.0;3],[1.0;3])?,[4,2,2],&CurvedCantilever,
