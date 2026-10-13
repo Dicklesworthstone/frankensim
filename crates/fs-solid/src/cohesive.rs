@@ -26,6 +26,9 @@ use fs_exec::Cx;
 use fs_material::cohesive::{BilinearCohesive, CohesiveEnergy, CohesiveError, CohesivePoint, CohesiveStep};
 use fs_solver::{LinearOp, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, NonlinearProblem, SolverRunProgress};
 
+/// Geometry-backed matching P1 interfaces and displacement transfer.
+pub mod p1;
+
 /// One sparse column of a local displacement-jump map.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JumpTerm {
@@ -44,11 +47,12 @@ pub struct CohesivePatch<'a> {
 }
 impl<'a> CohesivePatch<'a> {
     /// Admit at most 64 distinct sparse displacement columns. Duplicate DOFs
-    /// refuse rather than silently changing the caller's interpolation.
+    /// refuse rather than silently changing the caller's interpolation. An empty
+    /// map is a fully prescribed interface: its history/energy still evolves.
     pub fn new(id: u64, area_m2: f64, law: &'a BilinearCohesive,
         mut terms: Vec<JumpTerm>) -> Result<Self, Error> {
         positive(area_m2)?;
-        if terms.is_empty() || terms.len() > 64 { return Err(Error::Invalid("patch needs 1..64 jump columns")); }
+        if terms.len() > 64 { return Err(Error::Invalid("patch admits at most 64 jump columns")); }
         for term in &terms {
             for value in term.local { finite(value)?; }
             if term.local == [0.0; 3] { return Err(Error::Invalid("zero jump column")); }
