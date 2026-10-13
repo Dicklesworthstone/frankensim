@@ -21,6 +21,8 @@ use super::krylov::bicgstab_ilu0;
 use super::{ChtError, finite, finite_positive};
 use crate::d3q19::Face3;
 
+mod material_field;
+
 /// Thermal rule on one domain face.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ThermalFace {
@@ -29,7 +31,7 @@ pub enum ThermalFace {
     /// Prescribed temperature (K) on the face plane, half a cell from the
     /// boundary cell centre.
     Temperature(f64),
-    /// Prescribed heat flux INTO the domain, W/m^2.
+    /// Heat flux INTO the domain, W/m^2.
     HeatFlux(f64),
     /// Film coefficient `h` (W/(m^2 K)) to an ambient temperature (K), in
     /// series with the boundary half cell.
@@ -670,7 +672,7 @@ pub(crate) fn solve_energy_inner(
 
 /// One linear energy solve; `nonlinear` carries per-cell solid conductivity
 /// factors and an optional warm start (the previous Picard pass).
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // admission, assembly, solve, balance
+#[allow(clippy::too_many_arguments)]
 fn solve_energy_once(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -680,6 +682,24 @@ fn solve_energy_once(
     config: &EnergyConfig,
     step: Option<&PseudoStep<'_>>,
     nonlinear: Option<(&[f64], Option<&[f64]>)>,
+    gate: &CancelGate,
+) -> Result<EnergySolution, ChtError> {
+    solve_energy_field(domain, fluid, solids, flow, setup, config, step, nonlinear, None, gate)
+}
+
+/// Shared assembly/solve/accounting kernel. An explicit field replaces only
+/// molecular conductivity, never material indices, contacts, or heat sources.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn solve_energy_field(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    flow: &FlowField,
+    setup: &ThermalSetup,
+    config: &EnergyConfig,
+    step: Option<&PseudoStep<'_>>,
+    nonlinear: Option<(&[f64], Option<&[f64]>)>,
+    molecular_conductivity: Option<&[[f64; 3]]>,
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
     fluid.validate()?;
@@ -777,17 +797,32 @@ fn solve_energy_once(
         }
     }
     let eddy = |c: usize| setup.eddy_conductivity_w_m_k.get(c).copied().unwrap_or(0.0);
-    let k: Vec<[f64; 3]> = (0..cells)
-        .map(|c| match domain.voxel_at(c) {
-            Voxel::Fluid => [fluid.conductivity_w_m_k + eddy(c); 3],
-            Voxel::Solid(m) => {
-                let scale = nonlinear.map_or(1.0, |(scales, _)| scales[c]);
-                solids[usize::from(m)]
-                    .axis_conductivity()
-                    .map(|k| k * scale)
+    let k: Vec<[f64; 3]> = if let Some(field) = molecular_conductivity {
+        // Admission is performed by the public field entry point. Keep the
+        // existing fluid eddy contribution separate and add it exactly once.
+        let mut resolved = field.to_vec();
+        for (c, axes) in resolved.iter_mut().enumerate() {
+            if domain.is_fluid(c) {
+                for axis in axes {
+                    *axis += eddy(c);
+                    finite_positive("thermal.total_conductivity", *axis)?;
+                }
             }
-        })
-        .collect();
+        }
+        resolved
+    } else {
+        (0..cells)
+            .map(|c| match domain.voxel_at(c) {
+                Voxel::Fluid => [fluid.conductivity_w_m_k + eddy(c); 3],
+                Voxel::Solid(m) => {
+                    let scale = nonlinear.map_or(1.0, |(scales, _)| scales[c]);
+                    solids[usize::from(m)]
+                        .axis_conductivity()
+                        .map(|k| k * scale)
+                }
+            })
+            .collect()
+    };
     let mut contacts = Vec::with_capacity(setup.contacts.len());
     for contact in &setup.contacts {
         let (a, b) = contact.materials;
