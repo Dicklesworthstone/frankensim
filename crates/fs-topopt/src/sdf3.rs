@@ -23,6 +23,7 @@ pub mod adaptive_continuation;
 pub mod response;
 pub mod stress;
 pub mod design;
+pub mod robust;
 pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
 pub use refine::inherit_raw_densities3;
 pub use regions::PhysicalRegion3;
@@ -137,15 +138,23 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         assert_eq!(rho.len(),self.cells(),"one raw density per active cut cell required");
         assert!(rho.iter().all(|r|r.is_finite()&&(0.0..=1.0).contains(r)),"invalid raw density");
         let filtered = self.filter_apply(rho,control)?;
+        self.design_from_filtered(&filtered, self.params.eta, control)
+    }
+
+    // All realizations share the same filter, physical-region override and
+    // SIMP law. Only the projection threshold changes in the robust model.
+    fn design_from_filtered(&self, filtered: &[f64], eta: f64, control: &mut SolveControl<'_>)
+        -> Result<Design3, EvaluationStop> {
+        control.checkpoint("sdf3-projection")?;
         let p = self.params;
-        let mut projected = Vec::with_capacity(rho.len());
-        let mut slope = Vec::with_capacity(rho.len());
-        let mut scales = Vec::with_capacity(rho.len());
+        let mut projected = Vec::with_capacity(filtered.len());
+        let mut slope = Vec::with_capacity(filtered.len());
+        let mut scales = Vec::with_capacity(filtered.len());
         for (index, &r) in filtered.iter().enumerate() {
-            let h = heaviside(r,p.beta,p.eta);
+            let h = heaviside(r,p.beta,eta);
             if !h.is_finite() { return Err(failure("sdf3-projection")); }
             let physical = h.clamp(0.0,1.0);
-            let derivative = if h < 0.0 || h > 1.0 { 0.0 } else { heaviside_derivative(r,p.beta,p.eta) };
+            let derivative = if h < 0.0 || h > 1.0 { 0.0 } else { heaviside_derivative(r,p.beta,eta) };
             // Override the physical map AND its local derivative, before SIMP,
             // volume integration and all compliance/stress/response pullbacks.
             let (physical, derivative) = match self.physical_regions.as_ref().map(|r| r[index]) {
@@ -184,6 +193,13 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         control.checkpoint("sdf3-evaluation")?;
         assert_loads(self, loads);
         let design = self.design(rho,control)?;
+        self.evaluate_design(design, loads, control)
+    }
+
+    // The primal, self-adjoint sensitivities, true-residual gate and rollback
+    // are identical for nominal and eroded material fields.
+    fn evaluate_design(&mut self, design: Design3, loads: &[LoadCase<'_>], control: &mut SolveControl<'_>)
+        -> Result<CutDensityEvaluation3, EvaluationStop> {
         let previous = self.operator.scales().to_vec();
         self.operator.set_scales(&design.scales).map_err(|_|failure("sdf3-scales"))?;
         let result = (|| {

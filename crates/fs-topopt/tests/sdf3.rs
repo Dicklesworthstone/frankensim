@@ -11,6 +11,8 @@ use fs_topopt::sdf3::{CutDensityStudy3, controlled_sdf3_optimality_criteria};
 
 #[path = "sdf3/continuation.rs"]
 mod continuation;
+#[path = "sdf3/robust.rs"]
+mod robust;
 
 struct Slab;
 impl CutSdf3 for Slab {
