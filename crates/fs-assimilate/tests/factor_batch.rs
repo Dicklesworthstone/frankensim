@@ -126,7 +126,7 @@ fn constrained_state_stays_exact_through_correlated_updates() {
         let result = assimilate_observation_batch(&prior, &batch, cx).unwrap();
         let posterior = result.posterior().unwrap();
         assert_eq!(posterior.mean()[1], 3.0);
-        assert_eq!(posterior.variance(1), Some(0.0));
+        assert_eq!(posterior.variance(1), Ok(0.0));
         assert_eq!(posterior.covariance()[0][1], 0.0);
     });
 }

@@ -34,3 +34,7 @@ The new regression target compares direct block conditioning and joint
 Mahalanobis residuals, the independent dense Joseph oracle, constrained prior
 states, dimensional refusals, and cumulative budget exhaustion. It also
 exercises a 128-state/40-observation batch beyond the dense cubic-work cap.
+
+`groups::jacobian` constructs these full observation covariances from signed
+measurement sensitivities and a multivariate nuisance model. See
+`SHARED_NOISE_JACOBIANS.md` and the runnable `shared_calibration` example.

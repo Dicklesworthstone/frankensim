@@ -28,6 +28,9 @@ use crate::robust::{
 };
 use crate::{AssimError, Belief, Cx, Observation, assimilate_all};
 
+/// Full nuisance covariance and signed observation Jacobians.
+pub mod jacobian;
+
 /// A bounded dataset-row identity token (same leaf grammar as instrument
 /// identities).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
