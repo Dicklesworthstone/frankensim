@@ -44,7 +44,7 @@ fn unsupported_complete_port_count_refuses_before_the_rayleigh_sweep() {
     let surface = [SurfaceSample { position_m: [0.0, 0.0, 0.0],
         area_m2: 0.001, mode_shape: vec![1.0; count] }];
     let error = prepare(&surface, &bank, &Options::parse("1,40,500,65").unwrap(),
-        medium(), 48_000).err().expect("unsupported full image must refuse");
+        medium(), 48_000, None).err().expect("unsupported full image must refuse");
     assert_eq!(error, format!("Rayleigh loading retains 1..{MAX_PORTS} complete board modes and 1..{} area samples; reduce the supplied physical image explicitly", fs_bem::helmholtz::MAX_DENSE_PANELS));
 }
 
@@ -52,7 +52,7 @@ fn unsupported_complete_port_count_refuses_before_the_rayleigh_sweep() {
 fn complete_loaded_projection_reaches_the_actual_passive_fit() {
     let (bank, surface) = fixture();
     let options = Options::parse("1,40,500,65").unwrap();
-    let result = prepare(&surface, &bank, &options, medium(), 48_000).unwrap();
+    let result = prepare(&surface, &bank, &options, medium(), 48_000, None).unwrap();
     let (_, reference) = bank.board_pressure_basis().unwrap();
     let loaded_shape = bank.project_board_shape(&[1.0]).unwrap()[0];
     eprintln!("piston loaded shape={loaded_shape:.17e}, reference_hz={:.17e}", det::sqrt(reference[0])/TAU);
@@ -84,8 +84,8 @@ fn two_half_spaces_add_reaction_without_changing_the_source_coordinates() {
     let (bank, surface) = fixture();
     let one = Options::parse("1,40,500,65").unwrap();
     let two = Options { sides: 2, ..one };
-    let a = prepare(&surface, &bank, &one, medium(), 48_000).unwrap();
-    let b = prepare(&surface, &bank, &two, medium(), 48_000).unwrap();
+    let a = prepare(&surface, &bank, &one, medium(), 48_000, None).unwrap();
+    let b = prepare(&surface, &bank, &two, medium(), 48_000, None).unwrap();
     for hz in [40.0, 193.0, 500.0] {
         let first = a.model.impedance(TAU * hz).unwrap()[0];
         let second = b.model.impedance(TAU * hz).unwrap()[0];
@@ -110,7 +110,7 @@ fn loading_requires_explicit_sides_resolved_clocks_and_complete_reference_band()
     let reference_hz = det::sqrt(bank.board_pressure_basis().unwrap().1[0]) / TAU;
     for invalid in [Options { min_hz: reference_hz * 1.01, ..options },
         Options { max_hz: reference_hz * 0.99, ..options }] {
-        assert!(prepare(&surface, &bank, &invalid, medium(), 48_000).is_err());
+        assert!(prepare(&surface, &bank, &invalid, medium(), 48_000, None).is_err());
     }
 }
 
@@ -119,13 +119,13 @@ fn nonplanar_or_spatially_unresolved_sources_refuse_before_fitting() {
     let (bank, mut surface) = fixture();
     let options = Options::parse("1,40,500,65").unwrap();
     surface[1].position_m[2] = 0.001;
-    assert!(prepare(&surface, &bank, &options, medium(), 48_000).is_err());
+    assert!(prepare(&surface, &bank, &options, medium(), 48_000, None).is_err());
     // A large XY translation cannot hide a physically nonplanar source.
     for cell in &mut surface { cell.position_m[0] += 1e12; }
-    assert!(prepare(&surface, &bank, &options, medium(), 48_000).is_err());
+    assert!(prepare(&surface, &bank, &options, medium(), 48_000, None).is_err());
     let (_, mut coarse) = fixture();
     coarse[0].area_m2 = 2.0;
-    assert!(prepare(&coarse, &bank, &options, medium(), 48_000).is_err());
+    assert!(prepare(&coarse, &bank, &options, medium(), 48_000, None).is_err());
 }
 
 #[test]
@@ -155,7 +155,7 @@ fn physical_radiation_changes_string_board_decay_and_closes_the_combined_energy(
             mode_shape: vec![2.0 * (PI * x).sin() * (PI * y).sin(),
                 2.0 * (2.0 * PI * x).sin() * (PI * y).sin()] }
     })).collect();
-    let load = prepare(&surface, &bank, &Options::parse("1,40,500,65").unwrap(), medium(), 48_000).unwrap();
+    let load = prepare(&surface, &bank, &Options::parse("1,40,500,65").unwrap(), medium(), 48_000, None).unwrap();
     let mut air = Prepared::new(&load.model, bank.rate, bank.board_count).unwrap();
     let offset = bank.modes.len();
     bank.v[offset] = 0.03; bank.v[offset + 1] = -0.02;
@@ -185,4 +185,14 @@ fn physical_radiation_changes_string_board_decay_and_closes_the_combined_energy(
     assert!(maximum_air > 1e-4 * initial, "missing reactive acoustic storage");
     assert!(bank.energy() < 0.95 * initial, "receiver-only output cannot replace physical reaction");
     eprintln!("Rayleigh reaction: initial={initial:e} J, radiated={radiated:e} J, mechanics={:e} J, air={:e} J, max relative ledger={maximum_balance:e}", bank.energy(), air.energy());
+}
+
+#[test]
+fn projected_rayleigh_loading_builds_port_basis() {
+    let (bank, surface) = fixture();
+    let options = Options::parse("1,40,500,65").unwrap();
+    let result = prepare(&surface, &bank, &options, medium(), 48_000, Some(1)).unwrap();
+    assert!(result.basis.is_some());
+    assert_eq!(result.report.acoustic_ports, 1);
+    assert!(result.report.surface_rms_error.is_some());
 }

@@ -1,7 +1,7 @@
 //! Optional pressure reaction for the same planar, infinite-baffle image used
 //! by the primary piano receiver. All structural columns and area samples feed
 //! the existing passive load fitter and the existing mechanical air exchange.
-use super::{board_geometry::SurfaceSample, engine::radiation::Model, linear::Bank};
+use super::{board_geometry::SurfaceSample, engine::radiation::{self, Model, PortBasis}, linear::Bank};
 use fs_bem::helmholtz::{Medium, rayleigh_modal::{AreaSample, PreparedSurface, MAX_MODAL_RAYLEIGH_FIELDS}};
 use fs_couple::render::plate::impact::radiation::{fit, MAX_PORTS};
 use fs_math::det;
@@ -75,6 +75,8 @@ pub struct Report {
     pub rms_error: f64,
     pub resistance_peak_error: f64,
     pub resistance_rms_error: f64,
+    pub acoustic_ports: usize,
+    pub surface_rms_error: Option<f64>,
 }
 
 impl std::fmt::Display for Report {
@@ -83,11 +85,15 @@ impl std::fmt::Display for Report {
             self.sides, self.board_modes, self.surface_samples, self.acoustic_poles,
             self.min_hz, self.max_hz, self.frequencies, self.peak_error, self.rms_error,
             self.resistance_peak_error, self.resistance_rms_error, self.reference_min_hz,
-            self.reference_max_hz, self.minimum_equivalent_disc_ppw, self.sweep_terms)
+            self.reference_max_hz, self.minimum_equivalent_disc_ppw, self.sweep_terms)?;
+        if let Some(error) = self.surface_rms_error {
+            write!(f, " Explicit acoustic projection: {} ports over all {} board coordinates; surface-field RMS omission {:.5}. Reported load errors include projection and fitting on the complete original matrices.", self.acoustic_ports, self.board_modes, error)?;
+        }
+        Ok(())
     }
 }
 
-pub struct PreparedLoad { pub model: Model, pub report: Report }
+pub struct PreparedLoad { pub model: Model, pub report: Report, pub basis: Option<PortBasis> }
 
 /// Prepare before attaching the existing radiation owner or launching a note.
 /// `SurfaceSample` shapes are bare-board shapes: apply the bank's actual loaded
@@ -96,12 +102,16 @@ pub struct PreparedLoad { pub model: Model, pub report: Report }
 /// its geometry frontdoor. Two sides means two independent equal half-spaces,
 /// never an extra receiver gain and never an inferred lower cavity.
 pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium: Medium,
-    output_rate: u32) -> Result<PreparedLoad, String> {
+    output_rate: u32, max_ports: Option<usize>) -> Result<PreparedLoad, String> {
     options.validate_clock(output_rate, bank.rate)?;
+    if max_ports.is_some_and(|ports| !(1..=MAX_PORTS).contains(&ports)) {
+        return Err("Rayleigh acoustic reduction needs an explicit ceiling of 1..32 ports".into());
+    }
     let modes = bank.board_count;
     // The numerical kernel may admit more fields than the downstream passive
     // realization. Refuse that complete image before preparing its sweep.
-    let maximum_fields = MAX_MODAL_RAYLEIGH_FIELDS.min(MAX_PORTS);
+    let maximum_fields = if max_ports.is_some() { MAX_MODAL_RAYLEIGH_FIELDS }
+        else { MAX_MODAL_RAYLEIGH_FIELDS.min(MAX_PORTS) };
     if !(1..=maximum_fields).contains(&modes) || surface.is_empty()
         || surface.len() > fs_bem::helmholtz::MAX_DENSE_PANELS {
         return Err(format!("Rayleigh loading retains 1..{maximum_fields} complete board modes and 1..{} area samples; reduce the supplied physical image explicitly", fs_bem::helmholtz::MAX_DENSE_PANELS));
@@ -137,6 +147,15 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
             panels_per_wavelength: minimum_equivalent_disc_ppw,
         }.to_string());
     }
+    // Select from the SAME complete loaded surface before seeing any frequency
+    // response. Every board coordinate still participates in the full sweep.
+    let projection = max_ports.map(|ports| {
+        let areas: Vec<_> = cells.iter().map(|cell| cell.area_m2).collect();
+        let weights: Vec<Vec<_>> = (0..modes).map(|mode|
+            cells.iter().map(|cell| cell.mode_shape[mode]).collect()).collect();
+        radiation::geometry_basis(&weights, &areas, ports,
+            fs_bem::helmholtz::MAX_DENSE_PANELS)
+    }).transpose()?;
     let low = det::ln(options.min_hz);
     let span = det::ln(options.max_hz) - low;
     let mut omega: Vec<_> = (0..options.samples).map(|i|
@@ -149,7 +168,9 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
         for value in &mut matrix { *value = value.scale(f64::from(options.sides)); }
         data.push(matrix);
     }
-    let fitted = fit::fit(&omega, &data, modes)?;
+    let fitted = if let Some((basis, _)) = &projection {
+        radiation::fit_projected(&omega, &data, basis)?
+    } else { fit::fit(&omega, &data, modes)? };
     let report = Report {
         sides: options.sides, surface_samples: surface.len(), board_modes: modes,
         frequencies: options.samples, min_hz: options.min_hz, max_hz: options.max_hz,
@@ -157,8 +178,10 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
         minimum_equivalent_disc_ppw, sweep_terms, peak_error: fitted.peak_error,
         rms_error: fitted.rms_error, resistance_peak_error: fitted.resistance_peak_error,
         resistance_rms_error: fitted.resistance_rms_error,
+        acoustic_ports: fitted.model.ports,
+        surface_rms_error: projection.as_ref().map(|(_, error)| *error),
     };
-    Ok(PreparedLoad { model: fitted.model, report })
+    Ok(PreparedLoad { model: fitted.model, report, basis: projection.map(|(basis, _)| basis) })
 }
 
 #[cfg(test)]
