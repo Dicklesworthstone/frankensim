@@ -187,3 +187,57 @@ fn motion_without_crossings_preserves_the_ordinary_thermal_path_bitwise() {
     assert_eq!(a,r.thermal);
     assert_eq!(r.thermal_intervals,1);
 }
+
+#[test]
+fn history_reversals_keep_damage_and_replay_the_same_frame_grid() {
+    let law = law();
+    let initial = coupled(vec![binding(law.bonded_point())],vec![]);
+    let open = [endpoint(7,[0.002,0.0,0.0])];
+    let closed = [endpoint(7,[-0.0002,0.0,0.0])];
+    let frames = [Frame { time_s: 2.0,endpoints: &open },Frame { time_s: 4.0,endpoints: &closed },
+        Frame { time_s: 5.0,endpoints: &open }];
+    let (whole,r) = initial.advance_prescribed_history(&frames,config(),3,|| Ok(())).unwrap();
+    let (prefix,first) = initial.advance_prescribed_history(&frames[..1],config(),1,|| Ok(())).unwrap();
+    let (resumed,last) = prefix.clone().advance_prescribed_history(&frames[1..],config(),2,|| Ok(())).unwrap();
+    assert_eq!(whole.thermal().cells(),resumed.thermal().cells());
+    assert_eq!(whole.interfaces()[&7].point,resumed.interfaces()[&7].point);
+    assert_eq!(r.thermal.substeps,first.thermal.substeps+last.thermal.substeps);
+    assert_eq!(r.contacts.opened,2); assert_eq!(r.contacts.reclosed,1);
+    near(r.contacts.fracture_dissipation_j,0.02,1e-12);
+    assert_eq!(whole.interfaces()[&7].point.traction_pa(),[0.0;3]);
+    assert!(!whole.interfaces()[&7].closed);
+}
+
+#[test]
+fn history_does_not_renew_work_or_crossing_budgets_at_motion_corners() {
+    let law = law();
+    let initial = coupled(vec![binding(law.bonded_point())],vec![]);
+    let open = [endpoint(7,[0.002,0.0,0.0])];
+    let closed = [endpoint(7,[-0.0002,0.0,0.0])];
+    let frames = [Frame { time_s: 1.0,endpoints: &open },Frame { time_s: 2.0,endpoints: &closed }];
+    let (_,first) = initial.advance_prescribed_history(&frames[..1],config(),1,|| Ok(())).unwrap();
+    for cfg in [Config { max_event_trials: first.event_trials,..config() },
+        Config { max_crossings: first.crossings.len(),..config() },
+        Config { max_thermal_substeps: 1500,..config() }] {
+        assert!(initial.advance_prescribed_history(&frames,cfg,2,|| Ok(())).is_err());
+    }
+    assert!(initial.advance_prescribed_history(&frames,config(),1,|| Ok(())).is_err());
+    assert_eq!(initial.thermal().time_s(),0.0);
+    assert_eq!(initial.interfaces()[&7].point.damage(),0.0);
+}
+
+#[test]
+fn invalid_late_motion_and_cancelled_history_preserve_the_original_state() {
+    let law = law();
+    let initial = coupled(vec![binding(law.bonded_point())],vec![]);
+    let open = [endpoint(7,[0.002,0.0,0.0])];
+    let foreign = [endpoint(999,[0.0;3])];
+    let first = Frame { time_s: 1.0,endpoints: &open };
+    assert!(initial.advance_prescribed_history(&[first,Frame { time_s: 2.0,endpoints: &foreign }],
+        config(),2,|| Ok(())).is_err());
+    assert!(initial.advance_prescribed_history(&[first,first],config(),2,|| Ok(())).is_err());
+    assert!(initial.advance_prescribed_history(&[],config(),2,|| Ok(())).is_err());
+    assert!(initial.advance_prescribed_history(&[first],config(),1,|| Err(DepositionError::Cancelled)).is_err());
+    assert_eq!(initial.thermal().temperature_k(CellId(1)).unwrap(),500.0);
+    assert_eq!(initial.interfaces()[&7].point.damage(),0.0);
+}

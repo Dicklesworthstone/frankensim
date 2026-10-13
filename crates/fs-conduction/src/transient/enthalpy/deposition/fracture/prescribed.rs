@@ -22,6 +22,15 @@ pub struct Endpoint {
     pub jump_m: [f64; 3],
 }
 
+/// One explicit corner of a continuous piecewise-linear motion history.
+/// All interface jumps interpolate from the preceding accepted frame. A hold
+/// uses repeated jumps at a later time; reversals require a separate frame.
+#[derive(Debug, Clone, Copy)]
+pub struct Frame<'a> {
+    pub time_s: f64,
+    pub endpoints: &'a [Endpoint],
+}
+
 /// Whole-segment work bounds and independent thermal/event numerical controls.
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
@@ -117,6 +126,65 @@ fn locate(
 }
 
 impl<'t, 'm> FractureCooling<'t, 'm> {
+    /// Evolve an ordered prescribed motion history as ONE atomic candidate.
+    /// Event-query, crossing-storage and thermal-substep budgets are shared by
+    /// all segments, never renewed at a motion corner. No full-field history is
+    /// retained. Split calls at chosen frame boundaries for in-memory restart;
+    /// the same frame/thermal grid reproduces the same state, while each explicit
+    /// call has its own work allowance. Inserting extra frames can change the
+    /// thermal grid and is not promised bitwise equivalent.
+    ///
+    /// A late invalid frame, schedule conflict, budget or cancellation refusal
+    /// publishes neither an earlier motion prefix nor partially updated damage.
+    /// Inputs are borrowed so the caller can retry unchanged. No external motion
+    /// or actuator effect is performed or rolled back by this numerical API.
+    pub fn advance_prescribed_history(
+        &self, frames: &[Frame<'_>], config: Config, max_segments: usize,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, Report), Error> {
+        checkpoint()?;
+        if frames.is_empty() || frames.len() > max_segments {
+            return Err(Error::Thermal(DepositionError::Budget("prescribed motion segments")));
+        }
+        let mut previous = self.thermal.time_s();
+        for frame in frames {
+            checkpoint()?;
+            if !frame.time_s.is_finite() || frame.time_s <= previous {
+                return Err(Error::Invalid("motion frames must strictly increase from the accepted time"));
+            }
+            previous = frame.time_s;
+        }
+        let initial_energy = self.thermal.energy_j();
+        let mut next = self.clone();
+        let mut report = Report { thermal: EnergyAudit { incoming_mass_kg: 0.0,incoming_energy_j: 0.0,
+            external_heat_j: 0.0,stored_energy_change_j: 0.0,residual_j: 0.0,substeps: 0,events: 0 },
+            contacts: ContactReport::default(),crossings: Vec::new(),event_trials: 0,thermal_intervals: 0 };
+        for frame in frames {
+            checkpoint()?;
+            let remaining = Config {
+                max_event_trials: config.max_event_trials-report.event_trials,
+                max_crossings: config.max_crossings-report.crossings.len(),
+                max_thermal_substeps: config.max_thermal_substeps-report.thermal.substeps,
+                ..config
+            };
+            let (state,part) = next.advance_prescribed_to(frame.time_s,frame.endpoints,remaining,&mut checkpoint)?;
+            add_thermal(&mut report.thermal,part.thermal)?;
+            add_contacts(&mut report.contacts,part.contacts)?;
+            report.event_trials = add_count(report.event_trials,part.event_trials)?;
+            report.thermal_intervals = add_count(report.thermal_intervals,part.thermal_intervals)?;
+            report.crossings.extend(part.crossings);
+            next = state;
+        }
+        report.thermal.stored_energy_change_j = finite_value(next.thermal.energy_j()-initial_energy)?;
+        report.thermal.residual_j = finite_value(report.thermal.stored_energy_change_j
+            -report.thermal.incoming_energy_j-report.thermal.external_heat_j)?;
+        if report.thermal.residual_j.abs() > config.thermal.energy_tolerance_j {
+            return Err(Error::Thermal(DepositionError::EnergyBalance(report.thermal.residual_j)));
+        }
+        checkpoint()?;
+        Ok((next,report))
+    }
+
     /// Evolve a complete straight prescribed separation segment and its heat.
     ///
     /// All interfaces move simultaneously from their retained jumps to supplied
