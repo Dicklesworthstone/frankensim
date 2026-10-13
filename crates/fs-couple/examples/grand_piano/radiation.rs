@@ -25,6 +25,9 @@ pub use fs_couple::render::plate::impact::radiation::{Model,Pole};
 #[path = "radiation_ports.rs"]
 mod ports;
 pub use ports::PortBasis;
+pub(crate) use ports::{geometry_basis, fit_projected};
+#[cfg(test)]
+pub(crate) use ports::validate_complete_fit;
 
 #[derive(Clone, Copy, Default)]
 struct Free { xx:f64, xp:f64, px:f64, pp:f64 }
