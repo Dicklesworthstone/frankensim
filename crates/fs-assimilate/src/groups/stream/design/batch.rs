@@ -234,7 +234,12 @@ impl SharedNoiseStream {
         let mut posterior_variance = prior_variance;
         let mut features = reserve(m)?;
         for candidate in candidates {
-            features.push(project(&self.joint, &candidate.probe.operator, &mut progress)?);
+            // An unaffordable candidate can never become affordable later.
+            // Admit its identity/shape above, but do not spend numerical work
+            // on a measurement this plan is forbidden to acquire.
+            features.push(if k > 0 && u64::from(candidate.cost) <= budget.max_cost {
+                project(&self.joint, &candidate.probe.operator, &mut progress)?
+            } else { Vec::new() });
         }
         let mut selected = reserve(m)?;
         selected.resize(m, false);
@@ -271,7 +276,7 @@ impl SharedNoiseStream {
             let mut chosen = reserve(features[index].len())?;
             chosen.extend_from_slice(&features[index]);
             for other in 0..m {
-                if other != index && !selected[other] {
+                if other != index && !selected[other] && !features[other].is_empty() {
                     features[other] = condition(&features[other], &chosen,
                         candidates[index].probe.noise_variance, &mut progress)?.residual;
                 }
@@ -307,3 +312,6 @@ fn copy_candidate(candidate: &CostedProbe) -> Result<CostedProbe, AssimError> {
         operator, noise_variance: probe.noise_variance,
     } })
 }
+
+mod acquisition;
+pub use acquisition::ProbeReading;
