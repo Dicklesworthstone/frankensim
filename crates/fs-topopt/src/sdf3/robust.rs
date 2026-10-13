@@ -16,6 +16,7 @@ pub mod continuation;
 pub mod goal;
 pub mod refit;
 pub mod adaptive;
+pub mod envelope;
 mod optimize;
 pub use optimize::{RobustDesignIteration3, RobustDesignOptions3, RobustDesignPoint3, RobustDesignStudy3};
 
