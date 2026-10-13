@@ -43,3 +43,23 @@ fn load_rejects_missing_geometry_diagnostics_duplicate_sides_and_audio_band() {
         assert!(Options::parse(&args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>()).is_err());
     }
 }
+
+#[test]
+fn primary_radiation_ports_are_explicit_bounded_and_require_the_load() {
+    assert_eq!(options(&[]).unwrap().radiation_ports, None);
+    for ports in ["1", "32"] {
+        let selected = options(&["--rayleigh-loading", "1,20,2000,65",
+            "--radiation-ports", ports]).unwrap();
+        assert_eq!(selected.radiation_ports, Some(ports.parse().unwrap()));
+    }
+    for extra in [
+        vec!["--radiation-ports", "1"],
+        vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "0"],
+        vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "33"],
+        vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "1", "--radiation-ports", "2"],
+        vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "NaN"],
+        vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "2", "--diagnostic-volume"],
+    ] {
+        assert!(options(&extra).is_err(), "accepted incompatible {extra:?}");
+    }
+}

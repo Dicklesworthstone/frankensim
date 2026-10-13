@@ -196,3 +196,43 @@ fn projected_rayleigh_loading_builds_port_basis() {
     assert_eq!(result.report.acoustic_ports, 1);
     assert!(result.report.surface_rms_error.is_some());
 }
+
+#[test]
+fn explicit_projection_reaches_the_existing_runtime_with_all_33_board_coordinates() {
+    let count = MAX_PORTS + 1;
+    let course = steinway_scale::courses().unwrap().into_iter().find(|c| c.midi == 69).unwrap();
+    let course = Course { unison: 1, duplex_length_m: 0.0, ..course };
+    let board: Vec<_> = (0..count).map(|i| BoardMode {
+        frequency_hz: 250.0 + i as f64, damping_ratio: 0.0,
+        bridge: [0.0; 88], volume: 0.0,
+    }).collect();
+    let bank = Bank::new(&[course], &board, 192_000, 8_000.0, 20, false).unwrap();
+    let surface = [SurfaceSample { position_m: [0.0, 0.0, 0.0],
+        area_m2: 0.001, mode_shape: vec![1.0; count] }];
+    let options = Options::parse("1,40,500,65").unwrap();
+    for invalid in [0, MAX_PORTS + 1] {
+        assert!(prepare(&surface, &bank, &options, medium(), 48_000, Some(invalid)).is_err());
+    }
+    let load = prepare(&surface, &bank, &options, medium(), 48_000, Some(1)).unwrap();
+    let basis = load.basis.as_ref().unwrap();
+    assert_eq!(bank.board_count, count);
+    assert_eq!(load.report.board_modes, count);
+    assert_eq!(basis.board_ports(), count);
+    assert_eq!(basis.ports(), 1);
+    assert_eq!(load.model.ports, 1);
+    assert_eq!(load.report.acoustic_ports, 1);
+    assert!(load.report.surface_rms_error.unwrap() < 1e-12);
+    assert!(load.report.peak_error < 0.05 && load.report.rms_error < 0.02);
+    assert!(load.report.resistance_peak_error < 0.10 && load.report.resistance_rms_error < 0.05);
+    let mut air = radiation::Prepared::new_projected(&load.model, bank.rate, basis).unwrap();
+    let mut velocity = vec![0.01; count];
+    let initial = 0.5 * velocity.iter().map(|v| v * v).sum::<f64>();
+    let mut loss = 0.0;
+    for _ in 0..480 {
+        loss += air.before(&mut velocity).unwrap() + air.after(&mut velocity).unwrap();
+    }
+    let final_energy = 0.5 * velocity.iter().map(|v| v * v).sum::<f64>() + air.energy();
+    assert!((final_energy + loss - initial).abs() < 2e-13);
+    assert!(air.energy() > 0.0 && loss > 0.0);
+    assert_eq!(velocity.len(), count);
+}

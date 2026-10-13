@@ -17,6 +17,18 @@ frequency-band endpoints in Hz, and an odd count of 33 through 257 logarithmic
 frequency samples. There is no inferred side count or separate fit-order knob.
 Without this option, the existing one-way receiver path is unchanged.
 
+`--radiation-ports N`, with an explicit ceiling from 1 through 32, connects the
+existing projected acoustic runtime to this load. It can attempt a complete
+board image of up to 128 coordinates while fitting fewer radiating combinations.
+The complete physical impedance is still sampled; every mechanical coordinate
+and microphone input remains. Geometry alone selects the orthonormal acoustic
+rows before any frequency response or microphone position is consulted. The
+lifted fit must pass the existing complex and resistance limits against every
+original full matrix, including the held-out frequencies. Insufficient rank
+refuses without increasing the requested ceiling. The report distinguishes
+board coordinates, acoustic ports, surface-field omission and complete-load
+errors. This option requires `--rayleigh-loading`.
+
 ## Physical model
 
 The load uses the same planar, infinite rigid baffle assumption as the primary
@@ -61,12 +73,16 @@ existing mechanical-rate guard. At 48 kHz with four substeps, the upper endpoint
 must therefore be below 10.8 kHz. Broadband excitation can still reach outside
 the sampled band; the fitted load has no validated accuracy there.
 
-The piano path admits up to 32 complete board modes, 8,192 area samples
+The direct piano path admits up to 32 complete board modes, 8,192 area samples
 and 64 billion cell-mode-frequency visits. The numerical Rayleigh kernel can
 retain 128 fields, but the shared passive fitter and runtime model still admit
-32 complete velocity ports. The frontend checks their common limit before
-preparing any impedance sweep. A larger physical image remains unsupported;
-no board fields are removed to fit the smaller realization. It caches the spatial pair distances
+32 complete velocity ports. Without an explicit acoustic projection, the
+frontend checks their common limit before preparing any impedance sweep.
+The opt-in projection retains the larger complete board and attaches its
+acoustic load through the existing orthonormal port map. Its full-matrix error
+checks include every omitted acoustic direction; a small surface-field error
+alone cannot establish an adequate load. All cell, work, clock, resolution and
+fit limits remain. The kernel caches the spatial pair distances
 and projects each frequency in `O(cells^2*modes + cells*modes^2)` work. No acoustic
 port reduction or automatic spatial coarsening is performed. Preparation is
 offline work, with no real-time claim.
