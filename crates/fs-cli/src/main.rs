@@ -1,6 +1,7 @@
 //! `frankensim` command-line entry point.
 
 mod cht_command;
+mod electrothermal_command;
 mod network_command;
 mod uq_command;
 
@@ -13,6 +14,8 @@ fn main() -> ExitCode {
     let command = usize::from(json);
     let mut output = if args.get(command).is_some_and(|arg| arg == "cooling-cht") {
         cht_command::run(&args[command + 1..], json)
+    } else if args.get(command).is_some_and(|arg| arg == "electrothermal") {
+        electrothermal_command::run(&args[command + 1..], json)
     } else if args.get(command).is_some_and(|arg| arg == "cooling-network") {
         network_command::run(&args[command + 1..], json)
     } else if args.get(command).is_some_and(|arg| arg == "cooling-network-uq") {
@@ -25,7 +28,7 @@ fn main() -> ExitCode {
     if !json && output.exit_code == 0
         && (args.is_empty() || (args.len() == 1 && matches!(args[0].to_str(), Some("--help" | "-h" | "help"))))
     {
-        output.stdout.push_str("\nExperimental coupled workflows:\n  cooling-cht <scene.json>\n  cooling-network <request.json>\n  cooling-network-uq <base-request.json> <uq-request.json>\n  cooling-component-design <base-request.json> <allocation.json>\nUse each command's --help for its file-driven interface.\n");
+        output.stdout.push_str("\nExperimental coupled workflows:\n  cooling-cht <scene.json>\n  electrothermal <scene.json>\n  cooling-network <request.json>\n  cooling-network-uq <base-request.json> <uq-request.json>\n  cooling-component-design <base-request.json> <allocation.json>\nUse each command's --help for its file-driven interface.\n");
     }
     print!("{}", output.stdout);
     eprint!("{}", output.stderr);
