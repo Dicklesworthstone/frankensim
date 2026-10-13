@@ -4,6 +4,8 @@
 //! Arguments: accepted updates, cumulative Krylov iterations, min/max reaction.
 //! Optional --estimate checks every limit on an enriched physical grid;
 //! --refit also selectively rebuilds marked cells and restarts material design.
+//! --adapt-rounds N runs repeated checked refits; --response-tol and
+//! --volume-tol select its numerical change thresholds (not continuum bounds).
 //! All phases retain the original cumulative geometry and linear-work budgets.
 //! Two independent extension/compression experiments on a dimensionless slab.
 //! E=1, nu=0, imposed axial strain +/-0.02. Bounds are declared design limits,
@@ -22,6 +24,8 @@ use fs_topopt::sdf3::response::limits::*;
 use fs_topopt::sdf3::response::limits::design::*;
 #[path = "minimum_material_sdf3/adaptive.rs"]
 mod adaptive;
+#[path = "minimum_material_sdf3/campaign.rs"]
+mod campaign;
 struct Slab;
 impl CutSdf3 for Slab {
     fn value(&self, p: [f64; 3]) -> f64 { (p[0]-0.17)*(p[0]-0.83) }
@@ -39,15 +43,17 @@ fn compression(p: [f64; 3], n: [f64; 3]) -> [f64; 3] { motion(p, n).map(|v| -v) 
 fn right(_: [f64; 3], n: [f64; 3]) -> [f64; 3] { if n[0] > 0.0 { [1.0, 0.0, 0.0] } else { [0.0; 3] } }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args: Vec<_> = std::env::args().skip(1).collect();
+    let campaign = campaign::parse(&mut args)?;
     let refit = args.last().is_some_and(|s| s == "--refit");
     let estimate = refit || args.last().is_some_and(|s| s == "--estimate");
     if estimate { let _ = args.pop(); }
-    if args.len() > 4 { return Err("usage: minimum_material_sdf3 [UPDATES [KRYLOV [MIN_REACTION [MAX_REACTION]]]] [--estimate|--refit]".into()); }
+    if args.len() > 4 { return Err("usage: minimum_material_sdf3 [UPDATES [KRYLOV [MIN_REACTION [MAX_REACTION]]]] [--estimate|--refit|--adapt-rounds N [--response-tol X] [--volume-tol X]]".into()); }
     let steps = args.first().map_or(Ok(80), |s| s.parse::<usize>())?;
     let budget = args.get(1).map_or(Ok(250000), |s| s.parse::<usize>())?;
     let lo = args.get(2).map_or(Ok(0.0012), |s| s.parse::<f64>())?;
     let hi = args.get(3).map_or(Ok(0.003), |s| s.parse::<f64>())?;
     if !lo.is_finite() || !hi.is_finite() || lo <= 0.0 || lo >= hi { return Err("require finite 0 < MIN_REACTION < MAX_REACTION".into()); }
+    if let Some(config) = campaign { return campaign::run(steps, budget, lo, hi, config); }
     let mut gp = |_| ControlFlow::Continue(());
     let mut geometry = QuadratureControl3::new(QuadratureOptions3::default(), &mut gp)?;
     let tree = Octree3::uniform(1, 4, 4096)?;
