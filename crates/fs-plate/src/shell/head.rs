@@ -9,6 +9,8 @@ use crate::{AssemblyOptions,EdgeSupport,PlateError,PlateMesh,PlateModel,PlateSec
 
 /// Geometric stretching with cold, statically condensed in-plane relaxation.
 pub mod nonlinear;
+/// Reciprocal uniform edge actuation of the same geometrically nonlinear film.
+pub mod dilation;
 /// Equilibrated spatial installed tension on the actual head mesh.
 pub mod tension;
 pub use tension::TensionVariation;
