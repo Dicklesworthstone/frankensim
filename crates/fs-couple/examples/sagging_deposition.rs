@@ -9,6 +9,8 @@ use fs_conduction::transient::deposition::{Boundary, CellGeometry, CellId, Conta
 use fs_material::thermovisco::{Limits, ThermalKnot, ThermoMaxwell};
 use fs_solid::bridge::{Bridge, Budget, Config, Support};
 use fs_solid::bridge::contact::{ContactFootprint, Pass};
+use fs_solid::bridge::supports::{self, Stop};
+use fs_solver::orthant::GramOrthantConfig;
 use fs_solid::deposition::{self, LayerGeometry};
 
 struct Sensible;
@@ -22,7 +24,8 @@ impl ThermalLaw for Sensible {
 
 #[derive(Debug)]
 struct Summary { sag_m: f64, flat_area_m2: f64, contact_area_m2: f64,
-    sagged_old_mean_k: f64, flat_old_mean_k: f64, thermal_residual_j: f64 }
+    sagged_old_mean_k: f64, flat_old_mean_k: f64, thermal_residual_j: f64,
+    supported_sag_m: f64, support_force_n: f64, supported_contact_m2: f64, supported_old_mean_k: f64 }
 
 fn run() -> Result<Summary,Box<dyn Error>> {
     const N: usize = 16;
@@ -37,6 +40,15 @@ fn run() -> Result<Summary,Box<dyn Error>> {
         .deposit_bonded_layer(1,LayerGeometry { area_m2: 1e-6,centroid_z_m: 0.0,thickness_m: 0.001 },
             1200.0,&law,&(0..N).map(|i| (i as u64,500.0)).collect(),&mut || false)?;
     let flat = bridge.clone();
+    let mut supported = bridge.clone();
+    // An ideal thermally insulating roller at a MATERIAL reference station.
+    // It has no finite thermal area and supplies no adhesion or tensile force.
+    let stops = [Stop { id: 1, reference_x_m: bridge.length_m()/2.0, minimum_deflection_m: 0.0 }];
+    let support_config = supports::Config {
+        contact: GramOrthantConfig { max_variables: 1, max_columns: N, max_setup_products: N,
+            max_sweeps: 64, gradient_tolerance: 1e-13 },
+        gap_tolerance_m: 1e-10, complementarity_tolerance_j: 1e-10,
+    };
     let mut schedule = Vec::new();
     for (road,time_s) in [(0u64,0.0),(1,5.0)] {
         for i in 0..N {
@@ -65,19 +77,27 @@ fn run() -> Result<Summary,Box<dyn Error>> {
         moment_tolerance_nm: 1e-9,energy_tolerance_j: 1e-8,max_strain: 0.03,max_rotation_rad: 0.1 },
         maximum_deflection_m: 0.001 };
     let mut sag = 0.0;
+    let mut supported_sag_m = 0.0;
+    let mut support_force_n = 0.0;
     for step in 1..=50 {
         let time_s = f64::from(step)/10.0;
         let (candidate,_) = thermal.advance_to(time_s,cfg,|| Ok(()))?;
         let temperatures = (0..N).map(|i| Ok(((i as u64,1),candidate.temperature_k(CellId(i as u64))?)))
             .collect::<Result<BTreeMap<_,_>,DepositionError>>()?;
         let (shape,report) = bridge.advance_controlled(time_s,&temperatures,9.81,&[0.0;N],mechanical,&mut || false)?;
-        // Publish both only after both physical updates have succeeded.
+        let (propped, supports) = supported.advance_supported_controlled(time_s, &temperatures,
+            9.81, &[0.0;N], &stops, mechanical, support_config, &mut || false)?;
+        // All three candidates succeed before publication. The independent
+        // supported/free cases share the same heat inputs, not their stresses.
         thermal = candidate; bridge = shape; sag = report.maximum_sag_m;
+        supported = propped; supported_sag_m = supports.beam.maximum_sag_m;
+        support_force_n = supports.reactions[0].upward_force_n;
     }
     let pass = Pass { start_x_m: 0.0,end_x_m: 0.02,start_lower_z_m: 0.0005,end_lower_z_m: 0.0005,
         width_m: 0.001,capture_gap_m: 5e-6,penetration_tolerance_m: 1e-12 };
     let actual = bridge.next_pass_contact(pass,N,&mut || false)?;
     let counterfactual = flat.next_pass_contact(pass,N,&mut || false)?;
+    let propped_contact = supported.next_pass_contact(pass,N,&mut || false)?;
     let area = |footprint: &ContactFootprint| footprint.rows.iter().map(|r| r.reference_area_m2).sum::<f64>();
     let updates = |footprint: &ContactFootprint| footprint.rows.iter().filter(|r| r.reference_area_m2>0.0)
         .map(|row| ContactUpdate { id: 1000+row.cell_id,expected: None,replacement: Some(ThermalLink {
@@ -96,16 +116,24 @@ fn run() -> Result<Summary,Box<dyn Error>> {
     };
     let (sagged_old_mean_k,residual) = simulate(&actual)?;
     let (flat_old_mean_k,flat_residual) = simulate(&counterfactual)?;
+    let (supported_old_mean_k,supported_residual) = simulate(&propped_contact)?;
     assert!(sag>pass.capture_gap_m);
     assert!(area(&actual)<0.75*area(&counterfactual));
     assert!(sagged_old_mean_k<flat_old_mean_k);
+    assert!(support_force_n > 0.0 && supported_sag_m < sag);
+    assert!(area(&propped_contact) > area(&actual));
+    assert!(supported_old_mean_k > sagged_old_mean_k);
     Ok(Summary { sag_m: sag,flat_area_m2: area(&counterfactual),contact_area_m2: area(&actual),
-        sagged_old_mean_k,flat_old_mean_k,thermal_residual_j: residual.abs().max(flat_residual.abs()) })
+        sagged_old_mean_k,flat_old_mean_k,
+        thermal_residual_j: residual.abs().max(flat_residual.abs()).max(supported_residual.abs()),
+        supported_sag_m, support_force_n, supported_contact_m2: area(&propped_contact), supported_old_mean_k })
 }
 fn main() -> Result<(),Box<dyn Error>> {
     let s = run()?;
     println!("sag_m={:.8e}; reference_flat_contact_m2={:.8e}; deformed_contact_m2={:.8e}; old_mean_with_sag_k={:.8}; old_mean_flat_k={:.8}; thermal_defect_j={:.3e}",
         s.sag_m,s.flat_area_m2,s.contact_area_m2,s.sagged_old_mean_k,s.flat_old_mean_k,s.thermal_residual_j);
+    println!("supported_sag_m={:.8e}; roller_force_n={:.8e}; supported_contact_m2={:.8e}; supported_old_mean_k={:.8}",
+        s.supported_sag_m, s.support_force_n, s.supported_contact_m2, s.supported_old_mean_k);
     println!("synthetic bounded beam/thermal example; no adhesion or contact-force qualification");
     Ok(())
 }
@@ -117,5 +145,8 @@ mod tests {
         assert!(s.contact_area_m2>0.0 && s.contact_area_m2<s.flat_area_m2);
         assert!(s.flat_old_mean_k-s.sagged_old_mean_k>0.1);
         assert!(s.thermal_residual_j<1e-8);
+        assert!(s.support_force_n > 0.0 && s.supported_sag_m < s.sag_m);
+        assert!(s.supported_contact_m2 > s.contact_area_m2);
+        assert!(s.supported_old_mean_k > s.sagged_old_mean_k);
     }
 }
