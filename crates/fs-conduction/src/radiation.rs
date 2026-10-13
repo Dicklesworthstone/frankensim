@@ -1184,7 +1184,7 @@ pub struct CoupledRadiationConfig {
     /// Surface-temperature absolute tolerance, K.
     pub surface_temperature_atol_k: f64,
     /// Under-relaxation applied to the temperatures that drive the next
-    /// radiosity solve, in `(0, 1]`.
+    /// radiosity solve, in `(0, 1].
     pub relaxation: f64,
     /// Outer-iteration budget.
     pub max_iterations: usize,
@@ -1281,12 +1281,11 @@ pub fn solve_with_gray_diffuse_enclosure(
         let dofs = DofMap::new(&overlaid, problem.mesh.vertex_count())?;
         let mut next_config = conduction_config.clone();
         next_config.initial = InitialGuess::Free(dofs.gather(&conduction.temperature));
+        // Radiation replaces boundary loads, not the solid's material laws.
+        // Retain heterogeneous assignments (including k(T)) on EVERY iterate.
         let next_problem = ConductionProblem {
-            element_materials: None,
-            mesh: problem.mesh,
             boundary: &overlaid,
-            material: problem.material,
-            source: problem.source,
+            ..problem
         };
         let next = run_conduction(cx, next_problem, interfaces, next_config)?;
         let actual_temperatures =
