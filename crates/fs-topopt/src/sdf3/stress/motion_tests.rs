@@ -157,3 +157,54 @@ fn g0_motion_family_and_support_admission_precedes_callbacks_and_solves() {
     assert!(s.evaluate_stress_with_prescribed_motion(&rho,&loads,&[],Default::default(),StressMeasure3::NormalizedAverage,&mut c).is_err());
     assert_eq!(calls.get(),0);assert_eq!(c.work().linear_solves,0);
 }
+
+#[test]
+fn g1_motion_stress_design_reduces_volume_and_retains_matching_physics() {
+    use crate::sdf3::design::{StressDesignOptions3, StressDesignStudy3};
+    let op=build(true);let f=op.elasticity().body_load(&|_|[0.0,0.0,-0.001],||ControlFlow::Continue(())).unwrap();
+    let loads=[LoadCase{force:&f,weight:1.0}];let motions: &StressMotions3<'_>=&[Some(&motion)];
+    let mut s=CutDensityStudy3::new(op,0.15,params());let rho=vec![0.65;s.cells()];
+    let options=StressDesignOptions3 { stress_limit:1.0,density_floor:0.1,..Default::default() };
+    let mut p=|_|ControlFlow::Continue(());let mut c=SolveControl::new(SolveBudget::default(),&mut p);
+    let mut session=StressDesignStudy3::new_with_prescribed_motion(&mut s,&loads,motions,&rho,options,StressMeasure3::SampledPeakBound,&mut c).unwrap();
+    let initial=session.accepted().volume_fraction;
+    session.run(8).unwrap();let best=session.best_feasible().unwrap();
+    assert!(best.volume_fraction<initial-1e-4);assert!(best.aggregate<=options.stress_limit*(1.0+options.optimizer.tolerance));
+    let endpoint=session.accepted().clone();let scales=session.study().operator().scales().to_vec();drop(session);
+    let again=s.evaluate_stress_with_prescribed_motion(&endpoint.rho,&loads,motions,options.stress,StressMeasure3::SampledPeakBound,&mut c).unwrap();
+    same(&endpoint,&again);assert_eq!(s.operator.scales(),scales);
+}
+
+#[test]
+fn g5_motion_stress_checkpoint_restores_the_same_search_not_frozen_liftings() {
+    use crate::sdf3::design::{StressDesignOptions3, StressDesignStudy3};
+    let mut a=CutDensityStudy3::new(build(false),0.15,params());
+    let mut b=CutDensityStudy3::new(build(false),0.15,params());
+    let f=a.operator.elasticity().body_load(&|_|[0.0,0.0,-0.001],||ControlFlow::Continue(())).unwrap();
+    let loads=[LoadCase{force:&f,weight:1.0}];let motions: &StressMotions3<'_>=&[Some(&motion)];
+    let rho=vec![0.65;a.cells()];let options=StressDesignOptions3{stress_limit:1.0,density_floor:0.1,..Default::default()};
+    let mut pa=|_|ControlFlow::Continue(());let mut ca=SolveControl::new(SolveBudget::default(),&mut pa);
+    let mut pb=|_|ControlFlow::Continue(());let mut cb=SolveControl::new(SolveBudget::default(),&mut pb);
+    let mut a=StressDesignStudy3::new_with_prescribed_motion(&mut a,&loads,motions,&rho,options,StressMeasure3::SampledPeakBound,&mut ca).unwrap();
+    let mut split=StressDesignStudy3::new_with_prescribed_motion(&mut b,&loads,motions,&rho,options,StressMeasure3::SampledPeakBound,&mut cb).unwrap();
+    a.run(4).unwrap();split.run(2).unwrap();let checkpoint=split.checkpoint();let cost=checkpoint.restoration_cost();drop(split);
+    let mut resumed=StressDesignStudy3::restore_with_prescribed_motion(&mut b,&loads,motions,checkpoint,options,StressMeasure3::SampledPeakBound,&mut cb).unwrap();
+    resumed.run(2).unwrap();same(a.accepted(),resumed.accepted());
+    assert_eq!(a.history(),resumed.history());same(a.best_feasible().unwrap(),resumed.best_feasible().unwrap());
+    let mut expected=a.checkpoint().optimizer;expected.work.evaluations+=cost;
+    assert_eq!(expected,resumed.checkpoint().optimizer);
+}
+
+#[test]
+fn g4_changed_motion_cannot_restore_a_saved_stress_state() {
+    use crate::sdf3::design::{StressDesignOptions3, StressDesignStudy3};
+    let mut s=CutDensityStudy3::new(build(false),0.15,params());let f=vec![0.0;s.operator.n()];
+    let loads=[LoadCase{force:&f,weight:1.0}];let motions: &StressMotions3<'_>=&[Some(&motion)];
+    let rho=vec![0.6;s.cells()];let options=StressDesignOptions3{stress_limit:1.0,density_floor:0.1,..Default::default()};
+    let mut p=|_|ControlFlow::Continue(());let mut c=SolveControl::new(SolveBudget::default(),&mut p);
+    let session=StressDesignStudy3::new_with_prescribed_motion(&mut s,&loads,motions,&rho,options,StressMeasure3::SampledPeakBound,&mut c).unwrap();
+    let cp=session.checkpoint();let scales=session.study().operator().scales().to_vec();drop(session);
+    let changed: &StressMotions3<'_>=&[Some(&opposite)];
+    assert!(StressDesignStudy3::restore_with_prescribed_motion(&mut s,&loads,changed,cp,options,StressMeasure3::SampledPeakBound,&mut c).is_err());
+    assert_eq!(s.operator.scales(),scales);
+}

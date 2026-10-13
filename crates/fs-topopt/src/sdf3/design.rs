@@ -5,7 +5,7 @@
 //! there is no dense KKT system, surrogate, numerical-gradient optimizer or
 //! separate optimizer implementation. Geometry and material model remain fixed.
 
-use super::stress::{self, StressError3, StressEvaluation3, StressMeasure3, StressOptions3};
+use super::stress::{self, StressError3, StressEvaluation3, StressMeasure3, StressOptions3, StressMotions3};
 use super::{CutDensityStudy3, PhysicalRegion3, Sdf3Elasticity};
 use crate::pipeline::LoadCase;
 use crate::{SimpParams, SolveControl, SolveWork};
@@ -99,17 +99,23 @@ fn monotone_stress_branch(r: f64, params: SimpParams, q: f64) -> bool {
     let turnover_power = q * params.e_min / ((params.penal - q) * (1.0 - params.e_min));
     r.is_finite() && r > 0.0 && fs_math::det::pow(r, params.penal) > turnover_power
 }
+#[allow(clippy::too_many_arguments)]
 fn sample<O: Sdf3Elasticity>(
     study: &mut CutDensityStudy3<O>,
     loads: &[LoadCase<'_>],
     rho: &[f64],
     options: StressDesignOptions3,
     measure: StressMeasure3,
+    motions: Option<&StressMotions3<'_>>,
     last: &mut Option<StressEvaluation3>,
     control: &mut SolveControl<'_>,
 ) -> Result<Option<ProjectedAlSample>, StressError3> {
     control.checkpoint("sdf3-stress-design-evaluate")?;
-    let evaluated = study.evaluate_stress_with_measure(rho, loads, options.stress, measure, control)?;
+    let evaluated = match motions {
+        Some(motions) => study.evaluate_stress_with_prescribed_motion(rho, loads, motions,
+            options.stress, measure, control)?,
+        None => study.evaluate_stress_with_measure(rho, loads, options.stress, measure, control)?,
+    };
     // The graph filter's exact maximum principle preserves the raw box. Check
     // the actually solved/projection values too, rather than assume numerical
     // filter error cannot cross the strength-model boundary. An authored
@@ -155,6 +161,7 @@ fn sample<O: Sdf3Elasticity>(
 pub struct StressDesignStudy3<'a, 'callback, O: Sdf3Elasticity> {
     study: &'a mut CutDensityStudy3<O>,
     loads: &'a [LoadCase<'a>],
+    motions: Option<&'a StressMotions3<'a>>,
     control: &'a mut SolveControl<'callback>,
     options: StressDesignOptions3,
     measure: StressMeasure3,
@@ -186,6 +193,28 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
         measure: StressMeasure3,
         control: &'a mut SolveControl<'callback>,
     ) -> Result<Self, ProjectedAlError<StressError3>> {
+        Self::new_family(study, loads, None, rho, options, measure, control)
+    }
+
+    /// Minimize material under a stress cap with independent actuator motions
+    /// and external forces. Recompute each motion lifting at every density and
+    /// use its exact material derivative in the existing stress adjoint.
+    /// The optimizer, sampled/averaged measure, density-floor admission and
+    /// feasible archive are unchanged. Pure-motion stress can decrease with
+    /// material removal: this is not an actuator-force or stiffness constraint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_prescribed_motion(study: &'a mut CutDensityStudy3<O>,
+        loads: &'a [LoadCase<'a>], motions: &'a StressMotions3<'a>, rho: &[f64],
+        options: StressDesignOptions3, measure: StressMeasure3,
+        control: &'a mut SolveControl<'callback>) -> Result<Self, ProjectedAlError<StressError3>> {
+        Self::new_family(study, loads, Some(motions), rho, options, measure, control)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_family(study: &'a mut CutDensityStudy3<O>, loads: &'a [LoadCase<'a>],
+        motions: Option<&'a StressMotions3<'a>>, rho: &[f64], options: StressDesignOptions3,
+        measure: StressMeasure3, control: &'a mut SolveControl<'callback>)
+        -> Result<Self, ProjectedAlError<StressError3>> {
         let n = study.cells();
         options.optimizer.validate(n)?;
         if !options.stress_limit.is_finite()
@@ -203,6 +232,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
             ));
         }
         stress::admit(study, rho, loads, options.stress).map_err(ProjectedAlError::Evaluation)?;
+        stress::admit_motions(study, loads, motions).map_err(ProjectedAlError::Evaluation)?;
         let params = study.params();
         let projected_floor =
             crate::filter::heaviside(options.density_floor, params.beta, params.eta);
@@ -226,6 +256,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                         rho,
                         options,
                         measure,
+                        motions,
                         &mut last,
                         &mut **ledger.borrow_mut(),
                     )
@@ -256,6 +287,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
         Ok(Self {
             study,
             loads,
+            motions,
             control,
             options,
             measure,
@@ -294,6 +326,29 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
         measure: StressMeasure3,
         control: &'a mut SolveControl<'callback>,
     ) -> Result<Self, ProjectedAlError<StressError3>> {
+        Self::restore_family(study, loads, None, checkpoint, options, measure, control)
+    }
+
+    /// Restore with the original reference actuator laws as well as loads,
+    /// geometry and numerical policy. Rebuild current-density liftings, stress
+    /// primals/adjoints and a distinct feasible incumbent before accepting the
+    /// saved optimizer state. Previous search steps are not replayed.
+    /// Callers must bind these pure laws externally; callback addresses are not
+    /// source identity and matching one endpoint cannot prove global equivalence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore_with_prescribed_motion(study: &'a mut CutDensityStudy3<O>,
+        loads: &'a [LoadCase<'a>], motions: &'a StressMotions3<'a>,
+        checkpoint: StressDesignCheckpoint3, options: StressDesignOptions3,
+        measure: StressMeasure3, control: &'a mut SolveControl<'callback>)
+        -> Result<Self, ProjectedAlError<StressError3>> {
+        Self::restore_family(study, loads, Some(motions), checkpoint, options, measure, control)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn restore_family(study: &'a mut CutDensityStudy3<O>, loads: &'a [LoadCase<'a>],
+        motions: Option<&'a StressMotions3<'a>>, checkpoint: StressDesignCheckpoint3,
+        options: StressDesignOptions3, measure: StressMeasure3,
+        control: &'a mut SolveControl<'callback>) -> Result<Self, ProjectedAlError<StressError3>> {
         let n = study.cells();
         let cost = checkpoint.restoration_cost();
         let restoration_evaluations = checkpoint.restoration_evaluations.checked_add(cost)
@@ -327,7 +382,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
             return Err(ProjectedAlError::Invalid("stress checkpoint lost its feasible incumbent"));
         }
         let previous_scales = study.operator.scales().to_vec();
-        let mut result = Self::new_with_measure(study, loads, restored.point(), options, measure, control)?;
+        let mut result = Self::new_family(study, loads, motions, restored.point(), options, measure, control)?;
         let rebuilt = (|| {
             if result.state.sample() != restored.sample()
                 || history.last() != Some(&row(&result.accepted, restored.work().iterations, options))
@@ -343,7 +398,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                         return Err(ProjectedAlError::Invalid("invalid retained feasible density"));
                     }
                     let mut evaluated = None;
-                    sample(result.study, loads, &rho, options, measure, &mut evaluated, result.control)
+                    sample(result.study, loads, &rho, options, measure, motions, &mut evaluated, result.control)
                         .map_err(ProjectedAlError::Evaluation)?;
                     evaluated
                 }
@@ -435,6 +490,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                 let loads = self.loads;
                 let options = self.options;
                 let measure = self.measure;
+                let motions = self.motions;
                 self.state.try_run(
                     remaining.min(1),
                     &mut |rho| {
@@ -444,6 +500,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                             rho,
                             options,
                             measure,
+                            motions,
                             &mut last,
                             &mut **ledger.borrow_mut(),
                         )
