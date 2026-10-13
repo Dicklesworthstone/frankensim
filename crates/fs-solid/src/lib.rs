@@ -28,6 +28,8 @@
 //! simplicial H(div)-family bead and is a recorded no-claim.
 
 pub mod beamcol;
+/// Quasistatic cohesive interface failure and structural load redistribution.
+pub mod cohesive;
 #[cfg(feature = "contact")]
 pub mod contact;
 pub mod continuation;
