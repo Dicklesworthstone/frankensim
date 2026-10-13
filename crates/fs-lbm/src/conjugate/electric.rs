@@ -1,8 +1,10 @@
 //! DC electric conduction and Joule heating on the voxel domain.
 //!
 //! Solid materials may conduct electricity ([`Conductor`]: a resistivity
-//! with a linear temperature coefficient). Electrodes are boxes of cells
-//! treated as perfect conductors, one potential each, held at a voltage or
+//! with a linear temperature coefficient). [`ElectricSetup::solve_with_resistivity`]
+//! admits a caller's state-resolved constitutive law instead, without replacing
+//! the current-balance or Joule-heating discretization. Electrodes are boxes of
+//! cells treated as perfect conductors, one potential each, held at a voltage or
 //! carrying a declared total current. The potential solves the discrete
 //! current balance `sum_f G_f (phi_P - phi_N) = 0` on every conductor cell,
 //! with `G_f = A_f / (rho_P w_P / 2 + rho_N w_N / 2)` between conductor
@@ -120,6 +122,50 @@ impl ElectricSetup {
             .flatten()
             .any(|c| c.temperature_coefficient_per_k != 0.0)
     }
+
+    /// Solve with a state-resolved resistivity law in the existing spatial kernel.
+    ///
+    /// `resolve(cell, material_index, temperature_k)` is called once per
+    /// non-electrode conductor cell, in increasing cell order. The caller can
+    /// resolve its material card at that cell's full state (including pressure,
+    /// composition and processing coordinates captured by the closure), retain
+    /// the resulting property-use receipts, and return resistivity in ohm metres.
+    /// No material name, temperature coefficient, fallback value or extrapolation
+    /// is inferred here. An error from the constitutive owner aborts the solve.
+    ///
+    /// `conductors` still declares electrical topology and valid reference data;
+    /// its `Some`/`None` entries determine which solid materials conduct. On this
+    /// path its reference/linear coefficients do not replace the callback result.
+    /// Temperature needs one entry per domain cell and must be finite and positive
+    /// at every cell where the material law is evaluated. Electrode and insulating
+    /// cells do not demand an electrical material property.
+    ///
+    /// This is a frozen-state electrical solve, not a thermal evolution or an
+    /// experimental qualification. The callback owns its evidence; numerical
+    /// coefficients alone do not acquire material-card authority.
+    ///
+    /// # Errors
+    /// Shape/temperature/resistivity errors, constitutive refusals, the ordinary
+    /// electrical solver's refusals, or cancellation. No field is published on
+    /// failure; externally captured callback state remains the caller's concern.
+    pub fn solve_with_resistivity(
+        &self,
+        domain: &VoxelDomain,
+        temperature: &[f64],
+        mut resolve: impl FnMut(usize, u16, f64) -> Result<f64, ChtError>,
+        gate: &CancelGate,
+    ) -> Result<ElectricSolution, ChtError> {
+        solve_electric_impl(
+            domain,
+            self,
+            Some(temperature),
+            |cell, material, point, _| {
+                // The shared kernel checks the complete shape before evaluation.
+                resolve(cell, material, point.expect("explicit temperature field"))
+            },
+            gate,
+        )
+    }
 }
 
 /// One electrode's solved state.
@@ -235,8 +281,7 @@ fn admit(domain: &VoxelDomain, setup: &ElectricSetup) -> Result<Vec<Node>, ChtEr
             }
         }
     }
-    // Two electrodes in contact would short through an infinite
-    // conductance.
+    // Two electrodes in contact would short through an infinite conductance.
     for c in 0..domain.cell_count() {
         if let Node::Electrode(e) = nodes[c] {
             for face in 0..6 {
@@ -263,13 +308,32 @@ fn admit(domain: &VoxelDomain, setup: &ElectricSetup) -> Result<Vec<Node>, ChtEr
 /// current electrode with no path to a voltage electrode, or a resistivity
 /// that is not positive at the given temperature; solver refusals;
 /// [`ChtError::Cancelled`].
-#[allow(clippy::too_many_lines)] // admission, assembly, solve, post-processing
 pub fn solve_electric(
     domain: &VoxelDomain,
     setup: &ElectricSetup,
     temperature: Option<&[f64]>,
     gate: &CancelGate,
 ) -> Result<ElectricSolution, ChtError> {
+    solve_electric_impl(
+        domain,
+        setup,
+        temperature,
+        |_, _, t, conductor| {
+            Ok(t.map_or(conductor.resistivity_ohm_m, |t| conductor.resistivity(t)))
+        },
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_lines)] // admission, assembly, solve, post-processing
+fn solve_electric_impl(
+    domain: &VoxelDomain,
+    setup: &ElectricSetup,
+    temperature: Option<&[f64]>,
+    mut resolve: impl FnMut(usize, u16, Option<f64>, Conductor) -> Result<f64, ChtError>,
+    gate: &CancelGate,
+) -> Result<ElectricSolution, ChtError> {
+    poll(gate)?;
     let mut nodes = admit(domain, setup)?;
     if temperature.is_some_and(|t| t.len() != domain.cell_count()) {
         return Err(ChtError::InvalidInput {
@@ -278,27 +342,33 @@ pub fn solve_electric(
         });
     }
     let cells = domain.cell_count();
-    // Resistivity per conductor cell.
+    // Resolve once per cell, before matrix assembly. Both entry points use
+    // this same field for current balance AND resistive heat deposition.
     let mut rho = vec![f64::NAN; cells];
     for c in 0..cells {
+        poll_every(gate, c)?;
         if nodes[c] == Node::Conductor
             && let Voxel::Solid(m) = domain.voxel_at(c)
         {
             let conductor = setup.conductors[m as usize].expect("conductor node");
-            let value =
-                temperature.map_or(conductor.resistivity_ohm_m, |t| conductor.resistivity(t[c]));
+            let point = temperature.map(|t| t[c]);
+            if let Some(t) = point {
+                finite_positive("electric.temperature", t)?;
+            }
+            let value = resolve(c, m, point, conductor)?;
             if !(value.is_finite() && value > 0.0) {
                 return Err(ChtError::InvalidInput {
                     field: "electric.resistivity_ohm_m",
                     reason: format!(
                         "resistivity {value} ohm m at cell {c} is not positive (temperature {} K)",
-                        temperature.map_or(f64::NAN, |t| t[c])
+                        point.unwrap_or(f64::NAN)
                     ),
                 });
             }
             rho[c] = value;
         }
     }
+    poll(gate)?;
     let half = |c: usize, axis: usize| 0.5 * rho[c] * domain.widths(c)[axis];
     // Reachability from the voltage electrodes over conducting links.
     let electrodes = setup.electrodes.len();
@@ -482,6 +552,7 @@ pub fn solve_electric(
     let mut joule_w = vec![0.0f64; cells];
     let mut current = vec![0.0f64; electrodes];
     for c in 0..cells {
+        poll_every(gate, c)?;
         if nodes[c] != Node::Conductor {
             continue;
         }
@@ -518,6 +589,7 @@ pub fn solve_electric(
         .filter(|(v, _)| v.is_finite())
         .map(|(v, i)| v * i)
         .sum();
+    poll(gate)?;
     Ok(ElectricSolution {
         potential_v,
         joule_w,
@@ -610,4 +682,103 @@ pub fn solve_electrothermal(
         relative_residual: change,
         tolerance: 1e-9,
     })
+}
+
+#[cfg(test)]
+mod material_tests {
+    use super::*;
+
+    fn bar() -> (VoxelDomain, ElectricSetup) {
+        let domain = VoxelDomain::from_fn(5, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+        let setup = ElectricSetup {
+            conductors: vec![Some(Conductor::new(2.0))],
+            electrodes: vec![
+                Electrode {
+                    lo: [0, 0, 0],
+                    hi: [1, 1, 1],
+                    drive: ElectrodeDrive::Voltage(0.0),
+                },
+                Electrode {
+                    lo: [4, 0, 0],
+                    hi: [5, 1, 1],
+                    drive: ElectrodeDrive::Voltage(9.0),
+                },
+            ],
+        };
+        (domain, setup)
+    }
+
+    #[test]
+    fn g1_g3_state_resistivity_drives_series_current_and_local_joule_heat() {
+        let (domain, setup) = bar();
+        let temperature = [300.0, 300.0, 310.0, 320.0, 300.0];
+        let gate = CancelGate::new();
+        for scale in [1.0, 2.0] {
+            let mut visited = Vec::new();
+            let field = setup
+                .solve_with_resistivity(
+                    &domain,
+                    &temperature,
+                    |cell, material, t| {
+                        visited.push((cell, material, t));
+                        Ok(scale * [2.0, 4.0, 8.0][cell - 1])
+                    },
+                    &gate,
+                )
+                .unwrap();
+            assert_eq!(visited, vec![(1, 0, 300.0), (2, 0, 310.0), (3, 0, 320.0)]);
+            // Three unit-length, unit-area resistors between electrode surfaces.
+            let current = 9.0 / (scale * 14.0);
+            assert!((field.electrodes[1].current_a - current).abs() < 1e-9);
+            assert!((field.electrodes[0].current_a + current).abs() < 1e-9);
+            for (cell, rho) in [(1, 2.0), (2, 4.0), (3, 8.0)] {
+                assert!((field.joule_w[cell] - current * current * scale * rho).abs() < 1e-9);
+            }
+            assert!((field.total_joule_w - 9.0 * current).abs() < 1e-9);
+            assert!((field.total_joule_w - field.delivered_w).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn g5_material_callback_and_reference_law_share_identical_kernel() {
+        let (domain, setup) = bar();
+        let gate = CancelGate::new();
+        let temperature = [300.0; 5];
+        let reference = solve_electric(&domain, &setup, Some(&temperature), &gate).unwrap();
+        let resolved = setup
+            .solve_with_resistivity(&domain, &temperature, |_, _, _| Ok(2.0), &gate)
+            .unwrap();
+        assert_eq!(reference, resolved);
+    }
+
+    #[test]
+    fn g0_material_refusal_and_invalid_values_never_publish_an_electrical_field() {
+        let (domain, setup) = bar();
+        let gate = CancelGate::new();
+        let refusal = ChtError::InvalidInput {
+            field: "material.state",
+            reason: "outside the selected resistivity claim's temperature domain".into(),
+        };
+        assert_eq!(
+            setup.solve_with_resistivity(&domain, &[300.0; 5], |_, _, _| Err(refusal.clone()), &gate),
+            Err(refusal.clone())
+        );
+        for rho in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                setup.solve_with_resistivity(&domain, &[300.0; 5], |_, _, _| Ok(rho), &gate),
+                Err(ChtError::InvalidInput { field: "electric.resistivity_ohm_m", .. })
+            ));
+        }
+        for temperature in [vec![300.0; 4], vec![300.0; 6], vec![f64::NAN; 5], vec![0.0; 5]] {
+            let mut calls = 0;
+            assert!(matches!(
+                setup.solve_with_resistivity(&domain, &temperature, |_, _, _| {
+                    calls += 1;
+                    Ok(2.0)
+                }, &gate),
+                Err(ChtError::InvalidInput { field: "electric.temperature", .. })
+            ));
+            assert_eq!(calls, 0);
+        }
+    }
 }
