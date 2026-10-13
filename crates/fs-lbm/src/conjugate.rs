@@ -43,6 +43,10 @@
 //! BiCGStab on the Jacobi-row-scaled system; the reported residual is the
 //! recomputed true residual, never the recurrence estimate.
 //!
+//! [`material_coupling`] connects state-resolved electrical laws to the thermal
+//! owner, re-evaluating resistivity at every proposed thermal state and retaining
+//! both temperature and Joule-source consistency defects.
+//!
 //! # Units
 //!
 //! SI throughout: lengths in metres, velocities m/s, volumetric fluxes
@@ -67,8 +71,8 @@
 //! - Steady, constant-property convection: forced, or Boussinesq natural
 //!   and mixed; turbulence only through the algebraic LVEL closure
 //!   ([`turbulence`]); radiation only as surface emission to the
-//!   surroundings; no temperature-dependent properties. Fluid properties are
-//!   frozen at the declared state.
+//!   surroundings. Fluid properties are frozen at the declared state within
+//!   each flow solve; material feedback requires an explicit coupling driver.
 //! - Voxel (staircase) geometry at the declared resolution; curved walls are
 //!   represented to `O(dx)`. No mesh-convergence claim is made by a single
 //!   run; refinement ladders are the caller's evidence.
@@ -88,6 +92,7 @@ mod electric;
 mod energy;
 mod flow;
 mod krylov;
+pub mod material_coupling;
 mod natural;
 mod radiation;
 mod simple;
