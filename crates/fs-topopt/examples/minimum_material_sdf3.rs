@@ -6,6 +6,7 @@
 //! --refit also selectively rebuilds marked cells and restarts material design.
 //! --adapt-rounds N runs repeated checked refits; --response-tol and
 //! --volume-tol select its numerical change thresholds (not continuum bounds).
+//! --binary independently checks thresholded endpoints after the gray fit.
 //! All phases retain the original cumulative geometry and linear-work budgets.
 //! Two independent extension/compression experiments on a dimensionless slab.
 //! E=1, nu=0, imposed axial strain +/-0.02. Bounds are declared design limits,
@@ -26,6 +27,8 @@ use fs_topopt::sdf3::response::limits::design::*;
 mod adaptive;
 #[path = "minimum_material_sdf3/campaign.rs"]
 mod campaign;
+#[path = "minimum_material_sdf3/binary.rs"]
+mod binary;
 struct Slab;
 impl CutSdf3 for Slab {
     fn value(&self, p: [f64; 3]) -> f64 { (p[0]-0.17)*(p[0]-0.83) }
@@ -43,11 +46,18 @@ fn compression(p: [f64; 3], n: [f64; 3]) -> [f64; 3] { motion(p, n).map(|v| -v) 
 fn right(_: [f64; 3], n: [f64; 3]) -> [f64; 3] { if n[0] > 0.0 { [1.0, 0.0, 0.0] } else { [0.0; 3] } }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args: Vec<_> = std::env::args().skip(1).collect();
+    let binary = args.last().is_some_and(|s| s == "--binary");
+    if binary {
+        let _ = args.pop();
+        if args.iter().any(|s| s.starts_with("--")) {
+            return Err("--binary cannot be combined with adaptive or estimate/refit modes".into());
+        }
+    }
     let campaign = campaign::parse(&mut args)?;
     let refit = args.last().is_some_and(|s| s == "--refit");
     let estimate = refit || args.last().is_some_and(|s| s == "--estimate");
     if estimate { let _ = args.pop(); }
-    if args.len() > 4 { return Err("usage: minimum_material_sdf3 [UPDATES [KRYLOV [MIN_REACTION [MAX_REACTION]]]] [--estimate|--refit|--adapt-rounds N [--response-tol X] [--volume-tol X]]".into()); }
+    if args.len() > 4 { return Err("usage: minimum_material_sdf3 [UPDATES [KRYLOV [MIN_REACTION [MAX_REACTION]]]] [--binary|--estimate|--refit|--adapt-rounds N [--response-tol X] [--volume-tol X]]".into()); }
     let steps = args.first().map_or(Ok(80), |s| s.parse::<usize>())?;
     let budget = args.get(1).map_or(Ok(250000), |s| s.parse::<usize>())?;
     let lo = args.get(2).map_or(Ok(0.0012), |s| s.parse::<f64>())?;
@@ -99,6 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = outcome?;
     eprintln!("latest_al_stop={:?}; latest_al_kkt={:?}; selected_endpoint_stationarity_not_claimed=true", report.stop, report.kkt);
     let selected = session.into_best_feasible()?;
+    if binary { binary::run(&mut study, &selected, &cases, options, &mut control)?; }
     if estimate {
         adaptive::run(&mut study, &tree, &selected, &cases, options, steps, refit, &mut geometry, &mut control)?;
     }

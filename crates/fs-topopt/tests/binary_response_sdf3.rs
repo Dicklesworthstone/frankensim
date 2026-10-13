@@ -12,7 +12,7 @@ use fs_topopt::sdf3::{CutDensityStudy3, PhysicalRegion3};
 use fs_topopt::sdf3::response::ResponseError3;
 use fs_topopt::sdf3::response::limits::*;
 use fs_topopt::sdf3::response::limits::binary::*;
-use fs_solver::{CgState, LinearOp};
+use fs_solver::CgState;
 
 struct Slab;
 impl CutSdf3 for Slab {
@@ -163,3 +163,6 @@ fn g0_endpoint_policy_and_whole_limit_family_are_admitted_before_callbacks() {
     assert!(s.evaluate_binary_response_limits(&rho,&[ResponseLimitCase3 { force:&f,prescribed:Some(&motion),limits:&rows }],Default::default(),&mut c).is_err());
     assert_eq!(calls.get(),0); assert_eq!(c.work().linear_solves,0);
 }
+
+#[path = "binary_response_sdf3/scan.rs"]
+mod scan;
