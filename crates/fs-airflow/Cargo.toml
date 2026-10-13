@@ -28,6 +28,9 @@ fs-ladder = { path = "../fs-ladder" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
 fs-regime = { path = "../fs-regime" }
+# Reuse checked matrix-free CG for implicit hydraulic derivatives.
+fs-solver = { path = "../fs-solver" }
+fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }

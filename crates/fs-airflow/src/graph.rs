@@ -7,8 +7,9 @@
 //!
 //! Results are nominal numerical estimates, NOT interval certificates. Retained
 //! coefficient uncertainty and validity cards are not propagated or validated by
-//! this solver. It supplies no CFD, thermal-feedback, transient, adjoint, or
-//! cross-ISA accuracy claim. Unlike `EnclosureNetwork`, this generic graph does
+//! this solver. It supplies no CFD, thermal-feedback, transient, or
+//! cross-ISA accuracy claim. Opt-in nominal derivatives live in `sensitivity`.
+//! Unlike `EnclosureNetwork`, this generic graph does
 //! not infer or require a leakage branch: callers must supply every physical
 //! path. Work uses fixed node/edge order, `fs_math::det`, explicit iteration
 //! limits, and checkpoints in each node solve and bounded edge traversals.
@@ -24,6 +25,7 @@ use crate::LossElement;
 
 mod fan;
 pub use fan::{GraphFanConfig, GraphFanError, GraphOperatingPoint};
+pub mod sensitivity;
 pub mod thermal;
 
 /// An oriented passive branch; its orientation does not constrain flow sign.
