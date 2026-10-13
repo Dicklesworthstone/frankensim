@@ -1,5 +1,6 @@
 //! Minimum dilated material subject to ALL declared eroded compliance caps.
 //! The smooth maximum is a conservative numerical surrogate, not an average.
+pub mod start;
 use super::{EnvelopeEvaluation3, EnvelopeGradientCheck3, LoadEnvelope3,
     RobustOptions3, controlled_envelope_gradient_check};
 use super::optimize::EnvelopeDesignPoint3;
@@ -57,6 +58,19 @@ impl Default for ComplianceLimitedOptions3 {
         Self { robustness: RobustOptions3::default(), density_floor: 1e-3,
             gradient_check: GradientCheckOptions::default(), optimizer: ProjectedAlOptions::default() }
     }
+}
+
+fn admit<O: Sdf3Elasticity>(study: &CutDensityStudy3<O>, forces: &[&[f64]], rho: &[f64],
+    caps: &ComplianceCaps3, options: ComplianceLimitedOptions3)
+    -> Result<(), ProjectedAlError<EvaluationStop>> {
+    options.optimizer.validate::<EvaluationStop>(study.cells())?;
+    if forces.len() != caps.caps().len() || !options.robustness.valid(study.params())
+        || forces.iter().any(|f| f.len() != study.operator().n() || f.iter().any(|v| !v.is_finite()))
+        || !options.density_floor.is_finite() || options.density_floor <= 0.0 || options.density_floor >= 1.0
+        || rho.len() != study.cells() || rho.iter().any(|r| !r.is_finite() || *r < options.density_floor || *r > 1.0) {
+        return Err(ProjectedAlError::Invalid("invalid compliance-limited design policy, forces or raw start"));
+    }
+    Ok(())
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComplianceLimitedIteration3 {
@@ -125,14 +139,8 @@ impl<'a, 'callback, O: Sdf3Elasticity> ComplianceLimitedDesign3<'a, 'callback, O
     pub fn new(study: &'a mut CutDensityStudy3<O>, forces: &'a [&'a [f64]], rho: &[f64],
         caps: ComplianceCaps3, options: ComplianceLimitedOptions3, control: &'a mut SolveControl<'callback>)
         -> Result<Self, ProjectedAlError<EvaluationStop>> {
+        admit(study, forces, rho, &caps, options)?;
         let n = study.cells();
-        options.optimizer.validate::<EvaluationStop>(n)?;
-        if forces.len() != caps.caps().len() || !options.robustness.valid(study.params())
-            || forces.iter().any(|f| f.len() != study.operator().n() || f.iter().any(|v| !v.is_finite()))
-            || !options.density_floor.is_finite() || options.density_floor <= 0.0 || options.density_floor >= 1.0
-            || rho.len() != n || rho.iter().any(|r| !r.is_finite() || *r < options.density_floor || *r > 1.0) {
-            return Err(ProjectedAlError::Invalid("invalid compliance-limited design policy, forces or raw start"));
-        }
         let check = controlled_envelope_gradient_check(study, rho, forces, options.robustness,
             caps.envelope(), options.gradient_check, control).map_err(ProjectedAlError::Evaluation)?;
         if !check.numerical.passed() {
@@ -160,6 +168,21 @@ impl<'a, 'callback, O: Sdf3Elasticity> ComplianceLimitedDesign3<'a, 'callback, O
     #[must_use] pub fn history(&self) -> &[ComplianceLimitedIteration3] { &self.history }
     #[must_use] pub fn work(&self) -> SolveWork { self.control.work() }
     #[must_use] pub fn optimizer_work(&self) -> ProjectedAlWork { self.state.work() }
+
+    /// Freshly re-solve the retained raw design and recheck every physical cap.
+    /// This is a new numerical solve, NOT an independent solver or continuum
+    /// certificate. It charges the physical budget, not optimization callback
+    /// counters, and never mutates the trajectory or cached feasible incumbent.
+    pub fn recheck_best(&mut self) -> Result<Option<EnvelopeDesignPoint3>, EvaluationStop> {
+        let Some(best) = &self.best else { return Ok(None); };
+        self.control.checkpoint("sdf3-compliance-limited-recheck")?;
+        let evaluation = self.study.evaluate_robust_envelope(&best.rho, self.forces,
+            self.options.robustness, self.caps.envelope(), self.control)?;
+        if !self.caps.admits(&evaluation, self.options.optimizer.tolerance) {
+            return Err(EvaluationStop::Breakdown { stage: "sdf3-compliance-limited-recheck" });
+        }
+        Ok(Some(EnvelopeDesignPoint3 { rho: best.rho.clone(), evaluation }))
+    }
 
     /// Continue the same AL state for at most additional_steps accepted primal
     /// updates; zero steps uses cached fields. Trials and numerical failures

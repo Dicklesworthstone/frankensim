@@ -32,6 +32,11 @@ fn minimum_material_descent_respects_each_eroded_cap_and_replays_the_fields() {
     let best = session.best_feasible().unwrap().clone();
     assert!(best.evaluation.physical.dilated_volume_fraction < 0.99*initial);
     assert!(limits.satisfied_by(&best.evaluation.physical.eroded.objective.case_compliances));
+    let work = session.work(); let optimizer_work = session.optimizer_work();
+    let rechecked = session.recheck_best().unwrap().unwrap();
+    assert_eq!(rechecked.rho, best.rho); assert_eq!(rechecked.evaluation.envelope, best.evaluation.envelope);
+    assert!(session.work().linear_solves > work.linear_solves);
+    assert_eq!(session.optimizer_work(), optimizer_work);
     drop(session);
     let fresh = study.evaluate_robust_envelope(&best.rho, &forces, RobustOptions3::default(),
         limits.envelope(), &mut control).unwrap();

@@ -1,5 +1,7 @@
 //! Normalize each independent eroded load by a fixed baseline reference, then
 //! minimize the smooth maximum under the actual dilated material-volume cap.
+//! --minimum-material CAP_Y CAP_Z instead minimizes dilated material under
+//! explicit hard eroded-compliance requirements; no cap is baseline-inferred.
 use std::ops::ControlFlow;
 use fs_cutfem::{CutSdf3, HeightAxis, HexCell};
 use fs_cutfem::elastic3::{CutElasticity3, ElasticityOptions3};
@@ -12,6 +14,8 @@ use fs_topopt::sdf3::CutDensityStudy3;
 use fs_topopt::sdf3::robust::envelope::{LoadEnvelope3,
     optimize::{EnvelopeDesignOptions3, EnvelopeDesignStudy3}};
 use fs_ascent::projected_al::ProjectedAlStop;
+#[path = "worst_load_sdf3/limits.rs"]
+mod limits;
 
 struct Slab;
 impl CutSdf3 for Slab {
@@ -25,6 +29,7 @@ impl CutSdf3 for Slab {
 }
 fn main()->Result<(),Box<dyn std::error::Error>> {
     let args:Vec<_>=std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--minimum-material") { return limits::run(&args[1..]); }
     if args.len()>2 { return Err("usage: worst_load_sdf3 [ACCEPTED_UPDATES [TOTAL_KRYLOV_ITERATIONS]]".into()); }
     let updates=args.first().map_or(Ok(200),|s|s.parse::<usize>())?;
     let iterations=args.get(1).map_or(Ok(250_000),|s|s.parse::<usize>())?;
