@@ -26,6 +26,8 @@ use super::{BranchThermalModel, TransportError, TransportMarch, TransportNetwork
 
 pub mod design;
 mod feedback;
+// Opt-in signed-flow derivatives, separate from the fixed-flow controls above.
+mod flows;
 
 /// An input perturbation. Temperature entries are differences, not absolute K.
 #[derive(Debug, Clone, PartialEq)]
