@@ -122,6 +122,15 @@ pub struct Report {
     pub energy_j: Energy,
 }
 
+/// Affine endpoint curvature at zero axial force and fixed temperature/duration.
+/// This is the derivative of the same implicit section solve, not a fitted EI.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BendingResponse {
+    pub zero_moment_curvature_per_m: f64,
+    /// d(curvature)/d(moment), in 1/(N m2), strictly positive.
+    pub compliance_per_n_m2: f64,
+}
+
 impl<'a> LayeredStrip<'a> {
     pub fn new(length_m: f64, budget: Budget) -> Result<Self, Error> {
         positive(length_m)?;
@@ -142,6 +151,47 @@ impl<'a> LayeredStrip<'a> {
     pub fn stored_energy_j(&self) -> f64 {
         self.layers.values().map(|layer| 0.5*layer.geometry.area_m2*self.length_m
             * layer.points.iter().map(Point::stored_energy_j_m3).sum::<f64>()).sum()
+    }
+
+    /// Condense axial freedom without aging history or testing a fictitious
+    /// unit-load material state. Final strain/rate admission belongs to advance_to.
+    pub fn bending_response(&self, target_s: f64, temperatures_k: &BTreeMap<u64, f64>,
+        mut checkpoint: impl FnMut() -> Result<(), Error>) -> Result<BendingResponse, Error> {
+        checkpoint()?;
+        if self.layers.is_empty() { return Err(Error::Invalid("unborn section has no bending compliance")); }
+        let (scale, k, history) = self.linearization(target_s-self.time_s, temperatures_k, &mut checkpoint)?;
+        let free = solve(k, [-history[0], -history[1]], [None, None])?;
+        let unit = solve(k, [0.0, 1.0], [None, None])?;
+        let compliance = finite(unit[1]/scale/scale)?;
+        positive(compliance)?;
+        checkpoint()?;
+        Ok(BendingResponse { zero_moment_curvature_per_m: finite(free[1]/scale)?,
+            compliance_per_n_m2: compliance })
+    }
+
+    fn linearization(&self, dt: f64, temperatures_k: &BTreeMap<u64, f64>,
+        checkpoint: &mut impl FnMut() -> Result<(), Error>)
+        -> Result<(f64, [[f64; 2]; 2], [f64; 2]), Error> {
+        positive(dt)?;
+        if temperatures_k.len() != self.layers.len() || self.layers.keys().any(|id| !temperatures_k.contains_key(id)) {
+            return Err(Error::Invalid("one endpoint temperature per active layer required"));
+        }
+        let scale = self.layers.values().map(|l| l.geometry.centroid_z_m.abs()+0.5*l.geometry.thickness_m)
+            .fold(0.0_f64, f64::max);
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        let mut k = [[0.0; 2]; 2]; let mut history = [0.0; 2];
+        for (&id, layer) in &self.layers {
+            checkpoint()?;
+            for (point, z) in layer.points.iter().zip(layer.geometry.points()) {
+                let affine = point.linearize(temperatures_k[&id], dt)?;
+                let b = [1.0, -z/scale]; let area = 0.5*layer.geometry.area_m2;
+                for i in 0..2 {
+                    history[i] = finite(history[i]+area*b[i]*affine.offset_pa)?;
+                    for j in 0..2 { k[i][j] = finite(k[i][j]+area*b[i]*b[j]*affine.tangent_pa)?; }
+                }
+            }
+        }
+        Ok((scale, k, history))
     }
 
     /// Birth at the current accepted time and CURRENT section strain/curvature.
@@ -196,24 +246,7 @@ impl<'a> LayeredStrip<'a> {
         if config.max_strain > 0.05 || config.max_rotation_rad > 0.1 {
             return Err(Error::Regime("small-strain/rotation ceiling cannot exceed 0.05 / 0.1 rad"));
         }
-        if temperatures_k.len() != self.layers.len() || self.layers.keys().any(|id| !temperatures_k.contains_key(id)) {
-            return Err(Error::Invalid("one endpoint temperature per active layer required"));
-        }
-        let scale = self.layers.values().map(|l| l.geometry.centroid_z_m.abs()+0.5*l.geometry.thickness_m)
-            .fold(0.0_f64, f64::max);
-        let scale = if scale > 0.0 { scale } else { 1.0 };
-        let mut k = [[0.0; 2]; 2]; let mut history = [0.0; 2];
-        for (&id, layer) in &self.layers {
-            checkpoint()?;
-            for (point, z) in layer.points.iter().zip(layer.geometry.points()) {
-                let affine = point.linearize(temperatures_k[&id], dt)?;
-                let b = [1.0, -z/scale]; let area = 0.5*layer.geometry.area_m2;
-                for i in 0..2 {
-                    history[i] = finite(history[i]+area*b[i]*affine.offset_pa)?;
-                    for j in 0..2 { k[i][j] = finite(k[i][j]+area*b[i]*b[j]*affine.tangent_pa)?; }
-                }
-            }
-        }
+        let (scale, k, history) = self.linearization(dt, temperatures_k, &mut checkpoint)?;
         let (prescribed0, force) = match control.axial {
             AxialControl::Strain(e) => (Some(finite(e)?), 0.0),
             AxialControl::ForceN(n) => (None, finite(n)?),

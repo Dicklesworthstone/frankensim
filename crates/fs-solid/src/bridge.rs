@@ -11,7 +11,8 @@
 //! Local frame: x along the horizontal reference span, z upward. Supports are
 //! a left pin/right roller or left clamp/free right end. Axial resultant is zero;
 //! no drawing tension, slack, membrane stiffening, inertia, shear deformation,
-//! adhesion, fracture, molten-strand flow or new contact force is inferred.
+//! adhesion, fracture or molten-strand flow is inferred. Explicit frictionless
+//! point supports are available separately through `supports`.
 //! An initial complete span must be supplied. Later complete layers may be born
 //! stress-free on the current shape only with an explicit perfect-bond assumption.
 //! This is bounded issue #1 R5 functionality, not whole-print qualification.
@@ -23,6 +24,8 @@ use fs_material::thermovisco::{Energy, ThermoMaxwell};
 
 /// Later-pass footprint capture on the actual deformed surface.
 pub mod contact;
+/// Solved unilateral support reactions on the same history-dependent beam.
+pub mod supports;
 
 /// Fixed transverse restraints; both allow free axial thermal contraction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +238,15 @@ impl<'a> Bridge<'a> {
     pub fn advance_controlled(&self, target_s: f64, temperatures_k: &BTreeMap<(u64, u64), f64>,
         gravity_m_s2: f64, additional_downward_n_m: &[f64], config: Config,
         cancelled: &mut impl FnMut() -> bool) -> Result<(Self, Report), Error> {
+        self.advance_with_point_forces(target_s, temperatures_k, gravity_m_s2,
+            additional_downward_n_m, &[], config, cancelled)
+    }
+
+    // Point forces are upward N at REFERENCE x. They come from the checked
+    // support solve, and enter both the moment diagram and displacement work.
+    fn advance_with_point_forces(&self, target_s: f64, temperatures_k: &BTreeMap<(u64, u64), f64>,
+        gravity_m_s2: f64, additional_downward_n_m: &[f64], point_forces: &[(f64, f64)],
+        config: Config, cancelled: &mut impl FnMut() -> bool) -> Result<(Self, Report), Error> {
         poll(cancelled)?;
         positive(finite(target_s-self.time_s)?)?;
         if !gravity_m_s2.is_finite() || gravity_m_s2 < 0.0 { return Err(Error::Invalid("gravity must be finite and nonnegative")); }
@@ -244,34 +256,14 @@ impl<'a> Bridge<'a> {
         let expected = count.checked_mul(layers).ok_or(Error::Budget)?;
         if layers == 0 || temperatures_k.len() != expected || additional_downward_n_m.len() != count {
             return Err(Error::Invalid("born span, complete temperatures and one line load per cell required")); }
-        let mut loads = Vec::with_capacity(count);
-        let mut weight = 0.0;
-        let mut first_moment = 0.0;
-        for (cell, &extra) in self.cells.iter().zip(additional_downward_n_m) {
-            poll(cancelled)?;
-            let q = finite(gravity_m_s2*cell.mass_per_length_kg_m + finite(extra)?)?;
-            let force = finite(q*cell.length_m())?;
-            weight = finite(weight + force)?;
-            first_moment = finite(first_moment + force*(cell.start_m + 0.5*cell.length_m()))?;
-            loads.push(q);
-        }
-        let right = match self.support { Support::SimplySupported => first_moment/self.length_m, Support::CantileverLeft => 0.0 };
-        let left = finite(weight-right)?;
-        let clamp = match self.support { Support::SimplySupported => 0.0, Support::CantileverLeft => first_moment };
-        let mut passed_force = 0.0;
-        let mut passed_moment = 0.0;
+        let load = self.load_field(gravity_m_s2, additional_downward_n_m, point_forces, cancelled)?;
         let mut next = self.clone();
-        let mut moments = Vec::with_capacity(count);
         let mut energy = Energy::default();
         let mut updates = 0usize;
         let mut section_config = config.section;
         section_config.energy_tolerance_j /= count as f64;
-        for (cell, &q) in next.cells.iter_mut().zip(&loads) {
+        for (cell, &moment) in next.cells.iter_mut().zip(&load.moments) {
             poll(cancelled)?;
-            let h = cell.length_m();
-            let x = cell.start_m;
-            let moment = finite(-clamp + (left-passed_force)*(x+0.5*h)
-                + passed_moment - q*h*h/6.0)?;
             let mut temperatures = BTreeMap::new();
             for &layer in cell.section.layers().keys() {
                 let t = *temperatures_k.get(&(cell.id, layer)).ok_or(Error::Invalid("missing section temperature"))?;
@@ -285,9 +277,6 @@ impl<'a> Bridge<'a> {
             cell.section = section;
             add_energy(&mut energy, report.energy_j)?;
             updates = updates.checked_add(report.material_point_updates).ok_or(Error::Budget)?;
-            moments.push(moment);
-            passed_force = finite(passed_force + q*h)?;
-            passed_moment = finite(passed_moment + q*h*(x+0.5*h))?;
         }
         // Integrate the section curvatures exactly on their piecewise-constant
         // representation. The pin/roller integration constant enforces w(L)=0.
@@ -306,7 +295,7 @@ impl<'a> Bridge<'a> {
         let mut sag: f64 = 0.0;
         let mut rotation: f64 = 0.0;
         let mut work = 0.0;
-        for ((cell, old), &q) in next.cells.iter_mut().zip(&self.cells).zip(&loads) {
+        for ((cell, old), &q) in next.cells.iter_mut().zip(&self.cells).zip(&load.distributed) {
             poll(cancelled)?;
             let h = cell.length_m();
             let kappa = cell.section.curvature_per_m();
@@ -327,6 +316,12 @@ impl<'a> Bridge<'a> {
             w = end;
             work = finite(work-q*(cell.integral_height()-old.integral_height()))?;
         }
+        for &(x, force) in point_forces {
+            poll(cancelled)?;
+            let (old, s_old) = self.locate(x)?;
+            let (new, s_new) = next.locate(x)?;
+            work = finite(work + force*(new.height(s_new)-old.height(s_old)))?;
+        }
         if max_abs > config.maximum_deflection_m || rotation > config.section.max_rotation_rad {
             return Err(Error::Regime("integrated shape exceeds the declared deflection/rotation range")); }
         next.time_s = target_s;
@@ -339,10 +334,59 @@ impl<'a> Bridge<'a> {
         }
         energy.residual = balance;
         poll(cancelled)?;
-        Ok((next, Report { vertical_reactions_n: [left, right], clamp_reaction_nm: clamp,
-            moments_nm: moments, maximum_sag_m: sag, maximum_absolute_deflection_m: max_abs,
+        Ok((next, Report { vertical_reactions_n: load.reactions, clamp_reaction_nm: load.clamp,
+            moments_nm: load.moments, maximum_sag_m: sag, maximum_absolute_deflection_m: max_abs,
             maximum_absolute_rotation_rad: rotation, material_point_updates: updates,
             energy_j: energy, load_work_j: work, load_work_residual_j: work_defect }))
+    }
+
+    fn load_field(&self, gravity: f64, extra: &[f64], point_forces: &[(f64, f64)],
+        cancelled: &mut impl FnMut() -> bool) -> Result<LoadField, Error> {
+        if !gravity.is_finite() || gravity < 0.0 || extra.len() != self.cells.len() {
+            return Err(Error::Invalid("invalid gravity or incomplete cell loads"));
+        }
+        let mut distributed = Vec::with_capacity(self.cells.len());
+        let mut weight = 0.0;
+        let mut first_moment = 0.0;
+        for (cell, &added) in self.cells.iter().zip(extra) {
+            poll(cancelled)?;
+            let q = finite(gravity*cell.mass_per_length_kg_m + finite(added)?)?;
+            let force = finite(q*cell.length_m())?;
+            weight = finite(weight+force)?;
+            first_moment = finite(first_moment+force*(cell.start_m+0.5*cell.length_m()))?;
+            distributed.push(q);
+        }
+        for &(x, force) in point_forces {
+            poll(cancelled)?;
+            if !x.is_finite() || !(0.0..=self.length_m).contains(&x) {
+                return Err(Error::Invalid("point force outside reference span"));
+            }
+            weight = finite(weight-finite(force)?)?;
+            first_moment = finite(first_moment-force*x)?;
+        }
+        let right = match self.support { Support::SimplySupported => first_moment/self.length_m, Support::CantileverLeft => 0.0 };
+        let left = finite(weight-right)?;
+        let clamp = match self.support { Support::SimplySupported => 0.0, Support::CantileverLeft => first_moment };
+        let mut passed_force = 0.0;
+        let mut passed_moment = 0.0;
+        let mut moments = Vec::with_capacity(self.cells.len());
+        for (cell, &q) in self.cells.iter().zip(&distributed) {
+            poll(cancelled)?;
+            let h = cell.length_m();
+            let x = cell.start_m;
+            let mut moment = finite(-clamp+(left-passed_force)*(x+0.5*h)+passed_moment-q*h*h/6.0)?;
+            for &(position, force) in point_forces {
+                // Integral of the positive-part ramp / cell length. This
+                // factorization avoids subtracting two nearly equal squares.
+                let a = (x-position).max(0.0);
+                let b = (x+h-position).max(0.0);
+                moment = finite(moment+force*(0.5*((b-a)/h)*(a+b)))?;
+            }
+            moments.push(moment);
+            passed_force = finite(passed_force+q*h)?;
+            passed_moment = finite(passed_moment+q*h*(x+0.5*h))?;
+        }
+        Ok(LoadField { distributed, moments, reactions: [left, right], clamp })
     }
 
     pub fn advance_to(&self, cx: &Cx<'_>, target_s: f64, temperatures_k: &BTreeMap<(u64, u64), f64>,
@@ -350,6 +394,13 @@ impl<'a> Bridge<'a> {
         self.advance_controlled(target_s, temperatures_k, gravity_m_s2, additional_downward_n_m,
             config, &mut || cx.checkpoint().is_err())
     }
+}
+
+struct LoadField {
+    distributed: Vec<f64>,
+    moments: Vec<f64>,
+    reactions: [f64; 2],
+    clamp: f64,
 }
 
 fn add_energy(sum: &mut Energy, part: Energy) -> Result<(), Error> {
