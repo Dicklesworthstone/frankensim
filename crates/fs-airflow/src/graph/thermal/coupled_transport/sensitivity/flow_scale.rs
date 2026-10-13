@@ -13,6 +13,9 @@
 
 use super::*;
 
+// Individual-flow controls close the same solid/air interface adjoint.
+mod individual;
+
 /// Existing thermal controls plus a common signed-flow scaling control.
 #[derive(Debug, Clone)]
 pub struct CoupledFlowScaleGradient {
