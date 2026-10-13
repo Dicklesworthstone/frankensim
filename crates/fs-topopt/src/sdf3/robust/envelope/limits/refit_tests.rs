@@ -117,3 +117,57 @@ fn impossible_caps_and_budget_stops_never_become_successful_refits() {
     assert!(result.best.is_none());
     assert_eq!(source.operator().scales(), scales);
 }
+
+
+#[test]
+fn initial_reference_solve_uses_the_same_cap_optimizer_and_fresh_fields() {
+    use crate::sdf3::robust::envelope::limits::ComplianceLimitedDesign3;
+    let (_, _, source, rho) = fixture();
+    let caps = ComplianceCaps3::new(vec![1e6, 2e6], 0.02, 2).unwrap();
+    let mut options = policy(); options.accepted_steps = 2;
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
+    let mut solved = source.solve_reference_compliance_caps(&rho, &laws(), &caps, options, &mut control).unwrap();
+    assert!(solved.completed_and_rechecked());
+    assert_eq!(solved.inherited_rho, rho);
+    let saved = solved.best.as_ref().unwrap().clone();
+    let forces: Vec<_> = laws().iter().map(|&law| solved.study.operator()
+        .reference_load(law, || ControlFlow::Continue(())).unwrap()).collect();
+    let borrowed: Vec<_> = forces.iter().map(Vec::as_slice).collect();
+    let mut direct = ComplianceLimitedDesign3::new(&mut solved.study, &borrowed,
+        &solved.restoration.point.as_ref().unwrap().rho, caps.clone(), options.design, &mut control).unwrap();
+    direct.run(2).unwrap();
+    assert_eq!(direct.history(), solved.history);
+    assert_eq!(direct.best_feasible().unwrap().rho, saved.rho);
+    assert_eq!(direct.best_feasible().unwrap().evaluation.physical.eroded.objective.displacements,
+        saved.evaluation.physical.eroded.objective.displacements);
+}
+
+#[test]
+fn initial_reference_solve_keeps_restoration_when_optimizer_is_cancelled() {
+    let (_, _, source, rho) = fixture();
+    let caps = ComplianceCaps3::new(vec![1e6, 2e6], 0.02, 2).unwrap();
+    let mut poll = |p: SolveProgress| if p.stage == "sdf3-compliance-limited-accepted" {
+        ControlFlow::Break(())
+    } else { ControlFlow::Continue(()) };
+    let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
+    let solved = source.solve_reference_compliance_caps(&rho, &laws(), &caps, policy(), &mut control).unwrap();
+    assert!(!solved.completed_and_rechecked());
+    assert!(solved.restoration.point.is_some() && solved.best.is_some());
+    assert_eq!(solved.history.len(), 2);
+    assert!(matches!(solved.outcome, Some(Err(_))));
+    assert!(solved.recheck.is_none());
+    assert_eq!(solved.work, control.work());
+}
+
+#[test]
+fn initial_reference_admission_precedes_load_callbacks() {
+    let (_, _, source, rho) = fixture();
+    let forbidden = |_: [f64; 3]| -> [f64; 3] { panic!("invalid policy reached load assembly") };
+    let laws = [ReferenceLoad3::body(&forbidden)];
+    let caps = ComplianceCaps3::new(vec![1e6, 2e6], 0.02, 2).unwrap();
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
+    assert!(source.solve_reference_compliance_caps(&rho, &laws, &caps, policy(), &mut control).is_err());
+    assert_eq!(control.work().linear_solves, 0);
+}

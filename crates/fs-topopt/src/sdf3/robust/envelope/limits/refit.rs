@@ -53,6 +53,7 @@ pub struct ComplianceCapRefit3<O: AdaptiveSdf3Elasticity> {
     pub study: CutDensityStudy3<O>,
     pub params: SimpParams,
     pub caps: ComplianceCaps3,
+    /// Raw input on an initial grid, or checked parent-inherited input on a refit.
     pub inherited_rho: Vec<f64>,
     pub restoration: ComplianceStartReport3,
     pub history: Vec<ComplianceLimitedIteration3>,
@@ -88,6 +89,23 @@ fn invalid(message: &'static str) -> ComplianceCapRefitError3 {
     GoalRefinementError3::Invalid(message).into()
 }
 
+fn admit_grid(cells: usize, rho: &[f64], params: SimpParams, laws: &[ReferenceLoad3<'_>],
+    caps: &ComplianceCaps3, options: ComplianceCapRefitOptions3) -> Result<(), ComplianceCapRefitError3> {
+    let design = options.design;
+    design.optimizer.validate::<EvaluationStop>(cells)?;
+    design.robustness.assert_valid(params);
+    design.gradient_check.assert_valid();
+    if laws.len() != caps.caps().len() || laws.len() > options.max_load_cases
+        || options.max_transfer_terms == 0 || !design.density_floor.is_finite()
+        || design.density_floor <= 0.0 || design.density_floor >= 1.0
+        || rho.len() != cells || rho.iter().any(|r| !r.is_finite() || *r < design.density_floor || *r > 1.0)
+        || options.start.max_bisections > 64 || !options.start.margin.is_finite()
+        || options.start.margin < 0.0 || options.start.margin >= 1.0 - caps.envelope().bias_bound() {
+        return Err(invalid("invalid cap refit inputs, raw bounds or resource policy"));
+    }
+    Ok(())
+}
+
 impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     /// Parent-inherit RAW controls and authored solid/void regions, rebuild
     /// filtering and numerical volume, reintegrate every reference law, recover
@@ -108,18 +126,8 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         &self, operator: F, rho: &[f64], params: SimpParams, laws: &[ReferenceLoad3<'_>],
         caps: &ComplianceCaps3, options: ComplianceCapRefitOptions3, control: &mut SolveControl<'_>,
     ) -> Result<ComplianceCapRefit3<F>, ComplianceCapRefitError3> {
-        let design = options.design;
-        design.optimizer.validate::<EvaluationStop>(operator.cells())?;
-        design.robustness.assert_valid(params);
-        design.gradient_check.assert_valid();
-        if laws.len() != caps.caps().len() || laws.len() > options.max_load_cases
-            || options.max_transfer_terms == 0 || !design.density_floor.is_finite()
-            || design.density_floor <= 0.0 || design.density_floor >= 1.0
-            || rho.len() != self.cells() || rho.iter().any(|r| !r.is_finite() || *r < design.density_floor || *r > 1.0)
-            || options.start.max_bisections > 64 || !options.start.margin.is_finite()
-            || options.start.margin < 0.0 || options.start.margin >= 1.0 - caps.envelope().bias_bound() {
-            return Err(invalid("invalid cap refit inputs, raw bounds or resource policy"));
-        }
+        admit_grid(self.cells(), rho, params, laws, caps, options)?;
+        options.design.optimizer.validate::<EvaluationStop>(operator.cells())?;
         control.checkpoint("sdf3-cap-refit-start")?;
         let mut stop = None;
         let mapped = AdaptiveTransfer3::new(self.operator().adaptive(), operator.adaptive(),
@@ -140,6 +148,28 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         drop(transfer);
         let mut study = CutDensityStudy3::new(operator, self.filter_radius, params);
         if let Some(regions) = regions { study = study.with_physical_regions(regions)?; }
+        study.solve_reference_compliance_caps(&inherited_rho, laws, caps, options, control)
+    }
+
+    /// Solve the initial grid with the SAME reference-load integration,
+    /// feasible-start recovery, gradient gate, optimizer and fresh recheck as a
+    /// refined candidate. No adaptive transfer or geometry rebuilding occurs.
+    ///
+    /// This consumes the working study. The returned owner retains it together
+    /// with the restoration seed and accepted prefix even when later numerical
+    /// work stops. Shape/policy and load-assembly errors precede any admitted
+    /// design. `inherited_rho` records the supplied initial controls on this
+    /// route; for refits it records their parent-inherited counterpart.
+    /// A completed allowance is not an accuracy or stationarity certificate.
+    pub fn solve_reference_compliance_caps(
+        self, incoming: &[f64], laws: &[ReferenceLoad3<'_>], caps: &ComplianceCaps3,
+        options: ComplianceCapRefitOptions3, control: &mut SolveControl<'_>,
+    ) -> Result<ComplianceCapRefit3<O>, ComplianceCapRefitError3> {
+        let params = self.params();
+        admit_grid(self.cells(), incoming, params, laws, caps, options)?;
+        let design = options.design;
+        let inherited_rho = incoming.to_vec();
+        let mut study = self;
         let mut forces = Vec::with_capacity(laws.len());
         for &law in laws {
             control.checkpoint("sdf3-cap-refit-load")?;
