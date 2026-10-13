@@ -91,16 +91,6 @@ impl SharedNoiseStream {
         let du = d as u128;
         let mut progress = WorkProgress::new(cx, WorkPlan::checked(0, 0, 0, 0, 8 * du * du + 8 * du, 0, 16 * du * du + 1_024)?)?;
         progress.checkpoint("shared stream construction")?;
-        let mut mean = zeros(d)?;
-        mean[..n].copy_from_slice(prior.mean());
-        let mut covariance = reserve(d)?;
-        for row in 0..d {
-            let mut values = zeros(d)?;
-            if row < n { values[..n].copy_from_slice(&prior.covariance()[row]); }
-            else { values[n..].copy_from_slice(&model.covariance()[row - n]); }
-            covariance.push(values);
-            progress.scalar("shared stream construction", 2 * du)?;
-        }
         let mut hash = DomainHasher::new("org.frankensim.fs-assimilate.shared-stream-initial.v1");
         field(&mut hash, model.content_id().as_bytes(), &mut progress)?;
         field(&mut hash, &(n as u64).to_le_bytes(), &mut progress)?;
@@ -109,7 +99,10 @@ impl SharedNoiseStream {
             for value in row { number(&mut hash, *value, &mut progress)?; }
         }
         let model_id = copy_string(model.content_id())?;
-        let joint = FactorBelief::from_belief(&Belief::new(mean, covariance, cx)?, cx)?;
+        // Initial independence is structural: preserve both admitted factors,
+        // including exact nuisance null directions, without a larger PSD gate.
+        let physical = FactorBelief::from_belief(prior, cx)?;
+        let joint = physical.independent_product(&model.factor, cx)?;
         progress.checkpoint("shared stream publication")?;
         Ok(Self { joint, physical_dim: n, model_id, row_capacity, seen: Vec::new(), history: hash.finalize() })
     }
@@ -138,22 +131,13 @@ impl SharedNoiseStream {
     pub const fn history_id(&self) -> ContentHash { self.history }
 
     /// Reconstruct a checked physical marginal without discarding the retained
-    /// joint factor. Dense publication is optional and costs O((n+k)^3).
+    /// joint factor. Only the physical block is reconstructed and PSD-checked;
+    /// all joint factor columns still contribute to its covariance.
     ///
     /// # Errors
     /// Propagates dense reconstruction/PSD, allocation and budget refusals.
     pub fn physical_belief(&self, cx: &Cx<'_>) -> Result<Belief, AssimError> {
-        let dense = self.joint.to_belief(cx)?;
-        let n = self.physical_dim;
-        let mut mean = reserve(n)?;
-        mean.extend_from_slice(&dense.mean()[..n]);
-        let mut covariance = reserve(n)?;
-        for row in &dense.covariance()[..n] {
-            let mut values = reserve(n)?;
-            values.extend_from_slice(&row[..n]);
-            covariance.push(values);
-        }
-        Belief::new(mean, covariance, cx)
+        self.joint.prefix_marginal(self.physical_dim, cx)
     }
 
     /// Assimilate a checked batch under the SAME retained nuisance model.

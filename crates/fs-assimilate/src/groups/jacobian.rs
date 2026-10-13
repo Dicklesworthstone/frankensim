@@ -36,7 +36,7 @@ pub struct SharedNoiseModel {
     identity: String,
     parameters: Vec<String>,
     covariance: Vec<Vec<f64>>,
-    factor: FactorBelief,
+    pub(super) factor: FactorBelief,
     content_id: String,
 }
 

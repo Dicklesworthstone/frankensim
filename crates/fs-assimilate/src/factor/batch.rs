@@ -277,3 +277,5 @@ impl FactorBelief {
         Ok(Belief { mean, cov })
     }
 }
+
+mod independent;
