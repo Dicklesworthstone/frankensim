@@ -6,6 +6,8 @@
 //! specimens; ambient temperature does not silently set material temperature,
 //! transport thermal history, or promote raw coefficients to sourced authority.
 
+pub mod concentric;
+
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, MaterialStatePointError,

@@ -33,6 +33,7 @@ pub mod iso9613;
 pub mod phase;
 pub mod plastic;
 pub mod porous;
+pub mod section;
 pub mod state_point;
 pub mod tensor;
 /// Bounded temperature-dependent Maxwell history, thermal strain and work balance.
