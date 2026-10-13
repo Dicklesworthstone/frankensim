@@ -109,3 +109,6 @@ fn g0_admission_and_unsupported_reaction_refinement_fail_before_physics(){
 
 #[path = "reaction_response_sdf3/refinement.rs"]
 mod refinement;
+
+#[path = "reaction_response_sdf3/adaptive.rs"]
+mod adaptive;
