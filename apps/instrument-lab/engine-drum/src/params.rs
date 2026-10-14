@@ -5,7 +5,8 @@
 //! eigen-solve of the heads these numbers describe.
 
 use crate::json::{self, Value};
-use fs_plate::shell::head::TensionVariation;\nuse fs_plate::shell::head::tension::TENSION_HARMONIC_COUNT;
+use fs_plate::shell::head::TensionVariation;
+use fs_plate::shell::head::tension::TENSION_HARMONIC_COUNT;
 
 /// A typed refusal that crosses the browser boundary as `{code, message}`.
 #[derive(Debug, Clone, PartialEq)]
@@ -361,7 +362,8 @@ impl DrumParams {
                 "\"batter_thickness_m\":{},\"resonant_thickness_m\":{},",
                 "\"batter_tension_n_m\":{},\"resonant_tension_n_m\":{},",
                 "\"batter_damping_ratio\":{},\"resonant_damping_ratio\":{},",
-                "\"batter_tension_variation\":{},\"resonant_tension_variation\":{},",\n                "\"batter_tension_harmonics\":{},\"resonant_tension_harmonics\":{},",
+                "\"batter_tension_variation\":{},\"resonant_tension_variation\":{},",
+                "\"batter_tension_harmonics\":{},\"resonant_tension_harmonics\":{},",
                 "\"young_pa\":{},\"poisson\":{},\"density_kg_m3\":{},",
                 "\"radial_intervals\":{},\"azimuths\":{},",
                 "\"band_low_hz\":{},\"band_high_hz\":{},\"substeps\":{},",
@@ -374,6 +376,7 @@ impl DrumParams {
             n(self.batter.tension_n_m), n(self.resonant.tension_n_m),
             n(self.batter.damping_ratio), n(self.resonant.damping_ratio),
             tv(&self.batter.tension_variation), tv(&self.resonant.tension_variation),
+            th(&self.batter.tension_variation), th(&self.resonant.tension_variation),
             n(self.young_pa), n(self.poisson), n(self.density_kg_m3),
             self.radial_intervals, self.azimuths,
             n(self.band_low_hz), n(self.band_high_hz), self.substeps,
@@ -402,7 +405,7 @@ mod tests {
         let d=DrumParams::default();
         let mut values=vec![0.0;2*TENSION_HARMONIC_COUNT];
         values[2*(10-2)]=120.0; values[2*(10-2)+1]=-35.0;
-        let json=format!("{\\\"batter_tension_harmonics\\\":{}}",json::numbers(&values));
+        let json=format!("{{\"batter_tension_harmonics\":{}}}",json::numbers(&values));
         let tuned=d.overlay_json(&json).unwrap();
         assert_eq!(tuned.batter.tension_variation.harmonics_n_m[8],[120.0,-35.0]);
         tuned.validate().unwrap();
