@@ -5,7 +5,7 @@
 use super::{Model,Pole,MAX_PORTS};
 use fs_math::{c64::C64,det};
 const TERMS:usize=32;
-const SWEEPS:usize=256;
+const SWEEPS:usize=512;
 
 pub struct Fit {
     pub model:Model,
@@ -15,10 +15,20 @@ pub struct Fit {
     pub resistance_rms_error:f64,
 }
 fn dictionary(low:f64,high:f64)->Vec<(f64,f64)> {
-    let mut poles:Vec<_>=(0..TERMS-1).map(|j| {
-        let w=det::exp(det::ln(low/4.)+(det::ln(8.*high)-det::ln(low/4.))*j as f64/(TERMS-2) as f64);
-        (w,0.2)
-    }).collect();
+    let mut poles=Vec::with_capacity(TERMS);
+    for &factor in &[0.35,0.55,0.80] {
+        poles.push((low*factor,0.25));
+    }
+    let in_band=22usize;
+    for j in 0..in_band {
+        let w=det::exp(det::ln(low)+(det::ln(high)-det::ln(low))*j as f64/(in_band-1) as f64);
+        poles.push((w,0.12));
+    }
+    let high_band=TERMS-1-poles.len();
+    for j in 1..=high_band {
+        let w=det::exp(det::ln(high)+(det::ln(8.*high)-det::ln(high))*j as f64/high_band as f64);
+        poles.push((w,0.25));
+    }
     // Off-band lossless storage permits compact dipole loads without imposing
     // an artificial minimum resistance. Its pole must still resolve at runtime.
     poles.push((8.*high,0.));poles
@@ -121,7 +131,7 @@ pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
     // exact minimizer.
     let real_scale=data.iter().step_by(2).map(|row|row.iter().fold(0.0_f64,|s,z|s.hypot(z.re)))
         .fold(0.0_f64,f64::max);
-    let real_weight=if real_scale==0. {1.} else {(0.6*(scale/real_scale)).max(1.0)};
+    let real_weight=if real_scale==0. {1.} else {(0.35*(scale/real_scale)).max(1.0)};
     if !real_weight.is_finite() || real_weight>1e12 {
         return Err("radiation resistance is below the load fit's relative resolution budget".into());
     }
