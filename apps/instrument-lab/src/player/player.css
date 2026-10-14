@@ -44,6 +44,7 @@
 .pp-tile.g-bossa-nova { --band: #2f5d3a; }
 .pp-tile.g-straight-eighths { --band: #5b3a6b; }
 .pp-tile.g-syncopated-sixteenths { --band: #6b5418; }
+.pp-tile.g-game { --band: #6a2450; }
 .pp-tile.on { box-shadow: 0 0 0 2px var(--verdigris), 0 16px 30px -14px rgba(0, 0, 0, 0.95); }
 .pp-tile.on .pp-tile-meta::after { content: "on the player"; float: right; color: var(--verdigris); font-weight: 600; }
 .pp-playing .pp-tile.on .pp-tile-spool { animation: pp-spin 2.4s linear infinite; }
@@ -166,7 +167,7 @@
 .pp-report-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6px 20px; flex-wrap: wrap; margin-bottom: 14px; }
 .pp-report-head h3 { font-size: clamp(19px, 1.9vw, 23px); }
 .pp-report-head p { max-width: 80ch; }
-.pp-report-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.25fr); gap: clamp(14px, 2vw, 26px); }
+.pp-report-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: clamp(14px, 2vw, 26px); }
 .pp-report-grid h4 { margin-bottom: 10px; }
 .pp-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
 .pp-fact { background: var(--ink-1); padding: 9px 11px; min-width: 0; }
@@ -268,3 +269,24 @@
 .pp-chord .acc, .pp-next .acc, .pp-mini-chord .acc { font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols 2", system-ui, sans-serif; font-style: normal; font-weight: 400; font-size: 0.86em; margin: 0 0.02em 0 -0.03em; }
 .pp-strings[hidden] { display: none; }
 .pp-seek { --fill: 0%; }
+
+/* packs of rolls, and what the player did with each part */
+.pp-packs { margin-top: 10px; gap: 6px; }
+.pp-packs button { min-height: 36px; padding: 5px 12px; }
+.pp-packs button small { display: inline; margin-left: 6px; }
+.pp-parts tr.out td { color: var(--ivory-3); }
+.pp-parts tr.out td:first-child { text-decoration: line-through; text-decoration-color: rgba(232, 106, 60, 0.6); }
+.pp-part-do { font-size: 12.5px; line-height: 1.45; color: var(--ivory-2); min-width: 18em; }
+.pp-parts-wrap { grid-column: 1 / -1; }
+.pp-parts-wrap .table-scroll { max-height: 420px; }
+@media (max-width: 720px) {
+  .pp-parts thead { display: none; }
+  .pp-parts, .pp-parts tbody, .pp-parts tr, .pp-parts td { display: block; width: 100%; }
+  .pp-parts tr { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .pp-parts td { border: 0; padding: 2px 0; }
+  .pp-parts td[data-label] { display: inline-block; width: auto; margin-right: 12px; }
+  .pp-parts td[data-label]::before { content: attr(data-label) " "; color: var(--ivory-3); font: 500 10.5px/1.4 var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; }
+  .pp-part-do { min-width: 0; padding-top: 4px !important; }
+  .pp-parts-wrap .table-scroll { max-height: none; overflow-x: visible; }
+  .pp-packs { display: flex; }
+}

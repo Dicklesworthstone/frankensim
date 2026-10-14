@@ -11,7 +11,7 @@ import { createLiveAudioContext } from "../live/liveAudio";
 import { createLiveMix, KitLane, PianoLane, type KitReady, type KitScoreEvent, type LaneWorkerStats, type LiveMix, type PianoReady } from "../live/mix";
 import { parsePianoSnapshot } from "../live/pianoClient";
 import { decodeMidi, MAX_MIDI_BYTES } from "../midi/smf";
-import { arrange, gmFamily, PIECE_NAMES, type Arrangement, type PieceId } from "../midi/arrange";
+import { arrange, gmInstrument, PIECE_NAMES, type Arrangement, type PieceId } from "../midi/arrange";
 import { RollView } from "./roll";
 import { SoundboardView } from "./soundboard3d";
 import { KitView, fmtJ } from "./kit3d";
@@ -174,33 +174,55 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
   let selectedTile: HTMLElement | null = null;
 
   // --------------------------------------------------------------- library
-  let catalog: Catalog | null = null;
+  // two packs: the jazz editor's standards, and video-game MIDI files as found online
+  const packs: { id: string; label: string; blurb: string; entries: Standard[] }[] = [];
+  const load = async (url: string): Promise<Catalog | null> => {
+    try {
+      const res = await fetch(asset(url));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return (await res.json()) as Catalog;
+    } catch { return null; }
+  };
+  const [standards, game] = await Promise.all([load("midi/standards.json"), load("midi/game-pack.json")]);
+  if (standards) packs.push({ id: "standards", label: "Standards", blurb: "chord charts from the jazz chord editor's library, comped by its own bass and piano generators, with drums", entries: standards.entries });
+  if (game) packs.push({ id: "game", label: "Game pack", blurb: (game as unknown as { note: string }).note, entries: game.entries });
   const tiles = new Map<string, HTMLElement>();
-  try {
-    const res = await fetch(asset("midi/standards.json"));
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    catalog = (await res.json()) as Catalog;
-  } catch (e) {
-    shelfCount.textContent = `The library could not be loaded (${(e as Error).message}); your own files still play.`;
-  }
-  if (catalog) {
-    shelfCount.textContent = `${catalog.entries.length} rolls · chord charts from the jazz chord editor's library, comped by its own bass and piano generators, with drums`;
-    for (const s of catalog.entries) {
-      const tile = el("button", { type: "button", class: `pp-tile g-${s.groove.split("@")[0]}`, "aria-label": `${s.title}, ${s.kicker}: ${s.grooveName}, ${Math.round(s.tempoBpm)} beats per minute, ${fmtTime(s.durationS)}` },
-        el("span", { class: "pp-tile-band" }, s.grooveName),
-        el("b", { class: "pp-tile-title" }, s.title),
-        el("span", { class: "pp-tile-kicker" }, s.kicker),
-        el("span", { class: "pp-tile-meta num" }, `♩ ${Math.round(s.tempoBpm)} · ${fmtTime(s.durationS)}`),
-        el("span", { class: "pp-tile-spool", "aria-hidden": "true" }));
-      tile.title = s.note;
-      tile.addEventListener("click", () => {
-        primeAudio();
-        void loadStandard(s, tile, true);
-      });
+  const makeTile = (s: Standard): HTMLElement => {
+    const tile = el("button", { type: "button", class: `pp-tile g-${s.groove.split("@")[0]}`, "aria-label": `${s.title}, ${s.kicker}: ${s.grooveName}, ${Math.round(s.tempoBpm)} beats per minute, ${fmtTime(s.durationS)}` },
+      el("span", { class: "pp-tile-band" }, s.grooveName),
+      el("b", { class: "pp-tile-title" }, s.title),
+      el("span", { class: "pp-tile-kicker" }, s.kicker),
+      el("span", { class: "pp-tile-meta num" }, `♩ ${Math.round(s.tempoBpm)} · ${fmtTime(s.durationS)}`),
+      el("span", { class: "pp-tile-spool", "aria-hidden": "true" }));
+    tile.title = s.note;
+    tile.addEventListener("click", () => {
+      primeAudio();
+      void loadStandard(s, tile, true);
+    });
+    return tile;
+  };
+  const packButtons = el("div", { class: "seg live pp-packs", role: "group", "aria-label": "Packs of rolls" });
+  const showPack = (id: string): void => {
+    const pack = packs.find((p) => p.id === id) ?? packs[0];
+    if (!pack) return;
+    for (const b of packButtons.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.pack === pack.id));
+    shelfCount.textContent = `${pack.entries.length} rolls · ${pack.blurb}`;
+    for (const t of [...shelf.children]) if (t !== fileTile) t.remove();
+    for (const s of pack.entries) {
+      const tile = tiles.get(s.id) ?? makeTile(s);
       tiles.set(s.id, tile);
       shelf.append(tile);
     }
+    shelf.scrollLeft = 0;
+    shelfEdges();
+  };
+  for (const p of packs) {
+    const b = el("button", { type: "button", "aria-pressed": "false", "data-pack": p.id }, p.label, el("small", {}, `${p.entries.length} rolls`));
+    b.addEventListener("click", () => showPack(p.id));
+    packButtons.append(b);
   }
+  if (packs.length > 1) shelfHead.firstElementChild!.append(packButtons);
+  if (!packs.length) shelfCount.textContent = "The rolls could not be loaded; your own files still play.";
   const scrollShelf = (dir: number): void => shelf.scrollBy({ left: dir * Math.max(240, shelf.clientWidth * 0.8), behavior: "smooth" });
   shelfPrev.addEventListener("click", () => scrollShelf(-1));
   shelfNext.addEventListener("click", () => scrollShelf(1));
@@ -248,7 +270,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const bytes = new Uint8Array(await res.arrayBuffer());
       if (my !== token) return;
-      meta = { kind: "standard", id: s.id, title: s.title, sub: `${s.kicker} · ${s.grooveName} · ♩ ${Math.round(s.tempoBpm)} · ${s.choruses > 1 ? `${s.choruses} choruses` : "one chorus"}` };
+      meta = { kind: "standard", id: s.id, title: s.title, sub: `${s.kicker} · ${s.grooveName} · ♩ ${Math.round(s.tempoBpm)}${s.groove === "game" ? "" : ` · ${s.choruses > 1 ? `${s.choruses} choruses` : "one chorus"}`}` };
       const ok = punch(bytes, `${s.id}.mid`);
       if (!ok || my !== token) return;
       select(tile);
@@ -711,7 +733,11 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       fact("Doublings merged", String(r.merged), "one key, one strike"),
       fact("Thinned", String(r.thinnedChord + r.thinnedDensity), r.thinnedChord + r.thinnedDensity ? `${r.thinnedChord} in chords over 10, ${r.thinnedDensity} over 16 per ¼ s` : "none needed"),
       fact("Sustain pedal", r.pedalChanges ? `${r.pedalChanges} changes` : "none", r.pedalSkipped ? `${r.pedalSkipped} tiny moves skipped` : ""),
-      fact("Keys ringing at once", `up to ${r.peakKeys}`, r.peakKeys > 24 ? "the engine keeps 24; the quietest retire" : "within the engine's 24"));
+      fact("Keys ringing at once", `up to ${r.peakKeys}`, r.peakKeys > 24 ? "the engine keeps 24; the quietest retire" : "within the engine's 24"),
+      fact("Copies left out", String(r.partsLeftOut), r.partsLeftOut ? "parts doubling or echoing another" : "every part plays"),
+      fact("Faded out by the file", String(r.silencedByVolume), "its own channel volume"),
+      fact("Repeats too fast", String(r.tooFast), "a key repeats about 14 times a second"),
+      fact("Pitch bends", r.pitchBends ? String(r.pitchBends) : "none", r.pitchBends ? "not played: a piano key cannot bend" : ""));
     const mapped = Object.entries(r.drumsMapped);
     const skipped = Object.entries(r.drumsSkipped);
     const counts = new Map<PieceId, number>();
@@ -721,22 +747,24 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       ? el("div", { class: "pp-drums" },
         el("ul", { class: "pp-drum-bars" }, ...[...counts].map(([p, n]) => el("li", {}, el("span", {}, PIECE_NAMES[p]), el("i", { style: `--w:${((n / maxCount) * 100).toFixed(1)}%` }), el("b", { class: "num" }, n.toLocaleString("en-US"))))),
         mapped.length ? el("p", { class: "small muted" }, el("b", {}, "Substituted: "), mapped.map(([k, n]) => `${k} (${n})`).join("; "), ".") : null,
+        r.drumsLayered ? el("p", { class: "small muted" }, el("b", {}, "Layered: "), `${r.drumsLayered} drum notes struck together on one piece (a doubled kick) played as one stroke.`) : null,
         skipped.length ? el("p", { class: "small pp-skipped" }, el("b", {}, "Skipped, no matching piece: "), skipped.map(([k, n]) => `${k} ×${n}`).join(", "), ".") : null)
       : el("p", { class: "small muted" }, "No drum part (nothing on General MIDI channel 10).");
+    const roleWord: Record<string, string> = { percussion: "drums", bass: "bass", melody: "melody", harmony: "accompaniment", ornament: "ornament", pad: "pad", silent: "silent" };
     const parts = el("table", { class: "pp-parts" },
-      el("thead", {}, el("tr", {}, el("th", {}, "Track"), el("th", {}, "Part"), el("th", {}, "Role"), el("th", {}, "Notes"), el("th", {}, "Plays on"))),
-      el("tbody", {}, ...a.parts.map((p) => el("tr", {},
-        el("td", { class: "num" }, `${p.track + 1}·${p.channel + 1}`),
-        el("td", {}, p.name, gmFamily(p.program) && p.channel !== 9 ? el("small", {}, ` ${gmFamily(p.program)}`) : null),
-        el("td", {}, p.role),
-        el("td", { class: "num" }, p.notes.toLocaleString("en-US")),
-        el("td", {}, p.channel === 9 ? "drum kit" : "grand piano")))));
+      el("thead", {}, el("tr", {}, el("th", {}, "Track"), el("th", {}, "Part"), el("th", {}, "Role"), el("th", {}, "Notes"), el("th", {}, "What the player does"))),
+      el("tbody", {}, ...a.parts.map((p) => el("tr", { class: p.leftOut ? "out" : "" },
+        el("td", { class: "num", "data-label": "Track" }, `${p.track + 1}·${p.channel + 1}`),
+        el("td", { "data-label": "Part" }, p.name, p.channel !== 9 && gmInstrument(p.program) && gmInstrument(p.program) !== p.name ? el("small", {}, ` ${gmInstrument(p.program)}`) : null),
+        el("td", { "data-label": "Role" }, roleWord[p.role] ?? p.role),
+        el("td", { class: "num", "data-label": "Notes" }, p.notesOut !== p.notes ? `${p.notes.toLocaleString("en-US")} → ${p.notesOut.toLocaleString("en-US")}` : p.notes.toLocaleString("en-US")),
+        el("td", { class: "pp-part-do" }, `${p.channel === 9 ? "Drum kit" : p.leftOut ? "Not played" : "Grand piano"}: ${p.actions.map((x) => x.replace(/^left out: /, "")).join("; ")}`)))));
     const fileFacts = [
       `${a.parts.length} part${a.parts.length === 1 ? "" : "s"}`,
       `♩ ${a.tempoBpm.toFixed(a.tempoBpm % 1 ? 1 : 0)}${r.tempoChanges ? ` (${r.tempoChanges} tempo changes)` : ""}`,
       a.meter,
       fmtTime(a.durationS),
-      r.ignoredControllers ? `${r.ignoredControllers} other controller messages (volume, expression, modulation…) not used: velocity alone sets each strike` : "",
+      r.ignoredControllers ? `${r.ignoredControllers.toLocaleString("en-US")} controller messages (modulation, pan and the like) not used; volume and expression shape each strike` : "",
     ].filter(Boolean).join(" · ");
     const repairs = [r.salvage, ...r.lenient].filter(Boolean) as string[];
     report.replaceChildren(
@@ -956,6 +984,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
   setPhase("empty");
   paintLanes();
   requestDraw();
+  showPack(packs[0]?.id ?? "");
   shelfEdges();
   say("Pick a roll to hear it. The first press starts the engines in this tab, which takes a few seconds.");
 }

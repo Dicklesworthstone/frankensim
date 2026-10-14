@@ -45,7 +45,7 @@ export interface DecodedMidi {
   /** Salvage repairs (restruck notes ended, orphan offs dropped, open notes closed), if any. */
   salvageNote: string | null;
   lenient: { missingEndOfTrack: number; truncatedChunks: number; openNotesClosed: number; zeroLengthNotes: number };
-  counters: { bytes: number; events: number; notes: number; sysex: number; ignoredMeta: number };
+  counters: { bytes: number; events: number; notes: number; sysex: number; ignoredMeta: number; pitchBends: number };
 }
 export type DecodeResult = { ok: true; midi: DecodedMidi } | { ok: false; message: string };
 
@@ -115,7 +115,7 @@ function decode(input: Uint8Array): DecodeResult {
   if (division < 1) return { ok: false, message: "The file declares zero ticks per quarter note." };
 
   const lenient = { missingEndOfTrack: 0, truncatedChunks: 0, openNotesClosed: 0, zeroLengthNotes: 0 };
-  const counters = { bytes: bytes.byteLength, events: 0, notes: 0, sysex: 0, ignoredMeta: 0 };
+  const counters = { bytes: bytes.byteLength, events: 0, notes: 0, sysex: 0, ignoredMeta: 0, pitchBends: 0 };
   const tempoMap: TempoEntry[] = [];
   const meterMap: MeterEntry[] = [];
   const tracks: DecodedTrack[] = [];
@@ -201,6 +201,8 @@ function decode(input: Uint8Array): DecodeResult {
         track.controls.push({ tick, channel, controller: a, value: b });
       } else if (high === 0xc0) {
         track.programs.push({ tick, channel, program: a });
+      } else if (high === 0xe0 && (a !== 0 || b !== 64)) {
+        counters.pitchBends++; // a piano key cannot bend
       }
     }
     if (!ended) lenient.missingEndOfTrack++;

@@ -6,6 +6,7 @@
 // General MIDI meaning) or skipped and listed by name.
 
 import { chordTimeline } from "./chords";
+import { orchestrate, type Role, type SourcePart } from "./orchestrate";
 import { tempoClock, type DecodedMidi, type DecodedTrack, type PairedNote } from "./smf";
 
 export type PieceId = "kick" | "snare" | "snare-off" | "tom-12" | "tom-14" | "hihat-closed" | "hihat-open" | "crash" | "ride";
@@ -20,8 +21,9 @@ export interface PianoNote { key: number; t: number; off: number; vel: number; s
 export interface PianoEvent { t: number; on?: number; off?: number; speed?: number; sustain?: number }
 /** A stroke: where on the piece, as fractions of its radius, and a factor on its standard stick speed. */
 export interface DrumHit { t: number; piece: PieceId; u: number; v: number; g: number; note: number; vel: number }
-export type Role = "percussion" | "bass" | "melody" | "harmony" | "silent";
-export interface Part { track: number; channel: number; name: string; role: Role; notes: number; program: number | null }
+export type { Role } from "./orchestrate";
+/** A part of the file (one track and channel) and what the player did with it. */
+export interface Part { track: number; channel: number; name: string; role: Role; notes: number; program: number | null; actions: string[]; notesOut: number; leftOut: boolean }
 
 export interface Arrangement {
   title: string;
@@ -56,6 +58,15 @@ export interface Arrangement {
     ignoredControllers: number;
     salvage: string | null;
     lenient: string[];
+    /** notes the file's own channel volume or expression had faded to silence */
+    silencedByVolume: number;
+    /** parts left out as copies (doublings or echoes) of another part */
+    partsLeftOut: number;
+    /** strikes closer together on one key than its action can repeat */
+    tooFast: number;
+    /** drum notes that were one stroke layered (two kick notes at once) */
+    drumsLayered: number;
+    pitchBends: number;
   };
 }
 
@@ -75,8 +86,12 @@ export function stickFactor(velocity: number): number {
 const MERGE_S = 0.03;
 /** A chord: onsets within 30 ms. More strikes than this in one chord are thinned (outer and loudest kept). */
 const MAX_CHORD = 10;
-/** No more than this many strikes in any 250 ms (the quietest go first). */
+/** No more than this many strikes in any 250 ms (the least important and quietest go first). */
 const MAX_PER_QUARTER_SECOND = 16;
+/** A piano key repeats at most about 14 times a second (double escapement). */
+const REPEAT_S = 0.07;
+/** A drummer's ordinary stroke weights, for drum parts written all at one velocity. */
+const DRUM_WEIGHT: Partial<Record<PieceId, number>> = { kick: 92, snare: 96, "snare-off": 90, "tom-12": 90, "tom-14": 90, crash: 88, ride: 80 };
 
 // ------------------------------------------------------------------ drum map
 interface DrumRule { piece: PieceId; u: number; v: number; g: number; label?: string }
@@ -119,6 +134,8 @@ const DRUM_MAP: Record<number, DrumRule> = {
  */
 const HAT_RINGS = "Hi-hat, closed, pedal and open (the live hi-hat rings like a chime)";
 const LEFT_OUT: Record<number, string> = { 42: HAT_RINGS, 44: HAT_RINGS, 46: HAT_RINGS };
+/** "Tempo", "Conductor", "untitled", "tk6" and the like are labels, not names. */
+const LABEL = /^(?:\s*(?:conductor|tempo|control|meta|master|global|setup|sequence|track|untitled|copyright|midi|smf|time\s*sig\w*)\b.*|\s*(?:tk|trk|tr|ch)?\s*\d*\s*)$/i;
 const GM_PERCUSSION: Record<number, string> = {
   27: "High Q", 28: "Slap", 29: "Scratch push", 30: "Scratch pull", 31: "Sticks", 32: "Square click", 33: "Metronome click", 34: "Metronome bell",
   54: "Tambourine", 56: "Cowbell", 58: "Vibraslap", 67: "High agogô", 68: "Low agogô", 69: "Cabasa", 70: "Maracas", 71: "Short whistle",
@@ -163,7 +180,7 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   const report: Arrangement["report"] = {
     pianoNotesIn: 0, drumNotesIn: 0, folded: 0, merged: 0, thinnedChord: 0, thinnedDensity: 0, pedalChanges: 0, pedalSkipped: 0,
     peakKeys: 0, tempoChanges: Math.max(0, midi.tempoMap.length - 1), drumsMapped: {}, drumsSkipped: {}, ignoredControllers: 0,
-    salvage: midi.salvageNote, lenient: [],
+    salvage: midi.salvageNote, lenient: [], silencedByVolume: 0, partsLeftOut: 0, tooFast: 0, drumsLayered: 0, pitchBends: 0,
   };
   const l = midi.lenient;
   if (l.missingEndOfTrack) report.lenient.push(`${l.missingEndOfTrack} track${l.missingEndOfTrack > 1 ? "s" : ""} without an end marker read to the end of the chunk`);
@@ -171,11 +188,38 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   if (l.openNotesClosed) report.lenient.push(`${l.openNotesClosed} note${l.openNotesClosed > 1 ? "s" : ""} never released, ended with the track`);
   if (l.zeroLengthNotes) report.lenient.push(`${l.zeroLengthNotes} zero-length note${l.zeroLengthNotes > 1 ? "s" : ""} given one tick`);
 
+  // ------------------------------------------------- channel volume and expression
+  // MIDI controllers are per channel, whichever track sends them; a note plays at its written
+  // velocity times the channel's volume (CC7) and expression (CC11) when it starts. A file that
+  // sends neither plays as written.
+  const cc = new Map<number, { t: number; c: number; v: number }[]>();
+  const pedalByChannel = new Map<number, { t: number; value: number }[]>();
+  for (const track of midi.tracks) for (const c of track.controls) {
+    if (c.controller === 7 || c.controller === 11) {
+      const list = cc.get(c.channel) ?? [];
+      list.push({ t: sec(c.tick), c: c.controller, v: c.value });
+      cc.set(c.channel, list);
+    } else if (c.controller === 64 && c.channel !== 9) {
+      const list = pedalByChannel.get(c.channel) ?? [];
+      list.push({ t: sec(c.tick), value: c.value / 127 });
+      pedalByChannel.set(c.channel, list);
+    } else if (c.controller !== 0 && c.controller !== 32 && c.controller < 120) report.ignoredControllers++;
+  }
+  for (const list of cc.values()) list.sort((a, b) => a.t - b.t);
+  const levelAt = (ch: number, t: number): number => {
+    const list = cc.get(ch);
+    if (!list) return 1;
+    let vol = 127, expr = 127;
+    for (const e of list) { if (e.t > t + 1e-6) break; if (e.c === 7) vol = e.v; else expr = e.v; }
+    return (vol / 127) * (expr / 127);
+  };
+  report.pitchBends = midi.counters.pitchBends;
+
   // ---------------------------------------------------------------- parts
   const parts: Part[] = [];
-  const raw: PianoNote[] = [];
+  const sources: SourcePart[] = [];
+  const sourceOf: number[] = []; // parts index of each source
   const hits: DrumHit[] = [];
-  const pedalByChannel = new Map<number, { t: number; value: number }[]>();
   let jitter = 0x9e3779b9;
   const rand = (): number => { jitter ^= jitter << 13; jitter ^= jitter >>> 17; jitter ^= jitter << 5; return ((jitter >>> 0) / 4294967296) - 0.5; };
   for (const track of midi.tracks) {
@@ -183,48 +227,88 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
     for (const ch of channels) {
       const notes = track.notes.filter((n) => n.channel === ch);
       const program = programOf(track, ch);
-      const name = track.name || track.instrumentName || (ch === 9 ? "Drums" : program !== null ? GM_PROGRAMS[program >> 3] ?? `Channel ${ch + 1}` : `Channel ${ch + 1}`);
-      parts.push({ track: track.index, channel: ch, name, role: classify(`${track.name ?? ""} ${track.instrumentName ?? ""}`, notes, ch), notes: notes.length, program });
+      // a track's name names a part only when it is a name and the track holds one part
+      const own = [track.name, track.instrumentName].find((x) => x && !LABEL.test(x) && channels.length === 1);
+      const name = own || (ch === 9 ? "Drums" : program !== null ? GM_INSTRUMENTS[program] ?? `Channel ${ch + 1}` : `Channel ${ch + 1}`);
+      const fileName = ch === 9 ? "Drums" : name;
+      const role = classify(`${track.name ?? ""} ${track.instrumentName ?? ""}`, notes, ch);
+      parts.push({ track: track.index, channel: ch, name: fileName, role, notes: notes.length, program, actions: [], notesOut: notes.length, leftOut: false });
       if (ch === 9) {
-        for (const n of notes) {
-          report.drumNotesIn++;
-          const rule = DRUM_MAP[n.key];
-          if (!rule) {
-            const label = LEFT_OUT[n.key] ?? GM_PERCUSSION[n.key] ?? `Note ${n.key}`;
-            report.drumsSkipped[label] = (report.drumsSkipped[label] ?? 0) + 1;
-            continue;
-          }
-          if (rule.label) report.drumsMapped[rule.label] = (report.drumsMapped[rule.label] ?? 0) + 1;
-          // strike near the rule's spot, never twice at exactly the same point
-          const r = Math.hypot(rule.u, rule.v), a = Math.atan2(rule.v, rule.u);
-          const rr = Math.max(0, Math.min(0.92, r + rand() * 0.07)), aa = a + rand() * (r > 0.05 ? 0.5 : 6);
-          hits.push({ t: sec(n.onTick), piece: rule.piece, u: rr * Math.cos(aa), v: rr * Math.sin(aa), g: rule.g * stickFactor(n.onVelocity) * (1 + rand() * 0.04), note: n.key, vel: n.onVelocity });
-        }
+        drumPart(notes, parts[parts.length - 1]!);
       } else {
-        for (const n of notes) {
-          report.pianoNotesIn++;
-          let key = n.key;
-          while (key < 21) key += 12;
-          while (key > 108) key -= 12;
-          if (key !== n.key) report.folded++;
-          raw.push({ key, t: sec(n.onTick), off: sec(n.offTick), vel: n.onVelocity, speed: hammerSpeed(n.onVelocity) });
-        }
+        report.pianoNotesIn += notes.length;
+        sourceOf.push(parts.length - 1);
+        sources.push({ track: track.index, channel: ch, name, program, baseRole: role,
+          notes: notes.map((n) => ({ t: sec(n.onTick), off: sec(n.offTick), key: n.key, vel: n.onVelocity, level: levelAt(ch, sec(n.onTick)) })) });
       }
     }
-    for (const c of track.controls) {
-      if (c.channel === 9) continue;
-      if (c.controller === 64) {
-        const list = pedalByChannel.get(c.channel) ?? [];
-        list.push({ t: sec(c.tick), value: c.value / 127 });
-        pedalByChannel.set(c.channel, list);
-      } else if (c.controller !== 0 && c.controller !== 32 && c.controller < 120) report.ignoredControllers++;
+  }
+
+  function drumPart(notes: PairedNote[], part: Part): void {
+    report.drumNotesIn += notes.length;
+    const written = notes.map((n) => n.onVelocity).sort((a, b) => a - b);
+    // all the same velocity (machine velocities): strokes at a drummer's ordinary weights instead
+    const flat = written.length > 4 && written[Math.floor(written.length * 0.9)]! - written[Math.floor(written.length * 0.1)]! <= 2;
+    let silenced = 0;
+    for (const n of notes) {
+      const rule = DRUM_MAP[n.key];
+      if (!rule) {
+        const label = LEFT_OUT[n.key] ?? GM_PERCUSSION[n.key] ?? `Note ${n.key}`;
+        report.drumsSkipped[label] = (report.drumsSkipped[label] ?? 0) + 1;
+        continue;
+      }
+      const t = sec(n.onTick);
+      const eff = n.onVelocity * levelAt(9, t);
+      if (eff < 6) { silenced++; continue; }
+      const vel = flat ? (DRUM_WEIGHT[rule.piece] ?? 90) * (eff / n.onVelocity) : eff;
+      if (rule.label) report.drumsMapped[rule.label] = (report.drumsMapped[rule.label] ?? 0) + 1;
+      // strike near the rule's spot, never twice at exactly the same point
+      const r = Math.hypot(rule.u, rule.v), a = Math.atan2(rule.v, rule.u);
+      const rr = Math.max(0, Math.min(0.92, r + rand() * 0.07)), aa = a + rand() * (r > 0.05 ? 0.5 : 6);
+      hits.push({ t, piece: rule.piece, u: rr * Math.cos(aa), v: rr * Math.sin(aa), g: rule.g * stickFactor(vel) * (1 + rand() * 0.04), note: n.key, vel: Math.round(vel) });
     }
+    if (flat) part.actions.push(`every stroke written at velocity ${written[written.length >> 1]}: played at a drummer's ordinary weights`);
+    if (silenced) part.actions.push(`${silenced} strokes silenced by the file's own volume`);
   }
   hits.sort((a, b) => a.t - b.t);
+  // layered drum notes (two kick notes at once, a kick and a doubled kick) are one stroke, and one
+  // piece is not struck again within 45 ms (a fast double stroke)
+  {
+    const lastAt = new Map<PieceId, DrumHit>();
+    const kept: DrumHit[] = [];
+    for (const h of hits) {
+      const prev = lastAt.get(h.piece);
+      if (prev && h.t - prev.t < 0.045) { prev.g = Math.max(prev.g, h.g); report.drumsLayered++; continue; }
+      lastAt.set(h.piece, h);
+      kept.push(h);
+    }
+    hits.length = 0;
+    hits.push(...kept);
+  }
+  for (const p of parts) if (p.channel === 9 && !p.actions.length) p.actions.push("played as written");
+
+  // ------------------------------------------------------ one pianist's part
+  const orch = orchestrate(sources);
+  report.silencedByVolume = orch.silenced;
+  orch.plans.forEach((plan, i) => {
+    const part = parts[sourceOf[i]!]!;
+    part.role = plan.role;
+    part.actions = plan.actions;
+    part.notesOut = plan.notesOut;
+    part.leftOut = plan.leftOut;
+    if (plan.leftOut) report.partsLeftOut++;
+  });
+  const raw: (PianoNote & { prio: number })[] = orch.notes.map((n) => {
+    let key = n.key;
+    while (key < 21) key += 12;
+    while (key > 108) key -= 12;
+    if (key !== n.key) report.folded++;
+    return { key, t: n.t, off: n.off, vel: n.vel, speed: hammerSpeed(n.vel), prio: n.prio };
+  });
 
   // --------------------------------------------- merge doublings, then thin
   raw.sort((a, b) => a.t - b.t || a.key - b.key);
-  const byKey = new Map<number, PianoNote[]>();
+  const byKey = new Map<number, (PianoNote & { prio: number })[]>();
   for (const n of raw) {
     const list = byKey.get(n.key) ?? [];
     const prev = list[list.length - 1];
@@ -232,15 +316,22 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
       prev.vel = Math.max(prev.vel, n.vel);
       prev.speed = hammerSpeed(prev.vel);
       prev.off = Math.max(prev.off, n.off);
+      prev.prio = Math.max(prev.prio, n.prio);
       report.merged++;
+      continue;
+    }
+    // a key cannot be struck again sooner than its action repeats (about 14 times a second)
+    if (prev && n.t - prev.t < REPEAT_S) {
+      prev.off = Math.max(prev.off, n.off);
+      report.tooFast++;
       continue;
     }
     list.push(n);
     byKey.set(n.key, list);
   }
   let notes = [...byKey.values()].flat().sort((a, b) => a.t - b.t || a.key - b.key);
-  // chords wider than ten fingers: keep the bass, the top and the loudest
-  const keep: PianoNote[] = [];
+  // chords wider than ten fingers: keep the bass, the top and the most important, loudest notes
+  const keep: typeof notes = [];
   for (let i = 0; i < notes.length;) {
     let j = i;
     while (j < notes.length && notes[j]!.t - notes[i]!.t < 0.03) j++;
@@ -248,24 +339,26 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
     if (group.length > MAX_CHORD) {
       const lo = group.reduce((a, b) => (b.key < a.key ? b : a));
       const hi = group.reduce((a, b) => (b.key > a.key ? b : a));
-      const rest = group.filter((n) => n !== lo && n !== hi).sort((a, b) => b.vel - a.vel).slice(0, MAX_CHORD - 2);
+      const rest = group.filter((n) => n !== lo && n !== hi).sort((a, b) => b.prio - a.prio || b.vel - a.vel).slice(0, MAX_CHORD - 2);
       report.thinnedChord += group.length - rest.length - 2;
       keep.push(lo, hi, ...rest);
     } else keep.push(...group);
     i = j;
   }
   notes = keep.sort((a, b) => a.t - b.t || a.key - b.key);
-  // density: at most MAX_PER_QUARTER_SECOND strikes in any 250 ms; the quietest yield
-  const dense: PianoNote[] = [];
-  const window: PianoNote[] = [];
+  // density: at most MAX_PER_QUARTER_SECOND strikes in any 250 ms; ornaments and accompaniment
+  // yield before the bass and the melody, and within a role the quietest yields
+  const dense: typeof notes = [];
+  const window: typeof notes = [];
+  const weaker = (a: { prio: number; vel: number }, b: { prio: number; vel: number }): boolean => a.prio < b.prio || (a.prio === b.prio && a.vel < b.vel);
   for (const n of notes) {
     while (window.length && n.t - window[0]!.t >= 0.25) window.shift();
     if (window.length >= MAX_PER_QUARTER_SECOND) {
-      const quiet = window.reduce((a, b) => (b.vel < a.vel ? b : a));
-      if (quiet.vel < n.vel) {
-        const k = dense.lastIndexOf(quiet);
+      const weakest = window.reduce((a, b) => (weaker(b, a) ? b : a));
+      if (weaker(weakest, n)) {
+        const k = dense.lastIndexOf(weakest);
         if (k >= 0) dense.splice(k, 1);
-        window.splice(window.indexOf(quiet), 1);
+        window.splice(window.indexOf(weakest), 1);
       } else { report.thinnedDensity++; continue; }
       report.thinnedDensity++;
     }
@@ -341,11 +434,12 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   const usedPieces = [...new Set(hits.map((h) => h.piece))];
   const order: PieceId[] = ["kick", "snare", "snare-off", "hihat-closed", "hihat-open", "tom-12", "tom-14", "ride", "crash"];
   const tempo0 = midi.tempoMap.find((e) => e.tick <= 0) ?? midi.tempoMap[0];
-  const meter0 = midi.meterMap[0];
-  // a song title is often the name of the conductor track; "Tempo", "Conductor", "control track"
-  // and the like are labels, not titles
-  const label = /^(?:\s*(?:conductor|tempo|control|meta|master|global|setup|sequence|track|untitled|copyright|midi|smf|time\s*sig\w*)\b.*|\s*\d*\s*)$/i;
-  const named = midi.tracks.find((t) => t.notes.length === 0 && t.name && !label.test(t.name));
+  const meter0 = midi.meterMap.reduce<{ m: (typeof midi.meterMap)[number] | null; span: number }>((best, m, i) => {
+    const span = (midi.meterMap[i + 1]?.tick ?? lastTick) - m.tick;
+    return span > best.span ? { m, span } : best;
+  }, { m: null, span: -1 }).m;
+  // a song title is often the name of the conductor track
+  const named = midi.tracks.find((t) => t.notes.length === 0 && t.name && !LABEL.test(t.name));
   const title = named?.name ?? fileName.replace(/\.(mid|midi|kar|rmi)$/i, "");
   return {
     title,
@@ -398,3 +492,6 @@ function peakSounding(notes: PianoNote[], pedal: { t: number; value: number }[])
 /** General MIDI program families (program >> 3). */
 const GM_PROGRAMS = ["Piano", "Chromatic percussion", "Organ", "Guitar", "Bass", "Strings", "Ensemble", "Brass", "Reed", "Pipe", "Synth lead", "Synth pad", "Synth effects", "Ethnic", "Percussive", "Sound effects"];
 export const gmFamily = (program: number | null): string | null => (program === null ? null : GM_PROGRAMS[program >> 3] ?? null);
+/** General MIDI program names (0-127). */
+const GM_INSTRUMENTS = ["Acoustic grand", "Bright piano", "Electric grand", "Honky-tonk", "Electric piano 1", "Electric piano 2", "Harpsichord", "Clavinet", "Celesta", "Glockenspiel", "Music box", "Vibraphone", "Marimba", "Xylophone", "Tubular bells", "Dulcimer", "Drawbar organ", "Percussive organ", "Rock organ", "Church organ", "Reed organ", "Accordion", "Harmonica", "Tango accordion", "Nylon guitar", "Steel guitar", "Jazz guitar", "Clean guitar", "Muted guitar", "Overdrive guitar", "Distortion guitar", "Guitar harmonics", "Acoustic bass", "Finger bass", "Pick bass", "Fretless bass", "Slap bass 1", "Slap bass 2", "Synth bass 1", "Synth bass 2", "Violin", "Viola", "Cello", "Contrabass", "Tremolo strings", "Pizzicato strings", "Harp", "Timpani", "Strings", "Slow strings", "Synth strings 1", "Synth strings 2", "Choir aahs", "Voice oohs", "Synth voice", "Orchestra hit", "Trumpet", "Trombone", "Tuba", "Muted trumpet", "French horn", "Brass section", "Synth brass 1", "Synth brass 2", "Soprano sax", "Alto sax", "Tenor sax", "Baritone sax", "Oboe", "English horn", "Bassoon", "Clarinet", "Piccolo", "Flute", "Recorder", "Pan flute", "Blown bottle", "Shakuhachi", "Whistle", "Ocarina", "Square lead", "Saw lead", "Calliope lead", "Chiff lead", "Charang lead", "Voice lead", "Fifths lead", "Bass and lead", "New age pad", "Warm pad", "Polysynth pad", "Choir pad", "Bowed pad", "Metallic pad", "Halo pad", "Sweep pad", "Rain", "Soundtrack", "Crystal", "Atmosphere", "Brightness", "Goblins", "Echoes", "Sci-fi", "Sitar", "Banjo", "Shamisen", "Koto", "Kalimba", "Bagpipe", "Fiddle", "Shanai", "Tinkle bell", "Agogo", "Steel drums", "Woodblock", "Taiko drum", "Melodic tom", "Synth drum", "Reverse cymbal", "Guitar fret noise", "Breath noise", "Seashore", "Bird tweet", "Telephone ring", "Helicopter", "Applause", "Gunshot"];
+export const gmInstrument = (program: number | null): string | null => (program === null ? null : GM_INSTRUMENTS[program] ?? null);
