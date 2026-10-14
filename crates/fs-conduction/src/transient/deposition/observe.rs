@@ -124,6 +124,9 @@ impl DepositionSimulation<'_> {
     /// contact/cell/area admission is reused. Mass, enthalpy and time are untouched;
     /// no mechanical work is silently injected as heat. Cost is bounded by the
     /// event and active-link budgets, with existing O(links) area checks per add.
+    /// This symmetric API refuses an asymmetric current patch, including a
+    /// no-op, rather than losing its side areas. Use `replace_contact_patches`
+    /// with the complete expected patch for such an interface.
     pub fn replace_contacts(
         &self,
         updates: &[ContactUpdate],
@@ -133,41 +136,15 @@ impl DepositionSimulation<'_> {
         if updates.len() > self.budget.max_events {
             return Err(DepositionError::Budget("contact updates"));
         }
-        if self.schedule.get(self.cursor).is_some_and(|e| e.time_s <= self.time_s) {
-            return Err(DepositionError::InvalidInput("process due scheduled events before contact updates"));
-        }
-        let mut ids = std::collections::BTreeSet::new();
+        let mut patches = Vec::with_capacity(updates.len());
         for update in updates {
             checkpoint()?;
-            if !ids.insert(update.id)
-                || update.expected.is_some_and(|link| link.id != update.id)
-                || update.replacement.is_some_and(|link| link.id != update.id)
-            {
-                return Err(DepositionError::InvalidInput("duplicate or inconsistent contact update identity"));
-            }
-            if self.links.get(&update.id).copied() != update.expected {
-                return Err(DepositionError::InvalidInput("stale thermal contact update"));
-            }
+            patches.push(ContactPatchUpdate {
+                id: update.id,
+                expected: update.expected.map(ContactPatch::symmetric),
+                replacement: update.replacement.map(ContactPatch::symmetric),
+            });
         }
-        let mut next = self.clone();
-        let mut audit = EnergyAudit { incoming_mass_kg: 0.0, incoming_energy_j: 0.0,
-            external_heat_j: 0.0, stored_energy_change_j: 0.0, residual_j: 0.0,
-            substeps: 0, events: 0 };
-        for update in updates {
-            checkpoint()?;
-            if update.expected != update.replacement && update.expected.is_some() {
-                next.apply(Event::Separation(update.id), &mut audit)?;
-            }
-        }
-        for update in updates {
-            checkpoint()?;
-            if update.expected != update.replacement {
-                if let Some(link) = update.replacement {
-                    next.apply(Event::Contact(link), &mut audit)?;
-                }
-            }
-        }
-        checkpoint()?;
-        Ok(next)
+        self.replace_contact_patches(&patches, checkpoint)
     }
 }
