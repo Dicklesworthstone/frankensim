@@ -1,4 +1,6 @@
 //! Heterogeneous phase-change contact: independent eight-node P1 references.
+#[path = "temperature_contact_enthalpy/radiation.rs"]
+mod radiation;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::ContentHash;
 use fs_conduction::{ConductionMesh, ConductionProblem, ConductivityModel, ConductivityTable,
@@ -186,6 +188,11 @@ fn g4_contact_enthalpy_limits_domain_and_cancellation_preserve_history() {
         let problem=ConductionProblem{mesh:&mesh,boundary:&bc,material:&material,
             element_materials:None,source:&source};
         let old=[80.,80.,80.,80.,450.,450.,450.,450.];let before=old;
+        let zero=ScalarField::Uniform(0.);
+        let negative=[-100.;8];
+        let idle=contacts.advance_enthalpy(cx,&engine,ConductionProblem{source:&zero,..problem},
+            &negative,0.15,config(),coupling()).unwrap();
+        for &h in &idle.conduction.specific_enthalpy_j_kg {close(h,-100.,1e-8);}
         assert!(contacts.advance_enthalpy(cx,&engine,problem,&old,0.15,config(),
             ContactIterationConfig{max_iterations:1,..coupling()}).is_err());
         let mut outside=old;outside[0]=-201.;
