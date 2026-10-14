@@ -15,6 +15,8 @@
 //! source/correlation supported; errors never trigger a different material law.
 
 pub mod solid;
+/// Parallel material-driven paths with enthalpy-conserving outlet mixing.
+pub mod parallel;
 
 use fs_exec::Cx;
 use fs_material::liquid::ResolvedLiquidState;
