@@ -6,7 +6,8 @@ use super::*;
 /// fine; external effects or shared mutable state cannot be rolled back here.
 /// An observer is called after each individual event in supplied order, and
 /// after each CFL-limited step BEFORE any events at its ending time. An optional
-/// source hook runs before that step, after all events at its starting time.
+/// source hook and then a conductance hook run before that step, after all
+/// events at its starting time. Both see the unchanged start-state history.
 pub trait DepositionObserver: Clone {
     type Error: From<DepositionError>;
     /// Start one candidate advance; useful for resetting a per-call work counter.
@@ -27,6 +28,21 @@ pub trait DepositionObserver: Clone {
     fn sources(&mut self, _thermal: &DepositionSimulation<'_>,
         _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, Self::Error> { Ok(BTreeMap::new()) }
+    /// Step-local thermal-link conductances [W/K], evaluated after `sources`
+    /// against the SAME start state. A source owner may retain one prepared
+    /// material evaluation for both hooks. Omitted links keep their authored
+    /// conductance; zero explicitly insulates without removing covered area.
+    /// Only active link IDs and finite nonnegative values are admitted.
+    ///
+    /// The original thermal kernel uses these values for BOTH pairwise heat
+    /// exchange and its timestep bound. This frozen-coefficient bound is not
+    /// a general nonlinear-stability or time-accuracy guarantee. Refine max_dt.
+    /// Geometry, per-side coverage, material laws and reference mass never change.
+    /// Authored conductances are restored before `step` and scheduled events;
+    /// retain applied values in the observer when observations need them.
+    fn conductances(&mut self, _thermal: &DepositionSimulation<'_>,
+        _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<u64, f64>, Self::Error> { Ok(BTreeMap::new()) }
     fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>)
         -> Result<(), Self::Error>;
     /// Old temperatures and new enthalpy-backed temperatures on the same step.
@@ -69,6 +85,29 @@ impl<'a> DepositionSimulation<'a> {
         for (id, old, combined) in changes {
             self.cells.get_mut(&id).expect("validated active source").boundary.source_w = combined;
             authored.push((id, old));
+        }
+        Ok(authored)
+    }
+
+    fn set_step_conductances(&mut self, values: &BTreeMap<u64, f64>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
+        -> Result<Vec<(u64, f64)>, DepositionError> {
+        if values.len() > self.links.len() {
+            return Err(DepositionError::InvalidInput("too many step-local conductances"));
+        }
+        let mut authored = Vec::with_capacity(values.len());
+        for (index, (&id, &g)) in values.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            let link = self.links.get(&id)
+                .ok_or(DepositionError::InvalidInput("inactive step-local thermal link"))?;
+            if !nonnegative(g) {
+                return Err(DepositionError::InvalidInput("step-local conductance must be finite and nonnegative"));
+            }
+            authored.push((id, link.conductance_w_k));
+        }
+        checkpoint()?;
+        for (&id, &g) in values {
+            self.links.get_mut(&id).expect("validated active link").conductance_w_k = g;
         }
         Ok(authored)
     }
@@ -127,6 +166,9 @@ impl<'a> DepositionSimulation<'a> {
             let start_s = next.time_s;
             let sources = observer.sources(&next, &mut checkpoint)?;
             checkpoint()?;
+            let conductances = observer.conductances(&next, &mut checkpoint)?;
+            checkpoint()?;
+            let original_links = next.set_step_conductances(&conductances, &mut checkpoint)?;
             let authored = next.add_step_sources(&sources, &mut checkpoint)?;
             let step = next.thermal_step(stop-start_s,
                 config.max_dt_s, &mut audit, &mut checkpoint);
@@ -134,6 +176,9 @@ impl<'a> DepositionSimulation<'a> {
             // boundaries, never a generated source masquerading as a new input.
             for (id, watts) in authored {
                 next.cells.get_mut(&id).expect("validated active source").boundary.source_w = watts;
+            }
+            for (id, g) in original_links {
+                next.links.get_mut(&id).expect("validated active link").conductance_w_k = g;
             }
             let (dt, old_temperatures) = step?;
             let time = finite(start_s+dt)?;
