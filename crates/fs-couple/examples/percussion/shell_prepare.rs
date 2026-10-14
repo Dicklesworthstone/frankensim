@@ -4,6 +4,25 @@ use super::{Error, specimen, ShellSupport, modes_shell, ModePair, SliceOptions,
     ShellReduction, ReductionBudget};
 use fs_plate::shell::survey::MeshShell;
 
+// Cold host ceilings, not a physical bandwidth claim. The previous 32-mode
+// cap blocked supplied multi-kHz cymbal bases before the nonlinear shell owner
+// could use them. Keep enough headroom for sticks, mounts and other mechanical
+// participants under MAX_IMPACT_MODES, and still refuse rather than truncate.
+const MAX_RETAINED_SHELL_MODES: usize = 192;
+const MAX_SHELL_FACET_MODES: usize = 131_072;
+
+fn reduction_budget(mode_count: usize, facet_count: usize) -> Result<ReductionBudget, Error> {
+    if mode_count == 0 || mode_count > MAX_RETAINED_SHELL_MODES {
+        return Err(format!("splash shell needs 1..={MAX_RETAINED_SHELL_MODES} retained modes; narrow the explicit frequency window or use a larger host").into());
+    }
+    let work = facet_count.checked_mul(mode_count).ok_or("splash shell facet-mode work overflow")?;
+    if work > MAX_SHELL_FACET_MODES {
+        return Err(format!("splash shell reduction needs {work} facet-mode records, above the host ceiling {MAX_SHELL_FACET_MODES}; refine the requested band/mesh together").into());
+    }
+    Ok(ReductionBudget { max_modes: MAX_RETAINED_SHELL_MODES,
+        max_facet_modes: MAX_SHELL_FACET_MODES, relative_tolerance: 1e-5 })
+}
+
 pub fn prepare(specimen:&specimen::Specimen,dt_s:f64)->Result<(MeshShell,ShellReduction),Error> {
     build(specimen,dt_s,None)
 }
@@ -42,8 +61,7 @@ fn build(specimen:&specimen::Specimen,dt_s:f64,rocking:Option<f64>)->Result<(Mes
         vec![ModePair{lambda:0.0,phi,residual,interval:(-residual,residual)}]
     };
     modes.extend(report.modes);
-    if modes.len()>32 {return Err("splash retains too many modes for this declared reference; narrow the explicit window or increase the host budget".into());}
-    let budget=ReductionBudget{max_modes:32,max_facet_modes:20000,relative_tolerance:1e-5};
+    let budget=reduction_budget(modes.len(),shell.mesh.tris.len())?;
     let reduction=match rocking {
         Some(maximum_rotation_rad)=>ShellReduction::new_with_linearized_rigid_motion(
             &shell.mesh,&shell.sections,&model,&modes,budget,
@@ -51,4 +69,20 @@ fn build(specimen:&specimen::Specimen,dt_s:f64,rocking:Option<f64>)->Result<(Mes
         None=>ShellReduction::new(&shell.mesh,&shell.sections,&model,&modes,budget)?,
     };
     Ok((shell,reduction))
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn high_band_shell_budget_accepts_more_than_the_old_32_mode_ceiling_without_truncation() {
+        let budget = reduction_budget(96, 512).unwrap();
+        assert_eq!(budget.max_modes, MAX_RETAINED_SHELL_MODES);
+        assert_eq!(budget.max_facet_modes, MAX_SHELL_FACET_MODES);
+        assert!(reduction_budget(33, 512).is_ok());
+        assert!(reduction_budget(MAX_RETAINED_SHELL_MODES + 1, 1).is_err());
+        assert!(reduction_budget(192, 682).is_ok());
+        assert!(reduction_budget(192, 683).is_err());
+    }
 }
