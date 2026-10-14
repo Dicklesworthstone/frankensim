@@ -4,7 +4,7 @@
 //! a second FEM or a reconstruction algorithm. It retains the supplied vertices,
 //! triangles, nodal thickness and per-facet isotropic material. No smoothing,
 //! welding, hole filling, resampling or inferred manufacturing data is applied.
-use super::{ShellMesh, ShellModel, ShellSupport, assemble_shell_sections};
+use super::{ShellMesh, ShellModel, ShellSupport, FacetGeometry, assemble_shell_sections};
 use super::profile::{ProfileBudget, ProfileShell};
 use crate::{PlateError, PlateSection};
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,6 +18,52 @@ pub struct IsotropicMaterial {
     pub poisson: f64,
     /// Volume density [kg/m^3].
     pub density_kg_m3: f64,
+}
+
+/// Explicit facet material. Orthotropic axis 1 is a supplied GLOBAL direction:
+/// it is projected into each actual facet tangent before stiffness rotation.
+/// One material ID can therefore cross mesh diagonals without changing its
+/// physical grain/rolling direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SurveyMaterial {
+    Isotropic(IsotropicMaterial),
+    Orthotropic {
+        e1_pa: f64,
+        e2_pa: f64,
+        nu12: f64,
+        g12_pa: f64,
+        density_kg_m3: f64,
+        axis1_global: [f64; 3],
+    },
+}
+impl From<IsotropicMaterial> for SurveyMaterial {
+    fn from(value:IsotropicMaterial)->Self { Self::Isotropic(value) }
+}
+impl SurveyMaterial {
+    fn section(self,h:f64,facet:&FacetGeometry)->Result<PlateSection,PlateError> {
+        match self {
+            Self::Isotropic(m)=>PlateSection::isotropic(m.young_pa,m.poisson,h,m.density_kg_m3),
+            Self::Orthotropic{e1_pa,e2_pa,nu12,g12_pa,density_kg_m3,axis1_global}=>{
+                if axis1_global.iter().any(|v|!v.is_finite()) {
+                    return Err(bad("orthotropic shell material axis must be finite"));
+                }
+                let axis_norm=axis1_global.iter().map(|v|v*v).sum::<f64>().sqrt();
+                if !axis_norm.is_finite() || axis_norm<=0.0 {
+                    return Err(bad("orthotropic shell material needs a nonzero global axis"));
+                }
+                let dot=|a:[f64;3],b:[f64;3]|a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+                let x=dot(axis1_global,facet.frame[0]);
+                let y=dot(axis1_global,facet.frame[1]);
+                let tangent=x.hypot(y);
+                if !tangent.is_finite() || tangent<=1e-10*axis_norm {
+                    return Err(bad("orthotropic shell material axis is unresolved on a facet tangent"));
+                }
+                let angle=y.atan2(x);
+                PlateSection::orthotropic_plane_stress_at_angle(
+                    e1_pa,e2_pa,nu12,g12_pa,h,density_kg_m3,angle)
+            }
+        }
+    }
 }
 
 /// One connected, consistently oriented, manifold triangular shell.
@@ -50,6 +96,16 @@ impl MeshShell {
     pub fn new(mesh: ShellMesh, nodal_thickness_m: Vec<f64>,
         materials: &[IsotropicMaterial], budget: ProfileBudget) -> Result<Self, PlateError>
     {
+        let materials=materials.iter().copied().map(SurveyMaterial::from).collect::<Vec<_>>();
+        Self::new_with_materials(mesh,nodal_thickness_m,&materials,budget)
+    }
+
+    /// Same explicit geometry with isotropic or physically oriented orthotropic
+    /// material per facet. The global material direction is never inferred from
+    /// triangle edge order.
+    pub fn new_with_materials(mesh: ShellMesh, nodal_thickness_m: Vec<f64>,
+        materials: &[SurveyMaterial], budget: ProfileBudget) -> Result<Self, PlateError>
+    {
         let n = mesh.nodes.len(); let count = mesh.tris.len();
         if n < 3 || count == 0 || n > budget.max_nodes || count > budget.max_triangles
             || nodal_thickness_m.len() != n || materials.len() != count
@@ -74,8 +130,7 @@ impl MeshShell {
             let mut key = *tri; key.sort_unstable();
             if !facets.insert(key) { return Err(bad("shell survey contains duplicate facets")); }
             let h = (nodal_thickness_m[tri[0]]+nodal_thickness_m[tri[1]]+nodal_thickness_m[tri[2]])/3.0;
-            let material = materials[e];
-            let section = PlateSection::isotropic(material.young_pa, material.poisson, h, material.density_kg_m3)?;
+            let section = materials[e].section(h,&facet)?;
             mass += section.density*section.thickness*facet.area_m2;
             sections.push(section);
             for k in 0..3 {

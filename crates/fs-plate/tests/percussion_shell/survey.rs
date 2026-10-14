@@ -1,6 +1,6 @@
 use fs_plate::shell::{ShellMesh, ShellSupport};
 use fs_plate::shell::profile::{ProfileBudget, ProfileStation, revolve};
-use fs_plate::shell::survey::{IsotropicMaterial, MeshShell};
+use fs_plate::shell::survey::{IsotropicMaterial, SurveyMaterial, MeshShell};
 use fs_plate::shell::reduction::{ReductionBudget, ShellReduction};
 use fs_plate::{ModePair, PlateSection};
 
@@ -133,5 +133,50 @@ fn field_admission_and_original_mesh_budgets_remain_explicit() {
     }
     for b in [ProfileBudget { max_nodes: 3,..budget() },ProfileBudget { max_triangles: 1,..budget() }] {
         assert!(MeshShell::new(panel(),vec![0.001;4],&[bronze();2],b).is_err());
+    }
+}
+
+
+#[test]
+fn global_orthotropic_axis_reaches_each_facet_without_mesh_diagonal_grain_jumps() {
+    let mesh=panel(); let h=vec![0.001;mesh.nodes.len()];
+    let material=SurveyMaterial::Orthotropic {
+        e1_pa:120e9,e2_pa:70e9,nu12:0.27,g12_pa:30e9,density_kg_m3:8200.,
+        axis1_global:[1.,0.,0.],
+    };
+    let anisotropic=MeshShell::new_with_materials(mesh.clone(),h.clone(),&[material;2],budget()).unwrap();
+    let isotropic=shell(mesh.clone(),0.001);
+    assert_eq!(anisotropic.mass_kg,0.01*0.001*8200.);
+    assert_ne!(anisotropic.sections[0].d,isotropic.sections[0].d);
+    // The two triangles have different local first edges. Their stored local D
+    // matrices must therefore differ so that the SAME global x material axis is
+    // represented continuously rather than restarting at each triangle.
+    assert_ne!(anisotropic.sections[0].d,anisotropic.sections[1].d);
+    let a=anisotropic.assemble(&[],ShellSupport::Free).unwrap();
+    let b=isotropic.assemble(&[],ShellSupport::Free).unwrap();
+    assert_ne!(a.k.get(0,0),b.k.get(0,0));
+
+    // Rotating both geometry and the declared physical axis is a rigid change
+    // of frame: mass is identical and the material remains admissible.
+    let mut rotated=mesh;
+    for p in &mut rotated.nodes { let x=p[0];p[0]=-p[1];p[1]=x; }
+    let rotated_material=SurveyMaterial::Orthotropic {axis1_global:[0.,1.,0.],..material};
+    let same=MeshShell::new_with_materials(rotated,h,&[rotated_material;2],budget()).unwrap();
+    assert_eq!(same.mass_kg,anisotropic.mass_kg);
+}
+
+#[test]
+fn orthotropic_survey_refuses_missing_or_normal_only_material_axes() {
+    let base=SurveyMaterial::Orthotropic {
+        e1_pa:120e9,e2_pa:70e9,nu12:0.27,g12_pa:30e9,density_kg_m3:8200.,
+        axis1_global:[1.,0.,0.],
+    };
+    for material in [
+        SurveyMaterial::Orthotropic {axis1_global:[0.,0.,0.],..base},
+        SurveyMaterial::Orthotropic {axis1_global:[0.,0.,1.],..base},
+        SurveyMaterial::Orthotropic {e2_pa:0.0,..base},
+        SurveyMaterial::Orthotropic {g12_pa:f64::NAN,..base},
+    ] {
+        assert!(MeshShell::new_with_materials(panel(),vec![0.001;4],&[material;2],budget()).is_err());
     }
 }
