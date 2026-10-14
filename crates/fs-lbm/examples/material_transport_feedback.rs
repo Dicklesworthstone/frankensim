@@ -60,8 +60,9 @@ fn midpoint_requested(args:&[String])->Result<bool,Box<dyn Error>> {
     if args.get(3).is_some_and(|a|a=="--electrical") {
         if args.len()==6 { return Ok(false); }
         if args.len()==7 && args[6]=="--midpoint" { return Ok(true); }
+        if args.len()==9 && args[6]=="--midpoint" && args[7]=="--interfaces" { return Ok(true); }
     }
-    Err("usage: material_transport_feedback TABLE.txt [steps: 2..2000] OR TABLE.txt STEPS --electrical VOLTAGE B_Y_TESLA [--midpoint]".into())
+    Err("usage: material_transport_feedback TABLE.txt [steps: 2..2000] OR TABLE.txt STEPS --electrical VOLTAGE B_Y_TESLA [--midpoint [--interfaces INTERFACE.txt]]".into())
 }
 
 fn main()->Result<(),Box<dyn Error>> {
@@ -75,6 +76,7 @@ fn main()->Result<(),Box<dyn Error>> {
     let table=Table::parse(&text)?;
     if args.len()>=6 {
         let (voltage,b)=(args[4].parse()?,args[5].parse()?);
+        if args.len()==9 {return electrical::run_interfaces(&table,steps,voltage,b,&args[8]);}
         return if midpoint {electrical::run_midpoint(&table,steps,voltage,b)}
             else {electrical::run(&table,steps,voltage,b)};
     }
@@ -141,6 +143,17 @@ mod tests {
         assert!(midpoint_requested(&args("table.txt 20 --electrical 10 0.5 --midpoint")).unwrap());
         for tail in ["", "table.txt 20 --midpoint", "table.txt 20 --electrical 10",
             "table.txt 20 --electrical 10 0.5 --other", "table.txt 20 --electrical 10 0.5 --midpoint extra"] {
+            assert!(midpoint_requested(&args(tail)).is_err());
+        }
+    }
+
+    #[test]
+    fn interface_file_requires_the_coupled_electrical_mode() {
+        let args=|tail:&str|std::iter::once("material_transport_feedback")
+            .chain(tail.split_whitespace()).map(str::to_owned).collect::<Vec<_>>();
+        assert!(midpoint_requested(&args("bulk.txt 20 --electrical 10 0.5 --midpoint --interfaces surface.txt")).unwrap());
+        for tail in ["bulk.txt 20 --interfaces surface.txt", "bulk.txt 20 --electrical 10 0.5 --interfaces surface.txt",
+            "bulk.txt 20 --electrical 10 0.5 --midpoint --interfaces", "bulk.txt 20 --electrical 10 0.5 --midpoint --interfaces surface.txt extra"] {
             assert!(midpoint_requested(&args(tail)).is_err());
         }
     }

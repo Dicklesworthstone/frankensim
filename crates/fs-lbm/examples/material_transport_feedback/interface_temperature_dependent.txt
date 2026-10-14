@@ -1,0 +1,7 @@
+# Synthetic electrical interface, not measured properties of any material pair.
+# Same heat partition; only resistance varies with the declared film temperature.
+# film_K  area_specific_resistance_ohm_m2  heat_fraction_to_first_surface
+290 0.004 0.75
+300 0.020 0.75
+310 0.036 0.75
+330 0.068 0.75
