@@ -1,6 +1,7 @@
 //! Material table -> pressure-selected flow -> coolant enthalpy <-> actual FEM.
 //! This example owns no material law, heat equation, or coupling algorithm.
 mod source;
+mod pump_source;
 
 use fs_airflow::AirflowError;
 use fs_airflow::conjugate::{ConjugateConfig, Relaxation, SolidRegionState};
@@ -18,6 +19,9 @@ use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pre
     ParallelLiquidBranch, ParallelLiquidNetwork, ParallelPressureBudget,
 };
 use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::solid::ParallelLiquidCouplingControls;
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::ParallelLiquidSolution;
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::pump::{PumpHeadCurve, PumpOperatingControls};
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::pump::solid::PumpCouplingControls;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_conduction::{ConductionError, ConductionMesh, ConductionProblem, ConductivityModel,
     InitialGuess, LinearConfig, Nonlinearity, ScalarField, SolveConfig, StopRule,
@@ -62,9 +66,22 @@ struct CoolingResult {
     neglected_hydraulic_power_w: f64,
     maximum_heat_imbalance_w: f64,
     solid_solves: usize,
+    pump: Option<PumpReport>,
+}
+
+#[derive(Debug)]
+struct PumpReport {
+    head_m: f64, available_pressure_pa: f64, residual_pa: f64,
+    inlet_volume_flow_m3_s: f64, hydraulic_power_w: f64,
+    network_evaluations: usize, total_flow_evaluations: usize,
 }
 
 fn run(table: &LiquidTable, settings: Settings) -> Result<CoolingResult> {
+    run_with_drive(table, settings, None)
+}
+
+fn run_with_drive(table: &LiquidTable, settings: Settings,
+    pump: Option<(&PumpHeadCurve, PumpOperatingControls)>) -> Result<CoolingResult> {
     if !settings.heat_w.is_finite() { return Err("heat power must be finite (negative means cooling)".into()); }
     let law = LiquidTemperatureLaw::try_new(&table.card, &table.point(INLET_K)?, "T",
         LiquidViscosityBasis::Dynamic, MaterialPropertySelection::SingleClaimOnly)?;
@@ -141,6 +158,44 @@ fn run(table: &LiquidTable, settings: Settings) -> Result<CoolingResult> {
             Ok(LiquidSolidResponse { regions, state: solution })
         };
         let attempted: std::result::Result<CoolingResult, String> = (|| {
+            if let Some((curve, operating_point)) = pump {
+                // One branch for the original series circuit, two for parallel.
+                // Both use the exact same source/material and FEM callback above.
+                let ranges = match settings.topology {
+                    Topology::Series => vec![0..2], Topology::Parallel => vec![0..1, 1..2],
+                };
+                let paths = ranges.iter().map(|range| LiquidHeatPath::try_new(&cx, &law, &caloric,
+                    MassFlowRate::new(settings.minimum_mass), Temperature::new(INLET_K),
+                    &sections[range.clone()], LiquidPropertyTemperature::BulkMean))
+                    .collect::<std::result::Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+                let pressure_budget = PressureDrivenBudget {
+                    pressure_absolute_tolerance_pa: 1e-10, pressure_relative_tolerance: 1e-11,
+                    ..controls.pressure
+                };
+                let branches: Vec<_> = paths.iter().zip(&ranges).enumerate().map(|(i, (path, range))|
+                    ParallelLiquidBranch { name: REGIONS[i], path,
+                        resistances: &resistances[range.clone()], pressure_budget }).collect();
+                let network = ParallelLiquidNetwork::try_new(&cx, &branches).map_err(|e| e.to_string())?;
+                let pumped = PumpCouplingControls {
+                    network: ParallelLiquidCouplingControls {
+                        coupling: controls.coupling, local: controls.local, acceleration: controls.acceleration,
+                        mass_flow_relative_tolerance: 1e-8,
+                        work: ParallelPressureBudget { max_flow_evaluations: 250000,
+                            maximum_neglected_hydraulic_power_w: 0.01 },
+                    }, operating_point, max_total_solid_solves: 4096,
+                };
+                let point = network.solve_with_pump_coupled_iqn(&cx, &[INLET_K; 2], curve,
+                    &pumped, &mut solid).map_err(|e| e.to_string())?;
+                let report = PumpReport { head_m: point.supply.head_m,
+                    available_pressure_pa: point.supply.available_pressure_pa, residual_pa: point.pressure_residual_pa,
+                    inlet_volume_flow_m3_s: point.supply.inlet_volume_flow_m3_s,
+                    hydraulic_power_w: point.supply.hydraulic_power_w,
+                    network_evaluations: point.network_evaluations, total_flow_evaluations: point.total_flow_evaluations };
+                let answer = point.state;
+                return network_result(&answer.fluid, &answer.solid.regions,
+                    answer.solid.state.report.energy.robin_out_w, answer.residuals.heat_imbalance_w,
+                    point.total_solid_solves, Some(report));
+            }
             match settings.topology {
                 Topology::Series => {
                     let path = LiquidHeatPath::try_new(&cx, &law, &caloric,
@@ -163,7 +218,7 @@ fn run(table: &LiquidTable, settings: Settings) -> Result<CoolingResult> {
                         branch_pressure_drops_pa: vec![point.hydraulics.total_pressure_drop_pa],
                         neglected_hydraulic_power_w: point.hydraulics.total_dissipated_power_w,
                         maximum_heat_imbalance_w: coupled.maximum_heat_imbalance_w,
-                        solid_solves: answer.total_solid_solves,
+                        solid_solves: answer.total_solid_solves, pump: None,
                     })
                 }
                 Topology::Parallel => {
@@ -195,26 +250,9 @@ fn run(table: &LiquidTable, settings: Settings) -> Result<CoolingResult> {
                     };
                     let answer = network.solve_coupled_iqn(&cx, &[INLET_K; 2],
                         Pressure::new(settings.drive_pa), &parallel, &mut solid).map_err(|e| e.to_string())?;
-                    let branch_mass_flows_kg_s = answer.fluid.branches.iter()
-                        .map(|b| b.solution.mass_flow_kg_per_s).collect();
-                    let branch_outlets_k = answer.fluid.branches.iter().map(|b| {
-                        b.solution.thermal.regions.last().map(|r| r.outlet.temperature_k())
-                            .ok_or("accepted parallel branch lacks an outlet")
-                    }).collect::<std::result::Result<Vec<_>, _>>()?;
-                    let branch_pressure_drops_pa: Vec<_> = answer.fluid.branches.iter()
-                        .map(|b| b.solution.hydraulics.total_pressure_drop_pa).collect();
-                    Ok(CoolingResult {
-                        mass_flow_kg_s: answer.fluid.total_mass_flow_kg_per_s,
-                        outlet_k: answer.fluid.mixed_outlet.temperature_k(),
-                        walls_k: answer.solid.regions.iter().map(|r| r.mean_wall_temperature_k).collect(),
-                        heat_w: answer.fluid.total_heat_rate_w,
-                        solid_heat_w: answer.solid.state.report.energy.robin_out_w,
-                        pressure_drop_pa: branch_pressure_drops_pa[0],
-                        branch_mass_flows_kg_s, branch_outlets_k, branch_pressure_drops_pa,
-                        neglected_hydraulic_power_w: answer.fluid.total_dissipated_power_w,
-                        maximum_heat_imbalance_w: answer.residuals.heat_imbalance_w,
-                        solid_solves: answer.iterations,
-                    })
+                    network_result(&answer.fluid, &answer.solid.regions,
+                        answer.solid.state.report.energy.robin_out_w, answer.residuals.heat_imbalance_w,
+                        answer.iterations, None)
                 }
             }
         })();
@@ -238,11 +276,61 @@ fn parse_args(args: &[String]) -> Result<(&str, Settings)> {
         minimum_mass: args[3].parse()?, maximum_mass: args[4].parse()?, topology }))
 }
 
+fn network_result(fluid: &ParallelLiquidSolution<'_>, solid: &[SolidRegionState],
+    solid_heat_w: f64, maximum_heat_imbalance_w: f64, solid_solves: usize, pump: Option<PumpReport>)
+    -> std::result::Result<CoolingResult, String> {
+    let branch_mass_flows_kg_s = fluid.branches.iter().map(|b| b.solution.mass_flow_kg_per_s).collect();
+    let branch_outlets_k = fluid.branches.iter().map(|b| b.solution.thermal.regions.last()
+        .map(|r| r.outlet.temperature_k()).ok_or("accepted branch lacks an outlet"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let branch_pressure_drops_pa: Vec<_> = fluid.branches.iter()
+        .map(|b| b.solution.hydraulics.total_pressure_drop_pa).collect();
+    Ok(CoolingResult {
+        mass_flow_kg_s: fluid.total_mass_flow_kg_per_s, outlet_k: fluid.mixed_outlet.temperature_k(),
+        walls_k: solid.iter().map(|r| r.mean_wall_temperature_k).collect(),
+        heat_w: fluid.total_heat_rate_w, solid_heat_w,
+        pressure_drop_pa: branch_pressure_drops_pa[0],
+        branch_mass_flows_kg_s, branch_outlets_k, branch_pressure_drops_pa,
+        neglected_hydraulic_power_w: fluid.total_dissipated_power_w,
+        maximum_heat_imbalance_w, solid_solves, pump,
+    })
+}
+
+// Legacy invocations still use parse_args unchanged. A pump invocation supplies
+// a pressure bracket instead of pretending its operating pressure is known.
+fn parse_command(args: &[String]) -> Result<(&str, Settings, Option<(&str, PumpOperatingControls)>)> {
+    let (topology, rest) = if args.first().is_some_and(|a| a == "--parallel") {
+        (Topology::Parallel, &args[1..])
+    } else { (Topology::Series, args) };
+    if rest.first().is_some_and(|a| a == "--pump") {
+        if rest.len() != 8 {
+            return Err("usage: pressure_cooling [--parallel] --pump PUMP.txt MIN_DP_PA MAX_DP_PA MATERIAL.txt HEAT_W MIN_MASS_KG_S MAX_MASS_KG_S".into());
+        }
+        let bracket = (rest[2].parse()?, rest[3].parse()?);
+        let controls = PumpOperatingControls { pressure_bracket_pa: bracket,
+            absolute_pressure_tolerance_pa: 1e-6, relative_pressure_tolerance: 1e-8,
+            max_network_evaluations: 48 };
+        // drive_pa is unused by run_with_drive on the pump path; use the initial
+        // bracket endpoint rather than an invented final pressure or NaN sentinel.
+        Ok((&rest[4], Settings { drive_pa: bracket.0, heat_w: rest[5].parse()?,
+            minimum_mass: rest[6].parse()?, maximum_mass: rest[7].parse()?, topology }, Some((&rest[1], controls))))
+    } else {
+        let (path, settings) = parse_args(args)?;
+        Ok((path, settings, None))
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let (path, settings) = parse_args(&args)?;
+    let (path, settings, pump_request) = parse_command(&args)?;
     let table = LiquidTable::parse(&std::fs::read_to_string(path)?)?;
-    let result = run(&table, settings)?;
+    let pump_table = pump_request.map(|(path, _)| -> Result<_> {
+        pump_source::PumpTable::parse(&std::fs::read_to_string(path)?)
+    }).transpose()?;
+    let result = match (&pump_table, pump_request) {
+        (Some(table_source), Some((_, controls))) => run_with_drive(&table, settings, Some((&table_source.curve, controls)))?,
+        _ => run(&table, settings)?,
+    };
     println!("model=regional_liquid_pressure_cooling; phase_stability=assumed; calibration=not_established");
     println!("topology={}", match settings.topology { Topology::Series => "series", Topology::Parallel => "parallel" });
     println!("material_card={:?}", table.card.content_hash());
@@ -252,6 +340,15 @@ fn main() -> Result<()> {
         result.branch_mass_flows_kg_s, result.branch_outlets_k, result.branch_pressure_drops_pa);
     println!("neglected_hydraulic_power_w={:.12e}\nmaximum_regional_heat_imbalance_w={:.12e}\nsolid_solves={}",
         result.neglected_hydraulic_power_w, result.maximum_heat_imbalance_w, result.solid_solves);
+    if let Some(pump) = &result.pump {
+        println!("supply=pump; head_m={:.9}; available_pressure_pa={:.9}; pressure_residual_pa={:.12e}",
+            pump.head_m, pump.available_pressure_pa, pump.residual_pa);
+        println!("pump_inlet_volume_flow_m3_s={:.12e}; pump_hydraulic_power_w={:.12e}; network_evaluations={}; total_flow_evaluations={}",
+            pump.inlet_volume_flow_m3_s, pump.hydraulic_power_w, pump.network_evaluations, pump.total_flow_evaluations);
+        if let Some(table_source) = &pump_table {
+            println!("pump_source={:?}; pump_license={:?}", table_source.curve.source(), table_source.license);
+        }
+    }
     Ok(())
 }
 
@@ -344,4 +441,71 @@ mod tests {
         assert!((cooled.heat_w + 5.0).abs() < 3e-5);
         assert!((cooled.solid_heat_w + 5.0).abs() < 3e-5);
     }
+
+    #[test]
+    fn pump_command_preserves_legacy_forms_and_selects_an_explicit_pressure_bracket() {
+        let args: Vec<_> = ["--parallel", "--pump", "pump.txt", "20", "90", "constant.txt", "20", "0.0002", "0.012"]
+            .into_iter().map(str::to_owned).collect();
+        let (material, settings, pump) = parse_command(&args).unwrap();
+        assert_eq!(material, "constant.txt");
+        assert_eq!(settings.topology, Topology::Parallel);
+        let (name, controls) = pump.unwrap();
+        assert_eq!(name, "pump.txt");
+        assert_eq!(controls.pressure_bracket_pa, (20.0, 90.0));
+        assert_eq!(parse_command(&args[1..]).unwrap().1.topology, Topology::Series);
+        assert!(parse_command(&args[..args.len()-1]).is_err());
+        let old: Vec<_> = ["constant.txt", "50", "20", "0.0002", "0.008"].into_iter().map(str::to_owned).collect();
+        assert!(parse_command(&old).unwrap().2.is_none());
+        assert_eq!(parse_command(&old).unwrap().1, parse_args(&old).unwrap().1);
+    }
+
+    #[test]
+    fn pump_and_material_tables_drive_the_same_series_and_parallel_fem() {
+        let curve = pump_source::PumpTable::parse(include_str!("pump.txt")).unwrap();
+        let root = PumpOperatingControls { pressure_bracket_pa: (20.0, 90.0),
+            absolute_pressure_tolerance_pa: 1e-6, relative_pressure_tolerance: 1e-8,
+            max_network_evaluations: 48 };
+        let fixed = LiquidTable::parse(FIXED).unwrap();
+        let variable = LiquidTable::parse(VARIABLE).unwrap();
+        for (topology, expected_pressure, expected_mass) in [
+            (Topology::Series, 80.0, 0.004), (Topology::Parallel, 50.0, 0.01),
+        ] {
+            let setup = Settings { topology, maximum_mass: 0.012, ..settings(20.0) };
+            let a = run_with_drive(&fixed, setup, Some((&curve.curve, root))).unwrap();
+            let b = run_with_drive(&variable, setup, Some((&curve.curve, root))).unwrap();
+            assert!((a.pressure_drop_pa-expected_pressure).abs() < 1e-5);
+            assert!((a.mass_flow_kg_s-expected_mass).abs() < 1e-8);
+            assert!(b.pressure_drop_pa < a.pressure_drop_pa);
+            assert!(b.mass_flow_kg_s > a.mass_flow_kg_s);
+            assert_ne!(a.walls_k, b.walls_k);
+            for answer in [&a, &b] {
+                assert!((answer.heat_w-20.0).abs() < 3e-5);
+                assert!((answer.solid_heat_w-20.0).abs() < 3e-5);
+                assert!(answer.pump.as_ref().unwrap().residual_pa.abs() < 2e-6);
+                assert!(answer.maximum_heat_imbalance_w < 1e-5);
+                assert!(answer.neglected_hydraulic_power_w <= 0.01);
+                assert!(answer.solid_solves <= 4096);
+            }
+        }
+    }
+
+    #[test]
+    fn pump_table_substitution_and_signed_heat_are_not_fixed_pressure_shortcuts() {
+        let curve = pump_source::PumpTable::parse(include_str!("pump.txt")).unwrap();
+        let stronger = pump_source::PumpTable::parse(&include_str!("pump.txt").replace("0 0.01", "0 0.02")).unwrap();
+        let root = PumpOperatingControls { pressure_bracket_pa: (20.0, 75.0),
+            absolute_pressure_tolerance_pa: 1e-6, relative_pressure_tolerance: 1e-8,
+            max_network_evaluations: 48 };
+        let table = LiquidTable::parse(FIXED).unwrap();
+        let setup = Settings { topology: Topology::Parallel, maximum_mass: 0.012, ..settings(20.0) };
+        let a = run_with_drive(&table, setup, Some((&curve.curve, root))).unwrap();
+        let b = run_with_drive(&table, setup, Some((&stronger.curve, root))).unwrap();
+        assert!(b.mass_flow_kg_s > a.mass_flow_kg_s);
+        assert!(b.pressure_drop_pa > a.pressure_drop_pa);
+        assert!(b.outlet_k < a.outlet_k);
+        let cooled = run_with_drive(&table, Settings { heat_w: -5.0, ..setup }, Some((&curve.curve, root))).unwrap();
+        assert!(cooled.outlet_k < INLET_K);
+        assert!((cooled.heat_w+5.0).abs() < 3e-5);
+    }
+
 }
