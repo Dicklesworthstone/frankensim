@@ -101,8 +101,9 @@ fn boundary(mesh: &ConductionMesh, rows: &[CorrelationRobinBoundary], air: f64)
         .region("body", |f| f.outward_normal[2] > 0.99, rows[0].boundary_condition().clone())?
         .adiabatic_remainder().finish()
 }
-fn fixture<R>(run: impl FnOnce(&Cx<'_>, &CancelGate, &ParallelLiquidNetwork<'_, '_, '_>,
-    &PumpHeadCurve, &mut StoredCoolingState<'_, '_, '_, '_>, &ConductionMesh, &ConductivityModel) -> R) -> R {
+// Preserve the shared fluid chart lifetime across the callback's mutable state.
+fn fixture<R>(run: impl for<'fluid> FnOnce(&Cx<'_>, &CancelGate, &ParallelLiquidNetwork<'_, 'fluid, '_>,
+    &PumpHeadCurve, &mut StoredCoolingState<'fluid, '_, '_, '_>, &ConductionMesh, &ConductivityModel) -> R) -> R {
     let liquid = source::ThermalTable::parse(include_str!("../examples/pressure_cooling/constant.txt")).unwrap();
     let solid = source::ThermalTable::parse_solid(include_str!("../examples/recirculating_cooling/solid_low_capacity.txt")).unwrap();
     let law = LiquidTemperatureLaw::try_new(&liquid.card, &liquid.point(300.0).unwrap(), "T",

@@ -110,9 +110,11 @@ fn boundary(mesh: &ConductionMesh, rows: &[CorrelationRobinBoundary]) -> std::re
     ThermalBoundaryBuilder::new(mesh).region("body", |f| f.outward_normal[2] > 0.99,
         rows[0].boundary_condition().clone())?.adiabatic_remainder().finish()
 }
-fn fixture<R>(cp_scale: f64, run: impl FnOnce(&Cx<'_>, &CancelGate,
-    &ParallelLiquidNetwork<'_, '_, '_>, &PumpHeadCurve,
-    &mut StoredCoolingState<'_, '_, '_, '_>, &ConductionMesh, &ConductivityModel) -> R) -> R {
+// The network and mutable reservoir retain the SAME fluid chart lifetime.
+// Independent elided lifetimes lose that relation at the callback boundary.
+fn fixture<R>(cp_scale: f64, run: impl for<'fluid> FnOnce(&Cx<'_>, &CancelGate,
+    &ParallelLiquidNetwork<'_, 'fluid, '_>, &PumpHeadCurve,
+    &mut StoredCoolingState<'fluid, '_, '_, '_>, &ConductionMesh, &ConductivityModel) -> R) -> R {
     let fluid = source::LiquidTable::parse(include_str!("../examples/pressure_cooling/constant.txt")).unwrap();
     let law = LiquidTemperatureLaw::try_new(&fluid.card, &point(300.0), "T",
         LiquidViscosityBasis::Dynamic, MaterialPropertySelection::SingleClaimOnly).unwrap();
