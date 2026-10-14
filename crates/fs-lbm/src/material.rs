@@ -11,6 +11,9 @@ pub mod conjugate;
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
+mod three_dimensional;
+pub use three_dimensional::{MaterialSlab3, MaterialThermalSlab3};
+
 use crate::{CS2, Grid, MACH_LIMIT, ScalingPlan, ThermalLbm};
 
 /// A material, physical-unit, numerical-range or allocation-budget refusal.
@@ -119,7 +122,7 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
     /// Existing momentum scaling representation and its necessary bounds.
     #[must_use]
     pub const fn flow(&self) -> &ScalingPlan { &self.flow }
-    /// Thermal relaxation time from that same snapshot and physical scaling.
+    /// D2Q5 thermal relaxation time from that same snapshot and physical scaling.
     #[must_use]
     pub const fn thermal_relaxation_time(&self) -> f64 { self.thermal_relaxation_time }
     /// Thermal diffusivity in lattice units.
@@ -159,21 +162,39 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
         {
             return Err(MaterialLbmError::Invalid("slab needs at least two fluid rows, finite expansion and nonnegative gravity"));
         }
-        positive(input.bottom_temperature_k, "bottom absolute temperature must be positive and finite")?;
-        positive(input.top_temperature_k, "top absolute temperature must be positive and finite")?;
-        let difference = input.bottom_temperature_k - input.top_temperature_k;
-        if !difference.is_finite() || difference == 0.0 {
-            return Err(MaterialLbmError::Invalid("normalized slab requires a finite nonzero wall temperature contrast"));
-        }
+        let (difference, gbeta) = self.slab_boundary(
+            input.bottom_temperature_k, input.top_temperature_k,
+            input.gravity_m_s2, input.expansion_per_k,
+        )?;
         let rows = input.ny.checked_add(2).ok_or(MaterialLbmError::Invalid("slab row count overflows"))?;
         admit_cells(input.nx, rows, input.max_cells)?;
-        let acceleration = input.gravity_m_s2 * input.expansion_per_k * difference;
-        let gbeta = self.acceleration_lattice(acceleration)?;
         Ok(MaterialSlab {
             lattice: ThermalLbm::slab(input.nx, input.ny, self.flow.tau, self.thermal_relaxation_time, gbeta),
             top_temperature_k: input.top_temperature_k,
             temperature_difference_k: difference,
         })
+    }
+
+    // Shared by the 2-D and 3-D thermal solvers. Neither dimension may silently
+    // change the sign, absolute-temperature convention or material expansion.
+    fn slab_boundary(
+        &self,
+        bottom_temperature_k: f64,
+        top_temperature_k: f64,
+        gravity_m_s2: f64,
+        expansion_per_k: f64,
+    ) -> Result<(f64, f64), MaterialLbmError> {
+        positive(bottom_temperature_k, "bottom absolute temperature must be positive and finite")?;
+        positive(top_temperature_k, "top absolute temperature must be positive and finite")?;
+        if !gravity_m_s2.is_finite() || gravity_m_s2 < 0.0 || !expansion_per_k.is_finite() {
+            return Err(MaterialLbmError::Invalid("slab needs finite expansion and nonnegative finite gravity"));
+        }
+        let difference = bottom_temperature_k - top_temperature_k;
+        if !difference.is_finite() || difference == 0.0 {
+            return Err(MaterialLbmError::Invalid("normalized slab requires a finite nonzero wall temperature contrast"));
+        }
+        let gbeta = self.acceleration_lattice(gravity_m_s2 * expansion_per_k * difference)?;
+        Ok((difference, gbeta))
     }
 
     /// Numerical reference-one density to physical density [kg/m³].
@@ -211,16 +232,17 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
     }
 }
 
-/// Existing thermal solver together with its physical temperature convention.
+/// Existing thermal solver together with its dimension-independent temperature mapping.
+/// Defaults to the D2Q9/D2Q5 solver; [`MaterialSlab3`] uses D3Q19/D3Q7.
 /// Numerical fields remain public through `lattice`; manually changing its
 /// normalized wall values invalidates this frozen physical-unit mapping.
-pub struct MaterialSlab {
+pub struct MaterialSlab<L = ThermalLbm> {
     /// Actual solver; step it through `lattice.step()`.
-    pub lattice: ThermalLbm,
+    pub lattice: L,
     top_temperature_k: f64,
     temperature_difference_k: f64,
 }
-impl MaterialSlab {
+impl<L> MaterialSlab<L> {
     /// Convert any finite normalized temperature to absolute K.
     /// This also works for negative bottom-minus-top temperature contrasts.
     pub fn temperature_si(&self, normalized: f64) -> Result<f64, MaterialLbmError> {
