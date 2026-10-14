@@ -15,6 +15,14 @@
 // sorted once and fed into the queue only as far as the render horizon, so a 10,000-event score
 // costs what a short loop does. `resync()` forgets how far ahead the lane has rendered, so after
 // the mixer drops a lane's queued audio the next samples are rendered for the clock as it is now.
+//
+// Rendering happens in turns, one task each. A clock tick only moves the clock and asks for a
+// turn, so ticks that queued while the Worker was busy are read in microseconds instead of
+// costing a render each. A turn renders for at most TURN_MS of wall time and then yields through
+// a message the lane posts to itself (no timer clamping), so messages from the page (seek, pause,
+// a new score) and fresh ticks are handled between turns even while the lane is behind.
+
+const TURN_MS = 16;
 
 export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {}) {
   let clock = { frame: 0, at: 0, rate: 48000, seen: false };
@@ -40,7 +48,7 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
       let frame = m.frame;
       if (Number.isFinite(m.wallMs)) frame += (Math.max(0, Date.now() - m.wallMs - 1) * rate) / 1000;
       if (!clock.seen || frame > now() - 1024 || at - clock.at > 50) clock = { frame, at, rate, seen: true };
-      pump();
+      schedulePump();
     }
   };
 
@@ -67,14 +75,17 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
     }
   }
 
+  // at most one turn pending: queued behind whatever the page and the mixer have already posted
   let scheduled = false;
+  const wake = new MessageChannel();
+  wake.port1.onmessage = () => {
+    scheduled = false;
+    pump();
+  };
   function schedulePump() {
     if (scheduled) return;
     scheduled = true;
-    setTimeout(() => {
-      scheduled = false;
-      pump();
-    }, 0);
+    wake.port2.postMessage(0);
   }
 
   function pump() {
@@ -112,6 +123,7 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
       if (engine.idle() && due !== undefined && due > next) next = Math.round(due); // skip silence up to the event
       const turnLimit = next + Math.max(chunk * 16, 2048);
       const stopAt = Math.min(horizon, turnLimit);
+      const yieldAt = performance.now() + TURN_MS;
       while (next < stopAt) {
         // act on everything due at this sample, then render up to the next event or a full chunk
         while (queue.length && (queue[0].frame === undefined || queue[0].frame <= next)) {
@@ -123,12 +135,14 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
         if (queue.length && queue[0].frame !== undefined) n = Math.max(1, Math.min(n, Math.round(queue[0].frame) - next));
         const t0 = performance.now();
         const samples = engine.render(n);
-        stats.wallMs += performance.now() - t0;
+        const t1 = performance.now();
+        stats.wallMs += t1 - t0;
         stats.audioMs += (n * 1000) / clock.rate;
         stats.renderedFrames += n;
         port.postMessage({ type: 'audio', frame: next, channels: [samples], epoch }, [samples.buffer]);
         next += n;
         if (engine.idle() && !queue.length && !seq) break;
+        if (t1 >= yieldAt) break; // the turn has had its time; the rest is rendered after a yield
       }
       const nextDue = queue.length ? queue[0].frame : undefined;
       if (next < horizon && (!engine.idle() || (nextDue !== undefined && nextDue <= horizon))) {
@@ -140,7 +154,7 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
   }
 
   // the clock arrives every ~5 ms while the context runs; this keeps a lane alive between ticks
-  setInterval(pump, 10);
+  setInterval(schedulePump, 10);
 
   return {
     stats,
