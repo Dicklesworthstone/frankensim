@@ -6,6 +6,7 @@
 //! the actual kinetic-energy update remains the existing flow owner's result.
 
 pub mod midpoint;
+mod isolated;
 
 use super::{
     ChtError, ElectricHeatError, ElectricHeatInput, FluidTransportState,
@@ -96,7 +97,7 @@ fn admit_field<const D: usize>(field_t: &[[f64; 3]], cells: usize) -> Result<(),
 fn source_at(
     domain: &VoxelDomain, plane: usize, input: ElectricHeatInput<'_>,
     field_t: &[[f64; 3]], temperature: &[f64], velocity: &[[f64; 3]],
-    transport: &FluidTransportState, dt: f64, gate: &CancelGate,
+    transport: &FluidTransportState, dt: f64, isolated_current_tolerance_a: Option<f64>, gate: &CancelGate,
     resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<Option<f64>, ChtError>,
 ) -> Result<MagneticSource, ElectricHeatError> {
     poll(gate)?;
@@ -105,15 +106,23 @@ fn source_at(
     if !tolerance_w.is_finite() || (input.limits.coupling_tolerance_j > 0.0 && tolerance_w == 0.0) {
         return Err(invalid("magnetic power tolerance is unrepresentable"));
     }
-    let motion = input.setup.solve_with_cell_motion(
-        domain, temperature, input.contacts,
-        ElectricMotionInput { velocity_m_s: velocity, magnetic_flux_density_t: field_t,
-            max_cells: input.limits.thermal.max_cells, power_tolerance_w: tolerance_w },
-        |cell, _, t| {
-            if cell < plane || cell >= cells-plane { Ok(None) }
-            else { resolve(cell, t, transport) }
-        }, gate,
-    )?;
+    let motion_input = ElectricMotionInput {
+        velocity_m_s: velocity, magnetic_flux_density_t: field_t,
+        max_cells: input.limits.thermal.max_cells, power_tolerance_w: tolerance_w,
+    };
+    let law = |cell, _, t| {
+        if cell < plane || cell >= cells-plane { Ok(None) }
+        else { resolve(cell, t, transport) }
+    };
+    let motion = if let Some(tolerance_a) = isolated_current_tolerance_a {
+        input.setup.solve_isolated_cell_motion(
+            domain, temperature, input.contacts, motion_input, tolerance_a, law, gate,
+        )?
+    } else {
+        input.setup.solve_with_cell_motion(
+            domain, temperature, input.contacts, motion_input, law, gate,
+        )?
+    };
     let (power, joule_energy_j) = deposited_power(domain, plane, &motion.electric.joule_w, dt, gate)?;
     let electrode_energy_j: f64 = motion.electric.electrodes.iter()
         .map(|e| (e.voltage_v * e.current_a) * dt).sum();
@@ -161,6 +170,7 @@ fn balance(source: MagneticSource, heat: HeatBalance, input: ElectricHeatInput<'
 fn advance<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
     slab: &mut MaterialSlab<S>, domain: VoxelDomain, plane: usize,
     input: ElectricHeatInput<'_>, field_t: &[[f64; 3]], external: &[[f64; D]],
+    isolated_current_tolerance_a: Option<f64>,
     gate: &CancelGate,
     mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<Option<f64>, ChtError>,
     step: impl FnOnce(&mut MaterialSlab<S>, &[f64], &[[f64; D]], HeatSourceLimits) -> Result<HeatBalance, ThermalSourceError>,
@@ -171,7 +181,7 @@ fn advance<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
     let temperature = temperatures::<S, D, Q>(slab, input.limits.thermal, gate)?;
     let velocity = velocities::<S, D, Q>(slab, cells, plane, gate)?;
     let source = source_at(&domain, plane, input, field_t, &temperature, &velocity,
-        &slab.force_units.transport, slab.force_units.timestep_s, gate, &mut resolve)?;
+        &slab.force_units.transport, slab.force_units.timestep_s, isolated_current_tolerance_a, gate, &mut resolve)?;
     let forces = combined_forces(external, &source.motion, gate)?;
     poll(gate)?;
     let mut next = candidate::<S, D, Q>(slab);
@@ -214,7 +224,7 @@ impl MaterialSlab<ThermalLbm> {
         let domain = VoxelDomain::graded([
             vec![dx; self.lattice.grid.nx], vec![dx; self.lattice.grid.ny], vec![depth_m],
         ])?;
-        advance::<ThermalLbm, 2, 5>(self, domain, plane, input, field_t, forces_n_m3, gate, resolve,
+        advance::<ThermalLbm, 2, 5>(self, domain, plane, input, field_t, forces_n_m3, None, gate, resolve,
             |s, p, f, limits| s.step_with_power_density(p, f, depth_m, limits))
     }
 }
@@ -233,7 +243,7 @@ impl MaterialSlab<ThermalLbm3> {
         let dx = self.force_units.cell_size_m;
         if !positive((dx * dx) * dx) { return Err(invalid("invalid represented 3D cell volume")); }
         let domain = VoxelDomain::new(g.nx, g.ny, g.nz, dx)?;
-        advance::<ThermalLbm3, 3, 7>(self, domain, plane, input, field_t, forces_n_m3, gate, resolve,
+        advance::<ThermalLbm3, 3, 7>(self, domain, plane, input, field_t, forces_n_m3, None, gate, resolve,
             |s, p, f, limits| s.step_with_power_density(p, f, limits))
     }
 }

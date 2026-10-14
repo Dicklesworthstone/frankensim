@@ -33,7 +33,7 @@ pub struct MagneticMidpointOptions {
 }
 
 impl MagneticMidpointOptions {
-    fn admit(self) -> Result<(), MagneticMidpointError> {
+    pub(super) fn admit(self) -> Result<(), MagneticMidpointError> {
         let nonnegative = |x: f64| x.is_finite() && x >= 0.0;
         if self.max_iterations == 0 || self.max_iterations > MAX_MIDPOINT_ITERATIONS
             || !positive(self.temperature_tolerance_k) || !positive(self.velocity_tolerance_m_s)
@@ -59,7 +59,7 @@ pub struct MagneticSourceResidual {
 /// Accepted coupled step; all returned sources are the ones actually applied.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MagneticMidpointStep {
-    /// Source-producing current, heat, force and instantaneous power fields.
+    /// Source-producing current, conductor-frame heat, force and instantaneous power fields.
     pub motion: MovingConductorSolution,
     /// Actual heat storage and independently measured thermal wall exchange.
     pub heat: HeatBalance,
@@ -158,10 +158,10 @@ fn source_residual(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn solve<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
+pub(super) fn solve<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
     slab: &mut MaterialSlab<S>, domain: VoxelDomain, plane: usize,
     input: ElectricHeatInput<'_>, field: &[[f64; 3]], external: &[[f64; D]],
-    options: MagneticMidpointOptions, gate: &CancelGate,
+    options: MagneticMidpointOptions, isolated_current_tolerance_a: Option<f64>, gate: &CancelGate,
     mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<Option<f64>, ChtError>,
     mut step: impl FnMut(&mut MaterialSlab<S>, &[f64], &[[f64; D]], HeatSourceLimits) -> Result<HeatBalance, ThermalSourceError>,
 ) -> Result<MagneticMidpointStep, MagneticMidpointError> {
@@ -179,7 +179,7 @@ fn solve<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
     for iteration in 1..=options.max_iterations {
         poll(gate)?;
         let source = source_at(&domain, plane, input, field, &evaluation_temperature, &evaluation_velocity,
-            &slab.force_units.transport, dt, gate, &mut resolve)?;
+            &slab.force_units.transport, dt, isolated_current_tolerance_a, gate, &mut resolve)?;
         electrical_solves += 1;
         let forces = combined_forces(external, &source.motion, gate)?;
         let mut next = candidate::<S, D, Q>(slab);
@@ -202,7 +202,7 @@ fn solve<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
         last_source = None;
         if last_temperature <= options.temperature_tolerance_k && last_velocity <= options.velocity_tolerance_m_s {
             let checked = source_at(&domain, plane, input, field, &midpoint_temperature, &midpoint_velocity,
-                &slab.force_units.transport, dt, gate, &mut resolve)?;
+                &slab.force_units.transport, dt, isolated_current_tolerance_a, gate, &mut resolve)?;
             electrical_solves += 1;
             let residual = source_residual(&source.motion, &checked.motion, &evaluation_velocity,
                 &midpoint_velocity, &domain, dt, gate)?;
@@ -266,7 +266,7 @@ impl MaterialSlab<ThermalLbm> {
         let domain = VoxelDomain::graded([
             vec![dx; self.lattice.grid.nx], vec![dx; self.lattice.grid.ny], vec![depth_m],
         ]).map_err(ElectricHeatError::from)?;
-        solve::<ThermalLbm, 2, 5>(self, domain, plane, input, field_t, external_n_m3, options, gate, resolve,
+        solve::<ThermalLbm, 2, 5>(self, domain, plane, input, field_t, external_n_m3, options, None, gate, resolve,
             |s,p,f,limits| s.step_with_power_density(p,f,depth_m,limits))
     }
 }
@@ -287,7 +287,7 @@ impl MaterialSlab<ThermalLbm3> {
         let dx = self.force_units.cell_size_m;
         if !positive((dx * dx) * dx) { return Err(invalid("invalid represented 3D cell volume").into()); }
         let domain = VoxelDomain::new(g.nx, g.ny, g.nz, dx).map_err(ElectricHeatError::from)?;
-        solve::<ThermalLbm3, 3, 7>(self, domain, plane, input, field_t, external_n_m3, options, gate, resolve,
+        solve::<ThermalLbm3, 3, 7>(self, domain, plane, input, field_t, external_n_m3, options, None, gate, resolve,
             |s,p,f,limits| s.step_with_power_density(p,f,limits))
     }
 }
