@@ -19,6 +19,12 @@ import { KitView, fmtJ } from "./kit3d";
 const SR = 48_000;
 /** Look-ahead of every lane [frames], and how long after Play the score starts (cold, warm). */
 const AHEAD = 48_000;
+/**
+ * Most frames per audio message from a lane. The score is computed a second ahead, so a lane can send
+ * 512 frames at a time: a quarter of the messages into the mixer's realtime thread, every engine call
+ * unchanged (public/live/lane.js). The live kit, which plays what is struck now, keeps 128.
+ */
+const CHUNK = 512;
 const LEAD_COLD_S = 1.5;
 const LEAD_WARM_S = 0.85;
 /** One fixed playback gain per instrument (see the evidence note). */
@@ -374,7 +380,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     let warm = !!piano;
     const started: Promise<unknown>[] = [];
     if (!piano) {
-      piano = new PianoLane(m, { aheadFrames: AHEAD, gain: PIANO_GAIN, snapshotHz: 30, minRealtime: 1.3 });
+      piano = new PianoLane(m, { aheadFrames: AHEAD, chunk: CHUNK, gain: PIANO_GAIN, snapshotHz: 30, minRealtime: 1.3 });
       piano.onStats = (s) => { const h = health["piano"]; if (h) { h.rt = s.realtime; h.stats = s; } };
       piano.onSnapshot = (frame, data, ep) => { if (ep >= epoch) { snaps.push({ frame, data }); if (snaps.length > 90) snaps.shift(); } };
       health["piano"] = { rt: 0, late: 0, gap: 0, base: 0, skipBase: 0, detail: "", slow: 0 };
@@ -409,7 +415,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
    * restarted one grid coarser (see the stats handler), and the page says so.
    */
   function startPiece(m: LiveMix, p: PieceId, scales: number[]): Promise<void> {
-    const lane = new KitLane(m, p, { gain: KIT_GAIN[p], aheadFrames: AHEAD, minRealtime: GRID[p].minRt, scales, fieldFrames: SR / 40, bursts: false });
+    const lane = new KitLane(m, p, { gain: KIT_GAIN[p], aheadFrames: AHEAD, chunk: CHUNK, minRealtime: GRID[p].minRt, scales, fieldFrames: SR / 40, bursts: false });
     const entry = { lane, ready: null as KitReady | null };
     kits.set(p, entry);
     const h: Health = { rt: 0, late: 0, gap: 0, base: 0, skipBase: 0, detail: "", slow: 0 };

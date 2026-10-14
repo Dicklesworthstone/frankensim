@@ -21,10 +21,20 @@
 // costing a render each. A turn renders for at most TURN_MS of wall time and then yields through
 // a message the lane posts to itself (no timer clamping), so messages from the page (seek, pause,
 // a new score) and fresh ticks are handled between turns even while the lane is behind.
+//
+// The engine is called for BLOCK frames at a time (fewer up to the next event). `chunk` is the most
+// frames one audio message carries: with a larger chunk the blocks are gathered into one message
+// before it is sent, which changes nothing but the number of messages. A lane that renders a score
+// a second ahead can send 512 frames at a time, a quarter of the tasks for the mixer's realtime
+// thread; a partly filled message waits for its next blocks only while its first frame is at least
+// a quarter of the look-ahead (and 4 chunks) ahead of the clock, so it never arrives late for it.
 
 const TURN_MS = 16;
+const BLOCK = 128;
 
-export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {}) {
+export function createLane(port, engine, { aheadFrames = 1024, chunk = BLOCK } = {}) {
+  chunk = Math.max(BLOCK, Math.round(chunk) || BLOCK);
+  const keepAhead = Math.max(4 * chunk, aheadFrames / 4);
   let clock = { frame: 0, at: 0, rate: 48000, seen: false };
   let next = -1;                 // context frame of the next sample to render
   const queue = [];              // pending events, sorted by frame (undefined frame = now)
@@ -32,6 +42,7 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
   let score = null;              // {events (sorted by frame), at}
   let epoch = 0;                 // stamped on every block; raised by resync (see mix-worklet flush)
   let pumping = false;
+  let open = null;               // the audio message being gathered: {frame, epoch, buf, len}
   const stats = { renderedFrames: 0, skippedFrames: 0, lateEvents: 0, wallMs: 0, audioMs: 0 };
 
   port.onmessage = (event) => {
@@ -88,6 +99,25 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
     wake.port2.postMessage(0);
   }
 
+  function send() {
+    const s = open.len === open.buf.length ? open.buf : open.buf.subarray(0, open.len);
+    port.postMessage({ type: 'audio', frame: open.frame, channels: [s], epoch: open.epoch }, [s.buffer]);
+    open = null;
+  }
+
+  // a rendered block, to the mixer at once or gathered into the open message
+  function deliver(samples, frame) {
+    if (open && (open.frame + open.len !== frame || open.epoch !== epoch)) send();
+    if (chunk === BLOCK) {
+      port.postMessage({ type: 'audio', frame, channels: [samples], epoch }, [samples.buffer]);
+      return;
+    }
+    if (!open) open = { frame, epoch, buf: new Float32Array(chunk), len: 0 };
+    open.buf.set(samples, open.len);
+    open.len += samples.length;
+    if (open.len + BLOCK > chunk) send(); // the next block may not fit
+  }
+
   function pump() {
     if (pumping || !clock.seen) return;
     pumping = true;
@@ -95,7 +125,7 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
       const t = now();
       const lead = seq ? Math.min(seq.startFrame, t + aheadFrames) : t;
       const horizon = Math.max(t, lead) + aheadFrames;
-      extend(horizon + chunk);
+      extend(horizon + BLOCK);
       const due = queue.length ? queue[0].frame : undefined;
       if (engine.idle() && (due === undefined || due > horizon) && !queue.some((e) => e.frame === undefined)) {
         // silent and nothing due within reach: keep pace with the clock without stepping
@@ -103,10 +133,10 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
         if (next < horizon) next = Math.round(due !== undefined ? Math.min(horizon, due) : horizon);
         return;
       }
-      if (next < t + chunk) {
+      if (next < t + BLOCK) {
         if (next < 0 || engine.idle()) {
           // never rendered or woken from idle: start at the next scheduled event or a short lead-in
-          next = due !== undefined && due >= t + chunk
+          next = due !== undefined && due >= t + BLOCK
             ? Math.round(Math.min(due, horizon))
             : Math.round(t + Math.min(aheadFrames / 2, 4096));
         } else {
@@ -121,7 +151,7 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
         }
       }
       if (engine.idle() && due !== undefined && due > next) next = Math.round(due); // skip silence up to the event
-      const turnLimit = next + Math.max(chunk * 16, 2048);
+      const turnLimit = next + Math.max(BLOCK * 16, 2048);
       const stopAt = Math.min(horizon, turnLimit);
       const yieldAt = performance.now() + TURN_MS;
       while (next < stopAt) {
@@ -131,7 +161,7 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
           if (e.frame !== undefined && e.frame < next) stats.lateEvents += 1;
           engine.apply(e);
         }
-        let n = chunk;
+        let n = BLOCK;
         if (queue.length && queue[0].frame !== undefined) n = Math.max(1, Math.min(n, Math.round(queue[0].frame) - next));
         const t0 = performance.now();
         const samples = engine.render(n);
@@ -139,9 +169,12 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
         stats.wallMs += t1 - t0;
         stats.audioMs += (n * 1000) / clock.rate;
         stats.renderedFrames += n;
-        port.postMessage({ type: 'audio', frame: next, channels: [samples], epoch }, [samples.buffer]);
+        deliver(samples, next);
         next += n;
-        if (engine.idle() && !queue.length && !seq) break;
+        if (engine.idle() && !queue.length && !seq) {
+          if (open) send();
+          break;
+        }
         if (t1 >= yieldAt) break; // the turn has had its time; the rest is rendered after a yield
       }
       const nextDue = queue.length ? queue[0].frame : undefined;
@@ -150,6 +183,7 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
       }
     } finally {
       pumping = false;
+      if (open && open.frame < now() + keepAhead) send(); // close to its time: send what there is
     }
   }
 
@@ -195,6 +229,7 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
      */
     resync(newEpoch) {
       epoch = Number.isFinite(newEpoch) ? newEpoch : epoch + 1;
+      open = null; // rendered for the old epoch: the mixer refuses it
       next = -1;
       pump();
     },

@@ -4,7 +4,8 @@
 // 5x (levels.js, engine_levels.json beside the wasm).
 //
 // Main thread -> worker
-//   {type:'init', piece, port, gain?, aheadFrames?, scales?, minRealtime?, fieldHz?, fieldFrames?, bursts?}
+//   {type:'init', piece, port, gain?, aheadFrames?, chunk?, scales?, minRealtime?, fieldHz?, fieldFrames?, bursts?}
+//       chunk        most frames per audio message (default 128; lane.js)
 //       fieldHz      fields per second of wall time (0: no fields)
 //       fieldFrames  instead: one field every this many AUDIO frames (even spacing however far
 //                    ahead the lane renders; for a score heard a second after it is computed)
@@ -160,7 +161,7 @@ self.onmessage = async (event) => {
           return out;
         },
       };
-      lane = createLane(m.port, engine, { aheadFrames: m.aheadFrames || 1024 });
+      lane = createLane(m.port, engine, { aheadFrames: m.aheadFrames || 1024, chunk: m.chunk });
       const xy = piece.surfaceXY();
       post({ type: 'ready', info: JSON.parse(piece.info()), xy, h: piece.surfaceH(), radius: piece.radius(), scale: pick.scale, realtime: pick.realtime, levelFix: fix, levels: table ? 'ok' : 'none' }, [xy.buffer]);
     } else if (!piece || !lane) {

@@ -28,6 +28,8 @@ interface StrandbarData {
 const SR = 48_000;
 /** Look-ahead of the live lanes, frames, and how long after Play both versions start (the lanes fill first). */
 const AHEAD = 96_000;
+/** Most frames per audio message: the lanes run two seconds ahead, so 512 (a quarter of the messages; see public/live/lane.js). */
+const CHUNK = 512;
 const LEAD_S = 1.75;
 type Phase = "idle" | "loading" | "playing";
 
@@ -214,9 +216,9 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       });
       // a fixed score needs no low latency: a second of look-ahead rides out CPU contention
       // (another tab, a busy machine) that an 85 ms buffer turned into dropouts
-      const piano = new PianoLane(m, { aheadFrames: AHEAD, gain: data.live.piano.gain });
-      const kick = new KitLane(m, "kick", { gain: data.live.kick.gain, aheadFrames: AHEAD, scales: [2, 2.5, 3, 3.5, 4, 5, 6], minRealtime: 1.4, fieldHz: 0 });
-      const hihat = new KitLane(m, "hihat-closed", { gain: data.live.hihat.gain, aheadFrames: AHEAD, scales: [2.5, 3, 3.5, 4, 5, 6], minRealtime: 1.4, fieldHz: 0 });
+      const piano = new PianoLane(m, { aheadFrames: AHEAD, chunk: CHUNK, gain: data.live.piano.gain });
+      const kick = new KitLane(m, "kick", { gain: data.live.kick.gain, aheadFrames: AHEAD, chunk: CHUNK, scales: [2, 2.5, 3, 3.5, 4, 5, 6], minRealtime: 1.4, fieldHz: 0 });
+      const hihat = new KitLane(m, "hihat-closed", { gain: data.live.hihat.gain, aheadFrames: AHEAD, chunk: CHUNK, scales: [2.5, 3, 3.5, 4, 5, 6], minRealtime: 1.4, fieldHz: 0 });
       const meter = (id: string) => (s: LaneWorkerStats): void => {
         const h = (laneHealth[id] ??= { late: 0, gap: 0, rt: 0 });
         h.rt = s.realtime;

@@ -130,7 +130,8 @@ export class KitLane {
   private worker: Worker;
   private mix: LiveMix;
 
-  constructor(mix: LiveMix, piece: string, opts: { gain: number; aheadFrames?: number; scales?: number[]; minRealtime?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
+  /** `chunk`: most frames per audio message (default 128; a score lane far ahead can send larger ones, see lane.js). */
+  constructor(mix: LiveMix, piece: string, opts: { gain: number; aheadFrames?: number; chunk?: number; scales?: number[]; minRealtime?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
     this.piece = piece;
     this.mix = mix;
     this.worker = new Worker(`${LIVE_BASE_URL}/kit/worker.js`, { type: "module", name: `kit-${piece}` });
@@ -196,7 +197,8 @@ export class PianoLane {
   private worker: Worker;
   private mix: LiveMix;
 
-  constructor(mix: LiveMix, opts: { aheadFrames?: number; options?: Record<string, number>; gain?: number; minRealtime?: number; snapshotHz?: number; governor?: boolean } = {}) {
+  /** `chunk`: most frames per audio message (default 128; a score lane far ahead can send larger ones, see lane.js). */
+  constructor(mix: LiveMix, opts: { aheadFrames?: number; chunk?: number; options?: Record<string, number>; gain?: number; minRealtime?: number; snapshotHz?: number; governor?: boolean } = {}) {
     this.mix = mix;
     this.worker = new Worker(`${LIVE_BASE_URL}/piano/lane-worker.js`, { type: "module", name: "piano-lane" });
     const ch = new MessageChannel();
