@@ -30,6 +30,7 @@ pub mod moist_air;
 pub mod graph;
 /// Contact-temperature history and explicit strength handoff for polymer welding.
 pub mod healing;
+mod heat_capacity_state;
 pub mod hyper;
 pub mod identifiability;
 pub mod iso9613;
