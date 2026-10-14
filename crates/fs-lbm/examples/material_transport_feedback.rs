@@ -55,18 +55,29 @@ impl Table {
         Ok((transport,resistivity))
     }
 }
+fn midpoint_requested(args:&[String])->Result<bool,Box<dyn Error>> {
+    if (2..=3).contains(&args.len()) { return Ok(false); }
+    if args.get(3).is_some_and(|a|a=="--electrical") {
+        if args.len()==6 { return Ok(false); }
+        if args.len()==7 && args[6]=="--midpoint" { return Ok(true); }
+    }
+    Err("usage: material_transport_feedback TABLE.txt [steps: 2..2000] OR TABLE.txt STEPS --electrical VOLTAGE B_Y_TESLA [--midpoint]".into())
+}
+
 fn main()->Result<(),Box<dyn Error>> {
     let args:Vec<_>=std::env::args().collect();
-    if !(2..=3).contains(&args.len()) && !(args.len()==6 && args[3]=="--electrical") {
-        return Err("usage: material_transport_feedback TABLE.txt [steps: 2..2000] OR TABLE.txt STEPS --electrical VOLTAGE B_Y_TESLA".into());
-    }
+    let midpoint=midpoint_requested(&args)?;
     let steps:usize=args.get(2).map_or(Ok(200),|s|s.parse())?;
     if !(2..=2000).contains(&steps) {return Err("steps must be in 2..2000".into());}
     let mut text=String::new();
     std::fs::File::open(&args[1])?.take(65_537).read_to_string(&mut text)?;
     if text.len()>65_536 {return Err("table exceeds 64 KiB".into());}
     let table=Table::parse(&text)?;
-    if args.len()==6 {return electrical::run(&table,steps,args[4].parse()?,args[5].parse()?);}
+    if args.len()>=6 {
+        let (voltage,b)=(args[4].parse()?,args[5].parse()?);
+        return if midpoint {electrical::run_midpoint(&table,steps,voltage,b)}
+            else {electrical::run(&table,steps,voltage,b)};
+    }
     let reference=table.at(305.0)?;
     let scale=plan_scaling_from_material(&reference,0.01,0.01,0.05)?;
     let mut slab=scale.thermal_slab3(MaterialThermalSlab3 {nx:2,ny:1,nz:8,
@@ -117,6 +128,20 @@ mod tests {
         assert!(old.at(310.0).is_ok()); assert!(old.electrical_at(310.0).is_err());
         for text in ["1000 1000\n300 100 1 2\n320 300 0.5\n", "1000 1000\n300 100 1 -2\n320 300 0.5 4\n"] {
             assert!(Table::parse(text).is_err());
+        }
+    }
+
+    #[test]
+    fn midpoint_flag_is_opt_in_and_preserves_original_command_forms() {
+        let args=|tail:&str|std::iter::once("material_transport_feedback")
+            .chain(tail.split_whitespace()).map(str::to_owned).collect::<Vec<_>>();
+        for tail in ["table.txt", "table.txt 20", "table.txt 20 --electrical 10 0.5"] {
+            assert!(!midpoint_requested(&args(tail)).unwrap());
+        }
+        assert!(midpoint_requested(&args("table.txt 20 --electrical 10 0.5 --midpoint")).unwrap());
+        for tail in ["", "table.txt 20 --midpoint", "table.txt 20 --electrical 10",
+            "table.txt 20 --electrical 10 0.5 --other", "table.txt 20 --electrical 10 0.5 --midpoint extra"] {
+            assert!(midpoint_requested(&args(tail)).is_err());
         }
     }
 
