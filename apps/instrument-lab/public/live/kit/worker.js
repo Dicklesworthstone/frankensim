@@ -1,5 +1,7 @@
 // Live drum-kit piece worker (ES module Worker): owns one fs-vkplate piece (engine.js) and
-// feeds one lane of fs-live-mix. Samples are microphone pressure [Pa] times a fixed gain.
+// feeds one lane of fs-live-mix. Samples are microphone pressure [Pa] times a fixed gain, which the
+// page sets for the 5x grid; on the grid picked here it is scaled so that a stroke is as loud as on
+// 5x (levels.js, engine_levels.json beside the wasm).
 //
 // Main thread -> worker
 //   {type:'init', piece, port, gain?, aheadFrames?, scales?, minRealtime?, fieldHz?, fieldFrames?, bursts?}
@@ -15,9 +17,11 @@
 //   {type:'stopScore'}                      drop the rest of the score (ringing continues)
 //   {type:'resync', epoch}                  render for the clock as it is now (after a mix flush)
 //   {type:'stop'}                           end the sequence (ringing continues)
-//   {type:'gain', gain}
+//   {type:'gain', gain}                     a new page gain (scaled by the same levelFix)
 // Worker -> main thread
-//   {type:'ready', info, xy:Float32Array, h, radius, scale, realtime}
+//   {type:'ready', info, xy:Float32Array, h, radius, scale, realtime, levelFix, levels}
+//       levelFix  the factor on the page's gain for this grid (1 on 5x); levels: 'ok', or 'none' when
+//                 engine_levels.json is missing or was measured with another wasm (gain unscaled)
 //   {type:'burst', frame, stepMs, count, v:Float32Array}    the first milliseconds after a stroke: `count`
 //                                                          surface velocities `stepMs` apart, back to back
 //   {type:'field', frame, epoch, v:Float32Array, kinetic, force}   ~fieldHz while the piece moves; force:
@@ -26,10 +30,12 @@
 //   {type:'error', message}
 import init, { KitPiece } from './engine.js';
 import { createLane } from '../lane.js';
+import { levelFix } from './levels.js';
 
 let piece = null;
 let lane = null;
-let gain = 0.03;
+let gain = 0.03; // = the page's gain times fix
+let fix = 1;
 let fieldEvery = 1000 / 30;
 let fieldFrames = 0; // > 0: fields paced by audio frames instead of wall time
 let fieldDue = 0;
@@ -55,6 +61,20 @@ function bench(name, scale) {
   return (40 * 128 * 1000) / 48000 / ms;
 }
 
+// The level table, only if it was measured with this very wasm (a stale table would scale wrongly).
+async function loadLevels(wasmBytes) {
+  try {
+    const r = await fetch(new URL('./engine_levels.json', import.meta.url));
+    if (!r.ok) return null;
+    const table = await r.json();
+    if (!globalThis.crypto || !crypto.subtle) return table; // plain-http dev server: cannot check
+    const h = new Uint8Array(await crypto.subtle.digest('SHA-256', await wasmBytes));
+    return Array.from(h, (b) => b.toString(16).padStart(2, '0')).join('') === table.wasmSha256 ? table : null;
+  } catch {
+    return null;
+  }
+}
+
 function choose(name, scales, minRealtime) {
   let fallback = null;
   for (const s of scales) {
@@ -73,13 +93,18 @@ self.onmessage = async (event) => {
   const m = event.data || {};
   try {
     if (m.type === 'init') {
-      await init({ module_or_path: new URL('./engine_bg.wasm', import.meta.url) });
-      gain = Number.isFinite(m.gain) ? m.gain : gain;
+      const wasm = await fetch(new URL('./engine_bg.wasm', import.meta.url));
+      const levels = loadLevels(wasm.clone().arrayBuffer());
+      await init({ module_or_path: wasm });
+      const table = await levels;
+      const pageGain = Number.isFinite(m.gain) ? m.gain : gain;
       if (Number.isFinite(m.fieldHz)) fieldEvery = m.fieldHz > 0 ? 1000 / m.fieldHz : Infinity;
       if (Number(m.fieldFrames) > 0) { fieldFrames = Math.max(128, Math.round(Number(m.fieldFrames))); fieldEvery = Infinity; }
       if (m.bursts === false) bursts = false;
       const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7);
       piece = new KitPiece(m.piece, pick.scale);
+      fix = levelFix(table, m.piece, pick.scale, pageGain);
+      gain = pageGain * fix;
       const engine = {
         idle: () => piece.asleep(),
         apply: (e) => {
@@ -137,7 +162,7 @@ self.onmessage = async (event) => {
       };
       lane = createLane(m.port, engine, { aheadFrames: m.aheadFrames || 1024 });
       const xy = piece.surfaceXY();
-      post({ type: 'ready', info: JSON.parse(piece.info()), xy, h: piece.surfaceH(), radius: piece.radius(), scale: pick.scale, realtime: pick.realtime }, [xy.buffer]);
+      post({ type: 'ready', info: JSON.parse(piece.info()), xy, h: piece.surfaceH(), radius: piece.radius(), scale: pick.scale, realtime: pick.realtime, levelFix: fix, levels: table ? 'ok' : 'none' }, [xy.buffer]);
     } else if (!piece || !lane) {
       return;
     } else if (m.type === 'strike') {
@@ -153,7 +178,7 @@ self.onmessage = async (event) => {
     } else if (m.type === 'stop') {
       lane.stopSequence();
     } else if (m.type === 'gain') {
-      gain = Number(m.gain) || 0;
+      gain = (Number(m.gain) || 0) * fix;
     }
   } catch (e) {
     post({ type: 'error', message: e && e.message ? String(e.message) : String(e) });

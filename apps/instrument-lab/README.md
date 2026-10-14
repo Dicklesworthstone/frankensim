@@ -116,8 +116,19 @@ piece gets its own Worker (`public/live/kit/worker.js`), which times a stroke at
 and keeps the finest that runs 1.7x faster than real time on the device. A silent piece is not
 stepped. Strokes land where the head or cymbal is touched; the Worker sends the surface velocity
 at ~45 Hz and, after each stroke, the first 8 ms every 0.25 ms, which the page replays 60x slower.
-Levels: one fixed gain per piece, its 50 ms loudness matched to the Salamander overheads, capped so
-a standard stroke peaks at 0.55 (the live cymbals' attacks are too sharp to match their loudness).
+Levels: one gain per piece, set on the 5x grid: its 50 ms loudness matched to the Salamander
+overheads, capped so a standard stroke peaks at 0.55 (the live cymbals' attacks are too sharp to
+match their loudness). A stroke's loudness moves with the grid, by piece and not monotonically (the
+crash is 5 dB louder at 4x than at 5x, the closed hi-hat 5 dB quieter; the drums move by under
+1 dB, the snare by up to 3.8 dB at 2x), so `build-wasm.sh` also writes `engine_levels.json`: each
+piece's standard stroke per grid 2-10x, its loudness (largest 400 ms RMS, so a cymbal's wash counts)
+and peak, measured with that wasm by `tools/kit_levels.mjs` and stamped with its SHA-256. The
+Worker scales the page's gain so the stroke on the grid it picked is as loud as on 5x
+(`public/live/kit/levels.js`): a cut always, a boost only while the stroke still peaks at or under
+0.55. So the hi-hats stay up to 3.5 dB quiet at 3.5-4x, and the hats and cymbals at 6x and finer,
+whose strokes already peak over 0.55, are not raised (up to 4.4 dB quiet). Beside any other wasm the
+table is ignored and the gain is used as given. The same applies wherever a kit Worker plays
+(Strandbar's gains are also measured on 5x).
 
 ## Strandbar
 

@@ -26,4 +26,8 @@ fi
 cp $STAGE/engine.js $OUT/engine.js
 cp $STAGE/engine.d.ts $OUT/engine.d.ts
 cp $STAGE/engine_bg.opt.wasm $OUT/engine_bg.wasm
+# each piece's stroke loudness per grid, for the Worker's grid-independent level (levels.js); the
+# table names this wasm's SHA-256 and is ignored beside any other build
+node $HERE/../tools/kit_levels.mjs $OUT > $STAGE/engine_levels.json
+cp $STAGE/engine_levels.json $OUT/engine_levels.json
 echo "engine_bg.wasm raw=$(wc -c < $OUT/engine_bg.wasm) gzip=$(gzip -9 -c $OUT/engine_bg.wasm | wc -c)"

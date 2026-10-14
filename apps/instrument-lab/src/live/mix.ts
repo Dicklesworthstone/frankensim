@@ -75,6 +75,10 @@ export interface KitReady {
   radius: number;
   scale: number;
   realtime: number;
+  /** Factor on the page's gain (set for the 5x grid) that keeps a stroke as loud on `scale`; 1 on 5x. */
+  levelFix?: number;
+  /** "none": no level table for this wasm, so the gain is unscaled. */
+  levels?: "ok" | "none";
 }
 export interface KitField {
   frame: number;
