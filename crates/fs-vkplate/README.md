@@ -42,6 +42,11 @@ auxiliary variable `psi = sqrt(2V)` (Bilbao, Ducceschi and Zama): the update sta
 needs one rank-one correction (Sherman-Morrison; with the air mass a 2x2 Woodbury solve), and
 conserves a discrete energy, so the nonlinearity cannot destabilise the step. The plain explicit
 von Karman update blew up a crash struck at 8 m/s within 7000 steps; this one stays bounded.
+`psi` is advanced along the gradient only, so it drifts from `sqrt(2V)`; a shallow shell carries its
+curvature stiffness in `V`, so that drift scales the shell's stiffness (on a live grid it wandered
+between 0.5 and 1.5 within 2 s and the 8-16 kHz bands grew back after a second). Each step pulls `psi`
+back to `sqrt(2V)` at the half step: lowering it only removes energy, and raising it spends at most
+the energy the loss terms removed in the step before, so the discrete energy still never grows.
 The linear part's CFL limit is checked by power iteration and the internal rate is the smallest
 multiple of 48 kHz that uses at most 60 % of it. Output is decimated with a windowed sinc.
 

@@ -253,6 +253,10 @@ pub struct Body {
     psi: f64,
     psi_next: f64,
     sav: bool,
+    /// sqrt(2 V) at the previous step, and the energy the loss terms removed in the last step
+    /// (the most the auxiliary variable may be raised by when it is pulled back to sqrt(2 V)).
+    r_prev: f64,
+    budget: f64,
     /// Step size the cached update coefficients `cf` belong to.
     kc: f64,
     cf: Vec<[f64; 4]>,
@@ -482,7 +486,7 @@ impl Body {
         }
         Ok(Body {
             name: name.into(), h, n, xy, grid_index, mass, s0: s0v, s1, lap, stiff, tension: s.tension, berger, vk,
-            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, kc: 0.0, cf: vec![],
+            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0,
         })
     }
@@ -502,7 +506,7 @@ impl Body {
             name: name.into(), h, n, xy, grid_index: BTreeMap::new(), mass: vec![mass_per_m * h; n],
             s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]),
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
-            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, kc: 0.0, cf: vec![],
+            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0,
         }
     }
@@ -513,7 +517,7 @@ impl Body {
             name: name.into(), h: 1.0, n: 1, xy: vec![[0.0, 0.0]], grid_index: BTreeMap::new(), mass: vec![mass],
             s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]),
             tension: 0.0, berger: 0.0, vk: None,
-            w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, kc: 0.0, cf: vec![],
+            w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0,
         }
     }
@@ -649,6 +653,20 @@ impl Body {
         if nl {
             let v = self.nonlinear_gradient();
             let root = (2.0 * v).sqrt();
+            if self.vk.is_some() {
+                // psi is advanced along g only, so it drifts from sqrt(2V): on a live grid it wandered
+                // between 0.5 and 1.5 times sqrt(2V) within 2 s, scaling the shell's curvature
+                // stiffness (which a shallow shell carries entirely in V) by that factor. Pull it back
+                // to sqrt(2V) at the half step without adding energy the losses did not remove:
+                // lowering psi only removes energy; raising it spends at most the last step's loss.
+                let target = if self.r_prev > 0.0 { 0.5 * (root + self.r_prev) } else { root };
+                if self.psi > target {
+                    self.psi = target;
+                } else {
+                    self.psi = (self.psi * self.psi + 2.0 * self.budget).sqrt().min(target);
+                }
+                self.r_prev = root;
+            }
             if root > 0.0 {
                 let ir = 1.0 / root;
                 for x in self.g.iter_mut() {
@@ -718,7 +736,20 @@ impl Body {
     }
 
     /// After contacts have adjusted `wn`: advance the auxiliary variable consistently.
-    fn finish(&mut self) {
+    fn finish(&mut self, k: f64) {
+        if self.sav && self.vk.is_some() {
+            // energy the loss terms removed over this step (the budget for raising psi next step):
+            // s0: sum m s0 (wn - wp)^2 / (2k); s1: s1/(k h^2) sum m (L(w - wp)) . (wn - wp), if positive
+            let ih2 = 1.0 / (self.h * self.h);
+            let mut d0 = 0.0;
+            let mut d1 = 0.0;
+            for i in 0..self.n {
+                let dv = self.wn[i] - self.wp[i];
+                d0 += self.mass[i] * self.s0[i] * dv * dv;
+                d1 += self.mass[i] * (self.lw[i] - self.lwp[i]) * dv;
+            }
+            self.budget = d0 / (2.0 * k) + (self.s1 * ih2 / k * d1).max(0.0);
+        }
         if self.sav {
             let d: f64 = self.g.iter().zip(&self.wn).zip(&self.wp).map(|((g, a), b)| g * (a - b)).sum();
             self.psi_next = self.psi + 0.5 * d;
@@ -773,6 +804,47 @@ impl Body {
         }
         self.w = saved;
         lam
+    }
+
+    /// Largest eigenvalue of M^-1 (K + B), B the stiffness of the nonlinear potential linearised
+    /// about the rest state (a shallow shell's curvature stiffness), by power iteration.
+    pub fn max_rate2_with_shell(&mut self) -> f64 {
+        let n = self.n;
+        let saved = (self.w.clone(), self.g.clone());
+        let mut v: Vec<f64> = (0..n).map(|i| ((i * 7919) % 101) as f64 / 101.0 - 0.5).collect();
+        let mut lam = 0.0;
+        let eps = 1e-9;
+        for _ in 0..400 {
+            let vn = v.iter().map(|a| a * a).sum::<f64>().sqrt();
+            for i in 0..n {
+                self.w[i] = v[i] / vn / self.mass[i].sqrt();
+            }
+            let bias = std::mem::replace(&mut self.bias, vec![0.0; n]);
+            self.linear_forces();
+            self.bias = bias;
+            // B x ~ grad V(eps x) / eps
+            let xs = self.w.clone();
+            for i in 0..n {
+                self.w[i] = eps * xs[i];
+            }
+            self.nonlinear_gradient();
+            let y: Vec<f64> = (0..n).map(|i| (-self.f[i] + self.g[i] / eps) / self.mass[i].sqrt()).collect();
+            let norm = y.iter().map(|a| a * a).sum::<f64>().sqrt();
+            lam = norm;
+            if norm == 0.0 {
+                break;
+            }
+            v = y;
+        }
+        self.w = saved.0;
+        self.g = saved.1;
+        lam
+    }
+
+    /// Diagnostics between steps: (psi, sqrt(2 V(w))) of the auxiliary variable.
+    pub fn sav_state(&mut self) -> (f64, f64) {
+        let v = self.nonlinear_gradient();
+        (self.psi, (2.0 * v).sqrt())
     }
 
     pub fn loss(&self) -> (f64, f64) {
@@ -1188,7 +1260,7 @@ impl Instrument {
             c.d_now = d_pred - comp * f;
         }
         for b in self.bodies.iter_mut() {
-            b.finish();
+            b.finish(k);
         }
         // microphones: centred acceleration at this step
         for (mi, m) in self.mics.iter_mut().enumerate() {

@@ -105,3 +105,20 @@ fn a_new_stroke_retires_the_sticks_earlier_contact() {
     assert!(!c[first[0]].active, "the first stroke's contact is still active after the second launch");
     assert!(c[first[1]].active && c[first[1]].peak_force > 0.0, "the second stroke never landed");
 }
+
+/// The auxiliary variable must keep tracking sqrt(2V): a shallow shell carries its curvature
+/// stiffness in V, so psi / sqrt(2V) scales that stiffness. Without the relaxation this ratio
+/// reached 1.48 and then 0.52 within 2 s on this live-grid ride (and the 8-16 kHz bands grew back).
+#[test]
+fn shell_auxiliary_variable_tracks_its_potential() {
+    let mut p = live::Live::new("ride", 2.5).unwrap();
+    p.strike(0.6 * p.radius, 0.0, 2.5);
+    let mut blk = vec![0.0f32; 4800];
+    let mut worst = 0.0f64;
+    for _ in 0..20 {
+        p.render(&mut blk, 1.0);
+        let (psi, r) = p.ins.bodies[0].sav_state();
+        worst = worst.max((psi / r - 1.0).abs());
+    }
+    assert!(worst < 0.08, "psi / sqrt(2V) drifted {:.1} % from 1 within 2 s", 100.0 * worst);
+}
