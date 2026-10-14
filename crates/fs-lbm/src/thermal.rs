@@ -5,6 +5,9 @@
 //! bracket (decay below Ra_c ≈ 1708, growth above) — physics the
 //! scheme cannot fake.
 
+pub(crate) mod forcing;
+pub use forcing::ThermalForcingError;
+
 use crate::core2::{Cell, Grid};
 use crate::{CS2, Q};
 
@@ -124,6 +127,22 @@ impl ThermalLbm {
     /// One coupled step: buoyancy from T, flow step, then temperature
     /// collide + stream (anti-bounce-back at the fixed-T walls).
     pub fn step(&mut self) {
+        self.step_with_forces_inner(None);
+    }
+
+    /// Advance with a separate external force-density field in lattice units.
+    /// These forces are added to buoyancy, not overwritten by it. Supply one
+    /// vector per cell including walls; wall loads are ignored. The field is
+    /// borrowed for this step only, so forces cannot accumulate across steps.
+    /// Invalid fields or nonfinite sums with buoyancy are refused before any
+    /// mutation; ordinary solver-state and stability requirements still apply.
+    pub fn step_with_external_forces(&mut self, forces: &[[f64; 2]]) -> Result<(), ThermalForcingError> {
+        forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref)?;
+        self.step_with_forces_inner(Some(forces));
+        Ok(())
+    }
+
+    fn step_with_forces_inner(&mut self, external: Option<&[[f64; 2]]>) {
         let (nx, ny) = (self.grid.nx, self.grid.ny);
         // Boussinesq: per-cell force via the external-force field.
         for y in 1..ny - 1 {
@@ -131,6 +150,11 @@ impl ThermalLbm {
                 let i = self.grid.idx(x, y);
                 let t: f64 = self.gpop[i].iter().sum();
                 self.grid.fext[i] = [0.0, self.gbeta * (t - self.t_ref)];
+                if let Some(forces) = external {
+                    for (total, &load) in self.grid.fext[i].iter_mut().zip(&forces[i]) {
+                        *total += load;
+                    }
+                }
             }
         }
         self.grid.step(&mut self.scratch);

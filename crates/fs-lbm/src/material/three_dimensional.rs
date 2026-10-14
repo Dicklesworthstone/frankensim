@@ -100,6 +100,7 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
             ),
             top_temperature_k: input.top_temperature_k,
             temperature_difference_k: difference,
+            force_units: super::forcing::ForceUnits::from_scale(self),
         })
     }
 }
