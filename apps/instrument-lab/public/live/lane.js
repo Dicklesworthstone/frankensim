@@ -10,6 +10,8 @@
 //
 // While the engine reports itself idle (a silent drum is not stepped) nothing is rendered and
 // the lane jumps ahead with the clock, so the next stroke lands `aheadFrames` after it arrives.
+// Each audio message says whether the silence before it was such a rest (`rest`), so the mixer
+// counts as gaps only the frames a lane skipped after falling behind (= skippedFrames).
 //
 // A score is a fixed, non-looping list of events with absolute frames (a whole MIDI file): it is
 // sorted once and fed into the queue only as far as the render horizon, so a 10,000-event score
@@ -42,7 +44,9 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = BLOCK } =
   let score = null;              // {events (sorted by frame), at}
   let epoch = 0;                 // stamped on every block; raised by resync (see mix-worklet flush)
   let pumping = false;
-  let open = null;               // the audio message being gathered: {frame, epoch, buf, len}
+  let open = null;               // the audio message being gathered: {frame, epoch, rest, buf, len}
+  let sentEnd = -1;              // context frame after the last block delivered
+  let hole = false;              // the next block follows frames this lane skipped (it fell behind)
   const stats = { renderedFrames: 0, skippedFrames: 0, lateEvents: 0, wallMs: 0, audioMs: 0 };
 
   port.onmessage = (event) => {
@@ -101,18 +105,23 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = BLOCK } =
 
   function send() {
     const s = open.len === open.buf.length ? open.buf : open.buf.subarray(0, open.len);
-    port.postMessage({ type: 'audio', frame: open.frame, channels: [s], epoch: open.epoch }, [s.buffer]);
+    port.postMessage({ type: 'audio', frame: open.frame, channels: [s], epoch: open.epoch, rest: open.rest }, [s.buffer]);
     open = null;
   }
 
-  // a rendered block, to the mixer at once or gathered into the open message
+  // a rendered block, to the mixer at once or gathered into the open message. `rest` tells the
+  // mixer that the silence before this block is on purpose (the lane rested, or starts here); a
+  // block after a skip is not a rest, so the mixer counts the skipped frames as a gap.
   function deliver(samples, frame) {
+    const rest = frame !== sentEnd && !hole;
+    hole = false;
+    sentEnd = frame + samples.length;
     if (open && (open.frame + open.len !== frame || open.epoch !== epoch)) send();
     if (chunk === BLOCK) {
-      port.postMessage({ type: 'audio', frame, channels: [samples], epoch }, [samples.buffer]);
+      port.postMessage({ type: 'audio', frame, channels: [samples], epoch, rest }, [samples.buffer]);
       return;
     }
-    if (!open) open = { frame, epoch, buf: new Float32Array(chunk), len: 0 };
+    if (!open) open = { frame, epoch, rest, buf: new Float32Array(chunk), len: 0 };
     open.buf.set(samples, open.len);
     open.len += samples.length;
     if (open.len + BLOCK > chunk) send(); // the next block may not fit
@@ -143,6 +152,7 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = BLOCK } =
           // momentarily fell behind while streaming: step ahead by a small ~42 ms cushion (never a half-second dropout)
           const resume = Math.round(t + Math.min(aheadFrames / 4, 2048));
           stats.skippedFrames += Math.max(0, resume - next);
+          hole = resume > next;
           while (queue.length && queue[0].frame !== undefined && queue[0].frame < resume) {
             stats.lateEvents += 1;
             engine.apply(queue.shift());
@@ -231,6 +241,8 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = BLOCK } =
       epoch = Number.isFinite(newEpoch) ? newEpoch : epoch + 1;
       open = null; // rendered for the old epoch: the mixer refuses it
       next = -1;
+      sentEnd = -1;
+      hole = false;
       pump();
     },
     pump,

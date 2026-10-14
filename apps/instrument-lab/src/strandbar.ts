@@ -287,13 +287,15 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
     const h = laneHealth[id];
     if (!mtr || !h) return;
     const rt = h.rt;
-    const troubled = h.late > 0 || h.gap > 4800;
+    // the mixer counts late frames (arrived after they played) and gap frames (skipped by a lane that
+    // fell behind; a drum resting between strokes is not a gap), each frame once: together, the audio lost
+    const lost = (h.late + h.gap) / 48;
+    const troubled = h.late + h.gap > 0;
     mtr.bar.style.width = `${Math.min(100, (rt / 6) * 100).toFixed(1)}%`;
     mtr.root.classList.toggle("warn", rt > 0 && rt < 1.15);
     mtr.root.classList.toggle("bad", troubled);
     const grid = h.scale ? ` · grid ${h.scale}×` : h.board ? ` · board ${h.board}` : "";
-    const lost = (h.late + h.gap) / 48;
-    mtr.value.textContent = rt > 0 ? `${rt.toFixed(1)}× real time${grid}${troubled ? ` · ${lost < 1000 ? Math.round(lost) + " ms" : (lost / 1000).toFixed(1) + " s"} dropped` : ""}` : "—";
+    mtr.value.textContent = rt > 0 ? `${rt.toFixed(1)}× real time${grid}${troubled ? ` · ${lost < 10 ? lost.toFixed(1) + " ms" : lost < 1000 ? Math.round(lost) + " ms" : (lost / 1000).toFixed(1) + " s"} dropped` : ""}` : "—";
     mtr.root.dataset.late = String(h.late);
     mtr.root.dataset.gap = String(h.gap);
   }

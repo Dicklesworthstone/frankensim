@@ -6,7 +6,12 @@ import { LIVE_BASE_URL, LIVE_SAMPLE_RATE, LiveRefusal } from "./liveAudio";
 
 export interface LaneStats {
   queuedFrames: number;
+  /** Frames dropped because they arrived after they played (whole messages and partly late heads). */
   lateFrames: number;
+  /**
+   * Frames a streaming lane skipped (it fell behind and stepped ahead: its skippedFrames). A lane
+   * resting between strokes is not a gap. No frame is both, so late + gap is the audio lost.
+   */
   gapFrames: number;
 }
 
