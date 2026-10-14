@@ -2,13 +2,16 @@
 //! This is CLI orchestration, not a new constitutive law or discretization.
 
 pub(super) mod transient;
+mod fluid;
+pub(super) use fluid::{Fluid, load_fluid};
+pub(super) use fluid::NO_CLAIM as FLUID_NO_CLAIM;
 
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::material_coupling::{
-    MaterialCoupledSolution, MaterialCouplingConfig, solve_material_electrothermal,
+    MaterialCoupledSolution, MaterialCouplingConfig, solve_cell_material_electrothermal,
 };
 use fs_lbm::conjugate::{
-    ChtError, Conductor, ElectricSetup, EnergyConfig, EnergySolution, FlowField,
+    ChtError, ElectricSetup, EnergyConfig, EnergySolution, FlowField,
     FluidProperties, SolidMaterial, ThermalSetup, VoxelDomain,
 };
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
@@ -119,6 +122,7 @@ pub(super) struct Problem {
     pub energy: EnergyConfig,
     pub max_thermal_passes: usize,
     pub conductivity_tolerance: f64,
+    pub fluid: Option<Fluid>,
 }
 
 pub(super) struct ResultField {
@@ -151,34 +155,36 @@ impl Problem {
         storage: Option<&transient::Storage<'_>>, gate: &CancelGate,
     ) -> Result<ResultField, ChtError> {
         poll(gate)?;
+        if storage.is_some() && self.fluid.is_some() {
+            return Err(invalid("fluid.transient", "fluid scenes require a separate advective storage model; the solid-only transient path is not applicable"));
+        }
         let initial = self.states(start, gate)?;
         let mut solids = Vec::with_capacity(self.materials.len());
-        let mut electric = electric.clone();
-        electric.conductors.clear();
         for (m, source) in self.materials.iter().enumerate() {
             let cell = self.material_indices.iter().position(|&i| i == m)
                 .ok_or_else(|| invalid("material_indices", "each declared material must be assigned to a cell"))?;
             solids.push(SolidMaterial::new(source.pack.pack_id(), initial[cell].k));
-            electric.conductors.push(initial[cell].conductor.as_ref()
-                .map(|c| Conductor::new(c.resistivity_ohm_m())));
         }
-        // This command admits all-solid domains. No fluid cell consumes these
-        // reference coefficients; they do not describe invented air properties.
+        // Only all-solid scenes use this unconsumed placeholder. Fluid scenes
+        // use their exact source-resolved reference and prescribed face flux.
         let unused_fluid = FluidProperties {
             density_kg_m3: 1.0, specific_heat_j_kg_k: 1.0,
             conductivity_w_m_k: 1.0, kinematic_viscosity_m2_s: 1.0,
         };
-        let flow = FlowField::quiescent(&self.domain);
+        let quiescent = self.fluid.is_none().then(|| FlowField::quiescent(&self.domain));
+        let (fluid, flow) = match &self.fluid {
+            Some(binding) => (&binding.properties, &binding.flow),
+            None => (&unused_fluid, quiescent.as_ref().expect("all-solid quiescent field")),
+        };
         let mut thermal_solves = 0usize;
-        let coupled = solve_material_electrothermal(
-            &self.domain, &electric, thermal, start, self.coupling,
-            |_, material, temperature| {
-                self.materials[usize::from(material)].at(temperature)?.conductor
-                    .map(|c| c.resistivity_ohm_m())
-                    .ok_or_else(|| invalid("material.electrical_resistivity", "insulator requested as conductor"))
+        let coupled = solve_cell_material_electrothermal(
+            &self.domain, electric, thermal, start, self.coupling,
+            |cell, _, temperature| {
+                Ok(self.materials[self.material_indices[cell]].at(temperature)?.conductor
+                    .map(|c| c.resistivity_ohm_m()))
             },
             |heated, temperature| {
-                self.solve_heat(heated, temperature, &solids, &unused_fluid, &flow,
+                self.solve_heat(heated, temperature, &solids, fluid, flow,
                     storage, &mut thermal_solves, gate)
             },
             gate,
