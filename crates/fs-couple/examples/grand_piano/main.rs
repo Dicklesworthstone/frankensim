@@ -573,7 +573,8 @@ impl Options {
     fn tuning_hz(&self) -> Option<f64> {
         if self.stretch_tuning.is_some() { return None; }
         self.concert_pitch.or_else(||
-            (self.preset.is_some() && self.scale.is_none() && !self.raw_tensions).then_some(440.0))
+            (self.preset.is_some() && self.scale.is_none() && self.string_sections.is_none()
+                && !self.raw_tensions).then_some(440.0))
     }
     fn tuning_report(&self) -> String {
         if let Some(f) = self.stretch_tuning {
