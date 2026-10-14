@@ -394,3 +394,15 @@ footer.site code { color: var(--ivory-2); }
   .seg.vs-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .vs-table td[data-label]::before { content: attr(data-label) ": "; color: var(--ivory-3); font: 500 11px/1.4 var(--font-mono); }
 }
+
+.vs-verdicts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 22px; }
+.vs-verdict { padding: 16px 18px; border: 1px solid var(--line); border-left: 3px solid var(--vc); border-radius: var(--radius-sm); background: var(--ink-1); }
+.vs-verdict.close { --vc: var(--ivory-2); }
+.vs-verdict.mixed { --vc: var(--brass); }
+.vs-verdict.off { --vc: var(--ember); }
+.vs-verdict-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.vs-verdict h4 { font: 600 15px/1.3 var(--font-body); color: var(--ivory); margin: 0; order: -1; flex-basis: 100%; }
+.vs-mark { color: var(--vc); font: 600 13px/1 var(--font-mono); }
+.vs-word { color: var(--vc); font: 600 11px/1.4 var(--font-mono); letter-spacing: 0.12em; text-transform: uppercase; }
+.vs-verdict p { margin-top: 8px; font-size: 14px; line-height: 1.5; color: var(--ivory-2); }
+@media (max-width: 860px) { .vs-verdicts { grid-template-columns: 1fr; } }

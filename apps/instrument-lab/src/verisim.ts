@@ -96,6 +96,29 @@ function rulerChart(canvas: HTMLCanvasElement, rows: { label: string; value: num
   draw();
 }
 
+/** Three-line verdict up front, computed like the findings. */
+function verdicts(v: Verisim): HTMLElement {
+  const d = (id: string, k: string): Descriptor | undefined => v.pairs.find((x) => x.id === id)?.descriptors[k];
+  const relErr = (id: string, realRef: number): number => Math.abs((d(id, "inharmonicity_B")?.ours as number) - realRef) / realRef;
+  const realA3 = ["a3-pp", "a3-mf", "a3-ff"].map((id) => d(id, "inharmonicity_B")?.real as number);
+  const meanA3 = realA3.reduce((a, b) => a + b, 0) / realA3.length;
+  const bErr = Math.max(relErr("a3-mf", meanA3), relErr("c6-mf", d("c6-mf", "inharmonicity_B")?.real as number));
+  const ff = v.pairs.some((p) => p.id === "a3-ff8") ? "a3-ff8" : "a3-ff";
+  const dull = (d(ff, "high_band_db")?.real as number) - (d(ff, "high_band_db")?.ours as number);
+  const rows = v.cymbal_ruler.rows;
+  const crashes = rows.filter((r) => r.real && /crash/.test(r.label)).map((r) => r.rms_gap_db);
+  const ours = Math.min(...rows.filter((r) => !r.real && /stick|m\/s/.test(r.label)).map((r) => r.rms_gap_db));
+  const card = (kind: "close" | "mixed" | "off", mark: string, word: string, title: string, text: string): HTMLElement =>
+    el("div", { class: `vs-verdict ${kind}` },
+      el("div", { class: "vs-verdict-head" }, el("span", { class: "vs-mark", "aria-hidden": "true" }, mark), el("span", { class: "vs-word" }, word), el("h4", {}, title)),
+      el("p", {}, text));
+  return el("div", { class: "vs-verdicts" },
+    card("close", "✓", "Close", "Piano strings", `Inharmonicity within ${Math.ceil(bErr * 100)}% of a real Steinway at A3 and C6, measured from the partials of both.`),
+    card("mixed", "◐", "Mixed", "Piano tone", `pp and mf sit inside the real piano's own change of touch. ff is ${dull.toFixed(0)} dB too dull, even at matched loudness.`),
+    card("off", "✕", "Not yet", "Splash cymbal", `${ours.toFixed(0)} dB from a real splash, where other real cymbals sit ${Math.min(...crashes).toFixed(0)}–${Math.max(...crashes).toFixed(0)} dB away.`),
+  );
+}
+
 /** Findings are derived from the data so the words cannot drift from the numbers. */
 function findings(v: Verisim): HTMLElement[] {
   const p = (id: string): Pair | undefined => v.pairs.find((x) => x.id === id);
@@ -224,7 +247,8 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
       b.setAttribute("aria-pressed", String(k === view));
       b.setAttribute("aria-selected", String(k === view));
     }
-    subtitle.textContent = current.title.split(": ").slice(1).join(": ");
+    const sub = current.title.split(": ").slice(1).join(": ");
+    subtitle.textContent = sub.charAt(0).toUpperCase() + sub.slice(1);
     // In a blind test the labelled spectrograms would give the answer away.
     viewBtns["real"]!.disabled = blind;
     viewBtns["ours"]!.disabled = blind;
@@ -272,6 +296,7 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
   const gap = (id: string): number => (pairs.find((p) => p.id === id)?.descriptors["partial_envelope_db"]?.rms_gap_db ?? NaN) as number;
 
   root.append(
+    verdicts(data),
     el("div", { class: "panel" },
       el("div", { class: "panel-head" }, el("h3", {}, "Listen and look, side by side"), el("div", { class: "tags" }, el("span", { class: "tag offline" }, "Offline reference"), el("span", { class: "tag plain" }, "Real recording"))),
       seg, subtitle,
