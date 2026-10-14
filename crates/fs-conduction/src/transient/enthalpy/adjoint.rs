@@ -419,7 +419,10 @@ impl EnthalpyStepLinearization<'_> {
         self.tangent = coo.assemble();
         for row in 0..n {
             if row % ASSEMBLY_TILE == 0 { poll(cx, row)?; }
-            let diagonal = finite(self.masses[row] + self.dt * self.tangent.get(row, row))?;
+            let mut diagonal = finite(self.masses[row] + self.dt * self.tangent.get(row, row))?;
+            for update in &self.feedback {
+                diagonal = finite(diagonal + update.left[row] * update.right[row])?;
+            }
             if diagonal == 0.0 {
                 return Err(EnthalpyAdjointError::InvalidInput(
                     "nonzero contact-coupled enthalpy Jacobian diagonal required for Jacobi",

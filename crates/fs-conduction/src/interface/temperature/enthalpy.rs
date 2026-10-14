@@ -313,3 +313,116 @@ impl TemperatureContacts<'_, '_> {
         Ok(ContactEnthalpyLinearization { step, contact, dt_s })
     }
 }
+
+
+pub struct ContactEnthalpyRadiationLinearization<'m> {
+    step: crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyRadiationStepLinearization<'m>,
+    contact: super::tangent::ContactTemperatureLinearization,
+    dt_s: f64,
+}
+
+#[derive(Debug)]
+pub struct ContactEnthalpyRadiationGradient {
+    pub radiation: crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyRadiationStepGradient,
+    pub resistance_multipliers: Vec<crate::interface::ContactResistanceGradient>,
+}
+
+impl ContactEnthalpyRadiationLinearization<'_> {
+    #[must_use]
+    pub fn transport(
+        &self,
+    ) -> &crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyRadiationStepLinearization<'_> {
+        &self.step
+    }
+
+    #[must_use]
+    pub fn contact(&self) -> &super::tangent::ContactTemperatureLinearization {
+        &self.contact
+    }
+
+    pub fn temperature_pullback(
+        &self,
+        cx: &Cx<'_>,
+        seed: &[f64],
+    ) -> Result<Vec<f64>, crate::transient::enthalpy::adjoint::EnthalpyAdjointError> {
+        self.step.transport().temperature_pullback(cx, seed)
+    }
+}
+
+
+impl ContactEnthalpyRadiationLinearization<'_> {
+    pub fn pullback_with_resistance_controls(
+        &self,
+        cx: &Cx<'_>,
+        seed: &[f64],
+        linear: crate::LinearConfig,
+        max_face_pairs: usize,
+    ) -> Result<ContactEnthalpyRadiationGradient, crate::transient::enthalpy::adjoint::EnthalpyAdjointError> {
+        poll(cx, 0)?;
+        let radiation = self.step.pullback(cx, seed, linear)?;
+        let mut load_dual = Vec::with_capacity(radiation.storage.transport.adjoint.len());
+        for (index, &lambda) in radiation.storage.transport.adjoint.iter().enumerate() {
+            if index % 256 == 0 { poll(cx, index)?; }
+            load_dual.push(super::finite(self.dt_s * lambda)?);
+        }
+        let resistance_multipliers = self.contact.physical_contacts().frozen_interfaces()
+            .matching_resistance_scale_pullback(
+                cx, self.contact.temperature(), &load_dual, max_face_pairs,
+            )?;
+        Ok(ContactEnthalpyRadiationGradient { radiation, resistance_multipliers })
+    }
+}
+
+
+impl TemperatureContacts<'_, '_> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_accepted_enthalpy_with_ambient_radiation<'m>(
+        &self,
+        cx: &Cx<'_>,
+        engine: &HeterogeneousEnthalpyBackwardEuler<'m, '_>,
+        problem: ConductionProblem<'_>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        physical_residual_tolerance_j: f64,
+        patches: &[AmbientRadiationPatch],
+        accepted: ContactEnthalpyStep,
+        max_feedback_entries: usize,
+        max_face_pairs: usize,
+    ) -> Result<ContactEnthalpyRadiationLinearization<'m>, crate::transient::enthalpy::adjoint::EnthalpyAdjointError> {
+        poll(cx, 0)?;
+        if accepted.radiation.is_none() || accepted.combined_boundary.is_none() {
+            return Err(crate::transient::enthalpy::adjoint::EnthalpyAdjointError::InvalidInput(
+                "radiative contact adjoint requires an accepted radiative-contact endpoint",
+            ));
+        }
+        if !physical_residual_tolerance_j.is_finite() || physical_residual_tolerance_j <= 0.0 {
+            return Err(crate::transient::enthalpy::adjoint::EnthalpyAdjointError::InvalidInput(
+                "positive finite physical contact/radiation residual target required",
+            ));
+        }
+        let contact = self.linearize_temperature(
+            cx, problem.boundary, &accepted.conduction.temperature, max_face_pairs,
+        )?;
+        if contact.physical_contacts().states() != accepted.physical_contacts.states() {
+            return Err(crate::transient::enthalpy::adjoint::EnthalpyAdjointError::InvalidInput(
+                "rebound radiative-contact source state differs from accepted physical endpoint",
+            ));
+        }
+        let step = engine
+            .linearize_accepted_parameters_with_ambient_radiation_target(
+                cx,
+                problem,
+                Some(contact.physical_contacts().frozen_interfaces()),
+                old_h,
+                dt_s,
+                config,
+                patches,
+                accepted.conduction,
+                max_feedback_entries,
+                physical_residual_tolerance_j,
+            )?
+            .with_contact_temperature_feedback(cx, &contact)?;
+        Ok(ContactEnthalpyRadiationLinearization { step, contact, dt_s })
+    }
+}
