@@ -76,8 +76,14 @@ def decay_ms(x):
     return out
 
 
+FLOOR_DB = -50.0
+
+
 def balance(x):
-    return V.octave_levels(x, 0.0, 0.25)
+    """Octave-band levels relative to total, first 250 ms, floored at -50 dB: a band 50 dB under the
+    drum is inaudible beside it, and the real overheads carry room noise and cymbal bleed there
+    while a render is digitally silent, which would otherwise dominate the distance."""
+    return [max(v, FLOOR_DB) for v in V.octave_levels(x, 0.0, 0.25)]
 
 
 def log_decay_gap(a, b):
@@ -110,7 +116,7 @@ def main(kit_dir: Path, oh: Path):
         br, bo, ba, bx = balance(real), balance(ours), balance(again), balance(other)
         gap = V.rms_db(br, bo)
         d["balance_gap_db"] = {"real": [V.r(v, 3) for v in br], "ours": [V.r(v, 3) for v in bo], "bands_hz": OCT, "rms_gap_db": V.r(gap, 3),
-                               "note": "octave-band levels relative to total, first 250 ms"}
+                               "note": "octave-band levels relative to total, first 250 ms, floored at -50 dB (inaudible beside the stroke)"}
         pairs.append({
             "id": pid, "title": title, "duration_s": dur,
             "real": {"file": real_id, "url": SOURCE, "rights": RIGHTS, "sha256_wav": V.sha(oh / f"{real_id}.wav"),

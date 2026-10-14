@@ -6,7 +6,7 @@ difference along the chain hammer -> string -> bridge -> board -> radiation -> m
 using observables only a simulation has (the bridge velocity) and ablation renders that
 switch one mechanism on at a time.
 
-usage: uv run --with numpy --with pillow python tools/diagnose.py CAMPAIGN_DIR REF_WAV48_DIR PUBLIC_DIR
+usage: uv run --with numpy --with pillow python tools/diagnose.py CAMPAIGN_DIR REF_WAV48_DIR PUBLIC_DIR [KIT_DIR SALAMANDER_OH_DIR]
 
 Inputs beyond verisim.py's:
   piano/a3-mf-bridge.csv     bridge velocity and microphone pressure of the A3 mf render
@@ -348,6 +348,23 @@ def main():
         "status": "open",
         "data": {"bands_hz": V.OCT, "peak_ms_real": pr, "peak_ms_ours": po, "above_1200_db_real": er, "above_1200_db_ours": eo},
     })
+    # The experiment the card proposes, run with a different solver: fs-vkplate's cymbals keep no mode
+    # list and carry von Karman coupling. Compared with a real crash of the same size (Salamander).
+    kit_dir, oh_dir = (Path(sys.argv[4]), Path(sys.argv[5])) if len(sys.argv) > 5 else (None, None)
+    if kit_dir and (kit_dir / "crash.wav").exists() and (oh_dir / "crash1_OH_FF_6.wav").exists():
+        hp = lambda x: V.highpass(x, 20.0, 30.0)
+        oc = V.segment(hp(V.load(kit_dir / "crash.wav")), 2.5)
+        rc = V.segment(hp(V.load(oh_dir / "crash1_OH_FF_6.wav")), 2.5)
+        (pk_o, e_o), (pk_r, e_r) = band_peaks(oc), band_peaks(rc)
+        row = next(q for q in rows if q["id"] == "cymbal-shimmer")
+        late = pk_o[6] > 40 or pk_o[7] > 40
+        row["status"] = "confirmed" if late and 10 ** (e_o / 10) > 0.5 else "testing"
+        row["result"] = (f"Run with a grid solver that keeps no mode list and carries von Karman coupling (crates/fs-vkplate), on an 18-inch crash struck at 6 m/s: "
+                         f"{100 * 10 ** (e_o / 10):.0f}% of the energy lies above 1.2 kHz (a real 18-inch Paiste crash: {100 * 10 ** (e_r / 10):.0f}%), and its 4 and 8 kHz bands peak "
+                         f"{pk_o[6]:.0f} and {pk_o[7]:.0f} ms after the strike (the real crash: {pk_r[6]:.0f} and {pk_r[7]:.0f} ms). "
+                         + ("The upward energy flow appears once the shell can carry it: the missing mechanism is confirmed." if late else
+                            "The high bands still peak at the strike, so the cascade is not yet reproduced."))
+        row["data"]["kit_crash"] = {"peak_ms_ours": pk_o, "peak_ms_real_crash": pk_r, "above_1200_db_ours": e_o, "above_1200_db_real_crash": e_r}
 
     # Ablations, when their renders exist
     abl = {}

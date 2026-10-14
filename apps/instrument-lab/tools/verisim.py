@@ -32,7 +32,7 @@ def r(v, d=5):
 
 
 def load(path: Path, channel=0):
-    """RIFF/WAVE reader for the two encodings used here (16-bit PCM, 32-bit float); anything else refuses."""
+    """RIFF/WAVE reader for the encodings used here (16- and 24-bit PCM, 32-bit float); anything else refuses."""
     b = path.read_bytes()
     assert b[:4] == b"RIFF" and b[8:12] == b"WAVE", path
     fmt = data = None
@@ -50,6 +50,10 @@ def load(path: Path, channel=0):
         tag = struct.unpack("<H", fmt[24:26])[0]
     if (tag, bits) == (1, 16):
         x = np.frombuffer(data, "<i2").astype(np.float64) / 32768
+    elif (tag, bits) == (1, 24):
+        b3 = np.frombuffer(data[: len(data) // 3 * 3], np.uint8).reshape(-1, 3).astype(np.int32)
+        v = b3[:, 0] | (b3[:, 1] << 8) | (b3[:, 2] << 16)
+        x = np.where(v >= 1 << 23, v - (1 << 24), v).astype(np.float64) / (1 << 23)
     elif (tag, bits) == (3, 32):
         x = np.frombuffer(data, "<f4").astype(np.float64)
     else:

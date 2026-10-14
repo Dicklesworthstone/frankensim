@@ -3,8 +3,7 @@ import "@fontsource-variable/inter";
 import "@fontsource/jetbrains-mono/400.css";
 import "@fontsource/jetbrains-mono/500.css";
 import "./styles.css";
-import drumSpec from "../../../crates/fs-couple/examples/percussion/estimated_drum.fsd?raw";
-import cymbalSpec from "../../../crates/fs-couple/examples/percussion/estimated-splash.profile?raw";
+import kitSource from "../../../crates/fs-vkplate/src/kit.rs?raw";
 import { GroupPlayer, claimPlayback } from "./audio";
 import { ClipGroupView, type Manifest } from "./clipgroup";
 import { LineChart, type Series } from "./chart";
@@ -309,32 +308,19 @@ function initLive(): void {
 }
 
 // ---------------------------------------------------------------------- method
-function highlightSpec(text: string): string {
-  const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
-  return text.trimEnd().split("\n").map((line) => {
-    if (line.trim().startsWith("#")) return `<span class="c">${esc(line)}</span>`;
-    const [k, ...rest] = line.split(",");
-    if (!rest.length) return `<span class="k">${esc(line)}</span>`;
-    return `<span class="k">${esc(k!)}</span>,${rest.map((v) => `<span class="n">${esc(v)}</span>`).join(",")}`;
-  }).join("\n");
-}
-
 const REFUSALS: [string, string][] = [
-  ["percussion reference refused: BEM reports invalid diagnostics or negative radiation power beyond roundoff at 1460 Hz, input 26, formulation PlainCbie: power_interval=(-4.9e-22, -4.9e-22) … refine the acoustic solve",
-    "Every drum and cymbal render at HEAD stopped here. The diagnosis: a cymbal mode that radiates almost nothing produced a radiated power of −4.9×10⁻²² W, which is solve noise 10⁻¹⁴ times smaller than its reactive power, but the gate compared it only with floating-point summation roundoff. The fix keeps the refusal and scales it to the dense solve's own accuracy (n·ε·κ of the apparent power). Genuine sign errors, like the 1.3% Burton–Miller artifact on the drum's quadrupole modes, still refuse; the drum renders here use a 40–1000 Hz band, where the drum qualifies for plain CBIE."],
-  ["percussion reference refused: observer order budget exhausted at 24; last candidate: observer holdout refused: max=0.146, rms=0.0743",
-    "The cymbal's close-microphone transfer could not be fitted by a stable filter that passes its held-out audit (5% RMS) even at order 24. The cymbal clips on this page therefore use the far-field microphone, whose fit passed its audit at order 4."],
   ["grand_piano: audio sample 713760 after 32 frames in block: sample 713760, event 83: hammer/key has not returned for another strike",
     "A mistake in our own score: Satie's melody holds F♯4 while the left-hand chord also asks for F♯4. One physical key cannot be struck again while it is held, so the performance was refused before the 41-minute render. The chord now leaves out the held key."],
   ["grand_piano: adaptive bridge response work estimate 9667910336 exceeds 8000000000; use fewer source modes, retained modes or admitted bridge ports",
-    "An adaptive soundboard reduction to 3.2 kHz was refused against its declared work budget before it started. The renders here use an explicit 128-mode Ritz reduction of the 0–2.4 kHz board instead."],
-  ["percussion reference refused: percussion mechanics: Owner(\"FS-PLATE-BAD-SECTION: shell state exceeds its declared linearized rigid-rotation limit\")",
-    "We let the splash rock on its felts. A 2 m/s off-centre stroke exceeded the declared small-angle rigid-rotation limit at 0.03 rad, and again at the model's largest admitted limit of 0.1 rad. The linearization was refused rather than extrapolated. The rocking clip on this page is a gentler 0.6 m/s stroke, which stays inside 0.1 rad."],
-];
+    "An adaptive soundboard reduction to 3.2 kHz was refused against its declared work budget before it started. The renders here use an explicit 128-mode Ritz reduction of the 0–2.4 kHz board instead."],];
 
 async function initMethod(): Promise<void> {
-  $("#spec-drum")!.innerHTML = highlightSpec(drumSpec);
-  $("#spec-cymbal")!.innerHTML = highlightSpec(cymbalSpec);
+  // The kit's own source: the snare's description and the crash's, verbatim.
+  const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const snare = /pub fn snare\(\) -> DrumSpec \{\n([\s\S]*?)\n\}/.exec(kitSource)?.[1] ?? "";
+  const crash = /pub fn crash\(\) -> CymbalSpec \{\n\s*([\s\S]*?)\n\}/.exec(kitSource)?.[1] ?? "";
+  $("#spec-drum")!.innerHTML = esc(snare.replace(/^ {4}/gm, ""));
+  $("#spec-cymbal")!.innerHTML = esc(crash.replace(/,\s*(?=[a-z_0-9]+:)/g, ",\n").replace(/^CymbalSpec \{ /, "").replace(/ \}$/, ""));
   const pm = await pianoP;
   const table = $("#scale-table")!;
   const cols: [string, (r: PianoModel["scale_et"][number]) => string][] = [
@@ -383,6 +369,14 @@ async function initRegisterNote(): Promise<void> {
   p.textContent = `A0 is a single ${a0.L.toFixed(2)} m wound string with B = ${fmtSci(a0.B)}, so its 20th partial lies ${cents(20).toFixed(0)} cents and its 40th ${cents(40).toFixed(0)} cents sharp of the harmonic series. C6 has three short plain strings and a much shorter hammer contact.`;
 }
 
+function initKit(): void {
+  const root = $("#kit-root");
+  if (root) onVisible(root, () => void import("./kit").then((m) => m.mountKit(root)).catch(() => {
+    root.style.minHeight = "0";
+    root.textContent = "The kit could not be loaded. Reload the page to try again.";
+  }), "800px");
+}
+
 function initVerisim(): void {
   const root = $("#verisim-root");
   if (root) onVisible(root, () => void import("./verisim").then((m) => m.mountVerisim(root)).catch(() => {
@@ -394,6 +388,7 @@ function initVerisim(): void {
 initNav();
 void initHero();
 initVerisim();
+initKit();
 void initGroups();
 void initCharts();
 initViewers();

@@ -22,8 +22,8 @@ interface KitData {
 const SCALAR: [string, string, (v: number) => string][] = [
   ["fundamental_hz", "Strongest low component", (v) => `${fmt(v, 3)} Hz`],
   ["centroid_hz", "Spectral centroid, first 250 ms", (v) => `${fmt(v, 3)} Hz`],
-  ["above_1k_pct", "Energy above 1 kHz", (v) => `${v.toFixed(1)} %`],
-  ["above_4k_pct", "Energy above 4 kHz", (v) => `${v.toFixed(1)} %`],
+  ["above_1k_pct", "Energy above 1 kHz", (v) => (v < 0.1 ? "< 0.1 %" : `${v.toFixed(1)} %`)],
+  ["above_4k_pct", "Energy above 4 kHz", (v) => (v < 0.1 ? "< 0.1 %" : `${v.toFixed(1)} %`)],
 ];
 
 function bandLabel(f: number): string {
@@ -61,6 +61,7 @@ export async function mountKit(root: HTMLElement): Promise<void> {
   const legend = el("p", { class: "small muted" });
   const table = el("table", { class: "vs-table" });
   const ruler = el("div", { class: "kit-ruler" });
+  const decay = el("div", { class: "kit-ruler" });
   const source = el("p", { class: "small muted" });
   const viewBtns: Record<string, HTMLButtonElement> = {};
   for (const [k, label] of [["ours", "FrankenSim"], ["real", "Real kit"], ["diff", "Difference"]] as const) {
@@ -107,15 +108,19 @@ export async function mountKit(root: HTMLElement): Promise<void> {
         el("td", { class: "num", "data-label": "Real kit" }, typeof v.real === "number" ? f(v.real) : "—"),
         el("td", { class: "num", "data-label": "FrankenSim" }, typeof v.ours === "number" ? f(v.ours) : "—")));
     }
+    table.replaceChildren(el("thead", {}, el("tr", {}, el("th", {}, "Measure"), el("th", {}, "Real kit"), el("th", {}, "FrankenSim"))), el("tbody", {}, ...rows));
     const dec = d["decay_ms"];
     if (dec && Array.isArray(dec.real) && Array.isArray(dec.ours)) {
-      const cells = (arr: (number | null)[]): string => arr.map((x) => (x === null ? "—" : String(x))).join(" · ");
-      rows.push(el("tr", {}, el("td", { class: "vs-measure" }, el("div", {}, "Time to fall 20 dB, ms"),
-        el("div", { class: "small muted", style: "margin-top:3px" }, `octave bands ${(dec.bands_hz ?? []).map(bandLabel).join(" · ")} Hz; a dash never falls that far`)),
-        el("td", { class: "num small", "data-label": "Real kit" }, cells(dec.real as (number | null)[])),
-        el("td", { class: "num small", "data-label": "FrankenSim" }, cells(dec.ours as (number | null)[]))));
-    }
-    table.replaceChildren(el("thead", {}, el("tr", {}, el("th", {}, "Measure"), el("th", {}, "Real kit"), el("th", {}, "FrankenSim"))), el("tbody", {}, ...rows));
+      const bands = dec.bands_hz ?? [];
+      const cell = (x: number | null): HTMLElement => el("span", { class: "num" }, x === null ? "—" : String(x));
+      decay.replaceChildren(
+        el("h4", {}, "Time for each octave band to fall 20 dB, ms"),
+        el("div", { class: "kit-decay", style: `grid-template-columns: 6.5rem repeat(${bands.length}, minmax(0, 1fr))` },
+          el("span", {}, "Hz"), ...bands.map((f) => el("span", { class: "num muted" }, bandLabel(f))),
+          el("span", {}, "Real kit"), ...(dec.real as (number | null)[]).map(cell),
+          el("span", {}, "FrankenSim"), ...(dec.ours as (number | null)[]).map(cell)),
+        el("p", { class: "small muted" }, "A dash: the band never falls that far within the excerpt."));
+    } else decay.replaceChildren();
     const r = current.ruler;
     const max = Math.max(r.real_same_stroke_db, r.real_other_dynamic_db, r.ours_db) * 1.1 || 1;
     const bar = (name: string, v: number, real: boolean): HTMLElement =>
@@ -130,14 +135,14 @@ export async function mountKit(root: HTMLElement): Promise<void> {
       el("p", { class: "small muted" }, r.ours_db <= r.real_other_dynamic_db
         ? "FrankenSim is closer to this stroke than the same real drum played at another dynamic."
         : `FrankenSim is ${(r.ours_db / Math.max(r.real_other_dynamic_db, 0.1)).toFixed(1)}× as far from this stroke as the same real drum at another dynamic.`));
-    source.replaceChildren(el("span", {}, `Recording: ${current.real.file}, `), el("a", { href: current.real.url, rel: "noopener" }, "Salamander Drumkit"),
-      el("span", {}, `. ${current.real.recording}. ${current.audio.level_match.charAt(0).toUpperCase()}${current.audio.level_match.slice(1)}. ${current.real.rights}.`));
+    const cap = (t: string): string => t.charAt(0).toUpperCase() + t.slice(1);
+    source.replaceChildren(el("span", {}, `Recording: ${current.real.file} from the `), el("a", { href: current.real.url, rel: "noopener" }, "Salamander Drumkit"),
+      el("span", {}, `. ${cap(current.real.recording)}. ${cap(current.audio.level_match)}. ${current.real.rights}.`));
     label();
   };
 
   for (const p of pairs) {
-    const f = p.descriptors["fundamental_hz"]?.ours;
-    const b = el("button", { type: "button", "aria-pressed": String(p === current) }, p.title, el("small", {}, typeof f === "number" ? `${fmt(f, 3)} Hz` : ""));
+    const b = el("button", { type: "button", "aria-pressed": String(p === current) }, p.title);
     b.addEventListener("click", () => {
       current = p;
       for (const x of seg.querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
@@ -181,7 +186,7 @@ export async function mountKit(root: HTMLElement): Promise<void> {
       el("div", { class: "kit-grid", style: "margin-top: 16px" },
         el("div", { class: "stack" }, el("div", { class: "btn-row" }, playOurs, playReal, stop), tabs,
           el("div", { class: "clip-view", style: "position:relative" }, img, axis), legend),
-        el("div", { class: "stack" }, el("div", { class: "table-scroll", tabindex: "0", "aria-label": "Measurements" }, table), ruler, source))),
+        el("div", { class: "stack" }, el("div", { class: "table-scroll", tabindex: "0", "aria-label": "Measurements" }, table), decay, ruler, source))),
   );
   makePlayer();
   render();

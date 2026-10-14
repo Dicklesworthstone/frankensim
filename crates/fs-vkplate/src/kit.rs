@@ -7,6 +7,10 @@ use crate::*;
 
 pub const OUT_RATE: f64 = 48_000.0;
 
+/// Effective tip mass of a hickory stick in a short impact: FrankenSim's own Z5A stick estimate
+/// (crates/fs-couple/examples/percussion: contact_effective_mass_kg = 0.00724314).
+pub const STICK_TIP_KG: f64 = 0.00724314;
+
 /// Polyester (Mylar) film.
 const MYLAR: (f64, f64, f64) = (4.0e9, 0.38, 1390.0);
 /// B20 cymbal bronze.
@@ -42,7 +46,8 @@ pub struct Wires {
 
 impl Wires {
     pub fn estimated() -> Wires {
-        Wires { strands: 18, spacing: 0.004, length: 0.36, mass_per_m: 0.004, tension: 2.0, preload_per_m: 0.25, t60: 0.35,
+        // a loosely set strainer: slack strands slap the head instead of tracking it (measured: the most buzz)
+        Wires { strands: 18, spacing: 0.004, length: 0.36, mass_per_m: 0.004, tension: 0.5, preload_per_m: 0.15, t60: 0.35,
                 contact: Law::Power { k: 2.0e7, alpha: 1.5, mu: 2.0 } }
     }
 }
@@ -188,7 +193,7 @@ pub fn snare() -> DrumSpec {
         grid: 3.5e-3,
         oversample: 2,
         strike_xy: (0.06, 0.02),
-        striker: (0.012, hertz_stick(0.005, MYLAR.0, MYLAR.1), 0.0),
+        striker: (STICK_TIP_KG, hertz_stick(0.005, MYLAR.0, MYLAR.1), 0.0),
         muffle: None,
         wires: Some(Wires::estimated()),
         port: None,
@@ -247,7 +252,7 @@ pub fn tom(size_in: f64) -> DrumSpec {
         grid: 4.0e-3,
         oversample: 1,
         strike_xy: (0.35 * radius, 0.0),
-        striker: (0.012, hertz_stick(0.005, MYLAR.0, MYLAR.1), 0.0),
+        striker: (STICK_TIP_KG, hertz_stick(0.005, MYLAR.0, MYLAR.1), 0.0),
         muffle: None,
         wires: None,
         port: None,
@@ -327,7 +332,7 @@ pub fn cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)]) -> Result<Piece, St
     body.origin = [0.0, 0.0, 0.0];
     let n = body.n;
     let ci = ins.add(body);
-    let st = ins.add(Body::point("stick", 0.02));
+    let st = ins.add(Body::point("stick", STICK_TIP_KG));
     let mut notes = vec![format!("{}: {n} nodes at {:.1} mm", c.name, c.grid * 1e3)];
     for (k, &(t, v, rf, tip)) in hits.iter().enumerate() {
         let fp = ins.bodies[ci].footprint(rf * c.radius, 0.0, 0.0);
@@ -397,7 +402,7 @@ pub fn hihat_with(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
     if pedal_n != 0.0 {
         ins.drives.push(Drive { body: rod, node: 0, knots: vec![(0.0, 0.0), (0.12, -pedal_n), (1e9, -pedal_n)] });
     }
-    let st = ins.add(Body::point("stick", 0.012));
+    let st = ins.add(Body::point("stick", STICK_TIP_KG));
     for &(t, v) in hits {
         let fp = ins.bodies[ti].footprint(0.85 * ts.radius, 0.0, 0.0);
         let mut con = Contact::new(fp.into_iter().map(|(n_, w)| (ti, n_, w)).collect(), vec![(st, 0, 1.0)], 0.0, hertz_stick(0.005, BRONZE.0, BRONZE.1));

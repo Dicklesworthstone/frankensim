@@ -74,3 +74,22 @@ switch one mechanism on at a time, whenever they are present in the campaign:
 A card counts as confirmed only when its experiment moves the measured gap. Air loading
 (`--rayleigh-loading`) cannot yet be admitted on the production board; see bead
 frankensim-s59w0.
+
+## The drum kit
+
+Every kit piece comes from one solver, `crates/fs-vkplate` (its own workspace, std only; see its
+README for the physics). Render each piece, then grade them against the Salamander Drumkit
+(Alexander Holm, CC BY-SA 3.0; `archive.org/details/SalamanderDrumkit`, extract `OH/`):
+
+    cd crates/fs-vkplate && cargo build --release --example kit
+    for p in kick snare snare-off tom-12 tom-14; do kit $p $KIT/$p.wav; done        # 1-5 min each
+    kit hihat-closed $KIT/hihat-closed.wav 0 0.6; kit hihat-open $KIT/hihat-open.wav 0 2.5
+    kit crash $KIT/crash.wav 0 3; kit ride $KIT/ride.wav 0 3                       # ~20 min each
+    uv run --with numpy --with pillow python tools/kitgrade.py $KIT $SALAMANDER/OH public
+
+`kitgrade.py` writes `data/kit.json`, level-matched excerpts, spectrograms and the two grooves
+(the same two bars on the real kit and on FrankenSim's). Its ruler is real-vs-real: another stroke
+of the same real drum at the same dynamic, and the same drum one dynamic away. Octave-band balance
+is floored at -50 dB, because the real overheads carry room noise and cymbal bleed where a render
+is silent. `diagnose.py` takes `$KIT $SALAMANDER/OH` as optional fourth and fifth arguments to run
+the cymbal-shimmer experiment on the kit's crash.
