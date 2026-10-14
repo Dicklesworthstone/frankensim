@@ -10,6 +10,10 @@
 use fs_exec::CancelGate;
 use fs_ga::So3;
 use fs_material::section::ConcentricShearSection;
+use fs_material::state_point::MaterialStatePointError;
+
+/// Sourced nonuniform thermal expansion and compatible section stresses.
+pub mod thermal;
 
 use super::{MAX_MATERIAL_ROD_SEGMENTS, Rod, RodSection, TipLoad};
 use crate::SolidError;
@@ -19,6 +23,8 @@ use crate::SolidError;
 pub enum SpatialRodError {
     /// The original constitutive/kinematic/equilibrium owner refused.
     Solid(SolidError),
+    /// The original thermal section refused a source, strain or derived value.
+    Material(MaterialStatePointError),
     /// Invalid spatial assignment or unrepresentable result.
     Invalid(&'static str),
     /// No candidate configuration is published after cancellation.
@@ -28,6 +34,7 @@ impl core::fmt::Display for SpatialRodError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Solid(error) => write!(f, "spatial material rod: {error}"),
+            Self::Material(error) => write!(f, "spatial material rod: {error}"),
             Self::Invalid(what) => write!(f, "spatial material rod: {what}"),
             Self::Cancelled => f.write_str("spatial material rod: cancelled"),
         }
@@ -36,6 +43,9 @@ impl core::fmt::Display for SpatialRodError {
 impl std::error::Error for SpatialRodError {}
 impl From<SolidError> for SpatialRodError {
     fn from(error: SolidError) -> Self { Self::Solid(error) }
+}
+impl From<MaterialStatePointError> for SpatialRodError {
+    fn from(error: MaterialStatePointError) -> Self { Self::Material(error) }
 }
 
 /// One compatible rod configuration with a source-bound section per segment.
@@ -51,6 +61,7 @@ pub struct SpatialMaterialRod {
     sections: Vec<ConcentricShearSection>,
     stiffness: Vec<RodSection>,
     reference_length_m: f64,
+    thermal: Option<thermal::ThermalField>,
 }
 
 impl SpatialMaterialRod {
@@ -77,7 +88,7 @@ impl SpatialMaterialRod {
         let stiffness = sections.iter().map(RodSection::try_from_concentric_material)
             .collect::<Result<Vec<_>, _>>()?;
         let rod = Rod::straight(length_m, sections.len(), stiffness[0]);
-        Ok(Self { rod, sections, stiffness, reference_length_m: length_m })
+        Ok(Self { rod, sections, stiffness, reference_length_m: length_m, thermal: None })
     }
 
     /// Original material assignments and all layer receipts, in spatial order.
@@ -106,7 +117,11 @@ impl SpatialMaterialRod {
     pub fn segment_resultants(&self, segment: usize) -> Result<([f64; 3], [f64; 3]), SpatialRodError> {
         let (g, k) = self.segment_strains(segment)?;
         let s = self.stiffness[segment];
-        let force = [s.ea * g[0], s.ga * g[1], s.ga * g[2]];
+        let axial = match &self.thermal {
+            Some(field) => field.summary(segment, g[0])?.0,
+            None => s.ea * g[0],
+        };
+        let force = [axial, s.ga * g[1], s.ga * g[2]];
         let moment = [s.gj * k[0], s.ei * k[1], s.ei * k[2]];
         if !force.iter().chain(&moment).all(|v| v.is_finite()) {
             return Err(SpatialRodError::Invalid("section resultants are unrepresentable"));
@@ -123,7 +138,16 @@ impl SpatialMaterialRod {
         let mut energy = 0.0;
         for (segment, section) in self.stiffness.iter().enumerate() {
             let (g, k) = rod.strains(segment)?;
-            energy += 0.5 * rod.l0 * section.twice_energy_per_length(g, k);
+            energy += match &self.thermal {
+                Some(field) => {
+                    // Replace, never add to, the old axial stored energy.
+                    // Keep shear/twist/bending in the common mechanical law.
+                    let axial_energy = field.summary(segment, g[0])?.1;
+                    rod.l0 * axial_energy + 0.5 * rod.l0
+                        * section.twice_energy_per_length([0.0, g[1], g[2]], k)
+                }
+                None => 0.5 * rod.l0 * section.twice_energy_per_length(g, k),
+            };
         }
         if !energy.is_finite() {
             return Err(SpatialRodError::Invalid("material strain energy is unrepresentable"));

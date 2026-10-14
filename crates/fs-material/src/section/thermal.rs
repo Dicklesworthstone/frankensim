@@ -102,13 +102,34 @@ impl ConcentricThermoelasticSection {
         total_strain: f64,
         linear_strain_limit: f64,
     ) -> Result<ConcentricAxialResponse, MaterialStatePointError> {
+        let mut layers = Vec::with_capacity(self.expansions.len());
+        let (force_n, energy_per_length) = self.evaluate_axial(
+            total_strain, linear_strain_limit, |layer| layers.push(layer),
+        )?;
+        Ok(ConcentricAxialResponse { total_strain, layers, force_n, energy_per_length })
+    }
+
+    /// Axial force [N] and stored energy per length [J/m], without allocating
+    /// per-layer output. This uses the exact same layer arithmetic and ALL the
+    /// strain/stress/representability checks as `response_at_axial_strain`.
+    /// Useful for constitutive evaluations inside repeated residual/tangent
+    /// probes; it does not replace layer stresses with an averaged material.
+    pub fn axial_force_and_energy_at_strain(
+        &self, total_strain: f64, linear_strain_limit: f64,
+    ) -> Result<(f64, f64), MaterialStatePointError> {
+        self.evaluate_axial(total_strain, linear_strain_limit, |_| {})
+    }
+
+    fn evaluate_axial(
+        &self, total_strain: f64, linear_strain_limit: f64,
+        mut emit: impl FnMut(ConcentricLayerResponse),
+    ) -> Result<(f64, f64), MaterialStatePointError> {
         if !linear_strain_limit.is_finite() || linear_strain_limit <= 0.0
             || linear_strain_limit >= 1.0 || !total_strain.is_finite()
             || total_strain.abs() > linear_strain_limit
         {
             return Err(invalid("thermal section total strain or linear strain limit is inadmissible"));
         }
-        let mut layers = Vec::with_capacity(self.expansions.len());
         let mut force_n = 0.0;
         let mut energy_per_length = 0.0;
         for (integral, path) in self.section.layer_integrals().iter().zip(&self.expansions) {
@@ -127,9 +148,9 @@ impl ConcentricThermoelasticSection {
             let energy = checked_product(0.5, checked_product(force, elastic_strain)?)?;
             force_n = finite(force_n + force)?;
             energy_per_length = finite(energy_per_length + energy)?;
-            layers.push(ConcentricLayerResponse { thermal_strain, elastic_strain, force_n: force, stress_pa: stress });
+            emit(ConcentricLayerResponse { thermal_strain, elastic_strain, force_n: force, stress_pa: stress });
         }
-        Ok(ConcentricAxialResponse { total_strain, layers, force_n, energy_per_length })
+        Ok((force_n, energy_per_length))
     }
 }
 
