@@ -42,9 +42,11 @@ pub struct BowedSample {
 /// The string's candidate states reuse a workspace; a plate retains its own
 /// allocation behavior. No blanket real-time guarantee is implied.
 ///
-/// The existing first-order stiction correction and one-way rigid-bridge/body
-/// approximation are unchanged. Control changes are physical inputs, not mode
-/// resets, frequency assignments, or a new integration scheme.
+/// Stiction uses the shared exact-ZOH port solve: the held force enforces
+/// endpoint no-slip, subject to the static friction capacity. This is not a
+/// continuous-time constraint or a new friction constitutive law. The one-way
+/// rigid-bridge/body approximation is unchanged. Control changes are physical
+/// inputs, not mode resets or frequency assignments.
 pub struct BowedStringState {
     card: BowedStringCard,
     island: FrictionIsland,
@@ -53,7 +55,6 @@ pub struct BowedStringState {
     model: ModalAcousticTimeModel,
     workspace: ModalAcousticWorkspace,
     shapes_at_bow: Vec<f64>,
-    w_point: f64,
     bridge_force_factors: Vec<f64>,
     bridge_viscous_factors: Vec<f64>,
     plate: Option<(CompactBody, f64)>,
@@ -153,7 +154,7 @@ impl BowedStringState {
         let peak_energy_j = frame_total_energy(&model);
         Ok(Self {
             card: card.clone(), island: config.island.clone(), stribeck,
-            gesture: config.gesture, model, workspace, shapes_at_bow, w_point,
+            gesture: config.gesture, model, workspace, shapes_at_bow,
             bridge_force_factors, bridge_viscous_factors, plate,
             listener_m: config.listener_m, forces: vec![0.0; card.mode_count],
             dt, sub_dt, subsamples,
@@ -237,7 +238,6 @@ impl BowedStringState {
             for (k, phi) in self.shapes_at_bow.iter_mut().enumerate() {
                 *phi = unit_shape(k, station, self.card.length_m, self.card.linear_density_kg_m);
             }
-            self.w_point = w_point;
         }
         self.gesture = BowGesture { v_bow_m_s: velocity_m_s, normal_force_n, station_fraction: station };
         Ok(())
@@ -313,26 +313,24 @@ impl BowedStringState {
                     FrictionIsland::Stribeck(_) | FrictionIsland::InterfaceStribeck { .. } => {
                         let law = self.stribeck.ok_or(BowedRunError::Friction("missing Stribeck law"))?;
                         let hold_cap = law.mu_static * self.gesture.normal_force_n;
-                        // Preserve the legacy first-order pinning correction;
-                        // the exact-ZOH step below is not an exact no-slip solve.
-                        let pin = || -> f64 {
-                            let accel_hold: f64 = self.model.modes().iter().zip(self.model.states())
-                                .zip(&self.shapes_at_bow).map(|((m, s), phi)| {
-                                    phi * (2.0 * m.damping_ratio * m.angular_frequency_rad_s
-                                        * s.velocity_m_sqrt_kg_per_s
-                                        + m.angular_frequency_rad_s * m.angular_frequency_rad_s
-                                            * s.displacement_m_sqrt_kg)
-                                }).sum::<f64>() / self.w_point;
-                            accel_hold + v_rel / (self.w_point * self.sub_dt)
+                        // Solve the same held-force transition that is committed
+                        // below. An acceleration correction belongs to Euler,
+                        // not to the exact-ZOH modal discretization.
+                        let pin = || -> Result<f64, BowedRunError> {
+                            self.model.held_force_for_port_velocity(
+                                &self.shapes_at_bow,
+                                self.gesture.v_bow_m_s,
+                                self.sub_dt,
+                            ).map_err(BowedRunError::Model)
                         };
                         if self.stuck {
-                            let p = pin();
+                            let p = pin()?;
                             if p.abs() <= hold_cap { p } else {
                                 self.stuck = false;
                                 self.island.sliding_traction(law, v_rel, self.gesture.normal_force_n)?
                             }
                         } else if flipped || v_rel.abs() <= self.capture_tol {
-                            let p = pin();
+                            let p = pin()?;
                             if p.abs() <= hold_cap { self.stuck = true; p } else {
                                 self.island.sliding_traction(law, v_rel, self.gesture.normal_force_n)?
                             }
@@ -412,4 +410,105 @@ pub enum BowedRenderOutcome {
     /// Cancelled before the next host callback; state is resumable.
     Cancelled { /// Written sample count.
         samples: usize },
+}
+
+#[cfg(test)]
+mod exact_stiction_tests {
+    use super::*;
+
+    // Numerical mechanics fixtures, not claims of measured instrument timbre.
+    fn config(length: f64, mu: f64, tension: f64, bending: f64) -> BowedRunConfig {
+        BowedRunConfig {
+            card: BowedStringCard {
+                length_m: length, tension_n: tension, linear_density_kg_m: mu,
+                bending_stiffness_n_m2: bending, viscous_bending_n_m2_s: 0.0,
+                mode_count: 12, zetas: vec![0.12; 12], sample_rate_hz: 48_000,
+            },
+            island: FrictionIsland::Stribeck(StribeckFriction::try_new(0.8, 0.3, 0.1).unwrap()),
+            gesture: BowGesture::admit(0.01, 100.0, 0.13).unwrap(),
+            steps: 0, subsamples: 1, termination: Termination::Rigid, listener_m: 1.0,
+        }
+    }
+
+    #[test]
+    fn exact_stiction_tracks_the_bow_across_string_scales_and_substeps() {
+        for (length, mu, tension, bending) in [
+            (0.328, 0.003, 50.0, 1.0e-5),
+            (0.69, 0.012, 90.0, 1.0e-4),
+            (1.04, 0.04, 140.0, 1.0e-3),
+        ] {
+            for subsamples in [1, 2, 8] {
+                let mut cfg = config(length, mu, tension, bending);
+                cfg.subsamples = subsamples;
+                let mut voice = BowedStringState::new(&cfg, 64).unwrap();
+                for _ in 0..64 {
+                    let frame = voice.step().unwrap();
+                    assert!(voice.stuck);
+                    assert!(frame.relative_velocity_m_s.abs() < 2.0e-11,
+                        "endpoint slip {} with {subsamples} substeps", frame.relative_velocity_m_s);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_stiction_reverses_and_release_preserves_free_motion() {
+        let cfg = config(0.328, 0.003, 50.0, 1.0e-5);
+        let mut voice = BowedStringState::new(&cfg, 1).unwrap();
+        voice.step().unwrap();
+        // Pass through rest so recapture remains inside the existing basin.
+        for velocity in [0.0, -0.01] {
+            voice.set_bow(velocity, 100.0, 0.13).unwrap();
+            let frame = voice.step().unwrap();
+            assert!(voice.stuck);
+            assert!(frame.relative_velocity_m_s.abs() < 2.0e-11);
+        }
+        let mut free = voice.model.clone();
+        free.step_duration(&vec![0.0; cfg.card.mode_count], voice.sub_dt).unwrap();
+        voice.set_bow(0.5, 0.0, 0.13).unwrap();
+        voice.step().unwrap();
+        assert!(!voice.stuck);
+        assert_eq!(voice.model.states(), free.states());
+        assert!(voice.total_modal_energy_j() > 0.0);
+    }
+
+    #[test]
+    fn exact_stiction_never_overrides_the_static_force_capacity() {
+        let mut cfg = config(0.328, 0.003, 50.0, 1.0e-5);
+        cfg.gesture.normal_force_n = 1.0e-6;
+        let mut voice = BowedStringState::new(&cfg, 1).unwrap();
+        let required = voice.model.held_force_for_port_velocity(
+            &voice.shapes_at_bow, cfg.gesture.v_bow_m_s, voice.sub_dt,
+        ).unwrap();
+        assert!(required > 0.8 * cfg.gesture.normal_force_n);
+        let frame = voice.step().unwrap();
+        assert!(!voice.stuck);
+        assert!(frame.relative_velocity_m_s > 0.009);
+        // The actual generalized load remains the declared kinetic law.
+        let law = voice.stribeck.unwrap();
+        let traction = cfg.island.sliding_traction(
+            law, cfg.gesture.v_bow_m_s, cfg.gesture.normal_force_n,
+        ).unwrap();
+        for (force, phi) in voice.forces.iter().zip(&voice.shapes_at_bow) {
+            assert_eq!(*force, traction * phi);
+        }
+    }
+
+    #[test]
+    fn exact_stiction_force_responds_to_material_mass_and_stiffness() {
+        let cfg = config(0.328, 0.003, 50.0, 1.0e-5);
+        let mut heavier = cfg.clone();
+        // Preserve modal frequencies while tripling mechanical impedance.
+        heavier.card.linear_density_kg_m *= 3.0;
+        heavier.card.tension_n *= 3.0;
+        heavier.card.bending_stiffness_n_m2 *= 3.0;
+        let mut a = BowedStringState::new(&cfg, 1).unwrap();
+        let mut b = BowedStringState::new(&heavier, 1).unwrap();
+        a.step().unwrap();
+        b.step().unwrap();
+        let force_a = a.forces[0] / a.shapes_at_bow[0];
+        let force_b = b.forces[0] / b.shapes_at_bow[0];
+        assert!((force_b / force_a - 3.0).abs() < 1.0e-10);
+        assert!((b.total_modal_energy_j() / a.total_modal_energy_j() - 3.0).abs() < 1.0e-9);
+    }
 }
