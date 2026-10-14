@@ -17,8 +17,10 @@
 //   lane -> mix         {type:'audio', frame, channels:[Float32Array, ...], epoch?}
 //                       `frame` = context frame of the first sample (transfer the buffers).
 //                       1 channel is copied to every output channel; N channels map 1:1.
-//   mix  -> lane        {type:'clock', frame, sampleRate}   every 2 render quanta:
-//                       the context frame at which the NEXT quantum starts.
+//   mix  -> lane        {type:'clock', frame, sampleRate, wallMs}   every 2 render quanta:
+//                       the context frame at which the NEXT quantum starts, and Date.now() when
+//                       the tick was sent (Date is the one clock this scope shares with Workers;
+//                       it has no `performance`), so a lane can tell how long a tick queued.
 //   mix  -> node.port   {type:'stats', frame, lanes:{id:{queuedFrames, lateFrames, gapFrames}}}
 //                       about every 0.1 s. gapFrames: silence inside a lane that was sending.
 
@@ -36,7 +38,7 @@ class FsLiveMix extends AudioWorkletProcessor {
       const lane = { port: message.port, queue: [], lateFrames: 0, gapFrames: 0, streaming: false };
       message.port.onmessage = (event) => this.receive(lane, event.data);
       this.lanes.set(message.id, lane);
-      message.port.postMessage({ type: 'clock', frame: currentFrame, sampleRate });
+      message.port.postMessage({ type: 'clock', frame: currentFrame, sampleRate, wallMs: Date.now() });
     } else if (message.type === 'drop') {
       const lane = this.lanes.get(message.id);
       if (lane) {
@@ -110,7 +112,8 @@ class FsLiveMix extends AudioWorkletProcessor {
     }
     this.quantum += 1;
     if (this.quantum % 2 === 0) {
-      for (const lane of this.lanes.values()) lane.port.postMessage({ type: 'clock', frame: f1, sampleRate });
+      const wallMs = Date.now();
+      for (const lane of this.lanes.values()) lane.port.postMessage({ type: 'clock', frame: f1, sampleRate, wallMs });
     }
     if (this.quantum % 38 === 0) {
       const lanes = {};

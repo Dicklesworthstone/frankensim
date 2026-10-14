@@ -2,9 +2,11 @@
 //
 // The Worker renders a fixed distance ahead of the AudioContext clock and stamps every block
 // with the context frame its first sample plays at, so lanes computed in different Workers
-// stay sample-aligned. Events (a stroke, a key) carry the frame they act on; an event without
-// one acts on the next rendered sample. A sequence repeats a list of events every
-// `loopFrames`, starting at `startFrame`.
+// stay sample-aligned. The clock comes from the mixer's ticks, each advanced by the time it
+// waited in this Worker's queue, so a busy Worker still knows when it is late (it then steps
+// ahead and counts skippedFrames and lateEvents). Events (a stroke, a key) carry the frame they
+// act on; an event without one acts on the next rendered sample. A sequence repeats a list of
+// events every `loopFrames`, starting at `startFrame`.
 //
 // While the engine reports itself idle (a silent drum is not stepped) nothing is rendered and
 // the lane jumps ahead with the clock, so the next stroke lands `aheadFrames` after it arrives.
@@ -27,10 +29,17 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
   port.onmessage = (event) => {
     const m = event.data;
     if (m && m.type === 'clock') {
-      // ticks that queued up while this Worker was busy are stale: keep the extrapolated clock
-      // unless the tick is current, or the estimate is old enough to need re-anchoring anyway
+      // A tick that queued while this Worker was busy is stale by the time it is read. A tick
+      // stamped with the wall clock (`wallMs`, Date.now() in the mixer) says by how much: advance
+      // its frame by that age, less 1 ms for Date.now()'s whole-millisecond steps so the clock is
+      // never put ahead, and "now" stays right however far behind the Worker falls (so the
+      // fell-behind step below fires and counts). An unstamped tick is taken as current: keep the
+      // extrapolated clock unless it is, or the estimate is old enough to need re-anchoring anyway.
       const at = performance.now();
-      if (!clock.seen || m.frame > now() - 1024 || at - clock.at > 50) clock = { frame: m.frame, at, rate: m.sampleRate || 48000, seen: true };
+      const rate = m.sampleRate || 48000;
+      let frame = m.frame;
+      if (Number.isFinite(m.wallMs)) frame += (Math.max(0, Date.now() - m.wallMs - 1) * rate) / 1000;
+      if (!clock.seen || frame > now() - 1024 || at - clock.at > 50) clock = { frame, at, rate, seen: true };
       pump();
     }
   };
