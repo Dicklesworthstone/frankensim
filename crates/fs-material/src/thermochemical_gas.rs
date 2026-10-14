@@ -13,6 +13,9 @@
 //! chemical-equilibrium sound speed, molecular relaxation, condensation and
 //! real-gas effects are NOT modeled. The legacy USSA gas evaluator is unchanged.
 
+/// Conservative density/energy reconstruction and closed-volume gas heating.
+pub mod energy;
+
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{DynViscosity, Pressure, QuantitySpec, Temperature};
