@@ -5,10 +5,13 @@
 //! exchange retain their existing owners. No material presets are inferred.
 //! Electrical outer faces are insulated; lateral fluid boundaries are periodic.
 //! Electrodes are ideal *electrical* cell constraints, not mechanical obstacles.
-//! This is ohmic sensible heating, not electrochemistry, motional EMF, magnetic
-//! force, phase change, compressible work or a total-energy model.
+//! The stationary entry points model ohmic sensible heating. The explicit
+//! [`magnetic`] path adds imposed-field motional current and magnetic reaction.
+//! Neither path supplies electrochemistry, phase change, compressible work or
+//! a time-integrated total-energy model.
 
 pub mod midpoint;
+pub mod magnetic;
 
 use fs_exec::CancelGate;
 use fs_material::fluid_transport::FluidTransportState;
@@ -168,9 +171,28 @@ fn solve_source(
     if electric.joule_w.len() != cells || !electric.total_joule_w.is_finite()
         || !electric.delivered_w.is_finite()
     { return Err(invalid("electrical output has invalid shape or total power")); }
+    let (power_w_m3, joule_j) = deposited_power(domain, plane, &electric.joule_w, dt, gate)?;
+    let electrode_j: f64 = electric.electrodes.iter().map(|e| (e.voltage_v * e.current_a) * dt).sum();
+    let electrical_defect_j = electrode_j - joule_j;
+    let tol = input.limits.coupling_tolerance_j;
+    if ![joule_j, electrode_j, electrical_defect_j].iter().all(|x| x.is_finite())
+        || electrical_defect_j.abs() > tol
+        || (electric.total_joule_w * dt - joule_j).abs() > tol
+        || (electric.delivered_w * dt - electrode_j).abs() > tol
+    { return Err(invalid("electrode work and deposited Joule heat do not close")); }
+    Ok(JouleSource { electric, power_w_m3, electrode_j, joule_j, electrical_defect_j })
+}
+
+// One checked Joule-to-thermal conversion for stationary and moving conductors.
+fn deposited_power(
+    domain: &VoxelDomain, plane: usize, watts_per_cell: &[f64], dt: f64,
+    gate: &CancelGate,
+) -> Result<(Vec<f64>, f64), ElectricHeatError> {
+    let cells = domain.cell_count();
+    if watts_per_cell.len() != cells { return Err(invalid("invalid cell Joule-power shape")); }
     let mut power_w_m3 = Vec::with_capacity(cells);
     let mut joule_j = 0.0;
-    for (cell, &watts) in electric.joule_w.iter().enumerate() {
+    for (cell, &watts) in watts_per_cell.iter().enumerate() {
         if cell % 256 == 0 { poll(gate)?; }
         let volume = domain.volume(cell);
         if !watts.is_finite() || watts < 0.0 || !positive(volume)
@@ -184,15 +206,7 @@ fn solve_source(
         power_w_m3.push(density);
         joule_j += energy;
     }
-    let electrode_j: f64 = electric.electrodes.iter().map(|e| (e.voltage_v * e.current_a) * dt).sum();
-    let electrical_defect_j = electrode_j - joule_j;
-    let tol = input.limits.coupling_tolerance_j;
-    if ![joule_j, electrode_j, electrical_defect_j].iter().all(|x| x.is_finite())
-        || electrical_defect_j.abs() > tol
-        || (electric.total_joule_w * dt - joule_j).abs() > tol
-        || (electric.delivered_w * dt - electrode_j).abs() > tol
-    { return Err(invalid("electrode work and deposited Joule heat do not close")); }
-    Ok(JouleSource { electric, power_w_m3, electrode_j, joule_j, electrical_defect_j })
+    Ok((power_w_m3, joule_j))
 }
 
 fn balance(source: JouleSource, heat: HeatBalance, limits: ElectricHeatLimits) -> Result<ElectricHeatStep, ElectricHeatError> {
