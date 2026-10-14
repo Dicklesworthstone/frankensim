@@ -440,7 +440,7 @@ impl ThermalLbm3 {
     /// temperature collide + stream (anti-bounce-back at the fixed-T
     /// plates, periodic x/y).
     pub fn step(&mut self) {
-        self.step_with_forces_inner(None);
+        self.step_with_forces_inner(None, None);
     }
 
     /// Advance with external lattice force densities added to thermal buoyancy.
@@ -451,11 +451,23 @@ impl ThermalLbm3 {
     pub fn step_with_external_forces(&mut self, forces: &[[f64; 3]]) -> Result<(), ThermalForcingError> {
         let plane = self.grid.nx.checked_mul(self.grid.ny).ok_or(ThermalForcingError::Layout)?;
         validate_external_forces(forces, &self.gpop, plane, self.gbeta, self.t_ref)?;
-        self.step_with_forces_inner(Some(forces));
+        self.step_with_forces_inner(Some(forces), None);
         Ok(())
     }
 
-    fn step_with_forces_inner(&mut self, external: Option<&[[f64; 3]]>) {
+    // The shared transactional source owner admits the complete rate field.
+    pub(crate) fn step_with_local_thermal_relaxation(
+        &mut self, forces: &[[f64; 3]], thermal_tau: &[f64],
+    ) -> Result<(), ThermalForcingError> {
+        let plane = self.grid.nx.checked_mul(self.grid.ny).ok_or(ThermalForcingError::Layout)?;
+        validate_external_forces(forces, &self.gpop, plane, self.gbeta, self.t_ref)?;
+        self.step_with_forces_inner(Some(forces), Some(thermal_tau));
+        Ok(())
+    }
+
+    fn step_with_forces_inner(
+        &mut self, external: Option<&[[f64; 3]]>, thermal_tau: Option<&[f64]>,
+    ) {
         let (nx, ny, nz) = (self.grid.nx, self.grid.ny, self.grid.nz);
         for z in 1..nz - 1 {
             for y in 0..ny {
@@ -481,8 +493,9 @@ impl ThermalLbm3 {
                     let (_, u) = self.grid.moments3(i);
                     let t: f64 = self.gpop[i].iter().sum();
                     let eq = geq3(t, u);
+                    let tau_g = thermal_tau.map_or(self.tau_g, |field| field[i]);
                     for q in 0..7 {
-                        post[i][q] = self.gpop[i][q] + (eq[q] - self.gpop[i][q]) / self.tau_g;
+                        post[i][q] = self.gpop[i][q] + (eq[q] - self.gpop[i][q]) / tau_g;
                     }
                 }
             }

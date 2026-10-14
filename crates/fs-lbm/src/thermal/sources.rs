@@ -7,6 +7,8 @@
 //! step, not an implicit reaction law. Symmetric source splitting alone does
 //! not establish second-order accuracy of the partitioned flow/heat solver.
 
+pub mod transport;
+
 use super::{ThermalForcingError, ThermalLbm};
 use crate::core2::{Cell, CollisionModel2};
 use crate::d3q19::ThermalLbm3;
@@ -125,6 +127,9 @@ pub(crate) trait Slab<const D: usize, const Q: usize>: Sized {
     fn incoming() -> (usize, usize);
     fn flow_valid(&self) -> bool;
     fn advance(&mut self, forces: &[[f64; D]]) -> Result<(), ThermalForcingError>;
+    fn momentum_relaxation(&self) -> &[f64];
+    fn momentum_relaxation_mut(&mut self) -> &mut [f64];
+    fn advance_local(&mut self, forces: &[[f64; D]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError>;
 }
 
 fn invalid(what: &'static str) -> ThermalSourceError { ThermalSourceError::Invalid(what) }
@@ -155,6 +160,16 @@ pub(crate) fn source_step_mapped<S: Slab<D, Q>, const D: usize, const Q: usize, 
     state: &mut S, heat: &[f64], forces: &[[f64; D]], limits: ThermalSourceLimits,
     finish: impl FnOnce(ThermalSourceBalance) -> Result<R, ThermalSourceError>,
 ) -> Result<R, ThermalSourceError> {
+    source_step_transport_mapped::<S, D, Q, R>(
+        state, heat, forces, limits, None, |_, balance| finish(balance),
+    )
+}
+
+pub(crate) fn source_step_transport_mapped<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
+    state: &mut S, heat: &[f64], forces: &[[f64; D]], limits: ThermalSourceLimits,
+    transport: Option<transport::RelaxationField<'_>>,
+    finish: impl FnOnce(&S, ThermalSourceBalance) -> Result<R, ThermalSourceError>,
+) -> Result<R, ThermalSourceError> {
     let (cells, plane) = state.layout()?;
     if cells > limits.max_cells || !limits.balance_tolerance.is_finite() || limits.balance_tolerance < 0.0
         || !limits.temperature_range.iter().all(|x| x.is_finite())
@@ -177,10 +192,17 @@ pub(crate) fn source_step_mapped<S: Slab<D, Q>, const D: usize, const Q: usize, 
     }
     let source: f64 = heat[plane..cells-plane].iter().sum();
     if !source.is_finite() { return Err(invalid("summed source is not representable")); }
+    if let Some(field) = transport { field.admit(cells)?; }
     let (mut candidate, weights) = state.snapshot();
+    if let Some(field) = transport {
+        candidate.momentum_relaxation_mut().copy_from_slice(field.momentum);
+    }
     kick(candidate.populations_mut(), heat, &weights, plane);
     check_temperatures(candidate.populations(), limits.temperature_range)?;
-    candidate.advance(forces)?;
+    match transport {
+        Some(field) => candidate.advance_local(forces, field.thermal)?,
+        None => candidate.advance(forces)?,
+    }
     if !candidate.flow_valid() { return Err(invalid("transport produced an inadmissible flow state")); }
     check_temperatures(candidate.populations(), limits.temperature_range)?;
     // Anti-bounce-back gives incoming = 2*w*Twall - outgoing. Therefore the
@@ -200,7 +222,13 @@ pub(crate) fn source_step_mapped<S: Slab<D, Q>, const D: usize, const Q: usize, 
     if !defect.is_finite() || defect.abs() > limits.balance_tolerance {
         return Err(ThermalSourceError::Balance { defect });
     }
-    let result = finish(ThermalSourceBalance { source, stored_change, bottom_wall, top_wall, defect })?;
+    // Coefficients are borrowed for ONE step, like sources. Preserve background
+    // rates so a later legacy step cannot combine stale local viscosity with
+    // default thermal diffusivity. Populations and actual forces are retained.
+    if transport.is_some() {
+        candidate.momentum_relaxation_mut().copy_from_slice(state.momentum_relaxation());
+    }
+    let result = finish(&candidate, ThermalSourceBalance { source, stored_change, bottom_wall, top_wall, defect })?;
     *state = candidate;
     Ok(result)
 }
@@ -243,6 +271,11 @@ impl Slab<2, 5> for ThermalLbm {
             && g.flags.iter().enumerate().all(|(i, flag)| *flag == if i < g.nx || i >= g.f.len()-g.nx { Cell::Wall } else { Cell::Fluid })
     }
     fn advance(&mut self, forces: &[[f64; 2]]) -> Result<(), ThermalForcingError> { self.step_with_external_forces(forces) }
+    fn momentum_relaxation(&self) -> &[f64] { &self.grid.tau }
+    fn momentum_relaxation_mut(&mut self) -> &mut [f64] { &mut self.grid.tau }
+    fn advance_local(&mut self, forces: &[[f64; 2]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError> {
+        self.step_with_local_thermal_relaxation(forces, thermal_tau)
+    }
 }
 impl Slab<3, 7> for ThermalLbm3 {
     fn layout(&self) -> Result<(usize, usize), ThermalSourceError> {
@@ -271,6 +304,11 @@ impl Slab<3, 7> for ThermalLbm3 {
         flow_valid(&self.grid.f, &self.grid.tau, &self.grid.fext, self.tau_g) && self.gbeta.is_finite() && self.t_ref.is_finite()
     }
     fn advance(&mut self, forces: &[[f64; 3]]) -> Result<(), ThermalForcingError> { self.step_with_external_forces(forces) }
+    fn momentum_relaxation(&self) -> &[f64] { &self.grid.tau }
+    fn momentum_relaxation_mut(&mut self) -> &mut [f64] { &mut self.grid.tau }
+    fn advance_local(&mut self, forces: &[[f64; 3]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError> {
+        self.step_with_local_thermal_relaxation(forces, thermal_tau)
+    }
 }
 
 impl ThermalLbm {
