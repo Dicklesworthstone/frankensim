@@ -58,11 +58,15 @@ function bench(name, scale) {
 function choose(name, scales, minRealtime) {
   let fallback = null;
   for (const s of scales) {
-    const rt = bench(name, s);
-    if (rt >= minRealtime) return { scale: s, realtime: rt };
-    fallback = { scale: s, realtime: rt };
+    try {
+      const rt = bench(name, s);
+      if (rt >= minRealtime) return { scale: s, realtime: rt };
+      fallback = { scale: s, realtime: rt };
+    } catch {
+      // Scale requires oversampling at 48 kHz; try the next coarser grid.
+    }
   }
-  return fallback;
+  return fallback || { scale: 5, realtime: bench(name, 5) };
 }
 
 self.onmessage = async (event) => {
@@ -74,7 +78,7 @@ self.onmessage = async (event) => {
       if (Number.isFinite(m.fieldHz)) fieldEvery = m.fieldHz > 0 ? 1000 / m.fieldHz : Infinity;
       if (Number(m.fieldFrames) > 0) { fieldFrames = Math.max(128, Math.round(Number(m.fieldFrames))); fieldEvery = Infinity; }
       if (m.bursts === false) bursts = false;
-      const pick = choose(m.piece, m.scales || [4, 5, 6, 7, 8], m.minRealtime || 1.7);
+      const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7);
       piece = new KitPiece(m.piece, pick.scale);
       const engine = {
         idle: () => piece.asleep(),

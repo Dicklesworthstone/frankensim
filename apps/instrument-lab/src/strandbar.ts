@@ -27,8 +27,8 @@ interface StrandbarData {
 
 const SR = 48_000;
 /** Look-ahead of the live lanes, frames, and how long after Play both versions start (the lanes fill first). */
-const AHEAD = 48_000;
-const LEAD_S = 1.5;
+const AHEAD = 96_000;
+const LEAD_S = 1.75;
 type Phase = "idle" | "loading" | "playing";
 
 /** Strandbar on the studio render and on the live engines at once, with a switch between them. */
@@ -215,8 +215,8 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       // a fixed score needs no low latency: a second of look-ahead rides out CPU contention
       // (another tab, a busy machine) that an 85 ms buffer turned into dropouts
       const piano = new PianoLane(m, { aheadFrames: AHEAD, gain: data.live.piano.gain });
-      const kick = new KitLane(m, "kick", { gain: data.live.kick.gain, aheadFrames: AHEAD, minRealtime: 1.6, fieldHz: 0 });
-      const hihat = new KitLane(m, "hihat-closed", { gain: data.live.hihat.gain, aheadFrames: AHEAD, minRealtime: 1.6, fieldHz: 0 });
+      const kick = new KitLane(m, "kick", { gain: data.live.kick.gain, aheadFrames: AHEAD, scales: [2, 2.5, 3, 3.5, 4, 5, 6], minRealtime: 1.4, fieldHz: 0 });
+      const hihat = new KitLane(m, "hihat-closed", { gain: data.live.hihat.gain, aheadFrames: AHEAD, scales: [2.5, 3, 3.5, 4, 5, 6], minRealtime: 1.4, fieldHz: 0 });
       const meter = (id: string) => (s: LaneWorkerStats): void => {
         const h = (laneHealth[id] ??= { late: 0, gap: 0, rt: 0 });
         h.rt = s.realtime;
@@ -243,11 +243,21 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       hihat.sequence(startFrame, data.loopFrames, data.hihat);
       spec.start();
       setPhase("playing");
-      status.textContent = `Both versions are playing in step. The drums run on a grid ${kr.scale}× (kick) and ${hr.scale}× (hi-hat) coarser than the studio render, chosen for this device.`;
+      const playingText = `Both versions are playing in step. The drums run on a grid ${kr.scale}× (kick) and ${hr.scale}× (hi-hat) coarser than the studio render, chosen for this device.`;
+      status.textContent = `Pre-buffering 2.0 s of live piano (${pr.boardCoordinates} board modes) and kit (${kr.scale}× kick, ${hr.scale}× hi-hat)…`;
+      let announcedPlaying = false;
       const pos = (): void => {
         posRaf = requestAnimationFrame(pos);
         const f = c.currentTime * SR - startFrame;
-        if (f < 0) return;
+        if (f < 0) {
+          const pct = Math.max(0, Math.min(99, Math.round((1 + f / (LEAD_S * SR)) * 100)));
+          barEl.textContent = `Buffering ${pct}%`;
+          return;
+        }
+        if (!announcedPlaying) {
+          announcedPlaying = true;
+          status.textContent = playingText;
+        }
         const inLoop = f % data.loopFrames;
         const beat = inLoop / beatFrames;
         const bar = Math.floor(beat / data.beatsPerBar);
