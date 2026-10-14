@@ -1,4 +1,4 @@
-//! Ambient gray radiation on a named, uniform convective P1 trace.
+//! Ambient gray radiation on a named P1 trace, with or without convection.
 //!
 //! This preserves the cooling lab's area-mean patch model: its integrated
 //! radiative loss is epsilon sigma A (T_mean^4 - T_ambient^4). A positive
@@ -6,6 +6,12 @@
 //! solve. It is neither an integral of pointwise T(x)^4 nor uniform patch
 //! flux. The reservoir is black, isothermal and occupies view factor one;
 //! there is no enclosure, occlusion or participating medium.
+//!
+//! A named uniform zero-flux row declares no nonradiative exchange (for
+//! example a vacuum-facing surface). Its actual radiative secant supplies
+//! the Robin operator; no artificial convection or air reference is added.
+//! Such a trace is absent from the separated convection reports. Existing
+//! convection adjoints still require original uniform Robin controls.
 //!
 //! The returned conduction report retains the combined Robin operator that
 //! was actually solved. Separate ORIGINAL convection rows carry heat to air.
@@ -27,7 +33,7 @@ use std::collections::BTreeSet;
 mod adjoint;
 pub use adjoint::{AmbientRadiationGradient, pullback_ambient_radiation};
 
-/// One immutable material-card-backed ambient patch on an existing Robin row.
+/// One immutable material-card-backed ambient patch on a named natural trace.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AmbientRadiationPatch {
     region: String,
@@ -37,7 +43,7 @@ pub struct AmbientRadiationPatch {
 
 impl AmbientRadiationPatch {
     /// Bind the material declaration and reservoir temperature. The named
-    /// Robin trace is admitted against the actual problem at solve time.
+    /// uniform Robin or zero-flux trace is admitted at solve time.
     pub fn new(
         region: impl Into<String>,
         emissivity: SurfaceEmissivity,
@@ -48,7 +54,7 @@ impl AmbientRadiationPatch {
             return Err(radiation_error(
                 "<unnamed>",
                 "ambient patch name is blank",
-                "name the existing convective boundary region",
+                "name the existing natural boundary region",
             ));
         }
         // The reservoir need not lie within the SURFACE material's validity
@@ -63,7 +69,7 @@ impl AmbientRadiationPatch {
         Ok(patch)
     }
 
-    /// Named existing uniform Robin region.
+    /// Named existing uniform Robin or zero-flux region.
     #[must_use]
     pub fn region(&self) -> &str {
         &self.region
@@ -280,10 +286,11 @@ struct BoundPatch<'a> {
 }
 
 /// Solve the existing conduction/contact problem with ambient patch radiation
-/// in addition to its named uniform Robin laws. Every iteration uses the
+/// on named uniform Robin or zero-flux traces. Every iteration uses the
 /// original heterogeneous/nonlinear conductivity and finite contact operator.
+/// Zero-flux traces have radiation only, not an artificial convection law.
 ///
-/// Patches must be unique nonempty existing uniform Robin traces. Failed
+/// Patches must be unique nonempty existing natural traces. Failed
 /// material validity, incomplete convergence, exhausted work and cancellation
 /// return errors, never a frozen-coefficient success. This function does not
 /// provide radiative derivatives or continuum/uncertainty bounds.
@@ -360,6 +367,7 @@ pub(crate) fn solve_ambient_radiation_with<S, E: From<ConductionError>>(
     }
     let mut bound = Vec::with_capacity(patches.len());
     let mut names = BTreeSet::new();
+    let mut radiation_only = BTreeSet::new();
     for patch in patches {
         poll(cx, bound.len())?;
         if !names.insert(patch.region()) {
@@ -379,21 +387,27 @@ pub(crate) fn solve_ambient_radiation_with<S, E: From<ConductionError>>(
                 radiation_error(
                     patch.region(),
                     "no matching boundary region",
-                    "name an existing uniform convective boundary",
+                    "name an existing uniform Robin or zero-flux boundary",
                 )
             })?;
-        let ThermalBc::Robin {
-            htc: ScalarField::Uniform(h),
-            t_ref: ScalarField::Uniform(reference),
-        } = &problem.boundary.conditions()[region]
-        else {
-            return Err(radiation_error(
+        let (h, reference) = match &problem.boundary.conditions()[region] {
+            ThermalBc::Robin {
+                htc: ScalarField::Uniform(h),
+                t_ref: ScalarField::Uniform(reference),
+            } => {
+                require_temperature(patch.region(), "convective reference", *reference)?;
+                (*h, *reference)
+            }
+            ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) } if *flux == 0.0 => {
+                radiation_only.insert(patch.region());
+                (0.0, patch.ambient_temperature_k())
+            }
+            _ => return Err(radiation_error(
                 patch.region(),
-                "ambient patch is not a uniform Robin boundary",
-                "bind the patch to uniform convection; prescribed, flux and nodal Robin rows are unsupported",
-            ).into());
+                "ambient patch is neither uniform Robin nor explicitly zero-flux",
+                "declare convection or no nonradiative exchange; prescribed temperature, nonzero flux and nodal rows are unsupported",
+            ).into()),
         };
-        require_temperature(patch.region(), "convective reference", *reference)?;
         let mut area = 0.0;
         for (slot, face) in problem.mesh.boundary().iter().enumerate() {
             poll(cx, slot)?;
@@ -412,8 +426,8 @@ pub(crate) fn solve_ambient_radiation_with<S, E: From<ConductionError>>(
         bound.push(BoundPatch {
             patch,
             region,
-            convective_coefficient: *h,
-            convective_reference: *reference,
+            convective_coefficient: h,
+            convective_reference: reference,
         });
     }
     let mut driving: Vec<f64> = patches
@@ -441,7 +455,7 @@ pub(crate) fn solve_ambient_radiation_with<S, E: From<ConductionError>>(
         }
         let combined_boundary = problem
             .boundary
-            .with_uniform_robin_replacements(&replacements)?;
+            .with_radiative_robin_replacements(&replacements)?;
         let combined_problem = ConductionProblem {
             boundary: &combined_boundary,
             ..problem
@@ -531,6 +545,9 @@ pub(crate) fn solve_ambient_radiation_with<S, E: From<ConductionError>>(
             flux.mean_reference_temperature_k = patch.convective_reference;
             flux.heat_rate_w = convective_heat;
         }
+        // Radiation-only secants are not original convection controls or air
+        // heat ports. Keep their complete traces on the conduction report.
+        convective_robin_fluxes.retain(|flux| !radiation_only.contains(flux.region.as_str()));
         let mut convective_out_w = 0.0;
         for flux in &convective_robin_fluxes {
             convective_out_w = finite(convective_out_w + flux.heat_rate_w, "convective total")?;
