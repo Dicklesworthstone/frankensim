@@ -1,5 +1,8 @@
 //! Generated electrical heat/force through the existing table-driven example.
 use super::*;
+#[path = "interfaces.rs"]
+mod interfaces;
+use fs_lbm::conjugate::ElectricalContact;
 use fs_lbm::conjugate::{ElectricSetup, Electrode, ElectrodeDrive};
 use fs_lbm::material::electrothermal::{ElectricHeatInput, ElectricHeatLimits};
 use fs_lbm::material::electrothermal::magnetic::midpoint::MagneticMidpointOptions;
@@ -10,6 +13,7 @@ struct Record {
     time_s:f64, mean_k:f64, mean_vx:f64, current_a:f64, joule_w:f64,
     mechanical_w:f64, min_k:f64, max_k:f64, min_mu:f64, max_mu:f64,
     defect_j:f64, iterations:usize, transport_relative:f64,
+    min_contact:f64,max_contact:f64,interface_relative:f64,
 }
 #[derive(Default)]
 struct Summary {
@@ -36,14 +40,24 @@ fn simulate(table:&Table,steps:usize,voltage:f64,b:f64,emit:impl FnMut(Record))
     simulate_mode(table,steps,voltage,b,false,emit)
 }
 
+#[derive(Default)]
 struct SourceAccount {
     electrode_j:f64,joule_j:f64,mechanical_j:f64,defect_j:f64,
     iterations:usize,transport_relative:f64,
+    min_contact:f64,max_contact:f64,interface_relative:f64,
 }
 
-fn simulate_mode(table:&Table,steps:usize,voltage:f64,b:f64,midpoint:bool,mut emit:impl FnMut(Record))
+fn simulate_mode(table:&Table,steps:usize,voltage:f64,b:f64,midpoint:bool,emit:impl FnMut(Record))
     ->Result<Summary,Box<dyn Error>>
 {
+    simulate_interfaces(table,steps,voltage,b,midpoint,None,emit)
+}
+
+// One geometry, drive schedule and physical reporting loop for every mode.
+fn simulate_interfaces(table:&Table,steps:usize,voltage:f64,b:f64,midpoint:bool,
+    interface:Option<&interfaces::Table>,mut emit:impl FnMut(Record)) ->Result<Summary,Box<dyn Error>>
+{
+    if interface.is_some() && !midpoint {return Err("interfaces require the coupled midpoint mode".into());}
     if !(2..=2000).contains(&steps) || !voltage.is_finite() || !b.is_finite() {
         return Err("electrical mode requires 2..2000 steps and finite voltage/B".into());
     }
@@ -64,12 +78,32 @@ fn simulate_mode(table:&Table,steps:usize,voltage:f64,b:f64,midpoint:bool,mut em
     };
     let field=[[0.0,b,0.0];20]; let force=[[2.0,0.0,0.0];20];
     let gate=CancelGate::new(); let mut totals=Summary::default();
+    // Electrical-only interior interfaces; no hydrodynamic wall is introduced.
+    // Values are callback templates, not an implicit perfect-contact fallback.
+    let contacts=[
+        ElectricalContact {cells:[8,10],resistance_ohm_m2:0.0,heat_fraction_to_first:0.0},
+        ElectricalContact {cells:[9,11],resistance_ohm_m2:0.0,heat_fraction_to_first:0.0},
+    ];
     for index in 0..steps {
         // Zero voltage shorts the ideal electrodes; it does NOT open the circuit.
         // Motional currents and braking can still generate heat after switch-off.
         if index==steps/2 {setup.electrodes[0].drive=ElectrodeDrive::Voltage(0.0);}
         let request=ElectricHeatInput {setup:&setup,contacts:&[],limits};
-        let (motion,heat,applied,endpoint,account)=if midpoint {
+        let (motion,heat,applied,endpoint,account)=if let Some(law)=interface {
+            let result=slab.step_magnetothermal_midpoint_with_interfaces(
+                ElectricHeatInput {contacts:&contacts,..request},&field,&force,interfaces::options(),&gate,
+                |_,t,_|table.electrical_at(t),|_,_,pair|law.at([pair[0].temperature_k,pair[1].temperature_k]),
+            )?;
+            let min_contact=result.applied_interfaces.iter().map(|s|s.contact.resistance_ohm_m2).fold(f64::INFINITY,f64::min);
+            let max_contact=result.applied_interfaces.iter().map(|s|s.contact.resistance_ohm_m2).fold(0.0,f64::max);
+            let s=result.bulk.step;
+            let account=SourceAccount {electrode_j:s.electrode_energy_j,joule_j:s.joule_energy_j,
+                mechanical_j:s.midpoint_mechanical_work_j,defect_j:s.coupling_defect_j,
+                iterations:s.iterations,transport_relative:result.bulk.transport_residual.conductivity_relative
+                    .max(result.bulk.transport_residual.viscosity_relative),min_contact,max_contact,
+                interface_relative:result.interface_residual.resistance_relative};
+            (s.motion,s.heat,result.bulk.applied,result.bulk.endpoint,account)
+        } else if midpoint {
             let result=slab.step_magnetothermal_midpoint_with_material_transport(
                 request,&field,&force,midpoint_options(),&gate,|_,t,_|table.electrical_at(t),
             )?;
@@ -77,7 +111,7 @@ fn simulate_mode(table:&Table,steps:usize,voltage:f64,b:f64,midpoint:bool,mut em
             let account=SourceAccount {electrode_j:s.electrode_energy_j,joule_j:s.joule_energy_j,
                 mechanical_j:s.midpoint_mechanical_work_j,defect_j:s.coupling_defect_j,
                 iterations:s.iterations,transport_relative:result.transport_residual.conductivity_relative
-                    .max(result.transport_residual.viscosity_relative)};
+                    .max(result.transport_residual.viscosity_relative),..SourceAccount::default()};
             (s.motion,s.heat,result.applied,result.endpoint,account)
         } else {
             let result=slab.step_magnetothermal_with_material_transport(
@@ -86,7 +120,7 @@ fn simulate_mode(table:&Table,steps:usize,voltage:f64,b:f64,midpoint:bool,mut em
             let s=result.step;
             let account=SourceAccount {electrode_j:s.electrode_energy_j,joule_j:s.joule_energy_j,
                 mechanical_j:s.lagged_mechanical_work_j,defect_j:s.coupling_defect_j,
-                iterations:1,transport_relative:0.0};
+                iterations:1,transport_relative:0.0,..SourceAccount::default()};
             (s.motion,s.heat,result.applied,result.endpoint,account)
         };
         let mean_k=endpoint.iter().map(|s|s.temperature_k).sum::<f64>()/16.0;
@@ -97,7 +131,8 @@ fn simulate_mode(table:&Table,steps:usize,voltage:f64,b:f64,midpoint:bool,mut em
             joule_w:motion.electric.total_joule_w,
             mechanical_w:motion.mechanical_power_w,
             min_k:f64::INFINITY,max_k:f64::NEG_INFINITY,min_mu:f64::INFINITY,max_mu:f64::NEG_INFINITY,
-            defect_j:account.defect_j,iterations:account.iterations,transport_relative:account.transport_relative};
+            defect_j:account.defect_j,iterations:account.iterations,transport_relative:account.transport_relative,
+            min_contact:account.min_contact,max_contact:account.max_contact,interface_relative:account.interface_relative};
         for sample in &applied {
             let k=sample.transport.thermal_conductivity_w_m_k();
             let mu=sample.transport.dynamic_viscosity_pa_s();
@@ -137,6 +172,10 @@ pub(super) fn run_midpoint(table:&Table,steps:usize,voltage:f64,b:f64)->Result<(
     eprintln!("electrode_J={:.9} joule_J={:.9} midpoint_mechanical_J={:.9} stored_J={:.9} wall_J={:.9} coupling_defect_J={:.6e}",
         totals.electrode_j,totals.joule_j,totals.mechanical_j,totals.stored_j,totals.wall_j,totals.defect());
     Ok(())
+}
+
+pub(super) fn run_interfaces(table:&Table,steps:usize,voltage:f64,b:f64,path:&str)->Result<(),Box<dyn Error>> {
+    interfaces::run(table,steps,voltage,b,path)
 }
 
 #[cfg(test)]

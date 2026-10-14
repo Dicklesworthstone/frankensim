@@ -245,3 +245,6 @@ fn undeclared_heat_ownership_and_cancellation_refuse_without_publication() {
         });
     }
 }
+
+#[path = "stored_radiation/vacuum.rs"]
+mod vacuum;
