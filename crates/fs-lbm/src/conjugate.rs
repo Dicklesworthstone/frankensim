@@ -105,8 +105,8 @@ pub use buoyant::{
 };
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 pub use electric::{
-    Conductor, ElectricSetup, ElectricSolution, Electrode, ElectrodeDrive, ElectrodeSolution,
-    ElectrothermalReport, solve_electric, solve_electrothermal,
+    Conductor, ElectricSetup, ElectricSolution, ElectricalContact, Electrode, ElectrodeDrive,
+    ElectrodeSolution, ElectrothermalReport, solve_electric, solve_electrothermal,
 };
 pub use energy::{
     CellSink, CompactComponent, ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig,
