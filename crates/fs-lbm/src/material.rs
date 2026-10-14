@@ -12,6 +12,7 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
 mod forcing;
+pub use forcing::electrothermal;
 mod runtime_rebind;
 mod three_dimensional;
 pub use three_dimensional::{MaterialSlab3, MaterialThermalSlab3};
@@ -257,7 +258,7 @@ impl<L> MaterialSlab<L> {
     /// This also works for negative bottom-minus-top temperature contrasts.
     pub fn temperature_si(&self, normalized: f64) -> Result<f64, MaterialLbmError> {
         finite(normalized, "normalized temperature must be finite")?;
-        positive(self.top_temperature_k + normalized * self.temperature_difference_k,
+        positive(self.top_temperature_k + normalized *self.temperature_difference_k,
             "physical temperature must remain finite and positive")
     }
     /// Physical temperature scale used by both wall mapping and buoyancy.

@@ -1,6 +1,7 @@
 //! Material-bound SI momentum and heat sources for the existing thermal solvers.
 
 mod heating;
+pub mod electrothermal;
 
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use crate::ThermalLbm;
