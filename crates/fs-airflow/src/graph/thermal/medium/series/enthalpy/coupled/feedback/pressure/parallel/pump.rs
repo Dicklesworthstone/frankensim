@@ -11,6 +11,9 @@
 //! range; changing viscosity beyond that range refuses. No affinity scaling or
 //! motor heat is invented. Head data are not material properties.
 
+/// Joint pump operating point and common-solid thermal feedback.
+pub mod solid;
+
 use fs_exec::Cx;
 use fs_material::liquid::ResolvedLiquidState;
 use fs_qty::{Length, Pressure, VolumetricFlowRate};
