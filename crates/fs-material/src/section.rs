@@ -7,8 +7,11 @@
 //!
 //! These are Euler-Bernoulli section integrals, not a three-dimensional
 //! composite constitutive law: shear deformation, Poisson constraint, slip,
-//! residual stress, winding geometry, damage and dissipation are not modeled.
+//! winding geometry, damage and dissipation are not modeled. The explicit
+//! [`thermal`] binding adds per-layer thermal eigenstrain and axial stress.
 //! Source validity applies at each retained query point, not at future states.
+
+pub mod thermal;
 
 use fs_qty::{Density, Pressure, QuantitySpec};
 use crate::state_point::{
@@ -29,11 +32,40 @@ pub struct ConcentricMaterialLayer {
     pub material: ResolvedMaterialStatePoint,
 }
 
+/// The same per-layer integrals used in every aggregate section coefficient.
+/// Their source is the corresponding entry in `ConcentricElasticSection::layers`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ElasticLayerIntegrals {
+    area_m2: f64,
+    second_moment_m4: f64,
+    line_density_kg_m: f64,
+    axial_stiffness_n: f64,
+    bending_stiffness_n_m2: f64,
+}
+impl ElasticLayerIntegrals {
+    /// Layer cross-sectional area [m2].
+    #[must_use]
+    pub const fn area_m2(&self) -> f64 { self.area_m2 }
+    /// Layer second moment about the shared centroid [m4].
+    #[must_use]
+    pub const fn second_moment_m4(&self) -> f64 { self.second_moment_m4 }
+    /// Layer mass per length [kg/m].
+    #[must_use]
+    pub const fn line_density_kg_m(&self) -> f64 { self.line_density_kg_m }
+    /// Layer axial stiffness [N].
+    #[must_use]
+    pub const fn axial_stiffness_n(&self) -> f64 { self.axial_stiffness_n }
+    /// Layer bending stiffness [N m2].
+    #[must_use]
+    pub const fn bending_stiffness_n_m2(&self) -> f64 { self.bending_stiffness_n_m2 }
+}
+
 /// Immutable section integrals with all original source bundles and geometry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConcentricElasticSection {
     inner_radius_m: f64,
     layers: Vec<ConcentricMaterialLayer>,
+    layer_integrals: Vec<ElasticLayerIntegrals>,
     area_m2: f64,
     second_moment_m4: f64,
     line_density_kg_m: f64,
@@ -72,6 +104,7 @@ impl ConcentricElasticSection {
         let mut line_density = 0.0;
         let mut axial = 0.0;
         let mut bending = 0.0;
+        let mut layer_integrals = Vec::with_capacity(layers.len());
         for layer in &layers {
             let outer = layer.outer_radius_m;
             if !outer.is_finite() || outer <= inner {
@@ -91,20 +124,30 @@ impl ConcentricElasticSection {
             // squared/fourth powers when a thin layer is still representable.
             let a = positive(core::f64::consts::PI * (outer - inner) * (outer + inner), "annular area")?;
             let i = positive(0.25 * a * (outer * outer + inner * inner), "annular second moment")?;
+            let layer_mass = positive(rho * a, "layer line density")?;
+            let layer_axial = positive(young * a, "layer axial stiffness")?;
+            let layer_bending = positive(young * i, "layer bending stiffness")?;
             area = positive(area + a, "section area")?;
             inertia = positive(inertia + i, "section second moment")?;
-            line_density = positive(line_density + positive(rho * a, "layer line density")?, "section line density")?;
-            axial = positive(axial + positive(young * a, "layer axial stiffness")?, "section axial stiffness")?;
-            bending = positive(bending + positive(young * i, "layer bending stiffness")?, "section bending stiffness")?;
+            line_density = positive(line_density + layer_mass, "section line density")?;
+            axial = positive(axial + layer_axial, "section axial stiffness")?;
+            bending = positive(bending + layer_bending, "section bending stiffness")?;
+            layer_integrals.push(ElasticLayerIntegrals {
+                area_m2: a, second_moment_m4: i, line_density_kg_m: layer_mass,
+                axial_stiffness_n: layer_axial, bending_stiffness_n_m2: layer_bending,
+            });
             inner = outer;
         }
-        Ok(Self { inner_radius_m, layers, area_m2: area, second_moment_m4: inertia,
+        Ok(Self { inner_radius_m, layers, layer_integrals, area_m2: area, second_moment_m4: inertia,
             line_density_kg_m: line_density, axial_stiffness_n: axial, bending_stiffness_n_m2: bending })
     }
 
     /// Original ordered material assignments; no averaged material receipt.
     #[must_use]
     pub fn layers(&self) -> &[ConcentricMaterialLayer] { &self.layers }
+    /// Integrals in exactly the same spatial order as `layers()`.
+    #[must_use]
+    pub fn layer_integrals(&self) -> &[ElasticLayerIntegrals] { &self.layer_integrals }
     /// Explicit central void radius [m].
     #[must_use]
     pub const fn inner_radius_m(&self) -> f64 { self.inner_radius_m }
