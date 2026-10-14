@@ -389,10 +389,10 @@ mod tests {
             ] {
                 claims.insert_claim(PropertyClaim {
                     key: PropertyKey::new(name, dims),
-                    value: PropertyValue::Constant { value, dims },
+                    value: PropertyValue::Scalar { value, dims },
                     validity: ValidityDomain::unconstrained(),
-                    uncertainty: UncertaintyModel::None,
-                    interpolation: InterpolationPolicy::None,
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
                     observations: vec![],
                     provenance: Provenance {
                         source: "synthetic string material integration fixture".into(),
