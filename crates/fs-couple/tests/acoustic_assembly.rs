@@ -1436,9 +1436,18 @@ fn g3_plate_density_changes_actual_force_to_pressure_response() {
         "actual plate contribution required"
     );
     assert!((frequencies[1] / frequencies[0] - 0.5).abs() < 1.0e-8);
+    let dt = 1.0 / f64::from(bare.sample_rate_hz);
+    let zeta = panel.damping_ratio;
+    let zoh_endpoint_factor = |omega: f64| {
+        let wd = omega * (1.0 - zeta * zeta).sqrt();
+        (-zeta * omega * dt).exp() * ((wd * dt).cos() - (zeta * omega / wd) * (wd * dt).sin())
+    };
+    let expected_ratio =
+        0.25 * zoh_endpoint_factor(frequencies[1]) / zoh_endpoint_factor(frequencies[0]);
     assert!(
-        (modal_pressure[1] / modal_pressure[0] - 0.25).abs() < 1.0e-8,
-        "fixed-force plate pressure must follow inverse density: {modal_pressure:?}"
+        (modal_pressure[1] / modal_pressure[0] - 0.25).abs() < 2.0e-4
+            && (modal_pressure[1] / modal_pressure[0] - expected_ratio).abs() < 1.0e-12,
+        "fixed-force plate pressure must follow inverse density and exact ZOH endpoint factor: {modal_pressure:?}"
     );
     eprintln!(
         "G3 plate density x4: first pressure {modal_pressure:?} Pa; modal omega {frequencies:?} rad/s"
