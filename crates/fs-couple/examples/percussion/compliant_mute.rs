@@ -13,7 +13,7 @@ const MAX_BYTES: u64 = 65_536;
 struct Envelope { center_m: [f64;2], radius_m: f64 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PairSurface { Upper, Lower }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Spec {
     pub surface: Surface,
     pair_surface: Option<PairSurface>,
