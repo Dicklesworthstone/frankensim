@@ -27,8 +27,9 @@
     <a class="brand" href="#top"><b>Struck</b><span>FrankenSim instrument lab</span></a>
     <nav class="topnav" aria-label="Sections">
       <a href="#two-ways">Two ways</a>
+      <a href="#strandbar">Strandbar</a>
       <a href="#kit">Drum kit</a>
-      <a class="is-live" href="#live-drum">Play the drum</a>
+      <a class="is-live" href="#live-kit">Play the kit</a>
       <a class="is-live" href="#live-piano">Play the piano</a>
       <a href="#piano">Grand piano</a>
       <a href="#real">Real vs ours</a>
@@ -103,6 +104,19 @@
       </div>
     </section>
 
+    <!-- ============================================================ STRANDBAR -->
+    <section id="strandbar">
+      <div class="wrap">
+        <header>
+          <div class="rule"></div>
+          <p class="eyebrow"><span class="tag offline">Offline reference</span> <span class="tag live">Live · WebAssembly</span></p>
+          <h2>One groove, two simulations, one switch.</h2>
+          <p class="lede">The piano riff and four-on-the-floor of Todd Terje's <i>Strandbar</i>, played on FrankenSim's concert grand and drum kit. Two versions run on one clock: the studio render, computed offline at full resolution, and the same piano and drums computed in this tab while you listen. Flip the switch as it plays; nothing else changes.</p>
+        </header>
+        <div id="strandbar-root" class="live-root" style="min-height: 560px"></div>
+      </div>
+    </section>
+
     <!-- ============================================================ DRUM KIT -->
     <section id="kit">
       <div class="wrap">
@@ -116,16 +130,16 @@
       </div>
     </section>
 
-    <!-- ============================================================ LIVE DRUM -->
-    <section id="live-drum">
+    <!-- ============================================================ LIVE KIT -->
+    <section id="live-kit">
       <div class="wrap">
         <header>
           <div class="rule live"></div>
           <p class="eyebrow"><span class="tag live">Live · WebAssembly</span></p>
-          <h2>Hit a drum that is being solved right now.</h2>
-          <p class="lede">Tap anywhere on the head. The heads are prestressed films meshed and eigen-solved in this tab, and the stick is a mass with a Hertz contact law. Change the tension and the drum is rebuilt in milliseconds: new frequencies, because new eigenvalues came out of the solver. This live engine is the earlier modal model: with only its lowest modes and light damping it rings longer and purer than a real drum. The kit above is the realistic one.</p>
+          <h2>Play a drum kit that is being solved as you hit it.</h2>
+          <p class="lede">Strike any head or cymbal where you like: the stick lands at that spot on the same plate solver as the kit above, computed in this tab. The colours are the surface's own velocity field, the wave you hear spreading from where you hit. Keys work too: B kick, S snare, T and F toms, H hi-hat, C crash, R ride.</p>
         </header>
-        <div id="live-drum-root" class="live-root" data-mount="drum"></div>
+        <div id="live-kit-root" class="live-root" style="min-height: 420px"></div>
       </div>
     </section>
 
@@ -273,7 +287,7 @@
 
   <footer class="site">
     <div class="wrap">
-      <p>Built from <a href="https://github.com/Dicklesworthstone/frankensim">FrankenSim</a> at commit <code id="commit">—</code>. Offline clips were rendered natively with the <code>percussion</code> and <code>grand_piano</code> examples in <code>crates/fs-couple/examples</code>. The live engines are in <code>apps/instrument-lab/engine-drum</code> and <code>engine-piano</code>.</p>
+      <p>Built from <a href="https://github.com/Dicklesworthstone/frankensim">FrankenSim</a> at commit <code id="commit">—</code>. Offline clips were rendered natively with the <code>percussion</code> and <code>grand_piano</code> examples in <code>crates/fs-couple/examples</code>. The live engines are in <code>apps/instrument-lab/engine-kit</code> (the drum kit) and <code>engine-piano</code>.</p>
       <p>Audio is pressure in pascals multiplied by one fixed playback gain per comparison; no clip was normalized, equalized or reverberated. Nobody has formally adjudicated these sounds against real instruments, and no realism claim is made beyond what each panel states.</p>
     </div>
   </footer>

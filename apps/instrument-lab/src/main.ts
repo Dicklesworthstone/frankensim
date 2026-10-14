@@ -286,7 +286,7 @@ function initViewers(): void {
 // ------------------------------------------------------------------------ live
 function initLive(): void {
   // The sections only build DOM here; no wasm is fetched until a Start button is pressed.
-  const drum = $("#live-drum-root");
+  const kit = $("#live-kit-root");
   const piano = $("#live-piano-root");
   const opened = (root: HTMLElement): void => {
     const d = root.querySelector<HTMLDetailsElement>("details.evidence");
@@ -294,14 +294,14 @@ function initLive(): void {
   };
   idle(() => {
     const jobs: Promise<void>[] = [];
-    if (drum) jobs.push(import("./live/drumSection").then((m) => { m.mountLiveDrum(drum); opened(drum); }));
+    if (kit) jobs.push(import("./live/kitStage").then((m) => { m.mountLiveKit(kit); }));
     if (piano) jobs.push(import("./live/pianoSection").then((m) => { m.mountLivePiano(piano); opened(piano); }));
     void Promise.all(jobs).then(() => {
       if (location.hash) document.querySelector(location.hash)?.scrollIntoView();
     });
   });
   // An engine start is a deliberate act: offline clips yield to it.
-  for (const root of [drum, piano]) root?.addEventListener("click", (e) => {
+  for (const root of [kit, piano]) root?.addEventListener("click", (e) => {
     const b = (e.target as HTMLElement).closest("button");
     if (b && /start/i.test(b.textContent ?? "")) claimPlayback(() => {});
   }, true);
@@ -377,6 +377,14 @@ function initKit(): void {
   }), "800px");
 }
 
+function initStrandbar(): void {
+  const root = $("#strandbar-root");
+  if (root) onVisible(root, () => void import("./strandbar").then((m) => m.mountStrandbar(root)).catch(() => {
+    root.style.minHeight = "0";
+    root.textContent = "The groove could not be loaded. Reload the page to try again.";
+  }), "800px");
+}
+
 function initVerisim(): void {
   const root = $("#verisim-root");
   if (root) onVisible(root, () => void import("./verisim").then((m) => m.mountVerisim(root)).catch(() => {
@@ -388,6 +396,7 @@ function initVerisim(): void {
 initNav();
 void initHero();
 initVerisim();
+initStrandbar();
 initKit();
 void initGroups();
 void initCharts();

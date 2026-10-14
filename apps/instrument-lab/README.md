@@ -1,7 +1,7 @@
 # Struck — FrankenSim instrument lab
 
-A public demo of FrankenSim's physically simulated drum, splash cymbal and concert grand.
-Live at https://frankensim-struck.vercel.app.
+A public demo of FrankenSim's physically simulated drum kit and concert grand.
+Live at https://frankensim.org/music and https://frankensim-struck.vercel.app.
 
 Two tracks, always labelled:
 
@@ -9,11 +9,11 @@ Two tracks, always labelled:
   examples in `crates/fs-couple/examples`, with every clip's command, render time and energy
   closure parsed from its own log. One fixed playback gain per comparison; nothing is
   normalized, equalized or reverberated.
-- **Live** — two WebAssembly engines that compute sound in the browser:
-  `engine-drum` (FrankenSim's own FE heads, eigen-solver and prepared linear impact engine;
-  its mechanics output is byte-identical to the reference binary at the same clock) and
+- **Live** — WebAssembly engines that compute sound in the browser: `engine-kit` (the
+  `fs-vkplate` drum-kit solver itself on a coarser grid, one Worker per piece) and
   `engine-piano` (a lean kernel that steps the grand piano's own equations for the sounding
-  keys only, validated against the reference `Instrument`).
+  keys only, validated against the reference `Instrument`). `engine-drum` is the earlier modal
+  drum (FE heads, eigen-solver, prepared linear impact engine), no longer on the page.
 
 ## Layout
 
@@ -22,7 +22,9 @@ Two tracks, always labelled:
 | `index.html`, `src/` | the page (Vite, TypeScript, three.js; no framework) |
 | `src/live/` | live section UIs and typed clients for the engine workers |
 | `public/live/` | engine wasm + module workers + the AudioWorklet sink (static, unbundled) |
-| `engine-drum/`, `engine-piano/` | the live engines (standalone cargo workspaces) |
+| `engine-kit/`, `engine-piano/`, `engine-drum/` | the live engines (standalone cargo workspaces) |
+| `public/live/mix-worklet.js`, `lane.js` | `fs-live-mix`: sums frame-stamped lanes from several engine Workers in lock-step with the AudioContext clock |
+| `tools/strandbar.py` | builds the Strandbar studio loop and the live engines' score and levels (`data/strandbar.json`) |
 | `tools/build_data.py` | turns a render campaign into `public/{audio,img,data,viz}` |
 | `tools/diagnose.py` | traces each real-vs-ours gap to a link of the signal chain and scores ablation renders: `public/data/diagnosis.json` |
 | `tools/verisim.py` | grades renders against real recordings: `public/data/verisim.json` plus `vs-*` spectrograms and level-matched clips |
@@ -93,3 +95,29 @@ of the same real drum at the same dynamic, and the same drum one dynamic away. O
 is floored at -50 dB, because the real overheads carry room noise and cymbal bleed where a render
 is silent. `diagnose.py` takes `$KIT $SALAMANDER/OH` as optional fourth and fifth arguments to run
 the cymbal-shimmer experiment on the kit's crash.
+
+## The live kit
+
+`engine-kit/build-wasm.sh` compiles `fs_vkplate::live` (wasm-bindgen) into `public/live/kit/`. Each
+piece gets its own Worker (`public/live/kit/worker.js`), which times a stroke at grid scales 4-8
+and keeps the finest that runs 1.7x faster than real time on the device. A silent piece is not
+stepped. Strokes land where the head or cymbal is touched; the Worker sends the surface velocity
+at ~45 Hz and, after each stroke, the first 8 ms every 0.25 ms, which the page replays 60x slower.
+Levels: one fixed gain per piece, its 50 ms loudness matched to the Salamander overheads, capped so
+a standard stroke peaks at 0.55 (the live cymbals' attacks are too sharp to match their loudness).
+
+## Strandbar
+
+The studio loop is three native renders that start 0.15 s before the first downbeat:
+`grand_piano --performance strandbar-piano.csv` (Steinway D preset, 128 board coordinates up to
+2.4 kHz, one substep) and fs-vkplate `perform` for the kick and the closed hi-hat. Long fs-vkplate
+parts can be rendered as bar-sized simulations, each with a pre-roll of real strokes, and stitched
+(the stitched kick matched a continuous render to 0.9 % RMS). The hi-hat's banded Airy solve is
+memory-bound: run one or two such processes per L3 cache (`taskset`, `-C target-cpu=native`).
+
+    uv run --with numpy --with soundfile python tools/strandbar.py ARRANGEMENT.json STEMS_DIR RECORDING.wav public
+
+It balances the three parts against the recording's low/middle/high band energies, folds the
+tail onto the loop's start, writes `audio/strandbar-studio.flac` and `data/strandbar.json` (the
+same score for the live piano and kit lanes), and gives each live part the RMS of its studio part
+by running the live engines' WebAssembly in Node (`tools/strandbar_live_rms.mjs`).
