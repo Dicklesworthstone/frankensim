@@ -5,11 +5,28 @@ use super::*;
 /// `Clone` must deeply copy mutable physical state. Shared immutable laws are
 /// fine; external effects or shared mutable state cannot be rolled back here.
 /// An observer is called after each individual event in supplied order, and
-/// after each CFL-limited step BEFORE any events at its ending time.
+/// after each CFL-limited step BEFORE any events at its ending time. An optional
+/// source hook runs before that step, after all events at its starting time.
 pub trait DepositionObserver: Clone {
     type Error: From<DepositionError>;
     /// Start one candidate advance; useful for resetting a per-call work counter.
     fn begin(&mut self) -> Result<(), Self::Error> { Ok(()) }
+    /// Additional signed heat rates [W] at active cells, evaluated at the start
+    /// of EACH thermal substep, after same-time events. Omitted cells get zero.
+    /// These rates are added to authored boundary sources for this step only;
+    /// they are never persisted in boundaries or re-added on the next step.
+    /// Unknown cells and nonfinite rates refuse before thermal integration.
+    ///
+    /// The existing conduction CFL does not bound a nonlinear source's stiffness.
+    /// Select `max_dt_s` for that source and perform time refinement. A source
+    /// discontinuity must coincide with a scheduled event or an advance endpoint.
+    /// `step` receives the actual CFL-limited duration for integrating a source's
+    /// own work/energy account. Generated heat is already in `external_heat_j`;
+    /// do not add it again to that thermal audit. On failure, the source owner's
+    /// cloned state and the entire proposed thermal advance are discarded.
+    fn sources(&mut self, _thermal: &DepositionSimulation<'_>,
+        _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<CellId, f64>, Self::Error> { Ok(BTreeMap::new()) }
     fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>)
         -> Result<(), Self::Error>;
     /// Old temperatures and new enthalpy-backed temperatures on the same step.
@@ -30,6 +47,32 @@ impl DepositionObserver for () {
 }
 
 impl<'a> DepositionSimulation<'a> {
+    // Validate the complete generated field before changing any boundary. The
+    // ordinary no-source path does not even add +0, preserving its arithmetic.
+    fn add_step_sources(&mut self, sources: &BTreeMap<CellId, f64>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
+        -> Result<Vec<(CellId, f64)>, DepositionError> {
+        if sources.len() > self.cells.len() {
+            return Err(DepositionError::InvalidInput("too many generated heat sources"));
+        }
+        let mut changes = Vec::with_capacity(sources.len());
+        for (index, (&id, &watts)) in sources.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            let cell = self.cells.get(&id).ok_or(DepositionError::InvalidInput("inactive generated-source cell"))?;
+            finite(watts)?;
+            if watts != 0.0 {
+                changes.push((id, cell.boundary.source_w, finite(cell.boundary.source_w + watts)?));
+            }
+        }
+        checkpoint()?;
+        let mut authored = Vec::with_capacity(changes.len());
+        for (id, old, combined) in changes {
+            self.cells.get_mut(&id).expect("validated active source").boundary.source_w = combined;
+            authored.push((id, old));
+        }
+        Ok(authored)
+    }
+
     /// Advance thermal state and a deeply cloned observer as one candidate.
     /// Any thermal, observer, conservation, budget or cancellation error drops
     /// both. The ordinary `advance_to` delegates here with a no-op observer;
@@ -82,8 +125,17 @@ impl<'a> DepositionSimulation<'a> {
                 return Err(DepositionError::Budget("thermal substeps").into());
             }
             let start_s = next.time_s;
-            let (dt, old_temperatures) = next.thermal_step(stop-start_s,
-                config.max_dt_s, &mut audit, &mut checkpoint)?;
+            let sources = observer.sources(&next, &mut checkpoint)?;
+            checkpoint()?;
+            let authored = next.add_step_sources(&sources, &mut checkpoint)?;
+            let step = next.thermal_step(stop-start_s,
+                config.max_dt_s, &mut audit, &mut checkpoint);
+            // Restore even on thermal refusal. Observations/events see authored
+            // boundaries, never a generated source masquerading as a new input.
+            for (id, watts) in authored {
+                next.cells.get_mut(&id).expect("validated active source").boundary.source_w = watts;
+            }
+            let (dt, old_temperatures) = step?;
             let time = finite(start_s+dt)?;
             if time <= start_s { return Err(DepositionError::Arithmetic.into()); }
             next.time_s = if dt == stop-start_s { stop } else { time };
