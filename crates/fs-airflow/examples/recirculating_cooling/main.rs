@@ -4,6 +4,8 @@
 mod source;
 #[path = "../pressure_cooling/pump_source.rs"]
 mod pump_source;
+mod surface;
+use surface::SurfaceTable;
 
 use fs_airflow::AirflowError;
 use fs_airflow::conjugate::{ConjugateConfig, Relaxation, SolidRegionState};
@@ -20,14 +22,15 @@ use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pre
 use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::pump::solid::PumpCouplingControls;
 use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::recirculation::ReservoirStepControls;
 use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::stored_solid::{
-    StoredCoolingControls, StoredCoolingState, StoredSolidProblem,
+    StoredCoolingControls, StoredCoolingState, StoredCoolingStep, StoredSolidProblem,
 };
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::stored_solid::radiation::RadiatingStoredCoolingControls;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_conduction::{ConductionError, ConductionMesh, ConductionProblem, ConductivityModel, ConductivityTable, ThermalBoundary,
     InitialGuess, LinearConfig, Nonlinearity, ScalarField, SolveConfig, StopRule, ThermalBoundaryBuilder, solve};
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_convection::{CorrelationId, CorrelationRobinBoundary};
-use fs_conduction::transient::enthalpy::{EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyStepConfig};
+use fs_conduction::transient::enthalpy::{EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyStepConfig, EnthalpyStepSolution};
 use fs_solver::NewtonKrylovConfig;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -56,13 +59,44 @@ struct Sample {
     external_j: f64, residual_j: f64, ignored_hydraulic_j: f64,
     solid_heat_w: f64, solid_calls: usize,
     storage: Option<SolidStorageSample>,
+    radiation: Option<RadiationSample>,
 }
 #[derive(Debug)]
 struct SolidStorageSample {
     stored_j: f64, external_j: f64, interface_residual_j: f64, combined_residual_j: f64,
 }
 
+#[derive(Debug)]
+struct RadiationSample {
+    outward_j: f64, external_convection_j: f64, physical_residual_j: f64,
+    enthalpy_solves: usize,
+}
+
+fn stored_sample<R>(result: &StoredCoolingStep<'_, '_, R>, solid: &EnthalpyStepSolution,
+    coolant_out_w: f64, radiation: Option<RadiationSample>) -> Sample {
+    let coupled = &result.liquid.circuit.state;
+    Sample {
+        time_s: result.liquid.end_time_s, reservoir_k: result.liquid.final_state.temperature_k(),
+        return_k: coupled.fluid.mixed_outlet.temperature_k(), mass_flow_kg_s: coupled.fluid.total_mass_flow_kg_per_s,
+        walls_k: [coupled.solid.regions[0].mean_wall_temperature_k, coupled.solid.regions[1].mean_wall_temperature_k],
+        pressure_pa: result.liquid.circuit.network_pressure_pa,
+        stored_j: result.liquid.stored_enthalpy_change_j, return_j: result.liquid.returned_heat_j,
+        external_j: result.liquid.external_heat_j, residual_j: result.liquid.energy_residual_j,
+        ignored_hydraulic_j: result.liquid.neglected_hydraulic_energy_j,
+        solid_heat_w: coolant_out_w, solid_calls: result.liquid.total_solid_solves,
+        storage: Some(SolidStorageSample { stored_j: solid.stored_energy_change_j,
+            external_j: result.solid_external_heat_j, interface_residual_j: result.interface_energy_residual_j,
+            combined_residual_j: result.combined_energy_residual_j }), radiation,
+    }
+}
+
 fn mapped_boundary(mesh: &ConductionMesh, rows: &[CorrelationRobinBoundary])
+    -> std::result::Result<ThermalBoundary, ConductionError>
+{
+    mapped_boundary_with_surface(mesh, rows, None)
+}
+
+fn mapped_boundary_with_surface(mesh: &ConductionMesh, rows: &[CorrelationRobinBoundary], surface: Option<&SurfaceTable>)
     -> std::result::Result<ThermalBoundary, ConductionError>
 {
     let mut builder = ThermalBoundaryBuilder::new(mesh);
@@ -71,6 +105,11 @@ fn mapped_boundary(mesh: &ConductionMesh, rows: &[CorrelationRobinBoundary])
             && on_box_face(face.centroid[2],0.01)
             && if index==0 {face.centroid[0]<0.03} else {face.centroid[0]>=0.03},
             rows[index].boundary_condition().clone())?;
+    }
+    if let Some(surface) = surface {
+        builder = builder.region(surface::EXPOSED_REGION,
+            |face| face.outward_normal[2] < -0.99 && on_box_face(face.centroid[2],0.0),
+            fs_conduction::ThermalBc::robin(surface.convection_w_m2_k, surface.air_temperature_k)?)?;
     }
     builder.adiabatic_remainder().finish()
 }
@@ -81,6 +120,14 @@ fn run(table: &LiquidTable, pump: &PumpTable, settings: Settings) -> Result<Vec<
 
 fn run_with_solid(table: &LiquidTable, pump: &PumpTable, solid_table: Option<&ThermalTable>,
     settings: Settings) -> Result<Vec<Sample>> {
+    run_with_surface(table, pump, solid_table, None, settings)
+}
+
+fn run_with_surface(table: &LiquidTable, pump: &PumpTable, solid_table: Option<&ThermalTable>,
+    surface: Option<&SurfaceTable>, settings: Settings) -> Result<Vec<Sample>> {
+    if surface.is_some() && solid_table.is_none() {
+        return Err("--radiation requires an explicit --solid storage material".into());
+    }
     if !(1..=128).contains(&settings.steps) || !settings.dt_s.is_finite() || settings.dt_s <= 0.0
         || !(settings.dt_s*settings.steps as f64).is_finite()
         || !settings.body_w.is_finite() || !settings.reservoir_w.is_finite()
@@ -167,34 +214,43 @@ fn run_with_solid(table: &LiquidTable, pump: &PumpTable, solid_table: Option<&Th
                 energy_absolute_tolerance_j:1e-4,max_inlet_evaluations:64,
                 maximum_neglected_hydraulic_energy_j:0.01*duration};
             if let Some(state) = stored_state.as_mut() {
-                let result = network.advance_stored_solid_with_pump(&cx, state, end,
-                    settings.reservoir_w*duration, &initial_walls, &pump.curve,
-                    StoredSolidProblem { mesh: &mesh, material: solid_material, source: &power,
-                        element_materials: None, interfaces: None },
-                    StoredCoolingControls {
-                        pump: controls, reservoir: step,
-                        solid: EnthalpyStepConfig { newton: NewtonKrylovConfig {
-                            absolute_tolerance: 1e-10, relative_tolerance: 1e-11,
-                            linear_restart: 24, max_linear_cycles: 16, forcing_minimum: 1e-12,
-                            forcing_maximum: 1e-3, ..Default::default()
-                        }, max_newton_iterations: 32, energy_tolerance_j: 1e-8 },
-                        joint_energy_tolerance_j: 5e-4,
-                    }, |_, rows| mapped_boundary(&mesh, rows))?;
-                let coupled = &result.liquid.circuit.state;
-                initial_walls = [coupled.solid.regions[0].mean_wall_temperature_k,
-                    coupled.solid.regions[1].mean_wall_temperature_k];
-                samples.push(Sample {
-                    time_s: state.reservoir().time_s(), reservoir_k: state.reservoir().state().temperature_k(),
-                    return_k: coupled.fluid.mixed_outlet.temperature_k(), mass_flow_kg_s: coupled.fluid.total_mass_flow_kg_per_s,
-                    walls_k: initial_walls, pressure_pa: result.liquid.circuit.network_pressure_pa,
-                    stored_j: result.liquid.stored_enthalpy_change_j, return_j: result.liquid.returned_heat_j,
-                    external_j: result.liquid.external_heat_j, residual_j: result.liquid.energy_residual_j,
-                    ignored_hydraulic_j: result.liquid.neglected_hydraulic_energy_j,
-                    solid_heat_w: coupled.solid.state.robin_out_w, solid_calls: result.liquid.total_solid_solves,
-                    storage: Some(SolidStorageSample { stored_j: coupled.solid.state.stored_energy_change_j,
-                        external_j: result.solid_external_heat_j, interface_residual_j: result.interface_energy_residual_j,
-                        combined_residual_j: result.combined_energy_residual_j }),
-                });
+                let problem = StoredSolidProblem { mesh: &mesh, material: solid_material, source: &power,
+                    element_materials: None, interfaces: None };
+                let thermal = StoredCoolingControls {
+                    pump: controls, reservoir: step,
+                    solid: EnthalpyStepConfig { newton: NewtonKrylovConfig {
+                        absolute_tolerance: 1e-10, relative_tolerance: 1e-11,
+                        linear_restart: 24, max_linear_cycles: 16, forcing_minimum: 1e-12,
+                        forcing_maximum: 1e-3, ..Default::default()
+                    }, max_newton_iterations: 32, energy_tolerance_j: 1e-8 },
+                    joint_energy_tolerance_j: 5e-4,
+                };
+                let sample = if let Some(surface) = surface {
+                    let answer = network.advance_stored_solid_with_pump_and_radiation(&cx, state, end,
+                        settings.reservoir_w*duration, &initial_walls, &pump.curve, problem,
+                        core::slice::from_ref(&surface.patch), RadiatingStoredCoolingControls {
+                            thermal, radiation: fs_conduction::AmbientRadiationConfig {
+                                max_iterations: 48, temperature_tolerance_k: 1e-9,
+                                balance_tolerance_w: 1e-8, balance_relative_tolerance: 1e-10, relaxation: 1.0,
+                            }, max_total_enthalpy_solves: 65536,
+                        }, |_, rows| mapped_boundary_with_surface(&mesh, rows, Some(surface)))?;
+                    let response = &answer.step.liquid.circuit.state.solid.state;
+                    stored_sample(&answer.step, &response.thermal.conduction, response.coolant_out_w,
+                        Some(RadiationSample {
+                            outward_j: duration*response.thermal.radiation.nonlinear_radiation_out_w,
+                            external_convection_j: duration*response.external_convection_out_w,
+                            physical_residual_j: response.thermal.physical_residual_norm_j,
+                            enthalpy_solves: answer.total_enthalpy_solves,
+                        }))
+                } else {
+                    let result = network.advance_stored_solid_with_pump(&cx, state, end,
+                        settings.reservoir_w*duration, &initial_walls, &pump.curve, problem,
+                        thermal, |_, rows| mapped_boundary(&mesh, rows))?;
+                    let solid = &result.liquid.circuit.state.solid.state;
+                    stored_sample(&result, solid, solid.robin_out_w, None)
+                };
+                initial_walls = sample.walls_k;
+                samples.push(sample);
                 continue;
             }
             let mut original_error = None;
@@ -225,7 +281,7 @@ fn run_with_solid(table: &LiquidTable, pump: &PumpTable, solid_table: Option<&Th
                 walls_k:initial_walls,pressure_pa:result.circuit.network_pressure_pa,
                 stored_j:result.stored_enthalpy_change_j,return_j:result.returned_heat_j,external_j:result.external_heat_j,
                 residual_j:result.energy_residual_j,ignored_hydraulic_j:result.neglected_hydraulic_energy_j,
-                solid_heat_w:coupled.solid.state.report.energy.robin_out_w,solid_calls:result.total_solid_solves,storage:None});
+                solid_heat_w:coupled.solid.state.report.energy.robin_out_w,solid_calls:result.total_solid_solves,storage:None,radiation:None});
         }
         Ok(samples)
     })
@@ -242,24 +298,47 @@ fn parse_args(a: &[String]) -> Result<(Option<&str>, &str, &str, Settings)> {
         pressure_bracket_pa:(a[9].parse()?,a[10].parse()?)}))
 }
 
+fn parse_radiation_args(a: &[String]) -> Result<(Option<&str>, Option<&str>, &str, &str, Settings)> {
+    let (surface, args) = if a.first().is_some_and(|v| v == "--radiation") {
+        if a.len()<2 { return Err("--radiation needs a surface file followed by --solid SOLID.txt".into()); }
+        (Some(a[1].as_str()), &a[2..])
+    } else { (None, a) };
+    let (solid, fluid, pump, settings) = parse_args(args)?;
+    if surface.is_some() && solid.is_none() {
+        return Err("--radiation requires --solid SOLID.txt before the existing arguments".into());
+    }
+    Ok((surface, solid, fluid, pump, settings))
+}
+
 fn main() -> Result<()> {
     let a:Vec<_> = std::env::args().skip(1).collect();
-    let (solid_path, fluid_path, pump_path, settings) = parse_args(&a)?;
+    let (surface_path, solid_path, fluid_path, pump_path, settings) = parse_radiation_args(&a)?;
     let table = LiquidTable::parse(&std::fs::read_to_string(fluid_path)?)?;
     let pump = PumpTable::parse(&std::fs::read_to_string(pump_path)?)?;
     let solid = solid_path.map(|path| -> Result<_> {
         ThermalTable::parse_solid(&std::fs::read_to_string(path)?)
     }).transpose()?;
-    let samples = match &solid {
-        Some(solid) => run_with_solid(&table, &pump, Some(solid), settings)?,
-        None => run(&table, &pump, settings)?,
+    let surface = surface_path.map(|path| -> Result<_> {
+        SurfaceTable::parse(&std::fs::read_to_string(path)?)
+    }).transpose()?;
+    let samples = match &surface {
+        Some(surface) => run_with_surface(&table, &pump, solid.as_ref(), Some(surface), settings)?,
+        None => match &solid {
+            Some(solid) => run_with_solid(&table, &pump, Some(solid), settings)?,
+            None => run(&table, &pump, settings)?,
+        },
     };
     eprintln!("model=well_mixed_fixed_pressure_reservoir; solid={}; hydraulic_heat=bounded_omission; calibration=not_established",
         if solid.is_some() { "transient_reference_enthalpy_FEM" } else { "quasi_steady_FEM" });
     eprintln!("material={:?}; pump={:?}; pump_license={}",table.card.content_hash(),pump.curve.source(),pump.license);
     if let Some(solid) = &solid { eprintln!("solid_material={:?}", solid.card.content_hash()); }
+    if let Some(surface) = &surface {
+        eprintln!("surface_material={:?}; surface_license={}; radiation=implicit_area_mean_gray_patch; emissivity=constant_source_snapshot",
+            surface.patch.emissivity().card_identity(), surface.license);
+    }
     print!("time_s,reservoir_k,return_k,total_mass_kg_s,wall_first_k,wall_last_k,pressure_pa,stored_change_j,return_heat_j,external_heat_j,balance_j,ignored_hydraulic_j,solid_heat_w,solid_calls");
     if solid.is_some() { print!(",solid_stored_change_j,solid_external_heat_j,interface_balance_j,combined_balance_j"); }
+    if surface.is_some() { print!(",radiation_out_j,external_convection_out_j,physical_solid_residual_j,enthalpy_solves"); }
     println!();
     for s in samples {
         print!("{:.9},{:.9},{:.9},{:.12e},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.12e},{:.12e},{:.9},{}",
@@ -267,6 +346,8 @@ fn main() -> Result<()> {
             s.stored_j,s.return_j,s.external_j,s.residual_j,s.ignored_hydraulic_j,s.solid_heat_w,s.solid_calls);
         if let Some(storage) = s.storage { print!(",{:.9},{:.9},{:.12e},{:.12e}",
             storage.stored_j,storage.external_j,storage.interface_residual_j,storage.combined_residual_j); }
+        if let Some(radiation) = s.radiation { print!(",{:.9},{:.9},{:.12e},{}",
+            radiation.outward_j,radiation.external_convection_j,radiation.physical_residual_j,radiation.enthalpy_solves); }
         println!();
     }
     Ok(())
