@@ -537,6 +537,45 @@ fn triangle_weak_influence_with_static<const ORDER: usize>(
     let (static_single, static_double) = static_layers;
     let mut single = C64::from_re(static_single);
     let mut double = C64::from_re(static_double);
+    let height = dot(sub(a, x), ny);
+    let x_proj = [
+        x[0] + height * ny[0],
+        x[1] + height * ny[1],
+        x[2] + height * ny[2],
+    ];
+    let sub_areas: [f64; 3] = core::array::from_fn(|edge| {
+        let e0 = sub(triangle[edge], x_proj);
+        let e1 = sub(triangle[(edge + 1) % 3], x_proj);
+        dot(cross(e0, e1), ny)
+    });
+    if sub_areas.iter().all(|&sa| sa >= 0.05 * double_area) {
+        for (edge, &sub_double_area) in sub_areas.iter().enumerate() {
+            let e0 = sub(triangle[edge], x_proj);
+            let e1 = sub(triangle[(edge + 1) % 3], x_proj);
+            for (&radial, &wr) in nodes.iter().zip(weights) {
+                for (&tangent, &wt) in nodes.iter().zip(weights) {
+                    let ray = [
+                        (1.0 - tangent).mul_add(e0[0], tangent * e1[0]),
+                        (1.0 - tangent).mul_add(e0[1], tangent * e1[1]),
+                        (1.0 - tangent).mul_add(e0[2], tangent * e1[2]),
+                    ];
+                    let y = [
+                        radial.mul_add(ray[0], x_proj[0]),
+                        radial.mul_add(ray[1], x_proj[1]),
+                        radial.mul_add(ray[2], x_proj[2]),
+                    ];
+                    let d = sub(x, y);
+                    let r = norm(d);
+                    let weight = wr * wt * radial * sub_double_area;
+                    let g = regularized_single_layer(k, r);
+                    let dgdny = regularized_coplanar_hypersingular(k, r).scale(dot(ny, d));
+                    single = single + g.scale(weight);
+                    double = double + dgdny.scale(weight);
+                }
+            }
+        }
+        return (single, double);
+    }
     for (&u, &wu) in nodes.iter().zip(weights) {
         for (&v, &wv) in nodes.iter().zip(weights) {
             let y = affine3(a, ab, u, ac, (1.0 - u) * v);
