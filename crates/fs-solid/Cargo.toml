@@ -26,7 +26,9 @@ fs-ga = { path = "../fs-ga" }
 fs-la = { path = "../fs-la" }
 fs-modal = { path = "../fs-modal" }
 fs-material = { path = "../fs-material" }
+fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
+fs-qty = { path = "../fs-qty" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
@@ -34,9 +36,7 @@ fs-sparse = { path = "../fs-sparse" }
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
 fs-evidence = { path = "../fs-evidence" }
-fs-matdb = { path = "../fs-matdb" }
 fs-phs = { path = "../fs-phs" }
-fs-qty = { path = "../fs-qty" }
 fs-ivl = { path = "../fs-ivl" }
 fs-mesh = { path = "../fs-mesh" }
 
