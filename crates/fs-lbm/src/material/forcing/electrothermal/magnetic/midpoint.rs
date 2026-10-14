@@ -157,7 +157,9 @@ fn source_residual(
     Ok(result)
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+// The original frozen-transport API uses the same iteration as local-material
+// coupling. Its empty prepared state adds no material queries or physics steps.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn solve<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
     slab: &mut MaterialSlab<S>, domain: VoxelDomain, plane: usize,
     input: ElectricHeatInput<'_>, field: &[[f64; 3]], external: &[[f64; D]],
@@ -165,6 +167,48 @@ pub(super) fn solve<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
     mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<Option<f64>, ChtError>,
     mut step: impl FnMut(&mut MaterialSlab<S>, &[f64], &[[f64; D]], HeatSourceLimits) -> Result<HeatBalance, ThermalSourceError>,
 ) -> Result<MagneticMidpointStep, MagneticMidpointError> {
+    let transport = slab.force_units.transport;
+    let dt = slab.force_units.timestep_s;
+    let result = solve_prepared::<S, (), (), MagneticMidpointError, D, Q>(
+        slab, &domain, plane, input, field, external, options, gate,
+        |_, _| Ok(()),
+        |temperature, velocity, _| Ok(source_at(
+            &domain, plane, input, field, temperature, velocity,
+            &transport, dt, isolated_current_tolerance_a, gate, &mut resolve,
+        )?),
+        |old, power, force, _| {
+            let mut next = candidate::<S, D, Q>(old);
+            let heat = step(&mut next, power, force, input.limits.thermal)?;
+            Ok((next, heat))
+        },
+        |_, _| Ok((true, ())),
+    )?;
+    Ok(result.step)
+}
+
+// Internal data retained by the two actual physics adapters, not another
+// material system. The driver never queries or converts a prepared object.
+pub(super) struct PreparedMidpointStep<P, R> {
+    pub step: MagneticMidpointStep,
+    pub applied: P,
+    pub endpoint: P,
+    pub material_residual: R,
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) fn solve_prepared<
+    S: MovingSlab<D, Q>, P, R, E, const D: usize, const Q: usize,
+>(
+    slab: &mut MaterialSlab<S>, domain: &VoxelDomain, plane: usize,
+    input: ElectricHeatInput<'_>, field: &[[f64; 3]], external: &[[f64; D]],
+    options: MagneticMidpointOptions, gate: &CancelGate,
+    mut prepare: impl FnMut(&MaterialSlab<S>, &[f64]) -> Result<P, E>,
+    mut source_at_prepared: impl FnMut(&[f64], &[[f64; 3]], &P) -> Result<MagneticSource, E>,
+    mut step_prepared: impl FnMut(&MaterialSlab<S>, &[f64], &[[f64; D]], &P) -> Result<(MaterialSlab<S>, HeatBalance), E>,
+    mut check_prepared: impl FnMut(&P, &P) -> Result<(bool, R), E>,
+) -> Result<PreparedMidpointStep<P, R>, E>
+where E: From<ElectricHeatError> + From<MagneticMidpointError> {
+    options.admit()?;
     let cells = domain.cell_count();
     admit_field::<D>(field, cells)?;
     let old_temperature = temperatures::<S, D, Q>(slab, input.limits.thermal, gate)?;
@@ -178,12 +222,11 @@ pub(super) fn solve<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
     let mut last_source = None;
     for iteration in 1..=options.max_iterations {
         poll(gate)?;
-        let source = source_at(&domain, plane, input, field, &evaluation_temperature, &evaluation_velocity,
-            &slab.force_units.transport, dt, isolated_current_tolerance_a, gate, &mut resolve)?;
+        let applied = prepare(slab, &evaluation_temperature)?;
+        let source = source_at_prepared(&evaluation_temperature, &evaluation_velocity, &applied)?;
         electrical_solves += 1;
         let forces = combined_forces(external, &source.motion, gate)?;
-        let mut next = candidate::<S, D, Q>(slab);
-        let heat = step(&mut next, &source.power, &forces, input.limits.thermal)?;
+        let (next, heat) = step_prepared(slab, &source.power, &forces, &applied)?;
         let end_temperature = temperatures::<S, D, Q>(&next, input.limits.thermal, gate)?;
         let end_velocity = velocities::<S, D, Q>(&next, cells, plane, gate)?;
         let mut midpoint_temperature = Vec::with_capacity(cells);
@@ -201,20 +244,24 @@ pub(super) fn solve<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
         }
         last_source = None;
         if last_temperature <= options.temperature_tolerance_k && last_velocity <= options.velocity_tolerance_m_s {
-            let checked = source_at(&domain, plane, input, field, &midpoint_temperature, &midpoint_velocity,
-                &slab.force_units.transport, dt, isolated_current_tolerance_a, gate, &mut resolve)?;
+            let checked_material = prepare(slab, &midpoint_temperature)?;
+            let checked = source_at_prepared(&midpoint_temperature, &midpoint_velocity, &checked_material)?;
             electrical_solves += 1;
             let residual = source_residual(&source.motion, &checked.motion, &evaluation_velocity,
                 &midpoint_velocity, &domain, dt, gate)?;
             last_source = Some(residual);
-            if residual.joule_j <= options.joule_tolerance_j
+            let (material_matches, material_residual) = check_prepared(&applied, &checked_material)?;
+            if material_matches && residual.joule_j <= options.joule_tolerance_j
                 && residual.impulse_n_s <= options.impulse_tolerance_n_s
                 && residual.mechanical_work_j <= options.work_tolerance_j
             {
                 let report = balance(source, heat, input)?;
+                // Endpoint evaluation is a support check, never a replacement
+                // for the material that actually supplied the accepted sources.
+                let endpoint = prepare(&next, &end_temperature)?;
                 poll(gate)?;
                 *slab = next;
-                return Ok(MagneticMidpointStep {
+                return Ok(PreparedMidpointStep { applied, endpoint, material_residual, step: MagneticMidpointStep {
                     motion: report.motion, heat: report.heat,
                     electrode_energy_j: report.electrode_energy_j, joule_energy_j: report.joule_energy_j,
                     midpoint_mechanical_work_j: report.lagged_mechanical_work_j,
@@ -224,7 +271,7 @@ pub(super) fn solve<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
                     evaluation_velocity_m_s: evaluation_velocity,
                     temperature_residual_k: last_temperature, velocity_residual_m_s: last_velocity,
                     source_residual: residual,
-                });
+                }});
             }
         }
         for c in 0..cells {
@@ -238,7 +285,7 @@ pub(super) fn solve<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
     Err(MagneticMidpointError::NonConvergence {
         iterations: options.max_iterations, temperature_residual_k: last_temperature,
         velocity_residual_m_s: last_velocity, source_residual: last_source,
-    })
+    }.into())
 }
 
 impl MaterialSlab<ThermalLbm> {

@@ -84,7 +84,6 @@ pub(in crate::material::forcing) fn sample<S: Slab<D, Q>, F: FluidTransport, con
     range: [f64; 2], gate: &CancelGate,
     resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
 ) -> Result<Vec<TransportSample<F>>, MaterialTransportError> {
-    let units = mapping.force_units;
     // Admit the whole field before calling a material owner; no late bad
     // temperature causes an otherwise avoidable partially evaluated field.
     let mut temperatures = Vec::with_capacity(cells);
@@ -99,6 +98,32 @@ pub(in crate::material::forcing) fn sample<S: Slab<D, Q>, F: FluidTransport, con
         }
         temperatures.push(t);
     }
+    sample_temperatures::<S, F, D, Q>(mapping, &temperatures, cells, plane, range, gate, resolve)
+}
+
+// The same sampler accepts physical midpoint coordinates without fabricating
+// temperature populations or resetting the accepted nonequilibrium state.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::material::forcing) fn sample_temperatures<
+    S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q: usize,
+>(
+    mapping: &MaterialSlab<S>, temperatures: &[f64], cells: usize, plane: usize,
+    range: [f64; 2], gate: &CancelGate,
+    resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
+) -> Result<Vec<TransportSample<F>>, MaterialTransportError> {
+    poll(gate)?;
+    if temperatures.len() != cells || plane == 0 || plane > cells / 2
+        || !range.iter().all(|t| t.is_finite() && *t > 0.0) || range[0] > range[1]
+    {
+        return Err(MaterialTransportError::Invalid("invalid material temperature coordinates"));
+    }
+    for (cell, &t) in temperatures.iter().enumerate() {
+        if cell % 256 == 0 { poll(gate)?; }
+        if !t.is_finite() || t < range[0] || t > range[1] {
+            return Err(MaterialTransportError::Invalid("temperature outside the admitted interval"));
+        }
+    }
+    let units = mapping.force_units;
     let mut samples = Vec::with_capacity(cells-2*plane);
     for cell in plane..cells-plane {
         poll(gate)?;

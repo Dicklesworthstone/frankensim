@@ -5,6 +5,8 @@
 //! initial-state coefficients and sources are held over one step. Endpoint
 //! sampling checks material support, not a coupled midpoint or an induction law.
 
+pub mod midpoint;
+
 use super::{
     ChtError, ElectricHeatError, ElectricHeatInput, FluidTransportState,
     MagneticHeatStep, MaterialSlab, MovingSlab, ThermalLbm, ThermalLbm3,
