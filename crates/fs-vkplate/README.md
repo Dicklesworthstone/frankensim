@@ -1,9 +1,9 @@
 # fs-vkplate: a drum kit from one solver
 
 Every vibrating surface of a standard kit is one object here: a thin plate on a square
-finite-difference grid. A drum head is a clamped plate with in-plane tension and negligible
-bending; a cymbal is a free-edged plate with bending, a rest shape (a shallow shell) and full
-von Karman coupling. Kick, snare, toms, hi-hat, crash and ride are parameter sets of the same
+finite-difference grid. A drum head is a clamped plate with in-plane tension and the film's own
+small bending stiffness; a cymbal is a free-edged plate with bending, a rest shape (a shallow
+shell) and full von Karman coupling. Kick, snare, toms, hi-hat, crash and ride are parameter sets of the same
 equations, couplings and output stage (`src/kit.rs`).
 
 Why it exists: FrankenSim's modal percussion (`crates/fs-couple/examples/percussion`) keeps at
@@ -14,8 +14,11 @@ on a 7 mm grid carries 3356 nodes and resolves the whole audio band.
 
 ## Physics
 
-- **Membranes**: `rho t w_tt = T Lap(w) + ...`, rim clamped. Berger tension modulation (the mean
-  stretch raises the tension) gives the pitch drop of a hard-struck tom.
+- **Membranes**: `rho t w_tt = T Lap(w) - D Lap^2(w) + ...`, rim clamped, with the Mylar film's
+  bending stiffness `D = E t^3 / 12(1 - nu^2)`, which takes over from tension for waves with
+  `D k^2 > T` (above roughly 0.7 kHz on the slack 2-ply kick and floor-tom batters, 5 kHz on the
+  snare and rack tom). Berger tension modulation (the mean stretch raises the tension) gives the pitch drop of a
+  hard-struck tom.
 - **Plates and shells**: bending energy summed over 3x3 curvature stencils with the full
   `(1 - nu)` twist term; free edges are the natural boundary of that energy. Von Karman coupling
   through the Airy stress function with a rest shape `z0(r)`:
@@ -62,6 +65,11 @@ holds up and the pedal pulls down. With 80 N on the pedal about 62 N reaches the
 keeps the rest). An earlier version also tied the top shell's centre to the ground through felt,
 which took ~75 N of the pedal force, so the "closed" hat was barely pressed.
 
+No rim is flat: the rim contact carries a two-lobe waviness of up to 0.15 mm (offline grid), and
+with no pedal force the shells rest at most 0.14 mm apart there, so a stroke on the open hat sets
+the rims chattering against each other (its sizzle above 4 kHz). The rim contact is lightly damped
+(Hunt-Crossley `mu` 0.08 s/m); tangential friction between the rims is still not modelled.
+
 ## Validation (`cargo test --release`)
 
 - clamped membrane: fundamental within 1.5 % of `2.405 c / (2 pi R)`;
@@ -91,9 +99,10 @@ fundamental lands on the recording's; loss points come from the recordings' band
 ## Estimates (not measurements)
 
 Film and bronze properties are handbook values; head tensions are tuned; the stick's effective
-mass (12-20 g), its Hertz constant (hickory on the target), the felt beater law, snare-wire mass,
-tension and preload, felt washer stiffness and loss, and the hi-hat rim contact law are declared
-estimates in `src/kit.rs`. The lumped cavity has no cavity modes; there is no shell, hoop or rim
+tip mass (6-7 g), its Hertz constant (hickory on the target), the felt beater law (a 32 g crown in
+point contact), strike points, snare-wire mass, tension and preload, felt washer stiffness and
+loss, and the hi-hat rim contact law, rest gap and waviness are declared estimates in
+`src/kit.rs`. The lumped cavity has no cavity modes; there is no shell, hoop or rim
 vibration, no tangential friction between hi-hat plates, and each piece is simulated alone (a kit
 mix adds independent renders: the snare does not buzz when the kick is struck).
 

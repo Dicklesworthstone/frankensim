@@ -215,7 +215,6 @@ pub struct PlateSpec<'a> {
 
 struct VonKarman {
     eh: f64,
-    core: Vec<usize>,          // node index of each core point
     nb: Vec<[Option<usize>; 9]>, // C, E, W, N, S, NE, NW, SE, SW
     l0: Vec<f64>,              // l(z0) at core
     z0: Vec<f64>,              // rest height per node
@@ -430,12 +429,10 @@ impl Body {
             }
             let z0: Vec<f64> = xy.iter().map(|&p| (s.rest_height)(r_of(p))).collect();
             let mut cidx = BTreeMap::new();
-            let mut core_nodes = vec![];
             let mut sorted = core.clone();
             sorted.sort_by_key(|&(i, j)| (j, i));
-            for &(i, j) in &sorted {
-                cidx.insert((i, j), core_nodes.len());
-                core_nodes.push(at(i, j).unwrap());
+            for (idx, &(i, j)) in sorted.iter().enumerate() {
+                cidx.insert((i, j), idx);
             }
             let nb: Vec<[Option<usize>; 9]> = sorted
                 .iter()
@@ -456,7 +453,7 @@ impl Body {
                 a * b - c * c
             }).collect();
             // Airy energy 1/2 sum (Lap_h F)^2 over every node where it is nonzero; F = 0 off the core
-            let nc = core_nodes.len();
+            let nc = sorted.len();
             let mut arows = vec![BTreeMap::new(); nc];
             let h2 = h * h;
             for (&(i, j), _) in &grid_index {
@@ -476,7 +473,7 @@ impl Body {
                 }
             }
             let airy = Band::factor(&arows)?;
-            Some(VonKarman { eh: s.young * t_mean, core: core_nodes, nb, l0, z0, airy, f: vec![0.0; nc], q: vec![0.0; nc], curv: vec![(0.0, 0.0, 0.0); nc] })
+            Some(VonKarman { eh: s.young * t_mean, nb, l0, z0, airy, f: vec![0.0; nc], q: vec![0.0; nc], curv: vec![(0.0, 0.0, 0.0); nc] })
         } else {
             None
         };

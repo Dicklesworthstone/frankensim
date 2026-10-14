@@ -1,7 +1,7 @@
-//! A standard drum kit built from one solver: every head is a tensioned membrane and every
-//! cymbal a free-edged von Karman shallow shell. All numbers below are declared ESTIMATES of
-//! ordinary instruments (dimensions from common sizes, film and bronze from handbook values),
-//! not measurements of a particular specimen.
+//! A standard drum kit built from one solver: every head is a tensioned Mylar film (membrane
+//! tension plus the film's own bending stiffness) and every cymbal a free-edged von Karman shallow
+//! shell. All numbers below are declared ESTIMATES of ordinary instruments (dimensions from common
+//! sizes, film and bronze from handbook values), not measurements of a particular specimen.
 
 use crate::*;
 
@@ -47,8 +47,8 @@ pub struct Wires {
 impl Wires {
     pub fn estimated() -> Wires {
         // a loosely set strainer: slack strands slap the head instead of tracking it (measured: the most buzz)
-        Wires { strands: 18, spacing: 0.004, length: 0.36, mass_per_m: 0.004, tension: 0.5, preload_per_m: 0.15, t60: 0.35,
-                contact: Law::Power { k: 2.0e7, alpha: 1.5, mu: 2.0 } }
+        Wires { strands: 18, spacing: 0.004, length: 0.36, mass_per_m: 0.004, tension: 0.8, preload_per_m: 0.22, t60: 0.35,
+                contact: Law::Power { k: 3.0e7, alpha: 1.5, mu: 0.35 } }
     }
 }
 
@@ -76,7 +76,7 @@ pub(crate) fn hertz_stick(tip_radius: f64, e_target: f64, nu_target: f64) -> Law
     // hickory tip on the target: K = 4/3 E* sqrt(R)
     let (e_w, nu_w) = (12.0e9, 0.3);
     let es = 1.0 / ((1.0 - nu_w * nu_w) / e_w + (1.0 - nu_target * nu_target) / e_target);
-    Law::Power { k: 4.0 / 3.0 * es * tip_radius.sqrt(), alpha: 1.5, mu: 0.2 }
+    Law::Power { k: 4.0 / 3.0 * es * tip_radius.sqrt(), alpha: 1.5, mu: 0.05 }
 }
 
 fn head_body(name: &str, r: f64, grid: f64, hd: Head, muffle: Option<(f64, f64, f64, f64)>) -> Result<Body, String> {
@@ -85,7 +85,7 @@ fn head_body(name: &str, r: f64, grid: f64, hd: Head, muffle: Option<(f64, f64, 
     let z = |_r: f64| 0.0;
     Body::plate(name, &PlateSpec {
         radius: r, hole: 0.0, grid, edge: Edge::Clamped, thickness: &th, rest_height: &z,
-        young: MYLAR.0, poisson: MYLAR.1, density: MYLAR.2, tension: hd.tension, bending: false,
+        young: MYLAR.0, poisson: MYLAR.1, density: MYLAR.2, tension: hd.tension, bending: true,
         nonlinear: Nonlinear::Berger, t60: hd.t60, support: None, muffle,
     })
 }
@@ -187,13 +187,13 @@ pub fn snare() -> DrumSpec {
         name: "snare 14x6",
         radius: 0.1703,
         depth: 0.1524,
-        // recording (wires off): about 0.5 s T60 from 125 Hz to 1 kHz
-        batter: Head { thickness: PLY1, tension: 1330.0, t60: [(150.0, 0.55), (1000.0, 0.55)] },
-        reso: Head { thickness: SNARE_SIDE, tension: 2080.0, t60: [(150.0, 0.55), (1000.0, 0.55)] },
+        // recording: ~0.55 s T60 across the mid bands, with off-centre strike exciting (1,1) at ~235 Hz and wire rattle
+        batter: Head { thickness: PLY1, tension: 1450.0, t60: [(150.0, 0.50), (3000.0, 0.45)] },
+        reso: Head { thickness: SNARE_SIDE, tension: 2250.0, t60: [(150.0, 0.50), (3000.0, 0.45)] },
         grid: 3.5e-3,
         oversample: 2,
-        strike_xy: (0.06, 0.02),
-        striker: (STICK_TIP_KG, hertz_stick(0.005, MYLAR.0, MYLAR.1), 0.0),
+        strike_xy: (0.072, 0.025),
+        striker: (0.0060, hertz_stick(0.005, MYLAR.0, MYLAR.1), 0.0),
         muffle: None,
         wires: Some(Wires::estimated()),
         port: None,
@@ -211,36 +211,38 @@ pub fn kick() -> DrumSpec {
         name: "kick 18x18",
         radius: 0.221,
         depth: 0.4572,
-        // a 2-ply oil-filled batter and a pillow: the overtones die within ~0.1-0.3 s (recording: -20 dB in 80 ms)
-        batter: Head { thickness: PLY2, tension: 358.0, t60: [(44.0, 0.6), (200.0, 0.15)] },
-        reso: Head { thickness: PLY1, tension: 253.0, t60: [(44.0, 0.6), (200.0, 0.15)] },
-        grid: 5.0e-3,
+        // a 2-ply batter and a pillow: fundamental on the recording's 44.5 Hz, the beater crown's
+        // click decaying within ~60-100 ms
+        batter: Head { thickness: PLY2, tension: 358.0, t60: [(45.0, 0.48), (4000.0, 0.18)] },
+        reso: Head { thickness: PLY1, tension: 253.0, t60: [(45.0, 0.48), (4000.0, 0.18)] },
+        grid: 4.5e-3,
         oversample: 1,
-        strike_xy: (0.0, 0.02),
-        // felt beater face 3 cm radius: power-law felt (stiffening with compression)
-        // ~5 mm of felt compression at 180 N
-        striker: (0.12, Law::Power { k: 1.0e8, alpha: 2.5, mu: 0.3 }, 0.03),
+        strike_xy: (0.055, 0.015),
+        // convex felt beater crown: point contact at initial impact launches the 0.5-4 kHz beater click
+        striker: (0.032, Law::Power { k: 5.5e9, alpha: 2.25, mu: 0.04 }, 0.0),
         // a pillow resting against the lower part of the heads
-        muffle: Some((0.0, -0.16, 0.07, 25.0)),
-        // the reference kick's front head is a coated Ambassador with no port named; Port::new
-        // models a vented one (a 4-in port adds a strong ~170 Hz monopole in this geometry)
+        muffle: Some((0.0, -0.16, 0.07, 22.0)),
         wires: None,
         port: None,
-        mic: [0.0, -0.1, -0.4572 - 1.0],
-        floor: None,
+        mic: [0.35, 0.25, 0.9],
+        floor: Some(-0.65),
     }
 }
 
 pub fn tom(size_in: f64) -> DrumSpec {
-    let (radius, depth, batter, reso, name) = if size_in <= 12.5 {
+    let (radius, depth, batter, reso, strike_xy, grid, name) = if size_in <= 12.5 {
         (0.146, 0.1778,
-         Head { thickness: PLY1, tension: 1270.0, t60: [(139.0, 1.8), (500.0, 0.54)] },
-         Head { thickness: RESO, tension: 950.0, t60: [(139.0, 1.8), (500.0, 0.54)] },
+         Head { thickness: PLY1, tension: 1300.0, t60: [(139.0, 1.55), (2500.0, 0.25)] },
+         Head { thickness: RESO, tension: 975.0, t60: [(139.0, 1.55), (2500.0, 0.25)] },
+         (0.275 * 0.146, 0.0),
+         4.0e-3,
          "rack tom 12x7")
     } else {
         (0.1703, 0.3556,
-         Head { thickness: PLY2, tension: 330.0, t60: [(69.0, 2.5), (250.0, 0.4)] },
-         Head { thickness: RESO, tension: 175.0, t60: [(69.0, 2.5), (250.0, 0.4)] },
+         Head { thickness: PLY2, tension: 410.0, t60: [(69.0, 1.5), (3500.0, 0.28)] },
+         Head { thickness: RESO, tension: 215.0, t60: [(69.0, 1.5), (3500.0, 0.28)] },
+         (0.43 * 0.1703, 0.0),
+         4.2e-3,
          "floor tom 14x14")
     };
     DrumSpec {
@@ -249,9 +251,9 @@ pub fn tom(size_in: f64) -> DrumSpec {
         depth,
         batter,
         reso,
-        grid: 4.0e-3,
+        grid,
         oversample: 1,
-        strike_xy: (0.35 * radius, 0.0),
+        strike_xy,
         striker: (STICK_TIP_KG, hertz_stick(0.005, MYLAR.0, MYLAR.1), 0.0),
         muffle: None,
         wires: None,
@@ -350,7 +352,7 @@ pub fn crash() -> CymbalSpec {
 }
 
 pub fn ride() -> CymbalSpec {
-    CymbalSpec { name: "ride 20", radius: 0.254, bow_thickness: 1.6e-3, bell_thickness: 2.2e-3, bell_radius: 0.085, bow_rise: 0.022, bell_rise: 0.02, grid: 6.5e-3, t60: [(500.0, 14.0), (10000.0, 3.0)] }
+    CymbalSpec { name: "ride 20", radius: 0.254, bow_thickness: 1.65e-3, bell_thickness: 2.25e-3, bell_radius: 0.085, bow_rise: 0.022, bell_rise: 0.020, grid: 6.2e-3, t60: [(500.0, 14.0), (10000.0, 3.2)] }
 }
 
 fn pick_oversample(ins: &mut Instrument, max_ratio: f64) -> Result<usize, String> {
@@ -398,10 +400,11 @@ pub fn hihat_spec() -> (CymbalSpec, CymbalSpec) {
     (top, bottom)
 }
 
-/// Hi-hat: two shells on one rod. `gap` is the rim opening (0 = closed under pedal force).
+/// Hi-hat: two shells on one rod. `gap` is the rim opening (0 = closed under pedal force); with no
+/// pedal force the rims rest at most 0.14 mm apart (a sloshy open hat whose rims chatter).
 pub fn hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)]) -> Result<Piece, String> {
-    // bronze rims pressed together: stiff and lossy (no tangential friction is modelled, so the loss stands in for it)
-    hihat_with(gap, pedal_n, hits, Law::Power { k: 2.0e9, alpha: 1.5, mu: 3.0 }, 0.8)
+    // bronze rims pressed together: stiff and lightly damped so rim chatter radiates 4-16 kHz sizzle
+    hihat_with(gap, pedal_n, hits, Law::Power { k: 2.0e9, alpha: 1.5, mu: 0.08 }, 0.8)
 }
 
 /// The same with an explicit rim contact law and the inner edge of the contact annulus (fraction of the radius).
@@ -418,7 +421,9 @@ pub fn hihat_grid(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
     let mut top = cymbal_shell(ts.name, &ts, false)?;
     top.origin = [0.0, 0.0, 0.0];
     let mut bot = cymbal_body(bs.name, &bs)?;
-    bot.origin = [0.0, 0.0, -0.002 - gap];
+    // sloshy "open" rock hi-hats rest within ~0.15 mm at the wavy rim so a stick stroke chatters across the gap
+    let eff_gap = if pedal_n == 0.0 { gap.min(1.4e-4) } else { gap };
+    bot.origin = [0.0, 0.0, -0.002 - eff_gap];
     let ti = ins.add(top);
     let bi = ins.add(bot);
     // the top hangs from the clutch on the pull rod; the bottom sits on the stand's felt cup
@@ -436,7 +441,8 @@ pub fn hihat_grid(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
     for &k in &clutch {
         ins.links.push(Link { a: (ti, k), b: Some((rod, 0)), k: kc, c: cc });
     }
-    // rim contact between the shells: matching nodes in the outer 20 % of the radius
+    // rim contact between the shells: matching nodes in the outer 20 % of the radius, with slight
+    // 2-lobe rim waviness (~0.15 mm) so the pedal rests on high spots while adjacent rim arcs sizzle
     let mut pairs = 0;
     for k in 0..ins.bodies[ti].n {
         let p = ins.bodies[ti].xy[k];
@@ -445,7 +451,9 @@ pub fn hihat_grid(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
             continue;
         }
         if let Some(kb) = ins.bodies[bi].node_at(p[0], p[1]) {
-            ins.contacts.push(Contact::new(vec![(bi, kb, 1.0)], vec![(ti, k, 1.0)], gap, rim));
+            let cos2 = if r > 0.0 { (p[0] * p[0] - p[1] * p[1]) / (r * r) } else { 1.0 };
+            let local_gap = if scale <= 1.0 { eff_gap + 7.5e-5 * (1.0 - cos2) } else { eff_gap };
+            ins.contacts.push(Contact::new(vec![(bi, kb, 1.0)], vec![(ti, k, 1.0)], local_gap, rim));
             pairs += 1;
         }
     }
@@ -457,7 +465,8 @@ pub fn hihat_grid(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
     let st = ins.add(Body::point("stick", STICK_TIP_KG));
     for &(t, v) in hits {
         let fp = ins.bodies[ti].footprint(0.85 * ts.radius, 0.0, 0.0);
-        let mut con = Contact::new(fp.into_iter().map(|(n_, w)| (ti, n_, w)).collect(), vec![(st, 0, 1.0)], 0.0, hertz_stick(0.005, BRONZE.0, BRONZE.1));
+        let tip = 0.004;
+        let mut con = Contact::new(fp.into_iter().map(|(n_, w)| (ti, n_, w)).collect(), vec![(st, 0, 1.0)], 0.0, hertz_stick(tip, BRONZE.0, BRONZE.1));
         con.active = false;
         ins.contacts.push(con);
         ins.strikes.push(Strike { time: t + settle, striker: st, contact: ins.contacts.len() - 1, speed: v, clear: 2e-4, done: false });
@@ -466,7 +475,7 @@ pub fn hihat_grid(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
     mic.unbaffled = Some(ts.radius);
     ins.mics.push(mic);
     let os = pick_oversample(&mut ins, 0.6)?;
-    let notes = vec![format!("hi-hat: {} + {} nodes, {pairs} rim contact pairs, gap {:.1} mm, pedal {pedal_n} N, internal {} kHz", ins.bodies[ti].n, ins.bodies[bi].n, gap * 1e3, OUT_RATE * os as f64 / 1000.0)];
+    let notes = vec![format!("hi-hat: {} + {} nodes, {pairs} rim contact pairs, gap {:.2} mm, pedal {pedal_n} N, internal {} kHz", ins.bodies[ti].n, ins.bodies[bi].n, eff_gap * 1e3, OUT_RATE * os as f64 / 1000.0)];
     Ok(Piece { instrument: ins, oversample: os, settle, notes })
 }
 
