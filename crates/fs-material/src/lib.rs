@@ -18,6 +18,8 @@ pub mod calibrate;
 /// Irreversible mixed-mode cohesive interfaces with work and fracture accounting.
 pub mod cohesive;
 pub mod conductor;
+/// Ordered source-backed Ohmic contact resistance, distinct from bulk resistivity.
+pub mod electrical_interface;
 pub mod liquid;
 pub mod liquid_temperature;
 pub mod elastic;
