@@ -385,7 +385,10 @@ async function initRegisterNote(): Promise<void> {
 
 function initVerisim(): void {
   const root = $("#verisim-root");
-  if (root) onVisible(root, () => void import("./verisim").then((m) => m.mountVerisim(root)), "800px");
+  if (root) onVisible(root, () => void import("./verisim").then((m) => m.mountVerisim(root)).catch(() => {
+    root.style.minHeight = "0";
+    root.textContent = "The comparison could not be loaded. Reload the page to try again.";
+  }), "800px");
 }
 
 initNav();

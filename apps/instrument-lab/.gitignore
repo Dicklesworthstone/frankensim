@@ -10,3 +10,4 @@ public/data/
 public/viz/
 public/live/drum/engine*
 public/live/piano/engine*
+__pycache__/

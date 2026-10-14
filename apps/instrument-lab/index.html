@@ -327,7 +327,13 @@
         <div class="panel subsection" style="margin-top: 22px">
           <h3>What the comparison shows</h3>
           <ul class="findings" id="verisim-findings"></ul>
-          <p class="small muted" style="margin-top: 14px">Method: both signals are high-passed at 40–70 Hz to remove room rumble, and each pair is aligned at its note onset, measured against the recording's own noise floor. Partial frequencies come from a 1 s window, and B is fitted from (fₙ/n)² = f₀²(1+Bn²) over partials above the noise floor. Decay rates are linear fits of each partial over 0.2–2.6 s. The Iowa microphones' first channel is used, because averaging two spaced microphones can cancel partials. Playback is matched in early loudness only, and nothing else is processed. The analysis is <code>tools/verisim.py</code>.</p>
+
+          <p class="small muted" style="margin-top: 14px">Method: both signals are high-passed at 40–70 Hz to remove room rumble, and each pair is aligned at its note onset, measured against the recording's own noise floor. Partial frequencies come from a 1 s window, and B is fitted from (fₙ/n)² = f₀²(1+Bn²) over partials above the noise floor. Decay rates are linear fits of each partial over 0.2–2.6 s (0.2–2.0 s at C6). The Iowa piano was recorded with two microphones 8 inches above the bass and treble strings in a normal room; the bass-side channel is used, because averaging two spaced microphones can cancel partials. FrankenSim's piano is heard at one point 1 m above its board with no room, so some differences belong to the two listening positions rather than the instruments. The cymbals were recorded 5 feet away in an anechoic chamber; FrankenSim's cymbal is also heard at a far-field point with no room, so those listening conditions are similar. Playback gets the same high-pass and an early-loudness match, and nothing else. The analysis is <code>tools/verisim.py</code>.</p>
+        </div>
+        <div class="panel subsection" style="margin-top: 22px">
+          <h3>Why it sounds different: tracing each gap to what the model leaves out</h3>
+          <p class="muted small" style="margin: 8px 0 16px; max-width: 92ch">A score says how far apart two sounds are, not why. Here each difference is followed back along the chain hammer → string → bridge → soundboard → air → microphone. Some links can be checked inside the simulation, which records the bridge's motion as well as the sound. Then one physical mechanism is switched on at a time and the note is rendered again. A suspicion counts as confirmed only when that experiment moves the measured gap.</p>
+          <div id="diagnosis-root" class="diag-list"></div>
         </div>
       </div>
     </section>

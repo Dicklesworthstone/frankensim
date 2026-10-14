@@ -406,3 +406,17 @@ footer.site code { color: var(--ivory-2); }
 .vs-word { color: var(--vc); font: 600 11px/1.4 var(--font-mono); letter-spacing: 0.12em; text-transform: uppercase; }
 .vs-verdict p { margin-top: 8px; font-size: 14px; line-height: 1.5; color: var(--ivory-2); }
 @media (max-width: 860px) { .vs-verdicts { grid-template-columns: 1fr; } }
+
+.diag-list { display: grid; gap: 12px; }
+.diag { padding: 16px 18px; border: 1px solid var(--line); border-left: 3px solid var(--dc, var(--line-strong)); border-radius: var(--radius-sm); background: var(--ink-1); }
+.diag.open { --dc: var(--ember); }
+.diag.testing { --dc: var(--brass); }
+.diag.confirmed { --dc: var(--verdigris); }
+.diag.refuted { --dc: var(--ivory-3); }
+.diag-head { display: grid; gap: 6px; }
+.diag-status { font: 600 11px/1.4 var(--font-mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--dc); }
+.diag h4 { font: 600 15.5px/1.45 var(--font-body); color: var(--ivory); margin: 0; max-width: 92ch; }
+.diag dl { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px 16px; margin-top: 12px; font-size: 14px; line-height: 1.55; }
+.diag dt { color: var(--ivory-3); font: 500 11.5px/1.9 var(--font-mono); letter-spacing: 0.04em; text-transform: uppercase; }
+.diag dd { margin: 0; color: var(--ivory-2); max-width: 92ch; }
+@media (max-width: 640px) { .diag dl { grid-template-columns: 1fr; gap: 2px; } .diag dd { margin-bottom: 8px; } }
