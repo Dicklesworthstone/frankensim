@@ -8,7 +8,10 @@ pub(super) use fluid::NO_CLAIM as FLUID_NO_CLAIM;
 
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::material_coupling::{
-    MaterialCoupledSolution, MaterialCouplingConfig, solve_cell_material_electrothermal,
+    MaterialCoupledSolution, MaterialCouplingConfig,
+};
+use fs_lbm::conjugate::material_coupling::interfaces::{
+    MaterialContact, solve as solve_material_interfaces,
 };
 use fs_lbm::conjugate::{
     ChtError, ElectricSetup, EnergyConfig, EnergySolution, FlowField,
@@ -23,6 +26,8 @@ use fs_material::state_point::{
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
+
+use super::interfaces::{self, InterfaceSource};
 
 pub(super) struct Source {
     pub pack: NormalizedMaterialCardPack,
@@ -115,6 +120,7 @@ pub(super) struct Problem {
     pub domain: VoxelDomain,
     pub material_indices: Vec<usize>,
     pub materials: Vec<Source>,
+    pub electrical_interfaces: Vec<InterfaceSource>,
     pub electric: ElectricSetup,
     pub thermal: ThermalSetup,
     pub initial_temperature: Vec<f64>,
@@ -128,6 +134,7 @@ pub(super) struct Problem {
 pub(super) struct ResultField {
     pub coupled: MaterialCoupledSolution,
     pub sources: Vec<CellState>,
+    pub interfaces: Vec<MaterialContact>,
     pub thermal_solves: usize,
     pub conductivity_relative_defect: f64,
 }
@@ -177,25 +184,31 @@ impl Problem {
             None => (&unused_fluid, quiescent.as_ref().expect("all-solid quiescent field")),
         };
         let mut thermal_solves = 0usize;
-        let coupled = solve_cell_material_electrothermal(
+        // Reuse the source-backed contact coupling owner. It resolves joints
+        // at both current cell temperatures, deposits their heat once, and
+        // retains exactly the contacts used by the final electrical solve.
+        let interface_solution = solve_material_interfaces(
             &self.domain, electric, thermal, start, self.coupling,
             |cell, _, temperature| {
                 Ok(self.materials[self.material_indices[cell]].at(temperature)?.conductor
                     .map(|c| c.resistivity_ohm_m()))
             },
+            |temperature| interfaces::resolve(&self.electrical_interfaces, temperature, gate),
             |heated, temperature| {
                 self.solve_heat(heated, temperature, &solids, fluid, flow,
                     storage, &mut thermal_solves, gate)
             },
             gate,
         )?;
+        let coupled = interface_solution.coupled;
+        let interfaces = interface_solution.contacts;
         let sources = self.states(&coupled.thermal.temperature, gate)?;
         let conductivity_relative_defect = conductivity_defect(&sources, &coupled.thermal.conductivity);
         if conductivity_relative_defect > self.conductivity_tolerance {
             return Err(invalid("material.conductivity_consistency", "final conductivity differs from the thermal solve beyond tolerance"));
         }
         poll(gate)?;
-        Ok(ResultField { coupled, sources, thermal_solves, conductivity_relative_defect })
+        Ok(ResultField { coupled, sources, interfaces, thermal_solves, conductivity_relative_defect })
     }
 
     #[allow(clippy::too_many_arguments)] // existing physical owners and the accumulated work count
