@@ -67,11 +67,11 @@ pub fn spd_inverse(a: &[f64], n: usize, what: &str) -> Result<Vec<f64>, String> 
 }
 
 /// Cyclic Jacobi eigen-decomposition of a symmetric matrix (destroyed).
-/// Returns eigenvalues (unsorted) and the eigenvector matrix (columns).
+/// Returns eigenvalues (unsorted) and the eigenvector matrix (row-major: row `p` is eigenvector `p`).
 fn jacobi(a: &mut [f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), String> {
-    let mut v = vec![0.0; n * n];
+    let mut vt = vec![0.0; n * n];
     for i in 0..n {
-        v[i * n + i] = 1.0;
+        vt[i * n + i] = 1.0;
     }
     for _sweep in 0..60 {
         let mut rotated = false;
@@ -100,16 +100,19 @@ fn jacobi(a: &mut [f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), String> {
                 }
                 a[p * n + q] = 0.0;
                 a[q * n + p] = 0.0;
-                for k in 0..n {
-                    let (vkp, vkq) = (v[k * n + p], v[k * n + q]);
-                    v[k * n + p] = c * vkp - s * vkq;
-                    v[k * n + q] = s * vkp + c * vkq;
+                let (head, tail) = vt.split_at_mut(q * n);
+                let vp = &mut head[p * n..(p + 1) * n];
+                let vq = &mut tail[..n];
+                for (vkp, vkq) in vp.iter_mut().zip(vq.iter_mut()) {
+                    let (old_p, old_q) = (*vkp, *vkq);
+                    *vkp = c * old_p - s * old_q;
+                    *vkq = s * old_p + c * old_q;
                 }
             }
         }
         if !rotated {
             let values = (0..n).map(|i| a[i * n + i]).collect();
-            return Ok((values, v));
+            return Ok((values, vt));
         }
     }
     Err("symmetric eigen-solve did not converge".into())
@@ -149,16 +152,17 @@ pub fn eigh_gen(k: &[f64], m: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), 
             c[j * n + i] = mean;
         }
     }
-    let (values, y) = jacobi(&mut c, n)?;
+    let (values, yt) = jacobi(&mut c, n)?;
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|a, b| values[*a].total_cmp(&values[*b]));
     let mut phi = vec![0.0; n * n];
     let mut lambda = vec![0.0; n];
     for (j, &source) in order.iter().enumerate() {
         lambda[j] = values[source];
+        let y_row = &yt[source * n..(source + 1) * n];
         // Back-substitute L^T phi = y.
         for i in (0..n).rev() {
-            let mut sum = y[i * n + source];
+            let mut sum = y_row[i];
             for kk in i + 1..n {
                 sum -= l[kk * n + i] * phi[kk * n + j];
             }
@@ -185,14 +189,20 @@ pub fn exp_neg_small(x: &[f64], n: usize) -> Result<Vec<f64>, String> {
     let mut term = result.clone();
     let mut next = vec![0.0; n * n];
     for order in 1..=24 {
-        // term <- term * (-X) / order
+        let inv_order = -1.0 / order as f64;
+        // Both `term` and `x` are symmetric: (term * (-X) / order)[i, j]
+        // uses two contiguous rows `term[i, ..]` and `x[j, ..]` for j >= i.
         for i in 0..n {
-            for j in 0..n {
+            let row_i = &term[i * n..(i + 1) * n];
+            for j in i..n {
+                let row_j = &x[j * n..(j + 1) * n];
                 let mut sum = 0.0;
-                for k in 0..n {
-                    sum += term[i * n + k] * x[k * n + j];
+                for (&tik, &xjk) in row_i.iter().zip(row_j) {
+                    sum += tik * xjk;
                 }
-                next[i * n + j] = -sum / order as f64;
+                let val = sum * inv_order;
+                next[i * n + j] = val;
+                next[j * n + i] = val;
             }
         }
         std::mem::swap(&mut term, &mut next);

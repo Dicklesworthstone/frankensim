@@ -260,8 +260,8 @@ impl MultiContactModalSystem {
         let mut at = 0;
         for model in &self.network.models {
             poll(gate)?;
-            for (&mode, &state) in model.modes().iter().zip(model.states()) {
-                self.free_q[at] = finite(advance_exact_zoh(mode, state, self.network.forces[at], self.network.dt)
+            for (mode_index, &state) in model.states().iter().enumerate() {
+                self.free_q[at] = finite(model.advance_exact_zoh_step(mode_index, state, self.network.forces[at])
                     .displacement_m_sqrt_kg)?;
                 at += 1;
             }

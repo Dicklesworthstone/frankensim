@@ -29,7 +29,7 @@ use super::{
     CoupledModalSystem, ModalAttachment, ModalCouplingError, check_solve, dot,
     extension, finite, invalid, limit, poll,
 };
-use crate::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeModel, advance_exact_zoh};
+use crate::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeModel};
 // Same one-coordinate potential secant, with stable near-equilibrium arithmetic.
 use fs_dcontact::OpeningContactStep as SlitContactStep;
 
@@ -250,8 +250,8 @@ impl ContactModalSystem {
         let mut index = 0;
         for model in &self.network.models {
             poll(gate)?;
-            for (&mode, &state) in model.modes().iter().zip(model.states()) {
-                let q = advance_exact_zoh(mode, state, self.network.forces[index], self.network.dt)
+            for (mode_index, &state) in model.states().iter().enumerate() {
+                let q = model.advance_exact_zoh_step(mode_index, state, self.network.forces[index])
                     .displacement_m_sqrt_kg;
                 x_free = finite(x_free + self.column[index]*q)?;
                 index += 1;
@@ -377,8 +377,8 @@ fn network_response(network: &CoupledModalSystem, column: &[f64], gate: &CancelG
     let mut d = Vec::with_capacity(column.len());
     for model in &network.models {
         poll(Some(gate))?;
-        for &mode in model.modes() {
-            d.push(finite(advance_exact_zoh(mode, ModalAcousticState::default(), 1.0, network.dt)
+        for mode_index in 0..model.modes().len() {
+            d.push(finite(model.advance_exact_zoh_step(mode_index, ModalAcousticState::default(), 1.0)
                 .displacement_m_sqrt_kg)?);
         }
     }

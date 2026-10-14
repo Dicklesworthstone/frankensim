@@ -301,9 +301,21 @@ impl BaffledPressure {
         for (delay,weights) in &self.kernels {
             let frame=if self.head>=*delay {self.head-*delay}else{self.head+self.history_frames-*delay};
             let offset=frame*self.modes;
-            for (i,weight) in weights.iter().enumerate() {
-                pressure+=weight*self.history[offset+i];
+            let hist=&self.history[offset..offset+self.modes];
+            let mut s=[0.0_f64;4];
+            let mut cw=weights.chunks_exact(4);
+            let mut ch=hist.chunks_exact(4);
+            for (w,h) in (&mut cw).zip(&mut ch) {
+                s[0]+=w[0]*h[0];
+                s[1]+=w[1]*h[1];
+                s[2]+=w[2]*h[2];
+                s[3]+=w[3]*h[3];
             }
+            let mut tap=(s[0]+s[1])+(s[2]+s[3]);
+            for (w,h) in cw.remainder().iter().zip(ch.remainder()) {
+                tap+=w*h;
+            }
+            pressure+=tap;
         }
         if !pressure.is_finite() {return Err("radiated pressure overflow".into());}
         let offset=self.head*self.modes;

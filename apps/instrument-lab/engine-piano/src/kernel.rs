@@ -43,7 +43,7 @@ use crate::refmods::{
     relaxation, shank, steinway_d, steinway_scale,
 };
 use fs_couple::modal_acoustic_time::{
-    ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
+    ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
 use fs_couple::pcm_wav::baffled::{BaffledPressure, RayleighMedium, SurfaceSample};
 use fs_material::{Uniaxial, WoolFelt};
@@ -387,38 +387,15 @@ fn zoh_probe(rate: u32, omega: &[f64]) -> Result<Vec<Zoh>, String> {
                 pressure_per_modal_velocity: C64::new(0.0, 0.0),
             })
             .collect();
-        let mut model = ModalAcousticTimeModel::try_new(rate, modes.clone(), ModalAcousticTimeBudget::audible_reference())
+        let model = ModalAcousticTimeModel::try_new(rate, modes, ModalAcousticTimeBudget::audible_reference())
             .map_err(|e| e.to_string())?;
-        let zeros = vec![0.0; modes.len()];
-        let mut result = vec![Zoh::default(); modes.len()];
-        let mut states: Vec<ModalAcousticState> = modes
-            .iter()
-            .map(|m| ModalAcousticState { displacement_m_sqrt_kg: 1.0 / m.angular_frequency_rad_s, velocity_m_sqrt_kg_per_s: 0.0 })
-            .collect();
-        model.restore_states(&states).map_err(|e| e.to_string())?;
-        model.step(&zeros).map_err(|e| e.to_string())?;
-        for ((t, state), mode) in result.iter_mut().zip(model.states()).zip(&modes) {
-            t.qq = state.displacement_m_sqrt_kg * mode.angular_frequency_rad_s;
-            t.vq = state.velocity_m_sqrt_kg_per_s * mode.angular_frequency_rad_s;
-        }
-        states.fill(ModalAcousticState { displacement_m_sqrt_kg: 0.0, velocity_m_sqrt_kg_per_s: 1.0 });
-        model.restore_states(&states).map_err(|e| e.to_string())?;
-        model.step(&zeros).map_err(|e| e.to_string())?;
-        for (t, state) in result.iter_mut().zip(model.states()) {
-            t.qv = state.displacement_m_sqrt_kg;
-            t.vv = state.velocity_m_sqrt_kg_per_s;
-        }
-        states.fill(ModalAcousticState::default());
-        model.restore_states(&states).map_err(|e| e.to_string())?;
-        model.step(&vec![1.0; modes.len()]).map_err(|e| e.to_string())?;
-        for (t, state) in result.iter_mut().zip(model.states()) {
-            t.bq = state.displacement_m_sqrt_kg;
-            t.bv = state.velocity_m_sqrt_kg_per_s;
-            if !t.bq.is_finite() || t.bq <= 0.0 {
+        for i in 0..chunk.len() {
+            let (qq, qv, vq, vv, bq, bv) = model.probe_linear_map(i);
+            if !bq.is_finite() || bq <= 0.0 {
                 return Err("nonpositive ZOH displacement compliance".into());
             }
+            out.push(Zoh { qq, qv, vq, vv, bq, bv });
         }
-        out.extend(result);
     }
     Ok(out)
 }
@@ -643,6 +620,236 @@ fn matvec(a: &[f64], x: &[f64], y: &mut [f64]) {
     }
 }
 
+#[inline]
+fn step_string_loss(
+    v: &mut [f64],
+    c1: &[f64],
+    c2: &[f64],
+    c3: &[f64],
+    bm: f64,
+) -> (f64, f64) {
+    let mut l = [0.0_f64; 4];
+    let mut a = [0.0_f64; 4];
+    let mut cv = v.chunks_exact_mut(4);
+    let mut cc1 = c1.chunks_exact(4);
+    let mut cc2 = c2.chunks_exact(4);
+    let mut cc3 = c3.chunks_exact(4);
+    for (((vc, c1c), c2c), c3c) in (&mut cv).zip(&mut cc1).zip(&mut cc2).zip(&mut cc3) {
+        for lane in 0..4 {
+            let old = vc[lane];
+            let dv = c1c[lane] * old + c2c[lane] * bm;
+            l[lane] += (old - dv) * (old + dv);
+            a[lane] += c3c[lane] * old;
+            vc[lane] = dv;
+        }
+    }
+    let mut loss = (l[0] + l[1]) + (l[2] + l[3]);
+    let mut acc3 = (a[0] + a[1]) + (a[2] + a[3]);
+    for (((v, &c1), &c2), &c3) in cv
+        .into_remainder()
+        .iter_mut()
+        .zip(cc1.remainder())
+        .zip(cc2.remainder())
+        .zip(cc3.remainder())
+    {
+        let old = *v;
+        let dv = c1 * old + c2 * bm;
+        loss += (old - dv) * (old + dv);
+        acc3 += c3 * old;
+        *v = dv;
+    }
+    (loss, acc3)
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn step_zoh_free(
+    q: &[f64],
+    v: &mut [f64],
+    fq: &mut [f64],
+    qq: &[f64],
+    qv: &[f64],
+    vq: &[f64],
+    vv: &[f64],
+    ha: &[f64],
+) -> f64 {
+    let mut r = [0.0_f64; 4];
+    let mut cq = q.chunks_exact(4);
+    let mut cv = v.chunks_exact_mut(4);
+    let mut cfq = fq.chunks_exact_mut(4);
+    let mut cqq = qq.chunks_exact(4);
+    let mut cqv = qv.chunks_exact(4);
+    let mut cvq = vq.chunks_exact(4);
+    let mut cvv = vv.chunks_exact(4);
+    let mut cha = ha.chunks_exact(4);
+    for (((((((qc, vc), fqc), qqc), qvc), vqc), vvc), hac) in (&mut cq)
+        .zip(&mut cv)
+        .zip(&mut cfq)
+        .zip(&mut cqq)
+        .zip(&mut cqv)
+        .zip(&mut cvq)
+        .zip(&mut cvv)
+        .zip(&mut cha)
+    {
+        for lane in 0..4 {
+            let qi = qc[lane];
+            let dv = vc[lane];
+            let x = qqc[lane] * qi + qvc[lane] * dv;
+            fqc[lane] = x;
+            vc[lane] = vqc[lane] * qi + vvc[lane] * dv;
+            r[lane] += hac[lane] * (qi + x);
+        }
+    }
+    let mut reac = (r[0] + r[1]) + (r[2] + r[3]);
+    for (((((((&q, v), fq), &qq), &qv), &vq), &vv), &ha) in cq
+        .remainder()
+        .iter()
+        .zip(cv.into_remainder().iter_mut())
+        .zip(cfq.into_remainder().iter_mut())
+        .zip(cqq.remainder())
+        .zip(cqv.remainder())
+        .zip(cvq.remainder())
+        .zip(cvv.remainder())
+        .zip(cha.remainder())
+    {
+        let dv = *v;
+        let x = qq * q + qv * dv;
+        *fq = x;
+        *v = vq * q + vv * dv;
+        reac += ha * (q + x);
+    }
+    reac
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn step_zoh_forced(
+    q: &mut [f64],
+    v: &mut [f64],
+    fq: &[f64],
+    bqa: &[f64],
+    bva: &[f64],
+    ha: &[f64],
+    cross: &[f64],
+    bbar: f64,
+) -> (f64, f64) {
+    let mut r = [0.0_f64; 4];
+    let mut s = [0.0_f64; 4];
+    let mut cq = q.chunks_exact_mut(4);
+    let mut cv = v.chunks_exact_mut(4);
+    let mut cfq = fq.chunks_exact(4);
+    let mut cbqa = bqa.chunks_exact(4);
+    let mut cbva = bva.chunks_exact(4);
+    let mut cha = ha.chunks_exact(4);
+    let mut ccross = cross.chunks_exact(4);
+    for ((((((qc, vc), fqc), bqac), bvac), hac), crossc) in (&mut cq)
+        .zip(&mut cv)
+        .zip(&mut cfq)
+        .zip(&mut cbqa)
+        .zip(&mut cbva)
+        .zip(&mut cha)
+        .zip(&mut ccross)
+    {
+        for lane in 0..4 {
+            let nq = fqc[lane] + bqac[lane] * bbar;
+            let nv = vc[lane] + bvac[lane] * bbar;
+            r[lane] += hac[lane] * (qc[lane] + nq);
+            s[lane] += crossc[lane] * nv;
+            qc[lane] = nq;
+            vc[lane] = nv;
+        }
+    }
+    let mut reac = (r[0] + r[1]) + (r[2] + r[3]);
+    let mut src = (s[0] + s[1]) + (s[2] + s[3]);
+    for ((((((q, v), &fq), &bqa), &bva), &ha), &cross) in cq
+        .into_remainder()
+        .iter_mut()
+        .zip(cv.into_remainder().iter_mut())
+        .zip(cfq.remainder())
+        .zip(cbqa.remainder())
+        .zip(cbva.remainder())
+        .zip(cha.remainder())
+        .zip(ccross.remainder())
+    {
+        let nq = fq + bqa * bbar;
+        let nv = *v + bva * bbar;
+        reac += ha * (*q + nq);
+        src += cross * nv;
+        *q = nq;
+        *v = nv;
+    }
+    (reac, src)
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn step_zoh_forced_contact(
+    q: &mut [f64],
+    v: &mut [f64],
+    fq: &[f64],
+    bqa: &[f64],
+    bva: &[f64],
+    ha: &[f64],
+    cross: &[f64],
+    bqhs: &[f64],
+    bvhs: &[f64],
+    bbar: f64,
+    force: f64,
+) -> (f64, f64) {
+    let mut r = [0.0_f64; 4];
+    let mut s = [0.0_f64; 4];
+    let mut cq = q.chunks_exact_mut(4);
+    let mut cv = v.chunks_exact_mut(4);
+    let mut cfq = fq.chunks_exact(4);
+    let mut cbqa = bqa.chunks_exact(4);
+    let mut cbva = bva.chunks_exact(4);
+    let mut cha = ha.chunks_exact(4);
+    let mut ccross = cross.chunks_exact(4);
+    let mut cbqhs = bqhs.chunks_exact(4);
+    let mut cbvhs = bvhs.chunks_exact(4);
+    for ((((((((qc, vc), fqc), bqac), bvac), hac), crossc), bqhsc), bvhsc) in (&mut cq)
+        .zip(&mut cv)
+        .zip(&mut cfq)
+        .zip(&mut cbqa)
+        .zip(&mut cbva)
+        .zip(&mut cha)
+        .zip(&mut ccross)
+        .zip(&mut cbqhs)
+        .zip(&mut cbvhs)
+    {
+        for lane in 0..4 {
+            let nq = fqc[lane] + bqac[lane] * bbar + bqhsc[lane] * force;
+            let nv = vc[lane] + bvac[lane] * bbar + bvhsc[lane] * force;
+            r[lane] += hac[lane] * (qc[lane] + nq);
+            s[lane] += crossc[lane] * nv;
+            qc[lane] = nq;
+            vc[lane] = nv;
+        }
+    }
+    let mut reac = (r[0] + r[1]) + (r[2] + r[3]);
+    let mut src = (s[0] + s[1]) + (s[2] + s[3]);
+    for ((((((((q, v), &fq), &bqa), &bva), &ha), &cross), &bqhs), &bvhs) in cq
+        .into_remainder()
+        .iter_mut()
+        .zip(cv.into_remainder().iter_mut())
+        .zip(cfq.remainder())
+        .zip(cbqa.remainder())
+        .zip(cbva.remainder())
+        .zip(cha.remainder())
+        .zip(ccross.remainder())
+        .zip(cbqhs.remainder())
+        .zip(cbvhs.remainder())
+    {
+        let nq = fq + bqa * bbar + bqhs * force;
+        let nv = *v + bva * bbar + bvhs * force;
+        reac += ha * (*q + nq);
+        src += cross * nv;
+        *q = nq;
+        *v = nv;
+    }
+    (reac, src)
+}
+
 /// One string segment of the scale (speaking unison member or its duplex).
 #[derive(Clone, Debug)]
 struct Seg {
@@ -662,6 +869,47 @@ struct Seg {
     strike_fraction: f64,
 }
 
+/// Everything the pre half-flow loop of `step` reads per mode, packed into one
+/// 64-byte record (one cache line, one prefetch stream) instead of eight
+/// separate arrays. Values are copies of the `Modes` constants of the same
+/// name; the ZOH free-motion map `fq = qq*q + qv*v`, `fv = vq*q + vv*v` has no
+/// other reader, so it lives only here.
+#[derive(Clone, Copy)]
+#[repr(C, align(64))]
+struct PreFlow {
+    c1: f64,
+    c2: f64,
+    c3: f64,
+    qq: f64,
+    qv: f64,
+    vq: f64,
+    vv: f64,
+    ha: f64,
+}
+
+/// What the finish loop of `step` reads per mode besides the state: the board
+/// drive `bqa = bq*a`, `bva = bv*a`, the reaction weight `ha` and the loss
+/// cross term `cross`, in one 32-byte record (one stream instead of four).
+/// `ha` and `cross` are copies of the `Modes` arrays of the same name (other
+/// readers keep those); `bqa`/`bva` live only here.
+#[derive(Clone, Copy)]
+#[repr(C, align(32))]
+struct FinFlow {
+    bqa: f64,
+    bva: f64,
+    ha: f64,
+    cross: f64,
+}
+
+/// The felt-force drive `bqhs = bq*hs`, `bvhs = bv*hs` the finish loop adds
+/// while a segment carries a contact force (16 bytes; read only there).
+#[derive(Clone, Copy)]
+#[repr(C, align(16))]
+struct HitFlow {
+    bqhs: f64,
+    bvhs: f64,
+}
+
 /// Per-mode constants (structure of arrays, bank order).
 #[derive(Default)]
 struct Modes {
@@ -669,19 +917,18 @@ struct Modes {
     w2: Vec<f64>,
     beta: Vec<f64>,
     hs: Vec<f64>,
-    qq: Vec<f64>,
-    qv: Vec<f64>,
-    vq: Vec<f64>,
-    vv: Vec<f64>,
+    /// Pre half-flow record per mode (see `PreFlow`).
+    pre: Vec<PreFlow>,
     bq: Vec<f64>,
-    /// 0.5*a, 0.5*bq*a, bq*a, bv*a with a = w^2*beta.
+    /// 0.5*a, 0.5*bq*a with a = w^2*beta.
     ha: Vec<f64>,
     hba: Vec<f64>,
-    bqa: Vec<f64>,
-    bva: Vec<f64>,
-    bqhs: Vec<f64>,
-    bvhs: Vec<f64>,
+    /// Finish-loop records per mode (see `FinFlow`, `HitFlow`).
+    fin: Vec<FinFlow>,
+    hit: Vec<HitFlow>,
     /// String-loss half-flow: v' = c1*v + c2*b_mid, bridge reaction -c3*v.
+    /// (The post half-flow reads these 3 of the 8 `PreFlow` fields alone, so
+    /// it keeps the plain arrays.)
     c1: Vec<f64>,
     c2: Vec<f64>,
     c3: Vec<f64>,
@@ -738,10 +985,8 @@ struct ACourse {
     damped_now: bool,
     /// Samples since activation (diagnostic).
     age: u64,
-    /// Display shape table: rows = stations, cols = partials of the first
-    /// speaking string (bank segment `shape_seg`); empty for duplex-only keys.
-    shape: Vec<f32>,
-    shape_seg: usize,
+    /// Partial count and mode offset of the first speaking string for display
+    /// (`0` for duplex-only keys).
     shape_n: usize,
     shape_off: usize,
 }
@@ -879,7 +1124,7 @@ pub struct LivePiano {
     c_lift: Vec<f64>,
     c_site: Vec<crate::fastfelt::Site>,
     c_start: Vec<f64>,
-    /// Cold caches per bank segment: damper pad projections and display table.
+    /// Cold caches per course: damper pad projections and display table.
     pad_cache: Vec<Option<(usize, Vec<(Vec<f64>, f64, f64)>)>>,
     shape_cache: Vec<Option<(usize, Vec<f32>)>>,
     last_error: Option<String>,
@@ -925,20 +1170,19 @@ impl LivePiano {
             m.w2.push(mode.omega * mode.omega);
             m.beta.push(mode.beta);
             m.hs.push(mode.hammer_shape);
-            m.qq.push(z.qq);
-            m.qv.push(z.qv);
-            m.vq.push(z.vq);
-            m.vv.push(z.vv);
+            let ha = 0.5 * a;
+            let c1 = 1.0 - dur * (mr + sr) * inv;
+            let c2 = -dur * ((mr + sr) * cross - sr * mode.beta);
+            let c3 = sr * mode.beta * inv;
+            m.pre.push(PreFlow { c1, c2, c3, qq: z.qq, qv: z.qv, vq: z.vq, vv: z.vv, ha });
             m.bq.push(z.bq);
-            m.ha.push(0.5 * a);
+            m.ha.push(ha);
             m.hba.push(0.5 * z.bq * a);
-            m.bqa.push(z.bq * a);
-            m.bva.push(z.bv * a);
-            m.bqhs.push(z.bq * mode.hammer_shape);
-            m.bvhs.push(z.bv * mode.hammer_shape);
-            m.c1.push(1.0 - dur * (mr + sr) * inv);
-            m.c2.push(-dur * ((mr + sr) * cross - sr * mode.beta));
-            m.c3.push(sr * mode.beta * inv);
+            m.fin.push(FinFlow { bqa: z.bq * a, bva: z.bv * a, ha, cross });
+            m.hit.push(HitFlow { bqhs: z.bq * mode.hammer_shape, bvhs: z.bv * mode.hammer_shape });
+            m.c1.push(c1);
+            m.c2.push(c2);
+            m.c3.push(c3);
             m.c4.push(sr * mode.beta * (cross - mode.beta));
             m.cross.push(cross);
             m.lw.push(half * sr * mode.beta * mode.beta * (1.0 + half * mr) * inv);
@@ -1092,7 +1336,7 @@ impl LivePiano {
             RayleighMedium { density: gas.density, sound_speed: gas.sound_speed })?;
         let surface_xy = desc.surface.iter().flat_map(|p| [p.position_m[0] as f32, p.position_m[1] as f32]).collect();
         let surface_shapes: Vec<f32> = desc.surface.iter().flat_map(|p| p.mode_shape.iter().map(|x| *x as f32)).collect();
-        let n_segs = segs.len();
+        let n_courses = courses.len();
         let mut piano = Self {
             r,
             dt,
@@ -1146,8 +1390,8 @@ impl LivePiano {
             c_lift: Vec::with_capacity(96),
             c_site: Vec::with_capacity(96),
             c_start: Vec::with_capacity(96),
-            pad_cache: vec![None; n_segs],
-            shape_cache: vec![None; n_segs],
+            pad_cache: vec![None; n_courses],
+            shape_cache: vec![None; n_courses],
             last_error: None,
             cfg,
         };
@@ -1248,7 +1492,8 @@ impl LivePiano {
         loss_w += half * endpoint_drag;
         let mut pad = Vec::new();
         if !seg.duplex && self.keys[seg.course].has_damper {
-            if self.pad_cache[si].as_ref().is_none_or(|(count, _)| *count != n) {
+            let ci = seg.course;
+            if self.pad_cache[ci].as_ref().is_none_or(|(count, _)| *count != n) {
                 // The reference's estimated pad, as `damper_points` midpoint
                 // stations: y = phi*z + (x/L - sum(phi*beta))*b at each station.
                 let width = (DAMPER_WIDTH_FRACTION * seg.length_m).min(DAMPER_WIDTH_MAX_M);
@@ -1264,9 +1509,9 @@ impl LivePiano {
                     let norm_string = shape.iter().map(|g| g * g).sum::<f64>();
                     points.push((shape, lift, norm_string));
                 }
-                self.pad_cache[si] = Some((n, points));
+                self.pad_cache[ci] = Some((n, points));
             }
-            if let Some((_, points)) = &self.pad_cache[si] {
+            if let Some((_, points)) = &self.pad_cache[ci] {
                 pad = points.iter().map(|(shape, lift, norm_string)| PadPoint {
                     shape: shape.clone(), lift: *lift, norm_string: *norm_string, coef: 0.0, norm: 0.0,
                 }).collect();
@@ -1362,49 +1607,24 @@ impl LivePiano {
                     self.keys[ci].slot = Some(self.active.len());
                     self.active.push(ACourse {
                         ci, segs: fresh, gl: vec![0.0; r], resp: vec![0.0; r], gl_norm2: 0.0, modes: 0, b0: 0.0,
-                        damped_now: false, age: 0, shape: Vec::new(), shape_seg: usize::MAX, shape_n: 0, shape_off: 0,
+                        damped_now: false, age: 0, shape_n: 0, shape_off: 0,
                     });
                 }
             }
         }
-        // Per-key bookkeeping and the display table of its first speaking
-        // string: y(x_j) = sum_n phi_n(x_j) q_n + x_j/L * b (display only).
+        // Per-key bookkeeping (display shape table is populated lazily in snapshot()).
         for slot in 0..self.active.len() {
-            let ac = &self.active[slot];
-            let modes = ac.segs.iter().map(|s| s.n).sum();
-            let first = ac.segs.iter().find(|s| !s.duplex).map(|s| (s.seg, s.n, s.off));
-            let stale = first.is_some_and(|(seg, n, _)| seg != ac.shape_seg || n != ac.shape_n);
-            if let (Some((seg, n, _)), true) = (first, stale) {
-                if self.shape_cache[seg].as_ref().is_none_or(|(count, _)| *count != n) {
-                    let root = self.segs[seg].modal_mass_kg.sqrt();
-                    let mut shape = Vec::with_capacity(SHAPE_STATIONS * n);
-                    for j in 0..SHAPE_STATIONS {
-                        let x = (j as f64 + 0.5) / SHAPE_STATIONS as f64;
-                        for p in 1..=n {
-                            shape.push(((p as f64 * PI * x).sin() / root) as f32);
-                        }
-                    }
-                    self.shape_cache[seg] = Some((n, shape));
-                }
-            }
-            let table = match (first, stale) {
-                (Some((seg, _, _)), true) => self.shape_cache[seg].as_ref().map(|(_, shape)| shape.clone()),
-                _ => None,
-            };
             let ac = &mut self.active[slot];
-            ac.modes = modes;
-            match (first, table) {
-                (Some((seg, n, off)), Some(shape)) => {
-                    ac.shape = shape;
-                    ac.shape_seg = seg;
+            ac.modes = ac.segs.iter().map(|s| s.n).sum();
+            match ac.segs.iter().find(|s| !s.duplex).map(|s| (s.n, s.off)) {
+                Some((n, off)) => {
                     ac.shape_n = n;
                     ac.shape_off = off;
                 }
-                (None, _) => {
-                    ac.shape_seg = usize::MAX;
+                None => {
                     ac.shape_n = 0;
+                    ac.shape_off = 0;
                 }
-                _ => {}
             }
         }
         // Loaded board pencil of the CURRENT dynamic set, in the static basis:
@@ -1810,23 +2030,16 @@ impl LivePiano {
                     .zip(self.v[range.clone()].iter())
                     .zip(self.fq[range.clone()].iter_mut())
                     .zip(self.fv[range.clone()].iter_mut())
-                    .zip(m.c1[range.clone()].iter())
-                    .zip(m.c2[range.clone()].iter())
-                    .zip(m.c3[range.clone()].iter())
-                    .zip(m.qq[range.clone()].iter())
-                    .zip(m.qv[range.clone()].iter())
-                    .zip(m.vq[range.clone()].iter())
-                    .zip(m.vv[range.clone()].iter())
-                    .zip(m.ha[range.clone()].iter());
-                for (((((((((((q, v), fq), fv), c1), c2), c3), qq), qv), vq), vv), ha) in it {
+                    .zip(m.pre[range.clone()].iter());
+                for ((((q, v), fq), fv), p) in it {
                     let old = *v;
-                    let dv = c1 * old + c2 * bm;
+                    let dv = p.c1 * old + p.c2 * bm;
                     loss += (old - dv) * (old + dv);
-                    acc3 += c3 * old;
-                    let x = qq * q + qv * dv;
+                    acc3 += p.c3 * old;
+                    let x = p.qq * q + p.qv * dv;
                     *fq = x;
-                    *fv = vq * q + vv * dv;
-                    reac += ha * (q + x);
+                    *fv = p.vq * q + p.vv * dv;
+                    reac += p.ha * (q + x);
                 }
                 string_loss += 0.5 * loss;
                 reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
@@ -1896,15 +2109,12 @@ impl LivePiano {
                         .zip(self.v[range.clone()].iter_mut())
                         .zip(self.fq[range.clone()].iter())
                         .zip(self.fv[range.clone()].iter())
-                        .zip(m.bqa[range.clone()].iter())
-                        .zip(m.bva[range.clone()].iter())
-                        .zip(m.ha[range.clone()].iter())
-                        .zip(m.cross[range.clone()].iter());
-                    for (((((((q, v), fq), fv), bqa), bva), ha), cross) in it {
-                        let nq = fq + bqa * bbar;
-                        let nv = fv + bva * bbar;
-                        reac += ha * (*q + nq);
-                        src += cross * nv;
+                        .zip(m.fin[range.clone()].iter());
+                    for ((((q, v), fq), fv), p) in it {
+                        let nq = fq + p.bqa * bbar;
+                        let nv = fv + p.bva * bbar;
+                        reac += p.ha * (*q + nq);
+                        src += p.cross * nv;
                         *q = nq;
                         *v = nv;
                     }
@@ -1914,17 +2124,13 @@ impl LivePiano {
                         .zip(self.v[range.clone()].iter_mut())
                         .zip(self.fq[range.clone()].iter())
                         .zip(self.fv[range.clone()].iter())
-                        .zip(m.bqa[range.clone()].iter())
-                        .zip(m.bva[range.clone()].iter())
-                        .zip(m.ha[range.clone()].iter())
-                        .zip(m.cross[range.clone()].iter())
-                        .zip(m.bqhs[range.clone()].iter())
-                        .zip(m.bvhs[range.clone()].iter());
-                    for (((((((((q, v), fq), fv), bqa), bva), ha), cross), bqhs), bvhs) in it {
-                        let nq = fq + bqa * bbar + bqhs * force;
-                        let nv = fv + bva * bbar + bvhs * force;
-                        reac += ha * (*q + nq);
-                        src += cross * nv;
+                        .zip(m.fin[range.clone()].iter())
+                        .zip(m.hit[range.clone()].iter());
+                    for (((((q, v), fq), fv), p), h) in it {
+                        let nq = fq + p.bqa * bbar + h.bqhs * force;
+                        let nv = fv + p.bva * bbar + h.bvhs * force;
+                        reac += p.ha * (*q + nq);
+                        src += p.cross * nv;
                         *q = nq;
                         *v = nv;
                     }
@@ -2419,6 +2625,21 @@ impl LivePiano {
         let mut bare = vec![0.0; self.r];
         self.board_coordinates(&mut bare);
         out.extend(bare.iter().map(|x| *x as f32));
+        for slot in 0..self.active.len() {
+            let (ci, n) = (self.active[slot].ci, self.active[slot].shape_n);
+            if n > 0 && self.shape_cache[ci].as_ref().is_none_or(|(count, _)| *count != n) {
+                let c = &self.courses[ci];
+                let root = (0.5 * c.linear_density_kg_m * c.length_m).sqrt();
+                let mut shape = Vec::with_capacity(SHAPE_STATIONS * n);
+                for j in 0..SHAPE_STATIONS {
+                    let x = (j as f64 + 0.5) / SHAPE_STATIONS as f64;
+                    for p in 1..=n {
+                        shape.push(((p as f64 * PI * x).sin() / root) as f32);
+                    }
+                }
+                self.shape_cache[ci] = Some((n, shape));
+            }
+        }
         for ac in &self.active {
             let key = &self.keys[ac.ci];
             let b = dot(&ac.gl, &self.bq);
@@ -2432,11 +2653,16 @@ impl LivePiano {
             out.push(ac.segs.iter().filter(|s| !s.duplex).count() as f32);
             out.push(b as f32);
             let n = ac.shape_n;
+            let shape = if n > 0 {
+                self.shape_cache[ac.ci].as_ref().map(|(_, s)| s.as_slice())
+            } else {
+                None
+            };
             for j in 0..SHAPE_STATIONS {
                 let x = (j as f64 + 0.5) / SHAPE_STATIONS as f64;
                 let mut y = x * b;
-                if n > 0 {
-                    let row = &ac.shape[j * n..(j + 1) * n];
+                if let Some(table) = shape {
+                    let row = &table[j * n..(j + 1) * n];
                     for (p, g) in row.iter().enumerate() {
                         let k = ac.shape_off + p;
                         y += f64::from(*g) * (self.q[k] - self.m.beta[k] * b);

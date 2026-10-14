@@ -271,37 +271,45 @@ pub struct ModalAcousticTimeModel {
 
 #[derive(Debug)]
 struct ExactZohKernel {
+    sample_period_s: f64,
     full_duration_bits: u64,
     half_duration_bits: u64,
     full: Box<[ExactZohCoefficients]>,
-    half: Box<[ExactZohCoefficients]>,
+    half: std::sync::OnceLock<Box<[ExactZohCoefficients]>>,
 }
 
 impl ExactZohKernel {
     fn new(modes: &[ModalAcousticMode], sample_period_s: f64) -> Self {
         let half_period_s = 0.5 * sample_period_s;
-        let coefficients = |dt| {
-            modes
-                .iter()
-                .copied()
-                .map(|mode| exact_zoh_coefficients(mode, dt))
-                .collect::<Vec<_>>()
-                .into_boxed_slice()
-        };
+        let full = modes
+            .iter()
+            .copied()
+            .map(|mode| exact_zoh_coefficients(mode, sample_period_s))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Self {
+            sample_period_s,
             full_duration_bits: sample_period_s.to_bits(),
             half_duration_bits: half_period_s.to_bits(),
-            full: coefficients(sample_period_s),
-            half: coefficients(half_period_s),
+            full,
+            half: std::sync::OnceLock::new(),
         }
     }
 
-    fn for_duration(&self, duration_s: f64) -> Option<&[ExactZohCoefficients]> {
+    fn for_duration(&self, modes: &[ModalAcousticMode], duration_s: f64) -> Option<&[ExactZohCoefficients]> {
         let duration_bits = duration_s.to_bits();
         if duration_bits == self.full_duration_bits {
             Some(&self.full)
         } else if duration_bits == self.half_duration_bits {
-            Some(&self.half)
+            let half_period_s = 0.5 * self.sample_period_s;
+            Some(self.half.get_or_init(|| {
+                modes
+                    .iter()
+                    .copied()
+                    .map(|mode| exact_zoh_coefficients(mode, half_period_s))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice()
+            }))
         } else {
             None
         }
@@ -519,6 +527,82 @@ impl ModalAcousticTimeModel {
         )?;
         self.states.clone_from_slice(states);
         Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn copy_states_from(&mut self, source: &Self) {
+        debug_assert_eq!(self.states.len(), source.states.len());
+        self.states.copy_from_slice(&source.states);
+    }
+
+    #[inline]
+    pub(crate) fn advance_exact_zoh_step(
+        &self,
+        mode_index: usize,
+        state: ModalAcousticState,
+        force: f64,
+    ) -> ModalAcousticState {
+        advance_exact_zoh_cached(
+            self.modes[mode_index],
+            state,
+            force,
+            self.transition_kernel.full[mode_index],
+        )
+    }
+
+    /// Exact zero-order-hold one-sample linear map `(qq, qv, vq, vv, bq, bv)`
+    /// of `self.modes()[mode_index]`, evaluated on the three basis states
+    /// `(q = 1/omega, v = 0, F = 0)` (or `q = 1` when `omega == 0`),
+    /// `(q = 0, v = 1, F = 0)`, and `(q = 0, v = 0, F = 1)` using the admitted
+    /// model's cached full-step transition coefficients.
+    #[must_use]
+    pub fn probe_linear_map(&self, mode_index: usize) -> (f64, f64, f64, f64, f64, f64) {
+        let omega = self.modes[mode_index].angular_frequency_rad_s;
+        let (qq, vq) = if omega == 0.0 {
+            let s_q = self.advance_exact_zoh_step(
+                mode_index,
+                ModalAcousticState {
+                    displacement_m_sqrt_kg: 1.0,
+                    velocity_m_sqrt_kg_per_s: 0.0,
+                },
+                0.0,
+            );
+            (s_q.displacement_m_sqrt_kg, s_q.velocity_m_sqrt_kg_per_s)
+        } else {
+            let s_q = self.advance_exact_zoh_step(
+                mode_index,
+                ModalAcousticState {
+                    displacement_m_sqrt_kg: 1.0 / omega,
+                    velocity_m_sqrt_kg_per_s: 0.0,
+                },
+                0.0,
+            );
+            (
+                s_q.displacement_m_sqrt_kg * omega,
+                s_q.velocity_m_sqrt_kg_per_s * omega,
+            )
+        };
+        let s_v = self.advance_exact_zoh_step(
+            mode_index,
+            ModalAcousticState {
+                displacement_m_sqrt_kg: 0.0,
+                velocity_m_sqrt_kg_per_s: 1.0,
+            },
+            0.0,
+        );
+        let s_f = self.advance_exact_zoh_step(
+            mode_index,
+            ModalAcousticState::default(),
+            1.0,
+        );
+        (
+            qq,
+            s_v.displacement_m_sqrt_kg,
+            vq,
+            s_v.velocity_m_sqrt_kg_per_s,
+            s_f.displacement_m_sqrt_kg,
+            s_f.velocity_m_sqrt_kg_per_s,
+        )
     }
 
     /// Nominal output sample period [s].
@@ -817,7 +901,7 @@ impl ModalAcousticTimeModel {
         let mut input_work_j = 0.0;
         let mut energy_before_j = 0.0;
         let mut energy_after_j = 0.0;
-        let transition_coefficients = self.transition_kernel.for_duration(duration_s);
+        let transition_coefficients = self.transition_kernel.for_duration(&self.modes, duration_s);
         for (mode_index, ((mode, state), force)) in self
             .modes
             .iter()
@@ -968,7 +1052,7 @@ impl ModalAcousticTimeModel {
                 what: "held-force port shapes and target velocity must be finite",
             });
         }
-        let transition_coefficients = self.transition_kernel.for_duration(duration_s);
+        let transition_coefficients = self.transition_kernel.for_duration(&self.modes, duration_s);
         let mut free_port_velocity_m_s = 0.0;
         let mut port_mobility_m_s_per_n = 0.0;
         for (mode_index, (mode, state)) in self.modes.iter().zip(&self.states).enumerate() {
@@ -1409,13 +1493,13 @@ mod tests {
         assert!(
             model
                 .transition_kernel
-                .for_duration(sample_period_s)
+                .for_duration(&model.modes, sample_period_s)
                 .is_some()
         );
         assert!(
             model
                 .transition_kernel
-                .for_duration(0.5 * sample_period_s)
+                .for_duration(&model.modes, 0.5 * sample_period_s)
                 .is_some()
         );
     }
@@ -1434,7 +1518,7 @@ mod tests {
         };
         model.restore_states(&[state]).unwrap();
         let dt = 0.37 / 48_000.0;
-        assert!(model.transition_kernel.for_duration(dt).is_none());
+        assert!(model.transition_kernel.for_duration(&model.modes, dt).is_none());
         let expected = advance_exact_zoh(mode, state, -1.75, dt);
         model.step_duration(&[-1.75], dt).unwrap();
         assert_state_bits_eq(model.states()[0], expected);
@@ -1990,5 +2074,60 @@ mod tests {
         ));
 
         assert_eq!(model.states(), before, "every refusal must leave state untouched");
+    }
+
+    #[test]
+    fn probe_linear_map_matches_step_for_oscillatory_and_free_coordinates() {
+        let modes = vec![
+            ModalAcousticMode {
+                angular_frequency_rad_s: 0.0,
+                damping_ratio: 0.0,
+                pressure_per_modal_velocity: C64::ZERO,
+            },
+            ModalAcousticMode {
+                angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 880.0,
+                damping_ratio: 0.015,
+                pressure_per_modal_velocity: C64::ZERO,
+            },
+        ];
+        let mut model =
+            ModalAcousticTimeModel::try_new_with_free_coordinates(48_000, modes, budget())
+                .unwrap();
+        let initial = [
+            ModalAcousticState {
+                displacement_m_sqrt_kg: 0.002,
+                velocity_m_sqrt_kg_per_s: -0.35,
+            },
+            ModalAcousticState {
+                displacement_m_sqrt_kg: -0.0004,
+                velocity_m_sqrt_kg_per_s: 0.8,
+            },
+        ];
+        model.restore_states(&initial).unwrap();
+        let forces = [1.25, -3.5];
+        let m0 = model.probe_linear_map(0);
+        let m1 = model.probe_linear_map(1);
+        model.step(&forces).unwrap();
+        let after = model.states();
+        for (idx, (q0, f, (qq, qv, vq, vv, bq, bv), s1)) in [
+            (0usize, initial[0], forces[0], m0, after[0]),
+            (1usize, initial[1], forces[1], m1, after[1]),
+        ]
+        .into_iter()
+        .map(|(i, q0, f, m, s1)| (i, (q0, f, m, s1)))
+        {
+            let pred_q = qq * q0.displacement_m_sqrt_kg + qv * q0.velocity_m_sqrt_kg_per_s + bq * f;
+            let pred_v = vq * q0.displacement_m_sqrt_kg + vv * q0.velocity_m_sqrt_kg_per_s + bv * f;
+            assert!(
+                (pred_q - s1.displacement_m_sqrt_kg).abs() <= 1e-15,
+                "mode {idx} displacement mismatch: {pred_q} vs {}",
+                s1.displacement_m_sqrt_kg
+            );
+            assert!(
+                (pred_v - s1.velocity_m_sqrt_kg_per_s).abs() <= 1e-12,
+                "mode {idx} velocity mismatch: {pred_v} vs {}",
+                s1.velocity_m_sqrt_kg_per_s
+            );
+        }
     }
 }

@@ -99,11 +99,21 @@ impl Stage {
             let end = ((frame + 1) * self.ratio - 1) as isize;
             let center = self.frame(input, end - self.half as isize);
             for (value, x) in out.iter_mut().zip(center) { *value = self.center * x; }
-            for &(lag, weight) in &self.pairs {
-                let a = self.frame(input, end - lag as isize);
-                let b = self.frame(input, end - (2 * self.half - lag) as isize);
-                for ((value, a), b) in out.iter_mut().zip(a).zip(b) {
-                    *value += weight * if self.antisymmetric { a - b } else { a + b };
+            if self.antisymmetric {
+                for &(lag, weight) in &self.pairs {
+                    let a = self.frame(input, end - lag as isize);
+                    let b = self.frame(input, end - (2 * self.half - lag) as isize);
+                    for ((value, a), b) in out.iter_mut().zip(a).zip(b) {
+                        *value += weight * (a - b);
+                    }
+                }
+            } else {
+                for &(lag, weight) in &self.pairs {
+                    let a = self.frame(input, end - lag as isize);
+                    let b = self.frame(input, end - (2 * self.half - lag) as isize);
+                    for ((value, a), b) in out.iter_mut().zip(a).zip(b) {
+                        *value += weight * (a + b);
+                    }
                 }
             }
         }
