@@ -357,7 +357,7 @@ perc_group("mallet", "Hard stick tip vs felt mallet face", [
     ("stick", "Hertz stick tip — 2.5 m/s", 200), ("mallet", "Felt mallet — 2.5 m/s", 200)], DRUM_BAND)
 perc_group("roll", "Two hands from a force score", [("roll", "Alternating strokes, accented", 200)], DRUM_BAND)
 CYM_BAND = {"label": "Shell modes retained", "lo_hz": 50, "hi_hz": 1200, "acoustic_lo_hz": 40, "acoustic_hi_hz": 1640,
-            "note": "The cymbal keeps its 30 lowest elastic modes (50–1200 Hz) and the radiation fit spans 40–1640 Hz. A real splash rings far above this; that part is not simulated and is not faked."}
+            "note": "The cymbal keeps its 30 lowest elastic modes (50–1200 Hz) and its radiation fit is verified over 40–1640 Hz. Sound drawn above 1640 Hz is computed but passed through that fit, so its transfer is unverified. Shell modes above 1200 Hz are not in the model, so a real splash's high shimmer is missing (Real vs ours measures by how much), and nothing is added to fake it."}
 perc_group("cymbal", "Splash cymbal: stick, soft stroke, felt mallet, rocking", [
     ("cym-ff", "Stick — 2 m/s", 5), ("cym-ff-soft", "Stick — 0.6 m/s", 5), ("cym-ff-mallet", "Felt mallet — 1 m/s", 5),
     ("cym-ff-rock3", "Stick — 0.6 m/s, free to rock", 5)], CYM_BAND)
