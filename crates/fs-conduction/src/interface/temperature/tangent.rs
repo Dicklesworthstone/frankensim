@@ -8,6 +8,58 @@ use fs_matdb::{InterpolationPolicy, PropertyValue};
 use fs_sparse::{Coo, Csr, ops};
 use crate::{ConductionError, ThermalBoundary};
 use super::{TemperatureContact, TemperatureContactEvaluation, TemperatureContacts, finite, invalid, poll};
+use crate::transient::backward_euler::StepLinearization;
+
+/// A rechecked capacity endpoint with complete R(T) contact derivatives.
+/// Existing source, history, capacity and Robin operations use the SAME
+/// complete nonsymmetric response. No frozen-contact solve is exposed here.
+pub struct ContactCapacityLinearization<'a> {
+    step: StepLinearization<'a>,
+    contact: ContactTemperatureLinearization,
+}
+
+impl<'a> std::ops::Deref for ContactCapacityLinearization<'a> {
+    type Target = StepLinearization<'a>;
+    fn deref(&self) -> &Self::Target { &self.step }
+}
+
+/// One complete physical transpose and its named contact-scale contractions.
+#[derive(Debug)]
+pub struct ContactCapacityGradient {
+    /// Existing watt-coordinate source, history and boundary multiplier.
+    pub transport: crate::adjoint::robin::RobinGradient,
+    /// Independent multipliers of each interface's entire resistance law at one.
+    pub resistance_multipliers: Vec<crate::interface::ContactResistanceGradient>,
+}
+
+impl<'a> ContactCapacityLinearization<'a> {
+    pub(crate) fn new(step: StepLinearization<'a>, contact: ContactTemperatureLinearization) -> Self {
+        Self { step, contact }
+    }
+    /// Physical local source states and the complete contact-only Jacobian.
+    #[must_use]
+    pub fn contact(&self) -> &ContactTemperatureLinearization { &self.contact }
+    /// Differentiate nodal temperatures and selected Robin observations once,
+    /// then contract each whole resistance-law multiplier with that same dual.
+    /// Geometry, pressure and source selection stay fixed. No extra dt belongs
+    /// in these watt-coordinate contractions; named controls remain independent
+    /// even when their source cards match.
+    pub fn pullback_with_resistance_controls(
+        &self, cx: &Cx<'_>, temperature_weights: &[f64], mean_weights: &[f64],
+        heat_weights: &[f64], max_face_pairs: usize,
+    ) -> Result<ContactCapacityGradient, ConductionError> {
+        poll(cx, 0)?;
+        if self.contact.face_pairs > max_face_pairs {
+            return Err(invalid("<contact-adjoint>", "contact controls exceed the paired-face allowance"));
+        }
+        let transport = self.step.pullback(cx, temperature_weights, mean_weights, heat_weights)?;
+        let resistance_multipliers = self.contact.physical_contacts().frozen_interfaces()
+            .matching_resistance_scale_pullback(
+                cx, self.contact.temperature(), &transport.nodal_load, max_face_pairs,
+            )?;
+        Ok(ContactCapacityGradient { transport, resistance_multipliers })
+    }
+}
 
 impl TemperatureContact<'_> {
     fn temperature_slope(&self, cx: &Cx<'_>, t: f64) -> Result<f64, ConductionError> {
@@ -48,6 +100,7 @@ impl TemperatureContact<'_> {
 /// invertibility certificate or derivative of material-source selection.
 #[derive(Debug)]
 pub struct ContactTemperatureLinearization {
+    face_pairs: usize,
     physical: TemperatureContactEvaluation,
     temperature: Vec<f64>,
     load: Vec<f64>,
@@ -150,7 +203,7 @@ impl TemperatureContacts<'_, '_> {
         }
         poll(cx, n)?;
         Ok(ContactTemperatureLinearization {
-            physical, temperature: temperature.to_vec(), load, frozen, feedback, feedback_transpose,
+            face_pairs: count, physical, temperature: temperature.to_vec(), load, frozen, feedback, feedback_transpose,
         })
     }
 }

@@ -10,6 +10,8 @@ use super::*;
 use crate::adjoint::robin::RobinResponse;
 use crate::assemble::assemble_jacobian_with_optional_interfaces;
 
+mod contact;
+
 /// A residual- and energy-checked transient endpoint and its response operator.
 /// Dereferencing exposes the same Robin tangent/adjoint operations as the
 /// steady producer, without representing this state as a steady solution.

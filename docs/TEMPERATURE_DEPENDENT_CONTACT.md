@@ -73,9 +73,10 @@ This is an Estimated fixed-geometry model with a declared interface-temperature
 closure, not experimental validation or a continuum-error certificate. It
 holds pressure, gap, surface condition, medium and contact pairing fixed.
 Frozen snapshots do not expose the missing dR/dT term and must not be used as
-complete nonlinear-contact adjoints. This capacity entry point does not close
-airflow or radiation feedback. Native project lowering, nonmatching dynamic
-contacts, contact mechanics and changing source-law selection are not supplied.
+complete nonlinear-contact adjoints. Use the explicit full-contact derivative
+API below for capacity storage. This capacity forward entry point does not
+close airflow or radiation feedback. Native project lowering, nonmatching
+dynamic contacts, contact mechanics and changing source selection are absent.
 
 ## Heterogeneous phase-change storage
 
@@ -151,7 +152,72 @@ compilation remain unverified in the implementation environment.
 The phase-change path is a thermal, stationary reference-mass model. It does
 not move liquid, change geometry/contact mechanics or infer pressure-dependent
 phase equilibrium. Enthalpy Dirichlet conditions remain unsupported. Dynamic
-contact is not yet lowered from native `.fsim` projects and its complete
-contact-law tangent/adjoint is not supplied; the fixed-contact adjoints must
-not be mislabeled as derivatives of this temperature-dependent law. Airflow
-feedback remains a separate integration task for this opt-in contact driver.
+contact is not yet lowered from native `.fsim` projects. The complete dynamic
+contact derivative is implemented below for capacity storage, not yet for the
+enthalpy/radiative trajectory. A frozen-contact adjoint is not its substitute.
+Airflow feedback remains separate for this opt-in contact driver.
+
+## Complete contact-law derivatives and capacity adjoints
+
+`TemperatureContacts::linearize_temperature` evaluates the local source laws
+and returns `ContactTemperatureLinearization`, with actual contact loads and
+both Jacobian actions. For one face, let B be its consistent P1 mass matrix,
+D map the full field to the matched A-minus-B trace, and m average the six
+trace nodes. With `q = D^T B D T / R(m T)`, the exact temperature Jacobian is
+
+```text
+J_contact = D^T B D / R - (R_prime / R) q m
+```
+
+The original matching owner supplies D and B. There is no nearest-face search,
+new quadrature, finite-difference PDE derivative or mean-jump replacement.
+Even when a face's integrated mean jump is zero, its nonuniform nodal jump
+can make the second term nonzero. Its transpose is generally different from
+its forward action. Both actions preserve internal heat conservation.
+
+Source slope evaluation uses the selected claim's exact piecewise-linear
+segments. Queries at adjacent representable temperatures establish the
+original pin's two-sided support; they do not estimate a numerical slope.
+Continuously supported constant scalars have slope zero. Redundant equal-slope
+knots are admitted, but slope-changing knots, support endpoints and unsupported
+interpolation refuse derivatives even when the primal remains valid.
+
+`BackwardEuler::linearize_temperature_contact_endpoint` binds an actual
+accepted capacity endpoint, its immutable old temperature and the original
+absolute physical residual/energy gates. It rechecks that field with freshly
+queried resistance, then attaches the second contact term to the existing
+`C/dt + J_bulk + K_contact` operator. The complete nonsymmetric transpose uses
+the existing bounded FGMRES owner, including for temperature-independent bulk
+conductivity. No primal solve or replacement endpoint is introduced.
+
+The returned `ContactCapacityLinearization` exposes the existing source-density,
+source-scale, history, capacity and prescribed-Robin derivative operations.
+`pullback_with_resistance_controls` adds one independent multiplier for each
+interface's entire resistance law, using the same complete physical dual.
+Source pins, geometry, pressure and all nonthermal context stay fixed. The
+reported contact control is at multiplier one; equal source cards do not merge
+named interfaces. These watt-coordinate contractions need no extra dt. Reverse
+a trajectory by applying the history pullback to that same dual at each saved
+endpoint, summing only controls that precede the selected observation.
+
+```sh
+cargo test -p fs-conduction --test temperature_contact_tangent
+```
+
+Five new tests cover fresh-query Jacobian differences, transpose duality,
+orientation/replay, zero-mean nonuniform jumps, domain/knot/work/cancellation
+refusals, and three-step trajectory derivatives against fresh initial states,
+sources, capacities and immutable resistance cards. The independent Python
+P1 reference gives 0.614056765497 for a combined control direction versus
+0.614056766153 from fresh solves; freezing contact instead gives 0.916052407587.
+The nonlinear-conductivity counterpart agrees within 6.0e-10. These are
+independent mathematical checks, not native Rust test results.
+
+At implementation time GitHub's native job completed dependency bootstrap but
+Cargo rejected a pre-existing package cycle through fs-feec, fs-couple,
+fs-aeroac, fs-lbm and fs-conduction before compilation. Local Rust tools are
+also unavailable. The native tests therefore remain unexecuted, not passed.
+These local fixed-grid derivatives do not establish physical validation,
+invertibility, global smoothness, geometry sensitivity, or an enthalpy/radiative
+contact adjoint. The explicit face allowance includes all fixed and variable
+contacts and checks sparse staging sizes; it is not a whole-process RSS limit.

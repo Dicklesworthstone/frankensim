@@ -14,6 +14,7 @@ mod mean_feedback;
 mod mean_feedback_goal;
 mod material_controls;
 mod prescribed;
+mod contact;
 
 pub(super) struct TangentSystem {
     transpose: Csr,
