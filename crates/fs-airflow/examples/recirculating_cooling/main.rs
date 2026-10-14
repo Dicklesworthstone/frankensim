@@ -1,0 +1,202 @@
+//! Material/pump tables -> finite recirculating inventory <-> actual solid FEM.
+//! Source readers and every physics/iteration algorithm are existing owners.
+#[path = "../pressure_cooling/source.rs"]
+mod source;
+#[path = "../pressure_cooling/pump_source.rs"]
+mod pump_source;
+
+use fs_airflow::AirflowError;
+use fs_airflow::conjugate::{ConjugateConfig, Relaxation, SolidRegionState};
+use fs_airflow::graph::thermal::medium::FlowHeatGeometry;
+use fs_airflow::graph::thermal::medium::series::hydraulic::MaterialFlowResistance;
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::LiquidSolidResponse;
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::{
+    LiquidFeedbackBudget, LiquidHeatPath, LiquidHeatSection, LiquidPropertyTemperature,
+};
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::{LiquidResistanceSection, PressureDrivenBudget};
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::{ParallelLiquidBranch, ParallelLiquidNetwork, ParallelPressureBudget};
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::solid::ParallelLiquidCouplingControls;
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::pump::PumpOperatingControls;
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::pump::solid::PumpCouplingControls;
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::recirculation::ReservoirStepControls;
+use fs_alloc::{ArenaConfig, ArenaPool};
+use fs_conduction::{ConductionError, ConductionMesh, ConductionProblem, ConductivityModel,
+    InitialGuess, LinearConfig, Nonlinearity, ScalarField, SolveConfig, StopRule, ThermalBoundaryBuilder, solve};
+use fs_conduction::fixtures::{box_grid, on_box_face};
+use fs_convection::CorrelationId;
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_matdb::{PropertyKey, SelectionPolicy};
+use fs_material::liquid_temperature::{LiquidTemperatureLaw, LiquidViscosityBasis};
+use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
+use fs_material::state_point::MaterialPropertySelection;
+use fs_qty::{Area, Dims, Length, MassFlowRate, QuantitySpec, Temperature};
+use fs_rep_mesh::TetComplex;
+use source::LiquidTable;
+use pump_source::PumpTable;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+const REGIONS: [&str;2] = ["first","last"];
+const INITIAL_K: f64 = 300.0;
+
+#[derive(Clone, Copy)]
+struct Settings {
+    mass_kg: f64, dt_s: f64, steps: usize, body_w: f64, reservoir_w: f64,
+    inlet_bracket_k: (f64,f64), pressure_bracket_pa: (f64,f64),
+}
+#[derive(Debug)]
+struct Sample {
+    time_s: f64, reservoir_k: f64, return_k: f64, mass_flow_kg_s: f64,
+    walls_k: [f64;2], pressure_pa: f64, stored_j: f64, return_j: f64,
+    external_j: f64, residual_j: f64, ignored_hydraulic_j: f64,
+    solid_heat_w: f64, solid_calls: usize,
+}
+
+fn run(table: &LiquidTable, pump: &PumpTable, settings: Settings) -> Result<Vec<Sample>> {
+    if !(1..=128).contains(&settings.steps) || !settings.dt_s.is_finite() || settings.dt_s <= 0.0
+        || !(settings.dt_s*settings.steps as f64).is_finite()
+        || !settings.body_w.is_finite() || !settings.reservoir_w.is_finite()
+    { return Err("finite heat rates, positive dt and 1..=128 steps required".into()); }
+    let law = LiquidTemperatureLaw::try_new(&table.card,&table.point(INITIAL_K)?,"T",
+        LiquidViscosityBasis::Dynamic,MaterialPropertySelection::SingleClaimOnly)?;
+    let cp = PropertyKey::with_quantity("specific_heat_capacity",QuantitySpec::dimensional(Dims([2,0,-2,-1,0,0])));
+    let rho = PropertyKey::with_quantity("density",QuantitySpec::dimensional(Dims([-3,1,0,0,0,0])));
+    let caloric = ResolvedHeatCapacityCurve::try_new(&table.card,HeatCapacitySourceQuery {
+        heat_capacity:&cp,density:&rho,temperature_axis:"T",lower:&table.point(table.lower_k)?,
+        upper:&table.point(table.upper_k)?,selection:SelectionPolicy::SingleClaimOnly,
+    },SolidLiquidPhase::Liquid,0.0,0.5)?;
+    let geometry = FlowHeatGeometry { flow_area:Area::new(core::f64::consts::PI*0.01*0.01/4.0),
+        characteristic_length:Length::new(0.01),heated_length:Length::new(2.0),wetted_area:Area::new(0.003),aspect_ratio:None };
+    let sections = REGIONS.map(|region|LiquidHeatSection {region,geometry,correlation:CorrelationId::CircularDuctLaminarCwt});
+    let resistance = MaterialFlowResistance::try_new(5e9,0.0,geometry.flow_area,geometry.characteristic_length,(0.0,2300.0))?;
+    let losses = REGIONS.map(|region|[LiquidResistanceSection {region,resistance}]);
+    let (topology,positions) = box_grid([2,1,1],[0.06,0.1,0.01]);
+    let mesh = ConductionMesh::new(TetComplex::from_tets(positions.len(),topology.tets),positions)?;
+    let solid_material = ConductivityModel::isotropic_declared(5.0)?;
+    let power = ScalarField::nodal("declared recirculating solid heat",mesh.vertex_count(),
+        vec![settings.body_w/(0.06*0.1*0.01);mesh.vertex_count()])?;
+    let branch = PressureDrivenBudget {mass_flow_bracket_kg_per_s:(0.0002,0.012),
+        pressure_absolute_tolerance_pa:1e-9,pressure_relative_tolerance:1e-9,max_flow_evaluations:64,
+        maximum_neglected_hydraulic_power_w:0.01};
+    let controls = PumpCouplingControls {
+        network:ParallelLiquidCouplingControls {
+            coupling:ConjugateConfig {temperature_tolerance_k:1e-7,max_iterations:64,
+                balance_tolerance_w:1e-6,balance_relative_tolerance:1e-8,relaxation:Relaxation::Fixed {omega:1.0}},
+            local:LiquidFeedbackBudget {temperature_tolerance_k:1e-9,coefficient_relative_tolerance:1e-9,max_region_iterations:64},
+            acceleration:Default::default(),mass_flow_relative_tolerance:1e-8,
+            work:ParallelPressureBudget {max_flow_evaluations:1_000_000,maximum_neglected_hydraulic_power_w:0.01},
+        },
+        operating_point:PumpOperatingControls {pressure_bracket_pa:settings.pressure_bracket_pa,
+            absolute_pressure_tolerance_pa:1e-7,relative_pressure_tolerance:1e-9,max_network_evaluations:64},
+        max_total_solid_solves:8192,
+    };
+    let gate = CancelGate::new();
+    ArenaPool::new(ArenaConfig::default()).scope(|arena| -> Result<_> {
+        let cx = Cx::new(&gate,arena,StreamKey {seed:947,kernel_id:755,tile:0,iteration:0},Budget::INFINITE,ExecMode::Deterministic);
+        let paths = sections.iter().map(|s|LiquidHeatPath::try_new(&cx,&law,&caloric,
+            MassFlowRate::new(0.001),Temperature::new(INITIAL_K),core::slice::from_ref(s),LiquidPropertyTemperature::BulkMean))
+            .collect::<std::result::Result<Vec<_>,_>>()?;
+        let descriptions:Vec<_> = (0..2).map(|i|ParallelLiquidBranch {
+            name:REGIONS[i],path:&paths[i],resistances:&losses[i],pressure_budget:branch,
+        }).collect();
+        let network = ParallelLiquidNetwork::try_new(&cx,&descriptions)?;
+        let mut tank = network.reservoir(&cx,settings.mass_kg,Temperature::new(INITIAL_K),0.0)?;
+        let mut initial_walls = [INITIAL_K;2];
+        let mut samples = Vec::with_capacity(settings.steps);
+        for i in 0..settings.steps {
+            let end = settings.dt_s*(i+1) as f64;
+            let duration = end-tank.time_s();
+            let step = ReservoirStepControls {temperature_bracket_k:settings.inlet_bracket_k,
+                energy_absolute_tolerance_j:1e-4,max_inlet_evaluations:64,
+                maximum_neglected_hydraulic_energy_j:0.01*duration};
+            let mut original_error = None;
+            let result = network.advance_reservoir_with_pump_coupled_iqn(&cx,&mut tank,end,
+                settings.reservoir_w*duration,&initial_walls,&pump.curve,&controls,step,|cx,rows| {
+                let attempted = (|| {
+                    let mut builder = ThermalBoundaryBuilder::new(&mesh);
+                    for (index,name) in REGIONS.iter().enumerate() {
+                        builder = builder.region(name,|face|face.outward_normal[2]>0.99
+                            && on_box_face(face.centroid[2],0.01)
+                            && if index==0 {face.centroid[0]<0.03} else {face.centroid[0]>=0.03},
+                            rows[index].boundary_condition().clone())?;
+                    }
+                    let boundary = builder.adiabatic_remainder().finish()?;
+                    solve(cx,ConductionProblem {mesh:&mesh,boundary:&boundary,material:&solid_material,
+                        source:&power,element_materials:None},SolveConfig {
+                        nonlinearity:Nonlinearity::FixedPoint {relaxation:1.0,max_backtracks:8},
+                        stop:StopRule {residual_rtol:1e-10,residual_atol:1e-18,step_atol:0.0,max_iterations:12},
+                        linear:LinearConfig {tolerance:1e-10,max_iterations:10000,restart:64},
+                        initial:InitialGuess::Uniform(INITIAL_K),
+                    })
+                })();
+                let field = attempted.map_err(|error:ConductionError| {
+                    original_error=Some(error.to_string());
+                    AirflowError::InvalidConjugateInput {field:"recirculation example solid; original error retained",value_bits:0}
+                })?;
+                Ok(LiquidSolidResponse {regions:field.report.robin_fluxes.iter().map(SolidRegionState::from_robin_flux).collect(),state:field})
+            }).map_err(|error| match original_error {
+                Some(original)=>format!("{error}; original solid error: {original}"),None=>error.to_string(),
+            })?;
+            let coupled = &result.circuit.state;
+            initial_walls = [coupled.solid.regions[0].mean_wall_temperature_k,coupled.solid.regions[1].mean_wall_temperature_k];
+            samples.push(Sample {time_s:tank.time_s(),reservoir_k:tank.state().temperature_k(),
+                return_k:coupled.fluid.mixed_outlet.temperature_k(),mass_flow_kg_s:coupled.fluid.total_mass_flow_kg_per_s,
+                walls_k:initial_walls,pressure_pa:result.circuit.network_pressure_pa,
+                stored_j:result.stored_enthalpy_change_j,return_j:result.returned_heat_j,external_j:result.external_heat_j,
+                residual_j:result.energy_residual_j,ignored_hydraulic_j:result.neglected_hydraulic_energy_j,
+                solid_heat_w:coupled.solid.state.report.energy.robin_out_w,solid_calls:result.total_solid_solves});
+        }
+        Ok(samples)
+    })
+}
+
+fn main() -> Result<()> {
+    let a:Vec<_> = std::env::args().skip(1).collect();
+    if a.len()!=11 {return Err("usage: recirculating_cooling MATERIAL.txt PUMP.txt MASS_KG DT_S STEPS BODY_W RESERVOIR_W MIN_T_K MAX_T_K MIN_DP_PA MAX_DP_PA".into());}
+    let table = LiquidTable::parse(&std::fs::read_to_string(&a[0])?)?;
+    let pump = PumpTable::parse(&std::fs::read_to_string(&a[1])?)?;
+    let samples = run(&table,&pump,Settings {mass_kg:a[2].parse()?,dt_s:a[3].parse()?,steps:a[4].parse()?,
+        body_w:a[5].parse()?,reservoir_w:a[6].parse()?,inlet_bracket_k:(a[7].parse()?,a[8].parse()?),
+        pressure_bracket_pa:(a[9].parse()?,a[10].parse()?)})?;
+    eprintln!("model=well_mixed_fixed_pressure_reservoir; solid=quasi_steady_FEM; hydraulic_heat=bounded_omission; calibration=not_established");
+    eprintln!("material={:?}; pump={:?}; pump_license={}",table.card.content_hash(),pump.curve.source(),pump.license);
+    println!("time_s,reservoir_k,return_k,total_mass_kg_s,wall_first_k,wall_last_k,pressure_pa,stored_change_j,return_heat_j,external_heat_j,balance_j,ignored_hydraulic_j,solid_heat_w,solid_calls");
+    for s in samples {println!("{:.9},{:.9},{:.9},{:.12e},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.12e},{:.12e},{:.9},{}",
+        s.time_s,s.reservoir_k,s.return_k,s.mass_flow_kg_s,s.walls_k[0],s.walls_k[1],s.pressure_pa,
+        s.stored_j,s.return_j,s.external_j,s.residual_j,s.ignored_hydraulic_j,s.solid_heat_w,s.solid_calls);}
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const FIXED:&str=include_str!("../pressure_cooling/constant.txt");
+    const VARIABLE:&str=include_str!("../pressure_cooling/temperature_dependent.txt");
+    const PUMP:&str=include_str!("../pressure_cooling/pump.txt");
+    fn settings()->Settings {Settings {mass_kg:0.1,dt_s:5.0,steps:2,body_w:20.0,reservoir_w:-5.0,
+        inlet_bracket_k:(290.0,315.0),pressure_bracket_pa:(20.0,80.0)}}
+    #[test]
+    fn real_fem_recirculation_closes_step_energy_and_accumulates_the_actual_inventory() {
+        let table=LiquidTable::parse(FIXED).unwrap();let pump=PumpTable::parse(PUMP).unwrap();
+        let rows=run(&table,&pump,settings()).unwrap();
+        for s in rows {
+            assert!((s.reservoir_k-(300.0+15.0*s.time_s/200.0)).abs()<2e-5);
+            assert!((s.stored_j-75.0).abs()<2e-4);
+            assert!((s.return_j-100.0).abs()<2e-4);
+            assert!((s.solid_heat_w-20.0).abs()<2e-5);
+            assert!(s.residual_j.abs()<=1e-4);
+            assert!(s.walls_k.iter().all(|&t|t>s.reservoir_k));
+        }
+        let cold=run(&table,&pump,Settings {body_w:-5.0,reservoir_w:0.0,steps:1,..settings()}).unwrap();
+        assert!((cold[0].reservoir_k-299.875).abs()<2e-5);
+    }
+    #[test]
+    fn data_only_swap_changes_thermal_history_pump_flow_and_solid_field() {
+        let pump=PumpTable::parse(PUMP).unwrap();
+        let fixed=run(&LiquidTable::parse(FIXED).unwrap(),&pump,settings()).unwrap();
+        let varied=run(&LiquidTable::parse(VARIABLE).unwrap(),&pump,settings()).unwrap();
+        assert!((fixed[1].reservoir_k-varied[1].reservoir_k).abs()>1e-4);
+        assert!((fixed[1].mass_flow_kg_s-varied[1].mass_flow_kg_s).abs()>1e-6);
+        assert_ne!(fixed[1].walls_k,varied[1].walls_k);
+        assert!(run(&LiquidTable::parse(FIXED).unwrap(),&pump,Settings {steps:0,..settings()}).is_err());
+    }
+}
