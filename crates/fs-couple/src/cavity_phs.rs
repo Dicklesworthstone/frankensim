@@ -6,6 +6,7 @@
 //! same objects. There is no guitar type.
 
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::air_path::{GasAbsorptionModel, absorb_pressure_history_with_model};
 use crate::thin_plate::certified_radiators;
 use fs_material::gas::GasState;
 use fs_phs::{
@@ -60,7 +61,9 @@ pub struct PlateCavitySpec {
     /// Admitted ambient state used consistently by the cavity, radiation,
     /// observer and propagation path. Plate temperature is independent.
     pub gas: GasState,
-    /// Relative humidity in `[0, 1]` for the observer path.
+    /// Relative humidity in `[0, 1]`, used by [`realize_plate_cavity_in_air`].
+    /// The generic-gas path validates this legacy metadata but does not use it
+    /// to infer composition or select an air-only absorption law.
     pub relative_humidity: f64,
 }
 
@@ -102,14 +105,46 @@ impl PlateCavitySpec {
 ///
 /// `force_n[i]` is the external force at sample `i`. The far-field
 /// observer is the baffled compact sum `ρ A ÿ / (2π r)`.
+/// The supplied gas drives cavity storage, radiation and classical
+/// Stokes-Kirchhoff propagation. Molecular relaxation is not modeled here;
+/// terrestrial-air ISO absorption requires [`realize_plate_cavity_in_air`].
 ///
 /// # Errors
-/// Empty/mismatched modes, non-physical cavity, or a pHS refusal.
+/// Empty/mismatched modes, incoherent gas, non-physical cavity, or a pHS/
+/// absorption refusal. Generic steam is not subjected to humid-air fit limits.
 pub fn realize_plate_cavity(
     spec: &PlateCavitySpec,
     force_n: &[f64],
     sample_rate_hz: u32,
     listener_m: f64,
+) -> Result<Vec<f64>, CavityPhsError> {
+    realize_with_absorption(spec, force_n, sample_rate_hz, listener_m,
+        GasAbsorptionModel::StokesKirchhoff)
+}
+
+/// Explicit terrestrial-air realization using the spec's relative humidity.
+/// This is a caller assertion of ISO applicability, not gas identity inferred
+/// from coefficients. Cavity mechanics still use the same supplied gas state.
+///
+/// # Errors
+/// All [`realize_plate_cavity`] refusals plus out-of-domain ISO conditions.
+/// An unavailable air law is never silently replaced with a different law.
+pub fn realize_plate_cavity_in_air(
+    spec: &PlateCavitySpec,
+    force_n: &[f64],
+    sample_rate_hz: u32,
+    listener_m: f64,
+) -> Result<Vec<f64>, CavityPhsError> {
+    realize_with_absorption(spec, force_n, sample_rate_hz, listener_m,
+        GasAbsorptionModel::Iso9613Air { relative_humidity: spec.relative_humidity })
+}
+
+fn realize_with_absorption(
+    spec: &PlateCavitySpec,
+    force_n: &[f64],
+    sample_rate_hz: u32,
+    listener_m: f64,
+    absorption: GasAbsorptionModel,
 ) -> Result<Vec<f64>, CavityPhsError> {
     let n_m = spec.omegas.len();
     if n_m == 0 || spec.zetas.len() != n_m || spec.drive.len() != n_m || spec.areas.len() != n_m {
@@ -122,7 +157,7 @@ pub fn realize_plate_cavity(
             what: "sample rate and listener distance must be positive",
         });
     }
-    if !gas_state_is_admitted(&spec.gas) {
+    if spec.gas.validate_coherence().is_err() {
         return Err(CavityPhsError::Invalid {
             what: "gas state must remain inside its admitted physical domain",
         });
@@ -138,14 +173,14 @@ pub fn realize_plate_cavity(
     let neck_area = pi * spec.neck_radius_m * spec.neck_radius_m;
     let l_eff = spec.neck_length_m + 2.0 * (8.0 / (3.0 * pi)) * spec.neck_radius_m;
     let omega0 = spec.gas.sound_speed * (neck_area / (spec.volume_m3 * l_eff)).sqrt();
-    let r_rad = compact_radiation_impedance(
+    let (r_rad, _) = compact_radiation_impedance(
         spec.gas.density,
         spec.gas.sound_speed,
         spec.neck_radius_m,
         omega0,
         MouthFlange::Unflanged,
     )
-    .map_or(0.0, |(r, _)| r);
+    .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
     let cavity = helmholtz_resonator_flow(
         spec.volume_m3,
         spec.neck_radius_m,
@@ -181,39 +216,9 @@ pub fn realize_plate_cavity(
         }
         out.push(p_obs);
     }
-    crate::air_path::absorb_pressure_history(
-        &mut out,
-        dt,
-        listener_m,
-        &spec.gas,
-        spec.relative_humidity,
-    );
+    absorb_pressure_history_with_model(&mut out, dt, listener_m, &spec.gas, absorption)
+        .map_err(CavityPhsError::Plate)?;
     Ok(out)
-}
-
-fn gas_state_is_admitted(gas: &GasState) -> bool {
-    [
-        gas.temperature,
-        gas.pressure,
-        gas.density,
-        gas.sound_speed,
-        gas.dynamic_viscosity,
-        gas.thermal_conductivity,
-        gas.specific_gas_constant,
-        gas.specific_heat_cp,
-        gas.prandtl,
-        gas.characteristic_impedance,
-    ]
-    .into_iter()
-    .all(|value| value.is_finite() && value > 0.0)
-        && (50.0..=2_000.0).contains(&gas.temperature)
-        && gas.pressure <= 1.0e7
-        && gas.gamma.is_finite()
-        && gas.gamma > 1.0
-        && gas.gamma < 5.0 / 3.0 + 1.0e-9
-        && gas.water_mole_fraction.is_finite()
-        && (0.0..=0.15).contains(&gas.water_mole_fraction)
-        && (gas.water_mole_fraction == 0.0 || (253.15..=323.15).contains(&gas.temperature))
 }
 
 fn plate_force_and_flow(
@@ -377,10 +382,12 @@ mod tests {
             ("water fraction", |gas: &mut GasState| {
                 gas.water_mole_fraction = -1.0
             }),
-            ("moist temperature window", |gas: &mut GasState| {
+            ("incoherent moist temperature", |gas: &mut GasState| {
                 gas.temperature = 200.0;
                 gas.water_mole_fraction = 0.01;
             }),
+            ("finite inconsistent pressure", |gas: &mut GasState| gas.pressure *= 2.0),
+            ("finite inconsistent impedance", |gas: &mut GasState| gas.characteristic_impedance *= 2.0),
         ] {
             let mut forged = admitted;
             mutate(&mut forged);
@@ -408,7 +415,26 @@ mod tests {
         spec.relative_humidity = 0.5;
         assert!(
             realize_plate_cavity(&spec, &[1.0], 8_000, 1.0).is_ok(),
-            "the local guard must preserve an admitted moist state"
+            "the shared guard must preserve an admitted moist state"
         );
+        assert!(realize_plate_cavity_in_air(&spec, &[1.0], 8_000, 1.0).is_ok());
+    }
+
+    #[test]
+    fn steam_and_air_share_cavity_mechanics_without_air_only_limits() {
+        use fs_qty::semantic::{Composition, CompositionBasis};
+        let mut spec = panel(0.008);
+        let input = pulse(64, 1.0);
+        let air = realize_plate_cavity(&spec, &input, 8000, 1.0).unwrap();
+        let composition = Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap();
+        spec.gas = GasState::try_new_mixture(&[GasSpec::water_vapor_nist()],
+            &composition, 450.0, 100000.0, Some(0)).unwrap();
+        assert_eq!(spec.gas.water_mole_fraction, 1.0);
+        let steam = realize_plate_cavity(&spec, &input, 8000, 1.0).unwrap();
+        assert_eq!(steam.len(), input.len());
+        assert!(steam.iter().all(|sample| sample.is_finite()));
+        assert!(steam.iter().any(|sample| *sample != 0.0));
+        assert_ne!(air, steam);
+        assert!(realize_plate_cavity_in_air(&spec, &input, 8000, 1.0).is_err());
     }
 }
