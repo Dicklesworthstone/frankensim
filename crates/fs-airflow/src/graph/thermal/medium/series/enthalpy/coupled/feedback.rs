@@ -13,6 +13,7 @@
 //! exact spatial mean or a new correlation-accuracy claim.
 
 pub mod solid;
+pub mod pressure;
 
 use fs_convection::{CorrelationId, CorrelationRobinBoundary, NusseltEvaluation, ThermalDirection};
 use fs_exec::Cx;
