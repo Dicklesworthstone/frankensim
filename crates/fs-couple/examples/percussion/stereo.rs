@@ -74,6 +74,24 @@ fn band_formulation(surface:&SpherePanels,k_max:f64)->Formulation {
     }else{Formulation::BurtonMiller}
 }
 
+/// A source that radiates almost nothing (a high-order pattern far below
+/// coincidence) has a true surface power many orders below its reactive
+/// exchange. The dense solve returns each panel pressure only to about
+/// `n*eps*cond` relative accuracy, so the summed real power then carries an
+/// error of that fraction of the APPARENT power `1/2 SUM |p||v|A`. A negative
+/// sum inside that floor is solve noise, not evidence of a non-passive field;
+/// the dot-product roundoff enclosure alone cannot see it. Anything larger
+/// still refuses. `condition_lower_bound` underestimates the true condition
+/// number, which can only make this floor smaller, i.e. stricter.
+fn negative_beyond_solve_floor(solution:&fs_bem::helmholtz::RadiationSolution)->bool {
+    let upper=solution.radiated_power_roundoff_interval.1;
+    if upper>=0.0 {return false;}
+    let apparent=solution.power_diagnostics.apparent_power;
+    let floor=(solution.pressure.len() as f64)*f64::EPSILON
+        *solution.condition_lower_bound*apparent;
+    !(floor.is_finite() && apparent.is_finite() && -upper<=floor)
+}
+
 // The same BEM fields feed both pressure observers and (when selected) the
 // complete force/velocity matrix. One-way callers never construct a load.
 fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
@@ -198,7 +216,7 @@ fn bake_scene_image(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec
             if !solution.radiated_power_roundoff_interval.1.is_finite()
                 || !solution.panels_per_wavelength.is_finite()
                 || !solution.condition_lower_bound.is_finite()
-                || solution.radiated_power_roundoff_interval.1<0.0 {
+                || negative_beyond_solve_floor(solution) {
                 return Err(format!("BEM reports invalid diagnostics or negative radiation power beyond roundoff at {} Hz, input {input}, formulation {formulation:?}: power_interval={:?}, panels_per_wavelength={}, condition_lower_bound={}; refine the acoustic solve",
                     w/core::f64::consts::TAU,solution.radiated_power_roundoff_interval,
                     solution.panels_per_wavelength,solution.condition_lower_bound).into());

@@ -210,3 +210,28 @@ fn acoustic_budget_cancellation_and_neck_band_refusals_never_advance_mechanics()
     let broad=radiation_spec::Spec {band_hz:[40.0,8000.0],..radiation_spec::Spec::default()};
     assert!(broad.admit_necks(&e).is_err());radiation_spec::Spec::default().admit_necks(&e).unwrap();
 }
+
+fn power_solution(upper:f64,apparent:f64,panels:usize,condition:f64)->fs_bem::helmholtz::RadiationSolution {
+    fs_bem::helmholtz::RadiationSolution {pressure:vec![C64::ZERO;panels],velocity:vec![C64::ZERO;panels],
+        k:1.0,medium:Medium::air(),surface_fingerprint:0,panels_per_wavelength:20.0,
+        radiated_power:upper.max(0.0),radiated_power_roundoff_interval:(upper,upper),
+        power_diagnostics:fs_bem::helmholtz::RadiationPowerDiagnostics {surface_power:C64::new(upper,1.0),
+            positive_real_power:0.0,negative_real_power:upper,apparent_power:apparent,
+            plane_wave_reference_power:apparent},
+        condition_lower_bound:condition,dense_cap_utilization:0.1}
+}
+
+#[test]
+fn radiated_power_gate_scales_negative_noise_to_the_dense_solve_floor() {
+    // The measured splash-wav refusal (1460 Hz, input 26, plain CBIE, 1024 panels,
+    // condition bound ~922): -4.9e-22 W on a mode whose real/apparent ratio over the
+    // whole band never fell below -1.7e-14. That is solve noise and is admitted.
+    assert!(!negative_beyond_solve_floor(&power_solution(-4.9e-22,3.0e-8,1024,922.0)));
+    // The 14x6.5in drum under Burton-Miller at 540 Hz: -4.4e-8 W against ~3.4e-6 W
+    // apparent (-1.3%) is a genuine resistance sign error and still refuses.
+    assert!(negative_beyond_solve_floor(&power_solution(-4.4e-8,3.4e-6,1024,250.0)));
+    // Non-negative power never refuses; non-finite scales fail closed.
+    assert!(!negative_beyond_solve_floor(&power_solution(0.0,1.0,1024,10.0)));
+    assert!(negative_beyond_solve_floor(&power_solution(-1e-30,f64::NAN,1024,10.0)));
+    assert!(negative_beyond_solve_floor(&power_solution(-1e-30,1.0,1024,f64::INFINITY)));
+}
