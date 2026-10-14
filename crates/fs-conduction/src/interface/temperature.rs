@@ -8,6 +8,8 @@
 pub mod capacity;
 /// Primary-enthalpy contact evolution, including latent phase states.
 pub mod enthalpy;
+/// Complete source-backed contact temperature Jacobian and its transpose.
+pub mod tangent;
 
 use fs_exec::Cx;
 use fs_matdb::{InterfaceSystemCard, QueryPoint, SelectionPolicy};
@@ -213,7 +215,7 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
         Ok(TemperatureContactEvaluation { interfaces, states })
     }
 
-    fn check_mesh(&self, mesh: &ConductionMesh) -> Result<(), ConductionError> {
+    pub(crate) fn check_mesh(&self, mesh: &ConductionMesh) -> Result<(), ConductionError> {
         if std::ptr::eq(self.mesh, mesh) { Ok(()) }
         else { Err(invalid("<contact-set>", "contact and spatial problem must use the identical mesh")) }
     }
