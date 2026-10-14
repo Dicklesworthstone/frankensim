@@ -191,3 +191,22 @@ fn g0_g4_zero_gravity_legacy_equivalence_and_failures_leave_pose_intact() {
     assert!(matches!(original.solve_static(&load, 1, 1e-7, &gate), Err(SpatialRodError::Cancelled)));
     assert_eq!(original.positions_m(), pose);
 }
+
+#[test]
+fn g1_small_thermal_member_probes_do_not_exceed_the_material_strain_limit() {
+    let card = card(1000.0, 0.5, 0.5);
+    let gate = CancelGate::new();
+    let original = source(&card, 4);
+    let short = RodMaterialSource::try_new(0.04, original.segments().to_vec(),
+        "shear_modulus", 0.03, &gate).unwrap();
+    let mut rod = short.resolve_at(&[350.0; 4], &gate).unwrap()
+        .with_gravity([10.0, 0.0, 0.0], &gate).unwrap();
+    // The former 0.0003 m tangent plus 0.000003 m residual probe created
+    // 0.0303 strain on these 0.01 m segments and refused before Newton.
+    rod.solve_static(&TipLoad::default(), 1, 1e-7, &gate).unwrap();
+    let expected = 1000.0*10.0*0.04_f64.powi(2)/(2.0*7.5e6);
+    near(rod.positions_m()[4][0]-0.04, expected, 2e-5);
+    assert!(rod.support_reactions(&TipLoad::default(), &gate).unwrap().free_residual_norm < 1e-7);
+    near(rod.root_support_reaction(&gate).unwrap().force_n[0].unwrap(),
+        -10.0*rod.reference_mass().total_mass_kg(), 2e-5);
+}

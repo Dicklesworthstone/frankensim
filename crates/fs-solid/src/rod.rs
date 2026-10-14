@@ -64,6 +64,17 @@ fn group_error(error: GaError) -> SolidError {
     }
 }
 
+// Translation probes have length units; rotation probes are angles. Material
+// rods supply the segment length, avoiding an artificial 3% strain probe on
+// a 1 cm segment. Legacy raw rods retain their original 1 metre probe scale.
+fn fd_step(coordinate: usize, translation_scale_m: f64, relative_step: f64) -> Result<f64, SolidError> {
+    let step = if coordinate % 6 < 3 { relative_step * translation_scale_m } else { relative_step };
+    if !step.is_finite() || step <= 0.0 {
+        return Err(SolidError::InvalidInput { what: "rod derivative probe is unrepresentable".into() });
+    }
+    Ok(step)
+}
+
 impl Rod {
     /// A straight reference rod along +x with `segments` segments of
     /// total length `length`.
@@ -166,16 +177,17 @@ impl Rod {
         &self, load: &TipLoad, factor: f64,
         energy: &impl Fn(&Self) -> Result<f64, E>,
         checkpoint: &impl Fn() -> Result<(), E>,
+        translation_scale_m: f64,
     ) -> Result<Vec<f64>, E> {
         let n = self.ndof();
         let mut r = vec![0.0f64; n];
         // FD scales: the tangent is FD-of-FD — the residual step must
         // sit well above energy roundoff or the nested difference is
         // noise (measured: a junk Newton direction that creeps).
-        let eps = 3e-6;
         let mut probe = self.clone();
         for k in 0..n {
             checkpoint()?;
+            let eps = fd_step(k, translation_scale_m, 3e-6)?;
             let mut d = vec![0.0f64; n];
             d[k] = eps;
             probe.clone_from(self);
@@ -204,18 +216,19 @@ impl Rod {
         steps: usize,
         tol: f64,
     ) -> Result<Vec<f64>, SolidError> {
-        self.solve_static_with_energy(load, steps, tol, &Self::energy, &|| Ok(()), None)
+        self.solve_static_with_energy(load, steps, tol, &Self::energy, &|| Ok(()), None, 1.0)
     }
 
     // Both uniform and spatial material paths use the SAME nodal update,
     // residual, tangent, load stepping and line search. Additional supports
     // project the same residual onto their free coordinates. No solver fork.
-    #[allow(clippy::too_many_lines)] // preserve one bounded Newton/line-search owner
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // one Newton/line-search owner
     fn solve_static_with_energy<E: From<SolidError>>(
         &mut self, load: &TipLoad, steps: usize, tol: f64,
         energy: &impl Fn(&Self) -> Result<f64, E>,
         checkpoint: &impl Fn() -> Result<(), E>,
         free_dofs: Option<&[usize]>,
+        translation_scale_m: f64,
     ) -> Result<Vec<f64>, E> {
         checkpoint()?;
         let full_n = self.ndof();
@@ -257,7 +270,7 @@ impl Rod {
             let mut converged = false;
             for _ in 0..40 {
                 checkpoint()?;
-                let r = self.residual(load, factor, energy, checkpoint)?;
+                let r = self.residual(load, factor, energy, checkpoint, translation_scale_m)?;
                 let rn = residual_norm(&r);
                 history.push(rn);
                 if rn < tol {
@@ -265,21 +278,21 @@ impl Rod {
                     break;
                 }
                 // FD tangent (fixture-scale dense).
-                let eps = 3e-4;
                 let mut kmat = vec![0.0f64; n * n];
                 let mut probe = self.clone();
                 for col in 0..n {
                     checkpoint()?;
+                    let eps = fd_step(free[col], translation_scale_m, 3e-4)?;
                     let mut d = vec![0.0f64; full_n];
                     d[free[col]] = eps;
                     probe.clone_from(self);
                     probe.apply_increment(&d, 1.0)?;
                     constrain(&mut probe);
-                    let rp = probe.residual(load, factor, energy, checkpoint)?;
+                    let rp = probe.residual(load, factor, energy, checkpoint, translation_scale_m)?;
                     probe.clone_from(self);
                     probe.apply_increment(&d, -1.0)?;
                     constrain(&mut probe);
-                    let rm = probe.residual(load, factor, energy, checkpoint)?;
+                    let rm = probe.residual(load, factor, energy, checkpoint, translation_scale_m)?;
                     for row in 0..n {
                         kmat[row * n + col] = (rp[free[row]] - rm[free[row]]) / (2.0 * eps);
                     }
@@ -303,7 +316,7 @@ impl Rod {
                     let mut trial = self.clone();
                     trial.apply_increment(&d, alpha)?;
                     constrain(&mut trial);
-                    let rt = trial.residual(load, factor, energy, checkpoint)?;
+                    let rt = trial.residual(load, factor, energy, checkpoint, translation_scale_m)?;
                     let rtn = residual_norm(&rt);
                     if rtn < rn {
                         *self = trial;

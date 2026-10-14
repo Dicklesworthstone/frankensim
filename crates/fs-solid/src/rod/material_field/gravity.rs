@@ -171,10 +171,10 @@ impl SpatialMaterialRod {
         &self, gate: &CancelGate,
     ) -> Result<RodSupportReaction, SpatialRodError> {
         checkpoint(gate)?;
-        let eps = 3e-6; // Same physical translation/body-angle probe as Rod::residual.
         let mut reaction = [0.0; 6];
         for (coordinate, value) in reaction.iter_mut().enumerate() {
             checkpoint(gate)?;
+            let eps = super::super::fd_step(coordinate, self.probe_translation_scale_m(), 3e-6)?;
             let mut plus = self.rod.clone();
             let mut minus = self.rod.clone();
             if coordinate < 3 {

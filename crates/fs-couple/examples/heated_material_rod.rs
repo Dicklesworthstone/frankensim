@@ -1,5 +1,5 @@
 //! Source data -> shared enthalpy transport -> shared material rod equilibrium.
-//! The example is axially guided, quasistatic and one-way thermomechanical.
+//! Guided or cantilever mechanics remain quasistatic and one-way thermomechanical.
 //! Mechanical energy is observed separately, NOT silently added to the heat audit.
 #[path = "heated_material_rod/material.rs"]
 mod material;
@@ -33,6 +33,8 @@ struct Experiment<'a> {
     fixed_end: bool,
     power_w: f64,
     duration_s: f64,
+    cantilever: bool,
+    gravity_m_s2: [f64; 3],
 }
 #[derive(Clone)]
 struct State<'a> {
@@ -67,20 +69,26 @@ impl<'a> Experiment<'a> {
                     || r.query_point.iter().any(|(axis, _)| axis != "T")) {
             return Err("caloric and mechanical density must select the same card, claim and fixed coordinates".into());
         }
-        Ok(Self { material, source, fixed_end, power_w, duration_s })
+        Ok(Self { material, source, fixed_end, power_w, duration_s,
+            cantilever: false, gravity_m_s2: [0.0; 3] })
     }
     fn boundary(&self, cell: usize, powered: bool) -> Boundary {
         Boundary { ambient_k: 300.0, htc_w_m2_k: HTC, reservoir: None,
             source_w: if cell == 0 && powered { self.power_w } else { 0.0 } }
     }
     fn resolve_mechanics(&self, temperature: &[f64], gate: &CancelGate) -> Result<SpatialMaterialRod> {
-        let rod = self.source.resolve_at(temperature, gate)?;
-        // Explicit straight axial guides, NOT a claim about a buckling-free beam.
-        let supports: Vec<_> = (1..=N).map(|node| RodSupport { node,
-            position_m: [if self.fixed_end && node == N { Some(LENGTH) } else { None }, Some(0.0), Some(0.0)],
-            frame: Some(self.source.reference_rod().frames()[node]),
-        }).collect();
-        let mut rod = rod.with_supports(&supports, gate)?;
+        let mut rod = self.source.resolve_at(temperature, gate)?;
+        if !self.cantilever {
+            // Explicit straight axial guides, NOT a claim about a buckling-free beam.
+            let supports: Vec<_> = (1..=N).map(|node| RodSupport { node,
+                position_m: [if self.fixed_end && node == N { Some(LENGTH) } else { None }, Some(0.0), Some(0.0)],
+                frame: Some(self.source.reference_rod().frames()[node]),
+            }).collect();
+            rod = rod.with_supports(&supports, gate)?;
+        }
+        if self.gravity_m_s2 != [0.0; 3] {
+            rod = rod.with_gravity(self.gravity_m_s2, gate)?;
+        }
         rod.solve_static(&TipLoad::default(), 1, 1e-8, gate)?;
         Ok(rod)
     }
@@ -93,7 +101,7 @@ impl<'a> Experiment<'a> {
             poll(gate)?;
             applied_conductivity.push(self.material.conductivity_at(300.0)?);
             // Use source-resolved reference mass, not current rho(T)*fixed volume.
-            let mass = dx*self.source.reference_rod().sections()[cell].elastic().line_density_kg_m();
+            let mass = self.source.reference_rod().reference_mass().segment_mass_kg()[cell];
             events.push(TimedEvent { time_s: 0.0, event: Event::Birth(DepositedCell {
                 id: CellId(cell as u64), segment_id: cell as u64, body_id: 1, material_id: MaterialId(1),
                 mass_kg: mass, specific_h_j_kg: h,
@@ -162,32 +170,60 @@ impl<'a> Experiment<'a> {
         Ok((State { heat, rod, applied_conductivity, external_heat_j }, audit))
     }
 }
-fn run(args: &[String]) -> Result<()> {
-    if args.len() != 6 {
-        return Err("usage: heated_material_rod --demo CP_J_KG_K|--pack MATERIAL_PACK free|fixed POWER_W DURATION_S INTERVALS".into());
+fn gravity_args(args: &[String]) -> Result<[f64; 3]> {
+    if args.is_empty() { return Ok([0.0; 3]); }
+    if args.len() != 4 || args[0] != "--gravity" {
+        return Err("gravity requires --gravity GX GY GZ in world-frame m/s2".into());
     }
+    let gravity: [f64; 3] = [args[1].parse()?, args[2].parse()?, args[3].parse()?];
+    if !gravity.iter().all(|g| g.is_finite()) { return Err("gravity components must be finite".into()); }
+    Ok(gravity)
+}
+fn loading_observations(state: &State<'_>, gate: &CancelGate) -> Result<String> {
+    let root = state.rod.root_support_reaction(gate)?;
+    let moment = root.moment_body_nm.ok_or("root frame is not constrained")?;
+    let forces = [root.force_n[0].ok_or("root x is not constrained")?,
+        root.force_n[1].ok_or("root y is not constrained")?, root.force_n[2].ok_or("root z is not constrained")?];
+    let residual = state.rod.support_reactions(&TipLoad::default(), gate)?.free_residual_norm;
+    Ok(format!(",{},{},{},{},{},{},{},{},{},{},{}", state.rod.positions_m()[N][1],
+        state.rod.positions_m()[N][2], state.rod.reference_mass().total_mass_kg(), state.rod.gravity_potential_j()?,
+        forces[0], forces[1], forces[2], moment[0], moment[1], moment[2], residual))
+}
+fn run(args: &[String]) -> Result<()> {
+    if args.len() != 6 && args.len() != 10 {
+        return Err("usage: heated_material_rod --demo CP_J_KG_K|--pack MATERIAL_PACK free|fixed|cantilever POWER_W DURATION_S INTERVALS [--gravity GX GY GZ]".into());
+    }
+    let gravity = gravity_args(&args[6..])?;
     let material = match args[0].as_str() {
         "--demo" => material::demo(args[1].parse()?, 1.0, 500.0)?,
         "--pack" => material::Material::load(&args[1])?,
         _ => return Err("choose --demo (synthetic data) or --pack (canonical material card pack)".into()),
     };
-    let fixed = match args[2].as_str() { "free" => false, "fixed" => true, _ => return Err("support must be free or fixed".into()) };
+    let (fixed, cantilever) = match args[2].as_str() {
+        "free" => (false, false), "fixed" => (true, false), "cantilever" => (false, true),
+        _ => return Err("support must be free, fixed or cantilever".into()),
+    };
     let intervals: usize = args[5].parse()?;
     if intervals == 0 || intervals > 10_000 { return Err("interval count must lie in 1..=10000".into()); }
     let gate = CancelGate::new();
-    let experiment = Experiment::new(&material, fixed, args[3].parse()?, args[4].parse()?, &gate)?;
+    let mut experiment = Experiment::new(&material, fixed, args[3].parse()?, args[4].parse()?, &gate)?;
+    experiment.cantilever = cantilever;
+    experiment.gravity_m_s2 = gravity;
     let mut state = experiment.initial(&gate)?;
     let initial_heat = state.heat.energy_j();
-    eprintln!("source={}, length_m={LENGTH}, radius_m={RADIUS}, segments={N}, h_W_m2_K={HTC}, reference_K=300, caloric_span_K=[300,500], axial_guides=true, fixed_end={fixed}, reference_mass_kg={}; one-way quasistatic mechanics, no melting or total thermomechanical energy claim",
-        material.card.content_hash().to_hex(), experiment.source.reference_mass_kg());
-    println!("time_s,T0_K,T1_K,T2_K,T3_K,tip_extension_m,axial_force_N,elastic_energy_J,stored_heat_change_J,external_heat_J,heat_residual_J,applied_k0_W_m_K");
+    eprintln!("source={}, length_m={LENGTH}, radius_m={RADIUS}, segments={N}, h_W_m2_K={HTC}, reference_K=300, caloric_span_K=[300,500], axial_guides={}, fixed_end={fixed}, gravity_m_s2={gravity:?}, reference_mass_kg={}; one-way quasistatic mechanics, fixed thermal geometry, no melting or total thermomechanical energy claim",
+        material.card.content_hash().to_hex(), !cantilever, experiment.source.reference_mass_kg());
+    let extended = cantilever || args.len() == 10;
+    let extra_header = if extended { ",tip_y_m,tip_z_m,reference_mass_kg,gravity_potential_J,root_fx_N,root_fy_N,root_fz_N,root_mx_Nm,root_my_Nm,root_mz_Nm,free_equilibrium_residual" } else { "" };
+    println!("time_s,T0_K,T1_K,T2_K,T3_K,tip_extension_m,axial_force_N,elastic_energy_J,stored_heat_change_J,external_heat_J,heat_residual_J,applied_k0_W_m_K{extra_header}");
     for step in 1..=intervals {
         let target = experiment.duration_s * (step as f64 / intervals as f64);
         state = experiment.advance(&state, target, &gate)?.0;
         let temperatures = (0..N).map(|c| state.heat.temperature_k(CellId(c as u64)))
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let heat_change = state.heat.energy_j()-initial_heat;
-        println!("{target},{},{},{},{},{},{},{},{},{},{},{}", temperatures[0], temperatures[1], temperatures[2], temperatures[3],
+        let extra = if extended { loading_observations(&state, &gate)? } else { String::new() };
+        println!("{target},{},{},{},{},{},{},{},{},{},{},{}{extra}", temperatures[0], temperatures[1], temperatures[2], temperatures[3],
             state.rod.positions_m()[N][0]-LENGTH, state.rod.segment_resultants(N-1)?.0[0],
             state.rod.energy_j()?, heat_change, state.external_heat_j, heat_change-state.external_heat_j,
             k(&state.applied_conductivity[0]));
@@ -249,6 +285,67 @@ mod tests {
         assert_eq!(old.heat.time_s(), 0.0); assert_eq!(old.heat.cells(), &cells);
         assert_eq!(old.rod.positions_m(), positions);
         gate.request(); assert!(experiment.advance(&old, 0.01, &gate).is_err());
+        assert_eq!(old.heat.cells(), &cells);
+    }
+}
+
+#[cfg(test)]
+mod gravity_tests {
+    use super::*;
+    #[test]
+    fn gravity_requires_an_explicit_finite_vector_and_preserves_the_old_default() {
+        assert_eq!(gravity_args(&[]).unwrap(), [0.0; 3]);
+        let input = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+        assert_eq!(gravity_args(&input(&["--gravity", "0", "0", "-1"])).unwrap(), [0.0, 0.0, -1.0]);
+        for values in [vec!["--gravity", "0"], vec!["--weight", "0", "0", "1"],
+            vec!["--gravity", "NaN", "0", "0"], vec!["--gravity", "0", "inf", "0"]] {
+            assert!(gravity_args(&input(&values)).is_err());
+        }
+    }
+    #[test]
+    fn heat_capacity_changes_heated_sag_at_identical_weight_and_physical_input() {
+        let gate = CancelGate::new();
+        let mut sag = Vec::new();
+        for cp in [500.0, 1000.0] {
+            let material = material::demo(cp, 1.0, 500.0).unwrap();
+            let mut experiment = Experiment::new(&material, false, 1.0, 4.0, &gate).unwrap();
+            experiment.cantilever = true;
+            experiment.gravity_m_s2 = [0.0, 0.0, -1.0];
+            let mut state = experiment.initial(&gate).unwrap();
+            let initial_sag = -state.rod.positions_m()[N][2];
+            let initial_weight = state.rod.gravity_nodal_forces_n().unwrap().to_vec();
+            assert!(initial_sag > 0.0);
+            for i in 1..=10 { state = experiment.advance(&state, 0.2*i as f64, &gate).unwrap().0; }
+            assert!(state.rod.supports().is_empty());
+            assert_eq!(state.rod.gravity_nodal_forces_n().unwrap(), initial_weight);
+            let thermal_mass = state.heat.cells().values().map(|c| c.mass_kg).sum::<f64>();
+            assert_eq!(thermal_mass, state.rod.reference_mass().total_mass_kg());
+            assert!((state.heat.energy_j()-state.external_heat_j).abs() < 1e-8);
+            assert!(-state.rod.positions_m()[N][2] > initial_sag+1e-7);
+            assert!(state.rod.gravity_potential_j().unwrap() < 0.0);
+            assert_eq!(loading_observations(&state, &gate).unwrap().split(',').count(), 12);
+            sag.push(-state.rod.positions_m()[N][2]);
+        }
+        assert!(sag[0] > sag[1]+1e-7);
+    }
+    #[test]
+    fn failed_heated_cantilever_keeps_mass_weight_pose_and_thermal_history() {
+        let material = material::demo(500.0, 1.0, 301.0).unwrap();
+        let gate = CancelGate::new();
+        let mut experiment = Experiment::new(&material, false, 1.0, 4.0, &gate).unwrap();
+        experiment.cantilever = true;
+        experiment.gravity_m_s2 = [0.0, 0.0, -1.0];
+        let old = experiment.initial(&gate).unwrap();
+        let cells = old.heat.cells().clone();
+        let positions = old.rod.positions_m().to_vec();
+        let weights = old.rod.gravity_nodal_forces_n().unwrap().to_vec();
+        assert!(experiment.advance(&old, 0.5, &gate).is_err());
+        assert_eq!(old.heat.time_s(), 0.0);
+        assert_eq!(old.heat.cells(), &cells);
+        assert_eq!(old.rod.positions_m(), positions);
+        assert_eq!(old.rod.gravity_nodal_forces_n().unwrap(), weights);
+        gate.request();
+        assert!(experiment.advance(&old, 0.01, &gate).is_err());
         assert_eq!(old.heat.cells(), &cells);
     }
 }

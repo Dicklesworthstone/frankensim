@@ -115,7 +115,8 @@ impl SpatialMaterialRod {
         if !load.force.iter().chain(&load.moment).all(|x| x.is_finite()) {
             return Err(SpatialRodError::Invalid("reaction loads must be finite"));
         }
-        let residual = self.rod.residual(load, 1.0, &|rod| self.equilibrium_energy_for(rod), &|| checkpoint(gate))?;
+        let residual = self.rod.residual(load, 1.0, &|rod| self.equilibrium_energy_for(rod),
+            &|| checkpoint(gate), self.probe_translation_scale_m())?;
         let free_residual_norm = self.free_dofs.iter().map(|&k| residual[k] * residual[k]).sum::<f64>().sqrt();
         if !residual.iter().all(|v| v.is_finite()) || !free_residual_norm.is_finite() {
             return Err(SpatialRodError::Invalid("support reaction or free residual is unrepresentable"));

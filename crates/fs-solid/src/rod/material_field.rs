@@ -165,6 +165,13 @@ impl SpatialMaterialRod {
         self.energy_for(&self.rod)
     }
 
+    // Thermal fields impose an explicit local strain domain. Scale their
+    // translation probes geometrically while retaining exact uniform/spatial
+    // parity for the original unheated elastic path.
+    fn probe_translation_scale_m(&self) -> f64 {
+        if self.thermal.is_some() { self.rod.l0 } else { 1.0 }
+    }
+
     fn energy_for(&self, rod: &Rod) -> Result<f64, SpatialRodError> {
         let mut energy = 0.0;
         for (segment, section) in self.stiffness.iter().enumerate() {
@@ -213,7 +220,7 @@ impl SpatialMaterialRod {
         let mut candidate = self.rod.clone();
         let residuals = candidate.solve_static_with_energy(
             load, steps, tolerance, &|rod| self.equilibrium_energy_for(rod), &|| checkpoint(gate),
-            Some(&self.free_dofs),
+            Some(&self.free_dofs), self.probe_translation_scale_m(),
         )?;
         self.equilibrium_energy_for(&candidate)?;
         if !candidate.positions.iter().flatten().all(|v| v.is_finite()) {
