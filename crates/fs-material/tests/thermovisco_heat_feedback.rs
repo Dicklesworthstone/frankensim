@@ -7,7 +7,7 @@ use fs_blake3::ContentHash;
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve,
     UniformEnthalpyStep, UniformEnthalpyStepInput};
 use fs_material::thermovisco::{Limits, ThermalKnot, ThermoMaxwell};
-use fs_material::thermovisco::thermal::{CaloricPoint, FeedbackConfig, FeedbackError};
+use fs_material::thermovisco::thermal::{CaloricPoint, FeedbackConfig, FeedbackError, MechanicalControl};
 
 const VOLUME: f64 = 1e-6;
 const MASS: f64 = 1e-3;
@@ -192,4 +192,125 @@ fn unsupported_caloric_physics_is_refused_instead_of_inventing_missing_work() {
         assert!(CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(), &unsupported, 0.0, MASS, VOLUME, 0.001).is_err());
     }
     assert!(CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(), &curve, 0.0, 2.0*MASS, VOLUME, 0.001).is_err());
+}
+
+fn stress(value: f64) -> MechanicalControl {
+    MechanicalControl::Stress { stress_pa: value, tolerance_pa: 1e-6 }
+}
+
+#[test]
+fn sustained_signed_load_matches_discrete_creep_and_closes_prescribed_work() {
+    let material = law(1.0);
+    let curve = chart(100.0, 11);
+    for load in [-1e6, 1e6] {
+        let mut point = CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(),
+            &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+        let mut work = 0.0;
+        let mut numerical = 0.0;
+        for n in 1..=12 {
+            let previous = point.mechanical().total_strain();
+            let step = point.advance_controlled(stress(load), 0.2, config(), adiabatic, || false).unwrap();
+            // Standard-linear-solid BE creep: tau_creep=tau*(E_inf+E_1)/E_inf.
+            let expected = load/1e8 + (load/4e8 - load/1e8) / 1.05_f64.powi(n);
+            close(step.next.mechanical().total_strain(), expected, 1e-13);
+            close(step.next.mechanical().stress_pa(), load, 1e-6);
+            close(step.external_mechanical_work_j,
+                VOLUME*load*(step.next.mechanical().total_strain()-previous), 1e-16);
+            assert_eq!(step.control, stress(load));
+            assert!(step.stress_residual_pa.unwrap().abs() <= 1e-6);
+            work += step.external_mechanical_work_j;
+            numerical += VOLUME*step.mechanical_energy.numerical_dissipation;
+            point = step.next;
+        }
+        close(VOLUME*point.mechanical().stored_energy_j_m3()
+            + MASS*point.caloric_state().specific_enthalpy_j_kg() + numerical, work, 1e-10);
+        assert!(point.caloric_state().temperature_k() > 300.0);
+    }
+}
+
+#[test]
+fn caloric_data_changes_actual_strain_under_the_same_sustained_load() {
+    let material = law(0.05);
+    let curves = [chart(5.0, 12), chart(10.0, 13)];
+    let mut results = Vec::new();
+    for curve in &curves {
+        let mut point = CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(),
+            curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+        for _ in 0..12 {
+            let step = point.advance_controlled(stress(2e6), 0.2, config(), adiabatic, || false).unwrap();
+            assert!(step.combined_residual_j.abs() < 1e-9);
+            point = step.next;
+        }
+        results.push(point);
+    }
+    assert!(results[0].caloric_state().temperature_k() > results[1].caloric_state().temperature_k()+0.5);
+    assert!(results[0].mechanical().total_strain() > results[1].mechanical().total_strain()+1e-4);
+    for result in &results { close(result.mechanical().stress_pa(), 2e6, 1e-6); }
+}
+
+#[test]
+fn stress_control_and_strain_control_share_the_exact_constitutive_endpoint() {
+    let material = law(0.05);
+    let curve = chart(100.0, 14);
+    let loaded = material.birth(300.0, 0.001).unwrap()
+        .advance(300.0, 0.011, 0.1, 1e-3).unwrap().point;
+    let old = CaloricPoint::try_new(loaded.clone(), &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+    let thermostat = |input: UniformEnthalpyStepInput<'_>| {
+        Ok::<_, Infallible>(UniformEnthalpyStep { state: input.initial,
+            external_heat_j: -input.internal_heat_j, energy_residual_tolerance_j: 1e-10, report: () })
+    };
+    let a = old.advance_controlled(stress(-1e6), 0.2, config(), thermostat, || false).unwrap();
+    let b = old.advance(a.next.mechanical().total_strain(), 0.2, config(), thermostat, || false).unwrap();
+    assert_eq!(a.next.mechanical(), b.next.mechanical());
+    assert_eq!(a.next.caloric_state(), b.next.caloric_state());
+    assert_eq!(a.applied_heat_j, b.applied_heat_j);
+    assert_eq!(b.stress_residual_pa, None);
+    close(a.external_mechanical_work_j, b.external_mechanical_work_j, 1e-12);
+    assert_eq!(old.mechanical(), &loaded);
+}
+
+#[test]
+fn load_removal_preserves_memory_and_generates_heat_without_external_work() {
+    let material = law(0.05);
+    let curve = chart(5.0, 15);
+    let mut point = CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(),
+        &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+    for _ in 0..5 {
+        point = point.advance_controlled(stress(2e6), 0.2, config(), adiabatic, || false).unwrap().next;
+    }
+    let before = point.clone();
+    let unloaded = point.advance_controlled(stress(0.0), 0.2, config(), adiabatic, || false).unwrap();
+    assert_eq!(unloaded.external_mechanical_work_j, 0.0);
+    assert!(unloaded.next.mechanical().total_strain() < point.mechanical().total_strain());
+    assert!(unloaded.next.mechanical().branch_strains().iter().any(|q| q.abs() > 1e-5));
+    assert!(unloaded.applied_heat_j > 0.0);
+    assert!(unloaded.next.caloric_state().temperature_k() > point.caloric_state().temperature_k());
+    assert!(unloaded.combined_residual_j.abs() < 1e-9);
+    assert_eq!(point, before);
+}
+
+#[test]
+fn invalid_or_unattainable_loads_refuse_without_changing_history() {
+    let material = law(0.05);
+    let curve = chart(5.0, 16);
+    let old = CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(),
+        &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+    let saved = old.clone();
+    for control in [stress(f64::NAN), stress(f64::INFINITY),
+        MechanicalControl::Stress { stress_pa: 1.0, tolerance_pa: 0.0 },
+        MechanicalControl::Stress { stress_pa: 1.0, tolerance_pa: f64::NAN },
+        MechanicalControl::TotalStrain(f64::NAN)] {
+        let called = Cell::new(false);
+        assert!(matches!(old.advance_controlled(control, 0.2, config(), |input| {
+            called.set(true); adiabatic(input)
+        }, || false), Err(FeedbackError::Invalid(_))));
+        assert!(!called.get());
+    }
+    assert!(matches!(old.advance_controlled(stress(1e12), 0.2, config(), adiabatic, || false),
+        Err(FeedbackError::Mechanical(_))));
+    let cancelled = Cell::new(false);
+    assert!(matches!(old.advance_controlled(stress(2e6), 0.2, config(), |input| {
+        cancelled.set(true); adiabatic(input)
+    }, || cancelled.get()), Err(FeedbackError::Cancelled)));
+    assert_eq!(old, saved);
 }

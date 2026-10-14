@@ -34,6 +34,58 @@ pub struct FeedbackConfig {
     pub relaxation: f64,
 }
 
+/// Work-conjugate uniaxial endpoint control, independent of the material law.
+/// Stress is work per reference volume per total engineering strain, matching
+/// the existing small-strain Maxwell owner; it is not a finite-strain load.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MechanicalControl {
+    /// Imposed total engineering strain. The material supplies the reaction.
+    TotalStrain(f64),
+    /// Imposed endpoint stress [Pa], positive in tension. Strain is solved from
+    /// the existing affine constitutive tangent at EACH thermal trial. A changing
+    /// load uses endpoint work, as in the existing backward-Euler material law.
+    Stress {
+        stress_pa: f64,
+        /// Independent absolute endpoint stress residual gate [Pa].
+        tolerance_pa: f64,
+    },
+}
+
+impl MechanicalControl {
+    fn validate<E>(self) -> Result<(), FeedbackError<E>> {
+        match self {
+            Self::TotalStrain(strain) if strain.is_finite() => Ok(()),
+            Self::Stress { stress_pa, tolerance_pa }
+                if stress_pa.is_finite() && positive(tolerance_pa) => Ok(()),
+            _ => Err(FeedbackError::Invalid("control needs finite strain or stress and positive stress tolerance")),
+        }
+    }
+
+    fn propose<'a, E>(self, old: &Point<'a>, temperature: f64, duration_s: f64,
+        energy_tolerance: f64) -> Result<super::Step<'a>, FeedbackError<E>> {
+        let strain = match self {
+            Self::TotalStrain(strain) => strain,
+            Self::Stress { stress_pa, .. } => {
+                // This inversion changes the boundary condition, not the
+                // constitutive update or its branch-history integration.
+                let affine = old.linearize(temperature, duration_s)
+                    .map_err(FeedbackError::Mechanical)?;
+                finite(finite(stress_pa - affine.offset_pa)? / affine.tangent_pa)?
+            }
+        };
+        let step = old.advance(temperature, strain, duration_s, energy_tolerance)
+            .map_err(FeedbackError::Mechanical)?;
+        if let Self::Stress { stress_pa, tolerance_pa } = self {
+            let residual = finite(step.stress_pa - stress_pa)?;
+            if residual.abs() > tolerance_pa {
+                return Err(FeedbackError::StressResidual { target_pa: stress_pa,
+                    actual_pa: step.stress_pa, tolerance_pa });
+            }
+        }
+        Ok(step)
+    }
+}
+
 /// The original material, caloric or transport failure remains distinguishable.
 #[derive(Debug)]
 pub enum FeedbackError<E = Infallible> {
@@ -47,6 +99,8 @@ pub enum FeedbackError<E = Infallible> {
     Invalid(&'static str),
     /// The old mechanical and caloric histories have not been changed.
     Cancelled,
+    /// Actual constitutive stress missed the independently prescribed load gate.
+    StressResidual { target_pa: f64, actual_pa: f64, tolerance_pa: f64 },
     /// Work budget exhausted without a consistent physical endpoint.
     NotConverged {
         iterations: usize,
@@ -64,6 +118,8 @@ impl<E: fmt::Display> fmt::Display for FeedbackError<E> {
             Self::Transport(e) => write!(f, "thermovisco heat transport: {e}"),
             Self::Invalid(message) => write!(f, "thermovisco heat feedback: {message}"),
             Self::Cancelled => f.write_str("thermovisco heat feedback: cancelled"),
+            Self::StressResidual { target_pa, actual_pa, tolerance_pa } => write!(f,
+                "thermovisco load control: target={target_pa} Pa, actual={actual_pa} Pa, allowance={tolerance_pa} Pa"),
             Self::NotConverged { iterations, temperature_defect_k, heat_defect_j,
                 thermal_residual_j, combined_residual_j } => write!(f,
                 "thermovisco heat feedback did not converge in {iterations} proposals: dT={temperature_defect_k} K, dQ={heat_defect_j} J, thermal={thermal_residual_j} J, combined={combined_residual_j} J"),
@@ -93,6 +149,14 @@ pub struct CaloricPoint<'a> {
 #[derive(Debug)]
 pub struct FeedbackStep<'a, R> {
     pub next: CaloricPoint<'a>,
+    /// The imposed boundary condition, not a fitted material parameter.
+    pub control: MechanicalControl,
+    /// Actual minus prescribed stress [Pa]; None for strain control.
+    pub stress_residual_pa: Option<f64>,
+    /// Endpoint boundary work [J]. For stress control this uses the prescribed
+    /// load, not a possibly imperfect constitutive reaction. Under strain
+    /// control it is the original law's mechanical work times reference volume.
+    pub external_mechanical_work_j: f64,
     /// Original Maxwell endpoint audit, in J/m3; not recomputed by this adapter.
     pub mechanical_energy: Energy,
     /// Final thermal proposal, including its concrete report and boundary heat.
@@ -105,7 +169,7 @@ pub struct FeedbackStep<'a, R> {
     pub temperature_defect_k: f64,
     /// m delta_h - final physical dissipation - external heat [J].
     pub thermal_residual_j: f64,
-    /// delta_elastic + m delta_h + numerical_loss - mechanical_work - heat [J].
+    /// delta_elastic + m delta_h + numerical_loss - imposed work - heat [J].
     pub combined_residual_j: f64,
 }
 
@@ -175,24 +239,44 @@ impl<'a> CaloricPoint<'a> {
     /// returns no candidate; the original specimen and histories are immutable.
     pub fn advance<R, E>(&self, total_strain: f64, duration_s: f64,
         config: FeedbackConfig,
+        transport: impl FnMut(UniformEnthalpyStepInput<'_>) -> Result<UniformEnthalpyStep<R>, E>,
+        cancelled: impl FnMut() -> bool) -> Result<FeedbackStep<'a, R>, FeedbackError<E>> {
+        self.advance_controlled(MechanicalControl::TotalStrain(total_strain), duration_s,
+            config, transport, cancelled)
+    }
+
+    /// Solve strain or stress control and heat feedback in the SAME iteration.
+    /// Stress control enables creep, unloading and signed load reversal without
+    /// resetting viscoelastic history. Every trial and the returned endpoint
+    /// solve the affine stress law from the same old point. The original affine
+    /// tangent is a fixed-temperature constitutive tangent, not a derivative of
+    /// this coupled thermal solve. This method supplies no structural dynamics.
+    ///
+    /// Prescribed endpoint work enters the combined energy gate independently
+    /// of the stress gate; an allowed force residual is not relabeled as heat.
+    /// The original transport transaction, source-domain, work and cancellation
+    /// limits apply to both control modes. A rejected proposal changes neither
+    /// strain, branch memory, enthalpy nor the accepted clock.
+    pub fn advance_controlled<R, E>(&self, control: MechanicalControl, duration_s: f64,
+        config: FeedbackConfig,
         mut transport: impl FnMut(UniformEnthalpyStepInput<'_>) -> Result<UniformEnthalpyStep<R>, E>,
         mut cancelled: impl FnMut() -> bool) -> Result<FeedbackStep<'a, R>, FeedbackError<E>> {
         poll(&mut cancelled)?;
+        control.validate()?;
         let final_time = self.time_s + duration_s;
         let material_tolerance = config.energy_tolerance_j / self.volume_m3;
         if config.max_iterations == 0 || config.max_iterations > MAX_FEEDBACK_ITERATIONS
             || !positive(config.temperature_tolerance_k) || !positive(config.energy_tolerance_j)
             || !positive(config.relaxation) || config.relaxation > 1.0
             || !positive(duration_s) || !positive(material_tolerance)
-            || !total_strain.is_finite() || !final_time.is_finite() || final_time <= self.time_s {
+            || !final_time.is_finite() || final_time <= self.time_s {
             return Err(FeedbackError::Invalid("invalid feedback controls, strain or physical interval"));
         }
         let mut temperature = self.point.temperature_k();
         let mut defects = [f64::INFINITY; 4];
         for iteration in 1..=config.max_iterations {
             poll(&mut cancelled)?;
-            let trial = self.point.advance(temperature, total_strain, duration_s, material_tolerance)
-                .map_err(FeedbackError::Mechanical)?;
+            let trial = control.propose(&self.point, temperature, duration_s, material_tolerance)?;
             let applied_heat_j = product(self.volume_m3, trial.energy.dissipated)?;
             let proposal = transport(UniformEnthalpyStepInput { curve: self.curve, initial: self.state,
                 mass_kg: self.mass_kg, volume_m3: self.volume_m3, surface_area_m2: self.surface_area_m2,
@@ -213,13 +297,22 @@ impl<'a> CaloricPoint<'a> {
                 return Err(FeedbackError::Invalid("transport proposal violates its own physical heat balance"));
             }
             let final_temperature = proposal.state.temperature_k();
-            let mechanical = self.point.advance(final_temperature, total_strain, duration_s, material_tolerance)
-                .map_err(FeedbackError::Mechanical)?;
+            let mechanical = control.propose(&self.point, final_temperature, duration_s, material_tolerance)?;
             let actual_heat = product(self.volume_m3, mechanical.energy.dissipated)?;
             let thermal_residual = finite(thermal_change - actual_heat - proposal.external_heat_j)?;
+            let stress_residual_pa = match control {
+                MechanicalControl::TotalStrain(_) => None,
+                MechanicalControl::Stress { stress_pa, .. } => Some(finite(mechanical.stress_pa - stress_pa)?),
+            };
+            let work_density = match control {
+                MechanicalControl::TotalStrain(_) => mechanical.energy.mechanical_work,
+                MechanicalControl::Stress { stress_pa, .. } => product(stress_pa,
+                    mechanical.point.total_strain() - self.point.total_strain())?,
+            };
+            let external_mechanical_work_j = product(self.volume_m3, work_density)?;
             let combined_residual = finite(product(self.volume_m3, mechanical.energy.stored_change)?
                 + thermal_change + product(self.volume_m3, mechanical.energy.numerical_dissipation)?
-                - product(self.volume_m3, mechanical.energy.mechanical_work)? - proposal.external_heat_j)?;
+                - external_mechanical_work_j - proposal.external_heat_j)?;
             defects = [(final_temperature - temperature).abs(), (actual_heat - applied_heat_j).abs(),
                 thermal_residual, combined_residual];
             if defects[0] <= config.temperature_tolerance_k && defects[1] <= config.energy_tolerance_j
@@ -228,7 +321,8 @@ impl<'a> CaloricPoint<'a> {
                 let next = Self { point: mechanical.point, curve: self.curve, state: proposal.state,
                     mass_kg: self.mass_kg, volume_m3: self.volume_m3,
                     surface_area_m2: self.surface_area_m2, time_s: final_time };
-                return Ok(FeedbackStep { next, mechanical_energy: mechanical.energy, transport: proposal,
+                return Ok(FeedbackStep { next, control, stress_residual_pa, external_mechanical_work_j,
+                    mechanical_energy: mechanical.energy, transport: proposal,
                     iterations: iteration, applied_heat_j, heat_defect_j: defects[1],
                     temperature_defect_k: defects[0], thermal_residual_j: defects[2], combined_residual_j: defects[3] });
             }
