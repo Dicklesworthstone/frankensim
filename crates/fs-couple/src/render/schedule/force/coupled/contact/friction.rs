@@ -106,7 +106,7 @@ impl std::error::Error for ModalFrictionError {}
 pub struct FrictionModalFrame {
     /// Original network's one-based accepted sample clock.
     pub sample: u64,
-    /// Sum of the original read-only pressure observations [Pa].
+    /// Original read-only pressure sum, or the explicit acceleration observation [Pa].
     pub observer_pressure_pa: f64,
     /// Modal plus bilateral-spring stored energy [J].
     pub network_energy_j: f64,
@@ -145,6 +145,7 @@ pub struct FrictionModalSystem {
     compliance: f64,
     forces: Vec<f64>,
     last: Option<FrictionModalFrame>,
+    acceleration_pressure: Option<Vec<f64>>,
 }
 
 impl FrictionModalSystem {
@@ -181,7 +182,7 @@ impl FrictionModalSystem {
         let compliance = effective_compliance(&network, &column, gate)?;
         poll(Some(gate))?;
         Ok(Self { forces: vec![0.0; network.mode_count()], network, port,
-            config, column, compliance, last: None })
+            config, column, compliance, last: None, acceleration_pressure: None })
     }
 
     /// Accepted components, with their existing basis, budgets and state.
@@ -270,6 +271,7 @@ impl FrictionModalSystem {
                 finite(traction*slip)?
             }
         };
+        let observer_pressure_pa = self.staged_observer_pressure(gate)?;
         let frame = &self.network.staged_frame;
         let after = finite(frame.modal_energy_j+frame.connection_energy_j)?;
         let network_loss = finite(frame.component_dissipation_j+frame.connection_dissipation_j)?;
@@ -283,13 +285,14 @@ impl FrictionModalSystem {
             return Err(ModalCouplingError::EnergyBalance { residual_j: residual, tolerance_j: tolerance }.into());
         }
         let accepted = FrictionModalFrame {
-            sample: frame.sample, observer_pressure_pa: frame.observer_pressure_pa,
+            sample: frame.sample, observer_pressure_pa,
             network_energy_j: after, external_work_j: external_work, drive_work_j: drive_work,
             network_dissipation_j: network_loss, friction_dissipation_j: loss,
             energy_residual_j: residual, energy_tolerance_j: tolerance, traction_n: traction,
             slip_distance_m: slip, constitutive_residual_n, regime, iterations,
         };
         poll(gate)?;
+        self.network.staged_frame.observer_pressure_pa = observer_pressure_pa;
         self.network.publish_staged();
         Ok(self.last.insert(accepted))
     }
@@ -350,3 +353,6 @@ impl FrictionModalSystem {
         Err(ModalCouplingError::ContactSolve { residual_n: residual, tolerance_n: tolerance, iterations: used }.into())
     }
 }
+
+// Optional physical acceleration readout; it does not replace mechanical evolution.
+mod observation;
