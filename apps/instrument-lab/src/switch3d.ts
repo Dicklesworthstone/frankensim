@@ -5,8 +5,8 @@ import { reducedMotion } from "./util";
 
 export type SwitchState = "studio" | "live";
 
-const UP = -0.52; // lever tilt (rad) toward the top legend
-const DOWN = 0.52;
+const UP = -0.38; // lever tilt (rad) toward the top legend
+const DOWN = 0.38;
 
 /** A brushed-aluminium panel with a chrome bat-handle toggle and two lamps. */
 export class Switch3D {
@@ -41,7 +41,7 @@ export class Switch3D {
     this.scene.environmentIntensity = 0.48;
     pm.dispose();
     this.build();
-    this.camera.position.set(2.4, -6.6, 19.5);
+    this.camera.position.set(2.4, -6.6, 22.5);
     this.camera.lookAt(0.15, -0.35, 0.9);
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(host);
@@ -98,13 +98,13 @@ export class Switch3D {
     s.add(rim);
 
     // the panel: brushed aluminium with engraved legends
-    const W = 5.6, H = 8.2, T = 0.5;
+    const W = 5.6, H = 9.6, T = 0.5;
     const brushed = brushedTexture();
     const plateMat = new THREE.MeshPhysicalMaterial({ color: 0x7f858d, metalness: 1, roughness: 0.52, roughnessMap: brushed, clearcoat: 0.25, clearcoatRoughness: 0.6 });
     const plate = new THREE.Mesh(new RoundedBoxGeometry(W, H, T, 6, 0.38), plateMat);
     plate.receiveShadow = true;
     s.add(plate);
-    const legend = new THREE.Mesh(new THREE.PlaneGeometry(W - 0.5, H - 0.5), new THREE.MeshPhysicalMaterial({ map: legendTexture(), transparent: true, metalness: 0.6, roughness: 0.55, depthWrite: false }));
+    const legend = new THREE.Mesh(new THREE.PlaneGeometry(W - 0.5, H - 0.5), new THREE.MeshPhysicalMaterial({ map: legendTexture((H - 0.5) / (W - 0.5)), transparent: true, metalness: 0.6, roughness: 0.55, depthWrite: false }));
     legend.position.z = T / 2 + 0.002;
     legend.receiveShadow = true;
     s.add(legend);
@@ -147,12 +147,12 @@ export class Switch3D {
     this.lever.position.z = T / 2 + 0.62;
     const dome = new THREE.Mesh(new THREE.SphereGeometry(0.4, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2), chrome);
     dome.rotation.x = Math.PI / 2;
-    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.3, 3.6, 40), chrome);
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.3, 2.9, 40), chrome);
     shaft.rotation.x = Math.PI / 2;
-    shaft.position.z = 1.85;
+    shaft.position.z = 1.5;
     const tip = new THREE.Mesh(new THREE.SphereGeometry(0.3, 32, 24), chrome);
     tip.scale.set(1, 1, 1.25);
-    tip.position.z = 3.7;
+    tip.position.z = 3.0;
     for (const m of [dome, shaft, tip]) { m.castShadow = true; this.lever.add(m); }
     s.add(this.lever);
 
@@ -184,8 +184,8 @@ export class Switch3D {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     // keep the whole panel in view whatever the aspect
-    const k = w / h < 0.72 ? 0.72 / Math.max(0.45, w / h) : 1;
-    this.camera.position.set(2.4 * k, -6.6 * k, 19.5 * k);
+    const k = w / h < 0.7 ? 0.7 / Math.max(0.45, w / h) : 1;
+    this.camera.position.set(2.4 * k, -6.6 * k, 22.5 * k);
     this.camera.lookAt(0.15, -0.35, 0.9);
     this.camera.updateProjectionMatrix();
     this.kick();
@@ -283,9 +283,9 @@ function brushedTexture(): THREE.CanvasTexture {
   return t;
 }
 
-function legendTexture(): THREE.CanvasTexture {
+function legendTexture(aspect: number): THREE.CanvasTexture {
   const c = document.createElement("canvas");
-  c.width = 1020; c.height = 1540;
+  c.width = 1020; c.height = Math.round(1020 * aspect);
   const g = c.getContext("2d")!;
   const engrave = (text: string, x: number, y: number, font: string, spacing: number): void => {
     g.font = font;

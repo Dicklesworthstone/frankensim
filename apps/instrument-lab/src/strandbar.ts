@@ -58,7 +58,8 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
     const y = 1 - Math.log(f / 40) / Math.log(16000 / 40);
     axis.append(el("span", { style: `top: calc(${half * 50}% + ${(y * 50).toFixed(2)}% - ${half ? 1 : 6}px)` }, t));
   }
-  const spectro = el("div", { class: "sb-spectro" }, canvas, labelStudio, labelLive, axis);
+  const idleHint = el("div", { class: "sb-idle" }, "Press play: both versions scroll here, the one you hear lit");
+  const spectro = el("div", { class: "sb-spectro" }, canvas, labelStudio, labelLive, axis, idleHint);
   const meters: Record<string, { root: HTMLElement; value: HTMLElement; bar: HTMLElement }> = {};
   const lanesEl = el("div", { class: "sb-lanes" });
   for (const [id, name] of [["piano", "Piano"], ["kick", "Kick"], ["hihat", "Hi-hat"]] as const) {
@@ -139,6 +140,7 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
     play.textContent = p === "playing" ? "■ Stop" : p === "loading" ? "Starting…" : "▶ Play Strandbar";
     play.toggleAttribute("disabled", p === "loading");
     root.classList.toggle("sb-playing", p === "playing");
+    idleHint.hidden = p === "playing";
   }
 
   const stop = (): void => {
