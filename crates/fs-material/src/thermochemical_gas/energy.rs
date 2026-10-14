@@ -4,11 +4,14 @@
 //! The resulting temperature and density determine pressure through the same
 //! ideal-gas species model; all transport and acoustic coefficients are then
 //! re-evaluated together. Composition is frozen and the phase must remain gas.
-//! No reaction mechanism, moving boundary, pressure-volume work or spatial
-//! thermal transport is implied by this local conservative-state closure.
+//! [`parcel`] composes this heating path with reversible adiabatic volume work.
+//! No reaction mechanism, piston dynamics or spatial thermal transport is
+//! implied by these local conservative-state closures.
 
 /// Density/entropy closure for reversible adiabatic gas-state changes.
 pub mod entropy;
+/// Closed gas storage with heating and reversible adiabatic boundary work.
+pub mod parcel;
 mod root;
 
 use super::{ResolvedThermochemicalGasState, ThermochemicalGasModel, coordinates, positive, typed};

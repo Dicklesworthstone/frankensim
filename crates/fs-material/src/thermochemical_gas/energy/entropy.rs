@@ -75,7 +75,7 @@ fn map_root(error: root::Error<GasEntropyError>) -> GasEntropyError {
     }
 }
 // The shared coordinate/poll helpers cannot perform an energy inversion.
-fn map_context(error: GasEnergyError) -> GasEntropyError {
+pub(super) fn map_context(error: GasEnergyError) -> GasEntropyError {
     match error {
         GasEnergyError::Material(e) => GasEntropyError::Material(e),
         GasEnergyError::Cancelled => GasEntropyError::Cancelled,
@@ -91,6 +91,9 @@ pub struct GasEntropySolution {
     iterations: usize,
 }
 impl GasEntropySolution {
+    /// Move the complete source-bearing state into a consumer without re-querying.
+    #[must_use]
+    pub fn into_state(self) -> ResolvedThermochemicalGasState { self.state }
     /// Same material state for momentum, heat and acoustic consumers.
     #[must_use]
     pub const fn state(&self) -> &ResolvedThermochemicalGasState { &self.state }
