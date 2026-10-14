@@ -1,7 +1,12 @@
 # Keep radiation physics, eliminate the large acoustic factorization
 
-`--radiation-feedback --analytic-newton` now prepares exact acoustic-pair
-condensation automatically for the nonlinear percussion image. The existing
+`--radiation-feedback --analytic-newton` prepares exact condensation
+automatically for the nonlinear percussion image. With at least two canonical
+modes it now combines displacement-equation momentum pivots followed by
+acoustic pairs; see [MOMENTUM_CONDENSATION.md](MOMENTUM_CONDENSATION.md). Their
+reciprocal coupling is retained by ordered forward substitution, not discarded.
+The pair-only algorithm described below remains the shared primitive and the
+one-mode default; the multi-mode default has an even smaller border. The existing
 splash, drum, snare and paired-cymbal commands retain their admitted geometry,
 force programs, contact/material laws, acoustic pole models and clocks. No
 extra command-line flag or alternate physical model is required.
@@ -19,6 +24,12 @@ finished, is calibrated, or can run in real time. Radiation-fit, power,
 spatial-resolution, state-count and mechanical-validity refusals still apply.
 
 ## What gets smaller
+
+In current multi-mode percussion preparation, write `b=2*m+h`, where `m` is
+the number of canonical modes and `h` the material memories. The joint plan
+retains all `b+2*p` states but factors a border of size `m+h+1`, rather than
+the pair-only `b+1` below. Coupled damping and nonlinear contact loss remain
+in the retained equations. All original-equation checks and fallbacks apply.
 
 For `b` original mechanical/material scalar states and `p` acoustic oscillators,
 the previous analytic path factored a dense `(b+2p)` square matrix at every
@@ -74,8 +85,9 @@ calls ignore the plan and preserve their original arithmetic.
 `PreparedImpactSystem::set_radiation_condensation(false)` selects the original
 full dense analytic factorization for comparison; `true` rebuilds the plan.
 Changing the plan allocates cold scratch and must be done outside a hard-real-
-time callback. It does not reset physical state. With no load, or a completely
-zero load that the existing owner omits, no condensation plan is installed.
+time callback. It does not reset physical state. On an unloaded model (including
+a completely zero load omitted by its owner), this setter clears the plan;
+normal preparation may instead select unloaded momentum condensation.
 
 `condensed_newton_dimension()` reports the planned border size when analytic
 condensation is enabled. `newton_linear_solve_counts()` returns the condensed

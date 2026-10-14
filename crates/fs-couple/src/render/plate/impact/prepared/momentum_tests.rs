@@ -106,51 +106,64 @@ fn actual_curved_shell_and_stretching_head_keep_nonlinear_coupling_and_all_coord
 }
 
 #[test]
-fn cross_velocity_and_nonlinear_contact_loss_keep_their_original_solve_by_default() {
+fn cross_velocity_and_nonlinear_contact_loss_use_kinematic_pivots_without_changing_physics() {
     let gate=CancelGate::new_clock_free();
-    for (loss,damped) in [(0.0,true),(0.1,false)] {
+    for (loss,damped) in [(0.0,true),(0.1,false),(0.1,true)] {
+        let mut fast=strike(loss,damped).prepare_analytic().unwrap();
         let mut dense=strike(loss,damped).prepare_analytic().unwrap();
+        dense.set_momentum_condensation(false).unwrap();
+        assert_eq!(fast.condensed_newton_dimension(),Some(4));
         assert_eq!(dense.condensed_newton_dimension(),None);
-        let mut requested=strike(loss,damped).prepare_analytic().unwrap();
-        requested.set_momentum_condensation(true).unwrap();let mut fallbacks=0;
-        for _ in 0..250 {
-            let f=dense.step(&[0.0;2],&gate).unwrap();let r=requested.step(&[0.0;2],&gate).unwrap();
-            assert_eq!(f.sample,r.sample);
-            for (a,b) in dense.state().iter().zip(requested.state()) {assert!((a-b).abs()<2e-8);}
-            fallbacks+=requested.newton_linear_solve_counts().1;
+        let initial=fast.stored_energy_j();let (mut solves,mut dissipated,mut work)=(0,0.0,0.0);
+        for tick in 0..500 {
+            let force=[if tick<50 {0.1}else{0.0},0.0];
+            let f=fast.step(&force,&gate).unwrap();let d=dense.step(&force,&gate).unwrap();
+            assert_eq!(f.sample,d.sample);
+            for (a,b) in fast.state().iter().zip(dense.state()) {assert!((a-b).abs()<2e-8);}
+            assert!(f.balance_residual_j.abs()<1e-8);
+            solves+=fast.newton_linear_solve_counts().0;
+            dissipated+=f.dissipated_energy_j;work+=f.supplied_work_j;
         }
-        assert!(fallbacks>0,"a spatial or active impact resistance must not be diagonalized");
+        assert!(solves>0 && dissipated>0.0 && fast.state()[4]!=0.0);
+        assert!((fast.stored_energy_j()-initial+dissipated-work).abs()<1e-7);
+        assert!((fast.felt_observation(0).unwrap().0-dense.felt_observation(0).unwrap().0).abs()<1e-7);
     }
 }
 
 #[test]
 fn refused_steps_switching_and_repreparation_do_not_reset_felt_or_motion() {
-    let gate=CancelGate::new_clock_free();let mut retry=strike(0.0,false).prepare_analytic().unwrap();
-    let mut clean=strike(0.0,false).prepare_analytic().unwrap();
-    for _ in 0..140 {retry.step(&[0.0;2],&gate).unwrap();clean.step(&[0.0;2],&gate).unwrap();}
-    let state=retry.state().to_vec();let history=retry.felt_history(0);let samples=retry.samples();
-    let cancelled=CancelGate::new_clock_free();cancelled.request();
-    assert!(matches!(retry.step(&[0.0;2],&cancelled),Err(ImpactError::Cancelled)));
-    assert!(retry.step(&[f64::NAN,0.0],&gate).is_err());
-    retry.set_iteration_limit(0).unwrap();assert!(retry.step(&[0.0;2],&gate).is_err());
-    assert_eq!(retry.state(),state);assert_eq!(retry.felt_history(0),history);assert_eq!(retry.samples(),samples);
-    retry.set_iteration_limit(50).unwrap();retry.set_momentum_condensation(false).unwrap();
-    assert_eq!(retry.state(),state);retry.set_momentum_condensation(true).unwrap();
-    retry.set_analytic_newton(false);assert_eq!(retry.condensed_newton_dimension(),None);
-    retry.set_analytic_newton(true);retry.step(&[0.0;2],&gate).unwrap();clean.step(&[0.0;2],&gate).unwrap();
-    assert_eq!(retry.state(),clean.state());assert_eq!(retry.felt_history(0),clean.felt_history(0));
-    let mut retry=retry.into_reference().prepare_analytic().unwrap();
-    retry.step(&[0.0;2],&gate).unwrap();clean.step(&[0.0;2],&gate).unwrap();
-    assert_eq!(retry.state(),clean.state());assert_eq!(retry.samples(),clean.samples());
+    let gate=CancelGate::new_clock_free();
+    for (loss,damped) in [(0.0,false),(0.1,true)] {
+        let mut retry=strike(loss,damped).prepare_analytic().unwrap();
+        let mut clean=strike(loss,damped).prepare_analytic().unwrap();
+        for _ in 0..140 {retry.step(&[0.0;2],&gate).unwrap();clean.step(&[0.0;2],&gate).unwrap();}
+        let state=retry.state().to_vec();let history=retry.felt_history(0);let samples=retry.samples();
+        let cancelled=CancelGate::new_clock_free();cancelled.request();
+        assert!(matches!(retry.step(&[0.0;2],&cancelled),Err(ImpactError::Cancelled)));
+        assert!(retry.step(&[f64::NAN,0.0],&gate).is_err());
+        retry.set_iteration_limit(0).unwrap();assert!(retry.step(&[0.0;2],&gate).is_err());
+        assert_eq!(retry.state(),state);assert_eq!(retry.felt_history(0),history);assert_eq!(retry.samples(),samples);
+        retry.set_iteration_limit(50).unwrap();retry.set_momentum_condensation(false).unwrap();
+        assert_eq!(retry.state(),state);retry.set_momentum_condensation(true).unwrap();
+        retry.set_analytic_newton(false);assert_eq!(retry.condensed_newton_dimension(),None);
+        retry.set_analytic_newton(true);retry.step(&[0.0;2],&gate).unwrap();clean.step(&[0.0;2],&gate).unwrap();
+        assert_eq!(retry.state(),clean.state());assert_eq!(retry.felt_history(0),clean.felt_history(0));
+        let mut retry=retry.into_reference().prepare_analytic().unwrap();
+        retry.step(&[0.0;2],&gate).unwrap();clean.step(&[0.0;2],&gate).unwrap();
+        assert_eq!(retry.state(),clean.state());assert_eq!(retry.samples(),clean.samples());
+    }
 }
 
 #[test]
-fn radiation_pair_preparation_is_unchanged_and_cannot_be_accidentally_replaced() {
+fn loaded_preparation_combines_ordered_pivots_without_replacing_the_physical_state() {
     let model=Model {ports:2,poles:(0..4).map(|i|Pole {omega:300.0+30.0*i as f64,zeta:0.1,
         coupling:vec![0.4,-0.2]}).collect()};
     let mut system=strike(0.0,false).with_radiation_load(&model,&[0,1],4).unwrap().prepare_analytic().unwrap();
     let state=system.state().to_vec();let history=system.felt_history(0);
-    let dimension=system.condensed_newton_dimension();assert_eq!(dimension,Some(6));
+    let dimension=system.condensed_newton_dimension();assert_eq!(dimension,Some(4));
+    system.set_radiation_condensation(false).unwrap();assert_eq!(system.condensed_newton_dimension(),None);
+    system.set_radiation_condensation(true).unwrap();assert_eq!(system.condensed_newton_dimension(),dimension);
+    assert_eq!(system.state(),state);assert_eq!(system.felt_history(0),history);
     for enabled in [true,false] {
         assert!(system.set_momentum_condensation(enabled).is_err());
         assert_eq!(system.condensed_newton_dimension(),dimension);assert_eq!(system.state(),state);

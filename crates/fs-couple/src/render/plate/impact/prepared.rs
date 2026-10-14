@@ -19,8 +19,8 @@ use super::tangent::BodyTangents;
 ///
 /// Construction allocates; stepping does not allocate in this host or its solver.
 /// The supplied storage callbacks must independently avoid allocation. This is
-/// finite-difference Newton or analytic Newton with exact acoustic-pair or
-/// canonical-momentum condensation. This is NOT a measured hard-real-time contract.
+/// finite-difference Newton or analytic Newton with exact ordered momentum
+/// and acoustic-pair condensation. This is NOT a measured hard-real-time contract.
 /// The model, basis, timestep, contact, Kelvin memory and felt conditioning are
 /// unchanged. Only accepted steps update physical history and the sample counter.
 pub struct PreparedImpactSystem {
@@ -52,10 +52,11 @@ impl ImpactSystem {
 
     /// Prepare the same system using analytic storage tangents for Newton.
     /// Retains the complete Gonzalez energy correction, physical acceptance
-    /// gates, and all current state/history. Independent acoustic pairs or
-    /// canonical momenta are eliminated from the factorization, not the physical
-    /// equation or state. Momentum selection leaves all displacement and material
-    /// memory coupled; cross-velocity damping keeps the full solve by default.
+    /// gates, and all current state/history. Canonical momenta and acoustic pairs
+    /// are eliminated from the factorization, not the physical equation or state.
+    /// Ordered kinematic pivots retain cross-velocity damping, nonlinear contact
+    /// loss and reciprocal acoustic coupling; displacements/material memories
+    /// remain in the dense border. Simple unloaded models keep scalar leaves.
     /// No difference probes, split acoustic updates, or new time integrator.
     ///
     /// # Errors
@@ -134,7 +135,7 @@ impl PreparedImpactSystem {
     /// Counts saturate at usize::MAX; state/history acceptance is independent.
     pub fn body_tangent_work_counts(&self) -> (usize, usize) { self.body_tangents.borrow().counts() }
 
-    /// Enable/disable exact acoustic-pair elimination for analytic Newton.
+    /// Enable/disable joint kinematic/acoustic elimination for analytic Newton.
     /// Enabled at preparation when radiation memory exists. Finite-difference
     /// execution ignores the plan. This is a numerical choice: state, accepted
     /// time, force ports, felt and material history remain untouched. Changing
@@ -142,13 +143,19 @@ impl PreparedImpactSystem {
     ///
     /// This replaces the current elimination plan; false selects full dense LU.
     /// On a model without radiation, use `set_momentum_condensation` to restore
-    /// the momentum plan. The two selections are not silently combined.
-    /// A failed pair solve falls back to full dense LU on the same Jacobian;
+    /// the unloaded momentum plan. Loaded models with at least two canonical
+    /// modes eliminate momenta using displacement-equation pivots FIRST, then
+    /// solve the acoustic pairs with their lower couplings retained. One-mode
+    /// models retain the independent-acoustic-pair plan. The two physical sets
+    /// are never treated as mutually independent. Failed elimination falls back
+    /// to full dense LU on the same Jacobian;
     /// no coupling, acoustic pole or Gonzalez correction is dropped.
     pub fn set_radiation_condensation(&mut self, enabled: bool) -> Result<(), ImpactError> {
-        let pairs=if enabled {self.inner.radiation.as_ref().map(|air|air.state_pairs()).unwrap_or_default()}
-            else {Vec::new()};
-        self.workspace.set_condensed_pairs(&pairs).map_err(ImpactError::PreparedSolve)
+        if enabled && self.inner.radiation.is_some() {
+            momentum::prepare_plan(&self.inner,&mut self.workspace)
+        } else {
+            self.workspace.set_condensed_pairs(&[]).map_err(ImpactError::PreparedSolve)
+        }
     }
 
     /// Planned dense border dimension for the selected analytic elimination.

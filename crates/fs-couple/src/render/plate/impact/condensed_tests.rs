@@ -31,12 +31,12 @@ fn make(air_first:bool, poles:usize)->ImpactSystem {
 }
 
 #[test]
-fn loaded_impact_eliminates_acoustics_in_either_material_attachment_order() {
+fn loaded_impact_eliminates_momenta_then_acoustics_in_either_material_attachment_order() {
     let gate=CancelGate::new_clock_free();
     for order in [false,true] {
         let mut fast=make(order,24).prepare_analytic().unwrap();
         let mut dense=make(order,24).prepare_analytic().unwrap();dense.set_radiation_condensation(false).unwrap();
-        assert_eq!(fast.state().len(),54);assert_eq!(fast.condensed_newton_dimension(),Some(7));
+        assert_eq!(fast.state().len(),54);assert_eq!(fast.condensed_newton_dimension(),Some(5));
         assert_eq!(dense.condensed_newton_dimension(),None);assert_eq!(fast.state(),dense.state());
         let initial=fast.stored_energy_j();let (mut work,mut loss,mut calls)=(0.,0.,0);
         for tick in 0..160 {
@@ -76,7 +76,7 @@ fn switching_numerical_images_preserves_all_accepted_physical_state() {
     let gate=CancelGate::new_clock_free();s.step(&[0.1,0.],&gate).unwrap();
     let state=s.state().to_vec();let sample=s.samples_rendered();
     let history=format!("{:?}",s.felt_history(0).unwrap());
-    s.set_analytic_newton(true);assert_eq!(s.condensed_newton_dimension(),Some(7));
+    s.set_analytic_newton(true);assert_eq!(s.condensed_newton_dimension(),Some(5));
     s.set_radiation_condensation(false).unwrap();assert_eq!(s.state(),state);
     s.set_radiation_condensation(true).unwrap();assert_eq!(s.state(),state);assert_eq!(s.samples_rendered(),sample);
     assert_eq!(format!("{:?}",s.felt_history(0).unwrap()),history);
