@@ -1,5 +1,5 @@
 import { GroupPlayer } from "./audio";
-import { dpr, el, fmt, hidpi } from "./util";
+import { dpr, el, fmt, hidpi, sciNode } from "./util";
 
 interface Descriptor { real?: number | number[] | null; ours?: number | number[] | null; note?: string; rms_gap_db?: number | null; n?: number[]; bands_hz?: number[]; partials_used?: number[] }
 interface Pair {
@@ -30,45 +30,106 @@ const LABELS: Record<string, string> = {
   attack_rise_ms: "Attack rise, 10→90 %",
   octave_early_db: "Octave-band balance, first 250 ms (RMS gap)",
   octave_decay_db_s: "Octave-band decay rates",
+  low_knock_early_db: "Low knock, first half second",
+  low_knock_late_db: "Low component, 1.5–2.9 s",
 };
 
 function show(v: Descriptor[keyof Descriptor], unit: string, digits = 3): string {
   if (v === null || v === undefined) return "—";
   if (Array.isArray(v)) return v.map((x) => (typeof x === "number" ? fmt(x, 2) : "—")).join(" · ") + (unit ? ` ${unit}` : "");
   if (typeof v !== "number") return String(v);
-  return `${Math.abs(v) < 1e-2 && v !== 0 ? v.toExponential(2) : fmt(v, digits)}${unit ? ` ${unit}` : ""}`;
+  return `${fmt(v, digits)}${unit ? ` ${unit}` : ""}`;
 }
 
-const UNITS: Record<string, string> = { f1_hz: "Hz", high_band_db: "dB", attack_rise_ms: "ms", partial_decay_db_s: "dB/s", octave_decay_db_s: "dB/s" };
+function cell(v: Descriptor[keyof Descriptor], unit: string): Node {
+  if (typeof v === "number" && v !== 0 && Math.abs(v) < 1e-2) return sciNode(v, 3);
+  return document.createTextNode(show(v, unit));
+}
+
+const UNITS: Record<string, string> = { f1_hz: "Hz", high_band_db: "dB", attack_rise_ms: "ms", partial_decay_db_s: "dB/s", octave_decay_db_s: "dB/s", low_knock_early_db: "dB", low_knock_late_db: "dB" };
 
 /** Bars against a ruler made only of real recordings. */
 function rulerChart(canvas: HTMLCanvasElement, rows: { label: string; value: number; real: boolean }[], unit: string): void {
   const draw = (): void => {
-    hidpi(canvas, 0, rows.length * 34 + 36);
+    // Size once: resizing a canvas resets its 2D context, font included.
+    const narrow = (canvas.clientWidth || canvas.parentElement?.clientWidth || 600) < 520;
+    hidpi(canvas, 0, rows.length * (narrow ? 44 : 34) + 40);
     const g = canvas.getContext("2d")!;
     const d = dpr();
     const { width: W, height: H } = canvas;
     g.fillStyle = "#07080b";
     g.fillRect(0, 0, W, H);
-    const max = Math.max(...rows.map((r) => r.value)) * 1.12;
-    const left = Math.min(W * 0.42, 260 * d);
-    g.font = `${11.5 * d}px "JetBrains Mono", monospace`;
+    g.font = `${(narrow ? 10.5 : 11.5) * d}px "JetBrains Mono", monospace`;
+    const labelW = Math.max(...rows.map((r) => g.measureText(r.label).width));
+    const left = narrow ? 10 * d : Math.min(labelW + 22 * d, W * 0.5);
+    const rowH = (narrow ? 44 : 34) * d;
+    const max = Math.max(...rows.map((r) => r.value)) * 1.15;
+    const span = W - left - 74 * d;
+    const reals = rows.filter((r) => r.real).map((r) => r.value);
+    if (reals.length) {
+      // The spread of real-vs-real distances: the ruler itself.
+      const x0 = left + (span * Math.min(...reals)) / max;
+      const x1 = left + (span * Math.max(...reals)) / max;
+      g.fillStyle = "rgba(143,185,214,0.10)";
+      g.fillRect(x0, 0, Math.max(2 * d, x1 - x0), canvas.height);
+      g.strokeStyle = "rgba(143,185,214,0.45)";
+      g.setLineDash([4 * d, 4 * d]);
+      g.beginPath(); g.moveTo(x1, 0); g.lineTo(x1, canvas.height); g.stroke();
+      g.setLineDash([]);
+    }
     g.textBaseline = "middle";
     rows.forEach((r, i) => {
-      const y = 16 * d + i * 34 * d;
-      g.fillStyle = "rgba(201,194,179,0.85)";
-      g.textAlign = "right";
-      g.fillText(r.label, left - 10 * d, y + 11 * d);
-      const w = ((W - left - 70 * d) * r.value) / max;
+      const y = 14 * d + i * rowH;
+      const barY = narrow ? y + 18 * d : y + 3 * d;
+      g.fillStyle = "rgba(201,194,179,0.9)";
+      g.textAlign = narrow ? "left" : "right";
+      g.fillText(r.label, narrow ? left : left - 10 * d, narrow ? y + 6 * d : y + 11 * d);
+      const w = (span * r.value) / max;
       g.fillStyle = r.real ? "rgba(143,185,214,0.85)" : "#d9a94f";
-      g.fillRect(left, y + 3 * d, w, 16 * d);
+      g.fillRect(left, barY, w, 14 * d);
       g.textAlign = "left";
       g.fillStyle = "#f1eadb";
-      g.fillText(`${r.value.toFixed(1)} ${unit}`, left + w + 8 * d, y + 11 * d);
+      g.fillText(`${r.value.toFixed(1)} ${unit}`, left + w + 8 * d, barY + 7 * d);
     });
   };
   new ResizeObserver(draw).observe(canvas);
   draw();
+}
+
+/** Findings are derived from the data so the words cannot drift from the numbers. */
+function findings(v: Verisim): HTMLElement[] {
+  const p = (id: string): Pair | undefined => v.pairs.find((x) => x.id === id);
+  const num = (id: string, k: string, side: "real" | "ours"): number => (p(id)?.descriptors[k]?.[side] as number) ?? NaN;
+  const gap = (id: string): number => (p(id)?.descriptors["partial_envelope_db"]?.rms_gap_db as number) ?? NaN;
+  const sci = (x: number): string => {
+    const [m, e] = x.toExponential(2).split("e");
+    return `${m}×10${String(Number(e)).replace("-", "⁻").replace(/\d/g, (c) => "⁰¹²³⁴⁵⁶⁷⁸⁹"[Number(c)]!)}`;
+  };
+  const rB = ["a3-pp", "a3-mf", "a3-ff"].map((id) => num(id, "inharmonicity_B", "real"));
+  const dyn = v.piano_dynamics;
+  const brightGain = (side: "real_high_band_db" | "ours_high_band_db", hi: string): number => (dyn[side][hi] ?? NaN) - (dyn[side]["mf"] ?? NaN);
+  const items: [string, string][] = [];
+  items.push(["The string physics lands on a real Steinway.",
+    `Inharmonicity fitted from the partials of A3 is ${sci(num("a3-mf", "inharmonicity_B", "ours"))} for FrankenSim and ${sci(Math.min(...rB))}–${sci(Math.max(...rB))} for the real piano across three dynamics. At C6 it is ${sci(num("c6-mf", "inharmonicity_B", "ours"))} against ${sci(num("c6-mf", "inharmonicity_B", "real"))}. Our scale describes a Model D and the recording is a Model B; at A3 their first partials agree to ${Math.abs(num("a3-mf", "f1_hz", "real") - num("a3-mf", "f1_hz", "ours")).toFixed(2)} Hz.`]);
+  items.push(["Timbre stays within one real dynamic step.",
+    `The partial-level gap to the recording is ${gap("a3-pp").toFixed(1)} dB at pp, ${gap("a3-mf").toFixed(1)} dB at mf and ${gap("a3-ff").toFixed(1)} dB at ff. The real piano changes by ${v.piano_ruler.real_pp_vs_real_mf_db.toFixed(1)} dB from pp to mf and ${v.piano_ruler.real_mf_vs_real_ff_db.toFixed(1)} dB from mf to ff. At mf, 2–8 kHz brightness is within ${Math.abs(num("a3-mf", "high_band_db", "real") - num("a3-mf", "high_band_db", "ours")).toFixed(1)} dB.`]);
+  if (dyn.ours_db["ff8"] !== undefined) items.push(["ff is too dull, even at matched loudness.",
+    `From mf to ff the real piano gains ${brightGain("real_high_band_db", "ff").toFixed(1)} dB of 2–8 kHz brightness and ${dyn.real_db["ff"]!.toFixed(1)} dB of level. FrankenSim at 4.5 m/s gains ${brightGain("ours_high_band_db", "ff").toFixed(1)} dB of brightness and ${dyn.ours_db["ff"]!.toFixed(1)} dB of level. At its hardest stroke, 8 m/s, it reaches ${dyn.ours_db["ff8"]!.toFixed(1)} dB of level, close to the real ff, but is still ${(num("a3-ff8", "high_band_db", "real") - num("a3-ff8", "high_band_db", "ours")).toFixed(1)} dB duller. So stroke speed alone does not explain it; the missing brightness lies in how the hammer, strings and soundboard make and radiate high partials.`]);
+  items.push(["A soundboard knock that is too loud.",
+    `In the first half second FrankenSim has a component near 131 Hz at ${num("a3-mf", "low_knock_early_db", "ours").toFixed(1)} dB relative to the fundamental. The real piano's strongest low component there sits at ${num("a3-mf", "low_knock_early_db", "real").toFixed(1)} dB. Later the two agree (${num("a3-mf", "low_knock_late_db", "ours").toFixed(1)} dB and ${num("a3-mf", "low_knock_late_db", "real").toFixed(1)} dB). Our working hypothesis: the default microphone assumes an infinite baffle, which radiates low board modes far more efficiently than a board inside a real case.`]);
+  const dr = p("a3-mf")?.descriptors["partial_decay_db_s"];
+  if (dr && Array.isArray(dr.real) && Array.isArray(dr.ours)) items.push(["Some partials ring too long, others too short.",
+    `At mf, partial 4 decays at ${(dr.ours[3] as number).toFixed(1)} dB/s in FrankenSim against ${(dr.real[3] as number).toFixed(1)} dB/s on the real piano. Partial 2 goes the other way: ${(dr.ours[1] as number).toFixed(1)} dB/s against ${(dr.real[1] as number).toFixed(1)} dB/s. Decay is set by losses at the bridge and in the string, so this points at the coupling and damping model.`]);
+  items.push(["The attack is sharper.",
+    `FrankenSim rises in about ${num("a3-mf", "attack_rise_ms", "ours").toFixed(1)} ms, the recording in about ${num("a3-mf", "attack_rise_ms", "real").toFixed(1)} ms. A room and a microphone at a distance soften a real attack, so part of this gap belongs to the recording.`]);
+  const cr = v.cymbal_ruler.rows;
+  const cv = (label: string): number => cr.find((r) => r.label === label)?.rms_gap_db ?? NaN;
+  const crashes = cr.filter((r) => r.real && /crash/.test(r.label)).map((r) => r.rms_gap_db);
+  const od = p("splash-mf")?.descriptors["octave_decay_db_s"];
+  const ratio = od && Array.isArray(od.real) && Array.isArray(od.ours) ? Math.max(...(od.ours as number[]).map((o, i) => o / (od.real as number[])[i]!)) : NaN;
+  items.push(["The cymbal is not there yet.",
+    `The real splash has ${num("splash-mf", "high_band_db", "real").toFixed(1)} dB more energy in 2–8 kHz than in 0.2–2 kHz. FrankenSim's 2 m/s render is at ${num("splash-mf", "high_band_db", "ours").toFixed(1)} dB, and its bands decay up to ${ratio.toFixed(0)}× faster. In octave-band balance it sits ${cv("FrankenSim splash, 2 m/s").toFixed(1)} dB from the real splash. Real 13-, 17- and 18-inch crashes sit ${Math.min(...crashes).toFixed(1)}–${Math.max(...crashes).toFixed(1)} dB away. The felt-mallet render comes closest at ${cv("FrankenSim splash, felt mallet").toFixed(1)} dB, though the reference was struck with a stick. This shell model resolves its modes to 1.2 kHz, and a real splash lives above that.`]);
+  return items.map(([h, t]) => el("li", {}, el("b", {}, h), " ", t));
 }
 
 export async function mountVerisim(root: HTMLElement): Promise<void> {
@@ -78,25 +139,27 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
   let blind = false;
   let blindOrder: ("real" | "ours")[] = ["real", "ours"];
 
-  const seg = el("div", { class: "seg", role: "group", "aria-label": "Choose a comparison" });
+  const seg = el("div", { class: "seg vs-pairs", role: "group", "aria-label": "Choose a comparison" });
   const playA = el("button", { class: "btn sm", type: "button" });
   const playB = el("button", { class: "btn sm", type: "button" });
   const stop = el("button", { class: "btn ghost sm", type: "button" }, "Stop");
   const blindBox = el("label", { class: "toggle" }, el("input", { type: "checkbox" }), "Blind test: hide which is which");
-  const reveal = el("div", { class: "small", "aria-live": "polite" });
-  const tabs = el("div", { class: "seg", role: "tablist", "aria-label": "Spectrogram" });
-  const img = el("img", { alt: "", style: "width:100%; height:auto; display:block; image-rendering:auto" });
+  const reveal = el("div", { class: "small vs-reveal", "aria-live": "polite" });
+  const subtitle = el("p", { class: "small muted", style: "margin-top: 8px" });
+  const verdict = el("ul", { class: "findings" });
+  const tabs = el("div", { class: "seg vs-tabs", role: "tablist", "aria-label": "Spectrogram" });
+  const img = el("img", { alt: "", class: "vs-img" });
   const axis = el("div", { class: "vs-axis", "aria-hidden": "true" });
   const imgBox = el("div", { class: "clip-view", style: "position:relative" }, img, axis);
   const legend = el("p", { class: "small muted" });
-  const table = el("table");
+  const table = el("table", { class: "vs-table" });
   const tableBox = el("div", { class: "table-scroll", tabindex: "0", "aria-label": "Scorecard" }, table);
   const source = el("p", { class: "small muted" });
 
   let view: "real" | "ours" | "diff" = "real";
   const viewBtns: Record<string, HTMLButtonElement> = {};
   for (const [k, label] of [["real", "Real recording"], ["ours", "FrankenSim"], ["diff", "Difference"]] as const) {
-    const b = el("button", { type: "button", role: "tab", "aria-pressed": String(k === view) }, label);
+    const b = el("button", { type: "button", role: "tab", "aria-selected": String(k === view), "aria-pressed": String(k === view) }, label);
     b.addEventListener("click", () => { view = k; render(); });
     viewBtns[k] = b;
     tabs.append(b);
@@ -129,28 +192,39 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
   playA.addEventListener("click", () => playSlot(0));
   playB.addEventListener("click", () => playSlot(1));
   stop.addEventListener("click", () => player?.pause());
-  blindBox.querySelector("input")!.addEventListener("change", (e) => {
-    blind = (e.target as HTMLInputElement).checked;
+  const askBlind = (): void => {
     blindOrder = Math.random() < 0.5 ? ["real", "ours"] : ["ours", "real"];
     reveal.replaceChildren();
-    if (blind) {
-      const ask = el("div", { class: "btn-row" }, el("span", {}, "Which one is the real piano or cymbal?"));
-      for (const slot of [0, 1] as const) {
-        const b = el("button", { class: "btn sm", type: "button" }, `Sound ${slot === 0 ? "X" : "Y"}`);
-        b.addEventListener("click", () => {
-          const right = which(slot) === "real";
-          reveal.replaceChildren(el("p", {}, right ? "Correct: that was the recording." : "That one was FrankenSim's render.", ` X was ${which(0) === "real" ? "the recording" : "FrankenSim"}, Y was ${which(1) === "real" ? "the recording" : "FrankenSim"}. Your answer stays in this browser; nothing is collected.`));
-        });
-        ask.append(b);
-      }
-      reveal.append(ask);
-      view = "diff";
+    if (!blind) return;
+    const ask = el("div", { class: "btn-row" }, el("span", {}, `Which one is the real ${current.kind === "piano" ? "piano" : "cymbal"}?`));
+    const guesses: HTMLButtonElement[] = [];
+    for (const slot of [0, 1] as const) {
+      const b = el("button", { class: "btn sm", type: "button" }, `Sound ${slot === 0 ? "X" : "Y"}`);
+      b.addEventListener("click", () => {
+        for (const g of guesses) g.disabled = true;
+        const right = which(slot) === "real";
+        reveal.append(el("p", { style: "margin-top: 8px" }, right ? "Correct: that was the recording. " : "That one was FrankenSim's render. ",
+          `X was ${which(0) === "real" ? "the recording" : "FrankenSim"}, Y was ${which(1) === "real" ? "the recording" : "FrankenSim"}. Your answer stays in this browser; nothing is collected. Pick another pair to try again.`));
+      });
+      guesses.push(b);
+      ask.append(b);
     }
+    reveal.append(ask);
+  };
+  blindBox.querySelector("input")!.addEventListener("change", (e) => {
+    blind = (e.target as HTMLInputElement).checked;
+    player?.pause();
+    if (blind) view = "diff";
+    askBlind();
     render();
   });
 
   const render = (): void => {
-    for (const [k, b] of Object.entries(viewBtns)) b.setAttribute("aria-pressed", String(k === view));
+    for (const [k, b] of Object.entries(viewBtns)) {
+      b.setAttribute("aria-pressed", String(k === view));
+      b.setAttribute("aria-selected", String(k === view));
+    }
+    subtitle.textContent = current.title.split(": ").slice(1).join(": ");
     // In a blind test the labelled spectrograms would give the answer away.
     viewBtns["real"]!.disabled = blind;
     viewBtns["ours"]!.disabled = blind;
@@ -164,28 +238,30 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
     for (const [k, dsc] of Object.entries(current.descriptors)) {
       const unit = UNITS[k] ?? "";
       const gap = dsc.rms_gap_db;
-      const measure = el("td", {}, el("div", {}, LABELS[k] ?? k), el("div", { class: "small muted", style: "margin-top:3px" }, dsc.note ?? ""));
+      const measure = el("td", { class: "vs-measure" }, el("div", {}, LABELS[k] ?? k), el("div", { class: "small muted", style: "margin-top:3px" }, dsc.note ?? ""));
       if (gap !== undefined && gap !== null) {
-        rows.push(el("tr", {}, measure, el("td", { class: "num", colspan: "2" }, `${gap.toFixed(1)} dB apart`)));
+        rows.push(el("tr", {}, measure, el("td", { class: "num", colspan: "2", "data-label": "Real ↔ FrankenSim" }, `${gap.toFixed(1)} dB apart`, el("span", { class: "vs-wide" }, " (real ↔ FrankenSim)"))));
         continue;
       }
       const cls = Array.isArray(dsc.real) ? "num small" : "num";
-      rows.push(el("tr", {}, measure, el("td", { class: cls }, show(dsc.real, unit)), el("td", { class: cls }, show(dsc.ours, unit))));
+      const realName = current.kind === "piano" ? "Real Steinway" : "Real splash";
+      rows.push(el("tr", {}, measure, el("td", { class: cls, "data-label": realName }, cell(dsc.real, unit)), el("td", { class: cls, "data-label": "FrankenSim" }, cell(dsc.ours, unit))));
     }
     table.replaceChildren(el("thead", {}, rows[0]!), el("tbody", {}, ...rows.slice(1)));
     source.replaceChildren(
       el("span", {}, `Recording: ${current.real.label}, `), el("a", { href: current.real.url, rel: "noopener" }, "source file"),
-      el("span", {}, `. ${current.real.recording}. ${current.audio.level_match}. Rights: ${current.real.rights}.`),
+      el("span", {}, `. ${current.real.recording}. ${current.audio.level_match.charAt(0).toUpperCase()}${current.audio.level_match.slice(1)}. Both signals high-passed at 40–70 Hz to remove room rumble. Rights: ${current.real.rights}.`),
     );
     labelButtons();
   };
 
   for (const p of pairs) {
-    const b = el("button", { type: "button", "aria-pressed": String(p === current) }, p.title.split(":")[0]!);
+    const b = el("button", { type: "button", "aria-pressed": String(p === current) }, p.title.split(":")[0]!.replace(" · ", " "));
     b.addEventListener("click", () => {
       current = p;
       for (const x of seg.querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
       makePlayer();
+      askBlind();
       render();
     });
     seg.append(b);
@@ -198,7 +274,7 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
   root.append(
     el("div", { class: "panel" },
       el("div", { class: "panel-head" }, el("h3", {}, "Listen and look, side by side"), el("div", { class: "tags" }, el("span", { class: "tag offline" }, "Offline reference"), el("span", { class: "tag plain" }, "Real recording"))),
-      seg,
+      seg, subtitle,
       el("div", { class: "stack", style: "margin-top: 16px" },
         el("div", { class: "stack" },
           el("div", { class: "btn-row" }, playA, playB, stop, blindBox),
@@ -222,9 +298,12 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
     { label: "FrankenSim vs real, pp", value: gap("a3-pp"), real: false },
     { label: "FrankenSim vs real, mf", value: gap("a3-mf"), real: false },
     { label: "FrankenSim vs real, ff", value: gap("a3-ff"), real: false },
+    { label: "FrankenSim vs real, ff at 8 m/s", value: gap("a3-ff8"), real: false },
     { label: "FrankenSim vs real, C6 mf", value: gap("c6-mf"), real: false },
   ].filter((r) => Number.isFinite(r.value)), "dB");
   rulerChart(cymRuler, data.cymbal_ruler.rows.map((r) => ({ label: r.label, value: r.rms_gap_db, real: r.real })), "dB");
+  const host = document.getElementById("verisim-findings");
+  if (host) host.replaceChildren(...findings(data));
   makePlayer();
   render();
 }

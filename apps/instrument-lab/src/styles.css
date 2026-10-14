@@ -379,3 +379,18 @@ footer.site code { color: var(--ivory-2); }
 .findings b { color: var(--ivory); font-weight: 600; }
 .vs-axis { position: absolute; inset: 0; pointer-events: none; }
 .seg button[disabled] { opacity: 0.4; cursor: not-allowed; }
+
+.vs-img { width: 100%; height: auto; display: block; min-height: 200px; object-fit: fill; }
+.vs-reveal:empty { display: none; }
+@media (max-width: 640px) {
+  .vs-pairs { display: flex; flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; padding-bottom: 4px; }
+  .vs-pairs button { flex: none; }
+  .vs-table thead { display: none; }
+  .vs-table, .vs-table tbody, .vs-table tr, .vs-table td { display: block; width: 100%; }
+  .vs-table tr { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .vs-table td { border: 0; padding: 3px 0; }
+  .vs-table td.num { white-space: normal; overflow-wrap: anywhere; }
+  .vs-table .vs-wide { display: none; }
+  .seg.vs-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .vs-table td[data-label]::before { content: attr(data-label) ": "; color: var(--ivory-3); font: 500 11px/1.4 var(--font-mono); }
+}

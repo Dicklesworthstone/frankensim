@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#08090c" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <meta property="og:title" content="Struck — instruments from first principles" />
-  <meta property="og:description" content="No samples. A drum, a cymbal and a concert grand computed from geometry, materials and contact — with every joule accounted for." />
+  <meta property="og:description" content="A drum, a cymbal and a concert grand computed from geometry, materials and contact, with every joule accounted for, and graded against real recordings." />
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://frankensim-struck.vercel.app/" />
   <meta property="og:image" content="https://frankensim-struck.vercel.app/og.png" />
@@ -42,7 +42,7 @@
           <p class="eyebrow">FrankenSim · physical acoustics</p>
           <h1>Nothing here<br />was <em>recorded.</em></h1>
           <p class="lede">A drum, a splash cymbal and a concert grand, computed from geometry, materials and contact. Strings get their partials from tension, stiffness and mass. Heads and soundboards get their modes from finite elements. A felt hammer or a stick collides with them, and the air carries the result to a microphone placed at a point in space. Every mechanical step closes an energy ledger, or the render stops.</p>
-          <p class="lede">Two ways to hear it: <em class="b">offline reference renders</em> that took up to 41 minutes per clip, and a <em class="v">live engine</em> compiled to WebAssembly that you can play in this tab.</p>
+          <p class="lede">Two ways to hear it: <em class="b">offline reference renders</em> that took up to 41 minutes per clip, and a <em class="v">live engine</em> compiled to WebAssembly that you can play in this tab. The only recordings on this page are the real instruments we <a href="#real">grade ourselves against</a>, and they are clearly marked.</p>
           <div class="btn-row">
             <button class="btn primary" id="hero-play" type="button" aria-describedby="hero-play-note">
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor" /></svg>
@@ -321,20 +321,13 @@
           <div class="rule"></div>
           <p class="eyebrow">Graded against real instruments</p>
           <h2>How close is it to the real thing?</h2>
-          <p class="lede">Sounding plausible is easy to fake, so we put FrankenSim's renders next to real recordings of the same notes, from the University of Iowa's free instrument samples: a Steinway &amp; Sons Model B grand, and a splash cymbal recorded in an anechoic chamber. We measured the same things on both. Every gap sits next to a ruler made only of real instruments: how much the real piano changes between two dynamics, and how far one real cymbal is from another.</p>
+          <p class="lede">Sounding plausible is easy to fake, so we put FrankenSim's renders next to real recordings of the same notes, from the University of Iowa's free instrument samples: a Steinway &amp; Sons Model B grand, and a splash cymbal recorded in an anechoic chamber. We measured the same things on both. The two headline gaps sit next to rulers made only of real instruments: how much the real piano changes between two dynamics, and how far one real cymbal is from another.</p>
         </header>
         <div id="verisim-root" class="live-root" style="min-height: 640px"></div>
         <div class="panel subsection" style="margin-top: 22px">
           <h3>What the comparison shows</h3>
-          <ul class="findings">
-            <li><b>The string physics lands on a real Steinway.</b> Inharmonicity fitted from the partials of A3 is 2.45×10⁻⁴ for FrankenSim and 2.2–2.3×10⁻⁴ for the real piano across three dynamics. At C6 it is 2.74×10⁻³ against 2.43×10⁻³. Our scale describes a Model D and the recording is a Model B, yet the first partials agree to 0.2 Hz.</li>
-            <li><b>pp and mf timbre are inside the real piano's own spread.</b> The partial-level gap to the recording is 7.3 dB at pp and 6.9 dB at mf. That is smaller than the real piano's own change from pp to mf (9.2 dB). Brightness in the 2–8 kHz band is within 3 dB.</li>
-            <li><b>ff is too dull.</b> From mf to ff the real piano gains 13 dB of 2–8 kHz brightness. FrankenSim at 4.5 m/s gains 5.6 dB. Part of that may be a softer stroke: the real ff is also 14 dB louder than its mf, ours only 7.3 dB.</li>
-            <li><b>A soundboard knock that is too loud.</b> In the first half second FrankenSim has a component near 131 Hz at −18 dB relative to the fundamental, where the real piano has −41 dB. Later the two agree (−35 dB and −34.5 dB). Our working hypothesis: the default microphone assumes an infinite baffle, which radiates low board modes far more efficiently than a board inside a real case.</li>
-            <li><b>The attack is sharper.</b> FrankenSim rises in about 2 ms, the recording in about 7 ms at mf. A room and a microphone at a distance soften a real attack, so this gap is partly the recording, not the piano.</li>
-            <li><b>The cymbal is not there yet.</b> The real splash puts more energy above 2 kHz than below it. FrankenSim's has 21 dB less up there, and it decays faster. In octave-band balance it sits 23 dB from the real splash, twice as far as real 17- and 18-inch crashes (11–13 dB). The felt-mallet render is closest (15.9 dB). This shell model resolves its modes to 1.2 kHz, and a real splash lives above that.</li>
-          </ul>
-          <p class="small muted" style="margin-top: 14px">Method: each pair is aligned at the onset. Partial frequencies come from a 1 s window, and B is fitted from (fₙ/n)² = f₀²(1+Bn²) over partials above the noise floor. Decay rates are linear fits of each partial over 0.2–2.6 s. The Iowa microphones' first channel is used, because averaging two spaced microphones can cancel partials. Playback is matched in early loudness only, and nothing else is processed. The analysis is <code>tools/verisim.py</code>.</p>
+          <ul class="findings" id="verisim-findings"></ul>
+          <p class="small muted" style="margin-top: 14px">Method: both signals are high-passed at 40–70 Hz to remove room rumble, and each pair is aligned at its note onset, measured against the recording's own noise floor. Partial frequencies come from a 1 s window, and B is fitted from (fₙ/n)² = f₀²(1+Bn²) over partials above the noise floor. Decay rates are linear fits of each partial over 0.2–2.6 s. The Iowa microphones' first channel is used, because averaging two spaced microphones can cancel partials. Playback is matched in early loudness only, and nothing else is processed. The analysis is <code>tools/verisim.py</code>.</p>
         </div>
       </div>
     </section>

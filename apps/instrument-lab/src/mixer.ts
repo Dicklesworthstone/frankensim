@@ -168,12 +168,14 @@ export class SoundboardMixer {
       const every = Math.max(1, Math.ceil((30 * d) / bw));
       if (i % every === 0 || i === n - 1) {
         g.fillStyle = "rgba(201,194,179,0.7)";
-        g.fillText(f ? (f >= 1000 ? (f / 1000).toFixed(1) + "k" : f.toFixed(0)) : "rest", x + bw / 2, H - 8 * d);
+        const label = f ? (f >= 1000 ? (f / 1000).toFixed(1) + "k" : f.toFixed(0)) : "rest";
+        const half = g.measureText(label).width / 2 + 2 * d;
+        g.fillText(label, Math.min(Math.max(x + bw / 2, half), W - half), H - 8 * d);
       }
     }
     g.textAlign = "left";
     g.fillStyle = "rgba(143,137,125,0.95)";
-    g.fillText("loaded-board mode reference frequency [Hz] · bar height ∝ √(energy share) · tap to mute", 8 * d, 12 * d);
+    g.fillText(W / d < 560 ? "mode frequency [Hz] · height ∝ √energy · tap to mute" : "loaded-board mode reference frequency [Hz] · bar height ∝ √(energy share) · tap to mute", 8 * d, 12 * d);
   }
 
   private drawWave(): void {

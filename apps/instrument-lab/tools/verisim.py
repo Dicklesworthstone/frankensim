@@ -44,15 +44,36 @@ def load(path: Path):
     return x[:, 0]  # first channel only: averaging spaced microphones can cancel partials
 
 
+def highpass(x, f0=40.0, f1=70.0):
+    """Zero-phase raised-cosine high-pass. Room rumble below 70 Hz precedes and underlies the
+    Iowa pp notes; no note compared here has energy there (A3 is 220 Hz, the splash's lowest
+    tone is about 140 Hz). Applied identically to both signals."""
+    n = 1 << int(np.ceil(np.log2(len(x) + 1)))
+    X = np.fft.rfft(x, n)
+    f = np.fft.rfftfreq(n, 1 / SR)
+    g = np.clip((f - f0) / (f1 - f0), 0, 1)
+    X *= 0.5 - 0.5 * np.cos(np.pi * g)
+    return np.fft.irfft(X, n)[: len(x)]
+
+
 def onset(x):
+    # Relative to BOTH the peak and the recording's own noise floor: a pp note in a room
+    # sits less than 30 dB above the hiss before it, and the hiss is not the note.
     env = np.convolve(np.abs(x), np.ones(96) / 96, "same")
-    return max(0, int(np.argmax(env > env.max() * 10 ** (-30 / 20))) - int(0.005 * SR))
+    head = env[: max(int(0.05 * SR), 1)]
+    noise = float(np.percentile(head, 90)) if env.argmax() > len(head) else 0.0
+    thr = max(env.max() * 10 ** (-30 / 20), noise * 10 ** (15 / 20))
+    return max(0, int(np.argmax(env > thr)) - int(0.005 * SR))
 
 
 def segment(x, dur):
     o = onset(x)
     y = x[o:o + int(dur * SR)]
-    return np.pad(y, (0, int(dur * SR) - len(y)))
+    y = np.pad(y, (0, int(dur * SR) - len(y)))
+    env = np.convolve(np.abs(y), np.ones(96) / 96, "same")
+    first = int(np.argmax(env > env.max() * 10 ** (-20 / 20))) / SR
+    assert first < 0.012, f"onset not aligned: the note starts {first*1000:.1f} ms into the window"
+    return y
 
 
 def early_rms(x, t=0.3):
@@ -130,6 +151,22 @@ def centroid_track(x, dur):
         tt.append(r((i + n / 2) / SR, 4))
         cc.append(r(float((f * S).sum() / tot), 4))
     return {"t": tt[::2], "hz": cc[::2]}
+
+
+def low_knock(x, f1):
+    """Strongest component between 80 Hz and 0.77*f1, relative to partial 1, early and late."""
+    out = {}
+    for tag, t0, t1 in (("early", 0.05, 0.5), ("late", 1.5, 2.9)):
+        if t1 * SR > len(x):
+            continue
+        f, s = spectrum(x, t0, t1, 1 << 19)
+        lo = (f > 80) & (f < 0.77 * f1)
+        p1 = (f > f1 * 0.96) & (f < f1 * 1.04)
+        if not lo.any() or not p1.any():
+            continue
+        k, k1 = np.argmax(np.where(lo, s, 0)), np.argmax(np.where(p1, s, 0))
+        out[tag] = {"hz": r(f[k], 5), "db": r(20 * math.log10(s[k] / s[k1]), 3)}
+    return out
 
 
 def band_ratio(x, t0=0.0, t1=1.0):
@@ -268,14 +305,15 @@ def ours_clip(kind, cid):
 
 
 def piano_pair(pid, title, ours_id, real_name, f_guess, dur):
-    real_raw = load(REFS / f"{real_name}.wav")
-    ours_raw = ours_clip("piano", ours_id)
+    real_raw = highpass(load(REFS / f"{real_name}.wav"))
+    ours_raw = highpass(ours_clip("piano", ours_id))
     real, ours = segment(real_raw, dur), segment(ours_raw, dur)
     g_r, g_o = 1 / early_rms(real), 1 / early_rms(ours)
     real_n, ours_n = real * g_r, ours * g_o
     pk = max(np.abs(real_n).max(), np.abs(ours_n).max())
     play = 10 ** (-1 / 20) / pk
     pr, po = partials(real, f_guess), partials(ours, f_guess)
+    kr, ko = low_knock(real, pr["f1"] or f_guess), low_knock(ours, po["f1"] or f_guess)
     dr = partial_decay(real, [p["f"] for p in pr["partials"][:6]])
     do = partial_decay(ours, [p["f"] for p in po["partials"][:6]])
     env_r = {p["n"]: p["db"] for p in pr["partials"]}
@@ -300,6 +338,12 @@ def piano_pair(pid, title, ours_id, real_name, f_guess, dur):
                                    "note": "linear fit of each partial's level 0.2-2.6 s after onset"},
             "high_band_db": {"real": r(band_ratio(real), 4), "ours": r(band_ratio(ours), 4), "note": "energy 2-8 kHz relative to 200-2000 Hz, first second"},
             "attack_rise_ms": {"real": r(rise_ms(real), 3), "ours": r(rise_ms(ours), 3), "note": "10% to 90% of the envelope peak"},
+            **({"low_knock_early_db": {"real": kr["early"]["db"], "ours": ko["early"]["db"],
+                                       "note": f"strongest component 80 Hz-{0.77 * f_guess:.0f} Hz in the first 0.05-0.5 s, relative to partial 1 (real at {kr['early']['hz']} Hz, ours at {ko['early']['hz']} Hz)"}}
+               if "early" in kr and "early" in ko else {}),
+            **({"low_knock_late_db": {"real": kr["late"]["db"], "ours": ko["late"]["db"],
+                                      "note": "the same, 1.5-2.9 s after onset"}}
+               if "late" in kr and "late" in ko else {}),
         },
         "centroid": {"real": centroid_track(real_n, dur), "ours": centroid_track(ours_n, dur)},
         "_env": (env_r, env_o),
@@ -312,8 +356,8 @@ def cymbal_desc(x):
 
 
 def cymbal_pair(pid, title, ours_id, real_name, dur):
-    real_raw = load(REFS / f"{real_name}.wav")
-    ours_raw = ours_clip("perc", ours_id)
+    real_raw = highpass(load(REFS / f"{real_name}.wav"))
+    ours_raw = highpass(ours_clip("perc", ours_id))
     real, ours = segment(real_raw, dur), segment(ours_raw, dur)
     real_n, ours_n = real / early_rms(real), ours / early_rms(ours)
     pk = max(np.abs(real_n).max(), np.abs(ours_n).max())
@@ -347,10 +391,14 @@ def cymbal_pair(pid, title, ours_id, real_name, dur):
 pairs = []
 ladder = {}
 for dyn, speed in [("pp", "0.6"), ("mf", "2.0"), ("ff", "4.5")]:
-    p = piano_pair(f"a3-{dyn}", f"A3 {dyn}: real Steinway vs FrankenSim at {speed} m/s", f"a3-{dyn}", f"Piano.{dyn}.A3", 220.0, 3.0)
+    p = piano_pair(f"a3-{dyn}", f"A3 {dyn} · {speed} m/s: real Steinway vs FrankenSim at {speed} m/s", f"a3-{dyn}", f"Piano.{dyn}.A3", 220.0, 3.0)
     pairs.append(p)
     ladder[dyn] = p
-pairs.append(piano_pair("c6-mf", "C6 mf: real Steinway vs FrankenSim at 2.0 m/s", "c6-mf", "Piano.mf.C6", 1046.5, 2.0))
+if (CAMPAIGN / "piano" / "a3-fff.wav").exists():
+    p8 = piano_pair("a3-ff8", "A3 ff · 8 m/s: real Steinway ff vs FrankenSim at its hardest stroke, 8 m/s", "a3-fff", "Piano.ff.A3", 220.0, 3.0)
+    pairs.append(p8)
+    ladder["ff8"] = p8
+pairs.append(piano_pair("c6-mf", "C6 mf · 2.0 m/s: real Steinway vs FrankenSim at 2.0 m/s", "c6-mf", "Piano.mf.C6", 1046.5, 2.0))
 
 # Piano ruler: how far apart are two DYNAMIC LAYERS of the same real piano?
 def env_gap(a, b):
@@ -370,22 +418,22 @@ dyn_levels = {
 }
 
 cym = []
-for dyn, ours_id in [("pp", "cym-ff-soft"), ("mf", "cym-ff"), ("ff", "cym-ff")]:
-    c = cymbal_pair(f"splash-{dyn}", f"Splash {dyn}: real Iowa splash vs FrankenSim ({'0.6' if dyn == 'pp' else '2'} m/s stick)", ours_id, f"splash.stick.normal.{dyn}", 2.5)
+for dyn, ours_id, speed in [("pp", "cym-ff-soft", "0.6"), ("mf", "cym-ff", "2")]:
+    c = cymbal_pair(f"splash-{dyn}", f"Splash {dyn} · {speed} m/s: real Iowa splash vs FrankenSim with a {speed} m/s stick", ours_id, f"splash.stick.normal.{dyn}", 2.5)
     pairs.append(c)
     cym.append(c)
 
 # Cymbal ruler: distance of each REAL crash, and of FrankenSim, from the real mf splash.
-splash_mf = segment(load(REFS / "splash.stick.normal.mf.wav"), 2.5)
+splash_mf = segment(highpass(load(REFS / "splash.stick.normal.mf.wav")), 2.5)
 ref_early = octave_levels(splash_mf, 0.0, 0.25)
 ruler = []
 for name, label in [("13crash.stick.normal.mf", "real 13-inch crash"), ("17crash.stick.normal.mf", "real 17-inch crash"),
                     ("18crash.stick.normal.mf", "real 18-inch crash"), ("splash.stick.normal.ff", "same real splash, ff"),
                     ("splash.stick.normal.pp", "same real splash, pp")]:
-    x = segment(load(REFS / f"{name}.wav"), 2.5)
+    x = segment(highpass(load(REFS / f"{name}.wav")), 2.5)
     ruler.append({"label": label, "rms_gap_db": r(rms_db(octave_levels(x, 0.0, 0.25), ref_early), 3), "real": True})
 for cid, label in [("cym-ff", "FrankenSim splash, 2 m/s"), ("cym-ff-soft", "FrankenSim splash, 0.6 m/s"), ("cym-ff-mallet", "FrankenSim splash, felt mallet")]:
-    x = segment(ours_clip("perc", cid), 2.5)
+    x = segment(highpass(ours_clip("perc", cid)), 2.5)
     ruler.append({"label": label, "rms_gap_db": r(rms_db(octave_levels(x, 0.0, 0.25), ref_early), 3), "real": False})
 
 for p in pairs:
