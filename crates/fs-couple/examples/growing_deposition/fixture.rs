@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use fs_conduction::transient::deposition::*;
 use fs_material::thermovisco::{Limits, ThermalKnot, ThermoMaxwell};
 use fs_solid::bridge::{self, Bridge, Support};
+use fs_solid::bridge::drawing::Drawing;
 use fs_solid::deposition::{Config as SectionConfig, LayerGeometry};
 use super::driver::{Binding, Config, Error, GrowingRoad};
 
@@ -29,7 +30,7 @@ pub fn config() -> Config {
     Config { mechanics: bridge::Config {
         section: SectionConfig { force_tolerance_n: 1e-7,moment_tolerance_nm: 1e-9,
             energy_tolerance_j: 1e-9,max_strain: 0.03,max_rotation_rad: 0.1 },
-        maximum_deflection_m: 0.002 }, gravity_m_s2: 9.81,
+        maximum_deflection_m: 0.002 }, gravity_m_s2: 9.81, drawing: Drawing::Slack,
         coordinate_tolerance_m: 1e-12, volume_tolerance_m3: 1e-18,
         mass_tolerance_kg: 1e-14, temperature_tolerance_k: 1e-10,
         max_bound_cells: 32,max_material_point_updates: 100_000 }
@@ -72,6 +73,12 @@ pub fn bindings(law: &ThermoMaxwell) -> Vec<Binding<'_>> {
     (4..8).map(|id| Binding { cell: CellId(id),thermal_material: MaterialId(3),mechanical_law: law }).collect()
 }
 pub fn build(law: &ThermoMaxwell) -> Result<GrowingRoad<'static,'_>,Error> {
+    build_with_drawing(law, Drawing::Slack)
+}
+pub fn build_with_drawing(law: &ThermoMaxwell, drawing: Drawing)
+    -> Result<GrowingRoad<'static,'_>,Error> {
     let (thermal,beam) = initial(law,schedule())?;
-    GrowingRoad::new(thermal,beam,BODY,bindings(law),config(),|| Ok(()))
+    let mut cfg=config();
+    cfg.drawing=drawing;
+    GrowingRoad::new(thermal,beam,BODY,bindings(law),cfg,|| Ok(()))
 }

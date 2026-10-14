@@ -101,3 +101,27 @@ fn reference_mismatch_and_unbound_road_births_refuse_without_fake_coupling() {
     let mut duplicate=fixture::bindings(&law); duplicate.push(duplicate[0]);
     assert!(GrowingRoad::new(thermal,beam,fixture::BODY,duplicate,fixture::config(),|| Ok(())).is_err());
 }
+
+
+#[test]
+fn declared_drawing_tension_changes_growth_sag_without_changing_birth_heat() {
+    use fs_solid::bridge::drawing::Drawing;
+    let law=fixture::material();
+    let slack=fixture::build(&law).unwrap();
+    let drawn=fixture::build_with_drawing(&law,Drawing::TensionN(0.002)).unwrap();
+    let (slack,rs)=slack.advance_to(2.0,fixture::stepping(0.03125),|| Ok(())).unwrap();
+    let (drawn,rd)=drawn.advance_to(2.0,fixture::stepping(0.03125),|| Ok(())).unwrap();
+    assert_eq!(slack.thermal().cells(),drawn.thermal().cells());
+    assert_eq!(slack.thermal().links(),drawn.thermal().links());
+    assert_eq!(rs.thermal,rd.thermal);
+    assert_eq!(slack.beam().cells().len(),drawn.beam().cells().len());
+    let zs=slack.beam().deformed_position_m(slack.beam().length_m(),0.0).unwrap()[1];
+    let zd=drawn.beam().deformed_position_m(drawn.beam().length_m(),0.0).unwrap()[1];
+    assert!(zd>zs,"drawing tension should reduce downward sag: {zd:e} <= {zs:e}");
+    let report=rd.last_mechanics.unwrap();
+    assert_eq!(report.drawing,Drawing::TensionN(0.002));
+    near(report.drawing_force_n,0.002,1e-12);
+    for cell in &drawn.beam().cells()[4..] {
+        assert!(cell.section().layers()[&9].birth_time_s>=0.5);
+    }
+}
