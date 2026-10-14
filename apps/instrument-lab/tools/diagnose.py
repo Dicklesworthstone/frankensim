@@ -413,9 +413,17 @@ def main():
             + ("The bass strings take part in it. But at the estimated 0.4 N s/m a damper barely acts in the first half second, "
                "so this cannot tell whether real-strength dampers would remove it; a render with stronger dampers decides."))
         follows = None  # undecided until the stronger-damper render is scored
+        damp10 = V.CAMPAIGN / "piano" / "a3-mf-damp10.wav"
+        if damp10.exists():
+            y = piano("a3-mf-damp10", 1.6)
+            res["damp10"] = {"hz": r(precise_peak(y, 128, 135, 0.05, 1.5), 6), "early_db": r(band(y, 0.05, 0.5), 3), "late_db": r(band(y, 0.8, 1.55), 3)}
+            drop = res["early_db"]["dampers_down"] - res["damp10"]["early_db"]
+            lr["result"] += (f" With every pad's drag raised tenfold (4 N s/m per string) the early resonance falls only {drop:.1f} dB, to {res['damp10']['early_db']:.1f} dB, "
+                             f"and moves to {res['damp10']['hz']:.2f} Hz. Weak dampers explain a small part of it, not most of it.")
+            follows = drop > 6  # dampers decide it only if real-strength pads remove most of the excess
     mech = {None: "either the dampered bass strings ring with the board, or the board and strings resonate together, driven too strongly or damped too lightly.",
             True: "the dampered bass strings ring with the board (lifting the dampers moves it); the estimated dampers, 0.4 N s/m per string centred at 35% of the length, are the first suspect.",
-            False: "a resonance of the board and strings together (lifting the dampers leaves it in place), driven too strongly or damped too lightly; the board's losses and its missing air loading are the candidates."}[follows]
+            False: "a resonance of the board and strings together (tenfold damper drag barely changes it), driven too strongly or damped too lightly; the board's losses and its missing air loading are the candidates."}[follows]
     if "listening_db" in lr["data"]:
         lr["suspect"] = (f"Two parts. The default listening point accounts for about {lr['data']['listening_db']:.0f} dB (shown by the receiver experiment). "
                          f"The remaining {lr['data']['remaining_db']:.0f} dB is mechanical: {mech}")
