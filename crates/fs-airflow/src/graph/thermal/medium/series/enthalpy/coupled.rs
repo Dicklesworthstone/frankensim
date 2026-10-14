@@ -6,6 +6,8 @@
 //! evaluates a candidate from the same accepted solid state; advancing that
 //! accepted state during trial iterations would describe a different problem.
 
+pub mod feedback;
+
 use fs_convection::CorrelationRobinBoundary;
 use fs_couple::AitkenRelaxation;
 use fs_couple::iqn_ils::{IqnIls, IqnIlsConfig};
