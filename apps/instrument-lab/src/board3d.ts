@@ -66,7 +66,7 @@ export class BoardView {
     this.controls.enablePan = false;
     this.controls.minDistance = 1.2;
     this.controls.maxDistance = 6;
-    this.controls.addEventListener("start", () => { this.lastInteraction = performance.now(); });
+    this.controls.addEventListener("start", () => { this.lastInteraction = performance.now(); this.kick(); });
     this.controls.addEventListener("change", () => this.render());
     const d = 2.55;
     this.camera.position.set(this.center.x + d * 0.55, this.center.y + this.front * d * 0.9, d * 1.1);
@@ -154,8 +154,15 @@ export class BoardView {
     if (shouldSpin && !this.spinning) {
       this.spinning = true;
       let last = performance.now();
+      const began = last;
       const tick = (now: number): void => {
         if (!this.spinning) return;
+        // An idle page should cost nothing: stop turning 25 s after the last start or touch.
+        if (now - Math.max(began, this.lastInteraction) > 25000) {
+          this.spinning = false;
+          this.render();
+          return;
+        }
         const dt = Math.min(0.05, (now - last) / 1000);
         last = now;
         if (this.controls && now - this.lastInteraction > 4000) {
