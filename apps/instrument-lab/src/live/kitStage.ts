@@ -410,7 +410,7 @@ function dynName(v: number): string {
   return v < 0.55 ? "pp" : v < 0.75 ? "p" : v < 0.95 ? "mp" : v < 1.15 ? "mf" : v < 1.35 ? "f" : "ff";
 }
 function fmtJ(j: number): string {
-  return j >= 1 ? `${j.toFixed(2)} J` : j >= 1e-3 ? `${(j * 1e3).toFixed(1)} mJ` : `${(j * 1e6).toFixed(1)} µJ`;
+  return j >= 1 ? `${j.toFixed(2)} J` : j >= 1e-3 ? `${(j * 1e3).toFixed(1)} mJ` : j >= 1e-6 ? `${(j * 1e6).toFixed(1)} µJ` : `${(j * 1e9).toPrecision(2)} nJ`;
 }
 
 // ---------------------------------------------------------------- painters
