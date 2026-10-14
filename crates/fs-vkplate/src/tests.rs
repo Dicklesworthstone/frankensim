@@ -93,3 +93,15 @@ fn shallow_shell_struck_hard_stays_bounded_and_spreads_energy_upward() {
     let peak = x.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
     assert!(peak > 1e-3 && peak < 1e3, "peak {peak}");
 }
+
+#[test]
+fn a_new_stroke_retires_the_sticks_earlier_contact() {
+    // a hi-hat adds one stick contact per stroke; the stale one must stop pushing on the shell
+    let mut p = kit::hihat(0.002, 0.0, &[(0.002, 2.0), (0.012, 2.0)]).unwrap();
+    let first: Vec<usize> = (0..p.instrument.contacts.len()).filter(|&i| p.instrument.contacts[i].b.iter().any(|&(b, _, _)| p.instrument.bodies[b].name == "stick")).collect();
+    assert_eq!(first.len(), 2, "one stick contact per stroke");
+    let _ = kit::render(&mut p, 0.02, |_| {});
+    let c = &p.instrument.contacts;
+    assert!(!c[first[0]].active, "the first stroke's contact is still active after the second launch");
+    assert!(c[first[1]].active && c[first[1]].peak_force > 0.0, "the second stroke never landed");
+}

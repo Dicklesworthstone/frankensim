@@ -45,13 +45,35 @@ von Karman update blew up a crash struck at 8 m/s within 7000 steps; this one st
 The linear part's CFL limit is checked by power iteration and the internal rate is the smallest
 multiple of 48 kHz that uses at most 60 % of it. Output is decimated with a windowed sinc.
 
-The Airy operator is factored once (banded Cholesky, row-major ordering).
+The Airy operator is factored once (banded Cholesky, row-major ordering); both triangular sweeps
+stream the one stored factor, which dominates a cymbal's cost on a fine grid. Contacts warm-start
+their Newton solve from the previous step's force.
+
+## Hi-hat
+
+Two shells on one rod. The bottom shell sits on the stand's felt; the top shell hangs from the
+clutch (felt washers gripping the annulus round its hole) on the pull rod, which a return spring
+holds up and the pedal pulls down. With 80 N on the pedal about 62 N reaches the rims (the spring
+keeps the rest). An earlier version also tied the top shell's centre to the ground through felt,
+which took ~75 N of the pedal force, so the "closed" hat was barely pressed.
 
 ## Validation (`cargo test --release`)
 
 - clamped membrane: fundamental within 1.5 % of `2.405 c / (2 pi R)`;
 - free disc: lowest elastic mode within 4 % of `lambda^2 = 5.253` (nu = 0.33);
-- crash struck at 8 m/s: bounded, finite output.
+- crash struck at 8 m/s: bounded, finite output;
+- a hi-hat's second stroke retires the stick's earlier contact (each stroke adds one);
+- every piece builds on the live grid, sounds, and the kick and snare stop being stepped once
+  silent (`live`).
+
+## Real time (`live`)
+
+`live::Live` is one piece on a grid `scale` times coarser (5 runs several times faster than real
+time in WebAssembly), struck anywhere on its playing surface, stepped in 48 kHz blocks, and not
+stepped at all once its motion is 70 dB below its peak. On grids too coarse to put four nodes in
+the 6.5-20 mm annulus round a cymbal's hole, the felt washers and the hi-hat clutch spread their
+total stiffness and damping over the first ring of nodes instead. `apps/instrument-lab/engine-kit`
+compiles it for the browser.
 
 ## Graded against a real kit
 
@@ -74,6 +96,8 @@ mix adds independent renders: the snare does not buzz when the kick is struck).
 
 ```sh
 cargo run --release --example kit -- crash crash.wav          # PIECE OUT.wav [SPEED_M_S] [SECONDS]
+cargo run --release --example perform -- kick hits.csv kick.wav 17   # time_s,speed_m_s per stroke
+cargo run --release --example livebench -- 5                   # real-time factor per piece at grid x5
 cargo test --release
 ```
 Pieces: `kick snare snare-off tom-12 tom-14 hihat-closed hihat-open crash ride`.

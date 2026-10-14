@@ -59,12 +59,13 @@ impl Csr {
     /// y += s * A x
     #[inline]
     pub fn mul_add(&self, x: &[f64], s: f64, y: &mut [f64]) {
-        for i in 0..self.n {
+        for (yi, p) in y[..self.n].iter_mut().zip(self.ptr.windows(2)) {
+            let (cols, vals) = (&self.col[p[0]..p[1]], &self.val[p[0]..p[1]]);
             let mut acc = 0.0;
-            for p in self.ptr[i]..self.ptr[i + 1] {
-                acc += self.val[p] * x[self.col[p]];
+            for (&j, &v) in cols.iter().zip(vals) {
+                acc += v * x[j];
             }
-            y[i] += s * acc;
+            *yi += s * acc;
         }
     }
     pub fn quad(&self, x: &[f64]) -> f64 {
@@ -91,6 +92,27 @@ pub struct Band {
     n: usize,
     b: usize,
     l: Vec<f64>, // L(i, j) at l[i*(b+1) + (j + b - i)], j in [i-b, i]
+}
+
+/// Dot product with eight independent accumulators (a fixed, deterministic summation order that
+/// keeps several SIMD lanes and FMA pipes busy).
+#[inline]
+pub fn dot(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    let (a, b) = (&a[..n], &b[..n]);
+    let mut s = [0.0f64; 8];
+    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (x, y) in ca.zip(cb) {
+        for k in 0..8 {
+            s[k] += x[k] * y[k];
+        }
+    }
+    let mut t = ((s[0] + s[4]) + (s[1] + s[5])) + ((s[2] + s[6]) + (s[3] + s[7]));
+    for (x, y) in ra.iter().zip(rb) {
+        t += x * y;
+    }
+    t
 }
 
 impl Band {
@@ -131,18 +153,21 @@ impl Band {
     pub fn solve(&self, x: &mut [f64]) {
         let (n, b, w) = (self.n, self.b, self.b + 1);
         for i in 0..n {
-            let mut s = x[i];
-            for j in i.saturating_sub(b)..i {
-                s -= self.l[i * w + (j + b - i)] * x[j];
-            }
-            x[i] = s / self.l[i * w + b];
+            let lo = i.saturating_sub(b);
+            let row = &self.l[i * w + (lo + b - i)..i * w + b + 1];
+            let s = x[i] - dot(&row[..i - lo], &x[lo..i]);
+            x[i] = s / row[i - lo];
         }
+        // L' x = y by columns of L' (rows of L): each solved x[i] is pushed into the rows above,
+        // so both sweeps stream the same contiguous factor once
         for i in (0..n).rev() {
-            let mut s = x[i];
-            for k in i + 1..(i + b + 1).min(n) {
-                s -= self.l[k * w + (i + b - k)] * x[k];
+            let lo = i.saturating_sub(b);
+            let row = &self.l[i * w + (lo + b - i)..i * w + b + 1];
+            let xi = x[i] / row[i - lo];
+            x[i] = xi;
+            for (xj, lij) in x[lo..i].iter_mut().zip(&row[..i - lo]) {
+                *xj -= lij * xi;
             }
-            x[i] = s / self.l[i * w + b];
         }
     }
 }
@@ -228,6 +253,9 @@ pub struct Body {
     psi: f64,
     psi_next: f64,
     sav: bool,
+    /// Step size the cached update coefficients `cf` belong to.
+    kc: f64,
+    cf: Vec<[f64; 4]>,
     /// 3-D placement for microphones: origin and outward normal (+1 up, -1 down).
     pub origin: [f64; 3],
     pub facing: f64,
@@ -454,7 +482,7 @@ impl Body {
         }
         Ok(Body {
             name: name.into(), h, n, xy, grid_index, mass, s0: s0v, s1, lap, stiff, tension: s.tension, berger, vk,
-            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false,
+            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0,
         })
     }
@@ -474,7 +502,7 @@ impl Body {
             name: name.into(), h, n, xy, grid_index: BTreeMap::new(), mass: vec![mass_per_m * h; n],
             s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]),
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
-            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false,
+            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0,
         }
     }
@@ -485,7 +513,7 @@ impl Body {
             name: name.into(), h: 1.0, n: 1, xy: vec![[0.0, 0.0]], grid_index: BTreeMap::new(), mass: vec![mass],
             s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]),
             tension: 0.0, berger: 0.0, vk: None,
-            w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false,
+            w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0,
         }
     }
@@ -528,7 +556,9 @@ impl Body {
         for ((f, b), l) in self.f.iter_mut().zip(&self.bias).zip(&self.lw) {
             *f = b - t * l;
         }
-        self.stiff.mul_add(&self.w, -1.0, &mut self.f);
+        if !self.stiff.col.is_empty() {
+            self.stiff.mul_add(&self.w, -1.0, &mut self.f);
+        }
     }
 
     /// Nonlinear potential V(w) >= 0 and its gradient into `g`; returns V.
@@ -588,13 +618,30 @@ impl Body {
     /// auxiliary variable psi = sqrt(2 V) (Bilbao, Ducceschi and Zama): the update stays explicit
     /// (one Sherman-Morrison rank-one correction) and conserves a discrete energy
     /// 1/2 |dw/dt|^2_M + 1/2 w'Kw + 1/2 psi^2, so the nonlinearity cannot destabilise it.
+    /// Per-node update coefficients for step `k`: [1/a, 2m/k^2, (1 - s0 k) m/k^2, 2 s1 m/k] with
+    /// a = m (1 + s0 k)/k^2. Mass and loss are fixed once stepping starts.
+    fn coefs(&mut self, k: f64) {
+        if self.kc == k && self.cf.len() == self.n {
+            return;
+        }
+        let k2 = k * k;
+        self.cf = (0..self.n)
+            .map(|i| {
+                let (m, s0k) = (self.mass[i], self.s0[i] * k);
+                [k2 / (m * (1.0 + s0k)), 2.0 * m / k2, (1.0 - s0k) * m / k2, 2.0 * self.s1 * m / k]
+            })
+            .collect();
+        self.kc = k;
+    }
+
     fn predict(&mut self, k: f64) {
+        self.coefs(k);
         let n = self.n;
         if self.s1 > 0.0 {
             // Lap_h (w - wp) = -(L w - L wp) / h^2 from the two stored products
             let ih2 = 1.0 / (self.h * self.h);
-            for i in 0..n {
-                self.tmp[i] = -(self.lw[i] - self.lwp[i]) * ih2;
+            for ((t, a), b) in self.tmp.iter_mut().zip(&self.lw).zip(&self.lwp) {
+                *t = -(a - b) * ih2;
             }
         }
         let nl = self.berger > 0.0 || self.vk.is_some();
@@ -603,8 +650,9 @@ impl Body {
             let v = self.nonlinear_gradient();
             let root = (2.0 * v).sqrt();
             if root > 0.0 {
+                let ir = 1.0 / root;
                 for x in self.g.iter_mut() {
-                    *x /= root;
+                    *x *= ir;
                 }
                 scale = 1.0;
             } else {
@@ -614,36 +662,38 @@ impl Body {
             }
         }
         let k2 = k * k;
-        let gwp: f64 = if scale > 0.0 { self.g.iter().zip(&self.wp).map(|(a, b)| a * b).sum() } else { 0.0 };
+        let gwp: f64 = if scale > 0.0 { dot(&self.g, &self.wp) } else { 0.0 };
         let sc = self.psi - 0.25 * gwp;
         // air mass on the volume motion: (M_r / A^2) u u' with u = h^2 per node, implicit
         let h2 = self.h * self.h;
         let mu = if self.air_mass > 0.0 { self.air_mass / (self.area * self.area * k2) } else { 0.0 };
-        let vol_prev = if mu > 0.0 { (0..n).map(|i| 2.0 * self.w[i] - self.wp[i]).sum::<f64>() * h2 } else { 0.0 };
+        let vol_prev = if mu > 0.0 { self.w.iter().zip(&self.wp).map(|(a, b)| 2.0 * a - b).sum::<f64>() * h2 } else { 0.0 };
+        let extra = if mu > 0.0 { mu * h2 * vol_prev } else { 0.0 };
         let (mut gy, mut gzg, mut uy, mut uzu, mut gzu) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        let (cf, w, wp, f, g) = (&self.cf[..n], &self.w[..n], &self.wp[..n], &self.f[..n], &self.g[..n]);
+        let (wn, tmp) = (&mut self.wn[..n], &mut self.tmp[..n]);
+        let s1 = self.s1 > 0.0;
         for i in 0..n {
-            let s0k = self.s0[i] * k;
-            let a = self.mass[i] * (1.0 + s0k) / k2;
-            let mut rhs = self.mass[i] * (2.0 * self.w[i] - (1.0 - s0k) * self.wp[i]) / k2 + self.f[i];
-            if self.s1 > 0.0 {
-                rhs += 2.0 * self.s1 * self.mass[i] * self.tmp[i] / k;
+            let [ia, cw, cwp, cs1] = cf[i];
+            let mut rhs = cw * w[i] - cwp * wp[i] + f[i] + extra;
+            if s1 {
+                rhs += cs1 * tmp[i];
             }
             if scale > 0.0 {
-                rhs -= self.g[i] * sc;
+                rhs -= g[i] * sc;
             }
-            if mu > 0.0 {
-                rhs += mu * h2 * vol_prev;
-            }
-            self.wn[i] = rhs / a;
+            let x = rhs * ia;
+            wn[i] = x;
             if scale > 0.0 {
-                self.tmp[i] = self.g[i] / a;
-                gy += self.g[i] * self.wn[i];
-                gzg += self.g[i] * self.tmp[i];
-                gzu += self.g[i] * h2 / a;
+                let z = g[i] * ia;
+                tmp[i] = z;
+                gy += g[i] * x;
+                gzg += g[i] * z;
+                gzu += h2 * z;
             }
             if mu > 0.0 {
-                uy += h2 * self.wn[i];
-                uzu += h2 * h2 / a;
+                uy += h2 * x;
+                uzu += h2 * h2 * ia;
             }
         }
         // Woodbury with U = [g, u], C = diag(1/4, mu): solve (C^-1 + U' D^-1 U) c = U' D^-1 r
@@ -658,10 +708,10 @@ impl Body {
             }
         };
         if cg != 0.0 || cu != 0.0 {
+            let hc = h2 * cu;
             for i in 0..n {
-                let a = self.mass[i] * (1.0 + self.s0[i] * k) / k2;
-                let zg = if scale > 0.0 { self.tmp[i] } else { 0.0 };
-                self.wn[i] -= zg * cg + h2 / a * cu;
+                let zg = if scale > 0.0 { tmp[i] } else { 0.0 };
+                wn[i] -= zg * cg + hc * cf[i][0];
             }
         }
         self.sav = scale > 0.0;
@@ -670,16 +720,17 @@ impl Body {
     /// After contacts have adjusted `wn`: advance the auxiliary variable consistently.
     fn finish(&mut self) {
         if self.sav {
-            let d: f64 = (0..self.n).map(|i| self.g[i] * (self.wn[i] - self.wp[i])).sum();
+            let d: f64 = self.g.iter().zip(&self.wn).zip(&self.wp).map(|((g, a), b)| g * (a - b)).sum();
             self.psi_next = self.psi + 0.5 * d;
         } else {
             self.psi_next = self.psi;
         }
     }
 
+    /// Displacement per unit force on node `i` within one step (k^2 / a).
     #[inline]
     fn compliance(&self, i: usize, k: f64) -> f64 {
-        k * k / (self.mass[i] * (1.0 + self.s0[i] * k))
+        if self.kc == k && i < self.cf.len() { self.cf[i][0] } else { k * k / (self.mass[i] * (1.0 + self.s0[i] * k)) }
     }
 
     fn rotate(&mut self) {
@@ -1003,7 +1054,7 @@ impl Instrument {
                 self.bodies[bb].f[nb] -= f;
             }
         }
-        for c in &self.cavities {
+        for c in self.cavities.iter_mut() {
             let mut dv = 0.0;
             for &hb in &c.heads {
                 let b = &self.bodies[hb];
@@ -1016,13 +1067,6 @@ impl Instrument {
                 for f in b.f.iter_mut() {
                     *f += fa;
                 }
-            }
-        }
-        for c in self.cavities.iter_mut() {
-            let mut dv = 0.0;
-            for &hb in &c.heads {
-                let b = &self.bodies[hb];
-                dv += b.w.iter().sum::<f64>() * b.h * b.h;
             }
             if let Some(q) = c.port.as_mut() {
                 // the air plug: rho L / A du/dt = p - R u (symplectic Euler, far below its limit)
@@ -1037,7 +1081,7 @@ impl Instrument {
             let mut q = 0.0;
             for &bi in &r.bodies {
                 let b = &self.bodies[bi];
-                q += (0..b.n).map(|i| (b.w[i] - b.wp[i]) / k).sum::<f64>() * b.h * b.h;
+                q += b.w.iter().zip(&b.wp).map(|(a, c)| a - c).sum::<f64>() / k * b.h * b.h;
             }
             for &bi in &r.bodies {
                 let b = &mut self.bodies[bi];
@@ -1060,6 +1104,13 @@ impl Instrument {
                 continue;
             }
             s.done = true;
+            // one stick, one contact: a new launch retires the striker's earlier contacts (a hi-hat or
+            // cymbal adds one contact per hit, and a stale one would push on the shell again)
+            for (j, c) in self.contacts.iter_mut().enumerate() {
+                if j != s.contact && c.a.iter().chain(&c.b).any(|&(b, _, _)| b == s.striker) {
+                    c.active = false;
+                }
+            }
             let c = &mut self.contacts[s.contact];
             let surf: f64 = c.a.iter().map(|&(b, i, w)| w * self.bodies[b].w[i]).sum();
             // striker on side b: d = surf - z - gap, so z starts at surf - gap - clear and moves "down" toward -d
@@ -1093,7 +1144,7 @@ impl Instrument {
                 if d <= 0.0 {
                     return (0.0, 0.0);
                 }
-                let pa1 = d.powf(alpha - 1.0);
+                let pa1 = if alpha == 1.5 { d.sqrt() } else { d.powf(alpha - 1.0) };
                 let pa = pa1 * d;
                 let damp = 1.0 + mu * (d - d_now) / k;
                 let v = kk * pa * damp;
@@ -1104,7 +1155,8 @@ impl Instrument {
                 // g(f) = f - phi(d_pred - comp f) is increasing with a root in [0, d_pred / comp]:
                 // safeguarded Newton (a bisection step whenever Newton leaves the bracket)
                 let (mut lo, mut hi) = (0.0, d_pred / comp);
-                let mut x = 0.5 * hi;
+                // a contact held under load barely changes between steps: start from the last force
+                let mut x = if c.force > 0.0 && c.force < hi { c.force } else { 0.5 * hi };
                 for _ in 0..60 {
                     let (v, dv) = phi(d_pred - comp * x);
                     let g = x - v;
@@ -1234,6 +1286,7 @@ pub fn wav_f32(channels: &[Vec<f64>], rate: u32) -> Vec<u8> {
 }
 
 pub mod kit;
+pub mod live;
 
 #[cfg(test)]
 mod tests;

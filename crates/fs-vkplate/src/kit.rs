@@ -14,7 +14,7 @@ pub const STICK_TIP_KG: f64 = 0.00724314;
 /// Polyester (Mylar) film.
 const MYLAR: (f64, f64, f64) = (4.0e9, 0.38, 1390.0);
 /// B20 cymbal bronze.
-const BRONZE: (f64, f64, f64) = (1.05e11, 0.33, 8600.0);
+pub(crate) const BRONZE: (f64, f64, f64) = (1.05e11, 0.33, 8600.0);
 
 pub struct Piece {
     pub instrument: Instrument,
@@ -72,7 +72,7 @@ pub struct DrumSpec {
     pub floor: Option<f64>,
 }
 
-fn hertz_stick(tip_radius: f64, e_target: f64, nu_target: f64) -> Law {
+pub(crate) fn hertz_stick(tip_radius: f64, e_target: f64, nu_target: f64) -> Law {
     // hickory tip on the target: K = 4/3 E* sqrt(R)
     let (e_w, nu_w) = (12.0e9, 0.3);
     let es = 1.0 / ((1.0 - nu_w * nu_w) / e_w + (1.0 - nu_target * nu_target) / e_target);
@@ -280,7 +280,40 @@ pub struct CymbalSpec {
     pub t60: [(f64, f64); 2],
 }
 
+/// Grid points (spacing h) with r in [r0, r1]. A grid too coarse to put four of them in the
+/// annulus (a real-time grid) widens r1 to the first ring that does; the caller then spreads the
+/// annulus's total stiffness and damping over those nodes. Offline grids never widen.
+fn ring_nodes(h: f64, r0: f64, r1: f64) -> (f64, usize) {
+    let count = |r1: f64| {
+        let m = (r1 / h).ceil() as i64 + 1;
+        let mut n = 0;
+        for j in -m..=m {
+            for i in -m..=m {
+                let r = h * ((i * i + j * j) as f64).sqrt();
+                if r >= r0 && r <= r1 + 1e-12 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    let mut r = r1;
+    loop {
+        let n = count(r);
+        if n >= 4 {
+            return (r, n);
+        }
+        r += 0.25 * h;
+    }
+}
+
 fn cymbal_body(name: &str, c: &CymbalSpec) -> Result<Body, String> {
+    cymbal_shell(name, c, true)
+}
+
+/// A cymbal shell; `felt` puts it on a stand's felt washers (a hi-hat's top shell hangs from the
+/// clutch on the pull rod instead, so all the pedal force reaches the rims).
+fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool) -> Result<Body, String> {
     let (rb, tb, tw, r) = (c.bell_radius, c.bell_thickness, c.bow_thickness, c.radius);
     // thickness: bell, a blend over 2 cm, then the bow thinning slightly toward the rim
     let th = move |x: f64| {
@@ -296,12 +329,19 @@ fn cymbal_body(name: &str, c: &CymbalSpec) -> Result<Body, String> {
         bow + bell
     };
     // felt washers clamp the annulus round the 13 mm centre hole
+    let (r1, n) = ring_nodes(c.grid, 0.0065, 0.02);
+    let (ks, cs) = if r1 > 0.02 {
+        let per = PI * (0.02f64.powi(2) - 0.0065f64.powi(2)) / (n as f64 * c.grid * c.grid);
+        (9.0e7 * per, 2.7e3 * per)
+    } else {
+        (9.0e7, 2.7e3)
+    };
     Body::plate(name, &PlateSpec {
         radius: r, hole: 0.0065, grid: c.grid, edge: Edge::Free, thickness: &th, rest_height: &z,
         young: BRONZE.0, poisson: BRONZE.1, density: BRONZE.2, tension: 0.0, bending: true,
         nonlinear: Nonlinear::VonKarman, t60: c.t60,
         // felt washers: ~1e5 N/m and ~3 N s/m in all, spread over the clamped annulus
-        support: Some((0.0065, 0.02, 9.0e7, 2.7e3)), muffle: None,
+        support: if felt { Some((0.0065, r1, ks, cs)) } else { None }, muffle: None,
     })
 }
 
@@ -366,9 +406,16 @@ pub fn hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)]) -> Result<Piece, Strin
 
 /// The same with an explicit rim contact law and the inner edge of the contact annulus (fraction of the radius).
 pub fn hihat_with(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64) -> Result<Piece, String> {
-    let (ts, bs) = hihat_spec();
+    hihat_grid(gap, pedal_n, hits, rim, from, 1.0)
+}
+
+/// The same on a grid `scale` times coarser (real-time play).
+pub fn hihat_grid(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64) -> Result<Piece, String> {
+    let (mut ts, mut bs) = hihat_spec();
+    ts.grid *= scale;
+    bs.grid *= scale;
     let mut ins = Instrument::new(OUT_RATE);
-    let mut top = cymbal_body(ts.name, &ts)?;
+    let mut top = cymbal_shell(ts.name, &ts, false)?;
     top.origin = [0.0, 0.0, 0.0];
     let mut bot = cymbal_body(bs.name, &bs)?;
     bot.origin = [0.0, 0.0, -0.002 - gap];
@@ -377,13 +424,17 @@ pub fn hihat_with(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
     // the top hangs from the clutch on the pull rod; the bottom sits on the stand's felt cup
     let rod = ins.add(Body::point("rod", 0.3));
     ins.links.push(Link { a: (rod, 0), b: None, k: 2000.0, c: 20.0 });
+    // the clutch grips the annulus round the hole: 2e5 N/m and 2 N s/m per node of the 5.5 mm grid
+    // (40 nodes); a coarser grid spreads those totals over its first ring
+    let (r1, n) = ring_nodes(ins.bodies[ti].h, 0.0065, 0.02);
+    let (kc, cc) = if r1 > 0.02 { (8.0e6 / n as f64, 80.0 / n as f64) } else { (2.0e5, 2.0) };
     let clutch: Vec<usize> = (0..ins.bodies[ti].n).filter(|&k| {
         let p = ins.bodies[ti].xy[k];
         let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
-        r >= 0.0065 && r <= 0.02
+        r >= 0.0065 && r <= r1 + 1e-12
     }).collect();
     for &k in &clutch {
-        ins.links.push(Link { a: (ti, k), b: Some((rod, 0)), k: 2.0e5, c: 2.0 });
+        ins.links.push(Link { a: (ti, k), b: Some((rod, 0)), k: kc, c: cc });
     }
     // rim contact between the shells: matching nodes in the outer 20 % of the radius
     let mut pairs = 0;
@@ -398,7 +449,8 @@ pub fn hihat_with(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
             pairs += 1;
         }
     }
-    let settle = if pedal_n != 0.0 { 0.25 } else { 0.0 };
+    // the pedal pulls the hanging top shell ~1 cm down onto the bottom; let the suspension settle
+    let settle = if pedal_n != 0.0 { 0.5 } else { 0.0 };
     if pedal_n != 0.0 {
         ins.drives.push(Drive { body: rod, node: 0, knots: vec![(0.0, 0.0), (0.12, -pedal_n), (1e9, -pedal_n)] });
     }
