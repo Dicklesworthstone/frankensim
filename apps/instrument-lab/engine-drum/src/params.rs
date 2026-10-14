@@ -5,7 +5,7 @@
 //! eigen-solve of the heads these numbers describe.
 
 use crate::json::{self, Value};
-use fs_plate::shell::head::TensionVariation;
+use fs_plate::shell::head::TensionVariation;\nuse fs_plate::shell::head::tension::TENSION_HARMONIC_COUNT;
 
 /// A typed refusal that crosses the browser boundary as `{code, message}`.
 #[derive(Debug, Clone, PartialEq)]
@@ -190,6 +190,8 @@ impl DrumParams {
                 "resonant_damping_ratio" => self.resonant.damping_ratio = scalar(k, value)?,
                 "batter_tension_variation" => self.batter.tension_variation = variation(k, value)?,
                 "resonant_tension_variation" => self.resonant.tension_variation = variation(k, value)?,
+                "batter_tension_harmonics" => self.batter.tension_variation.harmonics_n_m = harmonics(k,value)?,
+                "resonant_tension_harmonics" => self.resonant.tension_variation.harmonics_n_m = harmonics(k,value)?,
                 "young_pa" => self.young_pa = scalar(k, value)?,
                 "poisson" => self.poisson = scalar(k, value)?,
                 "density_kg_m3" => self.density_kg_m3 = scalar(k, value)?,
@@ -233,6 +235,7 @@ impl DrumParams {
         for (name, head) in [("batter", &self.batter), ("resonant", &self.resonant)] {
             positive(&format!("{name}_thickness_m"), head.thickness_m)?;
             positive(&format!("{name}_tension_n_m"), head.tension_n_m)?;
+            head.tension_variation.validate().map_err(|e|bad(format!("{name} tension field: {e}")))?;
             if !head.damping_ratio.is_finite() || head.damping_ratio < 0.0 || head.damping_ratio >= 1.0 {
                 return Err(bad(format!("{name}_damping_ratio must be a passive ratio in 0..1")));
             }
@@ -335,6 +338,10 @@ impl DrumParams {
             all.extend_from_slice(&v.gradient_n_m2);
             json::numbers(&all)
         };
+        let th = |v: &TensionVariation| {
+            let all=v.harmonics_n_m.iter().flatten().copied().collect::<Vec<_>>();
+            json::numbers(&all)
+        };
         let n = json::number;
         format!(
             concat!(
@@ -342,7 +349,7 @@ impl DrumParams {
                 "\"batter_thickness_m\":{},\"resonant_thickness_m\":{},",
                 "\"batter_tension_n_m\":{},\"resonant_tension_n_m\":{},",
                 "\"batter_damping_ratio\":{},\"resonant_damping_ratio\":{},",
-                "\"batter_tension_variation\":{},\"resonant_tension_variation\":{},",
+                "\"batter_tension_variation\":{},\"resonant_tension_variation\":{},",\n                "\"batter_tension_harmonics\":{},\"resonant_tension_harmonics\":{},",
                 "\"young_pa\":{},\"poisson\":{},\"density_kg_m3\":{},",
                 "\"radial_intervals\":{},\"azimuths\":{},",
                 "\"band_low_hz\":{},\"band_high_hz\":{},\"substeps\":{},",
@@ -376,6 +383,24 @@ mod tests {
         assert!((d.radius_m - 0.1703).abs() < 1e-12);
         let again = DrumParams::default().overlay_json(&d.to_json()).unwrap();
         assert_eq!(d, again);
+    }
+
+    #[test]
+    fn live_json_round_trips_and_builds_multi_lug_prestress() {
+        let d=DrumParams::default();
+        let mut values=vec![0.0;2*TENSION_HARMONIC_COUNT];
+        values[2*(10-2)]=120.0; values[2*(10-2)+1]=-35.0;
+        let json=format!("{\\\"batter_tension_harmonics\\\":{}}",json::numbers(&values));
+        let tuned=d.overlay_json(&json).unwrap();
+        assert_eq!(tuned.batter.tension_variation.harmonics_n_m[8],[120.0,-35.0]);
+        tuned.validate().unwrap();
+        let again=DrumParams::default().overlay_json(&tuned.to_json()).unwrap();
+        assert_eq!(tuned,again);
+        let plain=crate::instrument::Instrument::build(d).unwrap();
+        let built=crate::instrument::Instrument::build(tuned).unwrap();
+        assert_eq!(plain.heads[0].film.model.m,built.heads[0].film.model.m);
+        assert!(plain.heads[0].modes.iter().zip(&built.heads[0].modes)
+            .any(|(a,b)|(a.lambda-b.lambda).abs()>1e-8*a.lambda.max(1.0)));
     }
 
     #[test]
