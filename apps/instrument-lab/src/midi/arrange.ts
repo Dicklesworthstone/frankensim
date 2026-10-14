@@ -89,9 +89,7 @@ const DRUM_MAP: Record<number, DrumRule> = {
   40: { piece: "snare", u: 0.3, v: 0.05, g: 1.05 },
   41: { piece: "tom-14", u: 0.35, v: 0.1, g: 1 },
   43: { piece: "tom-14", u: 0.3, v: 0.12, g: 1 },
-  42: { piece: "hihat-closed", u: 0.85, v: 0, g: 1 },
-  44: { piece: "hihat-closed", u: 0.6, v: 0, g: 0.45, label: "Pedal hi-hat → hi-hat, lightly" },
-  46: { piece: "hihat-open", u: 0.85, v: 0, g: 1 },
+  // closed (42), pedal (44) and open (46) hi-hat: see HAT_RINGS
   45: { piece: "tom-12", u: 0.4, v: 0.1, g: 1 },
   47: { piece: "tom-12", u: 0.35, v: 0.1, g: 1 },
   48: { piece: "tom-12", u: 0.3, v: 0.12, g: 1 },
@@ -111,6 +109,16 @@ const DRUM_MAP: Record<number, DrumRule> = {
   65: { piece: "snare-off", u: 0.4, v: 0.1, g: 1, label: "Timbale → snare with the wires off" },
   66: { piece: "snare-off", u: 0.5, v: 0.1, g: 0.9, label: "Timbale → snare with the wires off" },
 };
+/**
+ * The live hi-hat rings like a chime: struck with the pedal down it keeps sounding for seconds in
+ * sustained tonal partials (70 Hz-4 kHz in its spectrogram, not the short broadband chick of a real
+ * closed hat), and open it rings in the same few pure tones for over six seconds, because the
+ * solver has no friction between the two cymbals. A groove's sixteenth-note hats pile up into a
+ * wash of chimes, so hi-hat strokes are left out and listed. Put them back (42 and 44 to
+ * "hihat-closed", 46 to "hihat-open") when the solver damps the clamp.
+ */
+const HAT_RINGS = "Hi-hat, closed, pedal and open (the live hi-hat rings like a chime)";
+const LEFT_OUT: Record<number, string> = { 42: HAT_RINGS, 44: HAT_RINGS, 46: HAT_RINGS };
 const GM_PERCUSSION: Record<number, string> = {
   27: "High Q", 28: "Slap", 29: "Scratch push", 30: "Scratch pull", 31: "Sticks", 32: "Square click", 33: "Metronome click", 34: "Metronome bell",
   54: "Tambourine", 56: "Cowbell", 58: "Vibraslap", 67: "High agogô", 68: "Low agogô", 69: "Cabasa", 70: "Maracas", 71: "Short whistle",
@@ -182,7 +190,7 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
           report.drumNotesIn++;
           const rule = DRUM_MAP[n.key];
           if (!rule) {
-            const label = GM_PERCUSSION[n.key] ?? `Note ${n.key}`;
+            const label = LEFT_OUT[n.key] ?? GM_PERCUSSION[n.key] ?? `Note ${n.key}`;
             report.drumsSkipped[label] = (report.drumsSkipped[label] ?? 0) + 1;
             continue;
           }

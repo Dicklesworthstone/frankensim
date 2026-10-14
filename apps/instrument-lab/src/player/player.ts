@@ -27,8 +27,25 @@ const PIANO_GAIN = 0.8;
 const STICK: Record<PieceId, number> = { kick: 3.0, snare: 4.5, "snare-off": 4.5, "tom-12": 3.5, "tom-14": 3.5, "hihat-closed": 2.5, "hihat-open": 2.5, crash: 6.0, ride: 2.5 };
 const KIT_GAIN: Record<PieceId, number> = { kick: 0.0207, snare: 0.0108, "snare-off": 0.0108, "tom-12": 0.0277, "tom-14": 0.0258, "hihat-closed": 0.137, "hihat-open": 0.137, crash: 0.0527, ride: 0.177 };
 const IDLE_DISPOSE_MS = 90_000;
-/** Speed each piece must reach alone when it measures itself (the snare's wires cost the most). */
-const MIN_RT: Record<PieceId, number> = { kick: 2.0, snare: 3.2, "snare-off": 3.0, "tom-12": 2.2, "tom-14": 2.2, "hihat-closed": 2.2, "hihat-open": 2.2, crash: 2.2, ride: 2.2 };
+/**
+ * Each piece's grid choice: the grid coarsenings it may use (finest first) and the speed it must
+ * reach alone when it measures itself. A coarser grid loses the high end first, and pieces differ
+ * in how much they have to lose. Measured on single strokes: a closed hi-hat keeps -18 dB of its
+ * energy above 4 kHz at 4x and -91 dB at 6x (a bare click with no shimmer), while a kick has no
+ * energy above 4 kHz even at 4x. So cymbals hold on to fine grids and the kick gives way first;
+ * a piece that still falls behind while playing is restarted one grid coarser.
+ */
+const GRID: Record<PieceId, { scales: number[]; minRt: number }> = {
+  kick: { scales: [5, 6, 7, 8], minRt: 1.7 },
+  snare: { scales: [4, 5, 6, 7, 8], minRt: 2.2 },
+  "snare-off": { scales: [4, 5, 6, 7, 8], minRt: 2.0 },
+  "tom-12": { scales: [4, 5, 6, 7], minRt: 1.8 },
+  "tom-14": { scales: [4, 5, 6, 7], minRt: 1.8 },
+  "hihat-closed": { scales: [4, 5, 6], minRt: 1.5 },
+  "hihat-open": { scales: [4, 5, 6], minRt: 1.5 },
+  crash: { scales: [4, 5, 6], minRt: 1.5 },
+  ride: { scales: [4, 5, 6], minRt: 1.5 },
+};
 
 interface Standard {
   id: string; title: string; kicker: string; note: string; provenance: string; groove: string; grooveName: string;
@@ -36,7 +53,8 @@ interface Standard {
 }
 interface Catalog { source: { repo: string; commit: string }; entries: Standard[] }
 type Phase = "empty" | "loading" | "ready" | "warming" | "playing" | "paused";
-interface Health { rt: number; late: number; gap: number; base: number; detail: string; slow: number; scale?: number; stats?: LaneWorkerStats; lastLate?: number; lateAt?: number }
+/** late: audio that reached the mixer after its moment; skipped: audio a lane that fell behind never rendered; both are real gaps */
+interface Health { rt: number; late: number; gap: number; base: number; skipBase: number; detail: string; slow: number; scale?: number; stats?: LaneWorkerStats; lastLate?: number; lateAt?: number; lostSeen?: number }
 
 const ICON = {
   play: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.6v10.8l8.6-5.4z" fill="currentColor"/></svg>',
@@ -337,7 +355,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       piano = new PianoLane(m, { aheadFrames: AHEAD, gain: PIANO_GAIN, snapshotHz: 30, minRealtime: 1.5 });
       piano.onStats = (s) => { const h = health["piano"]; if (h) { h.rt = s.realtime; h.stats = s; } };
       piano.onSnapshot = (frame, data, ep) => { if (ep >= epoch) { snaps.push({ frame, data }); if (snaps.length > 90) snaps.shift(); } };
-      health["piano"] = { rt: 0, late: 0, gap: 0, base: 0, detail: "", slow: 0 };
+      health["piano"] = { rt: 0, late: 0, gap: 0, base: 0, skipBase: 0, detail: "", slow: 0 };
       started.push(piano.ready.then((r) => {
         pianoReady = r;
         health["piano"]!.detail = `${r.boardCoordinates} board coordinates`;
@@ -349,7 +367,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     for (const p of a.pieces) {
       if (kits.has(p)) continue;
       warm = false;
-      started.push(startPiece(m, p, [4, 5, 6, 7, 8]));
+      started.push(startPiece(m, p, GRID[p].scales));
     }
     if (started.length) {
       const total = started.length;
@@ -365,22 +383,26 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
 
   /**
    * One drum piece in its Worker. Each piece measures itself and keeps the finest grid that runs
-   * MIN_RT[p] times faster than real time alone: a whole kit and the piano share the machine, so
-   * the margin is larger than the live kit's. A piece that still falls behind while playing is
+   * GRID[p].minRt times faster than real time alone (see GRID). A piece that still falls behind while playing is
    * restarted one grid coarser (see the stats handler), and the page says so.
    */
   function startPiece(m: LiveMix, p: PieceId, scales: number[]): Promise<void> {
-    const lane = new KitLane(m, p, { gain: KIT_GAIN[p], aheadFrames: AHEAD, minRealtime: MIN_RT[p], scales, fieldFrames: SR / 40, bursts: false });
+    const lane = new KitLane(m, p, { gain: KIT_GAIN[p], aheadFrames: AHEAD, minRealtime: GRID[p].minRt, scales, fieldFrames: SR / 40, bursts: false });
     const entry = { lane, ready: null as KitReady | null };
     kits.set(p, entry);
-    const h: Health = { rt: 0, late: 0, gap: 0, base: 0, detail: "", slow: 0 };
+    const h: Health = { rt: 0, late: 0, gap: 0, base: 0, skipBase: 0, detail: "", slow: 0 };
     health[p] = h;
     lane.onStats = (s) => {
       if (kits.get(p) !== entry) return;
       if (!s.asleep) h.rt = s.realtime;
       h.stats = s;
       h.slow = phase === "playing" && !s.asleep && s.realtime > 0 && s.realtime < 1.05 ? h.slow + 1 : 0;
-      if (h.slow >= 3 && (h.scale ?? 8) < 10) void coarsen(p, h.scale ?? 8);
+      // audio actually lost (more than 50 ms since the last report) steps the piece down at once:
+      // a gap is worse than a duller cymbal
+      const lost = lostFrames(h);
+      const fresh = lost - (h.lostSeen ?? lost);
+      h.lostSeen = lost;
+      if ((h.slow >= 3 || (phase === "playing" && fresh > 2400)) && (h.scale ?? 8) < 10) void coarsen(p, h.scale ?? 8);
     };
     lane.onField = (f) => { if ((f.epoch ?? 0) >= epoch && kits.get(p) === entry) kit.field(p, f); };
     return lane.ready.then((r) => {
@@ -394,7 +416,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
   async function coarsen(p: PieceId, scale: number): Promise<void> {
     const old = kits.get(p);
     if (!old || !mix) return;
-    const lostBefore = health[p] ? health[p]!.late - health[p]!.base : 0;
+    const lostBefore = health[p] ? lostFrames(health[p]!) : 0;
     old.lane.dispose(); // drops its mix lane before the new one joins under the same name
     kits.delete(p);
     say(`${PIECE_NAMES[p]}: this device could not compute it in real time, so it restarts on a coarser grid.`, "warn");
@@ -406,7 +428,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     if (!k || !arr || phase !== "playing") return;
     // join the score already playing, from a moment the new Worker can still reach
     k.lane.resync(epoch);
-    if (h) h.base = h.late;
+    if (h) { h.base = h.late; h.skipBase = h.stats?.skippedFrames ?? 0; }
     k.lane.score(kitScore(p, scoreTime() + LEAD_WARM_S));
   }
 
@@ -475,7 +497,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     retiredBase = null;
     kit.clear();
     hitCursor = lowerBound(a.hits.map((h) => h.t), from);
-    for (const h of Object.values(health)) h.base = h.late;
+    for (const h of Object.values(health)) { h.base = h.late; h.skipBase = h.stats?.skippedFrames ?? 0; }
   }
 
   /** A piece's strokes from score time `from` on, on the clock of the score now playing. */
@@ -647,13 +669,13 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     for (const id of ids) {
       const h = health[id];
       const name = id === "piano" ? "Piano" : PIECE_NAMES[id as PieceId];
-      const lost = h ? (h.late - h.base) / 48 : 0;
+      const lost = h ? lostFrames(h) / 48 : 0;
       const rt = h?.rt ?? 0;
       const tone = !h || rt === 0 ? "idle" : lost > 10 ? "bad" : rt < 1.1 ? "warn" : "ok";
       const meter = el("span", { class: "pp-meter" }, el("i", { style: `width:${Math.min(100, (rt / 4) * 100).toFixed(0)}%` }));
       const grid = h?.scale ? ` · ${h.scale}× grid` : id === "piano" && pianoReady ? ` · ${pianoReady.boardCoordinates} modes` : "";
       const val = !h ? "starts with Play" : rt > 0 ? `${rt.toFixed(1)}×${grid}${lost > 10 ? ` · ${lost < 1000 ? `${Math.round(lost)} ms` : `${(lost / 1000).toFixed(1)} s`} lost` : ""}` : h.stats?.asleep || h.scale ? `resting${grid}` : "measuring…";
-      const row = el("div", { class: `pp-lane ${tone}`, "data-id": id, "data-rt": rt.toFixed(2), "data-late": String(h ? h.late - h.base : 0), "data-gap": String(h ? h.gap : 0), "data-lost-ms": lost.toFixed(1) },
+      const row = el("div", { class: `pp-lane ${tone}`, "data-id": id, "data-rt": rt.toFixed(2), "data-late": String(h ? lostFrames(h) : 0), "data-gap": String(h ? h.gap : 0), "data-lost-ms": lost.toFixed(1) },
         el("span", { class: "pp-lane-dot", "aria-hidden": "true" }),
         el("span", { class: "pp-lane-name" }, name),
         meter,
@@ -664,8 +686,8 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     lanesEl.replaceChildren(el("p", { class: "pp-lanes-head" }, el("span", { class: "tag live" }, "Live · WebAssembly"), el("span", { class: "small muted" }, "× real time, one Worker each")), ...rows);
     // a slow machine is said out loud, never hidden: audio that arrived too late is a real gap
     const wall = performance.now();
-    for (const id of ids) { const h = health[id]; if (h && h.late > (h.lastLate ?? 0)) { h.lastLate = h.late; h.lateAt = wall; } }
-    const late = ids.filter((id) => { const h = health[id]; return h && (h.late - h.base) / 48 > 20 && wall - (h.lateAt ?? -1e9) < 3000; });
+    for (const id of ids) { const h = health[id]; if (h && lostFrames(h) > (h.lastLate ?? 0)) { h.lastLate = lostFrames(h); h.lateAt = wall; } }
+    const late = ids.filter((id) => { const h = health[id]; return h && lostFrames(h) / 48 > 20 && wall - (h.lateAt ?? -1e9) < 3000; });
     if (phase === "playing" && late.length) {
       const who = late.map((id) => (id === "piano" ? "the piano" : PIECE_NAMES[id as PieceId].toLowerCase())).join(", ");
       say(`This device computed ${who} too slowly for a moment, so you heard gaps: they are real, not part of the music. ${late.includes("piano") ? "A slower tempo helps." : "A slow drum piece is restarted on a coarser grid."}`, "warn");
@@ -676,6 +698,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     }
   }
   let lateWarned = false;
+  const lostFrames = (h: Health): number => Math.max(0, h.late - h.base) + Math.max(0, (h.stats?.skippedFrames ?? 0) - h.skipBase);
   setInterval(() => { if (phase === "playing" || phase === "warming") paintLanes(); }, 500);
 
   // ---------------------------------------------------------------- report
@@ -975,7 +998,8 @@ function evidenceBody(): HTMLElement {
       el("h4", {}, "The mapping"),
       p("Every pitched channel plays the one grand piano; General MIDI channel 10 plays the drum kit. Notes outside A0–C8 are moved by octaves into the keyboard. Notes that start within 30 ms on the same key are one strike, and a key held by two parts is released only when the last of them ends."),
       p("Velocity sets the hammer's speed as it leaves the escapement, log-linear between 0.6 m/s (velocity 1), 2 m/s (64, mezzo-forte) and 5 m/s (127). Controller 64 is the sustain pedal, with half-pedal positions kept. Volume, expression and other controllers are not used."),
-      p("Drum notes go to the piece their General MIDI number names: kick, snare (side stick near the rim, claps on the snare), closed, pedal and open hi-hat, rack and floor toms, crash (china and splash too), ride and its bell; bongos and congas to the toms, timbales to the snare with its wires off. Anything else is skipped and listed. Velocity scales the piece's standard stroke, and each stroke lands a little away from the last, so no two are identical."),
+      p("Drum notes go to the piece their General MIDI number names: kick, snare (side stick near the rim, claps on the snare), rack and floor toms, crash (china and splash too), ride and its bell; bongos and congas to the toms, timbales to the snare with its wires off. Anything else is skipped and listed. Velocity scales the piece's standard stroke, and each stroke lands a little away from the last, so no two are identical."),
+      p("Hi-hat strokes are left out for now, and counted. The live hi-hat rings like a chime: closed, it keeps sounding for seconds in a few sustained partials below 4 kHz, where a real closed hi-hat gives a short broadband chick, and open it rings in the same pure tones for over six seconds, because the solver has no friction between the two cymbals. A groove's sixteenth-note hats would pile up into a wash of chimes."),
       p("The engines have limits, and the roll keeps within them where it can: a chord of more than ten notes keeps its bass, its top and its loudest notes; no more than sixteen strikes in any quarter second. The piano simulates 24 sounding keys at once; beyond that the quietest strings are retired early.")),
     el("div", {},
       el("h4", {}, "What is computed"),
