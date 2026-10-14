@@ -18,11 +18,11 @@ fn main() -> Result<(), Error> {
     if args.len()<2 {return Err("usage: kettle SPEC.fsk COUNT [--wav ...] [--edge-tensioner M K C STRAIN] [--edge-force SAMPLE N]".into());}
     let spec=spec::Spec::load(&args[0])?;
     let tensioner=tuning::option(&mut args,spec.maximum_slope)?;
-    if args.len()!=2 && args.len()!=11 {return Err("usage: kettle SPEC.fsk COUNT [--wav FULL_SCALE_PA MIN_HZ MAX_HZ INTERVALS ORDER X_M Y_M Z_M] plus explicit edge options".into());}
+    if args.len()!=2 && args.len()!=11 && args.len()!=12 {return Err("usage: kettle SPEC.fsk COUNT [--wav FULL_SCALE_PA MIN_HZ MAX_HZ INTERVALS ORDER X_M Y_M Z_M] or --wav-reciprocal with final MAXIMUM_WORK; plus explicit edge options".into());}
     let steps: u64 = args[1].parse()?;
     if steps > 10_000_000 { return Err("at most ten million requested mechanical steps".into()); }
     let gate = CancelGate::new_clock_free();
-    if args.len()==11 {
+    if args.len()>2 {
         let settings=audio::Settings::read(&args[2..],&spec)?;
         if steps==0 || steps>480_000 { return Err("audio count must be 1..480000 output frames".into()); }
         let ticks=steps.checked_mul(u64::from(spec.rate_hz/audio::OUTPUT_RATE)).ok_or("audio clock overflow")?;

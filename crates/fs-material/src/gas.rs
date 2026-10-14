@@ -523,6 +523,7 @@ impl GasState {
 /// `phi_ij = [1 + sqrt(mu_i/mu_j) (M_j/M_i)^(1/4)]^2 /
 /// sqrt(8 (1 + M_i/M_j))`. The component transport coefficients are retained
 /// source approximations; this mixing rule carries no experimental error bound.
+/// The actual mixture calculation is shared with arbitrary gas compositions.
 ///
 /// # Errors
 /// Refuses incompatible, already-moist, non-finite, or non-positive component
@@ -550,81 +551,14 @@ pub(crate) fn mix_moist_air(
             ),
         });
     }
-    let x_dry = 1.0 - x_vapor;
-    let molar_mass_dry = R_USSA_1976 / dry.specific_gas_constant;
-    let molar_mass_vapor = R_USSA_1976 / vapor.specific_gas_constant;
-    let molar_mass = x_dry * molar_mass_dry + x_vapor * molar_mass_vapor;
-    let cp_molar = x_dry * dry.specific_heat_cp * molar_mass_dry
-        + x_vapor * vapor.specific_heat_cp * molar_mass_vapor;
-    let cv_molar = cp_molar - R_USSA_1976;
-    if !(molar_mass.is_finite() && molar_mass > 0.0 && cp_molar.is_finite() && cv_molar > 0.0) {
-        return Err(MaterialError::Parameters {
-            what: "component heat capacities cannot form a physical ideal-gas mixture".into(),
-        });
-    }
-    let specific_gas_constant = R_USSA_1976 / molar_mass;
-    let specific_heat_cp = cp_molar / molar_mass;
-    let gamma = cp_molar / cv_molar;
-    let interaction = |mu_i: f64, mu_j: f64, molar_mass_i: f64, molar_mass_j: f64| {
-        let numerator = 1.0 + (mu_i / mu_j).sqrt() * (molar_mass_j / molar_mass_i).sqrt().sqrt();
-        numerator * numerator / (8.0 * (1.0 + molar_mass_i / molar_mass_j)).sqrt()
-    };
-    let phi_dry_vapor = interaction(
-        dry.dynamic_viscosity,
-        vapor.dynamic_viscosity,
-        molar_mass_dry,
-        molar_mass_vapor,
-    );
-    let phi_vapor_dry = interaction(
-        vapor.dynamic_viscosity,
-        dry.dynamic_viscosity,
-        molar_mass_vapor,
-        molar_mass_dry,
-    );
-    let dry_denominator = x_dry + x_vapor * phi_dry_vapor;
-    let vapor_denominator = x_vapor + x_dry * phi_vapor_dry;
-    let dynamic_viscosity = x_dry * dry.dynamic_viscosity / dry_denominator
-        + x_vapor * vapor.dynamic_viscosity / vapor_denominator;
-    let thermal_conductivity = x_dry * dry.thermal_conductivity / dry_denominator
-        + x_vapor * vapor.thermal_conductivity / vapor_denominator;
-    let density = dry.pressure / (specific_gas_constant * dry.temperature);
-    let sound_speed = (gamma * specific_gas_constant * dry.temperature).sqrt();
-    let prandtl = dynamic_viscosity * specific_heat_cp / thermal_conductivity;
-    let characteristic_impedance = density * sound_speed;
-    let state = GasState {
-        temperature: dry.temperature,
-        pressure: dry.pressure,
-        density,
-        sound_speed,
-        dynamic_viscosity,
-        thermal_conductivity,
-        gamma,
-        specific_gas_constant,
-        specific_heat_cp,
-        prandtl,
-        characteristic_impedance,
-        water_mole_fraction: x_vapor,
-    };
-    if [
-        state.density,
-        state.sound_speed,
-        state.dynamic_viscosity,
-        state.thermal_conductivity,
-        state.gamma,
-        state.specific_gas_constant,
-        state.specific_heat_cp,
-        state.prandtl,
-        state.characteristic_impedance,
-    ]
-    .into_iter()
-    .any(|value| !value.is_finite() || value <= 0.0)
-        || state.gamma <= 1.0
-    {
-        return Err(MaterialError::Parameters {
-            what: "moist-air mixture produced non-physical gas properties".into(),
-        });
-    }
-    Ok(state)
+    let composition = fs_qty::semantic::Composition::new(
+        fs_qty::semantic::CompositionBasis::MoleFraction,
+        vec![1.0 - x_vapor, x_vapor],
+    )
+    .map_err(|error| MaterialError::Parameters {
+        what: format!("humid-air composition: {error}"),
+    })?;
+    crate::gas_mixture::mix_gas_states(&[dry, vapor], &composition, Some(1))
 }
 
 fn validate_moist_air_components(dry: &GasState, vapor: &GasState) -> Result<(), MaterialError> {

@@ -13,7 +13,8 @@
 //! tangent, dense-LU Newton with load stepping. Fixture-scale by
 //! design (≤ a few hundred DOFs); analytic tangents and SE(3)
 //! DYNAMICS under fs-time's symplectic integrators are the recorded
-//! successor scope.
+//! successor scope. [`MaterialRod`] binds the shared source-resolved concentric
+//! section to this same energy and equilibrium solver, retaining all layers.
 
 use crate::SolidError;
 use fs_ga::{GaError, So3, Vec3};
@@ -262,9 +263,253 @@ impl Rod {
     }
 }
 
+impl RodSection {
+    /// Project the canonical layered material section into this rod's existing
+    /// diagonal energy law. EA, EI, corrected GA and circular GJ are all taken
+    /// from the same section; no isotropic preset or effective radius is inferred.
+    /// The returned numerical coefficients alone do not retain source authority;
+    /// use [`MaterialRod`] to keep the material bundles with the solved geometry.
+    ///
+    /// # Errors
+    /// Refuses a sampled frequency/other-state curve as a static elastic law.
+    /// Coefficients must be constants or T-only curves at fixed positive absolute
+    /// T, and any explicit frequency support must include zero (static loading).
+    pub fn try_from_concentric_material(
+        section: &fs_material::section::ConcentricShearSection,
+    ) -> Result<Self, SolidError> {
+        use fs_material::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY};
+        for (index, layer) in section.elastic().layers().iter().enumerate() {
+            for name in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, section.shear_property()] {
+                let refuse = || SolidError::MaterialRefused {
+                    what: format!("rod layer {index} property {name} must support a frozen static elastic law"),
+                };
+                let property = layer.material.property(name).ok_or_else(refuse)?;
+                if !property.is_constant_at_fixed_temperature() {
+                    return Err(refuse());
+                }
+                if let Some((lo, hi)) = property.angular_frequency_band_rad_s().map_err(|_| refuse())?
+                    && (lo > 0.0 || hi < 0.0)
+                {
+                    return Err(refuse());
+                }
+            }
+        }
+        Ok(Self {
+            ea: section.elastic().axial_stiffness_n(),
+            ga: section.shear_stiffness_n(),
+            gj: section.torsional_stiffness_n_m2(),
+            ei: section.elastic().bending_stiffness_n_m2(),
+        })
+    }
+}
+
+/// The retained dense/finite-difference rod solver is a fixture-scale solver.
+/// This material entry point admits at most 384 free degrees of freedom.
+pub const MAX_MATERIAL_ROD_SEGMENTS: usize = 64;
+
+/// The existing Cosserat rod and its immutable, source-bound layered section.
+///
+/// Each layer describes the stress-free reference configuration at its retained
+/// query state. Density supplies reference mass; it does not silently add gravity
+/// or dynamics. This is the existing diagonal linear elastic rod law with exact
+/// rotational kinematics, not helical winding, interlayer slip, plasticity,
+/// thermal evolution or a validated 3D composite material. Replacing a material
+/// constructs a new specimen; no old stress/history is transplanted.
+#[derive(Clone, Debug)]
+pub struct MaterialRod {
+    rod: Rod,
+    section: fs_material::section::ConcentricShearSection,
+    reference_length_m: f64,
+    reference_mass_kg: f64,
+}
+
+impl MaterialRod {
+    /// Build the actual rod, clamped at node zero, without hand-copied stiffness.
+    /// Work and allocation remain within the existing fixture-scale solver.
+    ///
+    /// # Errors
+    /// Refuses nonpositive/nonfinite length, zero or oversized segment counts,
+    /// unrepresentable segment length/reference mass and unsupported source laws.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn try_straight(
+        length_m: f64,
+        segments: usize,
+        section: fs_material::section::ConcentricShearSection,
+    ) -> Result<Self, SolidError> {
+        if !length_m.is_finite() || length_m <= 0.0
+            || segments == 0 || segments > MAX_MATERIAL_ROD_SEGMENTS
+        {
+            return Err(SolidError::InvalidInput {
+                what: "material rod needs finite positive length and 1..=64 segments".into(),
+            });
+        }
+        let segment_length = length_m / segments as f64;
+        let mass = length_m * section.elastic().line_density_kg_m();
+        if !segment_length.is_finite() || segment_length <= 0.0 || !mass.is_finite() || mass <= 0.0 {
+            return Err(SolidError::InvalidInput {
+                what: "material rod segment length or reference mass is unrepresentable".into(),
+            });
+        }
+        let coefficients = RodSection::try_from_concentric_material(&section)?;
+        Ok(Self {
+            rod: Rod::straight(length_m, segments, coefficients), section,
+            reference_length_m: length_m, reference_mass_kg: mass,
+        })
+    }
+
+    /// Solved geometry, nodal frames, energy and strains from the existing rod.
+    /// Read-only access prevents silently replacing its bound section coefficients.
+    #[must_use]
+    pub const fn rod(&self) -> &Rod { &self.rod }
+    /// Original ordered material bundles, reference geometry and shear correction.
+    #[must_use]
+    pub const fn material_section(&self) -> &fs_material::section::ConcentricShearSection { &self.section }
+    /// Physical stress-free reference length [m].
+    #[must_use]
+    pub const fn reference_length_m(&self) -> f64 { self.reference_length_m }
+    /// Reference mass [kg], unchanged by elastic extension in this static model.
+    #[must_use]
+    pub const fn reference_mass_kg(&self) -> f64 { self.reference_mass_kg }
+
+    /// Solve with the existing energy/Newton/Lie-group implementation.
+    /// Only a fully successful, finite result replaces the previous geometry.
+    /// This preserves the legacy solver's numerical and no-dynamics boundaries;
+    /// a small residual is not a model-accuracy or stability certificate.
+    ///
+    /// # Errors
+    /// Refuses nonfinite loads, tolerance outside (0,infinity), load-step count
+    /// outside 1..=256, or any solver failure. Material and prior pose are unchanged.
+    pub fn solve_static(
+        &mut self,
+        load: &TipLoad,
+        steps: usize,
+        tolerance: f64,
+    ) -> Result<Vec<f64>, SolidError> {
+        if steps == 0 || steps > 256 || !tolerance.is_finite() || tolerance <= 0.0
+            || !load.force.iter().chain(&load.moment).all(|value| value.is_finite())
+        {
+            return Err(SolidError::InvalidInput {
+                what: "material rod solve needs finite loads, positive tolerance and 1..=256 load steps".into(),
+            });
+        }
+        let mut candidate = self.rod.clone();
+        let residuals = candidate.solve_static(load, steps, tolerance)?;
+        if !candidate.positions.iter().flatten().all(|value| value.is_finite())
+            || !candidate.energy()?.is_finite()
+        {
+            return Err(SolidError::InvalidInput {
+                what: "material rod solve produced an unrepresentable configuration".into(),
+            });
+        }
+        self.rod = candidate;
+        Ok(residuals)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
+        PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
+    use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer, ConcentricShearSection};
+    use fs_material::state_point::{MaterialPropertySelection, ScalarAdmissibility,
+        ScalarPropertyRequirement, resolve_material_state_point};
+    use fs_qty::{Density, Pressure};
+
+    fn section(sleeve_scale: f64, band: Option<(f64, f64)>) -> ConcentricShearSection {
+        let layers = [(0.05, 1.0), (0.1, sleeve_scale)].into_iter().map(|(radius, scale)| {
+            let mut claims = ClaimSet::new();
+            let mut requirements = Vec::new();
+            for (name, value, dims) in [("density", 1000.0*scale, Density::DIMS),
+                ("young_modulus", 1e6*scale, Pressure::DIMS), ("shear_modulus", 4e5*scale, Pressure::DIMS)] {
+                claims.insert_claim(PropertyClaim {
+                    key: PropertyKey::new(name, dims), value: PropertyValue::Scalar { value, dims },
+                    validity: band.map_or_else(ValidityDomain::unconstrained,
+                        |(lo, hi)| ValidityDomain::unconstrained().with("omega", lo, hi)),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::ConstantWithinValidity, observations: vec![],
+                    provenance: Provenance { source: "synthetic layered rod".into(), license: "test-only".into(), artifact: None },
+                }).unwrap();
+                requirements.push(ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::StrictlyPositive).unwrap());
+            }
+            let card = MaterialCard::assemble(MaterialStateId { chemistry: "synthetic".into(),
+                phase: "solid".into(), process: "test".into(), revision: 0 }, claims, vec![]).unwrap();
+            let point = band.map_or_else(QueryPoint::new,
+                |(lo, hi)| QueryPoint::new().with("omega", (lo + hi) / 2.0).unwrap());
+            ConcentricMaterialLayer { outer_radius_m: radius, material: resolve_material_state_point(
+                &card, &point, &requirements, MaterialPropertySelection::SingleClaimOnly).unwrap() }
+        }).collect();
+        ConcentricElasticSection::try_new(0.0, layers).unwrap().with_shear_modulus("shear_modulus", 0.8).unwrap()
+    }
+    fn near(a: f64, b: f64) { assert!((a-b).abs() < 2e-11 * a.abs().max(b.abs()), "{a} != {b}"); }
+
+    #[test]
+    fn shared_layer_integrals_drive_actual_axial_shear_torsion_and_bending_energy() {
+        let section = section(2.0, None);
+        let coefficients = RodSection::try_from_concentric_material(&section).unwrap();
+        assert_eq!(coefficients.ea, section.elastic().axial_stiffness_n());
+        assert_eq!(coefficients.ei, section.elastic().bending_stiffness_n_m2());
+        let mut rod = Rod::straight(1.0, 1, coefficients);
+        rod.positions[1] = [1.001, 0.002, 0.003];
+        near(rod.energy().unwrap(), 0.5 * (coefficients.ea*0.001_f64.powi(2)
+            + coefficients.ga*(0.002_f64.powi(2) + 0.003_f64.powi(2))));
+        rod.positions[1] = [1.0, 0.0, 0.0];
+        rod.frames[1] = So3::identity().body_plus(fs_ga::So3Tangent::new(Vec3::new(0.01, 0.0, 0.0))).unwrap();
+        near(rod.energy().unwrap(), 0.5 * coefficients.gj * 0.01_f64.powi(2));
+        rod.frames[1] = So3::identity().body_plus(fs_ga::So3Tangent::new(Vec3::new(0.0, 0.0, 0.01))).unwrap();
+        let midpoint = So3::identity().body_plus(fs_ga::So3Tangent::new(Vec3::new(0.0, 0.0, 0.005))).unwrap();
+        let tip = midpoint.rotate(Vec3::new(1.0, 0.0, 0.0)).unwrap();
+        rod.positions[1] = [tip.x, tip.y, tip.z];
+        near(rod.energy().unwrap(), 0.5 * coefficients.ei * 0.01_f64.powi(2));
+    }
+
+    #[test]
+    fn replacing_sleeve_data_changes_solved_extension_and_twist_not_the_solver() {
+        let mut a = MaterialRod::try_straight(1.0, 1, section(1.0, None)).unwrap();
+        let mut b = MaterialRod::try_straight(1.0, 1, section(2.0, None)).unwrap();
+        let original_section = b.material_section().clone();
+        let mass = b.reference_mass_kg();
+        let load = TipLoad { force: [1.0, 0.0, 0.0], moment: [0.1, 0.0, 0.0] };
+        for rod in [&mut a, &mut b] {
+            rod.solve_static(&load, 1, 1e-8).unwrap();
+            let (gamma, kappa) = rod.rod().strains(0).unwrap();
+            let expected_extension = load.force[0] / rod.rod().section.ea;
+            let expected_twist = load.moment[0] / rod.rod().section.gj;
+            assert!((gamma[0] / expected_extension - 1.0).abs() < 1e-5);
+            assert!((kappa[0] / expected_twist - 1.0).abs() < 1e-5);
+        }
+        assert!(b.rod().positions[1][0] < a.rod().positions[1][0]);
+        assert!(b.rod().strains(0).unwrap().1[0] < a.rod().strains(0).unwrap().1[0]);
+        assert_eq!(b.material_section(), &original_section);
+        assert_eq!(b.reference_mass_kg(), mass);
+        assert!(mass > a.reference_mass_kg());
+    }
+
+    #[test]
+    fn static_material_binding_does_not_extrapolate_dynamic_source_support() {
+        assert!(MaterialRod::try_straight(1.0, 1, section(1.0, Some((1.0, 100.0)))).is_err());
+        assert!(MaterialRod::try_straight(1.0, 1, section(1.0, Some((0.0, 100.0)))).is_ok());
+    }
+
+    #[test]
+    fn invalid_configuration_or_load_preserves_material_and_pose() {
+        let source = section(1.0, None);
+        for length in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(MaterialRod::try_straight(length, 1, source.clone()).is_err());
+        }
+        for segments in [0, MAX_MATERIAL_ROD_SEGMENTS + 1, usize::MAX] {
+            assert!(MaterialRod::try_straight(1.0, segments, source.clone()).is_err());
+        }
+        let mut rod = MaterialRod::try_straight(1.0, 2, source.clone()).unwrap();
+        let positions = rod.rod().positions.clone();
+        assert!(rod.solve_static(&TipLoad::default(), 0, 1e-8).is_err());
+        assert!(rod.solve_static(&TipLoad::default(), 1, f64::NAN).is_err());
+        assert!(rod.solve_static(&TipLoad { force: [f64::NAN, 0.0, 0.0], moment: [0.0; 3] }, 1, 1e-8).is_err());
+        assert_eq!(rod.rod().positions, positions);
+        assert_eq!(rod.material_section(), &source);
+        near(rod.reference_mass_kg(), source.elastic().line_density_kg_m());
+    }
 
     #[test]
     fn linear_tip_deflection_matches_beam_theory() {

@@ -23,6 +23,9 @@ use std::collections::BTreeMap;
 #[path = "deposition/observe.rs"]
 mod observe;
 pub use observe::{ContactUpdate, DepositionObserver};
+#[path = "deposition/coverage.rs"]
+mod coverage;
+pub use coverage::{ContactPatch, ContactPatchUpdate};
 
 /// Persistent physical cell identity; distinct from its source segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -114,7 +117,8 @@ pub struct ThermalLink {
     pub a: CellId,
     /// Second incident cell.
     pub b: CellId,
-    /// Covered area on EACH side, m².
+    /// Default covered area on EACH side, m². A `ContactPatch` can instead
+    /// supply separate covered areas; then this is its nominal interface area.
     pub area_m2: f64,
     /// Total thermal conductance, W/K.
     pub conductance_w_k: f64,
@@ -218,6 +222,8 @@ pub struct DepositionSimulation<'a> {
     materials: BTreeMap<MaterialId, &'a dyn ThermalLaw>,
     cells: BTreeMap<CellId, DepositedCell>,
     links: BTreeMap<u64, ThermalLink>,
+    // Overrides only; symmetric links retain their existing area semantics.
+    covered_areas: BTreeMap<u64, [f64; 2]>,
     budget: DepositionBudget,
 }
 
@@ -271,6 +277,7 @@ impl<'a> DepositionSimulation<'a> {
             materials: laws,
             cells: BTreeMap::new(),
             links: BTreeMap::new(),
+            covered_areas: BTreeMap::new(),
             budget,
         })
     }
@@ -285,7 +292,8 @@ impl<'a> DepositionSimulation<'a> {
     pub fn cells(&self) -> &BTreeMap<CellId, DepositedCell> {
         &self.cells
     }
-    /// Current thermal interfaces, suitable for a later bond-history owner.
+    /// Current exchange links. Use `contact_patch` for authoritative per-side
+    /// coverage: a link alone does not encode an asymmetric material footprint.
     #[must_use]
     pub fn links(&self) -> &BTreeMap<u64, ThermalLink> {
         &self.links
@@ -325,7 +333,8 @@ impl<'a> DepositionSimulation<'a> {
             cell.geometry.surface_area_m2 - cell.boundary.reservoir.map_or(0.0, |r| r.area_m2);
         for link in self.links.values() {
             if link.a == id || link.b == id {
-                area -= link.area_m2;
+                let covered = self.contact_areas(link);
+                area -= if link.a == id { covered[0] } else { covered[1] };
             }
         }
         if !nonnegative(area) {
@@ -384,28 +393,13 @@ impl<'a> DepositionSimulation<'a> {
                 self.exposed_area_m2(id)?;
             }
             Event::Contact(link) => {
-                if self.links.len() >= self.budget.max_links {
-                    return Err(DepositionError::Budget("active links"));
-                }
-                if self.links.contains_key(&link.id)
-                    || link.a == link.b
-                    || !positive(link.area_m2)
-                    || !nonnegative(link.conductance_w_k)
-                    || !self.cells.contains_key(&link.a)
-                    || !self.cells.contains_key(&link.b)
-                {
-                    return Err(DepositionError::InvalidInput(
-                        "contact requires distinct active cells and a unique ID",
-                    ));
-                }
-                self.links.insert(link.id, link);
-                self.exposed_area_m2(link.a)?;
-                self.exposed_area_m2(link.b)?;
+                self.insert_contact_patch(ContactPatch::symmetric(link))?;
             }
             Event::Separation(id) => {
                 if self.links.remove(&id).is_none() {
                     return Err(DepositionError::InvalidInput("inactive interface"));
                 }
+                self.covered_areas.remove(&id);
             }
             Event::Boundary(id, boundary) => {
                 validate_boundary(boundary)?;
@@ -446,13 +440,14 @@ impl<'a> DepositionSimulation<'a> {
             }
             let power =
                 finite(link.conductance_w_k * (temperatures[&link.b] - temperatures[&link.a]))?;
-            for (id, sign) in [(link.a, 1.0), (link.b, -1.0)] {
+            let coverage = self.contact_areas(link);
+            for (id, sign, side_area) in [(link.a, 1.0, coverage[0]), (link.b, -1.0, coverage[1])] {
                 let rate = rates.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
                 *rate = finite(*rate + sign * power)?;
                 let g = outgoing.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
                 *g = finite(*g + link.conductance_w_k)?;
                 let area = covered.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
-                *area = finite(*area + link.area_m2)?;
+                *area = finite(*area + side_area)?;
             }
         }
         let mut external_w = 0.0;

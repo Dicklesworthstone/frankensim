@@ -13,7 +13,8 @@
 //! no drawing tension, slack, membrane stiffening, inertia, shear deformation,
 //! adhesion, fracture or molten-strand flow is inferred. Explicit frictionless
 //! point supports are available separately through `supports`.
-//! An initial complete span must be supplied. Later complete layers may be born
+//! A complete initial seed must be supplied. `growth` extends a clamped seed
+//! at its current tip without activating future material. Complete layers may be born
 //! stress-free on the current shape only with an explicit perfect-bond assumption.
 //! This is bounded issue #1 R5 functionality, not whole-print qualification.
 
@@ -28,6 +29,8 @@ pub mod contact;
 pub mod supports;
 /// Equal-and-opposite contact forces between deformable neighbouring roads.
 pub mod neighbours;
+/// Stress-free cell birth at the advancing tip of a clamped road.
+pub mod growth;
 
 /// Fixed transverse restraints; both allow free axial thermal contraction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

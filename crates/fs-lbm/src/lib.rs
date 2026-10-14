@@ -19,6 +19,7 @@ pub mod conjugate;
 pub mod core2;
 pub mod d3q19;
 pub mod freesurface;
+pub mod material;
 pub mod perf;
 pub mod refine;
 pub mod rheology;

@@ -108,6 +108,11 @@ fn request(p:&mut fs_project::ProjectSpec) {
 #[test]
 fn finite_card_bound_preserves_the_physical_field_and_reaches_retained_reports() {
     let fixture=Fixture::new(true,true); let mut p=fixture.project.clone();
+    for binding in p.materials.as_mut().unwrap() {
+        binding.temp_lo.value=290.0; binding.temp_hi.value=301.0;
+    }
+    // Unit cube: the old one-ended bound is 302 K; using both cooled ends
+    // gives 300.75 K. Only the latter fits the retained 301 K domain.
     let (_,baseline,field)=fixture.solve(&p,0); request(&mut p);
     let (run,receipt,bounded_field)=fixture.solve(&p,1);
     assert_eq!(field.get("temperature"),bounded_field.get("temperature"));
@@ -120,6 +125,8 @@ fn finite_card_bound_preserves_the_physical_field_and_reaches_retained_reports()
     assert!(range.f64_field("lower").unwrap()>=span.f64_field("lower").unwrap());
     assert!(range.f64_field("upper").unwrap()<=span.f64_field("upper").unwrap());
     assert!(range.f64_field("upper").unwrap()>300.0);
+    assert!(range.f64_field("upper").unwrap()<300.7500001);
+    assert_eq!(validity.get("two_sided"),Some(&J::Bool(true)));
     assert_eq!(bound.str_field("authority"),Some("Verified"));
     let material=&bound.get("materials").unwrap().as_array().unwrap()[0];
     assert_eq!(material.str_field("card"),Some(p.materials.as_ref().unwrap()[0].card.as_str()));
@@ -155,7 +162,7 @@ fn finite_and_global_claims_use_the_same_nominal_equations() {
 fn unsupported_geometry_and_insufficient_barriers_remain_refusals() {
     for cube in [false,true] {
         let f=Fixture::new(true,cube); let mut p=f.project.clone();
-        if cube { for b in p.materials.as_mut().unwrap() { b.temp_lo.value=290.0; b.temp_hi.value=301.0; } }
+        if cube { for b in p.materials.as_mut().unwrap() { b.temp_lo.value=290.0; b.temp_hi.value=300.7; } }
         f.solve(&p,0); // the actual nominal field is admissible before the bound request
         request(&mut p);
         let result=f.run(&p,1);

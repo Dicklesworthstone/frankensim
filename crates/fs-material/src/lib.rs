@@ -19,6 +19,7 @@ pub mod calibrate;
 pub mod cohesive;
 pub mod conductor;
 pub mod liquid;
+pub mod liquid_temperature;
 pub mod elastic;
 pub mod fiber;
 /// Shared gas/liquid transport for material-driven flow and heat consumers.
@@ -29,6 +30,7 @@ pub mod moist_air;
 pub mod graph;
 /// Contact-temperature history and explicit strength handoff for polymer welding.
 pub mod healing;
+mod heat_capacity_state;
 pub mod hyper;
 pub mod identifiability;
 pub mod iso9613;

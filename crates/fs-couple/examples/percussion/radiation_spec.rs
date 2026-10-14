@@ -8,8 +8,18 @@ const MAX_BYTES: usize = 4096;
 const MAX_REFINED_PANELS: usize = 4096;
 const MAX_DENSE_WORK: u64 = 100_000_000_000_000;
 
+/// Separate acoustic images of the SAME physical boundary. Selection is cold,
+/// explicit and final: a failed image never retries using the other operator.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Image {
+    #[default]
+    Collocation,
+    Reciprocal,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Spec {
+    pub image: Image,
     pub band_hz: [f64;2],
     pub training_intervals: usize,
     pub max_order: usize,
@@ -19,7 +29,7 @@ pub struct Spec {
 }
 impl Default for Spec {
     fn default() -> Self {
-        Self { band_hz: [40.0,1640.0], training_intervals: 20, max_order: 8,
+        Self { image: Image::Collocation, band_hz: [40.0,1640.0], training_intervals: 20, max_order: 8,
             subdivisions: 0, max_panels: MAX_PANELS, max_dense_work: 1_000_000_000_000 }
     }
 }
@@ -42,10 +52,12 @@ impl Spec {
         let mut lines=text.lines().map(|l|l.split('#').next().unwrap_or("").trim()).filter(|l| !l.is_empty());
         if lines.next() != Some(HEADER) { return Err("radiation specification requires frankensim-radiation-preparation-v1".into()); }
         let mut band=None; let mut intervals=None; let mut order=None;
-        let mut subdivisions=None; let mut panels=None; let mut work=None;
+        let mut subdivisions=None; let mut panels=None; let mut work=None; let mut image=None;
         for line in lines {
             let f: Vec<_>=line.split(',').map(str::trim).collect();
             match f.as_slice() {
+                ["image","collocation"] if image.is_none() => image=Some(Image::Collocation),
+                ["image","reciprocal"] if image.is_none() => image=Some(Image::Reciprocal),
                 ["band_hz",a,b] if band.is_none() => band=Some([a.parse()?,b.parse()?]),
                 ["training_intervals",v] if intervals.is_none() => intervals=Some(v.parse()?),
                 ["max_order",v] if order.is_none() => order=Some(v.parse()?),
@@ -55,7 +67,7 @@ impl Spec {
                 _ => return Err("radiation specification has an unknown, duplicate or malformed record".into()),
             }
         }
-        let s=Self { band_hz:band.ok_or("missing radiation band_hz")?,
+        let s=Self { image:image.unwrap_or_default(), band_hz:band.ok_or("missing radiation band_hz")?,
             training_intervals:intervals.ok_or("missing radiation training_intervals")?,
             max_order:order.ok_or("missing radiation max_order")?,
             subdivisions:subdivisions.ok_or("missing radiation subdivisions")?,
@@ -72,7 +84,7 @@ impl Spec {
         self.validate()?;
         if !matches!(command,"splash-wav"|"splash-mic"|"drum-wav"|"drum-mic"|
             "drum-stretch-wav"|"drum-stretch-mic"|"drum-modal-wav"|"drum-modal-mic"|
-            "snare-wav"|"snare-mic"|"snare-off-wav"|"snare-off-mic") {
+            "snare-wav"|"snare-mic"|"snare-off-wav"|"snare-off-mic"|"hihat-wav"|"hihat-mic") {
             return Err("--radiation-spec requires an existing pressure-audio command".into());
         }
         Ok(())
@@ -120,6 +132,7 @@ impl Spec {
 }
 
 /// Transactional option removal: malformed files leave all arguments intact.
+/// An absent image record retains collocation for existing input files.
 pub fn option(args: &mut Vec<String>) -> Result<Option<Spec>, Error> {
     let mut occurrences=args.iter().enumerate().filter(|(_,a)|a.as_str()=="--radiation-spec");
     let Some((index,_))=occurrences.next() else { return Ok(None); };

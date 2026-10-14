@@ -15,6 +15,7 @@ fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-matdb = { path = "../fs-matdb" }
+fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
 fs-sparse = { path = "../fs-sparse" }

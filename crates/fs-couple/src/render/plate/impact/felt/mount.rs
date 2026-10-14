@@ -8,6 +8,9 @@
 use super::FeltPad;
 use super::super::{BodyPotential, ImpactBody, ImpactError, MAX_IMPACT_MODES, invalid};
 
+/// Distributed felt on a supplied translating, rocking or elastic support basis.
+pub mod modal;
+
 /// One fixed-axis translating carrier, with explicit passive ground attachment.
 /// Mass excludes the instrument, whose original inertia remains in its body.
 /// Stiffness/rest position describe a physical support, not an audio parameter.
