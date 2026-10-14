@@ -3,10 +3,10 @@ use super::{ImpactError, ImpactSystem, PreparedImpactSystem, StepWorkspace, inva
 
 pub(super) fn prepare_plan(inner: &ImpactSystem, workspace: &mut StepWorkspace) -> Result<(), ImpactError> {
     if let Some(air)=&inner.radiation {
-        // Mechanical momentum exchanges power with the acoustic pairs. They
-        // are not mutually independent leaves; keep the existing loaded image.
-        workspace.set_condensed_pairs(&air.state_pairs()).map_err(ImpactError::PreparedSolve)?;
-    } else if inner.modes>1 && !inner.has_nonlinear_dissipation() && diagonal_momentum_flow(inner) {
+        let pairs=air.state_pairs();
+        if inner.modes>1 {select_kinematic(inner,workspace,&pairs)?;}
+        else {workspace.set_condensed_pairs(&pairs).map_err(ImpactError::PreparedSolve)?;}
+    } else if inner.modes>1 {
         select(inner,workspace)?;
     }
     Ok(())
@@ -22,8 +22,24 @@ fn diagonal_momentum_flow(inner: &ImpactSystem) -> bool {
 }
 
 fn select(inner: &ImpactSystem, workspace: &mut StepWorkspace) -> Result<(), ImpactError> {
-    let momenta:Vec<_>=(0..inner.modes).map(|i|2*i+1).collect();
-    workspace.set_condensed_leaves(&[],&momenta).map_err(ImpactError::PreparedSolve)
+    if !inner.has_nonlinear_dissipation() && diagonal_momentum_flow(inner) {
+        // Keep the established scalar traversal when its independent momentum
+        // block is suitable. The actual Jacobian is still checked at each step.
+        let momenta:Vec<_>=(0..inner.modes).map(|i|2*i+1).collect();
+        workspace.set_condensed_leaves(&[],&momenta).map_err(ImpactError::PreparedSolve)
+    } else {
+        select_kinematic(inner,workspace,&[])
+    }
+}
+
+fn select_kinematic(inner: &ImpactSystem, workspace: &mut StepWorkspace, pairs: &[[usize;2]]) -> Result<(), ImpactError> {
+    // Displacement equations eliminate momenta; momentum equations stay in the
+    // border. Thus off-diagonal resistance and nonlinear contact loss are NOT
+    // discarded. Acoustic equations may depend on earlier momentum leaves;
+    // the shared owner performs exact forward substitution, not independent
+    // elimination or a staggered mechanical/acoustic step.
+    let pivots:Vec<_>=(0..inner.modes).map(|i|[2*i,2*i+1]).collect();
+    workspace.set_condensed_pivots(&pivots,pairs).map_err(ImpactError::PreparedSolve)
 }
 
 impl PreparedImpactSystem {
@@ -34,12 +50,13 @@ impl PreparedImpactSystem {
     /// physical acceptance gate. No mass, contact law, shell nonlinearity, felt
     /// history, cavity overlap or acoustic observation is replaced or discarded.
     ///
-    /// Preparation selects this by default when there are at least two modes,
-    /// no nonlinear dissipative port and no off-diagonal momentum J-R entries.
-    /// That cold screen avoids known unsuitable layouts; the ACTUAL analytic
-    /// Jacobian is still checked on every update. Even the smallest nonzero
-    /// inter-leaf term requires the original full dense solve. Explicit enabling
-    /// may attempt other unloaded layouts, but cannot bypass that exact check.
+    /// Preparation selects this by default with at least two modes. Models with
+    /// diagonal momentum resistance and no nonlinear loss keep scalar momentum
+    /// leaves. Other models use displacement-equation/momentum-unknown pivots:
+    /// spatial dampers and nonlinear contact loss remain fully coupled.
+    /// The ACTUAL base Jacobian must have the selected exact block structure on
+    /// every update. Singular pivots, unexpected structure or failed original
+    /// backward error use full LU of the SAME complete Jacobian.
     /// False selects full dense Newton. Finite differences ignore the selection.
     ///
     /// This method allocates and belongs outside the callback. Switching changes
@@ -48,7 +65,7 @@ impl PreparedImpactSystem {
     ///
     /// # Errors
     /// Refuses a radiation-loaded model without changing its existing plan:
-    /// the acoustic-pair plan remains controlled by `set_radiation_condensation`.
+    /// its joint kinematic/acoustic plan is controlled by `set_radiation_condensation`.
     /// Also returns the shared workspace's capacity/dimension refusal.
     pub fn set_momentum_condensation(&mut self, enabled: bool) -> Result<(), ImpactError> {
         if self.inner.radiation.is_some() {

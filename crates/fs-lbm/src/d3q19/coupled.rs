@@ -28,6 +28,7 @@
 //! determinism hash stays a replay-checked CANDIDATE until the
 //! GOLDEN_POLICY four-quadrant ceremony, as in the 40p2 precedent).
 
+use crate::thermal::{ThermalForcingError, forcing::validate_external_forces};
 use super::{CollisionModel3, E3, OPP3, Q3, collide_cell3, equilibrium3};
 use crate::rheology::{Rheology, RheologyStats, TAU_CAP, TAU_FLOOR};
 
@@ -439,6 +440,22 @@ impl ThermalLbm3 {
     /// temperature collide + stream (anti-bounce-back at the fixed-T
     /// plates, periodic x/y).
     pub fn step(&mut self) {
+        self.step_with_forces_inner(None);
+    }
+
+    /// Advance with external lattice force densities added to thermal buoyancy.
+    /// The borrowed field has one vector per cell including the two wall
+    /// planes, whose loads are ignored. It contains EXTERNAL forces only, not
+    /// the previous step's total `fext`. Admission failures leave state intact;
+    /// ordinary solver-state and stability requirements still apply.
+    pub fn step_with_external_forces(&mut self, forces: &[[f64; 3]]) -> Result<(), ThermalForcingError> {
+        let plane = self.grid.nx.checked_mul(self.grid.ny).ok_or(ThermalForcingError::Layout)?;
+        validate_external_forces(forces, &self.gpop, plane, self.gbeta, self.t_ref)?;
+        self.step_with_forces_inner(Some(forces));
+        Ok(())
+    }
+
+    fn step_with_forces_inner(&mut self, external: Option<&[[f64; 3]]>) {
         let (nx, ny, nz) = (self.grid.nx, self.grid.ny, self.grid.nz);
         for z in 1..nz - 1 {
             for y in 0..ny {
@@ -446,6 +463,11 @@ impl ThermalLbm3 {
                     let i = self.grid.idx(x, y, z);
                     let t: f64 = self.gpop[i].iter().sum();
                     self.grid.fext[i] = [0.0, 0.0, self.gbeta * (t - self.t_ref)];
+                    if let Some(forces) = external {
+                        for (total, &load) in self.grid.fext[i].iter_mut().zip(&forces[i]) {
+                            *total += load;
+                        }
+                    }
                 }
             }
         }

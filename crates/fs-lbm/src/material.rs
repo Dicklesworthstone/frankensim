@@ -11,6 +11,7 @@ pub mod conjugate;
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
+mod forcing;
 mod three_dimensional;
 pub use three_dimensional::{MaterialSlab3, MaterialThermalSlab3};
 
@@ -21,6 +22,8 @@ use crate::{CS2, Grid, MACH_LIMIT, ScalingPlan, ThermalLbm};
 pub enum MaterialLbmError {
     /// The original material transport owner refused its snapshot.
     Transport(MaterialError),
+    /// An external thermal-flow force field was refused before stepping.
+    Forcing(crate::thermal::ThermalForcingError),
     /// Invalid or unrepresentable physical/numerical input.
     Invalid(&'static str),
 }
@@ -28,11 +31,15 @@ impl core::fmt::Display for MaterialLbmError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Transport(error) => write!(f, "material LBM: {error}"),
+            Self::Forcing(error) => write!(f, "material LBM: {error}"),
             Self::Invalid(message) => write!(f, "material LBM: {message}"),
         }
     }
 }
 impl std::error::Error for MaterialLbmError {}
+impl From<crate::thermal::ThermalForcingError> for MaterialLbmError {
+    fn from(error: crate::thermal::ThermalForcingError) -> Self { Self::Forcing(error) }
+}
 impl From<MaterialError> for MaterialLbmError {
     fn from(error: MaterialError) -> Self { Self::Transport(error) }
 }
@@ -172,6 +179,7 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
             lattice: ThermalLbm::slab(input.nx, input.ny, self.flow.tau, self.thermal_relaxation_time, gbeta),
             top_temperature_k: input.top_temperature_k,
             temperature_difference_k: difference,
+            force_units: forcing::ForceUnits::from_scale(self),
         })
     }
 
@@ -241,6 +249,7 @@ pub struct MaterialSlab<L = ThermalLbm> {
     pub lattice: L,
     top_temperature_k: f64,
     temperature_difference_k: f64,
+    force_units: forcing::ForceUnits,
 }
 impl<L> MaterialSlab<L> {
     /// Convert any finite normalized temperature to absolute K.

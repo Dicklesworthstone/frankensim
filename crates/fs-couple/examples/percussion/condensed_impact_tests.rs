@@ -1,4 +1,4 @@
-//! Existing instrument geometry, contacts and material memory with condensed air.
+//! Existing instrument geometry, contacts and material memory with joint kinematic/air elimination.
 use crate::*;
 use fs_couple::render::plate::impact::{PreparedImpactSystem,radiation::{Model,Pole}};
 
@@ -15,7 +15,7 @@ fn attach(e:Experiment,condensed:bool)->Run {
     let prefix=s.state().to_vec();let before=s.stored_energy_j();
     let mut system=s.with_radiation_load(&model,&sources,16).unwrap().prepare_analytic().unwrap();
     assert_eq!(&system.state()[..prefix.len()],prefix);assert_eq!(system.stored_energy_j(),before);
-    assert_eq!(system.condensed_newton_dimension(),Some(prefix.len()+1));
+    assert_eq!(system.condensed_newton_dimension(),Some(prefix.len()-e.force.len()+1));
     system.set_radiation_condensation(condensed).unwrap();
     Run{system,force:e.force,sources,observers:[e.observer_a,e.observer_b]}
 }
@@ -69,4 +69,38 @@ fn condensed_radiation_keeps_stretching_heads_cavity_and_hereditary_material() {
     assert!(fast.system.relaxation_observation().unwrap().stored_energy_j>0.);
     assert!(fast.system.membrane_observation(1).unwrap().stretching_energy_j>0.);
     assert!(fast.sources.len()<fast.force.len()-1,"cavity coordinates must not become radiation sources");
+}
+
+
+#[test]
+fn kinematic_radiation_solve_keeps_active_wire_contacts_nonlinear_heads_and_cavity() {
+    let wires=snare::SnareSet {strands:2,modes_per_strand:2,contact_cells:4,
+        clearance_m:-2e-6,..snare::SnareSet::reference(false)};
+    let make=||drum_with_cavity_loss(256,2e-6,true,false,Some(wires),true,
+        Stroke {speed_m_s:0.0,position_m:Some([0.06,0.01])},true,None,
+        Some(drum_spec::Spec {radial_intervals:2,azimuths:8,..drum_spec::Spec::reference()}),None,
+        &[muffling::Muffler {surface:muffling::Surface::Batter,position_m:[0.07,0.01],resistance_n_s_m:0.1}],25.0).unwrap();
+    // Interference is deliberate initial stored contact energy, NOT an inferred
+    // equilibrium or a calibrated snare setting. Both numerical paths see it.
+    let first=make();let start=first.air.as_ref().unwrap().coupling.structural_modes()-4;
+    let fast=compare(attach(first,true),attach(make(),false),128);
+    assert!(fast.system.state()[2*start..2*(start+4)].iter().any(|v|v.abs()>1e-10));
+    assert!(!fast.sources.iter().any(|&i|(start..start+4).contains(&i)));
+    assert!(fast.system.membrane_observation(1).unwrap().stretching_energy_j>0.0);
+    assert!(fast.system.membrane_observation(2).unwrap().stretching_energy_j>0.0);
+}
+
+#[test]
+fn complete_twenty_strand_bank_retains_all_coordinates_with_a_smaller_loaded_border() {
+    let e=drum_with_cavity_loss(2,2e-6,true,false,Some(snare::SnareSet::reference(false)),true,
+        Stroke {speed_m_s:0.0,position_m:Some([0.06,0.01])},true,None,
+        Some(drum_spec::Spec {radial_intervals:2,azimuths:8,..drum_spec::Spec::reference()}),None,&[],25.0).unwrap();
+    let m=e.force.len();let physical=e.system.state().len();
+    let source_modes=e.acoustics.as_ref().unwrap().state_modes().to_vec();
+    assert!(m>160);let fast=attach(e,true);
+    assert_eq!(fast.system.state().len(),physical+32);
+    assert_eq!(fast.system.condensed_newton_dimension(),Some(physical-m+1));
+    assert_eq!(fast.sources,source_modes);assert_eq!(fast.force.len(),m);
+    // No need to run a large idle trajectory to prove preparation kept the
+    // bank. The active small-bank test above checks the full nonlinear solve.
 }
