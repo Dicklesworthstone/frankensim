@@ -1,0 +1,8 @@
+# Synthetic SI data. Density, Cp and resistivity(T) match electrical_constant.txt.
+# Only thermal conductivity and viscosity differ; no material-name dispatch.
+1000 1000
+# T[K] k[W/(m K)] mu[Pa s] resistivity[ohm m]
+290 40 1.8 0.8
+300 80 1.2 1.0
+310 160 0.6 1.2
+330 300 0.4 1.6
