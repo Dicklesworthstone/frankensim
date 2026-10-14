@@ -179,3 +179,6 @@ fn source_mismatches_invalid_budgets_and_domain_exits_refuse() {
         assert_eq!(no_heat.regions[0].inlet, no_heat.regions[0].outlet);
     });
 }
+
+#[path = "liquid_feedback/coupled.rs"]
+mod coupled;

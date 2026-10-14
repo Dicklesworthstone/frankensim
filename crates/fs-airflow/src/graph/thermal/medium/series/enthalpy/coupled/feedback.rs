@@ -12,6 +12,8 @@
 //! The arithmetic endpoint mean here is a declared regional closure, not an
 //! exact spatial mean or a new correlation-accuracy claim.
 
+pub mod solid;
+
 use fs_convection::{CorrelationId, CorrelationRobinBoundary, NusseltEvaluation, ThermalDirection};
 use fs_exec::Cx;
 use fs_material::liquid::ResolvedLiquidState;
@@ -86,6 +88,19 @@ pub enum LiquidFeedbackError {
     Enthalpy(LiquidEnthalpyError),
     /// No locally self-consistent property state in the admitted iteration budget.
     NotConverged { region: String },
+    /// Joint material/solid solve exhausted its explicit work budget.
+    CouplingNotConverged {
+        /// Solid solves performed.
+        iterations: usize,
+        /// Unrelaxed wall residual, K.
+        maximum_wall_residual_k: f64,
+        /// Effective coolant-reference residual, K.
+        maximum_reference_residual_k: f64,
+        /// Relative h residual.
+        maximum_coefficient_residual_relative: f64,
+        /// Largest regional power mismatch, W.
+        maximum_heat_imbalance_w: f64,
+    },
 }
 impl core::fmt::Display for LiquidFeedbackError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
