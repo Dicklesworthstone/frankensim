@@ -123,3 +123,41 @@ fn profile_export_roundtrips_all_physical_fields_without_running_an_eigensolve()
     assert!(super::super::export_command(&["export-shell-mesh".into()]).is_err());
     assert!(super::super::export_command(&["export-shell-mesh".into(),"out".into(),"profile".into(),"extra".into()]).is_err());
 }
+
+
+#[test]
+fn orthotropic_material_uses_one_global_axis_across_the_actual_cymbal_mesh() {
+    let text=reference_text();
+    let mut lines:Vec<_>=text.lines().map(String::from).collect();
+    lines.push("orthotropic_material,99,120e9,70e9,0.27,30e9,8200,1,0,0".into());
+    // Assign a pair of adjacent facets to the same physical rolling direction.
+    let face_ids=lines.iter().enumerate().filter(|(_,l)|l.starts_with("triangle,"))
+        .take(2).map(|(i,_)|i).collect::<Vec<_>>();
+    for i in face_ids {
+        lines[i]=lines[i].strip_suffix(",23").unwrap().to_string()+",99";
+    }
+    let (shell,_,_)=parse(&lines.join("\n")).unwrap();
+    assert_ne!(shell.sections[0].d,shell.sections[1].d,
+        "local D should rotate because facet frames differ while the global material axis does not");
+    assert_eq!(shell.sections[0].density,8200.0);
+    assert_eq!(shell.sections[1].density,8200.0);
+    let model=shell.assemble(&[],fs_plate::shell::ShellSupport::Free).unwrap();
+    assert!(model.k.row(0).1.iter().all(|v|v.is_finite()));
+}
+
+#[test]
+fn orthotropic_material_records_refuse_ambiguous_or_unusable_axes() {
+    let base=reference_text();
+    for row in [
+        "orthotropic_material,99,120e9,70e9,0.27,30e9,8200,0,0,0",
+        "orthotropic_material,99,120e9,70e9,0.27,0,8200,1,0,0",
+        "orthotropic_material,99,120e9,70e9,0.27,30e9,8200,NaN,0,0",
+    ] {
+        let mut text=base.clone();text.push_str(row);text.push('\n');
+        // An unused material is itself a refusal, so assign it to one facet.
+        text=text.replacen(",23\n",",99\n",1);
+        assert!(parse(&text).is_err(),"{row}");
+    }
+    let duplicate=format!("{base}orthotropic_material,23,120e9,70e9,0.27,30e9,8200,1,0,0\n");
+    assert!(parse(&duplicate).is_err());
+}

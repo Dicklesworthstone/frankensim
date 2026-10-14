@@ -66,6 +66,16 @@ existing isotropic section law; mass uses its actual three-dimensional area.
 This retains the profile path's section approximation, rather than claiming
 exact integration of bending stiffness through an arbitrary thickness field.
 Young's modulus, Poisson's ratio and density belong to the assigned material.
+The optional `orthotropic_material` record supplies principal in-plane E1/E2,
+nu12, G12, density, and one **global physical axis-1 direction**. That vector is
+projected into every actual facet tangent before the existing orthotropic section
+law is rotated. It therefore represents a measured rolling/grain/texture
+direction continuously across mesh diagonals; triangle edge order never becomes
+a hidden material direction. A zero/nonfinite axis, or an axis locally normal to
+a used facet, refuses. Separate material IDs may provide spatially varying
+identified texture. These constants are direct inputs, not a hardness-to-modulus
+inference or an alloy-name preset.
+
 No alloy-name lookup or unprovided residual stress/hardness is inferred.
 
 One connected, consistently oriented manifold shell is admitted. Boundaries and
