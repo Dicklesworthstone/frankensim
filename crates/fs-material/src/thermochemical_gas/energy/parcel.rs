@@ -6,6 +6,9 @@
 //! survive both operations. No piston inertia, combustion, mass exchange,
 //! shocks, friction or simultaneous heat/moving-boundary integration is implied.
 
+/// Work-conjugate mechanical loads using the common acoustic compressibility.
+pub mod mechanics;
+
 use super::entropy::{GasEntropyError, GasEntropySolve, map_context};
 use super::{GasEnergyError, GasEnergySolve, GasHeatStep, IsochoricGasParcel,
     ResolvedThermochemicalGasState, ThermochemicalGasModel, poll, positive, updated_point};
