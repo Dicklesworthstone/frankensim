@@ -5,6 +5,8 @@ use super::{Bridge, Error, finite, poll, positive};
 
 /// Finite-nozzle sweeps against the frozen, actually deformed top surface.
 pub mod nozzle;
+/// Facing-surface contact footprints between two independently deformed roads.
+pub mod pair;
 
 /// A centered straight footprint in the same local WORLD x-z frame as the beam.
 #[derive(Debug, Clone, Copy)]
