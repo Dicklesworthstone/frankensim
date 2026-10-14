@@ -14,6 +14,8 @@ use fs_material::state_point::MaterialStatePointError;
 
 /// Sourced nonuniform thermal expansion and compatible section stresses.
 pub mod thermal;
+/// Prescribed nodal supports and reactions using the same material energy.
+pub mod supports;
 
 use super::{MAX_MATERIAL_ROD_SEGMENTS, Rod, RodSection, TipLoad};
 use crate::SolidError;
@@ -62,6 +64,8 @@ pub struct SpatialMaterialRod {
     stiffness: Vec<RodSection>,
     reference_length_m: f64,
     thermal: Option<thermal::ThermalField>,
+    supports: Vec<supports::RodSupport>,
+    free_dofs: Vec<usize>,
 }
 
 impl SpatialMaterialRod {
@@ -88,7 +92,9 @@ impl SpatialMaterialRod {
         let stiffness = sections.iter().map(RodSection::try_from_concentric_material)
             .collect::<Result<Vec<_>, _>>()?;
         let rod = Rod::straight(length_m, sections.len(), stiffness[0]);
-        Ok(Self { rod, sections, stiffness, reference_length_m: length_m, thermal: None })
+        let free_dofs = (0..rod.ndof()).collect();
+        Ok(Self { rod, sections, stiffness, reference_length_m: length_m, thermal: None,
+            supports: Vec::new(), free_dofs })
     }
 
     /// Original material assignments and all layer receipts, in spatial order.
@@ -179,6 +185,7 @@ impl SpatialMaterialRod {
         let mut candidate = self.rod.clone();
         let residuals = candidate.solve_static_with_energy(
             load, steps, tolerance, &|rod| self.energy_for(rod), &|| checkpoint(gate),
+            Some(&self.free_dofs),
         )?;
         self.energy_for(&candidate)?;
         if !candidate.positions.iter().flatten().all(|v| v.is_finite()) {
