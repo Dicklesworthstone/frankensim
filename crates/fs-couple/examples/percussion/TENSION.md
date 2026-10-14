@@ -28,6 +28,41 @@ nonlinear head/wire and material compatibility, force programs, both strikers,
 mutes and the existing radiation-feedback admission still apply. The original
 head/modal/acoustic bandwidth limits are not extended by this option.
 
+## Resolved multi-lug harmonics
+
+A drum specification may add normalized Airy harmonics such as:
+
+```text
+tension_harmonic,batter,10,120,-35
+tension_harmonic,resonant,10,60,20
+```
+
+The order is an integer 2..12. Orders 6, 8, 10 and 12 are useful bounded images
+of common equally spaced lug counts. The final cosine/sine coefficients are N/m
+and rotate the stress pattern; they are not individual lug forces or per-mode
+detuning controls.
+
+Each term comes from a polynomial Airy stress potential, so its installed
+resultant is divergence-free in the film interior. Coefficients are normalized
+so their pair magnitude is a conservative tensor-norm bound across the disk.
+The sum must stay below the certified tensile margin of the base+affine field;
+a request that could create slack/compression refuses rather than being clipped.
+Order-12-and-below stress integrals use bounded 8x8 Gauss-Legendre Duffy
+quadrature for the polynomial Airy family. With no harmonic rows the original
+affine centroid assembly and arithmetic remain unchanged.
+
+```sh
+cargo run --release -p fs-couple --example percussion -- \
+  drum-stretch 4096 --analytic-newton --impact-substeps 8 511 \
+  --drum-spec crates/fs-couple/examples/percussion/illustrative-ten-lug.fsd \
+  --strike-position-m 0.06 0.01 > ten-lug-motion.csv
+```
+
+The tracked card is illustrative, not a measured torque/force survey. Real lug
+measurements can be identified into this basis without inventing oscillator
+pitches. Hoop inertia, lug compliance, bearing-edge friction and head seating
+remain separate mechanisms.
+
 ## SI tensor, not seven independent pitches
 
 After the head name, the first three values are constant additions
@@ -45,9 +80,7 @@ Nxy =     xy - f*x - c*y
 `Nxy` is tensor shear, not doubled engineering shear. Both in-plane divergence
 equations are zero: this is a continuous equilibrated affine stress field with
 rim traction `N*n`. Arbitrarily varying a scalar tension would not generally
-satisfy that equilibrium. This family can resolve directional tuning and a
-spatial gradient, but it does **not** reconstruct discrete lug forces, hoop
-compliance, bearing-edge friction, wrinkling or a measured specimen.
+satisfy that equilibrium. This affine family resolves directional tuning and a spatial gradient. The optional Airy harmonics resolve circumferential multi-lug stress patterns, but neither image infers individual lug forces, hoop compliance, bearing-edge friction, wrinkling or a measured specimen.
 
 The full tensor must be positive definite at every mesh vertex. Because it is
 affine, the vertex tensors also bound the interior of every triangle through
