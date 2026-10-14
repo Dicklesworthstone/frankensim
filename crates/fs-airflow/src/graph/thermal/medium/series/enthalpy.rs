@@ -10,6 +10,8 @@
 //! not the momentum solve, film-property iteration, boiling model or source
 //! uncertainty. The Cp-to-enthalpy chart's interpolation limits still apply.
 
+pub mod coupled;
+
 use fs_convection::CorrelationRobinBoundary;
 use fs_exec::Cx;
 use fs_material::phase::{

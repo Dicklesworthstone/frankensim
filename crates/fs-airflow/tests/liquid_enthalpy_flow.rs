@@ -241,3 +241,6 @@ fn unsupported_late_fluid_temperature_returns_no_partial_march() {
         assert!(weak.march_liquid_enthalpy(cx,&source,"T",&[500.0]).is_ok());
     });
 }
+
+#[path = "liquid_enthalpy_flow/coupled.rs"]
+mod coupled;
