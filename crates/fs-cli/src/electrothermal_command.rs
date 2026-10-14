@@ -1,5 +1,5 @@
 //! `frankensim electrothermal`: canonical material packs -> coupled spatial fields.
-//! All-solid, fixed-geometry, steady isotropic conduction; no invented presets.
+//! All-solid, fixed-geometry isotropic conduction; no invented presets.
 
 #[path = "json_read.rs"]
 #[allow(dead_code)]
@@ -7,6 +7,8 @@ mod json;
 mod source;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transient_tests;
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -33,19 +35,35 @@ const MAX_SCENE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PACK_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TOTAL_PACK_BYTES: u64 = 64 * 1024 * 1024;
 const NO_CLAIM: &str = "steady fixed-geometry all-solid isotropic ohmic/thermal conduction; source nominal values, not propagated uncertainty or experimental qualification; no phase change, thermal deformation, fluid flow, electrical contact resistance or AC effects";
-const HELP: &str = "Usage: frankensim [--json] electrothermal <scene.json>\n\nLoad canonical FSMCDPK material-card packs and solve spatial current, Joule\nheating and temperature together. Both resistivity and conductivity are\nre-resolved at every changed local temperature; unsupported states refuse.\nMaterial substitutions change pack data, not solver code.\n\nSchema: frankensim.electrothermal.v1. See docs/MATERIAL_ELECTROTHERMAL.md\nfor the complete scene and pack-compilation workflow. All lengths are metres,\ntemperatures kelvin, current amperes and power watts. --json includes the\nfields, source identities and coupling/energy defects.\n";
+const HELP: &str = "Usage: frankensim [--json] electrothermal <scene.json> [--transient <time.json>]\n\nLoad canonical FSMCDPK material-card packs and solve spatial current, Joule\nheating and temperature together. Both resistivity and conductivity are\nre-resolved at every changed local temperature; unsupported states refuse.\nMaterial substitutions change pack data, not solver code.\n\n--transient additionally requires sourced density and heat capacity over an\nexplicit temperature interval, and advances stored energy with scheduled\nelectrode drives and authored heat sources. Cell mass remains fixed.\n\nScene schema: frankensim.electrothermal.v1. Time request schema:\nfrankensim.electrothermal.transient.v1. See docs/MATERIAL_ELECTROTHERMAL.md\nand docs/MATERIAL_ELECTROTHERMAL_TRANSIENT.md. All lengths are metres,\ntemperatures kelvin, current amperes and power watts. --json includes the\nfields, source identities and coupling/energy defects.\n";
 
 pub fn run(args: &[OsString], json: bool) -> CommandOutput {
     if args.len() == 1 && matches!(args[0].to_str(), Some("--help" | "-h")) {
         return CommandOutput { exit_code: exit::SUCCESS, stdout: HELP.into(), stderr: String::new() };
     }
-    if args.len() != 1 {
+    let transient = args.len() == 3 && args[1] == "--transient";
+    if args.len() != 1 && !transient {
         return refusal(exit::USAGE, "electrothermal-usage", HELP, json);
     }
     let mut problem = match load(Path::new(&args[0])) {
         Ok(problem) => problem,
         Err(error) => return refusal(exit::INPUT, "electrothermal-input", &error, json),
     };
+    if transient {
+        let request = match source::transient::load(Path::new(&args[2]), problem.domain.cell_count()) {
+            Ok(request) => request,
+            Err(error) => return refusal(exit::INPUT, "electrothermal-transient-input", &error, json),
+        };
+        return match source::transient::march(&problem, &request, &CancelGate::new()) {
+            Ok(result) => CommandOutput {
+                exit_code: exit::SUCCESS, stdout: source::transient::render(&problem, &result, json), stderr: String::new(),
+            },
+            Err(error) => {
+                let code = if matches!(error, ChtError::Cancelled) { exit::CANCELLED } else { exit::REFUSED };
+                refusal(code, "electrothermal-transient-solve", &error.to_string(), json)
+            }
+        };
+    }
     let result = match problem.solve(&CancelGate::new()) {
         Ok(result) => result,
         Err(error) => {

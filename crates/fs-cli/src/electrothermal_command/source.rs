@@ -1,6 +1,8 @@
 //! File-supplied material states lowered into the existing coupled solvers.
 //! This is CLI orchestration, not a new constitutive law or discretization.
 
+pub(super) mod transient;
+
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::material_coupling::{
     MaterialCoupledSolution, MaterialCouplingConfig, solve_material_electrothermal,
@@ -75,16 +77,20 @@ impl Source {
         Ok(Self { pack, point, temperature_axis, temperature_quantity, conducting, conductivity })
     }
 
-    pub fn at(&self, temperature: f64) -> Result<CellState, ChtError> {
+    fn point_at(&self, temperature: f64) -> Result<QueryPoint, ChtError> {
         if !temperature.is_finite() || temperature <= 0.0 {
             return Err(invalid("material.temperature", "temperature must be finite positive kelvin"));
         }
-        let point = match self.temperature_quantity {
+        match self.temperature_quantity {
             Some(quantity) => self.point.clone().with_quantity(
                 &self.temperature_axis, quantity, temperature,
             ),
             None => self.point.clone().with(&self.temperature_axis, temperature),
-        }.map_err(|e| invalid("material.state", e))?;
+        }.map_err(|e| invalid("material.state", e))
+    }
+
+    pub fn at(&self, temperature: f64) -> Result<CellState, ChtError> {
+        let point = self.point_at(temperature)?;
         let thermal = resolve_material_state_point(
             self.pack.card(), &point, core::slice::from_ref(&self.conductivity),
             MaterialPropertySelection::SingleClaimOnly,
@@ -137,15 +143,23 @@ impl Problem {
     }
 
     pub fn solve(&mut self, gate: &CancelGate) -> Result<ResultField, ChtError> {
+        self.solve_at(&self.initial_temperature, &self.electric, &self.thermal, None, gate)
+    }
+
+    fn solve_at(
+        &self, start: &[f64], electric: &ElectricSetup, thermal: &ThermalSetup,
+        storage: Option<&transient::Storage<'_>>, gate: &CancelGate,
+    ) -> Result<ResultField, ChtError> {
         poll(gate)?;
-        let initial = self.states(&self.initial_temperature, gate)?;
+        let initial = self.states(start, gate)?;
         let mut solids = Vec::with_capacity(self.materials.len());
-        self.electric.conductors.clear();
+        let mut electric = electric.clone();
+        electric.conductors.clear();
         for (m, source) in self.materials.iter().enumerate() {
             let cell = self.material_indices.iter().position(|&i| i == m)
                 .ok_or_else(|| invalid("material_indices", "each declared material must be assigned to a cell"))?;
             solids.push(SolidMaterial::new(source.pack.pack_id(), initial[cell].k));
-            self.electric.conductors.push(initial[cell].conductor.as_ref()
+            electric.conductors.push(initial[cell].conductor.as_ref()
                 .map(|c| Conductor::new(c.resistivity_ohm_m())));
         }
         // This command admits all-solid domains. No fluid cell consumes these
@@ -157,8 +171,7 @@ impl Problem {
         let flow = FlowField::quiescent(&self.domain);
         let mut thermal_solves = 0usize;
         let coupled = solve_material_electrothermal(
-            &self.domain, &self.electric, &self.thermal, &self.initial_temperature,
-            self.coupling,
+            &self.domain, &electric, thermal, start, self.coupling,
             |_, material, temperature| {
                 self.materials[usize::from(material)].at(temperature)?.conductor
                     .map(|c| c.resistivity_ohm_m())
@@ -166,7 +179,7 @@ impl Problem {
             },
             |heated, temperature| {
                 self.solve_heat(heated, temperature, &solids, &unused_fluid, &flow,
-                    &mut thermal_solves, gate)
+                    storage, &mut thermal_solves, gate)
             },
             gate,
         )?;
@@ -182,7 +195,8 @@ impl Problem {
     #[allow(clippy::too_many_arguments)] // existing physical owners and the accumulated work count
     fn solve_heat(
         &self, setup: &ThermalSetup, start: &[f64], solids: &[SolidMaterial],
-        fluid: &FluidProperties, flow: &FlowField, solves: &mut usize, gate: &CancelGate,
+        fluid: &FluidProperties, flow: &FlowField, storage: Option<&transient::Storage<'_>>,
+        solves: &mut usize, gate: &CancelGate,
     ) -> Result<EnergySolution, ChtError> {
         let mut previous = start.to_vec();
         let mut states = self.states(&previous, gate)?;
@@ -190,24 +204,37 @@ impl Problem {
         for _ in 0..self.max_thermal_passes {
             poll(gate)?;
             let field: Vec<[f64; 3]> = states.iter().map(|state| [state.k; 3]).collect();
-            let solution = self.energy.solve_with_conductivity(
-                &self.domain, fluid, solids, flow, setup, &field, gate,
-            )?;
+            let capacity = storage.map(|s| s.capacities(&previous, gate)).transpose()?;
+            let solution = match (storage, &capacity) {
+                (Some(s), Some(capacity)) => self.energy.step_with_conductivity(
+                    &self.domain, fluid, solids, flow, setup, &field,
+                    capacity, s.previous, s.dt, gate,
+                )?.0,
+                _ => self.energy.solve_with_conductivity(
+                    &self.domain, fluid, solids, flow, setup, &field, gate,
+                )?,
+            };
             *solves += 1;
-            // This re-query is essential: the last temperature must be supported
-            // by the actual source, not by a clamped/extended conductivity table.
+            // Re-query both transport and storage at the proposed endpoint.
+            // Neither material support nor stored energy is frozen at startup.
             let next = self.states(&solution.temperature, gate)?;
+            let storage_consistent = match (storage, &capacity) {
+                (Some(s), Some(capacity)) => s.consistent(&solution.temperature, capacity, gate)?,
+                _ => true,
+            };
             defect = conductivity_defect(&next, &solution.conductivity);
             let change = previous.iter().zip(&solution.temperature)
                 .map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
-            if defect <= self.conductivity_tolerance && change <= self.coupling.temperature_tolerance_k {
+            if defect <= self.conductivity_tolerance && change <= self.coupling.temperature_tolerance_k
+                && storage_consistent
+            {
                 return Ok(solution);
             }
             previous = solution.temperature;
             states = next;
         }
         Err(ChtError::SolverNotConverged {
-            system: "source-resolved thermal conductivity", iterations: self.max_thermal_passes,
+            system: "source-resolved thermal conductivity/storage", iterations: self.max_thermal_passes,
             relative_residual: defect, tolerance: self.conductivity_tolerance,
         })
     }
