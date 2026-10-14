@@ -42,8 +42,8 @@ fn build(specimen:&specimen::Specimen,dt_s:f64,rocking:Option<f64>)->Result<(Mes
         vec![ModePair{lambda:0.0,phi,residual,interval:(-residual,residual)}]
     };
     modes.extend(report.modes);
-    if modes.len()>32 {return Err("splash retains too many modes for this declared reference; narrow the explicit window or increase the host budget".into());}
-    let budget=ReductionBudget{max_modes:32,max_facet_modes:20000,relative_tolerance:1e-5};
+    if modes.len()>63 {return Err("splash retains too many modes for this declared reference; narrow the explicit window or increase the host budget".into());}
+    let budget=ReductionBudget{max_modes:63,max_facet_modes:65_536,relative_tolerance:1e-5};
     let reduction=match rocking {
         Some(maximum_rotation_rad)=>ShellReduction::new_with_linearized_rigid_motion(
             &shell.mesh,&shell.sections,&model,&modes,budget,
