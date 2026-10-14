@@ -9,8 +9,9 @@
 //! integral of the declared piecewise-constant dead load against displacement.
 //!
 //! Local frame: x along the horizontal reference span, z upward. Supports are
-//! a left pin/right roller or left clamp/free right end. Axial resultant is zero;
-//! no drawing tension, slack, membrane stiffening, inertia, shear deformation,
+//! a left pin/right roller or left clamp/free right end. The ordinary path has zero axial resultant; `drawing` adds explicitly declared
+//! tensile drawing force or explicit slack with small-deflection geometric stiffening.
+//! No compression/buckling, inertia, shear deformation,
 //! adhesion, fracture or molten-strand flow is inferred. Explicit frictionless
 //! point supports are available separately through `supports`.
 //! A complete initial seed must be supplied. `growth` extends a clamped seed
@@ -31,6 +32,8 @@ pub mod supports;
 pub mod neighbours;
 /// Stress-free cell birth at the advancing tip of a clamped road.
 pub mod growth;
+/// Declared drawing tension/slack with beam-column geometric stiffness.
+pub mod drawing;
 
 /// Fixed transverse restraints; both allow free axial thermal contraction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -156,11 +156,24 @@ impl<'a> LayeredStrip<'a> {
     /// Condense axial freedom without aging history or testing a fictitious
     /// unit-load material state. Final strain/rate admission belongs to advance_to.
     pub fn bending_response(&self, target_s: f64, temperatures_k: &BTreeMap<u64, f64>,
+        checkpoint: impl FnMut() -> Result<(), Error>) -> Result<BendingResponse, Error> {
+        self.bending_response_at_force(target_s, temperatures_k, 0.0, checkpoint)
+    }
+
+    /// Affine bending response at a declared constant axial section force.
+    ///
+    /// Positive force is tension. This probes the same implicit material
+    /// linearization used by LayeredStrip::advance_to without aging history.
+    /// Thermal/history offsets and axial/bending coupling are retained.
+    /// Geometric stiffness is a beam-level effect and is not added here.
+    pub fn bending_response_at_force(&self, target_s: f64,
+        temperatures_k: &BTreeMap<u64, f64>, axial_force_n: f64,
         mut checkpoint: impl FnMut() -> Result<(), Error>) -> Result<BendingResponse, Error> {
         checkpoint()?;
         if self.layers.is_empty() { return Err(Error::Invalid("unborn section has no bending compliance")); }
+        let axial_force_n = finite(axial_force_n)?;
         let (scale, k, history) = self.linearization(target_s-self.time_s, temperatures_k, &mut checkpoint)?;
-        let free = solve(k, [-history[0], -history[1]], [None, None])?;
+        let free = solve(k, [finite(axial_force_n-history[0])?, -history[1]], [None, None])?;
         let unit = solve(k, [0.0, 1.0], [None, None])?;
         let compliance = finite(unit[1]/scale/scale)?;
         positive(compliance)?;
