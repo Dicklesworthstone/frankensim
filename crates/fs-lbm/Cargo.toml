@@ -33,3 +33,7 @@ fs-roofline = { path = "../fs-roofline" }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "joule_phase_change"
+required-features = ["enthalpy-coupling"]
