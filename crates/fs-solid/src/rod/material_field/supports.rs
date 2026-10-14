@@ -22,7 +22,7 @@ pub struct RodSupport {
     pub frame: Option<So3>,
 }
 
-/// Reactions in only the constrained coordinates of one additional support.
+/// Reactions in the constrained coordinates of one support (including root).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RodSupportReaction {
     /// Original node index.
@@ -34,7 +34,8 @@ pub struct RodSupportReaction {
 }
 
 /// Numerical reaction estimates and the unbalanced free-coordinate residual.
-/// Root reaction is NOT included; this is not a whole-body force/moment balance.
+/// Root reaction is available separately through `root_support_reaction`.
+/// This report itself is not a whole-body force/moment balance.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RodSupportReactions {
     /// Additional supports in canonical node order.
@@ -89,7 +90,7 @@ impl SpatialMaterialRod {
         }
         candidate.free_dofs = (0..fixed.len()).filter(|&k| !fixed[k]).collect();
         candidate.supports = ordered;
-        candidate.energy_j()?;
+        candidate.equilibrium_energy_for(&candidate.rod)?;
         checkpoint(gate)?;
         Ok(candidate)
     }
@@ -103,6 +104,7 @@ impl SpatialMaterialRod {
     /// this pose. The returned free residual prevents a reaction-only report
     /// from hiding an unequilibrated configuration. FD probes must fit the same
     /// source strain bounds; no analytical stress or exact balance is claimed.
+    /// The same gravitational potential participates when gravity is enabled.
     ///
     /// # Errors
     /// Refuses nonfinite loads/residuals, source/kinematic failures and cancellation.
@@ -113,7 +115,7 @@ impl SpatialMaterialRod {
         if !load.force.iter().chain(&load.moment).all(|x| x.is_finite()) {
             return Err(SpatialRodError::Invalid("reaction loads must be finite"));
         }
-        let residual = self.rod.residual(load, 1.0, &|rod| self.energy_for(rod), &|| checkpoint(gate))?;
+        let residual = self.rod.residual(load, 1.0, &|rod| self.equilibrium_energy_for(rod), &|| checkpoint(gate))?;
         let free_residual_norm = self.free_dofs.iter().map(|&k| residual[k] * residual[k]).sum::<f64>().sqrt();
         if !residual.iter().all(|v| v.is_finite()) || !free_residual_norm.is_finite() {
             return Err(SpatialRodError::Invalid("support reaction or free residual is unrepresentable"));

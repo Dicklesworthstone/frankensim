@@ -11,11 +11,14 @@ use fs_exec::CancelGate;
 use fs_ga::So3;
 use fs_material::section::ConcentricShearSection;
 use fs_material::state_point::MaterialStatePointError;
+use std::sync::Arc;
 
 /// Sourced nonuniform thermal expansion and compatible section stresses.
 pub mod thermal;
 /// Prescribed nodal supports and reactions using the same material energy.
 pub mod supports;
+/// Reference mass, gravity and root-clamp reaction in the same equilibrium.
+pub mod gravity;
 
 use super::{MAX_MATERIAL_ROD_SEGMENTS, Rod, RodSection, TipLoad};
 use crate::SolidError;
@@ -66,6 +69,8 @@ pub struct SpatialMaterialRod {
     thermal: Option<thermal::ThermalField>,
     supports: Vec<supports::RodSupport>,
     free_dofs: Vec<usize>,
+    reference_mass: Arc<gravity::RodReferenceMass>,
+    gravity: Option<gravity::GravityLoad>,
 }
 
 impl SpatialMaterialRod {
@@ -80,6 +85,15 @@ impl SpatialMaterialRod {
         length_m: f64,
         sections: Vec<ConcentricShearSection>,
     ) -> Result<Self, SpatialRodError> {
+        Self::try_straight_with_mass(length_m, sections, None)
+    }
+
+    // Source refreshes retain the reference inventory instead of evaluating
+    // current density on frozen geometry. Only this module's descendants use it.
+    fn try_straight_with_mass(
+        length_m: f64, sections: Vec<ConcentricShearSection>,
+        reference_mass: Option<Arc<gravity::RodReferenceMass>>,
+    ) -> Result<Self, SpatialRodError> {
         if !length_m.is_finite() || length_m <= 0.0 || sections.is_empty()
             || sections.len() > MAX_MATERIAL_ROD_SEGMENTS
         {
@@ -91,10 +105,21 @@ impl SpatialMaterialRod {
         }
         let stiffness = sections.iter().map(RodSection::try_from_concentric_material)
             .collect::<Result<Vec<_>, _>>()?;
+        let reference_mass = match reference_mass {
+            Some(mass) => {
+                if mass.segment_mass_kg().len() != sections.len()
+                    || mass.segment_length_m().to_bits() != l0.to_bits()
+                {
+                    return Err(SpatialRodError::Invalid("reference mass and rod discretization must match"));
+                }
+                mass
+            }
+            None => Arc::new(gravity::RodReferenceMass::try_new(l0, &sections)?),
+        };
         let rod = Rod::straight(length_m, sections.len(), stiffness[0]);
         let free_dofs = (0..rod.ndof()).collect();
         Ok(Self { rod, sections, stiffness, reference_length_m: length_m, thermal: None,
-            supports: Vec::new(), free_dofs })
+            supports: Vec::new(), free_dofs, reference_mass, gravity: None })
     }
 
     /// Original material assignments and all layer receipts, in spatial order.
@@ -169,6 +194,9 @@ impl SpatialMaterialRod {
     ///
     /// `tolerance` retains the legacy norm mixing force and moment residuals;
     /// it is numerical stopping evidence, not a dimensionless error certificate.
+    /// Explicit gravity, when present, is a permanent load at every stage;
+    /// `steps` ramps only the tip load. Stored and gravitational energy remain
+    /// separate observations, not a coupled thermodynamic balance.
     ///
     /// # Errors
     /// Refuses invalid loads/budgets, all source/solver failures and cancellation.
@@ -184,10 +212,10 @@ impl SpatialMaterialRod {
         }
         let mut candidate = self.rod.clone();
         let residuals = candidate.solve_static_with_energy(
-            load, steps, tolerance, &|rod| self.energy_for(rod), &|| checkpoint(gate),
+            load, steps, tolerance, &|rod| self.equilibrium_energy_for(rod), &|| checkpoint(gate),
             Some(&self.free_dofs),
         )?;
-        self.energy_for(&candidate)?;
+        self.equilibrium_energy_for(&candidate)?;
         if !candidate.positions.iter().flatten().all(|v| v.is_finite()) {
             return Err(SpatialRodError::Invalid("solved material rod position is unrepresentable"));
         }

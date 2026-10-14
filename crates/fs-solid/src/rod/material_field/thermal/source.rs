@@ -126,9 +126,7 @@ impl<'a> RodMaterialSource<'a> {
             reference_sections.push(elastic.with_shear_modulus(shear_property, segment.shear_correction)?);
         }
         let reference = SpatialMaterialRod::try_straight(length_m, reference_sections)?;
-        let l0 = length_m / segments.len() as f64;
-        let reference_mass_kg = reference.sections().iter()
-            .map(|s| l0 * s.elastic().line_density_kg_m()).sum::<f64>();
+        let reference_mass_kg = reference.reference_mass().total_mass_kg();
         if !reference_mass_kg.is_finite() || reference_mass_kg <= 0.0 {
             return Err(SpatialRodError::Invalid("reference rod mass is unrepresentable"));
         }
@@ -172,7 +170,11 @@ impl<'a> RodMaterialSource<'a> {
             thermal.push(ConcentricThermoelasticSection::try_new(elastic.clone(), expansions)?);
             mechanical.push(elastic.with_shear_modulus(&self.shear_property, segment.shear_correction)?);
         }
-        let rod = SpatialMaterialRod::try_straight(self.reference.reference_length_m(), mechanical)?;
+        // Retain the original per-segment inventory and its density receipts.
+        // Current rho(T) must not redefine weight on frozen reference geometry.
+        let rod = SpatialMaterialRod::try_straight_with_mass(
+            self.reference.reference_length_m(), mechanical, Some(self.reference.reference_mass.clone()),
+        )?;
         rod.with_thermal_sections(thermal, self.linear_strain_limit, gate)
     }
 
