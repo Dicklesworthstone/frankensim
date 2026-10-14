@@ -231,11 +231,15 @@ async function initCharts(): Promise<void> {
   const beats = $<HTMLCanvasElement>('[data-chart="beats"]');
   if (beats) onVisible(beats, () => {
     const s: Series[] = [];
-    for (const [id, label, color, dash] of [["octhi2-et", "equal-tempered", "#e86a3c", undefined], ["octhi3-stretch", "stretch-tuned", "#63d2c0", [6, 4]]] as const) {
-      const env = (manifest.clips[id]?.evidence["short_band_envelopes"] as Record<string, { t: number[]; a: number[] }> | undefined)?.["1760"];
-      if (env) s.push({ label: `${label}: band near 1760 Hz (A5 partial 2 + A6)`, color, dash: dash ? [...dash] : undefined, x: env.t, y: env.a.map((v) => v * 1000), width: 1.7 });
+    const partial2 = (r: PianoModel["scale_et"][number]): number => 2 * r.f1 * Math.sqrt(1 + 4 * r.B) / Math.sqrt(1 + r.B);
+    for (const [id, label, color, dash, sc] of [["octhi2-et", "equal-tempered", "#e86a3c", undefined, model.scale_et], ["octhi3-stretch", "stretch-tuned", "#63d2c0", [6, 4], model.scale_stretch]] as const) {
+      const z = manifest.clips[id]?.evidence["zoom_1760"] as { f: number[]; db: number[] } | undefined;
+      if (!z) continue;
+      s.push({ label: `${label}: rendered spectrum`, color, dash: dash ? [...dash] : undefined, x: z.f, y: z.db, width: 1.6 });
+      const a5 = sc.find((r) => r.midi === 81), a6 = sc.find((r) => r.midi === 93);
+      if (a5 && a6) s.push({ label: `${label}: scale predicts A6 f₁ ${a6.f1.toFixed(2)} Hz, A5 partial 2 ${partial2(a5).toFixed(2)} Hz`, color, x: [a6.f1, a6.f1, NaN, partial2(a5), partial2(a5)], y: [-40, 3, NaN, -40, 3], width: 1, dash: [2, 3] });
     }
-    if (s.length) new LineChart(beats, { xLabel: "time [s]", yLabel: "band amplitude [mPa]", aspect: 0.5, xFormat: (v) => v.toFixed(1) }, $('[data-legend="beats"]')).set(s);
+    if (s.length) new LineChart(beats, { xLabel: "frequency [Hz]", yLabel: "level [dB]", aspect: 0.5, xRange: [1752, 1774], yRange: [-40, 3], xFormat: (v) => v.toFixed(0), yFormat: (v) => v.toFixed(0) }, $('[data-legend="beats"]')).set(s);
     else beats.closest("figure")?.setAttribute("hidden", "");
   });
 
@@ -325,7 +329,7 @@ const REFUSALS: [string, string][] = [
   ["grand_piano: adaptive bridge response work estimate 9667910336 exceeds 8000000000; use fewer source modes, retained modes or admitted bridge ports",
     "An adaptive soundboard reduction to 3.2 kHz was refused against its declared work budget before it started. The renders here use an explicit 128-mode Ritz reduction of the 0–2.4 kHz board instead."],
   ["percussion reference refused: percussion mechanics: Owner(\"FS-PLATE-BAD-SECTION: shell state exceeds its declared linearized rigid-rotation limit\")",
-    "Letting the splash rock on its felts with a declared small-angle limit of 0.03 rad: a 2 m/s off-centre stroke tilted it further, so the rigid-rotation linearization was refused rather than extrapolated. The rocking render on this page declares the model's largest admitted limit, 0.1 rad."],
+    "We let the splash rock on its felts. A 2 m/s off-centre stroke exceeded the declared small-angle rigid-rotation limit at 0.03 rad, and again at the model's largest admitted limit of 0.1 rad. The linearization was refused rather than extrapolated. The rocking clip on this page is a gentler 0.6 m/s stroke, which stays inside 0.1 rad."],
 ];
 
 async function initMethod(): Promise<void> {

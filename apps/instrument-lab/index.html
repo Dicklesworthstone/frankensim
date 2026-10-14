@@ -10,6 +10,12 @@
   <meta property="og:title" content="Struck — instruments from first principles" />
   <meta property="og:description" content="No samples. A drum, a cymbal and a concert grand computed from geometry, materials and contact — with every joule accounted for." />
   <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://frankensim-struck.vercel.app/" />
+  <meta property="og:image" content="https://frankensim-struck.vercel.app/og.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:image" content="https://frankensim-struck.vercel.app/og.png" />
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
@@ -228,10 +234,10 @@
           <div class="rule"></div>
           <p class="eyebrow"><span class="tag offline">Offline reference</span></p>
           <h2>An 8-inch splash: the low skeleton of a cymbal.</h2>
-          <p class="lede">The shell is a tapered bronze dome meshed into 448 curved triangles, with nonlinear membrane strain and bending. It rests on three felt pads, and the radiating skin includes both faces and the 0.5 mm edge. The model keeps its 30 lowest elastic modes, up to 1.2 kHz. A real splash shimmers far above that, so what you hear is the part this model resolves. The shaded region on every spectrogram is what is <em>not</em> simulated; nothing was added to fill it.</p>
+          <p class="lede">The shell is a tapered bronze dome meshed into 448 curved triangles, with nonlinear membrane strain and bending. It rests on three felt pads, and the radiating skin includes both faces and the 0.5 mm edge. The model keeps its 30 lowest elastic modes, up to 1.2 kHz, and its radiation filters are verified to 1.64 kHz. A real splash shimmers far above that, so what you hear is the part this model resolves. The dashed line on each spectrogram marks where verification ends. Content above it comes from contact impulses in the computed mechanics, passed through a filter that is unverified up there, and nothing was added to fill the gap.</p>
         </header>
         <div class="grid wide-left">
-          <article class="panel" data-group="cymbal"><div class="panel-head"><h3>Stick, soft stroke and felt mallet</h3></div><p class="muted small">Far-field microphone at 2.2 m. Each second of cymbal sound costs about 18 minutes of single-core computation at 768,000 steps per second.</p><div class="clip-host"></div></article>
+          <article class="panel" data-group="cymbal"><div class="panel-head"><h3>Stick, soft stroke, felt mallet, and a cymbal free to rock</h3></div><p class="muted small">Far-field microphone at 2.2 m. Each second of cymbal sound costs about 18 minutes of single-core computation at 768,000 steps per second.</p><div class="clip-host"></div></article>
           <div class="panel flush">
             <div class="stage aspect-1" data-viz="cymbal-ring" style="border: 0; border-radius: 0">
               <div class="stage-top"><span class="tag offline">Solver state</span><span class="tag plain" data-viz-clock>t = 0.000 ms</span></div>
@@ -275,14 +281,14 @@
           </article>
           <article class="panel" data-group="piano-octaves">
             <div class="panel-head"><h3>Why piano octaves are wider than 2:1</h3></div>
-            <p class="muted">A steel string is a little stiff, so its partials run sharp: <span class="num">fₙ = n·f₁·√(1+Bn²)/√(1+B)</span>. The effect grows up the keyboard. With exact 2:1 first partials, A5's second partial lands 5.4 cents sharp of A6, and the octave beats about 5.5 times a second (A4–A5: 1.8 cents, about 0.9 Hz). Stretch tuning removes this <em>by changing each string's tension</em> until the partials meet, not by retuning an oscillator. The clips play A4+A5, then A5+A6 from 2.6 s.</p>
+            <p class="muted">A steel string is a little stiff, so its partials run sharp: <span class="num">fₙ = n·f₁·√(1+Bn²)/√(1+B)</span>. The effect grows up the keyboard. With exact 2:1 first partials, A5's second partial lands 5.5 Hz (5.4 cents) above A6. Stretch tuning moves them together <em>by changing each string's tension</em>, not by retuning an oscillator. The clips play A4+A5, then A5+A6 from 2.6 s. The plot zooms into the rendered sound near 1760 Hz, where the two tunings differ.</p>
             <div class="grid wide-left" style="margin-top: 14px">
               <div class="clip-host"></div>
               <div class="stack">
                 <figure>
-                  <div class="chart"><canvas data-chart="beats" width="900" height="420" aria-label="Amplitude of the 1760 hertz band over time for both tunings"></canvas></div>
+                  <div class="chart"><canvas data-chart="beats" width="900" height="420" aria-label="Spectrum of the rendered sound near 1760 hertz for both tunings, with the scale's predicted partial positions"></canvas></div>
                   <div class="legend" data-legend="beats"></div>
-                  <figcaption>Amplitude of the band around 1760 Hz while A5 and A6 sound together, measured on each rendered clip with a 43 ms window. Equal-tempered: A5's second partial and A6 beat against each other. Stretch-tuned: they coincide, and the band decays smoothly.</figcaption>
+                  <figcaption>The last 2.65 s of each clip, zoomed to 1752–1774 Hz; dotted marks are where the string scale puts A6's first partial and A5's second. Equal-tempered: two separate clusters about 5.5 Hz apart, as predicted. Stretch-tuned: one cluster where both predictions coincide (1767.35 Hz). Each cluster is itself split by about 0.9 Hz, because the model's three unison strings are detuned by ±0.8 cents. That split makes both clips wobble about once a second, and it masks the 5.5 Hz octave beat by ear.</figcaption>
                 </figure>
                 <figure>
                   <div class="chart"><canvas data-chart="stretch" width="900" height="420" aria-label="Stretch tuning curve in cents for all 88 keys"></canvas></div>

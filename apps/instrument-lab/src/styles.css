@@ -367,3 +367,8 @@ footer.site code { color: var(--ivory-2); }
 .live-root { min-height: 860px; }
 .clip-host { min-height: 340px; }
 @media (max-width: 999px) { .hero-stage { order: -1; } }
+
+@media (max-width: 600px) {
+  .stage-hud { font-size: 10px; }
+  #hero-hud-right { display: none; }
+}

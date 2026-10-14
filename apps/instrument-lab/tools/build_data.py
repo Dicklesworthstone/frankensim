@@ -291,10 +291,10 @@ for cid, label in OCT:
     nfft = 1 << 21
     spec = np.abs(np.fft.rfft(seg * np.hanning(len(seg)), nfft))
     freqs = np.fft.rfftfreq(nfft, 1 / sr)
-    win = (freqs > 432) & (freqs < 448)
+    win = (freqs > 1748) & (freqs < 1778)
     mag = spec[win] / spec[win].max()
-    ev["zoom_440"] = {"f": [r(v, 7) for v in freqs[win][::4]], "db": [r(20 * math.log10(v + 1e-9), 4) for v in mag[::4]],
-                      "window_s": r(len(seg) / sr, 4)}
+    ev["zoom_1760"] = {"f": [r(v, 8) for v in freqs[win][::3]], "db": [r(20 * math.log10(v + 1e-9), 4) for v in mag[::3]],
+                       "window_s": r(len(seg) / sr, 4)}
     items.append((cid, label, sr, pa, ev))
 add_group("piano-octaves", "Octaves A4–A5, then A5–A6: two tunings of the same strings", items, PIANO_BAND)
 
@@ -360,7 +360,7 @@ CYM_BAND = {"label": "Shell modes retained", "lo_hz": 50, "hi_hz": 1200, "acoust
             "note": "The cymbal keeps its 30 lowest elastic modes (50–1200 Hz) and the radiation fit spans 40–1640 Hz. A real splash rings far above this; that part is not simulated and is not faked."}
 perc_group("cymbal", "Splash cymbal: stick, soft stroke, felt mallet, rocking", [
     ("cym-ff", "Stick — 2 m/s", 5), ("cym-ff-soft", "Stick — 0.6 m/s", 5), ("cym-ff-mallet", "Felt mallet — 1 m/s", 5),
-    ("cym-ff-rock", "Stick — 2 m/s, free to rock", 5)], CYM_BAND)
+    ("cym-ff-rock3", "Stick — 0.6 m/s, free to rock", 5)], CYM_BAND)
 
 # ------------------------------------------------------- mechanics time series
 def csv_series(name, cols, every):

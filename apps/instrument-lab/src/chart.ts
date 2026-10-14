@@ -202,7 +202,10 @@ export class LineChart {
       for (let i = 0; i < s.x.length; i++) {
         const xv = s.x[i]!;
         const yv = s.y[i]!;
-        if (!Number.isFinite(xv) || !Number.isFinite(yv) || (xl && xv <= 0)) continue;
+        if (!Number.isFinite(xv) || !Number.isFinite(yv) || (xl && xv <= 0)) {
+          first = true; // a gap breaks the line
+          continue;
+        }
         const px = X(xv);
         const py = right ? Y2(Math.max(yv, y2l ? r0 : -Infinity)) : Y(yv);
         if (s.scatter) {
