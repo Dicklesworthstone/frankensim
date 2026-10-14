@@ -695,14 +695,15 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       const rt = h?.rt ?? 0;
       const tone = !h || rt === 0 ? "idle" : lost > 10 ? "bad" : rt < 1.1 ? "warn" : "ok";
       const meter = el("span", { class: "pp-meter" }, el("i", { style: `width:${Math.min(100, (rt / 4) * 100).toFixed(0)}%` }));
-      const grid = h?.scale ? ` · ${h.scale}× grid` : id === "piano" && pianoReady ? ` · ${pianoReady.boardCoordinates} modes` : "";
+      const cap = id === "piano" && h?.stats?.modeCap && h.stats.fullModeCap && h.stats.modeCap < h.stats.fullModeCap ? h.stats.modeCap : 0;
+      const grid = h?.scale ? ` · ${h.scale}× grid` : id === "piano" && pianoReady ? ` · ${pianoReady.boardCoordinates} modes${cap ? ` · strings ${cap}` : ""}` : "";
       const val = !h ? "starts with Play" : rt > 0 ? `${rt.toFixed(1)}×${grid}${lost > 10 ? ` · ${lost < 1000 ? `${Math.round(lost)} ms` : `${(lost / 1000).toFixed(1)} s`} lost` : ""}` : h.stats?.asleep || h.scale ? `resting${grid}` : "measuring…";
       const row = el("div", { class: `pp-lane ${tone}`, "data-id": id, "data-rt": rt.toFixed(2), "data-late": String(h ? lostFrames(h) : 0), "data-gap": String(h ? h.gap : 0), "data-lost-ms": lost.toFixed(1) },
         el("span", { class: "pp-lane-dot", "aria-hidden": "true" }),
         el("span", { class: "pp-lane-name" }, name),
         meter,
         el("span", { class: "pp-lane-val num" }, val));
-      if (h?.detail) row.title = `${name}: ${h.detail}; ${rt > 0 ? `${rt.toFixed(2)}× faster than real time` : "not computing (silent pieces are not stepped)"}`;
+      if (h?.detail) row.title = `${name}: ${h.detail}${cap ? `; string modes held to ${cap} of ${h?.stats?.fullModeCap} so this device keeps up` : ""}; ${rt > 0 ? `${rt.toFixed(2)}× faster than real time` : "not computing (silent pieces are not stepped)"}`;
       rows.push(row);
     }
     lanesEl.replaceChildren(el("p", { class: "pp-lanes-head" }, el("span", { class: "tag live" }, "Live · WebAssembly"), el("span", { class: "small muted" }, "× real time, one Worker each")), ...rows);

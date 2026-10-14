@@ -103,6 +103,12 @@ export interface LaneWorkerStats {
   noteOns?: number;
   refusedNoteOns?: number;
   forcedRetirements?: number;
+  /** Piano: the dynamic string mode cap the load governor grants now, and the one asked for. */
+  modeCap?: number;
+  fullModeCap?: number;
+  courseModeBudget?: number;
+  governorDown?: number;
+  governorUp?: number;
 }
 
 /** A stroke of a fixed score: absolute context frame, point on the surface [m], stick speed [m/s]. */
@@ -183,7 +189,7 @@ export class PianoLane {
   private worker: Worker;
   private mix: LiveMix;
 
-  constructor(mix: LiveMix, opts: { aheadFrames?: number; options?: Record<string, number>; gain?: number; minRealtime?: number; snapshotHz?: number } = {}) {
+  constructor(mix: LiveMix, opts: { aheadFrames?: number; options?: Record<string, number>; gain?: number; minRealtime?: number; snapshotHz?: number; governor?: boolean } = {}) {
     this.mix = mix;
     this.worker = new Worker(`${LIVE_BASE_URL}/piano/lane-worker.js`, { type: "module", name: "piano-lane" });
     const ch = new MessageChannel();

@@ -13,6 +13,7 @@
 //       minRealtime  the speed the measurement asks for (default 1.35)
 //       snapshotHz   display snapshots per second of AUDIO (default 0: none). With it, 'ready' also
 //                    carries the board geometry and the key geometry.
+//       governor     false turns the load governor off (default on; see createGovernor)
 //   {type:'note', midi, speed, frame?} | {type:'off', midi, frame?} | {type:'sustain', value, frame?}
 //   {type:'sequence', startFrame, loopFrames, events:[{offset, on?, off?, speed?}]}
 //   {type:'score', events:[{frame, on?, off?, speed?, sustain?}]}   a fixed score, played once
@@ -22,7 +23,9 @@
 // Worker -> main thread
 //   {type:'ready', info, boardCoordinates, realtime, board?:{xy, shapes, modeHz}, keyGeometry?}
 //   {type:'stats', realtime, renderedFrames, skippedFrames, lateEvents, voices, peakPa,
-//    dynamicModes, noteOns, refusedNoteOns, forcedRetirements}
+//    dynamicModes, noteOns, refusedNoteOns, forcedRetirements,
+//    modeCap, fullModeCap, courseModeBudget, governorDown, governorUp}
+//       modeCap  the dynamic string mode cap the governor grants now (fullModeCap = the asked one)
 //   {type:'snapshot', frame, epoch, data}   engine.snapshot() for the state at context frame `frame`
 //                                    (layout: parseSnapshot in client.js); `epoch` as on the audio
 //   {type:'error', message}
@@ -38,6 +41,69 @@ let snapEvery = 0;   // audio frames between snapshots (0: none)
 let snapDue = 0;
 const post = (m, t) => self.postMessage(m, t ?? []);
 const FALLBACK_REALTIME = 0.75;
+
+// Load governor. The piano's cost follows the dynamic string modes sounding at once (about
+// linearly), and a dense passage can need more than this device computes in real time. When the
+// look-ahead runs down while the measured speed is below real time (or the lane had to skip), the
+// mode cap for strikes from then on is lowered to the modes sounding now times the measured speed
+// over GOV.target, so the quietest keys yield at the next strikes. The per-key mode budget follows
+// the cap in proportion, so about as many keys keep sounding and each loses upper partials instead:
+// against the full-quality render that changed the spectrogram about a third as much as retiring
+// quiet keys at the same cap, and the partial band (it dulls every key) is never touched. The cap
+// returns 10 % at a time only once the look-ahead is full again and the speed measured at the cap
+// leaves GOV.raiseHeadroom of room at the raised cap, so a passage settles instead of see-sawing.
+// A device that keeps up never meets the lowering condition, so its piano is unchanged.
+const GOV = {
+  everyMs: 400, minFrames: 4096,      // judge windows of at least this much wall time and audio
+  lowCushion: 0.85, slow: 1.0,        // lower after two windows with look-ahead < 85 % and speed < real time ...
+  skipSlow: 1.1,                      // ... or at once when the lane skipped and speed < 1.1
+  target: 1.25, minFactor: 0.75, maxFactor: 0.92, coolMs: 800,
+  fullCushion: 0.85, holdMs: 3000, raise: 1.1, raiseHeadroom: 1.35,
+  floorModes: 400, floorBudget: 40,
+};
+function createGovernor(eng, full, aheadFrames) {
+  const g = { cap: full.maxDynamicModes, budget: full.courseModeBudget, down: 0, up: 0, at: -1, changedAt: -1e9, audioMs: 0, wallMs: 0, skipped: 0, rendered: 0, cushion: 0, slowWindows: 0, modes: 0 };
+  const set = (cap) => {
+    const budget = Math.max(GOV.floorBudget, Math.min(full.courseModeBudget, Math.round((full.courseModeBudget * cap) / full.maxDynamicModes)));
+    if (!eng.setQuality(budget, full.partialBandHz, cap)) return false;
+    g.cap = cap;
+    g.budget = budget;
+    return true;
+  };
+  // called after each block: `frames` is how far ahead of the clock the lane has rendered
+  g.check = (stats, frames) => {
+    const t = performance.now();
+    if (g.at >= 0 && t - g.at < GOV.everyMs) return;
+    const audioMs = stats.audioMs - g.audioMs;
+    const skipped = stats.skippedFrames - g.skipped;
+    if (g.at >= 0 && audioMs * 48 < GOV.minFrames && !skipped) return;
+    const wallMs = stats.wallMs - g.wallMs;
+    const rendered = stats.renderedFrames - g.rendered;
+    const span = t - g.at;
+    const cushionBefore = g.cushion;
+    const fresh = g.at < 0 || span > 4 * GOV.everyMs; // first window, or rendering paused in between
+    const modesNow = eng.stats()[2];
+    const modes = fresh ? modesNow : Math.max(modesNow, g.modes); // sounding modes, at either end of the window
+    Object.assign(g, { at: t, audioMs: stats.audioMs, wallMs: stats.wallMs, skipped: stats.skippedFrames, rendered: stats.renderedFrames, cushion: frames, modes: modesNow });
+    if (fresh || !(wallMs > 0)) { g.slowWindows = 0; return; }
+    let speed = audioMs / wallMs; // speed of the engine calls themselves
+    // behind at both ends of the window, the lane rendered without waiting: frames produced per
+    // wall frame is the true speed, including time this Worker was not scheduled at all
+    if (frames < 0.9 * aheadFrames && cushionBefore < 0.9 * aheadFrames) speed = Math.min(speed, rendered / (span * 48));
+    const cushion = frames / aheadFrames;
+    g.slowWindows = cushion < GOV.lowCushion && speed < GOV.slow ? g.slowWindows + 1 : 0;
+    if (g.slowWindows >= 2 || (skipped > 0 && speed < GOV.skipSlow)) {
+      if (t - g.changedAt < GOV.coolMs || g.cap <= GOV.floorModes) return;
+      const factor = Math.min(GOV.maxFactor, Math.max(GOV.minFactor, speed / GOV.target));
+      const cap = Math.max(GOV.floorModes, Math.min(g.cap - 1, Math.round(Math.min(g.cap, modes) * factor)));
+      if (set(cap)) { g.down += 1; g.changedAt = t; g.slowWindows = 0; }
+    } else if (g.cap < full.maxDynamicModes && cushion >= GOV.fullCushion && !skipped && t - g.changedAt >= GOV.holdMs) {
+      const cap = Math.min(full.maxDynamicModes, Math.ceil(g.cap * GOV.raise));
+      if ((speed * modes) / cap >= GOV.raiseHeadroom && set(cap)) { g.up += 1; g.changedAt = t; }
+    }
+  };
+  return g;
+}
 
 self.onmessage = async (event) => {
   const m = event.data || {};
@@ -74,6 +140,10 @@ self.onmessage = async (event) => {
         probe.free();
       }
       engine = make(bytes, coords);
+      const info = JSON.parse(engine.info());
+      const aheadFrames = m.aheadFrames || 2048;
+      const full = { courseModeBudget: info.courseModeBudget, partialBandHz: info.partialBandHz, maxDynamicModes: info.maxDynamicModes };
+      const gov = m.governor === false ? null : createGovernor(engine, full, aheadFrames);
       let active = false;
       let quietFrames = 0;
       const adapter = {
@@ -108,18 +178,19 @@ self.onmessage = async (event) => {
               post({ type: 'snapshot', frame: lane.frame + n, epoch: lane.epoch, data }, [data.buffer]);
             }
           }
+          if (gov && lane) gov.check(lane.stats, lane.frame + n - lane.now());
           const now = performance.now();
           if (now - lastStats >= 500 && lane) {
             lastStats = now;
             const s = lane.stats;
             const st = engine.stats();
-            post({ type: 'stats', realtime: s.wallMs > 0 ? s.audioMs / s.wallMs : 0, renderedFrames: s.renderedFrames, skippedFrames: s.skippedFrames, lateEvents: s.lateEvents, voices: st[1], peakPa: st[4], dynamicModes: st[2], noteOns: st[10], refusedNoteOns: st[11], forcedRetirements: st[6] });
+            post({ type: 'stats', realtime: s.wallMs > 0 ? s.audioMs / s.wallMs : 0, renderedFrames: s.renderedFrames, skippedFrames: s.skippedFrames, lateEvents: s.lateEvents, voices: st[1], peakPa: st[4], dynamicModes: st[2], noteOns: st[10], refusedNoteOns: st[11], forcedRetirements: st[6],
+              modeCap: gov ? gov.cap : full.maxDynamicModes, fullModeCap: full.maxDynamicModes, courseModeBudget: gov ? gov.budget : full.courseModeBudget, governorDown: gov ? gov.down : 0, governorUp: gov ? gov.up : 0 });
           }
           return out;
         },
       };
-      lane = createLane(m.port, adapter, { aheadFrames: m.aheadFrames || 2048 });
-      const info = JSON.parse(engine.info());
+      lane = createLane(m.port, adapter, { aheadFrames });
       if (snapEvery > 0) {
         const xy = engine.boardSurfaceXY();
         const shapes = engine.boardSurfaceShapes();
