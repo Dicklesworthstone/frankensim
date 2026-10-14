@@ -441,8 +441,17 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 }
 
 /// See the wasm32 `dot` above: same sum, two-exit loop shape for native targets.
+///
+/// `inline(always)`, not `inline` (optimisation pass 6): with plain `inline`
+/// LLVM simplifies `dot` on its own first and inlines it afterwards. At call
+/// sites where both slices provably have the same length (`matvec` rows
+/// against `x`, `gl . mid`, `cross . v` over one segment) it then folds the
+/// two exits into one, and the loop vectorizer emits the slow ordered
+/// reduction anyway (ld4.2d, lane extracts, serial scalar adds). Inlined
+/// before simplification, the loop keeps the two-exit fadd.2d/fmul.2d form.
+/// Same operations in the same order, so the sums are bit-identical.
 #[cfg(not(target_arch = "wasm32"))]
-#[inline]
+#[inline(always)]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     let mut s = [0.0_f64; 4];
     let mut ca = a.chunks_exact(4);
