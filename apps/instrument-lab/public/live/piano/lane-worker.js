@@ -45,7 +45,7 @@ self.onmessage = async (event) => {
       const make = (coords) => new PianoEngine(48000, coords, Number(o.courseModeBudget) || 0, Number(o.maxDynamicModes) || 0, Number(o.fullScalePa) || 0);
       // a five-note stab with its bass: keep the most soundboard coordinates this device can
       // compute at least `minRealtime` times faster than real time
-      const tries = o.boardCoordinates ? [Number(o.boardCoordinates)] : [0, 24, 16];
+      const tries = o.boardCoordinates ? [Number(o.boardCoordinates)] : [0, 16];
       let realtime = 0;
       for (const coords of tries) {
         engine?.free();
@@ -57,19 +57,33 @@ self.onmessage = async (event) => {
         realtime = (48 * 128 * 1000) / 48000 / (performance.now() - t0);
         engine.free();
         engine = make(coords);
-        if (realtime >= (m.minRealtime || 1.5)) break;
+        if (realtime >= (m.minRealtime || 1.35)) break;
       }
+      let active = false;
+      let quietFrames = 0;
       const adapter = {
-        idle: () => false, // the soundboard and every sympathetic string keep moving
+        idle: () => !active, // at rest before the first strike or once the soundboard has died away
         apply: (e) => {
-          if (e.on !== undefined) engine.noteOn(e.on, e.speed);
+          if (e.on !== undefined) { active = true; quietFrames = 0; engine.noteOn(e.on, e.speed); }
           else if (e.off !== undefined) engine.noteOff(e.off);
           else if (e.sustain !== undefined) engine.sustain(e.sustain);
           else if (e.allOff) engine.allNotesOff();
         },
         render: (n) => {
           const out = engine.render(n);
-          if (gain !== 1) for (let i = 0; i < out.length; i++) out[i] *= gain;
+          let peak = 0;
+          for (let i = 0; i < out.length; i++) {
+            const v = out[i] * gain;
+            out[i] = v;
+            const a = Math.abs(v);
+            if (a > peak) peak = a;
+          }
+          if (peak < 1e-4) {
+            quietFrames += out.length;
+            if (quietFrames >= 14400 && engine.stats()[1] === 0) active = false;
+          } else {
+            quietFrames = 0;
+          }
           if (snapEvery > 0 && lane) {
             snapDue -= n;
             if (snapDue <= 0) {

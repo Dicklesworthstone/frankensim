@@ -58,12 +58,23 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
     }
   }
 
+  let scheduled = false;
+  function schedulePump() {
+    if (scheduled) return;
+    scheduled = true;
+    setTimeout(() => {
+      scheduled = false;
+      pump();
+    }, 0);
+  }
+
   function pump() {
     if (pumping || !clock.seen) return;
     pumping = true;
     try {
       const t = now();
-      const horizon = t + aheadFrames;
+      const lead = seq ? Math.min(seq.startFrame, t + aheadFrames) : t;
+      const horizon = Math.max(t, lead) + aheadFrames;
       extend(horizon + chunk);
       const due = queue.length ? queue[0].frame : undefined;
       if (engine.idle() && (due === undefined || due > horizon) && !queue.some((e) => e.frame === undefined)) {
@@ -73,13 +84,26 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
         return;
       }
       if (next < t + chunk) {
-        // never rendered, woken from idle, or fallen behind: resume a safe distance ahead
-        const resume = Math.round(t + aheadFrames / 2);
-        if (next >= 0 && !engine.idle()) stats.skippedFrames += Math.max(0, resume - next);
-        next = resume;
+        if (next < 0 || engine.idle()) {
+          // never rendered or woken from idle: start at the next scheduled event or a short lead-in
+          next = due !== undefined && due >= t + chunk
+            ? Math.round(Math.min(due, horizon))
+            : Math.round(t + Math.min(aheadFrames / 2, 4096));
+        } else {
+          // momentarily fell behind while streaming: step ahead by a small ~42 ms cushion (never a half-second dropout)
+          const resume = Math.round(t + Math.min(aheadFrames / 4, 2048));
+          stats.skippedFrames += Math.max(0, resume - next);
+          while (queue.length && queue[0].frame !== undefined && queue[0].frame < resume) {
+            stats.lateEvents += 1;
+            engine.apply(queue.shift());
+          }
+          next = resume;
+        }
       }
       if (engine.idle() && due !== undefined && due > next) next = Math.round(due); // skip silence up to the event
-      while (next < horizon) {
+      const turnLimit = next + Math.max(chunk * 16, 2048);
+      const stopAt = Math.min(horizon, turnLimit);
+      while (next < stopAt) {
         // act on everything due at this sample, then render up to the next event or a full chunk
         while (queue.length && (queue[0].frame === undefined || queue[0].frame <= next)) {
           const e = queue.shift();
@@ -96,6 +120,10 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
         port.postMessage({ type: 'audio', frame: next, channels: [samples], epoch }, [samples.buffer]);
         next += n;
         if (engine.idle() && !queue.length && !seq) break;
+      }
+      const nextDue = queue.length ? queue[0].frame : undefined;
+      if (next < horizon && (!engine.idle() || (nextDue !== undefined && nextDue <= horizon))) {
+        schedulePump();
       }
     } finally {
       pumping = false;
@@ -116,7 +144,9 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
     sequence(startFrame, loopFrames, events) {
       for (let i = queue.length - 1; i >= 0; i--) if (queue[i].seq) queue.splice(i, 1);
       const sorted = events.map((e) => ({ ...e, seq: true })).sort((a, b) => a.offset - b.offset);
-      seq = { startFrame: Math.round(startFrame), loopFrames: Math.round(loopFrames), events: sorted, loop: 0 };
+      const start = Math.round(startFrame);
+      seq = { startFrame: start, loopFrames: Math.round(loopFrames), events: sorted, loop: 0 };
+      if (engine.idle() && next < start) next = start;
       pump();
     },
     stopSequence() {
