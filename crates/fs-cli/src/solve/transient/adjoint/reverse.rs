@@ -9,6 +9,7 @@ use crate::solve::conjugate::ConjugatePath;
 use crate::solve::radiation::LoweredRadiation;
 use crate::solve::natural::NaturalLaw;
 use super::{Objective, Selected, Tape, finite, select, storage_bytes};
+use super::enthalpy::material_controls;
 use super::super::{SolveRefusal, Workload, bad, lower, poll};
 
 mod report;
@@ -43,6 +44,18 @@ pub(in crate::solve::transient) fn airflow_storage_bytes(
         .ok_or_else(|| bad("native capacity airflow workspace overflows"))
 }
 
+/// Both storage coordinates share the same physical material/contact owner.
+/// Capacity has no retained element-load tape; the shared allowance therefore
+/// conservatively includes the enthalpy owner's element scratch as well.
+pub(in crate::solve::transient) fn material_control_storage_bytes(
+    spec: &ProjectSpec, nodes: usize, elements: usize,
+) -> Result<usize, SolveRefusal> {
+    material_controls::storage_bytes(
+        nodes, elements, spec.materials.as_deref().map_or(0, |rows| rows.len()),
+        spec.interface_cards.as_deref().map_or(0, |rows| rows.len()),
+    )
+}
+
 struct Derivatives {
     selected: Selected,
     initial: Vec<f64>,
@@ -61,6 +74,7 @@ struct Derivatives {
     additional_storage_bytes: usize,
     radiation: String,
     convection: String,
+    material_controls: String,
 }
 
 fn dot(cx: &Cx<'_>, a: &[f64], b: &[f64], deadline: Option<(Instant, f64)>)
@@ -150,10 +164,14 @@ pub(in crate::solve::transient) fn finish(
         air_controls::storage_bytes(spec, path.segments.len()))
         .transpose()?.unwrap_or(0).checked_add(natural_control_bytes)
         .ok_or_else(|| bad("native capacity cooling-control workspace overflows"))?;
+    let material_workspace = if objective.material_controls() {
+        material_control_storage_bytes(spec, n, problem.mesh.element_count())?
+    } else { 0 };
     let additional_storage_bytes = storage_bytes(n, ends_s.len(), names.len())?
         .checked_add(radiation_workspace)
         .and_then(|value| value.checked_add(natural_workspace))
         .and_then(|value| value.checked_add(air_workspace))
+        .and_then(|value| value.checked_add(material_workspace))
         .ok_or_else(|| bad("native capacity adjoint total workspace overflows"))?;
     let patch_count = radiation.map_or(0, |lowering| lowering.patches.len());
     let mut emissivities = vec![0.0; patch_count];
@@ -161,6 +179,13 @@ pub(in crate::solve::transient) fn finish(
     let mut natural_ambients = vec![0.0; natural.map_or(0, |coupling| coupling.laws.len())];
     let mut air_controls = airflow.map(|path| air_controls::Controls::new(cx, spec, path, deadline))
         .transpose()?;
+    // Bind even for an initial selected peak so zero controls retain physical
+    // identities. Ordinary capacity reports do not acquire this extra work.
+    let mut material_controls = if objective.material_controls() {
+        Some(material_controls::Controls::new(
+            cx, spec, problem, interfaces, labels, region_ids, &tape.states[0], deadline,
+        )?)
+    } else { None };
     let fixed_ports: Vec<usize> = ports.iter().enumerate().filter_map(|(index, &name)| {
         let owned = natural.is_some_and(|coupling|
             coupling.laws.iter().any(|law| law.target == name))
@@ -308,6 +333,13 @@ pub(in crate::solve::transient) fn finish(
         if let Some(controls) = &mut air_controls {
             controls.add(cx, spec, convection_problem, expected, &ports, &gradient, deadline)?;
         }
+        // Fixed-state material partials use the same complete watt-coordinate
+        // dual. Neither K(T) nor matching resistance receives another dt.
+        if let Some(controls) = &mut material_controls {
+            controls.add_capacity(
+                cx, convection_problem, interfaces, expected, &gradient.nodal_load, deadline,
+            )?;
+        }
         let density_bar = step.source_density_pullback(cx, &gradient.nodal_load).map_err(lower)?;
         for (region, basis) in bases.iter().enumerate() {
             source_controls[index][region] = dot(cx, &density_bar, basis, deadline)?;
@@ -357,6 +389,8 @@ pub(in crate::solve::transient) fn finish(
     let radiation = radiation.map(|lowering|
         radiation::fragment(lowering, &emissivities, &reservoirs, selected.state))
         .transpose()?.unwrap_or_default();
+    let material_controls = material_controls.as_ref()
+        .map(|controls| controls.fragment(selected.state)).transpose()?.unwrap_or_default();
     let result = Derivatives {
         selected, initial: carry, region_names: names, source_controls, source_multipliers,
         capacity: capacities, ports: fixed_ports.iter().map(|&i| ports[i].to_owned()).collect(),
@@ -364,6 +398,7 @@ pub(in crate::solve::transient) fn finish(
         coefficients: fixed_ports.iter().map(|&i| coefficients[i]).collect(),
         primal_iterations, dual_iterations, worst_dual,
         reconstructed_steps, revalidated_steps, additional_storage_bytes, radiation, convection,
+        material_controls,
     };
     report::render(cx, &result, ends_s, objective, config, deadline)
 }

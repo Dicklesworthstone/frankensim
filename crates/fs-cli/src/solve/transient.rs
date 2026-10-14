@@ -713,6 +713,11 @@ pub(super) fn solve(
     let bytes = if objective.is_some() {
         let mut additional = adjoint::storage_bytes(problem.mesh.vertex_count(), fine_steps,
             policy.capacities.len())?;
+        if objective.is_some_and(adjoint::Objective::material_controls) {
+            additional = additional.checked_add(adjoint::material_control_storage_bytes(
+                spec, problem.mesh.vertex_count(), problem.mesh.element_count(),
+            )?).ok_or_else(|| bad("combined material-control adjoint memory estimate overflows"))?;
+        }
         let ports = problem.boundary.conditions().iter()
             .filter(|condition| matches!(condition, fs_conduction::ThermalBc::Robin { .. }))
             .count();

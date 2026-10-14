@@ -11,6 +11,7 @@ use super::{SolveRefusal, bad, poll};
 mod reverse;
 pub(super) use reverse::{
     NaturalCoupling, finish, airflow_storage_bytes, natural_storage_bytes, radiation_storage_bytes,
+    material_control_storage_bytes,
 };
 mod enthalpy;
 pub(super) use enthalpy::{
@@ -25,25 +26,44 @@ pub(super) use enthalpy::{
 mod tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Objective { Final, SampledPeak }
+pub(super) enum Objective { Final, SampledPeak, FinalMaterial, SampledPeakMaterial }
 
 impl Objective {
     fn name(self) -> &'static str {
         match self {
             Self::Final => "temperature-final-adjoint",
             Self::SampledPeak => "temperature-sampled-peak-adjoint",
+            Self::FinalMaterial => "temperature-final-material-adjoint",
+            Self::SampledPeakMaterial => "temperature-sampled-peak-material-adjoint",
         }
+    }
+
+    fn from_output_name(name: &str) -> Option<Self> {
+        match name {
+            "temperature-final-adjoint" => Some(Self::Final),
+            "temperature-sampled-peak-adjoint" => Some(Self::SampledPeak),
+            "temperature-final-material-adjoint" => Some(Self::FinalMaterial),
+            "temperature-sampled-peak-material-adjoint" => Some(Self::SampledPeakMaterial),
+            _ => None,
+        }
+    }
+
+    /// The explicit report name is part of native project/run identity.
+    /// Existing capacity reports retain their work, fields and scope unchanged.
+    /// Enthalpy reports already include these controls under either name.
+    pub(super) fn material_controls(self) -> bool {
+        matches!(self, Self::FinalMaterial | Self::SampledPeakMaterial)
+    }
+
+    fn final_time(self) -> bool {
+        matches!(self, Self::Final | Self::FinalMaterial)
     }
 }
 
 pub(super) fn requested(spec: &ProjectSpec) -> Result<Option<Objective>, SolveRefusal> {
     let mut selected = None;
     for output in spec.outputs.iter().flatten() {
-        let objective = match output.name.as_str() {
-            "temperature-final-adjoint" => Objective::Final,
-            "temperature-sampled-peak-adjoint" => Objective::SampledPeak,
-            _ => continue,
-        };
+        let Some(objective) = Objective::from_output_name(&output.name) else { continue; };
         if selected.is_some() || output.kind != "report" || output.region.is_some() {
             return Err(bad("select one transient adjoint report without an output region; it uses the existing temperature-max requirement region"));
         }
@@ -66,7 +86,7 @@ pub(super) fn requested(spec: &ProjectSpec) -> Result<Option<Objective>, SolveRe
 }
 
 pub(super) fn is_output(name: &str) -> bool {
-    matches!(name, "temperature-final-adjoint" | "temperature-sampled-peak-adjoint")
+    Objective::from_output_name(name).is_some()
 }
 
 fn finite(value: f64) -> Result<f64, SolveRefusal> {
@@ -155,7 +175,7 @@ fn select(cx: &Cx<'_>, tape: &Tape, objective: Objective, vertices: &[usize],
     if tape.states.len() != tape.limit || vertices.is_empty() {
         return Err(bad("transient adjoint needs a complete fine trajectory and a nonempty goal region"));
     }
-    let first = if objective == Objective::Final { tape.states.len() - 1 } else { 0 };
+    let first = if objective.final_time() { tape.states.len() - 1 } else { 0 };
     let mut selected: Option<Selected> = None;
     for index in first..tape.states.len() {
         for (slot, &vertex) in vertices.iter().enumerate() {
@@ -170,4 +190,26 @@ fn select(cx: &Cx<'_>, tape: &Tape, objective: Objective, vertices: &[usize],
         }
     }
     selected.ok_or_else(|| bad("transient adjoint has no selected objective"))
+}
+
+#[cfg(test)]
+mod material_output_tests {
+    use super::*;
+
+    #[test]
+    fn material_reports_preserve_time_selection_and_have_distinct_request_identities() {
+        for (ordinary, material) in [
+            (Objective::Final, Objective::FinalMaterial),
+            (Objective::SampledPeak, Objective::SampledPeakMaterial),
+        ] {
+            assert_eq!(ordinary.final_time(), material.final_time());
+            assert!(!ordinary.material_controls());
+            assert!(material.material_controls());
+            assert_ne!(ordinary.name(), material.name());
+            assert_eq!(Objective::from_output_name(ordinary.name()), Some(ordinary));
+            assert_eq!(Objective::from_output_name(material.name()), Some(material));
+            assert!(is_output(material.name()));
+        }
+        assert!(!is_output("temperature-final-material"));
+    }
 }
