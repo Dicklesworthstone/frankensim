@@ -5,6 +5,7 @@
 //! bracket (decay below Ra_c ≈ 1708, growth above) — physics the
 //! scheme cannot fake.
 
+pub mod sources;
 pub(crate) mod forcing;
 pub use forcing::ThermalForcingError;
 
