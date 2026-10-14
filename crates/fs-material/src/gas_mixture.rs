@@ -43,38 +43,12 @@ fn check_count(count: usize, composition: &Composition) -> Result<(), MaterialEr
     Ok(())
 }
 
-fn close(actual: f64, expected: f64) -> bool {
-    expected.is_finite()
-        && expected > 0.0
-        && (actual - expected).abs() <= 2.0e-12 * actual.abs().max(expected.abs())
-}
-
-// GasState has public fields, so an arbitrary tuple is not automatically a
-// thermodynamically coherent input. Check before computing any mixture output.
+// Coherence belongs to GasState. The additional pure-component requirement
+// belongs only to this mixing law; it must not restrict downstream media.
 fn validate_component(state: &GasState) -> Result<(), MaterialError> {
-    if [
-        state.temperature, state.pressure, state.density, state.sound_speed,
-        state.dynamic_viscosity, state.thermal_conductivity, state.gamma,
-        state.specific_gas_constant, state.specific_heat_cp, state.prandtl,
-        state.characteristic_impedance,
-    ].iter().any(|value| !value.is_finite() || *value <= 0.0)
-        || !(50.0..=2000.0).contains(&state.temperature)
-        || state.pressure > 1.0e7
-        || state.gamma <= 1.0
-        || state.gamma > 5.0 / 3.0 + 1.0e-9
-        || state.water_mole_fraction != 0.0
-    {
-        return Err(invalid("gas component is invalid, already humid, or outside the GasState domain"));
-    }
-    let r = state.specific_gas_constant;
-    let rt = r * state.temperature;
-    if !close(state.density, state.pressure / rt)
-        || !close(state.sound_speed, (state.gamma * rt).sqrt())
-        || !close(state.specific_heat_cp, state.gamma * r / (state.gamma - 1.0))
-        || !close(state.prandtl, state.dynamic_viscosity * state.specific_heat_cp / state.thermal_conductivity)
-        || !close(state.characteristic_impedance, state.density * state.sound_speed)
-    {
-        return Err(invalid("gas component contains inconsistent ideal-gas or transport properties"));
+    state.validate_coherence()?;
+    if state.water_mole_fraction != 0.0 {
+        return Err(invalid("gas component is already humid; supply explicitly labeled pure components"));
     }
     Ok(())
 }
