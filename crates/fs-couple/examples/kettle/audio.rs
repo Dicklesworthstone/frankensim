@@ -6,6 +6,8 @@ use fs_bem::{helmholtz::{Medium, Formulation, PreparedCbieGeometry, solve_radiat
 #[path = "audio_field.rs"]
 mod field;
 use field::{Field, Image};
+#[path = "reciprocal_air.rs"]
+mod reciprocal;
 use fs_couple::{pcm_wav::{decimate::Decimator, encode_pcm16_wav_interleaved},
     render::plate::impact::{audio::ImpactSource, radiation::{self, fit}}};
 use fs_exec::CancelGate;
@@ -127,11 +129,6 @@ pub fn bake(spec:&Spec,film:&TensionedDisk,modes:&[ModePair],settings:Settings,g
         .ok_or("exterior work budget overflow")?;
     if work>settings.maximum_work { return Err("exterior sweep exceeds the declared dense work budget".into()); }
     let medium=Medium {density:spec.air[0],sound_speed:spec.air[1]};
-    let range=settings.receiver_m[0].hypot(settings.receiver_m[1]).hypot(settings.receiver_m[2]);
-    let delay_s=(range-boundary.radius_m)/medium.sound_speed;
-    if !delay_s.is_finite() || delay_s<2.0/f64::from(OUTPUT_RATE) || delay_s>2.0 {
-        return Err("finite receiver must be outside the enclosing sphere, with 2 samples..2 seconds of explicit propagation".into());
-    }
     let omega:Vec<_>=(0..samples).map(|i|TAU*(settings.band_hz[0]
         +(settings.band_hz[1]-settings.band_hz[0])*i as f64/(samples-1) as f64)).collect();
     let k_max=omega[samples-1]/medium.sound_speed;
@@ -140,46 +137,48 @@ pub fn bake(spec:&Spec,film:&TensionedDisk,modes:&[ModePair],settings:Settings,g
         Formulation::PlainCbie
     } else { Formulation::BurtonMiller };
     let surface=SpherePanels::from_triangles(boundary.triangles)?;
-    let geometry=if settings.image==Image::Collocation && formulation==Formulation::PlainCbie {
-        Some(PreparedCbieGeometry::new_with_cancel(&surface,k_max,
-            2048*2048*core::mem::size_of::<(f64,f64)>(),||gate.is_requested())?)
-    } else { None };
-    let reciprocal=if settings.image==Image::Reciprocal {
-        Some(field::prepare(&surface,k_max,n,samples,settings.maximum_work,gate)?)
-    } else {None};
-    let mut values=vec![vec![C64::ZERO;samples];n];
-    let mut impedance=vec![vec![C64::ZERO;n*n];samples];
-    let mut ppw=f64::INFINITY;
-    for index in (0..samples).rev() {
-        if gate.is_requested() { return Err("exterior frequency sweep cancelled".into()); }
-        let w=omega[index]; let k=w/medium.sound_speed;
-        let fields:Vec<Vec<_>>=boundary.weights.iter().map(|row|row.iter().map(|b|C64::new(0.0,*b/w)).collect()).collect();
-        let refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
-        // Both images retain their ORIGINAL field representation through
-        // receiver evaluation. Panel means are shared only for surface work.
-        let solutions:Vec<_>=if let Some(source)=&reciprocal {
-            source.solve_batch(k,medium,&refs,||gate.is_requested())?
-                .into_iter().map(Field::Reciprocal).collect()
-        } else {
+    let (values,impedance,delay_s,ppw)=if settings.image==Image::Reciprocal {
+        let sampled=reciprocal::sample(&surface,&boundary.weights,boundary.radius_m,
+            medium,&omega,settings.receiver_m,settings.maximum_work,gate)?;
+        (sampled.pressure,sampled.impedances,sampled.delay_s,sampled.minimum_ppw)
+    } else {
+        let range=settings.receiver_m[0].hypot(settings.receiver_m[1]).hypot(settings.receiver_m[2]);
+        let delay_s=(range-boundary.radius_m)/medium.sound_speed;
+        if !delay_s.is_finite() || delay_s<2.0/f64::from(OUTPUT_RATE) || delay_s>2.0 {
+            return Err("finite receiver must be outside the enclosing sphere, with 2 samples..2 seconds of explicit propagation".into());
+        }
+        let geometry=if formulation==Formulation::PlainCbie {
+            Some(PreparedCbieGeometry::new_with_cancel(&surface,k_max,
+                2048*2048*core::mem::size_of::<(f64,f64)>(),||gate.is_requested())?)
+        } else { None };
+        let mut values=vec![vec![C64::ZERO;samples];n];
+        let mut impedance=vec![vec![C64::ZERO;n*n];samples];
+        let mut ppw=f64::INFINITY;
+        for index in (0..samples).rev() {
+            if gate.is_requested() { return Err("exterior frequency sweep cancelled".into()); }
+            let w=omega[index]; let k=w/medium.sound_speed;
+            let fields:Vec<Vec<_>>=boundary.weights.iter().map(|row|row.iter().map(|b|C64::new(0.0,*b/w)).collect()).collect();
+            let refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
             let solved=if let Some(geometry)=&geometry {geometry.solve_batch(k,medium,&refs)?}
                 else {solve_radiation_batch(&surface,k,medium,&refs,formulation)?};
-            solved.into_iter().map(Field::Collocation).collect()
-        };
-        if solutions.len()!=n { return Err("exterior solve lost a head source".into()); }
-        for (j,solution) in solutions.iter().enumerate() {
-            ppw=ppw.min(solution.admit(panels)?);
-            let pressure=solution.pressure_at(&surface,medium,settings.receiver_m)?;
-            // Finite-point pressure ALREADY includes propagation and spreading.
-            // Peel only this lower-bound delay and restore it once at playback.
-            values[j][index]=phase(pressure,-w*delay_s);
-            for (i,row) in boundary.weights.iter().enumerate() {
-                let mut force=C64::ZERO;
-                for ((p,area),b) in solution.trace().iter().zip(surface.areas()).zip(row) {force=force+p.scale(area*b);}
-                impedance[index][i*n+j]=force*C64::new(0.0,-w);
+            let solutions:Vec<_>=solved.into_iter().map(Field::Collocation).collect();
+            if solutions.len()!=n { return Err("exterior solve lost a head source".into()); }
+            for (j,solution) in solutions.iter().enumerate() {
+                ppw=ppw.min(solution.admit(panels)?);
+                let pressure=solution.pressure_at(&surface,medium,settings.receiver_m)?;
+                // Finite-point pressure ALREADY includes propagation and spreading.
+                // Peel only this lower-bound delay and restore it once at playback.
+                values[j][index]=phase(pressure,-w*delay_s);
+                for (i,row) in boundary.weights.iter().enumerate() {
+                    let mut force=C64::ZERO;
+                    for ((p,area),b) in solution.trace().iter().zip(surface.areas()).zip(row) {force=force+p.scale(area*b);}
+                    impedance[index][i*n+j]=force*C64::new(0.0,-w);
+                }
             }
+            admit_power(&impedance[index],n)?;
         }
-        admit_power(&impedance[index],n)?;
-    }
+        (values,impedance,delay_s,ppw)
+    };
     if gate.is_requested() { return Err("exterior fit cancelled".into()); }
     let fitted=fit::fit(&omega,&impedance,n)?;
     let mut filters=Vec::with_capacity(n);
@@ -202,8 +201,9 @@ pub fn render(model:&mut Model,bake:&Bake,spec:&Spec,settings:Settings,frames:us
         || model.mechanics.sample_period_s().to_bits()!=(1.0/f64::from(spec.rate_hz)).to_bits() { return Err("pressure playback requires quiescent prior source history".into()); }
     let count=model.modes.len(); let factor=(spec.rate_hz/OUTPUT_RATE) as usize;
     let mut filters=bake.filters.iter().map(DiscreteStateSpace::try_runtime).collect::<Result<Vec<_>,_>>()?;
-    let mut delay=DelayedFilter::new(bake.delay_s*f64::from(OUTPUT_RATE),DigitalFilter {
-        sections:vec![],direct:1.0,t_s:1.0/f64::from(OUTPUT_RATE),prewarp:0.0 })?;
+    let mut delay=if bake.delay_s==0.0 {None} else {Some(DelayedFilter::new(
+        bake.delay_s*f64::from(OUTPUT_RATE),DigitalFilter {
+            sections:vec![],direct:1.0,t_s:1.0/f64::from(OUTPUT_RATE),prewarp:0.0 })?)};
     let mut decimator=Decimator::new(factor,count)?;
     let mut block=vec![0.0;factor*count]; let mut previous=vec![0.0;count];
     let mut pressure=Vec::with_capacity(frames);
@@ -218,7 +218,7 @@ pub fn render(model:&mut Model,bake:&Bake,spec:&Spec,settings:Settings,frames:us
         let acceleration=decimator.preview(&block)?;
         let mut p=0.0;
         for (filter,&a) in filters.iter_mut().zip(acceleration) { p+=filter.step(a)?; }
-        p=delay.push(p)?;
+        if let Some(delay)=&mut delay {p=delay.push(p)?;}
         if !p.is_finite() { return Err("exterior pressure overflow".into()); }
         decimator.commit(); pressure.push(p);
     }
