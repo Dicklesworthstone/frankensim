@@ -93,6 +93,9 @@ mod energy;
 mod flow;
 mod krylov;
 pub mod material_coupling;
+/// Ohmic sources on conservative enthalpy timelines, including latent plateaus.
+#[cfg(feature = "enthalpy-coupling")]
+pub mod enthalpy;
 mod natural;
 mod radiation;
 mod simple;

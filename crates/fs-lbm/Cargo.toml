@@ -10,7 +10,12 @@ description = "Lattice Boltzmann core (fs-lbm): a D2Q9 BGK stream-and-collide so
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+# Keep the spatial enthalpy dependency opt-in for ordinary LBM consumers.
+enthalpy-coupling = ["dep:fs-conduction"]
+
 [dependencies]
+fs-conduction = { path = "../fs-conduction", optional = true }
 fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
