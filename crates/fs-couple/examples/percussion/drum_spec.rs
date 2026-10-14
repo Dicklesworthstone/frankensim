@@ -122,13 +122,13 @@ impl Spec {
         Self::read(&text)
     }
     /// Geometry, both heads, mesh and band are mandatory. Optional per-head
-    /// tension_variation rows add a physical equilibrated tensor, not pitches.
+    /// tension_variation and tension_harmonic rows add a physical equilibrated tensor, not pitches.
     /// Order is free and comments start with #.
     pub fn read(text: &str) -> Result<Self, Error> {
         if text.len()>MAX_BYTES { return Err("drum specification exceeds 64 KiB".into()); }
         let (mut header,mut geometry,mut mesh,mut band) = (false,None,None,None);
         let mut heads = [None,None];
-        let mut variations = [None,None];
+        let mut variations = [None,None];\n        let mut harmonic_seen = [[false; fs_plate::shell::head::tension::TENSION_HARMONIC_COUNT];2];
         for (number,raw) in text.lines().enumerate() {
             let row = raw.split('#').next().unwrap_or("").trim();
             if row.is_empty() { continue; }
@@ -138,7 +138,7 @@ impl Spec {
                 header=true; continue;
             }
             let fields: Vec<_> = row.split(',').map(str::trim).collect();
-            let count = match fields[0] { "geometry"=>4, "head"=>8, "mesh"|"band_hz"=>3, "tension_variation"=>9,
+            let count = match fields[0] { "geometry"=>4, "head"=>8, "mesh"|"band_hz"=>3, "tension_variation"=>9, "tension_harmonic"=>5,
                 _=>return Err(error("unknown record")) };
             if fields.len()!=count { return Err(error("wrong number of fields")); }
             let value = |i: usize| -> Result<f64,Error> {
@@ -161,6 +161,18 @@ impl Spec {
                     if variations[i].is_some() { return Err(error("duplicate head tension variation")); }
                     variations[i]=Some(TensionVariation {constant_n_m:[value(2)?,value(3)?,value(4)?],
                         gradient_n_m2:[value(5)?,value(6)?,value(7)?,value(8)?]});
+                }
+                "tension_harmonic" => {
+                    let i=match fields[1] {"batter"=>0,"resonant"=>1,_=>return Err(error("unknown tension-harmonic head"))};
+                    let order=fields[2].parse::<usize>().map_err(|_|error("invalid tension-harmonic order"))?;
+                    if !(fs_plate::shell::head::tension::MIN_TENSION_HARMONIC_ORDER
+                        ..=fs_plate::shell::head::tension::MAX_TENSION_HARMONIC_ORDER).contains(&order) {
+                        return Err(error("tension-harmonic order must be 2..12"));
+                    }
+                    let slot=order-fs_plate::shell::head::tension::MIN_TENSION_HARMONIC_ORDER;
+                    if harmonic_seen[i][slot] {return Err(error("duplicate head tension harmonic"));}
+                    harmonic_seen[i][slot]=true;
+                    variations[i].get_or_insert_with(TensionVariation::default).harmonics_n_m[slot]=[value(3)?,value(4)?];
                 }
                 "mesh" => {
                     if mesh.is_some() { return Err(error("duplicate mesh")); }

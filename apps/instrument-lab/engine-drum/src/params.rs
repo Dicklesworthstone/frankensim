@@ -161,7 +161,7 @@ fn vector<const N: usize>(key: &str, value: &Value) -> Result<[f64; N], Refusal>
 }
 fn variation(key: &str, value: &Value) -> Result<TensionVariation, Refusal> {
     let v: [f64; 7] = vector(key, value)?;
-    Ok(TensionVariation { constant_n_m: [v[0], v[1], v[2]], gradient_n_m2: [v[3], v[4], v[5], v[6]] })
+    Ok(TensionVariation { constant_n_m: [v[0], v[1], v[2]], gradient_n_m2: [v[3], v[4], v[5], v[6]], ..TensionVariation::default() })
 }
 
 impl DrumParams {

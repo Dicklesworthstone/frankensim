@@ -195,3 +195,38 @@ fn supplied_drum_retains_stretching_distributed_air_and_prepared_nonlinearity() 
     }
     assert!(stretching>0.0);
 }
+
+
+#[test]
+fn multi_lug_harmonics_parse_into_equilibrated_prestress_and_change_modes_not_mass() {
+    let base=small();
+    let declared=format!("{}tension_harmonic,batter,8,120,-35\ntension_harmonic,resonant,10,60,20\n",text(base));
+    let tuned=Spec::read(&declared).unwrap();
+    assert_eq!(tuned.tension_variation[0].harmonics_n_m[6],[120.0,-35.0]);
+    assert_eq!(tuned.tension_variation[1].harmonics_n_m[8],[60.0,20.0]);
+    let (plain_f,plain_m)=base.prepare(2e-6,false).unwrap();
+    let (tuned_f,tuned_m)=tuned.prepare(2e-6,false).unwrap();
+    for i in 0..2 {
+        assert_eq!(plain_f[i].model.m,tuned_f[i].model.m);
+        assert_eq!(plain_f[i].mesh.nodes,tuned_f[i].mesh.nodes);
+        assert_eq!(plain_f[i].model.dof_map,tuned_f[i].model.dof_map);
+        assert_eq!(plain_m[i].len(),tuned_m[i].len());
+        assert!(plain_m[i].iter().zip(&tuned_m[i]).any(|(a,b)|(a.lambda-b.lambda).abs()>1e-8*a.lambda.max(1.0)));
+    }
+}
+
+#[test]
+fn malformed_duplicate_or_overstrong_lug_harmonics_refuse_without_clipping() {
+    let valid=text(small());
+    for row in [
+        "tension_harmonic,batter,1,10,0",
+        "tension_harmonic,batter,13,10,0",
+        "tension_harmonic,batter,8,NaN,0",
+        "tension_harmonic,unknown,8,10,0",
+    ] { assert!(Spec::read(&format!("{valid}{row}\n")).is_err(),"{row}"); }
+    assert!(Spec::read(&format!("{valid}tension_harmonic,batter,8,10,0\ntension_harmonic,batter,8,20,0\n")).is_err());
+    // Harmonic bound exceeds the 1500 N/m resonant base, so physical head
+    // construction refuses rather than scaling or clipping the requested map.
+    let s=Spec::read(&format!("{valid}tension_harmonic,resonant,8,1600,0\n")).unwrap();
+    assert!(s.head(1).is_err());
+}

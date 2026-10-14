@@ -11,7 +11,7 @@ fn budget() -> ProfileBudget {
     ProfileBudget {max_nodes:200,max_triangles:400,max_feature_evaluations:0}
 }
 fn field() -> TensionVariation {
-    TensionVariation {constant_n_m:[250.0,-150.0,80.0],gradient_n_m2:[600.0,-200.0,100.0,400.0]}
+    TensionVariation {constant_n_m:[250.0,-150.0,80.0],gradient_n_m2:[600.0,-200.0,100.0,400.0],..TensionVariation::default()}
 }
 fn close(a:f64,b:f64,relative:f64) {
     assert!((a-b).abs()<=relative*a.abs().max(b.abs()).max(1.0),"{a:e} != {b:e}");
@@ -104,4 +104,47 @@ fn loss_of_tension_at_a_vertex_refuses_even_when_the_center_is_tensile() {
     // Ordinary spatial variation remains legal; it is not replaced by its mean.
     let disk=TensionedDisk::new_with_tension_variation(spec(),field(),budget()).unwrap();
     assert_eq!(disk.tension_variation,field());
+}
+
+
+#[test]
+fn normalized_eight_lug_harmonic_is_equilibrated_periodic_and_changes_the_real_pencil() {
+    let mut h=TensionVariation::default();
+    h.harmonics_n_m[8-MIN_TENSION_HARMONIC_ORDER]=[120.0,-35.0];
+    h.validate().unwrap();
+    let radius=spec().radius_m;
+    let p=[0.073,0.021];
+    let a=h.resultant_on_disk(1000.0,radius,p);
+    let angle=core::f64::consts::TAU/8.0;
+    let (s,c)=angle.sin_cos();
+    let q=[c*p[0]-s*p[1],s*p[0]+c*p[1]];
+    let b=h.resultant_on_disk(1000.0,radius,q);
+    // Rotate b back into p's Cartesian frame; an order-8 Airy field repeats.
+    let bxx=c*c*b[0]+s*s*b[1]+2.0*s*c*b[2];
+    let byy=s*s*b[0]+c*c*b[1]-2.0*s*c*b[2];
+    let bxy=-s*c*b[0]+s*c*b[1]+(c*c-s*s)*b[2];
+    close(a[0],bxx,2e-12);close(a[1],byy,2e-12);close(a[2],bxy,2e-12);
+
+    let plain=TensionedDisk::new(spec(),budget()).unwrap();
+    let tuned=TensionedDisk::new_with_tension_variation(spec(),h,budget()).unwrap();
+    assert_eq!(plain.model.m,tuned.model.m);
+    assert_eq!(plain.model.dof_map,tuned.model.dof_map);
+    let mut delta=0.0_f64;
+    for r in 0..plain.model.free {for c in 0..plain.model.free {
+        delta=delta.max((plain.model.k.get(r,c)-tuned.model.k.get(r,c)).abs());
+    }}
+    assert!(delta>1e-6);
+}
+
+#[test]
+fn harmonic_norm_guard_refuses_any_pattern_that_can_exhaust_the_tensile_margin() {
+    let mut safe=TensionVariation::default();
+    safe.harmonics_n_m[6-MIN_TENSION_HARMONIC_ORDER]=[400.0,300.0];
+    assert!(TensionedDisk::new_with_tension_variation(spec(),safe,budget()).is_ok());
+    let mut unsafe_field=safe;
+    unsafe_field.harmonics_n_m[10-MIN_TENSION_HARMONIC_ORDER]=[600.0,0.0];
+    assert!(TensionedDisk::new_with_tension_variation(spec(),unsafe_field,budget()).is_err());
+    let mut nonfinite=TensionVariation::default();
+    nonfinite.harmonics_n_m[0]=[f64::NAN,0.0];
+    assert!(nonfinite.validate().is_err());
 }
