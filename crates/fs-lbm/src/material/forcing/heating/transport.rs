@@ -79,7 +79,7 @@ fn poll(gate: &CancelGate) -> Result<(), MaterialTransportError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sample<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q: usize>(
+pub(in crate::material::forcing) fn sample<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q: usize>(
     mapping: &MaterialSlab<S>, state: &S, cells: usize, plane: usize,
     range: [f64; 2], gate: &CancelGate,
     resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
@@ -146,11 +146,46 @@ fn advance<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q: usize>(
     }
     let applied = sample::<S, F, D, Q>(slab, &slab.lattice, cells, plane,
         limits.temperature_range_k, gate, &mut resolve)?;
+    let (trial, heat) = candidate_with_input::<S, F, D, Q>(slab, input, &applied, gate)?;
+    let endpoint = sample::<S, F, D, Q>(slab, &trial, cells, plane,
+        limits.temperature_range_k, gate, &mut resolve)?;
+    poll(gate)?;
+    slab.lattice = trial;
+    Ok(MaterialTransportStep { heat, applied, endpoint })
+}
+
+// Shared by prescribed and electrical heat. The returned solver is tentative;
+// material endpoint, circuit accounting and cancellation owners publish later.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::material::forcing) fn candidate_with_samples<
+    S: Slab<D, Q>, F, const D: usize, const Q: usize,
+>(
+    slab: &MaterialSlab<S>, power: &[f64], forces: &[[f64; D]],
+    depth_m: f64, limits: HeatSourceLimits, applied: &[TransportSample<F>],
+    gate: &CancelGate,
+) -> Result<(S, HeatBalance), MaterialTransportError> {
+    poll(gate)?;
+    let (cells, _) = slab.lattice.layout()?;
+    let input = slab.heat_inputs(power, forces, cells, depth_m, limits)?;
+    candidate_with_input::<S, F, D, Q>(slab, input, applied, gate)
+}
+
+fn candidate_with_input<S: Slab<D, Q>, F, const D: usize, const Q: usize>(
+    slab: &MaterialSlab<S>, input: super::Inputs<D>, applied: &[TransportSample<F>],
+    gate: &CancelGate,
+) -> Result<(S, HeatBalance), MaterialTransportError> {
+    let (cells, plane) = slab.lattice.layout()?;
+    if applied.len() != cells - 2 * plane
+        || applied.iter().enumerate().any(|(i, s)| s.cell != plane + i)
+        || slab.lattice.walls() != (1.0, 0.0) || !slab.lattice.flow_valid()
+    {
+        return Err(MaterialTransportError::Invalid("invalid material samples or slab"));
+    }
     // Wall entries are admitted but unused by the fluid kernels. Do not query
     // a fluid material law for the separate fixed-temperature reservoir.
     let mut momentum = vec![1.0;cells];
     let mut thermal = vec![1.0;cells];
-    for value in &applied {
+    for value in applied {
         momentum[value.cell] = value.momentum_relaxation;
         thermal[value.cell] = value.thermal_relaxation;
     }
@@ -164,11 +199,7 @@ fn advance<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q: usize>(
         Some(RelaxationField { momentum: &momentum, thermal: &thermal }),
         |_, raw| input.balance(raw),
     )?;
-    let endpoint = sample::<S, F, D, Q>(slab, &trial, cells, plane,
-        limits.temperature_range_k, gate, &mut resolve)?;
-    poll(gate)?;
-    slab.lattice = trial;
-    Ok(MaterialTransportStep { heat, applied, endpoint })
+    Ok((trial, heat))
 }
 
 impl MaterialSlab<ThermalLbm> {

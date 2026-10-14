@@ -6,6 +6,7 @@
 //! the actual kinetic-energy update remains the existing flow owner's result.
 
 pub mod midpoint;
+pub mod transport;
 mod isolated;
 
 use super::{
