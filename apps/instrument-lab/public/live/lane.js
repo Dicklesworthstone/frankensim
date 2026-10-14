@@ -8,12 +8,19 @@
 //
 // While the engine reports itself idle (a silent drum is not stepped) nothing is rendered and
 // the lane jumps ahead with the clock, so the next stroke lands `aheadFrames` after it arrives.
+//
+// A score is a fixed, non-looping list of events with absolute frames (a whole MIDI file): it is
+// sorted once and fed into the queue only as far as the render horizon, so a 10,000-event score
+// costs what a short loop does. `resync()` forgets how far ahead the lane has rendered, so after
+// the mixer drops a lane's queued audio the next samples are rendered for the clock as it is now.
 
 export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {}) {
   let clock = { frame: 0, at: 0, rate: 48000, seen: false };
   let next = -1;                 // context frame of the next sample to render
   const queue = [];              // pending events, sorted by frame (undefined frame = now)
   let seq = null;                // {startFrame, loopFrames, events, loop}
+  let score = null;              // {events (sorted by frame), at}
+  let epoch = 0;                 // stamped on every block; raised by resync (see mix-worklet flush)
   let pumping = false;
   const stats = { renderedFrames: 0, skippedFrames: 0, lateEvents: 0, wallMs: 0, audioMs: 0 };
 
@@ -36,8 +43,13 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
     queue.splice(i, 0, e);
   }
 
-  // queue every sequenced event whose frame falls before `until`
+  // queue every sequenced or scored event whose frame falls before `until`
   function extend(until) {
+    if (score) {
+      const ev = score.events;
+      while (score.at < ev.length && ev[score.at].frame < until) insert(ev[score.at++]);
+      if (score.at >= ev.length) score = null;
+    }
     if (!seq) return;
     while (seq.startFrame + seq.loop * seq.loopFrames < until) {
       const base = seq.startFrame + seq.loop * seq.loopFrames;
@@ -81,7 +93,7 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
         stats.wallMs += performance.now() - t0;
         stats.audioMs += (n * 1000) / clock.rate;
         stats.renderedFrames += n;
-        port.postMessage({ type: 'audio', frame: next, channels: [samples] }, [samples.buffer]);
+        port.postMessage({ type: 'audio', frame: next, channels: [samples], epoch }, [samples.buffer]);
         next += n;
         if (engine.idle() && !queue.length && !seq) break;
       }
@@ -97,6 +109,8 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
     stats,
     /** Next frame to be rendered (the context frame the current engine state belongs to). */
     get frame() { return next; },
+    /** The epoch stamped on blocks rendered now (see resync). */
+    get epoch() { return epoch; },
     now,
     event(e) { insert(e); pump(); },
     sequence(startFrame, loopFrames, events) {
@@ -108,6 +122,28 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = 128 } = {
     stopSequence() {
       seq = null;
       for (let i = queue.length - 1; i >= 0; i--) if (queue[i].seq) queue.splice(i, 1);
+    },
+    /** Replace the score: events [{frame, ...}] with absolute context frames, played once. */
+    score(events) {
+      for (let i = queue.length - 1; i >= 0; i--) if (queue[i].score) queue.splice(i, 1);
+      const sorted = [];
+      for (const e of events) if (Number.isFinite(e.frame)) { e.frame = Math.round(e.frame); e.score = true; sorted.push(e); }
+      sorted.sort((a, b) => a.frame - b.frame);
+      score = sorted.length ? { events: sorted, at: 0 } : null;
+      pump();
+    },
+    stopScore() {
+      score = null;
+      for (let i = queue.length - 1; i >= 0; i--) if (queue[i].score) queue.splice(i, 1);
+    },
+    /**
+     * Render the next samples for the clock as it is now, stamped with `newEpoch`: the mixer was
+     * told to flush this lane with the same epoch, so blocks rendered before this call are refused.
+     */
+    resync(newEpoch) {
+      epoch = Number.isFinite(newEpoch) ? newEpoch : epoch + 1;
+      next = -1;
+      pump();
     },
     pump,
   };

@@ -121,3 +121,26 @@ It balances the three parts against the recording's low/middle/high band energie
 tail onto the loop's start, writes `audio/strandbar-studio.flac` and `data/strandbar.json` (the
 same score for the live piano and kit lanes), and gives each live part the RMS of its studio part
 by running the live engines' WebAssembly in Node (`tools/strandbar_live_rms.mjs`).
+
+## Player piano
+
+`src/player/` plays any MIDI file on the live piano and kit: a paper roll over a tracker bar, the
+88 keys, the soundboard's modal field in 3D and each drum piece's surface velocity in 3D.
+`src/midi/` reads the file: `midi-salvage.ts` is copied from the owner's jazz chord editor
+(`jazz_chord_progression_editor_html`), `smf.ts` reads the result under that editor's M0 laws plus
+the controllers a player needs, `chords.ts` names chords with its reverse-T1 templates, and
+`arrange.ts` maps the file (pitched channels to the piano, GM channel 10 to kit pieces, velocity to
+hammer or stick speed, CC64 to the pedal) and counts every fold, merge, thinning and skipped drum.
+
+The shelf's rolls are that editor's chord-chart library played through its own bass and comping
+generators, with drum parts written per groove (from the frankensim root; the output in
+`public/midi/` is committed):
+
+    bun apps/instrument-lab/tools/standards/build-standards.ts ../jazz_chord_progression_editor_html apps/instrument-lab/public
+    uv run --with mido python apps/instrument-lab/tools/standards/verify_standards.py apps/instrument-lab/public
+
+The lanes take a whole score at once (`{type:'score', events}` with absolute frames, sorted once in
+the Worker and fed to the queue only as far as the look-ahead), and a stop or a jump flushes what
+they rendered ahead (`mix.flush({epoch})` + `lane.resync(epoch)`; audio, snapshots and fields carry
+the epoch they were computed in). The piano lane sends `engine.snapshot()` per 1/30 s of audio
+when asked (`snapshotHz`), and a kit lane its fields per `fieldFrames` of audio.

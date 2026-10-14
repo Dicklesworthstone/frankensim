@@ -34,6 +34,7 @@
       <a href="#piano">Grand piano</a>
       <a href="#real">Real vs ours</a>
       <a href="#method">Method</a>
+      <a class="is-live" href="#player">Player piano</a>
     </nav>
   </header>
 
@@ -281,6 +282,19 @@
           <p class="muted small" style="margin: 8px 0 14px">Every offline clip carries its exact command, run time and energy closure in its “Run evidence” drawer. Totals:</p>
           <dl class="stats" id="method-stats"></dl>
         </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ PLAYER PIANO -->
+    <section id="player">
+      <div class="wrap">
+        <header>
+          <div class="rule live"></div>
+          <p class="eyebrow"><span class="tag live">Live · WebAssembly</span></p>
+          <h2>A player piano and drum machine for any MIDI file.</h2>
+          <p class="lede">A MIDI file is only a list of keys and strokes; it usually reaches you through a handful of recorded samples, and sounds like it. Here it is punched into a paper roll that plays FrankenSim's concert grand and drum kit, computed in this tab. Each note launches a felt hammer into real strings on one shared soundboard; each drum note lands a stick on a simulated head or cymbal. Pick a roll, or drop in a MIDI file of your own.</p>
+        </header>
+        <div id="player-root" class="live-root" style="min-height: 900px"></div>
       </div>
     </section>
   </main>

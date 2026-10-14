@@ -2,19 +2,26 @@
 // feeds one lane of fs-live-mix. Samples are microphone pressure [Pa] times a fixed gain.
 //
 // Main thread -> worker
-//   {type:'init', piece, port, gain?, aheadFrames?, scales?, minRealtime?, fieldHz?}   fieldHz 0: no fields
+//   {type:'init', piece, port, gain?, aheadFrames?, scales?, minRealtime?, fieldHz?, fieldFrames?, bursts?}
+//       fieldHz      fields per second of wall time (0: no fields)
+//       fieldFrames  instead: one field every this many AUDIO frames (even spacing however far
+//                    ahead the lane renders; for a score heard a second after it is computed)
+//       bursts       false: no slow-motion burst after each stroke (default true when fields are on)
 //       scales       grid coarsening factors to try, finest first (default [4, 5, 6, 7, 8])
 //       minRealtime  the finest scale that runs at least this much faster than real time wins (1.7)
 //   {type:'strike', x, y, speed, frame?}   x, y metres from the centre; speed m/s
 //   {type:'sequence', startFrame, loopFrames, events:[{offset, x, y, speed}]}
+//   {type:'score', events:[{frame, x, y, speed}]}   a fixed score, played once
+//   {type:'stopScore'}                      drop the rest of the score (ringing continues)
+//   {type:'resync', epoch}                  render for the clock as it is now (after a mix flush)
 //   {type:'stop'}                           end the sequence (ringing continues)
 //   {type:'gain', gain}
 // Worker -> main thread
 //   {type:'ready', info, xy:Float32Array, h, radius, scale, realtime}
 //   {type:'burst', frame, stepMs, count, v:Float32Array}    the first milliseconds after a stroke: `count`
 //                                                          surface velocities `stepMs` apart, back to back
-//   {type:'field', frame, v:Float32Array, kinetic, force}   ~fieldHz while the piece moves; force: the
-//                                                          largest stick force since the last field
+//   {type:'field', frame, epoch, v:Float32Array, kinetic, force}   ~fieldHz while the piece moves; force:
+//                                                          the largest stick force since the last field
 //   {type:'stats', realtime, renderedFrames, skippedFrames, lateEvents, asleep}
 //   {type:'error', message}
 import init, { KitPiece } from './engine.js';
@@ -24,6 +31,9 @@ let piece = null;
 let lane = null;
 let gain = 0.03;
 let fieldEvery = 1000 / 30;
+let fieldFrames = 0; // > 0: fields paced by audio frames instead of wall time
+let fieldDue = 0;
+let bursts = true;
 let lastField = 0;
 let lastStats = 0;
 let forceMax = 0;
@@ -62,11 +72,17 @@ self.onmessage = async (event) => {
       await init({ module_or_path: new URL('./engine_bg.wasm', import.meta.url) });
       gain = Number.isFinite(m.gain) ? m.gain : gain;
       if (Number.isFinite(m.fieldHz)) fieldEvery = m.fieldHz > 0 ? 1000 / m.fieldHz : Infinity;
+      if (Number(m.fieldFrames) > 0) { fieldFrames = Math.max(128, Math.round(Number(m.fieldFrames))); fieldEvery = Infinity; }
+      if (m.bursts === false) bursts = false;
       const pick = choose(m.piece, m.scales || [4, 5, 6, 7, 8], m.minRealtime || 1.7);
       piece = new KitPiece(m.piece, pick.scale);
       const engine = {
         idle: () => piece.asleep(),
-        apply: (e) => { piece.strike(e.x, e.y, e.speed); if (fieldEvery !== Infinity) burst = { frames: [], since: 0, frame: lane ? lane.frame : 0 }; },
+        apply: (e) => {
+          piece.strike(e.x, e.y, e.speed);
+          if (bursts && (fieldEvery !== Infinity || fieldFrames > 0)) burst = { frames: [], since: 0, frame: lane ? lane.frame : 0 };
+          if (fieldFrames > 0) fieldDue = 0; // show the stroke's first moment
+        },
         render: (n) => {
           let out;
           if (burst) {
@@ -94,10 +110,17 @@ self.onmessage = async (event) => {
           } else out = piece.render(n, gain);
           forceMax = Math.max(forceMax, piece.force());
           const now = performance.now();
-          if (!piece.asleep() && now - lastField >= fieldEvery) {
+          let fieldNow = false;
+          if (fieldFrames > 0) {
+            fieldDue -= n;
+            if (fieldDue <= 0) { fieldDue += fieldFrames; if (fieldDue <= 0) fieldDue = fieldFrames; fieldNow = !piece.asleep(); }
+          } else if (!piece.asleep() && now - lastField >= fieldEvery) {
             lastField = now;
+            fieldNow = true;
+          }
+          if (fieldNow) {
             const v = piece.velocity();
-            post({ type: 'field', frame: lane ? lane.frame + n : 0, v, kinetic: piece.kinetic(), force: forceMax }, [v.buffer]);
+            post({ type: 'field', frame: lane ? lane.frame + n : 0, epoch: lane ? lane.epoch : 0, v, kinetic: piece.kinetic(), force: forceMax }, [v.buffer]);
             forceMax = 0;
           }
           if (now - lastStats >= 500 && lane) {
@@ -117,6 +140,12 @@ self.onmessage = async (event) => {
       lane.event({ frame: Number.isFinite(m.frame) ? m.frame : undefined, x: m.x, y: m.y, speed: m.speed });
     } else if (m.type === 'sequence') {
       lane.sequence(m.startFrame, m.loopFrames, m.events);
+    } else if (m.type === 'score') {
+      lane.score(Array.isArray(m.events) ? m.events : []);
+    } else if (m.type === 'stopScore') {
+      lane.stopScore();
+    } else if (m.type === 'resync') {
+      lane.resync(m.epoch);
     } else if (m.type === 'stop') {
       lane.stopSequence();
     } else if (m.type === 'gain') {

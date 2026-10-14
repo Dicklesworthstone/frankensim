@@ -3,16 +3,26 @@
 // frames, so the piano can play in time with live drum pieces computed in other Workers.
 //
 // Main thread -> worker
-//   {type:'init', port, options?, aheadFrames?, gain?}
+//   {type:'init', port, options?, aheadFrames?, gain?, minRealtime?, snapshotHz?}
 //       gain     one fixed factor on every sample (level matching against another rendering; default 1)
 //       options  {boardCoordinates?, courseModeBudget?, maxDynamicModes?, fullScalePa?}  (0 = engine default)
 //                without boardCoordinates the worker measures itself: the default, then 24, then 16
 //       minRealtime  the speed the measurement asks for (default 1.5)
+//       snapshotHz   display snapshots per second of AUDIO (default 0: none). With it, 'ready' also
+//                    carries the board geometry and the key geometry.
 //   {type:'note', midi, speed, frame?} | {type:'off', midi, frame?} | {type:'sustain', value, frame?}
 //   {type:'sequence', startFrame, loopFrames, events:[{offset, on?, off?, speed?}]}
+//   {type:'score', events:[{frame, on?, off?, speed?, sustain?}]}   a fixed score, played once
+//   {type:'stopScore'}   drop the rest of the score and release every key and the pedal
+//   {type:'resync', epoch}   render for the clock as it is now (after the mix flushed this lane)
 //   {type:'stop'}   end the sequence and release every key
 // Worker -> main thread
-//   {type:'ready', info, boardCoordinates, realtime} | {type:'stats', realtime, renderedFrames, skippedFrames, lateEvents, voices} | {type:'error', message}
+//   {type:'ready', info, boardCoordinates, realtime, board?:{xy, shapes, modeHz}, keyGeometry?}
+//   {type:'stats', realtime, renderedFrames, skippedFrames, lateEvents, voices, peakPa,
+//    dynamicModes, noteOns, refusedNoteOns, forcedRetirements}
+//   {type:'snapshot', frame, epoch, data}   engine.snapshot() for the state at context frame `frame`
+//                                    (layout: parseSnapshot in client.js); `epoch` as on the audio
+//   {type:'error', message}
 import init, { PianoEngine } from './engine.js';
 import { createLane } from '../lane.js';
 
@@ -20,7 +30,9 @@ let engine = null;
 let lane = null;
 let lastStats = 0;
 let gain = 1;
-const post = (m) => self.postMessage(m);
+let snapEvery = 0;   // audio frames between snapshots (0: none)
+let snapDue = 0;
+const post = (m, t) => self.postMessage(m, t ?? []);
 
 self.onmessage = async (event) => {
   const m = event.data || {};
@@ -29,6 +41,7 @@ self.onmessage = async (event) => {
       await init({ module_or_path: new URL('./engine_bg.wasm', import.meta.url) });
       const o = m.options || {};
       gain = Number.isFinite(m.gain) ? m.gain : 1;
+      snapEvery = Number(m.snapshotHz) > 0 ? Math.max(256, Math.round(48000 / Math.min(120, Number(m.snapshotHz)))) : 0;
       const make = (coords) => new PianoEngine(48000, coords, Number(o.courseModeBudget) || 0, Number(o.maxDynamicModes) || 0, Number(o.fullScalePa) || 0);
       // a five-note stab with its bass: keep the most soundboard coordinates this device can
       // compute at least `minRealtime` times faster than real time
@@ -57,19 +70,37 @@ self.onmessage = async (event) => {
         render: (n) => {
           const out = engine.render(n);
           if (gain !== 1) for (let i = 0; i < out.length; i++) out[i] *= gain;
+          if (snapEvery > 0 && lane) {
+            snapDue -= n;
+            if (snapDue <= 0) {
+              snapDue += snapEvery;
+              if (snapDue <= 0) snapDue = snapEvery;
+              const data = engine.snapshot();
+              post({ type: 'snapshot', frame: lane.frame + n, epoch: lane.epoch, data }, [data.buffer]);
+            }
+          }
           const now = performance.now();
           if (now - lastStats >= 500 && lane) {
             lastStats = now;
             const s = lane.stats;
             const st = engine.stats();
-            post({ type: 'stats', realtime: s.wallMs > 0 ? s.audioMs / s.wallMs : 0, renderedFrames: s.renderedFrames, skippedFrames: s.skippedFrames, lateEvents: s.lateEvents, voices: st[1], peakPa: st[4] });
+            post({ type: 'stats', realtime: s.wallMs > 0 ? s.audioMs / s.wallMs : 0, renderedFrames: s.renderedFrames, skippedFrames: s.skippedFrames, lateEvents: s.lateEvents, voices: st[1], peakPa: st[4], dynamicModes: st[2], noteOns: st[10], refusedNoteOns: st[11], forcedRetirements: st[6] });
           }
           return out;
         },
       };
       lane = createLane(m.port, adapter, { aheadFrames: m.aheadFrames || 2048 });
       const info = JSON.parse(engine.info());
-      post({ type: 'ready', info, boardCoordinates: info.boardCoordinates, realtime });
+      if (snapEvery > 0) {
+        const xy = engine.boardSurfaceXY();
+        const shapes = engine.boardSurfaceShapes();
+        const modeHz = engine.boardModeHz();
+        const keyGeometry = engine.keyGeometry();
+        post({ type: 'ready', info, boardCoordinates: info.boardCoordinates, realtime, board: { xy, shapes, modeHz }, keyGeometry },
+          [xy.buffer, shapes.buffer, modeHz.buffer, keyGeometry.buffer]);
+      } else {
+        post({ type: 'ready', info, boardCoordinates: info.boardCoordinates, realtime });
+      }
     } else if (!engine || !lane) {
       return;
     } else if (m.type === 'note') {
@@ -80,6 +111,13 @@ self.onmessage = async (event) => {
       lane.event({ frame: Number.isFinite(m.frame) ? m.frame : undefined, sustain: m.value });
     } else if (m.type === 'sequence') {
       lane.sequence(m.startFrame, m.loopFrames, m.events);
+    } else if (m.type === 'score') {
+      lane.score(Array.isArray(m.events) ? m.events : []);
+    } else if (m.type === 'stopScore') {
+      lane.stopScore();
+      lane.event({ allOff: true });
+    } else if (m.type === 'resync') {
+      lane.resync(m.epoch);
     } else if (m.type === 'stop') {
       lane.stopSequence();
       lane.event({ allOff: true });

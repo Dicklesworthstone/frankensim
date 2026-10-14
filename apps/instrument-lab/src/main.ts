@@ -385,6 +385,14 @@ function initStrandbar(): void {
   }), "800px");
 }
 
+function initPlayer(): void {
+  const root = $("#player-root");
+  if (root) onVisible(root, () => void import("./player/player").then((m) => m.mountPlayer(root)).catch(() => {
+    root.style.minHeight = "0";
+    root.textContent = "The player could not be loaded. Reload the page to try again.";
+  }), "900px");
+}
+
 function initVerisim(): void {
   const root = $("#verisim-root");
   if (root) onVisible(root, () => void import("./verisim").then((m) => m.mountVerisim(root)).catch(() => {
@@ -398,6 +406,7 @@ void initHero();
 initVerisim();
 initStrandbar();
 initKit();
+initPlayer();
 void initGroups();
 void initCharts();
 initViewers();

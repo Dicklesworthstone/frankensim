@@ -9,7 +9,12 @@
 // Protocol
 //   main -> node.port   {type:'lane', id, port}   adopt a producer MessagePort as lane `id`
 //   main -> node.port   {type:'drop', id}         forget a lane
-//   lane -> mix         {type:'audio', frame, channels:[Float32Array, ...]}
+//   main -> node.port   {type:'flush', id?, from?, epoch?}  discard queued audio of lane `id`
+//                       (every lane when omitted) at context frames >= `from` (default: now).
+//                       With `epoch`, only audio stamped with an older epoch is discarded, and
+//                       older audio still in flight is refused when it arrives. Used to stop a
+//                       fixed score that the lanes rendered far ahead; nothing is faded here.
+//   lane -> mix         {type:'audio', frame, channels:[Float32Array, ...], epoch?}
 //                       `frame` = context frame of the first sample (transfer the buffers).
 //                       1 channel is copied to every output channel; N channels map 1:1.
 //   mix  -> lane        {type:'clock', frame, sampleRate}   every 2 render quanta:
@@ -38,6 +43,23 @@ class FsLiveMix extends AudioWorkletProcessor {
         lane.port.onmessage = null;
         this.lanes.delete(message.id);
       }
+    } else if (message.type === 'flush') {
+      const from = Number.isFinite(message.from) ? Math.round(message.from) : currentFrame;
+      const epoch = Number.isFinite(message.epoch) ? message.epoch : undefined;
+      for (const [id, lane] of this.lanes) {
+        if (message.id !== undefined && message.id !== id) continue;
+        const kept = [];
+        for (const c of lane.queue) {
+          if (c.frame + c.len <= from || (epoch !== undefined && c.epoch >= epoch)) kept.push(c);
+          else if (c.frame < from) {
+            const len = from - c.frame;
+            kept.push({ frame: c.frame, len, epoch: c.epoch, channels: c.channels.map((x) => x.subarray(0, len)) });
+          }
+        }
+        lane.queue = kept;
+        lane.streaming = false;
+        if (epoch !== undefined) lane.epoch = epoch;
+      }
     }
   }
 
@@ -46,6 +68,8 @@ class FsLiveMix extends AudioWorkletProcessor {
     const len = message.channels[0].length;
     const frame = Math.round(message.frame);
     if (!len || !Number.isFinite(frame)) return;
+    const epoch = Number.isFinite(message.epoch) ? message.epoch : 0;
+    if (lane.epoch !== undefined && epoch < lane.epoch) return; // rendered before a flush: stale
     if (frame + len <= currentFrame) {
       lane.lateFrames += len;
       return;
@@ -54,7 +78,7 @@ class FsLiveMix extends AudioWorkletProcessor {
     // producers send in order; keep the queue sorted even if one does not
     let i = q.length;
     while (i > 0 && q[i - 1].frame > frame) i--;
-    q.splice(i, 0, { frame, channels: message.channels, len });
+    q.splice(i, 0, { frame, channels: message.channels, len, epoch });
   }
 
   process(_inputs, outputs) {
