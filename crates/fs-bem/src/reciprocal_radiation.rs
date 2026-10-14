@@ -33,6 +33,8 @@ mod geometry;
 use geometry::*;
 mod field;
 pub use field::Solution;
+mod ports;
+pub use ports::VelocityPortSolution;
 mod receivers;
 pub use receivers::{ReceiverGeometry,PreparedReceivers};
 
