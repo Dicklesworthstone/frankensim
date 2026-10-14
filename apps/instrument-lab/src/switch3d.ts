@@ -38,7 +38,7 @@ export class Switch3D {
     host.append(cv);
     const pm = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pm.fromScene(new RoomEnvironment(), 0.035).texture;
-    this.scene.environmentIntensity = 0.62;
+    this.scene.environmentIntensity = 0.48;
     pm.dispose();
     this.build();
     this.camera.position.set(2.4, -6.6, 19.5);
@@ -100,7 +100,7 @@ export class Switch3D {
     // the panel: brushed aluminium with engraved legends
     const W = 5.6, H = 8.2, T = 0.5;
     const brushed = brushedTexture();
-    const plateMat = new THREE.MeshPhysicalMaterial({ color: 0x8e949c, metalness: 1, roughness: 0.5, roughnessMap: brushed, clearcoat: 0.25, clearcoatRoughness: 0.6 });
+    const plateMat = new THREE.MeshPhysicalMaterial({ color: 0x7f858d, metalness: 1, roughness: 0.52, roughnessMap: brushed, clearcoat: 0.25, clearcoatRoughness: 0.6 });
     const plate = new THREE.Mesh(new RoundedBoxGeometry(W, H, T, 6, 0.38), plateMat);
     plate.receiveShadow = true;
     s.add(plate);
