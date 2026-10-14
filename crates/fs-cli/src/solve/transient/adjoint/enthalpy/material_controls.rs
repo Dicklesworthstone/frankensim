@@ -1,8 +1,9 @@
 //! Regional conductivity and named contact controls of the accepted trajectory.
 //!
-//! Conductivity bars arrive from the checked enthalpy owner with dt already
-//! included. Matching-contact bars use dt times the SAME full joule-residual
-//! multiplier. Neither path resolves a primal or another transpose.
+//! Enthalpy conductivity bars already include dt; its contact dual converts
+//! from joules to watts once. Capacity storage supplies watt-coordinate bars
+//! directly. Both use the SAME complete dual and original material/contact
+//! owners. Neither path resolves a primal or another transpose.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -59,7 +60,7 @@ pub(in crate::solve::transient) fn storage_bytes(
 
 /// Immutable material/contact bindings and controls held throughout the
 /// selected prefix. Sharing a card never merges distinct declared coordinates.
-pub(super) struct Controls<'m> {
+pub(in crate::solve::transient::adjoint) struct Controls<'m> {
     mesh: &'m ConductionMesh,
     fallback: &'m ConductivityModel,
     materials: Option<&'m ElementMaterials>,
@@ -72,7 +73,7 @@ pub(super) struct Controls<'m> {
 
 impl<'m> Controls<'m> {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    pub(super) fn new(
+    pub(in crate::solve::transient::adjoint) fn new(
         cx: &Cx<'_>,
         spec: &ProjectSpec,
         problem: ConductionProblem<'m>,
@@ -203,6 +204,56 @@ impl<'m> Controls<'m> {
         dt_s: f64,
         deadline: Option<(Instant, f64)>,
     ) -> Result<(), SolveRefusal> {
+        self.add_scaled(
+            cx, problem, interfaces, temperature, element_conductivity,
+            full_joule_multiplier, dt_s, deadline,
+        )
+    }
+
+    /// Capacity storage already exposes dJ/d(nodal load in W). Contract the
+    /// production K(T) at the unchanged endpoint, including anisotropy and
+    /// prescribed-temperature lifts. K'(T) is in the complete state tangent,
+    /// not another factor in this fixed-state material partial.
+    ///
+    /// The caller must first gate the complete transpose, including all air,
+    /// natural and radiative feedback. No new primal or transpose is solved.
+    /// A scale of one below is the identity change of residual coordinates,
+    /// NOT a one-second physical timestep. Neither control receives another dt.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::solve::transient::adjoint) fn add_capacity(
+        &mut self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        temperature: &[f64],
+        nodal_load_adjoint: &[f64],
+        deadline: Option<(Instant, f64)>,
+    ) -> Result<(), SolveRefusal> {
+        poll(cx, deadline)?;
+        let conductivity = fs_conduction::adjoint::RobinResponse::conductivity_scale_pullback(
+            cx, problem, temperature, nodal_load_adjoint, self.mesh.element_count(),
+        ).map_err(lower)?;
+        self.add_scaled(
+            cx, problem, interfaces, temperature, &conductivity,
+            nodal_load_adjoint, 1.0, deadline,
+        )
+    }
+
+    /// Element bars are already objective derivatives. Only the contact dual
+    /// changes residual coordinates: dt for joules, identity for watts.
+    /// Both storage formulations retain the same owner checks and aggregation.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn add_scaled(
+        &mut self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        temperature: &[f64],
+        element_conductivity: &[f64],
+        full_residual_multiplier: &[f64],
+        load_scale: f64,
+        deadline: Option<(Instant, f64)>,
+    ) -> Result<(), SolveRefusal> {
         poll(cx, deadline)?;
         let same_materials = match (self.materials, problem.element_materials) {
             (Some(original), Some(current)) => std::ptr::eq(original, current),
@@ -218,16 +269,16 @@ impl<'m> Controls<'m> {
         if !std::ptr::eq(self.mesh, problem.mesh)
             || !std::ptr::eq(self.fallback, problem.material)
             || !same_materials || !same_interfaces
-            || temperature.len() != n || full_joule_multiplier.len() != n
+            || temperature.len() != n || full_residual_multiplier.len() != n
             || element_conductivity.len() != self.mesh.element_count()
             || (!self.conductivity.is_empty()
                 && self.element_regions.len() != element_conductivity.len())
-            || !(dt_s.is_finite() && dt_s > 0.0)
+            || !(load_scale.is_finite() && load_scale > 0.0)
         {
             return Err(bad("enthalpy material controls lost their accepted physical owner or layout"));
         }
         for (vertex, (&temperature, &lambda)) in temperature.iter()
-            .zip(full_joule_multiplier).enumerate()
+            .zip(full_residual_multiplier).enumerate()
         {
             if vertex % 256 == 0 { poll(cx, deadline)?; }
             if !temperature.is_finite() || temperature <= 0.0 || !lambda.is_finite() {
@@ -247,10 +298,10 @@ impl<'m> Controls<'m> {
         if let Some(interfaces) = interfaces {
             let mut load_dual = zeros(n)?;
             for (vertex, (weight, &lambda)) in load_dual.iter_mut()
-                .zip(full_joule_multiplier).enumerate()
+                .zip(full_residual_multiplier).enumerate()
             {
                 if vertex % 256 == 0 { poll(cx, deadline)?; }
-                *weight = finite(dt_s * lambda)?;
+                *weight = finite(load_scale * lambda)?;
             }
             let gradients = interfaces.matching_resistance_scale_pullback(
                 cx, temperature, &load_dual, self.mesh.boundary().len(),
@@ -292,7 +343,7 @@ impl<'m> Controls<'m> {
         poll(cx, deadline)
     }
 
-    pub(super) fn fragment(&self, expected_steps: usize) -> Result<String, SolveRefusal> {
+    pub(in crate::solve::transient::adjoint) fn fragment(&self, expected_steps: usize) -> Result<String, SolveRefusal> {
         if self.steps != expected_steps {
             return Err(bad("enthalpy material controls do not cover the selected reverse prefix"));
         }

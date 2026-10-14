@@ -27,7 +27,7 @@ use super::super::{SolveRefusal, Workload, airflow, bad, buoyancy, json_string,
     lower, number, poll, radiation};
 
 mod convection;
-mod material_controls;
+pub(super) mod material_controls;
 pub(in crate::solve::transient) use material_controls::storage_bytes as material_control_storage_bytes;
 pub(in crate::solve::transient) use convection::storage_bytes as convection_storage_bytes;
 pub(in crate::solve::transient) use convection::control_storage_bytes;
