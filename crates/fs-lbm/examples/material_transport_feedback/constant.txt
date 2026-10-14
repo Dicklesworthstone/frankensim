@@ -1,0 +1,6 @@
+# Explicitly synthetic, not calibrated measurements.
+# Fixed density [kg/m3] and specific heat [J/(kg K)]
+1000 1000
+# Temperature [K], conductivity [W/(m K)], dynamic viscosity [Pa s]
+290 1000 1
+400 1000 1

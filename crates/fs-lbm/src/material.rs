@@ -12,7 +12,7 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
 mod forcing;
-pub use forcing::electrothermal;
+pub use forcing::{electrothermal, transport};
 mod runtime_rebind;
 mod three_dimensional;
 pub use three_dimensional::{MaterialSlab3, MaterialThermalSlab3};

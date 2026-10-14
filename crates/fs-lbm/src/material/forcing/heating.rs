@@ -1,5 +1,7 @@
 //! SI heat and momentum use the SAME retained material evaluation and units.
 
+pub mod transport;
+
 use super::{MaterialSlab, ThermalLbm, ThermalLbm3};
 use crate::thermal::sources::{
     HeatBalance, HeatSourceLimits, ThermalSourceBalance, ThermalSourceError,
