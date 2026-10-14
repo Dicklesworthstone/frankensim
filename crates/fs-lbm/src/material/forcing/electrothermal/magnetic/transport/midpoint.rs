@@ -4,6 +4,8 @@
 //! trial starts at the accepted populations, with all three properties evaluated
 //! together at the proposed midpoint. No additional field solver is introduced.
 
+pub mod interfaces;
+
 use super::*;
 use super::super::midpoint::{
     self as driver, MagneticMidpointError, MagneticMidpointOptions, MagneticMidpointStep,

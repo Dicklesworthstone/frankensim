@@ -16,6 +16,9 @@ use fs_exec::CancelGate;
 use fs_material::section::thermal::{ConcentricAxialResponse, ConcentricThermoelasticSection};
 use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
 
+/// Temperature-only refresh of all section properties from pinned material cards.
+pub mod source;
+
 #[derive(Clone, Debug)]
 pub(super) struct ThermalField {
     sections: Vec<ConcentricThermoelasticSection>,
