@@ -164,3 +164,97 @@ fn next_step_uses_evolved_kelvin_and_the_retained_material_snapshot() {
     }).unwrap();
     assert_eq!(calls, 8); // Four bulk rows, two cells each; no wall/electrode calls.
 }
+
+use fs_lbm::material::electrothermal::midpoint::{MidpointError, MidpointOptions};
+fn midpoint_options() -> MidpointOptions { MidpointOptions {
+    max_iterations: 32, temperature_tolerance_k: 1e-9, source_tolerance_j: 1e-8, relaxation: 1.0,
+} }
+
+#[test]
+fn constant_law_midpoint_is_the_original_step_not_repeated_time_advancement() {
+    let setup = electrodes(2, 20.0);
+    let mut a = slab3(1000.0); let mut b = slab3(1000.0);
+    let force = [[1.0, 0.0, 0.0];16]; let gate = CancelGate::new();
+    let direct = a.step_electrothermal(input(&setup), &force, &gate, |_,_,_| Ok(Some(1.0))).unwrap();
+    let coupled = b.step_electrothermal_midpoint(input(&setup), &force, midpoint_options(), &gate,
+        |_,_,_| Ok(Some(1.0))).unwrap();
+    assert_eq!(coupled.step.heat, direct.heat);
+    assert_eq!(b.lattice.grid.f, a.lattice.grid.f);
+    assert_eq!(b.lattice.gpop, a.lattice.gpop);
+    assert!(coupled.iterations <= 2);
+    assert!(coupled.electrical_solves <= 3);
+    assert_eq!(coupled.joule_residual_j, 0.0);
+}
+
+#[test]
+fn current_driven_temperature_feedback_closes_at_actual_midpoint() {
+    let mut setup = electrodes(2, 0.0);
+    setup.electrodes[0].drive = ElectrodeDrive::Current(2.0);
+    let mut slab = slab3(1000.0); let mut explicit = slab3(1000.0);
+    let old: Vec<_> = slab.lattice.gpop.iter().map(|p| slab.temperature_si(p.iter().sum()).unwrap()).collect();
+    let force = [[0.0;3];16]; let gate = CancelGate::new();
+    let law = |_: usize, t: f64, _: &FluidTransportState| Ok(Some(1.0+0.02*(t-300.0)));
+    let lagged = explicit.step_electrothermal(input(&setup), &force, &gate, law).unwrap();
+    let report = slab.step_electrothermal_midpoint(input(&setup), &force, midpoint_options(), &gate, law).unwrap();
+    assert!(report.step.joule_energy_j > lagged.joule_energy_j);
+    assert!(report.iterations > 1);
+    let exact_midpoint: Vec<_> = old.iter().zip(&slab.lattice.gpop).map(|(a,p)| {
+        0.5*a+0.5*slab.temperature_si(p.iter().sum()).unwrap()
+    }).collect();
+    for (a,b) in exact_midpoint.iter().zip(&report.evaluation_temperature_k) {
+        close(*a,*b,midpoint_options().temperature_tolerance_k);
+    }
+    let domain = fs_lbm::conjugate::VoxelDomain::new(2,1,8,DX).unwrap();
+    let verified = setup.solve_with_cell_resistivity(&domain, &exact_midpoint, |cell,_,t| {
+        if !(2..14).contains(&cell) { Ok(None) } else { Ok(Some(1.0+0.02*(t-300.0))) }
+    }, &gate).unwrap();
+    let discrepancy: f64 = verified.joule_w.iter().zip(&report.step.electric.joule_w).map(|(a,b)| (a-b).abs()*DT).sum();
+    close(discrepancy,report.joule_residual_j,1e-12);
+    assert!(discrepancy <= midpoint_options().source_tolerance_j);
+}
+
+#[test]
+fn midpoint_budget_and_mid_iteration_cancellation_do_not_publish_trials() {
+    let setup = electrodes(2, 20.0);
+    let mut slab = slab3(1000.0); let force = [[0.0;3];16];
+    let old_f = slab.lattice.grid.f.clone(); let old_g = slab.lattice.gpop.clone();
+    let too_short = MidpointOptions { max_iterations: 1, ..midpoint_options() };
+    let result = slab.step_electrothermal_midpoint(input(&setup), &force, too_short, &CancelGate::new(), |_,_,_| Ok(Some(1.0)));
+    assert!(matches!(result, Err(MidpointError::NonConvergence { iterations: 1, .. })));
+    assert_eq!(slab.lattice.grid.f, old_f); assert_eq!(slab.lattice.gpop, old_g);
+    // A loose temperature criterion must not bypass the independent source recheck.
+    let loose_temperature = MidpointOptions { max_iterations: 1, temperature_tolerance_k: 1e3,
+        source_tolerance_j: 0.0, ..midpoint_options() };
+    let result = slab.step_electrothermal_midpoint(input(&setup), &force, loose_temperature,
+        &CancelGate::new(), |_,t,_| Ok(Some(1.0+0.02*(t-300.0))));
+    assert!(matches!(result, Err(MidpointError::NonConvergence {
+        joule_residual_j: Some(discrepancy), ..
+    }) if discrepancy > 0.0));
+    assert_eq!(slab.lattice.grid.f, old_f); assert_eq!(slab.lattice.gpop, old_g);
+    let gate = CancelGate::new(); let mut calls = 0;
+    let result = slab.step_electrothermal_midpoint(input(&setup), &force, midpoint_options(), &gate, |_,_,_| {
+        calls += 1; if calls == 9 { gate.request(); } Ok(Some(1.0))
+    });
+    assert!(matches!(result, Err(MidpointError::Step(ElectricHeatError::Cancelled))));
+    assert_eq!(slab.lattice.grid.f, old_f); assert_eq!(slab.lattice.gpop, old_g);
+    let invalid = MidpointOptions { relaxation: 0.0, ..midpoint_options() };
+    assert!(matches!(slab.step_electrothermal_midpoint(input(&setup), &force, invalid, &CancelGate::new(), |_,_,_| {
+        panic!("invalid controls must refuse before querying material")
+    }), Err(MidpointError::InvalidOptions)));
+}
+
+#[test]
+fn two_dimensional_midpoint_drive_switch_off_keeps_thermal_history() {
+    let on = electrodes(1, 20.0); let off = electrodes(1, 0.0);
+    let mut slab = slab2(); let initial = slab.lattice.gpop.clone(); let gate = CancelGate::new();
+    let force = [[0.0;2];16];
+    for _ in 0..5 {
+        slab.step_electrothermal_midpoint(input(&on), &force, DX, midpoint_options(), &gate,
+            |_,t,_| Ok(Some(1.0+0.01*(t-300.0)))).unwrap();
+    }
+    let result = slab.step_electrothermal_midpoint(input(&off), &force, DX, midpoint_options(), &gate,
+        |_,t,_| Ok(Some(1.0+0.01*(t-300.0)))).unwrap();
+    close(result.step.heat.source_j, 0.0, 0.0);
+    assert_ne!(slab.lattice.gpop, initial);
+    assert!(result.step.combined_defect_j.abs() < 1e-9);
+}

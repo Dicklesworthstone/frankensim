@@ -8,6 +8,8 @@
 //! This is ohmic sensible heating, not electrochemistry, motional EMF, magnetic
 //! force, phase change, compressible work or a total-energy model.
 
+pub mod midpoint;
+
 use fs_exec::CancelGate;
 use fs_material::fluid_transport::FluidTransportState;
 
@@ -147,6 +149,7 @@ struct JouleSource {
     electrical_defect_j: f64,
 }
 
+#[allow(clippy::too_many_arguments)] // geometry, field and constitutive law are independent inputs
 fn solve_source(
     domain: &VoxelDomain, plane: usize, temperature: &[f64],
     transport: &FluidTransportState, dt: f64, input: ElectricHeatInput<'_>,
@@ -215,6 +218,7 @@ fn candidate<S: Slab<D, Q>, const D: usize, const Q: usize>(slab: &MaterialSlab<
     }
 }
 
+#[allow(clippy::too_many_arguments)] // shared 2D/3D orchestration without duplicating solvers
 fn advance<S: Slab<D, Q>, const D: usize, const Q: usize>(
     slab: &mut MaterialSlab<S>, domain: VoxelDomain, plane: usize,
     input: ElectricHeatInput<'_>, forces: &[[f64; D]], gate: &CancelGate,
