@@ -7,6 +7,7 @@
 //! caloric chart, while retaining the same frozen hydraulic and convection data.
 
 pub mod enthalpy;
+pub mod hydraulic;
 
 use fs_convection::{
     CorrelationId, CorrelationRobinBoundary, HeatTransferCoefficient,
