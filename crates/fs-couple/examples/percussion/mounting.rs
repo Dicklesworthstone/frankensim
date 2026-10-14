@@ -9,6 +9,8 @@ use fs_plate::shell::{survey::MeshShell, reduction::ShellReduction};
 use fs_plate::shell::reduction::radiation::ShellFace;
 use std::io::{Read, Write};
 
+mod rocking;
+
 const MAX_BYTES:u64=65_536;
 #[derive(Clone, Copy, Debug)]
 struct Backing { z_m:f64, thickness_m:f64, prior_strain:f64 }
@@ -17,6 +19,7 @@ struct Site { xy_m:[f64;2], area_m2:f64 }
 #[derive(Clone, Debug)]
 pub struct Spec {
     carrier:Carrier,
+    rocking:Option<rocking::Support>,
     upper:Backing,
     lower:Backing,
     law:WoolFelt,
@@ -36,7 +39,7 @@ impl Spec {
             return Err("expected frankensim-felt-mount-v1".into());
         }
         let (mut carrier,mut upper,mut lower,mut law)=(None,None,None,None);
-        let mut creep=Vec::new();let mut sites=Vec::new();
+        let mut creep=Vec::new();let mut sites=Vec::new();let mut rocking=None;
         for (line,row) in rows {
             let fields:Vec<_>=row.split(',').map(str::trim).collect();
             let bad=||format!("invalid felt-mount record at line {line}");
@@ -48,6 +51,10 @@ impl Spec {
                 ("carrier",6) if carrier.is_none()=>carrier=Some(Carrier {
                     mass_kg:value(1)?,stiffness_n_m:value(2)?,resistance_n_s_m:value(3)?,
                     initial_position_m:value(4)?,initial_velocity_m_s:value(5)?,
+                }),
+                ("rocking",9) if rocking.is_none()=>rocking=Some(rocking::Support {
+                    centre_xy_m:[value(1)?,value(2)?],inertia_kg_m2:[value(3)?,value(4)?],
+                    stiffness_nm_rad:[value(5)?,value(6)?],resistance_nm_s_rad:[value(7)?,value(8)?],
                 }),
                 ("upper",4) if upper.is_none()=>upper=Some(Backing {
                     z_m:value(1)?,thickness_m:value(2)?,prior_strain:value(3)?,
@@ -68,7 +75,7 @@ impl Spec {
             carrier:carrier.ok_or("felt mount needs explicit carrier mass, spring, resistance and initial motion")?,
             upper:upper.ok_or("felt mount needs an upper backing plane, thickness and conditioning")?,
             lower:lower.ok_or("felt mount needs a lower backing plane, thickness and conditioning")?,
-            law:law.ok_or("felt mount needs an explicit material law")?,creep,sites,
+            law:law.ok_or("felt mount needs an explicit material law")?,creep,sites,rocking,
         };
         if result.upper.z_m<=result.lower.z_m || result.sites.is_empty()
             || result.sites.iter().any(|s|s.area_m2<=0.0) {
@@ -89,7 +96,7 @@ impl Spec {
                     compression_per_carrier_m:-sign});
             }
         }
-        MountedFelt::new(1,result.carrier,&sites)?;
+        result.assemble(1,&sites)?;
         Ok(result)
     }
     pub fn load(path:&str)->Result<Self,Error> {
@@ -111,6 +118,16 @@ impl Spec {
             creep:self.creep.iter().map(|b|KelvinBranch {
                 stiffness_n_m:b.stiffness_n_m*fraction,viscosity_n_s_m:b.viscosity_n_s_m*fraction,
             }).collect()})
+    }
+    fn assemble(&self,structural:usize,sites:&[MountSite])->Result<MountedFelt,Error> {
+        let base=MountedFelt::new(structural,self.carrier,sites)?;
+        match self.rocking {
+            None=>Ok(base),
+            Some(support)=>{
+                let positions:Vec<_>=self.sites.iter().flat_map(|s|[s.xy_m,s.xy_m]).collect();
+                support.assemble(structural,base,sites,&positions)
+            },
+        }
     }
     /// Append the carrier after the ENTIRE original structural layout. The shell
     /// keeps its existing prefix and all other bodies are zero in the felt rows.
@@ -158,18 +175,24 @@ impl Spec {
                     compression_per_carrier_m:-sign});
             }
         }
-        let mount=MountedFelt::new(structural_modes,self.carrier,&sites)?;
+        let mount=self.assemble(structural_modes,&sites)?;
         eprintln!("felt mount: carrier_coordinate={}, mass_kg={}, ground_K_N_m={}, ground_R_Ns_m={}, loaded_area_per_face_m2={area}, sites_per_face={}; actual finite-thickness skin gaps; input is not measured/calibrated authority; no gravity equilibrium or full stand flexure",
             mount.port.coordinate,self.carrier.mass_kg,self.carrier.stiffness_n_m,
             self.carrier.resistance_n_s_m,self.sites.len());
         eprintln!("felt mount zero-coordinate precompressions_m={:?}",mount.pads.iter().map(|p|p.precompression_m).collect::<Vec<_>>());
+        if let Some(support)=self.rocking {
+            eprintln!("mount rocking: centre_xy_m={:?}, principal_inertia_kg_m2={:?}; two linearized rotations, reference-aligned launch, actual point levers; not finite rotations or a complete flexible stand",support.centre_xy_m,support.inertia_kg_m2);
+        }
         Ok(mount)
     }
     /// The host appends the carrier last, BEFORE private Kelvin/material memory
     /// and later acoustic states. Capture this port before exterior preparation.
-    pub fn port(&self,structural_modes:usize)->Result<CarrierPort,Error> {
-        Ok(CarrierPort {coordinate:structural_modes.checked_sub(1).ok_or("missing mount coordinate")?,
-            inverse_sqrt_mass:1.0/self.carrier.mass_kg.sqrt()})
+    pub fn port(&self,structural_modes:usize)->Result<rocking::Port,Error> {
+        let count=if self.rocking.is_some(){3}else{1};
+        Ok(rocking::Port {translation:CarrierPort {
+            coordinate:structural_modes.checked_sub(count).ok_or("missing mount coordinates")?,
+            inverse_sqrt_mass:1.0/self.carrier.mass_kg.sqrt()},
+            inverse_sqrt_inertia:self.rocking.map(|s|s.inertia_kg_m2.map(|i|1.0/i.sqrt()))})
     }
 }
 
@@ -209,8 +232,14 @@ pub fn admit_command(selected:bool,command:&str)->Result<(),Error> {
 pub fn header(out:&mut impl Write)->Result<(),Error> {
     write!(out,",mount_position_m,mount_velocity_m_s")?;Ok(())
 }
-pub fn row(port:CarrierPort,state:&[f64],out:&mut impl Write)->Result<(),Error> {
-    let [x,v]=port.motion(state)?;write!(out,",{x:.17e},{v:.17e}")?;Ok(())
+pub fn row(port:rocking::Port,state:&[f64],out:&mut impl Write)->Result<(),Error> {
+    let [x,v]=port.motion(state)?;
+    let angular=port.angular_motion(state)?;
+    write!(out,",{x:.17e},{v:.17e}")?;
+    if let Some(axes)=angular {
+        for [angle,rate] in axes {write!(out,",{angle:.17e},{rate:.17e}")?;}
+    }
+    Ok(())
 }
 
 #[cfg(test)]

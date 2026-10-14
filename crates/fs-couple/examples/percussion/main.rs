@@ -229,7 +229,7 @@ fn splash_with_mount(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option
     // Append the ONE shared carrier after every original rigid/elastic body.
     // Existing contact, drive, observer and BEM source coordinates never move.
     bodies.append(&mut shaft.elastic);
-    let total=n+usize::from(mount_body.is_some());
+    let total=n+mount_body.as_ref().map_or(0,|body|body.initial.len());
     if let Some(body)=mount_body {
         contacts=contacts.iter().map(|contact|mounting::extend_contact(contact,n,total)).collect::<Result<_,_>>()?;
         bodies.push(body);
@@ -702,7 +702,7 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     if let Some(mute)=&experiment.mute {mute.header(&mut out)?;}
     shaft_playing::header(&experiment,&mut out)?;
     if rocking.is_some() {rocking::header(&mut out,"cymbal")?;}
-    if mount_port.is_some() {mounting::header(&mut out)?;}
+    if let Some(port)=mount_port {port.header(&mut out)?;}
     writeln!(out)?;
     for _ in 0..steps {
         let f=experiment.system.step(&experiment.force,&gate)?;let x=experiment.system.state();
