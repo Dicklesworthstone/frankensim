@@ -221,6 +221,9 @@ pub struct Body {
     /// Constant external force per node (snare-wire preload).
     pub bias: Vec<f64>,
     tmp: Vec<f64>,
+    /// L w at the current step, and L w at the previous one (reused: one Laplacian product per step).
+    lw: Vec<f64>,
+    lwp: Vec<f64>,
     g: Vec<f64>,
     psi: f64,
     psi_next: f64,
@@ -451,7 +454,7 @@ impl Body {
         }
         Ok(Body {
             name: name.into(), h, n, xy, grid_index, mass, s0: s0v, s1, lap, stiff, tension: s.tension, berger, vk,
-            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false,
+            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false,
             origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0,
         })
     }
@@ -471,7 +474,7 @@ impl Body {
             name: name.into(), h, n, xy, grid_index: BTreeMap::new(), mass: vec![mass_per_m * h; n],
             s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]),
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
-            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false,
+            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false,
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0,
         }
     }
@@ -482,7 +485,7 @@ impl Body {
             name: name.into(), h: 1.0, n: 1, xy: vec![[0.0, 0.0]], grid_index: BTreeMap::new(), mass: vec![mass],
             s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]),
             tension: 0.0, berger: 0.0, vk: None,
-            w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false,
+            w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false,
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0,
         }
     }
@@ -516,9 +519,14 @@ impl Body {
 
     /// Linear elastic forces and the constant bias into `f` (overwrites).
     fn linear_forces(&mut self) {
-        self.f.copy_from_slice(&self.bias);
-        if self.tension != 0.0 {
-            self.lap.mul_add(&self.w, -self.tension, &mut self.f);
+        // the one Laplacian product of the step: tension, Berger stretch and loss all reuse it
+        for x in self.lw.iter_mut() {
+            *x = 0.0;
+        }
+        self.lap.mul_add(&self.w, 1.0, &mut self.lw);
+        let t = self.tension;
+        for ((f, b), l) in self.f.iter_mut().zip(&self.bias).zip(&self.lw) {
+            *f = b - t * l;
         }
         self.stiff.mul_add(&self.w, -1.0, &mut self.f);
     }
@@ -531,9 +539,12 @@ impl Body {
         let mut v = 0.0;
         if self.berger > 0.0 {
             // V = berger/4 (w' L w)^2, grad = berger (w' L w) L w
-            let sq = self.lap.quad(&self.w);
+            let sq: f64 = self.w.iter().zip(&self.lw).map(|(a, b)| a * b).sum();
             v += 0.25 * self.berger * sq * sq;
-            self.lap.mul_add(&self.w, self.berger * sq, &mut self.g);
+            let c = self.berger * sq;
+            for (g, l) in self.g.iter_mut().zip(&self.lw) {
+                *g += c * l;
+            }
         }
         if let Some(vk) = self.vk.as_mut() {
             let h2 = self.h * self.h;
@@ -580,11 +591,11 @@ impl Body {
     fn predict(&mut self, k: f64) {
         let n = self.n;
         if self.s1 > 0.0 {
+            // Lap_h (w - wp) = -(L w - L wp) / h^2 from the two stored products
+            let ih2 = 1.0 / (self.h * self.h);
             for i in 0..n {
-                self.wn[i] = self.w[i] - self.wp[i];
-                self.tmp[i] = 0.0;
+                self.tmp[i] = -(self.lw[i] - self.lwp[i]) * ih2;
             }
-            self.lap.mul_add(&self.wn, -1.0 / (self.h * self.h), &mut self.tmp);
         }
         let nl = self.berger > 0.0 || self.vk.is_some();
         let mut scale = 0.0;
@@ -674,7 +685,16 @@ impl Body {
     fn rotate(&mut self) {
         std::mem::swap(&mut self.wp, &mut self.w);
         std::mem::swap(&mut self.w, &mut self.wn);
+        std::mem::swap(&mut self.lwp, &mut self.lw); // L wp of the next step is this step's L w
         self.psi = self.psi_next;
+    }
+
+    /// After setting w or wp directly (initial conditions), refresh the stored L wp.
+    pub fn sync(&mut self) {
+        for x in self.lwp.iter_mut() {
+            *x = 0.0;
+        }
+        self.lap.mul_add(&self.wp, 1.0, &mut self.lwp);
     }
 
     /// Largest eigenvalue of M^-1 K for the LINEAR stiffness (power iteration on the symmetric
@@ -955,7 +975,7 @@ impl Instrument {
                     dmax = dmax.max(di + 2);
                 }
             }
-            m.ring = vec![0.0; dmax + 2];
+            m.ring = vec![0.0; (dmax + 2).next_power_of_two()];
         }
         self.prepared = true;
     }
@@ -1067,29 +1087,39 @@ impl Instrument {
                 comp += w * w * self.bodies[b].compliance(i, k);
             }
             let Law::Power { k: kk, alpha, mu } = c.law;
-            let phi = |d: f64| -> f64 {
+            let d_now = c.d_now;
+            // phi(d) and its derivative: K d^a (1 + mu (d - d_now)/k), clipped at zero force
+            let phi = |d: f64| -> (f64, f64) {
                 if d <= 0.0 {
-                    return 0.0;
+                    return (0.0, 0.0);
                 }
-                let rate = (d - c.d_now) / k;
-                (kk * d.powf(alpha) * (1.0 + mu * rate)).max(0.0)
+                let pa1 = d.powf(alpha - 1.0);
+                let pa = pa1 * d;
+                let damp = 1.0 + mu * (d - d_now) / k;
+                let v = kk * pa * damp;
+                if v <= 0.0 { (0.0, 0.0) } else { (v, kk * (alpha * pa1 * damp + pa * mu / k)) }
             };
             let mut f = 0.0;
             if d_pred > 0.0 {
-                // g(f) = f - phi(d_pred - comp f) is increasing; root in [0, d_pred / comp]
+                // g(f) = f - phi(d_pred - comp f) is increasing with a root in [0, d_pred / comp]:
+                // safeguarded Newton (a bisection step whenever Newton leaves the bracket)
                 let (mut lo, mut hi) = (0.0, d_pred / comp);
-                for _ in 0..80 {
-                    let mid = 0.5 * (lo + hi);
-                    if mid - phi(d_pred - comp * mid) > 0.0 {
-                        hi = mid;
-                    } else {
-                        lo = mid;
+                let mut x = 0.5 * hi;
+                for _ in 0..60 {
+                    let (v, dv) = phi(d_pred - comp * x);
+                    let g = x - v;
+                    if g > 0.0 { hi = x; } else { lo = x; }
+                    let mut next = x - g / (1.0 + comp * dv);
+                    if !(next > lo && next < hi) {
+                        next = 0.5 * (lo + hi);
                     }
-                    if hi - lo <= 1e-12 * hi.max(1e-30) {
+                    let done = (next - x).abs() <= 1e-13 * next.abs().max(1e-30) || hi - lo <= 1e-13 * hi.max(1e-30);
+                    x = next;
+                    if done {
                         break;
                     }
                 }
-                f = 0.5 * (lo + hi);
+                f = x;
             }
             if f > 0.0 {
                 for &(b, i, w) in &c.a {
@@ -1110,20 +1140,20 @@ impl Instrument {
         }
         // microphones: centred acceleration at this step
         for (mi, m) in self.mics.iter_mut().enumerate() {
-            let len = m.ring.len();
+            let mask = m.ring.len() - 1;
             let base = self.step_index as usize;
             for &(bi, i, di, lo, hi) in &m.taps {
                 let b = &self.bodies[bi];
                 let a = b.wn[i] - 2.0 * b.w[i] + b.wp[i];
-                m.ring[(base + di) % len] += lo * a;
-                m.ring[(base + di + 1) % len] += hi * a;
+                m.ring[(base + di) & mask] += lo * a;
+                m.ring[(base + di + 1) & mask] += hi * a;
             }
             for &(ci, di, lo, hi) in &m.ptaps {
                 let a = self.cavities[ci].port.as_ref().map_or(0.0, |q| q.du);
-                m.ring[(base + di) % len] += lo * a;
-                m.ring[(base + di + 1) % len] += hi * a;
+                m.ring[(base + di) & mask] += lo * a;
+                m.ring[(base + di + 1) & mask] += hi * a;
             }
-            let slot = base % len;
+            let slot = base & mask;
             let mut y = m.ring[slot];
             if let Some(a) = m.unbaffled {
                 // bilinear first-order high-pass, H(s) = s tau / (1 + s tau)

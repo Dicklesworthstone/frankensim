@@ -1,0 +1,11 @@
+/music/*.wasm
+  Content-Type: application/wasm
+  Cache-Control: public, max-age=3600
+/music/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+/music/audio/*
+  Cache-Control: public, max-age=3600
+/music/img/*
+  Cache-Control: public, max-age=3600
+/music/data/*
+  Cache-Control: public, max-age=3600

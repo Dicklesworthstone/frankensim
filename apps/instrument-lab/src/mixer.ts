@@ -1,5 +1,5 @@
 import { claimPlayback, getContext, registerPlayer, resumeContext } from "./audio";
-import { dpr, el, fmt, hidpi } from "./util";
+import { dpr, el, fmt, hidpi, asset } from "./util";
 
 interface MixerMeta {
   sample_rate: number;
@@ -68,8 +68,8 @@ export class SoundboardMixer {
   private load(): Promise<void> {
     this.loading ??= (async () => {
       const [meta, bytes] = await Promise.all([
-        fetch("/data/soundboard-modes.json").then((r) => r.json() as Promise<MixerMeta>),
-        fetch("/data/soundboard-modes.i16").then((r) => r.arrayBuffer()),
+        fetch(asset("data/soundboard-modes.json")).then((r) => r.json() as Promise<MixerMeta>),
+        fetch(asset("data/soundboard-modes.i16")).then((r) => r.arrayBuffer()),
       ]);
       this.meta = meta;
       const pcm = new Int16Array(bytes);

@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { dpr, fmt, reducedMotion } from "./util";
+import { dpr, fmt, reducedMotion, asset } from "./util";
 
 interface Blob { offset: number; length: number; dtype: string }
 interface Body {
@@ -98,8 +98,8 @@ export class ModalViewer {
     if (!this.ensureRenderer()) return;
     this.pause();
     const [header, buf] = await Promise.all([
-      fetch(`/viz/${name}.json`).then((r) => r.json() as Promise<VizHeader>),
-      fetch(`/viz/${name}.bin`).then((r) => r.arrayBuffer()),
+      fetch(asset(`viz/${name}.json`)).then((r) => r.json() as Promise<VizHeader>),
+      fetch(asset(`viz/${name}.bin`)).then((r) => r.arrayBuffer()),
     ]);
     if (token !== this.loadToken) return;
     for (const m of this.meshes) {

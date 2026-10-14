@@ -1,0 +1,18 @@
+// Static Struck under frankensim.org/music, served by an assets-only Worker.
+// Build first:  VITE_SITE_URL=https://frankensim.org/music/ npx vite build --base /music/ --outDir dist-cf/music --emptyOutDir
+// then:         npx wrangler deploy --config cloudflare/wrangler.jsonc
+// The route needs frankensim.org proxied through Cloudflare (orange cloud); everything outside
+// /music keeps going to the existing origin.
+{
+  "name": "frankensim-music",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "../dist-cf",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none"
+  },
+  "routes": [
+    { "pattern": "frankensim.org/music", "zone_name": "frankensim.org" },
+    { "pattern": "frankensim.org/music/*", "zone_name": "frankensim.org" }
+  ]
+}

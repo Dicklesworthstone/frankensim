@@ -10,12 +10,12 @@
   <meta property="og:title" content="Struck — instruments from first principles" />
   <meta property="og:description" content="A drum kit and a concert grand computed from geometry, materials and contact, and graded against real recordings." />
   <meta property="og:type" content="website" />
-  <meta property="og:url" content="https://frankensim-struck.vercel.app/" />
-  <meta property="og:image" content="https://frankensim-struck.vercel.app/og.png" />
+  <meta property="og:url" content="%VITE_SITE_URL%" />
+  <meta property="og:image" content="%VITE_SITE_URL%og.png" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:image" content="https://frankensim-struck.vercel.app/og.png" />
+  <meta name="twitter:image" content="%VITE_SITE_URL%og.png" />
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
@@ -109,10 +109,6 @@
           <p class="lede">Kick, snare, toms, hi-hat, crash and ride are one object here: a thin plate on a fine grid. A drum head is a film under tension, clamped at its rim; a cymbal is a bronze shell with a free edge that bends, stretches and trades energy between its vibrations (von Kármán coupling), which is what turns a strike into a wash. Stick, beater, snare wires and hi-hat rims meet the surfaces through contact laws; the air inside a drum couples its two heads. The sizes copy a real kit recorded with overhead microphones, and each piece is played next to its recording below.</p>
         </header>
         <div id="kit-root" class="live-root" style="min-height: 520px"></div>
-        <details class="panel subsection" style="margin-top: 22px">
-          <summary><b>Why the previous drum and cymbal sounded like bells</b></summary>
-          <p class="muted small" style="margin-top: 10px">Until today this page played FrankenSim's modal percussion: each drum head kept only its modes between 80 and 500 Hz, about nine for the whole drum, ringing with a damping ratio of 0.001 (a five-second tail), and the splash kept 30 modes below 1.2 kHz. A handful of slowly decaying tones is, physically, a bell. That framework cannot keep more: it caps a head at 63 modes and audio at 1.64 kHz, and a cymbal shell at 32 modes. The kit above needs no list of modes: an 18-inch crash is 4,564 grid points carrying the whole audible band, and its nonlinearity moves energy upward the way a real crash does.</p>
-        </details>
       </div>
     </section>
 

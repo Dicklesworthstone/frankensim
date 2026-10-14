@@ -26,3 +26,8 @@ debug = false
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[profile.release-perf]
+inherits = "release"
+debug = "line-tables-only"
+strip = false

@@ -1,5 +1,5 @@
 import { GroupPlayer } from "./audio";
-import { el, fmt } from "./util";
+import { el, fmt, asset } from "./util";
 
 interface Pair {
   id: string;
@@ -34,7 +34,7 @@ function bandLabel(f: number): string {
 export async function mountKit(root: HTMLElement): Promise<void> {
   let data: KitData;
   try {
-    const res = await fetch("/data/kit.json");
+    const res = await fetch(asset("data/kit.json"));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     data = (await res.json()) as KitData;
   } catch (e) {
@@ -79,7 +79,7 @@ export async function mountKit(root: HTMLElement): Promise<void> {
   };
   const makePlayer = (): void => {
     player?.pause();
-    player = new GroupPlayer({ real: "/" + current.audio.real, ours: "/" + current.audio.ours }, "ours");
+    player = new GroupPlayer({ real: asset(current.audio.real), ours: asset(current.audio.ours) }, "ours");
     player.onState = label;
   };
   const play = (id: "real" | "ours"): void => {
@@ -94,7 +94,7 @@ export async function mountKit(root: HTMLElement): Promise<void> {
 
   const render = (): void => {
     for (const [k, b] of Object.entries(viewBtns)) b.setAttribute("aria-pressed", String(k === view));
-    img.src = "/" + current.images[view];
+    img.src = asset(current.images[view]);
     img.alt = `${view === "diff" ? "Difference" : view === "real" ? "Real kit" : "FrankenSim"} spectrogram of the ${current.title.toLowerCase()}, 40 Hz to 16 kHz on a log axis`;
     legend.textContent = view === "diff"
       ? `FrankenSim minus the recording, in dB after matching early loudness: orange = FrankenSim louder, blue = quieter (±${current.images.diff_range_db} dB).`
@@ -154,7 +154,7 @@ export async function mountKit(root: HTMLElement): Promise<void> {
 
   const groove = data.groove;
   const grooveBox = groove ? (() => {
-    const gp = new GroupPlayer({ real: "/" + groove.real, ours: "/" + groove.ours }, "ours");
+    const gp = new GroupPlayer({ real: asset(groove.real), ours: asset(groove.ours) }, "ours");
     const gOurs = el("button", { class: "btn primary", type: "button" });
     const gReal = el("button", { class: "btn", type: "button" });
     const gl = (): void => {

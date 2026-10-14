@@ -1,5 +1,5 @@
 import { GroupPlayer } from "./audio";
-import { dpr, el, fmt, hidpi, sciNode } from "./util";
+import { dpr, el, fmt, hidpi, sciNode, asset } from "./util";
 
 interface Descriptor { real?: number | number[] | null; ours?: number | number[] | null; note?: string; rms_gap_db?: number | null; n?: number[]; bands_hz?: number[]; partials_used?: number[] }
 interface Pair {
@@ -170,7 +170,7 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
   void mountDiagnosis();
   let data: Verisim;
   try {
-    const res = await fetch("/data/verisim.json");
+    const res = await fetch(asset("data/verisim.json"));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     data = (await res.json()) as Verisim;
     // The retired modal splash is no longer on the page: drums and cymbals are graded in the kit section.
@@ -217,7 +217,7 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
   let player: GroupPlayer | null = null;
   const makePlayer = (): void => {
     player?.pause();
-    player = new GroupPlayer({ real: "/" + current.audio.real, ours: "/" + current.audio.ours }, "real");
+    player = new GroupPlayer({ real: asset(current.audio.real), ours: asset(current.audio.ours) }, "real");
     player.onState = () => labelButtons();
   };
   const which = (slot: 0 | 1): "real" | "ours" => (blind ? blindOrder[slot]! : slot === 0 ? "real" : "ours");
@@ -272,7 +272,7 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
     subtitle.textContent = sub.charAt(0).toUpperCase() + sub.slice(1);
     viewBtns["real"]!.disabled = blind;
     viewBtns["ours"]!.disabled = blind;
-    img.src = "/" + current.images[view];
+    img.src = asset(current.images[view]);
     img.alt = `${view === "diff" ? "Difference" : view === "real" ? "Real recording" : "FrankenSim"} spectrogram, ${current.title}, 40 Hz to 16 kHz on a log axis`;
     legend.textContent = view === "diff"
       ? `Difference in dB, FrankenSim minus the recording, after matching early loudness: orange = FrankenSim louder, blue = FrankenSim quieter (±${current.images.diff_range_db} dB). Near-black = within a few dB of each other, or both below the shared floor.`
@@ -313,7 +313,7 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
   const pianoRuler = el("canvas", { "aria-label": "Partial-envelope gaps: FrankenSim versus the real piano, and the real piano versus itself across dynamics" });
   const gap = (id: string): number => (pairs.find((p) => p.id === id)?.descriptors["partial_envelope_db"]?.rms_gap_db ?? NaN) as number;
 
-  const kit = await fetch("/data/kit.json").then((r) => (r.ok ? (r.json() as Promise<KitSummary>) : null)).catch(() => null);
+  const kit = await fetch(asset("data/kit.json")).then((r) => (r.ok ? (r.json() as Promise<KitSummary>) : null)).catch(() => null);
   root.append(
     verdicts(data, kit),
     el("div", { class: "panel" },
@@ -355,7 +355,7 @@ async function mountDiagnosis(): Promise<void> {
   if (!root) return;
   let rows: DiagRow[];
   try {
-    const res = await fetch("/data/diagnosis.json");
+    const res = await fetch(asset("data/diagnosis.json"));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     rows = ((await res.json()) as { rows: DiagRow[] }).rows;
   } catch (e) {

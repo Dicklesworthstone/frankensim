@@ -15,7 +15,7 @@
 export const LIVE_SAMPLE_RATE = 48_000;
 
 /** Absolute URL prefix of the static live files (served from `public/live`). */
-export const LIVE_BASE_URL = '/live';
+export const LIVE_BASE_URL = `${import.meta.env.BASE_URL}live`;
 
 /** A typed refusal from an engine: `code` is stable and machine-readable. */
 export class LiveRefusal extends Error {

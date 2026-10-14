@@ -10,22 +10,22 @@ import { LineChart, type Series } from "./chart";
 import { BoardView, buildKeyboard, type PianoModel } from "./board3d";
 import { ModalViewer } from "./modal3d";
 import { SoundboardMixer } from "./mixer";
-import { dpr, el, fmt, fmtSci, hidpi, json, noteName, onVisible, sciNode } from "./util";
+import { dpr, el, fmt, fmtSci, hidpi, json, noteName, onVisible, sciNode, asset } from "./util";
 
 type SeriesData = Record<string, Record<string, number[] | number>>;
 
 const $ = <T extends Element = HTMLElement>(sel: string, root: ParentNode = document): T | null => root.querySelector<T>(sel);
 const $$ = <T extends Element = HTMLElement>(sel: string, root: ParentNode = document): T[] => [...root.querySelectorAll<T>(sel)];
 
-const manifestP = json<Manifest & { performances?: Record<string, [number, string, number, number][]> }>("/data/manifest.json");
+const manifestP = json<Manifest & { performances?: Record<string, [number, string, number, number][]> }>(asset("data/manifest.json"));
 let seriesCache: Promise<SeriesData> | null = null;
-const seriesP = (): Promise<SeriesData> => (seriesCache ??= json<SeriesData>("/data/series.json"));
+const seriesP = (): Promise<SeriesData> => (seriesCache ??= json<SeriesData>(asset("data/series.json")));
 const idle = (cb: () => void): void => {
   const ric = (window as unknown as { requestIdleCallback?: (f: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
   if (ric) ric(cb, { timeout: 1500 });
   else setTimeout(cb, 300);
 };
-const pianoP = json<PianoModel>("/data/piano-model.json");
+const pianoP = json<PianoModel>(asset("data/piano-model.json"));
 
 // ------------------------------------------------------------------- navigation
 function initNav(): void {
@@ -64,7 +64,7 @@ async function initHero(): Promise<void> {
   );
   $("#hero-render-note")!.textContent = `rendered in ${fmt((ev.wall_s ?? 0) / 60, 2)} min for ${clip.duration_s.toFixed(1)} s of sound (${fmt(ev.wall_audio_ratio ?? 0)}× slower than real time)`;
 
-  const player = new GroupPlayer({ hero: "/" + clip.audio }, "hero");
+  const player = new GroupPlayer({ hero: asset(clip.audio) }, "hero");
   const btn = $<HTMLButtonElement>("#hero-play")!;
   const label = btn.querySelector("span")!;
   player.onState = (s) => {

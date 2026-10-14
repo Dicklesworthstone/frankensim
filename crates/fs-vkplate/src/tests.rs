@@ -33,6 +33,7 @@ fn membrane_fundamental_matches_bessel_zero() {
         b.w[i] = v;
         b.wp[i] = v;
     }
+    b.sync();
     let mut ins = Instrument::new(96_000.0);
     let c = ins.add(b);
     let centre = ins.bodies[c].node_at(0.0, 0.0).unwrap();
@@ -65,6 +66,7 @@ fn free_plate_lowest_elastic_mode_matches_disc_theory() {
         b.wp[i] = v;
     }
     let probe = b.node_at(0.15, 0.0).unwrap();
+    b.sync();
     let mut ins = Instrument::new(96_000.0);
     let c = ins.add(b);
     let (ratio, _) = ins.stability();
