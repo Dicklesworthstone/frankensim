@@ -1,9 +1,11 @@
 //! Imposed magnetic fields couple live velocity, electric current, heat and force.
 //!
-//! This is an explicit, lagged-source step on the existing fixed-grid Boussinesq
-//! solvers. It is NOT an induction solver or a total-energy time integrator.
+//! The original entry point is explicit; [`midpoint`] additionally closes
+//! velocity/temperature source feedback on the same fixed-grid Boussinesq solvers. It is NOT an induction solver or a total-energy time integrator.
 //! The instantaneous electrical/Joule/Lorentz work identity is checked, while
 //! the actual kinetic-energy update remains the existing flow owner's result.
+
+pub mod midpoint;
 
 use super::{
     ChtError, ElectricHeatError, ElectricHeatInput, FluidTransportState,
@@ -69,6 +71,92 @@ fn velocities<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
     Ok(velocity)
 }
 
+// Both explicit and midpoint coupling use this exact source and energy owner.
+struct MagneticSource {
+    motion: MovingConductorSolution,
+    power: Vec<f64>,
+    electrode_energy_j: f64,
+    joule_energy_j: f64,
+    mechanical_work_j: f64,
+}
+
+fn admit_field<const D: usize>(field_t: &[[f64; 3]], cells: usize) -> Result<(), ElectricHeatError> {
+    if field_t.len() != cells || !field_t.iter().flatten().all(|b| b.is_finite()) {
+        return Err(invalid("one finite magnetic flux-density vector per cell is required"));
+    }
+    // A 2-D flow does not evolve out-of-plane momentum or current. Refuse the
+    // general vector instead of silently discarding its EMF/force components.
+    if D == 2 && field_t.iter().any(|b| b[0] != 0.0 || b[1] != 0.0) {
+        return Err(invalid("2D magnetic flow requires an out-of-plane magnetic field"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn source_at(
+    domain: &VoxelDomain, plane: usize, input: ElectricHeatInput<'_>,
+    field_t: &[[f64; 3]], temperature: &[f64], velocity: &[[f64; 3]],
+    transport: &FluidTransportState, dt: f64, gate: &CancelGate,
+    resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<Option<f64>, ChtError>,
+) -> Result<MagneticSource, ElectricHeatError> {
+    poll(gate)?;
+    let cells = domain.cell_count();
+    let tolerance_w = input.limits.coupling_tolerance_j / dt;
+    if !tolerance_w.is_finite() || (input.limits.coupling_tolerance_j > 0.0 && tolerance_w == 0.0) {
+        return Err(invalid("magnetic power tolerance is unrepresentable"));
+    }
+    let motion = input.setup.solve_with_cell_motion(
+        domain, temperature, input.contacts,
+        ElectricMotionInput { velocity_m_s: velocity, magnetic_flux_density_t: field_t,
+            max_cells: input.limits.thermal.max_cells, power_tolerance_w: tolerance_w },
+        |cell, _, t| {
+            if cell < plane || cell >= cells-plane { Ok(None) }
+            else { resolve(cell, t, transport) }
+        }, gate,
+    )?;
+    let (power, joule_energy_j) = deposited_power(domain, plane, &motion.electric.joule_w, dt, gate)?;
+    let electrode_energy_j: f64 = motion.electric.electrodes.iter()
+        .map(|e| (e.voltage_v * e.current_a) * dt).sum();
+    let mechanical_work_j = motion.mechanical_power_w * dt;
+    let electrical_defect = electrode_energy_j - joule_energy_j - mechanical_work_j;
+    let tol = input.limits.coupling_tolerance_j;
+    if ![electrode_energy_j, joule_energy_j, mechanical_work_j, electrical_defect]
+        .iter().all(|v| v.is_finite()) || electrical_defect.abs() > tol
+        || (motion.electric.total_joule_w * dt - joule_energy_j).abs() > tol
+        || (motion.electric.delivered_w * dt - electrode_energy_j).abs() > tol
+    { return Err(invalid("magnetic electrical/heat/mechanical source energy does not close")); }
+    Ok(MagneticSource { motion, power, electrode_energy_j, joule_energy_j, mechanical_work_j })
+}
+
+fn combined_forces<const D: usize>(
+    external: &[[f64; D]], motion: &MovingConductorSolution, gate: &CancelGate,
+) -> Result<Vec<[f64; D]>, ElectricHeatError> {
+    let mut forces = external.to_vec();
+    for (cell, target) in forces.iter_mut().enumerate() {
+        if cell % 256 == 0 { poll(gate)?; }
+        for a in 0..D {
+            target[a] += motion.lorentz_force_density_n_m3[cell][a];
+            if !target[a].is_finite() { return Err(invalid("combined magnetic/external force overflows")); }
+        }
+    }
+    Ok(forces)
+}
+
+fn balance(source: MagneticSource, heat: HeatBalance, input: ElectricHeatInput<'_>) -> Result<MagneticHeatStep, ElectricHeatError> {
+    let MagneticSource { motion, electrode_energy_j, joule_energy_j,
+        mechanical_work_j: lagged_mechanical_work_j, .. } = source;
+    let tol = input.limits.coupling_tolerance_j;
+    let transfer_defect_j = heat.source_j - joule_energy_j;
+    let coupling_defect_j = heat.stored_change_j - heat.bottom_wall_j - heat.top_wall_j
+        + lagged_mechanical_work_j - electrode_energy_j;
+    if !transfer_defect_j.is_finite() || transfer_defect_j.abs() > tol
+        || !coupling_defect_j.is_finite()
+        || coupling_defect_j.abs() > input.limits.thermal.balance_tolerance_j + 2.0 * tol
+    { return Err(invalid("magnetic heat transfer or coupling accounting failed")); }
+    Ok(MagneticHeatStep { motion, heat, electrode_energy_j, joule_energy_j,
+        lagged_mechanical_work_j, transfer_defect_j, coupling_defect_j })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn advance<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
     slab: &mut MaterialSlab<S>, domain: VoxelDomain, plane: usize,
@@ -79,66 +167,20 @@ fn advance<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
 ) -> Result<MagneticHeatStep, ElectricHeatError> {
     poll(gate)?;
     let cells = domain.cell_count();
-    if field_t.len() != cells || !field_t.iter().flatten().all(|b| b.is_finite()) {
-        return Err(invalid("one finite magnetic flux-density vector per cell is required"));
-    }
-    // A 2-D flow does not evolve out-of-plane momentum or current. Refuse the
-    // general vector instead of silently discarding its EMF/force components.
-    if D == 2 && field_t.iter().any(|b| b[0] != 0.0 || b[1] != 0.0) {
-        return Err(invalid("2D magnetic flow requires an out-of-plane magnetic field"));
-    }
+    admit_field::<D>(field_t, cells)?;
     let temperature = temperatures::<S, D, Q>(slab, input.limits.thermal, gate)?;
     let velocity = velocities::<S, D, Q>(slab, cells, plane, gate)?;
-    let dt = slab.force_units.timestep_s;
-    let tolerance_w = input.limits.coupling_tolerance_j / dt;
-    if !tolerance_w.is_finite() || (input.limits.coupling_tolerance_j > 0.0 && tolerance_w == 0.0) {
-        return Err(invalid("magnetic power tolerance is unrepresentable"));
-    }
-    let motion = input.setup.solve_with_cell_motion(
-        &domain, &temperature, input.contacts,
-        ElectricMotionInput { velocity_m_s: &velocity, magnetic_flux_density_t: field_t,
-            max_cells: input.limits.thermal.max_cells, power_tolerance_w: tolerance_w },
-        |cell, _, t| {
-            if cell < plane || cell >= cells-plane { Ok(None) }
-            else { resolve(cell, t, &slab.force_units.transport) }
-        }, gate,
-    )?;
-    let (power, joule_energy_j) = deposited_power(&domain, plane, &motion.electric.joule_w, dt, gate)?;
-    let electrode_energy_j: f64 = motion.electric.electrodes.iter()
-        .map(|e| (e.voltage_v * e.current_a) * dt).sum();
-    let lagged_mechanical_work_j = motion.mechanical_power_w * dt;
-    let electrical_defect = electrode_energy_j - joule_energy_j - lagged_mechanical_work_j;
-    let tol = input.limits.coupling_tolerance_j;
-    if ![electrode_energy_j, joule_energy_j, lagged_mechanical_work_j, electrical_defect]
-        .iter().all(|v| v.is_finite()) || electrical_defect.abs() > tol
-        || (motion.electric.total_joule_w * dt - joule_energy_j).abs() > tol
-        || (motion.electric.delivered_w * dt - electrode_energy_j).abs() > tol
-    { return Err(invalid("magnetic electrical/heat/mechanical source energy does not close")); }
-    let mut forces = external.to_vec();
-    for (cell, target) in forces.iter_mut().enumerate() {
-        if cell % 256 == 0 { poll(gate)?; }
-        for a in 0..D {
-            target[a] += motion.lorentz_force_density_n_m3[cell][a];
-            if !target[a].is_finite() { return Err(invalid("combined magnetic/external force overflows")); }
-        }
-    }
+    let source = source_at(&domain, plane, input, field_t, &temperature, &velocity,
+        &slab.force_units.transport, slab.force_units.timestep_s, gate, &mut resolve)?;
+    let forces = combined_forces(external, &source.motion, gate)?;
     poll(gate)?;
     let mut next = candidate::<S, D, Q>(slab);
-    let heat = step(&mut next, &power, &forces, input.limits.thermal)?;
-    // Reject candidate velocity outside the necessary lattice regime before
-    // publication, not after advancing the caller's state.
+    let heat = step(&mut next, &source.power, &forces, input.limits.thermal)?;
     velocities::<S, D, Q>(&next, cells, plane, gate)?;
-    let transfer_defect_j = heat.source_j - joule_energy_j;
-    let coupling_defect_j = heat.stored_change_j - heat.bottom_wall_j - heat.top_wall_j
-        + lagged_mechanical_work_j - electrode_energy_j;
-    if !transfer_defect_j.is_finite() || transfer_defect_j.abs() > tol
-        || !coupling_defect_j.is_finite()
-        || coupling_defect_j.abs() > input.limits.thermal.balance_tolerance_j + 2.0 * tol
-    { return Err(invalid("magnetic heat transfer or coupling accounting failed")); }
+    let report = balance(source, heat, input)?;
     poll(gate)?;
     *slab = next;
-    Ok(MagneticHeatStep { motion, heat, electrode_energy_j, joule_energy_j,
-        lagged_mechanical_work_j, transfer_defect_j, coupling_defect_j })
+    Ok(report)
 }
 
 impl MaterialSlab<ThermalLbm> {
