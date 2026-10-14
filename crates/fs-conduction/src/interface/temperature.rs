@@ -6,6 +6,8 @@
 //! Frozen snapshots are NOT complete nonlinear-contact tangents or adjoints.
 
 pub mod capacity;
+/// Primary-enthalpy contact evolution, including latent phase states.
+pub mod enthalpy;
 
 use fs_exec::Cx;
 use fs_matdb::{InterfaceSystemCard, QueryPoint, SelectionPolicy};
