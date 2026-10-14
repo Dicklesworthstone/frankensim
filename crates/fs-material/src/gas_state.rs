@@ -34,6 +34,12 @@ impl GasState {
     /// Refuses nonphysical, out-of-envelope, inconsistent or unrepresentable
     /// states. No coefficients are silently repaired or replaced by air data.
     pub fn validate_coherence(&self) -> Result<(), MaterialError> {
+        self.coherent_transport().map(|_| ())
+    }
+
+    // Admission and coefficient derivation are one operation for flow/heat
+    // consumers. Do not recompute transport after validating a different view.
+    pub(crate) fn coherent_transport(&self) -> Result<FluidTransportState, MaterialError> {
         if ![
             self.temperature,
             self.pressure,
@@ -80,7 +86,7 @@ impl GasState {
                 what: "gas snapshot contains inconsistent EOS, caloric, transport or acoustic coefficients".into(),
             });
         }
-        Ok(())
+        Ok(transport)
     }
 }
 

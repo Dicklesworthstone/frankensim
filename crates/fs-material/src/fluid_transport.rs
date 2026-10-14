@@ -142,7 +142,9 @@ pub trait FluidTransport {
     /// Checked numerical snapshot at the input's evaluated state point.
     ///
     /// # Errors
-    /// Refuses missing or inadmissible transport coefficients.
+    /// Refuses missing or inadmissible transport coefficients. Gas inputs also
+    /// require the SAME coherent EOS, caloric and acoustic state; stale public
+    /// fields are not silently reinterpreted as an unrelated raw fluid tuple.
     fn transport_state(&self) -> Result<FluidTransportState, MaterialError>;
 }
 
@@ -152,12 +154,10 @@ impl FluidTransport for FluidTransportState {
 
 impl FluidTransport for GasState {
     fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
-        // Public GasState derived fields may have been independently mutated.
-        // All consumers recompute from the same four independent coefficients.
-        FluidTransportState::try_new(
-            self.density, self.specific_heat_cp,
-            self.thermal_conductivity, self.dynamic_viscosity,
-        )
+        // One admission and one coefficient derivation for flow, heat and
+        // acoustics. Raw transport-only tuples still have their explicit
+        // FluidTransportState constructor; a GasState must remain a gas state.
+        self.coherent_transport()
     }
 }
 
@@ -249,11 +249,15 @@ mod tests {
     }
 
     #[test]
-    fn stale_public_derived_fields_cannot_change_transport() {
+    fn incoherent_gas_is_not_silently_reinterpreted_as_raw_transport() {
         let mut gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 100000.0).unwrap();
         let expected = gas.transport_state().unwrap();
         gas.prandtl = 100.0;
-        assert_eq!(gas.transport_state().unwrap(), expected);
+        assert!(gas.transport_state().is_err());
+        // A caller declaring only a transport tuple may use that explicit type,
+        // but it has neither gas EOS semantics nor an acoustic-state claim.
+        assert_eq!(FluidTransportState::try_new(gas.density, gas.specific_heat_cp,
+            gas.thermal_conductivity, gas.dynamic_viscosity).unwrap(), expected);
     }
 
     #[test]
