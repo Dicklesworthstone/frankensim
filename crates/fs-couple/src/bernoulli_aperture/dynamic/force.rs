@@ -1,6 +1,10 @@
-//! Physical mechanical loads on the original plate, projected by virtual work.
-//! Positive force acts in positive plate displacement. A patch force is TOTAL N
-//! spread uniformly over its selected triangles, not a pressure or fitted gain.
+//! Physical mechanical loads on the retained plate, projected by virtual work.
+//! Positive force acts in each blade's opening-positive chart. A patch force is
+//! TOTAL N spread uniformly over its selected triangles, not a pressure or gain.
+//! For a symmetric opposed pair this is the TOTAL force across both blades,
+//! split equally between mirrored sites. Port velocity is each site's velocity;
+//! total force times that common velocity equals work on the gap coordinate.
+//! Unequal blade loads and antisymmetric excitation are not represented.
 use super::{AcousticRealizeError, invalid};
 use crate::bernoulli_aperture::plate::PlateApertureReduction;
 
@@ -15,7 +19,8 @@ pub enum PlateForceFootprint {
 
 /// The SAME signed coefficient maps force to the opening coordinate and maps
 /// opening velocity to physical actuator velocity: Q=B F, v_port=B v_opening.
-/// This is a fixed linear projection, not an additional dynamic/contact body.
+/// For an opposed pair F is the total equally split load and v_port is one
+/// mirrored site's outward velocity. This is not an additional dynamic body.
 #[derive(Clone, Debug)]
 pub struct PlateForcePort {
     footprint: PlateForceFootprint,
@@ -30,10 +35,12 @@ impl PlateForcePort {
     /// in this retained basis, not a missing-data error.
     #[must_use]
     pub const fn coefficient(&self) -> f64 { self.coefficient }
-    /// Actual patch area [m²], absent for an ideal point force.
+    /// Actual patch area on ONE representative blade [m²], absent for a point.
+    /// Equal pressure on an opposed pair supplies force over twice this area.
     #[must_use]
     pub const fn area_m2(&self) -> Option<f64> { self.area_m2 }
     /// Opening-coordinate force [N]. No pressure area or PCM scaling enters it.
+    /// An opposed-pair input is total N, equally split between the two blades.
     ///
     /// # Errors
     /// Nonfinite input or overflow in the projected force.
@@ -44,7 +51,8 @@ impl PlateForcePort {
         }
         Ok(value)
     }
-    /// Physical actuator velocity [m/s]; patch ports return the area mean.
+    /// Physical actuator velocity [m/s]; patch ports return the area mean on one
+    /// blade. Its mirrored partner has the same local opening-positive velocity.
     ///
     /// # Errors
     /// Nonfinite input or overflow in the projected velocity.
@@ -61,6 +69,8 @@ impl PlateApertureReduction {
     /// linear displacement trace as uniform-pressure work on the source plate.
     /// Supports, thickness/material changes and the actual mode shape therefore
     /// affect the actuator coupling; no effective lever arm is prescribed.
+    /// A symmetric pair interprets force as total N, equally split across both
+    /// blades; the same coefficient observes each blade's physical velocity.
     ///
     /// # Errors
     /// Missing node, empty/duplicate/absent triangles, or nonfinite projection.

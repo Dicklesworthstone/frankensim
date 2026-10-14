@@ -1,9 +1,11 @@
-//! Nodal lay clearance and spatial slit area on the retained plate shape.
+//! Nodal clearance and spatial slit area on the retained plate shape.
 //!
 //! Contact uses area-lumped triangle quadrature of the existing power-law
 //! potential. Slit flow integrates the positive part of the P1 gap EXACTLY
 //! along each declared boundary edge, including partially closed edges. The
 //! structural basis stays fixed; this is not a multimode or large-strain model.
+//! An opposed pair sums both blades' gap motion but has ONE contact interface:
+//! neither its contact quadrature areas nor its slit width are doubled.
 use super::{AcousticRealizeError, PlateApertureReduction, invalid};
 use fs_dcontact::Obstacle;
 use crate::unilateral_contact::distributed::MAX_APERTURE_CONTACT_POINTS;
@@ -11,10 +13,12 @@ use crate::unilateral_contact::distributed::MAX_APERTURE_CONTACT_POINTS;
 /// Complete explicit clearance/contact description on the original plate mesh.
 #[derive(Debug, Clone)]
 pub struct PlateClosureSpec {
-    /// Signed rest clearances at EVERY mesh node [m]. Negative means installed
-    /// interference, not an inferred correction. Used at the slit and the lay.
+    /// Signed TOTAL rest clearances at EVERY mesh node [m]. Negative means
+    /// installed interference. For a symmetric pair these are blade-to-blade
+    /// gaps, not each blade's distance from the symmetry plane.
     pub nodal_rest_gap_m: Vec<f64>,
-    /// Unique zero-based triangle indices covered by the compliant lay.
+    /// Unique zero-based triangles of the common compliant contact interface.
+    /// A stationary lay for one blade; blade-to-blade contact for an opposed pair.
     pub lay_triangles: Vec<usize>,
     /// Normal pressure coefficient [Pa / m^alpha]. Triangle areas become
     /// quadrature weights [m²]; no dimensionless weight normalization occurs.
@@ -23,9 +27,10 @@ pub struct PlateClosureSpec {
     pub alpha: f64,
     /// Explicit Hunt--Crossley coefficient [s/m], nonnegative.
     pub internal_loss_s_per_m: f64,
-    /// Original source or explicit authored-model label, never inferred.
+    /// Original source or explicit authored-model label for THIS contact pair.
+    /// A blade/lay law is not automatically a blade/blade law.
     pub provenance: String,
-    /// Maximum admitted local lay penetration [m], strictly positive.
+    /// Maximum admitted local contact penetration [m], strictly positive.
     pub max_penetration_m: f64,
 }
 
@@ -34,11 +39,11 @@ pub struct PlateClosureSpec {
 pub struct PlateClosureProbe {
     /// Sum of positive-gap edge areas [m²], used by the Bernoulli junction.
     pub open_area_m2: f64,
-    /// Lay quadrature nodes at positive penetration; not exact contact area.
+    /// Contact quadrature nodes at positive penetration; not exact contact area.
     pub active_lay_points: usize,
     /// Sum of active nodal area weights [m²]; quadrature estimate only.
     pub active_lay_area_m2: f64,
-    /// Maximum nodal lay penetration [m].
+    /// Maximum nodal contact penetration [m].
     pub max_penetration_m: f64,
 }
 
@@ -49,7 +54,7 @@ pub struct PlateClosureProbe {
 pub struct PlateClosure {
     spec: PlateClosureSpec,
     law: Obstacle,
-    // Coordinate y is the earlier reduction's mean-slit opening; a supplied
+    // Coordinate y is the reduction's mean TOTAL opening; a supplied
     // nonuniform rest profile may have a different physical mean clearance.
     rest_coordinate_m: f64,
     shape: Vec<f64>,
@@ -57,7 +62,7 @@ pub struct PlateClosure {
     nodes: Vec<usize>,
 }
 impl PlateApertureReduction {
-    /// Compile the supplied lay against this plate's actual triangles and mode.
+    /// Compile the supplied interface against the actual triangles and gap mode.
     /// This is a geometry adapter over fs-dcontact, not a new collision law.
     ///
     /// # Errors
@@ -87,10 +92,12 @@ impl PlateApertureReduction {
             || weights.iter().any(|w| !w.is_finite()) {
             return Err(invalid("plate lay exceeds its 4096-point contact budget or area overflowed"));
         }
-        let shape: Vec<_> = self.shape_per_opening().iter().map(|v| v[0]).collect();
+        let blades = self.moving_blade_count() as f64;
+        let shape: Vec<_> = self.shape_per_opening().iter().map(|v| blades * v[0]).collect();
         let h = self.options().rest_opening_m;
-        // Local gap = g_i + shape_i*(y-H). Obstacle penetration b_i*y-c_i
-        // therefore uses b_i=-shape_i and c_i=g_i-shape_i*H.
+        // Local TOTAL gap = g_i + shape_i*(y-H). Obstacle penetration b_i*y-c_i
+        // therefore uses b_i=-shape_i and c_i=g_i-shape_i*H. Each physical
+        // interface point contributes once, including for two moving blades.
         let rows = nodes.iter().map(|&i| -shape[i]).collect();
         let gaps = nodes.iter().map(|&i| spec.nodal_rest_gap_m[i]-shape[i]*h).collect();
         let areas = nodes.iter().map(|&i| weights[i]).collect();
@@ -163,7 +170,7 @@ impl PlateClosure {
     /// Enforce the supplied penetration budget on an initial/candidate state.
     ///
     /// # Errors
-    /// Nonfinite geometry or excessive local lay penetration.
+    /// Nonfinite geometry or excessive local contact penetration.
     pub fn validate_opening(&self, opening_m: f64) -> Result<(), AcousticRealizeError> {
         if self.probe(opening_m)?.max_penetration_m > self.spec.max_penetration_m {
             return Err(invalid("plate closure exceeds its declared penetration allowance"));

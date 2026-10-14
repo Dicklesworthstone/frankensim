@@ -1,6 +1,9 @@
 //! Regional hereditary bending projected through the actual retained plate mode.
 //! Equilibrium stiffness remains in the plate; only additional Maxwell arms enter
-//! this state. Prestress, pressure area and the lay law are never relaxed here.
+//! this state. Prestress, pressure area and the contact law are never relaxed here.
+//! A symmetric opposed pair projects BOTH identical blades with their physical
+//! half-gap shapes. Its common memory represents equal histories, not two
+//! independently addressable blades or twice the material stiffness in gap units.
 use super::{DynamicAperture, invalid};
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_material::visco::GeneralizedMaxwell;
@@ -11,6 +14,7 @@ use fs_plate::{PlateSection, PlateSectionField, dkt_stiffness};
 #[derive(Clone, Debug)]
 pub struct PlateRelaxationRegion {
     /// Unique original triangle indices; regions must partition the whole plate.
+    /// The same material and history apply to each blade of a symmetric pair.
     pub triangles: Vec<usize>,
     /// E_inf must reproduce the source section's actual equilibrium D matrix.
     /// E_j and tau are supplied material data, not inferred from a damping ratio.
@@ -46,8 +50,9 @@ pub enum InitialApertureMemory {
     Relaxed,
     /// Zero prior viscous displacement, which can store energy in a bent plate.
     Unrelaxed,
-    /// One equivalent opening-coordinate viscous displacement [m] per positive
-    /// arm, in region/term order. Uniform history within each regional arm.
+    /// One equivalent TOTAL-opening-coordinate viscous displacement [m] per
+    /// positive arm, in region/term order. Uniform history within each regional
+    /// arm; identical mirrored histories on the symmetric-pair path.
     ViscousDisplacementM(Vec<f64>),
 }
 
@@ -65,8 +70,8 @@ impl ApertureRelaxation {
     /// Exact supplied laws, regions, source labels and numerical allowances.
     #[must_use]
     pub const fn spec(&self) -> &PlateRelaxationSpec { &self.spec }
-    /// Discrete regional phi^T K_bending phi in opening coordinates [N/m].
-    /// This excludes membrane prestress and does not modify equilibrium storage.
+    /// Sum over moving blades of regional phi^T K_bending phi in TOTAL-opening
+    /// coordinates [N/m]. Excludes prestress; does not modify equilibrium storage.
     #[must_use]
     pub fn region_bending_stiffness_n_m(&self) -> &[f64] { &self.region_stiffness_n_m }
     /// Positive projected relaxing arms; projection=[1] in opening metres.
@@ -127,10 +132,12 @@ impl DynamicAperture {
     /// their existing passive boundary/cavity/wall loads.
     ///
     /// Requires zero separate modal damping to avoid counting material loss twice.
-    /// The actual DKT matrices project each region; no stiffness, area, mass or
-    /// resonance is retuned. Proportional isotropic bending and one structural
-    /// mode only; neither prestress nor contact stiffness receives Maxwell arms.
-    /// This is supplied constitutive data, not automatic wet-cane identification.
+    /// The actual DKT matrices project each region of every represented blade;
+    /// no stiffness, area, mass or resonance is retuned. Proportional isotropic
+    /// bending and one structural opening mode only; neither prestress nor contact
+    /// stiffness receives Maxwell arms. Opposed blades share identical material
+    /// histories by the explicitly selected symmetry. This is supplied
+    /// constitutive data, not automatic wet-cane identification.
     ///
     /// # Errors
     /// Missing plate, repeated/late attachment, unmatched equilibrium sections,
@@ -178,6 +185,9 @@ impl DynamicAperture {
                 for (local,&node) in tri.iter().enumerate() {q[3*local..3*local+3].copy_from_slice(&plate.shape_per_opening()[node]);}
                 let mut element=0.0;
                 for a in 0..9 {for b in 0..9 {element+=q[a]*ke[9*a+b]*q[b];}}
+                // q is ONE blade's physical motion per total-gap metre. Both
+                // identical blades store/lose energy; the contact area does not double.
+                element *= plate.moving_blade_count() as f64;
                 if !element.is_finite() || element<0.0 {return Err(invalid("regional projected bending energy is not finite nonnegative"));}
                 stiffness+=element;
             }
