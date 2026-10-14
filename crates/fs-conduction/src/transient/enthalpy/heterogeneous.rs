@@ -651,6 +651,29 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
         self.bind_linearization(cx, old_h, inner)
     }
 
+    pub(crate) fn linearize_accepted_with_target(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        accepted: EnthalpyStepSolution,
+        physical_target_j: f64,
+    ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        if !physical_target_j.is_finite() || physical_target_j <= 0.0 {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "positive finite outer enthalpy residual target required",
+            ));
+        }
+        let inner = self.inner.linearize_accepted_with_target(
+            cx, problem, interfaces, old_h, dt_s, config, accepted,
+            Some(physical_target_j),
+        )?;
+        self.bind_linearization(cx, old_h, inner)
+    }
+
     fn bind_linearization(
         &self,
         cx: &Cx<'_>,
@@ -685,6 +708,15 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
 }
 
 impl HeterogeneousEnthalpyStepLinearization<'_> {
+    pub(crate) fn with_contact_temperature_feedback(
+        mut self,
+        cx: &Cx<'_>,
+        contact: &crate::interface::temperature::tangent::ContactTemperatureLinearization,
+    ) -> Result<Self, EnthalpyAdjointError> {
+        self.inner = self.inner.with_contact_temperature_feedback(cx, contact)?;
+        Ok(self)
+    }
+
     /// Attach original convective wall feedback without detaching the bound
     /// reference-density history. Ordering, units and the total nodal-factor
     /// cap are those of [`EnthalpyStepLinearization::with_robin_feedback`].

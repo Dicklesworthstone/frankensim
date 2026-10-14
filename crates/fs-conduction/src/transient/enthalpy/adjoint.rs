@@ -25,7 +25,7 @@ use fs_exec::Cx;
 use fs_solver::{
     FgmresState, FlexiblePreconditioner, LinearOp, NewtonKrylovState, SolverRunProgress, norm2,
 };
-use fs_sparse::Csr;
+use fs_sparse::{Coo, Csr};
 
 /// Convection-only response of the checked total-enthalpy endpoint.
 pub mod robin;
@@ -378,6 +378,57 @@ impl EnthalpyStepLinearization<'_> {
         self.feedback.push(EnthalpyFeedback { left, right });
         poll(cx, n)?;
         Ok(())
+    }
+
+    pub(crate) fn with_contact_temperature_feedback(
+        mut self,
+        cx: &Cx<'_>,
+        contact: &crate::interface::temperature::tangent::ContactTemperatureLinearization,
+    ) -> Result<Self, EnthalpyAdjointError> {
+        let n = self.masses.len();
+        if contact.temperature().len() != n
+            || contact.feedback().nrows() != n
+            || contact.feedback().ncols() != n
+        {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "contact feedback and enthalpy endpoint shapes differ",
+            ));
+        }
+        for (vertex, (&actual, &expected)) in contact.temperature().iter()
+            .zip(&self.primal.temperature).enumerate()
+        {
+            if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
+            if actual.to_bits() != expected.to_bits() {
+                return Err(EnthalpyAdjointError::InvalidInput(
+                    "contact feedback was bound at a different physical temperature",
+                ));
+            }
+        }
+        let mut coo = Coo::new(n, n);
+        for row in 0..n {
+            if row % ASSEMBLY_TILE == 0 { poll(cx, row)?; }
+            let (columns, entries) = self.tangent.row(row);
+            for (&column, &entry) in columns.iter().zip(entries) {
+                coo.push(row, column, entry);
+            }
+            let (columns, entries) = contact.feedback().row(row);
+            for (&column, &entry) in columns.iter().zip(entries) {
+                coo.push(row, column, finite(entry * self.slopes[column])?);
+            }
+        }
+        self.tangent = coo.assemble();
+        for row in 0..n {
+            if row % ASSEMBLY_TILE == 0 { poll(cx, row)?; }
+            let diagonal = finite(self.masses[row] + self.dt * self.tangent.get(row, row))?;
+            if diagonal == 0.0 {
+                return Err(EnthalpyAdjointError::InvalidInput(
+                    "nonzero contact-coupled enthalpy Jacobian diagonal required for Jacobi",
+                ));
+            }
+            self.inverse_diagonal[row] = finite(1.0 / diagonal)?;
+        }
+        poll(cx, n)?;
+        Ok(self)
     }
 
     /// Physically rechecked endpoint and independently integrated energy audit.

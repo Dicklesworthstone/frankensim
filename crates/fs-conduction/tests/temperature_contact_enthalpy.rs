@@ -1,6 +1,8 @@
 //! Heterogeneous phase-change contact: independent eight-node P1 references.
 #[path = "temperature_contact_enthalpy/radiation.rs"]
 mod radiation;
+#[path = "temperature_contact_enthalpy/adjoint.rs"]
+mod adjoint;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::ContentHash;
 use fs_conduction::{ConductionMesh, ConductionProblem, ConductivityModel, ConductivityTable,

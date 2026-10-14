@@ -208,3 +208,108 @@ impl TemperatureContacts<'_, '_> {
         )).into())
     }
 }
+
+
+/// Rechecked heterogeneous enthalpy endpoint with the complete source-backed
+/// contact Jacobian expressed in specific-enthalpy coordinates.
+pub struct ContactEnthalpyLinearization<'m> {
+    step: crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyStepLinearization<'m>,
+    contact: super::tangent::ContactTemperatureLinearization,
+    dt_s: f64,
+}
+
+/// One complete physical transpose and named whole-law resistance controls.
+#[derive(Debug)]
+pub struct ContactEnthalpyGradient {
+    /// Existing history, source and reference-density derivatives.
+    pub storage: crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyStepGradient,
+    /// Independent multipliers of each complete matching resistance law at one.
+    pub resistance_multipliers: Vec<crate::interface::ContactResistanceGradient>,
+}
+
+impl ContactEnthalpyLinearization<'_> {
+    #[must_use]
+    pub fn transport(
+        &self,
+    ) -> &crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyStepLinearization<'_> {
+        &self.step
+    }
+
+    #[must_use]
+    pub fn contact(&self) -> &super::tangent::ContactTemperatureLinearization {
+        &self.contact
+    }
+
+    pub fn temperature_pullback(
+        &self,
+        cx: &Cx<'_>,
+        seed: &[f64],
+    ) -> Result<Vec<f64>, crate::transient::enthalpy::adjoint::EnthalpyAdjointError> {
+        self.step.transport().temperature_pullback(cx, seed)
+    }
+
+    pub fn pullback_with_resistance_controls(
+        &self,
+        cx: &Cx<'_>,
+        seed: &[f64],
+        linear: crate::LinearConfig,
+        max_face_pairs: usize,
+    ) -> Result<ContactEnthalpyGradient, crate::transient::enthalpy::adjoint::EnthalpyAdjointError> {
+        poll(cx, 0)?;
+        let storage = self.step.pullback(cx, seed, linear)?;
+        let mut load_dual = Vec::with_capacity(storage.transport.adjoint.len());
+        for (index, &lambda) in storage.transport.adjoint.iter().enumerate() {
+            if index % 256 == 0 { poll(cx, index)?; }
+            load_dual.push(super::finite(self.dt_s * lambda)?);
+        }
+        let resistance_multipliers = self.contact.physical_contacts().frozen_interfaces()
+            .matching_resistance_scale_pullback(
+                cx, self.contact.temperature(), &load_dual, max_face_pairs,
+            )?;
+        Ok(ContactEnthalpyGradient { storage, resistance_multipliers })
+    }
+}
+
+impl TemperatureContacts<'_, '_> {
+    /// Revalidate and differentiate an accepted non-radiative enthalpy/contact
+    /// endpoint without another primal solve. The outer contact iteration's
+    /// original physical residual target remains authoritative.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_accepted_enthalpy<'m>(
+        &self,
+        cx: &Cx<'_>,
+        engine: &HeterogeneousEnthalpyBackwardEuler<'m, '_>,
+        problem: ConductionProblem<'_>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        physical_residual_tolerance_j: f64,
+        accepted: ContactEnthalpyStep,
+        max_face_pairs: usize,
+    ) -> Result<ContactEnthalpyLinearization<'m>, crate::transient::enthalpy::adjoint::EnthalpyAdjointError> {
+        poll(cx, 0)?;
+        if accepted.radiation.is_some() || accepted.combined_boundary.is_some() {
+            return Err(crate::transient::enthalpy::adjoint::EnthalpyAdjointError::InvalidInput(
+                "radiative temperature-contact enthalpy needs the radiative contact adjoint owner",
+            ));
+        }
+        if !physical_residual_tolerance_j.is_finite() || physical_residual_tolerance_j <= 0.0 {
+            return Err(crate::transient::enthalpy::adjoint::EnthalpyAdjointError::InvalidInput(
+                "positive finite physical contact residual target required",
+            ));
+        }
+        let contact = self.linearize_temperature(
+            cx, problem.boundary, &accepted.conduction.temperature, max_face_pairs,
+        )?;
+        if contact.physical_contacts().states() != accepted.physical_contacts.states() {
+            return Err(crate::transient::enthalpy::adjoint::EnthalpyAdjointError::InvalidInput(
+                "rebound contact source state differs from the accepted physical endpoint",
+            ));
+        }
+        let step = engine.linearize_accepted_with_target(
+            cx, problem, Some(contact.physical_contacts().frozen_interfaces()),
+            old_h, dt_s, config, accepted.conduction, physical_residual_tolerance_j,
+        )?.with_contact_temperature_feedback(cx, &contact)?;
+        Ok(ContactEnthalpyLinearization { step, contact, dt_s })
+    }
+}
