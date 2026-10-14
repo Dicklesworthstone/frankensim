@@ -13,6 +13,8 @@ use super::{
 };
 use fs_exec::CancelGate;
 
+mod isolated;
+
 /// Prescribed SI velocity and magnetic flux density on the electrical cells.
 #[derive(Clone, Copy, Debug)]
 pub struct ElectricMotionInput<'a> {
@@ -89,6 +91,7 @@ pub(super) struct MotionCoupling<'a> {
     ux_b: Vec<[f64; 3]>,
     force_n: Vec<[f64; 3]>,
     motional_power_w: f64,
+    isolation: Option<isolated::Isolation>,
 }
 
 impl<'a> MotionCoupling<'a> {
@@ -115,7 +118,11 @@ impl<'a> MotionCoupling<'a> {
             }
             ux_b.push(e);
         }
-        Ok(Self { input, ux_b, force_n: vec![[0.0; 3]; n], motional_power_w: 0.0 })
+        Ok(Self { input, ux_b, force_n: vec![[0.0; 3]; n], motional_power_w: 0.0, isolation: None })
+    }
+
+    pub(super) fn potential_gauges(&self) -> Option<&[bool]> {
+        self.isolation.as_ref().map(|state| state.potential_gauges.as_slice())
     }
 
     // c is always a bulk conductor; n is a conductor or an ideal electrode.
@@ -135,6 +142,9 @@ impl<'a> MotionCoupling<'a> {
         let mut tangent = [0.0; 3];
         tangent[axis] = direction(face);
         finite("electric.motion.face_current_a", current_a)?;
+        if let Some(isolation) = &mut self.isolation {
+            isolation.record(c, n, current_a)?;
+        }
         self.motional_power_w += current_a * self.emf(domain, c, n, face, neighbor)?;
         for (cell, bulk) in [(c, true), (n, neighbor == Node::Conductor)] {
             if bulk {
@@ -150,6 +160,9 @@ impl<'a> MotionCoupling<'a> {
     }
 
     fn finish(self, domain: &VoxelDomain, electric: ElectricSolution, gate: &CancelGate) -> Result<MovingConductorSolution, ChtError> {
+        if let Some(isolation) = &self.isolation {
+            isolation.check(gate)?;
+        }
         let mut force_density = Vec::with_capacity(self.force_n.len());
         let mut mechanical_power_w = 0.0;
         for (c, force) in self.force_n.iter().enumerate() {

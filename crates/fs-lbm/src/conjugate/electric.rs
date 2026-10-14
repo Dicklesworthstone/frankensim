@@ -117,7 +117,8 @@ pub struct ElectricSetup {
     /// insulator). Missing trailing entries are insulators. Ignored by the
     /// explicit per-cell constitutive path, including its topology decisions.
     pub conductors: Vec<Option<Conductor>>,
-    /// Electrodes; at least one must hold a voltage.
+    /// Electrodes; grounded paths require a voltage reference.
+    /// The opt-in isolated-motion path requires this list to be empty.
     pub electrodes: Vec<Electrode>,
 }
 
@@ -225,7 +226,8 @@ pub struct ElectrodeSolution {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ElectricSolution {
     /// Potential per cell, V (NaN for electrical insulators and conductors
-    /// with no path to a voltage electrode). Legacy paths also insulate fluids.
+    /// with no path to a voltage electrode on legacy paths). Isolated-motion
+    /// potentials use a numerical gauge, not an absolute voltage measurement.
     pub potential_v: Vec<f64>,
     /// Joule heat per cell, W, including explicitly partitioned contact heat.
     pub joule_w: Vec<f64>,
@@ -450,12 +452,18 @@ fn solve_electric_field_with_motion(
     let cells = domain.cell_count();
     let contact_field = contact::ContactField::new(domain, &nodes, contacts, gate)?;
     let half = |c: usize, axis: usize| 0.5 * rho[c] * domain.widths(c)[axis];
+    // Only isolated-motion calls supply gauges. Gauge cells remain conductors
+    // in all constitutive, contact, current, heating and force operations.
+    let potential_gauges = motion.as_deref().and_then(|m| m.potential_gauges());
     // Reachability from the voltage electrodes over conducting links.
     let electrodes = setup.electrodes.len();
     let mut grounded = vec![false; cells];
     let mut electrode_grounded = vec![false; electrodes];
     let mut stack: Vec<usize> = Vec::new();
     for (c, node) in nodes.iter().enumerate() {
+        if potential_gauges.is_some() && *node == Node::Conductor {
+            grounded[c] = true; // solved with a component gauge, not discarded
+        }
         if let Node::Electrode(e) = *node
             && matches!(setup.electrodes[e].drive, ElectrodeDrive::Voltage(_))
         {
@@ -556,6 +564,12 @@ fn solve_electric_field_with_motion(
         }
         poll_every(gate, c)?;
         let r = row_of[c];
+        if potential_gauges.is_some_and(|pins| pins[c]) {
+            // Symmetric row/column elimination of phi_c = 0. This replaces a
+            // redundant balance equation, NOT the cell's physical resistance.
+            coo.push(r, r, 1.0);
+            continue;
+        }
         for face in 0..6 {
             let Some(n) = domain.neighbor(c, face) else {
                 continue;
@@ -569,7 +583,9 @@ fn solve_electric_field_with_motion(
                     let g = area / (half(c, axis) + half(n, axis) + contact_r);
                     finite_positive("electric.face_conductance_s", g)?;
                     coo.push(r, r, g);
-                    coo.push(r, row_of[n], -g);
+                    if !potential_gauges.is_some_and(|pins| pins[n]) {
+                        coo.push(r, row_of[n], -g);
+                    }
                     if let Some(m) = motion.as_deref() {
                         b[r] -= g * m.emf(domain, c, n, face, nodes[n])?;
                     }

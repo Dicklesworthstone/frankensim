@@ -97,11 +97,24 @@ pub(super) fn resolve_cells(
     setup: &ElectricSetup,
     domain: &VoxelDomain,
     temperature: &[f64],
+    resolve: impl FnMut(usize, Voxel, f64) -> Result<Option<f64>, ChtError>,
+    gate: &CancelGate,
+) -> Result<(Vec<Node>, Vec<f64>), ChtError> {
+    poll(gate)?;
+    let nodes = admit(domain, setup, false)?;
+    resolve_admitted_cells(domain, temperature, nodes, resolve, gate)
+}
+
+// Numerical gauges never masquerade as electrode cells: every isolated bulk
+// cell reaches this same temperature and material evaluation as a wired cell.
+pub(super) fn resolve_admitted_cells(
+    domain: &VoxelDomain,
+    temperature: &[f64],
+    mut nodes: Vec<Node>,
     mut resolve: impl FnMut(usize, Voxel, f64) -> Result<Option<f64>, ChtError>,
     gate: &CancelGate,
 ) -> Result<(Vec<Node>, Vec<f64>), ChtError> {
     poll(gate)?;
-    let mut nodes = admit(domain, setup, false)?;
     let cells = domain.cell_count();
     if temperature.len() != cells {
         return Err(ChtError::InvalidInput {
