@@ -629,6 +629,7 @@ fn matvec(a: &[f64], x: &[f64], y: &mut [f64]) {
     }
 }
 
+#[cfg(test)]
 #[inline]
 fn step_string_loss(
     v: &mut [f64],
@@ -670,6 +671,7 @@ fn step_string_loss(
     (loss, acc3)
 }
 
+#[cfg(test)]
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn step_zoh_free(
@@ -730,6 +732,7 @@ fn step_zoh_free(
     reac
 }
 
+#[cfg(test)]
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn step_zoh_forced(
@@ -790,6 +793,7 @@ fn step_zoh_forced(
     (reac, src)
 }
 
+#[cfg(test)]
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn step_zoh_forced_contact(
@@ -2012,57 +2016,61 @@ impl LivePiano {
         let mut board_loss = 0.0;
 
         // ---- intrinsic string loss, pre half-flow (implicit midpoint) ----
-        self.rhs.copy_from_slice(&self.bvel);
-        for ac in &self.active {
-            let mut source = 0.0;
-            for s in &ac.segs {
-                source += dot(&self.m.cross[s.off..s.off + s.n], &self.v[s.off..s.off + s.n]);
-            }
-            for (x, g) in self.rhs.iter_mut().zip(&ac.gl) {
-                *x += g * source;
-            }
-        }
-        matvec(&self.sd_inv, &self.rhs, &mut self.mid);
-        self.force_b.fill(0.0);
-        self.rhs.fill(0.0); // becomes the coupling right-hand side below
-        for ac in &mut self.active {
-            let bm = dot(&ac.gl, &self.mid);
-            let b0 = dot(&ac.gl, &self.bq);
-            ac.b0 = b0;
-            let mut reaction_loss = 0.0;
-            let mut reaction = 0.0;
-            for s in &mut ac.segs {
-                let range = s.off..s.off + s.n;
-                let (mut loss, mut acc3, mut reac) = (0.0, 0.0, 0.0);
-                let m = &self.m;
-                let it = self.q[range.clone()].iter()
-                    .zip(self.v[range.clone()].iter())
-                    .zip(self.fq[range.clone()].iter_mut())
-                    .zip(self.fv[range.clone()].iter_mut())
-                    .zip(m.pre[range.clone()].iter());
-                for ((((q, v), fq), fv), p) in it {
-                    let old = *v;
-                    let dv = p.c1 * old + p.c2 * bm;
-                    loss += (old - dv) * (old + dv);
-                    acc3 += p.c3 * old;
-                    let x = p.qq * q + p.qv * dv;
-                    *fq = x;
-                    *fv = p.vq * q + p.vv * dv;
-                    reac += p.ha * (q + x);
+        if !self.active.is_empty() {
+            self.rhs.copy_from_slice(&self.bvel);
+            for ac in &self.active {
+                let mut source = 0.0;
+                for s in &ac.segs {
+                    source += dot(&self.m.cross[s.off..s.off + s.n], &self.v[s.off..s.off + s.n]);
                 }
-                string_loss += 0.5 * loss;
-                reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
-                reaction += reac + b0 * s.w_schur;
+                for (x, g) in self.rhs.iter_mut().zip(&ac.gl) {
+                    *x += g * source;
+                }
             }
-            for ((f, x), g) in self.force_b.iter_mut().zip(self.rhs.iter_mut()).zip(&ac.gl) {
-                *f += g * reaction_loss;
-                *x += g * reaction;
+            matvec(&self.sd_inv, &self.rhs, &mut self.mid);
+            self.force_b.fill(0.0);
+            self.rhs.fill(0.0); // becomes the coupling right-hand side below
+            for ac in &mut self.active {
+                let bm = dot(&ac.gl, &self.mid);
+                let b0 = dot(&ac.gl, &self.bq);
+                ac.b0 = b0;
+                let mut reaction_loss = 0.0;
+                let mut reaction = 0.0;
+                for s in &mut ac.segs {
+                    let range = s.off..s.off + s.n;
+                    let (mut loss, mut acc3, mut reac) = (0.0, 0.0, 0.0);
+                    let m = &self.m;
+                    let it = self.q[range.clone()].iter()
+                        .zip(self.v[range.clone()].iter())
+                        .zip(self.fq[range.clone()].iter_mut())
+                        .zip(self.fv[range.clone()].iter_mut())
+                        .zip(m.pre[range.clone()].iter());
+                    for ((((q, v), fq), fv), p) in it {
+                        let old = *v;
+                        let dv = p.c1 * old + p.c2 * bm;
+                        loss += (old - dv) * (old + dv);
+                        acc3 += p.c3 * old;
+                        let x = p.qq * q + p.qv * dv;
+                        *fq = x;
+                        *fv = p.vq * q + p.vv * dv;
+                        reac += p.ha * (q + x);
+                    }
+                    string_loss += 0.5 * loss;
+                    reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
+                    reaction += reac + b0 * s.w_schur;
+                }
+                for ((f, x), g) in self.force_b.iter_mut().zip(self.rhs.iter_mut()).zip(&ac.gl) {
+                    *f += g * reaction_loss;
+                    *x += g * reaction;
+                }
             }
-        }
-        for (v, f) in self.bvel.iter_mut().zip(&self.force_b) {
-            let old = *v;
-            *v = old - dur * f;
-            string_loss += 0.5 * (old - *v) * (old + *v);
+            for (v, f) in self.bvel.iter_mut().zip(&self.force_b) {
+                let old = *v;
+                *v = old - dur * f;
+                string_loss += 0.5 * (old - *v) * (old + *v);
+            }
+        } else {
+            self.rhs.fill(0.0);
         }
         // ---- board loss, pre half-flow (exact matrix exponential) ----
         matvec(&self.flow, &self.bvel, &mut self.tmp);
@@ -2168,44 +2176,46 @@ impl LivePiano {
         board_loss += 0.5 * self.bvel.iter().zip(&self.tmp).map(|(a, b)| a * a - b * b).sum::<f64>();
         self.bvel.copy_from_slice(&self.tmp);
         // ---- intrinsic string loss, post half-flow ----
-        self.rhs.copy_from_slice(&self.bvel);
-        for ac in &self.active {
-            let source: f64 = ac.segs.iter().map(|s| s.src).sum();
-            for (x, g) in self.rhs.iter_mut().zip(&ac.gl) {
-                *x += g * source;
-            }
-        }
-        matvec(&self.sd_inv, &self.rhs, &mut self.mid);
-        self.force_b.fill(0.0);
-        for ac in &self.active {
-            let bm = dot(&ac.gl, &self.mid);
-            let mut reaction_loss = 0.0;
-            for s in &ac.segs {
-                let range = s.off..s.off + s.n;
-                let m = &self.m;
-                let (mut loss, mut acc3) = (0.0, 0.0);
-                let it = self.v[range.clone()].iter_mut()
-                    .zip(m.c1[range.clone()].iter())
-                    .zip(m.c2[range.clone()].iter())
-                    .zip(m.c3[range.clone()].iter());
-                for (((v, c1), c2), c3) in it {
-                    let old = *v;
-                    let dv = c1 * old + c2 * bm;
-                    loss += (old - dv) * (old + dv);
-                    acc3 += c3 * old;
-                    *v = dv;
+        if !self.active.is_empty() {
+            self.rhs.copy_from_slice(&self.bvel);
+            for ac in &self.active {
+                let source: f64 = ac.segs.iter().map(|s| s.src).sum();
+                for (x, g) in self.rhs.iter_mut().zip(&ac.gl) {
+                    *x += g * source;
                 }
-                string_loss += 0.5 * loss;
-                reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
             }
-            for (f, g) in self.force_b.iter_mut().zip(&ac.gl) {
-                *f += g * reaction_loss;
+            matvec(&self.sd_inv, &self.rhs, &mut self.mid);
+            self.force_b.fill(0.0);
+            for ac in &self.active {
+                let bm = dot(&ac.gl, &self.mid);
+                let mut reaction_loss = 0.0;
+                for s in &ac.segs {
+                    let range = s.off..s.off + s.n;
+                    let m = &self.m;
+                    let (mut loss, mut acc3) = (0.0, 0.0);
+                    let it = self.v[range.clone()].iter_mut()
+                        .zip(m.c1[range.clone()].iter())
+                        .zip(m.c2[range.clone()].iter())
+                        .zip(m.c3[range.clone()].iter());
+                    for (((v, c1), c2), c3) in it {
+                        let old = *v;
+                        let dv = c1 * old + c2 * bm;
+                        loss += (old - dv) * (old + dv);
+                        acc3 += c3 * old;
+                        *v = dv;
+                    }
+                    string_loss += 0.5 * loss;
+                    reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
+                }
+                for (f, g) in self.force_b.iter_mut().zip(&ac.gl) {
+                    *f += g * reaction_loss;
+                }
             }
-        }
-        for (v, f) in self.bvel.iter_mut().zip(&self.force_b) {
-            let old = *v;
-            *v = old - dur * f;
-            string_loss += 0.5 * (old - *v) * (old + *v);
+            for (v, f) in self.bvel.iter_mut().zip(&self.force_b) {
+                let old = *v;
+                *v = old - dur * f;
+                string_loss += 0.5 * (old - *v) * (old + *v);
+            }
         }
         damper_loss += self.damp(true);
 
