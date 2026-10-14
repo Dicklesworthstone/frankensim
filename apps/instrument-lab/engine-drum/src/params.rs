@@ -163,6 +163,18 @@ fn variation(key: &str, value: &Value) -> Result<TensionVariation, Refusal> {
     let v: [f64; 7] = vector(key, value)?;
     Ok(TensionVariation { constant_n_m: [v[0], v[1], v[2]], gradient_n_m2: [v[3], v[4], v[5], v[6]], ..TensionVariation::default() })
 }
+fn harmonics(key: &str, value: &Value) -> Result<[[f64;2]; TENSION_HARMONIC_COUNT], Refusal> {
+    match value {
+        Value::Numbers(v) if v.len() == 2*TENSION_HARMONIC_COUNT => {
+            let mut out=[[0.0;2];TENSION_HARMONIC_COUNT];
+            for (slot,pair) in out.iter_mut().zip(v.chunks_exact(2)) {
+                slot.copy_from_slice(pair);
+            }
+            Ok(out)
+        }
+        _ => Err(bad(format!("\"{key}\" must contain cosine/sine N/m pairs for orders 2..12 (22 finite numbers)"))),
+    }
+}
 
 impl DrumParams {
     /// Overlay a flat JSON object on `self`. Unknown keys are refused, so a
