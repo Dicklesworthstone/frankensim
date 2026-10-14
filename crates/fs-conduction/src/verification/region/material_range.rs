@@ -196,3 +196,123 @@ fn two_sided_axes(
     poll(cx)?;
     Ok([0, 1, 2].map(|axis| (0..2).all(|end| seen[axis][end] && cooled[axis][end])))
 }
+
+/// Regional mean with independent validity of both solids and their contacts.
+#[derive(Debug)]
+pub struct ContactSlabValidatedMean {
+    /// Same-contact regional adjoint and equilibrated primal/dual majorants.
+    pub region: RegionMeanFieldBound,
+    /// Whole-continuum comparison range, not numerical nodal extrema.
+    pub continuum_temperature_range_k: [f64; 2],
+    /// Intersection of the original domains of all used material models.
+    pub material_temperature_span: TemperatureSpan,
+    /// Original common contact domain supplied by the source-card owner.
+    pub contact_temperature_span: TemperatureSpan,
+    /// Accepted stack axis and cooling-end orientation.
+    pub axis: usize,
+    pub reverse: bool,
+    /// Completed comparisons; only a successful range starts the dual.
+    pub comparison_attempts: usize,
+}
+
+/// Bound a regional mean across layered contacts with finite source validity.
+///
+/// `contact_temperature_span` is the caller's intersection of the ORIGINAL
+/// contact laws' temperature domains; this numerical adapter does not resolve
+/// or authenticate source cards. The native project caller verifies the exact
+/// scalar claims and receipts. No pressure/state-dependent law is implied.
+///
+/// Every original matching face pair and resistance enters both the outward
+/// layered comparison and the existing regional dual/majorants. The entire
+/// comparison range must lie inside all used material domains AND the contact
+/// domain before the dual starts. Testing the whole range is conservative for
+/// contacts, whose trace ranges could be narrower. No original material is
+/// widened, no contact trace is welded, and no new primal solve is performed.
+///
+/// A proof-only constant extension establishes a solution inside the original
+/// domains; it does not turn a finite card into a globally valid physical law.
+/// The original operator, source, prescribed data and separate temperature
+/// traces remain. Axial conductivity may differ between layers, not within a
+/// face-connected layer. One constant resistance is required per joining plane.
+/// See `layered_slab_temperature_range` for the exact geometric restrictions.
+///
+/// At most six distinct directions are checked with shared admission and at
+/// most one dual/majorant. Only unsupported or too-wide comparisons advance;
+/// invalid data, cancellation, exhausted budgets and numerical errors propagate.
+/// A refusal does not prove physical invalidity. This is a nominal linear-PDE
+/// mean bound, not an uncertain-contact or maximum-temperature-error certificate.
+#[allow(clippy::too_many_arguments)]
+pub fn bound_temperature_region_mean_with_contact_slab_validity(
+    cx: &Cx<'_>, problem: ConductionProblem<'_>, surfaces: &[crate::InterfaceSurface],
+    temperature: &[f64], cells: &[usize], directions: &[(usize, bool)],
+    contact_temperature_span: TemperatureSpan, config: RegionMeanConfig,
+) -> Result<ContactSlabValidatedMean> {
+    let selected = selection(cx, problem, cells, config)?;
+    if directions.is_empty() || directions.len() > 6 || directions.iter().enumerate()
+        .any(|(i, d)| d.0 >= 3 || directions[..i].contains(d))
+    { return Err(TetError::Invalid("one to six distinct stack directions required").into()); }
+    if let TemperatureSpan::Sampled { low, high } = contact_temperature_span {
+        if !low.is_finite() || !high.is_finite() || low > high {
+            return Err(TetError::Invalid("finite nonempty original contact domain required").into());
+        }
+    }
+    let ne = problem.mesh.element_count();
+    let n = problem.mesh.vertex_count();
+    if ne > config.flux.max_cells || n > config.flux.max_cells.saturating_mul(4) {
+        return Err(TetError::Budget.into());
+    }
+    if temperature.len() != n { return Err(TetError::Invalid("candidate temperature length").into()); }
+    if let Some(assigned) = problem.element_materials { assigned.validate_for(problem.mesh)?; }
+    let mut models = BTreeMap::new();
+    let mut labels = Vec::with_capacity(ne);
+    let mut material_span = TemperatureSpan::Unbounded;
+    for e in 0..ne {
+        poll(cx)?;
+        let (id, model) = match problem.element_materials {
+            Some(assigned) => (assigned.of_element()[e], assigned.model_for(e)?),
+            None => (MaterialId(0), problem.material),
+        };
+        if let std::collections::btree_map::Entry::Vacant(entry) = models.entry(id) {
+            entry.insert(constant_extension(model)?);
+            material_span = material_span.intersect(model.temperature_span());
+        }
+        labels.push(id);
+    }
+    let required_span = material_span.intersect(contact_temperature_span);
+    if let TemperatureSpan::Sampled { low, high } = required_span {
+        if low > high { return Err(unsupported("original contact/material domains do not intersect")); }
+    }
+    let extension = ElementMaterials::new(MaterialTable::new(models)?, labels)?;
+    let extended = ConductionProblem {
+        material: extension.model_for(0)?, element_materials: Some(&extension), ..problem
+    };
+    let (admitted, interfaces) = contact::admit_contacts(cx, extended, surfaces, config.flux)?;
+    let mut accepted = None;
+    let mut comparison_attempts = 0;
+    for &(axis, reverse) in directions {
+        poll(cx)?;
+        let range = match admitted.problem(problem.mesh.positions()).layered_slab_temperature_range(
+            temperature, axis, reverse, config.flux, || cx.checkpoint().is_ok()) {
+            Ok(range) => range,
+            Err(TetError::Unsupported(_)) => { comparison_attempts += 1; continue; }
+            Err(error) => return Err(error.into()),
+        };
+        comparison_attempts += 1;
+        if let TemperatureSpan::Sampled { low, high } = required_span {
+            if range.lo < low || range.hi > high { continue; }
+        }
+        accepted = Some((range, axis, reverse));
+        break;
+    }
+    let (range, axis, reverse) = accepted.ok_or_else(|| unsupported(
+        "no layered comparison establishes the original contact/material domains"))?;
+    poll(cx)?;
+    let region = bound_field(cx, extended, &admitted, &interfaces,
+        temperature, &selected, config)?;
+    poll(cx)?;
+    Ok(ContactSlabValidatedMean {
+        region, continuum_temperature_range_k: [range.lo, range.hi],
+        material_temperature_span: material_span, contact_temperature_span,
+        axis, reverse, comparison_attempts,
+    })
+}
