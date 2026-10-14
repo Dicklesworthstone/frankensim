@@ -9,6 +9,8 @@
 
 /// Common-solid feedback over all pressure-driven material branches.
 pub mod solid;
+/// Equipment-source operating points over the same thermal network.
+pub mod pump;
 
 use std::collections::BTreeSet;
 
