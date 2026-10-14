@@ -6,15 +6,18 @@
 //! EOS, phase transition, or conservative replacement of an evolving material.
 //! A successful plan checks necessary numerical bounds, not solver stability.
 
-use fs_material::fluid_transport::{FluidTransport, FluidTransportError, FluidTransportState};
+pub mod conjugate;
+
+use fs_material::MaterialError;
+use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
 use crate::{CS2, Grid, MACH_LIMIT, ScalingPlan, ThermalLbm};
 
 /// A material, physical-unit, numerical-range or allocation-budget refusal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MaterialLbmError {
     /// The original material transport owner refused its snapshot.
-    Transport(FluidTransportError),
+    Transport(MaterialError),
     /// Invalid or unrepresentable physical/numerical input.
     Invalid(&'static str),
 }
@@ -27,8 +30,8 @@ impl core::fmt::Display for MaterialLbmError {
     }
 }
 impl std::error::Error for MaterialLbmError {}
-impl From<FluidTransportError> for MaterialLbmError {
-    fn from(error: FluidTransportError) -> Self { Self::Transport(error) }
+impl From<MaterialError> for MaterialLbmError {
+    fn from(error: MaterialError) -> Self { Self::Transport(error) }
 }
 
 /// A frozen source binding and its common momentum/thermal lattice conversion.

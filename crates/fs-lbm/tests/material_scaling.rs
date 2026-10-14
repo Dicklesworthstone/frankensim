@@ -2,7 +2,8 @@
 //! coefficients are test inputs, not measured material cards or validation data.
 use fs_lbm::material::{MaterialThermalSlab, plan_scaling_from_material};
 use fs_lbm::{Cell, CS2};
-use fs_material::fluid_transport::{FluidTransport, FluidTransportError, FluidTransportState};
+use fs_material::MaterialError;
+use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_material::gas::{ConductivityModel, GasSpec, GasState};
 use fs_qty::semantic::{Composition, CompositionBasis};
 
@@ -58,7 +59,7 @@ fn gas_composition_reaches_actual_thermal_evolution() {
 
 #[test]
 fn physical_rayleigh_and_temperature_mapping_keep_both_signs() {
-    let fluid = FluidTransportState::try_new(1.2, 1000.0, 1.8e-5, 0.026).unwrap();
+    let fluid = FluidTransportState::try_new(1.2, 1000.0, 0.026, 1.8e-5).unwrap();
     let plan = plan_scaling_from_material(&fluid, 0.001, 0.001, 0.01).unwrap();
     for (bottom, top, beta) in [(310.0, 300.0, 0.003), (300.0, 310.0, 0.003),
         (310.0, 300.0, -0.003), (300.0, 310.0, -0.003)] {
@@ -78,7 +79,10 @@ fn physical_rayleigh_and_temperature_mapping_keep_both_signs() {
 fn changing_viscosity_changes_a_real_channel_at_fixed_physical_geometry_and_force() {
     let mut velocities = Vec::new();
     for viscosity in [0.001, 0.002] {
-        let fluid = FluidTransportState::try_new(1000.0, 1000.0, viscosity, 1.0).unwrap();
+        // Shared constructor order is rho, cp, conductivity, dynamic viscosity.
+        let fluid = FluidTransportState::try_new(1000.0, 1000.0, 1.0, viscosity).unwrap();
+        assert_eq!(fluid.dynamic_viscosity_pa_s(), viscosity);
+        assert_eq!(fluid.thermal_conductivity_w_m_k(), 1.0);
         let plan = plan_scaling_from_material(&fluid, 1e-4, 1e-3, 1e-3).unwrap();
         let mut grid = plan.flow_grid(4, 10, 40).unwrap();
         grid.periodic_y = false;
@@ -103,7 +107,7 @@ fn changing_viscosity_changes_a_real_channel_at_fixed_physical_geometry_and_forc
 
 #[test]
 fn physical_units_round_trip_and_prandtl_survive_resolution_changes() {
-    let fluid = FluidTransportState::try_new(1000.0, 4000.0, 0.001, 0.6).unwrap();
+    let fluid = FluidTransportState::try_new(1000.0, 4000.0, 0.6, 0.001).unwrap();
     for (dx, dt) in [(0.001, 0.001), (0.0001, 0.0002)] {
         let plan = plan_scaling_from_material(&fluid, dx, dt, 0.01).unwrap();
         near(CS2 * (plan.flow().tau - 0.5) * dx * dx / dt, fluid.kinematic_viscosity_m2_s(), 1e-12);
@@ -117,9 +121,9 @@ fn physical_units_round_trip_and_prandtl_survive_resolution_changes() {
 fn source_is_sampled_once_and_retained_while_multiple_solvers_are_built() {
     struct Counted(std::cell::Cell<usize>);
     impl FluidTransport for Counted {
-        fn transport_state(&self) -> Result<FluidTransportState, FluidTransportError> {
+        fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
             self.0.set(self.0.get() + 1);
-            FluidTransportState::try_new(1.0, 1000.0, 1e-5, 0.01)
+            FluidTransportState::try_new(1.0, 1000.0, 0.01, 1e-5)
         }
     }
     let source = Counted(std::cell::Cell::new(0));
@@ -133,7 +137,7 @@ fn source_is_sampled_once_and_retained_while_multiple_solvers_are_built() {
 
 #[test]
 fn invalid_domains_and_allocations_refuse_before_solver_construction() {
-    let fluid = FluidTransportState::try_new(1.0, 1000.0, 1e-5, 0.01).unwrap();
+    let fluid = FluidTransportState::try_new(1.0, 1000.0, 0.01, 1e-5).unwrap();
     for (dx, dt, speed) in [(0.0, 0.001, 0.01), (0.001, -1.0, 0.01),
         (0.001, 0.1, 100.0), (0.001, 0.001, -0.1), (f64::NAN, 0.001, 0.0),
         (1e100, 1e-100, 0.0)] {
