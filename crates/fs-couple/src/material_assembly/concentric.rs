@@ -4,6 +4,11 @@
 //! string. Geometry, material assignment and support prescription are data.
 //! Every downstream mass, axial nonlinear stiffness, bending dispersion and
 //! radiating width comes from the same section; no solver is reimplemented.
+//! The [`thermal`] adapter retains each layer's thermal path and stress.
+
+pub mod thermal;
+pub use thermal::{CompiledThermoelasticConcentricAssembly,
+    compile_concentric_thermal_material_assembly, with_concentric_thermal_extension};
 
 use fs_material::section::ConcentricElasticSection;
 use fs_scenario::{AcousticAssembly, PrestressedString};
@@ -67,7 +72,7 @@ pub fn with_concentric_section(
             section.line_density_kg_m() * speed * speed - section.bending_stiffness_n_m2() * k * k
         }
         StringPrestress::FixedThermalExtension { .. } => {
-            return Err(invalid("composite thermal prestress requires per-layer free strains, not a shared scalar override"));
+            return Err(invalid("composite thermal prestress requires per-layer free strains; use with_concentric_thermal_extension"));
         }
     };
     input.tension_n = positive(tension, "section support prescription must produce finite positive tension")?;
