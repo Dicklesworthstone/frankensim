@@ -52,6 +52,8 @@ jobs:
           PYCODE
             cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
           fi
+      - name: Test material stored cooling and radiative heat partition
+        run: cargo test -p fs-airflow --test stored_cooling --test stored_radiation
       - name: Test actual hydraulic derivatives and coupled resistance design
         run: |
           cargo test -p fs-airflow --lib graph::sensitivity::

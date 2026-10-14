@@ -10,9 +10,12 @@
 //! volume may vary. This is not moving-material transport, pipe residence time,
 //! phase-dependent mechanics, or a complete mechanical-energy certificate.
 
+/// Implicit ambient radiation with separately owned external and coolant heat.
+pub mod radiation;
+
 use fs_conduction::{
     ConductionError, ConductionMesh, ConductionProblem, ConductivityModel,
-    ElementMaterials, ScalarField, ThermalBoundary, ThermalInterfaces,
+    ElementMaterials, RobinFlux, ScalarField, ThermalBoundary, ThermalInterfaces,
 };
 use fs_conduction::transient::enthalpy::{
     EnthalpyBackwardEuler, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution,
@@ -102,6 +105,8 @@ pub enum StoredCoolingError {
     Circuit(RecirculationError),
     Solid(EnthalpyError),
     Boundary(ConductionError),
+    /// All inner thermal responses across every inlet, pump and wall trial.
+    ThermalWorkBudget { performed: usize, maximum: usize },
     EnergyBalance { account: &'static str, residual_j: f64, tolerance_j: f64 },
 }
 impl core::fmt::Display for StoredCoolingError {
@@ -128,19 +133,34 @@ impl From<ConductionError> for StoredCoolingError {
 }
 
 /// Actual original pump/common-solid result, with the original FEM solution.
-pub type StoredCoolingCircuit<'p, 'a> =
-    PumpOperatingPoint<'p, CoupledParallelLiquidSolution<'a, EnthalpyStepSolution>>;
+pub type StoredCoolingCircuit<'p, 'a, R = EnthalpyStepSolution> =
+    PumpOperatingPoint<'p, CoupledParallelLiquidSolution<'a, R>>;
 
 #[derive(Debug)]
-pub struct StoredCoolingStep<'p, 'a> {
-    pub liquid: RecirculatingLiquidStep<StoredCoolingCircuit<'p, 'a>>,
-    /// dt * (body generation - prescribed outward Neumann flux), J.
+pub struct StoredCoolingStep<'p, 'a, R = EnthalpyStepSolution> {
+    pub liquid: RecirculatingLiquidStep<StoredCoolingCircuit<'p, 'a, R>>,
+    /// Body input minus prescribed Neumann and enabled external boundary heat, J.
     /// Coolant Robin transfer and internal contacts are NOT external sources.
     pub solid_external_heat_j: f64,
-    /// dt * solid Robin outflow minus actual net coolant return energy, J.
+    /// dt * coolant-only solid outflow minus actual net coolant return energy, J.
     pub interface_energy_residual_j: f64,
     /// Sum of actual solid and reservoir storage minus both external inputs, J.
     pub combined_energy_residual_j: f64,
+}
+
+// Concrete thermal owners retain their complete result. This private protocol
+// supplies only the partition needed by the shared conservative transaction.
+trait StoredThermalResponse {
+    fn conduction(&self) -> &EnthalpyStepSolution;
+    fn coolant_fluxes(&self) -> &[RobinFlux];
+    fn coolant_out_w(&self) -> f64;
+    fn external_boundary_out_w(&self) -> f64;
+}
+impl StoredThermalResponse for EnthalpyStepSolution {
+    fn conduction(&self) -> &EnthalpyStepSolution { self }
+    fn coolant_fluxes(&self) -> &[RobinFlux] { &self.robin_fluxes }
+    fn coolant_out_w(&self) -> f64 { self.robin_out_w }
+    fn external_boundary_out_w(&self) -> f64 { 0.0 }
 }
 
 impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
@@ -162,9 +182,30 @@ impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
         &self, cx: &Cx<'_>, state: &mut StoredCoolingState<'a, '_, '_, '_>,
         end_time_s: f64, reservoir_external_heat_j: f64, initial_walls_k: &[f64],
         pump: &'p PumpHeadCurve, problem: StoredSolidProblem<'_>,
-        controls: StoredCoolingControls, mut boundary: F,
+        controls: StoredCoolingControls, boundary: F,
     ) -> Result<StoredCoolingStep<'p, 'a>, StoredCoolingError>
     where F: FnMut(&Cx<'_>, &[CorrelationRobinBoundary]) -> Result<ThermalBoundary, ConductionError>,
+    {
+        let storage = state.storage;
+        self.advance_stored_using(cx, state, end_time_s, reservoir_external_heat_j,
+            initial_walls_k, pump, problem, controls, boundary, |cx, mapped, old, dt| {
+                Ok(storage.advance(cx, mapped, problem.interfaces, old, dt, controls.solid)?)
+            })
+    }
+
+    // All supported physical response owners share this exact interval,
+    // coolant coupling, independent energy checks and atomic publication.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_stored_using<'p, R, F, S>(
+        &self, cx: &Cx<'_>, state: &mut StoredCoolingState<'a, '_, '_, '_>,
+        end_time_s: f64, reservoir_external_heat_j: f64, initial_walls_k: &[f64],
+        pump: &'p PumpHeadCurve, problem: StoredSolidProblem<'_>,
+        controls: StoredCoolingControls, mut boundary: F, mut solve: S,
+    ) -> Result<StoredCoolingStep<'p, 'a, R>, StoredCoolingError>
+    where
+        R: StoredThermalResponse,
+        F: FnMut(&Cx<'_>, &[CorrelationRobinBoundary]) -> Result<ThermalBoundary, ConductionError>,
+        S: FnMut(&Cx<'_>, ConductionProblem<'_>, &[f64], f64) -> Result<R, StoredCoolingError>,
     {
         poll(cx)?;
         let dt = end_time_s - state.reservoir.time_s();
@@ -175,7 +216,6 @@ impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
         // The existing reservoir API commits on success; operate on a disposable
         // copy until the solid and combined accounts have also passed.
         let mut reservoir = state.reservoir.clone();
-        let storage = state.storage;
         let old = &state.solid_specific_enthalpy_j_kg;
         let mut original_error = None;
         let attempted = self.advance_reservoir_with_pump_coupled_iqn(
@@ -183,11 +223,11 @@ impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
             pump, &controls.pump, controls.reservoir, |cx, rows| {
                 let trial = (|| -> Result<_, StoredCoolingError> {
                     let mapped = boundary(cx, rows)?;
-                    let solution = storage.advance(cx, ConductionProblem {
+                    let solution = solve(cx, ConductionProblem {
                         mesh: problem.mesh, boundary: &mapped, material: problem.material,
                         element_materials: problem.element_materials, source: problem.source,
-                    }, problem.interfaces, old, dt, controls.solid)?;
-                    let regions = solution.robin_fluxes.iter()
+                    }, old, dt)?;
+                    let regions = solution.coolant_fluxes().iter()
                         .map(SolidRegionState::from_robin_flux).collect();
                     Ok(LiquidSolidResponse { regions, state: solution })
                 })();
@@ -203,9 +243,11 @@ impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
             Ok(result) => result,
             Err(error) => return Err(original_error.unwrap_or_else(|| error.into())),
         };
-        let solid = &liquid.circuit.state.solid.state;
-        let solid_external_heat_j = dt * (solid.source_w - solid.neumann_out_w);
-        let interface_energy_residual_j = dt * solid.robin_out_w - liquid.returned_heat_j;
+        let response = &liquid.circuit.state.solid.state;
+        let solid = response.conduction();
+        let solid_external_heat_j = dt * ((solid.source_w - solid.neumann_out_w)
+            - response.external_boundary_out_w());
+        let interface_energy_residual_j = dt * response.coolant_out_w() - liquid.returned_heat_j;
         // Difference coordinates avoid dependence on either chart's arbitrary
         // absolute enthalpy origin. Do not add interface transfer twice.
         let combined_energy_residual_j = (solid.stored_energy_change_j - solid_external_heat_j)
