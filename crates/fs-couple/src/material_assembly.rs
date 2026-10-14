@@ -9,6 +9,7 @@
 pub mod concentric;
 
 use fs_matdb::{MaterialCard, QueryPoint};
+use fs_material::gas::GasState;
 use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, MaterialStatePointError,
     ORTHOTROPIC_POISSON_RATIO_PROPERTIES, ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES,
@@ -22,7 +23,8 @@ use fs_qty::{Density, Dims, DynViscosity, Pressure, Time};
 use fs_scenario::{AcousticAssembly, PrestressedString};
 
 use crate::acoustic_realize::{
-    AcousticRealizeError, RealizedAssembly, realize_assembly, realize_assembly_with_plate_chart,
+    AcousticRealizeError, RealizedAssembly, realize_assembly, realize_assembly_with_gas,
+    realize_assembly_with_plate_chart, realize_assembly_with_plate_chart_and_gas,
 };
 use crate::string_specimen::{
     EQUILIBRIUM_YOUNG_MODULUS_PROPERTY, KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
@@ -179,6 +181,40 @@ impl CompiledMaterialAssembly {
                 realize_assembly_with_plate_chart(&self.assembly, chart.chart(), radiation)
             }
             _ => realize_assembly(&self.assembly),
+        }
+    }
+
+    /// Run the compiled solid-material assembly in an explicitly supplied gas.
+    ///
+    /// This composes the two independent material ingress paths instead of
+    /// forcing a caller to choose between source-bound string/plate mechanics
+    /// and a source-/mixture-derived acoustic medium. String and plate
+    /// coefficients remain exactly those retained by this compilation, while
+    /// density, sound speed, viscosity, conductivity, heat capacity and
+    /// impedance come from `gas`. The authored scenario ambient is ignored by
+    /// the acoustic realizer on this path.
+    ///
+    /// A regional plate keeps its compiled material chart and force/radiation
+    /// controls; only the surrounding acoustic medium is replaced. No material
+    /// name inference, coefficient copying, or alternate solver is introduced.
+    ///
+    /// # Errors
+    /// Existing assembly/chart/runtime refusals plus the supplied-gas coherence
+    /// checks propagate unchanged.
+    pub fn realize_with_gas(
+        &self,
+        gas: &GasState,
+    ) -> Result<RealizedAssembly, AcousticRealizeError> {
+        match &self.plate {
+            Some(CompiledMaterialPlate::Regional { chart, radiation }) => {
+                realize_assembly_with_plate_chart_and_gas(
+                    &self.assembly,
+                    chart.chart(),
+                    radiation,
+                    gas,
+                )
+            }
+            _ => realize_assembly_with_gas(&self.assembly, gas),
         }
     }
 }
