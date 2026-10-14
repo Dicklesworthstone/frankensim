@@ -31,7 +31,8 @@ const LEAD_WARM_S = 0.85;
 const PIANO_GAIN = 0.8;
 /** Standard stick speeds [m/s] and the live kit's per-piece gains (src/live/kitStage.ts). */
 const STICK: Record<PieceId, number> = { kick: 3.0, snare: 4.5, "snare-off": 4.5, "tom-12": 3.5, "tom-14": 3.5, "hihat-closed": 2.5, "hihat-open": 2.5, crash: 6.0, ride: 2.5 };
-const KIT_GAIN: Record<PieceId, number> = { kick: 0.0207, snare: 0.0108, "snare-off": 0.0108, "tom-12": 0.0277, "tom-14": 0.0258, "hihat-closed": 0.137, "hihat-open": 0.137, crash: 0.0527, ride: 0.177 };
+// the live kit section's gains (src/live/kitStage.ts), re-derived for the retuned kit (fs-vkplate 96ccf8f1b)
+const KIT_GAIN: Record<PieceId, number> = { kick: 0.0319, snare: 0.0129, "snare-off": 0.0115, "tom-12": 0.0276, "tom-14": 0.0267, "hihat-closed": 0.134, "hihat-open": 0.134, crash: 0.0496, ride: 0.182 };
 const IDLE_DISPOSE_MS = 90_000;
 /**
  * Each piece's grid choice: the grid coarsenings it may use (finest first) and the speed it must
