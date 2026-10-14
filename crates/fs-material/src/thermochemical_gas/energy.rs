@@ -7,6 +7,10 @@
 //! No reaction mechanism, moving boundary, pressure-volume work or spatial
 //! thermal transport is implied by this local conservative-state closure.
 
+/// Density/entropy closure for reversible adiabatic gas-state changes.
+pub mod entropy;
+mod root;
+
 use super::{ResolvedThermochemicalGasState, ThermochemicalGasModel, coordinates, positive, typed};
 use crate::MaterialError;
 use fs_matdb::QueryPoint;
@@ -60,6 +64,19 @@ impl core::fmt::Display for GasEnergyError {
 impl std::error::Error for GasEnergyError {}
 impl From<MaterialError> for GasEnergyError {
     fn from(error: MaterialError) -> Self { Self::Material(error) }
+}
+fn map_root(error: root::Error<GasEnergyError>) -> GasEnergyError {
+    match error {
+        root::Error::Evaluation(e) => e,
+        root::Error::Invalid(s) => GasEnergyError::Invalid(s),
+        root::Error::Cancelled => GasEnergyError::Cancelled,
+        root::Error::OutsideBracket { lower, upper } => GasEnergyError::OutsideBracket {
+            lower_residual_j_kg: lower, upper_residual_j_kg: upper,
+        },
+        root::Error::NotConverged { iterations, residual } => GasEnergyError::NotConverged {
+            iterations, residual_j_kg: residual,
+        },
+    }
 }
 
 /// Accepted complete material state and its actual nonlinear energy residual.
@@ -117,7 +134,7 @@ impl ThermochemicalGasModel {
         if !positive(density) || !reference_u.is_finite() || !change.is_finite() {
             return Err(GasEnergyError::Invalid("finite positive density and finite specific energies required"));
         }
-        let thermal = |t: f64| -> Result<(f64, f64, f64), GasEnergyError> {
+        let thermal = |t: f64| -> Result<root::Sample, GasEnergyError> {
             // Ideal-gas u and cv do not depend on pressure. Use the retained
             // standard pressure only during inversion, then the actual EOS p.
             let reference = self.thermodynamics().components()[0].convention().reference_pressure();
@@ -125,70 +142,26 @@ impl ThermochemicalGasModel {
                 .map_err(|error| super::failure("energy thermodynamics", error))?;
             let properties = evaluated.properties();
             let u = properties.u().value() / properties.molar_mass().value();
-            let cv = properties.mass_specific_cv().value();
-            let p = density * properties.mass_specific_gas_constant().value() * t;
-            let residual = (u - reference_u) - change;
-            if !positive(cv) || !positive(p) || !residual.is_finite() {
-                return Err(GasEnergyError::Invalid("positive cv, representable pressure and energy residual required"));
-            }
-            Ok((residual, cv, p))
+            Ok(root::Sample {
+                residual: (u - reference_u) - change,
+                tangent: properties.mass_specific_cv().value(),
+                pressure_pa: density * properties.mass_specific_gas_constant().value() * t,
+            })
         };
-        let finish = |t: f64, p: f64, iterations: usize| -> Result<GasEnergySolution, GasEnergyError> {
-            let state = self.evaluate(&updated_point(context, t, p)?)?;
-            let residual = (state.specific_internal_energy_j_kg() - reference_u) - change;
-            if !residual.is_finite() || residual.abs() > controls.energy_tolerance_j_kg {
-                return Err(GasEnergyError::NotConverged { iterations, residual_j_kg: residual });
-            }
-            if (state.state().density / density - 1.0).abs() > 64.0 * f64::EPSILON {
-                return Err(GasEnergyError::Invalid("reconstructed EOS did not retain conserved density"));
-            }
-            Ok(GasEnergySolution { state, residual_j_kg: residual, iterations })
-        };
-        let (mut lo, mut hi) = (controls.minimum_temperature_k, controls.maximum_temperature_k);
+        let solved = root::solve(controls.minimum_temperature_k, controls.maximum_temperature_k,
+            controls.energy_tolerance_j_kg, controls.maximum_iterations, thermal, cancelled)
+            .map_err(map_root)?;
         poll(cancelled)?;
-        let (flo, _, plo) = thermal(lo)?;
+        let state = self.evaluate(&updated_point(context, solved.temperature_k, solved.sample.pressure_pa)?)?;
+        let residual = (state.specific_internal_energy_j_kg() - reference_u) - change;
+        if !residual.is_finite() || residual.abs() > controls.energy_tolerance_j_kg {
+            return Err(GasEnergyError::NotConverged { iterations: solved.iterations, residual_j_kg: residual });
+        }
+        if (state.state().density / density - 1.0).abs() > 64.0 * f64::EPSILON {
+            return Err(GasEnergyError::Invalid("reconstructed EOS did not retain conserved density"));
+        }
         poll(cancelled)?;
-        let (fhi, _, phi) = thermal(hi)?;
-        if flo > fhi {
-            return Err(GasEnergyError::OutsideBracket { lower_residual_j_kg: flo, upper_residual_j_kg: fhi });
-        }
-        for (t, f, p) in [(lo, flo, plo), (hi, fhi, phi)] {
-            if f.abs() <= controls.energy_tolerance_j_kg {
-                poll(cancelled)?;
-                let solution = finish(t, p, 0)?;
-                poll(cancelled)?;
-                return Ok(solution);
-            }
-        }
-        if flo > 0.0 || fhi < 0.0 {
-            return Err(GasEnergyError::OutsideBracket { lower_residual_j_kg: flo, upper_residual_j_kg: fhi });
-        }
-        let mut t = lo + 0.5 * (hi - lo);
-        let mut residual = flo;
-        for iteration in 1..=controls.maximum_iterations {
-            poll(cancelled)?;
-            let (f, cv, p) = thermal(t)?;
-            residual = f;
-            if f.abs() <= controls.energy_tolerance_j_kg {
-                poll(cancelled)?;
-                let solution = finish(t, p, iteration)?;
-                poll(cancelled)?;
-                return Ok(solution);
-            }
-            if f < 0.0 { lo = t; } else { hi = t; }
-            let proposed = t - f / cv;
-            // Interior safeguard bounds progress even for a poor tangent or
-            // strongly varying cp. Never terminate solely on temperature width.
-            let margin = 0.1 * (hi - lo);
-            let next = if proposed.is_finite() && proposed > lo + margin && proposed < hi - margin {
-                proposed
-            } else { lo + 0.5 * (hi - lo) };
-            if next <= lo || next >= hi || next == t {
-                return Err(GasEnergyError::NotConverged { iterations: iteration, residual_j_kg: f });
-            }
-            t = next;
-        }
-        Err(GasEnergyError::NotConverged { iterations: controls.maximum_iterations, residual_j_kg: residual })
+        Ok(GasEnergySolution { state, residual_j_kg: residual, iterations: solved.iterations })
     }
 }
 
