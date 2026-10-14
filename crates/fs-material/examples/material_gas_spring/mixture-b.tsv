@@ -1,0 +1,4 @@
+# Same species laws and geometry as mixture-a; ONLY composition changes.
+# Synthetic demonstration, NOT measured properties of named real gases.
+A 0.25 0.028 3.5 0.001 1.7e-5 0.025
+B 0.75 0.004 2.5 0.000 2.0e-5 0.150
