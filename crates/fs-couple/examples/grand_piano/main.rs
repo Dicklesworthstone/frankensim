@@ -18,6 +18,7 @@ mod pressure_basis;
 mod audio;
 mod wav_output;
 mod hammer_materials;
+mod string_sections;
 mod string_polarization;
 mod cavity;
 mod rayleigh_loading;
@@ -27,7 +28,8 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--rt0425-bridge-contacts] [--rt0425-hammer-stiffness]
     [--rt0425-hammer-dissipation] [--rt0425-string-damping]
     [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
-    [--hammers materials.fsh] [--hammer-footprints faces.fshp]
+    [--hammers materials.fsh] [--string-sections bonded.fsss]
+    [--hammer-footprints faces.fshp]
     [--dampers estimated | point | pads.fspd] [--string-stretching axial.fspx]
     [--string-polarization bridge-frames.fspp]
     [--cavity enclosure.fspc]
@@ -101,6 +103,14 @@ only the struck keys. Missing, duplicate or invalid cards refuse without fallbac
 These cards change physical contact forces and relaxation, not an output EQ.
 The preset shank and the scale's hammer mass/patch geometry remain unchanged.
 See HAMMERS.md for the SI format; importing values does not certify measurements.
+--string-sections overrides the inertial and bending coefficients of every
+selected speaking course using immutable fs-material source-claim layers.
+The v1 input is a strictly ordered, complete solid concentric section per key,
+NOT a surrogate for a helically wound bass string. Tension remains unchanged
+unless explicit tuning is requested. The resulting scale is passed unchanged
+to modal mechanics, hammer/bridge coupling and observation, with no timbre knob.
+This mode excludes RT-0425 measured string damping and --string-stretching:
+those lanes need a separately admitted material-derived loss/axial law.
 --hammer-footprints supplies point, uniform span or authored crown profile for
 EVERY key. Profiles supply one to four ordered sites with longitudinal offsets,
 face recession, local felt thickness and positive fractions of the original area.
@@ -257,7 +267,7 @@ encoding gain, not the mechanics, microphone position, or acoustic calibration."
 struct Options {
     render: Option<String>, scale: Option<String>, board: Option<String>,
     board_geometry: Option<String>, performance: Option<String>, preset: Option<String>,
-    hammers: Option<String>, hammer_footprints: Option<String>, dampers: Option<String>,
+    hammers: Option<String>, string_sections: Option<String>, hammer_footprints: Option<String>, dampers: Option<String>,
     string_stretching: Option<String>, string_polarization: Option<String>, cavity: Option<String>,
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, stretch_tuning: Option<f64>, raw_tensions: bool,
@@ -281,7 +291,7 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self { render: None, scale: None, board: None, board_geometry: None,
-            performance: None, preset: None, hammers: None, hammer_footprints: None, dampers: None, concert_pitch: None, stretch_tuning: None, raw_tensions: false,
+            performance: None, preset: None, hammers: None, string_sections: None, hammer_footprints: None, dampers: None, concert_pitch: None, stretch_tuning: None, raw_tensions: false,
             rt0425_bridge_contacts: false, rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false, rt0425_string_damping: false,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
@@ -326,6 +336,7 @@ impl Options {
                 "--board-geometry" => options.board_geometry = Some(value.clone()),
                 "--preset" => options.preset = Some(value.clone()),
                 "--hammers" => options.hammers = Some(value.clone()),
+                "--string-sections" => options.string_sections = Some(value.clone()),
                 "--hammer-footprints" => options.hammer_footprints = Some(value.clone()),
                 "--dampers" => options.dampers = Some(value.clone()),
                 "--string-stretching" => options.string_stretching = Some(value.clone()),
@@ -406,8 +417,14 @@ impl Options {
             return Err("RT-0425 contacts need the preset board; hammer stiffness needs a preset render without --hammers; hammer dissipation also requires source stiffness".into());
         }
         if options.rt0425_string_damping && (options.preset.is_none()
-            || options.scale.is_some() || options.render.is_none()) {
+            || options.scale.is_some() || options.string_sections.is_some() || options.render.is_none()) {
             return Err("RT-0425 string damping requires a preset render without a supplied scale".into());
+        }
+        if options.string_sections.as_deref().is_some_and(|path| path.is_empty() || path.starts_with("--")) {
+            return Err("--string-sections requires a nonempty material-data path".into());
+        }
+        if options.string_sections.is_some() && options.string_stretching.is_some() {
+            return Err("--string-sections and --string-stretching cannot coexist until axial EA is sourced from the same material section".into());
         }
         if options.hammers.is_some() && options.render.is_none() {
             return Err("--hammers requires --render; material input is not an export-only option".into());
@@ -608,6 +625,12 @@ fn selected_scale(text: Option<&str>, options: &Options) -> Result<Vec<geometry:
     let mut scale = if text.is_none() && options.preset.is_some() {
         steinway_scale::courses()?
     } else { load_scale(text)? };
+    // Bind declared material before retuning or geometry preparation, so every
+    // subsequent string/bridge/contact path sees exactly one frozen scale.
+    if let Some(path) = options.string_sections.as_deref() {
+        let data = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        scale = string_sections::apply(&data, &scale)?;
+    }
     if let Some(reference) = options.stretch_tuning {
         stretch_tuning::tune(&mut scale, reference)?;
     } else if let Some(reference) = options.tuning_hz() {
@@ -1118,7 +1141,7 @@ fn run() -> Result<(), String> {
     let polarization = options.string_polarization.as_deref().map(|path|
         string_polarization::Specification::load(path, &scale)).transpose()?;
     let cavity = options.cavity.as_deref().map(cavity::Specification::load).transpose()?;
-    let scale_source = options.scale.as_deref().unwrap_or(if options.preset.is_some() {
+    let scale_source = options.string_sections.as_deref().or(options.scale.as_deref()).unwrap_or(if options.preset.is_some() {
         "RT-0425 Appendix A wrapped-string MODEL: 84 published courses plus four estimated extensions"
     } else { "ESTIMATED demonstration" });
     let tuning_source = options.tuning_report();
