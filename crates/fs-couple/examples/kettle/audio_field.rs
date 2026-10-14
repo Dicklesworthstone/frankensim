@@ -71,8 +71,8 @@ pub(super) fn prepare<'s>(surface:&'s SpherePanels,k_max:f64,sources:usize,sampl
     let source=Prepared::new(surface,k_max,reciprocal_radiation::Budget {
         maximum_unknowns:4096,maximum_cache_bytes:256*1024*1024,
         maximum_work:per_frequency,angular_refinement },||gate.is_requested())?;
-    let work=source.frequency_work(sources)?;
-    if work>per_frequency {return Err("complete reciprocal kettle batch exceeds the declared sweep work".into());}
+    let work=source.velocity_port_work(sources)?;
+    if work>per_frequency {return Err("complete reciprocal kettle solve/projection exceeds the declared sweep work".into());}
     eprintln!("reciprocal kettle: unknowns={}, cache_bytes={}, angular_refinement={angular_refinement}, sweep_work_units={}; no acoustic operator fallback",
         source.unknowns(),source.cache_bytes(),work*samples as u64);
     Ok(source)
