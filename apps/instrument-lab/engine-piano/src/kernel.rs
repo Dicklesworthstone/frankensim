@@ -431,6 +431,40 @@ fn identity(n: usize) -> Vec<f64> {
     a
 }
 
+/// Four-lane dot product: lanes `s[0..4]` accumulate the whole 4-blocks, are
+/// combined as `(s0 + s1) + (s2 + s3)`, then the tails (`len % 4`) are added in
+/// order. Both loop shapes below produce the same blocks, tails and operation
+/// order, so the sum is bit-identical on every target; the shape is per target
+/// because LLVM vectorizes them differently (measured, optimisation pass 1):
+/// - wasm32: `as_chunks` + a single-exit zip; the lanes SLP-vectorize to f64x2.
+///   Measured ~5% less CPU for the whole engine in V8 than the two-exit loop.
+/// - elsewhere: the two-exit `(&mut ca).zip(&mut cb)` loop. Do NOT "fix" it to a
+///   single-exit (trusted-random-access) loop: AArch64's loop vectorizer then
+///   applies an ordered FP reduction (lane extracts, serial scalar adds, spills),
+///   measured 1.5-1.65x slower per dot on Apple silicon. The `split_at_checked`
+///   frame a profiler attributes to this loop is sampling skid from the four
+///   add-latency chains, which bound the loop (the sum order fixes them).
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    let (ca, ra) = a.as_chunks::<4>();
+    let (cb, rb) = b.as_chunks::<4>();
+    let mut s = [0.0_f64; 4];
+    for (x, y) in ca.iter().zip(cb) {
+        s[0] += x[0] * y[0];
+        s[1] += x[1] * y[1];
+        s[2] += x[2] * y[2];
+        s[3] += x[3] * y[3];
+    }
+    let mut t = (s[0] + s[1]) + (s[2] + s[3]);
+    for (x, y) in ra.iter().zip(rb) {
+        t += x * y;
+    }
+    t
+}
+
+/// See the wasm32 `dot` above: same sum, two-exit loop shape for native targets.
+#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     let mut s = [0.0_f64; 4];
@@ -447,6 +481,148 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
         t += x * y;
     }
     t
+}
+
+/// Pad shapes of one segment packed for the fused damper passes (1 to 4
+/// pads; otherwise empty and `damp` runs the sequential flows): for each
+/// 4-mode block `c`, `g_0[4c..4c+4], ..., g_{np-1}[4c..4c+4]`, then each
+/// pad's tail modes (`n % 4`) pad-major. Also the Gram matrix `g_t . g_j`.
+fn pack_pads(pad: &[PadPoint], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let np = pad.len();
+    if !(1..=4).contains(&np) {
+        return (Vec::new(), Vec::new());
+    }
+    let blocks = n / 4;
+    let mut pack = Vec::with_capacity(n * np);
+    for c in 0..blocks {
+        for p in pad {
+            pack.extend_from_slice(&p.shape[4 * c..4 * c + 4]);
+        }
+    }
+    for p in pad {
+        pack.extend_from_slice(&p.shape[4 * blocks..n]);
+    }
+    let mut gram = vec![0.0; np * np];
+    for t in 0..np {
+        for j in 0..np {
+            gram[t * np + j] = dot(&pad[t].shape, &pad[j].shape);
+        }
+    }
+    (pack, gram)
+}
+
+/// `[g_t . v; N]` for the `N` packed pad shapes in ONE pass over `v`; each
+/// sum has `dot`'s four-lane order. Loop shape per target as in `dot`.
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn pad_dots<const N: usize>(pack: &[f64], v: &[f64]) -> [f64; N] {
+    let mut s = [[0.0_f64; 4]; N];
+    let (cv, rv) = v.as_chunks::<4>();
+    let (cg, _) = pack.as_chunks::<4>();
+    for (x, g) in cv.iter().zip(cg.chunks_exact(N)) {
+        for t in 0..N {
+            s[t][0] += g[t][0] * x[0];
+            s[t][1] += g[t][1] * x[1];
+            s[t][2] += g[t][2] * x[2];
+            s[t][3] += g[t][3] * x[3];
+        }
+    }
+    pad_dots_finish(&s, &pack[cv.len() * 4 * N..], rv)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn pad_dots<const N: usize>(pack: &[f64], v: &[f64]) -> [f64; N] {
+    let mut s = [[0.0_f64; 4]; N];
+    let mut cv = v.chunks_exact(4);
+    let mut cg = pack.chunks_exact(4 * N);
+    for (x, g) in (&mut cv).zip(&mut cg) {
+        for t in 0..N {
+            s[t][0] += g[4 * t] * x[0];
+            s[t][1] += g[4 * t + 1] * x[1];
+            s[t][2] += g[4 * t + 2] * x[2];
+            s[t][3] += g[4 * t + 3] * x[3];
+        }
+    }
+    let rv = cv.remainder();
+    pad_dots_finish(&s, &pack[(v.len() - rv.len()) * N..], rv)
+}
+
+#[inline]
+fn pad_dots_finish<const N: usize>(s: &[[f64; 4]; N], tail: &[f64], rv: &[f64]) -> [f64; N] {
+    let rem = rv.len();
+    let mut d = [0.0; N];
+    for t in 0..N {
+        let mut acc = (s[t][0] + s[t][1]) + (s[t][2] + s[t][3]);
+        for (g, x) in tail[t * rem..(t + 1) * rem].iter().zip(rv) {
+            acc += g * x;
+        }
+        d[t] = acc;
+    }
+    d
+}
+
+/// `v += sum_t g_t * c[t]` for the `N` packed pad shapes in ONE pass (each
+/// element adds the pads in pack order).
+#[inline]
+fn pad_axpy<const N: usize>(pack: &[f64], v: &mut [f64], c: &[f64; N]) {
+    let body = v.len() / 4 * 4;
+    let (head, rv) = v.split_at_mut(body);
+    for (x, g) in head.chunks_exact_mut(4).zip(pack.chunks_exact(4 * N)) {
+        for t in 0..N {
+            x[0] += g[4 * t] * c[t];
+            x[1] += g[4 * t + 1] * c[t];
+            x[2] += g[4 * t + 2] * c[t];
+            x[3] += g[4 * t + 3] * c[t];
+        }
+    }
+    let rem = rv.len();
+    let tail = &pack[body * N..];
+    for t in 0..N {
+        for (x, g) in rv.iter_mut().zip(&tail[t * rem..(t + 1) * rem]) {
+            *x += g * c[t];
+        }
+    }
+}
+
+/// The `N` sequential exact rank-one pad flows of one segment (`damp`), fused:
+/// with `v0` the entry velocities, pad `t` (in processing order) sees
+/// `g_t . v = g_t . v0 + sum_{j before t} (g_t . g_j) c_j` and the bridge
+/// speed `beta = gl . bvel`, which each flow moves by `|gl|^2 lift_t c_t`.
+/// One multi-dot pass, an N x N recurrence, one multi-axpy pass. `beta` and
+/// `push` (= sum lift_t c_t, the bridge velocity change still owed to
+/// `bvel` along `gl`) carry across the course's segments. Returns the loss.
+#[inline]
+fn damp_fused<const N: usize>(s: &ASeg, v: &mut [f64], gl_norm2: f64, beta: &mut f64, push: &mut f64, reverse: bool) -> f64 {
+    let d = pad_dots::<N>(&s.pad_pack, v);
+    let mut c = [0.0_f64; N];
+    let mut loss = 0.0;
+    let mut moved = false;
+    for k in 0..N {
+        let t = if reverse { N - 1 - k } else { k };
+        let p = &s.pad[t];
+        if p.coef == 0.0 {
+            continue;
+        }
+        let row = &s.pad_gram[t * N..t * N + N];
+        let mut string_speed = d[t];
+        for kk in 0..k {
+            let j = if reverse { N - 1 - kk } else { kk };
+            string_speed += row[j] * c[j];
+        }
+        let speed = string_speed + p.lift * *beta;
+        let change = p.coef * speed;
+        c[t] = change;
+        let lc = p.lift * change;
+        *beta += gl_norm2 * lc;
+        *push += lc;
+        loss += -change * speed - 0.5 * change * change * p.norm;
+        moved = true;
+    }
+    if moved {
+        pad_axpy::<N>(&s.pad_pack, v, &c);
+    }
+    loss
 }
 
 /// `out = row^T * a` for a row-major `r x r` matrix `a`.
@@ -540,6 +716,11 @@ struct ASeg {
     lift_total: f64,
     cdiag: f64,
     pad: Vec<PadPoint>,
+    /// Pad shapes packed for the fused damper passes (`pack_pads`); empty
+    /// unless `1 <= pad.len() <= 4`.
+    pad_pack: Vec<f64>,
+    /// Pad Gram matrix `g_t . g_j`, row-major `pad.len()` squared (same rule).
+    pad_gram: Vec<f64>,
     /// Held contact force of this step [N] (speaking strings only).
     force: f64,
     src: f64,
@@ -1091,9 +1272,10 @@ impl LivePiano {
                 }).collect();
             }
         }
+        let (pad_pack, pad_gram) = pack_pads(&pad, n);
         ASeg {
             seg: si, off, n, duplex: self.segs[si].duplex, member: self.segs[si].member, beta2, mek, w_schur, loss_w, sum_c4,
-            endpoint_drag, hammer_lift, lift_total: hammer_lift + lift_bq, cdiag, pad, force: 0.0, src: 0.0,
+            endpoint_drag, hammer_lift, lift_total: hammer_lift + lift_bq, cdiag, pad, pad_pack, pad_gram, force: 0.0, src: 0.0,
         }
     }
 
@@ -1516,6 +1698,10 @@ impl LivePiano {
 
     /// Exact rank-one viscous flows of every engaged pad point for half a
     /// step (`dampers.rs::rank_one`); the post half reverses the order.
+    /// The flows stay sequential in exact arithmetic; per segment they are
+    /// fused (`damp_fused`), and the bridge velocity change of a whole course
+    /// is applied to `bvel` once (it enters later flows of that course only
+    /// through the scalar `gl . bvel`, tracked exactly).
     fn damp(&mut self, reverse: bool) -> f64 {
         if self.sustain >= 1.0 {
             return 0.0;
@@ -1525,29 +1711,54 @@ impl LivePiano {
         for index in 0..count {
             let slot = if reverse { count - 1 - index } else { index };
             let ac = &self.active[slot];
-            if !ac.damped_now {
+            if !ac.damped_now || ac.segs.iter().all(|s| s.pad.is_empty()) {
                 continue;
             }
+            let mut beta = dot(&ac.gl, &self.bvel);
+            let mut push = 0.0;
             let nseg = ac.segs.len();
             for sindex in 0..nseg {
                 let s = &ac.segs[if reverse { nseg - 1 - sindex } else { sindex }];
                 let np = s.pad.len();
                 let v = &mut self.v[s.off..s.off + s.n];
-                for pindex in 0..np {
-                    let p = &s.pad[if reverse { np - 1 - pindex } else { pindex }];
-                    if p.coef == 0.0 {
-                        continue;
+                let g2 = ac.gl_norm2;
+                loss += match np {
+                    0 => 0.0,
+                    1 => damp_fused::<1>(s, v, g2, &mut beta, &mut push, reverse),
+                    2 => damp_fused::<2>(s, v, g2, &mut beta, &mut push, reverse),
+                    3 => damp_fused::<3>(s, v, g2, &mut beta, &mut push, reverse),
+                    4 => damp_fused::<4>(s, v, g2, &mut beta, &mut push, reverse),
+                    _ => {
+                        // More than four pad points: the plain sequential flows.
+                        for (x, g) in self.bvel.iter_mut().zip(&ac.gl) {
+                            *x += g * push;
+                        }
+                        push = 0.0;
+                        let mut seg_loss = 0.0;
+                        for pindex in 0..np {
+                            let p = &s.pad[if reverse { np - 1 - pindex } else { pindex }];
+                            if p.coef == 0.0 {
+                                continue;
+                            }
+                            let speed = dot(&p.shape, v) + p.lift * dot(&ac.gl, &self.bvel);
+                            let change = p.coef * speed;
+                            for (x, g) in v.iter_mut().zip(&p.shape) {
+                                *x += g * change;
+                            }
+                            let lc = p.lift * change;
+                            for (x, g) in self.bvel.iter_mut().zip(&ac.gl) {
+                                *x += g * lc;
+                            }
+                            seg_loss += -change * speed - 0.5 * change * change * p.norm;
+                        }
+                        beta = dot(&ac.gl, &self.bvel);
+                        seg_loss
                     }
-                    let speed = dot(&p.shape, v) + p.lift * dot(&ac.gl, &self.bvel);
-                    let change = p.coef * speed;
-                    for (x, g) in v.iter_mut().zip(&p.shape) {
-                        *x += g * change;
-                    }
-                    let lc = p.lift * change;
-                    for (x, g) in self.bvel.iter_mut().zip(&ac.gl) {
-                        *x += g * lc;
-                    }
-                    loss += -change * speed - 0.5 * change * change * p.norm;
+                };
+            }
+            if push != 0.0 {
+                for (x, g) in self.bvel.iter_mut().zip(&ac.gl) {
+                    *x += g * push;
                 }
             }
         }
