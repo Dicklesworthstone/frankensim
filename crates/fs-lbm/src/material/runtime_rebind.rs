@@ -6,7 +6,7 @@
 
 use fs_material::fluid_transport::FluidTransport;
 
-use super::{MaterialLbmError, MaterialScaling, MaterialSlab, forcing};
+use super::{MaterialLbmError, MaterialScaling, MaterialSlab, MaterialSlab3, forcing};
 
 impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
     /// Update an already-evolving 2-D thermal slab from a new material snapshot.
@@ -72,13 +72,64 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
         slab.force_units = forcing::ForceUnits::from_scale(self);
         Ok(())
     }
+
+    /// Three-dimensional counterpart of the 2-D runtime rebind.
+    ///
+    /// D3Q19 momentum and D3Q7 heat populations are preserved exactly while
+    /// the new material updates both relaxation rates and buoyancy. The same
+    /// conservative-state and no-hidden-rheology refusals apply.
+    pub fn rebind_thermal_slab3<G: FluidTransport + ?Sized>(
+        &self,
+        slab: &mut MaterialSlab3,
+        previous: &MaterialScaling<'_, G>,
+        gravity_m_s2: f64,
+        expansion_per_k: f64,
+    ) -> Result<(), MaterialLbmError> {
+        if self.cell_size_m.to_bits() != previous.cell_size_m.to_bits()
+            || self.timestep_s.to_bits() != previous.timestep_s.to_bits()
+        {
+            return Err(MaterialLbmError::Invalid(
+                "runtime material rebind cannot change the slab's physical dx/dt mapping",
+            ));
+        }
+        if self.transport.density_kg_m3().to_bits()
+            != previous.transport.density_kg_m3().to_bits()
+            || self.transport.specific_heat_j_kg_k().to_bits()
+                != previous.transport.specific_heat_j_kg_k().to_bits()
+        {
+            return Err(MaterialLbmError::Invalid(
+                "runtime density or heat-capacity changes require conservative mass/enthalpy transfer",
+            ));
+        }
+        let previous_tau_g = previous.thermal_relaxation_time3()?;
+        if slab.lattice.tau_g.to_bits() != previous_tau_g.to_bits()
+            || slab.lattice.grid.tau.iter().any(|tau| tau.to_bits() != previous.flow.tau.to_bits())
+        {
+            return Err(MaterialLbmError::Invalid(
+                "runtime material rebind refuses independently modified relaxation fields",
+            ));
+        }
+        let bottom_temperature_k = slab.top_temperature_k + slab.temperature_difference_k;
+        let (_, gbeta) = self.slab_boundary(
+            bottom_temperature_k, slab.top_temperature_k, gravity_m_s2, expansion_per_k,
+        )?;
+        let tau_g = self.thermal_relaxation_time3()?;
+        slab.lattice.grid.tau.fill(self.flow.tau);
+        slab.lattice.tau_g = tau_g;
+        slab.lattice.gbeta = gbeta;
+        slab.force_units = forcing::ForceUnits::from_scale(self);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use fs_material::fluid_transport::FluidTransportState;
 
-    use super::super::{MaterialLbmError, MaterialThermalSlab, plan_scaling_from_material};
+    use super::super::{
+        MaterialLbmError, MaterialThermalSlab, MaterialThermalSlab3,
+        plan_scaling_from_material,
+    };
 
     fn slab_input() -> MaterialThermalSlab {
         MaterialThermalSlab {
@@ -117,6 +168,31 @@ mod tests {
             slab.lattice.gbeta,
             new.acceleration_lattice(9.81 * 2.0e-4 * 10.0).unwrap()
         );
+    }
+
+    #[test]
+    fn three_dimensional_rebind_preserves_both_population_fields() {
+        let first = FluidTransportState::try_new(1000.0, 4000.0, 0.5, 0.001).unwrap();
+        let second = FluidTransportState::try_new(1000.0, 4000.0, 0.75, 0.0015).unwrap();
+        let old = plan_scaling_from_material(&first, 1.0e-3, 1.0e-3, 0.01).unwrap();
+        let new = plan_scaling_from_material(&second, 1.0e-3, 1.0e-3, 0.01).unwrap();
+        let mut slab = old.thermal_slab3(MaterialThermalSlab3 {
+            nx: 3, ny: 2, nz: 6,
+            bottom_temperature_k: 310.0, top_temperature_k: 300.0,
+            gravity_m_s2: 9.81, expansion_per_k: 2.0e-4, max_cells: 48,
+        }).unwrap();
+        let cell = slab.lattice.grid.idx(1, 1, 3);
+        slab.lattice.grid.f[cell][1] += 1.0e-4;
+        slab.lattice.grid.f[cell][2] -= 1.0e-4;
+        slab.lattice.gpop[cell][0] += 1.0e-3;
+        let flow_before = slab.lattice.grid.f.clone();
+        let heat_before = slab.lattice.gpop.clone();
+        new.rebind_thermal_slab3(&mut slab, &old, 9.81, 2.0e-4).unwrap();
+        assert_eq!(slab.lattice.grid.f, flow_before);
+        assert_eq!(slab.lattice.gpop, heat_before);
+        assert!(slab.lattice.grid.tau.iter().all(|&tau| tau == new.flow().tau));
+        assert_eq!(slab.lattice.tau_g, new.thermal_relaxation_time3().unwrap());
+        assert_eq!(slab.lattice.gbeta, new.acceleration_lattice(9.81 * 2.0e-4 * 10.0).unwrap());
     }
 
     #[test]
