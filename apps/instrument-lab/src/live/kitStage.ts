@@ -28,14 +28,14 @@ interface PieceDef {
 // Gains: each piece's 50 ms loudness matched to the real kit's (Salamander overheads), capped so a
 // standard stroke peaks at 0.55 of full scale (the live cymbals' attacks are too sharp to match).
 const PIECES: PieceDef[] = [
-  { id: "kick", name: "Kick", key: "B", speed: 3.0, gain: 0.0207, kind: "kick", finish: "#5c1d1a" },
-  { id: "snare", name: "Snare", key: "S", speed: 4.5, gain: 0.0108, kind: "drum", finish: "#c9cdd3" },
-  { id: "tom-12", name: "Rack tom", key: "T", speed: 3.5, gain: 0.0277, kind: "drum", finish: "#5c1d1a" },
-  { id: "tom-14", name: "Floor tom", key: "F", speed: 3.5, gain: 0.0258, kind: "drum", finish: "#5c1d1a" },
-  { id: "hihat-closed", name: "Hi-hat", key: "H", speed: 2.5, gain: 0.137, kind: "hat" },
-  { id: "hihat-open", name: "Open hi-hat", key: "O", speed: 2.5, gain: 0.137, kind: "hat" },
-  { id: "crash", name: "Crash", key: "C", speed: 6.0, gain: 0.0527, kind: "cymbal" },
-  { id: "ride", name: "Ride", key: "R", speed: 2.5, gain: 0.177, kind: "cymbal" },
+  { id: "kick", name: "Kick", key: "B", speed: 3.0, gain: 0.0319, kind: "kick", finish: "#5c1d1a" },
+  { id: "snare", name: "Snare", key: "S", speed: 4.5, gain: 0.0129, kind: "drum", finish: "#c9cdd3" },
+  { id: "tom-12", name: "Rack tom", key: "T", speed: 3.5, gain: 0.0276, kind: "drum", finish: "#5c1d1a" },
+  { id: "tom-14", name: "Floor tom", key: "F", speed: 3.5, gain: 0.0267, kind: "drum", finish: "#5c1d1a" },
+  { id: "hihat-closed", name: "Hi-hat", key: "H", speed: 2.5, gain: 0.134, kind: "hat" },
+  { id: "hihat-open", name: "Open hi-hat", key: "O", speed: 2.5, gain: 0.134, kind: "hat" },
+  { id: "crash", name: "Crash", key: "C", speed: 6.0, gain: 0.0496, kind: "cymbal" },
+  { id: "ride", name: "Ride", key: "R", speed: 2.5, gain: 0.182, kind: "cymbal" },
 ];
 
 /** Where each piece sits, in a 1000-wide design space: centre, radii (perspective ellipse), draw order. */
