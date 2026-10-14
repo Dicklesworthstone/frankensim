@@ -172,6 +172,8 @@ function findings(v: Verisim): HTMLElement[] {
 }
 
 export async function mountVerisim(root: HTMLElement): Promise<void> {
+  // The diagnosis has its own data file: it must not vanish when the scorecard fails to load.
+  void mountDiagnosis();
   let data: Verisim;
   try {
     const res = await fetch("/data/verisim.json");
@@ -350,7 +352,6 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
   rulerChart(cymRuler, data.cymbal_ruler.rows.map((r) => ({ label: r.label, value: r.rms_gap_db, real: r.real })), "dB");
   const host = document.getElementById("verisim-findings");
   if (host) host.replaceChildren(...findings(data));
-  void mountDiagnosis();
   makePlayer();
   render();
 }

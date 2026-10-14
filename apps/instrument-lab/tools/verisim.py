@@ -76,9 +76,12 @@ def highpass(x, f0=40.0, f1=70.0):
 def onset(x):
     # Relative to BOTH the peak and the recording's own noise floor: a pp note in a room
     # sits less than 30 dB above the hiss before it, and the hiss is not the note.
+    # The first 50 ms count as a noise floor only when steady (10th to 90th percentile within
+    # 20 dB): a render whose note starts 10 ms in holds silence and an onset there, not hiss.
     env = np.convolve(np.abs(x), np.ones(96) / 96, "same")
     head = env[: max(int(0.05 * SR), 1)]
-    noise = float(np.percentile(head, 90)) if env.argmax() > len(head) else 0.0
+    lo, hi = np.percentile(head, [10, 90])
+    noise = float(hi) if env.argmax() > len(head) and hi <= 10 * lo else 0.0
     thr = max(env.max() * 10 ** (-30 / 20), noise * 10 ** (15 / 20))
     return max(0, int(np.argmax(env > thr)) - int(0.005 * SR))
 
