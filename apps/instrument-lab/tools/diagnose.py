@@ -357,11 +357,26 @@ def main():
                           "points to that axial force on the bridge as the main way phantom partials reach the board.")
         if row["status"] == "testing":
             row["suspect"] = ("Geometric string nonlinearity, confirmed in direction: switching on longitudinal waves creates phantom partials and adds brightness at ff. "
-                              "Missing in strength: the axial string force's path into the bridge, and possibly a stroke softer than the real ff.")
-            row["test"] = ("Render 8 m/s with waves to separate stroke strength; then add a longitudinal bridge port (axial force through the string's angle at the bridge) "
-                           "and check that phantom levels approach the real piano's at partials 13-16.")
+                              "Missing in strength: the axial string force's path into the bridge.")
+            row["test"] = ("Add a longitudinal bridge port (the axial string force acting through the string's angle at the bridge, with its work in the energy ledger) "
+                           "and check that phantom levels approach the real piano's at partials 13-16 (bead frankensim-na4ju).")
         if row["status"] == "refuted":
             row["suspect"] = "Not the longitudinal waves alone: with them switched on the brightness and phantom partials barely move. The hammer felt's stiffening law and the board's high-frequency response remain."
+        hard = V.CAMPAIGN / "piano" / "a3-fff-waves.wav"
+        if hard.exists() and (V.CAMPAIGN / "piano" / "a3-fff.wav").exists():
+            w8, l8 = piano("a3-fff-waves"), piano("a3-fff")
+            ph8 = {q["k"]: q for q in phantoms(w8)}
+            short8 = [q["re_partial_db"] - ph8[q["k"]]["re_partial_db"] for q in real_present]
+            sw["stroke_8ms"] = {"phantoms_waves": list(ph8.values()),
+                                "brightness_db": {"real_ff": r(V.band_ratio(real_ff), 3), "linear": r(V.band_ratio(l8), 3), "waves": r(V.band_ratio(w8), 3)},
+                                "phantom_shortfall_db": [r(x, 3) for x in short8]}
+            got8 = sum(q["present"] for q in ph8.values())
+            bd = sw["stroke_8ms"]["brightness_db"]
+            closed, gap = bd["waves"] - bd["linear"], bd["real_ff"] - bd["linear"]
+            extra += (f" Struck at 8 m/s, close to the real ff's loudness, the waves render reaches {bd['waves']:.1f} dB of 2-8 kHz brightness, against "
+                      f"{bd['linear']:.1f} dB with linear strings and {bd['real_ff']:.1f} dB for the real ff: string stretching closes {closed:.1f} of that {gap:.1f} dB gap. "
+                      f"Its phantom partials stay {min(short8):.0f}-{max(short8):.0f} dB below the real piano's (at 4.5 m/s: {min(short):.0f}-{max(short):.0f} dB), "
+                      + ("so a harder stroke closes most of that shortfall." if max(short8) < 10 else "so a harder stroke does not close that shortfall; the missing axial force path at the bridge remains the lead."))
         row["result"] = (f"A3 rendered with longitudinal string waves (axial stiffness from the scale's own bending stiffness, steel E = 200 GPa): "
                          f"phantom partials stand above the floor at {got} of {len(sw['phantoms_ff']['waves'])} positions at ff (linear strings: {sum(q['present'] for q in ph_ours)}). "
                          f"The mf-to-ff brightness gain moves from {sw['brightness_gain_db']['linear']:.1f} dB to {sw['brightness_gain_db']['waves']:.1f} dB (real piano {sw['brightness_gain_db']['real']:.1f} dB), "
