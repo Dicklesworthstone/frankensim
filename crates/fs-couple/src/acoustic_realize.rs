@@ -141,7 +141,30 @@ pub struct RealizedAssembly {
 pub fn realize_assembly(
     assembly: &AcousticAssembly,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
-    realize_assembly_inner(assembly, None)
+    realize_assembly_inner(assembly, None, None)
+}
+
+/// Realize the same assembly in an explicitly supplied gas state.
+///
+/// This is the general material/composition ingress. Density, sound speed,
+/// viscosity, thermal conductivity, heat capacities and impedance all come
+/// from the supplied state, so a caller can swap an admitted gas or mixture
+/// without rewriting instrument or solver code. The scenario AmbientGas is
+/// ignored for constitutive coefficients on this path.
+///
+/// ISO 9613-1 is an atmospheric-air model and is not applied to arbitrary
+/// mixtures. Free-field propagation therefore uses the existing generic
+/// Stokes-Kirchhoff fallback rather than pretending the external gas has an
+/// atmospheric relative-humidity coordinate.
+///
+/// # Errors
+/// Ordinary assembly refusals plus incoherent/nonphysical supplied gas states.
+pub fn realize_assembly_with_gas(
+    assembly: &AcousticAssembly,
+    gas: &GasState,
+) -> Result<RealizedAssembly, AcousticRealizeError> {
+    validate_external_gas(gas)?;
+    realize_assembly_inner(assembly, None, Some(*gas))
 }
 
 /// Realize an assembly with a linear plate chart, including regional materials
@@ -162,13 +185,35 @@ pub fn realize_assembly_with_plate_chart(
             what: "chart assembly requires the uniform plate description to be absent",
         });
     }
-    realize_assembly_inner(assembly, Some((chart, options)))
+    realize_assembly_inner(assembly, Some((chart, options)), None)
+}
+
+/// Plate-chart variant of realize_assembly_with_gas. Geometry/material
+/// charting and acoustic-medium selection remain independent inputs.
+///
+/// # Errors
+/// Conflicting plate descriptions, invalid gas/chart controls, or ordinary
+/// assembly admission and stepping errors refuse.
+pub fn realize_assembly_with_plate_chart_and_gas(
+    assembly: &AcousticAssembly,
+    chart: &fs_plate::PlateChart,
+    options: &PlateChartRadiation,
+    gas: &GasState,
+) -> Result<RealizedAssembly, AcousticRealizeError> {
+    if assembly.plate.is_some() {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "chart assembly requires the uniform plate description to be absent",
+        });
+    }
+    validate_external_gas(gas)?;
+    realize_assembly_inner(assembly, Some((chart, options)), Some(*gas))
 }
 
 #[allow(clippy::too_many_lines)] // one coherent realization dispatcher
 fn realize_assembly_inner(
     assembly: &AcousticAssembly,
     chart: Option<(&fs_plate::PlateChart, &PlateChartRadiation)>,
+    gas_override: Option<GasState>,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     if assembly.string.is_none() && assembly.duct.is_none() {
         return Err(AcousticRealizeError::InvalidDescription {
@@ -187,7 +232,10 @@ fn realize_assembly_inner(
             what: "listener distance must be positive and finite",
         });
     }
-    let gas = gas_state(assembly.ambient)?;
+    let gas = match gas_override {
+        Some(gas) => gas,
+        None => gas_state(assembly.ambient)?,
+    };
     if let Some(string) = assembly
         .string
         .as_ref()
@@ -926,6 +974,35 @@ pub(crate) fn map_drive(err: crate::driving_point::DrivingPointError) -> Acousti
     }
 }
 
+fn validate_external_gas(gas: &GasState) -> Result<(), AcousticRealizeError> {
+    let positive = [
+        gas.temperature, gas.pressure, gas.density, gas.sound_speed,
+        gas.dynamic_viscosity, gas.thermal_conductivity, gas.gamma,
+        gas.specific_gas_constant, gas.specific_heat_cp, gas.prandtl,
+        gas.characteristic_impedance,
+    ].into_iter().all(|value| value.is_finite() && value > 0.0);
+    if !positive || !gas.water_mole_fraction.is_finite()
+        || !(0.0..=1.0).contains(&gas.water_mole_fraction)
+    {
+        return Err(AcousticRealizeError::Ambient(
+            "supplied gas state must contain finite positive thermodynamic/transport coefficients and water mole fraction in [0,1]".into(),
+        ));
+    }
+    let impedance = gas.density * gas.sound_speed;
+    let prandtl = gas.dynamic_viscosity * gas.specific_heat_cp / gas.thermal_conductivity;
+    let zi = gas.characteristic_impedance.abs().max(impedance.abs()).max(1.0);
+    let zp = gas.prandtl.abs().max(prandtl.abs()).max(1.0);
+    if !impedance.is_finite() || !prandtl.is_finite()
+        || (impedance - gas.characteristic_impedance).abs() > 32.0 * f64::EPSILON * zi
+        || (prandtl - gas.prandtl).abs() > 64.0 * f64::EPSILON * zp
+    {
+        return Err(AcousticRealizeError::Ambient(
+            "supplied gas state has independently mutated derived impedance or Prandtl number".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn gas_state(ambient: AmbientGas) -> Result<GasState, AcousticRealizeError> {
     if !(ambient.relative_humidity >= 0.0 && ambient.relative_humidity <= 1.0) {
         return Err(AcousticRealizeError::InvalidDescription {
@@ -946,12 +1023,21 @@ fn finish_observer(
     mut pressure_pa: Vec<f64>,
 ) -> RealizedAssembly {
     let dt = 1.0 / f64::from(assembly.sample_rate_hz);
+    // ISO 9613-1 is only valid for atmospheric air. If this exact state did
+    // not come from the scenario AmbientGas declaration, deliberately pass an
+    // invalid humidity so absorb_pressure_history selects its documented
+    // Stokes-Kirchhoff generic-gas fallback at every frequency bin.
+    let relative_humidity = if gas_state(assembly.ambient).ok().as_ref() == Some(gas) {
+        assembly.ambient.relative_humidity
+    } else {
+        f64::NAN
+    };
     crate::air_path::absorb_pressure_history(
         &mut pressure_pa,
         dt,
         assembly.listener.distance_m,
         gas,
-        assembly.ambient.relative_humidity,
+        relative_humidity,
     );
     RealizedAssembly {
         sample_rate_hz: assembly.sample_rate_hz,
@@ -4685,5 +4771,62 @@ mod tone_hole_admission_tests {
             assert!(what.contains("tone"), "{what}");
         }
         assert!(physics_duct(&base_duct(None)).is_ok(), "control must pass");
+    }
+}
+
+#[cfg(test)]
+mod arbitrary_gas_realization_tests {
+    use super::*;
+    use fs_material::gas::{ConductivityModel, GasSpec};
+    use fs_scenario::{Listener, Pluck};
+
+    fn fixture() -> AcousticAssembly {
+        AcousticAssembly {
+            ambient: AmbientGas::sea_level(),
+            string: Some(PrestressedString {
+                length_m: 0.65, tension_n: 80.0, lin_density_kg_m: 0.006,
+                axial_stiffness_n: 0.0, width_m: 0.001, n_modes: 6,
+                damping_ratio: 0.0, rayleigh: None, bending_stiffness_n_m2: 0.0,
+                kelvin_voigt_bending: None, relaxation_bending: None,
+                polarization_detune: 0.0, moving_end: false,
+            }),
+            duct: None,
+            pluck: Some(Pluck { station_frac: 0.25, height_m: 1.0e-4 }),
+            bow: None, blow: None, reed: None, soundboard: None, body_modes: vec![],
+            plate: None, cavity: None, obstacles: vec![], contact_texture: None,
+            listener: Listener { distance_m: 10.0 }, sample_rate_hz: 16_000, duration_s: 0.02,
+        }
+    }
+
+    fn helium_like() -> GasState {
+        GasState::try_new(&GasSpec {
+            molar_mass: 4.002_602e-3, gamma: 5.0 / 3.0,
+            sutherland_beta: 1.05e-6, sutherland_s: 79.4,
+            conductivity: ConductivityModel::Eucken,
+        }, 288.15, 101_325.0).expect("admitted helium-like ideal-gas fixture")
+    }
+
+    #[test]
+    fn gas_data_only_swap_reaches_actual_pressure_realization() {
+        let description = fixture();
+        let air = realize_assembly(&description).expect("air realization");
+        let helium = helium_like();
+        let changed = realize_assembly_with_gas(&description, &helium).expect("gas realization");
+        assert_eq!(changed.gas, helium);
+        assert!(changed.gas.sound_speed > air.gas.sound_speed);
+        assert_eq!(changed.pressure_pa.len(), air.pressure_pa.len());
+        assert!(changed.pressure_pa.iter().all(|value| value.is_finite()));
+        assert_ne!(changed.pressure_pa, air.pressure_pa);
+        assert_eq!(description.ambient, AmbientGas::sea_level());
+    }
+
+    #[test]
+    fn independently_mutated_gas_derived_fields_refuse() {
+        let mut gas = helium_like();
+        gas.characteristic_impedance *= 2.0;
+        assert!(matches!(realize_assembly_with_gas(&fixture(), &gas), Err(AcousticRealizeError::Ambient(_))));
+        let mut gas = helium_like();
+        gas.prandtl = f64::NAN;
+        assert!(matches!(realize_assembly_with_gas(&fixture(), &gas), Err(AcousticRealizeError::Ambient(_))));
     }
 }
