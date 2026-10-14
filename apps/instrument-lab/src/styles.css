@@ -158,7 +158,7 @@ em.v { font-style: normal; color: var(--verdigris); }
   .grid.wide-right { grid-template-columns: 1fr 1.45fr; }
   .grid.three { grid-template-columns: repeat(3, 1fr); }
 }
-.stack { display: grid; gap: clamp(14px, 2vw, 22px); }
+.stack { display: grid; gap: clamp(14px, 2vw, 22px); align-content: start; }
 .stack > * { min-width: 0; }
 .subsection { margin-top: clamp(40px, 6vw, 72px); }
 .subsection > header { max-width: 780px; margin-bottom: 20px; }
@@ -372,3 +372,10 @@ footer.site code { color: var(--ivory-2); }
   .stage-hud { font-size: 10px; }
   #hero-hud-right { display: none; }
 }
+
+.findings { display: grid; gap: 12px; margin-top: 12px; }
+.findings li { position: relative; padding-left: 18px; font-size: 15px; line-height: 1.55; color: var(--ivory-2); max-width: 92ch; }
+.findings li::before { content: ""; position: absolute; left: 0; top: 0.62em; width: 7px; height: 7px; border-radius: 2px; background: var(--brass); }
+.findings b { color: var(--ivory); font-weight: 600; }
+.vs-axis { position: absolute; inset: 0; pointer-events: none; }
+.seg button[disabled] { opacity: 0.4; cursor: not-allowed; }

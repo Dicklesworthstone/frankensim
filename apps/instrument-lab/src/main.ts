@@ -383,8 +383,14 @@ async function initRegisterNote(): Promise<void> {
   p.textContent = `A0 is a single ${a0.L.toFixed(2)} m wound string with B = ${fmtSci(a0.B)}, so its 20th partial lies ${cents(20).toFixed(0)} cents and its 40th ${cents(40).toFixed(0)} cents sharp of the harmonic series. C6 has three short plain strings and a much shorter hammer contact.`;
 }
 
+function initVerisim(): void {
+  const root = $("#verisim-root");
+  if (root) onVisible(root, () => void import("./verisim").then((m) => m.mountVerisim(root)), "800px");
+}
+
 initNav();
 void initHero();
+initVerisim();
 void initGroups();
 void initCharts();
 initViewers();
