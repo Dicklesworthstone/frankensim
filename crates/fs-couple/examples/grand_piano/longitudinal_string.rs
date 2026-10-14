@@ -1,18 +1,23 @@
 //! Retained longitudinal inertia on the existing string/contact clock.
 //!
 //! The generic fs-nlmodal owner supplies strain, storage and the discrete
-//! gradient. This adapter only pulls slope forces through the actual moving
-//! transverse bridge and advances axial coordinates using the bank's existing
-//! exact-ZOH transitions. Axial endpoints remain fixed. No extra contact tick,
-//! output oscillator, or assumed axial bridge direction is introduced.
+//! gradient. This adapter pulls both transverse slope forces and axial bridge
+//! tension through the moving bridge and advances axial coordinates using the
+//! bank's existing exact-ZOH transitions.
 
-use fs_nlmodal::{KcStringParams, longitudinal::LongitudinalString};
+use fs_nlmodal::{
+    KcStringParams,
+    longitudinal::{LongitudinalString, MAX_LONGITUDINAL_MODES},
+};
 
 use super::super::{ModalAcousticMode, Transition, transitions};
 use super::{Channel, Observation, StringMode, StringPort, WaveMaterial};
 use fs_math::{c64::C64, det};
 
 const MAX_SLOPES: usize = 2 * (super::super::MAX_STRING_MODES + 1);
+/// Effective axial-to-transverse bridge coupling at the speaking termination
+/// (~1.8 deg downbearing inclination plus 28 mm bridge-cap rocking lever arm).
+const BRIDGE_AXIAL_PROJECTION: f64 = 0.06;
 
 pub(super) struct Prepared {
     model: LongitudinalString,
@@ -23,6 +28,7 @@ pub(super) struct Prepared {
     rest_tension: f64,
     material: WaveMaterial,
     transverse_scales: Vec<f64>,
+    axial_betas: Vec<f64>,
     transition: Vec<Transition>,
     pub q: Vec<f64>,
     pub v: Vec<f64>,
@@ -87,6 +93,15 @@ impl Prepared {
         let transition = transitions(rate, &modes)?;
         let n = indices.len();
         let slopes = model.slope_count();
+        let axial_betas = model
+            .axial_modes()
+            .iter()
+            .zip(model.axial_slope_scales())
+            .map(|(&mode, &scale)| {
+                let sign = if mode % 2 == 0 { -1.0 } else { 1.0 };
+                2.0 * sign / (channel.length * scale)
+            })
+            .collect();
         Ok(Self {
             model,
             string: channel.string,
@@ -96,6 +111,7 @@ impl Prepared {
             rest_tension: channel.rest_tension,
             material,
             transverse_scales: channel.diagonal.iter().map(|x| det::sqrt(*x)).collect(),
+            axial_betas,
             transition,
             q: vec![0.; n],
             v: vec![0.; n],
@@ -117,6 +133,25 @@ impl Prepared {
     }
     pub fn coupling_terms(&self) -> usize {
         self.model.slope_count() * (1 + self.q.len())
+    }
+
+    fn bridge_axial(&self, q: &[f64], strings: &[StringPort], modes: &[StringMode]) -> f64 {
+        if self.q.is_empty() {
+            return 0.0;
+        }
+        let bridge: f64 = strings[self.string]
+            .bridge
+            .iter()
+            .zip(&q[modes.len()..])
+            .map(|(g, x)| g * x)
+            .sum();
+        BRIDGE_AXIAL_PROJECTION * bridge
+    }
+
+    fn fill_relative_axial(&self, b_axial: f64, u: &[f64], out: &mut [f64]) {
+        for ((slot, &coord), &beta) in out.iter_mut().zip(u).zip(&self.axial_betas) {
+            *slot = coord - beta * b_axial;
+        }
     }
 
     fn fill_slopes(
@@ -158,6 +193,33 @@ impl Prepared {
         );
     }
 
+    fn potential_and_bounds(
+        &self,
+        q: &[f64],
+        u: &[f64],
+        strings: &[StringPort],
+        modes: &[StringMode],
+    ) -> Option<(f64, f64, f64)> {
+        let mut scratch = [0.; MAX_SLOPES];
+        let slopes = &mut scratch[..self.model.slope_count()];
+        self.slopes(q, strings, modes, slopes);
+        let b_axial = self.bridge_axial(q, strings, modes);
+        let eps_bridge = b_axial / self.length;
+        let mut u_rel_buf = [0.; MAX_LONGITUDINAL_MODES];
+        let u_rel = &mut u_rel_buf[..u.len()];
+        self.fill_relative_axial(b_axial, u, u_rel);
+        let (s0, spread) = self.model.strain_bounds(slopes, u_rel).ok()?;
+        let base = self.model.energy(slopes, u_rel).ok()?;
+        let extra_mean = 0.5 * self.ea * self.length * eps_bridge * (2.0 * s0 + eps_bridge);
+        let potential = base + extra_mean;
+        let mean = s0 + eps_bridge;
+        if potential.is_finite() && mean.is_finite() && spread.is_finite() {
+            Some((potential, mean, spread))
+        } else {
+            None
+        }
+    }
+
     pub fn energy(
         &self,
         q: &[f64],
@@ -165,17 +227,16 @@ impl Prepared {
         modes: &[StringMode],
         candidate: bool,
     ) -> f64 {
-        let mut scratch = [0.; MAX_SLOPES];
-        let slopes = &mut scratch[..self.model.slope_count()];
-        self.slopes(q, strings, modes, slopes);
         let (u, v) = if candidate {
             (&self.next_q, &self.next_v)
         } else {
             (&self.q, &self.v)
         };
         // Invalid energy propagates to the original finite/energy gate.
-        self.model.energy(slopes, u).unwrap_or(f64::NAN)
-            + 0.5 * v.iter().map(|x| x * x).sum::<f64>()
+        let potential = self
+            .potential_and_bounds(q, u, strings, modes)
+            .map_or(f64::NAN, |(p, _, _)| p);
+        potential + 0.5 * v.iter().map(|x| x * x).sum::<f64>()
     }
 
     pub fn observe(
@@ -185,18 +246,14 @@ impl Prepared {
         modes: &[StringMode],
         out: &mut Observation,
     ) {
-        let mut scratch = [0.; MAX_SLOPES];
-        let slopes = &mut scratch[..self.model.slope_count()];
-        self.slopes(q, strings, modes, slopes);
-        let (mean, spread) = self
-            .model
-            .strain_bounds(slopes, &self.q)
-            .unwrap_or((f64::NAN, f64::NAN));
+        let (potential, mean, spread) = self
+            .potential_and_bounds(q, &self.q, strings, modes)
+            .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
         out.additional_strain = mean;
         out.tension_n = self.rest_tension + self.ea * mean;
         out.minimum_tension_n = self.rest_tension + self.ea * (mean - spread);
         out.maximum_tension_n = self.rest_tension + self.ea * (mean + spread);
-        out.stretching_energy_j = self.model.energy(slopes, &self.q).unwrap_or(f64::NAN);
+        out.stretching_energy_j = potential;
         out.longitudinal_modes = self.q.len();
         out.longitudinal_kinetic_energy_j = 0.5 * self.v.iter().map(|x| x * x).sum::<f64>();
     }
@@ -246,24 +303,71 @@ impl Prepared {
             modes,
             &mut self.end_slopes,
         );
+        let b_axial_a = self.bridge_axial(a, strings, modes);
+        let b_axial_b = self.bridge_axial(b, strings, modes);
+        let n = self.q.len();
+        let mut u_rel_a_buf = [0.; MAX_LONGITUDINAL_MODES];
+        let mut u_rel_b_buf = [0.; MAX_LONGITUDINAL_MODES];
+        let u_rel_a = &mut u_rel_a_buf[..n];
+        let u_rel_b = &mut u_rel_b_buf[..n];
+        self.fill_relative_axial(b_axial_a, &self.q, u_rel_a);
+        self.fill_relative_axial(b_axial_b, &self.next_q, u_rel_b);
         self.model
-            .coupling_discrete_gradient(
+            .discrete_gradient(
                 &self.start_slopes,
                 &self.end_slopes,
-                &self.q,
-                &self.next_q,
+                u_rel_a,
+                u_rel_b,
                 &mut self.slope_gradient,
                 &mut self.required,
             )
             .map_err(|_| "longitudinal string discrete gradient failed finite admission")?;
-        for value in &mut self.required {
-            *value = -*value;
+        let s0_a = self
+            .model
+            .strain_bounds(&self.start_slopes, u_rel_a)
+            .map_err(|_| "longitudinal string strain is unrepresentable")?
+            .0;
+        let s0_b = self
+            .model
+            .strain_bounds(&self.end_slopes, u_rel_b)
+            .map_err(|_| "longitudinal string strain is unrepresentable")?
+            .0;
+        let s0_mid = f64::midpoint(s0_a, s0_b);
+        let eps_bridge_mid = f64::midpoint(b_axial_a, b_axial_b) / self.length;
+        let extra_mean_factor = self.ea * self.length * eps_bridge_mid;
+        let width = self.transverse_scales.len() + 1;
+        for ((sa, sb), out) in self
+            .start_slopes
+            .chunks_exact(width)
+            .zip(self.end_slopes.chunks_exact(width))
+            .zip(self.slope_gradient.chunks_exact_mut(width))
+        {
+            out[0] += extra_mean_factor * f64::midpoint(sa[0], sb[0]);
+            for k in 1..width {
+                out[k] += 0.5 * extra_mean_factor * f64::midpoint(sa[k], sb[k]);
+            }
+        }
+        let mut axial_bridge_reaction =
+            BRIDGE_AXIAL_PROJECTION * self.ea * (s0_mid + eps_bridge_mid);
+        for (j, ((value, &omega), &beta)) in self
+            .required
+            .iter_mut()
+            .zip(self.model.axial_omegas())
+            .zip(&self.axial_betas)
+            .enumerate()
+        {
+            let g_axial = *value;
+            axial_bridge_reaction -= BRIDGE_AXIAL_PROJECTION * beta * g_axial;
+            let u_mid = f64::midpoint(self.q[j], self.next_q[j]);
+            *value = -(g_axial - omega * omega * u_mid);
         }
         for (plane, si) in std::iter::once(self.string).chain(self.second).enumerate() {
             let s = &strings[si];
-            let width = self.transverse_scales.len() + 1;
             let row = &self.slope_gradient[plane * width..(plane + 1) * width];
             let mut reaction = row[0] / self.length;
+            if plane == 0 {
+                reaction += axial_bridge_reaction;
+            }
             for ((&gradient, &scale), k) in row[1..]
                 .iter()
                 .zip(&self.transverse_scales)
@@ -295,13 +399,9 @@ impl Prepared {
         if u.iter().chain(v).any(|x| !x.is_finite() || x.abs() > 1e5) {
             return Err("longitudinal string state is outside its finite motion domain");
         }
-        let mut scratch = [0.; MAX_SLOPES];
-        let slopes = &mut scratch[..self.model.slope_count()];
-        self.slopes(q, strings, modes, slopes);
-        let (mean, spread) = self
-            .model
-            .strain_bounds(slopes, u)
-            .map_err(|_| "longitudinal string strain is unrepresentable")?;
+        let (_, mean, spread) = self
+            .potential_and_bounds(q, u, strings, modes)
+            .ok_or("longitudinal string strain is unrepresentable")?;
         if mean.abs() + spread > self.material.maximum_strain
             || self.rest_tension + self.ea * (mean - spread) <= 0.
         {

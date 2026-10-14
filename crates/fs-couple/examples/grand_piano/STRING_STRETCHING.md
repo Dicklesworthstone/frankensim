@@ -156,20 +156,23 @@ The supplied `maximum_strain` bounds this increment. It does not add the
 installed reference strain `T0/EA`. Total tension is checked separately as
 `T0 + EA * epsilon`, including its lower bound over the complete reduced span.
 
-Here `u` is longitudinal displacement with fixed axial endpoints, and `y` and
-`z` are the retained transverse directions. A single transverse direction is
-also supported. Both polarizations of one physical string share one axial state
-and one strain energy; selecting two directions does not double the string.
-The moving transverse bridge supplies the same physical chord and reciprocal
-force pullback as averaged extension.
+Here `u` is longitudinal displacement coupled at the bridge through the
+speaking termination's axial-to-transverse projection (`BRIDGE_AXIAL_PROJECTION`
+in `longitudinal_string.rs`, representing downbearing inclination plus the
+bridge-cap rocking lever arm), and `y` and `z` are the retained transverse
+directions. A single transverse direction is also supported. Both polarizations
+of one physical string share one axial state and one strain energy; selecting
+two directions does not double the string. The moving bridge supplies both the
+transverse chord and the axial boundary extension `u(L, t) = eta * b(t)` with
+exact reciprocal discrete-gradient force pullback (`F_bridge = -eta * EA * epsilon(L, t)`).
 
 The retained axial sine modes have inertia, propagate their strain at the
-material wave speed, and exchange energy with transverse motion during contact
-and free vibration. Their damping acts on axial velocity. Higher unretained
-zero-mean strain channels are statically equilibrated: they have no resolved
-inertia or propagation. The mean extension remains present. An empty retained
-axial set therefore has the averaged Kirchhoff--Carrier potential; a small axial
-band does not establish a complete longitudinal wave solution.
+material wave speed, and exchange energy with transverse and bridge motion
+during contact and free vibration. Their damping acts on axial velocity. Higher
+unretained zero-mean strain channels are statically equilibrated: they have no
+resolved inertia or propagation. The mean extension remains present. An empty
+retained axial set therefore has the averaged Kirchhoff--Carrier potential; a
+small axial band does not establish a complete longitudinal wave solution.
 
 No independent force lag or sample clock is introduced. Trial axial states are
 accepted with the same converged string/contact solve, and a refused frame
@@ -177,9 +180,10 @@ restores their state together with the original mechanics. The additional-strain
 bound is checked across the complete reduced span. Loss of positive total
 tension refuses the trial rather than entering an unmodeled slack-string regime.
 
-This is a reduced moderate-slope model with fixed axial endpoints. It does not
-apply a longitudinal force or velocity port to the soundboard. Its changed
-pressure comes through reciprocal **transverse** bridge motion. It is simpler
+This is a reduced moderate-slope model with an effective axial-to-transverse
+bridge port (`u(L, t) = eta * b(t)`). Both transverse slope forces and axial
+tension fluctuations at `x = L` act reciprocally on the bridge coordinates and
+close the same mechanical energy ledger. It remains simpler
 than the geometrically nonlinear Timoshenko string model in Chabassier,
 Chaigne and Joly, [*Time domain simulation of a piano. Part 1* (2014)](https://archive.numdam.org/articles/10.1051/m2an/2013136/),
 which motivates resolving longitudinal waves in piano modeling; this feature
@@ -188,11 +192,11 @@ does not claim to reproduce that full model.
 ## Boundaries
 
 `stretch` selects averaged moderate-slope extension; `waves` adds the explicitly
-retained longitudinal modes described above. With `--string-polarization`, both
+retained longitudinal modes and axial bridge port described above. With `--string-polarization`, both
 transverse directions share their total strain and one extension energy per
 physical segment; see
 `STRING_POLARIZATION.md` for the required geometric input. It does not resolve
-axial motion of the bridge, tension-dependent winding slip, full 3-D hammer/string
+independent 3-D rigid-body DOFs of the bridge cap, tension-dependent winding slip, full 3-D hammer/string
 contact, or measured piano string materials. The acoustic fit
 remains bounded to its admitted sampled band even when a nonlinear attack
 contains higher-frequency energy. Retained modes, substeps and a supplied EA

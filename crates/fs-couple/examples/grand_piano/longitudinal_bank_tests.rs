@@ -338,3 +338,42 @@ fn longitudinal_trajectory_converges_to_independent_continuous_axial_transverse_
         "normalized full phase-space error={fine_error}"
     );
 }
+
+#[test]
+fn axial_strain_drives_bridge_at_zero_initial_bridge_displacement_and_closes_work() {
+    let c = course();
+    let mut bank = Bank::new(&[c], &board(), 96_000, 3000.0, 2, false).unwrap();
+    bank.configure_string_stretching(&[c], &specification(&[c], 3300.0, 2, 0.0))
+        .unwrap();
+    // Excite only an internal longitudinal wave coordinate while all transverse
+    // string and soundboard coordinates start at rest (bridge b = 0).
+    {
+        let state = bank.stretching.as_mut().unwrap();
+        let wave = state.channels[0].waves.as_mut().unwrap();
+        wave.q[0] = 2e-7;
+        state.predict();
+        state.commit();
+        state
+            .evaluate(&bank.q, &bank.q, &bank.strings, &bank.modes)
+            .unwrap();
+        let board_offset = bank.modes.len();
+        assert!(
+            state.required[board_offset..].iter().any(|f| f.abs() > 1e-3),
+            "axial strain must exert direct force on the bridge even at zero bridge displacement"
+        );
+    }
+    let initial = bank.energy();
+    assert!(initial > 0.0);
+    let board_offset = bank.modes.len();
+    for _ in 0..120 {
+        advance(&mut bank, &[0.0]).unwrap();
+        assert!((bank.next_energy() - initial).abs() < 1e-12 * initial);
+        bank.commit();
+    }
+    let board_kinetic: f64 = bank.v[board_offset..].iter().map(|v| 0.5 * v * v).sum();
+    assert!(
+        board_kinetic > 0.0,
+        "axial wave must transfer energy into soundboard motion through the bridge port"
+    );
+}
+
