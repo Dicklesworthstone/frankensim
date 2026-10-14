@@ -69,7 +69,8 @@ impl Bridge<'_> {
         if tension==0.0 {
             let (next,beam)=self.advance_controlled(target_s,temperatures_k,
                 gravity_m_s2,additional_downward_n_m,config,cancelled)?;
-            return Ok((next,slack_report(drawing,beam)));
+            let report=slack_report(&next,drawing,beam)?;
+            return Ok((next,report));
         }
         positive(finite(target_s-self.time_s)?)?;
         if !gravity_m_s2.is_finite() || gravity_m_s2<0.0 {
@@ -211,16 +212,20 @@ impl Bridge<'_> {
     }
 }
 
-fn slack_report(drawing:Drawing,beam:BeamReport)->Report {
-    Report{drawing,drawing_force_n:0.0,vertical_reactions_n:beam.vertical_reactions_n,
+fn slack_report(next:&Bridge<'_>,drawing:Drawing,beam:BeamReport)->Result<Report,Error> {
+    let mut extension=0.0;
+    for cell in &next.cells {
+        extension=finite(extension+cell.section.axial_strain()*cell.length_m())?;
+    }
+    Ok(Report{drawing,drawing_force_n:0.0,vertical_reactions_n:beam.vertical_reactions_n,
         clamp_reaction_nm:beam.clamp_reaction_nm,moments_nm:beam.moments_nm,
         maximum_sag_m:beam.maximum_sag_m,
         maximum_absolute_deflection_m:beam.maximum_absolute_deflection_m,
         maximum_absolute_rotation_rad:beam.maximum_absolute_rotation_rad,
-        material_point_updates:beam.material_point_updates,axial_extension_m:0.0,
+        material_point_updates:beam.material_point_updates,
         energy_j:beam.energy_j,transverse_load_work_j:beam.load_work_j,
         axial_material_work_j:0.0,geometric_bending_work_j:0.0,
-        minimum_cell_condensation:1.0}
+        minimum_cell_condensation:1.0,axial_extension_m:extension})
 }
 
 fn solve_initial(support:Support,cells:&[ProbeCell],tension:f64)->Result<State,Error> {
@@ -318,8 +323,10 @@ mod tests {
         let q=1200.0*1e-6*9.81;
         let l=0.02;
         let k=fs_math::det::sqrt(tension/ei);
+        let half=0.5*k*l;
+        let cosh_half=0.5*(fs_math::det::exp(half)+fs_math::det::exp(-half));
         let exact=q*l*l/(8.0*tension)-q*ei/(tension*tension)
-            *(1.0-1.0/fs_math::det::cosh(0.5*k*l));
+            *(1.0-1.0/cosh_half);
         let mut errors=Vec::new();
         for n in [4_u32,8,16] {
             let old=birth(n,Support::SimplySupported,&law);
