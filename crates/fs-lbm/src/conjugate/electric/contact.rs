@@ -84,36 +84,48 @@ impl ElectricSetup {
         domain: &VoxelDomain,
         temperature: &[f64],
         contacts: &[ElectricalContact],
-        mut resolve: impl FnMut(usize, Voxel, f64) -> Result<Option<f64>, ChtError>,
+        resolve: impl FnMut(usize, Voxel, f64) -> Result<Option<f64>, ChtError>,
         gate: &CancelGate,
     ) -> Result<ElectricSolution, ChtError> {
-        poll(gate)?;
-        let mut nodes = admit(domain, self, false)?;
-        let cells = domain.cell_count();
-        if temperature.len() != cells {
-            return Err(ChtError::InvalidInput {
-                field: "electric.temperature",
-                reason: "needs one temperature per cell".into(),
-            });
-        }
-        for c in 0..cells {
-            poll_every(gate, c)?;
-            if !matches!(nodes[c], Node::Electrode(_)) {
-                finite_positive("electric.temperature", temperature[c])?;
-            }
-        }
-        let mut rho = vec![f64::NAN; cells];
-        for c in 0..cells {
-            poll_every(gate, c)?;
-            if matches!(nodes[c], Node::Electrode(_)) { continue; }
-            if let Some(value) = resolve(c, domain.voxel_at(c), temperature[c])? {
-                finite_positive("electric.resistivity_ohm_m", value)?;
-                rho[c] = value;
-                nodes[c] = Node::Conductor;
-            }
-        }
+        let (nodes, rho) = resolve_cells(self, domain, temperature, resolve, gate)?;
         solve_electric_field(domain, self, nodes, &rho, contacts, gate)
     }
+}
+
+// One material/topology admission for stationary and moving conductors.
+pub(super) fn resolve_cells(
+    setup: &ElectricSetup,
+    domain: &VoxelDomain,
+    temperature: &[f64],
+    mut resolve: impl FnMut(usize, Voxel, f64) -> Result<Option<f64>, ChtError>,
+    gate: &CancelGate,
+) -> Result<(Vec<Node>, Vec<f64>), ChtError> {
+    poll(gate)?;
+    let mut nodes = admit(domain, setup, false)?;
+    let cells = domain.cell_count();
+    if temperature.len() != cells {
+        return Err(ChtError::InvalidInput {
+            field: "electric.temperature",
+            reason: "needs one temperature per cell".into(),
+        });
+    }
+    for c in 0..cells {
+        poll_every(gate, c)?;
+        if !matches!(nodes[c], Node::Electrode(_)) {
+            finite_positive("electric.temperature", temperature[c])?;
+        }
+    }
+    let mut rho = vec![f64::NAN; cells];
+    for c in 0..cells {
+        poll_every(gate, c)?;
+        if matches!(nodes[c], Node::Electrode(_)) { continue; }
+        if let Some(value) = resolve(c, domain.voxel_at(c), temperature[c])? {
+            finite_positive("electric.resistivity_ohm_m", value)?;
+            rho[c] = value;
+            nodes[c] = Node::Conductor;
+        }
+    }
+    Ok((nodes, rho))
 }
 
 /// Sparse canonical face data. Sorting the key does not discard surface order:

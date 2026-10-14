@@ -41,6 +41,7 @@ use super::krylov::bicgstab_ilu0;
 use super::{ChtError, finite, finite_positive, poll};
 
 mod contact;
+pub mod motion;
 pub use contact::ElectricalContact;
 
 /// An ohmic conductor: `rho(T) = rho_0 (1 + alpha (T - T_ref))`.
@@ -231,7 +232,8 @@ pub struct ElectricSolution {
     /// Sum of `joule_w`, W.
     pub total_joule_w: f64,
     /// Power the electrodes deliver, `sum_e V_e I_e`, W (equal to
-    /// `total_joule_w` up to the solver residual).
+    /// `total_joule_w` up to the solver residual in stationary solves; the
+    /// moving-conductor path additionally includes Lorentz mechanical power).
     pub delivered_w: f64,
     /// One entry per electrode, in order.
     pub electrodes: Vec<ElectrodeSolution>,
@@ -426,9 +428,22 @@ fn solve_electric_impl(
 fn solve_electric_field(
     domain: &VoxelDomain,
     setup: &ElectricSetup,
+    nodes: Vec<Node>,
+    rho: &[f64],
+    contacts: &[ElectricalContact],
+    gate: &CancelGate,
+) -> Result<ElectricSolution, ChtError> {
+    solve_electric_field_with_motion(domain, setup, nodes, rho, contacts, None, gate)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn solve_electric_field_with_motion(
+    domain: &VoxelDomain,
+    setup: &ElectricSetup,
     mut nodes: Vec<Node>,
     rho: &[f64],
     contacts: &[ElectricalContact],
+    mut motion: Option<&mut motion::MotionCoupling<'_>>,
     gate: &CancelGate,
 ) -> Result<ElectricSolution, ChtError> {
     poll(gate)?;
@@ -500,6 +515,12 @@ fn solve_electric_field(
     }
     for (c, node) in nodes.iter_mut().enumerate() {
         if *node == Node::Conductor && !grounded[c] {
+            if motion.is_some() {
+                return Err(ChtError::InvalidInput {
+                    field: "electric.motion",
+                    reason: format!("conducting component at cell {c} needs a voltage reference; motional currents cannot be discarded"),
+                });
+            }
             *node = Node::Off;
         }
     }
@@ -549,12 +570,22 @@ fn solve_electric_field(
                     finite_positive("electric.face_conductance_s", g)?;
                     coo.push(r, r, g);
                     coo.push(r, row_of[n], -g);
+                    if let Some(m) = motion.as_deref() {
+                        b[r] -= g * m.emf(domain, c, n, face, nodes[n])?;
+                    }
                 }
                 Node::Electrode(e) => {
                     linked[e] = true;
                     let g = area / (half(c, axis) + contact_r);
                     finite_positive("electric.face_conductance_s", g)?;
                     coo.push(r, r, g);
+                    if let Some(m) = motion.as_deref() {
+                        let induced = g * m.emf(domain, c, n, face, nodes[n])?;
+                        b[r] -= induced;
+                        if matches!(setup.electrodes[e].drive, ElectrodeDrive::Current(_)) {
+                            b[electrode_row[e]] += induced;
+                        }
+                    }
                     match setup.electrodes[e].drive {
                         ElectrodeDrive::Voltage(v) => b[r] += g * v,
                         ElectrodeDrive::Current(_) => {
@@ -575,6 +606,11 @@ fn solve_electric_field(
                 reason: format!("current electrode {e} touches no conductor cell"),
             });
         }
+    }
+    if motion.is_some() && b.iter().any(|value| !value.is_finite()) {
+        return Err(ChtError::InvalidInput {
+            field: "electric.motion", reason: "motional current right-hand side overflows".into(),
+        });
     }
     let mut x = vec![0.0f64; rows];
     let mut iterations = 0;
@@ -638,7 +674,11 @@ fn solve_electric_field(
                 Node::Conductor if face % 2 == 1 => {
                     let (hc, hn) = (half(c, axis), half(n, axis));
                     let resistance = hc + hn + contact_r;
-                    let drop = potential_v[c] - potential_v[n];
+                    let mut drop = potential_v[c] - potential_v[n];
+                    if let Some(m) = motion.as_deref_mut() {
+                        drop += m.emf(domain, c, n, face, nodes[n])?;
+                        m.deposit(domain, c, n, face, nodes[n], area / resistance * drop)?;
+                    }
                     let heat = area / resistance * drop * drop;
                     if contact_r == 0.0 {
                         // Preserve the established perfect-contact arithmetic.
@@ -655,7 +695,12 @@ fn solve_electric_field(
                     let hc = half(c, axis);
                     let resistance = hc + contact_r;
                     let g = area / resistance;
-                    let drop = electrode_potential[e] - potential_v[c];
+                    let mut drop = electrode_potential[e] - potential_v[c];
+                    if let Some(m) = motion.as_deref_mut() {
+                        // drop is electrode -> c; the face helper is c -> electrode.
+                        drop -= m.emf(domain, c, n, face, nodes[n])?;
+                        m.deposit(domain, c, n, face, nodes[n], -g * drop)?;
+                    }
                     let heat = g * drop * drop;
                     if contact_r == 0.0 {
                         joule_w[c] += heat;

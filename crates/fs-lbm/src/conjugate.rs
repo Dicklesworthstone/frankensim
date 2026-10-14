@@ -104,6 +104,7 @@ pub use buoyant::{
     FvBuoyancyConfig, FvNaturalConvection, FvNaturalConvectionReport, fv_natural_convection,
 };
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
+pub use electric::motion::{ElectricMotionInput, MovingConductorSolution};
 pub use electric::{
     Conductor, ElectricSetup, ElectricSolution, ElectricalContact, Electrode, ElectrodeDrive,
     ElectrodeSolution, ElectrothermalReport, solve_electric, solve_electrothermal,
