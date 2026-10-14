@@ -183,8 +183,8 @@ def main():
     rows.append({
         "id": "low-resonance",
         "symptom": f"An early resonance near {np.mean(list(knock_hz.values())):.1f} Hz sits at {early['pressure_db']:.1f} dB re the fundamental; the real piano's strongest component in that band is at {real_knock:.1f} dB.",
-        "evidence": f"Same frequency within {spread:.2f} Hz for A3 at every stroke speed and for C6, so it belongs to the modelled instrument, not a string. It is {abs(knock_hz['a3-mf'] - 130.813):.2f} Hz from C3, so not a sympathetic C string, and no bare-board mode lies within {min(abs(b - knock_hz['a3-mf']) for b in board):.0f} Hz. At A3's bridge it is already {early['bridge_db']:.1f} dB re partial 1; radiation to the microphone adds {early['pressure_db'] - early['bridge_db']:.1f} dB.",
-        "suspect": "Mostly mechanical: a string-loaded board resonance driven too strongly or damped too lightly. The infinite-baffle radiation adds only the last few dB.",
+        "evidence": f"Same frequency within {spread:.2f} Hz for A3 at every stroke speed and for C6: it does not follow the struck note. It is {abs(knock_hz['a3-mf'] - 130.813):.2f} Hz from nominal C3; that difference neither identifies nor excludes an unplayed string or a coupled board/string mode. No bare-board mode lies within {min(abs(b - knock_hz['a3-mf']) for b in board):.0f} Hz, which does not identify the loaded instrument's modes. At A3's bridge it is already {early['bridge_db']:.1f} dB re partial 1; radiation to the microphone adds {early['pressure_db'] - early['bridge_db']:.1f} dB.",
+        "suspect": "A coupled mechanical resonance driven too strongly or damped too lightly; participation of the board and unplayed strings is unresolved. The measured bridge-to-receiver coloration adds a further contribution.",
         "test": "Render with air reaction on the board (--rayleigh-loading). Today the production board cannot admit it: 128 modes exceed the work ceiling, the mesh is too coarse above 1.1 kHz, and the 1 kHz board's passive fit misses its accuracy limits.",
         "status": "open",
         "data": {"hz": knock_hz, "bridge_db": early["bridge_db"], "pressure_db": early["pressure_db"], "real_db": r(real_knock, 3)},
@@ -204,8 +204,8 @@ def main():
     rows.append({
         "id": "board-ringing",
         "symptom": f"Between 0.2 and 1 s, {np_ours['mf'] - np_real['mf']:.0f} dB more of FrankenSim's energy lies away from the string partials than the real piano's (mf: {np_ours['mf']:.1f} vs {np_real['mf']:.1f} dB re total).",
-        "evidence": "Strongest off-partial peaks: " + ", ".join(f"{p['hz']:.0f} Hz ({p['db']:.0f} dB)" for p in peaks[:6]) + "." + (f" Those within 15 Hz of partial{'s' if len(sat) > 1 else ''} {', '.join(map(str, sat))} are satellites: a string partial split by coupling to a nearby board mode." if sat else "") + (f" {len(lows)} lie below the fundamental, where only the board resonates." if lows else ""),
-        "suspect": "String-board coupling with board modes that ring too long: too little damping in the wood, no air reaction, or no losses at the rim and case.",
+        "evidence": "Strongest off-partial peaks: " + ", ".join(f"{p['hz']:.0f} Hz ({p['db']:.0f} dB)" for p in peaks[:6]) + "." + (f" Those within 15 Hz of partial{'s' if len(sat) > 1 else ''} {', '.join(map(str, sat))} may be satellites from string-board coupling; proximity alone does not establish their modal participation." if sat else "") + (f" {len(lows)} lie below the struck note's fundamental; the board and unplayed strings can both participate there." if lows else ""),
+        "suspect": "Coupled mechanical ringing: wood, unplayed-string/damper losses, air reaction and rim/case losses remain candidates until mode participation and controlled ablations distinguish them.",
         "test": "Raise the board's modal damping, or add air reaction, and re-measure the off-partial energy and the satellites' decay.",
         "status": "open",
         "data": {"real_db": np_real, "ours_db": np_ours, "peaks": peaks},
@@ -308,14 +308,14 @@ def main():
         row["status"] = "confirmed" if moved >= 3 else "refuted"
         if moved < 3:
             nodal = [k for k in (4, 6) if abs(math.sin(k * math.pi * 0.12031)) > 0.5]
-            row["suspect"] = (f"Upstream of the microphone. In the bridge's own motion partials 4 and 6 already sit at {lv[3]:.0f} and {lv[5]:.0f} dB, "
+            row["suspect"] = (f"The bridge deficits persist at these sampled receiver positions. In the bridge's own motion partials 4 and 6 already sit at {lv[3]:.0f} and {lv[5]:.0f} dB, "
                               + (f"and a strike at 0.12 of the string length does not null partial{'s' if len(nodal) > 1 else ''} {' and '.join(map(str, nodal))}. " if nodal else "")
-                              + "The remaining candidates are the board's mobility at A3's bridge and the felt's contact spectrum.")
-            row["test"] = "Compute the bridge driving-point admittance at A3 (grand_piano's admittance mode) and look for dips near 882 and 1323 Hz; then vary the felt law alone."
+                              + "The board's mobility at A3's bridge and the felt's contact spectrum remain candidates. Two receiver positions do not validate or exclude the radiation/spatial-transfer model.")
+            row["test"] = "Compute the bridge driving-point admittance at A3 (grand_piano's admittance mode) near 882 and 1323 Hz, compare radiation over more receivers, then vary the felt law alone."
         row["result"] = (f"Receivers 0.23 m above the board near the Iowa positions: the partial-pattern distance to the recording is "
                          f"{res['bass-side receiver']['pattern_gap_db']:.1f} dB (bass side) and {res['treble-side receiver']['pattern_gap_db']:.1f} dB (treble side), "
                          f"against {base['pattern_gap_db']:.1f} dB at the default point 1 m up. "
-                         + ("Listening position explains a real part of the gap." if moved >= 3 else "Moving the receiver does not close the gap, so the pattern is made upstream, in the hammer, string or board.")
+                         + ("Listening position explains a real part of the gap." if moved >= 3 else "These two receiver moves do not meet the 3 dB improvement criterion; they do not exclude a radiation/spatial-transfer defect.")
                          )
         near = min(res["bass-side receiver"]["low_resonance_db"], res["treble-side receiver"]["low_resonance_db"]), max(res["bass-side receiver"]["low_resonance_db"], res["treble-side receiver"]["low_resonance_db"])
         lr = next(q for q in rows if q["id"] == "low-resonance")
@@ -324,10 +324,10 @@ def main():
                         f"About {near[1] - lr['data']['real_db']:.0f} dB remain against the real piano's {lr['data']['real_db']:.1f} dB. The air-loading test for the remainder is still blocked.")
         lr["status"] = "testing"
         lr["suspect"] = (f"Two parts. The default listening point accounts for about {base['low_resonance_db'] - near[1]:.0f} dB (shown by the receiver experiment). "
-                         f"The remaining {near[1] - lr['data']['real_db']:.0f} dB is in the board: a string-loaded resonance driven too strongly or damped too lightly, possibly for lack of air loading.")
+                         f"The remaining {near[1] - lr['data']['real_db']:.0f} dB needs coupled-mode participation and damping/air-loading tests; the measurements do not attribute it to the board alone.")
         br_ = next(q for q in rows if q["id"] == "board-ringing")
-        br_["result"] = (f"Not a listening-position effect: at receivers near the Iowa positions the off-partial share is {res['bass-side receiver']['non_partial_db']:.1f} and "
-                         f"{res['treble-side receiver']['non_partial_db']:.1f} dB (default point {base['non_partial_db']:.1f} dB, real piano {np_real['mf']:.1f} dB). The board itself rings too much; damping and air loading remain the candidates.")
+        br_["result"] = (f"The two selected near receivers do not close the off-partial gap: their shares are {res['bass-side receiver']['non_partial_db']:.1f} and "
+                         f"{res['treble-side receiver']['non_partial_db']:.1f} dB (default point {base['non_partial_db']:.1f} dB, real piano {np_real['mf']:.1f} dB). Coupled board/string/damper losses and radiation remain candidates; this does not identify board-only ringing.")
     waves = {d: V.CAMPAIGN / "piano" / f"a3-{d}-waves.wav" for d in ("mf", "ff")}
     if all(p.exists() for p in waves.values()):
         def bright(x):
