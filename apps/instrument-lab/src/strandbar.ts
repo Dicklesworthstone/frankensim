@@ -26,6 +26,9 @@ interface StrandbarData {
 }
 
 const SR = 48_000;
+/** Look-ahead of the live lanes, frames, and how long after Play both versions start (the lanes fill first). */
+const AHEAD = 24_000;
+const LEAD_S = 1.0;
 type Phase = "idle" | "loading" | "playing";
 
 /** Strandbar on the studio render and on the live engines at once, with a switch between them. */
@@ -209,9 +212,11 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
           h.gap = s.gapFrames;
         }
       });
-      const piano = new PianoLane(m, { aheadFrames: 4096, gain: data.live.piano.gain });
-      const kick = new KitLane(m, "kick", { gain: data.live.kick.gain, aheadFrames: 4096, minRealtime: 1.6, fieldHz: 0 });
-      const hihat = new KitLane(m, "hihat-closed", { gain: data.live.hihat.gain, aheadFrames: 4096, minRealtime: 1.6, fieldHz: 0 });
+      // a fixed score needs no low latency: half a second of look-ahead rides out CPU contention
+      // (another tab, a busy machine) that an 85 ms buffer turned into dropouts
+      const piano = new PianoLane(m, { aheadFrames: AHEAD, gain: data.live.piano.gain });
+      const kick = new KitLane(m, "kick", { gain: data.live.kick.gain, aheadFrames: AHEAD, minRealtime: 1.6, fieldHz: 0 });
+      const hihat = new KitLane(m, "hihat-closed", { gain: data.live.hihat.gain, aheadFrames: AHEAD, minRealtime: 1.6, fieldHz: 0 });
       const meter = (id: string) => (s: LaneWorkerStats): void => {
         const h = (laneHealth[id] ??= { late: 0, gap: 0, rt: 0 });
         h.rt = s.realtime;
@@ -227,7 +232,7 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       lanes = { piano, kick, hihat };
 
       // one clock for everything: the loop and all three engines start on the same frame
-      startFrame = Math.round((c.currentTime + 0.4) * SR);
+      startFrame = Math.round((c.currentTime + LEAD_S) * SR);
       source = c.createBufferSource();
       source.buffer = buffer;
       source.loop = true;
