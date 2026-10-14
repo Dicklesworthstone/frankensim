@@ -6,6 +6,8 @@
 //! The original electrical contact deposition and thermal integration own all
 //! numerical work. This adapter neither solves melt flow nor changes cell mass.
 
+pub mod transport;
+
 use std::collections::{BTreeMap, BTreeSet};
 use fs_conduction::transient::deposition::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation,
@@ -163,9 +165,8 @@ fn admit_map(thermal: &DepositionSimulation<'_>, input: JouleEnthalpyInput<'_>, 
 type ResistivityLaw<'a> = dyn Fn(usize, &DepositedCell, f64) -> Result<Option<f64>, ChtError> + 'a;
 
 #[derive(Clone)]
-struct Source<'a> {
+struct Account<'a> {
     input: JouleEnthalpyInput<'a>,
-    law: &'a ResistivityLaw<'a>,
     gate: &'a CancelGate,
     solves: usize,
     electrode_j: f64,
@@ -176,8 +177,8 @@ struct Source<'a> {
     last: Option<EnthalpyCurrentState>,
     last_dt: Option<f64>,
 }
-impl Source<'_> {
-    fn evaluate(&mut self, thermal: &DepositionSimulation<'_>) -> Result<EnthalpyCurrentState, JouleEnthalpyError> {
+impl Account<'_> {
+    fn evaluate(&mut self, thermal: &DepositionSimulation<'_>, law: &ResistivityLaw<'_>) -> Result<EnthalpyCurrentState, JouleEnthalpyError> {
         checkpoint(self.gate)?;
         if self.solves >= self.input.max_current_solves { return Err(JouleEnthalpyError::CurrentBudget); }
         self.solves += 1;
@@ -192,7 +193,7 @@ impl Source<'_> {
         let electric = self.input.setup.solve_with_cell_contacts(
             self.input.domain, &temperature_k, self.input.contacts,
             |c,_,t| {
-                let value = (self.law)(c, &thermal.cells()[&self.input.cell_ids[c]], t)?;
+                let value = (law)(c, &thermal.cells()[&self.input.cell_ids[c]], t)?;
                 resistivity_ohm_m[c] = value;
                 Ok(value)
             }, self.gate,
@@ -214,13 +215,12 @@ impl Source<'_> {
             resistivity_ohm_m, electric })
     }
 }
-impl DepositionObserver for Source<'_> {
-    type Error = JouleEnthalpyError;
-    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(),Self::Error> { Ok(()) }
-    fn sources(&mut self, thermal: &DepositionSimulation<'_>, check: &mut dyn FnMut()->Result<(),DepositionError>)
-        -> Result<BTreeMap<CellId,f64>,Self::Error> {
-        check()?;
-        let state = self.evaluate(thermal)?;
+impl<'a> Account<'a> {
+    fn new(input: JouleEnthalpyInput<'a>, gate: &'a CancelGate) -> Self {
+        Self { input, gate, solves:0, electrode_j:0.0, joule_j:0.0, mapped_j:0.0,
+            pending_mapped_w:0.0, pending_electrode_w:0.0, last:None, last_dt:None }
+    }
+    fn apply(&mut self, state: EnthalpyCurrentState) -> Result<BTreeMap<CellId,f64>,JouleEnthalpyError> {
         let mapped: BTreeMap<_,_> = self.input.cell_ids.iter().copied()
             .zip(state.electric.joule_w.iter().copied()).collect();
         self.pending_mapped_w = mapped.values().try_fold(0.0, |sum,&q| finite(sum+q))?;
@@ -230,9 +230,7 @@ impl DepositionObserver for Source<'_> {
         self.last_dt = None;
         Ok(mapped)
     }
-    fn step(&mut self, start_s:f64, dt:f64, _: &BTreeMap<CellId,f64>, _: &DepositionSimulation<'_>,
-        check: &mut dyn FnMut()->Result<(),DepositionError>) -> Result<(),Self::Error> {
-        check()?;
+    fn record(&mut self, start_s:f64, dt:f64) -> Result<(),JouleEnthalpyError> {
         let state = self.last.as_ref().ok_or(invalid("thermal step has no electrical source"))?;
         if state.time_s != start_s || self.last_dt.is_some() || !dt.is_finite() || dt <= 0.0 {
             return Err(invalid("electrical source epoch does not match the thermal substep"));
@@ -242,6 +240,42 @@ impl DepositionObserver for Source<'_> {
         self.mapped_j = finite(self.mapped_j+finite(dt*self.pending_mapped_w)?)?;
         self.last_dt = Some(dt);
         Ok(())
+    }
+}
+
+impl Account<'_> {
+    fn finish(self, audit: EnergyAudit, endpoint: EnthalpyCurrentState) -> Result<JouleEnthalpyReport,JouleEnthalpyError> {
+        let electrical_defect_j = finite(self.electrode_j-self.joule_j)?;
+        let transfer_defect_j = finite(self.joule_j-self.mapped_j)?;
+        if electrical_defect_j.abs() > self.input.energy_tolerance_j || transfer_defect_j.abs() > self.input.energy_tolerance_j {
+            return Err(invalid("accumulated electrical/thermal source energy does not close"));
+        }
+        checkpoint(self.gate)?;
+        Ok(JouleEnthalpyReport { thermal:audit, electrode_energy_j:self.electrode_j,
+            joule_energy_j:self.joule_j, deposited_joule_j:self.mapped_j,
+            electrical_defect_j, transfer_defect_j, current_solves:self.solves,
+            last_applied:self.last, last_duration_s:self.last_dt, endpoint })
+    }
+}
+
+#[derive(Clone)]
+struct Source<'a> {
+    account: Account<'a>,
+    law: &'a ResistivityLaw<'a>,
+}
+impl DepositionObserver for Source<'_> {
+    type Error = JouleEnthalpyError;
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(),Self::Error> { Ok(()) }
+    fn sources(&mut self, thermal: &DepositionSimulation<'_>, check: &mut dyn FnMut()->Result<(),DepositionError>)
+        -> Result<BTreeMap<CellId,f64>,Self::Error> {
+        check()?;
+        let state = self.account.evaluate(thermal,self.law)?;
+        self.account.apply(state)
+    }
+    fn step(&mut self, start_s:f64, dt:f64, _: &BTreeMap<CellId,f64>, _: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut()->Result<(),DepositionError>) -> Result<(),Self::Error> {
+        check()?;
+        self.account.record(start_s,dt)
     }
 }
 
@@ -274,21 +308,10 @@ pub fn advance_joule_enthalpy<'t>(
     resolve: impl Fn(usize, &DepositedCell, f64) -> Result<Option<f64>, ChtError>,
 ) -> Result<(DepositionSimulation<'t>, JouleEnthalpyReport), JouleEnthalpyError> {
     admit_map(thermal,input,gate)?;
-    let source = Source { input, law: &resolve, gate, solves:0, electrode_j:0.0,
-        joule_j:0.0, mapped_j:0.0, pending_mapped_w:0.0, pending_electrode_w:0.0,
-        last:None, last_dt:None };
+    let source = Source { account:Account::new(input,gate), law:&resolve };
     let (next,mut source,audit) = thermal.advance_observed(&source,target_s,config,||checkpoint(gate))?;
-    // This current solve validates endpoint material support but contributes no
-    // heat and is retained separately from the last applied start-state source.
-    let endpoint = source.evaluate(&next)?;
-    let electrical_defect_j = finite(source.electrode_j-source.joule_j)?;
-    let transfer_defect_j = finite(source.joule_j-source.mapped_j)?;
-    if electrical_defect_j.abs() > input.energy_tolerance_j || transfer_defect_j.abs() > input.energy_tolerance_j {
-        return Err(invalid("accumulated electrical/thermal source energy does not close"));
-    }
-    checkpoint(gate)?;
-    Ok((next,JouleEnthalpyReport { thermal:audit, electrode_energy_j:source.electrode_j,
-        joule_energy_j:source.joule_j, deposited_joule_j:source.mapped_j,
-        electrical_defect_j, transfer_defect_j, current_solves:source.solves,
-        last_applied:source.last, last_duration_s:source.last_dt, endpoint }))
+    // Endpoint support contributes no additional heat.
+    let endpoint = source.account.evaluate(&next,source.law)?;
+    let report = source.account.finish(audit,endpoint)?;
+    Ok((next,report))
 }
