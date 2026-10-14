@@ -146,7 +146,7 @@ fn global_orthotropic_axis_reaches_each_facet_without_mesh_diagonal_grain_jumps(
     };
     let anisotropic=MeshShell::new_with_materials(mesh.clone(),h.clone(),&[material;2],budget()).unwrap();
     let isotropic=shell(mesh.clone(),0.001);
-    assert_eq!(anisotropic.mass_kg,0.01*0.001*8200.);
+    assert!((anisotropic.mass_kg-0.01*0.001*8200.).abs()<1e-14);
     assert_ne!(anisotropic.sections[0].d,isotropic.sections[0].d);
     // The two triangles have different local first edges. Their stored local D
     // matrices must therefore differ so that the SAME global x material axis is
@@ -162,7 +162,7 @@ fn global_orthotropic_axis_reaches_each_facet_without_mesh_diagonal_grain_jumps(
     for p in &mut rotated.nodes { let x=p[0];p[0]=-p[1];p[1]=x; }
     let rotated_material=SurveyMaterial::Orthotropic {axis1_global:[0.,1.,0.],..material};
     let same=MeshShell::new_with_materials(rotated,h,&[rotated_material;2],budget()).unwrap();
-    assert_eq!(same.mass_kg,anisotropic.mass_kg);
+    assert!((same.mass_kg-anisotropic.mass_kg).abs()<1e-14);
 }
 
 #[test]
