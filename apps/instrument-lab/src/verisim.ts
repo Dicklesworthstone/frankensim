@@ -97,6 +97,32 @@ function rulerChart(canvas: HTMLCanvasElement, rows: { label: string; value: num
   draw();
 }
 
+export type VerdictKind = "close" | "mixed" | "off";
+
+export function pianoToneVerdict(
+  dull: number,
+  softInside: boolean,
+  matched: boolean,
+): { kind: VerdictKind; text: string } {
+  const absDull = Math.abs(dull);
+  const brightInside = Number.isFinite(dull) && absDull <= 3;
+  const kind: VerdictKind =
+    softInside && brightInside ? "close" : softInside || brightInside ? "mixed" : "off";
+  const softClause = softInside
+    ? "pp and mf partial levels sit inside the real piano's own change of touch."
+    : "pp and mf partial levels sit outside the real piano's own change of touch.";
+  const matchedSuffix = matched ? ", even at matched loudness" : "";
+  const ffClause = !Number.isFinite(dull)
+    ? "ff brightness could not be measured."
+    : brightInside
+      ? `ff brightness is within ${absDull.toFixed(0)} dB of the recording${matched ? " at matched loudness" : ""}.`
+      : `ff is ${absDull.toFixed(0)} dB ${dull >= 0 ? "too dull" : "too bright"}${matchedSuffix}.`;
+  return {
+    kind,
+    text: `${softClause} ${ffClause} Several sounds the real piano lacks are listed below.`,
+  };
+}
+
 /** Three-line verdict up front, computed like the findings: both the words and the grade follow the data. */
 function verdicts(v: Verisim, kit: KitSummary | null): HTMLElement {
   const d = (id: string, k: string): Descriptor | undefined => v.pairs.find((x) => x.id === id)?.descriptors[k];
@@ -110,21 +136,20 @@ function verdicts(v: Verisim, kit: KitSummary | null): HTMLElement {
   const dull = n(ff, "high_band_db", "real") - n(ff, "high_band_db", "ours");
   const gap = (id: string): number => (d(id, "partial_envelope_db")?.rms_gap_db as number | null | undefined) ?? NaN;
   const softInside = gap("a3-pp") <= v.piano_ruler.real_pp_vs_real_mf_db && gap("a3-mf") <= v.piano_ruler.real_pp_vs_real_mf_db;
-  type Kind = "close" | "mixed" | "off";
-  const grade = (k: Kind): [Kind, string, string] => (k === "close" ? [k, "✓", "Close"] : k === "mixed" ? [k, "◐", "Mixed"] : [k, "✕", "Not yet"]);
-  const card = ([kind, mark, word]: [Kind, string, string], title: string, text: string): HTMLElement =>
+  const grade = (k: VerdictKind): [VerdictKind, string, string] => (k === "close" ? [k, "✓", "Close"] : k === "mixed" ? [k, "◐", "Mixed"] : [k, "✕", "Not yet"]);
+  const card = ([kind, mark, word]: [VerdictKind, string, string], title: string, text: string): HTMLElement =>
     el("div", { class: `vs-verdict ${kind}` },
       el("div", { class: "vs-verdict-head" }, el("span", { class: "vs-mark", "aria-hidden": "true" }, mark), el("span", { class: "vs-word" }, word), el("h4", {}, title)),
       el("p", {}, text));
-  const toneKind: Kind = softInside && dull <= 3 ? "close" : softInside || dull <= 3 ? "mixed" : "off";
+  const tone = pianoToneVerdict(dull, softInside, matched);
   // The drum kit is graded piece by piece in its own section against a real kit (Salamander overheads).
   const pieces = kit?.pairs ?? [];
   const within = pieces.filter((p) => p.ruler.ours_db <= p.ruler.real_other_dynamic_db).length;
   const ratio = pieces.length ? pieces.map((p) => p.ruler.ours_db / Math.max(p.ruler.real_other_dynamic_db, 0.1)).sort((a, b) => a - b)[Math.floor(pieces.length / 2)]! : NaN;
-  const kitKind: Kind = pieces.length && within === pieces.length ? "close" : within > 0 || ratio <= 3 ? "mixed" : "off";
+  const kitKind: VerdictKind = pieces.length && within === pieces.length ? "close" : within > 0 || ratio <= 3 ? "mixed" : "off";
   return el("div", { class: "vs-verdicts" },
     card(grade(bErr <= 0.15 ? "close" : bErr <= 0.3 ? "mixed" : "off"), "Piano strings", `Inharmonicity within ${Math.ceil(bErr * 100)}% of a real Steinway at A3 and C6, measured from the partials of both.`),
-    card(grade(toneKind), "Piano tone", `${softInside ? "pp and mf partial levels sit inside the real piano's own change of touch." : "pp and mf partial levels sit outside the real piano's own change of touch."} ff is ${dull.toFixed(0)} dB ${dull >= 0 ? "too dull" : "too bright"}${matched ? ", even at matched loudness" : ""}. Several sounds the real piano lacks are listed below.`),
+    card(grade(tone.kind), "Piano tone", tone.text),
     ...(pieces.length ? [card(grade(kitKind), "Drum kit", `${within} of ${pieces.length} pieces sit as close to a real stroke as the same real drum played one dynamic away; the median piece is ${ratio.toFixed(1)}× that distance. Graded in the kit section above.`)] : []),
   );
 }
@@ -150,8 +175,16 @@ function findings(v: Verisim): HTMLElement[] {
   const within = gap("a3-pp") <= ruler.real_pp_vs_real_mf_db && gap("a3-mf") <= ruler.real_pp_vs_real_mf_db && gap("a3-ff") <= ruler.real_mf_vs_real_ff_db;
   items.push([within ? "Partial levels stay within one real dynamic step." : "Partial levels drift beyond one real dynamic step.",
     `The partial-level gap to the recording is ${gap("a3-pp").toFixed(1)} dB at pp, ${gap("a3-mf").toFixed(1)} dB at mf and ${gap("a3-ff").toFixed(1)} dB at ff. The real piano changes by ${ruler.real_pp_vs_real_mf_db.toFixed(1)} dB from pp to mf and ${ruler.real_mf_vs_real_ff_db.toFixed(1)} dB from mf to ff. At mf, 2–8 kHz brightness is within ${Math.abs(num("a3-mf", "high_band_db", "real") - num("a3-mf", "high_band_db", "ours")).toFixed(1)} dB. This is one coarse measure; the sounds below are what set the two apart by ear.`]);
-  if (dyn.ours_db["ff8"] !== undefined) items.push(["ff is too dull, even at matched loudness.",
-    `From mf to ff the real piano gains ${brightGain("real_high_band_db", "ff").toFixed(1)} dB of 2–8 kHz brightness and ${dyn.real_db["ff"]!.toFixed(1)} dB of level. FrankenSim at 4.5 m/s gains ${brightGain("ours_high_band_db", "ff").toFixed(1)} dB of brightness and ${dyn.ours_db["ff"]!.toFixed(1)} dB of level. At 8 m/s, the hardest stroke rendered, it reaches ${dyn.ours_db["ff8"]!.toFixed(1)} dB of level, close to the real ff, but is still ${(num("a3-ff8", "high_band_db", "real") - num("a3-ff8", "high_band_db", "ours")).toFixed(1)} dB duller. Stroke speed alone does not explain it.`]);
+  if (dyn.ours_db["ff8"] !== undefined) {
+    const ff8Dull = num("a3-ff8", "high_band_db", "real") - num("a3-ff8", "high_band_db", "ours");
+    const ff8Abs = Math.abs(ff8Dull);
+    const ff8Word = ff8Dull >= 0 ? "dull" : "bright";
+    const ff8Comp = ff8Dull >= 0 ? "duller" : "brighter";
+    items.push([
+      ff8Abs <= 3 ? "ff brightness lands within 3 dB at matched loudness." : `ff is too ${ff8Word}, even at matched loudness.`,
+      `From mf to ff the real piano gains ${brightGain("real_high_band_db", "ff").toFixed(1)} dB of 2–8 kHz brightness and ${dyn.real_db["ff"]!.toFixed(1)} dB of level. FrankenSim at 4.5 m/s gains ${brightGain("ours_high_band_db", "ff").toFixed(1)} dB of brightness and ${dyn.ours_db["ff"]!.toFixed(1)} dB of level. At 8 m/s, the hardest stroke rendered, it reaches ${dyn.ours_db["ff8"]!.toFixed(1)} dB of level, close to the real ff, ${ff8Abs <= 3 ? `and within ${ff8Abs.toFixed(1)} dB of its brightness.` : `but is still ${ff8Abs.toFixed(1)} dB ${ff8Comp}. Stroke speed alone does not explain it.`}`,
+    ]);
+  }
   const kA = hz("a3-mf", "low_knock_early_db", "ours"), kC = hz("c6-mf", "low_knock_early_db", "ours");
   items.push(["A low resonance rings too loudly at the start.",
     `In the first half second FrankenSim has a component near ${kA.toFixed(0)} Hz at ${num("a3-mf", "low_knock_early_db", "ours").toFixed(1)} dB relative to the fundamental. The real piano's strongest component in that band sits at ${num("a3-mf", "low_knock_early_db", "real").toFixed(1)} dB. ${Math.abs(kA - kC) < 2 ? `It appears at the same frequency when C6 is struck (${kC.toFixed(1)} Hz), so it belongs to the modelled instrument, not to the A3 string. ` : ""}Later the two agree (${num("a3-mf", "low_knock_late_db", "ours").toFixed(1)} dB and ${num("a3-mf", "low_knock_late_db", "real").toFixed(1)} dB).`]);
