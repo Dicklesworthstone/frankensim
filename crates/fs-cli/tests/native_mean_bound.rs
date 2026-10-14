@@ -241,7 +241,7 @@ fn contact_pack(resistance: f64, bounded: bool) -> (Vec<u8>, String) {
     let source = fs_blake3::hash_bytes(b"declared-constant-contact-mean-fixture");
     let provenance = || Provenance {
         source: "explicit constant contact PDE; not experimental data".into(),
-        license: "CC-BY-4.0; redistribution permitted".into(),
+        license: "CC-BY-4.0; redistribution permitted",
         artifact: Some(source),
     };
     let mut claims = ClaimSet::new();
@@ -671,7 +671,9 @@ fn g0_finite_contact_validity_does_not_become_a_continuum_temperature_proof() {
     let mut project = fixture.project.clone();
     fixture.solve(&project, 0);
     request(&mut project);
-    fixture.refused(&project, 1, "global constant contact resistance");
+    // This original fixture has nonzero Neumann heating. A finite contact
+    // card still cannot use the layered comparison for that unsupported model.
+    fixture.refused(&project, 1, "original contact/material domains");
 }
 
 #[cfg(feature = "thermal-verification")]
@@ -746,4 +748,100 @@ fn g0_bounded_scalar_and_feedback_models_cannot_publish_a_frozen_mean_bound() {
         }],
     });
     f.refused(&p, 15, "steady fixed thermal boundary laws");
+}
+
+#[cfg(feature = "thermal-verification")]
+mod finite_contacts {
+    use super::*;
+
+    fn heated_stack(r: f64, finite_material: bool, finite_contact: bool) -> Fixture {
+        let mut fixture = contact_fixture(r, finite_contact);
+        let (bytes, card, state) = constant_pack(finite_material);
+        std::fs::write(fixture.dir.join("constant.fsmcdpk"), bytes).unwrap();
+        for binding in fixture.project.materials.as_mut().unwrap() {
+            binding.card = card.clone(); binding.state = state.clone();
+            binding.claim = None; binding.conductivity_tolerance = None;
+            binding.temp_lo.value = 290.0; binding.temp_hi.value = 330.0;
+        }
+        // Only the original hot region is heated. The source-free cold region
+        // still conducts through its own volume and the unchanged contact.
+        let power = &mut fixture.project.power.as_mut().unwrap()[0];
+        assert_eq!(power.region, "hot");
+        power.watts.value = 20.0;
+        let setup = fixture.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        setup.boundaries.truncate(1);
+        setup.boundaries[0].condition = fs_project::ThermalBoundaryCondition::Convection {
+            coefficient: fs_qty::QtyAny::new(20.0, fs_qty::Dims([0,1,-3,-1,0,0])),
+            reference_temperature: fs_qty::QtyAny::new(300.0, fs_project::spec::dims::TEMPERATURE),
+        };
+        fixture
+    }
+
+    #[test]
+    fn finite_contact_and_material_sources_reach_native_bound_and_replay() {
+        for (finite_material, finite_contact) in [(false,true),(true,false),(true,true)] {
+            let fixture = heated_stack(0.2, finite_material, finite_contact);
+            let mut p = fixture.project.clone();
+            let (_, baseline, original) = fixture.solve(&p, 0);
+            request(&mut p);
+            let (_, receipt, field) = fixture.solve(&p, 1);
+            assert_eq!(original.get("temperature"), field.get("temperature"));
+            for key in ["energy", "interfaces"] { assert_eq!(baseline.get(key), receipt.get(key)); }
+            let bound = receipt.get("volume_mean_bound").unwrap();
+            let proof = bound.get("material_validity").unwrap();
+            assert_eq!(proof.str_field("method"), Some("continuum-layered-contact-comparison"));
+            let range = proof.get("continuum_temperature_range_k").unwrap();
+            // Bound all temperatures by replacing each original P1 source with
+            // the positive envelope. This is conservative, not the actual peak.
+            assert!(range.f64_field("lower").unwrap() <= 300.0);
+            let upper = range.f64_field("upper").unwrap();
+            assert!(upper >= 310.0 && upper < 310.000001);
+            assert_eq!(proof.get("retained_material_domain_k") == Some(&J::Null), !finite_material);
+            assert_eq!(proof.get("retained_contact_domain_k") == Some(&J::Null), !finite_contact);
+            let interval = bound.get("enclosure_k").unwrap();
+            let exact_hot_mean = 303.0 + 20.0*0.2 + 2.0/3.0;
+            assert!(interval.f64_field("lower").unwrap() <= exact_hot_mean);
+            assert!(interval.f64_field("upper").unwrap() >= exact_hot_mean);
+            let contact = &bound.get("contacts").unwrap().as_array().unwrap()[0];
+            assert_eq!(contact.str_field("card"), Some(contact_pack(0.2, finite_contact).1.as_str()));
+            assert_eq!(contact.f64_field("resistance_m2_k_per_w"), Some(0.2));
+            assert_eq!(contact.get("temperature_domain_k") == Some(&J::Null), !finite_contact);
+            assert!(contact.str_field("receipt_bytes_hex").unwrap().len() > 100);
+            let (_, replay, _) = fixture.solve(&p, 2);
+            assert_eq!(bound, replay.get("volume_mean_bound").unwrap());
+        }
+    }
+
+    #[test]
+    fn finite_contact_numerical_bound_flows_into_existing_report_and_package() {
+        let fixture = heated_stack(0.05, true, true);
+        let mut p = fixture.project.clone(); request(&mut p);
+        let (run, receipt, _) = fixture.solve(&p, 0);
+        let bound = receipt.get("volume_mean_bound").unwrap();
+        let ledger = fixture.dir.join("runs.db"); let id = run.str_field("run").unwrap();
+        let exported = command(&["--json", "report", id, ledger.to_str().unwrap()]);
+        let report = J::parse(&std::fs::read_to_string(exported.str_field("report_json").unwrap()).unwrap()).unwrap();
+        let mean = report.get("qois").unwrap().as_array().unwrap().iter()
+            .find(|q| q.str_field("name") == Some(OUTPUT)).unwrap();
+        assert_eq!(mean.f64_field("value"), bound.f64_field("value_k"));
+        assert_eq!(mean.str_field("color"), Some("Verified"));
+        assert_eq!(mean.get("total_budget"), Some(&J::Null), "physical uncertainty stays unknown");
+        let exported = command(&["--json", "package", id, ledger.to_str().unwrap()]);
+        let package = fs_package::EvidencePackage::from_json(&std::fs::read_to_string(
+            exported.str_field("package").unwrap()).unwrap()).unwrap();
+        assert!(fs_checker::check(&package).passed());
+    }
+
+    #[test]
+    fn conservative_contact_range_is_not_replaced_by_an_admissible_nodal_field() {
+        let fixture = heated_stack(7.25, false, true);
+        let mut p = fixture.project.clone();
+        for binding in p.materials.as_mut().unwrap() { binding.temp_hi.value = 500.0; }
+        // Actual exact hot maximum = 449 K, whereas this source-envelope
+        // comparison reaches 451 K, outside the contact card's 450 K domain.
+        // Failure of this particular proof must not be called physical failure.
+        fixture.solve(&p, 0);
+        request(&mut p);
+        fixture.refused(&p, 1, "original contact/material domains");
+    }
 }
