@@ -154,3 +154,100 @@ fn stale_sources_excessive_strain_and_cancellation_publish_no_changed_pose() {
     assert_eq!(rod.solve_static(&TipLoad::default(), 1, 1e-7, &gate), Err(SpatialRodError::Cancelled));
     assert_eq!(rod.positions_m(), before);
 }
+
+#[test]
+fn restraining_nonuniform_heating_produces_compatible_compression_and_support_force() {
+    use fs_ga::So3;
+    use fs_solid::rod::material_field::supports::RodSupport;
+    let (sa, ta) = at(350.0, &[1.0]);
+    let (sb, tb) = at(400.0, &[1.0]);
+    let gate = CancelGate::new();
+    let free = SpatialMaterialRod::try_straight(1.0, vec![sa, sb]).unwrap()
+        .with_thermal_sections(vec![ta, tb], 0.02, &gate).unwrap();
+    let mut restrained = free.with_supports(&[RodSupport { node: 2,
+        position_m: [Some(1.0), Some(0.0), Some(0.0)], frame: Some(So3::identity()) }], &gate).unwrap();
+    let load = TipLoad::default();
+    restrained.solve_static(&load, 1, 1e-7, &gate).unwrap();
+    let area = core::f64::consts::PI * 0.05_f64.powi(2);
+    let force = -(0.5 * 0.00075 + 0.5 * 0.002)
+        / (0.5 / (0.75e6 * area) + 0.5 / (0.5e6 * area));
+    for (i, (young, thermal)) in [(0.75e6, 0.00075), (0.5e6, 0.002)].into_iter().enumerate() {
+        near(restrained.segment_strains(i).unwrap().0[0], thermal + force / (young * area), 3e-5);
+        near(restrained.segment_resultants(i).unwrap().0[0], force, 3e-5);
+    }
+    assert_eq!(restrained.positions_m()[2], [1.0, 0.0, 0.0]);
+    assert_eq!(restrained.frames()[2], So3::identity());
+    let reactions = restrained.support_reactions(&load, &gate).unwrap();
+    near(reactions.nodes[0].force_n[0].unwrap(), force, 3e-5);
+    assert!(reactions.free_residual_norm < 1e-7);
+    assert_eq!(free.positions_m()[1], [0.5, 0.0, 0.0]);
+    assert!(free.supports().is_empty());
+}
+
+#[test]
+fn fully_prescribed_pose_keeps_real_reactions_when_there_are_no_free_dofs() {
+    use fs_ga::{So3, So3Tangent, Vec3};
+    use fs_solid::rod::material_field::supports::RodSupport;
+    let (shear, _) = at(300.0, &[1.0]);
+    let axial = shear.elastic().axial_stiffness_n();
+    let torsion = shear.torsional_stiffness_n_m2();
+    let gate = CancelGate::new();
+    let pose = So3::identity().body_plus(So3Tangent::new(Vec3::new(0.005, 0.0, 0.0))).unwrap();
+    let mut rod = SpatialMaterialRod::try_straight(0.5, vec![shear]).unwrap()
+        .with_supports(&[RodSupport { node: 1, position_m: [Some(0.501), Some(0.0), Some(0.0)],
+            frame: Some(pose) }], &gate).unwrap();
+    let load = TipLoad { force: [0.5, 0.0, 0.0], moment: [0.01, 0.0, 0.0] };
+    assert_eq!(rod.solve_static(&load, 2, 1e-7, &gate).unwrap(), vec![0.0, 0.0]);
+    assert_eq!(rod.positions_m()[1], [0.501, 0.0, 0.0]);
+    assert_eq!(rod.frames()[1], pose);
+    let response = rod.support_reactions(&load, &gate).unwrap();
+    assert_eq!(response.free_residual_norm, 0.0);
+    near(response.nodes[0].force_n[0].unwrap(), axial * 0.002 - 0.5, 3e-5);
+    near(response.nodes[0].moment_body_nm.unwrap()[0], torsion * 0.01 - 0.01, 3e-5);
+    assert!(rod.energy_j().unwrap() > 0.0);
+}
+
+#[test]
+fn rotation_clamp_leaves_translation_free_and_retains_the_applied_moment_reaction() {
+    use fs_ga::So3;
+    use fs_solid::rod::material_field::supports::RodSupport;
+    let (shear, _) = at(300.0, &[1.0]);
+    let axial = shear.elastic().axial_stiffness_n();
+    let gate = CancelGate::new();
+    let mut rod = SpatialMaterialRod::try_straight(0.5, vec![shear]).unwrap()
+        .with_supports(&[RodSupport { node: 1, position_m: [None; 3],
+            frame: Some(So3::identity()) }], &gate).unwrap();
+    let load = TipLoad { force: [0.5, 0.0, 0.0], moment: [0.01, 0.0, 0.0] };
+    rod.solve_static(&load, 1, 1e-7, &gate).unwrap();
+    near(rod.positions_m()[1][0] - 0.5, 0.5 * 0.5 / axial, 3e-5);
+    assert_eq!(rod.frames()[1], So3::identity());
+    let response = rod.support_reactions(&load, &gate).unwrap();
+    assert_eq!(response.nodes[0].force_n, [None; 3]);
+    near(response.nodes[0].moment_body_nm.unwrap()[0], -0.01, 3e-5);
+    assert!(response.free_residual_norm < 1e-7);
+}
+
+#[test]
+fn malformed_or_out_of_regime_supports_cannot_mutate_the_material_specimen() {
+    use fs_solid::rod::material_field::supports::RodSupport;
+    let (shear, thermal) = at(400.0, &[1.0]);
+    let gate = CancelGate::new();
+    let rod = SpatialMaterialRod::try_straight(0.5, vec![shear]).unwrap()
+        .with_thermal_sections(vec![thermal], 0.02, &gate).unwrap();
+    let support = RodSupport { node: 1, position_m: [Some(0.5), None, None], frame: None };
+    for bad in [RodSupport { node: 0, ..support }, RodSupport { node: 2, ..support },
+        RodSupport { position_m: [None; 3], ..support },
+        RodSupport { position_m: [Some(f64::NAN), None, None], ..support },
+        RodSupport { position_m: [Some(0.6), None, None], ..support }]
+    {
+        assert!(rod.with_supports(&[bad], &gate).is_err());
+    }
+    assert!(rod.with_supports(&[support, support], &gate).is_err());
+    let bound = rod.with_supports(&[support], &gate).unwrap();
+    assert_eq!(bound.supports(), &[support]);
+    assert!(bound.with_supports(&[], &gate).unwrap().supports().is_empty());
+    gate.request();
+    assert!(matches!(rod.with_supports(&[support], &gate), Err(SpatialRodError::Cancelled)));
+    assert!(rod.supports().is_empty());
+    assert_eq!(rod.positions_m()[1], [0.5, 0.0, 0.0]);
+}

@@ -204,19 +204,51 @@ impl Rod {
         steps: usize,
         tol: f64,
     ) -> Result<Vec<f64>, SolidError> {
-        self.solve_static_with_energy(load, steps, tol, &Self::energy, &|| Ok(()))
+        self.solve_static_with_energy(load, steps, tol, &Self::energy, &|| Ok(()), None)
     }
 
-    // The constitutive energy is the only varying input. Both uniform and
-    // spatial material paths differentiate it through the SAME nodal update,
-    // residual, tangent, load stepping and line search. No solver fork.
+    // Both uniform and spatial material paths use the SAME nodal update,
+    // residual, tangent, load stepping and line search. Additional supports
+    // project the same residual onto their free coordinates. No solver fork.
+    #[allow(clippy::too_many_lines)] // preserve one bounded Newton/line-search owner
     fn solve_static_with_energy<E: From<SolidError>>(
         &mut self, load: &TipLoad, steps: usize, tol: f64,
         energy: &impl Fn(&Self) -> Result<f64, E>,
         checkpoint: &impl Fn() -> Result<(), E>,
+        free_dofs: Option<&[usize]>,
     ) -> Result<Vec<f64>, E> {
         checkpoint()?;
-        let n = self.ndof();
+        let full_n = self.ndof();
+        // These indices are admitted by the spatial support owner. The legacy
+        // path uses the full identity projection and keeps its operation order.
+        let free = match free_dofs {
+            Some(dofs) => dofs.to_vec(),
+            None => (0..full_n).collect(),
+        };
+        let n = free.len();
+        let mut fixed = vec![true; full_n];
+        for &k in &free { fixed[k] = false; }
+        let anchored_positions = self.positions.clone();
+        let anchored_frames = self.frames.clone();
+        // Even a zero group increment may canonicalize a frame's bits. Restore
+        // fixed coordinates explicitly rather than letting a clamp drift.
+        let constrain = |rod: &mut Self| {
+            for node in 1..rod.positions.len() {
+                let k = 6 * (node - 1);
+                for c in 0..3 {
+                    if fixed[k + c] { rod.positions[node][c] = anchored_positions[node][c]; }
+                }
+                if fixed[k + 3] && fixed[k + 4] && fixed[k + 5] {
+                    rod.frames[node] = anchored_frames[node];
+                }
+            }
+        };
+        if n == 0 {
+            energy(self)?;
+            checkpoint()?;
+            return Ok(vec![0.0; steps]);
+        }
+        let residual_norm = |r: &[f64]| free.iter().map(|&k| r[k] * r[k]).sum::<f64>().sqrt();
         let mut finals = Vec::new();
         for step in 1..=steps {
             #[allow(clippy::cast_precision_loss)]
@@ -226,7 +258,7 @@ impl Rod {
             for _ in 0..40 {
                 checkpoint()?;
                 let r = self.residual(load, factor, energy, checkpoint)?;
-                let rn = r.iter().map(|x| x * x).sum::<f64>().sqrt();
+                let rn = residual_norm(&r);
                 history.push(rn);
                 if rn < tol {
                     converged = true;
@@ -238,16 +270,18 @@ impl Rod {
                 let mut probe = self.clone();
                 for col in 0..n {
                     checkpoint()?;
-                    let mut d = vec![0.0f64; n];
-                    d[col] = eps;
+                    let mut d = vec![0.0f64; full_n];
+                    d[free[col]] = eps;
                     probe.clone_from(self);
                     probe.apply_increment(&d, 1.0)?;
+                    constrain(&mut probe);
                     let rp = probe.residual(load, factor, energy, checkpoint)?;
                     probe.clone_from(self);
                     probe.apply_increment(&d, -1.0)?;
+                    constrain(&mut probe);
                     let rm = probe.residual(load, factor, energy, checkpoint)?;
                     for row in 0..n {
-                        kmat[row * n + col] = (rp[row] - rm[row]) / (2.0 * eps);
+                        kmat[row * n + col] = (rp[free[row]] - rm[free[row]]) / (2.0 * eps);
                     }
                 }
                 checkpoint()?;
@@ -255,8 +289,10 @@ impl Rod {
                     iters: 0,
                     rel_residual: f64::INFINITY,
                 })?;
-                let mut d: Vec<f64> = r.iter().map(|x| -x).collect();
-                f.solve(&mut d);
+                let mut reduced: Vec<f64> = free.iter().map(|&k| -r[k]).collect();
+                f.solve(&mut reduced);
+                let mut d = vec![0.0; full_n];
+                for (&k, &value) in free.iter().zip(&reduced) { d[k] = value; }
                 checkpoint()?;
                 // Backtracking on the residual norm (dead moments make
                 // Π alone an incomplete merit function).
@@ -266,8 +302,9 @@ impl Rod {
                     checkpoint()?;
                     let mut trial = self.clone();
                     trial.apply_increment(&d, alpha)?;
+                    constrain(&mut trial);
                     let rt = trial.residual(load, factor, energy, checkpoint)?;
-                    let rtn = rt.iter().map(|x| x * x).sum::<f64>().sqrt();
+                    let rtn = residual_norm(&rt);
                     if rtn < rn {
                         *self = trial;
                         accepted = true;
