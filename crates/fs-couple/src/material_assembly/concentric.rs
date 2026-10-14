@@ -1,16 +1,17 @@
 //! Bind source-resolved concentric sections into the existing assembly solver.
 //!
-//! This is an elastic, perfectly bonded slender member, NOT a helical wrapped
-//! string. Geometry, material assignment and support prescription are data.
-//! Every downstream mass, axial nonlinear stiffness, bending dispersion and
-//! radiating width comes from the same section; no solver is reimplemented.
-//! The [`thermal`] adapter retains each layer's thermal path and stress.
+//! This is a perfectly bonded slender member, NOT a helical wrapped string.
+//! Geometry, material assignment and support prescription are data. Every
+//! downstream mass, axial nonlinear stiffness, bending dispersion and radiating
+//! width comes from the same section; no solver is reimplemented. Optional
+//! source-bound Kelvin-Voigt bending replaces, rather than inherits, internal
+//! loss. The [`thermal`] adapter retains each layer's thermal path and stress.
 
 pub mod thermal;
 pub use thermal::{CompiledThermoelasticConcentricAssembly,
     compile_concentric_thermal_material_assembly, with_concentric_thermal_extension};
 
-use fs_material::section::ConcentricElasticSection;
+use fs_material::section::{ConcentricElasticSection, ConcentricKelvinVoigtSection};
 use fs_scenario::{AcousticAssembly, PrestressedString};
 use crate::acoustic_realize::{AcousticRealizeError, RealizedAssembly};
 use crate::string_specimen::StringPrestress;
@@ -128,4 +129,181 @@ pub fn compile_concentric_material_assembly(
     candidate.string = Some(string);
     let compiled = compile_material_assembly(&candidate, other_bindings)?;
     Ok(CompiledConcentricAssembly { compiled, section, prestress })
+}
+
+/// Bind all elastic coefficients AND per-layer Kelvin-Voigt bending loss.
+/// The ordinary realizer consumes the summed viscous stiffness and checks its
+/// intersected source band against every retained reference-mode frequency.
+/// Air drag and radiation continue to use the assembly's independent medium.
+///
+/// # Errors
+/// Inherited internal/Rayleigh/Prony loss and invalid support prescriptions
+/// refuse through the same elastic binding. No alternative acoustic solver or
+/// nominal-material damping preset is selected.
+pub fn with_concentric_kelvin_voigt_section(
+    input: PrestressedString,
+    section: &ConcentricKelvinVoigtSection,
+    prestress: StringPrestress,
+) -> Result<PrestressedString, AcousticRealizeError> {
+    let mut string = with_concentric_section(input, section.elastic(), prestress)?;
+    string.kelvin_voigt_bending = Some(fs_scenario::acoustic::KelvinVoigtBending {
+        viscous_stiffness_n_m2_s: section.viscous_stiffness_n_m2_s(),
+        omega_band_rad_s: section.omega_band_rad_s(),
+        // This is NOT one homogeneous state. The compiled wrapper below retains
+        // every source bundle rather than mislabeling an aggregate as a source ID.
+        material_state_identity: None,
+    });
+    Ok(string)
+}
+
+/// Actual material-compiled acoustic assembly and its source-bound layered loss.
+#[derive(Clone, Debug)]
+pub struct CompiledConcentricKelvinVoigtAssembly {
+    compiled: CompiledMaterialAssembly,
+    section: ConcentricKelvinVoigtSection,
+    prestress: StringPrestress,
+}
+impl CompiledConcentricKelvinVoigtAssembly {
+    /// Existing assembly compiler result, including other material bindings.
+    #[must_use]
+    pub const fn compiled(&self) -> &CompiledMaterialAssembly { &self.compiled }
+    /// All elastic and viscous source data, geometry and validity bounds.
+    #[must_use]
+    pub const fn section(&self) -> &ConcentricKelvinVoigtSection { &self.section }
+    /// Independent mechanical support prescription.
+    #[must_use]
+    pub const fn prestress(&self) -> StringPrestress { self.prestress }
+    /// Execute the existing pressure solver, not a separately synthesized decay.
+    pub fn realize(&self) -> Result<RealizedAssembly, AcousticRealizeError> { self.compiled.realize() }
+}
+
+/// Compile a material-swappable, lossy layered member into the ordinary coupled
+/// assembly. Use the existing string-specimen bending-viscosity property name
+/// when constructing the section. The template is unchanged on success/failure.
+///
+/// # Errors
+/// Conflicting homogeneous bindings, inherited loss, missing string geometry,
+/// invalid support prescriptions and ordinary assembly admission failures refuse.
+pub fn compile_concentric_kelvin_voigt_material_assembly(
+    template: &AcousticAssembly,
+    section: ConcentricKelvinVoigtSection,
+    prestress: StringPrestress,
+    other_bindings: &AcousticMaterialBindings<'_>,
+) -> Result<CompiledConcentricKelvinVoigtAssembly, MaterialAssemblyError> {
+    if other_bindings.string.is_some() {
+        return Err(missing("string", "concentric and homogeneous string bindings are mutually exclusive"));
+    }
+    let input = template.string.as_ref()
+        .ok_or_else(|| missing("string", "concentric material binding requires a string description"))?;
+    let string = with_concentric_kelvin_voigt_section(input.clone(), &section, prestress)
+        .map_err(|error| physical("string", error))?;
+    let mut candidate = template.clone();
+    candidate.string = Some(string);
+    let compiled = compile_material_assembly(&candidate, other_bindings)?;
+    Ok(CompiledConcentricKelvinVoigtAssembly { compiled, section, prestress })
+}
+
+#[cfg(test)]
+mod viscous_tests {
+    use super::*;
+    use crate::string_specimen::KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY as ETA;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
+        PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
+    use fs_material::section::ConcentricMaterialLayer;
+    use fs_material::state_point::{MaterialPropertySelection, ScalarAdmissibility,
+        ScalarPropertyRequirement, resolve_material_state_point};
+    use fs_qty::{Density, DynViscosity, Pressure};
+    use fs_scenario::{AmbientGas, Listener, Pluck};
+
+    fn section(sleeve_eta: f64, band: (f64, f64)) -> ConcentricKelvinVoigtSection {
+        let layers = [(0.00025, 0.0), (0.0005, sleeve_eta)].into_iter().map(|(radius, eta)| {
+            let mut claims = ClaimSet::new();
+            let mut requirements = Vec::new();
+            for (key, value, dims) in [("density", 8000.0, Density::DIMS),
+                ("young_modulus", 2e11, Pressure::DIMS), (ETA, eta, DynViscosity::DIMS)] {
+                claims.insert_claim(PropertyClaim {
+                    key: PropertyKey::new(key, dims), value: PropertyValue::Scalar { value, dims },
+                    validity: ValidityDomain::unconstrained().with("omega", band.0, band.1),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::ConstantWithinValidity, observations: vec![],
+                    provenance: Provenance { source: "synthetic layered loss".into(), license: "test-only".into(), artifact: None },
+                }).unwrap();
+                requirements.push(ScalarPropertyRequirement::try_new(key, dims, ScalarAdmissibility::Finite).unwrap());
+            }
+            let card = MaterialCard::assemble(MaterialStateId { chemistry: "synthetic".into(),
+                phase: "solid".into(), process: "test".into(), revision: 0 }, claims, vec![]).unwrap();
+            ConcentricMaterialLayer { outer_radius_m: radius, material: resolve_material_state_point(&card,
+                &QueryPoint::new().with("omega", (band.0 + band.1) / 2.0).unwrap(), &requirements,
+                MaterialPropertySelection::SingleClaimOnly).unwrap() }
+        }).collect();
+        ConcentricElasticSection::try_new(0.0, layers).unwrap().with_kelvin_voigt_bending(ETA).unwrap()
+    }
+    fn assembly() -> AcousticAssembly {
+        AcousticAssembly { ambient: AmbientGas::sea_level(), string: Some(PrestressedString {
+            length_m: 0.65, tension_n: 10.0, lin_density_kg_m: 1.0, axial_stiffness_n: 0.0,
+            width_m: 0.01, n_modes: 4, damping_ratio: 0.0, rayleigh: None,
+            bending_stiffness_n_m2: 0.0, kelvin_voigt_bending: None, relaxation_bending: None,
+            polarization_detune: 0.0, moving_end: false }), duct: None,
+            pluck: Some(Pluck { station_frac: 0.25, height_m: 1e-5 }), bow: None, blow: None,
+            reed: None, soundboard: None, body_modes: vec![], plate: None, cavity: None,
+            obstacles: vec![], contact_texture: None, listener: Listener { distance_m: 1.0 },
+            sample_rate_hz: 16000, duration_s: 0.008 }
+    }
+
+    #[test]
+    fn replacing_only_sleeve_viscosity_reaches_actual_pressure_without_retuning() {
+        let template = assembly();
+        let snapshot = template.clone();
+        let bindings = AcousticMaterialBindings::default();
+        let a = compile_concentric_kelvin_voigt_material_assembly(&template,
+            section(1e7, (1.0, 20000.0)), StringPrestress::FixedTension(10.0), &bindings).unwrap();
+        let b = compile_concentric_kelvin_voigt_material_assembly(&template,
+            section(1e9, (1.0, 20000.0)), StringPrestress::FixedTension(10.0), &bindings).unwrap();
+        let sa = a.compiled().assembly().string.as_ref().unwrap();
+        let sb = b.compiled().assembly().string.as_ref().unwrap();
+        assert_eq!(sa.lin_density_kg_m, sb.lin_density_kg_m);
+        assert_eq!(sa.bending_stiffness_n_m2, sb.bending_stiffness_n_m2);
+        assert_eq!(sa.tension_n, sb.tension_n);
+        assert!(sb.kelvin_voigt_bending.unwrap().viscous_stiffness_n_m2_s
+            > sa.kelvin_voigt_bending.unwrap().viscous_stiffness_n_m2_s);
+        let ra = a.realize().unwrap();
+        let rb = b.realize().unwrap();
+        assert_eq!(ra.gas, rb.gas);
+        assert_eq!(ra.pressure_pa.len(), 128);
+        assert!(ra.pressure_pa.iter().chain(&rb.pressure_pa).all(|v| v.is_finite()));
+        assert!(ra.pressure_pa.iter().any(|v| *v != 0.0));
+        assert_ne!(ra.pressure_pa, rb.pressure_pa);
+        assert_eq!(template, snapshot);
+    }
+
+    #[test]
+    fn all_source_layers_and_explicit_zero_loss_survive_compilation() {
+        let loss = section(0.0, (1.0, 20000.0));
+        let compiled = compile_concentric_kelvin_voigt_material_assembly(&assembly(), loss.clone(),
+            StringPrestress::FixedTension(10.0), &AcousticMaterialBindings::default()).unwrap();
+        assert_eq!(compiled.section(), &loss);
+        let descriptor = compiled.compiled().assembly().string.as_ref().unwrap().kelvin_voigt_bending.unwrap();
+        assert_eq!(descriptor.viscous_stiffness_n_m2_s, 0.0);
+        assert_eq!(descriptor.material_state_identity, None);
+        assert!(compiled.realize().is_ok());
+    }
+
+    #[test]
+    fn reference_modes_outside_any_layer_support_refuse_before_sound_is_returned() {
+        let result = compile_concentric_kelvin_voigt_material_assembly(&assembly(),
+            section(1e7, (1.0, 2.0)), StringPrestress::FixedTension(10.0), &AcousticMaterialBindings::default());
+        if let Ok(compiled) = result { assert!(compiled.realize().is_err()); }
+    }
+
+    #[test]
+    fn inherited_internal_loss_is_not_silently_mixed_with_new_material_loss() {
+        let mut template = assembly();
+        template.string.as_mut().unwrap().damping_ratio = 0.01;
+        let snapshot = template.clone();
+        assert!(compile_concentric_kelvin_voigt_material_assembly(&template,
+            section(1e7, (1.0, 20000.0)), StringPrestress::FixedTension(10.0),
+            &AcousticMaterialBindings::default()).is_err());
+        assert_eq!(template, snapshot);
+    }
 }
