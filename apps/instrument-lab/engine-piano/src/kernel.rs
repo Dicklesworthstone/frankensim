@@ -193,6 +193,16 @@ impl Description {
         Self::from_board_bytes(courses, BOARD_BIN)
     }
 
+    /// The embedded scale on a board file written by `board_bytes` (a larger
+    /// bridge-informed reduction shipped beside the engine and fetched).
+    pub fn from_board(bytes: &[u8]) -> Result<Self, String> {
+        let courses = geometry::read_scale(SCALE_CSV)?;
+        if courses.len() != 88 {
+            return Err("embedded Model D scale must contain 88 courses".into());
+        }
+        Self::from_board_bytes(courses, bytes)
+    }
+
     /// Serialize the board of this description (`examples/gen_board.rs`).
     /// Layout (little-endian): magic, r, keys, surface points, exact low
     /// modes, mass, area, provenance; per coordinate frequency, damping ratio,
@@ -992,6 +1002,13 @@ struct ACourse {
     /// Bridge row in the current loaded board basis and S^-1 times it.
     gl: Vec<f64>,
     resp: Vec<f64>,
+    /// Sd^-1 times the bridge row: the string-loss Schur solve is only ever
+    /// read through `gl . Sd^-1 x = hsd . x` (Sd symmetric), so no r x r product.
+    hsd: Vec<f64>,
+    /// D^-1 gl with D = diag(1/bz.bq): the low-rank (Woodbury) bridge Schur solve.
+    wy: Vec<f64>,
+    /// `gl . Sd^-1 rhs` of the current half-flow.
+    bm: f64,
     gl_norm2: f64,
     modes: usize,
     b0: f64,
@@ -1101,6 +1118,10 @@ pub struct LivePiano {
     bz: Vec<Zoh>,
     s_inv: Vec<f64>,
     sd_inv: Vec<f64>,
+    /// Woodbury core of the bridge Schur solve, K x K for K sounding keys:
+    /// S^-1 x = D^-1 x + Y M Y^T x, Y = [wy_k], M = W^1/2 (I - W^1/2 Y^T G W^1/2)^-1 W^1/2.
+    wmk: Vec<f64>,
+    wu: Vec<f64>,
     // Board state in loaded coordinates and scratch.
     bq: Vec<f64>,
     bvel: Vec<f64>,
@@ -1108,7 +1129,6 @@ pub struct LivePiano {
     bfv: Vec<f64>,
     rhs: Vec<f64>,
     end: Vec<f64>,
-    mid: Vec<f64>,
     force_b: Vec<f64>,
     tmp: Vec<f64>,
     st_v: Vec<f64>,
@@ -1371,13 +1391,14 @@ impl LivePiano {
             bz: vec![Zoh::default(); r],
             s_inv: identity(r),
             sd_inv: identity(r),
+            wmk: Vec::with_capacity(32 * 32),
+            wu: Vec::with_capacity(32),
             bq: vec![0.0; r],
             bvel: vec![0.0; r],
             bfq: vec![0.0; r],
             bfv: vec![0.0; r],
             rhs: vec![0.0; r],
             end: vec![0.0; r],
-            mid: vec![0.0; r],
             force_b: vec![0.0; r],
             tmp: vec![0.0; r],
             st_v: vec![0.0; r],
@@ -1619,7 +1640,7 @@ impl LivePiano {
                 None => {
                     self.keys[ci].slot = Some(self.active.len());
                     self.active.push(ACourse {
-                        ci, segs: fresh, gl: vec![0.0; r], resp: vec![0.0; r], gl_norm2: 0.0, modes: 0, b0: 0.0,
+                        ci, segs: fresh, gl: vec![0.0; r], resp: vec![0.0; r], hsd: vec![0.0; r], wy: vec![0.0; r], bm: 0.0, gl_norm2: 0.0, modes: 0, b0: 0.0,
                         damped_now: false, age: 0, shape_n: 0, shape_off: 0,
                     });
                 }
@@ -1721,7 +1742,31 @@ impl LivePiano {
         self.sd_inv = crate::dense::spd_inverse(&loss_schur, r, "string-loss Schur complement")?;
         for ac in &mut self.active {
             matvec(&self.s_inv, &ac.gl, &mut ac.resp);
+            matvec(&self.sd_inv, &ac.gl, &mut ac.hsd);
+            for ((y, g), z) in ac.wy.iter_mut().zip(&ac.gl).zip(&self.bz) {
+                *y = z.bq * g;
+            }
         }
+        // S = D - G W G^T (D = diag(1/bz.bq), W = diag(sum w_schur)) is applied per
+        // sample through Woodbury: O(r K) instead of the dense O(r^2) product.
+        // The capacitance I - W^1/2 G^T D^-1 G W^1/2 is SPD exactly when S is.
+        let k = self.active.len();
+        let ws: Vec<f64> = self.active.iter().map(|ac| ac.segs.iter().map(|s| s.w_schur).sum::<f64>().sqrt()).collect();
+        let mut cap = identity(k);
+        for a in 0..k {
+            for b in 0..k {
+                cap[a * k + b] -= ws[a] * dot(&self.active[a].gl, &self.active[b].wy) * ws[b];
+            }
+        }
+        let cap_inv = if k > 0 { crate::dense::spd_inverse(&cap, k, "bridge Schur capacitance")? } else { Vec::new() };
+        self.wmk.clear();
+        for a in 0..k {
+            for b in 0..k {
+                self.wmk.push(ws[a] * cap_inv[a * k + b] * ws[b]);
+            }
+        }
+        self.wu.clear();
+        self.wu.resize(k, 0.0);
         self.engagement_cached = f64::NAN; // pad coefficients depend on gl
         self.counters.rebuilds += 1;
         Ok(())
@@ -2027,11 +2072,13 @@ impl LivePiano {
                     *x += g * source;
                 }
             }
-            matvec(&self.sd_inv, &self.rhs, &mut self.mid);
+            for ac in &mut self.active {
+                ac.bm = dot(&ac.hsd, &self.rhs);
+            }
             self.force_b.fill(0.0);
             self.rhs.fill(0.0); // becomes the coupling right-hand side below
             for ac in &mut self.active {
-                let bm = dot(&ac.gl, &self.mid);
+                let bm = ac.bm;
                 let b0 = dot(&ac.gl, &self.bq);
                 ac.b0 = b0;
                 let mut reaction_loss = 0.0;
@@ -2083,7 +2130,20 @@ impl LivePiano {
             self.bfv[j] = z.vq * self.bq[j] + z.vv * dv;
             self.rhs[j] += self.bfq[j] / z.bq;
         }
-        matvec(&self.s_inv, &self.rhs, &mut self.end);
+        // end = S^-1 rhs (Woodbury, see `rebuild`).
+        for ((e, x), z) in self.end.iter_mut().zip(&self.rhs).zip(&self.bz) {
+            *e = z.bq * x;
+        }
+        let k = self.active.len();
+        for (u, ac) in self.wu.iter_mut().zip(&self.active) {
+            *u = dot(&ac.wy, &self.rhs);
+        }
+        for (a, ac) in self.active.iter().enumerate() {
+            let c = dot(&self.wmk[a * k..(a + 1) * k], &self.wu);
+            for (e, y) in self.end.iter_mut().zip(&ac.wy) {
+                *e += y * c;
+            }
+        }
 
         // ---- hammers: free flight, implicit felt contact ----
         let mut felt_loss = 0.0;
@@ -2184,10 +2244,9 @@ impl LivePiano {
                     *x += g * source;
                 }
             }
-            matvec(&self.sd_inv, &self.rhs, &mut self.mid);
             self.force_b.fill(0.0);
             for ac in &self.active {
-                let bm = dot(&ac.gl, &self.mid);
+                let bm = dot(&ac.hsd, &self.rhs);
                 let mut reaction_loss = 0.0;
                 for s in &ac.segs {
                     let range = s.off..s.off + s.n;

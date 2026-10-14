@@ -96,6 +96,19 @@ is floored at -50 dB, because the real overheads carry room noise and cymbal ble
 is silent. `diagnose.py` takes `$KIT $SALAMANDER/OH` as optional fourth and fifth arguments to run
 the cymbal-shimmer experiment on the kit's crash.
 
+## Larger live soundboards
+
+The live piano embeds a 32-coordinate board; `public/live/piano/boards/` holds 48/64/96/128-coordinate
+boards (not committed, ~6 MB) that the browser fetches only when its timing probe says it can afford
+them (`boards.js`). They are the offline binary's reductions of the same FE slice; generate them
+natively with the engine's `gen_board` example:
+
+    gen_board public/live/piano/boards/model-d-board-2400-r64.bin 2400 64,32,200,400,800,1600,2300
+    # r48: 48,24,...  r96: 96,48,...  r128: 128,64,... (the studio render's reduction)
+
+Measured on the Strandbar piano part against the studio stem (RMS octave-balance error, 63 Hz-8 kHz):
+32 coordinates 2.95 dB, 48 2.66, 64 1.28, 96 0.77, 128 0.36.
+
 ## The live kit
 
 `engine-kit/build-wasm.sh` compiles `fs_vkplate::live` (wasm-bindgen) into `public/live/kit/`. Each

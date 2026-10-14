@@ -14,3 +14,4 @@ public/live/kit/engine*
 engine-kit/target/
 __pycache__/
 dist-cf/
+public/live/piano/boards/

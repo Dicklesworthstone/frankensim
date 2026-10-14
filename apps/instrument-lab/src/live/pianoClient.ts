@@ -190,8 +190,13 @@ export interface LivePianoOptions {
   /** Defaults to `/live`. */
   baseUrl?: string;
   destination?: AudioNode;
-  /** 0/undefined = the complete embedded board (32 coordinates); 1..16 = that many exact low FE modes only. */
-  boardCoordinates?: number;
+  /**
+   * 0/undefined = the complete embedded board (32 coordinates); 1..16 = that many exact low FE modes only;
+   * 48/64/96/128 = that larger reduction of the same FE slice, fetched from `live/piano/boards/`;
+   * 'auto' = the largest board this device computes `minRealtime` (default 1.4) times faster than real time.
+   */
+  boardCoordinates?: number | 'auto';
+  minRealtime?: number;
   courseModeBudget?: number;
   maxDynamicModes?: number;
   /** Pressure mapped to 1.0 [Pa] (default 10). */

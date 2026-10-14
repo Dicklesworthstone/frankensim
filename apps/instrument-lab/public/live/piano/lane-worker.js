@@ -6,8 +6,11 @@
 //   {type:'init', port, options?, aheadFrames?, gain?, minRealtime?, snapshotHz?}
 //       gain     one fixed factor on every sample (level matching against another rendering; default 1)
 //       options  {boardCoordinates?, courseModeBudget?, maxDynamicModes?, fullScalePa?}  (0 = engine default)
-//                without boardCoordinates the worker measures itself: the default, then 24, then 16
-//       minRealtime  the speed the measurement asks for (default 1.5)
+//                boardCoordinates: 32 = the embedded board, 48/64/96/128 = that board file from
+//                ./boards/, 1..16 = that many exact low modes. Without it the worker measures
+//                itself and keeps the LARGEST board it computes `minRealtime` times faster than
+//                real time (boards.js): 32 first, then at most two larger ones, else 16.
+//       minRealtime  the speed the measurement asks for (default 1.35)
 //       snapshotHz   display snapshots per second of AUDIO (default 0: none). With it, 'ready' also
 //                    carries the board geometry and the key geometry.
 //   {type:'note', midi, speed, frame?} | {type:'off', midi, frame?} | {type:'sustain', value, frame?}
@@ -25,6 +28,7 @@
 //   {type:'error', message}
 import init, { PianoEngine } from './engine.js';
 import { createLane } from '../lane.js';
+import { chooseBoard, fetchBoard, probeRealtime } from './boards.js';
 
 let engine = null;
 let lane = null;
@@ -33,6 +37,7 @@ let gain = 1;
 let snapEvery = 0;   // audio frames between snapshots (0: none)
 let snapDue = 0;
 const post = (m, t) => self.postMessage(m, t ?? []);
+const FALLBACK_REALTIME = 0.75;
 
 self.onmessage = async (event) => {
   const m = event.data || {};
@@ -42,23 +47,33 @@ self.onmessage = async (event) => {
       const o = m.options || {};
       gain = Number.isFinite(m.gain) ? m.gain : 1;
       snapEvery = Number(m.snapshotHz) > 0 ? Math.max(256, Math.round(48000 / Math.min(120, Number(m.snapshotHz)))) : 0;
-      const make = (coords) => new PianoEngine(48000, coords, Number(o.courseModeBudget) || 0, Number(o.maxDynamicModes) || 0, Number(o.fullScalePa) || 0);
-      // a five-note stab with its bass: keep the most soundboard coordinates this device can
-      // compute at least `minRealtime` times faster than real time
-      const tries = o.boardCoordinates ? [Number(o.boardCoordinates)] : [0, 16];
+      const limits = [Number(o.courseModeBudget) || 0, Number(o.maxDynamicModes) || 0, Number(o.fullScalePa) || 0];
+      // bytes: a fetched board file (PianoEngine.withBoard); otherwise the embedded board or its
+      // exact low-mode truncation (coords 1..16; 0/32 = all 32 embedded coordinates)
+      const make = (bytes, coords) => bytes ? PianoEngine.withBoard(48000, bytes, ...limits)
+        : new PianoEngine(48000, coords > 16 ? 0 : coords, ...limits);
+      const measure = probeRealtime; // twelve keys struck together, timed on a throwaway engine
+      const target = m.minRealtime || 1.35;
+      const asked = Number(o.boardCoordinates) || 0;
+      let bytes = null;
+      let coords = asked;
       let realtime = 0;
-      for (const coords of tries) {
-        engine?.free();
-        engine = make(coords);
-        for (const k of [38, 57, 61, 64, 66, 69]) engine.noteOn(k, 3.5);
-        engine.render(512);
-        const t0 = performance.now();
-        for (let i = 0; i < 48; i++) engine.render(128);
-        realtime = (48 * 128 * 1000) / 48000 / (performance.now() - t0);
-        engine.free();
-        engine = make(coords);
-        if (realtime >= (m.minRealtime || 1.35)) break;
+      if (asked > 32) {
+        bytes = await fetchBoard(asked);
+      } else if (!asked) {
+        const pick = await chooseBoard({ make, measure, target });
+        pick.engine.free();
+        ({ bytes, coordinates: coords, realtime } = pick);
+        // the old last resort, 16 exact low modes, only when even the embedded board cannot keep
+        // up with the probe (it is about twice the old five-note stab's load)
+        if (!bytes && realtime < FALLBACK_REALTIME) { coords = 16; realtime = 0; }
       }
+      if (!realtime) {
+        const probe = make(bytes, coords);
+        realtime = measure(probe);
+        probe.free();
+      }
+      engine = make(bytes, coords);
       let active = false;
       let quietFrames = 0;
       const adapter = {

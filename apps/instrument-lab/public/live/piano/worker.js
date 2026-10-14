@@ -10,7 +10,10 @@
 //   {type:'init', sampleRate, port, options?, wasmUrl?}
 //       port     MessagePort adopted by the sink ({type:'connect', port} on the node's port)
 //       options  {boardCoordinates?, courseModeBudget?, maxDynamicModes?, fullScalePa?,
-//                 targetMs?, snapshotHz?, governor?}   (0/undefined = engine default; targetMs default 18)
+//                 targetMs?, snapshotHz?, governor?, minRealtime?}   (0/undefined = engine default; targetMs default 18)
+//                boardCoordinates: 0/32 = the embedded board, 1..16 = that many exact low modes,
+//                48/64/96/128 = that board file from ./boards/, 'auto' = the largest board this
+//                device computes `minRealtime` (default 1.4) times faster than real time (boards.js)
 //   {type:'cmd', name, args?, id?}
 //       noteOn(midi, speedMS)   post-escapement hammer velocity in m/s, (0, 8]
 //       noteOff(midi)
@@ -32,6 +35,7 @@
 //   {type:'reply', id, name, value} | {type:'bench', id, results}
 //   {type:'error', code:'refused'|'engine'|'worker_error', message, id?, command?}
 import init, { PianoEngine } from './engine.js';
+import { chooseBoard, fetchBoard } from './boards.js';
 
 const CHUNK = 128;
 
@@ -51,6 +55,7 @@ let windowWallMs = 0;
 let windowAudioMs = 0;
 let worstChunkMs = 0;
 let engineOptions = null;
+let boardBytes = null; // a fetched board file (null = the embedded board)
 
 // Quality the user asked for, and what the load governor currently grants.
 let asked = { courseModeBudget: 0, partialBandHz: 0, maxDynamicModes: 0 };
@@ -166,14 +171,11 @@ function onSinkMessage(event) {
   }
 }
 
-function makeEngine(options) {
-  return new PianoEngine(
-    sampleRate,
-    Number(options.boardCoordinates) || 0,
-    Number(options.courseModeBudget) || 0,
-    Number(options.maxDynamicModes) || 0,
-    Number(options.fullScalePa) || 0,
-  );
+function makeEngine(options, bytes = boardBytes) {
+  const limits = [Number(options.courseModeBudget) || 0, Number(options.maxDynamicModes) || 0, Number(options.fullScalePa) || 0];
+  if (bytes) return PianoEngine.withBoard(sampleRate, bytes, ...limits);
+  const coords = Number(options.boardCoordinates) || 0;
+  return new PianoEngine(sampleRate, coords > 16 ? 0 : coords, ...limits);
 }
 
 // Offline speed test on a separate instance: real-time factor versus the
@@ -288,6 +290,14 @@ async function start(message) {
   if (engineOptions.snapshotHz !== undefined) snapshotIntervalMs = engineOptions.snapshotHz > 0 ? 1000 / engineOptions.snapshotHz : 0;
   if (engineOptions.governor !== undefined) governor = Boolean(engineOptions.governor);
   await init(message.wasmUrl ? { module_or_path: message.wasmUrl } : undefined);
+  if (engineOptions.boardCoordinates === 'auto') {
+    const pick = await chooseBoard({ make: (bytes) => makeEngine({ ...engineOptions, boardCoordinates: 0 }, bytes),
+      target: Number(engineOptions.minRealtime) || 1.4 });
+    pick.engine.free();
+    boardBytes = pick.bytes;
+  } else if (Number(engineOptions.boardCoordinates) > 32) {
+    boardBytes = await fetchBoard(Number(engineOptions.boardCoordinates));
+  }
   engine = makeEngine(engineOptions);
   info = JSON.parse(engine.info());
   asked = { courseModeBudget: info.courseModeBudget, partialBandHz: info.partialBandHz, maxDynamicModes: info.maxDynamicModes };
