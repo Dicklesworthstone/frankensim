@@ -15,6 +15,9 @@ use fs_exec::CancelGate;
 /// Sample-clock binding of physical bow gesture tracks to this retained state.
 pub mod schedule;
 
+/// Material-derived strings with reciprocal interior body connections.
+pub mod reciprocal;
+
 /// One completed audio sample. All mechanical channels describe the endpoint.
 /// A rigid termination has no acoustic observer: its acoustic channels are None,
 /// never velocity mislabeled as pressure.
