@@ -1,0 +1,102 @@
+/* Live piano section. Same language as styles.css: hairlines, ink panels,
+   verdigris for the live engine. Everything is scoped under .lp. */
+
+.lp { display: grid; gap: clamp(14px, 2vw, 22px); }
+.lp [hidden] { display: none !important; }
+
+/* -------------------------------------------------- stage + keyboard deck */
+.lp-instrument { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--ink-1); }
+.lp-stage { height: clamp(320px, 44vh, 470px); border: 0; border-radius: 0; border-bottom: 1px solid var(--line); }
+.lp-stage canvas { position: absolute; inset: 0; }
+.lp-stage .stage-top { z-index: 2; align-items: center; }
+.lp-stage .stage-hud { z-index: 2; }
+.lp-stage .stage-hud b { color: var(--verdigris); }
+.lp-stage .lp-up { color: var(--verdigris); }
+.lp-stage .lp-down { color: var(--ember); }
+.lp-stage .stage-note { z-index: 3; }
+@media (max-width: 760px) { .lp-stage { height: auto; aspect-ratio: 4 / 3; } }
+@media (max-width: 440px) { .lp-stage { aspect-ratio: 1; } }
+
+.lp-seg-sm { gap: 4px; flex-wrap: nowrap; }
+.lp-seg-sm button { min-height: 34px; padding: 4px 11px; font-size: 12.5px; border-radius: 8px; background: rgba(8, 9, 12, 0.66); border-color: var(--line-strong); white-space: nowrap; }
+
+.lp-note-body { display: grid; justify-items: center; gap: 12px; max-width: 48ch; }
+.lp-note-title { font: 480 clamp(19px, 2.2vw, 25px)/1.2 var(--font-display); color: var(--ivory); font-variation-settings: "opsz" 36, "SOFT" 40; text-wrap: balance; }
+.lp-note-text { color: var(--ivory-2); }
+.lp-note-status { min-height: 1.5em; color: var(--ivory-3); }
+.lp-start { min-width: 220px; }
+@media (max-width: 420px) { .lp-note-text { display: none; } }
+
+.lp-deck { padding: 14px clamp(12px, 2vw, 18px) 12px; display: grid; gap: 10px; }
+.lp-controls { display: grid; gap: 10px 22px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)); align-items: end; }
+.lp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.lp-row input[type="range"] { flex: 1 1 120px; min-width: 0; }
+.lp-controls .field > .label { min-width: 0; }
+.lp-controls output { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-touch input[type="range"] { opacity: 0.4; transition: opacity 0.18s; }
+.lp.lp-fixed .lp-touch input[type="range"] { opacity: 1; }
+.lp-pedal-btn[aria-pressed="true"] { background: var(--verdigris); border-color: var(--verdigris); color: #05201c; }
+.lp-midi output { max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* the strip, with a slim minimap scrubber when it overflows */
+.lp-scrub { position: relative; height: 18px; border-radius: 5px; background: #050608; border: 1px solid var(--line); cursor: ew-resize; touch-action: none; overflow: hidden; }
+.lp-scrub-keys { position: absolute; inset: 2px 2px; display: flex; gap: 1px; }
+.lp-scrub-keys i { flex: 1 1 0; background: rgba(239, 231, 216, 0.38); border-radius: 1px; }
+.lp-scrub-keys i.c { background: rgba(239, 231, 216, 0.6); }
+.lp-scrub-window { position: absolute; top: 0; bottom: 0; border: 1px solid var(--verdigris); border-radius: 4px; background: rgba(99, 210, 192, 0.12); pointer-events: none; }
+.lp-kbd-scroll { scrollbar-width: thin; scrollbar-color: rgba(99, 210, 192, 0.35) transparent; border-radius: 6px; }
+.lp-kbd { min-width: 100%; border-radius: 6px; }
+.lp-kbd .w, .lp-kbd .k { cursor: pointer; }
+.lp-kbd .w { transition: background 0.06s linear; }
+.lp-oct { position: absolute; left: 0; right: 0; bottom: 6px; text-align: center; font: 500 9.5px/1 var(--font-mono); color: #6d665a; pointer-events: none; }
+.lp-kbd .w.on .lp-oct { color: #0b3b35; }
+.lp-kbd .w.held, .lp-kbd .k.held { outline-color: var(--verdigris-deep); }
+
+.lp-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center; margin: 0; max-width: none; }
+.lp-legend kbd { display: inline-block; min-width: 18px; padding: 1px 4px; margin-right: 2px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 4px; font-size: 10.5px; line-height: 1.4; text-align: center; color: var(--ivory-2); }
+.lp-legend b { color: var(--ivory-2); font-weight: 500; }
+@media (pointer: coarse) { .lp-legend-keys, .lp-legend span:nth-child(2), .lp-legend span:nth-child(3) { display: none; } }
+@media (pointer: fine) { .lp-touch-hint { display: none; } }
+
+/* ------------------------------------------------------------------ try */
+.lp-demos { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)); }
+.lp-demo { justify-content: flex-start; white-space: normal; text-align: left; min-height: 40px; line-height: 1.25; padding-block: 6px; }
+.lp-demo.is-running { border-color: var(--verdigris); color: var(--verdigris); }
+.lp-demo-text { margin-top: 12px; min-height: 3em; color: var(--ivory-2); }
+.lp-try .panel-head { align-items: center; margin-bottom: 12px; }
+.lp-try .panel-head h3 { flex: 1 1 auto; }
+
+/* --------------------------------------------------------------- ledger */
+.lp-ledger-panel { border-color: rgba(99, 210, 192, 0.24); }
+.lp-ledger-panel .panel-head { margin-bottom: 10px; }
+.lp-ledger .ledger-bar { height: 18px; border-radius: 9px; }
+.lp-ledger .ledger-bar i { transition: flex-basis 0.1s linear; }
+.lp-ledger .ledger-keys b { color: var(--ivory); font-weight: 500; }
+.lp-breakdown { margin: 0; max-width: none; }
+.lp-residual { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font: 500 12px/1.5 var(--font-mono); max-width: none; }
+.lp-residual b { font-size: 15px; font-weight: 500; color: var(--verdigris); }
+.lp-ledger-note { margin-top: 12px; }
+
+.lp-side { container-type: inline-size; }
+.lp-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@container (min-width: 560px) { .lp-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.lp-stats .stat dd { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lp-stats .lp-stat-wide { grid-column: 1 / -1; }
+.lp-stats-note { max-width: none; }
+
+/* ------------------------------------------------------------- honesty */
+.lp-honesty { padding-block: 14px; }
+.lp-evidence { gap: 14px; }
+.lp-evidence p { font-size: 14px; color: var(--ivory-2); max-width: 82ch; }
+.lp-incl { display: grid; gap: 14px 28px; }
+@media (min-width: 820px) { .lp-incl { grid-template-columns: 1fr 1fr; } }
+.lp-incl h4, .lp-chiprow h4, .lp-evidence > h4 { margin-bottom: 8px; }
+.lp-list { display: grid; gap: 6px; font-size: 13.5px; line-height: 1.45; color: var(--ivory-2); }
+.lp-list li { padding-left: 16px; position: relative; }
+.lp-list li::before { content: ""; position: absolute; left: 2px; top: 0.62em; width: 7px; height: 1px; background: var(--verdigris); }
+.lp-list.out li::before { background: var(--ember); }
+.lp-chiprow { display: grid; }
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-ledger .ledger-bar i, .lp-kbd .w, .lp-touch input[type="range"] { transition: none; }
+}

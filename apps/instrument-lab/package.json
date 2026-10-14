@@ -1,0 +1,25 @@
+{
+  "name": "instrument-lab",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Struck — FrankenSim's physically simulated drum, cymbal and concert grand: offline reference renders and a live WebAssembly engine.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "lint": "tsc --noEmit",
+    "data": "uv run --with numpy --with pillow python tools/build_data.py"
+  },
+  "devDependencies": {
+    "@types/three": "^0.186.0",
+    "typescript": "~7.0.2",
+    "vite": "^8.3.0"
+  },
+  "dependencies": {
+    "@fontsource-variable/fraunces": "^5.2.5",
+    "@fontsource-variable/inter": "^5.2.5",
+    "@fontsource/jetbrains-mono": "^5.2.5",
+    "three": "^0.186.0"
+  }
+}

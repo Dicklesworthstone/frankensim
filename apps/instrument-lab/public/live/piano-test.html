@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live piano engine test</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { color-scheme: light dark; --bg: #f6f5f1; --fg: #1c1b19; --muted: #6b6860; --line: #d5d2c8; --accent: #9a3b1e; --white: #fbfaf6; --black: #23211d; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #171614; --fg: #ece9e1; --muted: #9a968b; --line: #37342e; --accent: #e08a63; --white: #e9e6dc; --black: #0e0d0c; } }
+  body { margin: 0; padding: 20px 16px 40px; background: var(--bg); color: var(--fg); font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  p { margin: 4px 0 12px; color: var(--muted); max-width: 78ch; }
+  button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 10px 0; }
+  #keys { display: flex; gap: 2px; overflow-x: auto; padding: 8px 0; user-select: none; touch-action: none; }
+  .key { flex: 0 0 22px; height: 96px; border: 1px solid var(--line); border-radius: 0 0 3px 3px; background: var(--white); color: #555; display: flex; align-items: flex-end; justify-content: center; font-size: 9px; padding-bottom: 3px; box-sizing: border-box; }
+  .key.black { background: var(--black); color: #aaa; height: 62px; }
+  .key.down { outline: 2px solid var(--accent); outline-offset: -2px; }
+  pre { margin: 8px 0; padding: 10px; border: 1px solid var(--line); border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+  canvas { width: 100%; max-width: 720px; height: 120px; border: 1px solid var(--line); border-radius: 4px; display: block; }
+  label { color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>FrankenSim live piano: reduced real-time model</h1>
+<p>Standalone test page. Strikes are post-escapement hammer velocities in m/s; the output is pressure in Pa at a Rayleigh half-space receiver divided by a fixed full scale. No samples, no assigned pitches, no normalization. Computer keys A W S E D F T G Y H U J K play C4..C5; space holds the sustain pedal.</p>
+<div class="row">
+  <button id="start">Start audio</button>
+  <label>hammer speed <input id="speed" type="range" min="0.3" max="4.5" step="0.1" value="2.5"> <span id="speedValue">2.5</span> m/s</label>
+  <label><input id="pedal" type="checkbox"> sustain pedal</label>
+  <button id="chord" disabled>C major 7 chord</button>
+  <button id="off" disabled>All notes off</button>
+  <button id="bench" disabled>Speed test</button>
+</div>
+<div id="keys"></div>
+<canvas id="scope" width="720" height="120"></canvas>
+<pre id="stats">not started</pre>
+<pre id="info"></pre>
+<pre id="log"></pre>
+<script type="module">
+import { PianoClient } from './piano/client.js';
+
+const $ = (id) => document.getElementById(id);
+const log = (text) => { $('log').textContent = `${text}\n${$('log').textContent}`.slice(0, 4000); };
+let client = null;
+let latest = null;
+const held = new Set();
+const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const speed = () => Number($('speed').value);
+
+function down(midi) {
+  if (!client || held.has(midi)) return;
+  held.add(midi);
+  client.noteOn(midi, speed());
+  document.querySelector(`[data-midi="${midi}"]`)?.classList.add('down');
+}
+function up(midi) {
+  if (!client || !held.has(midi)) return;
+  held.delete(midi);
+  client.noteOff(midi);
+  document.querySelector(`[data-midi="${midi}"]`)?.classList.remove('down');
+}
+
+for (let midi = 36; midi <= 96; midi++) {
+  const key = document.createElement('div');
+  const pitch = midi % 12;
+  key.className = `key${[1, 3, 6, 8, 10].includes(pitch) ? ' black' : ''}`;
+  key.dataset.midi = String(midi);
+  key.textContent = pitch === 0 ? `C${Math.floor(midi / 12) - 1}` : '';
+  key.title = `${names[pitch]}${Math.floor(midi / 12) - 1} (MIDI ${midi})`;
+  key.addEventListener('pointerdown', (event) => { key.setPointerCapture(event.pointerId); down(midi); });
+  key.addEventListener('pointerup', () => up(midi));
+  key.addEventListener('pointercancel', () => up(midi));
+  $('keys').appendChild(key);
+}
+const computerKeys = { a: 60, w: 61, s: 62, e: 63, d: 64, f: 65, t: 66, g: 67, y: 68, h: 69, u: 70, j: 71, k: 72 };
+addEventListener('keydown', (event) => {
+  if (event.repeat) return;
+  if (event.code === 'Space') { event.preventDefault(); $('pedal').checked = true; client?.sustain(1); return; }
+  const midi = computerKeys[event.key.toLowerCase()];
+  if (midi) down(midi);
+});
+addEventListener('keyup', (event) => {
+  if (event.code === 'Space') { $('pedal').checked = false; client?.sustain(0); return; }
+  const midi = computerKeys[event.key.toLowerCase()];
+  if (midi) up(midi);
+});
+$('speed').addEventListener('input', () => { $('speedValue').textContent = speed().toFixed(1); });
+$('pedal').addEventListener('change', () => client?.sustain($('pedal').checked ? 1 : 0));
+$('chord').addEventListener('click', () => {
+  for (const midi of [48, 55, 60, 64, 67, 71]) client.noteOn(midi, speed());
+  setTimeout(() => { for (const midi of [48, 55, 60, 64, 67, 71]) client.noteOff(midi); }, 1500);
+});
+$('off').addEventListener('click', () => { held.clear(); document.querySelectorAll('.key.down').forEach((k) => k.classList.remove('down')); client.allNotesOff(); $('pedal').checked = false; });
+$('bench').addEventListener('click', async () => {
+  $('bench').disabled = true;
+  log('speed test running (separate engine instance, nothing is played)...');
+  try {
+    const results = await client.bench({ seconds: 1.5 });
+    log(results.map((r) => `${String(r.keys).padStart(2)} keys  ${String(r.dynamicModes).padStart(4)} modes  ${r.realtimeFactor.toFixed(2)}x real time  worst chunk ${r.worstChunkMs.toFixed(2)} ms`).join('\n'));
+  } catch (error) { log(`speed test failed: ${error.message}`); }
+  $('bench').disabled = false;
+});
+
+function draw() {
+  const canvas = $('scope');
+  const g = canvas.getContext('2d');
+  const style = getComputedStyle(document.documentElement);
+  g.clearRect(0, 0, canvas.width, canvas.height);
+  g.strokeStyle = style.getPropertyValue('--line');
+  g.beginPath(); g.moveTo(0, canvas.height / 2); g.lineTo(canvas.width, canvas.height / 2); g.stroke();
+  if (latest && latest.keys.length) {
+    g.strokeStyle = style.getPropertyValue('--accent');
+    for (const key of latest.keys) {
+      const y = key.stringShapeM;
+      let peak = 1e-6;
+      for (const value of y) peak = Math.max(peak, Math.abs(value));
+      const gain = Math.min(canvas.height * 0.45 / peak, canvas.height * 0.45 / 2e-4);
+      g.beginPath();
+      g.moveTo(0, canvas.height / 2);
+      for (let j = 0; j < y.length; j++) g.lineTo(((j + 0.5) / y.length) * canvas.width, canvas.height / 2 - y[j] * gain);
+      g.lineTo(canvas.width, canvas.height / 2 - key.bridgeDisplacementM * gain);
+      g.stroke();
+    }
+  }
+  requestAnimationFrame(draw);
+}
+
+$('start').addEventListener('click', async () => {
+  $('start').disabled = true;
+  try {
+    const context = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+    client = await PianoClient.create(context, { baseUrl: new URL('./', location.href).href });
+    await context.resume();
+    $('info').textContent = JSON.stringify(client.info, null, 1);
+    log(`engine ready in ${client.initMs.toFixed(0)} ms; ${client.info.boardCoordinates} board coordinates, ${client.info.speakingStrings} strings on the bridge, context ${context.sampleRate} Hz`);
+    client.onError((message) => log(`error: ${message}`));
+    client.onSnapshot((snapshot) => { latest = snapshot; });
+    client.onStats((s) => {
+      const latency = client.latencyEstimateMs();
+      const l = latest ? latest.ledger : null;
+      $('stats').textContent = [
+        `real-time factor ${s.realtimeFactor ? s.realtimeFactor.toFixed(2) : '-'}x   load ${(s.load * 100).toFixed(0)} %   worst chunk ${s.worstChunkMs.toFixed(2)} ms`,
+        `queued ${s.queuedMs.toFixed(1)} ms (target ${s.targetMs.toFixed(0)})   underruns ${s.underruns}   latency estimate ${latency.totalMs.toFixed(1)} ms (queue ${latency.queuedMs.toFixed(1)} + receiver ${latency.receiverMs.toFixed(1)} + output ${latency.outputMs.toFixed(1)})`,
+        `sounding keys ${s.voices}   dynamic strings ${s.dynamicStrings}   dynamic modes ${s.dynamicModes} / ${s.quality.maxDynamicModes}   forced retirements ${s.forcedRetirements}   governor steps ${s.governorSteps}`,
+        `peak ${s.peakPa.toFixed(3)} Pa of ${client.info.fullScalePa} Pa full scale   clipped samples ${s.clippedSamples}   contact failures ${s.contactFailures}`,
+        l ? `energy: input ${(l.inputJ * 1e3).toFixed(3)} mJ = stored ${(l.storedJ * 1e3).toFixed(3)} + dissipated ${(l.dissipatedJ * 1e3).toFixed(3)} + retired ${(l.retiredJ * 1e3).toFixed(4)} + residual ${l.residualJ.toExponential(1)} J` : '',
+      ].join('\n');
+    });
+    for (const id of ['chord', 'off', 'bench']) $(id).disabled = false;
+    globalThis.pianoClient = client;
+    requestAnimationFrame(draw);
+  } catch (error) {
+    log(`start failed: ${error.message}`);
+    $('start').disabled = false;
+  }
+});
+</script>
+</body>
+</html>

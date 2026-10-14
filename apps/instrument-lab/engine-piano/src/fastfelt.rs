@@ -1,0 +1,209 @@
+//! The reference's energy-discrete WoolFelt contact force, prepared per step.
+//!
+//! `grand_piano/felt.rs::average` integrates fs-material's `WoolFelt` stress
+//! exactly over the strain increment of one step; `felt.rs::solve_with_rate`
+//! then finds the end overlap. This module evaluates the SAME closed forms
+//! (virgin power-law envelope, power-law unload/reload through the residual
+//! crush) and solves the SAME scalar equation to the SAME tolerance.
+//!
+//! Why it exists: the reference path spends about thirty `det::pow` calls per
+//! solve, and `det::pow` runs on a software fused multiply-add in wasm
+//! (measured 0.28 us per call, 9.2 us per solve). One struck trichord needs
+//! several solves per string per sample. Here the start-of-step integrals are
+//! computed once, each Newton iterate costs one `f64::powf`, and the iteration
+//! is warm-started from the previous force.
+//!
+//! The material card, its committed crush state and the stored-energy books
+//! remain fs-material's `WoolFelt` and `felt.rs::stored`. Equivalence of the
+//! resulting motion with the reference engine is measured by
+//! `examples/validate.rs`; `tests` below compare the force itself.
+use crate::refmods::felt::State;
+use fs_material::WoolFelt;
+
+const POSITION_TOL: f64 = 1.0e-13; // same displacement tolerance as felt::solve
+
+/// `felt.rs::stored`: recoverable compression energy density [J/m^3] on a
+/// committed branch, evaluated with `powf`.
+pub fn stored(law: &WoolFelt, e: f64, state: &State) -> f64 {
+    let residual = law.crush_fraction * state.eps_max;
+    if e <= residual || state.eps_max <= residual {
+        return 0.0;
+    }
+    let span = state.eps_max - residual;
+    state.sig_max * span / (law.q + 1.0) * ((e - residual) / span).powf(law.q + 1.0)
+}
+
+/// One contact site for one step: law, committed branch and start overlap.
+#[derive(Clone, Copy, Debug)]
+pub struct Site {
+    p: f64,
+    q: f64,
+    f_ref: f64,
+    eps_ref: f64,
+    eps_max: f64,
+    sig_max: f64,
+    residual: f64,
+    span: f64,
+    start_strain: f64,
+    primitive_start: f64,
+    stored_max: f64,
+    virgin_max: f64,
+    thickness: f64,
+    area: f64,
+    maximum_m: f64,
+}
+
+impl Site {
+    pub fn new(law: &WoolFelt, state: &State, start_m: f64, thickness_m: f64, area_m2: f64) -> Self {
+        let residual = law.crush_fraction * state.eps_max;
+        let span = state.eps_max - residual;
+        let mut site = Self {
+            p: law.p,
+            q: law.q,
+            f_ref: law.f_ref,
+            eps_ref: law.eps_ref,
+            eps_max: state.eps_max,
+            sig_max: state.sig_max,
+            residual,
+            span,
+            start_strain: start_m / thickness_m,
+            primitive_start: 0.0,
+            stored_max: 0.0,
+            virgin_max: 0.0,
+            thickness: thickness_m,
+            area: area_m2,
+            maximum_m: thickness_m * law.eps_densify,
+        };
+        site.stored_max = if span > 0.0 { state.sig_max * span / (law.q + 1.0) } else { 0.0 };
+        site.virgin_max = site.virgin(state.eps_max);
+        site.primitive_start = site.primitive(site.start_strain);
+        site
+    }
+
+    /// Integral of the virgin envelope from zero strain.
+    #[inline]
+    fn virgin(&self, e: f64) -> f64 {
+        if e <= 0.0 { 0.0 } else { self.f_ref * (e / self.eps_ref).powf(self.p) * e / (self.p + 1.0) }
+    }
+
+    /// `felt.rs::stored` on the committed branch.
+    #[inline]
+    fn stored(&self, e: f64) -> f64 {
+        if e <= self.residual || self.eps_max <= self.residual {
+            return 0.0;
+        }
+        self.sig_max * self.span / (self.q + 1.0) * ((e - self.residual) / self.span).powf(self.q + 1.0)
+    }
+
+    /// `felt.rs::primitive`: integral of the trial stress, committed branch fixed.
+    #[inline]
+    fn primitive(&self, e: f64) -> f64 {
+        if e <= self.eps_max {
+            return self.stored(e);
+        }
+        self.stored_max + self.virgin(e) - self.virgin_max
+    }
+
+    /// (primitive, stress) at strain `e` with ONE power evaluation.
+    #[inline]
+    fn primitive_and_stress(&self, e: f64) -> (f64, f64) {
+        if e >= self.eps_max {
+            if e <= 0.0 {
+                return (if e <= self.eps_max { self.stored(e) } else { self.stored_max - self.virgin_max }, 0.0);
+            }
+            let stress = self.f_ref * (e / self.eps_ref).powf(self.p);
+            let primitive = if e <= self.eps_max {
+                // e == eps_max exactly: the committed branch ends here.
+                self.stored(e)
+            } else {
+                self.stored_max + stress * e / (self.p + 1.0) - self.virgin_max
+            };
+            return (primitive, stress);
+        }
+        if e <= self.residual {
+            return (0.0, 0.0);
+        }
+        let x = (e - self.residual) / self.span;
+        let xq = x.powf(self.q);
+        (self.sig_max * self.span / (self.q + 1.0) * xq * x, self.sig_max * xq)
+    }
+
+    /// `WoolFelt::tangent` (only for the degenerate tiny-increment branch).
+    fn tangent(&self, e: f64) -> f64 {
+        if e >= self.eps_max {
+            if e <= 0.0 {
+                return 0.0;
+            }
+            return self.f_ref * self.p * (e / self.eps_ref).powf(self.p - 1.0) / self.eps_ref;
+        }
+        if e <= self.residual {
+            return 0.0;
+        }
+        let x = (e - self.residual) / self.span;
+        self.sig_max * self.q * x.powf(self.q - 1.0) / self.span
+    }
+
+    /// Held force [N] and its derivative with respect to END overlap [N/m]:
+    /// `felt.rs::average` with the start integral prepared.
+    #[inline]
+    pub fn force(&self, end_m: f64) -> (f64, f64) {
+        let a = self.start_strain;
+        let b = end_m / self.thickness;
+        let de = b - a;
+        let (stress, slope) = if de.abs() < 1.0e-7 * (a.abs().max(b.abs()) + 1.0e-12) {
+            let mid = 0.5 * (a + b);
+            (self.primitive_and_stress(mid).1, 0.5 * self.tangent(mid))
+        } else {
+            let (primitive, end_stress) = self.primitive_and_stress(b);
+            let stress = (primitive - self.primitive_start) / de;
+            (stress, (end_stress - stress) / de)
+        };
+        (self.area * stress, self.area * slope / self.thickness)
+    }
+
+    /// Solve `F = force(free - compliance*F)` for the end overlap, keeping a
+    /// bracket and accepting only a 1e-13 m overlap residual, exactly as
+    /// `felt.rs::solve`; `warm_force` only seeds the iteration.
+    pub fn solve(&self, free_m: f64, compliance_m_n: f64, warm_force: f64) -> Result<f64, &'static str> {
+        let residual = |end: f64| {
+            let (f, df) = self.force(end);
+            (end + compliance_m_n * f - free_m, 1.0 + compliance_m_n * df, f)
+        };
+        let mut hi = free_m.min(self.maximum_m);
+        let (rhi, _, fhi) = residual(hi);
+        if rhi < -1.0e-12 {
+            return Err("felt exceeded its admitted densification strain");
+        }
+        if rhi.abs() <= POSITION_TOL {
+            return Ok(fhi);
+        }
+        let start_m = self.start_strain * self.thickness;
+        let mut lo = start_m.min(free_m).min(0.0) - self.thickness;
+        let mut bracketed = false;
+        for _ in 0..16 {
+            if residual(lo).0 <= 0.0 {
+                bracketed = true;
+                break;
+            }
+            lo = 2.0 * lo - self.thickness;
+        }
+        if !bracketed && residual(lo).0 > 0.0 {
+            return Err("felt contact could not bracket its end overlap");
+        }
+        let seed = free_m - compliance_m_n * warm_force;
+        let mut end = if warm_force > 0.0 && seed > lo && seed < hi { seed } else { 0.5 * (lo + hi) };
+        for _ in 0..64 {
+            let (r, derivative, force) = residual(end);
+            if !r.is_finite() || !derivative.is_finite() || !force.is_finite() || force < 0.0 {
+                return Err("nonfinite or tensile discrete felt force");
+            }
+            if r.abs() <= POSITION_TOL {
+                return Ok(force);
+            }
+            if r > 0.0 { hi = end; } else { lo = end; }
+            let newton = end - r / derivative;
+            end = if newton > lo && newton < hi { newton } else { 0.5 * (lo + hi) };
+        }
+        Err("felt contact exhausted its safeguarded solve budget")
+    }
+}
