@@ -47,6 +47,8 @@ pub struct ThermalSourceBalance {
 pub enum ThermalSourceError {
     /// Invalid limits, layout, source or numerical state.
     Invalid(&'static str),
+    /// Physical material/source conversion was refused.
+    Material(crate::material::MaterialLbmError),
     /// Existing external-force admission rejected the candidate.
     Force(ThermalForcingError),
     /// A candidate temperature is outside the caller's interval.
@@ -66,6 +68,7 @@ impl core::fmt::Display for ThermalSourceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Invalid(what) => write!(f, "thermal source: {what}"),
+            Self::Material(error) => write!(f, "thermal source: {error}"),
             Self::Force(error) => write!(f, "thermal source: {error}"),
             Self::Temperature { cell, value } => write!(f, "thermal source temperature {value} at cell {cell} is outside its admitted range"),
             Self::Balance { defect } => write!(f, "thermal source balance defect {defect} exceeds tolerance"),
@@ -77,10 +80,43 @@ impl From<ThermalForcingError> for ThermalSourceError {
     fn from(error: ThermalForcingError) -> Self { Self::Force(error) }
 }
 
+/// Physical limits for source-coupled material slabs.
+#[derive(Debug, Clone, Copy)]
+pub struct HeatSourceLimits {
+    /// Maximum cells in either grid, including its two wall planes.
+    /// This counts grid cells, not bytes; see [`ThermalSourceLimits`].
+    pub max_cells: usize,
+    /// Positive absolute-temperature interval [K] admitted by the caller's
+    /// frozen-property material model and Boussinesq approximation.
+    pub temperature_range_k: [f64; 2],
+    /// Absolute energy-balance tolerance for one step [J].
+    pub balance_tolerance_j: f64,
+}
+
+/// Physical heat balance for the represented 3-D volume, or for the explicit
+/// extrusion depth of a 2-D slab. Positive wall energy enters the fluid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeatBalance {
+    /// Authored volumetric source integrated over cells and time [J].
+    pub source_j: f64,
+    /// Change in stored sensible thermal energy [J].
+    pub stored_change_j: f64,
+    /// Bottom-wall heat input, measured from population exchange [J].
+    pub bottom_wall_j: f64,
+    /// Top-wall heat input, measured from population exchange [J].
+    pub top_wall_j: f64,
+    /// Independently recomputed stored-minus-source-minus-wall defect [J].
+    pub defect_j: f64,
+}
+
+impl From<crate::material::MaterialLbmError> for ThermalSourceError {
+    fn from(error: crate::material::MaterialLbmError) -> Self { Self::Material(error) }
+}
+
 // Private adapters retain each solver's complete physical state. The source
 // weights come from the existing D2Q5 constant or the D3Q7 constructor
 // at unit wall temperature, rather than a duplicate quadrature table.
-trait Slab<const D: usize, const Q: usize>: Sized {
+pub(crate) trait Slab<const D: usize, const Q: usize>: Sized {
     fn layout(&self) -> Result<(usize, usize), ThermalSourceError>;
     fn populations(&self) -> &[[f64; Q]];
     fn populations_mut(&mut self) -> &mut [[f64; Q]];
@@ -115,9 +151,10 @@ fn kick<const Q: usize>(pops: &mut [[f64; Q]], heat: &[f64], weights: &[f64; Q],
     }
 }
 
-fn source_step<S: Slab<D, Q>, const D: usize, const Q: usize>(
+pub(crate) fn source_step_mapped<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
     state: &mut S, heat: &[f64], forces: &[[f64; D]], limits: ThermalSourceLimits,
-) -> Result<ThermalSourceBalance, ThermalSourceError> {
+    finish: impl FnOnce(ThermalSourceBalance) -> Result<R, ThermalSourceError>,
+) -> Result<R, ThermalSourceError> {
     let (cells, plane) = state.layout()?;
     if cells > limits.max_cells || !limits.balance_tolerance.is_finite() || limits.balance_tolerance < 0.0
         || !limits.temperature_range.iter().all(|x| x.is_finite())
@@ -163,8 +200,9 @@ fn source_step<S: Slab<D, Q>, const D: usize, const Q: usize>(
     if !defect.is_finite() || defect.abs() > limits.balance_tolerance {
         return Err(ThermalSourceError::Balance { defect });
     }
+    let result = finish(ThermalSourceBalance { source, stored_change, bottom_wall, top_wall, defect })?;
     *state = candidate;
-    Ok(ThermalSourceBalance { source, stored_change, bottom_wall, top_wall, defect })
+    Ok(result)
 }
 
 fn flow_valid<const Q: usize, const D: usize>(f: &[[f64; Q]], tau: &[f64], fext: &[[f64; D]], tau_g: f64) -> bool {
@@ -243,7 +281,7 @@ impl ThermalLbm {
     /// This checked path supports the constructor's periodic BGK slab, not
     /// edited obstacle masks or alternative collision operators.
     pub fn step_with_sources(&mut self, heat_per_step: &[f64], forces: &[[f64; 2]], limits: ThermalSourceLimits) -> Result<ThermalSourceBalance, ThermalSourceError> {
-        source_step::<Self, 2, 5>(self, heat_per_step, forces, limits)
+        source_step_mapped::<Self, 2, 5, _>(self, heat_per_step, forces, limits, Ok)
     }
 }
 impl ThermalLbm3 {
@@ -251,6 +289,6 @@ impl ThermalLbm3 {
     /// Uses the original D3Q7 equilibrium weights and the same source and
     /// balance implementation. Source rates are prescribed, not reaction laws.
     pub fn step_with_sources(&mut self, heat_per_step: &[f64], forces: &[[f64; 3]], limits: ThermalSourceLimits) -> Result<ThermalSourceBalance, ThermalSourceError> {
-        source_step::<Self, 3, 7>(self, heat_per_step, forces, limits)
+        source_step_mapped::<Self, 3, 7, _>(self, heat_per_step, forces, limits, Ok)
     }
 }
