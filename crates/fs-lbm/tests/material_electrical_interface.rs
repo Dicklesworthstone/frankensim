@@ -153,3 +153,93 @@ fn sourced_zero_is_distinct_from_missing_contact_data() {
     assert!(resolve_electrical_interface_state(&card(CONTACT_DIMS, -1.0), &point(350.0),
         MaterialPropertySelection::SingleClaimOnly).is_err());
 }
+
+fn coupling_config() -> fs_lbm::conjugate::material_coupling::MaterialCouplingConfig {
+    fs_lbm::conjugate::material_coupling::MaterialCouplingConfig {
+        max_passes: 100, temperature_tolerance_k: 1e-9,
+        power_tolerance_w: 1e-10, relative_tolerance: 0.0,
+    }
+}
+fn binding(source: &InterfaceSystemCard, t: f64)
+    -> Result<fs_lbm::conjugate::material_coupling::interfaces::MaterialContact, fs_lbm::conjugate::ChtError>
+{
+    use fs_lbm::conjugate::material_coupling::interfaces::MaterialContact;
+    let resolved = resolve_electrical_interface_state(source, &point(t),
+        MaterialPropertySelection::SingleClaimOnly).map_err(|e| fs_lbm::conjugate::ChtError::InvalidInput {
+            field: "fixture.interface", reason: e.to_string(),
+        })?;
+    // Actual scenario material/finish assignments, not descriptors copied from the source.
+    MaterialContact::try_new(resolved, [1,2], [
+        SurfaceSpec { material: material("a"), texture_frame: "finish-a".into() },
+        SurfaceSpec { material: material("b"), texture_frame: "finish-b".into() },
+    ].each_ref(), 0.25)
+}
+
+#[test]
+fn interface_temperature_feedback_reaches_closed_form_with_final_source_receipts() {
+    use fs_lbm::conjugate::material_coupling::interfaces;
+    let (domain, electric) = circuit();
+    let gate = CancelGate::new();
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(300.0); faces[1] = ThermalFace::Temperature(300.0);
+    let thermal = ThermalSetup::new(faces);
+    for scale in [1.0, 2.0] {
+        let source = card(CONTACT_DIMS, scale);
+        let mut calls = 0;
+        let result = interfaces::solve(&domain, &electric, &thermal, &[300.0; 4], coupling_config(),
+            |_, occupancy, _| Ok(Some(if occupancy == Voxel::Solid(0) {2.0} else {4.0})),
+            |t| { calls += 1; Ok(vec![binding(&source, t[1])?]) },
+            |heated, _| solve_energy(&domain, &FluidProperties::dry_air_300k(),
+                &[SolidMaterial::new("a",1.0), SolidMaterial::new("b",1.0)],
+                &FlowField::quiescent(&domain), heated, &EnergyConfig::default(), &gate),
+            &gate).unwrap();
+        // Explicit first-surface interface temperature: R=s*(3+.03*(T1-300)).
+        // The independent FV thermal solution gives T1-300=4.125+.65625*R.
+        let r = scale*3.12375 / (1.0-scale*0.0196875);
+        near(result.contacts[0].source().resistance_ohm_m2(), r);
+        near(result.coupled.thermal.temperature[1], 300.0+4.125+0.65625*r);
+        near(result.coupled.electric.electrodes[1].voltage_v, 6.0+r);
+        near(result.coupled.thermal.report.balance.boundary_outflow_w, 6.0+r);
+        near(result.coupled.thermal.report.balance.residual_w, 0.0);
+        assert_eq!(calls, result.coupled.report.passes+1);
+        assert_eq!(result.contacts[0].source().resolved().state_coordinate("T"),
+            Some(result.coupled.thermal.temperature[1]));
+    }
+}
+
+#[test]
+fn receiving_surface_finish_must_match_the_source_before_contact_binding() {
+    use fs_lbm::conjugate::material_coupling::interfaces::MaterialContact;
+    let source = card(CONTACT_DIMS, 1.0);
+    let resolved = resolve_electrical_interface_state(&source, &point(300.0),
+        MaterialPropertySelection::SingleClaimOnly).unwrap();
+    let mut other = source.surface_a().clone(); other.texture_frame = "different-finish".into();
+    assert!(MaterialContact::try_new(resolved.clone(), [1,2], [&other, source.surface_b()], 0.25).is_err());
+    for share in [-1.0, 2.0, f64::NAN] {
+        assert!(MaterialContact::try_new(resolved.clone(), [1,2],
+            [source.surface_a(), source.surface_b()], share).is_err());
+    }
+}
+
+#[test]
+fn a_late_interface_domain_refusal_cannot_be_hidden_by_a_small_temperature_update() {
+    use fs_lbm::conjugate::material_coupling::interfaces;
+    let (domain, mut electric) = circuit();
+    electric.electrodes[1].drive = ElectrodeDrive::Current(10.0);
+    let gate = CancelGate::new();
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(300.0); faces[1] = ThermalFace::Temperature(300.0);
+    let thermal = ThermalSetup::new(faces);
+    let source = card(CONTACT_DIMS, 1.0);
+    let mut calls = 0;
+    let result = interfaces::solve(&domain, &electric, &thermal, &[300.0; 4], coupling_config(),
+        |_, _, _| Ok(Some(2.0)),
+        |t| { calls += 1; Ok(vec![binding(&source, t[1])?]) },
+        |heated, _| solve_energy(&domain, &FluidProperties::dry_air_300k(),
+            &[SolidMaterial::new("a",1.0), SolidMaterial::new("b",1.0)],
+            &FlowField::quiescent(&domain), heated, &EnergyConfig::default(), &gate), &gate);
+    assert!(matches!(result, Err(fs_lbm::conjugate::ChtError::InvalidInput {
+        field: "fixture.interface", ..
+    })));
+    assert_eq!(calls, 2); // admissible initial state, refused proposed hot state
+}

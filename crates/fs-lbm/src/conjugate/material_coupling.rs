@@ -4,6 +4,9 @@
 //! temperature field. No material-name defaults, constant-property inference,
 //! source extrapolation, or new current/heat discretization is introduced here.
 
+/// Source-backed electrical interfaces in the shared temperature feedback loop.
+pub mod interfaces;
+
 use fs_exec::CancelGate;
 
 use super::{
