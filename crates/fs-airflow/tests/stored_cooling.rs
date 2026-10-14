@@ -148,8 +148,7 @@ fn fixture<R>(cp_scale: f64, run: impl FnOnce(&Cx<'_>, &CancelGate,
         }]).unwrap();
         let storage = EnthalpyBackwardEuler::uniform(&cx, &mesh, solid_chart.curve(), 1000.0,
             EnthalpyBudget { max_vertices: mesh.vertex_count(), max_elements: mesh.element_count() }).unwrap();
-        // Cp(T)=400+2(T-250): integral from 250 K to 300 K is 22500*scale J/kg.
-        let initial_h = 22500.0*cp_scale;
+        let initial_h = solid_chart.state_at_temperature(300.0).unwrap().specific_enthalpy_j_kg();
         let tank = network.reservoir(&cx, 0.1, Temperature::new(300.0), 0.0).unwrap();
         let mut state = StoredCoolingState::try_new(&cx, tank, &storage, vec![initial_h; mesh.vertex_count()]).unwrap();
         run(&cx, &cancel, &network, &pump, &mut state, &mesh, &conductivity)
@@ -239,7 +238,7 @@ fn original_boundary_failure_and_cancel_leave_both_histories_unchanged() {
 }
 
 #[test]
-fn budget_or_joint_account_refusal_cannot_publish_either_storage_state() {
+fn budget_or_invalid_joint_control_cannot_publish_either_storage_state() {
     fixture(1.0, |cx, _, network, pump, state, mesh, material| {
         let heat = ScalarField::uniform("20 W", 20.0/0.00006).unwrap();
         let old_tank = state.reservoir().clone();
