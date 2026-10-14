@@ -18,13 +18,13 @@ pub(super) const OUTPUT: &str = "temperature-volume-mean-bound";
 #[cfg(feature = "thermal-verification")]
 mod material_range;
 #[cfg(feature = "thermal-verification")]
-const SCOPE: &str = "Verified numerical interval for the region volume-mean temperature of the nominal linear conduction PDE on the exact published polyhedral mesh domain, with original fixed Dirichlet/Neumann/Robin data and constant scalar conductivity. Material validity is either globally declared or independently established by the retained whole-continuum slab comparison; the latter does not support contact. Original matching finite-resistance contacts retain separate temperature traces and globally declared scalar resistance; their resistance-weighted jumps enter the continuum majorant. Independent equilibrated primal and dual fluxes include discretization, algebraic residual and outward numerical evaluation. Original material and interface cards and exact selected property receipts are retained; their declarations are not experimental validation. The primary enclosure bounds the mean, not the error of the selected maximum. This is not a material/contact/boundary uncertainty bound, CAD/as-built geometry certificate, nonlinear/nonmatching-contact/convection-feedback bound, or a complete engineering decision. The existing temperature-max requirement and its uncertainty budget are unchanged.";
+const SCOPE: &str = "Verified numerical interval for the region volume-mean temperature of the nominal linear conduction PDE on the exact published polyhedral mesh domain, with original fixed Dirichlet/Neumann/Robin data and constant scalar conductivity. Material validity is either globally declared or independently established by the retained whole-continuum slab comparison; layered contacts include their original finite-resistance jumps in that proof. Original matching finite-resistance contacts retain separate temperature traces and constant scalar resistance whose source domain is global or established by the same whole-continuum comparison; their resistance-weighted jumps enter the continuum majorant. Independent equilibrated primal and dual fluxes include discretization, algebraic residual and outward numerical evaluation. Original material and interface cards and exact selected property receipts are retained; their declarations are not experimental validation. The primary enclosure bounds the mean, not the error of the selected maximum. This is not a material/contact/boundary uncertainty bound, CAD/as-built geometry certificate, nonlinear/nonmatching-contact/convection-feedback bound, or a complete engineering decision. The existing temperature-max requirement and its uncertainty budget are unchanged.";
 
 fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error(
         "cli-solve-mean-bound",
         message,
-        "request steady fixed thermal boundaries and constant scalar conductivity; finite spans require an admitted no-contact slab continuum range, while matching contacts require globally constant material and resistance claims",
+        "request steady fixed thermal boundaries and constant scalar conductivity; finite spans require an admitted slab or layered-contact continuum range with all original scalar source domains retained",
     )
 }
 
@@ -137,6 +137,12 @@ mod enabled {
             number(hi)?
         ))
     }
+    fn span_json(span: fs_conduction::TemperatureSpan) -> Result<String, SolveRefusal> {
+        match span {
+            fs_conduction::TemperatureSpan::Unbounded => Ok("null".into()),
+            fs_conduction::TemperatureSpan::Sampled { low, high } => interval(low, high),
+        }
+    }
     fn lower(error: fs_conduction::ConductionError) -> SolveRefusal {
         bad(format!("original material/thermal model refused: {error}"))
     }
@@ -217,6 +223,7 @@ mod enabled {
             ));
         }
         let mut contact_rows = Vec::with_capacity(data.interface_surfaces.len());
+        let mut contact_span = fs_conduction::TemperatureSpan::Unbounded;
         for surface in &data.interface_surfaces {
             poll(cx, work)?;
             let resistance = surface.resistance().ok_or_else(|| {
@@ -248,17 +255,10 @@ mod enabled {
                 .claims()
                 .claim(receipt.selected)
                 .ok_or_else(|| bad("the selected original contact claim is absent"))?;
-            // A discrete temperature range cannot establish validity of the
-            // unknown continuum trace on either side of the contact.
-            if !matches!(claim.value, fs_matdb::PropertyValue::Scalar { .. })
-                || claim.interpolation != fs_matdb::InterpolationPolicy::ConstantWithinValidity
-                || !claim.validity.bounds().is_empty()
-                || claim.validity.has_typed_axes()
-            {
-                return Err(bad(
-                    "global constant contact resistance requires a scalar ConstantWithinValidity claim with explicitly unconstrained validity; finite spans and sampled/state laws need a continuum validity proof",
-                ));
-            }
+            // Retain the selected source's actual domain. A finite domain
+            // requires a whole-continuum proof below, never nodal extrema.
+            let domain = contact_domain(claim, resistance.value_m2_k_per_w())?;
+            contact_span = contact_span.intersect(domain);
             card.claims().verify_receipt(receipt).map_err(|error| {
                 bad(format!("original contact source receipt refused: {error}"))
             })?;
@@ -279,7 +279,7 @@ mod enabled {
                 concat!(
                     "{{\"interface\":{},\"card\":{},\"selected_claim\":{},",
                     "\"receipt\":{},\"receipt_bytes_hex\":{},\"resistance_m2_k_per_w\":{},",
-                    "\"face_pairs\":[{}]}}"
+                    "\"face_pairs\":[{}],\"temperature_domain_k\":{}}}"
                 ),
                 json_string(surface.name()),
                 json_string(&binding.card),
@@ -287,10 +287,11 @@ mod enabled {
                 json_string(&receipt.content_hash().to_hex()),
                 json_string(&receipt_hex),
                 number(resistance.value_m2_k_per_w())?,
-                pairs,
+                pairs, span_json(domain)?,
             ));
         }
         let mut models = Vec::with_capacity(ids.len());
+        let mut finite_material = false;
         let mut material_rows = Vec::with_capacity(ids.len());
         for (name, &id) in ids {
             poll(cx, work)?;
@@ -331,6 +332,7 @@ mod enabled {
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>();
             let conductivity = model.tensor_at(binding.temp_lo.value).map_err(lower)?[0][0];
+            finite_material |= matches!(model.temperature_span(), fs_conduction::TemperatureSpan::Sampled { .. });
             let temperature_domain = match model.temperature_span() {
                 fs_conduction::TemperatureSpan::Unbounded => "null".to_string(),
                 fs_conduction::TemperatureSpan::Sampled { low, high } => interval(low, high)?,
@@ -392,24 +394,31 @@ mod enabled {
             element_materials: Some(&materials),
             source: &data.source,
         };
-        let (result, material_domain) = material_range::bound(
-            cx,
-            problem,
-            &data.interface_surfaces,
-            &solved.solution.temperature,
-            &cells,
-            RegionMeanConfig {
-                dual: data.linear,
-                residual_limits: GoalResidualLimits {
-                    max_rows: n,
-                    max_nonzeros: usize::try_from(memory / 64).unwrap_or(usize::MAX),
-                },
-                flux: FluxBudget {
-                    max_cells: ne,
-                    max_iterations: 128,
-                },
+        let config = RegionMeanConfig {
+            dual: data.linear,
+            residual_limits: GoalResidualLimits {
+                max_rows: n,
+                max_nonzeros: usize::try_from(memory / 64).unwrap_or(usize::MAX),
             },
-        )
+            flux: FluxBudget { max_cells: ne, max_iterations: 128 },
+        };
+        let needs_contact_proof = !data.interface_surfaces.is_empty()
+            && (finite_material || matches!(contact_span, fs_conduction::TemperatureSpan::Sampled { .. }));
+        let (result, material_domain, contact_proof) = if needs_contact_proof {
+            fs_conduction::verification::region::material_range::
+                bound_temperature_region_mean_with_contact_slab_validity(
+                    cx, problem, &data.interface_surfaces, &solved.solution.temperature, &cells,
+                    &[(0,false),(0,true),(1,false),(1,true),(2,false),(2,true)], contact_span, config,
+                ).map(|checked| {
+                    let validity = (checked.continuum_temperature_range_k, checked.material_temperature_span,
+                        checked.contact_temperature_span, checked.axis, checked.reverse, checked.comparison_attempts);
+                    (checked.region, None, Some(validity))
+                })
+        } else {
+            material_range::bound(cx, problem, &data.interface_surfaces,
+                &solved.solution.temperature, &cells, config)
+                .map(|(result, proof)| (result, proof, None))
+        }
         .map_err(|error| match error {
             ConductionBoundError::Verification(TetError::Cancelled)
             | ConductionBoundError::Conduction(fs_conduction::ConductionError::Cancelled {
@@ -422,14 +431,20 @@ mod enabled {
             error => bad(format!("continuum region-mean producer refused: {error}")),
         })?;
         poll(cx, work)?;
-        let material_validity = match material_domain {
+        let material_validity = if let Some((range, materials, contacts, axis, reverse, attempts)) = contact_proof {
+            format!(
+                "{{\"method\":\"continuum-layered-contact-comparison\",\"continuum_temperature_range_k\":{},\"retained_material_domain_k\":{},\"retained_contact_domain_k\":{},\"axis\":{},\"reverse\":{},\"comparison_attempts\":{}}}",
+                interval(range[0], range[1])?, span_json(materials)?, span_json(contacts)?,
+                axis, reverse, attempts,
+            )
+        } else { match material_domain {
             None => "{\"method\":\"global-constant-source\"}".to_string(),
             Some(proof) => format!(
                 "{{\"method\":\"continuum-slab-comparison\",\"continuum_temperature_range_k\":{},\"retained_material_domain_k\":{},\"axis\":{},\"reverse\":{},\"two_sided\":{},\"comparison_attempts\":{}}}",
                 interval(proof.range[0], proof.range[1])?, interval(proof.span[0], proof.span[1])?,
                 proof.axis, proof.reverse, proof.two_sided, proof.attempts,
             ),
-        };
+        }};
         let bound = &result.bound;
         let difference = bound.enclosure.sub(bound.candidate_mean);
         let error_upper = difference.lo.abs().max(difference.hi.abs());
@@ -467,5 +482,73 @@ mod enabled {
             material_validity,
             json_string(SCOPE)
         ))
+    }
+}
+
+#[cfg(feature = "thermal-verification")]
+fn contact_domain(
+    claim: &fs_matdb::PropertyClaim, actual_resistance: f64,
+) -> Result<fs_conduction::TemperatureSpan, SolveRefusal> {
+    use fs_conduction::{TemperatureSpan, AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS};
+    let fs_matdb::PropertyValue::Scalar { value, dims } = &claim.value else {
+        return Err(bad("contact bounds require the original scalar resistance claim"));
+    };
+    if *dims != AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS || *value != actual_resistance
+        || !value.is_finite() || *value <= 0.0
+        || claim.interpolation != fs_matdb::InterpolationPolicy::ConstantWithinValidity
+        || claim.validity.has_typed_axes()
+    {
+        return Err(bad("contact bound does not match an original constant scalar resistance law"));
+    }
+    if claim.validity.bounds().is_empty() { return Ok(TemperatureSpan::Unbounded); }
+    let Some((low, high)) = claim.validity.bound("T") else {
+        return Err(bad("finite contact validity requires a temperature-only source domain"));
+    };
+    if claim.validity.bounds().len() != 1 || !low.is_finite() || !high.is_finite() || low > high {
+        return Err(bad("finite contact validity requires one finite nonempty temperature domain"));
+    }
+    Ok(TemperatureSpan::Sampled { low, high })
+}
+
+#[cfg(all(test, feature = "thermal-verification"))]
+mod contact_domain_tests {
+    use super::*;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{InterpolationPolicy, PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel};
+
+    fn claim(validity: ValidityDomain) -> PropertyClaim {
+        let dims = fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
+        PropertyClaim {
+            key: PropertyKey::new(fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY, dims),
+            value: PropertyValue::Scalar { value: 0.2, dims }, validity,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            uncertainty: UncertaintyModel::Unstated, observations: Vec::new(),
+            provenance: Provenance { source: "synthetic contact domain fixture".into(),
+                license: "internal-test-use".into(), artifact: None },
+        }
+    }
+    #[test]
+    fn exact_contact_source_keeps_its_finite_domain_or_global_declaration() {
+        let source = claim(ValidityDomain::unconstrained().with("T", 250.0, 350.0));
+        assert_eq!(contact_domain(&source, 0.2).unwrap(),
+            fs_conduction::TemperatureSpan::Sampled { low: 250.0, high: 350.0 });
+        assert_eq!(source.validity.bound("T"), Some((250.0,350.0)));
+        assert_eq!(contact_domain(&claim(ValidityDomain::unconstrained()), 0.2).unwrap(),
+            fs_conduction::TemperatureSpan::Unbounded);
+        assert!(contact_domain(&source, 0.3).is_err(), "a changed numerical resistance is not the selected claim");
+    }
+    #[test]
+    fn other_state_axes_flat_curves_and_wrong_dimensions_do_not_become_contact_proofs() {
+        for domain in [ValidityDomain::unconstrained().with("pressure", 0.0, 1.0),
+            ValidityDomain::unconstrained().with("T",250.0,350.0).with("pressure",0.0,1.0)] {
+            assert!(contact_domain(&claim(domain),0.2).is_err());
+        }
+        let mut source = claim(ValidityDomain::unconstrained().with("T",250.0,350.0));
+        source.value = PropertyValue::Curve { abscissa:"T".into(),
+            abscissa_dims:fs_qty::Dims([0,0,0,1,0,0]), knots:vec![(250.0,0.2),(350.0,0.2)],
+            dims:fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS };
+        assert!(contact_domain(&source,0.2).is_err());
+        source.value = PropertyValue::Scalar { value:0.2, dims:fs_qty::Dims::NONE };
+        assert!(contact_domain(&source,0.2).is_err());
     }
 }
