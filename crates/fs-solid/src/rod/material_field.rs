@@ -1,0 +1,171 @@
+//! Spatially heterogeneous members using the existing Cosserat rod solver.
+//!
+//! A segment owns its actual concentric material section. Changing one segment
+//! changes equilibrium everywhere through shared nodal compatibility, not through
+//! an average modulus or separately solved pieces. Reference segments have equal
+//! length; cross-section/material jumps are one-dimensional idealizations, not
+//! resolved joint/interface stresses. The original clamped-root, dense FD/Newton
+//! statics and body-frame tip-moment convention remain in force.
+
+use fs_exec::CancelGate;
+use fs_ga::So3;
+use fs_material::section::ConcentricShearSection;
+
+use super::{MAX_MATERIAL_ROD_SEGMENTS, Rod, RodSection, TipLoad};
+use crate::SolidError;
+
+/// Original solid/material failure, input refusal, or cancellation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SpatialRodError {
+    /// The original constitutive/kinematic/equilibrium owner refused.
+    Solid(SolidError),
+    /// Invalid spatial assignment or unrepresentable result.
+    Invalid(&'static str),
+    /// No candidate configuration is published after cancellation.
+    Cancelled,
+}
+impl core::fmt::Display for SpatialRodError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Solid(error) => write!(f, "spatial material rod: {error}"),
+            Self::Invalid(what) => write!(f, "spatial material rod: {what}"),
+            Self::Cancelled => f.write_str("spatial material rod: cancelled"),
+        }
+    }
+}
+impl std::error::Error for SpatialRodError {}
+impl From<SolidError> for SpatialRodError {
+    fn from(error: SolidError) -> Self { Self::Solid(error) }
+}
+
+/// One compatible rod configuration with a source-bound section per segment.
+///
+/// The uniform `Rod` is kept private: exposing its first section as though it
+/// described the complete heterogeneous member would give a wrong energy.
+/// Sources, solved coordinates, strains and energy are available explicitly.
+/// This is statics, not dynamics, conservative remapping, or material evolution.
+/// Density is retained in each source but does not introduce an implicit weight.
+#[derive(Clone, Debug)]
+pub struct SpatialMaterialRod {
+    rod: Rod,
+    sections: Vec<ConcentricShearSection>,
+    stiffness: Vec<RodSection>,
+    reference_length_m: f64,
+}
+
+impl SpatialMaterialRod {
+    /// Build a straight member; spatial order is preserved, never sorted by card.
+    /// Each entry spans `length_m / sections.len()` in the reference coordinate.
+    /// Sources must support static, fixed-state elasticity as in `MaterialRod`.
+    ///
+    /// # Errors
+    /// Refuses invalid length, empty/oversized assignments, unrepresentable
+    /// segment lengths, and every original material-law admission failure.
+    pub fn try_straight(
+        length_m: f64,
+        sections: Vec<ConcentricShearSection>,
+    ) -> Result<Self, SpatialRodError> {
+        if !length_m.is_finite() || length_m <= 0.0 || sections.is_empty()
+            || sections.len() > MAX_MATERIAL_ROD_SEGMENTS
+        {
+            return Err(SpatialRodError::Invalid("finite positive length and 1..=64 material segments are required"));
+        }
+        let l0 = length_m / sections.len() as f64;
+        if !l0.is_finite() || l0 <= 0.0 {
+            return Err(SpatialRodError::Invalid("reference segment length is unrepresentable"));
+        }
+        let stiffness = sections.iter().map(RodSection::try_from_concentric_material)
+            .collect::<Result<Vec<_>, _>>()?;
+        let rod = Rod::straight(length_m, sections.len(), stiffness[0]);
+        Ok(Self { rod, sections, stiffness, reference_length_m: length_m })
+    }
+
+    /// Original material assignments and all layer receipts, in spatial order.
+    #[must_use]
+    pub fn sections(&self) -> &[ConcentricShearSection] { &self.sections }
+    /// Accepted nodal positions [m], shared by all incident material segments.
+    #[must_use]
+    pub fn positions_m(&self) -> &[[f64; 3]] { &self.rod.positions }
+    /// Accepted body-to-world nodal frames from the existing SO(3) owner.
+    #[must_use]
+    pub fn frames(&self) -> &[So3] { &self.rod.frames }
+    /// Authored straight reference length [m], not the current arc length.
+    #[must_use]
+    pub const fn reference_length_m(&self) -> f64 { self.reference_length_m }
+
+    /// Existing Cosserat axial/shear strains and curvature/twist [1/m].
+    pub fn segment_strains(&self, segment: usize) -> Result<([f64; 3], [f64; 3]), SpatialRodError> {
+        if segment >= self.sections.len() {
+            return Err(SpatialRodError::Invalid("segment index is outside the material field"));
+        }
+        Ok(self.rod.strains(segment)?)
+    }
+
+    /// Local force [N] and moment [N m] resultants at the accepted configuration.
+    /// These are section resultants, not three-dimensional interfacial stresses.
+    pub fn segment_resultants(&self, segment: usize) -> Result<([f64; 3], [f64; 3]), SpatialRodError> {
+        let (g, k) = self.segment_strains(segment)?;
+        let s = self.stiffness[segment];
+        let force = [s.ea * g[0], s.ga * g[1], s.ga * g[2]];
+        let moment = [s.gj * k[0], s.ei * k[1], s.ei * k[2]];
+        if !force.iter().chain(&moment).all(|v| v.is_finite()) {
+            return Err(SpatialRodError::Invalid("section resultants are unrepresentable"));
+        }
+        Ok((force, moment))
+    }
+
+    /// Stored strain energy [J] from every segment's own material law.
+    pub fn energy_j(&self) -> Result<f64, SpatialRodError> {
+        self.energy_for(&self.rod)
+    }
+
+    fn energy_for(&self, rod: &Rod) -> Result<f64, SpatialRodError> {
+        let mut energy = 0.0;
+        for (segment, section) in self.stiffness.iter().enumerate() {
+            let (g, k) = rod.strains(segment)?;
+            energy += 0.5 * rod.l0 * section.twice_energy_per_length(g, k);
+        }
+        if !energy.is_finite() {
+            return Err(SpatialRodError::Invalid("material strain energy is unrepresentable"));
+        }
+        Ok(energy)
+    }
+
+    /// Solve ONE compatible equilibrium using the original Newton/Lie-group path.
+    /// All tangent probes use this same spatial energy. Cancellation is checked
+    /// at load/Newton steps, every residual coordinate and tangent column, and
+    /// around the bounded dense solve. There is no millisecond latency claim.
+    /// Only a complete finite candidate replaces the previous geometry.
+    ///
+    /// `tolerance` retains the legacy norm mixing force and moment residuals;
+    /// it is numerical stopping evidence, not a dimensionless error certificate.
+    ///
+    /// # Errors
+    /// Refuses invalid loads/budgets, all source/solver failures and cancellation.
+    /// Every failure, including a late load-step failure, preserves the old pose.
+    pub fn solve_static(
+        &mut self, load: &TipLoad, steps: usize, tolerance: f64, gate: &CancelGate,
+    ) -> Result<Vec<f64>, SpatialRodError> {
+        checkpoint(gate)?;
+        if steps == 0 || steps > 256 || !tolerance.is_finite() || tolerance <= 0.0
+            || !load.force.iter().chain(&load.moment).all(|v| v.is_finite())
+        {
+            return Err(SpatialRodError::Invalid("finite loads, positive tolerance and 1..=256 load steps are required"));
+        }
+        let mut candidate = self.rod.clone();
+        let residuals = candidate.solve_static_with_energy(
+            load, steps, tolerance, &|rod| self.energy_for(rod), &|| checkpoint(gate),
+        )?;
+        self.energy_for(&candidate)?;
+        if !candidate.positions.iter().flatten().all(|v| v.is_finite()) {
+            return Err(SpatialRodError::Invalid("solved material rod position is unrepresentable"));
+        }
+        checkpoint(gate)?;
+        self.rod = candidate;
+        Ok(residuals)
+    }
+}
+
+fn checkpoint(gate: &CancelGate) -> Result<(), SpatialRodError> {
+    if gate.is_requested() { Err(SpatialRodError::Cancelled) } else { Ok(()) }
+}

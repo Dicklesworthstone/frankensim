@@ -19,6 +19,9 @@
 use crate::SolidError;
 use fs_ga::{GaError, So3, Vec3};
 
+/// Spatial material assignments using this same rod kinematics/Newton owner.
+pub mod material_field;
+
 /// Diagonal section stiffness of a Cosserat rod.
 #[derive(Debug, Clone, Copy)]
 pub struct RodSection {
@@ -116,10 +119,7 @@ impl Rod {
             let (g, k) = self.strains(seg)?;
             e += 0.5
                 * self.l0
-                * (s.ea * g[0] * g[0]
-                    + s.ga * (g[1] * g[1] + g[2] * g[2])
-                    + s.gj * k[0] * k[0]
-                    + s.ei * (k[1] * k[1] + k[2] * k[2]));
+                * s.twice_energy_per_length(g, k);
         }
         Ok(e)
     }
@@ -151,15 +151,22 @@ impl Rod {
     /// Potential Π = E_int − F·r_tip (dead force; the dead tip moment
     /// enters the residual directly — it has no global potential under
     /// multiplicative updates).
-    fn potential(&self, load: &TipLoad, factor: f64) -> Result<f64, SolidError> {
+    fn potential<E>(
+        &self, load: &TipLoad, factor: f64,
+        energy: &impl Fn(&Self) -> Result<f64, E>,
+    ) -> Result<f64, E> {
         let tip = self.positions[self.positions.len() - 1];
-        Ok(self.energy()?
+        Ok(energy(self)?
             - factor * (load.force[0] * tip[0] + load.force[1] * tip[1] + load.force[2] * tip[2]))
     }
 
     /// FD residual in body/right perturbation coordinates: ∂Π/∂dof,
     /// minus the body-frame tip moment on the last node's rotational DOFs.
-    fn residual(&self, load: &TipLoad, factor: f64) -> Result<Vec<f64>, SolidError> {
+    fn residual<E: From<SolidError>>(
+        &self, load: &TipLoad, factor: f64,
+        energy: &impl Fn(&Self) -> Result<f64, E>,
+        checkpoint: &impl Fn() -> Result<(), E>,
+    ) -> Result<Vec<f64>, E> {
         let n = self.ndof();
         let mut r = vec![0.0f64; n];
         // FD scales: the tangent is FD-of-FD — the residual step must
@@ -168,14 +175,15 @@ impl Rod {
         let eps = 3e-6;
         let mut probe = self.clone();
         for k in 0..n {
+            checkpoint()?;
             let mut d = vec![0.0f64; n];
             d[k] = eps;
             probe.clone_from(self);
             probe.apply_increment(&d, 1.0)?;
-            let ep = probe.potential(load, factor)?;
+            let ep = probe.potential(load, factor, energy)?;
             probe.clone_from(self);
             probe.apply_increment(&d, -1.0)?;
-            let em = probe.potential(load, factor)?;
+            let em = probe.potential(load, factor, energy)?;
             r[k] = (ep - em) / (2.0 * eps);
         }
         let tipk = n - 3;
@@ -196,6 +204,18 @@ impl Rod {
         steps: usize,
         tol: f64,
     ) -> Result<Vec<f64>, SolidError> {
+        self.solve_static_with_energy(load, steps, tol, &Self::energy, &|| Ok(()))
+    }
+
+    // The constitutive energy is the only varying input. Both uniform and
+    // spatial material paths differentiate it through the SAME nodal update,
+    // residual, tangent, load stepping and line search. No solver fork.
+    fn solve_static_with_energy<E: From<SolidError>>(
+        &mut self, load: &TipLoad, steps: usize, tol: f64,
+        energy: &impl Fn(&Self) -> Result<f64, E>,
+        checkpoint: &impl Fn() -> Result<(), E>,
+    ) -> Result<Vec<f64>, E> {
+        checkpoint()?;
         let n = self.ndof();
         let mut finals = Vec::new();
         for step in 1..=steps {
@@ -204,7 +224,8 @@ impl Rod {
             let mut history = Vec::new();
             let mut converged = false;
             for _ in 0..40 {
-                let r = self.residual(load, factor)?;
+                checkpoint()?;
+                let r = self.residual(load, factor, energy, checkpoint)?;
                 let rn = r.iter().map(|x| x * x).sum::<f64>().sqrt();
                 history.push(rn);
                 if rn < tol {
@@ -216,32 +237,36 @@ impl Rod {
                 let mut kmat = vec![0.0f64; n * n];
                 let mut probe = self.clone();
                 for col in 0..n {
+                    checkpoint()?;
                     let mut d = vec![0.0f64; n];
                     d[col] = eps;
                     probe.clone_from(self);
                     probe.apply_increment(&d, 1.0)?;
-                    let rp = probe.residual(load, factor)?;
+                    let rp = probe.residual(load, factor, energy, checkpoint)?;
                     probe.clone_from(self);
                     probe.apply_increment(&d, -1.0)?;
-                    let rm = probe.residual(load, factor)?;
+                    let rm = probe.residual(load, factor, energy, checkpoint)?;
                     for row in 0..n {
                         kmat[row * n + col] = (rp[row] - rm[row]) / (2.0 * eps);
                     }
                 }
+                checkpoint()?;
                 let f = fs_la::factor::lu(&kmat, n).map_err(|_| SolidError::SolveFailed {
                     iters: 0,
                     rel_residual: f64::INFINITY,
                 })?;
                 let mut d: Vec<f64> = r.iter().map(|x| -x).collect();
                 f.solve(&mut d);
+                checkpoint()?;
                 // Backtracking on the residual norm (dead moments make
                 // Π alone an incomplete merit function).
                 let mut alpha = 1.0f64;
                 let mut accepted = false;
                 for _ in 0..20 {
+                    checkpoint()?;
                     let mut trial = self.clone();
                     trial.apply_increment(&d, alpha)?;
-                    let rt = trial.residual(load, factor)?;
+                    let rt = trial.residual(load, factor, energy, checkpoint)?;
                     let rtn = rt.iter().map(|x| x * x).sum::<f64>().sqrt();
                     if rtn < rn {
                         *self = trial;
@@ -251,11 +276,11 @@ impl Rod {
                     alpha *= 0.5;
                 }
                 if !accepted {
-                    return Err(SolidError::NewtonStalled { history });
+                    return Err(SolidError::NewtonStalled { history }.into());
                 }
             }
             if !converged {
-                return Err(SolidError::NewtonStalled { history });
+                return Err(SolidError::NewtonStalled { history }.into());
             }
             finals.push(*history.last().expect("nonempty"));
         }
@@ -264,6 +289,15 @@ impl Rod {
 }
 
 impl RodSection {
+    // Keep the original operation tree for the uniform path. The spatial
+    // path changes coefficients, not the constitutive equation or kinematics.
+    fn twice_energy_per_length(&self, g: [f64; 3], k: [f64; 3]) -> f64 {
+        self.ea * g[0] * g[0]
+            + self.ga * (g[1] * g[1] + g[2] * g[2])
+            + self.gj * k[0] * k[0]
+            + self.ei * (k[1] * k[1] + k[2] * k[2])
+    }
+
     /// Project the canonical layered material section into this rod's existing
     /// diagonal energy law. EA, EI, corrected GA and circular GJ are all taken
     /// from the same section; no isotropic preset or effective radius is inferred.
