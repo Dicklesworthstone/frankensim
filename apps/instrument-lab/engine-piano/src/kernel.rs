@@ -588,9 +588,25 @@ fn pad_axpy<const N: usize>(pack: &[f64], v: &mut [f64], c: &[f64; N]) {
 /// One multi-dot pass, an N x N recurrence, one multi-axpy pass. `beta` and
 /// `push` (= sum lift_t c_t, the bridge velocity change still owed to
 /// `bvel` along `gl`) carry across the course's segments. Returns the loss.
+///
+/// The post half (`reverse`) of step n and the pre half of step n+1 are
+/// adjacent flows on the same string velocities (between them only the
+/// receiver, which reads `bvel`), so the post half's string update is owed
+/// instead of applied: `owe = c` and the pad speeds it leaves behind,
+/// `dn = d + Gram c` (exact). The next pre half starts from `dn` instead of a
+/// multi-dot and applies `owe + c` in its one multi-axpy: one pass of each per
+/// sample instead of two. Anything else that needs `v` settles first
+/// (`settle_owed`) or reads it through `LivePiano::seg_velocity`.
 #[inline]
-fn damp_fused<const N: usize>(s: &ASeg, v: &mut [f64], gl_norm2: f64, beta: &mut f64, push: &mut f64, reverse: bool) -> f64 {
-    let d = pad_dots::<N>(&s.pad_pack, v);
+fn damp_fused<const N: usize>(s: &mut ASeg, v: &mut [f64], gl_norm2: f64, beta: &mut f64, push: &mut f64, reverse: bool) -> f64 {
+    let owed = !reverse && s.owed;
+    let d: [f64; N] = if owed {
+        let mut d = [0.0_f64; N];
+        d.copy_from_slice(&s.dn[..N]);
+        d
+    } else {
+        pad_dots::<N>(&s.pad_pack, v)
+    };
     let mut c = [0.0_f64; N];
     let mut loss = 0.0;
     let mut moved = false;
@@ -615,10 +631,49 @@ fn damp_fused<const N: usize>(s: &ASeg, v: &mut [f64], gl_norm2: f64, beta: &mut
         loss += -change * speed - 0.5 * change * change * p.norm;
         moved = true;
     }
-    if moved {
+    if reverse {
+        if moved {
+            for t in 0..N {
+                let row = &s.pad_gram[t * N..t * N + N];
+                let mut next = d[t];
+                for j in 0..N {
+                    next += row[j] * c[j];
+                }
+                s.dn[t] = next;
+                s.owe[t] = c[t];
+            }
+            s.owed = true;
+        }
+    } else if owed {
+        let mut total = [0.0_f64; N];
+        for t in 0..N {
+            total[t] = s.owe[t] + c[t];
+        }
+        pad_axpy::<N>(&s.pad_pack, v, &total);
+        s.owed = false;
+    } else if moved {
         pad_axpy::<N>(&s.pad_pack, v, &c);
     }
     loss
+}
+
+/// Apply a segment's owed post-half damper flow (`damp_fused`) to `v`
+/// exactly as the unfused post half would have.
+#[inline]
+fn settle_owed_n<const N: usize>(s: &ASeg, v: &mut [f64]) {
+    let mut c = [0.0_f64; N];
+    c.copy_from_slice(&s.owe[..N]);
+    pad_axpy::<N>(&s.pad_pack, v, &c);
+}
+
+fn settle_owed(s: &ASeg, v: &mut [f64]) {
+    match s.pad.len() {
+        1 => settle_owed_n::<1>(s, v),
+        2 => settle_owed_n::<2>(s, v),
+        3 => settle_owed_n::<3>(s, v),
+        4 => settle_owed_n::<4>(s, v),
+        _ => {}
+    }
 }
 
 /// `out = row^T * a` for a row-major `r x r` matrix `a`.
@@ -991,6 +1046,11 @@ struct ASeg {
     pad_pack: Vec<f64>,
     /// Pad Gram matrix `g_t . g_j`, row-major `pad.len()` squared (same rule).
     pad_gram: Vec<f64>,
+    /// A post-half damper flow not yet applied to `v` (`damp_fused`): its pad
+    /// coefficients `owe` and the pad speeds `g_t . v` it leaves behind `dn`.
+    owed: bool,
+    owe: [f64; 4],
+    dn: [f64; 4],
     /// Held contact force of this step [N] (speaking strings only).
     force: f64,
     src: f64,
@@ -1554,7 +1614,8 @@ impl LivePiano {
         let (pad_pack, pad_gram) = pack_pads(&pad, n);
         ASeg {
             seg: si, off, n, duplex: self.segs[si].duplex, member: self.segs[si].member, beta2, mek, w_schur, loss_w, sum_c4,
-            endpoint_drag, hammer_lift, lift_total: hammer_lift + lift_bq, cdiag, pad, pad_pack, pad_gram, force: 0.0, src: 0.0,
+            endpoint_drag, hammer_lift, lift_total: hammer_lift + lift_bq, cdiag, pad, pad_pack, pad_gram,
+            owed: false, owe: [0.0; 4], dn: [0.0; 4], force: 0.0, src: 0.0,
         }
     }
 
@@ -1564,6 +1625,7 @@ impl LivePiano {
     /// motion across. Energy-continuous for activation; the relative energy of
     /// retired strings goes to `ledger.retired_j`.
     fn rebuild(&mut self, activate: &[usize], retire: &[(usize, usize)]) -> Result<(), String> {
+        self.settle_damp();
         let r = self.r;
         // Physical board motion (static coordinates) before the basis changes.
         let mut qs = vec![0.0; r];
@@ -1772,12 +1834,39 @@ impl LivePiano {
         Ok(())
     }
 
+    /// Apply every owed post-half damper flow to `v` (before a cold change of
+    /// the dynamic set reads or rewrites it).
+    fn settle_damp(&mut self) {
+        for ac in &mut self.active {
+            for s in &mut ac.segs {
+                if s.owed {
+                    settle_owed(s, &mut self.v[s.off..s.off + s.n]);
+                    s.owed = false;
+                }
+            }
+        }
+    }
+
+    /// A segment's string velocities as the mechanics define them: `v` plus
+    /// any owed post-half damper flow, applied as `settle_owed` would (for
+    /// readers that must not change the state, e.g. the display snapshot).
+    fn seg_velocity(&self, s: &ASeg) -> std::borrow::Cow<'_, [f64]> {
+        let v = &self.v[s.off..s.off + s.n];
+        if !s.owed {
+            return std::borrow::Cow::Borrowed(v);
+        }
+        let mut w = v.to_vec();
+        settle_owed(s, &mut w);
+        std::borrow::Cow::Owned(w)
+    }
+
     /// Relative (chord-following removed) energy of one dynamic string [J].
     fn segment_energy(&self, s: &ASeg, b: f64, bdot: f64) -> f64 {
         let mut e = 0.0;
-        for k in s.off..s.off + s.n {
+        let vel = self.seg_velocity(s);
+        for (k, v) in (s.off..s.off + s.n).zip(vel.iter()) {
             let x = self.q[k] - self.m.beta[k] * b;
-            let u = self.v[k] - self.m.beta[k] * bdot;
+            let u = v - self.m.beta[k] * bdot;
             e += 0.5 * u * u + 0.5 * self.m.w2[k] * x * x;
         }
         e
@@ -1980,23 +2069,37 @@ impl LivePiano {
     /// fused (`damp_fused`), and the bridge velocity change of a whole course
     /// is applied to `bvel` once (it enters later flows of that course only
     /// through the scalar `gl . bvel`, tracked exactly).
+    ///
+    /// The post half's string update is owed to the next pre half (see
+    /// `damp_fused`); a pre half that does not run a segment's flows settles it.
     fn damp(&mut self, reverse: bool) -> f64 {
         if self.sustain >= 1.0 {
+            if !reverse {
+                self.settle_damp();
+            }
             return 0.0;
         }
         let mut loss = 0.0;
         let count = self.active.len();
         for index in 0..count {
             let slot = if reverse { count - 1 - index } else { index };
-            let ac = &self.active[slot];
+            let ac = &mut self.active[slot];
             if !ac.damped_now || ac.segs.iter().all(|s| s.pad.is_empty()) {
+                if !reverse {
+                    for s in &mut ac.segs {
+                        if s.owed {
+                            settle_owed(s, &mut self.v[s.off..s.off + s.n]);
+                            s.owed = false;
+                        }
+                    }
+                }
                 continue;
             }
             let mut beta = dot(&ac.gl, &self.bvel);
             let mut push = 0.0;
             let nseg = ac.segs.len();
             for sindex in 0..nseg {
-                let s = &ac.segs[if reverse { nseg - 1 - sindex } else { sindex }];
+                let s = &mut ac.segs[if reverse { nseg - 1 - sindex } else { sindex }];
                 let np = s.pad.len();
                 let v = &mut self.v[s.off..s.off + s.n];
                 let g2 = ac.gl_norm2;
@@ -2622,9 +2725,10 @@ impl LivePiano {
         for ac in &self.active {
             let b = dot(&ac.gl, &self.bq);
             for s in &ac.segs {
-                for k in s.off..s.off + s.n {
+                let vel = self.seg_velocity(s);
+                for (k, v) in (s.off..s.off + s.n).zip(vel.iter()) {
                     let x = self.q[k] - self.m.beta[k] * b;
-                    e += 0.5 * self.v[k] * self.v[k] + 0.5 * self.m.w2[k] * x * x;
+                    e += 0.5 * v * v + 0.5 * self.m.w2[k] * x * x;
                 }
             }
         }
