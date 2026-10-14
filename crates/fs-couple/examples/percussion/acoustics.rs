@@ -255,26 +255,45 @@ fn fit_observer(omega:&[f64],values:&[C64],dt:f64,order:usize)->Result<(Discrete
     // Restore this SIGNED scale on C and D; error denominators stay positive.
     let anchor=values.iter().max_by(|a,b|a.abs().total_cmp(&b.abs())).unwrap();
     let sign=if anchor.re.abs()>=anchor.im.abs(){anchor.re}else{anchor.im};
-    let scale=magnitude.copysign(sign);
+    let primary_scale=magnitude.copysign(sign);
     let frequencies:Vec<_>=omega.iter().step_by(2).map(|w|2.0/dt*det::tan(w*dt/2.0)).collect();
-    // The fit owner uses s=+i omega. Conjugation and frequency warping are both
-    // required; fitting raw negative-time phasors reverses the physical phase.
-    let response:Vec<_>=values.iter().step_by(2).map(|v|C64::new(v.re/scale,-v.im/scale)).collect();
-    let fit=vector_fit(&frequencies,&response,&FitOptions{order,iterations:12,weights:WeightPreset::Uniform,fit_d:true,fit_e:false})?;
-    if !fit.model.is_stable() || fit.model.e!=0.0 || !fit.report.weighted_rms.is_finite() {
-        return Err("observer fit must be stable, finite and proper".into());
+    let mut best:Option<(DiscreteStateSpace,f64,f64)>=None;
+    let mut last_err:Option<Error>=None;
+    for scale in [primary_scale,-primary_scale] {
+        // The fit owner uses s=+i omega and constrains d>=0 in its residue pass.
+        // Testing both signed scales preserves exact polarity symmetry while
+        // allowing either sign of physical high-frequency feedthrough d.
+        let response:Vec<_>=values.iter().step_by(2).map(|v|C64::new(v.re/scale,-v.im/scale)).collect();
+        let fit=match vector_fit(&frequencies,&response,&FitOptions{order,iterations:12,weights:WeightPreset::Uniform,fit_d:true,fit_e:false}) {
+            Ok(fit)=>fit,
+            Err(e)=>{last_err=Some(e.into());continue;}
+        };
+        if !fit.model.is_stable() || fit.model.e!=0.0 || !fit.report.weighted_rms.is_finite() {
+            last_err=Some("observer fit must be stable, finite and proper".into());
+            continue;
+        }
+        let mut filter=match bilinear_state_space(&fit.model,dt,0.0) {
+            Ok(f)=>f,
+            Err(e)=>{last_err=Some(e.into());continue;}
+        };
+        for c in &mut filter.c {*c*=scale;} filter.d*=scale;
+        if let Err(e)=filter.try_runtime() {last_err=Some(e.into());continue;}
+        let mut maximum=0.0_f64; let mut square=0.0; let mut held=0;
+        let mut nonfinite=false;
+        for i in (1..omega.len()).step_by(2) {
+            let error=(filter.eval(omega[i])?.conj()-values[i]).abs()/magnitude;
+            if !error.is_finite() {nonfinite=true;break;}
+            maximum=maximum.max(error); square+=error*error; held+=1;
+        }
+        if nonfinite {last_err=Some("observer held-out error is nonfinite".into());continue;}
+        let rms=(square/held as f64).sqrt();
+        if best.as_ref().is_none_or(|(_,_,best_rms)| rms < *best_rms) {
+            best=Some((filter,maximum,rms));
+        }
     }
-    let mut filter=bilinear_state_space(&fit.model,dt,0.0)?;
-    for c in &mut filter.c {*c*=scale;} filter.d*=scale;
-    // Realization admission also checks finite scaling and any improper leftover.
-    filter.try_runtime()?;
-    let mut maximum=0.0_f64; let mut square=0.0; let mut held=0;
-    for i in (1..omega.len()).step_by(2) {
-        let error=(filter.eval(omega[i])?.conj()-values[i]).abs()/magnitude;
-        if !error.is_finite() {return Err("observer held-out error is nonfinite".into());}
-        maximum=maximum.max(error); square+=error*error; held+=1;
-    }
-    let rms=(square/held as f64).sqrt();
+    let Some((filter,maximum,rms))=best else {
+        return Err(last_err.unwrap_or_else(||"observer fit failed".into()));
+    };
     if maximum>MAX_RELATIVE_ERROR || rms>MAX_RMS_ERROR {
         return Err(format!("observer holdout refused: max={maximum}, rms={rms}; limits={MAX_RELATIVE_ERROR}/{MAX_RMS_ERROR}; refine the declared bake, do not bypass the gate").into());
     }
