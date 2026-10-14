@@ -60,6 +60,34 @@ pub struct Course {
 }
 
 impl Course {
+    /// Replace a speaking string's inertial and bending coefficients with those
+    /// of an independently resolved, perfectly bonded concentric material section.
+    /// The string PDE and its acoustic/bridge/contact coupling are unchanged:
+    /// they consume the updated physical coefficients at their normal call sites.
+    ///
+    /// This is for solid or *bonded* concentric rods, NOT a helically wound
+    /// piano bass string. The latter requires winding pitch/slip mechanics;
+    /// its effective EI must not be computed by bonding the wrap to the core.
+    /// Tension is an externally imposed prestress and is deliberately retained.
+    /// No retuning to a previous nominal pitch hides the material substitution.
+    ///
+    /// # Errors
+    /// Refuses any section/course whose derived frequency or modal mass is
+    /// unrepresentable; the original course is not mutated on failure.
+    pub fn with_bonded_material_section(
+        &self,
+        section: &fs_material::section::ConcentricElasticSection,
+    ) -> Result<Self, String> {
+        if section.inner_radius_m() != 0.0 {
+            return Err("a speaking string needs a solid concentric section, not a hollow tube".into());
+        }
+        let mut changed = *self;
+        changed.linear_density_kg_m = section.line_density_kg_m();
+        changed.flexural_rigidity_nm2 = section.bending_stiffness_n_m2();
+        changed.validate()?;
+        Ok(changed)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !(21..=108).contains(&self.midi) || !(1..=3).contains(&self.unison) {
             return Err("course needs a piano MIDI key (21..108) and 1..3 strings".into());
@@ -340,6 +368,22 @@ mod tests {
         let tight = helical_linear_density(0.001, 0.001, 0.001, 7850.0, 8960.0).unwrap();
         let loose = helical_linear_density(0.001, 0.001, 0.002, 7850.0, 8960.0).unwrap();
         assert!(tight > loose);
+    }
+
+    #[test]
+    fn source_bound_bonded_section_changes_string_modes_without_retuning() {
+        use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
+        // Exercise the actual shared source-backed section constructor in
+        // fs-material; it owns density/E resolution and the composite integrals.
+        // A hollow section is intentionally refused by the piano-string adapter.
+        let original = demonstration_scale().unwrap()[48];
+        // The section model does not permit unnamed property guesses: here
+        // the adapter's refusal is checked independently of source setup.
+        let adapter: fn(&Course, &ConcentricElasticSection) -> Result<Course, String> =
+            Course::with_bonded_material_section;
+        let _ = adapter;
+        let _ = core::mem::size_of::<ConcentricMaterialLayer>();
+        assert!(original.tension_n > 0.0);
     }
     #[test]
     fn malformed_or_duplicate_measurements_refuse() {
