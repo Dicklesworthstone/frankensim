@@ -278,15 +278,16 @@ fn integrate<T: ReservoirCircuit>(
     drop(upper);
     let mut evaluations = 2;
     for calls in 3..=controls.max_inlet_evaluations {
-        // A bracketed secant avoids dozens of complete circuit solves for an
-        // almost-linear caloric balance. Guarded interior placement guarantees
-        // bracket progress without treating this as a monotonicity proof.
+        // Near-linear storage should not require dozens of complete solid/pump
+        // solves. Use an interior secant, with a mandatory midpoint every fifth
+        // evaluation to prevent endpoint stagnation for strongly curved maps.
         let scale = lower_residual.abs().max(upper_residual.abs());
         let left = lower_residual.abs()/scale;
         let right = upper_residual.abs()/scale;
         let fraction = left/(left+right);
-        let middle = if (0.05..=0.95).contains(&fraction) {
-            (1.0-fraction)*lo + fraction*hi
+        let secant = (1.0-fraction)*lo + fraction*hi;
+        let middle = if calls % 5 != 0 && secant > lo && secant < hi {
+            secant
         } else { 0.5*lo + 0.5*hi };
         if middle == lo || middle == hi { break; }
         let result = probe(middle, calls)?;
@@ -298,4 +299,65 @@ fn integrate<T: ReservoirCircuit>(
         } else { hi = middle; upper_residual = last; }
     }
     Err(RecirculationError::NotConverged { evaluations, last_residual_j: last })
+}
+
+use fs_convection::CorrelationRobinBoundary;
+use crate::AirflowError;
+use crate::graph::thermal::medium::series::enthalpy::coupled::LiquidSolidResponse;
+use super::pressure::parallel::solid::CoupledParallelLiquidSolution;
+use super::pressure::parallel::pump::solid::PumpCouplingControls;
+
+impl<R> ReservoirCircuit for PumpOperatingPoint<'_, CoupledParallelLiquidSolution<'_, R>> {
+    fn fluid(&self) -> &ParallelLiquidSolution<'_> { &self.state.fluid }
+    fn flow_evaluations(&self) -> usize { self.total_flow_evaluations }
+    fn solid_solves(&self) -> usize { self.total_solid_solves }
+}
+
+impl<'p, 'a, 'card> ParallelLiquidNetwork<'p, 'a, 'card> {
+    /// Advance finite coolant storage while resolving ONE common solid field,
+    /// the pump operating point and all material-driven branches at each inlet.
+    /// Reuses the same enthalpy time step as the fixed-wall path; every original
+    /// regional heat, coefficient, wall, reference, mass and pressure gate stays
+    /// active. The exact accepted solid payload and its sent boundaries survive.
+    ///
+    /// Every callback must evaluate from the SAME committed solid history for
+    /// this interval, without externally committing a trial. On success callers
+    /// may adopt the returned solid payload; on failure the reservoir is unchanged.
+    /// A steady solid callback makes only the reservoir transient. A transient
+    /// solid callback must itself implement the same backward-Euler interval;
+    /// this adapter does not invent or certify its storage discretization.
+    /// Flow work and actual solid calls are capped across ALL inlet trials, not
+    /// reset for each pressure solve. Pump heat remains explicitly omitted.
+    pub fn advance_reservoir_with_pump_coupled_iqn<'s, R, F>(
+        &self, cx: &Cx<'_>, reservoir: &mut LiquidReservoir<'a>, end_time_s: f64,
+        external_heat_j: f64, initial_walls_k: &[f64], pump: &'s PumpHeadCurve,
+        controls: &PumpCouplingControls, step: ReservoirStepControls, mut solid: F,
+    ) -> Result<RecirculatingLiquidStep<PumpOperatingPoint<'s, CoupledParallelLiquidSolution<'a, R>>>, RecirculationError>
+    where F: FnMut(&Cx<'_>, &[CorrelationRobinBoundary]) -> Result<LiquidSolidResponse<R>, AirflowError>,
+    {
+        let duration = self.admit_reservoir_step(cx, reservoir, end_time_s, external_heat_j, step)?;
+        if controls.max_total_solid_solves == 0 {
+            return Err(RecirculationError::Invalid("reservoir solid callback budget must be positive"));
+        }
+        let mut controls = *controls;
+        controls.network.work.maximum_neglected_hydraulic_power_w = limited_power(
+            controls.network.work.maximum_neglected_hydraulic_power_w, step, duration)?;
+        let result = integrate(cx, reservoir, end_time_s, external_heat_j, step, |temperature, flows, solids| {
+            let remaining_flow = controls.network.work.max_flow_evaluations.saturating_sub(flows);
+            let remaining_solid = controls.max_total_solid_solves.saturating_sub(solids);
+            if remaining_flow < 2 || remaining_solid == 0 {
+                return Err(RecirculationError::WorkBudget { flow_evaluations: flows, solid_solves: solids });
+            }
+            let mut inner = controls;
+            inner.network.work.max_flow_evaluations = remaining_flow;
+            inner.max_total_solid_solves = remaining_solid;
+            self.with_reservoir_inlet(cx, temperature, |network| {
+                network.solve_with_pump_coupled_iqn(cx, initial_walls_k, pump, &inner, &mut solid)
+            })
+        })?;
+        checkpoint(cx)?;
+        reservoir.state = result.final_state;
+        reservoir.time_s = end_time_s;
+        Ok(result)
+    }
 }
