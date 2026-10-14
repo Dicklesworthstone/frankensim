@@ -224,3 +224,139 @@ fn mixing_different_material_charts_is_not_silently_permitted() {
         });
     });
 }
+
+use fs_airflow::conjugate::{ConjugateConfig, Relaxation, SolidRegionState};
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::LiquidSolidResponse;
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::solid::ParallelLiquidCouplingControls;
+
+fn coupling_controls() -> ParallelLiquidCouplingControls {
+    ParallelLiquidCouplingControls { coupling: ConjugateConfig {
+        temperature_tolerance_k: 1e-7, max_iterations: 40,
+        balance_tolerance_w: 1e-6, balance_relative_tolerance: 1e-8,
+        relaxation: Relaxation::Fixed { omega: 1.0 },
+    }, local: local(), acceleration: Default::default(),mass_flow_relative_tolerance: 1e-8,work: budget() }
+}
+fn two_node_solid(rows: &[fs_convection::CorrelationRobinBoundary]) -> LiquidSolidResponse<[f64;2]> {
+    let ua = [rows[0].coefficient().value.value()*0.003,rows[1].coefficient().value.value()*0.003];
+    let refs = [rows[0].reference_temperature().value(),rows[1].reference_temperature().value()];
+    let conductance = 0.4;
+    let rhs = [20.0+ua[0]*refs[0],5.0+ua[1]*refs[1]];
+    let determinant = (ua[0]+conductance)*(ua[1]+conductance)-conductance*conductance;
+    let walls = [((ua[1]+conductance)*rhs[0]+conductance*rhs[1])/determinant,
+        (conductance*rhs[0]+(ua[0]+conductance)*rhs[1])/determinant];
+    LiquidSolidResponse { state: walls, regions: (0..2).map(|i| SolidRegionState {
+        region: ["a-wall","b-wall"][i].into(),area_m2: 0.003,
+        mean_wall_temperature_k: walls[i],heat_rate_w: ua[i]*(walls[i]-refs[i]),
+        mean_reference_temperature_k: Some(refs[i]),
+    }).collect() }
+}
+
+#[test]
+fn one_common_solid_solve_closes_all_parallel_branches_against_analytic_solution() {
+    with_network(false,false,2.0,|cx,network| {
+        let mut calls = 0;
+        let solved = network.solve_coupled_iqn(cx,&[330.0,340.0],Pressure::new(50.0),&coupling_controls(),|_,rows| {
+            calls += 1; Ok(two_node_solid(rows))
+        }).unwrap();
+        let g = [5.0*(-(-0.549_f64/5.0).exp_m1()),2.5*(-(-0.549_f64/2.5).exp_m1())];
+        let rhs = [20.0+300.0*g[0],5.0+300.0*g[1]];
+        let determinant = (g[0]+0.4)*(g[1]+0.4)-0.16;
+        let expected = [((g[1]+0.4)*rhs[0]+0.4*rhs[1])/determinant,
+            (0.4*rhs[0]+(g[0]+0.4)*rhs[1])/determinant];
+        for (actual,expected) in solved.solid.state.iter().zip(expected) { near(*actual,expected); }
+        near(solved.fluid.total_heat_rate_w,25.0);
+        near(solved.fluid.mixed_outlet.temperature_k(),300.0+25.0/7.5);
+        assert_eq!(solved.iterations,calls);
+        assert!(solved.total_flow_evaluations <= coupling_controls().work.max_flow_evaluations);
+        assert!(solved.residuals.heat_imbalance_w <= 1e-6);
+        let rows = solved.boundary_state.branches.iter().flat_map(|b| &b.solution.thermal.regions);
+        for (row,body) in rows.zip(&solved.solid.regions) {
+            near(row.boundary.reference_temperature().value(),body.mean_reference_temperature_k.unwrap());
+        }
+    });
+}
+
+#[test]
+fn parallel_material_flow_closes_against_production_fem_and_retains_the_solid_field() {
+    use fs_conduction::{ConductionMesh,ConductionProblem,ConductivityModel,InitialGuess,LinearConfig,
+        Nonlinearity,ScalarField,SolveConfig,StopRule,ThermalBoundaryBuilder,solve};
+    use fs_conduction::fixtures::{box_grid,on_box_face};
+    use fs_rep_mesh::TetComplex;
+    with_network(true,true,2.0,|cx,network| {
+        let (topology,positions) = box_grid([2,1,1],[0.06,0.1,0.01]);
+        let mesh = ConductionMesh::new(TetComplex::from_tets(positions.len(),topology.tets),positions).unwrap();
+        let material = ConductivityModel::isotropic_declared(5.0).unwrap();
+        let source = ScalarField::nodal("parallel uniform 20W",mesh.vertex_count(),vec![20.0/(0.06*0.1*0.01);mesh.vertex_count()]).unwrap();
+        let mut calls = 0;
+        let result = network.solve_coupled_iqn(cx,&[325.0,330.0],Pressure::new(50.0),&coupling_controls(),|cx,rows| {
+            calls += 1;
+            let mut builder = ThermalBoundaryBuilder::new(&mesh);
+            for (i,name) in ["a-wall","b-wall"].iter().enumerate() {
+                builder = builder.region(name,|face| face.outward_normal[2]>0.99 && on_box_face(face.centroid[2],0.01)
+                    && if i == 0 { face.centroid[0]<0.03 } else { face.centroid[0]>=0.03 },
+                    rows[i].boundary_condition().clone()).unwrap();
+            }
+            let boundary = builder.adiabatic_remainder().finish().unwrap();
+            let solution = solve(cx,ConductionProblem { mesh: &mesh,boundary: &boundary,material: &material,
+                source: &source,element_materials: None },SolveConfig {
+                nonlinearity: Nonlinearity::FixedPoint { relaxation: 1.0,max_backtracks: 8 },
+                stop: StopRule { residual_rtol: 1e-10,residual_atol: 1e-18,step_atol: 0.0,max_iterations: 12 },
+                linear: LinearConfig { tolerance: 1e-10,max_iterations: 10000,restart: 64 },initial: InitialGuess::Uniform(330.0),
+            }).unwrap();
+            let regions = solution.report.robin_fluxes.iter().map(SolidRegionState::from_robin_flux).collect();
+            Ok(LiquidSolidResponse { regions,state: solution })
+        }).unwrap();
+        assert_eq!(calls,result.iterations);
+        assert!((result.solid.state.report.energy.robin_out_w-20.0).abs()<2e-5);
+        assert!((result.fluid.total_heat_rate_w-20.0).abs()<2e-5);
+        assert!(result.fluid.total_mass_flow_kg_per_s > 0.00375);
+        assert!(result.residuals.heat_imbalance_w < 1e-6);
+        for branch in &result.fluid.branches { near(branch.solution.hydraulics.total_pressure_drop_pa,50.0); }
+    });
+}
+
+#[test]
+fn opposing_branch_heat_errors_cannot_pass_a_global_cancellation() {
+    with_network(true,false,2.0,|cx,network| {
+        let result = network.solve_coupled_iqn(cx,&[330.0,340.0],Pressure::new(50.0),&coupling_controls(),|_,rows| {
+            let mut result = two_node_solid(rows);
+            result.regions[0].heat_rate_w += 0.001;
+            result.regions[1].heat_rate_w -= 0.001;
+            Ok(result)
+        });
+        assert!(result.is_err());
+    });
+}
+
+#[test]
+fn all_wall_iterations_share_the_original_flow_evaluation_allowance() {
+    with_network(false,false,2.0,|cx,network| {
+        let initial = [330.0,340.0];
+        let first = network.solve_pressure_driven(cx,&initial,Pressure::new(50.0),local(),budget()).unwrap();
+        let mut controls = coupling_controls();
+        controls.work.max_flow_evaluations = first.flow_evaluations+2;
+        let mut calls = 0;
+        let result = network.solve_coupled_iqn(cx,&initial,Pressure::new(50.0),&controls,|_,rows| {
+            calls += 1; Ok(two_node_solid(rows))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls,1);
+    });
+}
+
+#[test]
+fn malformed_common_solid_response_and_controls_refuse_before_publication() {
+    with_network(false,false,2.0,|cx,network| {
+        let mut bad = coupling_controls(); bad.mass_flow_relative_tolerance = f64::NAN;
+        let mut calls = 0;
+        assert!(network.solve_coupled_iqn(cx,&[300.0,300.0],Pressure::new(50.0),&bad,|_,rows| {
+            calls += 1; Ok(two_node_solid(rows))
+        }).is_err());
+        assert_eq!(calls,0);
+        assert!(network.solve_coupled_iqn(cx,&[300.0,300.0],Pressure::new(50.0),&coupling_controls(),|_,rows| {
+            calls += 1;
+            let mut result = two_node_solid(rows); result.regions[1].region = "wrong-owner".into(); Ok(result)
+        }).is_err());
+        assert_eq!(calls,1);
+    });
+}

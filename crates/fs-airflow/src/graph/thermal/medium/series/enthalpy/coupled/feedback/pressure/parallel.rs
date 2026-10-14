@@ -7,6 +7,9 @@
 //! here. Junction losses must be included in the authored branch resistances;
 //! no junction geometry, recirculation or transient storage is inferred.
 
+/// Common-solid feedback over all pressure-driven material branches.
+pub mod solid;
+
 use std::collections::BTreeSet;
 
 use fs_exec::Cx;
@@ -68,6 +71,8 @@ pub enum ParallelPressureError {
     Physics(PressureDrivenError),
     /// The shared thermal-evaluation allowance was exhausted.
     FlowBudget { performed: usize, maximum: usize },
+    /// The common-solid calculation exhausted its joint convergence budget.
+    CouplingNotConverged { iterations: usize, residuals: solid::ParallelLiquidResiduals },
     /// Branch-local allowances cannot hide excessive aggregate omitted power.
     NeglectedDissipation { power_w: f64, allowance_w: f64 },
 }
