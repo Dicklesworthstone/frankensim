@@ -7,10 +7,14 @@
 //       gain     one fixed factor on every sample (level matching against another rendering; default 1)
 //       options  {boardCoordinates?, courseModeBudget?, maxDynamicModes?, fullScalePa?}  (0 = engine default)
 //                boardCoordinates: 32 = the embedded board, 48/64/96/128 = that board file from
-//                ./boards/, 1..16 = that many exact low modes. Without it the worker measures
-//                itself and keeps the LARGEST board it computes `minRealtime` times faster than
-//                real time (boards.js): 32 first, then at most two larger ones, else 16.
-//       minRealtime  the speed the measurement asks for (default 1.35)
+//                ./boards/, 1..16 = that many exact low modes. Without it the worker times a
+//                sustained workload (boards.js probeSustained) and picks board AND starting mode
+//                cap together (chooseQuality): the largest board that runs `minRealtime` times
+//                faster than real time at half the cap or more (32 first, then at most two
+//                larger ones), else the embedded board with the cap lowered until it does; 16 only
+//                when even the floor cap is expected below real time. A fixed board gets its cap
+//                the same way; an explicit maxDynamicModes is kept.
+//       minRealtime  the speed the measurement asks for (default 1.3)
 //       snapshotHz   display snapshots per second of AUDIO (default 0: none). With it, 'ready' also
 //                    carries the board geometry and the key geometry.
 //       governor     false turns the load governor off (default on; see createGovernor)
@@ -21,7 +25,8 @@
 //   {type:'resync', epoch}   render for the clock as it is now (after the mix flushed this lane)
 //   {type:'stop'}   end the sequence and release every key
 // Worker -> main thread
-//   {type:'ready', info, boardCoordinates, realtime, board?:{xy, shapes, modeHz}, keyGeometry?}
+//   {type:'ready', info, boardCoordinates, realtime, modeCap, board?:{xy, shapes, modeHz}, keyGeometry?}
+//       realtime  the probe's speed at the chosen board and cap; modeCap  the starting mode cap
 //   {type:'stats', realtime, renderedFrames, skippedFrames, lateEvents, voices, peakPa,
 //    dynamicModes, noteOns, refusedNoteOns, forcedRetirements,
 //    modeCap, fullModeCap, courseModeBudget, governorDown, governorUp}
@@ -31,7 +36,7 @@
 //   {type:'error', message}
 import init, { PianoEngine } from './engine.js';
 import { createLane } from '../lane.js';
-import { chooseBoard, fetchBoard, probeRealtime } from './boards.js';
+import { BOARD_SIZES, chooseQuality, fetchBoard, probeSustained } from './boards.js';
 
 let engine = null;
 let lane = null;
@@ -40,7 +45,6 @@ let gain = 1;
 let snapEvery = 0;   // audio frames between snapshots (0: none)
 let snapDue = 0;
 const post = (m, t) => self.postMessage(m, t ?? []);
-const FALLBACK_REALTIME = 0.75;
 
 // Load governor. The piano's cost follows the dynamic string modes sounding at once (about
 // linearly), and a dense passage can need more than this device computes in real time. When the
@@ -61,10 +65,16 @@ const GOV = {
   fullCushion: 0.85, holdMs: 3000, raise: 1.1, raiseHeadroom: 1.35,
   floorModes: 400, floorBudget: 40,
 };
-function createGovernor(eng, full, aheadFrames) {
-  const g = { cap: full.maxDynamicModes, budget: full.courseModeBudget, down: 0, up: 0, at: -1, changedAt: -1e9, audioMs: 0, wallMs: 0, skipped: 0, rendered: 0, cushion: 0, slowWindows: 0, modes: 0 };
+// per-key string mode budget for a mode cap: in proportion to the cap
+// The startup choice never starts below this cap: offline (V8, board 32) cap 700 ran Giant Steps and
+// Character Select 2.65-2.86x faster than real time and cap 450 2.76x, while 450 moved the band levels
+// 1.67-1.76 dB from the full cap against 0.59-0.86 dB at 700. Below it only the governor goes.
+const START_FLOOR_MODES = 700;
+const budgetFor = (full, cap) => Math.max(GOV.floorBudget, Math.min(full.courseModeBudget, Math.round((full.courseModeBudget * cap) / full.maxDynamicModes)));
+function createGovernor(eng, full, aheadFrames, startCap = full.maxDynamicModes) {
+  const g = { cap: startCap, budget: budgetFor(full, startCap), down: 0, up: 0, at: -1, changedAt: -1e9, audioMs: 0, wallMs: 0, skipped: 0, rendered: 0, cushion: 0, slowWindows: 0, modes: 0 };
   const set = (cap) => {
-    const budget = Math.max(GOV.floorBudget, Math.min(full.courseModeBudget, Math.round((full.courseModeBudget * cap) / full.maxDynamicModes)));
+    const budget = budgetFor(full, cap);
     if (!eng.setQuality(budget, full.partialBandHz, cap)) return false;
     g.cap = cap;
     g.budget = budget;
@@ -115,35 +125,43 @@ self.onmessage = async (event) => {
       snapEvery = Number(m.snapshotHz) > 0 ? Math.max(256, Math.round(48000 / Math.min(120, Number(m.snapshotHz)))) : 0;
       const limits = [Number(o.courseModeBudget) || 0, Number(o.maxDynamicModes) || 0, Number(o.fullScalePa) || 0];
       // bytes: a fetched board file (PianoEngine.withBoard); otherwise the embedded board or its
-      // exact low-mode truncation (coords 1..16; 0/32 = all 32 embedded coordinates)
-      const make = (bytes, coords) => bytes ? PianoEngine.withBoard(48000, bytes, ...limits)
-        : new PianoEngine(48000, coords > 16 ? 0 : coords, ...limits);
-      const measure = probeRealtime; // twelve keys struck together, timed on a throwaway engine
-      const target = m.minRealtime || 1.35;
+      // exact low-mode truncation (coords 1..16; 0/32 = all 32 embedded coordinates). cap: a lower
+      // dynamic mode cap, the per-key budget in proportion (as the governor sets it)
+      let full = null; // the quality asked for (read from the first engine made)
+      const make = (bytes, coords, cap) => {
+        const e = bytes ? PianoEngine.withBoard(48000, bytes, ...limits) : new PianoEngine(48000, coords > 16 ? 0 : coords, ...limits);
+        if (!full) {
+          const i = JSON.parse(e.info());
+          full = { courseModeBudget: i.courseModeBudget, partialBandHz: i.partialBandHz, maxDynamicModes: i.maxDynamicModes };
+        }
+        if (cap && cap < full.maxDynamicModes) e.setQuality(budgetFor(full, cap), full.partialBandHz, cap);
+        return e;
+      };
+      // Board and starting mode cap are chosen together by timing a sustained, damped, cap-bound
+      // workload (boards.js), for `minRealtime` headroom, so the governor need not catch the first
+      // bars. A fixed board keeps its board and still gets its cap; an explicit maxDynamicModes is
+      // kept as it is.
+      const target = m.minRealtime || 1.3;
       const asked = Number(o.boardCoordinates) || 0;
-      let bytes = null;
+      let bytes = asked > 32 ? await fetchBoard(asked) : null;
       let coords = asked;
-      let realtime = 0;
-      if (asked > 32) {
-        bytes = await fetchBoard(asked);
-      } else if (!asked) {
-        const pick = await chooseBoard({ make, measure, target });
-        pick.engine.free();
-        ({ bytes, coordinates: coords, realtime } = pick);
-        // the old last resort, 16 exact low modes, only when even the embedded board cannot keep
-        // up with the probe (it is about twice the old five-note stab's load)
-        if (!bytes && realtime < FALLBACK_REALTIME) { coords = 16; realtime = 0; }
-      }
-      if (!realtime) {
-        const probe = make(bytes, coords);
-        realtime = measure(probe);
+      const pick = await chooseQuality({ make: asked ? (_b, _c, k) => make(bytes, coords, k) : make, target, sizes: asked ? [] : BOARD_SIZES,
+        floor: Number(o.maxDynamicModes) > 0 ? Infinity : START_FLOOR_MODES });
+      if (!asked) ({ bytes, coordinates: coords } = pick);
+      let { cap, realtime } = pick;
+      // the old last resort, 16 exact low modes, only when even the embedded board at the floor cap
+      // is expected below real time
+      if (!asked && !bytes && cap <= START_FLOOR_MODES && realtime < 1) {
+        coords = 16;
+        cap = full.maxDynamicModes;
+        const probe = make(null, 16);
+        realtime = probeSustained(probe);
         probe.free();
       }
-      engine = make(bytes, coords);
+      engine = make(bytes, coords, cap);
       const info = JSON.parse(engine.info());
       const aheadFrames = m.aheadFrames || 2048;
-      const full = { courseModeBudget: info.courseModeBudget, partialBandHz: info.partialBandHz, maxDynamicModes: info.maxDynamicModes };
-      const gov = m.governor === false ? null : createGovernor(engine, full, aheadFrames);
+      const gov = m.governor === false ? null : createGovernor(engine, full, aheadFrames, cap);
       let active = false;
       let quietFrames = 0;
       const adapter = {
@@ -196,10 +214,10 @@ self.onmessage = async (event) => {
         const shapes = engine.boardSurfaceShapes();
         const modeHz = engine.boardModeHz();
         const keyGeometry = engine.keyGeometry();
-        post({ type: 'ready', info, boardCoordinates: info.boardCoordinates, realtime, board: { xy, shapes, modeHz }, keyGeometry },
+        post({ type: 'ready', info, boardCoordinates: info.boardCoordinates, realtime, modeCap: cap, board: { xy, shapes, modeHz }, keyGeometry },
           [xy.buffer, shapes.buffer, modeHz.buffer, keyGeometry.buffer]);
       } else {
-        post({ type: 'ready', info, boardCoordinates: info.boardCoordinates, realtime });
+        post({ type: 'ready', info, boardCoordinates: info.boardCoordinates, realtime, modeCap: cap });
       }
     } else if (!engine || !lane) {
       return;

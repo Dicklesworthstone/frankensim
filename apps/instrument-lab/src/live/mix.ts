@@ -174,7 +174,10 @@ export class KitLane {
 export interface PianoReady {
   info: Record<string, unknown>;
   boardCoordinates: number;
+  /** The startup probe's speed (a sustained, damped workload) at the chosen board and mode cap. */
   realtime: number;
+  /** The dynamic string mode cap the piano starts with (chosen with the board for that headroom). */
+  modeCap?: number;
   /** Present when snapshots were requested: the board's quadrature points and mode shapes. */
   board?: { xy: Float32Array; shapes: Float32Array; modeHz: Float64Array };
   keyGeometry?: Float64Array;

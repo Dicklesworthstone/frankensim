@@ -374,7 +374,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     let warm = !!piano;
     const started: Promise<unknown>[] = [];
     if (!piano) {
-      piano = new PianoLane(m, { aheadFrames: AHEAD, gain: PIANO_GAIN, snapshotHz: 30, minRealtime: 1.5 });
+      piano = new PianoLane(m, { aheadFrames: AHEAD, gain: PIANO_GAIN, snapshotHz: 30, minRealtime: 1.3 });
       piano.onStats = (s) => { const h = health["piano"]; if (h) { h.rt = s.realtime; h.stats = s; } };
       piano.onSnapshot = (frame, data, ep) => { if (ep >= epoch) { snaps.push({ frame, data }); if (snaps.length > 90) snaps.shift(); } };
       health["piano"] = { rt: 0, late: 0, gap: 0, base: 0, skipBase: 0, detail: "", slow: 0 };
