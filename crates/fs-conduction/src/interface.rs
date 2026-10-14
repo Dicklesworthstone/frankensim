@@ -7,6 +7,8 @@
 //! No perfect contact, face ownership, material data or gap closure is inferred.
 mod matching;
 pub mod nonmatching;
+/// Source-backed temperature-dependent matching-contact advancement.
+pub mod temperature;
 mod sensitivity;
 pub use sensitivity::ContactResistanceGradient;
 
