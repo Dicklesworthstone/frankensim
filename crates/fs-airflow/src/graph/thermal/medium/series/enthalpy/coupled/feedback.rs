@@ -14,6 +14,8 @@
 
 pub mod solid;
 pub mod pressure;
+/// Finite, source-bound coolant storage and recirculating pump feedback.
+pub mod recirculation;
 
 use fs_convection::{CorrelationId, CorrelationRobinBoundary, NusseltEvaluation, ThermalDirection};
 use fs_exec::Cx;
