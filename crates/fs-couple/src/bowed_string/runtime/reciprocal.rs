@@ -72,6 +72,7 @@ pub struct ReciprocalStringSource {
     specimen: ResolvedStringSpecimen,
     ambient: AmbientGas,
     options: ReciprocalStringOptions,
+    material_plate: Option<plate::MaterialPlateBody>,
 }
 impl ReciprocalStringSource {
     /// Complete original specimen, including material identities and receipts.
@@ -83,6 +84,9 @@ impl ReciprocalStringSource {
     /// Original geometry, sample clock and declared numerical/physical limits.
     #[must_use]
     pub const fn options(&self) -> &ReciprocalStringOptions { &self.options }
+    /// Complete body material/geometry and observation binding, when constructed from a plate.
+    #[must_use]
+    pub const fn material_plate(&self) -> Option<&plate::MaterialPlateBody> { self.material_plate.as_ref() }
 }
 
 /// Admission failures retain their original physical owner.
@@ -207,7 +211,7 @@ impl ReciprocalMaterialString {
         let system = FrictionModalSystem::new(network, port, options.friction, gate)
             .map_err(ReciprocalStringError::Friction)?;
         poll(gate)?;
-        Ok(Self { source: ReciprocalStringSource { specimen, ambient, options }, system })
+        Ok(Self { source: ReciprocalStringSource { specimen, ambient, options, material_plate: None }, system })
     }
 
     /// Material/source data remain attached to the accepted mechanics.
@@ -259,3 +263,6 @@ impl ReciprocalStringPerformance {
 
 #[cfg(test)]
 mod tests;
+
+/// Source-bound plate reduction and physical pressure in the same reciprocal network.
+pub mod plate;

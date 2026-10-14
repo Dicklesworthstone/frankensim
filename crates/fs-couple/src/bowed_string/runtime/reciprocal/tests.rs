@@ -16,6 +16,7 @@ fn specimen(rho: f64, young: f64) -> ResolvedStringSpecimen {
     let mut requirements = Vec::new();
     for (key, dims, value) in [
         ("density", Density::DIMS, rho), ("young_modulus", Pressure::DIMS, young),
+        ("poisson_ratio", fs_qty::Dims::NONE, 0.3),
         (KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY, DynViscosity::DIMS, 10.0),
     ] {
         claims.insert_claim(PropertyClaim {
@@ -209,5 +210,117 @@ fn existing_scheduler_retains_source_and_checks_the_actual_bow_station() {
             max_events: 16, station_fraction: 0.3,
         };
         assert!(build(cx, gate, 0.2, 0.0).into_scheduled(&schedule, "bow", wrong).is_err());
+    });
+}
+
+
+fn material_plate(rho: f64) -> super::plate::MaterialPlateBody {
+    use crate::thin_plate::{PlateMaterialModel, PlateThicknessConstraint, with_uniform_plate_material_state};
+    let material = specimen(rho, 200e9);
+    let plate = with_uniform_plate_material_state(fs_scenario::ThinPlate {
+        length_m: 0.4, width_m: 0.3, thickness_m: 1.0, density_kg_m3: 1.0,
+        e1_pa: 1.0, e2_pa: 1.0, nu12: 0.0, g12_pa: 1.0, material_angle_rad: 0.0,
+        damping_ratio: 0.0, thermoelastic: None, kelvin_voigt_bending: None,
+        n_modes: 2, geometric_nonlinearity: false, pretension_n_m: 0.0, clamped: false,
+    }, material.material(), PlateMaterialModel::Isotropic,
+        PlateThicknessConstraint::FixedThickness(0.001)).unwrap()
+        .with_kelvin_voigt_bending_loss().unwrap();
+    super::plate::MaterialPlateBody {
+        specimen: plate, bridge_station_fraction: 0.8, stiffness_n_m: 3000.0,
+        damping_n_s_m: 0.1, rest_extension_m: 0.0,
+        modal_budget: ModalAcousticTimeBudget::audible_reference(), listener_m: 1.0,
+    }
+}
+fn plate_options() -> ReciprocalStringOptions {
+    let mut config = options(0.2);
+    config.connections.clear();
+    config
+}
+fn with_plate(cx: &Cx<'_>, gate: &CancelGate, rho: f64) -> ReciprocalMaterialString {
+    ReciprocalMaterialString::from_material_plate(cx, specimen(7800.0, 200e9), ambient(),
+        material_plate(rho), law(), plate_options(), gate).unwrap()
+}
+
+#[test]
+fn source_plate_generates_actual_body_modes_conjugate_bridge_and_acceleration_pressure() {
+    with_cx(|cx, gate| {
+        let body = material_plate(7800.0);
+        let expected = crate::thin_plate::certified_radiators(body.specimen.plate()).unwrap();
+        let material_id = body.specimen.material().identity();
+        let gas = crate::acoustic_realize::gas_state(ambient()).unwrap();
+        let mut model = ReciprocalMaterialString::from_material_plate(cx, specimen(7800.0, 200e9),
+            ambient(), body, law(), plate_options(), gate).unwrap();
+        assert_eq!(model.source().material_plate().unwrap().specimen.material().identity(), material_id);
+        let weights = model.system().acceleration_pressure_weights().unwrap();
+        let modes = model.system().components()[1].modes();
+        let bridge = &model.source().options().connections[0].body.shapes;
+        assert_eq!(modes.len(), expected.len());
+        for (k, radiator) in expected.iter().enumerate() {
+            assert_eq!(modes[k].angular_frequency_rad_s, radiator.omega);
+            assert_eq!(modes[k].damping_ratio, radiator.zeta);
+            assert!((bridge[k] - radiator.drive_participation / radiator.mass_kg.sqrt()).abs() < 1.0e-12);
+            assert_eq!(weights[4 + k], radiator.radiate_mass_normalized(1.0, gas.density, 1.0));
+        }
+        assert!(weights[..4].iter().all(|w| *w == 0.0));
+        let zero = vec![0.0; model.system().mode_count()];
+        let mut peak = 0.0_f64;
+        for _ in 0..256 {
+            let frame = model.system_mut().step(&zero,
+                FrictionDrive { speed_m_s: 0.01, normal_force_n: 0.1 }).unwrap();
+            peak = peak.max(frame.observer_pressure_pa.abs());
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+        assert!(peak > 1.0e-12, "material body never emitted physical pressure");
+    });
+}
+
+#[test]
+fn body_material_swap_changes_realized_mechanics_and_scheduled_pressure_without_code_changes() {
+    with_cx(|cx, gate| {
+        let a = with_plate(cx, gate, 7800.0);
+        let b = with_plate(cx, gate, 15_600.0);
+        let wa = a.system().components()[1].modes()[0].angular_frequency_rad_s;
+        let wb = b.system().components()[1].modes()[0].angular_frequency_rad_s;
+        assert!((wb / wa - 0.5_f64.sqrt()).abs() < 1.0e-6);
+        let source_a = a.source().material_plate().unwrap().specimen.material().identity();
+        let source_b = b.source().material_plate().unwrap().specimen.material().identity();
+        assert_ne!(source_a, source_b);
+        let schedule = GestureSchedule::try_new(700, vec![GestureTrack {
+            id: "bow".into(), target: GestureTarget::BowStroke { string: 0 },
+            initial: GestureValue::Bow { velocity_m_per_s: 0.01, normal_force_n: 0.1, station: 0.2 },
+            events: vec![],
+        }]).unwrap();
+        let config = FrictionGestureConfig {
+            sample_rate_hz: 48_000, samples: 256, max_block: 256, max_work: 1000,
+            max_events: 16, station_fraction: 0.2,
+        };
+        let mut a = a.into_scheduled(&schedule, "bow", config).unwrap();
+        let mut b = b.into_scheduled(&schedule, "bow", config).unwrap();
+        assert_eq!(a.source().material_plate().unwrap().specimen.material().identity(), source_a);
+        assert_eq!(b.source().material_plate().unwrap().specimen.material().identity(), source_b);
+        let mut pa = vec![0.0; 256];
+        let mut pb = vec![0.0; 256];
+        a.renderer_mut().block(&mut pa).unwrap();
+        for block in pb.chunks_mut(37) { b.renderer_mut().block(block).unwrap(); }
+        assert!(pa.iter().zip(&pb).any(|(x, y)| (x - y).abs() > 1.0e-12));
+        let mut partitioned = with_plate(cx, gate, 7800.0).into_scheduled(&schedule, "bow", config).unwrap();
+        let mut check = vec![0.0; 256];
+        for block in check.chunks_mut(37) { partitioned.renderer_mut().block(block).unwrap(); }
+        assert_eq!(pa.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            check.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
+    });
+}
+
+#[test]
+fn material_plate_constructor_never_ignores_authored_connections_or_invalid_observers() {
+    with_cx(|cx, gate| {
+        assert!(ReciprocalMaterialString::from_material_plate(cx, specimen(7800.0, 200e9), ambient(),
+            material_plate(7800.0), law(), options(0.2), gate).is_err());
+        for distance in [0.0, -1.0, f64::NAN] {
+            let mut body = material_plate(7800.0);
+            body.listener_m = distance;
+            assert!(ReciprocalMaterialString::from_material_plate(cx, specimen(7800.0, 200e9), ambient(),
+                body, law(), plate_options(), gate).is_err());
+        }
     });
 }
