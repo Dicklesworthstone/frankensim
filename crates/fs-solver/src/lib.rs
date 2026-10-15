@@ -21,6 +21,8 @@
 
 pub mod block;
 pub mod checked_cg;
+/// Source-refusing numerical Jacobian actions for the existing nonlinear owner.
+pub mod finite_difference;
 /// Outward residual evaluation and checked discrete algebraic goal bounds.
 pub mod goal;
 pub mod krylov;

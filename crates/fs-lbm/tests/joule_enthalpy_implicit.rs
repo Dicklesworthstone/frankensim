@@ -224,3 +224,6 @@ fn g0_insulated_zero_current_terminal_retains_undefined_voltage_and_zero_work() 
     assert_eq!(next.cells(),old.cells());
     assert_eq!(next.time_s(),0.125);
 }
+
+#[path="joule_enthalpy_implicit/adaptive.rs"]
+mod adaptive;

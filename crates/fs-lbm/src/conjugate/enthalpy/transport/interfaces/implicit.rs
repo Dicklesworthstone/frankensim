@@ -15,7 +15,10 @@
 //! accuracy are not inferred from algebraic convergence.
 
 use super::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+
+/// Error-controlled evolution using the existing implicit step and energy accounts.
+pub mod adaptive;
 use fs_conduction::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
 use fs_solver::{NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport,
     NonlinearProblem, SolverRunProgress};
@@ -187,6 +190,24 @@ pub fn step_joule_enthalpy_implicit<'t, F, I, J>(
         -> Result<ElectricalInterfaceResponse<J>, JouleEnthalpyError>,
     external_sources: impl Fn(&DepositionSimulation<'t>) -> Result<BTreeMap<CellId,f64>, JouleEnthalpyError>,
 ) -> Result<(DepositionSimulation<'t>, ImplicitJouleReport<F,I,J>), ImplicitJouleError> {
+    step_counted(thermal, target_s, input, link_ids, gate, config, initial_energy_increments_j,
+        resolve, resolve_link, resolve_interface, external_sources, &Cell::new(0))
+}
+
+// Retain actually spent current work on every return, including failed Newton
+// trials. Adaptive retries share one budget; no failed source becomes free work.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn step_counted<'t, F, I, J>(
+    thermal: &DepositionSimulation<'t>, target_s: f64,
+    input: JouleEnthalpyInput<'_>, link_ids: &[u64], gate: &CancelGate,
+    config: ImplicitJouleConfig, initial_energy_increments_j: &[f64],
+    resolve: impl Fn(usize, &DepositedCell, f64) -> Result<EnthalpyTransport<F>, JouleEnthalpyError>,
+    resolve_link: impl Fn(&ContactPatch, [&EnthalpyTransportSample<F>; 2]) -> Result<(f64,I), JouleEnthalpyError>,
+    resolve_interface: impl Fn(usize, &ElectricalContact, [&EnthalpyTransportSample<F>; 2])
+        -> Result<ElectricalInterfaceResponse<J>, JouleEnthalpyError>,
+    external_sources: impl Fn(&DepositionSimulation<'t>) -> Result<BTreeMap<CellId,f64>, JouleEnthalpyError>,
+    current_work: &Cell<usize>,
+) -> Result<(DepositionSimulation<'t>, ImplicitJouleReport<F,I,J>), ImplicitJouleError> {
     checkpoint(gate)?;
     config.newton.validate()?;
     if config.max_unknowns == 0 || thermal.cells().len() > config.max_unknowns
@@ -206,7 +227,9 @@ pub fn step_joule_enthalpy_implicit<'t, F, I, J>(
         interface: &resolve_interface, last: None,
     });
     let evaluate = |x: &[f64]| step.evaluate(x, |state| {
-        let (current, bulk, interfaces) = source.borrow_mut().evaluate(state)?;
+        let evaluated = source.borrow_mut().evaluate(state);
+        current_work.set(source.borrow().transport.account.solves);
+        let (current, bulk, interfaces) = evaluated?;
         let mut sources_w: BTreeMap<_,_> = input.cell_ids.iter().copied().zip(current.electric.joule_w.iter().copied()).collect();
         let external = external_sources(state)?;
         if external.len() > state.cells().len() { return Err(invalid("too many implicit external sources")); }

@@ -33,6 +33,8 @@ fs-ports = { path = "../fs-ports" }
 fs-qty = { path = "../fs-qty" }
 fs-rand = { path = "../fs-rand" }
 fs-scenario = { path = "../fs-scenario" }
+fs-solver = { path = "../fs-solver" }
+fs-thermal = { path = "../fs-thermal" }
 fs-tribo = { path = "../fs-tribo" }
 fs-vfit = { path = "../fs-vfit" }
 

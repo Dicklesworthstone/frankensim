@@ -377,3 +377,6 @@ pub mod multiple;
 
 /// Material-derived surface twisting in the same reciprocal contact solve.
 pub mod torsion;
+
+/// The same material sources in the existing nonlinear impact/contact owner.
+pub mod nonlinear;
