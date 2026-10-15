@@ -6680,7 +6680,7 @@ fn validate_stage_a_exact_inventory_v1(
                 .iter()
                 .filter(|observed_row| *observed_row == row)
                 .count();
-            if observed_occurrences > expected_occurrences {
+            if expected_occurrences > 0 && observed_occurrences > expected_occurrences {
                 ConstructionErrorKindV2::Duplicate
             } else {
                 ConstructionErrorKindV2::Unexpected
@@ -6695,12 +6695,12 @@ fn validate_stage_a_exact_inventory_v1(
                 .iter()
                 .filter(|observed_row| *observed_row == row)
                 .count();
-            if observed_occurrences > expected_occurrences {
-                ConstructionErrorKindV2::Duplicate
-            } else if expected.contains(row) {
-                ConstructionErrorKindV2::OutOfOrder
-            } else {
+            if expected_occurrences == 0 {
                 ConstructionErrorKindV2::Incompatible
+            } else if observed_occurrences > expected_occurrences {
+                ConstructionErrorKindV2::Duplicate
+            } else {
+                ConstructionErrorKindV2::OutOfOrder
             }
         }),
     };
