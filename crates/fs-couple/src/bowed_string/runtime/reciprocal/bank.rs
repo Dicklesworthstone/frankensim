@@ -111,6 +111,7 @@ pub struct MaterialStringBankSource {
     body_connections: Vec<ModalConnection>,
     material_plate: Option<plate::SharedMaterialPlateBody>,
     material_chart: Option<chart::SharedMaterialPlateChartBody>,
+    material_chart_viscosity: Option<crate::plate_viscosity::ViscousPlateImage>,
     material_cavity: Option<super::plate::MaterialBodyCavity>,
 }
 impl MaterialStringBankSource {
@@ -132,6 +133,12 @@ impl MaterialStringBankSource {
     /// Original regional geometry, material receipts and physical force footprint.
     #[must_use]
     pub const fn material_chart(&self) -> Option<&chart::SharedMaterialPlateChartBody> { self.material_chart.as_ref() }
+    /// Full tensor material loss and its SAME-basis projection, when selected.
+    /// The original viscous sources survive single/multiple-bow scheduling.
+    #[must_use]
+    pub const fn material_chart_viscosity(&self) -> Option<&crate::plate_viscosity::ViscousPlateImage> {
+        self.material_chart_viscosity.as_ref()
+    }
     /// Original body-air law, geometry, gas and observer, when supplied.
     #[must_use]
     pub const fn material_cavity(&self) -> Option<&super::plate::MaterialBodyCavity> { self.material_cavity.as_ref() }
@@ -192,7 +199,7 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_plate: None, material_chart: None, material_cavity: None }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_plate: None, material_chart: None, material_chart_viscosity: None, material_cavity: None }, cards, system })
     }
 
     /// Complete source assignments survive rendering and sympathetic vibration.

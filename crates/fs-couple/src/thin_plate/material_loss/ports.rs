@@ -2,6 +2,8 @@
 //! No per-footprint eigensolves: signs and degenerate eigenspaces must be shared.
 
 use super::*;
+use crate::plate_viscosity::{PlateViscosity, PlateViscosityLimits, ModalPlateViscosity, ViscousPlateImage};
+use fs_exec::CancelGate;
 
 impl ResolvedPlateChart {
     /// Reduce the body once and project additional nodal force footprints on
@@ -45,6 +47,48 @@ pub(super) fn reduce(
     additional: &[Vec<f64>],
     max_projection_terms: usize,
 ) -> Result<(Vec<CompactBody>, Vec<Vec<f64>>), AcousticRealizeError> {
+    reduce_with_tensor(specimen, options, additional, max_projection_terms, None)
+        .map(|(radiators, ports, _)| (radiators, ports))
+}
+
+impl ResolvedPlateChart {
+    /// Project the complete source-derived viscous tensor on the SAME modes and
+    /// physical ports. Radiators retain zero scalar loss: the returned passive
+    /// connections own ALL material damping, including cross-mode reactions.
+    /// No selected isotropic or authored damping can be counted a second time.
+    /// The original eigensolver is synchronous; gates bracket that bounded call.
+    pub fn certified_viscous_radiators(&self, options: &PlateChartRadiation,
+        viscosity: &PlateViscosity, limits: PlateViscosityLimits, gate: &CancelGate)
+        -> Result<ViscousPlateImage, AcousticRealizeError>
+    {
+        self.certified_viscous_radiators_with_force_ports(options, &[], 0, viscosity, limits, gate)
+            .map(|(image, _)| image)
+    }
+
+    /// Keep full tensor damping and multiple physical force footprints on one
+    /// eigenbasis. Additional force columns use the original unit-total-force
+    /// and projection-budget contract; no new modal solve or normalization.
+    pub fn certified_viscous_radiators_with_force_ports(&self, options: &PlateChartRadiation,
+        additional_force_weights: &[Vec<f64>], max_force_projection_terms: usize,
+        viscosity: &PlateViscosity, limits: PlateViscosityLimits, gate: &CancelGate)
+        -> Result<(ViscousPlateImage, Vec<Vec<f64>>), AcousticRealizeError>
+    {
+        let (radiators, ports, damping) = reduce_with_tensor(self, options,
+            additional_force_weights, max_force_projection_terms, Some((viscosity, limits, gate)))?;
+        Ok((ViscousPlateImage { source: viscosity.clone(), radiators,
+            damping: damping.expect("selected tensor projection returns its full matrix") }, ports))
+    }
+}
+
+fn reduce_with_tensor(
+    specimen: &ResolvedPlateChart, options: &PlateChartRadiation,
+    additional: &[Vec<f64>], max_projection_terms: usize,
+    tensor: Option<(&PlateViscosity, PlateViscosityLimits, &CancelGate)>,
+) -> Result<(Vec<CompactBody>, Vec<Vec<f64>>, Option<ModalPlateViscosity>), AcousticRealizeError> {
+    if let Some((law, limits, gate)) = tensor {
+        law.preflight(specimen, options.n_modes, limits, gate)?;
+        if options.damping_ratio != 0.0 { return Err(refuse("full material viscosity requires zero authored modal damping")); }
+    }
     let window = options.eigenvalue_window;
     if options.n_modes == 0 || !options.damping_ratio.is_finite() || options.damping_ratio < 0.0
         || !window.0.is_finite() || !window.1.is_finite() || window.0 < 0.0 || window.1 <= window.0 {
@@ -77,6 +121,7 @@ pub(super) fn reduce(
     let mut radiators = Vec::with_capacity(keep);
     let mut ports = vec![Vec::with_capacity(keep); projections.len()];
     let mut bending_zetas = Vec::with_capacity(keep);
+    let mut normalized = Vec::new();
     for pair in report.modes.iter().take(keep) {
         let omega = pair.lambda.max(0.0).sqrt();
         if !(omega > 0.0) { continue; }
@@ -84,6 +129,10 @@ pub(super) fn reduce(
         // reference drive. Every additional column uses precisely that mass.
         let radiator = reference.mode(&model, &pair.phi, omega, options.damping_ratio)?;
         let root_mass = fs_math::det::sqrt(radiator.mass_kg);
+        if let Some((_, _, gate)) = tensor {
+            if gate.is_requested() { return Err(AcousticRealizeError::Cancelled); }
+            normalized.push(pair.phi.iter().map(|p| p / root_mass).collect::<Vec<_>>());
+        }
         for (projection, port) in projections.iter().zip(&mut ports) {
             let mut drive = 0.0;
             for (node, &weight) in projection.unit_force.iter().enumerate() {
@@ -111,10 +160,17 @@ pub(super) fn reduce(
         }
     }
     for (body, bending_zeta) in radiators.iter_mut().zip(bending_zetas) { body.zeta += bending_zeta; }
-    Ok((radiators, ports))
+    let damping = tensor.map(|(law, limits, gate)| {
+        let omega: Vec<_> = radiators.iter().map(|r|r.omega).collect();
+        law.project(specimen, &model, &normalized, &omega, limits, gate)
+    }).transpose()?;
+    Ok((radiators, ports, damping))
 }
 
 #[cfg(test)]
 mod tests;
 
 mod pressure;
+
+#[cfg(test)]
+mod tensor_tests;

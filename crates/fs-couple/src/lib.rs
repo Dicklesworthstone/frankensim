@@ -56,6 +56,8 @@ pub mod modal_acoustic_time;
 pub mod pcm_wav;
 pub mod piano_vertical;
 pub mod pickup;
+/// Full source-derived viscous tensors on the shared DKT and modal runtime.
+pub mod plate_viscosity;
 pub mod reed_bore;
 pub mod render;
 pub mod selector;
