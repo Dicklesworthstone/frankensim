@@ -5,6 +5,9 @@
 //! only to the body's internal source. Interface heat remains equal/opposite.
 //! No constitutive power law, temperature increment or new time stepper lives here.
 
+/// Source-resolved resistive power, using the existing conductor owner.
+pub mod joule;
+
 use super::{ConductanceSample, GasPiston, HeatExchangeSolve, PistonInput, PistonSolve,
     ThermalPistonCandidate, ThermalPistonError, UniformEnthalpyStepInput,
     EquilibriumPhaseState, ResolvedThermochemicalGasState, feedback, poll};

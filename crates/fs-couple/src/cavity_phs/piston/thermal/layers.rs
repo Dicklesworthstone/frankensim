@@ -7,13 +7,20 @@
 //! https://web.mit.edu/16.unified/www/FALL/thermodynamics/notes/node118.html
 
 use super::ConductanceSample;
+use super::source::ThermalMaterialPoint;
+/// Compatibility name for the shared thermal/electrical material-source refusal.
+pub use super::source::ThermalMaterialError as LayerConductionError;
 use fs_material::phase::EquilibriumPhaseState;
-use fs_material::state_point::{MaterialPropertySelection, MaterialStatePointError,
+use fs_material::state_point::{MaterialPropertySelection,
     ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
     THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
-use fs_matdb::{MaterialCard, PropertyKey, PropertyValue, QueryPoint};
-use fs_qty::{Dims, QuantitySpec, Temperature};
+use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
+use fs_qty::QuantitySpec;
+#[cfg(test)]
+use fs_qty::{Dims, Temperature};
+#[cfg(test)]
+use fs_matdb::PropertyValue;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
 /// Original body source, explicit condition axes, and caller-owned layer geometry.
@@ -43,26 +50,6 @@ pub struct MaterialConductionLayers<'a> {
     pub body_distance_m: f64,
 }
 
-/// Original material refusal stays visible; no representative value is inserted.
-#[derive(Clone, Debug, PartialEq)]
-pub enum LayerConductionError {
-    /// Incompatible identity/quantity, absent coordinate or bad geometry.
-    Invalid(&'static str),
-    /// The original condition-point owner refused the update.
-    Coordinate(String),
-    /// The canonical property owner refused the exact source query.
-    Material(MaterialStatePointError),
-}
-impl core::fmt::Display for LayerConductionError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Invalid(s) => write!(f, "material conduction layers: {s}"),
-            Self::Coordinate(s) => write!(f, "material conduction coordinate: {s}"),
-            Self::Material(e) => write!(f, "material conduction source: {e}"),
-        }
-    }
-}
-impl std::error::Error for LayerConductionError {}
 fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
 fn semantic(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
@@ -82,9 +69,9 @@ impl MaterialConductionLayers<'_> {
         &self, gas: &ResolvedThermochemicalGasState, body: EquilibriumPhaseState,
     ) -> Result<ConductanceSample<ResolvedMaterialStatePoint>, LayerConductionError> {
         let invalid = LayerConductionError::Invalid;
-        if self.material.content_hash() != body.material_card_identity() {
-            return Err(invalid("conductivity and enthalpy must use the same material card"));
-        }
+        let binding = ThermalMaterialPoint { material: self.material, context: self.context,
+            temperature_axis: self.temperature_axis, liquid_fraction_axis: self.liquid_fraction_axis };
+        let point = binding.at(body)?;
         if !self.area_m2.is_finite() || self.area_m2 < 0.0
             || !positive(self.gas_distance_m) || !positive(self.body_distance_m) {
             return Err(invalid("finite nonnegative area and positive layer distances required"));
@@ -94,44 +81,13 @@ impl MaterialConductionLayers<'_> {
             && q != semantic(QuantityKind::ThermalConductivity) {
             return Err(invalid("scalar static thermal conductivity quantity required"));
         }
-        let tq = self.context.axis_quantities().get(self.temperature_axis);
-        if !self.context.axes().contains_key(self.temperature_axis)
-            || tq.is_some_and(|q| *q != QuantitySpec::dimensional(Temperature::DIMS)
-                && *q != semantic(QuantityKind::AbsoluteTemperature)) {
-            return Err(invalid("an existing absolute-temperature axis is required"));
-        }
-        let mut point = self.context.clone().with(self.temperature_axis, body.temperature_k())
-            .map_err(|e| LayerConductionError::Coordinate(e.to_string()))?;
-        if let Some(axis) = self.liquid_fraction_axis {
-            if axis == self.temperature_axis || !point.axes().contains_key(axis)
-                || point.axis_quantities().get(axis).is_some_and(|q|
-                    *q != QuantitySpec::dimensional(Dims([0;6]))) {
-                return Err(invalid("liquid mass fraction needs a distinct existing dimensional scalar axis"));
-            }
-            point = point.with(axis, body.liquid_mass_fraction())
-                .map_err(|e| LayerConductionError::Coordinate(e.to_string()))?;
-        }
         let requirement = ScalarPropertyRequirement::try_with_key(self.conductivity, ScalarAdmissibility::NonNegative)
             .map_err(LayerConductionError::Material)?;
         let source = resolve_material_state_point(self.material, &point, &[requirement], self.selection.clone())
             .map_err(LayerConductionError::Material)?;
         let property = source.property(self.conductivity.name())
             .ok_or(invalid("resolved conductivity is absent"))?;
-        let claim = self.material.claims().claim(property.answer().receipt.selected)
-            .ok_or(invalid("selected conductivity claim is absent"))?;
-        match &claim.value {
-            PropertyValue::Scalar { .. } => {},
-            PropertyValue::Curve { abscissa, abscissa_dims, .. }
-                if (abscissa == self.temperature_axis && *abscissa_dims == Temperature::DIMS)
-                    || (Some(abscissa.as_str()) == self.liquid_fraction_axis
-                        && *abscissa_dims == Dims([0;6])) => {},
-            _ => return Err(invalid("conductivity must be scalar or depend on a declared thermal coordinate")),
-        }
-        if property.angular_frequency_band_rad_s()
-            .map_err(|e| LayerConductionError::Coordinate(format!("{e:?}")))?
-            .is_some_and(|(low, _)| low > 0.0) {
-            return Err(invalid("conductivity source does not admit static heat transport"));
-        }
+        binding.admit_static(property)?;
         let kb = property.value_si();
         let kg = gas.state().thermal_conductivity;
         if !positive(kg) { return Err(invalid("gas midpoint conductivity is not positive and finite")); }

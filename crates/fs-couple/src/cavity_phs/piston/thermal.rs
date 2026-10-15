@@ -11,6 +11,8 @@
 pub mod layers;
 /// State-dependent power on the same material, phase and mechanical step.
 pub mod power;
+/// Shared material/phase coordinates for thermal and electrical responses.
+pub mod source;
 mod feedback;
 
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
