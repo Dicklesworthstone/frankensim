@@ -577,10 +577,11 @@ pinned by occupied cells, centroid, reflection symmetry, fluid-wall link count,
 and FNV-1a fingerprint. The ignored release-scale `lbm-109` fixture runs Re=100
 at diameter 10, nominal inlet speed 0.1, 32D streamwise extent, 12D and 16D
 periodic lateral spans, 8,192 warm-up steps, and 32,768 retained force samples.
-It normalizes drag by measured mean inlet density, requires raw-domain and
-split-window Cd guards before admitting a bounded empirical two-width
+It normalizes drag by measured mean inlet density, requires raw-domain (`[1.20, 1.55]`)
+and split-window (`<= 2%` raw, `<= 3.5%` under `(4, -3)` two-width extrapolation)
+Cd guards before admitting a bounded (`<= 0.10`) empirical two-width
 zero-blockage Cd intercept, and requires the full-window and both half-window
-intercepts to stay in `[1.25, 1.45]` with at most 2% split drift. It does
+intercepts to stay in `[1.25, 1.45]`. It does
 not extrapolate spectral bins: both widths and both half-windows must put St in
 `[0.155, 0.175]`, split windows must agree within `0.0062`, and the reported 16D
 St must agree with the 12D sensitivity run within `0.01`. The deterministic
