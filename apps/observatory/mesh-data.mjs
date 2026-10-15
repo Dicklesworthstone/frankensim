@@ -56,6 +56,21 @@ export function validateMeshSnapshot(raw) {
   const time_s = array(m.time_s, 'Recorded frames', 1, MESH_LIMITS.frames).map(v => scalar(v, 'Frame time'));
   if (time_s[0] < 0 || time_s.some((v,i) => i > 0 && v <= time_s[i-1])) fail('Recorded times must be nonnegative and strictly increasing.');
   let count = positions_m.length * 3 + triangles.length * 4;
+  let source_cells, source_types;
+  if (m.source_cells != null || m.source_types != null) {
+    source_types = array(m.source_types, 'Original cell types', cell_count, cell_count).map(t => {
+      if (![5,9,10,12].includes(t)) fail('Unsupported original cell type.'); return t;
+    });
+    source_cells = array(m.source_cells, 'Original cell connectivity', cell_count, cell_count).map((cell,i) => {
+      const size = {5:3,9:4,10:4,12:8}[source_types[i]];
+      const ids = array(cell, 'Original cell', size, size).map(v => integer(v, 'original cell point', 0, positions_m.length-1));
+      if (new Set(ids).size !== size) fail('Repeated point in original cell.'); count += size+1; return ids;
+    });
+    triangles.forEach((tri,i) => {
+      if (tri.some(p => !source_cells[triangle_cells[i]].includes(p))) fail('Surface face does not belong to its declared original cell.');
+    });
+  }
+  if (count > MESH_LIMITS.values) fail('Mesh exceeds the 2,000,000-value working-set budget.');
   const names = new Set();
   const fields = array(m.fields, 'Fields', 0, MESH_LIMITS.fields).map(f => {
     const name = label(f.label, 'field label', 100), unit = label(f.unit, 'field unit', 32);
@@ -68,6 +83,7 @@ export function validateMeshSnapshot(raw) {
     return {label: name, unit, association: f.association, components: f.components, values};
   });
   const mesh = {positions_m, triangles, triangle_cells, cell_count, time_s, fields};
+  if (source_cells) {mesh.source_cells = source_cells; mesh.source_types = source_types;}
   if (m.displacement_field != null) {
     const index = integer(m.displacement_field, 'displacement field index', 0, fields.length-1), f = fields[index];
     if (f.association !== 'point' || f.components !== 3 || f.unit !== 'm') fail('Displacement must explicitly select a three-component point field in metres.');
@@ -105,9 +121,10 @@ export function probe(mesh, fieldIndex, entity, component = 'magnitude') {
 export function joinFrames(snapshots, times) {
   if (snapshots.length !== times.length || snapshots.length < 1 || snapshots.length > MESH_LIMITS.frames) fail('One explicit time is required per snapshot.');
   const base = validateMeshSnapshot(snapshots[0]);
-  const topology = m => JSON.stringify([m.positions_m,m.triangles,m.triangle_cells,m.cell_count,m.displacement_field]);
+  const topology = m => JSON.stringify([m.positions_m,m.triangles,m.triangle_cells,m.cell_count,m.displacement_field,m.source_cells,m.source_types]);
   const shape = m => JSON.stringify(m.fields.map(f => [f.label,f.unit,f.association,f.components]));
   const signature = topology(base.mesh), fields = shape(base.mesh);
+  if (base.mesh.fields.some(f => f.association === 'cell') && !base.mesh.source_cells) fail('Cell-valued sequences require original source-cell connectivity.');
   for (let i=0;i<snapshots.length;i++) {
     const s = i===0 ? base : validateMeshSnapshot(snapshots[i]);
     if (s.mesh.time_s.length!==1 || topology(s.mesh)!==signature || shape(s.mesh)!==fields

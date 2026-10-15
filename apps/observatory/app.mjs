@@ -1,5 +1,9 @@
-import {MAX_BYTES, validateSnapshot, validateInputs, parseCSV, toCSV, audioRate} from './protocol.mjs';
+import {MAX_BYTES, validateSnapshot as validateSignalSnapshot, validateInputs, parseCSV, toCSV, audioRate} from './protocol.mjs';
 import {SectionView, drawPlot, format, palette, nearest, spectrum} from './visuals.mjs';
+import {MESH_SCHEMA, MESH_LIMITS, validateMeshSnapshot} from './mesh-data.mjs';
+import {parseVTU} from './import-vtu.mjs';
+import {MeshWorkspace} from './mesh-ui.mjs';
+const validateSnapshot = raw => raw?.schema === MESH_SCHEMA ? validateMeshSnapshot(raw) : validateSignalSnapshot(raw);
 const $ = id => document.getElementById(id);
 const element = (tag, text, className) => {const n = document.createElement(tag); if (text != null) n.textContent = text; if (className) n.className = className; return n;};
 const BUILD = 'cargo build --release -p fs-couple --example heated_section_sound';
@@ -9,6 +13,10 @@ let state = 'hot', layer = 0, group = 'Pa', hidden = new Set(), cursorIndex = 0,
 let audio = null, audioSource = null, audioGeneration = 0, noticeTimer, rendering = false;
 const fftCache = new WeakMap();
 const scene = new SectionView($('scene'), selected => {layer = selected; updateView();});
+const meshWorkspace = new MeshWorkspace({notify, onBack: () => {current = null; updateView();}});
+const activeView = () => meshWorkspace.active ? meshWorkspace.view : scene;
+$('file-input').accept += ',.vtu';
+$('drop-zone').querySelector('span').textContent = 'VTU or mesh JSON · up to 32 MiB / signal CSV or JSON · up to 8 MiB';
 function notify(message, error = false) {
   clearTimeout(noticeTimer); $('notification').textContent = message; $('notification').hidden = false;
   $('notification').classList.toggle('error', error); $('activity').textContent = message;
@@ -59,9 +67,13 @@ async function status(announce = false) {
 }
 function persist() {
   try {
-    let saved = runs.map(r => ({snapshot: r.snapshot, added: r.added}));
-    while (saved.length && JSON.stringify(saved).length > 3 * 1024 * 1024) saved.pop();
-    localStorage.setItem(STORE, JSON.stringify(saved));
+    const saved = []; let bytes = 2;
+    for (const r of runs) {
+      const json = JSON.stringify({snapshot: r.snapshot, added: r.added});
+      if (bytes + json.length + 1 > 3 * 1024 * 1024) continue;
+      saved.push(json); bytes += json.length + 1;
+    }
+    localStorage.setItem(STORE, '[' + saved.join(',') + ']');
     if (saved.length < runs.length) notify('Browser storage is bounded. Export large or older runs for durable retention.');
   } catch {notify('Browser storage is unavailable or full. Your run is still open; export it to keep a copy.');}
 }
@@ -83,7 +95,7 @@ function addRun(snapshot, origin) {
 function selectRun(run) {
   if (job) return notify('Cancel the running experiment before switching runs.');
   stopAudio(); current = run; hidden = new Set(); cursorIndex = 0; $('cursor').value = 0; $('zoom').value = '1';
-  group = keyFor(run.snapshot.traces.series[0]); setInputs(run.snapshot.inputs); updateView();
+  group = run.snapshot.traces ? keyFor(run.snapshot.traces.series[0]) : 'mesh'; setInputs(run.snapshot.inputs); updateView();
 }
 function library() {
   const list = $('run-list'); if (!runs.length) return;
@@ -92,7 +104,7 @@ function library() {
     const b = element('button', null, 'run-card' + (r === current ? ' active' : ''));
     b.setAttribute('aria-pressed', String(r === current)); b.disabled = !!job;
     b.append(element('strong', r.snapshot.title), element('span', `${r.origin.toUpperCase()} · ${r.added}`),
-      element('span', r.snapshot.inputs ? `${r.snapshot.inputs.voltage} V · ${r.snapshot.inputs.duration} s · ${r.snapshot.inputs.support === 'strain' ? 'fixed ends' : '10 N'}` : `${r.snapshot.traces.series.length} channels · imported values`, 'run-kind'));
+      element('span', r.snapshot.inputs ? `${r.snapshot.inputs.voltage} V · ${r.snapshot.inputs.duration} s · ${r.snapshot.inputs.support === 'strain' ? 'fixed ends' : '10 N'}` : r.snapshot.mesh ? `${r.snapshot.mesh.cell_count} cells · ${r.snapshot.mesh.time_s.length} recorded frames` : `${r.snapshot.traces.series.length} channels · imported values`, 'run-kind'));
     b.addEventListener('click', () => selectRun(r)); list.append(b);
   }
   $('baseline-label').textContent = baseline ? baseline.snapshot.title : 'No baseline selected';
@@ -103,6 +115,8 @@ function metric(id, value, unit) {
 }
 function updateView() {
   const s = current?.snapshot, sec = s?.section, m = s?.metrics;
+  if (s?.mesh) {meshWorkspace.enter(current, baseline); library(); return;}
+  meshWorkspace.exit();
   $('cold').classList.toggle('selected', state === 'cold'); $('cold').setAttribute('aria-pressed', String(state === 'cold'));
   $('hot').classList.toggle('selected', state === 'hot'); $('hot').setAttribute('aria-pressed', String(state === 'hot'));
   $('core').setAttribute('aria-pressed', String(layer === 0)); $('sleeve').setAttribute('aria-pressed', String(layer === 1));
@@ -160,6 +174,7 @@ function spectra(s) {
   return fftCache.get(s);
 }
 function charts() {
+  if (meshWorkspace.active) {meshWorkspace.drawProbe(); return;}
   const s = current?.snapshot, colors = palette(), box = $('channels'); box.replaceChildren();
   if (!s) {drawPlot($('trace'), []); drawPlot($('spectrum'), [], {xunit:'Hz', positive:true}); return;}
   cursorIndex = Math.min(cursorIndex, s.traces.time_s.length - 1);
@@ -178,7 +193,7 @@ function charts() {
     lines.push({x: t, y: channel.values, color: colors[i % colors.length]});
     const sp = spectra(s)[i]; if (sp) frequencyLines.push({...sp, color: colors[i % colors.length]});
   });
-  if (baseline && baseline !== current && group !== 'unspecified') {
+  if (baseline?.snapshot.traces && baseline !== current && group !== 'unspecified') {
     const bs = baseline.snapshot, index = bs.traces.series.findLastIndex(ch => ch.unit === yunit && yunit !== 'unspecified');
     if (index >= 0) {
       const ch = bs.traces.series[index]; lines.push({x: bs.traces.time_s, y: ch.values, color: colors[2], dashed:true});
@@ -195,7 +210,9 @@ function charts() {
     : 'Spectrum unavailable: this selection is not uniformly sampled audio-rate pressure data.';
 }
 async function runExperiment(e) {
-  e?.preventDefault(); if (job) return; if (!$('experiment-form').reportValidity()) return;
+  e?.preventDefault(); if (job) return;
+  if (meshWorkspace.active) return notify('Choose “New native experiment” to return to the solver controls.');
+  if (!$('experiment-form').reportValidity()) return;
   let input; try {input = values();} catch (error) {return notify(error.message, true);}
   await status(); if (!engine.ready) return notify('Build the native example, then click the engine indicator to refresh.', true);
   if (job) return;
@@ -221,7 +238,7 @@ function stopAudio() {
   $('stop-audio').disabled = true;
 }
 async function listen(index) {
-  const s = current?.snapshot, channel = s?.traces.series[index], rate = s && channel && audioRate(s, channel);
+  const s = current?.snapshot, channel = s?.traces?.series[index], rate = s && channel && audioRate(s, channel);
   if (!rate) return;
   const scale = Number($('full-scale').value);
   if (!Number.isFinite(scale) || scale < 1e-12 || scale > 1e12) return notify('Shared full scale must be between 1e-12 and 1e12 Pa.', true);
@@ -246,6 +263,7 @@ function help() {
   box.append(element('p', 'Run the real heated-section example, or import existing results. Everything runs on this machine; no account, remote service or dependency download is needed to open the viewer.'));
   box.append(element('h3', 'Enable the native experiment'), element('code', BUILD), element('p', 'Use the normal repository setup with pinned sibling crates. Then refresh the engine indicator. Parameters marked as edited are drafts, not new simulation results.'));
   box.append(element('h3', 'Bring your own data'), element('p', 'Drop a snapshot JSON or numeric CSV up to 8 MiB. CSV starts with time_s followed by 1–12 unique channel names; suffixes such as _pa, _k and _n declare units. Times must strictly increase. Missing values and non-finite data are rejected, never filled in.'));
+  box.append(element('h3', 'Explore mesh fields'), element('p', 'Import ASCII VTU from fs-viz or a recorded mesh JSON up to 32 MiB. VTU import requires you to declare coordinate units. Pick points or cells, inspect vector components, and replay recorded frames. Color limits span the whole record; no intermediate physics is synthesized. Use Shift-drag to pan the mesh and the frame controls to inspect time.'));
   box.append(element('h3', 'Move quickly'));
   const table = element('table', null, 'evidence-table');
   for (const [key, action] of [['R', 'Run experiment'], ['I', 'Import a run'], ['⌘ / Ctrl K', 'Command palette'], ['?', 'Open this guide'], ['Esc', 'Close a dialog or cancel a running experiment'], ['Arrow keys on model', 'Rotate camera; + / − zoom; 0 reset'], ['Arrow keys on trace', 'Inspect adjacent samples']]) {
@@ -264,14 +282,14 @@ function evidence() {
   }
   box.append(element('h3', 'Model boundaries'));
   s.source.notes.forEach(note => box.append(element('p', note)));
-  box.append(element('p', `${s.traces.time_s.length} original samples per channel. Chart envelopes retain pixel-bin extrema; CSV/JSON exports retain every sample. Spectra use the complete record, not the zoomed view.`));
+  box.append(element('p', s.mesh ? `${s.mesh.positions_m.length} source points, ${s.mesh.cell_count} source cells, ${s.mesh.time_s.length} recorded frames. Mesh exports retain all source values. Probe CSV contains the selected entity and component. Display interpolation never changes source samples.` : `${s.traces.time_s.length} original samples per channel. Chart envelopes retain pixel-bin extrema; CSV/JSON exports retain every sample. Spectra use the complete record, not the zoomed view.`));
 }
 function commands() {
   const box = modal('Jump to an action'), input = element('input'), list = element('div');
   input.placeholder = 'Search actions…'; input.setAttribute('aria-label', 'Search workspace actions'); box.append(input, list);
   const actions = [['Run experiment', 'R', () => $('experiment-form').requestSubmit()], ['Import snapshot or CSV', 'I', () => $('file-input').click()],
     ['Inspect evidence', '', evidence], ['Export current snapshot', '', exportJSON], ['Pin current run as baseline', '', pin],
-    ['Reset camera', '0', () => scene.reset()], ['Switch color theme', '', theme], ['Help and shortcuts', '?', help]];
+    ['Reset camera', '0', () => activeView().reset()], ['Switch color theme', '', theme], ['Help and shortcuts', '?', help]];
   function populate() {
     list.replaceChildren();
     for (const [label, key, action] of actions.filter(a => a[0].toLowerCase().includes(input.value.toLowerCase()))) {
@@ -288,7 +306,7 @@ function commands() {
 function theme() {
   const value = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = value;
   try {localStorage.setItem('frankensim.observatory.theme', value);} catch {}
-  scene.invalidate(); scheduleCharts();
+  activeView().invalidate(); scheduleCharts();
 }
 function exportJSON() {
   if (!current) return notify('Load a run before exporting.');
@@ -298,13 +316,39 @@ function pin() {if (!current) return notify('Load a run before pinning a baselin
 async function importFile(file) {
   if (!file) return;
   if (job) return notify('Cancel the experiment before importing another run.');
-  if (file.size > MAX_BYTES) return notify('File exceeds the 8 MiB import budget.', true);
+  const csv = file.name.toLowerCase().endsWith('.csv'), vtu = file.name.toLowerCase().endsWith('.vtu');
+  if (file.size > (csv ? MAX_BYTES : MESH_LIMITS.bytes)) return notify('File exceeds the import budget (8 MiB CSV; 32 MiB mesh).', true);
   try {
     const text = await file.text();
-    const snapshot = file.name.toLowerCase().endsWith('.csv') ? parseCSV(text, file.name.slice(0, 190)) : validateSnapshot(JSON.parse(text));
+    let snapshot;
+    if (vtu) {
+      const lengthUnit = await coordinateUnit(); if (lengthUnit == null) return;
+      snapshot = parseVTU(text, {lengthUnit, title: file.name.slice(0, 190)});
+    } else if (csv) snapshot = parseCSV(text, file.name.slice(0, 190));
+    else {
+      const raw = JSON.parse(text);
+      if (raw.schema !== MESH_SCHEMA && file.size > MAX_BYTES) throw new Error('Signal snapshots remain limited to 8 MiB.');
+      snapshot = validateSnapshot(raw);
+    }
     if (job) throw new Error('An experiment started during import. Cancel it before importing.');
     addRun(snapshot, 'Imported'); notify(`Imported ${file.name}. Source claims remain unverified.`);
   } catch (e) {notify(`Import refused: ${e.message} Previous result retained.`, true);}
+}
+function coordinateUnit() {
+  return new Promise(resolve => {
+    const box = modal('Declare the mesh coordinate unit');
+    box.append(element('p', 'VTU coordinates do not necessarily declare units. Choose the unit used by the exporter. Field Unit attributes are retained unchanged. No material properties are inferred.'));
+    const label = element('label', 'Coordinate unit'); label.htmlFor = 'import-length-unit';
+    const select = element('select'); select.id = 'import-length-unit';
+    for (const [value, text] of [['', 'Choose explicitly…'], ['m', 'Metres (m)'], ['mm', 'Millimetres (mm)'], ['cm', 'Centimetres (cm)']]) {
+      const option = element('option', text); option.value = value; select.append(option);
+    }
+    const button = element('button', 'Import mesh', 'button primary'); button.id = 'confirm-mesh-import'; button.disabled = true;
+    select.addEventListener('change', () => {button.disabled = !select.value;});
+    const close = () => {resolve(null);}; $('dialog').addEventListener('close', close, {once: true});
+    button.addEventListener('click', () => {$('dialog').removeEventListener('close', close); resolve(select.value); $('dialog').close();});
+    box.append(label, select, button); select.focus();
+  });
 }
 for (const id of ['voltage', 'duration', 'resistivity']) {
   $(id + '-range').addEventListener('input', () => {$(id).value = $(id + '-range').value; draft();});
@@ -327,23 +371,24 @@ $('studio-nav').addEventListener('click', () => {$('workspace').scrollIntoView({
 $('field').addEventListener('change', updateView);
 for (const id of ['cold', 'hot']) $(id).addEventListener('click', () => {state = id; updateView();});
 for (const [id, index] of [['core', 0], ['sleeve', 1]]) $(id).addEventListener('click', () => {layer = index; updateView();});
-$('zoom-in').addEventListener('click', () => scene.zoomBy(1.15)); $('zoom-out').addEventListener('click', () => scene.zoomBy(1 / 1.15));
-$('reset-view').addEventListener('click', () => scene.reset());
-$('snapshot-image').addEventListener('click', () => {scene.draw(); $('scene').toBlob(blob => {if (blob) download(blob, 'image/png', nameFor('png'));});});
-$('export-json').addEventListener('click', exportJSON); $('export-csv').addEventListener('click', () => {if (current) download(toCSV(current.snapshot), 'text/csv', nameFor('csv'));});
+$('zoom-in').addEventListener('click', () => activeView().zoomBy(1.15)); $('zoom-out').addEventListener('click', () => activeView().zoomBy(1 / 1.15));
+$('reset-view').addEventListener('click', () => activeView().reset());
+$('snapshot-image').addEventListener('click', () => {if (meshWorkspace.active) return meshWorkspace.screenshot(download, nameFor('png')); scene.draw(); $('scene').toBlob(blob => {if (blob) download(blob, 'image/png', nameFor('png'));});});
+$('export-json').addEventListener('click', exportJSON); $('export-csv').addEventListener('click', () => {if (current) download(toCSV(meshWorkspace.active ? {traces: meshWorkspace.trace()} : current.snapshot), 'text/csv', nameFor('csv'));});
 $('pin-baseline').addEventListener('click', pin); $('clear-baseline').addEventListener('click', () => {baseline = null; updateView();});
 $('listen-cold').addEventListener('click', () => listen(0)); $('listen-hot').addEventListener('click', () => listen(1)); $('stop-audio').addEventListener('click', stopAudio);
 $('zoom').addEventListener('change', scheduleCharts);
 function cursorTo(time) {
   if (!current) return;
+  if (meshWorkspace.active) return meshWorkspace.cursor(time);
   const t = current.snapshot.traces.time_s; cursorIndex = nearest(t, time);
   $('cursor').value = String((t[cursorIndex] - t[0]) / (t.at(-1) - t[0]) * 1000); scheduleCharts();
 }
-$('cursor').addEventListener('input', () => {if (current) {const t = current.snapshot.traces.time_s; cursorTo(t[0] + Number($('cursor').value) / 1000 * (t.at(-1) - t[0]));}});
-$('trace').addEventListener('pointerdown', e => {if (plotLayout) {const x = e.clientX - $('trace').getBoundingClientRect().left; cursorTo(plotLayout.range[0] + (x - plotLayout.start) / plotLayout.width * (plotLayout.range[1] - plotLayout.range[0]));}});
-$('trace').addEventListener('keydown', e => {if (current && ['ArrowLeft', 'ArrowRight'].includes(e.key)) {e.preventDefault(); cursorIndex = Math.max(0, Math.min(current.snapshot.traces.time_s.length - 1, cursorIndex + (e.key === 'ArrowLeft' ? -1 : 1))); cursorTo(current.snapshot.traces.time_s[cursorIndex]);}});
+$('cursor').addEventListener('input', () => {if (current && !meshWorkspace.active) {const t = current.snapshot.traces.time_s; cursorTo(t[0] + Number($('cursor').value) / 1000 * (t.at(-1) - t[0]));}});
+$('trace').addEventListener('pointerdown', e => {const plot = meshWorkspace.active ? meshWorkspace.plot : plotLayout; if (plot) {const x = e.clientX - $('trace').getBoundingClientRect().left; cursorTo(plot.range[0] + (x - plot.start) / plot.width * (plot.range[1] - plot.range[0]));}});
+$('trace').addEventListener('keydown', e => {if (current && ['ArrowLeft', 'ArrowRight'].includes(e.key)) {e.preventDefault(); if (meshWorkspace.active) return meshWorkspace.step(e.key === 'ArrowLeft' ? -1 : 1); cursorIndex = Math.max(0, Math.min(current.snapshot.traces.time_s.length - 1, cursorIndex + (e.key === 'ArrowLeft' ? -1 : 1))); cursorTo(current.snapshot.traces.time_s[cursorIndex]);}});
 new ResizeObserver(scheduleCharts).observe($('trace')); new ResizeObserver(scheduleCharts).observe($('spectrum'));
-document.addEventListener('visibilitychange', () => {if (!document.hidden) {scene.invalidate(); scheduleCharts();}});
+document.addEventListener('visibilitychange', () => {if (!document.hidden) {activeView().invalidate(); scheduleCharts();}});
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {e.preventDefault(); if ($('dialog').open) $('dialog').close(); else commands(); return;}
   if (!$('dialog').open && e.key === 'Escape' && job) {job.abort(); return;}
@@ -358,6 +403,6 @@ document.addEventListener('dragenter', e => {if (e.dataTransfer.types.includes('
 document.addEventListener('dragleave', () => {if (--dragDepth <= 0) {dragDepth = 0; $('drop-zone').hidden = true;}});
 document.addEventListener('dragover', e => {if (e.dataTransfer.types.includes('Files')) {e.preventDefault(); e.dataTransfer.dropEffect = 'copy';}});
 document.addEventListener('drop', e => {e.preventDefault(); dragDepth = 0; $('drop-zone').hidden = true; if (e.dataTransfer.files.length !== 1) notify('Import one run at a time.', true); else importFile(e.dataTransfer.files[0]);});
-window.addEventListener('pagehide', () => {job?.abort(); stopAudio(); audio?.close();});
+window.addEventListener('pagehide', () => {job?.abort(); meshWorkspace.pause(); stopAudio(); audio?.close();});
 try {const saved = localStorage.getItem('frankensim.observatory.theme'); if (['dark', 'light'].includes(saved)) document.documentElement.dataset.theme = saved;} catch {}
 restore(); updateView(); status();

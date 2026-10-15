@@ -2,7 +2,7 @@
 
 The API responses below are explicitly synthetic test doubles, not Rust physics.
 Normal mode exercises served assets; --in-memory loads identical assets with only
-module URLs rewritten when browser navigation is prohibited by the test host.
+module/stylesheet URLs rewritten when browser navigation is prohibited by the test host.
 That mode does not establish browser/HTTP/CSP integration or persistent storage.
 The Node server tests separately exercise real loopback HTTP and child processes.
 """
@@ -37,7 +37,13 @@ fixture = {'schema': 'frankensim.observatory/v1', 'title': 'UI test fixture · n
         for name, frequency in [('Cold pressure', 330), ('Heated pressure', 270)]]}}
 
 def module(path):
-    return 'data:text/javascript;base64,' + base64.b64encode(path.read_bytes()).decode()
+    text = path.read_text()
+    for name in re.findall(r"from\s+['\"]\./([^'\"]+)['\"]", text):
+        text = text.replace("'./" + name + "'", repr(module(path.parent / name)))
+    if path.name == 'mesh-ui.mjs':
+        css = base64.b64encode((ROOT / 'mesh.css').read_bytes()).decode()
+        text = text.replace("link.href='/mesh.css'", "link.href='data:text/css;base64," + css + "'")
+    return 'data:text/javascript;base64,' + base64.b64encode(text.encode()).decode()
 
 with sync_playwright() as playwright:
     browser = playwright.chromium.launch(headless=True, executable_path=options.browser)
@@ -66,9 +72,7 @@ with sync_playwright() as playwright:
         page.evaluate(setup, fixture)
         # about:blank is not a secure context. Production loopback has native UUIDs.
         page.evaluate("if(!crypto.randomUUID)crypto.randomUUID=()=>Math.random().toString(36).slice(2)")
-        app = (ROOT / 'app.mjs').read_text().replace("'./protocol.mjs'", repr(module(ROOT / 'protocol.mjs')))
-        app = app.replace("'./visuals.mjs'", repr(module(ROOT / 'visuals.mjs')))
-        page.add_script_tag(content=app, type='module')
+        page.add_script_tag(url=module(ROOT / 'app.mjs'), type='module')
     else:
         page.add_init_script('(' + setup + ')(' + json.dumps(fixture) + ')')
         page.goto(options.url)
