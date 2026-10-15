@@ -10,6 +10,7 @@
 //! output is pressure in Pa at a Rayleigh half-space receiver, mapped to float
 //! with a FIXED declared full scale. There is no sample, no assigned pitch,
 //! no normalization, no AGC, no EQ and no reverb anywhere in this crate.
+pub mod audio;
 pub mod dense;
 pub mod fastfelt;
 pub mod kernel;
@@ -19,6 +20,7 @@ pub mod refmods;
 #[allow(unused_imports)]
 use refmods::linear;
 
+pub use audio::PianoAudio;
 pub use kernel::{Config, Counters, Description, Ledger, LivePiano};
 
 #[cfg(target_arch = "wasm32")]
