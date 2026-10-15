@@ -19,6 +19,9 @@ use std::fmt;
 /// Physical dissipation coupled to an existing caloric/heat-transport owner.
 pub mod thermal;
 
+/// Source-backed coefficients shared by existing thermal and structural consumers.
+pub mod source;
+
 /// Temperature-dependent multipliers and stress-free thermal strain.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThermalKnot {
