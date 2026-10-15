@@ -5,7 +5,7 @@
 //! It adds no fitted loss, changes no impedance, and retains actual allpass
 //! storage. Finite-band phase error and numerical memory are explicit, not a
 //! broadband-exact propagation or measured instrument-fidelity claim.
-use super::network::{SectionRealization, TubeNetworkSpec};
+use super::network::{SectionRealization, TubeNetworkSpec, TubeSection};
 use super::tube::UniformTubeSpec;
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
@@ -61,7 +61,7 @@ impl TubeNetworkSpec {
     /// image. Its represented length includes fractional DC transit; the third
     /// return value retains all residuals and their band errors explicitly.
     /// "Original" here means this graph's supplied section geometry. If another
-    /// reduction already rounded that geometry (such as viscothermal subdivision),
+    /// reduction already rounded that geometry (such as LEGACY integer viscothermal subdivision),
     /// this operation does not recover its earlier source lengths or certify that
     /// earlier approximation; retain and inspect the reduction's own records.
     /// The section's original length tolerance still applies to DC representation.
@@ -76,14 +76,7 @@ impl TubeNetworkSpec {
     {
         poll(gate)?;
         self.validate_section_gases(gases)?;
-        let omega=core::f64::consts::TAU*policy.maximum_frequency_hz*dt;
-        if !dt.is_finite() || dt<=0.0 || !policy.maximum_frequency_hz.is_finite()
-            || policy.maximum_frequency_hz<=0.0 || !omega.is_finite()
-            || omega<=0.0 || omega>=core::f64::consts::PI
-            || !policy.maximum_summed_phase_error_rad.is_finite()
-            || policy.maximum_summed_phase_error_rad<0.0 {
-            return Err(invalid("fractional tube requires a resolved clock and explicit finite phase budget"));
-        }
+        let omega=policy.angular_frequency(dt)?;
         let bytes=self.sections.len().checked_mul(core::mem::size_of::<NetworkSegment>()
             +core::mem::size_of::<FractionalTransit>()+core::mem::size_of::<FractionalSection>()
             +core::mem::size_of::<SectionRealization>())
@@ -99,37 +92,65 @@ impl TubeNetworkSpec {
         let mut phase_sum=0.0;
         for (section,gas) in self.sections.iter().zip(gases) {
             poll(gate)?;
-            // The original uniform-tube owner validates physical geometry and Z.
-            let z=UniformTubeSpec {length_m:section.length_m,radius_m:section.radius_m,
-                sound_speed_m_s:gas.sound_speed,terminal_reflection:0.0,
-                max_length_error_m:section.max_length_error_m,max_wave_memory_bytes:0}
-                .characteristic_impedance(gas.density)?;
-            let cell=gas.sound_speed*dt;
-            let requested=section.length_m/cell;
-            if !cell.is_finite() || cell<=0.0 || !requested.is_finite()
-                || requested<1.0 || requested>=usize::MAX as f64
-                || !section.max_length_error_m.is_finite() || section.max_length_error_m<0.0 {
-                return Err(invalid("fractional section needs finite geometry and at least one full transit sample"));
-            }
-            let integer=requested.floor() as usize;
-            let transit=FractionalTransit::new(requested-integer as f64).map_err(wave)?;
-            let actual=(integer as f64+transit.realized_dc_samples())*cell;
-            if !actual.is_finite() || (actual-section.length_m).abs()>section.max_length_error_m {
-                return Err(invalid("fractional DC geometry exceeds the original length tolerance"));
-            }
-            let phase=transit.phase_error_bound_rad(omega).map_err(wave)?;
+            let (realization, detail)=section.realize_fractional(gas,dt,omega)?;
+            let phase=detail.phase_error_bound_rad;
             phase_sum+=phase;
             if !phase_sum.is_finite() || phase_sum>policy.maximum_summed_phase_error_rad {
                 return Err(invalid("fractional tube exceeds its declared accumulated phase-error budget"));
             }
-            segments.push(NetworkSegment {nodes:section.nodes,one_way_samples:integer,impedance_pa_s_m3:z});
-            transits.push(transit);
-            represented.push(SectionRealization {represented_length_m:actual,one_way_samples:integer,impedance_pa_s_m3:z});
-            details.push(FractionalSection {requested_length_m:section.length_m,realized_dc_length_m:actual,
-                requested_samples:requested,integer_samples:integer,transit,phase_error_bound_rad:phase});
+            segments.push(NetworkSegment {nodes:section.nodes,one_way_samples:realization.one_way_samples,
+                impedance_pa_s_m3:realization.impedance_pa_s_m3});
+            transits.push(detail.transit);
+            represented.push(realization);
+            details.push(detail);
         }
         let network=WaveguideNetwork::with_fractional_transits(&self.nodes,&segments,&transits,dt,budget).map_err(wave)?;
         poll(gate)?;
         Ok((network,represented,details))
+    }
+}
+
+impl FractionalTubePolicy {
+    pub(crate) fn angular_frequency(self, dt: f64) -> Result<f64, AcousticRealizeError> {
+        let omega=core::f64::consts::TAU*self.maximum_frequency_hz*dt;
+        if !dt.is_finite() || dt<=0.0 || !self.maximum_frequency_hz.is_finite()
+            || self.maximum_frequency_hz<=0.0 || !omega.is_finite()
+            || omega<=0.0 || omega>=core::f64::consts::PI
+            || !self.maximum_summed_phase_error_rad.is_finite()
+            || self.maximum_summed_phase_error_rad<0.0 {
+            return Err(invalid("fractional tube requires a resolved clock and explicit finite phase budget"));
+        }
+        Ok(omega)
+    }
+}
+
+impl TubeSection {
+    // Shared by direct propagation and geometry-preserving loss subdivision.
+    // The caller has validated the complete gas and policy; no state is allocated.
+    pub(crate) fn realize_fractional(&self, gas: &GasState, dt: f64, omega: f64)
+        -> Result<(SectionRealization, FractionalSection), AcousticRealizeError>
+    {
+        // The original uniform-tube owner validates physical geometry and Z.
+        let z=UniformTubeSpec {length_m:self.length_m,radius_m:self.radius_m,
+            sound_speed_m_s:gas.sound_speed,terminal_reflection:0.0,
+            max_length_error_m:self.max_length_error_m,max_wave_memory_bytes:0}
+            .characteristic_impedance(gas.density)?;
+        let cell=gas.sound_speed*dt;
+        let requested=self.length_m/cell;
+        if !cell.is_finite() || cell<=0.0 || !requested.is_finite()
+            || requested<1.0 || requested>=usize::MAX as f64
+            || !self.max_length_error_m.is_finite() || self.max_length_error_m<0.0 {
+            return Err(invalid("fractional section needs finite geometry and at least one full transit sample"));
+        }
+        let integer=requested.floor() as usize;
+        let transit=FractionalTransit::new(requested-integer as f64).map_err(wave)?;
+        let actual=(integer as f64+transit.realized_dc_samples())*cell;
+        if !actual.is_finite() || (actual-self.length_m).abs()>self.max_length_error_m {
+            return Err(invalid("fractional DC geometry exceeds the original length tolerance"));
+        }
+        let phase=transit.phase_error_bound_rad(omega).map_err(wave)?;
+        Ok((SectionRealization {represented_length_m:actual,one_way_samples:integer,impedance_pa_s_m3:z},
+            FractionalSection {requested_length_m:self.length_m,realized_dc_length_m:actual,
+                requested_samples:requested,integer_samples:integer,transit,phase_error_bound_rad:phase}))
     }
 }

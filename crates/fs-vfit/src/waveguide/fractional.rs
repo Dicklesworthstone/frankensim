@@ -58,13 +58,33 @@ impl FractionalTransit {
         }
         if self.requested == 0.0 || omega_max == 0.0 { return Ok(0.0); }
         let d = self.realized_dc_samples();
-        let angle = 0.5*omega_max;
-        let tangent = fs_math::det::sin(angle)/fs_math::det::cos(angle);
-        let phase = 2.0*(d*tangent).atan();
+        let phase = self.phase_lag_rad(omega_max)?;
         let error = (phase-d*omega_max).abs() + (d-self.requested).abs()*omega_max;
         if !error.is_finite() { return Err(WaveguideError("fractional transit phase calculation overflowed")); }
         Ok(error)
     }
+    /// Positive unwrapped phase lag of the ACTUAL rounded allpass coefficient.
+    /// Under exp(+i omega n), the response is exp(-i * phase_lag_rad(omega)).
+    /// This is the same fixed filter used by propagation, not the ideal d*omega.
+    /// It lets physical response checks include interpolation dispersion without
+    /// copying the filter law or claiming broadband-exact travel.
+    ///
+    /// # Errors
+    /// Nonfinite frequency or a frequency outside [0, Nyquist).
+    pub fn phase_lag_rad(&self, omega: f64) -> Result<f64, WaveguideError> {
+        if !omega.is_finite() || !(0.0..core::f64::consts::PI).contains(&omega) {
+            return Err(WaveguideError("fractional transit band must lie below Nyquist"));
+        }
+        if self.requested == 0.0 || omega == 0.0 { return Ok(0.0); }
+        let angle = 0.5*omega;
+        let tangent = fs_math::det::sin(angle)/fs_math::det::cos(angle);
+        let phase = 2.0*(self.realized_dc_samples()*tangent).atan();
+        if !phase.is_finite() {
+            return Err(WaveguideError("fractional transit phase calculation overflowed"));
+        }
+        Ok(phase)
+    }
+
 }
 
 #[derive(Debug, Clone)]
