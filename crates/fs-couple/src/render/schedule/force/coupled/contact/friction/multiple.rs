@@ -173,6 +173,16 @@ impl MultiFrictionModalSystem {
     #[must_use] pub fn port(&self, index: usize) -> Option<&ModalFrictionPort> { self.points.get(index).map(|p| &p.port) }
     /// Actual modal and bilateral stored energy [J].
     pub fn total_energy_j(&self) -> Result<f64, ModalCouplingError> { self.core.total_energy_j() }
+    /// Original full-network static preload with EVERY contact released before
+    /// the performance window. Neither the contact law nor its fixed compliance
+    /// changes. Refuses after any sample or nonzero initial vibration; keeps all
+    /// interface sources, body/cavity connections and pressure observations.
+    /// Returns initial stored energy, not a reconstructed history of input work.
+    pub fn initialize_released_equilibrium(&mut self, external: &[f64], gate: &CancelGate)
+        -> Result<f64, ModalFrictionError>
+    {
+        self.core.initialize_released_equilibrium(external, gate)
+    }
     /// Last joint report; absent until this wrapper accepts a sample.
     #[must_use] pub fn last_frame(&self) -> Option<&MultiFrictionFrame> { self.accepted.then_some(&self.frame) }
     /// Existing acceleration-to-pressure coefficients, if any, unchanged.

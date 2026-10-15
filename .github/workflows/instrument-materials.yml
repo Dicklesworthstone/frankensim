@@ -27,6 +27,10 @@ on:
       - 'crates/fs-couple/tests/material_duct_wall/**'
       - 'crates/fs-couple/src/bowed_string.rs'
       - 'crates/fs-couple/src/bowed_string/material.rs'
+      - 'crates/fs-couple/src/render/schedule/force.rs'
+      - 'crates/fs-couple/src/render/schedule/force/program.rs'
+      - 'crates/fs-couple/tests/force_program.rs'
+      - 'crates/fs-couple/tests/material_bow_interface/**'
       - 'crates/fs-couple/src/render/schedule/force/coupled/contact/friction*'
       - 'crates/fs-couple/src/render/schedule/force/coupled/contact/friction/**'
       - 'crates/fs-couple/src/render/schedule/force/coupled/render/friction.rs'
@@ -90,9 +94,9 @@ jobs:
       - name: Material walls and multi-outlet flute pressure
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test material_duct_wall -- --test-threads=1
-      - name: Source-bound interfaces in reciprocal material bow mechanics
+      - name: Source-bound interfaces, string loads and plucks
         if: ${{ !cancelled() }}
-        run: cargo test -p fs-couple --no-fail-fast --test modal_friction_interface --test material_bow_interface -- --test-threads=1
+        run: cargo test -p fs-couple --no-fail-fast --test force_program --test modal_friction_interface --test material_bow_interface -- --test-threads=1
       - name: Two-sided material reed physics and exterior pressure
         if: ${{ !cancelled() }}
         run: |
