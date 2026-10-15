@@ -10,8 +10,9 @@
 //       fieldFrames  instead: one field every this many AUDIO frames (even spacing however far
 //                    ahead the lane renders; for a score heard a second after it is computed)
 //       bursts       false: no slow-motion burst after each stroke (default true when fields are on)
-//       scales       grid coarsening factors to try, finest first (default [4, 5, 6, 7, 8])
-//       minRealtime  the finest scale that runs at least this much faster than real time wins (1.7)
+//       scales       grid coarsening factors to try, finest first (default [2.5, 3, 3.5, 4, 5, 6, 7, 8])
+//       minRealtime  the finest scale that runs at least this much faster than real time wins (1.7);
+//                    timed from the coarse end (choose)
 //   {type:'strike', x, y, speed, frame?}   x, y metres from the centre; speed m/s
 //   {type:'sequence', startFrame, loopFrames, events:[{offset, x, y, speed}]}
 //   {type:'score', events:[{frame, x, y, speed}]}   a fixed score, played once
@@ -76,18 +77,28 @@ async function loadLevels(wasmBytes) {
   }
 }
 
+// The finest of `scales` (listed finest first) that runs `minRealtime` times faster than real time; if none
+// does, the coarsest. The grids are timed from the coarse end, stepping finer until one falls short. A finer
+// grid has more nodes and never runs faster, so this is the grid a finest-first search picks. But the grids
+// finer than the pick are never built: building is the cost of start-up (the snare takes 0.2 s at 6x, 1.5 s at
+// 2.5x).
+// The first timing in a Worker runs while V8 is still optimizing the engine code, and can read slow. A
+// shortfall there is timed once more before it ends the search.
+let timed = 0;
 function choose(name, scales, minRealtime) {
-  let fallback = null;
-  for (const s of scales) {
+  let pick = null;
+  for (let i = scales.length - 1; i >= 0; i--) {
+    let rt;
     try {
-      const rt = bench(name, s);
-      if (rt >= minRealtime) return { scale: s, realtime: rt };
-      fallback = { scale: s, realtime: rt };
+      rt = bench(name, scales[i]);
+      if (timed++ === 0 && rt < minRealtime) rt = bench(name, scales[i]);
     } catch {
-      // Scale requires oversampling at 48 kHz; try the next coarser grid.
+      continue; // the grid needs oversampling at 48 kHz: skip it, as a finest-first search would
     }
+    if (rt < minRealtime) return pick || { scale: scales[i], realtime: rt };
+    pick = { scale: scales[i], realtime: rt };
   }
-  return fallback || { scale: 5, realtime: bench(name, 5) };
+  return pick || { scale: 5, realtime: bench(name, 5) };
 }
 
 self.onmessage = async (event) => {

@@ -112,10 +112,12 @@ Measured on the Strandbar piano part against the studio stem (RMS octave-balance
 ## The live kit
 
 `engine-kit/build-wasm.sh` compiles `fs_vkplate::live` (wasm-bindgen) into `public/live/kit/`. Each
-piece gets its own Worker (`public/live/kit/worker.js`), which times a stroke at grid scales 4-8
-and keeps the finest that runs 1.7x faster than real time on the device. A silent piece is not
-stepped. Strokes land where the head or cymbal is touched; the Worker sends the surface velocity
-at ~45 Hz and, after each stroke, the first 8 ms every 0.25 ms, which the page replays 60x slower.
+piece gets its own Worker (`public/live/kit/worker.js`), which times a stroke at grid scales 2.5-8
+and keeps the finest that runs 1.7x faster than real time on the device. It times from the coarse
+end and stops at the first grid that is too slow, so the costly fine grids are never built. A
+silent piece is not stepped. Strokes land where the head or cymbal is touched; the Worker sends
+the surface velocity at ~45 Hz and, after each stroke, the first 8 ms every 0.25 ms, which the
+page replays 60x slower.
 Levels: one gain per piece, set on the 5x grid: its 50 ms loudness matched to the Salamander
 overheads, capped so a standard stroke peaks at 0.55 (the live cymbals' attacks are too sharp to
 match their loudness). A stroke's loudness moves with the grid, by piece and not monotonically (the
