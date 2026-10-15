@@ -158,6 +158,27 @@ impl Band {
             let s = x[i] - dot(&row[..i - lo], &x[lo..i]);
             x[i] = s / row[i - lo];
         }
+        self.backward(x);
+    }
+    /// `solve` for the right-hand side `rhs(0), rhs(1), ...`, each entry built inside the forward
+    /// sweep just before its row is eliminated (`x` is only written). Every row of that sweep waits
+    /// on the previous row's division, so the right-hand side's independent loads and arithmetic
+    /// fill that wait instead of costing a pass of their own. Same operations, same order, same
+    /// bits as filling `x` first and calling `solve`.
+    #[inline]
+    pub fn solve_with(&self, x: &mut [f64], mut rhs: impl FnMut(usize) -> f64) {
+        let (n, b, w) = (self.n, self.b, self.b + 1);
+        for i in 0..n {
+            let lo = i.saturating_sub(b);
+            let row = &self.l[i * w + (lo + b - i)..i * w + b + 1];
+            let s = rhs(i) - dot(&row[..i - lo], &x[lo..i]);
+            x[i] = s / row[i - lo];
+        }
+        self.backward(x);
+    }
+    #[inline]
+    fn backward(&self, x: &mut [f64]) {
+        let (n, b, w) = (self.n, self.b, self.b + 1);
         // L' x = y by columns of L' (rows of L): each solved x[i] is pushed into the rows above,
         // so both sweeps stream the same contiguous factor once
         for i in (0..n).rev() {
@@ -580,21 +601,26 @@ impl Body {
         if let Some(vk) = self.vk.as_mut() {
             let h2 = self.h * self.h;
             let w = &self.w;
-            let u = |o: Option<usize>| o.map_or(0.0, |k| w[k] + vk.z0[k]);
-            for (c, s9) in vk.nb.iter().enumerate() {
+            let VonKarman { eh, nb, l0, z0, airy, f, q, curv } = vk;
+            let eh = *eh;
+            let u = |o: Option<usize>| o.map_or(0.0, |k| w[k] + z0[k]);
+            // q = -E t (l(w + z0) - l(z0)) per core node, built row by row inside the Airy solve's
+            // forward sweep (it fills that sweep's latency chain); A F = q
+            airy.solve_with(f, |c| {
+                let s9 = &nb[c];
                 let xx = (u(s9[1]) - 2.0 * u(s9[0]) + u(s9[2])) / h2;
                 let yy = (u(s9[3]) - 2.0 * u(s9[0]) + u(s9[4])) / h2;
                 let xy = (u(s9[5]) - u(s9[6]) - u(s9[7]) + u(s9[8])) / (4.0 * h2);
-                vk.q[c] = -vk.eh * (xx * yy - xy * xy - vk.l0[c]);
-                vk.curv[c] = (xx, yy, xy);
-            }
-            vk.f.copy_from_slice(&vk.q);
-            vk.airy.solve(&mut vk.f);
+                let qc = -eh * (xx * yy - xy * xy - l0[c]);
+                q[c] = qc;
+                curv[c] = (xx, yy, xy);
+                qc
+            });
             // V = h^2/(2 E t) F' A F with A F = q; the force h^2 (dq/dw)' F is -grad V
-            v += h2 / (2.0 * vk.eh) * vk.f.iter().zip(&vk.q).map(|(a, b)| a * b).sum::<f64>();
-            for (c, s9) in vk.nb.iter().enumerate() {
-                let (xx, yy, xy) = vk.curv[c];
-                let fc = vk.f[c]; // h^2 (area) times the 1/h^2 of each stencil weight
+            v += h2 / (2.0 * eh) * f.iter().zip(q.iter()).map(|(a, b)| a * b).sum::<f64>();
+            for (c, s9) in nb.iter().enumerate() {
+                let (xx, yy, xy) = curv[c];
+                let fc = f[c]; // h^2 (area) times the 1/h^2 of each stencil weight
                 let mut put = |o: Option<usize>, val: f64| {
                     if let Some(k) = o {
                         self.g[k] -= fc * val;
