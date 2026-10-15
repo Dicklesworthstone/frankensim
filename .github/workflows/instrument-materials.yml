@@ -30,6 +30,8 @@ on:
       - 'crates/fs-couple/src/cavity_phs/piston/**'
       - 'crates/fs-material/examples/material_gas_spring/**'
       - 'crates/fs-material/src/gas*.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/performance.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/performance/force.rs'
       - 'crates/fs-couple/src/bernoulli_aperture/performance/file*'
       - 'crates/fs-couple/src/bernoulli_aperture/performance/file/**'
       - 'crates/fs-couple/src/bernoulli_aperture/network/regional.rs'
@@ -66,7 +68,7 @@ jobs:
       - name: Retained scalar and symmetric plate material physics
         if: ${{ !cancelled() }}
         run: |
-          cargo test -p fs-couple --test plate_aperture relaxation -- --test-threads=1
+          cargo test -p fs-couple --test plate_aperture -- --test-threads=1
           cargo test -p fs-couple --test opposed_plate_aperture -- --test-threads=1
       - name: Regional material geometry in shared string body and cavity mechanics
         if: ${{ !cancelled() }}

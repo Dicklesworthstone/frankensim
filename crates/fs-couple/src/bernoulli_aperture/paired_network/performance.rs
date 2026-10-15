@@ -8,13 +8,18 @@
 //! seam; it does not replace the mechanical, material or radiation owners.
 
 use super::{PairedApertureNetwork, PairedNetworkFrame};
-use crate::bernoulli_aperture::performance::{ApertureObservation, AperturePerformanceConfig};
+use crate::bernoulli_aperture::performance::{
+    ApertureObservation, AperturePerformanceConfig, compile_schedule, pressure_candidate,
+};
+use crate::bernoulli_aperture::performance::force::ForceSchedule;
+
+mod plate_forces;
 use crate::bernoulli_aperture::tube::TubeDrive;
 use crate::pcm_wav::baffled::BaffledPressure;
 use crate::pcm_wav::observation::PressureRenderer;
-use crate::render::{ControlDelta, RenderError};
+use crate::render::RenderError;
 use crate::render::schedule::{
-    GestureCompileError, PressureGestureBinding, ScheduledControl, compile_pressure_gestures,
+    GestureCompileError, ScheduledControl,
 };
 use fs_scenario::gesture::GestureSchedule;
 
@@ -51,6 +56,9 @@ pub struct PairedAperturePerformance {
     next: usize,
     held_pressure_pa: f64,
     forces: Option<Vec<BladeForceControl>>,
+    // Source-mesh force programs are an alternative to already-generalized
+    // blade forces, never a second hidden supply or duplicated force law.
+    plate_forces: [Option<ForceSchedule>; 2],
     next_force: usize,
     held_forces_n: [f64; 2],
     last: Option<PairedNetworkFrame>,
@@ -80,27 +88,7 @@ impl PairedAperturePerformance {
             || a.accepted_steps() != 0 || config.samples > a.spec().max_steps
             || a.spec().time_step_s.to_bits() != (1.0 / f64::from(config.sample_rate_hz)).to_bits()
         { return Err(invalid("paired performance needs an unadvanced complete system and matching finite source clock")); }
-        let [track] = schedule.tracks() else {
-            return Err(invalid("paired performance requires exactly one blowing-pressure track"));
-        };
-        let rate = schedule.control_rate_hz;
-        if rate == 0 || rate > config.sample_rate_hz {
-            return Err(invalid("paired pressure control rate must be positive and no faster than mechanics"));
-        }
-        let last_tick = u128::from(config.samples - 1) * u128::from(rate)
-            / u128::from(config.sample_rate_hz);
-        if last_tick + 1 > config.max_controls as u128 {
-            return Err(invalid("paired pressure sampling exceeds its declared control budget"));
-        }
-        if track.events.iter().any(|e| e.time_s > last_tick as f64 / f64::from(rate)) {
-            return Err(invalid("paired pressure command begins after the last observed control tick"));
-        }
-        let controls = compile_pressure_gestures(&schedule, &[PressureGestureBinding {
-            track: track.id.clone(), voice: 0,
-        }], config.sample_rate_hz, config.samples, config.max_compile_work)?;
-        if controls.len() > config.max_controls {
-            return Err(invalid("paired compiled pressure exceeds its control storage allowance"));
-        }
+        let controls = compile_schedule(&schedule, &config)?;
         let receiver = match observation {
             ApertureObservation::Inlet => None,
             ApertureObservation::NetworkNode(n) if system.node_frame(n).is_some() => None,
@@ -110,7 +98,8 @@ impl PairedAperturePerformance {
             _ => return Err(invalid("paired observation must name this network's pressure or an admitted outlet receiver")),
         };
         Ok(Self { system, observation, receiver, config, schedule, controls, next: 0,
-            held_pressure_pa: 0.0, forces: None, next_force: 0, held_forces_n: [0.0; 2],
+            held_pressure_pa: 0.0, forces: None, plate_forces: [None, None],
+            next_force: 0, held_forces_n: [0.0; 2],
             last: None, poisoned: false })
     }
 
@@ -119,6 +108,9 @@ impl PairedAperturePerformance {
     /// than silently replacing a load. Forces start at zero. Pressure and force
     /// assignments together must fit the original control-storage allowance.
     /// This supplies actuator work, not an inferred lip/contact constitutive law.
+    /// These are already-generalized forces in each retained opening coordinate.
+    /// For physical node/patch loads use `with_plate_forces` instead; the two
+    /// representations cannot be attached together and accidentally double a load.
     ///
     /// # Errors
     /// Late/repeated attachment, unordered/duplicate/out-of-window controls,
@@ -126,7 +118,8 @@ impl PairedAperturePerformance {
     pub fn with_blade_forces(mut self, controls: Vec<BladeForceControl>)
         -> Result<Self, GestureCompileError>
     {
-        if self.poisoned || self.system.aperture().accepted_steps() != 0 || self.forces.is_some() {
+        if self.poisoned || self.system.aperture().accepted_steps() != 0 || self.forces.is_some()
+            || self.plate_forces.iter().any(Option::is_some) {
             return Err(invalid("paired force program requires one unadvanced attachment"));
         }
         if self.controls.len().checked_add(controls.len())
@@ -229,14 +222,8 @@ impl PressureRenderer for PairedAperturePerformance {
         if output.len() > self.config.max_block { return Err(sizing("paired callback exceeds its admitted capacity")); }
         for slot in output {
             let sample = self.samples_rendered();
-            let (mut next, mut pressure) = (self.next, self.held_pressure_pa);
-            while let Some(event) = self.controls.get(next) {
-                if event.sample != sample { break; }
-                if let ControlDelta::SetBlowingPressure { pressure_pa, .. } = event.delta {
-                    pressure = pressure_pa;
-                } else { unreachable!("canonical pressure compiler output"); }
-                next += 1;
-            }
+            let (next, pressure) = pressure_candidate(
+                &self.controls, self.next, self.held_pressure_pa, sample);
             let (mut next_force, mut forces) = (self.next_force, self.held_forces_n);
             if let Some(program) = &self.forces {
                 while let Some(event) = program.get(next_force) {
@@ -244,12 +231,18 @@ impl PressureRenderer for PairedAperturePerformance {
                     forces[event.blade] = event.force_n;
                     next_force += 1;
                 }
+            } else {
+                forces=std::array::from_fn(|i|self.plate_forces[i].as_ref()
+                    .map_or(0.0,|f|f.candidate(sample)));
             }
             match self.step_pressure(pressure, forces) {
                 Ok((value, frame)) => {
                     *slot = value; self.last = Some(frame);
                     self.next = next; self.held_pressure_pa = pressure;
                     self.next_force = next_force; self.held_forces_n = forces;
+                    for program in self.plate_forces.iter_mut().flatten() {
+                        program.accept(sample);
+                    }
                 }
                 Err(error) => { self.poisoned = true; return Err(error); }
             }
@@ -260,3 +253,6 @@ impl PressureRenderer for PairedAperturePerformance {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod plate_tests;

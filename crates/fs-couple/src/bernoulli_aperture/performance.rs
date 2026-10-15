@@ -155,24 +155,7 @@ impl AperturePerformance {
             }
             _ => return Err(invalid("pressure observation is not a node or terminal of the supplied system")),
         };
-        let [track] = schedule.tracks() else {
-            return Err(invalid("one explicitly typed blowing-pressure track is required"));
-        };
-        let rate = schedule.control_rate_hz;
-        if rate == 0 || rate > config.sample_rate_hz {
-            return Err(invalid("control rate must be positive and no faster than mechanics"));
-        }
-        let last_tick = u128::from(config.samples - 1) * u128::from(rate)
-            / u128::from(config.sample_rate_hz);
-        if last_tick + 1 > config.max_controls as u128 {
-            return Err(invalid("pressure sampling exceeds the declared control-tick/storage budget"));
-        }
-        if track.events.iter().any(|e| e.time_s > last_tick as f64 / f64::from(rate)) {
-            return Err(invalid("pressure command begins after the last observed control tick"));
-        }
-        let controls = compile_pressure_gestures(&schedule, &[PressureGestureBinding {
-            track: track.id.clone(), voice: 0,
-        }], config.sample_rate_hz, config.samples, config.max_compile_work)?;
+        let controls = compile_schedule(&schedule, &config)?;
         Ok(Self { system, observation, receiver, config, schedule, controls, next: 0,
             held_pressure_pa: 0.0, poisoned: false, forces: None, mechanical_work_j: 0.0 })
     }
@@ -256,16 +239,8 @@ impl PressureRenderer for AperturePerformance {
         if output.is_empty() { return Err(RenderError::EmptyBlock); }
         if output.len() > self.config.max_block { return Err(sizing("aperture callback exceeds its construction-time capacity")); }
         for slot in output {
-            let mut next = self.next;
-            let mut pressure = self.held_pressure_pa;
-            while let Some(event) = self.controls.get(next) {
-                if event.sample != self.samples_rendered() { break; }
-                if let ControlDelta::SetBlowingPressure { pressure_pa, .. } = event.delta {
-                    pressure = pressure_pa;
-                } else { unreachable!("existing compiler emits only pressure assignments"); }
-                next += 1;
-            }
             let sample = self.samples_rendered();
+            let (next, pressure) = pressure_candidate(&self.controls, self.next, self.held_pressure_pa, sample);
             let force_n = self.forces.as_ref().map_or(0.0, |f| f.candidate(sample));
             match self.step_pressure(pressure, force_n) {
                 Ok((value, work)) => {
@@ -278,4 +253,47 @@ impl PressureRenderer for AperturePerformance {
         }
         Ok(())
     }
+}
+
+// Shared source-clock admission/compilation for scalar and independent blades.
+// Physical owners remain different; control semantics and work budgets do not.
+pub(in crate::bernoulli_aperture) fn compile_schedule(schedule: &GestureSchedule, config: &AperturePerformanceConfig)
+    -> Result<Vec<ScheduledControl>, GestureCompileError>
+{
+    let [track] = schedule.tracks() else {
+        return Err(invalid("one explicitly typed blowing-pressure track is required"));
+    };
+    let rate = schedule.control_rate_hz;
+    if rate == 0 || rate > config.sample_rate_hz {
+        return Err(invalid("control rate must be positive and no faster than mechanics"));
+    }
+    let last_tick = u128::from(config.samples - 1) * u128::from(rate)
+        / u128::from(config.sample_rate_hz);
+    if last_tick + 1 > config.max_controls as u128 {
+        return Err(invalid("pressure sampling exceeds the declared control-tick/storage budget"));
+    }
+    if track.events.iter().any(|e| e.time_s > last_tick as f64 / f64::from(rate)) {
+        return Err(invalid("pressure command begins after the last observed control tick"));
+    }
+    let controls=compile_pressure_gestures(schedule, &[PressureGestureBinding {
+        track: track.id.clone(), voice: 0,
+    }], config.sample_rate_hz, config.samples, config.max_compile_work)?;
+    if controls.len()>config.max_controls {
+        return Err(invalid("compiled pressure exceeds the declared control storage allowance"));
+    }
+    Ok(controls)
+}
+
+// Preview controls without publishing them ahead of their physical sample.
+pub(in crate::bernoulli_aperture) fn pressure_candidate(controls: &[ScheduledControl], mut next: usize, mut pressure: f64,
+    sample: u64) -> (usize, f64)
+{
+    while let Some(event) = controls.get(next) {
+        if event.sample != sample { break; }
+        if let ControlDelta::SetBlowingPressure { pressure_pa, .. } = event.delta {
+            pressure = pressure_pa;
+        } else { unreachable!("existing compiler emits only pressure assignments"); }
+        next += 1;
+    }
+    (next, pressure)
 }
