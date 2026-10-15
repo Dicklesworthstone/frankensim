@@ -513,6 +513,34 @@ impl WaveguideNetwork {
     /// Same finite-set checks as `preview_step`; no allocation in this call.
     pub fn step(&mut self, outgoing: f64) -> Result<NetworkFrame, WaveguideError> {
         let frame = self.preview_step(outgoing)?;
+        self.accept_preview();
+        Ok(frame)
+    }
+
+    /// Advance two same-clock networks as one publication. Both complete
+    /// previews, including all reactive loads, must pass before either network
+    /// changes its accepted wave, load or observation state. This composes two
+    /// acoustic sides without cloning their histories or allocating per step.
+    /// Outgoing pressures are supplied by the coupled junction, in self/other order.
+    ///
+    /// # Errors
+    /// Unequal clocks or either original network's preview refusal. Scratch may
+    /// change after refusal; every accepted coordinate remains untouched.
+    pub fn step_pair(&mut self, other: &mut Self, outgoing: [f64; 2])
+        -> Result<[NetworkFrame; 2], WaveguideError>
+    {
+        if self.time_step_s.to_bits() != other.time_step_s.to_bits() {
+            return Err(WaveguideError("coupled wave networks require identical clocks"));
+        }
+        let frames = [self.preview_step(outgoing[0])?, other.preview_step(outgoing[1])?];
+        self.accept_preview();
+        other.accept_preview();
+        Ok(frames)
+    }
+
+    // Only called immediately after this owner's successful preview, with no
+    // intervening physical mutation. No fallible action follows publication.
+    fn accept_preview(&mut self) {
         for (i, line) in self.lines.iter_mut().enumerate() {
             line.commit_pair(self.departing[2 * i], self.departing[2 * i + 1]);
         }
@@ -520,7 +548,6 @@ impl WaveguideNetwork {
             if let Some(load) = load { load.accept_frame(*candidate); }
         }
         self.observed.copy_from_slice(&self.candidate);
-        Ok(frame)
     }
 }
 
