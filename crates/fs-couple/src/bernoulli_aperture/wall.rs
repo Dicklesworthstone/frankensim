@@ -20,6 +20,9 @@ pub use fs_phs::WallPin;
 use fs_vfit::impedance::SeriesImpedanceSpec;
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
 
+/// Source-bound thin cylindrical walls in the same acoustic graph.
+pub mod material;
+
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
 }
@@ -93,6 +96,29 @@ impl WallPatch {
             return Err(invalid("wall observation requires the same admitted patch at the named node"));
         }
         let state = network.load_state(node).ok_or_else(|| invalid("wall load state is unavailable"))?;
+        self.motion(state)
+    }
+
+    /// Observe the canonical wave/load owner without requiring a reed source.
+    /// Jets and prescribed-flow sources read exactly the same accepted wall
+    /// coordinates. Reading an observation never advances the physical clock.
+    ///
+    /// # Errors
+    /// Different node law, unavailable state, or nonfinite reconstructed motion.
+    pub fn observe_waveguide(&self, network: &fs_vfit::waveguide::network::WaveguideNetwork,
+        node: usize) -> Result<WallState, AcousticRealizeError>
+    {
+        if network.node(node) != Some(self.shunt()?) {
+            return Err(invalid("wall observation requires the same admitted patch at the named node"));
+        }
+        let state = network.terminal_state(node)
+            .ok_or_else(|| invalid("wall load state is unavailable"))?;
+        self.motion(state)
+    }
+
+    fn motion(&self, state: fs_vfit::impedance::ImpedanceState)
+        -> Result<WallState, AcousticRealizeError>
+    {
         let x = state.compliance_pressure_pa / self.wall.stiffness_per_area;
         let v = state.inertive_flow_m3_s / self.area_m2;
         let energy = 0.5 * self.area_m2 * (self.wall.surface_density * v * v
