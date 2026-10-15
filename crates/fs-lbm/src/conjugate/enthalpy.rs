@@ -179,6 +179,15 @@ struct Account<'a> {
 }
 impl Account<'_> {
     fn evaluate(&mut self, thermal: &DepositionSimulation<'_>, law: &ResistivityLaw<'_>) -> Result<EnthalpyCurrentState, JouleEnthalpyError> {
+        self.evaluate_with_contacts(thermal, law, self.input.contacts)
+    }
+
+    // Keep a single current solve, power transfer and work-accounting owner.
+    // Material-interface consumers pass contacts resolved at this SAME epoch;
+    // the original entry point passes its unchanged authored contact slice.
+    fn evaluate_with_contacts(&mut self, thermal: &DepositionSimulation<'_>,
+        law: &ResistivityLaw<'_>, contacts: &[ElectricalContact],
+    ) -> Result<EnthalpyCurrentState, JouleEnthalpyError> {
         checkpoint(self.gate)?;
         if self.solves >= self.input.max_current_solves { return Err(JouleEnthalpyError::CurrentBudget); }
         self.solves += 1;
@@ -191,7 +200,7 @@ impl Account<'_> {
         }
         let mut resistivity_ohm_m = vec![None; self.input.cell_ids.len()];
         let electric = self.input.setup.solve_with_cell_contacts(
-            self.input.domain, &temperature_k, self.input.contacts,
+            self.input.domain, &temperature_k, contacts,
             |c,_,t| {
                 let value = (law)(c, &thermal.cells()[&self.input.cell_ids[c]], t)?;
                 resistivity_ohm_m[c] = value;
