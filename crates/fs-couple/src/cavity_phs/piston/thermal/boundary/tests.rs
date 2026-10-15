@@ -64,3 +64,5 @@ fn equilibrium_does_not_bypass_source_admission_and_failures_preserve_history() 
     }
     assert_eq!(old,saved);
 }
+
+mod network;

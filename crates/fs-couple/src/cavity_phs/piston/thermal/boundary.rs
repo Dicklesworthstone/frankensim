@@ -2,6 +2,9 @@
 //! The caller supplies the other side's temperature for THIS nonlinear trial.
 //! A finite network must debit the returned signed heat and accept both endpoints.
 
+/// Finite circuit and thermal network feedback on this same boundary.
+pub mod network;
+
 use super::{ConductanceSample, GasPiston, HeatExchangeSolve, PistonInput,
     PistonSolve, PistonStep, ResolvedThermochemicalGasState, ThermalPistonError,
     feedback, poll, positive};
