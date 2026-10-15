@@ -152,3 +152,6 @@ fn stale_chart_geometry_mapping_clock_pending_events_and_cancellation_do_not_pub
     assert!(s.step_with_thermal_network(&mut thermal,&mut observer,&bindings(),thermal_config(5e-7),&[0.0;2],&stopped,unchanged).is_err());
     assert_eq!(thermal.time_s(),0.0);assert_eq!(s.reservoirs(),stores);assert_eq!(s.mechanics().samples(),0);
 }
+
+#[path="network/contact.rs"]
+mod contact;
