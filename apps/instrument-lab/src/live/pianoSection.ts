@@ -393,7 +393,7 @@ export class LivePianoSection {
         !board
           ? `32 to 128 board coordinates where the offline render keeps 128: the live piano part of Strandbar sits ${BOARD_ERROR_DB[32]} dB from the studio render in octave balance on 32 coordinates, ${BOARD_ERROR_DB[96]} dB on 96 and ${BOARD_ERROR_DB[128]} dB on 128.`
           : board >= 128
-          ?`${board} board coordinates, as many as the offline render: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[128]} dB from the studio render in octave balance.`
+          ? `${board} board coordinates, as many as the offline render: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[128]} dB from the studio render in octave balance.`
           : `${board} board coordinates instead of the offline render's 128: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[board] ?? '—'} dB from the studio render in octave balance (128 coordinates: ${BOARD_ERROR_DB[128]} dB)${board === 32 ? '; on A3, about 10 dB less energy above 2 kHz than the offline render' : ''}.`,
         'Strings of silent keys neither resonate nor absorb: offline, their dampers soak up about 10 % of an A3 strike, so the live notes decay more slowly early on (≈ −9.6 against −15.2 dB/s).',
         `A polyphony budget of ${info ? info.maxDynamicModes.toLocaleString('en-US') : '2,400'} string modes and ${info ? info.maxSoundingKeys : 24} keys. Beyond it the quietest key is returned to rest early; this is counted ("Forced out") and its energy appears as retired in the ledger. A load governor may lower the budget for new keys on a slow device, and says so.`,

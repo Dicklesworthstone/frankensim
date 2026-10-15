@@ -111,9 +111,9 @@ The live piano embeds a 32-coordinate board; `public/live/piano/boards/` holds 4
 boards (not committed, ~6 MB) that the browser fetches only when its timing probe says it can afford
 them (`boards.js`). The score lanes (Strandbar, the player) choose board and mode cap together on a
 sustained probe (`chooseQuality`); the keyboard section chooses the largest board whose 12-key probe runs
-1.4x faster than real time (`chooseBoard`) and leaves the mode budget to its load governor. A device with
-8 or more logical cores starts fetching board 96 while the embedded board is timed, so the fetch is off
-the start-up path. Each board the probe times is built once: the Worker keeps a copy
+1.4x faster than real time (`chooseBoard`) and leaves the mode budget to its load governor. For the lanes,
+a Chromium desktop (8+ logical cores, `userAgentData.mobile` false, no data saving) starts fetching board 96,
+their usual pick there, while the embedded board is timed, so the fetch is off the start-up path. Each board the probe times is built once: the Worker keeps a copy
 (`PianoEngine.copy()`) from before the timing and plays the chosen board's copy, which renders the same
 samples as a new engine (building board 96 takes ~0.9 s, a copy under a millisecond); an engine that cannot
 copy (a wasm from an older build) builds the chosen board again. On a device too slow for even the

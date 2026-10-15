@@ -247,12 +247,14 @@ export function fetchBoard(n) {
   return pending;
 }
 
-// The board a desktop-class device usually ends up with (96 here, timed on M-class Macs), fetched while the
-// embedded board's probe runs (the network works while the probe keeps this Worker busy), so the fetch is
-// off the start-up path. Devices with fewer than 8 logical cores (phones) rarely afford 96 and fetch nothing early.
+// The board the score lanes usually end up with on a desktop (96 on M-class Macs), fetched while the embedded
+// board's probe runs (the network works while the probe keeps this Worker busy), so the fetch is off the
+// start-up path. Only where the browser says it is not a phone (Chromium's userAgentData; most Android phones
+// report 8 cores, and they rarely afford 96) and no data saving is asked for: elsewhere nothing is fetched early.
 function prefetchLikely() {
-  const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 0;
-  if (cores >= 8) fetchBoard(96).catch(() => {});
+  const nav = typeof navigator !== 'undefined' ? navigator : null;
+  if (!nav || (nav.hardwareConcurrency || 0) < 8 || nav.userAgentData?.mobile !== false || nav.connection?.saveData) return;
+  fetchBoard(96).catch(() => {});
 }
 
 // The keyboard's choice (worker.js; the engine's own governor then guards the mode budget).
@@ -269,7 +271,8 @@ export async function chooseBoard({ make, measure = probeRealtime, target, sizes
       return null; // an engine_bg.wasm from before copies (see chooseQuality)
     }
   };
-  if (sizes.includes(96)) prefetchLikely();
+  // no prefetch: the keyboard's 12-key probe is heavier than the lanes', and its pick on M-class Macs is 64,
+  // so fetching 96 early would only compete with the board it needs
   const base = make(null, 0);
   const base0 = copyOf(base);
   const realtime32 = measure(base);
