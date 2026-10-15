@@ -95,3 +95,37 @@ fn late_binding_and_solved_domain_excursions_do_not_become_clipped_success() {
     assert_eq!(v.network().unwrap().stored_energy_j(),0.0);
     assert!(v.step_block(&mut sentinel).is_err());
 }
+
+#[test]
+fn physical_receiver_observes_the_solved_loss_not_a_postprocessed_pressure_gain() {
+    use fs_couple::flue_loop::network::performance::{FlueOutletConfig,FlueOutletPerformance};
+    use fs_couple::pcm_wav::baffled::{BaffledPressure,CircularOutletReceiver,RayleighMedium};
+    use fs_couple::pcm_wav::baffled::openings::CircularOpening;
+    use fs_couple::pcm_wav::observation::PressureRenderer;
+    use fs_scenario::gesture::GestureSchedule;
+    let schedule=GestureSchedule::from_canonical_bytes(b"frankensim-gesture-schedule-v1\ncontrol_rate_hz\t1000\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t0e0\tpressure-pa\t3e2\nevent\t5e-3\t0e0\tpressure-pa\t0e0\n").unwrap();
+    let receiver=CircularOutletReceiver {position_m:[0.0,0.0,0.25],radial_rings:4,
+        angular_points:16,maximum_frequency_hz:2000.0};
+    let config=FlueOutletConfig {sample_rate_hz:RATE,samples:513,max_block:64,
+        max_controls:128,max_compile_work:100000,outlet_node:1,receiver,maximum_abs_pressure_pa:1000.0};
+    let mut actual=FlueOutletPerformance::new(voice(101325.0).with_mouth_contraction(spec(0.6)).unwrap(),
+        schedule.clone(),config).unwrap();
+    let mut direct=voice(101325.0).with_mouth_contraction(spec(0.6)).unwrap();
+    let mut observed=BaffledPressure::circular_openings(&[CircularOpening {center_m:[0.0,0.0],radius_m:0.006}],
+        RATE,receiver,RayleighMedium {density:direct.gas().density,sound_speed:direct.gas().sound_speed}).unwrap();
+    let mut expected=vec![0.0;513];
+    for (n,slot) in expected.iter_mut().enumerate() {
+        if n==0 {direct.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();}
+        if n==240 {direct.apply(FlueControl::SetBlowingPressure(0.0)).unwrap();}
+        direct.step_block(&mut [0.0]).unwrap();
+        let q=direct.network().unwrap().node_frame(1).unwrap().net_flow_into_node_m3_s;
+        *slot=observed.step(&[q]).unwrap();
+    }
+    let mut out=vec![0.0;513];for block in out.chunks_mut(37) {actual.block(block).unwrap();}
+    assert_eq!(out,expected);assert!(out.iter().any(|p|*p!=0.0));
+    assert_eq!(actual.voice().mouth_flow_m3_s(),direct.mouth_flow_m3_s());
+    assert!(actual.voice().mouth_contraction().is_some());
+    let mut other=FlueOutletPerformance::new(voice(101325.0).with_mouth_contraction(spec(1.0)).unwrap(),schedule,config).unwrap();
+    let mut changed=vec![0.0;513];for block in changed.chunks_mut(64) {other.block(block).unwrap();}
+    assert_ne!(out,changed,"same receiver; changed physical loss must reach the microphone");
+}
