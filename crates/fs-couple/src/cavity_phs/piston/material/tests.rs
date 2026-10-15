@@ -103,3 +103,99 @@ fn material_bound_state_and_sources_survive_failures_and_cancellation() {
     assert_eq!(wall.body(),before.body());
     assert_ne!(wall.gas().state(),before.gas().state());
 }
+
+mod double_acting {
+    //! Reuse the original source fixture and inertia owner.
+    use super::{body, controls, drive, gas, near};
+    use crate::cavity_phs::piston::double_acting::{
+        DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve,
+    };
+    use crate::cavity_phs::piston::material::{MaterialDoubleActingGasPiston, MaterialGasPiston};
+    use crate::cavity_phs::piston::{GasPiston, PistonError};
+
+    fn input() -> DoublePistonInput {
+        DoublePistonInput { duration_s: drive(0.0).duration_s, heat_j: [20.0, 0.0], external_force_n: 0.0 }
+    }
+    fn solve() -> DoublePistonSolve {
+        DoublePistonSolve { piston: controls(), opposing_gas: controls().gas, volume_tolerance_m3: 1e-18 }
+    }
+
+    #[test]
+    fn solid_density_data_changes_one_inertia_and_both_material_gases() {
+        let run = |density| {
+            let mut wall = MaterialDoubleActingGasPiston::new(
+                gas(0.75, 0.001), gas(0.25, 0.001), body(density), [0.01, 0.01], 0.0,
+            ).unwrap();
+            let report = wall.step(input(), solve(), || false).unwrap();
+            (wall, report)
+        };
+        let (light, lr) = run(1000.0);
+        let (dense, dr) = run(8000.0);
+        near(light.piston().primary().mass_kg(), 0.1);
+        near(dense.piston().primary().mass_kg(), 0.8);
+        assert!(light.piston().primary().velocity_m_s() > dense.piston().primary().velocity_m_s());
+        assert!(light.gases()[0].state().state().temperature < dense.gases()[0].state().state().temperature);
+        assert!(light.gases()[1].state().state().temperature > dense.gases()[1].state().state().temperature);
+        assert!(light.gases()[1].state().state().sound_speed > dense.gases()[1].state().state().sound_speed);
+        for (wall, report) in [(&light, &lr), (&dense, &dr)] {
+            assert_eq!(wall.piston().primary().mass_kg(), wall.body().inertia().mass());
+            assert_eq!(wall.body().regions().len(), 1);
+            assert!(report.total_energy_residual_j.abs() <= controls().energy_tolerance_j);
+            for material in report.midpoint.iter() { assert_eq!(material.components().len(), 2); }
+        }
+    }
+
+    #[test]
+    fn material_binding_matches_the_original_numeric_dynamics_exactly() {
+        let specimen = body(8000.0);
+        let primary = gas(0.75, 0.001);
+        let opposing = gas(0.25, 0.001);
+        let mut numeric = DoubleActingGasPiston::new(
+            GasPiston::new(primary.clone(), specimen.inertia().mass(), 0.01, -0.1).unwrap(),
+            opposing.clone(), 0.006,
+        ).unwrap();
+        let mut sourced = MaterialDoubleActingGasPiston::new(
+            primary, opposing, specimen.clone(), [0.01, 0.006], -0.1,
+        ).unwrap();
+        let expected = numeric.step(input(), solve(), || false).unwrap();
+        let actual = sourced.step(input(), solve(), || false).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(sourced.piston(), &numeric);
+        assert_eq!(sourced.body(), &specimen);
+    }
+
+    #[test]
+    fn adding_opposing_gas_preserves_the_existing_source_and_momentum_history() {
+        let mut single = MaterialGasPiston::new(gas(0.75, 0.001), body(8000.0), 0.01, 0.0).unwrap();
+        single.step(drive(5.0), controls(), || false).unwrap();
+        let specimen = single.body().clone();
+        let accepted = single.piston().clone();
+        let opposing = gas(0.25, 0.001);
+        let bound = single.with_opposing_gas(opposing.clone(), 0.01).unwrap();
+        assert_eq!(bound.body(), &specimen);
+        assert_eq!(bound.piston().primary(), &accepted);
+        assert_eq!(bound.piston().opposing(), &opposing);
+    }
+
+    #[test]
+    fn source_failure_and_final_cancellation_cannot_publish_half_a_material_system() {
+        let mut wall = MaterialDoubleActingGasPiston::new(
+            gas(0.75, 0.001), gas(0.25, 0.001), body(8000.0), [0.01, 0.01], 0.0,
+        ).unwrap();
+        let before = wall.clone();
+        assert!(wall.step(DoublePistonInput { heat_j: [0.0, 1e9], ..input() }, solve(), || false).is_err());
+        assert_eq!(wall, before);
+        let mut probe = wall.clone();
+        let mut polls = 0;
+        probe.step(input(), solve(), || { polls += 1; false }).unwrap();
+        let mut actual = 0;
+        assert!(matches!(wall.step(input(), solve(), || {
+            actual += 1; actual == polls
+        }), Err(PistonError::Cancelled)));
+        assert_eq!(wall, before);
+        wall.step(input(), solve(), || false).unwrap();
+        assert_eq!(wall.body(), before.body());
+        assert_ne!(wall.gases()[0].state(), before.gases()[0].state());
+        assert_ne!(wall.gases()[1].state(), before.gases()[1].state());
+    }
+}
