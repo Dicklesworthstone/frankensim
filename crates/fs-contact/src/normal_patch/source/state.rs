@@ -1,4 +1,4 @@
-//! Re-resolve the existing point-contact ladder at one complete physical state.
+//! Re-resolve the existing point-contact ladder at complete physical states.
 //! This composes original bulk, ordered interface, model and geometry owners;
 //! it contains no constitutive formulas or material-name defaults.
 use fs_matdb::{InterfaceSystemCard,MaterialCard,QueryPoint};
@@ -8,13 +8,14 @@ use fs_material::state_point::{MaterialPropertySelection,MaterialStatePointError
 use fs_tribo::InputAuthority;
 use crate::interface_binding::{InterfaceBindingError,NormalContactModelSelection,
     ADHESION_ENERGY_PROPERTY,ADHESION_ENERGY_DIMS,bind_dry_interface_system_card,
-    bind_isotropic_elastic_interface,bind_normal_interface_state,bind_normal_contact_model};
+    bind_normal_interface_state,bind_normal_contact_model,
+    temperature::bind_isotropic_elastic_interface_at_temperatures};
 use super::{SourcePointContact,PointContactGeometry,PointContactEnvelope,NormalPatchError};
 
 /// Immutable data and explicit source selections, reusable across state points.
-/// Both bulk materials and the interface use the same declared physical point,
-/// as required by the existing isotropic contact binding. This does not average
-/// different temperatures or infer missing pressure, frequency or history axes.
+/// `resolve` uses one common point. `resolve_at_temperatures` retains independent
+/// bulk temperatures and a separately supplied interface-law temperature. Neither
+/// averages bodies or infers missing pressure, frequency or history coordinates.
 pub struct PointContactMaterialCards<'a> {
     pub surface_a:&'a MaterialCard,
     pub surface_b:&'a MaterialCard,
@@ -45,19 +46,28 @@ impl std::error::Error for ContactMaterialResolveError {}
 
 impl PointContactMaterialCards<'_> {
     /// Resolve complete sourced elasticity, yield, interface state and the
-    /// selected normal model, then compile through the original Hertz evaluator.
-    /// Geometry and operating bounds remain explicit. Each returned source owns
-    /// its original usage receipts and model; no previous source is mutated.
+    /// selected normal model at a common point through the original evaluator.
     pub fn resolve(&self,point:&QueryPoint,geometry:PointContactGeometry,envelope:PointContactEnvelope)
         ->Result<SourcePointContact,ContactMaterialResolveError> {
+        self.resolve_at_temperatures([point,point],point,geometry,envelope)
+    }
+
+    /// Resolve each bulk at its own temperature, retaining the declared state
+    /// for interface properties/model selection. Only T may differ: all other
+    /// coordinates and axis schemas must match. Every original property and
+    /// model validity gate remains active, including both bulk temperatures.
+    /// No effective-temperature averaging or thermal-stress correction is used.
+    pub fn resolve_at_temperatures(&self,bulk_points:[&QueryPoint;2],interface_point:&QueryPoint,
+        geometry:PointContactGeometry,envelope:PointContactEnvelope)
+        ->Result<SourcePointContact,ContactMaterialResolveError> {
         use ContactMaterialResolveError::{Material,Interface,Contact};
-        let a=resolve_isotropic_solid_state_point(self.surface_a,point,self.bulk_selection[0].clone()).map_err(Material)?;
-        let b=resolve_isotropic_solid_state_point(self.surface_b,point,self.bulk_selection[1].clone()).map_err(Material)?;
+        let a=resolve_isotropic_solid_state_point(self.surface_a,bulk_points[0],self.bulk_selection[0].clone()).map_err(Material)?;
+        let b=resolve_isotropic_solid_state_point(self.surface_b,bulk_points[1],self.bulk_selection[1].clone()).map_err(Material)?;
         let dry=bind_dry_interface_system_card(self.interface,self.authority).map_err(Interface)?;
-        let elastic=bind_isotropic_elastic_interface(&dry,&a,&b).map_err(Interface)?;
+        let elastic=bind_isotropic_elastic_interface_at_temperatures(&dry,&a,&b,interface_point).map_err(Interface)?;
         let requirement=ScalarPropertyRequirement::try_new(ADHESION_ENERGY_PROPERTY,
             ADHESION_ENERGY_DIMS,ScalarAdmissibility::NonNegative).map_err(Material)?;
-        let interface=resolve_interface_state_point(self.interface,point,&[requirement],
+        let interface=resolve_interface_state_point(self.interface,interface_point,&[requirement],
             self.interface_selection.clone()).map_err(Material)?;
         let normal=bind_normal_interface_state(&elastic,&interface).map_err(Interface)?;
         let model=bind_normal_contact_model(&normal,self.model_selection).map_err(Interface)?;

@@ -10,6 +10,10 @@ on:
       - 'crates/fs-material/tests/sheet/**'
       - 'crates/fs-couple/src/sheet_plate.rs'
       - 'crates/fs-couple/tests/sheet_plate.rs'
+      - 'crates/fs-couple/examples/textile_sheet.rs'
+      - 'scripts/import_franken_textiles.py'
+      - 'scripts/tests/test_import_franken_textiles.py'
+      - 'data/matdb/textile-examples/**'
       - 'crates/fs-material/src/thermal.rs'
       - 'crates/fs-material/src/section_temperature*'
       - 'crates/fs-material/src/section_temperature/**'
@@ -63,7 +67,7 @@ jobs:
           retention-days: 3
   electrothermal:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: '2'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -110,6 +114,25 @@ jobs:
       - name: Independent sheet bending on the actual DKT and modal owners
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test sheet_plate -- --test-threads=1
+      - name: Textile catalog to native material pack and physical sheet
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_import_franken_textiles.py -v
+          python3 scripts/import_franken_textiles.py data/matdb/textile-examples/synthetic-sheet.json synthetic-independent-sheet "$RUNNER_TEMP/textile-sheet" --citation 'Synthetic FTX integration specimen' --license 'Synthetic numerical fixture; repository license applies' --redistribution-terms 'Authored synthetic observations may be redistributed' --allow-estimates --interpolate-temperature
+          cargo run -p xtask -- matdb-pack --manifest "$RUNNER_TEMP/textile-sheet/manifest.tsv" --out "$RUNNER_TEMP/textile-sheet/material.pack"
+          cargo run -p fs-couple --example textile_sheet -- "$RUNNER_TEMP/textile-sheet/material.pack" 293.15 333.15 5 0.3 | tee "$RUNNER_TEMP/textile-sheet.log"
+      - name: Pinned real textile conductivity-only source remains partial
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --max-time 60 'https://raw.githubusercontent.com/Dicklesworthstone/franken_textiles/d9779504623f7bd8b7fd01cc70c5f6270bfac6e6/crates/ftx-pattern/src/material_catalog/thermal-measurements.json' -o "$RUNNER_TEMP/ftx-thermal.json"
+          test "$(git hash-object "$RUNNER_TEMP/ftx-thermal.json")" = ca819b4c8ff057f651075d8b9169b16d1c9327ce
+          python3 scripts/import_franken_textiles.py "$RUNNER_TEMP/ftx-thermal.json" fsri.cotton-batting.dried.2026-10-14 "$RUNNER_TEMP/textile-dried" --properties thermal_conductivity --citation 'FTX dated FSRI factual HFM transcription' --license 'Attributed factual observations; no page or image reproduction' --redistribution-terms 'Only attributed factual observations retained'
+          cargo run -p xtask -- matdb-pack --manifest "$RUNNER_TEMP/textile-dried/manifest.tsv" --out "$RUNNER_TEMP/textile-dried/material.pack"
+          cargo run -p fs-couple --example textile_sheet -- "$RUNNER_TEMP/textile-dried/material.pack" --conductivity-at 288.15 | tee "$RUNNER_TEMP/textile-source.log"
       - name: Test actual electrical solve, material phase law and composed transport
         shell: bash
         run: |
@@ -144,6 +167,8 @@ jobs:
           path: |
             ${{ runner.temp }}/electrothermal.log
             ${{ runner.temp }}/circuit-thermal.log
+            ${{ runner.temp }}/textile-sheet.log
+            ${{ runner.temp }}/textile-source.log
             ${{ runner.temp }}/thermal-lock.diff
             ${{ runner.temp }}/thermal-Cargo.lock
           retention-days: 3

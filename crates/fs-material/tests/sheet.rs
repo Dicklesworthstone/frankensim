@@ -110,3 +110,6 @@ fn query_domain_and_constitutive_stability_are_independent_gates() {
     assert!(QuadraticMembrane::new(1.0,1.0,1.0,1.0).is_err());
     assert!(adopt(&entries()).membrane().unwrap().response([f64::NAN;3]).is_err());
 }
+
+#[path="sheet/thermal.rs"]
+mod thermal;

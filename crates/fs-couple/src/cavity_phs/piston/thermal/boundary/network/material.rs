@@ -41,35 +41,41 @@ impl GasPiston {
         let destinations:Vec<_>=binding.resistors.iter().map(|r|r.destination).collect();
         let result=self.network_candidate(thermal,target_s,CircuitEnthalpyInput {circuit,ports,destinations:&destinations},
             drive,controls,guess_j,|state|binding.resolve(state,||(*cancel.borrow_mut())()),
-            |state,source,gas| {
-                let invalid=MaterialNetworkError::Invalid;
-                let cell=state.cells().get(&drive.cell).ok_or(invalid("inactive gas contact cell"))?;
-                if cell.boundary.htc_w_m2_k!=0.0 || !geometry.area_m2.is_finite() || geometry.area_m2<0.0
-                    || geometry.area_m2>state.exposed_area_m2(drive.cell)? {
-                    return Err(invalid("gas contact needs an exposed patch without duplicate ambient convection"));
-                }
-                let material=binding.cells.iter().find(|c|c.cell==drive.cell)
-                    .ok_or(invalid("gas contact lacks original cell material binding"))?;
-                let sample=source.cells.iter().find(|c|c.cell==drive.cell)
-                    .ok_or(invalid("gas contact lacks resolved endpoint phase"))?;
-                let (key,selection)=material.conductivity.as_ref()
-                    .ok_or(invalid("gas contact requires explicit cell conductivity"))?;
-                let layers=MaterialConductionLayers {material:material.point.material,context:material.point.context,
-                    temperature_axis:material.point.temperature_axis,liquid_fraction_axis:material.point.liquid_fraction_axis,
-                    conductivity:key,selection:selection.clone(),area_m2:geometry.area_m2,
-                    gas_distance_m:geometry.gas_distance_m,body_distance_m:geometry.cell_distance_m};
-                let resolved=layers.resolve(gas,sample.phase).map_err(MaterialNetworkError::Material)?;
-                // Retain exactly the same query/claim result as the network at
-                // this endpoint; a second independent state must not leak in.
-                if sample.conductivity.as_ref()!=Some(&resolved.source) {
-                    return Err(invalid("gas contact and network did not resolve the same conductivity source"));
-                }
-                Ok(resolved)
-            },||(*cancel.borrow_mut())());
+            |state,source,gas| resolve_contact(binding,drive.cell,state,source,gas,geometry),
+            ||(*cancel.borrow_mut())());
         match result {
             Err(CircuitEnthalpyError::Source(NetworkGasError::Material(MaterialNetworkError::Thermal(DepositionError::Cancelled)))) =>
                 Err(CircuitEnthalpyError::Cancelled),
             other=>other,
         }
     }
+}
+
+// The same source and conduction admission for single- and multi-chamber users.
+// Multi-contact callers ALSO check aggregate coverage before entering a solve.
+pub(crate) fn resolve_contact(
+    binding:&MaterialNetwork<'_>,id:CellId,state:&DepositionSimulation<'_>,
+    source:&MaterialNetworkSample,gas:&ResolvedThermochemicalGasState,geometry:GasConductionGeometry,
+) -> Result<ConductanceSample<ResolvedMaterialStatePoint>,MaterialNetworkError> {
+    let invalid=MaterialNetworkError::Invalid;
+    let cell=state.cells().get(&id).ok_or(invalid("inactive gas contact cell"))?;
+    if cell.boundary.htc_w_m2_k!=0.0 || !geometry.area_m2.is_finite() || geometry.area_m2<0.0
+        || geometry.area_m2>state.exposed_area_m2(id)? {
+        return Err(invalid("gas contact needs an exposed patch without duplicate ambient convection"));
+    }
+    let material=binding.cells.iter().find(|c|c.cell==id)
+        .ok_or(invalid("gas contact lacks original cell material binding"))?;
+    let sample=source.cells.iter().find(|c|c.cell==id)
+        .ok_or(invalid("gas contact lacks resolved endpoint phase"))?;
+    let (key,selection)=material.conductivity.as_ref()
+        .ok_or(invalid("gas contact requires explicit cell conductivity"))?;
+    let layers=MaterialConductionLayers {material:material.point.material,context:material.point.context,
+        temperature_axis:material.point.temperature_axis,liquid_fraction_axis:material.point.liquid_fraction_axis,
+        conductivity:key,selection:selection.clone(),area_m2:geometry.area_m2,
+        gas_distance_m:geometry.gas_distance_m,body_distance_m:geometry.cell_distance_m};
+    let resolved=layers.resolve(gas,sample.phase).map_err(MaterialNetworkError::Material)?;
+    if sample.conductivity.as_ref()!=Some(&resolved.source) {
+        return Err(invalid("gas contact and network did not resolve the same conductivity source"));
+    }
+    Ok(resolved)
 }

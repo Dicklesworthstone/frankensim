@@ -75,3 +75,17 @@ impl TerminalLoad {
         }
     }
 }
+
+impl super::WaveguideNetwork {
+    /// Accepted pressure histories of the parallel-RC impedance arms [Pa].
+    /// Available at terminal, series and shunt impedance nodes; distinct from
+    /// the series-RC admittance histories in `shunt_relaxation_pressures`.
+    /// An empty slice means a relaxation load with no compliance arms.
+    #[must_use]
+    pub fn load_compliance_pressures(&self, node: usize) -> Option<&[f64]> {
+        match self.loads.get(node)?.as_ref()? {
+            TerminalLoad::Relaxation(load) => Some(load.branch_pressures_pa()),
+            _ => None,
+        }
+    }
+}

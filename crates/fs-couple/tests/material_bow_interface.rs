@@ -25,9 +25,10 @@ fn with_cx<R>(f:impl FnOnce(&Cx<'_>,&CancelGate)->R)->R {
     pool.scope(|arena|f(&Cx::new(&gate,arena,fs_exec::StreamKey {seed:6,kernel_id:5,tile:0,iteration:0},
         fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic),&gate))
 }
-fn material()->ResolvedMaterialStatePoint {
+fn material()->ResolvedMaterialStatePoint { material_at_density(7800.0) }
+fn material_at_density(rho:f64)->ResolvedMaterialStatePoint {
     let mut claims=ClaimSet::new();let mut requirements=Vec::new();
-    for (name,dims,value) in [("density",Density::DIMS,7800.0),("young_modulus",Pressure::DIMS,200e9),
+    for (name,dims,value) in [("density",Density::DIMS,rho),("young_modulus",Pressure::DIMS,200e9),
         ("poisson_ratio",Dims::NONE,0.3),(ETA,DynViscosity::DIMS,10.0),
         ("G",Pressure::DIMS,80e9),("eta_s",DynViscosity::DIMS,1000.0)] {
         claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),value:PropertyValue::Scalar{value,dims},
@@ -41,12 +42,13 @@ fn material()->ResolvedMaterialStatePoint {
     resolve_material_state_point(&card,&QueryPoint::new().with("T",293.15).unwrap().with("omega",1000.0).unwrap(),
         &requirements,MaterialPropertySelection::SingleClaimOnly).unwrap()
 }
-fn source()->MaterialStringSource {
+fn source()->MaterialStringSource { source_at_density(7800.0) }
+fn source_at_density(rho:f64)->MaterialStringSource {
     MaterialStringSource::Homogeneous(with_uniform_circular_material_state(PrestressedString {
         length_m:0.5,tension_n:20.0,lin_density_kg_m:1.0,axial_stiffness_n:1.0,width_m:1.0,
         n_modes:4,damping_ratio:0.0,rayleigh:None,bending_stiffness_n_m2:0.0,kelvin_voigt_bending:None,
         relaxation_bending:None,polarization_detune:0.0,moving_end:false,
-    },0.0003,&material()).unwrap().with_kelvin_voigt_bending_loss().unwrap()).with_torsion("G","eta_s",3).unwrap()
+    },0.0003,&material_at_density(rho)).unwrap().with_kelvin_voigt_bending_loss().unwrap()).with_torsion("G","eta_s",3).unwrap()
 }
 fn options()->StringBankOptions {
     StringBankOptions{sample_rate_hz:48_000,bow:StringBowLocation{string:0,station_fraction:0.2},
@@ -123,7 +125,7 @@ fn source_domain_uses_torsional_surface_motion_not_just_prescribed_bow_speed() {
 #[test]
 fn both_interfaces_survive_joint_scheduling_and_callback_partitions() {
     with_cx(|cx,gate| {
-        let tracks:Vec<_>=["first","second"].into_iter().zip(drivers()).zip([0.2,0.31]).map(|((id,d),station)|GestureTrack{
+        let tracks:Vec<_>= ["first","second"].into_iter().zip(drivers()).zip([0.2,0.31]).map(|((id,d),station)|GestureTrack{
             id:id.into(),target:GestureTarget::BowStroke{string:0},initial:GestureValue::Bow{
                 velocity_m_per_s:d.speed_m_s,normal_force_n:d.normal_force_n,station},events:vec![],
         }).collect();
@@ -139,3 +141,6 @@ fn both_interfaces_survive_joint_scheduling_and_callback_partitions() {
         }
     });
 }
+
+#[path = "material_bow_interface/forces.rs"]
+mod forces;

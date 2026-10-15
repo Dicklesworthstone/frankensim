@@ -13,8 +13,14 @@
 //! intervals partition the ORIGINAL section transit exactly; no extra delay is
 //! introduced by the three instantaneous load nodes. Cold response checks use
 //! the actual integer intervals and bilinear loads, not their analogue ideal.
+//! The explicitly selected fractional image instead partitions ORIGINAL physical
+//! lengths and uses the same allpass response as execution in that cold check.
+//! On that image, material/gas loss coefficients use original physical lengths.
 
 use super::network::{NetworkNode, TubeNetworkSpec, TubeSection};
+use super::fractional::{FractionalSection, FractionalTubePolicy};
+mod partition;
+use partition::FractionalPartition;
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
@@ -65,16 +71,20 @@ pub struct ViscothermalSection {
     pub original_nodes: [usize; 2],
     /// Requested physical length [m], not an added radiation end correction.
     pub requested_length_m: f64,
-    /// Original integer-transit represented length [m].
+    /// Represented DC length [m]: rounded on the legacy integer image;
+    /// the sum of actual allpass DC lengths on the selected fractional image.
     pub represented_length_m: f64,
     /// Half-open range of replacement sections in the lowered graph.
     pub section_range: [usize; 2],
     /// Half-open range of new viscous/thermal load nodes.
     pub node_range: [usize; 2],
-    /// Same original total one-way transit, split among the replacement lines.
+    /// Sum of integer propagation buffers, split among the replacement lines.
+    /// On the fractional image this EXCLUDES residual allpass travel, which is
+    /// retained in the realized network's FractionalSection records.
     pub one_way_samples: usize,
     /// Maximum sampled absolute S11/S22/S21 discrepancy against the homogeneous
-    /// wide-tube telegraph section at its REPRESENTED length; fixed gate 0.03.
+    /// wide-tube telegraph section; fixed gate 0.03. The fractional image uses
+    /// the ORIGINAL physical length, the integer image its represented length.
     pub max_scattering_error: f64,
     /// Physical spectrum, including its separate numerical response checks.
     pub loss: WideTubeLoss,
@@ -220,7 +230,7 @@ pub fn with_viscothermal_sections(graph: TubeNetworkSpec, gas:&GasState, dt:f64,
     if graph.sound_speed_m_s.to_bits()!=gas.sound_speed.to_bits() {
         return Err(invalid("viscothermal medium must equal the network propagation medium"));
     }
-    let (graph, reports, _) = expand_sections(graph, gas, None, dt, selections, gate)?;
+    let (graph, reports, _) = expand_sections(graph, gas, None, dt, selections, gate, None)?;
     Ok((graph, reports))
 }
 
@@ -239,12 +249,43 @@ pub fn with_regional_viscothermal_sections(graph: TubeNetworkSpec, gases: Vec<Ga
     checkpoint(gate)?;
     graph.validate_section_gases(&gases)?;
     let inlet = gases[graph.inlet_section_index()?];
-    let (graph, reports, mapped) = expand_sections(graph, &inlet, Some(gases), dt, selections, gate)?;
+    let (graph, reports, mapped) = expand_sections(graph, &inlet, Some(gases), dt, selections, gate, None)?;
+    Ok((graph, mapped.expect("regional expansion preserves its mapping"), reports))
+}
+
+/// The same regional loss law and topology with ORIGINAL physical quarter lengths.
+///
+/// Select this together with `TubeNetworkSpec::realize_fractional_waveguide`.
+/// Each quarter retains positive integer travel plus the existing fixed allpass;
+/// no integer rounding precedes material loss scaling. The original geometry
+/// tolerance is divided among quarters and checked again on the total DC length.
+/// Existing gas, shear, Foster, spatial and sampled-scattering gates still apply.
+/// The scattering check includes the ACTUAL allpass phase and bilinear loads,
+/// against the homogeneous wide-tube model at the ORIGINAL physical length.
+///
+/// Original node addresses, solid-wall loads and regional gas identities survive.
+/// Empty selection preserves the supplied graph; the policy is still validated.
+/// This is a fixed-state, first-order wide-tube image, not live gas evolution,
+/// a broadband-exact delay, an antialiasing filter or measured instrument fidelity.
+///
+/// # Errors
+/// Existing loss refusals, unresolved physical quarter lengths, a propagation
+/// band narrower than the loss band, or the original geometry/phase/memory limits.
+pub fn with_regional_fractional_viscothermal_sections(
+    graph: TubeNetworkSpec, gases: Vec<GasState>, dt: f64,
+    selections: &[ViscothermalSectionSpec], policy: FractionalTubePolicy, gate: &CancelGate,
+) -> Result<(TubeNetworkSpec, Vec<GasState>, Vec<ViscothermalSection>), AcousticRealizeError> {
+    checkpoint(gate)?;
+    policy.angular_frequency(dt)?;
+    graph.validate_section_gases(&gases)?;
+    let inlet = gases[graph.inlet_section_index()?];
+    let (graph, reports, mapped) = expand_sections(graph, &inlet, Some(gases), dt,
+        selections, gate, Some(policy))?;
     Ok((graph, mapped.expect("regional expansion preserves its mapping"), reports))
 }
 
 fn expand_sections(mut graph: TubeNetworkSpec, uniform:&GasState, gases:Option<Vec<GasState>>, dt:f64,
-    selections:&[ViscothermalSectionSpec],gate:&CancelGate)
+    selections:&[ViscothermalSectionSpec],gate:&CancelGate,policy:Option<FractionalTubePolicy>)
     -> Result<(TubeNetworkSpec,Vec<ViscothermalSection>,Option<Vec<GasState>>),AcousticRealizeError>
 {
     let mut seen=std::collections::BTreeSet::new();
@@ -259,7 +300,8 @@ fn expand_sections(mut graph: TubeNetworkSpec, uniform:&GasState, gases:Option<V
     if selections.is_empty() {return Ok((graph,Vec::new(),gases));}
     // Bound the mandatory records before allocating; the final owner additionally
     // admits all wave/energy arrays, load states and lowering scratch.
-    let minimum=total.checked_mul(4*core::mem::size_of::<NetworkNode>()+4*core::mem::size_of::<TubeSection>())
+    let fractional_scratch = if policy.is_some() { 4*core::mem::size_of::<FractionalSection>() } else { 0 };
+    let minimum=total.checked_mul(4*core::mem::size_of::<NetworkNode>()+4*core::mem::size_of::<TubeSection>()+fractional_scratch)
         .ok_or_else(||invalid("viscothermal record size overflow"))?;
     if minimum>graph.max_wave_memory_bytes {return Err(invalid("viscothermal records exceed network memory budget"));}
     let original=core::mem::take(&mut graph.sections);
@@ -282,8 +324,14 @@ fn expand_sections(mut graph: TubeNetworkSpec, uniform:&GasState, gases:Option<V
             if let Some(mapped) = &mut mapped {mapped.push(*gas);}
             continue;
         };
-        let realized=section.realize(gas.sound_speed,gas.density,dt)?;
-        let n=realized.one_way_samples;
+        let fractional = policy.map(|p| FractionalPartition::new(&section, gas, dt, selection, p, gate)).transpose()?;
+        let (n, represented_length_m) = match &fractional {
+            Some(p) => (p.integer_samples(), p.represented_length_m()),
+            None => {
+                let r=section.realize(gas.sound_speed,gas.density,dt)?;
+                (r.one_way_samples, r.represented_length_m)
+            }
+        };
         if n<4*selection.cells {return Err(invalid("each viscothermal cell needs four positive propagation intervals"));}
         let loss=WideTubeLoss::new(section.radius_m,gas,dt,
             [selection.minimum_frequency_hz,selection.maximum_frequency_hz],gate)?;
@@ -296,10 +344,15 @@ fn expand_sections(mut graph: TubeNetworkSpec, uniform:&GasState, gases:Option<V
         for cell in 0..selection.cells {
             checkpoint(gate)?;
             let steps=boundary(4*cell+4)-boundary(4*cell);
-            if core::f64::consts::TAU*selection.maximum_frequency_hz*dt*steps as f64>0.5 {
+            let cell_phase = match &fractional {
+                Some(p) => p.cell_phase_rad(cell, core::f64::consts::TAU*selection.maximum_frequency_hz*dt)?,
+                None => core::f64::consts::TAU*selection.maximum_frequency_hz*dt*steps as f64,
+            };
+            if cell_phase>0.5 {
                 return Err(invalid("viscothermal spatial cell exceeds 0.5 rad in the declared band; refine the supplied cells/clock"));
             }
-            let length=steps as f64*(gas.sound_speed*dt);
+            let length=fractional.as_ref().map_or_else(
+                || steps as f64*(gas.sound_speed*dt), |p| p.cell_length_m(cell));
             let start=graph.nodes.len();
             let series=loss.series(0.5*length)?;
             graph.nodes.extend([NetworkNode::Series {load:series},
@@ -313,20 +366,22 @@ fn expand_sections(mut graph: TubeNetworkSpec, uniform:&GasState, gases:Option<V
                     let junction=graph.nodes.len();graph.nodes.push(NetworkNode::Junction);junction
                 };
                 graph.sections.push(TubeSection {nodes:[left,right],
-                    length_m:(boundary(k+1)-boundary(k)) as f64*(gas.sound_speed*dt),
-                    radius_m:section.radius_m,max_length_error_m:0.0});
+                    length_m:fractional.as_ref().map_or_else(
+                        || (boundary(k+1)-boundary(k)) as f64*(gas.sound_speed*dt), |p| p.quarter_length_m(k)),
+                    radius_m:section.radius_m,
+                    max_length_error_m:fractional.as_ref().map_or(0.0, |p| p.quarter_tolerance_m())});
                 if let Some(mapped) = &mut mapped {mapped.push(*gas);}
                 left=right;
             }
         }
         let mut report=ViscothermalSection {source:*selection,original_nodes:section.nodes,
-            requested_length_m:section.length_m,represented_length_m:realized.represented_length_m,
+            requested_length_m:section.length_m,represented_length_m,
             section_range:[section_start,graph.sections.len()],node_range:[node_start,graph.nodes.len()],
             one_way_samples:n,max_scattering_error:0.0,loss};
         for i in 0..=64 {
             checkpoint(gate)?;
             let f=selection.minimum_frequency_hz*det::pow(selection.maximum_frequency_hz/selection.minimum_frequency_hz,f64::from(i)/64.0);
-            let error=section_error(&report,f,&boundary);
+            let error=section_error(&report,f,&boundary,fractional.as_ref())?;
             if !error.is_finite() || error>0.03 {return Err(invalid("viscothermal section exceeds fixed 0.03 sampled scattering discrepancy"));}
             report.max_scattering_error=report.max_scattering_error.max(error);
         }
@@ -334,17 +389,30 @@ fn expand_sections(mut graph: TubeNetworkSpec, uniform:&GasState, gases:Option<V
     }
     // Ask the actual owner to admit topology, port scattering and load histories.
     // This temporary zero-state object is cold admission, not a second solver.
-    let mut segments=Vec::new();
-    for (i,s) in graph.sections.iter().enumerate() {
-        let gas=mapped.as_ref().map_or(uniform,|states| &states[i]);
-        let r=s.realize(gas.sound_speed,gas.density,dt)?;
-        segments.push(fs_vfit::waveguide::network::NetworkSegment {nodes:s.nodes,
-            one_way_samples:r.one_way_samples,impedance_pa_s_m3:r.impedance_pa_s_m3});}
-    let gas_bytes = mapped.as_ref().map_or(0, |states| states.len()*core::mem::size_of::<GasState>());
-    let budget = graph.max_wave_memory_bytes.checked_sub(gas_bytes)
-        .ok_or_else(||invalid("regional gas payload exceeds network memory budget"))?;
-    fs_vfit::waveguide::network::WaveguideNetwork::new(&graph.nodes,&segments,dt,budget)
-        .map_err(wave_error)?;
+    if let Some(policy) = policy {
+        let states=mapped.as_ref().expect("fractional lowering is regional");
+        let source_budget=graph.max_wave_memory_bytes;
+        let gas_bytes=states.len().checked_mul(core::mem::size_of::<GasState>())
+            .ok_or_else(||invalid("regional gas payload size overflow"))?;
+        graph.max_wave_memory_bytes=source_budget.checked_sub(gas_bytes)
+            .ok_or_else(||invalid("regional gas payload exceeds network memory budget"))?;
+        // Checks the combined phase budget across ALL lowered and untouched
+        // sections, topology, original load states and actual allpass storage.
+        graph.realize_fractional_waveguide(states,dt,policy,gate)?;
+        graph.max_wave_memory_bytes=source_budget;
+    } else {
+        let mut segments=Vec::new();
+        for (i,s) in graph.sections.iter().enumerate() {
+            let gas=mapped.as_ref().map_or(uniform,|states| &states[i]);
+            let r=s.realize(gas.sound_speed,gas.density,dt)?;
+            segments.push(fs_vfit::waveguide::network::NetworkSegment {nodes:s.nodes,
+                one_way_samples:r.one_way_samples,impedance_pa_s_m3:r.impedance_pa_s_m3});}
+        let gas_bytes = mapped.as_ref().map_or(0, |states| states.len()*core::mem::size_of::<GasState>());
+        let budget = graph.max_wave_memory_bytes.checked_sub(gas_bytes)
+            .ok_or_else(||invalid("regional gas payload exceeds network memory budget"))?;
+        fs_vfit::waveguide::network::WaveguideNetwork::new(&graph.nodes,&segments,dt,budget)
+            .map_err(wave_error)?;
+    }
     checkpoint(gate)?;
     Ok((graph,reports,mapped))
 }
@@ -357,14 +425,17 @@ fn scattering(m:Matrix)->[C64;3] {
     let d=m[0]+m[1]+m[2]+m[3];
     [(m[0]+m[1]-m[2]-m[3])/d,(-m[0]+m[1]-m[2]+m[3])/d,C64::from_re(2.0)/d]
 }
-fn section_error(r:&ViscothermalSection,f:f64,boundary:&impl Fn(usize)->usize)->f64 {
+fn section_error(r:&ViscothermalSection,f:f64,boundary:&impl Fn(usize)->usize,
+    fractional:Option<&FractionalPartition>)->Result<f64,AcousticRealizeError> {
     let w=core::f64::consts::TAU*f;let loss=&r.loss;
     let area=core::f64::consts::PI*loss.radius*loss.radius;
     let zc=loss.density*loss.speed/area;
     let ideal=C64::new(det::sqrt(w),-det::sqrt(w));
     let z=C64::new(0.0,-w*loss.density/area)+ideal.scale(loss.series_gain);
     let y=C64::new(0.0,-w*area/(loss.density*loss.speed*loss.speed))+ideal.scale(loss.shunt_gain);
-    let propagation=(z*y).sqrt();let g=propagation.scale(r.represented_length_m);
+    let propagation=(z*y).sqrt();
+    let reference_length=if fractional.is_some() {r.requested_length_m} else {r.represented_length_m};
+    let g=propagation.scale(reference_length);
     let ep=det::exp(g.re);let em=det::exp(-g.re);
     let ch=C64::new(0.5*(ep+em)*det::cos(g.im),0.5*(ep-em)*det::sin(g.im));
     let sh=C64::new(0.5*(ep-em)*det::cos(g.im),0.5*(ep+em)*det::sin(g.im));
@@ -372,9 +443,14 @@ fn section_error(r:&ViscothermalSection,f:f64,boundary:&impl Fn(usize)->usize)->
     let mut m=[C64::ONE,C64::ZERO,C64::ZERO,C64::ONE];
     let kernel=loss.kernel(w,true);
     for cell in 0..r.source.cells {
-        let length=(boundary(4*cell+4)-boundary(4*cell)) as f64*(loss.speed*loss.dt);
+        let length=fractional.map_or_else(
+            || (boundary(4*cell+4)-boundary(4*cell)) as f64*(loss.speed*loss.dt), |p| p.cell_length_m(cell));
         for q in 0..4 {
-            let k=4*cell+q;let angle=w*loss.dt*(boundary(k+1)-boundary(k)) as f64;
+            let k=4*cell+q;
+            let angle=match fractional {
+                Some(p) => p.quarter_phase_rad(k,w*loss.dt)?,
+                None => w*loss.dt*(boundary(k+1)-boundary(k)) as f64,
+            };
             let c=C64::from_re(det::cos(angle));let s=C64::new(0.0,-det::sin(angle));
             m=mul(m,[c,s,s,c]);
             if q==0 || q==2 {m=mul(m,[C64::ONE,kernel.scale(loss.series_gain*length/(2.0*zc)),C64::ZERO,C64::ONE]);}
@@ -382,6 +458,6 @@ fn section_error(r:&ViscothermalSection,f:f64,boundary:&impl Fn(usize)->usize)->
         }
     }
     let actual=scattering(m);
-    if actual.iter().chain(&target).any(|x| !x.re.is_finite() || !x.im.is_finite()) { return f64::INFINITY; }
-    actual.iter().zip(target).fold(0.0_f64,|worst,(a,b)|worst.max((*a-b).abs()))
+    if actual.iter().chain(&target).any(|x| !x.re.is_finite() || !x.im.is_finite()) { return Ok(f64::INFINITY); }
+    Ok(actual.iter().zip(target).fold(0.0_f64,|worst,(a,b)|worst.max((*a-b).abs())))
 }

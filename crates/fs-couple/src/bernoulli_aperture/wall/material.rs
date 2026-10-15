@@ -12,6 +12,11 @@
 //! a frozen-state, small-displacement, isotropic thin-wall image, not a claim
 //! that every change of bore metal must produce an audible timbre difference.
 
+/// Hereditary material spectra through the shared passive acoustic load.
+pub mod relaxation;
+pub use relaxation::WallRelaxation;
+
+use fs_vfit::relaxation::RelaxationImpedanceSpec;
 use super::{WallPatch, WallPin, invalid};
 use super::super::network::{NetworkNode, TubeNetworkSpec};
 use crate::acoustic_realize::AcousticRealizeError;
@@ -36,12 +41,15 @@ pub enum AxialConstraint {
 }
 
 /// Absence of damping is explicit, never replaced by a guessed loss factor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum WallMaterialLoss {
     /// Lossless membrane. Other network loss channels are unchanged.
     Elastic,
     /// Requires the source's `kelvin_voigt_young_viscosity` claim.
     KelvinVoigt,
+    /// Existing generalized-Maxwell law; retains its original spectrum and conditions.
+    /// No separate Kelvin--Voigt damping is added to this constitutive model.
+    Maxwell(WallRelaxation),
 }
 
 /// One source assignment to a physical, degree-two cylindrical junction.
@@ -78,6 +86,7 @@ pub struct BoundMaterialWall {
     length_m: f64,
     band_hz: [f64; 2],
     patch: WallPatch,
+    load: RelaxationImpedanceSpec,
 }
 impl BoundMaterialWall {
     /// Original material receipts, structural restraint and loss selection.
@@ -92,7 +101,8 @@ impl BoundMaterialWall {
     /// Declared frequency applicability [Hz], not an antialiasing filter.
     #[must_use]
     pub const fn band_hz(&self) -> [f64; 2] { self.band_hz }
-    /// Same wall law consumed by TMM, pressure-wave and pHS images.
+    /// Base inertia/equilibrium/viscous wall law, excluding hereditary arms.
+    /// Use `shunt()` or `load()` for the COMPLETE pressure/flow connection.
     #[must_use]
     pub const fn patch(&self) -> WallPatch { self.patch }
 }
@@ -133,8 +143,8 @@ fn reduce(source: MaterialWallAssignment, radius: f64, length: f64, band: [f64; 
     if rho <= 0.0 || young <= 0.0 || nu <= -1.0 || nu >= 0.5 {
         return Err(invalid("isotropic wall needs rho,E>0 and -1<nu<0.5"));
     }
-    let viscosity = match source.loss {
-        WallMaterialLoss::Elastic => 0.0,
+    let viscosity = match &source.loss {
+        WallMaterialLoss::Elastic | WallMaterialLoss::Maxwell(_) => 0.0,
         WallMaterialLoss::KelvinVoigt => property(&source.material, YOUNG_VISCOSITY_PROPERTY,
             DynViscosity::DIMS, band)?,
     };
@@ -151,7 +161,12 @@ fn reduce(source: MaterialWallAssignment, radius: f64, length: f64, band: [f64; 
     if viscosity > 0.0 && patch.wall.resistance == 0.0 {
         return Err(invalid("wall material reduction lost its nonzero viscosity"));
     }
-    Ok(BoundMaterialWall { source, radius_m: radius, length_m: length, band_hz: band, patch })
+    let load = match &source.loss {
+        WallMaterialLoss::Maxwell(spectrum) => spectrum.load(patch, young, band)?,
+        _ => RelaxationImpedanceSpec::new(patch.impedance()?, &[])
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
+    };
+    Ok(BoundMaterialWall { source, radius_m: radius, length_m: length, band_hz: band, patch, load })
 }
 
 /// Bind material walls without replacing gas, lengths, loads or numerical owners.
@@ -210,7 +225,7 @@ pub fn bind_material_walls(
         }
         if count != 2 { return Err(invalid("material wall requires exactly two adjacent tube sections")); }
         let wall = reduce(source, radius.ok_or_else(|| invalid("wall has no radius"))?, length, band_hz)?;
-        graph.nodes[wall.source.node] = wall.patch.shunt()?;
+        graph.nodes[wall.source.node] = wall.shunt();
         walls.push(wall);
     }
     poll(gate)?;

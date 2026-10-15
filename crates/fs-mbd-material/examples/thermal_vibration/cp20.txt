@@ -1,0 +1,5 @@
+frankensim-thermal-vibration-v1
+# Synthetic demonstration data, NOT measurements of a named material.
+# T[K] density[kg/m3] Cp[J/(kg K)] E[Pa] nu[1] alpha[1/K]
+300 6 20 1000 0.25 0.001
+400 6 20 1000 0.25 0.001

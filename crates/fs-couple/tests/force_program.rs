@@ -107,3 +107,49 @@ fn every_authored_input_and_all_three_original_budgets_are_enforced() {
     let overflowing = PhysicalForceInput::new(vec![vec![f64::MAX]], vec![2.0]).unwrap();
     assert!(ProjectedForceProgram::compile(vec![overflowing], vec![], config()).is_err());
 }
+
+#[test]
+fn released_friction_preload_is_the_joint_equilibrium_not_independent_mode_offsets() {
+    use fs_couple::render::schedule::force::coupled::{CoupledModalSystem,ModalAttachment,ModalConnection,ModalCouplingConfig};
+    use fs_couple::render::schedule::force::coupled::contact::friction::{FrictionModalSystem,ModalFrictionPort,ModalFrictionConfig,FrictionDrive};
+    use fs_couple::render::schedule::force::coupled::contact::friction::multiple::MultiFrictionConfig;
+    use fs_exec::CancelGate;
+    use fs_tribo::FrictionLaw;
+    let gate=CancelGate::new_clock_free();
+    let components:[ModalAcousticTimeModel;2]=[100.0,300.0].map(|w| ModalAcousticTimeModel::try_new(48_000,
+        vec![ModalAcousticMode {angular_frequency_rad_s:w,damping_ratio:0.01,pressure_per_modal_velocity:C64::ZERO}],
+        ModalAcousticTimeBudget::audible_reference()).unwrap());
+    let port=|component| ModalAttachment{component,shapes:vec![1.0]};
+    let config=ModalCouplingConfig{max_modes:4,max_connections:2,max_setup_terms:128,nyquist_guard_fraction:0.9,
+        maximum_total_energy_j:10.0,maximum_abs_pressure_pa:1000.0,maximum_abs_connection_force_n:10.0,
+        solve_relative_tolerance:1e-10,energy_absolute_tolerance_j:1e-12,energy_relative_tolerance:1e-8};
+    let network=CoupledModalSystem::new(components.to_vec(),vec![ModalConnection {left:port(0),right:port(1),
+        stiffness_n_m:400.0,damping_n_s_m:0.1,rest_extension_m:0.0}],config,&gate).unwrap();
+    let friction=ModalFrictionConfig{max_iterations:96,maximum_force_n:10.0,maximum_slip_speed_m_s:10.0,
+        force_absolute_tolerance_n:1e-10,force_relative_tolerance:1e-9,sticking_tolerance_m:1e-12};
+    let law=FrictionLaw::Coulomb{static_mu:0.8,kinetic_mu:0.4};
+    let single=FrictionModalSystem::new(network,ModalFrictionPort{left:port(0),right:None,law:law.clone()},friction,&gate)
+        .unwrap().with_acceleration_pressure(vec![0.0,1.0]).unwrap();
+    let mut system=single.with_additional_ports(vec![(ModalFrictionPort{left:port(1),right:None,law},friction)],
+        MultiFrictionConfig{max_ports:2,max_sweeps:128,max_setup_terms:1024},&gate).unwrap();
+    let stop=CancelGate::new_clock_free();stop.request();
+    assert!(system.initialize_released_equilibrium(&[1.0,0.0],&stop).is_err());
+    assert!(system.components().iter().flat_map(|m|m.states()).all(|s|s.displacement_m_sqrt_kg==0.0));
+    let energy=system.initialize_released_equilibrium(&[1.0,0.0],&gate).unwrap();
+    let det=10400.0*90400.0-400.0*400.0;
+    let q=[90400.0/det,400.0/det];
+    for (m,q) in system.components().iter().zip(q) {
+        assert!((m.states()[0].displacement_m_sqrt_kg-q).abs()<1e-16);
+        assert_eq!(m.states()[0].velocity_m_sqrt_kg_per_s,0.0);
+    }
+    assert!((energy-0.5*q[0]).abs()<1e-16);assert_eq!(system.samples_rendered(),0);
+    let released=[FrictionDrive{speed_m_s:0.0,normal_force_n:0.0};2];
+    for _ in 0..16 {assert!(system.step(&[1.0,0.0],&released).unwrap().observer_pressure_pa.abs()<1e-10);}
+    assert!(system.initialize_released_equilibrium(&[1.0,0.0],&gate).is_err());
+    let mut peak=0.0_f64;
+    for _ in 0..128 {
+        let f=system.step(&[0.0,0.0],&released).unwrap();peak=peak.max(f.observer_pressure_pa.abs());
+        assert_eq!(f.drive_work_j,0.0);assert!(f.energy_residual_j.abs()<=f.energy_tolerance_j);
+    }
+    assert!(peak>1e-6);
+}

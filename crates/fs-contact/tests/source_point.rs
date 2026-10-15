@@ -79,3 +79,6 @@ fn runtime_envelope_and_sample_identity_remain_explicit() {
     assert_ne!(a.request_id,b.request_id);close(a.normal_force_n,b.normal_force_n);
     assert!(law.evaluate("",1e-5,0.02,1e-4).is_err());
 }
+
+#[path="source_point/temperature.rs"]
+mod temperature;

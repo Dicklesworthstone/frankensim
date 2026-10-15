@@ -228,3 +228,6 @@ impl SheetLaw for QuadraticMembrane {
         Ok(SheetResponse {energy_j_m2:energy,resultants_n_m:stress,tangent_n_m:self.0.0})
     }
 }
+
+/// Source-qualified sheet sensible heat on the shared material/thermal owners.
+pub mod thermal;

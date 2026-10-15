@@ -177,6 +177,18 @@ impl FrictionModalSystem {
     pub fn samples_rendered(&self) -> u64 { self.network.samples_rendered() }
     /// Current modal plus bilateral connection energy [J].
     pub fn total_energy_j(&self) -> Result<f64, ModalCouplingError> { self.network.total_energy_j() }
+    /// Settle external loads against the COMPLETE connected instrument with all
+    /// friction contacts released. Delegates to the original static solver;
+    /// compression/bridge springs and any supported free coordinates remain
+    /// coupled. Requires sample zero and zero initial Q/V, so existing vibration
+    /// cannot be erased. No clock advances and no state publishes on refusal.
+    /// Returned stored energy is an initial condition, NOT measured settling work.
+    pub fn initialize_released_equilibrium(&mut self, external: &[f64], gate: &CancelGate)
+        -> Result<f64, ModalFrictionError>
+    {
+        self.network.initialize_static_equilibrium(external, gate).map_err(Into::into)
+    }
+
     /// Last fully accepted friction-inclusive frame.
     #[must_use]
     pub const fn last_frame(&self) -> Option<&FrictionModalFrame> { self.last.as_ref() }

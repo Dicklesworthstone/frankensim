@@ -197,3 +197,6 @@ fn material_wall_motion_closes_the_existing_pressure_flow_and_energy_equations()
     }
     assert_ne!(signals[0], signals[1]); // only the material E changed
 }
+
+#[path = "material_duct_wall/hereditary.rs"]
+mod hereditary;
