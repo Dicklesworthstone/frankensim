@@ -22,7 +22,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use crate::deposition::{self, AxialControl, BendingControl, Control, LayerGeometry, LayeredStrip};
 use fs_exec::Cx;
+use fs_material::phase::ResolvedHeatCapacityCurve;
 use fs_material::thermovisco::{Energy, ThermoMaxwell};
+use fs_material::thermovisco::source::ResolvedThermoMaxwell;
 
 /// Later-pass footprint capture on the actual deformed surface.
 pub mod contact;
@@ -215,6 +217,30 @@ impl<'a> Bridge<'a> {
         }
         finite(next.mass_kg())?;
         next.branch_states = branches;
+        poll(cancelled)?;
+        Ok(next)
+    }
+
+    /// Deposit a complete bonded layer whose viscoelastic law AND reference
+    /// mass density come from one source-compatible material bundle.
+    ///
+    /// This is the source-bound counterpart of `deposit_bonded_layer`: geometry
+    /// and birth temperatures remain specimen inputs, while density is taken from
+    /// the same-card caloric bundle accepted by `ResolvedThermoMaxwell`. A material
+    /// swap therefore changes inertia/weight and constitutive history together
+    /// instead of permitting an unrelated hand-authored density to survive.
+    ///
+    /// The caloric chart is used here only as source authority for reference
+    /// density; no heat equation or phase evolution is performed by this method.
+    pub fn deposit_bonded_material_layer(&self, layer: u64, geometry: LayerGeometry,
+        source: &'a ResolvedThermoMaxwell, caloric: &ResolvedHeatCapacityCurve,
+        temperatures_k: &BTreeMap<u64, f64>, cancelled: &mut impl FnMut() -> bool)
+        -> Result<Self, Error> {
+        poll(cancelled)?;
+        let density = source.reference_density_kg_m3(caloric)
+            .map_err(|_| Error::Invalid("mechanical law and reference density must share one admitted material source"))?;
+        let next = self.deposit_bonded_layer(layer, geometry, density, source.law(),
+            temperatures_k, cancelled)?;
         poll(cancelled)?;
         Ok(next)
     }
