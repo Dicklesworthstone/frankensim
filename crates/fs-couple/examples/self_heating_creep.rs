@@ -1,6 +1,8 @@
 //! A loaded uniform specimen heats itself; its temperature changes its creep.
 //! Existing Maxwell, caloric and convection/radiation owners do all physics.
 //! Synthetic demonstration data, NOT a calibrated polymer or metal specimen.
+#[path = "self_heating_creep/source.rs"]
+mod source;
 use fs_blake3::DomainHasher;
 use fs_conduction::lumped::{LumpedThermalEnvironment, LumpedThermalTransport};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -48,11 +50,13 @@ fn material(cp: f64) -> Result<(ThermoMaxwell, EquilibriumEnthalpyPhaseCurve)> {
     Ok((law, curve))
 }
 fn environment(htc: f64) -> Result<LumpedThermalEnvironment> {
+    environment_with_transport(htc, LumpedThermalTransport::try_declared(10.0, 0.0)?)
+}
+fn environment_with_transport(htc: f64, transport: LumpedThermalTransport) -> Result<LumpedThermalEnvironment> {
     Ok(LumpedThermalEnvironment { temperature_k: 300.0, radiation_temperature_k: 300.0,
-        convection_w_per_m2_k: htc,
-        // No radiative heat transfer is requested. k is still used by the
-        // existing isothermal-body admission; it is not an invented gradient.
-        transport: LumpedThermalTransport::try_declared(10.0, 0.0)?,
+        convection_w_per_m2_k: htc, transport,
+        // Radiation is explicitly disabled in both input modes. Conductivity
+        // still drives the original isothermal-body admission, not an invented gradient.
         enthalpy_tolerance_j_kg: 1e-9, maximum_thermal_residual_j: 1e-10 })
 }
 fn context<R>(f: impl FnOnce(&CancelGate, &Cx<'_>) -> R) -> R {
@@ -77,8 +81,18 @@ fn simulate(request: Request, gate: &CancelGate, cx: &Cx<'_>) -> Result<Vec<Reco
     let (law, curve) = material(request.cp)?;
     let environment = environment(request.htc)?;
     let initial = curve.state_at_specific_enthalpy(0.0)?;
-    let mut state = CaloricPoint::try_new(law.birth(initial.temperature_k(), 0.0)?, &curve,
+    let state = CaloricPoint::try_new(law.birth(initial.temperature_k(), 0.0)?, &curve,
         0.0, DENSITY_KG_M3 * VOLUME_M3, VOLUME_M3, surface_area())?;
+    simulate_state(request, state, &environment, gate, cx)
+}
+fn simulate_source(request: Request, source: &source::Source, gate: &CancelGate, cx: &Cx<'_>) -> Result<Vec<Record>> {
+    let state = source.mechanical.caloric_point(&source.caloric,300.0,0.0,VOLUME_M3,surface_area())?;
+    let environment = environment_with_transport(request.htc,source.transport.clone())?;
+    simulate_state(request.validate()?,state,&environment,gate,cx)
+}
+fn simulate_state(request: Request, mut state: CaloricPoint<'_>, environment: &LumpedThermalEnvironment,
+    gate: &CancelGate, cx: &Cx<'_>) -> Result<Vec<Record>> {
+    let initial = *state.caloric_state();
     let mut records = Vec::with_capacity(request.steps);
     let (mut work, mut external, mut numerical) = (0.0, 0.0, 0.0);
     for index in 1..=request.steps {
@@ -113,16 +127,36 @@ fn simulate(request: Request, gate: &CancelGate, cx: &Cx<'_>) -> Result<Vec<Reco
     }
     Ok(records)
 }
-fn main() -> Result<()> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 6 || args[0] != "--demo" {
-        return Err("usage: self_heating_creep --demo CP_J_KG_K HTC_W_M2_K STRESS_PA DURATION_S EVEN_STEPS".into());
-    }
-    let request = Request { cp: args[1].parse()?, htc: args[2].parse()?, stress: args[3].parse()?,
-        duration: args[4].parse()?, steps: args[5].parse()? }.validate()?;
-    let records = context(|gate, cx| simulate(request, gate, cx))?;
-    eprintln!("SYNTHETIC data; L={LENGTH_M} m, A={AREA_M2} m2, rho={DENSITY_KG_M3} kg/m3, surface={} m2; E_inf=1e8 Pa, branch=(3e8 Pa,1 s); shift=1 at 300 K,0.05 at 320 K; Cp={} J/(kg K), film={} W/(m2 K), ambient=300 K, k=10 W/(m K), emissivity=0; load removed at {} s; fixed thermal geometry, small-strain uniform specimen, no yield or spatial/dynamic claim",
-        surface_area(), request.cp, request.htc, request.duration/2.0);
+fn run(args: &[String]) -> Result<()> {
+    let mode=args.first().map(String::as_str).unwrap_or("");
+    let offset=match (mode,args.len()) {
+        ("--demo" | "--table",6) => 0,
+        ("--pack",7) => 1,
+        _ => return Err("usage: self_heating_creep --demo CP|--table FILE HTC STRESS DURATION EVEN_STEPS; or --pack FILE BRANCH_COUNT HTC STRESS DURATION EVEN_STEPS".into()),
+    };
+    let (records,description)=context(|gate,cx| -> Result<_> {
+        let supplied=match mode {
+            "--table" => Some(source::Source::table(&args[1],gate)?),
+            "--pack" => Some(source::Source::pack(&args[1],args[2].parse()?,gate)?),
+            _ => None,
+        };
+        // In file mode this validator value is the actual initial source Cp;
+        // the march still uses the complete caloric curve, not this one scalar.
+        let cp=match &supplied { Some(s) => s.caloric.secant_heat_capacity(300.0,300.0)?, None => args[1].parse()? };
+        let request=Request {cp,htc:args[2+offset].parse()?,stress:args[3+offset].parse()?,
+            duration:args[4+offset].parse()?,steps:args[5+offset].parse()?}.validate()?;
+        let records=match &supplied {Some(s)=>simulate_source(request,s,gate,cx)?,None=>simulate(request,gate,cx)?};
+        let description=match supplied {
+            Some(s)=>format!("material_card={}, branches={}, source_states={}, caloric_curve={}, thermal_transport={}; temperature_span=[{},{}] K; initial_Cp={} J/(kg K); no material qualification inferred",
+                s.card.content_hash().to_hex(),s.mechanical.law().branch_count(),s.mechanical.samples().len(),
+                s.caloric.curve().identity().to_hex(),s.transport.identity().to_hex(),
+                s.caloric.curve().knots()[0].temperature_k,s.caloric.curve().knots().last().unwrap().temperature_k,cp),
+            None=>format!("SYNTHETIC data; rho={DENSITY_KG_M3} kg/m3; E_inf=1e8 Pa, branch=(3e8 Pa,1 s); shift=1 at 300 K,0.05 at 320 K; Cp={cp} J/(kg K); k=10 W/(m K)"),
+        };
+        Ok((records,format!("{description}; L={LENGTH_M} m, A={AREA_M2} m2, surface={} m2; film={} W/(m2 K), ambient=300 K, radiation disabled; load removed at {} s; fixed thermal geometry, small-strain uniform specimen, no yield or spatial/dynamic claim",
+            surface_area(),request.htc,request.duration/2.0)))
+    })?;
+    eprintln!("{description}");
     println!("time_s,temperature_K,total_strain,extension_m,stress_Pa,target_stress_Pa,physical_heat_J,numerical_loss_J,mechanical_work_J,boundary_heat_J,elastic_storage_J,caloric_storage_change_J,cumulative_defect_J,thermal_proposals");
     for r in records {
         println!("{},{},{},{},{},{},{},{},{},{},{},{},{},{}", r.time, r.temperature, r.strain,
@@ -132,6 +166,7 @@ fn main() -> Result<()> {
     }
     Ok(())
 }
+fn main() -> Result<()> { run(&std::env::args().skip(1).collect::<Vec<_>>()) }
 
 #[cfg(test)]
 mod tests {
@@ -190,5 +225,57 @@ mod tests {
             assert_eq!(state, old);
         });
         assert!(Request { steps: 3, ..request(5.0, 2.0) }.validate().is_err());
+    }
+
+    #[test]
+    fn material_file_values_reproduce_demo_and_data_only_changes_reach_creep() {
+        context(|gate,cx| {
+            let low=source::Source::table_text(include_str!("self_heating_creep/cp5.txt"),gate).unwrap();
+            let high=source::Source::table_text(include_str!("self_heating_creep/cp10.txt"),gate).unwrap();
+            let a=simulate_source(request(5.0,2.0),&low,gate,cx).unwrap();
+            let b=simulate_source(request(10.0,2.0),&high,gate,cx).unwrap();
+            let demo=simulate(request(5.0,2.0),gate,cx).unwrap();
+            for (actual,expected) in a.iter().zip(demo) {
+                assert!((actual.temperature-expected.temperature).abs()<1e-6);
+                assert!((actual.strain-expected.strain).abs()<1e-9);
+                assert!(actual.combined_defect.abs()<1e-7);
+            }
+            assert!(a[23].temperature>b[23].temperature+0.2);
+            assert!(a[23].strain>b[23].strain+1e-5);
+            assert_eq!(low.transport.material_card_identity(),Some(low.card.content_hash()));
+            assert_eq!(low.caloric.curve().material_card_identity(),low.card.content_hash());
+            assert!(!low.transport.conductivity_receipts().is_empty());
+        });
+    }
+    #[test]
+    fn sourced_density_changes_reference_heat_storage_without_changing_geometry() {
+        context(|gate,cx| {
+            let text=include_str!("self_heating_creep/cp5.txt");
+            let a=source::Source::table_text(text,gate).unwrap();
+            let b=source::Source::table_text(&text.replace("1000 10","2000 10"),gate).unwrap();
+            let sa=a.mechanical.caloric_point(&a.caloric,300.0,0.0,VOLUME_M3,surface_area()).unwrap();
+            let sb=b.mechanical.caloric_point(&b.caloric,300.0,0.0,VOLUME_M3,surface_area()).unwrap();
+            assert_eq!(sb.mass_kg(),2.0*sa.mass_kg());
+            let ra=simulate_source(request(5.0,2.0),&a,gate,cx).unwrap();
+            let rb=simulate_source(request(5.0,2.0),&b,gate,cx).unwrap();
+            assert!(ra[23].temperature>rb[23].temperature+0.2);
+            assert!(ra[23].strain>rb[23].strain);
+        });
+    }
+    #[test]
+    fn source_file_refusals_and_cooling_admission_remain_real() {
+        context(|gate,cx| {
+            let text=include_str!("self_heating_creep/cp5.txt");
+            for bad in [text.replace("equilibrium 100000000", ""),
+                text.replace("state 300", "state 280"),text.replace("1000 10", "1000 NaN"),
+                text.replace("state 320 1 0.05 0", "state 320 0.5 0.05 0")] {
+                assert!(source::Source::table_text(&bad,gate).is_err());
+            }
+            let low_k=source::Source::table_text(&text.replace("1000 10","1000 0.000001"),gate).unwrap();
+            assert!(simulate_source(request(5.0,2.0),&low_k,gate,cx).is_err());
+            gate.request(); assert!(source::Source::table_text(text,gate).is_err());
+        });
+        assert!(run(&["--demo".into()]).is_err());
+        assert!(source::Source::pack("/definitely-absent-material.fsmat",1,&CancelGate::new()).is_err());
     }
 }
