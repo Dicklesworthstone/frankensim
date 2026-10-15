@@ -31,6 +31,10 @@ pub use coverage::{ContactPatch, ContactPatchUpdate};
 #[path = "enthalpy/backward_euler.rs"]
 pub mod backward_euler;
 
+/// Conservative enthalpy transport driven by a balanced, prescribed mass flow.
+#[path = "enthalpy/advection.rs"]
+pub mod advection;
+
 /// Persistent physical cell identity; distinct from its source segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CellId(pub u64);
@@ -126,6 +130,19 @@ pub struct ThermalLink {
     pub area_m2: f64,
     /// Total thermal conductance, W/K.
     pub conductance_w_k: f64,
+}
+
+/// A signed INTERNAL energy transfer, independent of contact area/coverage.
+/// The identical watts are subtracted from `a` and added to `b`; they never
+/// enter the external-heat account. Both endpoints must be distinct active cells.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeatTransfer {
+    /// First receiving control volume.
+    pub a: CellId,
+    /// Second receiving control volume.
+    pub b: CellId,
+    /// Signed power [W], positive from a to b.
+    pub power_w: f64,
 }
 
 /// Resolved physical event. Equal-time events execute in supplied order; put
@@ -494,13 +511,12 @@ impl<'a> DepositionSimulation<'a> {
 
     fn thermal_step(
         &mut self,
-        remaining: f64,
-        max_dt: f64,
+        rates: HeatRates,
         audit: &mut EnergyAudit,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(f64, BTreeMap<CellId, f64>), DepositionError> {
         let HeatRates { temperatures, watts: rates, external_w, explicit_dt_s: dt } =
-            self.heat_rates(remaining.min(max_dt), checkpoint)?;
+            rates;
         for (i, (&id, cell)) in self.cells.iter_mut().enumerate() {
             if i % 256 == 0 {
                 checkpoint()?;
