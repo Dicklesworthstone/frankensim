@@ -10,13 +10,19 @@
 //! fictitious oscillator. Antisymmetric motion therefore remains a real state.
 //!
 //! Fixed-state one-mode blades and a uniform effective slit only. This does
-//! not add curved-shell modes, hereditary material loss, staple pressure
+//! not add curved-shell modes, spatial material evolution, staple pressure
 //! recovery, or measured oboe/bassoon accuracy. Numerical root selection is
 //! deterministic, not a uniqueness theorem. Midpoint accuracy is second order
 //! only on smooth branches. The existing symmetric single-coordinate image
-//! remains available and unchanged.
+//! remains available and unchanged. Optional independent regional Maxwell laws
+//! use the same fs-material/fs-plate/fs-phs projection and update as the scalar
+//! plate valve. Material history participates in this same midpoint solve and
+//! publishes only with both blades and the connected acoustic network.
 
 use super::dynamic::{ApertureDrive, ApertureFrame, ApertureState};
+use super::dynamic::relaxation::{
+    ApertureRelaxation, InitialApertureMemory, MemoryTrial, PlateRelaxationSpec,
+};
 use super::plate::{PlateApertureMotion, PlateApertureReduction};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::unilateral_contact::distributed::ApertureContactStep;
@@ -53,7 +59,7 @@ pub struct PairedApertureLimits {
     pub maximum_abs_displacement_m: f64,
     /// Bound on each blade's endpoint speed [m/s].
     pub maximum_abs_velocity_m_s: f64,
-    /// Bound on combined mechanical and contact storage [J].
+    /// Bound on combined mechanical, material-memory and contact storage [J].
     pub maximum_energy_j: f64,
     /// Total nonlinear trial evaluations, including bracketing, in 1..=512.
     pub max_evaluations: usize,
@@ -107,6 +113,7 @@ pub struct PairedAperture {
     contact_storage: ContactStorage,
     plates: Option<Box<[PlateApertureReduction; 2]>>,
     gas: Option<GasState>,
+    relaxation: [Option<ApertureRelaxation>; 2],
     samples: u64,
 }
 
@@ -123,6 +130,13 @@ impl Storage for ZeroStorage {
 }
 #[derive(Clone, Copy)]
 struct Trial { velocity: [f64; 2], dp: f64, residual: f64, scale: f64 }
+
+// Complete immutable candidate. Public observations remain Copy, but material
+// histories cannot be accidentally discarded when a network accepts a frame.
+pub(super) struct PairedTrial {
+    pub(super) frame: PairedApertureFrame,
+    memory: [Option<MemoryTrial>; 2],
+}
 
 impl PairedAperture {
     /// Admit explicit mechanics and ONE scalar gap obstacle. For opposed blades
@@ -154,7 +168,7 @@ impl PairedAperture {
             .map_err(nonlinear)?;
         let contact_storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.clone()])
             .map_err(nonlinear)?;
-        let model = Self { spec, blades, contact, contact_storage, plates: None, gas: None, samples: 0 };
+        let model = Self { spec, blades, contact, contact_storage, plates: None, gas: None, relaxation: [None, None], samples: 0 };
         model.validate_state(blades)?;
         Ok(model)
     }
@@ -194,6 +208,43 @@ impl PairedAperture {
         Ok(model)
     }
 
+    /// Attach regional hereditary bending to ONE original source blade, before
+    /// any accepted step. Call separately for the other blade; its material,
+    /// history and even branch count may differ, or it may remain elastic.
+    ///
+    /// The existing plate projection checks equilibrium sections, triangle
+    /// coverage, material bands and time resolution. Only bending is relaxed;
+    /// mass, prestress, pressure area and the shared contact law are unchanged.
+    /// This blade must have zero separate viscous damping to avoid counting the
+    /// same loss twice. No spectra or history are inferred from a material name.
+    /// Initial viscous displacements use this blade's OWN coordinate in metres.
+    ///
+    /// # Errors
+    /// Invalid blade index, missing source plate, repeated/late attachment,
+    /// separate damping, incompatible material/clock/history, or combined energy
+    /// above the explicit budget. No active history is ever reset or transferred.
+    pub fn with_blade_relaxation(mut self, blade: usize, spec: PlateRelaxationSpec,
+        initial: InitialApertureMemory) -> Result<Self, AcousticRealizeError>
+    {
+        if blade>=2 || self.samples!=0 || self.relaxation[blade].is_some()
+            || self.spec.blades[blade].damping_n_s_m!=0.0 {
+            return Err(invalid("blade relaxation requires a valid cold blade, one attachment and zero separate damping"));
+        }
+        let plate=self.plates.as_ref().ok_or_else(||invalid("blade relaxation requires its original physical plate"))?;
+        let memory=ApertureRelaxation::from_plate(&plate[blade],self.spec.time_step_s,
+            self.blades[blade].displacement_m,spec,initial)?;
+        self.validate_energy(self.stored_energy_j()+memory.stored_energy_j())?;
+        self.relaxation[blade]=Some(memory);
+        Ok(self)
+    }
+
+    /// Accepted material history and original region laws for one blade.
+    /// An elastic blade or out-of-range index has no material-memory state.
+    #[must_use]
+    pub fn blade_relaxation(&self, blade: usize) -> Option<&ApertureRelaxation> {
+        self.relaxation.get(blade).and_then(Option::as_ref)
+    }
+
     /// Original mechanical/fluid/clock choices.
     #[must_use]
     pub const fn spec(&self) -> &PairedApertureSpec { &self.spec }
@@ -209,9 +260,12 @@ impl PairedAperture {
     /// Accepted sample count; refusals never advance it.
     #[must_use]
     pub const fn accepted_steps(&self) -> u64 { self.samples }
-    /// Combined stored mechanical and shared-interface energy [J].
+    /// Combined mechanical, independent material-memory and shared-interface energy [J].
     #[must_use]
-    pub fn stored_energy_j(&self) -> f64 { self.energy(self.blades) }
+    pub fn stored_energy_j(&self) -> f64 {
+        self.energy(self.blades)+self.relaxation.iter().flatten()
+            .map(ApertureRelaxation::stored_energy_j).sum::<f64>()
+    }
     fn gap(&self, state: [BladeState; 2]) -> f64 {
         self.spec.rest_opening_m + state[0].displacement_m + state[1].displacement_m
     }
@@ -234,7 +288,9 @@ impl PairedAperture {
                 plates[i].validate_opening(plates[i].options().rest_opening_m + s.displacement_m)?;
             }
         }
-        let energy = self.energy(state);
+        self.validate_energy(self.energy(state))
+    }
+    fn validate_energy(&self, energy: f64) -> Result<(), AcousticRealizeError> {
         if !energy.is_finite() || energy < 0.0 || energy > self.spec.limits.maximum_energy_j {
             return Err(invalid("paired aperture storage exceeds its finite energy budget"));
         }
@@ -265,17 +321,21 @@ impl PairedAperture {
     pub fn step_with_forces(&mut self, drive: ApertureDrive, forces_n: [f64; 2])
         -> Result<PairedApertureFrame, AcousticRealizeError>
     {
-        let frame = self.preview(drive, forces_n)?;
-        self.accept(frame);
+        let trial = self.preview(drive, forces_n)?;
+        let frame = trial.frame;
+        self.accept(trial);
         Ok(frame)
     }
-    pub(super) fn accept(&mut self, frame: PairedApertureFrame) {
-        self.blades = frame.blades;
-        self.samples = frame.aperture.step;
+    pub(super) fn accept(&mut self, trial: PairedTrial) {
+        for (memory, next) in self.relaxation.iter_mut().zip(trial.memory) {
+            if let (Some(memory), Some(next)) = (memory, next) { memory.accept(next); }
+        }
+        self.blades = trial.frame.blades;
+        self.samples = trial.frame.aperture.step;
     }
 
     pub(super) fn preview(&self, drive: ApertureDrive, forces: [f64; 2])
-        -> Result<PairedApertureFrame, AcousticRealizeError>
+        -> Result<PairedTrial, AcousticRealizeError>
     {
         if self.samples >= self.spec.max_steps { return Err(invalid("paired aperture step budget exhausted")); }
         if ![drive.upstream_pressure_pa, drive.incoming_pressure_pa, drive.body_flow_m3_s,
@@ -291,10 +351,16 @@ impl PairedAperture {
         let mut free = [0.0; 2];
         let mut mobility = [0.0; 2];
         for i in 0..2 {
-            let d = b[i].mass_kg + h*b[i].damping_n_s_m + h*h*b[i].stiffness_n_m;
+            let mut d = b[i].mass_kg + h*b[i].damping_n_s_m + h*h*b[i].stiffness_n_m;
+            let mut numerator = b[i].mass_kg*old[i].velocity_m_s
+                - h*b[i].stiffness_n_m*old[i].displacement_m + h*forces[i];
+            if let Some(memory) = self.relaxation[i].as_ref().filter(|m| !m.branches().is_empty()) {
+                let (bias, resistance) = memory.midpoint_response(old[i].displacement_m, dt)?;
+                d += h*resistance;
+                numerator -= h*bias;
+            }
             mobility[i] = h/d;
-            free[i] = (b[i].mass_kg*old[i].velocity_m_s - h*b[i].stiffness_n_m*old[i].displacement_m
-                + h*forces[i])/d;
+            free[i] = numerator/d;
             if !d.is_finite() || d <= 0.0 || !mobility[i].is_finite() || mobility[i] <= 0.0
                 || !free[i].is_finite() { return Err(invalid("paired blade midpoint response is not representable")); }
         }
@@ -371,7 +437,18 @@ impl PairedAperture {
         let wave = (outgoing-drive.incoming_pressure_pa)/z;
         let viscous = (0..2).map(|i| b[i].damping_n_s_m*trial.velocity[i]*trial.velocity[i]).sum::<f64>();
         let mechanical = dt*(forces[0]*trial.velocity[0]+forces[1]*trial.velocity[1]);
-        let energy = self.energy(next);
+        let mut memory: [Option<MemoryTrial>; 2] = [None, None];
+        let (mut memory_energy, mut memory_loss) = (0.0, 0.0);
+        for i in 0..2 {
+            if let Some(material) = &self.relaxation[i] {
+                let result = material.preview(old[i].displacement_m, next[i].displacement_m, dt)?;
+                memory_energy += result.energy;
+                memory_loss += result.loss;
+                memory[i] = Some(result);
+            }
+        }
+        let energy = self.energy(next)+memory_energy;
+        self.validate_energy(energy)?;
         let aperture = ApertureFrame {
             step: self.samples+1, time_s: (self.samples+1) as f64*dt,
             state: ApertureState { opening_m: next_gap, opening_velocity_m_s: next[0].velocity_m_s+next[1].velocity_m_s },
@@ -379,15 +456,18 @@ impl PairedAperture {
             jet_flow_m3_s: jet, swept_flow_m3_s: swept, bore_flow_m3_s: wave,
             flow_residual_m3_s: jet+swept+drive.body_flow_m3_s-wave,
             stored_energy_j: energy, storage_change_j: energy-self.stored_energy_j(),
-            dissipated_energy_j: dt*(trial.dp*jet+viscous+contact.dissipated_power),
+            dissipated_energy_j: dt*(trial.dp*jet+viscous+contact.dissipated_power)+memory_loss,
             pressure_work_j: dt*trial.dp*(wave-drive.body_flow_m3_s), mechanical_work_j: mechanical,
-            relaxation_energy_j: 0.0, relaxation_loss_j: 0.0,
+            relaxation_energy_j: memory_energy, relaxation_loss_j: memory_loss,
         };
         let mut momentum = [0.0; 2];
         for i in 0..2 {
             momentum[i] = b[i].mass_kg*(next[i].velocity_m_s-old[i].velocity_m_s)/dt
                 + b[i].stiffness_n_m*f64::midpoint(old[i].displacement_m,next[i].displacement_m)
                 + b[i].damping_n_s_m*trial.velocity[i]+b[i].pressure_area_m2*trial.dp-contact.force-forces[i];
+            if let Some(material) = &self.relaxation[i] {
+                momentum[i] += material.restoring_force(old[i].displacement_m, next[i].displacement_m, dt)?;
+            }
         }
         let flow_scale = jet.abs()+swept.abs()+drive.body_flow_m3_s.abs()+wave.abs();
         let scale = self.stored_energy_j()+energy+aperture.pressure_work_j.abs()+mechanical.abs()
@@ -400,10 +480,13 @@ impl PairedAperture {
             || aperture.dissipated_energy_j < -allowance*scale
             || aperture.flow_residual_m3_s.abs() > allowance*flow_scale.max(f64::MIN_POSITIVE)
         { return Err(invalid("paired aperture refused an unresolved physical work or flow balance")); }
-        Ok(PairedApertureFrame { aperture, blades: next, pressure_drop_pa: trial.dp,
-            contact_force_n: contact.force, momentum_residual_n: momentum })
+        Ok(PairedTrial { frame: PairedApertureFrame { aperture, blades: next, pressure_drop_pa: trial.dp,
+            contact_force_n: contact.force, momentum_residual_n: momentum }, memory })
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod relaxation_tests;

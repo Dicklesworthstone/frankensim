@@ -28,6 +28,10 @@ on:
       - 'crates/fs-couple/src/bernoulli_aperture/performance/file*'
       - 'crates/fs-couple/src/bernoulli_aperture/performance/file/**'
       - 'crates/fs-couple/src/bernoulli_aperture/network/regional.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/paired*'
+      - 'crates/fs-couple/src/bernoulli_aperture/paired/**'
+      - 'crates/fs-couple/src/bernoulli_aperture/paired_network/**'
+      - 'crates/fs-couple/src/bernoulli_aperture/dynamic/relaxation.rs'
       - 'crates/fs-couple/src/bin/music_render/duct_metadata.rs'
       - 'crates/fs-couple/examples/plate-valve-mixture*.performance'
       - 'crates/fs-couple/tests/music_render_wind*'
@@ -47,6 +51,15 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Independent hereditary blades and acoustic networks
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --lib bernoulli_aperture::paired -- --test-threads=1
+      - name: Retained scalar and symmetric plate material physics
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --test plate_aperture relaxation -- --test-threads=1
+          cargo test -p fs-couple --test opposed_plate_aperture -- --test-threads=1
       - name: Regional material geometry in shared string body and cavity mechanics
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test material_plate_chart_bank -- --test-threads=1

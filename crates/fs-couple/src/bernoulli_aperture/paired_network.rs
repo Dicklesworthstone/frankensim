@@ -160,10 +160,11 @@ impl PairedApertureNetwork {
     {
         poll(gate)?;
         let before=self.stored_energy_j();
-        let mechanics=self.aperture.preview(ApertureDrive {
+        let trial=self.aperture.preview(ApertureDrive {
             upstream_pressure_pa:drive.upstream_pressure_pa,
             incoming_pressure_pa:self.network.incoming_pressure_pa(),body_flow_m3_s:drive.body_flow_m3_s,
         },forces)?;
+        let mechanics=trial.frame;
         poll(gate)?;
         let aperture=mechanics.aperture;
         let network=self.network.preview_step(aperture.outgoing_pressure_pa).map_err(wave)?;
@@ -188,7 +189,7 @@ impl PairedApertureNetwork {
         // Original wave owner revalidates and commits; all blade checks are
         // already complete. Its failure leaves waves and both blades unchanged.
         self.network.step(aperture.outgoing_pressure_pa).map_err(wave)?;
-        self.aperture.accept(mechanics);
+        self.aperture.accept(trial);
         Ok(PairedNetworkFrame {mechanics,coupled})
     }
     /// Bounded caller-sized blocks with exact accepted-prefix cancellation and
