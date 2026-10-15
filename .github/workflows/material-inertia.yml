@@ -7,6 +7,12 @@ on:
       - 'crates/fs-contact/src/normal_patch/**'
       - 'crates/fs-contact/tests/source_point*'
       - 'crates/fs-contact/tests/source_point/**'
+      - 'crates/fs-couple/Cargo.toml'
+      - 'crates/fs-couple/src/render/plate/impact.rs'
+      - 'crates/fs-couple/src/render/plate/impact/material*'
+      - 'crates/fs-couple/src/render/plate/impact/prepared.rs'
+      - 'crates/fs-couple/src/render/plate/impact/squeeze.rs'
+      - 'crates/fs-couple/tests/material_impact.rs'
       - '.github/workflows/material-inertia.yml'
   workflow_dispatch:
 permissions:
@@ -53,6 +59,12 @@ jobs:
           fi
       - name: Source-bound normal contact through the original finite-patch law
         run: cargo test -p fs-contact --test source_point -- --test-threads=1
+      - name: Source-bound contact in actual coupled impact dynamics
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test material_impact -- --test-threads=1
+      - name: Source envelope at actual implicit effort and endpoint publication
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --lib render::plate::impact::material::tests -- --test-threads=1
       - name: Exercise actual material resolution and rigid dynamics
         if: ${{ !cancelled() }}
         shell: bash
