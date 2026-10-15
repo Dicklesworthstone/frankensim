@@ -3,11 +3,14 @@
 //! One existing isochoric parcel owns mass, geometry and the resolved state.
 //! Heating holds its current volume; a separate isentropic operation changes
 //! volume without heat. Composition, source selection and extra query axes
-//! survive both operations. No piston inertia, combustion, mass exchange,
-//! shocks, friction or simultaneous heat/moving-boundary integration is implied.
+//! survive both operations. No piston inertia, combustion or mass exchange is
+//! implied. The opt-in [`midpoint`] update couples heat and volume work in
+//! conservative coordinates; it is not an exact finite isentropic operation.
 
 /// Work-conjugate mechanical loads using the common acoustic compressibility.
 pub mod mechanics;
+/// Simultaneous heating and volume work through the original material laws.
+pub mod midpoint;
 
 use super::entropy::{GasEntropyError, GasEntropySolve, map_context};
 use super::{GasEnergyError, GasEnergySolve, GasHeatStep, IsochoricGasParcel,
