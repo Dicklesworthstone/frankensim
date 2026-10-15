@@ -120,3 +120,6 @@ fn extra_transport_cannot_replace_the_shared_material_epoch_link() {
     assert!(matches!(result,Err(ObserverCouplingError::ConflictingConductance(7))));
     near(old.energy_j(),0.0);assert_eq!(old.links()[&7].conductance_w_k,0.0);
 }
+
+#[path = "joule_enthalpy_composed/advection.rs"]
+mod advection;

@@ -1,7 +1,7 @@
 //! Real timeline regressions; fixture caloric data are not measured materials.
 use std::collections::BTreeMap;
 use crate::enthalpy::*;
-use super::{Advected, MassFlow};
+use super::{Advected, MassFlow, MassBoundary};
 use crate::observers::CoupledObservers;
 
 struct Caloric { cp: f64, latent: f64 }
@@ -202,4 +202,117 @@ fn cancellation_and_whole_advance_budget_reject_tentative_transport() {
     assert_eq!(s.time_s(),0.0);
     assert!(o.inner().durations.is_empty());
     assert_eq!(o.audit().substeps,0);
+}
+
+
+fn boundaries(cell: u64, rate: f64, h: f64) -> Vec<MassBoundary> {
+    vec![MassBoundary::Inlet { id: 10, cell: CellId(cell), kg_s: rate,
+        material_id: MaterialId(1), specific_h_j_kg: h },
+        MassBoundary::Outlet { id: 11, cell: CellId(cell), kg_s: rate }]
+}
+
+#[test]
+fn inlet_and_outlet_carry_enthalpy_once_without_changing_stored_mass() {
+    let s = prepared(&LAW,vec![cell(0,2.0,10_000.0)],vec![]);
+    let flow = Advected::new((),vec![],0).unwrap().with_boundaries(boundaries(0,1.0,80_000.0),2).unwrap();
+    let (n,o,a) = s.advance_observed(&flow,0.25,cfg(1.0),||Ok(())).unwrap();
+    assert_eq!(a.substeps,1);
+    close(n.cells()[&CellId(0)].specific_h_j_kg,18_750.0,0.0);
+    close(n.mass_kg(),2.0,0.0);
+    close(a.external_heat_j,17_500.0,0.0);
+    close(a.stored_energy_change_j,17_500.0,0.0);
+    close(o.audit().external_enthalpy_j,a.external_heat_j,0.0);
+    close(o.audit().inlet_mass_kg,0.25,0.0);
+    close(o.audit().outlet_mass_kg,0.25,0.0);
+    close(o.audit().transported_mass_kg,0.5,0.0);
+    close(o.audit().absolute_enthalpy_transfer_j,22_500.0,0.0);
+    assert_eq!(a.incoming_mass_kg,0.0);
+    assert_eq!(a.incoming_energy_j,0.0);
+    assert_eq!(n.cells()[&CellId(0)].boundary,s.cells()[&CellId(0)].boundary);
+    assert_eq!(flow.audit(),super::AdvectionAudit::default());
+}
+
+#[test]
+fn through_flow_separates_interior_exchange_from_reservoir_energy() {
+    let s = prepared(&LAW,vec![cell(0,1.0,20_000.0),cell(1,2.0,60_000.0)],vec![]);
+    let flow = Advected::new(Witness { watts: 16.0, ..Witness::default() },
+        vec![MassFlow {id:0,a:CellId(0),b:CellId(1),kg_s:0.5}],1).unwrap()
+        .with_boundaries(vec![
+            MassBoundary::Inlet {id:1,cell:CellId(0),kg_s:0.5,material_id:MaterialId(1),specific_h_j_kg:100_000.0},
+            MassBoundary::Outlet {id:2,cell:CellId(1),kg_s:0.5},
+        ],3).unwrap();
+    let (n,o,a) = s.advance_observed(&flow,0.125,cfg(1.0),||Ok(())).unwrap();
+    close(n.cells()[&CellId(0)].specific_h_j_kg,25_002.0,0.0);
+    close(n.cells()[&CellId(1)].specific_h_j_kg,58_750.0,0.0);
+    close(o.audit().external_enthalpy_j,2500.0,0.0);
+    close(a.external_heat_j,2502.0,0.0);
+    close(a.stored_energy_change_j,2502.0,0.0);
+    assert_eq!(a.substeps,o.inner().durations.len());
+    assert_eq!(a.substeps,o.audit().substeps);
+    assert!(n.cells().values().all(|c|c.boundary.source_w==0.0));
+    close(n.mass_kg(),s.mass_kg(),0.0);
+}
+
+#[test]
+fn reservoir_cooling_refines_to_well_mixed_reference_and_preserves_caloric_datum() {
+    let initial_h = 80_000.0;
+    let inlet_h = 10_000.0;
+    let duration = 2.0;
+    let exact = inlet_h+(initial_h-inlet_h)*(-1.0_f64).exp(); // q/m=0.5/s.
+    let s = prepared(&LAW,vec![cell(0,2.0,initial_h)],vec![]);
+    let flow = Advected::new((),vec![],0).unwrap().with_boundaries(boundaries(0,1.0,inlet_h),2).unwrap();
+    let mut errors = Vec::new();
+    for dt in [0.125,0.0625,0.03125] {
+        let (n,o,a) = s.advance_observed(&flow,duration,cfg(dt),||Ok(())).unwrap();
+        assert_eq!(n.time_s(),duration);
+        let h = n.cells()[&CellId(0)].specific_h_j_kg;
+        assert!((inlet_h..initial_h).contains(&h));
+        errors.push((h-exact).abs());
+        assert!(a.external_heat_j < 0.0);
+        close(a.external_heat_j,o.audit().external_enthalpy_j,1e-8);
+        close(a.stored_energy_change_j,a.external_heat_j,1e-7);
+        close(o.audit().inlet_mass_kg,2.0,1e-12);
+        close(o.audit().outlet_mass_kg,2.0,1e-12);
+        assert!(o.audit().maximum_courant<=0.8);
+    }
+    for pair in errors.windows(2) { assert!((1.8..2.2).contains(&(pair[0]/pair[1])),"{errors:?}"); }
+    // Shift the law's energy datum as well as ALL state/reservoir enthalpies.
+    struct Shifted;
+    impl ThermalLaw for Shifted {
+        fn temperature_k(&self,h:f64)->Result<f64,DepositionError>{LAW.temperature_k(h+100_000.0)}
+        fn maximum_temperature_slope(&self)->f64{LAW.maximum_temperature_slope()}
+    }
+    let shifted = prepared(&Shifted,vec![cell(0,2.0,initial_h-100_000.0)],vec![]);
+    let sf = Advected::new((),vec![],0).unwrap()
+        .with_boundaries(boundaries(0,1.0,inlet_h-100_000.0),2).unwrap();
+    let (normal,_,a) = s.advance_observed(&flow,0.5,cfg(0.125),||Ok(())).unwrap();
+    let (shifted,_,b) = shifted.advance_observed(&sf,0.5,cfg(0.125),||Ok(())).unwrap();
+    close(normal.temperature_k(CellId(0)).unwrap(),shifted.temperature_k(CellId(0)).unwrap(),1e-10);
+    close(a.external_heat_j,b.external_heat_j,1e-8);
+}
+
+#[test]
+fn boundary_identity_support_balance_and_limits_refuse_atomically() {
+    let s = prepared(&LAW,vec![cell(0,1.0,50_000.0)],vec![]);
+    let mut wrong_material = boundaries(0,1.0,0.0);
+    wrong_material[0] = MassBoundary::Inlet {id:10,cell:CellId(0),kg_s:1.0,
+        material_id:MaterialId(2),specific_h_j_kg:0.0};
+    let mut unbalanced = boundaries(0,1.0,0.0);
+    unbalanced[1] = MassBoundary::Outlet {id:11,cell:CellId(0),kg_s:2.0};
+    for bad in [wrong_material,unbalanced,boundaries(9,1.0,0.0),boundaries(0,1.0,2e6)] {
+        let flow = Advected::new(Witness::default(),vec![],0).unwrap().with_boundaries(bad,2).unwrap();
+        assert!(s.advance_observed(&flow,1.0,cfg(1.0),||Ok(())).is_err());
+        assert_eq!(flow.audit().substeps,0);
+        assert!(flow.inner().durations.is_empty());
+    }
+    let empty = || Advected::new((),vec![],0).unwrap();
+    assert!(empty().with_boundaries(boundaries(0,0.0,0.0),2).is_err());
+    assert!(empty().with_boundaries(boundaries(0,1.0,f64::NAN),2).is_err());
+    assert!(empty().with_boundaries(boundaries(0,1.0,0.0),1).is_err());
+    let mut duplicate = boundaries(0,1.0,0.0); duplicate[1]=duplicate[0];
+    assert!(empty().with_boundaries(duplicate,2).is_err());
+    let interior = Advected::new((),vec![MassFlow{id:10,a:CellId(0),b:CellId(1),kg_s:0.0}],1).unwrap();
+    assert!(interior.with_boundaries(boundaries(0,1.0,0.0),3).is_err());
+    assert_eq!(s.time_s(),0.0);
+    close(s.cells()[&CellId(0)].specific_h_j_kg,50_000.0,0.0);
 }
