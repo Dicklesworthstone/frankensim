@@ -69,7 +69,7 @@ fn slope(left: EnthalpyPhaseKnot, right: EnthalpyPhaseKnot) -> Result<f64, Phase
     Ok(value)
 }
 
-fn enthalpy_at_temperature(curve: &EquilibriumEnthalpyPhaseCurve, temperature: f64) -> Result<f64, PhaseStateError> {
+pub(crate) fn enthalpy_at_temperature(curve: &EquilibriumEnthalpyPhaseCurve, temperature: f64) -> Result<f64, PhaseStateError> {
     let index = segment(curve, temperature)?;
     let (left, right) = (curve.knots()[index], curve.knots()[index + 1]);
     let value = if temperature == left.temperature_k {
