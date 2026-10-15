@@ -15,7 +15,9 @@
 
 use super::{Bridge, Cell, Config, Error, Support, finite, poll, positive};
 use crate::deposition::{self, LayeredStrip};
+use fs_material::phase::ResolvedHeatCapacityCurve;
 use fs_material::thermovisco::ThermoMaxwell;
+use fs_material::thermovisco::source::ResolvedThermoMaxwell;
 
 /// A newly delivered cell, in order along the advancing reference x direction.
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +29,31 @@ pub struct CellBirth<'a> {
     pub mass_kg: f64,
     pub temperature_k: f64,
     pub law: &'a ThermoMaxwell,
+}
+
+impl<'a> CellBirth<'a> {
+    /// Construct one geometric birth from a single source-compatible material
+    /// bundle. Reference mass is `rho_ref * area * length`; the mechanical law
+    /// comes from the same resolved source. This deliberately differs from the
+    /// ordinary constructor fields, which continue to support process schedules
+    /// where delivered mass is independently measured and need not equal a dense
+    /// equilibrium-material volume.
+    ///
+    /// The subsequent bridge append still validates section geometry, law domain,
+    /// work budgets and the actual birth temperature. No porosity, bead swelling
+    /// or process-specific mass correction is inferred here.
+    pub fn from_material_bundle(id: u64, length_m: f64, area_m2: f64,
+        temperature_k: f64, source: &'a ResolvedThermoMaxwell,
+        caloric: &ResolvedHeatCapacityCurve) -> Result<Self, Error> {
+        positive(length_m)?;
+        positive(area_m2)?;
+        positive(temperature_k)?;
+        let density = source.reference_density_kg_m3(caloric)
+            .map_err(|_| Error::Invalid("growth law and reference density must share one admitted material source"))?;
+        let mass_kg = finite(finite(density * area_m2)? * length_m)?;
+        positive(mass_kg)?;
+        Ok(Self { id, length_m, mass_kg, temperature_k, law: source.law() })
+    }
 }
 
 /// Birth accounts only. They are not a force balance or a thermal-energy audit.
