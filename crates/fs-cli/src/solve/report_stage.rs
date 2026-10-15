@@ -738,6 +738,75 @@ pub(super) fn report_receipt(
             owner: term.str_field("owner").unwrap_or("").to_string(),
         });
     }
+    if budget_items.len() == fs_evidence::uncertainty::EngineeringUncertaintyKind::ALL.len() {
+        let mut reconstructed_terms = Vec::with_capacity(budget_items.len());
+        for item in &budget_items {
+            if let Some(kind) = fs_evidence::uncertainty::EngineeringUncertaintyKind::ALL
+                .into_iter()
+                .find(|candidate| candidate.name() == item.kind)
+            {
+                let role = if item.owner.trim().is_empty() {
+                    item.kind.as_str()
+                } else {
+                    item.owner.as_str()
+                };
+                let provenance = fs_evidence::uncertainty::UncertaintyArtifactRef::new(
+                    role,
+                    hash_bytes(item.kind.as_bytes()),
+                )
+                .expect("non-empty role");
+                let reason = if item.reason.trim().is_empty() {
+                    "retained-qoi-receipt"
+                } else {
+                    item.reason.as_str()
+                };
+                let term_value = match (item.state.as_str(), item.value) {
+                    ("negligible", _) => fs_evidence::uncertainty::TermValue::negligible(reason),
+                    (_, Some(half_width)) => {
+                        let hw = half_width.abs();
+                        fs_evidence::uncertainty::TermValue::interval(-hw, hw)
+                    }
+                    _ => fs_evidence::uncertainty::TermValue::unknown(reason),
+                };
+                if let Ok(term_value) = term_value
+                    && let Ok(term) = fs_evidence::uncertainty::EngineeringUncertaintyTerm::try_new(
+                        kind,
+                        term_value,
+                        provenance,
+                    )
+                {
+                    reconstructed_terms.push(term);
+                }
+            }
+        }
+        if let Ok(reconstructed_budget) =
+            fs_evidence::uncertainty::EngineeringUncertaintyBudget::try_new(
+                qoi_name,
+                qoi_unit,
+                reconstructed_terms,
+            )
+            && let Ok(scalar_requirement) =
+                fs_evidence::uncertainty::ScalarRequirement::try_new(
+                    &hash_bytes(requirement_id.as_bytes()).to_hex(),
+                    qoi_name,
+                    qoi_unit,
+                    fs_evidence::uncertainty::RequirementRelation::AtMost,
+                    effective_limit - required_margin,
+                    fs_evidence::uncertainty::UncertaintyArtifactRef::new(
+                        "retained-requirement",
+                        hash_bytes(requirement_id.as_bytes()),
+                    )
+                    .expect("non-empty role"),
+                )
+            && let Ok(compliance_verdict) =
+                reconstructed_budget.assess_requirement(qoi_value, &scalar_requirement, &[])
+        {
+            let _attribution =
+                reconstructed_budget.attribute_requirement(qoi_value, &scalar_requirement, &[]);
+            let _voi_recommendations =
+                fs_voi::recommend_unknown_resolutions(&compliance_verdict, &[]);
+        }
+    }
     let lineage = qoi
         .value
         .get("lineage")

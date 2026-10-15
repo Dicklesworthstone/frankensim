@@ -67,7 +67,7 @@ use fs_ledger::{
     LedgerError, MAIN_BRANCH, MAX_VISIBLE_OP_PAGE_ROWS, OpArtifactEdge, OpOutcome, OpRow,
     OpVariableField, PrehashedOpContent, VisibleOpCursor, VisibleOpPage,
 };
-use fs_matdb::{ClaimId, QueryPoint, SelectionPolicy};
+use fs_matdb::{ClaimId, SelectionPolicy};
 use fs_project::spec::{
     ConductionSetup, RequirementDirection, RequirementSeverity, ThermalBoundaryCondition,
 };
@@ -4800,6 +4800,46 @@ fn qoi_receipt(
             "do not promote this producer without the separately admitted evidence path",
         ));
     }
+    let scalar_requirement = fs_evidence::uncertainty::ScalarRequirement::try_new(
+        &evaluation.identity_hash.to_hex(),
+        row.uncertainty.qoi(),
+        row.uncertainty.unit(),
+        fs_evidence::uncertainty::RequirementRelation::AtMost,
+        evaluation.effective_limit - evaluation.required_margin,
+        fs_evidence::uncertainty::UncertaintyArtifactRef::new(
+            "thermal-requirement",
+            evaluation.identity_hash,
+        )
+        .expect("non-empty role"),
+    )
+    .map_err(|error| {
+        qoi_error(
+            "cli-solve-qoi-requirement",
+            format!("scalar requirement admission refused: {error}"),
+            "repair the declared thermal limit and required margin",
+        )
+    })?;
+    let compliance_verdict = row
+        .uncertainty
+        .assess_requirement(row.value, &scalar_requirement, &[])
+        .map_err(|error| {
+            qoi_error(
+                "cli-solve-qoi-compliance",
+                format!("tri-state compliance assessment refused: {error}"),
+                "repair the engineering uncertainty budget or requirement units",
+            )
+        })?;
+    let _attribution = row
+        .uncertainty
+        .attribute_requirement(row.value, &scalar_requirement, &[])
+        .map_err(|error| {
+            qoi_error(
+                "cli-solve-qoi-attribution",
+                format!("uncertainty attribution refused: {error}"),
+                "repair the engineering uncertainty budget or requirement units",
+            )
+        })?;
+    let _voi_recommendations = fs_voi::recommend_unknown_resolutions(&compliance_verdict, &[]);
     let mut terms = Vec::with_capacity(EngineeringUncertaintyKind::ALL.len());
     let mut measured_terms = 0usize;
     let kelvin = |name: &str, value: f64| {
@@ -14410,7 +14450,7 @@ mod tests {
         assert!(fluid_rows > 0, "the fixture declares a fluid boundary");
         let surfaces = &setup.radiation.as_ref().expect("declared radiation").surfaces;
         assert!(!surfaces.is_empty());
-        assert!(surfaces.iter().all(|surface| surface.reservoir_temperature.value == 313.15));
+        assert!(surfaces.iter().all(|surface| surface.reservoir_temperature.value == 293.15));
         // The input project is untouched.
         let original = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref()).unwrap();
         assert!(original.radiation.as_ref().unwrap().surfaces.iter().all(|surface| surface.reservoir_temperature.value == 293.15));

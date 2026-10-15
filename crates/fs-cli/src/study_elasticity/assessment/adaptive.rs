@@ -6,7 +6,7 @@ use fs_topols::adaptive_dwr::{AdaptiveDwrPolicy, AdaptiveDwrReport, AdaptiveDwrS
     AdaptiveDwrStop, assess_adaptive_dwr_controlled};
 use fs_topols::{DesignBoxEdge, RobustLoadCase};
 
-pub(super) struct Assessment {
+pub(in crate::study::elasticity) struct Assessment {
     report: AdaptiveDwrReport,
     policy: AdaptiveDwrPolicy,
     cases: Vec<RobustLoadCase>,
