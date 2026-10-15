@@ -13,6 +13,9 @@ on:
       - 'crates/fs-couple/src/bowed_string.rs'
       - 'crates/fs-couple/src/bowed_string/material.rs'
       - 'crates/fs-couple/tests/bowed_material_gas.rs'
+      - 'crates/fs-couple/src/bowed_string/runtime/reciprocal.rs'
+      - 'crates/fs-couple/src/bowed_string/runtime/reciprocal/**'
+      - 'crates/fs-couple/tests/material_string_bank.rs'
       - '.github/workflows/instrument-materials.yml'
 permissions:
   contents: read
@@ -41,3 +44,10 @@ jobs:
       - name: Shared homogeneous and layered bowed-string material physics
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test bowed_material_gas -- --test-threads=1
+      - name: Shared-body sympathetic material strings
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test material_string_bank -- --test-threads=1
+      - name: Retained single-string reciprocal material tests
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --lib bowed_string::runtime::reciprocal::tests -- --test-threads=1

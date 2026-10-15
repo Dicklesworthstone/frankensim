@@ -15,14 +15,14 @@
 //! radiation back-loading, or experimentally validated instrument timbre.
 
 use crate::acoustic_realize::AcousticRealizeError;
-use crate::bowed_string::{BowedStringCard, unit_shape};
+use crate::bowed_string::BowedStringCard;
 use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
 use crate::render::schedule::{GestureCompileError, ScheduledRenderer};
 use crate::render::schedule::force::coupled::{
-    CoupledModalSystem, ModalAttachment, ModalConnection, ModalCouplingConfig, ModalCouplingError,
+    ModalAttachment, ModalCouplingConfig, ModalCouplingError,
 };
 use crate::render::schedule::force::coupled::contact::friction::{
-    FrictionModalSystem, ModalFrictionConfig, ModalFrictionError, ModalFrictionPort,
+    FrictionModalSystem, ModalFrictionConfig, ModalFrictionError,
 };
 use crate::render::schedule::force::coupled::render::friction::FrictionGestureConfig;
 use crate::string_specimen::ResolvedStringSpecimen;
@@ -162,54 +162,12 @@ impl ReciprocalMaterialString {
         }
         let card = BowedStringCard::from_material_specimen(cx, &specimen, ambient, options.sample_rate_hz)
             .map_err(ReciprocalStringError::Material)?;
-        let shape = |station| -> Vec<f64> {
-            (0..card.mode_count).map(|k| unit_shape(k, station, card.length_m, card.linear_density_kg_m)).collect()
+        let shared = bank::StringBankOptions {
+            sample_rate_hz: options.sample_rate_hz,
+            bow: bank::StringBowLocation { string: 0, station_fraction: options.bow_station_fraction },
+            string_budget: options.string_budget, network: options.network, friction: options.friction,
         };
-        let mut links = Vec::with_capacity(options.connections.len());
-        for connection in &options.connections {
-            poll(gate)?;
-            if !interior(connection.station_fraction) {
-                return Err(invalid("a pinned string endpoint cannot be a moving body attachment; supply an interior station and afterlength"));
-            }
-            let body = bodies.get(connection.body.component)
-                .ok_or_else(|| invalid("string connection names an unknown supplied body"))?;
-            if connection.body.shapes.len() != body.modes().len()
-                || !connection.body.shapes.iter().all(|x| x.is_finite())
-                || !connection.body.shapes.iter().any(|x| *x != 0.0) {
-                return Err(invalid("reciprocal body attachment must be a nonzero finite shape in its original basis"));
-            }
-            if !(connection.stiffness_n_m > 0.0 || connection.damping_n_s_m > 0.0) {
-                return Err(invalid("reciprocal string connection cannot have both stiffness and damping zero"));
-            }
-            links.push(ModalConnection {
-                left: ModalAttachment { component: 0, shapes: shape(connection.station_fraction) },
-                right: ModalAttachment {
-                    component: connection.body.component + 1,
-                    shapes: connection.body.shapes.clone(),
-                },
-                stiffness_n_m: connection.stiffness_n_m,
-                damping_n_s_m: connection.damping_n_s_m,
-                rest_extension_m: connection.rest_extension_m,
-            });
-        }
-        let modes = (0..card.mode_count).map(|k| ModalAcousticMode {
-            angular_frequency_rad_s: card.mode_omega_rad_s(k + 1),
-            damping_ratio: card.zetas[k],
-            pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
-        }).collect();
-        let string = ModalAcousticTimeModel::try_new(options.sample_rate_hz, modes, options.string_budget)
-            .map_err(|source| ReciprocalStringError::Network(ModalCouplingError::Component { component: 0, source }))?;
-        let mut components = Vec::with_capacity(bodies.len() + 1);
-        components.push(string);
-        components.extend(bodies);
-        let network = CoupledModalSystem::new(components, links, options.network, gate)
-            .map_err(ReciprocalStringError::Network)?;
-        let port = ModalFrictionPort {
-            left: ModalAttachment { component: 0, shapes: shape(options.bow_station_fraction) },
-            right: None, law,
-        };
-        let system = FrictionModalSystem::new(network, port, options.friction, gate)
-            .map_err(ReciprocalStringError::Friction)?;
+        let system = bank::assemble(&[card], bodies, &[&options.connections], law, &shared, gate)?;
         poll(gate)?;
         Ok(Self { source: ReciprocalStringSource { specimen, ambient, options, material_plate: None }, system })
     }
@@ -266,3 +224,6 @@ mod tests;
 
 /// Source-bound plate reduction and physical pressure in the same reciprocal network.
 pub mod plate;
+
+/// Shared-body sympathetic strings with heterogeneous materials and explicit gas.
+pub mod bank;
