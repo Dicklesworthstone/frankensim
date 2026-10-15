@@ -12,8 +12,10 @@ export const boardUrl = (n) => new URL(`./boards/model-d-board-2400-r${n}.bin`, 
 
 // Cost of the same score relative to the embedded 32-coordinate board (V8, measured on the
 // Strandbar part with the Woodbury bridge solve; the sustained probe at the full cap gives 1.09-1.12,
-// 1.27-1.32, 1.67-1.82, 2.33-2.47). Only used to pick which larger board is worth fetching and at
-// which cap to time it; the choice itself is always a measurement on this device.
+// 1.27-1.32, 1.67-1.82, 2.33-2.47; with the two-mode string loops of optimisation pass 28 1.17, 1.35,
+// 1.76, 2.52 in thread CPU, while Chrome timed 96 within 1-5 % of its prediction). Only used to pick
+// which larger board is worth fetching and at which cap to time it; the choice itself is always a
+// measurement on this device.
 export const RELATIVE_COST = { 32: 1, 48: 1.12, 64: 1.3, 96: 1.75, 128: 2.35 };
 
 // Speed probe on a throwaway engine: twelve keys struck together (the Strandbar part's densest
@@ -70,8 +72,10 @@ export function probeSustained(engine, { beat = 10240, settle = 4096, timed = 12
 // Share of the probe's cost that does not shrink with the mode cap (board, radiation, per-block work):
 // cost(cap) / cost(full) = a + (1 - a) cap / full. Measured on the probe in V8: 0.36-0.39 on 32
 // coordinates, 0.43-0.50 on 64, 0.48-0.49 on 48, 0.54-0.64 on 96, 0.70-0.73 on 128 (caps 700-1800,
-// medians of 4-6 interleaved rounds). Only a first guess: the cap is re-measured.
-export const FIXED_COST = { 32: 0.38, 48: 0.48, 64: 0.46, 96: 0.58, 128: 0.7 };
+// medians of 4-6 interleaved rounds; after pass 28's string loops 0.44 on 32, 0.46 on 64, 0.63 on 96,
+// ~0.79 on 128 in thread CPU); 0.29-0.42 on the 16 exact low modes (caps 400-1600, the lanes' last
+// resort). Only a first guess: the cap is re-measured, or the governor corrects it.
+export const FIXED_COST = { 16: 0.32, 32: 0.38, 48: 0.48, 64: 0.46, 96: 0.58, 128: 0.7 };
 // the mode cap at which a probe measured at `realtime` (cap `from`, cost share `a` fixed) reaches `target`
 export function capFor(realtime, target, full, a, from = full) {
   const share = (realtime / target) * (a + ((1 - a) * from) / full); // cost(cap)/cost(full) wanted

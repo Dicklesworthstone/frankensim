@@ -14,9 +14,9 @@
 //                faster than real time at a cap no lower than its floor (boards.js MIN_CAP; 32
 //                first, then the best board predicted to keep its floor, timed at the predicted
 //                cap; at most two larger ones), else the embedded board with the cap lowered
-//                until it does; 16 only when even the floor cap is expected below real time.
-//                A fixed board gets its cap
-//                the same way; an explicit maxDynamicModes is kept.
+//                until it does; 16 only when even the floor cap runs below real time (it starts
+//                at the cap its own probe predicts, not below the floor). A fixed board gets its
+//                cap the same way; an explicit maxDynamicModes is kept.
 //       minRealtime  the speed the measurement asks for (default 1.3)
 //       snapshotHz   display snapshots per second of AUDIO (default 0: none). With it, 'ready' also
 //                    carries the board geometry and the key geometry.
@@ -29,7 +29,8 @@
 //   {type:'stop'}   end the sequence and release every key
 // Worker -> main thread
 //   {type:'ready', info, boardCoordinates, realtime, modeCap, board?:{xy, shapes, modeHz}, keyGeometry?}
-//       realtime  the probe's speed at the chosen board and cap; modeCap  the starting mode cap
+//       realtime  the probe's speed at the chosen board and cap (measured, or estimated from the
+//                 probes when the cap was set without a timing of its own); modeCap  the starting mode cap
 //   {type:'stats', realtime, renderedFrames, skippedFrames, lateEvents, voices, peakPa,
 //    dynamicModes, noteOns, refusedNoteOns, forcedRetirements,
 //    modeCap, fullModeCap, courseModeBudget, governorDown, governorUp}
@@ -39,7 +40,7 @@
 //   {type:'error', message}
 import init, { PianoEngine } from './engine.js';
 import { createLane } from '../lane.js';
-import { BOARD_SIZES, chooseQuality, fetchBoard, probeSustained } from './boards.js';
+import { BOARD_SIZES, FIXED_COST, capFor, chooseQuality, fetchBoard, probeSustained } from './boards.js';
 
 let engine = null;
 let lane = null;
@@ -68,11 +69,11 @@ const GOV = {
   fullCushion: 0.85, holdMs: 3000, raise: 1.1, raiseHeadroom: 1.35,
   floorModes: 400, floorBudget: 40,
 };
-// per-key string mode budget for a mode cap: in proportion to the cap
 // The startup choice never starts below this cap: offline (V8, board 32) cap 700 ran Giant Steps and
 // Character Select 2.65-2.86x faster than real time and cap 450 2.76x, while 450 moved the band levels
 // 1.67-1.76 dB from the full cap against 0.59-0.86 dB at 700. Below it only the governor goes.
 const START_FLOOR_MODES = 700;
+// per-key string mode budget for a mode cap: in proportion to the cap
 const budgetFor = (full, cap) => Math.max(GOV.floorBudget, Math.min(full.courseModeBudget, Math.round((full.courseModeBudget * cap) / full.maxDynamicModes)));
 function createGovernor(eng, full, aheadFrames, startCap = full.maxDynamicModes) {
   const g = { cap: startCap, budget: budgetFor(full, startCap), down: 0, up: 0, at: -1, changedAt: -1e9, audioMs: 0, wallMs: 0, skipped: 0, rendered: 0, cushion: 0, slowWindows: 0, modes: 0 };
@@ -157,15 +158,19 @@ self.onmessage = async (event) => {
       if (!asked) ({ bytes, coordinates: coords } = pick);
       let { cap, realtime } = pick;
       // the old last resort, 16 exact low modes, only when even the embedded board at the floor cap
-      // is expected below real time
+      // runs below real time. It starts at the cap its own full-cap probe predicts for `target`
+      // (capFor with its fixed share, not below the start floor, no second timing), not at the full
+      // cap the governor would spend its first seconds walking down from
       if (!asked && !bytes && cap <= START_FLOOR_MODES && realtime < 1) {
         pick.engine?.free();
         pick.engine = null;
         coords = 16;
-        cap = full.maxDynamicModes;
         const probe = make(null, 16);
         realtime = probeSustained(probe);
         probe.free();
+        const most = full.maxDynamicModes, a = FIXED_COST[16];
+        cap = realtime >= target ? most : Math.min(most, Math.max(START_FLOOR_MODES, capFor(realtime, target, most, a)));
+        realtime /= a + ((1 - a) * cap) / most; // the estimate at that cap
       }
       // the chosen board was built once, for its timing: its copy from before the timing plays
       // (bit for bit what a new engine at this cap renders)
