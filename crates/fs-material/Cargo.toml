@@ -18,6 +18,7 @@ fs-evidence = { path = "../fs-evidence" }
 fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
+fs-thermal = { path = "../fs-thermal" }
 fs-thermochem = { path = "../fs-thermochem" }
 
 [lints]

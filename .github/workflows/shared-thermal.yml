@@ -1,0 +1,34 @@
+name: Shared thermal kernel
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-thermal/**'
+      - 'crates/fs-material/src/thermal.rs'
+      - 'crates/fs-lbm/Cargo.toml'
+      - 'crates/fs-conduction/src/transient/deposition.rs'
+      - '.github/workflows/shared-thermal.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile and run the actual shared kernel without workspace dependencies
+        run: |
+          rustc --edition=2024 --test crates/fs-thermal/src/lib.rs --crate-name fs_thermal -o "$RUNNER_TEMP/thermal-tests"
+          "$RUNNER_TEMP/thermal-tests" --test-threads=1
+      - name: Retain exact source for focused offline integration checks
+        if: always()
+        run: |
+          git archive HEAD Cargo.toml Cargo.lock .beads/issues.jsonl crates/fs-thermal crates/fs-material crates/fs-lbm crates/fs-conduction .github/workflows | gzip > "$RUNNER_TEMP/thermal-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shared-thermal-source
+          path: ${{ runner.temp }}/thermal-source.tar.gz
+          retention-days: 3

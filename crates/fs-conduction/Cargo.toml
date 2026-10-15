@@ -28,6 +28,7 @@ fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
+fs-thermal = { path = "../fs-thermal" }
 fs-verify = { path = "../fs-verify", optional = true, features = ["thermal-conduction"] }
 
 [dev-dependencies]

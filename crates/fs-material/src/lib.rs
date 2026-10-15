@@ -12,7 +12,8 @@
 //! Layer: L3 (FLUX support). Runtime deps: `std`, fs-ad (duals for
 //! energy-derived stresses/tangents), fs-blake3 (typed content identities),
 //! fs-evidence (model cards, Evidence, and V&V artifacts), fs-matdb (immutable
-//! material/model cards), fs-qty, fs-math, and fs-thermochem (species thermodynamics).
+//! material/model cards), fs-qty, fs-math, fs-thermal (shared transport),
+//! and fs-thermochem (species thermodynamics).
 
 pub mod calibrate;
 /// Irreversible mixed-mode cohesive interfaces with work and fracture accounting.
@@ -43,6 +44,7 @@ pub mod porous;
 pub mod section;
 pub mod state_point;
 pub mod tensor;
+pub mod thermal;
 /// Shared species thermodynamics, acoustic medium and source-backed gas transport.
 pub mod thermochemical_gas;
 /// Bounded temperature-dependent Maxwell history, thermal strain and work balance.
