@@ -18,6 +18,9 @@ pub mod dynamic;
 pub(crate) mod moving;
 /// Independently moving source blades sharing one fluid/contact interface.
 pub mod paired;
+/// Several signed structural modes sharing one pressure/flow/contact port.
+pub mod modal;
+mod uniform;
 /// Independent blades coupled to regional tubes and physical outlets.
 pub mod paired_network;
 /// Same-sample material valve feedback from both upstream and downstream ducts.
