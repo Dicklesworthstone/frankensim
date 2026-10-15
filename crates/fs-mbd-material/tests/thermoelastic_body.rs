@@ -102,7 +102,7 @@ fn constrained_material_change_produces_reactions_not_fictitious_expansion() {
         let fixed:Vec<_>=(0..12).collect();
         let result=with_cx(|cx|mesh.solve_thermal(&inputs(&cards,&[400.]),&fixed,config(),cx)).unwrap();
         assert_eq!(result.body().inertia(),original.inertia());
-        assert_eq!(result.body().nodes_m(),NODES[..4]);
+        assert_eq!(result.body().nodes_m(),&NODES[..4]);
         for &s in &result.stress().elements()[0].stress_mandel_pa()[..3] {near(s,-young*0.01/(1.-2.*0.25));}
         assert!(result.stress().elastic_energy_j()>0.);
         for axis in 0..3 {near(result.stress().nodal_internal_force_n().iter().map(|f|f[axis]).sum(),0.);}
