@@ -12,6 +12,9 @@
 //! relevant solvers' responsibilities. The shared strain law and source domain
 //! bound applicability; no finite-strain constitutive law is introduced here.
 
+/// Material-bound thermal solver temperatures drive conserved geometry and inertia.
+pub mod temperature;
+
 mod articulated;
 pub use articulated::{ExpandedArticulated, LinkThermalExpansion, expand_articulated};
 
