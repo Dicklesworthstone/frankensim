@@ -4,6 +4,9 @@ on:
     branches: [main]
     paths:
       - 'crates/fs-mbd-material/**'
+      - 'crates/fs-solid/src/linear3.rs'
+      - 'crates/fs-solid/src/prestress.rs'
+      - 'crates/fs-solid/tests/thermal_prestress.rs'
       - 'crates/fs-contact/src/normal_patch/**'
       - 'crates/fs-contact/tests/source_point*'
       - 'crates/fs-contact/tests/source_point/**'
@@ -62,6 +65,11 @@ jobs:
           PY
             cargo run --manifest-path tools/bootstrap/Cargo.toml
           fi
+      - name: Thermal stress in the existing solid vibration pencil
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p fs-solid --test thermal_prestress 2>&1 | tee "$RUNNER_TEMP/material-prestress.log"
       - name: Source-bound normal contact through the original finite-patch law
         run: cargo test -p fs-contact --test source_point -- --test-threads=1
       - name: Contact work deposited in finite material thermal storage
@@ -89,6 +97,7 @@ jobs:
         with:
           name: material-inertia-validation
           path: |
+            ${{ runner.temp }}/material-prestress.log
             ${{ runner.temp }}/material-inertia.log
             ${{ runner.temp }}/material-inertia-Cargo.lock
             ${{ runner.temp }}/material-inertia-lock.diff

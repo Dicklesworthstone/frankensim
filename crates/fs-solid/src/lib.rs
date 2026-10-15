@@ -47,6 +47,8 @@ pub mod hyper3;
 pub mod koiter;
 pub mod linear;
 pub mod linear3;
+/// Initial-stress vibration pencils from the existing thermal equilibrium owner.
+pub mod prestress;
 pub mod mesh2;
 /// Incremental small-strain inelasticity (J2 and any `SmallStrainLaw`) on tetrahedra.
 pub mod plastic3;
