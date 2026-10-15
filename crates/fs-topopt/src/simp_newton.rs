@@ -7,6 +7,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ops::ControlFlow;
+use std::rc::Rc;
 
 use fs_exec::Cx;
 use fs_opt::reverse::physics::{PhysicsError, PhysicsHessian, PhysicsModel, PhysicsSample, PhysicsSignature};
@@ -18,6 +19,31 @@ use crate::filter::DensityFilter;
 use crate::pipeline::{LoadCase, SimpParams};
 use crate::simp_second_order::{SimpComplianceGoal, robust_parameters};
 use crate::{DensityElasticity, DesignPipeline, EvaluationStop, RobustPipeline, SolveBudget, SolveControl};
+
+/// Shared lifetime admission for a family of immutable SIMP continuation stages.
+/// Clones share counters and absolute ceilings, not numerical caches or model
+/// meaning. Construct all stages with the SAME handle to avoid resetting work
+/// when projection sharpness or penalization changes. This handle is deliberately
+/// single-threaded, like the provider's RefCell cache; it is not a global byte cap.
+#[derive(Debug, Clone)]
+pub struct SimpNewtonResources(Rc<Resources>);
+
+#[derive(Debug)]
+struct Resources {
+    budget: Cell<ComplianceNewtonBudget>,
+    work: Cell<ComplianceNewtonWork>,
+}
+impl SimpNewtonResources {
+    /// Start an empty work account. Zero ceilings are valid admission policies.
+    pub fn new(budget: ComplianceNewtonBudget) -> Self {
+        Self(Rc::new(Resources { budget: Cell::new(budget),
+            work: Cell::new(ComplianceNewtonWork::default()) }))
+    }
+    pub fn work(&self) -> ComplianceNewtonWork { self.0.work.get() }
+    pub fn budget(&self) -> ComplianceNewtonBudget { self.0.budget.get() }
+    /// Change absolute allowances for ALL attached stages, never spent work.
+    pub fn set_budget(&self, budget: ComplianceNewtonBudget) { self.0.budget.set(budget); }
+}
 
 struct Cached<'a> {
     bits: Vec<u64>,
@@ -51,8 +77,7 @@ pub struct SimpNewtonModel<'a> {
     loads: Vec<(Vec<f64>, f64)>,
     volumes: Vec<f64>,
     options: ComplianceSolveOptions,
-    budget: Cell<ComplianceNewtonBudget>,
-    work: Cell<ComplianceNewtonWork>,
+    resources: SimpNewtonResources,
     cache: RefCell<Option<Cached<'a>>>,
     last_native_error: RefCell<Option<ComplianceError>>,
 }
@@ -64,8 +89,8 @@ impl std::fmt::Debug for SimpNewtonModel<'_> {
             .field("loads", &self.loads.len())
             .field("compliance_threshold", &self.params.eta)
             .field("volume_threshold", &self.volume_eta)
-            .field("work", &self.work.get())
-            .field("budget", &self.budget.get())
+            .field("work", &self.resources.0.work.get())
+            .field("budget", &self.resources.0.budget.get())
             .finish_non_exhaustive()
     }
 }
@@ -122,6 +147,33 @@ impl<'a> SimpNewtonModel<'a> {
         Self::from_parts(&pipeline.filter, params, volume_eta, elasticity, loads, volumes, options, budget)
     }
 
+    /// Ordinary SIMP stage with a caller-owned shared lifetime work account.
+    /// Admission does no numerical work; the stage retains a separate cache.
+    pub fn new_with_resources(pipeline: &'a DesignPipeline, elasticity: &'a DensityElasticity,
+        loads: &[LoadCase<'_>], volumes: &[f64], options: ComplianceSolveOptions,
+        resources: SimpNewtonResources,
+    ) -> Result<Self, PhysicsError> {
+        let mut model = Self::new(pipeline, elasticity, loads, volumes, options, resources.budget())?;
+        model.resources = resources;
+        Ok(model)
+    }
+
+    /// Robust stage with the SAME work account as other continuation stages.
+    /// The threshold and SIMP parameters remain immutable per stage; sharing
+    /// admission must never mean reusing another stage's primal or derivatives.
+    pub fn new_robust_with_resources(pipeline: &'a RobustPipeline, elasticity: &'a DensityElasticity,
+        loads: &[LoadCase<'_>], volumes: &[f64], options: ComplianceSolveOptions,
+        resources: SimpNewtonResources,
+    ) -> Result<Self, PhysicsError> {
+        let mut model = Self::new_robust(pipeline, elasticity, loads, volumes, options, resources.budget())?;
+        model.resources = resources;
+        Ok(model)
+    }
+
+    /// Borrow this stage's account for construction of further immutable stages.
+    /// Counters reported by every attached model are family-wide, not per-stage.
+    pub fn resources(&self) -> SimpNewtonResources { self.resources.clone() }
+
     #[allow(clippy::too_many_arguments)]
     fn from_parts(filter: &'a DensityFilter, p: SimpParams, volume_eta: f64,
         elasticity: &'a DensityElasticity, loads: &[LoadCase<'_>], volumes: &[f64],
@@ -159,8 +211,8 @@ impl<'a> SimpNewtonModel<'a> {
         loads.len().checked_add(3).ok_or(PhysicsError::InvalidInput("too many loads"))?;
         Ok(Self { filter, params: p, volume_eta, elasticity,
             loads: loads.iter().map(|l| (l.force.to_vec(), l.weight)).collect(),
-            volumes: volumes.to_vec(), options, budget: Cell::new(budget),
-            work: Cell::new(ComplianceNewtonWork::default()), cache: RefCell::new(None),
+            volumes: volumes.to_vec(), options, resources: SimpNewtonResources::new(budget),
+            cache: RefCell::new(None),
             last_native_error: RefCell::new(None) })
     }
 
@@ -176,9 +228,9 @@ impl<'a> SimpNewtonModel<'a> {
     }
     /// Actual stiffness and physical-volume projection thresholds, in that order.
     pub fn projection_thresholds(&self) -> (f64, f64) { (self.params.eta, self.volume_eta) }
-    pub fn work(&self) -> ComplianceNewtonWork { self.work.get() }
-    pub fn budget(&self) -> ComplianceNewtonBudget { self.budget.get() }
-    pub fn set_budget(&self, budget: ComplianceNewtonBudget) { self.budget.set(budget); }
+    pub fn work(&self) -> ComplianceNewtonWork { self.resources.0.work.get() }
+    pub fn budget(&self) -> ComplianceNewtonBudget { self.resources.0.budget.get() }
+    pub fn set_budget(&self, budget: ComplianceNewtonBudget) { self.resources.0.budget.set(budget); }
     /// A later success does not erase the most recent native refusal.
     pub fn last_native_error(&self) -> Option<ComplianceError> { self.last_native_error.borrow().clone() }
 
@@ -187,8 +239,8 @@ impl<'a> SimpNewtonModel<'a> {
             ComplianceError::InvalidInput(message) => PhysicsError::InvalidInput(*message),
             ComplianceError::Stopped(EvaluationStop::Cancelled) => PhysicsError::Cancelled,
             ComplianceError::Stopped(EvaluationStop::TotalBudget { .. }) => PhysicsError::Budget {
-                resource: "SIMP Krylov iterations", used: self.work.get().linear_iterations,
-                limit: self.budget.get().linear_iterations,
+                resource: "SIMP Krylov iterations", used: self.resources.0.work.get().linear_iterations,
+                limit: self.resources.0.budget.get().linear_iterations,
             },
             ComplianceError::Stopped(EvaluationStop::LinearBudget { stage, iterations, residual_estimate }) =>
                 PhysicsError::NotConverged { phase: *stage, iterations: *iterations,
@@ -203,7 +255,7 @@ impl<'a> SimpNewtonModel<'a> {
         action: impl FnOnce(&mut SolveControl<'_>) -> Result<R, ComplianceError>,
     ) -> Result<R, PhysicsError> {
         poll(cx)?;
-        let mut work = self.work.get(); let budget = self.budget.get();
+        let mut work = self.resources.0.work.get(); let budget = self.resources.0.budget.get();
         if work.solve_reservations > budget.solve_reservations
             || slots > budget.solve_reservations - work.solve_reservations {
             return Err(PhysicsError::Budget { resource: "SIMP solve reservations",
@@ -214,7 +266,7 @@ impl<'a> SimpNewtonModel<'a> {
                 used: work.linear_iterations, limit: budget.linear_iterations });
         }
         work.solve_reservations += slots;
-        self.work.set(work);
+        self.resources.0.work.set(work);
         let mut callback = |_| match poll(cx) {
             Ok(()) => ControlFlow::Continue(()), Err(_) => ControlFlow::Break(()),
         };
@@ -227,7 +279,7 @@ impl<'a> SimpNewtonModel<'a> {
         debug_assert!(spent.linear_solves <= slots);
         work.started_solves += spent.linear_solves;
         work.linear_iterations += spent.linear_iterations;
-        self.work.set(work);
+        self.resources.0.work.set(work);
         let result = result.map_err(|e| self.native_error(e))?;
         poll(cx)?;
         Ok(result)
