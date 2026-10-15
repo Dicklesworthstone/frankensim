@@ -19,6 +19,51 @@ jobs:
         with:
           persist-credentials: false
       - name: Materialize pinned dependencies
-        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
+            # Same narrowly checked raw-byte restoration as shared-thermal.yml.
+            # No changed pins, skipped source checks or substantive source edits.
+            python3 - <<'PY'
+          import json, pathlib, subprocess
+          root = pathlib.Path('../franken_numpy')
+          row = next(r for r in json.loads(pathlib.Path('constellation.lock').read_text())['libraries'] if r['lib'] == 'franken_numpy')
+          def git(*args):
+              return subprocess.check_output(['git', '-C', str(root), *args])
+          if git('rev-parse', 'HEAD').decode().strip() != row['git_head'] or git('config', '--local', '--get', 'frankensim.bootstrapIncomplete').strip() != b'true':
+              raise SystemExit('not the incomplete pinned NumPy clone; refusing repair')
+          name = 'legacy_numpy_code/numpy/doc/make.bat'
+          path = root / name
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit('expected an ordinary tracked batch file')
+          raw = git('cat-file', 'blob', row['git_head'] + ':' + name)
+          actual = path.read_bytes()
+          if actual == raw or actual.replace(b'\r\n', b'\n') != raw.replace(b'\r\n', b'\n'):
+              raise SystemExit('not a line-ending-only checkout discrepancy')
+          path.write_bytes(raw)
+          git('add', '--', name)
+          if git('rev-parse', ':' + name).strip() != git('rev-parse', row['git_head'] + ':' + name).strip() or path.read_bytes() != raw:
+              raise SystemExit('restoration differs from locked source or index')
+          PY
+            cargo run --manifest-path tools/bootstrap/Cargo.toml
+          fi
       - name: Exercise actual material resolution and rigid dynamics
-        run: cargo test -p fs-mbd-material --all-targets
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p fs-mbd-material --all-targets 2>&1 | tee "$RUNNER_TEMP/material-inertia.log"
+      - name: Retain resolved dependency lock
+        if: always()
+        run: |
+          cp Cargo.lock "$RUNNER_TEMP/material-inertia-Cargo.lock"
+          git diff -- Cargo.lock > "$RUNNER_TEMP/material-inertia-lock.diff"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: material-inertia-validation
+          path: |
+            ${{ runner.temp }}/material-inertia.log
+            ${{ runner.temp }}/material-inertia-Cargo.lock
+            ${{ runner.temp }}/material-inertia-lock.diff
+          retention-days: 3
