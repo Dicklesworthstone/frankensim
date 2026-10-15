@@ -270,11 +270,10 @@ fn parse_flat_json(line: &str) -> Json {
     let body = trimmed.strip_prefix('{').unwrap_or(trimmed);
     let body = body.strip_suffix('}').unwrap_or(body);
     let mut pairs = Vec::new();
-    let mut parts = body.split("\",\"");
-    while let Some(part) = parts.next() {
+    for part in body.split(',') {
         if let Some((k, v)) = part.split_once("\":\"") {
-            let key = k.trim_start_matches(',').trim_matches('"').to_string();
-            let val = v.trim_end_matches('"').to_string();
+            let key = k.trim().trim_matches('"').to_string();
+            let val = v.trim().trim_end_matches('"').to_string();
             pairs.push((key, val));
         }
     }

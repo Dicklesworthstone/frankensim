@@ -58,7 +58,7 @@ impl Profile {
         edge: 128,
         os: "macos",
         arch: "aarch64",
-        model_needle: "Apple M4",
+        model_needle: "Apple M",
     };
 
     const THREADRIPPER_256: Self = Self {
@@ -1877,3 +1877,26 @@ fn production_scale_sparse_lbm_million_cells() {
         ),
     );
 }
+
+#[test]
+fn production_scale_profile_and_refusal_smoke() {
+    let m4 = Profile::parse("m4-128").expect("m4-128 profile parses");
+    assert_eq!(m4.cells().expect("m4 cells"), 128 * 128 * 128);
+    let tr = Profile::parse("threadripper-256").expect("threadripper-256 profile parses");
+    assert_eq!(tr.cells().expect("tr cells"), 256 * 256 * 256);
+    assert!(Profile::parse("unknown").is_err());
+
+    let cells = 16 * 16 * 16;
+    let payload_bytes = cells * size_of::<f64>();
+    let preflight_pool = ArenaPool::new(arena_config(payload_bytes));
+    let reservation_bytes = preflight_pool
+        .reservation_bytes_for_slice::<f64>(FIELD_SITE, cells)
+        .expect("smoke reservation fits");
+    let (refusal_pass, refusal_detail) = refusal_is_pre_mutation(cells, reservation_bytes);
+    assert!(refusal_pass, "{refusal_detail}");
+    let run = run_field(cells, reservation_bytes).expect("admitted smoke field succeeds");
+    assert!(run.content_verified);
+    assert_eq!(run.checksum, run.expected_checksum);
+    assert!(run.pool.quiescent());
+}
+

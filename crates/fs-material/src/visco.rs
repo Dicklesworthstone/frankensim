@@ -121,7 +121,7 @@ pub fn loss_factor_to_zeta(eta: f64) -> f64 {
 // Tier 0: Rayleigh
 // ---------------------------------------------------------------------------
 
-/// Classical Rayleigh damping `C = α·M + β·K`; `ζ(ω) = α/(2ω) + βω/2`.
+/// Classical Rayleigh damping `C = αM + βK`; `ζ(ω) = α/(2ω) + βω/2`.
 /// The matrix itself is assembled by the consumer holding M and K (fs-time's
 /// generalized-α takes C directly); this type owns the coefficients and the
 /// per-mode damping ratio.
@@ -392,45 +392,36 @@ impl GeneralizedMaxwell {
         }
     }
 
-    /// Advance one step with piecewise-linear strain: the EXACT exponential
-    /// internal-variable update `q_j ← a_j q_j + b_j Δε` with
-    /// `a_j = exp(−Δt/τ_j)`, `b_j = τ_j(1 − a_j)/Δt` (unconditionally
-    /// stable, convolution-free), then update the dissipation ledger:
-    /// trapezoidal external work minus stored energy
-    /// `U = ½E∞ε² + Σ ½E_j q_j²`. Returns the new stress.
+    /// Advance the SAME exact piecewise-linear-strain constitutive history.
+    /// Work integrates the actual (exponential, not linearly interpolated)
+    /// stress, and heat integrates `sum(E_j q_j(t)^2 / tau_j)`. Endpoint stress
+    /// and the original branch-strain recursion are retained. In particular,
+    /// a reversal cannot manufacture negative heat through trapezoidal work.
+    /// `dt = 0` is an elastic strain jump with exactly zero viscous loss.
+    ///
+    /// Energies are densities [J/m³], not joules. This fixed-temperature law
+    /// does not itself advance a thermal field or change source parameters.
     pub fn step(&self, state: &mut PronyState, strain_new: f64, dt: f64) -> f64 {
         assert!(
             dt.is_finite() && dt >= 0.0,
             "Prony step requires a finite non-negative dt"
         );
+        assert_eq!(state.q.len(), self.terms.len(), "Prony state must match its branches");
         let d_eps = strain_new - state.strain;
-        let stress_old = state.stress;
-        for (j, &(_e, tau)) in self.terms.iter().enumerate() {
-            let a = det::exp(-dt / tau);
-            // b = tau (1 - a) / dt via expm1: the direct 1 - exp(-h)
-            // form loses ~h significant digits for dt << tau (audio-rate
-            // stepping against long relaxation times), and at dt = 0 it
-            // is 0/0 NaN — the exact limit is b = 1 (instantaneous
-            // elastic jump of the branch strain).
-            let b = if dt == 0.0 {
-                1.0
-            } else {
-                -tau * det::expm1(-dt / tau) / dt
-            };
-            state.q[j] = a * state.q[j] + b * d_eps;
-        }
+        let mut mean_stress = self.e_inf * (state.strain + 0.5 * d_eps);
         let mut stress = self.e_inf * strain_new;
-        for (j, &(e, _tau)) in self.terms.iter().enumerate() {
-            stress += e * state.q[j];
+        let mut dissipated = 0.0;
+        for (q, &(e, tau)) in state.q.iter_mut().zip(&self.terms) {
+            let (next, mean, loss) = prony_ramp(*q, d_eps, dt / tau);
+            *q = next;
+            mean_stress += e * mean;
+            stress += e * next;
+            dissipated += e * loss;
         }
         state.strain = strain_new;
         state.stress = stress;
-        state.work += 0.5 * (stress_old + stress) * d_eps;
-        let mut stored = 0.5 * self.e_inf * strain_new * strain_new;
-        for (j, &(e, _tau)) in self.terms.iter().enumerate() {
-            stored += 0.5 * e * state.q[j] * state.q[j];
-        }
-        state.dissipated = state.work - stored;
+        state.work += mean_stress * d_eps;
+        state.dissipated += dissipated;
         stress
     }
 }
@@ -445,11 +436,47 @@ pub struct PronyState {
     pub strain: f64,
     /// Current stress.
     pub stress: f64,
-    /// Accumulated external work (trapezoidal).
+    /// Accumulated exact ramp work density [J/m³], relative to initialization.
     pub work: f64,
-    /// Ledgered dissipation `work − stored` (must be non-negative and
-    /// non-decreasing for admissible parameters — tested).
+    /// Accumulated physical dashpot heat density [J/m³]. Integrated independently
+    /// of work and stored energy; nonnegative and nondecreasing for admitted data.
     pub dissipated: f64,
+}
+
+// Exact scalar Maxwell ramp; r = dt/tau. Returns endpoint strain, mean
+// strain, and integral(q²/tau dt). Complete the square in the analytic
+// integral rather than subtracting nearly equal work/storage quantities:
+// A*(q0+h*delta)² + R*delta², A=(1-exp(-2r))/2,
+// h=tanh(r/2)/r, R=(r-2*tanh(r/2))/r² >= 0.
+fn prony_ramp(q0: f64, delta: f64, r: f64) -> (f64, f64, f64) {
+    if r == 0.0 {
+        return (q0 + delta, q0 + 0.5 * delta, 0.0);
+    }
+    let a = det::exp(-r);
+    let s = -det::expm1(-r);
+    let b = s / r;
+    let h = b / (1.0 + a);
+    let (c, remainder) = if r < 0.1 {
+        // Analytic series, not a loss clamp. Avoid cancellation in both
+        // (1-b)/r and (1-2h)/r at acoustic dt << material relaxation time.
+        let c = 0.5 + r * (-1.0 / 6.0 + r * (1.0 / 24.0
+            + r * (-1.0 / 120.0 + r * (1.0 / 720.0
+            + r * (-1.0 / 5040.0 + r * (1.0 / 40320.0
+            + r * (-1.0 / 362880.0 + r / 3628800.0)))))));
+        let r2 = r * r;
+        let remainder = r * (1.0 / 12.0 + r2 * (-1.0 / 120.0
+            + r2 * (17.0 / 20160.0 + r2 * (-31.0 / 362880.0
+            + r2 * (691.0 / 79833600.0)))));
+        (c, remainder)
+    } else {
+        // Ordered divisions also cover an overflowing dt/tau: the fully
+        // relaxed branch releases its old stored energy, with no NaN.
+        ((1.0 - b) / r, (1.0 - 2.0 * h) / r)
+    };
+    let shifted = q0 + h * delta;
+    let loss = (0.5 * s * (1.0 + a)) * shifted * shifted
+        + (remainder * delta) * delta;
+    (a * q0 + b * delta, b * q0 + c * delta, loss)
 }
 
 // ---------------------------------------------------------------------------
@@ -757,8 +784,7 @@ fn ls_solve_subset(a: &[f64], b: &[f64], rows: usize, cols: usize, idx: &[usize]
 pub struct ZenerFit {
     /// The fitted, admission-checked model.
     pub model: FractionalZener,
-    /// Relative residual norm after each accepted iteration, ending with
-    /// the converged value.
+    /// Per-iteration relative residual norms.
     pub residual_history: Vec<f64>,
 }
 
@@ -1212,8 +1238,8 @@ mod tests {
             last_d = state.dissipated;
         }
         assert!(state.dissipated > 0.0, "cyclic loading must dissipate");
-        // Ledger closure is BY CONSTRUCTION D = W − U; the load-bearing
-        // check is monotonicity + positivity above. MUTATION: flip the
+        // Heat is now integrated independently of work and storage. The
+        // check above still requires monotonicity. MUTATION: flip the
         // internal-variable update sign (the bead's named control) — the
         // ledger must go NEGATIVE, i.e. the mutant fabricates energy.
         let mut q = 0.0f64;

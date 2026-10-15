@@ -18,7 +18,7 @@
 
 use fs_exec::CancelGate;
 use fs_tribo::{FrictionLaw, TriboError};
-use crate::modal_acoustic_time::{ModalAcousticTimeModel, advance_exact_zoh};
+use crate::modal_acoustic_time::ModalAcousticTimeModel;
 use super::effective_compliance;
 use super::super::{CoupledModalSystem, ModalAttachment, ModalCouplingError,
     dot, finite, invalid, limit, poll};
@@ -217,8 +217,8 @@ impl FrictionModalSystem {
         let mut i = 0;
         for model in &self.network.models {
             poll(gate)?;
-            for (&mode, &state) in model.modes().iter().zip(model.states()) {
-                let q1 = advance_exact_zoh(mode, state, self.network.forces[i], self.network.dt)
+            for (mode_index, &state) in model.states().iter().enumerate() {
+                let q1 = model.advance_exact_zoh_step(mode_index, state, self.network.forces[i])
                     .displacement_m_sqrt_kg;
                 free_increment = finite(free_increment + self.column[i]*(q1-self.network.old_q[i]))?;
                 i += 1;

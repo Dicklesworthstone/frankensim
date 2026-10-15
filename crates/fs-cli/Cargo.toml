@@ -52,6 +52,7 @@ fs-topols = { path = "../fs-topols" }
 fs-topopt = { path = "../fs-topopt", features = ["cutfem-marquee"], optional = true }
 fs-uq = { path = "../fs-uq" }
 fs-viz = { path = "../fs-viz" }
+fs-voi = { path = "../fs-voi" }
 
 [features]
 # Bounded resistance sizing with the existing projected AL optimizer.

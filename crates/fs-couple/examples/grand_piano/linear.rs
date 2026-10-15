@@ -27,7 +27,7 @@
 //! strings still participate; no voice stealing or sympathetic-tail cutoff.
 
 use std::f64::consts::{PI, TAU};
-use fs_couple::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState,
+use fs_couple::modal_acoustic_time::{ModalAcousticMode,
     ModalAcousticTimeBudget, ModalAcousticTimeModel};
 use fs_material::visco::GeneralizedMaxwell;
 use fs_math::{c64::C64, det};
@@ -97,34 +97,13 @@ struct Transition { qq: f64, qv: f64, vq: f64, vv: f64, bq: f64, bv: f64 }
 /// Cold lowering of the EXISTING public exact-ZOH implementation to a reusable
 /// linear map. Unit-energy basis probes avoid extreme-frequency energy limits.
 fn transition_chunk(rate: u32, modes: &[ModalAcousticMode]) -> Result<Vec<Transition>, String> {
-    let mut model = ModalAcousticTimeModel::try_new(rate, modes.to_vec(),
+    let model = ModalAcousticTimeModel::try_new(rate, modes.to_vec(),
         ModalAcousticTimeBudget::audible_reference()).map_err(|e| e.to_string())?;
-    let zeros = vec![0.0; modes.len()];
-    let mut result = vec![Transition::default(); modes.len()];
-    let mut states: Vec<ModalAcousticState> = modes.iter().map(|m| ModalAcousticState {
-        displacement_m_sqrt_kg: 1.0 / m.angular_frequency_rad_s,
-        velocity_m_sqrt_kg_per_s: 0.0,
-    }).collect();
-    model.restore_states(&states).map_err(|e| e.to_string())?;
-    model.step(&zeros).map_err(|e| e.to_string())?;
-    for ((t, state), mode) in result.iter_mut().zip(model.states()).zip(modes) {
-        t.qq = state.displacement_m_sqrt_kg * mode.angular_frequency_rad_s;
-        t.vq = state.velocity_m_sqrt_kg_per_s * mode.angular_frequency_rad_s;
-    }
-    states.fill(ModalAcousticState { displacement_m_sqrt_kg: 0.0, velocity_m_sqrt_kg_per_s: 1.0 });
-    model.restore_states(&states).map_err(|e| e.to_string())?;
-    model.step(&zeros).map_err(|e| e.to_string())?;
-    for (t, state) in result.iter_mut().zip(model.states()) {
-        t.qv = state.displacement_m_sqrt_kg;
-        t.vv = state.velocity_m_sqrt_kg_per_s;
-    }
-    states.fill(ModalAcousticState::default());
-    model.restore_states(&states).map_err(|e| e.to_string())?;
-    model.step(&vec![1.0; modes.len()]).map_err(|e| e.to_string())?;
-    for (t, state) in result.iter_mut().zip(model.states()) {
-        t.bq = state.displacement_m_sqrt_kg;
-        t.bv = state.velocity_m_sqrt_kg_per_s;
-        if !t.bq.is_finite() || t.bq <= 0.0 { return Err("nonpositive ZOH displacement compliance".into()); }
+    let mut result = Vec::with_capacity(modes.len());
+    for i in 0..modes.len() {
+        let (qq, qv, vq, vv, bq, bv) = model.probe_linear_map(i);
+        if !bq.is_finite() || bq <= 0.0 { return Err("nonpositive ZOH displacement compliance".into()); }
+        result.push(Transition { qq, qv, vq, vv, bq, bv });
     }
     Ok(result)
 }

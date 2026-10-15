@@ -8,10 +8,8 @@
 //! - Explicit [`CampaignDisposition::NoData`] until physical acquisition occurs
 //! - Deterministic content-addressed manifest hashing
 
-use crate::corpus::{
-    Availability, DatasetPartition, MAX_CORPUS_TEXT_BYTES, valid_date, valid_slug,
-};
-use crate::rig::{RigError, RigRun, RigSpec};
+use crate::corpus::{DatasetPartition, valid_date, valid_slug};
+use crate::rig::{RigError, RigRun};
 use fs_blake3::{ContentHash, hash_bytes};
 
 /// Schema version for the Level-E campaign manifest.

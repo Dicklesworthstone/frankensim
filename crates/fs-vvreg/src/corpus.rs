@@ -2718,6 +2718,7 @@ impl CorpusDataset {
     }
 
     /// Decode, validate, canonicalize, and byte-compare one dataset.
+    #[allow(clippy::too_many_lines)] // Sequential binary schema decoder and canonical byte verifier.
     pub fn decode(bytes: &[u8]) -> Result<Self, CorpusError> {
         if bytes.len() > MAX_DATASET_CANONICAL_BYTES {
             return Err(CorpusError::ResourceLimit {
@@ -3552,6 +3553,7 @@ impl CorpusRegistry {
     /// Revalidate every dataset and report mandatory completeness plus
     /// optional gaps in stable dataset-id order.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // Complete dataset audit checklist in one deterministic pass.
     pub fn audit(&self) -> CorpusAuditReport {
         let mut rows = Vec::with_capacity(self.datasets.len());
         let mut warnings = Vec::new();

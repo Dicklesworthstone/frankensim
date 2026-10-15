@@ -44,6 +44,29 @@ impl PianoEngine {
         Ok(Self { piano, snap: Vec::with_capacity(4096) })
     }
 
+    /// The same live piano on a soundboard file written by `examples/gen_board.rs`
+    /// (the offline reference's own bridge-informed reduction with more
+    /// coordinates than the embedded board, e.g. `model-d-board-2400-r64.bin`),
+    /// fetched by the page. Same scale, equations and limits as `new`.
+    #[wasm_bindgen(js_name = withBoard)]
+    pub fn with_board(sample_rate: u32, board: &[u8], course_mode_budget: usize, max_dynamic_modes: usize,
+        full_scale_pa: f64) -> Result<PianoEngine, JsError> {
+        let mut cfg = Config::live(sample_rate);
+        if course_mode_budget > 0 { cfg.course_mode_budget = course_mode_budget; }
+        if max_dynamic_modes > 0 { cfg.max_dynamic_modes = max_dynamic_modes.min(1 << 24); }
+        if full_scale_pa > 0.0 { cfg.full_scale_pa = full_scale_pa; }
+        let desc = Description::from_board(board).map_err(|e| JsError::new(&e))?;
+        let piano = LivePiano::new(&desc, cfg).map_err(|e| JsError::new(&e))?;
+        Ok(Self { piano, snap: Vec::with_capacity(4096) })
+    }
+
+    /// A second engine in exactly this engine's state: it renders bit for bit
+    /// what this one would (so a fresh engine can be timed and its copy played
+    /// without building the piano twice). Costs a copy of the engine's memory.
+    pub fn copy(&self) -> PianoEngine {
+        PianoEngine { piano: self.piano.clone(), snap: Vec::with_capacity(self.snap.capacity()) }
+    }
+
     /// JSON statement of exactly what this model includes (see `describe`).
     pub fn info(&self) -> String { crate::describe(&self.piano) }
 

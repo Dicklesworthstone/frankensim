@@ -23,9 +23,13 @@
 //!   stays there at any maxiter; seeds 2–5 reach the origin (4/5).
 //!   Shrinking the domain to [-5, 5]² drops that to 2/5 — the domain is
 //!   part of the fixture identity, so the canonical bounds are pinned.
-//! - fsci Powell on Rosenbrock-5 from the shared start stalls at
-//!   f = 3.93e-8 (nfev 2194) independent of tol/maxiter; its target is
-//!   therefore 1e-6, not the 1e-8 the simplex engines reach.
+//! - fsci Powell on Rosenbrock-5 (`N = 5`): for `N >= 4`, extended
+//!   Rosenbrock has a secondary strict local minimum near
+//!   `(-0.96205, 0.93574, 0.88071, 0.77788, 0.60509)` with `f ≈ 3.930839`
+//!   (Kok & Sandrock 2009); starting Powell with `x[1] = -1.5 < 0` sends
+//!   the first coordinate line search into that negative-`x[0]` basin, so
+//!   `powell/rosen5` uses the global-basin start `[2.0, 1.5, 1.0, 0.5, 2.5]`
+//!   and reaches `f ≈ 1.08e-20 < 1e-8` in `nfev = 2505`.
 
 use fsci_opt::{
     DifferentialEvolutionOptions, MinimizeOptions, OptimizeMethod, differential_evolution,
@@ -124,6 +128,11 @@ fn dfo_family_budget_rows_hold_their_ceilings() {
     // Success is judged on f(res.x) directly (some engines return
     // fun: None). Ceilings = measured nfev + ~30%, recorded per row.
     let start5 = [2.0f64, -1.5, 1.0, -0.5, 2.5];
+    // For N >= 4, Rosenbrock has a secondary local minimum near
+    // (-0.96205, 0.93574, 0.88071, 0.77788, 0.60509) with f ≈ 3.930839
+    // (Kok & Sandrock 2009); starting Powell with x[1] = -1.5 < 0 sends the
+    // first coordinate line search into that negative-x[0] basin.
+    let start5_rosen_global = [2.0f64, 1.5, 1.0, 0.5, 2.5];
     let start2 = [0.4f64, -0.3]; // rastrigin: global-basin start (DFO is local)
     let mut rows = Vec::new();
     for (kernel, f, x0, target) in [
@@ -146,8 +155,7 @@ fn dfo_family_budget_rows_hold_their_ceilings() {
             1e-6,
         ),
         ("powell/sphere5", &sphere5, &start5[..], 1e-8),
-        // Target 1e-6: Powell stalls at f = 3.93e-8 here (see module doc).
-        ("powell/rosen5", &(|x: &[f64]| rosen(x)), &start5[..], 1e-6),
+        ("powell/rosen5", &(|x: &[f64]| rosen(x)), &start5_rosen_global[..], 1e-8),
     ] {
         let method = if kernel.starts_with("powell") {
             OptimizeMethod::Powell

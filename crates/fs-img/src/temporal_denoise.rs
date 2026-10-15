@@ -528,7 +528,7 @@ pub fn temporal_denoise_rgb_with_poll(
     mut poll: impl FnMut() -> bool,
 ) -> Result<TemporalDenoisedFrame, TemporalDenoiseError> {
     let config_identity = config.identity()?;
-    let pixel_count = validate_input(input)?;
+    let pixel_count = validate_input(&input)?;
     let pixel_count_u64 =
         u64::try_from(pixel_count).map_err(|_| TemporalDenoiseError::SizeOverflow {
             context: "pixel count",
@@ -539,7 +539,7 @@ pub fn temporal_denoise_rgb_with_poll(
             limit: limits.max_pixels,
         });
     }
-    validate_history(input, previous, boundary, config_identity)?;
+    validate_history(&input, previous, boundary, config_identity)?;
 
     let retained_bytes = retained_bytes(
         pixel_count,
@@ -576,7 +576,7 @@ pub fn temporal_denoise_rgb_with_poll(
             poll_or_cancel(&mut poll)?;
         }
         let current_rgb = [input.red[index], input.green[index], input.blue[index]];
-        let current_variance = input.variance_luminance[index] / sample_count(input, index) as f32;
+        let current_variance = input.variance_luminance[index] / sample_count(&input, index) as f32;
         let Some(history) = previous else {
             for channel in 0..3 {
                 rgb[channel][index] = current_rgb[channel];
@@ -584,14 +584,14 @@ pub fn temporal_denoise_rgb_with_poll(
             estimate_variance[index] = current_variance;
             continue;
         };
-        let Some(previous_index) = reproject_nearest(input, index) else {
+        let Some(previous_index) = reproject_nearest(&input, index) else {
             for channel in 0..3 {
                 rgb[channel][index] = current_rgb[channel];
             }
             estimate_variance[index] = current_variance;
             continue;
         };
-        if !guides_match_history(input, index, history, previous_index, config) {
+        if !guides_match_history(&input, index, history, previous_index, config) {
             for channel in 0..3 {
                 rgb[channel][index] = current_rgb[channel];
             }
@@ -614,7 +614,7 @@ pub fn temporal_denoise_rgb_with_poll(
             .min(f64::from(config.max_history_weight));
         let history_rgb =
             core::array::from_fn(|channel| history.linear_rgb[channel][previous_index]);
-        let clamped_history = clamp_history_rgb(input, index, history_rgb, config);
+        let clamped_history = clamp_history_rgb(&input, index, history_rgb, config);
         let current_weight = 1.0 - history_weight;
         for channel in 0..3 {
             rgb[channel][index] = (history_weight * f64::from(clamped_history[channel])
@@ -635,7 +635,7 @@ pub fn temporal_denoise_rgb_with_poll(
     ];
     for iteration in 0..config.spatial_iterations {
         spatial_atrous_pass(
-            input,
+            &input,
             &rgb,
             &estimate_variance,
             &mut scratch,
@@ -739,7 +739,7 @@ fn invalid_config<T>(field: &'static str) -> Result<T, TemporalDenoiseError> {
 
 #[allow(clippy::too_many_lines)] // one fixed plane/guide grammar, validated in refusal order
 #[allow(clippy::float_cmp)] // zero is the exact documented invalid/background sentinel
-fn validate_input(input: TemporalDenoiseInput<'_>) -> Result<usize, TemporalDenoiseError> {
+fn validate_input(input: &TemporalDenoiseInput<'_>) -> Result<usize, TemporalDenoiseError> {
     if input.samples_per_pixel == 0 {
         return Err(TemporalDenoiseError::InvalidConfig {
             field: "samples_per_pixel",
@@ -917,7 +917,7 @@ fn invalid_sample<T>(
 }
 
 fn validate_history(
-    input: TemporalDenoiseInput<'_>,
+    input: &TemporalDenoiseInput<'_>,
     previous: Option<&TemporalDenoisedFrame>,
     boundary: TemporalFrameBoundary,
     config_identity: TemporalDenoiseConfigIdentity,
@@ -971,7 +971,7 @@ fn validate_history(
     Ok(())
 }
 
-fn reproject_nearest(input: TemporalDenoiseInput<'_>, index: usize) -> Option<usize> {
+fn reproject_nearest(input: &TemporalDenoiseInput<'_>, index: usize) -> Option<usize> {
     if input
         .previous_motion_valid
         .is_some_and(|valid| !valid[index])
@@ -993,7 +993,7 @@ fn reproject_nearest(input: TemporalDenoiseInput<'_>, index: usize) -> Option<us
 }
 
 fn guides_match_history(
-    input: TemporalDenoiseInput<'_>,
+    input: &TemporalDenoiseInput<'_>,
     current: usize,
     previous: &TemporalDenoisedFrame,
     old: usize,
@@ -1042,7 +1042,7 @@ fn guides_match_history(
 }
 
 fn guides_match_current(
-    input: TemporalDenoiseInput<'_>,
+    input: &TemporalDenoiseInput<'_>,
     center: usize,
     sample: usize,
     config: TemporalDenoiseConfig,
@@ -1118,7 +1118,7 @@ fn normal_matches(left: [f32; 3], right: [f32; 3], threshold: f32) -> bool {
 }
 
 fn clamp_history_rgb(
-    input: TemporalDenoiseInput<'_>,
+    input: &TemporalDenoiseInput<'_>,
     center: usize,
     history_rgb: [f32; 3],
     config: TemporalDenoiseConfig,
@@ -1170,14 +1170,14 @@ fn clamp_history_rgb(
     })
 }
 
-fn sample_count(input: TemporalDenoiseInput<'_>, index: usize) -> u32 {
+fn sample_count(input: &TemporalDenoiseInput<'_>, index: usize) -> u32 {
     input
         .sample_counts_per_pixel
         .map_or(input.samples_per_pixel, |counts| counts[index])
 }
 
 fn spatial_atrous_pass(
-    input: TemporalDenoiseInput<'_>,
+    input: &TemporalDenoiseInput<'_>,
     current: &[Vec<f32>; 3],
     estimate_variance: &[f32],
     next: &mut [Vec<f32>; 3],
@@ -1696,6 +1696,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // tabular refusal battery covering every guide/shape/order rule
     fn malformed_guides_shapes_and_frame_order_fail_closed() {
         let mut malformed = Fixture::surface(2, 2, 0, [0.2; 3]);
         malformed.motion_x.pop();
@@ -1930,6 +1931,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)] // indexes parallel R/G/B channel planes at the same pixel index
     fn joint_rgb_filter_preserves_gray_and_constant_hue_lines() {
         let mut gray = Fixture::surface(6, 2, 0, [0.5; 3]);
         for index in 0..12 {

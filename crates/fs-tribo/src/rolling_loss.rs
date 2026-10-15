@@ -605,15 +605,15 @@ impl RollingLossLaw {
                     patch.normal_load_n,
                     "coulomb_contour_force_n",
                 )?;
-                (
-                    if magnitude == 0.0 || kinematics.contour_speed_mps == 0.0 {
-                        RollingLossStateKind::Quiescent
-                    } else {
-                        RollingLossStateKind::ContourDeformation
-                    },
-                    -kinematics.contour_speed_mps.signum() * magnitude,
-                    0.0,
-                )
+                if magnitude == 0.0 || kinematics.contour_speed_mps == 0.0 {
+                    (RollingLossStateKind::Quiescent, 0.0, 0.0)
+                } else {
+                    (
+                        RollingLossStateKind::ContourDeformation,
+                        -kinematics.contour_speed_mps.signum() * magnitude,
+                        0.0,
+                    )
+                }
             }
             Self::ViscousContour(card) => {
                 let force = -checked_mul(
@@ -641,15 +641,15 @@ impl RollingLossLaw {
                     card.loss_factor,
                     "hysteretic_rolling_moment_nm",
                 )?;
-                (
-                    if magnitude == 0.0 || kinematics.rolling_rate_rad_s == 0.0 {
-                        RollingLossStateKind::Quiescent
-                    } else {
-                        RollingLossStateKind::RollingHysteresis
-                    },
-                    0.0,
-                    -kinematics.rolling_rate_rad_s.signum() * magnitude,
-                )
+                if magnitude == 0.0 || kinematics.rolling_rate_rad_s == 0.0 {
+                    (RollingLossStateKind::Quiescent, 0.0, 0.0)
+                } else {
+                    (
+                        RollingLossStateKind::RollingHysteresis,
+                        0.0,
+                        -kinematics.rolling_rate_rad_s.signum() * magnitude,
+                    )
+                }
             }
         };
         let endpoint_body_power_w = checked_add(

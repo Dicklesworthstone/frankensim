@@ -4,6 +4,7 @@ use super::*;
 use fs_topols::refinement::prolongate_level_set;
 use fs_topols::refinement::projected::{VolumeRefinementStage, refine_controlled};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Stage {
     Read(ContentHash),

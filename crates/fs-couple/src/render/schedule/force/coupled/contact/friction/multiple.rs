@@ -227,8 +227,8 @@ impl MultiFrictionModalSystem {
         let mut at = 0;
         for model in &self.core.network.models {
             poll(gate)?;
-            for (&mode, &state) in model.modes().iter().zip(model.states()) {
-                let q = advance_exact_zoh(mode, state, self.core.network.forces[at], self.sample_period_s())
+            for (mode_index, &state) in model.states().iter().enumerate() {
+                let q = model.advance_exact_zoh_step(mode_index, state, self.core.network.forces[at])
                     .displacement_m_sqrt_kg;
                 self.free_delta[at] = finite(q - self.core.network.old_q[at])?; at += 1;
             }

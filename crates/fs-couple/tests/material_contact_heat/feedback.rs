@@ -141,3 +141,6 @@ fn thermal_source_binding_rejects_foreign_cards_unequal_temperatures_phase_and_c
     assert!(cards.resolve(&point().with("T",330.0).unwrap(),c.source().geometry(),c.source().envelope()).is_err());
 }
 fn interface_from(card:&MaterialCard)->InterfaceSystemCard {interface(card)}
+
+#[path="nonisothermal.rs"]
+mod nonisothermal;

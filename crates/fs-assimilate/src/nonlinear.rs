@@ -326,7 +326,7 @@ where
 pub fn nonlinear_assimilation_invocation_resources(
     prior: &Belief,
     spec: &NonlinearObservationSpec,
-    cx: &Cx<'_>,
+    _cx: &Cx<'_>,
 ) -> Result<fs_exec::InvocationResources, AssimError> {
     let plan = nonlinear_assimilation_work_plan(prior, spec)?;
     let polls = 3_u128

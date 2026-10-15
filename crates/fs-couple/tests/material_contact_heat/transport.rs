@@ -108,3 +108,5 @@ fn thermal_source_failure_foreign_state_and_late_cancellation_are_atomic() {
 mod coupled;
 #[path="refresh.rs"]
 mod refresh;
+#[path="network.rs"]
+mod network;

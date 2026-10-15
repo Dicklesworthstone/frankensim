@@ -38,9 +38,19 @@ pub enum ReverseProblemError {
         bits: u64,
     },
     /// Invalid augmentation policy, units, or problem identity.
-    Augmentation { index: Option<usize>, what: &'static str },
+    Augmentation {
+        /// Constraint index in declaration order, if constraint-specific.
+        index: Option<usize>,
+        /// Specific augmentation defect description.
+        what: &'static str,
+    },
     /// An augmented value, multiplier or derivative became non-finite.
-    NonFiniteAugmentation { index: usize, bits: u64 },
+    NonFiniteAugmentation {
+        /// Constraint index in declaration order.
+        index: usize,
+        /// Raw IEEE-754 bits of the non-finite value.
+        bits: u64,
+    },
     /// Combined root-count arithmetic cannot be represented.
     SizeOverflow,
 }

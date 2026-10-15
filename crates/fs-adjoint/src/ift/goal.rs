@@ -48,19 +48,41 @@ pub enum DensityGoalError {
     /// Invalid caller configuration, shape, or unrepresentable normalization.
     Invalid(&'static str),
     /// Another complete solve cycle could not be funded.
-    Budget { phase: &'static str, applications: usize, limit: usize },
+    Budget {
+        /// Solver phase (`"primal"` or `"adjoint"`).
+        phase: &'static str,
+        /// Operator applications already spent.
+        applications: usize,
+        /// Configured operator-application ceiling.
+        limit: usize,
+    },
     /// The actual returned-state residual, not a Krylov recurrence estimate.
     NotConverged {
+        /// Solver phase (`"primal"` or `"adjoint"`).
         phase: &'static str,
+        /// Completed Krylov iterations.
         iterations: usize,
+        /// Observed relative residual on the returned state.
         relative_residual: f64,
+        /// Required relative residual tolerance.
         tolerance: f64,
+        /// Operator applications spent.
         applications: usize,
     },
     /// Finite inputs led to unrepresentable solver or derivative arithmetic.
-    NonFinite { quantity: &'static str, bits: u64, applications: usize },
+    NonFinite {
+        /// Named quantity that overflowed or became NaN.
+        quantity: &'static str,
+        /// Raw IEEE-754 bits of the non-finite value.
+        bits: u64,
+        /// Operator applications spent prior to detection.
+        applications: usize,
+    },
     /// No partial goal or gradient is published. Spent calls remain attributed.
-    Cancelled { applications: usize },
+    Cancelled {
+        /// Operator applications spent before cancellation drained.
+        applications: usize,
+    },
 }
 impl core::fmt::Display for DensityGoalError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

@@ -6537,11 +6537,13 @@ impl Governor {
             Some(GatePhase::ReadyToResume) => {
                 self.ensure_durable_recovery_complete(&g)?;
                 if let Some(freeze_gate) = g.snapshot_freeze_gates.get(&session) {
-                    if !matches!(
-                        freeze_gate,
-                        freeze_receipt::SnapshotFreezeGateState::Satisfied { .. }
-                    ) {
-                        return Err(SessionError::SnapshotFreezeReceiptRequired { id: session });
+                    match freeze_gate {
+                        freeze_receipt::SnapshotFreezeGateState::Satisfied { receipt }
+                            if receipt.request_ordinal == completed.completion_ordinal
+                                && receipt.acknowledgement_hash == acknowledgement.content_hash => {}
+                        _ => {
+                            return Err(SessionError::SnapshotFreezeReceiptRequired { id: session });
+                        }
                     }
                 }
                 if current_gate.is_requested() {
@@ -6550,6 +6552,7 @@ impl Governor {
                         generation: current_generation,
                     });
                 }
+                g.snapshot_freeze_gates.remove(&session);
                 g.gate_phases.insert(session, GatePhase::Running);
                 g.resume_activations.insert(activation_id, receipt);
                 g.scopes
@@ -6605,17 +6608,11 @@ impl Governor {
         {
             return Err(SessionError::ResumeAcknowledgementMismatch { id: session });
         }
-        let entry = g.snapshot_freeze_gates.entry(session).or_insert(
-            freeze_receipt::SnapshotFreezeGateState::AwaitReceipt {
-                request_ordinal: completed.completion_ordinal,
-                acknowledgement_hash: acknowledgement.content_hash,
-            },
-        );
-        match entry {
-            freeze_receipt::SnapshotFreezeGateState::AwaitReceipt {
+        match g.snapshot_freeze_gates.get(&session) {
+            Some(freeze_receipt::SnapshotFreezeGateState::AwaitReceipt {
                 request_ordinal,
                 acknowledgement_hash,
-            } => {
+            }) => {
                 if *request_ordinal != completed.completion_ordinal
                     || *acknowledgement_hash != acknowledgement.content_hash
                 {
@@ -6624,10 +6621,25 @@ impl Governor {
                         reason: "gate is armed for a different completed pause",
                     });
                 }
-                Ok(())
+                return Ok(());
             }
-            freeze_receipt::SnapshotFreezeGateState::Satisfied { .. } => Ok(()),
+            Some(freeze_receipt::SnapshotFreezeGateState::Satisfied { receipt }) => {
+                if receipt.request_ordinal == completed.completion_ordinal
+                    && receipt.acknowledgement_hash == acknowledgement.content_hash
+                {
+                    return Ok(());
+                }
+            }
+            None => {}
         }
+        g.snapshot_freeze_gates.insert(
+            session,
+            freeze_receipt::SnapshotFreezeGateState::AwaitReceipt {
+                request_ordinal: completed.completion_ordinal,
+                acknowledgement_hash: acknowledgement.content_hash,
+            },
+        );
+        Ok(())
     }
 
     /// Validate an fs-exec committed freeze receipt against THIS governor's
@@ -6653,7 +6665,7 @@ impl Governor {
             });
         }
         let session = request_id.session.0;
-        let mut g = self.inner.lock().expect("governor lock");
+        let g = self.inner.lock().expect("governor lock");
         if !g.tokens.contains_key(&session) {
             return Err(SessionError::UnknownSession { id: session });
         }
@@ -6668,7 +6680,22 @@ impl Governor {
             return Err(SessionError::ResumeAcknowledgementMismatch { id: session });
         }
         match g.snapshot_freeze_gates.get(&session) {
-            Some(freeze_receipt::SnapshotFreezeGateState::Satisfied { .. }) => {}
+            Some(freeze_receipt::SnapshotFreezeGateState::Satisfied { receipt }) => {
+                if receipt.request_ordinal != completed.completion_ordinal
+                    || receipt.acknowledgement_hash != acknowledgement.content_hash
+                {
+                    return Err(SessionError::SnapshotFreezeBindingMismatch {
+                        id: session,
+                        reason: "gate is satisfied for a different completed pause",
+                    });
+                }
+                if !freeze_receipt::matches_recorded_freeze(receipt, freeze) {
+                    return Err(SessionError::SnapshotFreezeBindingMismatch {
+                        id: session,
+                        reason: "completed pause already bound a different freeze receipt",
+                    });
+                }
+            }
             Some(freeze_receipt::SnapshotFreezeGateState::AwaitReceipt {
                 request_ordinal,
                 acknowledgement_hash,
@@ -6689,7 +6716,7 @@ impl Governor {
                 });
             }
         }
-        freeze_receipt::validate_binding(self.id, session, freeze)
+        freeze_receipt::validate_binding(self.id, request_id, freeze)
             .map_err(|(_field, error)| error)?;
         let ledger_scope = g
             .tokens
@@ -6730,7 +6757,9 @@ impl Governor {
                 *request_ordinal == completed.completion_ordinal
                     && *acknowledgement_hash == acknowledgement.content_hash
             }
-            Some(freeze_receipt::SnapshotFreezeGateState::Satisfied { .. }) => true,
+            Some(freeze_receipt::SnapshotFreezeGateState::Satisfied { receipt }) => {
+                receipt == &write.recorded
+            }
             None => false,
         };
         if !still_bound {

@@ -1,0 +1,58 @@
+{
+  "title": "Game pack",
+  "note": "video-game soundtracks sequenced for General MIDI synthesizers: doubled lines, echo copies and chiptune arpeggios, turned into one pianist's part and a drummer's",
+  "entries": [
+    {
+      "id": "stage-1",
+      "title": "Stage 1",
+      "kicker": "Game MIDI · 8 parts",
+      "note": "Two square-wave arpeggio channels at nineteen notes a second, faded in and out by channel volume.",
+      "provenance": "owner-supplied",
+      "groove": "game",
+      "grooveName": "Game MIDI",
+      "tempoBpm": 120,
+      "choruses": 1,
+      "durationS": 124.4,
+      "file": "midi/game-pack/stage-1.mid"
+    },
+    {
+      "id": "stage-1-v2",
+      "title": "Streets of Rage 2, Level 1",
+      "kicker": "Sequenced by The Jade Emperor",
+      "note": "Fourteen parts: every line doubled on two or three instruments, and a delayed copy for echo.",
+      "provenance": "owner-supplied",
+      "groove": "game",
+      "grooveName": "Game MIDI",
+      "tempoBpm": 127,
+      "choruses": 1,
+      "durationS": 273.9,
+      "file": "midi/game-pack/stage-1-v2.mid"
+    },
+    {
+      "id": "stage-1-v3",
+      "title": "Stage 1, another sequence",
+      "kicker": "Sequenced by Kit Smith",
+      "note": "Ten parts, every note at full velocity.",
+      "provenance": "owner-supplied",
+      "groove": "game",
+      "grooveName": "Game MIDI",
+      "tempoBpm": 120,
+      "choruses": 1,
+      "durationS": 97.8,
+      "file": "midi/game-pack/stage-1-v3.mid"
+    },
+    {
+      "id": "character-select",
+      "title": "Character Select",
+      "kicker": "Sequenced by Kit Smith",
+      "note": "Eight parts and a layered double kick, every note at full velocity.",
+      "provenance": "owner-supplied",
+      "groove": "game",
+      "grooveName": "Game MIDI",
+      "tempoBpm": 100,
+      "choruses": 1,
+      "durationS": 79.2,
+      "file": "midi/game-pack/character-select.mid"
+    }
+  ]
+}

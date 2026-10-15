@@ -1825,8 +1825,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(with_bloom.samples(), without_bloom.samples());
-        assert_eq!(with_bloom.metadata().glare_source_rgb_sum(), 0.0);
-        assert_eq!(with_bloom.metadata().glare_added_rgb_sum(), 0.0);
+        assert_eq!(with_bloom.metadata().glare_source_rgb_sum().to_bits(), 0.0_f64.to_bits());
+        assert_eq!(with_bloom.metadata().glare_added_rgb_sum().to_bits(), 0.0_f64.to_bits());
     }
 
     #[test]

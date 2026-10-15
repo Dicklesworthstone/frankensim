@@ -1,5 +1,5 @@
 import { GroupPlayer, type PlayerState } from "./audio";
-import { el, fmt, fmtSci, hidpi, sciNode } from "./util";
+import { el, fmt, fmtSci, hidpi, sciNode, asset } from "./util";
 
 export interface ClipEvidence {
   command?: string | null;
@@ -103,7 +103,7 @@ export class ClipGroupView {
   constructor(host: HTMLElement, private readonly manifest: Manifest, private readonly groupId: string, private readonly opts: ClipGroupOptions = {}) {
     const group = manifest.groups[groupId]!;
     const urls: Record<string, string> = {};
-    for (const id of group.clips) urls[id] = "/" + manifest.clips[id]!.audio;
+    for (const id of group.clips) urls[id] = asset(manifest.clips[id]!.audio);
     this.current = group.clips[0]!;
     this.player = new GroupPlayer(urls, this.current);
 
@@ -207,7 +207,7 @@ export class ClipGroupView {
     items.push(["playback gain", `${this.group.playback_gain_db.toFixed(1)} dB`]);
     this.meta.replaceChildren(...items.map(([k, v, u]) => el("span", {}, `${k} `, el("b", {}, v, u ?? ""))));
     this.renderEvidence();
-    const fetchImage = (): void => void loadImage("/" + c.spectrogram).then((img) => {
+    const fetchImage = (): void => void loadImage(asset(c.spectrogram)).then((img) => {
       if (this.clip === c) {
         this.img = img;
         this.draw();

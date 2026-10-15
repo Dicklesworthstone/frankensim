@@ -113,6 +113,21 @@ The `drum-modal` linear-only image refuses rather than dropping felt history.
 Rimshots, stick-stick collisions, evolving footprint area and exterior mallet
 radiation remain outside this chart. The v1 fixed-axis image does not include
 mallet rotation or shaft bending; the explicit v2 composition below does.
+
+Because `estimated-felt-mallet.fsmallet` supplies a `20 g` effective mass (`2.76x`
+the default `7.243 g` Z5A tip inertia) and a `3000 N/m`, `6 N s/m` Kelvin branch
+over a `12 mm`-radius four-site footprint, a `2.5 m/s` off-center strike at
+`(0.06, 0.01) m` on the `14x6.5 in` stretching drum dissipates `44.92 mJ` of its
+`62.50 mJ` initial kinetic energy (`71.9%`, versus `0.74 mJ` / `3.3%` for the
+Hertz stick) and remains in lingering two-phase compression through `2.37 ms`
+(`0.010..0.534 ms` and `1.434..2.372 ms`). That second compression coincides
+with the upward return of the `(0,1)` fundamental (`~205-244 Hz`), damping
+post-contact tonal head acceleration by `9.6 dB` (`369` vs `1110 m/s^2` RMS)
+while leaving the `327-448 Hz` `(1,1)`/`(2,1)` asymmetric modes (`+2.2 dB` to
+`+7.2 dB` relative to the fundamental) and the direct-feedthrough `>1 kHz`
+contact/stretching acceleration transient (`-17.4 dB` vs `-27.0 dB` of total
+energy) comparatively prominent. Darker, faster-rebounding felt strokes require
+a lighter or less viscous card rather than this heavily damped illustrative fixture.
 Paired hi-hats admit one felt mallet on either hand through the same curved-skin
 and loaded-shaft owners. Their twelve stand sites plus four mallet sites fill
 the existing sixteen-pad limit; a second felt mallet refuses. See [HIHAT.md](HIHAT.md).

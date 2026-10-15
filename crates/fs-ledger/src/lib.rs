@@ -2807,7 +2807,12 @@ fn int_from_usize(n: usize) -> i64 {
 }
 
 fn normalize_schema_sql(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    let collapsed = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.starts_with("CREATE TRIGGER IF NOT EXISTS ") {
+        collapsed.replacen("CREATE TRIGGER IF NOT EXISTS ", "CREATE TRIGGER ", 1)
+    } else {
+        collapsed
+    }
 }
 
 const LEDGER_IDENTITY_GUARDS: [(&str, &str); 3] = [

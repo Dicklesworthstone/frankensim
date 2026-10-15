@@ -50,7 +50,7 @@ fn input(dry_force_n: Option<f64>, with_bildsten: bool) -> ReducedDecayInput {
         initial_theta_rad: INITIAL_THETA_RAD,
         validity_cutoff_theta_rad: CUTOFF_THETA_RAD,
         timestep_s: TIMESTEP_S,
-        maximum_steps: 120_000,
+        maximum_steps: 300_000,
         small_angle_oracle_source_id: "synthetic/small-angle-oracle-v1".to_owned(),
         dry_contour: dry_force_n.map(dry_channel),
         bildsten_boundary_layer: with_bildsten.then(bildsten_channel),

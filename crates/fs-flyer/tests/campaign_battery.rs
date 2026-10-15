@@ -75,8 +75,20 @@ fn campaign_emits_a_complete_consistent_selection_receipt() {
         r.receipt_digest, again.receipt_digest,
         "bit-identical twice"
     );
+    // GOLDEN-BUMP (frankensim-htzmi, attributed to phi67 commits 1a810fcba +
+    // 54dc7b7f1): fs-wakeref updated V-08b1 referee_receipt.receipt_digest
+    // (c439dbce… → 2dc1262c…) and enforced MAX_WAKE_ROWS=600 per station
+    // instead of truncating wake history at 600/8=75 steps during the
+    // 480-step campaign fixtures. Pinned per-ISA (fs_wing::romreduce uses
+    // platform f64::hypot; bit-identical across debug and release on each ISA).
+    #[cfg(target_arch = "aarch64")]
+    const EXPECTED_RECEIPT_DIGEST: &str =
+        "648ae44d30b50fb3b7ec62ee3994248eb7dbc98198ca31cf0fec971af4dea401";
+    #[cfg(not(target_arch = "aarch64"))]
+    const EXPECTED_RECEIPT_DIGEST: &str =
+        "da71eaa999323dc8b3d4b7ba60e6f125c964303b4617e5c7713a18d09175c01b";
     assert_eq!(
-        r.receipt_digest, "a282b8b3e2d08cbb7d8acfa8671be21799da527313369c8beb9e1357db36ae09",
+        r.receipt_digest, EXPECTED_RECEIPT_DIGEST,
         "selection golden moved — determinism regression or an \
          intentional campaign change requiring the golden-bump protocol"
     );

@@ -1,5 +1,5 @@
 import { GroupPlayer } from "./audio";
-import { dpr, el, fmt, hidpi, sciNode } from "./util";
+import { dpr, el, fmt, hidpi, sciNode, asset } from "./util";
 
 interface Descriptor { real?: number | number[] | null; ours?: number | number[] | null; note?: string; rms_gap_db?: number | null; n?: number[]; bands_hz?: number[]; partials_used?: number[] }
 interface Pair {
@@ -13,6 +13,7 @@ interface Pair {
   images: { real: string; ours: string; diff: string; f_lo: number; f_hi: number; span_db: number; diff_range_db: number };
   descriptors: Record<string, Descriptor>;
 }
+interface KitSummary { pairs: { ruler: { ours_db: number; real_other_dynamic_db: number } }[] }
 interface Verisim {
   pairs: Pair[];
   piano_ruler: { real_pp_vs_real_mf_db: number; real_mf_vs_real_ff_db: number; note: string };
@@ -96,8 +97,34 @@ function rulerChart(canvas: HTMLCanvasElement, rows: { label: string; value: num
   draw();
 }
 
+export type VerdictKind = "close" | "mixed" | "off";
+
+export function pianoToneVerdict(
+  dull: number,
+  softInside: boolean,
+  matched: boolean,
+): { kind: VerdictKind; text: string } {
+  const absDull = Math.abs(dull);
+  const brightInside = Number.isFinite(dull) && absDull <= 3;
+  const kind: VerdictKind =
+    softInside && brightInside ? "close" : softInside || brightInside ? "mixed" : "off";
+  const softClause = softInside
+    ? "pp and mf partial levels sit inside the real piano's own change of touch."
+    : "pp and mf partial levels sit outside the real piano's own change of touch.";
+  const matchedSuffix = matched ? ", even at matched loudness" : "";
+  const ffClause = !Number.isFinite(dull)
+    ? "ff brightness could not be measured."
+    : brightInside
+      ? `ff brightness is within ${absDull.toFixed(0)} dB of the recording${matched ? " at matched loudness" : ""}.`
+      : `ff is ${absDull.toFixed(0)} dB ${dull >= 0 ? "too dull" : "too bright"}${matchedSuffix}.`;
+  return {
+    kind,
+    text: `${softClause} ${ffClause} Several sounds the real piano lacks are listed below.`,
+  };
+}
+
 /** Three-line verdict up front, computed like the findings: both the words and the grade follow the data. */
-function verdicts(v: Verisim): HTMLElement {
+function verdicts(v: Verisim, kit: KitSummary | null): HTMLElement {
   const d = (id: string, k: string): Descriptor | undefined => v.pairs.find((x) => x.id === id)?.descriptors[k];
   const n = (id: string, k: string, side: "real" | "ours"): number => (d(id, k)?.[side] as number | null | undefined) ?? NaN;
   const relErr = (id: string, realRef: number): number => Math.abs(n(id, "inharmonicity_B", "ours") - realRef) / realRef;
@@ -109,21 +136,21 @@ function verdicts(v: Verisim): HTMLElement {
   const dull = n(ff, "high_band_db", "real") - n(ff, "high_band_db", "ours");
   const gap = (id: string): number => (d(id, "partial_envelope_db")?.rms_gap_db as number | null | undefined) ?? NaN;
   const softInside = gap("a3-pp") <= v.piano_ruler.real_pp_vs_real_mf_db && gap("a3-mf") <= v.piano_ruler.real_pp_vs_real_mf_db;
-  const rows = v.cymbal_ruler.rows;
-  const crashes = rows.filter((r) => r.real && /crash/.test(r.label)).map((r) => r.rms_gap_db);
-  const ours = Math.min(...rows.filter((r) => !r.real && /m\/s/.test(r.label)).map((r) => r.rms_gap_db));
-  type Kind = "close" | "mixed" | "off";
-  const grade = (k: Kind): [Kind, string, string] => (k === "close" ? [k, "✓", "Close"] : k === "mixed" ? [k, "◐", "Mixed"] : [k, "✕", "Not yet"]);
-  const card = ([kind, mark, word]: [Kind, string, string], title: string, text: string): HTMLElement =>
+  const grade = (k: VerdictKind): [VerdictKind, string, string] => (k === "close" ? [k, "✓", "Close"] : k === "mixed" ? [k, "◐", "Mixed"] : [k, "✕", "Not yet"]);
+  const card = ([kind, mark, word]: [VerdictKind, string, string], title: string, text: string): HTMLElement =>
     el("div", { class: `vs-verdict ${kind}` },
       el("div", { class: "vs-verdict-head" }, el("span", { class: "vs-mark", "aria-hidden": "true" }, mark), el("span", { class: "vs-word" }, word), el("h4", {}, title)),
       el("p", {}, text));
-  const toneKind: Kind = softInside && dull <= 3 ? "close" : softInside || dull <= 3 ? "mixed" : "off";
-  const cymKind: Kind = ours <= Math.max(...crashes) ? "close" : ours <= 1.5 * Math.max(...crashes) ? "mixed" : "off";
+  const tone = pianoToneVerdict(dull, softInside, matched);
+  // The drum kit is graded piece by piece in its own section against a real kit (Salamander overheads).
+  const pieces = kit?.pairs ?? [];
+  const within = pieces.filter((p) => p.ruler.ours_db <= p.ruler.real_other_dynamic_db).length;
+  const ratio = pieces.length ? pieces.map((p) => p.ruler.ours_db / Math.max(p.ruler.real_other_dynamic_db, 0.1)).sort((a, b) => a - b)[Math.floor(pieces.length / 2)]! : NaN;
+  const kitKind: VerdictKind = pieces.length && within === pieces.length ? "close" : within > 0 || ratio <= 3 ? "mixed" : "off";
   return el("div", { class: "vs-verdicts" },
     card(grade(bErr <= 0.15 ? "close" : bErr <= 0.3 ? "mixed" : "off"), "Piano strings", `Inharmonicity within ${Math.ceil(bErr * 100)}% of a real Steinway at A3 and C6, measured from the partials of both.`),
-    card(grade(toneKind), "Piano tone", `${softInside ? "pp and mf partial levels sit inside the real piano's own change of touch." : "pp and mf partial levels sit outside the real piano's own change of touch."} ff is ${dull.toFixed(0)} dB ${dull >= 0 ? "too dull" : "too bright"}${matched ? ", even at matched loudness" : ""}. Several sounds the real piano lacks are listed below.`),
-    card(grade(cymKind), "Splash cymbal", `${ours.toFixed(0)} dB from a real splash, where other real cymbals sit ${Math.min(...crashes).toFixed(0)}–${Math.max(...crashes).toFixed(0)} dB away.`),
+    card(grade(tone.kind), "Piano tone", tone.text),
+    ...(pieces.length ? [card(grade(kitKind), "Drum kit", `${within} of ${pieces.length} pieces sit as close to a real stroke as the same real drum played one dynamic away; the median piece is ${ratio.toFixed(1)}× that distance. Graded in the kit section above.`)] : []),
   );
 }
 
@@ -148,8 +175,16 @@ function findings(v: Verisim): HTMLElement[] {
   const within = gap("a3-pp") <= ruler.real_pp_vs_real_mf_db && gap("a3-mf") <= ruler.real_pp_vs_real_mf_db && gap("a3-ff") <= ruler.real_mf_vs_real_ff_db;
   items.push([within ? "Partial levels stay within one real dynamic step." : "Partial levels drift beyond one real dynamic step.",
     `The partial-level gap to the recording is ${gap("a3-pp").toFixed(1)} dB at pp, ${gap("a3-mf").toFixed(1)} dB at mf and ${gap("a3-ff").toFixed(1)} dB at ff. The real piano changes by ${ruler.real_pp_vs_real_mf_db.toFixed(1)} dB from pp to mf and ${ruler.real_mf_vs_real_ff_db.toFixed(1)} dB from mf to ff. At mf, 2–8 kHz brightness is within ${Math.abs(num("a3-mf", "high_band_db", "real") - num("a3-mf", "high_band_db", "ours")).toFixed(1)} dB. This is one coarse measure; the sounds below are what set the two apart by ear.`]);
-  if (dyn.ours_db["ff8"] !== undefined) items.push(["ff is too dull, even at matched loudness.",
-    `From mf to ff the real piano gains ${brightGain("real_high_band_db", "ff").toFixed(1)} dB of 2–8 kHz brightness and ${dyn.real_db["ff"]!.toFixed(1)} dB of level. FrankenSim at 4.5 m/s gains ${brightGain("ours_high_band_db", "ff").toFixed(1)} dB of brightness and ${dyn.ours_db["ff"]!.toFixed(1)} dB of level. At 8 m/s, the hardest stroke rendered, it reaches ${dyn.ours_db["ff8"]!.toFixed(1)} dB of level, close to the real ff, but is still ${(num("a3-ff8", "high_band_db", "real") - num("a3-ff8", "high_band_db", "ours")).toFixed(1)} dB duller. Stroke speed alone does not explain it.`]);
+  if (dyn.ours_db["ff8"] !== undefined) {
+    const ff8Dull = num("a3-ff8", "high_band_db", "real") - num("a3-ff8", "high_band_db", "ours");
+    const ff8Abs = Math.abs(ff8Dull);
+    const ff8Word = ff8Dull >= 0 ? "dull" : "bright";
+    const ff8Comp = ff8Dull >= 0 ? "duller" : "brighter";
+    items.push([
+      ff8Abs <= 3 ? "ff brightness lands within 3 dB at matched loudness." : `ff is too ${ff8Word}, even at matched loudness.`,
+      `From mf to ff the real piano gains ${brightGain("real_high_band_db", "ff").toFixed(1)} dB of 2–8 kHz brightness and ${dyn.real_db["ff"]!.toFixed(1)} dB of level. FrankenSim at 4.5 m/s gains ${brightGain("ours_high_band_db", "ff").toFixed(1)} dB of brightness and ${dyn.ours_db["ff"]!.toFixed(1)} dB of level. At 8 m/s, the hardest stroke rendered, it reaches ${dyn.ours_db["ff8"]!.toFixed(1)} dB of level, close to the real ff, ${ff8Abs <= 3 ? `and within ${ff8Abs.toFixed(1)} dB of its brightness.` : `but is still ${ff8Abs.toFixed(1)} dB ${ff8Comp}. Stroke speed alone does not explain it.`}`,
+    ]);
+  }
   const kA = hz("a3-mf", "low_knock_early_db", "ours"), kC = hz("c6-mf", "low_knock_early_db", "ours");
   items.push(["A low resonance rings too loudly at the start.",
     `In the first half second FrankenSim has a component near ${kA.toFixed(0)} Hz at ${num("a3-mf", "low_knock_early_db", "ours").toFixed(1)} dB relative to the fundamental. The real piano's strongest component in that band sits at ${num("a3-mf", "low_knock_early_db", "real").toFixed(1)} dB. ${Math.abs(kA - kC) < 2 ? `It appears at the same frequency when C6 is struck (${kC.toFixed(1)} Hz), so it belongs to the modelled instrument, not to the A3 string. ` : ""}Later the two agree (${num("a3-mf", "low_knock_late_db", "ours").toFixed(1)} dB and ${num("a3-mf", "low_knock_late_db", "real").toFixed(1)} dB).`]);
@@ -159,24 +194,20 @@ function findings(v: Verisim): HTMLElement[] {
     `At mf, partial 4 decays at ${at(dr.ours, 4).toFixed(1)} dB/s in FrankenSim against ${at(dr.real, 4).toFixed(1)} dB/s on the real piano. Partial 2 goes the other way: ${at(dr.ours, 2).toFixed(1)} dB/s against ${at(dr.real, 2).toFixed(1)} dB/s. Decay is set by losses at the bridge and in the string, so this points at the coupling and damping model.`]);
   items.push(["The attack is sharper.",
     `FrankenSim rises in about ${num("a3-mf", "attack_rise_ms", "ours").toFixed(1)} ms, the recording in about ${num("a3-mf", "attack_rise_ms", "real").toFixed(1)} ms. The Iowa microphones sat 8 inches above the strings in a normal room; ours is a single point 1 m above the board with no room, so part of this gap may belong to the recording rather than the piano.`]);
-  const cr = v.cymbal_ruler.rows;
-  const cv = (label: string): number => cr.find((r) => r.label === label)?.rms_gap_db ?? NaN;
-  const crashes = cr.filter((r) => r.real && /crash/.test(r.label)).map((r) => r.rms_gap_db);
-  const od = p("splash-mf")?.descriptors["octave_decay_db_s"];
-  const ratios = od && Array.isArray(od.real) && Array.isArray(od.ours)
-    ? (od.ours as number[]).map((o, i) => { const r0 = (od.real as number[])[i]!; return r0 < -3 ? o / r0 : NaN; }).filter(Number.isFinite) : [];
-  items.push(["The cymbal is not there yet.",
-    `Relative to its 0.2–2 kHz band, the real splash's 2–8 kHz band sits at ${signed(num("splash-mf", "high_band_db", "real"))} dB; FrankenSim's 2 m/s render sits at ${signed(num("splash-mf", "high_band_db", "ours"))} dB${ratios.length ? `, and its octave bands decay up to ${Math.max(...ratios).toFixed(0)}× faster` : ""}. In octave-band balance it sits ${cv("FrankenSim splash, 2 m/s").toFixed(1)} dB from the real splash. Real 13-, 17- and 18-inch crashes sit ${Math.min(...crashes).toFixed(1)}–${Math.max(...crashes).toFixed(1)} dB away. The felt-mallet render comes closest at ${cv("FrankenSim splash, felt mallet").toFixed(1)} dB, though the reference was struck with a stick.`]);
   // A missing number must not reach the page as "NaN dB".
   return items.filter(([, t]) => !t.includes("NaN")).map(([h, t]) => el("li", {}, el("b", {}, h), " ", t));
 }
 
 export async function mountVerisim(root: HTMLElement): Promise<void> {
+  // The diagnosis has its own data file: it must not vanish when the scorecard fails to load.
+  void mountDiagnosis();
   let data: Verisim;
   try {
-    const res = await fetch("/data/verisim.json");
+    const res = await fetch(asset("data/verisim.json"));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     data = (await res.json()) as Verisim;
+    // The retired modal splash is no longer on the page: drums and cymbals are graded in the kit section.
+    data.pairs = data.pairs.filter((p) => p.kind === "piano");
   } catch (e) {
     root.style.minHeight = "0";
     root.replaceChildren(el("p", { class: "panel small", role: "status" }, `The comparison data could not be loaded (${(e as Error).message}). Reload to try again.`));
@@ -219,7 +250,7 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
   let player: GroupPlayer | null = null;
   const makePlayer = (): void => {
     player?.pause();
-    player = new GroupPlayer({ real: "/" + current.audio.real, ours: "/" + current.audio.ours }, "real");
+    player = new GroupPlayer({ real: asset(current.audio.real), ours: asset(current.audio.ours) }, "real");
     player.onState = () => labelButtons();
   };
   const which = (slot: 0 | 1): "real" | "ours" => (blind ? blindOrder[slot]! : slot === 0 ? "real" : "ours");
@@ -274,7 +305,7 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
     subtitle.textContent = sub.charAt(0).toUpperCase() + sub.slice(1);
     viewBtns["real"]!.disabled = blind;
     viewBtns["ours"]!.disabled = blind;
-    img.src = "/" + current.images[view];
+    img.src = asset(current.images[view]);
     img.alt = `${view === "diff" ? "Difference" : view === "real" ? "Real recording" : "FrankenSim"} spectrogram, ${current.title}, 40 Hz to 16 kHz on a log axis`;
     legend.textContent = view === "diff"
       ? `Difference in dB, FrankenSim minus the recording, after matching early loudness: orange = FrankenSim louder, blue = FrankenSim quieter (±${current.images.diff_range_db} dB). Near-black = within a few dB of each other, or both below the shared floor.`
@@ -313,11 +344,11 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
   }
 
   const pianoRuler = el("canvas", { "aria-label": "Partial-envelope gaps: FrankenSim versus the real piano, and the real piano versus itself across dynamics" });
-  const cymRuler = el("canvas", { "aria-label": "Distance from the real splash cymbal: real crashes, the same splash at other dynamics, and FrankenSim" });
   const gap = (id: string): number => (pairs.find((p) => p.id === id)?.descriptors["partial_envelope_db"]?.rms_gap_db ?? NaN) as number;
 
+  const kit = await fetch(asset("data/kit.json")).then((r) => (r.ok ? (r.json() as Promise<KitSummary>) : null)).catch(() => null);
   root.append(
-    verdicts(data),
+    verdicts(data, kit),
     el("div", { class: "panel" },
       el("div", { class: "panel-head" }, el("h3", {}, "Listen and look, side by side"), el("div", { class: "tags" }, el("span", { class: "tag offline" }, "Offline reference"), el("span", { class: "tag plain" }, "Real recording"))),
       seg, subtitle,
@@ -327,15 +358,11 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
           reveal, tabs, imgBox, legend),
         el("div", { class: "stack" }, el("h4", {}, "Scorecard"), tableBox, source)),
     ),
-    el("div", { class: "grid two", style: "margin-top: 22px" },
+    el("div", { style: "margin-top: 22px" },
       el("figure", { class: "panel" },
         el("h3", {}, "Piano: a ruler made of the real piano"),
         el("p", { class: "muted small", style: "margin: 8px 0 14px" }, "How far apart are the partial-level envelopes (partials 2–16 relative to partial 1)? Blue bars are the real Steinway against itself, one dynamic apart: what a change of touch alone does. Brass bars are FrankenSim against the real piano at the same dynamic. A brass bar left of the dashed line differs from the recording by less than the real piano differs from itself between mf and ff."),
         el("div", { class: "chart" }, pianoRuler)),
-      el("figure", { class: "panel" },
-        el("h3", {}, "Cymbal: a ruler made of real cymbals"),
-        el("p", { class: "muted small", style: "margin: 8px 0 14px" }, "How far is each sound from the real splash struck mf, in octave-band balance over the first 250 ms? Blue bars are real cymbals from the same anechoic session, brass bars are FrankenSim. A brass bar left of the dashed line would be as close to this splash as a real crash cymbal is."),
-        el("div", { class: "chart" }, cymRuler)),
     ),
   );
   rulerChart(pianoRuler, [
@@ -347,10 +374,8 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
     { label: "FrankenSim vs real, ff at 8 m/s", value: gap("a3-ff8"), real: false },
     { label: "FrankenSim vs real, C6 mf", value: gap("c6-mf"), real: false },
   ].filter((r) => Number.isFinite(r.value)), "dB");
-  rulerChart(cymRuler, data.cymbal_ruler.rows.map((r) => ({ label: r.label, value: r.rms_gap_db, real: r.real })), "dB");
   const host = document.getElementById("verisim-findings");
   if (host) host.replaceChildren(...findings(data));
-  void mountDiagnosis();
   makePlayer();
   render();
 }
@@ -363,7 +388,7 @@ async function mountDiagnosis(): Promise<void> {
   if (!root) return;
   let rows: DiagRow[];
   try {
-    const res = await fetch("/data/diagnosis.json");
+    const res = await fetch(asset("data/diagnosis.json"));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     rows = ((await res.json()) as { rows: DiagRow[] }).rows;
   } catch (e) {

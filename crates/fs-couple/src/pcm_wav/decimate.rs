@@ -12,7 +12,7 @@
 use fs_math::det;
 use std::f64::consts::PI;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Stage {
     ratio: usize, channels: usize, half: usize, center: f64,
     pairs: Vec<(usize, f64)>, history: Vec<f64>, head: usize,
@@ -99,11 +99,21 @@ impl Stage {
             let end = ((frame + 1) * self.ratio - 1) as isize;
             let center = self.frame(input, end - self.half as isize);
             for (value, x) in out.iter_mut().zip(center) { *value = self.center * x; }
-            for &(lag, weight) in &self.pairs {
-                let a = self.frame(input, end - lag as isize);
-                let b = self.frame(input, end - (2 * self.half - lag) as isize);
-                for ((value, a), b) in out.iter_mut().zip(a).zip(b) {
-                    *value += weight * if self.antisymmetric { a - b } else { a + b };
+            if self.antisymmetric {
+                for &(lag, weight) in &self.pairs {
+                    let a = self.frame(input, end - lag as isize);
+                    let b = self.frame(input, end - (2 * self.half - lag) as isize);
+                    for ((value, a), b) in out.iter_mut().zip(a).zip(b) {
+                        *value += weight * (a - b);
+                    }
+                }
+            } else {
+                for &(lag, weight) in &self.pairs {
+                    let a = self.frame(input, end - lag as isize);
+                    let b = self.frame(input, end - (2 * self.half - lag) as isize);
+                    for ((value, a), b) in out.iter_mut().zip(a).zip(b) {
+                        *value += weight * (a + b);
+                    }
                 }
             }
         }
@@ -120,7 +130,7 @@ impl Stage {
 /// One input block is exactly `ratio` interleaved mechanics frames; one output
 /// is one interleaved audio frame. All buffers are prepared once. Preview and
 /// commit let an acoustic observer reject overflow without losing filter time.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Decimator {
     stages: Vec<Stage>, buffers: Vec<Vec<f64>>, pending: bool,
     ratio: usize, channels: usize, delay: f64,

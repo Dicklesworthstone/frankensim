@@ -5,7 +5,7 @@
 use super::{Model,Pole,MAX_PORTS};
 use fs_math::{c64::C64,det};
 const TERMS:usize=32;
-const SWEEPS:usize=256;
+const SWEEPS:usize=512;
 
 pub struct Fit {
     pub model:Model,
@@ -15,10 +15,20 @@ pub struct Fit {
     pub resistance_rms_error:f64,
 }
 fn dictionary(low:f64,high:f64)->Vec<(f64,f64)> {
-    let mut poles:Vec<_>=(0..TERMS-1).map(|j| {
-        let w=det::exp(det::ln(low/4.)+(det::ln(8.*high)-det::ln(low/4.))*j as f64/(TERMS-2) as f64);
-        (w,0.2)
-    }).collect();
+    let mut poles=Vec::with_capacity(TERMS);
+    for &factor in &[0.35,0.55,0.80] {
+        poles.push((low*factor,0.25));
+    }
+    let in_band=22usize;
+    for j in 0..in_band {
+        let w=det::exp(det::ln(low)+(det::ln(high)-det::ln(low))*j as f64/(in_band-1) as f64);
+        poles.push((w,0.12));
+    }
+    let high_band=TERMS-1-poles.len();
+    for j in 1..=high_band {
+        let w=det::exp(det::ln(high)+(det::ln(8.*high)-det::ln(high))*j as f64/high_band as f64);
+        poles.push((w,0.25));
+    }
     // Off-band lossless storage permits compact dipole loads without imposing
     // an artificial minimum resistance. Its pole must still resolve at runtime.
     poles.push((8.*high,0.));poles
@@ -49,6 +59,52 @@ fn psd(a:&[f64],n:usize,id:&[f64])->Result<Vec<f64>,String> {
     Ok(out)
 }
 
+fn quadratic_objective(residue:&[Vec<f64>],gram:&[f64],rhs:&[Vec<f64>])->f64 {
+    let mut total=0.0_f64;
+    for j in 0..TERMS {
+        let mut dot_rhs=0.0_f64;
+        for (&r,&b) in residue[j].iter().zip(&rhs[j]) {dot_rhs+=r*b;}
+        let mut quad=0.0_f64;
+        for k in 0..TERMS {
+            let g=gram[j*TERMS+k];
+            let mut inner=0.0_f64;
+            for (&rj,&rk) in residue[j].iter().zip(&residue[k]) {inner+=rj*rk;}
+            quad+=g*inner;
+        }
+        total+=0.5*quad-dot_rhs;
+    }
+    total
+}
+
+fn block_psd_sweep(
+    start:&[Vec<f64>],
+    gram:&[f64],
+    rhs:&[Vec<f64>],
+    ports:usize,
+    id:&[f64],
+)->Result<(Vec<Vec<f64>>,f64,f64),String> {
+    let size=ports*ports;
+    let mut state=start.to_vec();
+    let mut change=0.0_f64;
+    let mut magnitude=0.0_f64;
+    for j in 0..TERMS {
+        let mut candidate=vec![0.;size];
+        for (a,value) in candidate.iter_mut().enumerate() {
+            *value=(rhs[j][a]-(0..TERMS).filter(|k|*k!=j)
+                .map(|k|gram[j*TERMS+k]*state[k][a]).sum::<f64>())/gram[j*TERMS+j];
+        }
+        for i in 0..ports {for k in 0..i {
+            let v=0.5*(candidate[i*ports+k]+candidate[k*ports+i]);
+            candidate[i*ports+k]=v;candidate[k*ports+i]=v;
+        }}
+        let projected=psd(&candidate,ports,id)?;
+        for (old,new) in state[j].iter_mut().zip(projected) {
+            change=change.max((*old-new).abs());magnitude=magnitude.max(new.abs());*old=new;
+        }
+    }
+    Ok((state,change,magnitude))
+}
+
 /// Fit EVEN samples only. Odd samples are never used for coefficients,
 /// convergence stopping, dictionary choice or tolerance selection.
 pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
@@ -69,11 +125,13 @@ pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
     }
     // Balance resistive and reactive error using TRAINING data only. A very
     // small physical radiation resistance must not disappear in an inertance-
-    // dominated complex least-squares objective. Blocks still have a scalar
-    // Hessian, so the PSD projection remains their exact minimizer.
+    // dominated complex least-squares objective, while respecting that the
+    // complex RMS limit (.02) is tighter than the resistance RMS limit (.05).
+    // Blocks still have a scalar Hessian, so the PSD projection remains their
+    // exact minimizer.
     let real_scale=data.iter().step_by(2).map(|row|row.iter().fold(0.0_f64,|s,z|s.hypot(z.re)))
         .fold(0.0_f64,f64::max);
-    let real_weight=if real_scale==0. {1.} else {scale/real_scale};
+    let real_weight=if real_scale==0. {1.} else {(0.35*(scale/real_scale)).max(1.0)};
     if !real_weight.is_finite() || real_weight>1e12 {
         return Err("radiation resistance is below the load fit's relative resolution budget".into());
     }
@@ -94,26 +152,34 @@ pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
         return Err("unresolved passive fit dictionary".into());
     }
     let id=identity(ports);let mut residue=vec![vec![0.;size];TERMS];
+    let mut y=residue.clone();
+    let mut obj=quadratic_objective(&residue,&gram,&rhs);
+    let mut t=1.0_f64;
     // Exact block minimization: for fixed other blocks, the quadratic Hessian
     // is a positive scalar times identity. Symmetric PSD projection solves
     // this block's constrained least-squares problem, using fs-modal's owner.
+    // Monotone Nesterov extrapolation accelerates ill-conditioned dictionary
+    // coupling while keeping every accepted iterate strictly in the PSD cone.
     for _ in 0..SWEEPS {
-        let mut change=0.0_f64;let mut magnitude=0.0_f64;
-        for j in 0..TERMS {
-            let mut candidate=vec![0.;size];
-            for (a,value) in candidate.iter_mut().enumerate() {
-                *value=(rhs[j][a]-(0..TERMS).filter(|k|*k!=j)
-                    .map(|k|gram[j*TERMS+k]*residue[k][a]).sum::<f64>())/gram[j*TERMS+j];
+        let (mut next,mut change,mut magnitude)=block_psd_sweep(&y,&gram,&rhs,ports,&id)?;
+        let mut next_obj=quadratic_objective(&next,&gram,&rhs);
+        if !(next_obj<=obj) {
+            (next,change,magnitude)=block_psd_sweep(&residue,&gram,&rhs,ports,&id)?;
+            next_obj=quadratic_objective(&next,&gram,&rhs);
+            t=1.0;
+            y.clone_from(&next);
+        } else {
+            let next_t=0.5*(1.0+det::sqrt(1.0+4.0*t*t));
+            let beta=(t-1.0)/next_t;
+            for j in 0..TERMS {
+                for a in 0..size {
+                    y[j][a]=next[j][a]+beta*(next[j][a]-residue[j][a]);
+                }
             }
-            for i in 0..ports {for k in 0..i {
-                let v=0.5*(candidate[i*ports+k]+candidate[k*ports+i]);
-                candidate[i*ports+k]=v;candidate[k*ports+i]=v;
-            }}
-            let projected=psd(&candidate,ports,&id)?;
-            for (old,new) in residue[j].iter_mut().zip(projected) {
-                change=change.max((*old-new).abs());magnitude=magnitude.max(new.abs());*old=new;
-            }
+            t=next_t;
         }
+        residue=next;
+        obj=next_obj;
         if change<=1e-10*(1.+magnitude) {break;}
     }
     let mut model=Model {ports,poles:Vec::new()};

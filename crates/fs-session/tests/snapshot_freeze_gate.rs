@@ -104,12 +104,13 @@ fn gated_fixture(session: u64, scope: &'static str) -> GatedFixture {
     }
 }
 
-/// Drive one full fs-exec freeze transaction bound to `governor` + `session`
-/// and return the committed typed receipt.
-fn commit_freeze(
+/// Drive one full fs-exec freeze transaction bound to `governor`, `session`,
+/// and `labels` and return the committed typed receipt.
+fn commit_freeze_with_labels(
     governor: &Governor,
     session: u64,
     nonce_tag: u8,
+    labels: FreezeBoundaryLabels,
 ) -> fs_exec::freeze::SnapshotFreezeReceipt {
     use fs_exec::solver::snapshot_v2 as sv2;
 
@@ -146,10 +147,6 @@ fn commit_freeze(
         instance_nonce: [nonce_tag; 32],
     };
     let registry = SnapshotFreezeRegistry::new(binding).expect("fixture registry");
-    let labels = FreezeBoundaryLabels {
-        pause_request: sv2::SnapshotPauseRequestIdV2::from_bytes([0xC1; 32]),
-        gate_generation: 1,
-    };
     let inputs = FreezeResumeInputs {
         algorithm: sv2::SnapshotAlgorithmIdV2::from_bytes([0xD1; 32]),
         algorithm_version: 1,
@@ -166,7 +163,7 @@ fn commit_freeze(
         fs_blake3::identity::CanonicalLimits::new(16_384, 4_096, 32, 32, 64),
         4_096,
         1 << 20,
-        64,
+        1 << 20,
     );
     let run_gate = fs_exec::CancelGate::new();
     run_gate.request();
@@ -176,7 +173,9 @@ fn commit_freeze(
     let mut cancellation = || false;
     let permit = request
         .freeze(
-            FixtureState { marker: 7 },
+            FixtureState {
+                marker: u64::from(nonce_tag),
+            },
             &tracker,
             labels,
             inputs,
@@ -189,6 +188,22 @@ fn commit_freeze(
         .expect("envelope sealed")
         .receipt()
         .clone()
+}
+
+fn commit_freeze(
+    governor: &Governor,
+    session: u64,
+    request_id: fs_session::PauseRequestId,
+    nonce_tag: u8,
+) -> fs_exec::freeze::SnapshotFreezeReceipt {
+    use fs_exec::solver::snapshot_v2 as sv2;
+    let labels = FreezeBoundaryLabels {
+        pause_request: sv2::SnapshotPauseRequestIdV2::from_bytes(
+            *request_id.checkpoint_authority().as_bytes(),
+        ),
+        gate_generation: request_id.gate_generation(),
+    };
+    commit_freeze_with_labels(governor, session, nonce_tag, labels)
 }
 
 #[test]
@@ -205,7 +220,12 @@ fn gated_resume_refuses_until_receipt_is_recorded_then_activates() {
         Err(SessionError::SnapshotFreezeReceiptRequired { id: 60 })
     ));
 
-    let freeze = commit_freeze(&fixture.governor, 60, 0x5A);
+    let freeze = commit_freeze(
+        &fixture.governor,
+        60,
+        fixture.acknowledgement.request_id(),
+        0x5A,
+    );
     let write = fixture
         .governor
         .record_snapshot_freeze_receipt(&fixture.ledger, 1_000, &fixture.acknowledgement, &freeze)
@@ -239,7 +259,12 @@ fn foreign_session_receipt_fails_closed() {
         .require_snapshot_freeze(&fixture.acknowledgement)
         .expect("gate armed");
     // Bound to a DIFFERENT session number than the paused one.
-    let freeze = commit_freeze(&fixture.governor, 999, 0x5B);
+    let freeze = commit_freeze(
+        &fixture.governor,
+        999,
+        fixture.acknowledgement.request_id(),
+        0x5B,
+    );
     assert!(matches!(
         fixture.governor.record_snapshot_freeze_receipt(
             &fixture.ledger,
@@ -259,7 +284,12 @@ fn foreign_session_receipt_fails_closed() {
 #[test]
 fn un_armed_pause_refuses_receipt_publication() {
     let fixture = gated_fixture(62, "freeze-gate-unarmed");
-    let freeze = commit_freeze(&fixture.governor, 62, 0x5C);
+    let freeze = commit_freeze(
+        &fixture.governor,
+        62,
+        fixture.acknowledgement.request_id(),
+        0x5C,
+    );
     assert!(matches!(
         fixture.governor.record_snapshot_freeze_receipt(
             &fixture.ledger,
@@ -281,3 +311,157 @@ fn legacy_pauses_activate_without_any_freeze_machinery() {
         .activate_resume(&fixture.acknowledgement)
         .expect("unarmed legacy path activates");
 }
+
+#[test]
+fn mismatched_pause_labels_fail_closed() {
+    use fs_exec::solver::snapshot_v2 as sv2;
+
+    let fixture = gated_fixture(64, "freeze-gate-labels");
+    fixture
+        .governor
+        .require_snapshot_freeze(&fixture.acknowledgement)
+        .expect("gate armed");
+    let request_id = fixture.acknowledgement.request_id();
+
+    let wrong_pause = commit_freeze_with_labels(
+        &fixture.governor,
+        64,
+        0x61,
+        FreezeBoundaryLabels {
+            pause_request: sv2::SnapshotPauseRequestIdV2::from_bytes([0xC1; 32]),
+            gate_generation: request_id.gate_generation(),
+        },
+    );
+    assert!(matches!(
+        fixture.governor.record_snapshot_freeze_receipt(
+            &fixture.ledger,
+            10,
+            &fixture.acknowledgement,
+            &wrong_pause
+        ),
+        Err(SessionError::SnapshotFreezeBindingMismatch { id: 64, .. })
+    ));
+
+    let wrong_generation = commit_freeze_with_labels(
+        &fixture.governor,
+        64,
+        0x62,
+        FreezeBoundaryLabels {
+            pause_request: sv2::SnapshotPauseRequestIdV2::from_bytes(
+                *request_id.checkpoint_authority().as_bytes(),
+            ),
+            gate_generation: request_id.gate_generation() + 1,
+        },
+    );
+    assert!(matches!(
+        fixture.governor.record_snapshot_freeze_receipt(
+            &fixture.ledger,
+            11,
+            &fixture.acknowledgement,
+            &wrong_generation
+        ),
+        Err(SessionError::SnapshotFreezeBindingMismatch { id: 64, .. })
+    ));
+}
+
+#[test]
+fn conflicting_second_receipt_on_satisfied_gate_fails_closed() {
+    let fixture = gated_fixture(65, "freeze-gate-conflict");
+    fixture
+        .governor
+        .require_snapshot_freeze(&fixture.acknowledgement)
+        .expect("gate armed");
+    let request_id = fixture.acknowledgement.request_id();
+    let first = commit_freeze(&fixture.governor, 65, request_id, 0x71);
+    let second = commit_freeze(&fixture.governor, 65, request_id, 0x72);
+
+    let write = fixture
+        .governor
+        .record_snapshot_freeze_receipt(&fixture.ledger, 20, &fixture.acknowledgement, &first)
+        .expect("first receipt recorded");
+    assert_eq!(
+        write.disposition,
+        SnapshotFreezePublicationDisposition::Committed
+    );
+
+    assert!(matches!(
+        fixture.governor.record_snapshot_freeze_receipt(
+            &fixture.ledger,
+            21,
+            &fixture.acknowledgement,
+            &second
+        ),
+        Err(SessionError::SnapshotFreezeBindingMismatch { id: 65, .. })
+    ));
+}
+
+#[test]
+fn activated_resume_consumes_satisfied_gate_and_next_pause_requires_fresh_receipt() {
+    let fixture = gated_fixture(66, "freeze-gate-second-pause");
+    fixture
+        .governor
+        .require_snapshot_freeze(&fixture.acknowledgement)
+        .expect("first gate armed");
+    let first_freeze = commit_freeze(
+        &fixture.governor,
+        66,
+        fixture.acknowledgement.request_id(),
+        0x81,
+    );
+    fixture
+        .governor
+        .record_snapshot_freeze_receipt(
+            &fixture.ledger,
+            30,
+            &fixture.acknowledgement,
+            &first_freeze,
+        )
+        .expect("first receipt recorded");
+    fixture
+        .governor
+        .activate_resume(&fixture.acknowledgement)
+        .expect("first resume activated");
+
+    // Trigger a second pause on the resumed gate.
+    fixture.acknowledgement.resume_gate().request();
+    let action_id = fixture
+        .governor
+        .pressure_action_id(SessionId(66), "freeze-gate-pressure-2")
+        .expect("second pressure action authority");
+    let receipt = fixture
+        .governor
+        .apply_memory_pressure(action_id, 3)
+        .expect("second pause request minted");
+    let request_id_2 = receipt
+        .events()
+        .last()
+        .and_then(|event| event.pause_request_id)
+        .expect("second pause request authority");
+    let checkpoint_2 = solver_checkpoint(&fixture.ledger, request_id_2, "freeze-gate-fixture-2");
+    let acknowledgement_2 = fixture
+        .governor
+        .acknowledge_pause(request_id_2, &fixture.ledger, &checkpoint_2)
+        .expect("second pause acknowledged");
+
+    // Re-arming for the second pause must require a new receipt rather than
+    // inheriting the first pause's satisfied gate.
+    fixture
+        .governor
+        .require_snapshot_freeze(&acknowledgement_2)
+        .expect("second gate armed");
+    assert!(matches!(
+        fixture.governor.activate_resume(&acknowledgement_2),
+        Err(SessionError::SnapshotFreezeReceiptRequired { id: 66 })
+    ));
+
+    let second_freeze = commit_freeze(&fixture.governor, 66, request_id_2, 0x82);
+    fixture
+        .governor
+        .record_snapshot_freeze_receipt(&fixture.ledger, 31, &acknowledgement_2, &second_freeze)
+        .expect("second receipt recorded");
+    fixture
+        .governor
+        .activate_resume(&acknowledgement_2)
+        .expect("second resume activated");
+}
+

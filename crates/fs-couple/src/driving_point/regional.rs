@@ -8,6 +8,8 @@
 
 /// Physical outlet observation of the existing regional transfer.
 pub mod outlet;
+/// Independent exterior gas at the terminal pressure/volume-flow port.
+pub mod exterior;
 
 use super::{DrivingPointError, characteristic_line_response};
 use fs_duct::{Duct, DuctError, DuctResponse, HoleState, LossModel, Segment, Termination,
@@ -36,6 +38,7 @@ pub struct RegionalDuct {
     regions: Vec<Region>,
     gases: Vec<GasState>,
     one_way_time_s: f64,
+    exterior_gas: Option<GasState>,
 }
 
 fn invalid(what: &'static str) -> DuctError { DuctError::BadParameter { what } }
@@ -109,7 +112,7 @@ impl RegionalDuct {
         if !one_way_time_s.is_finite() || one_way_time_s <= 0.0 {
             return Err(invalid("regional travel time must be positive and finite"));
         }
-        Ok(Self { regions, gases: gases.to_vec(), one_way_time_s })
+        Ok(Self { regions, gases: gases.to_vec(), one_way_time_s, exterior_gas: None })
     }
 
     /// Resolved media in authored segment order, including hole records.
@@ -120,7 +123,8 @@ impl RegionalDuct {
     #[must_use]
     pub fn inlet_gas(&self) -> &GasState { &self.gases[0] }
 
-    /// Actual terminal medium used by the shared analytic radiation load.
+    /// Actual internal medium at the terminal axial segment. Radiation uses
+    /// [`Self::exterior_gas`], which defaults to this state.
     #[must_use]
     pub fn outlet_gas(&self) -> &GasState { self.gases.last().expect("nonempty binding") }
 
@@ -141,8 +145,7 @@ impl RegionalDuct {
         }
         let mut runs = self.regions.iter().rev();
         let terminal = runs.next().expect("nonempty binding");
-        let mut response = input_impedance_wall(&terminal.duct, &terminal.gas,
-            omega, loss, termination, wall)?;
+        let mut response = self.terminal_response(terminal, omega, loss, termination, wall)?;
         for region in runs {
             let upstream = input_impedance_load(&region.duct, &region.gas, omega,
                 loss, response.impedance, wall)?;
@@ -171,7 +174,8 @@ impl RegionalDuct {
         -> Result<DelayedFilter, DrivingPointError> {
         // Delegate the uniform case verbatim, including the order of travel-time
         // arithmetic at the FFT-size thresholds.
-        if self.regions.len() == 1 {
+        if self.regions.len() == 1 && (self.exterior_gas() == self.outlet_gas()
+            || matches!(termination, Termination::Closed | Termination::IdealOpen)) {
             let r = &self.regions[0];
             return super::characteristic_line_dense(&r.duct, &r.gas, termination,
                 sample_rate_hz, n, self.inlet_impedance(), wall, n_fft_override);

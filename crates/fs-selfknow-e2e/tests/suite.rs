@@ -285,8 +285,29 @@ fn stage_4_abstraction_ladder() {
 
 #[test]
 fn stage_5_explanation_objects() {
-    use fs_adjoint::explain::{Elliptic1d, Explanation, adjoint_attribution, finalize};
+    use fs_adjoint::explain::{
+        Elliptic1d, Explanation, adjoint_attribution, finalize, provenance_attribution,
+    };
     let h = Harness::new("explain");
+    // Telescoping provenance edits reconcile within certified aggregation
+    // roundoff (G3 — the permanent invariant).
+    let edits = vec![
+        ("thicken-spar".to_string(), 10.00, 10.40),
+        ("trim-flange".to_string(), 10.40, 10.15),
+        ("re-route-duct".to_string(), 10.15, 10.90),
+    ];
+    let ok = finalize(
+        provenance_attribution(&edits).expect("valid telescoping history"),
+        10.90 - 10.00,
+        1e-12,
+    )
+    .expect("valid provenance explanation finalization");
+    h.log(
+        "explain.reconcile",
+        &format!("{{\"ok\":{}}}", ok.reconciles()),
+    );
+    assert!(matches!(ok, Explanation::Explained { .. }) && ok.reconciles());
+
     let fixture = Elliptic1d::new(100).expect("bounded explanation fixture");
     let a0 = vec![1.0f64; 101];
     let mut a1 = a0.clone();
@@ -299,23 +320,24 @@ fn stage_5_explanation_objects() {
         - fixture
             .compliance(&fixture.solve(&a0).expect("positive conductivity solves"))
             .expect("finite compliance");
-    // Full channel set: reconciles within bounds (G3 — the permanent
-    // invariant).
+    // Full channel set removes the hidden-channel residual while remaining an
+    // honest no-claim until floating-point solve/accumulation rounding is
+    // proved (bead 9sf6/6pf9).
     let full = [
         ("left-half", (0..50).collect::<Vec<_>>()),
         ("right-half", (50..=100).collect::<Vec<_>>()),
     ];
-    let ok = finalize(
+    let full_adj = finalize(
         adjoint_attribution(&fixture, &a0, &a1, &full).expect("valid full attribution"),
         observed,
         1e-8,
     )
     .expect("valid explanation finalization");
-    h.log(
-        "explain.reconcile",
-        &format!("{{\"ok\":{}}}", ok.reconciles()),
+    assert!(
+        matches!(full_adj, Explanation::Refused { residual, .. } if residual.abs() < 1e-14)
+            && full_adj.is_structurally_valid()
+            && !full_adj.reconciles()
     );
-    assert!(matches!(ok, Explanation::Explained { .. }) && ok.reconciles());
     // Hidden channel: the honesty gate refuses AND the rendering layer
     // refuses too (no confabulated explanation).
     let partial = [("left-half", (0..50).collect::<Vec<_>>())];
@@ -340,8 +362,8 @@ fn stage_5_explanation_objects() {
     );
     verdict(
         "stage-5",
-        "channels + residual reconcile to the observed change; a hidden channel makes \
-         BOTH the gate and the narrative refuse — no confabulation (G3)",
+        "channels + residual reconcile to the observed change; unproved FP allowances \
+         and hidden channels make BOTH the gate and the narrative refuse — no confabulation (G3)",
     );
 }
 

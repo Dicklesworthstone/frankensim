@@ -337,10 +337,40 @@
       "title": "The FSMATPK material pack family",
       "owner": "fs-matdb",
       "version_kind": "integer-const",
-      "version_constant": "MATDB_PACK_SCHEMA_VERSION",
+      "version_constant": "MATDB_STRESS_PACK_SCHEMA_VERSION",
       "version_location": "crates/fs-matdb/src/pack.rs",
-      "current_version": "1",
+      "current_version": "7",
       "lockstep": [
+        {
+          "constant": "MATDB_PACK_SCHEMA_VERSION",
+          "location": "crates/fs-matdb/src/pack.rs",
+          "value": "1"
+        },
+        {
+          "constant": "MATDB_TYPED_PACK_SCHEMA_VERSION",
+          "location": "crates/fs-matdb/src/pack.rs",
+          "value": "2"
+        },
+        {
+          "constant": "MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION",
+          "location": "crates/fs-matdb/src/pack.rs",
+          "value": "3"
+        },
+        {
+          "constant": "MATDB_HARDNESS_PACK_SCHEMA_VERSION",
+          "location": "crates/fs-matdb/src/pack.rs",
+          "value": "4"
+        },
+        {
+          "constant": "MATDB_TENSOR_PACK_SCHEMA_VERSION",
+          "location": "crates/fs-matdb/src/pack.rs",
+          "value": "5"
+        },
+        {
+          "constant": "MATDB_STRAIN_PACK_SCHEMA_VERSION",
+          "location": "crates/fs-matdb/src/pack.rs",
+          "value": "6"
+        },
         {
           "constant": "SPECIES_PACK_SCHEMA_VERSION",
           "location": "crates/fs-matdb/src/species_pack.rs",
@@ -360,6 +390,11 @@
           "constant": "MATERIAL_CARD_PACK_SCHEMA_VERSION",
           "location": "crates/fs-matdb/src/material_pack.rs",
           "value": "1"
+        },
+        {
+          "constant": "MATERIAL_CARD_MODEL_PACK_SCHEMA_VERSION",
+          "location": "crates/fs-matdb/src/material_pack.rs",
+          "value": "2"
         }
       ],
       "surface": [
@@ -370,9 +405,46 @@
       ],
       "minor_bump": "may add optional payload sections that an older reader can skip without changing any admitted query answer",
       "major_bump": "any container, magic, or payload-structure change; every shipped pack must be recompilable from its tracked source",
-      "migration_obligation": "no-predecessor",
-      "migration_evidence": [],
-      "deprecation_horizon": "not yet applicable: the family has never been bumped, so no predecessor exists to support"
+      "migration_obligation": "auto-migration-receipt",
+      "migration_evidence": [
+        {
+          "test": "normalized_pack_round_trips_exact_bytes_and_semantics",
+          "location": "crates/fs-matdb/tests/pack.rs"
+        },
+        {
+          "test": "g3_typed_pack_preserves_quantity_identity_and_refuses_version_reinterpretation",
+          "location": "crates/fs-matdb/tests/pack.rs"
+        },
+        {
+          "test": "g3_typed_axis_pack_roundtrips_material_interface_and_joint_queries",
+          "location": "crates/fs-matdb/tests/pack.rs"
+        },
+        {
+          "test": "g3_hardness_tests_select_exact_apparatus_through_material_interface_and_joint_replay",
+          "location": "crates/fs-matdb/tests/pack.rs"
+        },
+        {
+          "test": "g3_elastic_components_preserve_context_through_pack_query_and_replay",
+          "location": "crates/fs-matdb/tests/pack.rs"
+        },
+        {
+          "test": "g3_strain_context_pack_queries_and_receipts_preserve_all_coordinates",
+          "location": "crates/fs-matdb/tests/pack.rs"
+        },
+        {
+          "test": "g0_g3_stress_pack_preserves_context_and_does_not_alias_stiffness",
+          "location": "crates/fs-matdb/tests/pack.rs"
+        },
+        {
+          "test": "material_card_pack_round_trips_deterministically",
+          "location": "crates/fs-matdb/tests/material_pack.rs"
+        },
+        {
+          "test": "g0_model_association_refuses_substitution_and_silent_downgrade",
+          "location": "crates/fs-matdb/tests/material_pack.rs"
+        }
+      ],
+      "deprecation_horizon": "prior pack schema versions (v1..v6 material packs and v1 model-free material-card packs) remain frozen and decode byte-identically alongside the current version; version-tag substitution without matching payload structure is refused"
     },
     {
       "id": "ledger.schema",

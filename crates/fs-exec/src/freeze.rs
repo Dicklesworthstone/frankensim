@@ -1015,9 +1015,7 @@ mod tests {
 
     impl fs_blake3::identity::CancellationProbe for TestProbe {
         fn is_cancelled(&mut self) -> bool {
-            if self.panic_on_poll {
-                panic!("seeded seal unwind");
-            }
+            assert!(!self.panic_on_poll, "seeded seal unwind");
             self.cancelled
         }
     }
@@ -1058,7 +1056,7 @@ mod tests {
     }
 
     /// Gate requested + one worker registered and drained.
-    fn drained_tracker<'a>(gate: &'a CancelGate) -> DrainTracker<'a> {
+    fn drained_tracker(gate: &CancelGate) -> DrainTracker<'_> {
         gate.request();
         let tracker = DrainTracker::new(RunId(77), gate);
         drop(tracker.register_worker().expect("register worker"));
@@ -1246,6 +1244,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn duplicate_seals_after_commit_refuse_as_spent() {
         let registry = SnapshotFreezeRegistry::new(owner_binding(0x09)).unwrap();
         let gate = CancelGate::new();
@@ -1275,8 +1274,7 @@ mod tests {
                     barrier.wait();
                     // Dropping a winning request here poisons the terminal;
                     // admission counting stays exact either way.
-                    let admitted = registry.begin_freeze().is_ok();
-                    admitted
+                    registry.begin_freeze().is_ok()
                 })
             })
             .collect();
@@ -1292,6 +1290,6 @@ mod tests {
     #[test]
     fn exec_mode_remains_importable_for_callers() {
         // Guard against accidental removal of re-exports used by sessions.
-        let _mode = ExecMode::Deterministic;
+        assert_eq!(ExecMode::Deterministic, ExecMode::Deterministic);
     }
 }

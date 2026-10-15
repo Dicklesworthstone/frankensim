@@ -22,6 +22,7 @@ pub const LONG_JOB_REQUEST_IDENTITY_DOMAIN: &str = "org.frankensim.fs-session.lo
 pub const MAX_LONG_JOB_OPERATOR_BYTES: usize = 128;
 /// Maximum UTF-8 bytes in a canonical model-family name.
 pub const MAX_LONG_JOB_MODEL_FAMILY_BYTES: usize = 128;
+#[allow(dead_code)]
 const LONG_JOB_REQUEST_DIGEST_BYTES: usize = 32;
 
 const FIELD_JOB_KIND: u8 = 1;
@@ -427,6 +428,7 @@ fn long_job_request_hash_with_schema(
     hash_domain(domain, &preimage)
 }
 
+#[allow(dead_code)]
 fn long_job_request_identity_transport_is_current(identity_version: u32, digest: &[u8]) -> bool {
     identity_version == LONG_JOB_REQUEST_IDENTITY_VERSION
         && digest.len() == LONG_JOB_REQUEST_DIGEST_BYTES

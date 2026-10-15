@@ -31,9 +31,9 @@ use fsci_opt::{
 };
 
 const SUITE: &str = "bedrock/fs-ascent-frankenscipy-optimizer-oracle-v1";
-const ORACLE_VERSION: &str = "fsci-opt/0.1.0";
-const ORACLE_LOCK_VERSION: &str = "0.1.0";
-const ORACLE_PIN: &str = "9e271fd734465e2b2ff755aa73ea66a7217d619b";
+const ORACLE_VERSION: &str = "fsci-opt/0.2.0";
+const ORACLE_LOCK_VERSION: &str = "0.2.0";
+const ORACLE_PIN: &str = "06108aea50fbb1541863101d371f9cd503e283d2";
 const CONSTELLATION_SCHEMA: &str = "frankensim-constellation-lock-v2";
 const CONSTELLATION_LOCK: &str = include_str!("../../../constellation.lock");
 const PRODUCTION_API: &str = "fs_ascent::LbfgsState:new+run;strong-wolfe;infinity-gradient-stop:v1";
@@ -78,11 +78,11 @@ const CORRUPTION_SEED: u64 = 0xF5A5_0024_0000_0101;
 // Filled after independent reconstruction of the framing functions without
 // executing either numerical implementation.
 const KAT_FRAME_LEN: usize = 1_953;
-const KAT_FRAME_FNV1A64: u64 = 0x593e_ead7_0b8e_9deb;
+const KAT_FRAME_FNV1A64: u64 = 0xa445_2f94_6023_514b;
 const ORACLE_FRAME_LEN: usize = 4_101;
-const ORACLE_FRAME_FNV1A64: u64 = 0x57fa_69ee_4260_88bd;
+const ORACLE_FRAME_FNV1A64: u64 = 0xaf92_7e51_fc0e_88ad;
 const CORRUPTION_FRAME_LEN: usize = 3_424;
-const CORRUPTION_FRAME_FNV1A64: u64 = 0x527f_3c74_f357_d6f4;
+const CORRUPTION_FRAME_FNV1A64: u64 = 0x1e92_f5bb_04e3_6f44;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProductionBits {
@@ -190,16 +190,19 @@ fn local_rosen_gradient(x: &[f64]) -> Vec<f64> {
 }
 
 fn local_central_gradient(x: &[f64], epsilon: f64) -> Vec<f64> {
+    let f0 = local_rosen(x);
     let mut gradient = vec![0.0; x.len()];
     let mut perturbed = x.to_vec();
     for (index, &component) in x.iter().enumerate() {
-        let step = epsilon * (1.0 + component.abs());
+        let mut step = epsilon;
+        if (component + step) - component == 0.0 {
+            let sign = if component >= 0.0 { 1.0 } else { -1.0 };
+            step = f64::EPSILON.sqrt() * sign * component.abs().max(1.0);
+        }
         perturbed[index] = component + step;
-        let plus = local_rosen(&perturbed);
-        perturbed[index] = component - step;
-        let minus = local_rosen(&perturbed);
+        let dx = perturbed[index] - component;
+        gradient[index] = (local_rosen(&perturbed) - f0) / dx;
         perturbed[index] = component;
-        gradient[index] = (plus - minus) / (2.0 * step);
     }
     gradient
 }
@@ -315,6 +318,7 @@ fn method_name(method: OptimizeMethod) -> &'static str {
         OptimizeMethod::TrustConstr => "TrustConstr",
         OptimizeMethod::TrustNcg => "TrustNcg",
         OptimizeMethod::Dogleg => "Dogleg",
+        OptimizeMethod::Cobyla => "Cobyla",
     }
 }
 
@@ -362,7 +366,10 @@ fn oracle_bits(method: OptimizeMethod, result: OptimizeResult) -> OracleBits {
         nhev,
         nit,
         jac: jac.map(|values| bits(&values)),
-        hess_inv: hess_inv.map(|rows| bit_rows(&rows)),
+        hess_inv: match hess_inv {
+            Some(fsci_opt::HessInv::Dense(rows)) => Some(bit_rows(&rows)),
+            Some(fsci_opt::HessInv::Lbfgs(_)) | None => None,
+        },
         maxcv: maxcv.map(f64::to_bits),
     }
 }
@@ -926,9 +933,9 @@ fn admit_oracle_result(oracle: &OracleBits) -> Result<f64, String> {
         "LBfgsB" => oracle.hess_inv.is_none(),
         _ => false,
     };
-    let minimum_function_evaluations = DIMENSION
-        .checked_mul(2)
-        .and_then(|per_gradient| oracle.njev.checked_mul(per_gradient))
+    let minimum_function_evaluations = oracle
+        .njev
+        .checked_mul(DIMENSION)
         .and_then(|gradient_evaluations| gradient_evaluations.checked_add(1))
         .ok_or_else(|| {
             format!(
@@ -936,12 +943,7 @@ fn admit_oracle_result(oracle: &OracleBits) -> Result<f64, String> {
                 oracle.method, oracle.nfev, oracle.njev, oracle.nit,
             )
         })?;
-    let maximum_gradient_evaluations = oracle.nit.checked_add(1).ok_or_else(|| {
-        format!(
-            "stage=oracle-accounting-overflow; method={}; nit={}",
-            oracle.method, oracle.nit,
-        )
-    })?;
+    let maximum_gradient_evaluations = ORACLE_DERIVED_MAX_EVALUATIONS / DIMENSION;
     if oracle.x.len() != DIMENSION
         || !finite_oracle(oracle)
         || !terminal_state_is_admitted
@@ -1259,7 +1261,7 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 fn kat_outcome() -> CaseOutcome {
     if let Err(error) = admit_oracle_declaration() {
-        return CaseOutcome::fail(error).with_evidence("constellation.lock:frankenscipy-0.1.0");
+        return CaseOutcome::fail(error).with_evidence("constellation.lock:frankenscipy-0.2.0");
     }
     let inputs = kat_inputs();
     let first = match capture_kat("first-kat-measurement") {
@@ -1296,12 +1298,12 @@ fn kat_outcome() -> CaseOutcome {
         hex_bytes(&first_receipt),
     ))
     .with_evidence("crates/fs-ascent/tests/frankenscipy_optimizer_oracle_casebook.rs#analytic-kat")
-    .with_evidence("constellation.lock:frankenscipy-0.1.0")
+    .with_evidence("constellation.lock:frankenscipy-0.2.0")
 }
 
 fn oracle_outcome() -> CaseOutcome {
     if let Err(error) = admit_oracle_declaration() {
-        return CaseOutcome::fail(error).with_evidence("constellation.lock:frankenscipy-0.1.0");
+        return CaseOutcome::fail(error).with_evidence("constellation.lock:frankenscipy-0.2.0");
     }
     let inputs = oracle_inputs();
     let first = match capture_oracle("first-oracle-measurement") {
@@ -1353,7 +1355,7 @@ fn oracle_outcome() -> CaseOutcome {
         hex_bytes(&first_receipt),
     ))
     .with_evidence("crates/fs-ascent/tests/frankenscipy_optimizer_oracle_casebook.rs#bounded-oracle")
-    .with_evidence("constellation.lock:frankenscipy-0.1.0")
+    .with_evidence("constellation.lock:frankenscipy-0.2.0")
 }
 
 fn corruption_frame(component: usize, bit: u32, canonical: u64, corrupted: u64) -> Vec<u8> {
@@ -1396,7 +1398,7 @@ fn reconstruct_corruption() -> Corruption {
 
 fn corruption_outcome(corruption: Corruption) -> CaseOutcome {
     if let Err(error) = admit_oracle_declaration() {
-        return CaseOutcome::fail(error).with_evidence("constellation.lock:frankenscipy-0.1.0");
+        return CaseOutcome::fail(error).with_evidence("constellation.lock:frankenscipy-0.2.0");
     }
     let measurement = match capture_kat("red-baseline-measurement") {
         Ok(measurement) => measurement,

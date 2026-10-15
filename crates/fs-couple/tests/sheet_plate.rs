@@ -17,7 +17,7 @@ fn sheet(mu:f64,bending:f64) -> ResolvedSheet {
             validity:ValidityDomain::unconstrained().with("specimen",3.0,3.0),uncertainty:UncertaintyModel::Unstated,
             observations:vec![],provenance:Provenance {source:"synthetic independent sheet".into(),license:"test-only".into(),artifact:None}}).unwrap();
     }
-    let card=MaterialCard::assemble(MaterialStateId {chemistry:"sheet".into(),phase:"solid".into(),process:"synthetic".into(),revision:1},claims,vec![]).unwrap();
+    let card=MaterialCard::assemble(MaterialStateId {chemistry:"sheet".into(),phase:"solid".into(),process:"synthetic".into(),revision:0},claims,vec![]).unwrap();
     resolve_sheet(&card,&QueryPoint::new().with("specimen",3.0).unwrap(),SheetCapabilities {membrane:false,bending:true},
         MaterialPropertySelection::SingleClaimOnly).unwrap()
 }
@@ -34,7 +34,7 @@ fn exact_existing_assembly_and_material_identity_are_preserved() {
         thickness:s.thickness_m(),density:s.areal_density_kg_m2()/s.thickness_m()};
     let original=fs_plate::assemble_with_sections(p.mesh(),PlateSectionField::Uniform(&section),
         &PlateMesh::rectangle_boundary(2,2),&[],&AssemblyOptions {pretension:0.0,support:EdgeSupport::Clamped}).unwrap();
-    assert_eq!(p.model().k.val(),original.k.val());assert_eq!(p.model().m.val(),original.m.val());
+    assert_eq!(p.model().k,original.k);assert_eq!(p.model().m,original.m);
     assert_eq!(p.model().dof_map,original.dof_map);
     for source in p.sheets() {assert_eq!(source.material(),s.material());}
     assert!((p.reference_mass_kg()-0.0014).abs()<1e-16);
@@ -49,8 +49,8 @@ fn cloning_retains_native_operators_sources_and_independent_owned_storage() {
     assert_eq!(cloned.sheets(), original.sheets());
     assert_eq!(cloned.grain_rad(), original.grain_rad());
     assert_eq!(cloned.reference_mass_kg(), original.reference_mass_kg());
-    assert_eq!(cloned.model().k.val(), original.model().k.val());
-    assert_eq!(cloned.model().m.val(), original.model().m.val());
+    assert_eq!(cloned.model().k, original.model().k);
+    assert_eq!(cloned.model().m, original.model().m);
     assert_eq!(cloned.model().dof_map, original.model().dof_map);
     assert_ne!(cloned.mesh().nodes.as_ptr(), original.mesh().nodes.as_ptr());
     assert_ne!(cloned.sheets().as_ptr(), original.sheets().as_ptr());
@@ -61,7 +61,7 @@ fn cloning_retains_native_operators_sources_and_independent_owned_storage() {
 #[test]
 fn data_only_density_and_bending_changes_propagate_into_native_modes() {
     let base=build(sheet(0.2,1.0),0.0);let heavy=build(sheet(0.4,1.0),0.0);let stiff=build(sheet(0.2,4.0),0.0);
-    assert_eq!(base.model().k.val(),heavy.model().k.val());assert_eq!(base.model().m.val(),stiff.model().m.val());
+    assert_eq!(base.model().k,heavy.model().k);assert_eq!(base.model().m,stiff.model().m);
     let eigenvalues=|p:&SheetPlate| {
         let options=fs_modal::SliceOptions {mass_diagonal_equilibration:true,..Default::default()};
         let modes=fs_plate::modes(p.model(),(0.0,1e10),&options).unwrap();
@@ -76,7 +76,7 @@ fn data_only_density_and_bending_changes_propagate_into_native_modes() {
 #[test]
 fn grain_changes_the_operator_without_rewriting_topology_or_sources() {
     let source=sheet(0.2,1.0);let a=build(source.clone(),0.0);let b=build(source,0.5);
-    assert_ne!(a.model().k.val(),b.model().k.val());assert_eq!(a.model().m.val(),b.model().m.val());
+    assert_ne!(a.model().k,b.model().k);assert_eq!(a.model().m,b.model().m);
     assert_eq!(a.mesh().tris,b.mesh().tris);assert_eq!(a.sheets(),b.sheets());
     let mesh=a.mesh().clone();let n=mesh.tris.len();
     let attempt=|sources,grains,cancel|SheetPlate::assemble(mesh.clone(),sources,grains,

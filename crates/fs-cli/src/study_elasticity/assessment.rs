@@ -191,8 +191,6 @@ pub(super) fn html(assessment: Option<&FinalAssessment>, requested: bool) -> Str
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     const FIXTURE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
         "/../../examples/marquee/bracket-2d.fsim"));
     const REQUEST: &str = "  (assessment :type elasticity-dwr :max-solves-per-attempt 2)\n";

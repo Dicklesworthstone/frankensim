@@ -521,6 +521,24 @@ fn triangle_weak_influence_with_rule<const ORDER: usize>(
     )
 }
 
+fn regularized_double_layer_remainder(k: f64, r: f64) -> C64 {
+    if k == 0.0 {
+        return C64::ZERO;
+    }
+    let z = k * r;
+    if z.abs() < 1.0e-2 {
+        let z2 = z * z;
+        let z3 = z2 * z;
+        return C64::new(
+            -z / 8.0 + z3 / 144.0,
+            1.0 / 3.0 - z2 / 30.0 + z2 * z2 / 840.0,
+        )
+        .scale(k * k * k / (4.0 * core::f64::consts::PI));
+    }
+    let numerator = expik(z) * C64::new(1.0, -z) - C64::new(1.0 + 0.5 * z * z, 0.0);
+    numerator.scale(1.0 / (4.0 * core::f64::consts::PI * r * r * r))
+}
+
 fn triangle_weak_influence_with_static<const ORDER: usize>(
     k: f64,
     x: [f64; 3],
@@ -535,8 +553,48 @@ fn triangle_weak_influence_with_static<const ORDER: usize>(
     let ac = sub(c, a);
     let double_area = norm(cross(ab, ac));
     let (static_single, static_double) = static_layers;
+    let height = dot(sub(a, x), ny);
+    let normal_offset = -height;
     let mut single = C64::from_re(static_single);
-    let mut double = C64::from_re(static_double);
+    let mut double = C64::from_re(static_double + 0.5 * k * k * normal_offset * static_single);
+    let x_proj = [
+        x[0] + height * ny[0],
+        x[1] + height * ny[1],
+        x[2] + height * ny[2],
+    ];
+    let sub_areas: [f64; 3] = core::array::from_fn(|edge| {
+        let e0 = sub(triangle[edge], x_proj);
+        let e1 = sub(triangle[(edge + 1) % 3], x_proj);
+        dot(cross(e0, e1), ny)
+    });
+    if sub_areas.iter().all(|&sa| sa > 0.0) {
+        for (edge, &sub_double_area) in sub_areas.iter().enumerate() {
+            let e0 = sub(triangle[edge], x_proj);
+            let e1 = sub(triangle[(edge + 1) % 3], x_proj);
+            for (&radial, &wr) in nodes.iter().zip(weights) {
+                for (&tangent, &wt) in nodes.iter().zip(weights) {
+                    let ray = [
+                        (1.0 - tangent).mul_add(e0[0], tangent * e1[0]),
+                        (1.0 - tangent).mul_add(e0[1], tangent * e1[1]),
+                        (1.0 - tangent).mul_add(e0[2], tangent * e1[2]),
+                    ];
+                    let y = [
+                        radial.mul_add(ray[0], x_proj[0]),
+                        radial.mul_add(ray[1], x_proj[1]),
+                        radial.mul_add(ray[2], x_proj[2]),
+                    ];
+                    let d = sub(x, y);
+                    let r = norm(d);
+                    let weight = wr * wt * radial * sub_double_area;
+                    let g = regularized_single_layer(k, r);
+                    let dgdny = regularized_double_layer_remainder(k, r).scale(normal_offset);
+                    single = single + g.scale(weight);
+                    double = double + dgdny.scale(weight);
+                }
+            }
+        }
+        return (single, double);
+    }
     for (&u, &wu) in nodes.iter().zip(weights) {
         for (&v, &wv) in nodes.iter().zip(weights) {
             let y = affine3(a, ab, u, ac, (1.0 - u) * v);
@@ -544,7 +602,7 @@ fn triangle_weak_influence_with_static<const ORDER: usize>(
             let d = sub(x, y);
             let r = norm(d);
             let g = regularized_single_layer(k, r);
-            let dgdny = regularized_coplanar_hypersingular(k, r).scale(dot(ny, d));
+            let dgdny = regularized_double_layer_remainder(k, r).scale(normal_offset);
             single = single + g.scale(weight);
             double = double + dgdny.scale(weight);
         }

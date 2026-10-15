@@ -1,11 +1,25 @@
 //! G0/G1/G4/G5: actual linear-storage optimization, bounds and restart behavior.
 use std::ops::ControlFlow;
 use fs_ascent::projected_al::{ProjectedAlError,ProjectedAlOptions,ProjectedAlSample,ProjectedAlState,ProjectedAlStop};
+fn sum_exact(values: impl IntoIterator<Item = f64>) -> f64 {
+    let mut sum = 0.0_f64;
+    let mut c = 0.0_f64;
+    for v in values {
+        let t = sum + v;
+        if sum.abs() >= v.abs() {
+            c += (sum - t) + v;
+        } else {
+            c += (v - t) + sum;
+        }
+        sum = t;
+    }
+    sum + c
+}
 fn quadratic(x:&[f64])->Result<Option<ProjectedAlSample>, &'static str> {
     let target:Vec<f64>=(0..x.len()).map(|i|0.7+0.01*(i%9) as f64).collect();
     let g:Vec<f64>=x.iter().zip(target).map(|(x,t)|x-t).collect();
-    Ok(Some(ProjectedAlSample{objective:0.5*g.iter().map(|g|g*g).sum::<f64>(),gradient:g,
-        constraint:x.iter().sum::<f64>()/x.len() as f64-0.3,constraint_gradient:vec![1.0/x.len() as f64;x.len()]}))
+    Ok(Some(ProjectedAlSample{objective:0.5*sum_exact(g.iter().map(|g|g*g)),gradient:g,
+        constraint:sum_exact(x.iter().map(|&xi|xi-0.3))/x.len() as f64,constraint_gradient:vec![1.0/x.len() as f64;x.len()]}))
 }
 fn start(n:usize,initial:f64,options:ProjectedAlOptions)->ProjectedAlState {
     ProjectedAlState::try_new(&vec![initial;n],&vec![0.0;n],&vec![1.0;n],options,&mut quadratic,|_|ControlFlow::Continue(())).unwrap()

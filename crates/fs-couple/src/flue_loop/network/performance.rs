@@ -25,11 +25,13 @@ use fs_vfit::waveguide::network::NetworkNode;
 /// Finite physical output and explicit observation/compilation limits.
 #[derive(Clone, Copy, Debug)]
 pub struct FlueOutletConfig {
-    /// Must equal the source's mechanical clock [Hz]. No resampling or retuning.
+    /// PCM/observation clock [Hz]. Legacy constructors require the same source
+    /// clock; `with_multirate_radiation` explicitly admits a faster source.
     pub sample_rate_hz: u32,
     /// Complete physical time window, including any desired propagation tail.
     pub samples: u64,
-    /// Largest host callback and allocated launched-wave scratch [samples].
+    /// Largest host callback [OUTPUT samples]. The launched-wave scratch has
+    /// this many times the mechanics/output ratio, at most 1,048,576 samples.
     pub max_block: usize,
     /// Upper bound on control ticks, even if equal inputs are coalesced.
     pub max_controls: usize,
@@ -75,6 +77,8 @@ pub struct FlueOutletPerformance {
     radiation: Option<FlueRadiationInput>,
     outlet_nodes: Vec<usize>,
     flows: Vec<f64>,
+    mechanics_rate_hz: u32,
+    mechanics_per_output: usize,
     schedule: GestureSchedule,
     controls: Vec<ScheduledControl>,
     next: usize,
@@ -112,7 +116,7 @@ impl FlueOutletPerformance {
     pub fn new(voice: FlueVoice, schedule: GestureSchedule, config: FlueOutletConfig)
         -> Result<Self, GestureCompileError>
     {
-        Self::build(voice, schedule, config, None)
+        Self::build(voice, schedule, config, None, None)
     }
 
     /// Observe the signed solved flows of multiple openings in ONE exterior gas.
@@ -134,15 +138,57 @@ impl FlueOutletPerformance {
         config: FlueOutletConfig, radiation: FlueRadiationInput)
         -> Result<Self, GestureCompileError>
     {
-        Self::build(voice, schedule, config, Some(radiation))
+        Self::build(voice, schedule, config, Some(radiation), None)
+    }
+
+    /// Run an already-constructed high-rate jet/bore through the same broadband
+    /// differentiating and anti-alias receiver used by structural sound sources.
+    /// `mechanics_rate_hz` must match that source exactly; this does not retime,
+    /// rebuild or retune it. The integer source/output ratio must be in 1..=16.
+    /// Ratio one selects broadband reconstruction without changing the source.
+    ///
+    /// Gestures compile on the MECHANICAL clock. A control can therefore land
+    /// inside an audio frame without throwing away preceding outlet-flow samples.
+    /// Every accepted substep of every selected outlet enters the receiver, not
+    /// just the last flow of an audio frame. Callback boundaries preserve both
+    /// the physical state and every anti-alias/derivative/propagation history.
+    /// Filter delay is explicit in OUTPUT samples via `receiver()`; include its
+    /// tail in the requested window. The physical source is never delay-shifted.
+    ///
+    /// The selected source/material/jet domains and one-way infinite-baffle
+    /// radiation limits are unchanged. This is improved numerical observation,
+    /// not additional jet physics, modes, empirical data or acoustic reaction.
+    ///
+    /// # Errors
+    /// Original physical refusals, conflicting/noninteger clocks, bandwidth or
+    /// scratch/window budgets. Admission does not advance a source or receiver.
+    pub fn with_multirate_radiation(voice: FlueVoice, schedule: GestureSchedule,
+        config: FlueOutletConfig, radiation: FlueRadiationInput, mechanics_rate_hz: u32)
+        -> Result<Self, GestureCompileError>
+    {
+        Self::build(voice, schedule, config, Some(radiation), Some(mechanics_rate_hz))
     }
 
     fn build(voice: FlueVoice, schedule: GestureSchedule, config: FlueOutletConfig,
-        radiation: Option<FlueRadiationInput>) -> Result<Self, GestureCompileError>
+        radiation: Option<FlueRadiationInput>, reconstruction_rate: Option<u32>)
+        -> Result<Self, GestureCompileError>
     {
+        let mechanics_rate_hz = reconstruction_rate.unwrap_or(config.sample_rate_hz);
+        if config.sample_rate_hz == 0 || mechanics_rate_hz == 0
+            || mechanics_rate_hz % config.sample_rate_hz != 0
+            || !(1..=16).contains(&(mechanics_rate_hz / config.sample_rate_hz)) {
+            return Err(invalid("flue needs an explicit integer mechanics/output clock ratio in 1..=16"));
+        }
+        let mechanics_per_output = (mechanics_rate_hz / config.sample_rate_hz) as usize;
+        let mechanical_samples = config.samples.checked_mul(mechanics_per_output as u64)
+            .filter(|&n| n <= (1_u64 << 53))
+            .ok_or_else(|| invalid("flue mechanical time window exceeds its exact sample budget"))?;
+        let scratch_samples = config.max_block.checked_mul(mechanics_per_output)
+            .filter(|&n| n <= 1_048_576)
+            .ok_or_else(|| invalid("flue mechanical callback scratch exceeds its sample budget"))?;
         if config.sample_rate_hz == 0 || config.samples == 0 || config.samples > (1_u64 << 53)
             || config.max_block == 0 || config.max_block > 1_048_576 || voice.samples_rendered() != 0
-            || voice.sample_period_s().to_bits() != (1.0 / f64::from(config.sample_rate_hz)).to_bits()
+            || voice.sample_period_s().to_bits() != (1.0 / f64::from(mechanics_rate_hz)).to_bits()
             || !config.maximum_abs_pressure_pa.is_finite() || config.maximum_abs_pressure_pa <= 0.0 {
             return Err(invalid("flue pressure needs a fresh source, matching clock and finite positive window/output budgets"));
         }
@@ -185,24 +231,28 @@ impl FlueOutletPerformance {
             openings.push(CircularOpening { center_m, radius_m: section.radius_m });
         }
         let gas = radiation.as_ref().map_or_else(|| local_gas.expect("primary outlet"), |input| input.exterior);
-        let receiver = BaffledPressure::circular_openings(&openings, config.sample_rate_hz,
-            config.receiver, RayleighMedium { density: gas.density, sound_speed: gas.sound_speed })
-            .map_err(|e| GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Nonlinear(e))))?;
+        let medium = RayleighMedium { density: gas.density, sound_speed: gas.sound_speed };
+        let receiver = match reconstruction_rate {
+            None => BaffledPressure::circular_openings(&openings, config.sample_rate_hz,
+                config.receiver, medium),
+            Some(rate) => BaffledPressure::circular_openings_multirate_differentiating(
+                &openings, rate, config.sample_rate_hz, config.receiver, medium),
+        }.map_err(|e| GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Nonlinear(e))))?;
         let [track] = schedule.tracks() else {
             return Err(invalid("flue performance needs one explicitly typed blowing-pressure track"));
         };
         let rate = schedule.control_rate_hz;
-        if rate == 0 || rate > config.sample_rate_hz {
+        if rate == 0 || rate > mechanics_rate_hz {
             return Err(invalid("flue controls must have a positive rate no faster than the source clock"));
         }
-        let last_tick = u128::from(config.samples - 1) * u128::from(rate) / u128::from(config.sample_rate_hz);
+        let last_tick = u128::from(mechanical_samples - 1) * u128::from(rate) / u128::from(mechanics_rate_hz);
         if last_tick + 1 > config.max_controls as u128
             || track.events.iter().any(|e| e.time_s > last_tick as f64 / f64::from(rate)) {
             return Err(invalid("flue commands exceed the observed window or control-tick budget"));
         }
         let controls = compile_pressure_gestures(&schedule, &[PressureGestureBinding {
             track: track.id.clone(), voice: 0,
-        }], config.sample_rate_hz, config.samples, config.max_compile_work)?;
+        }], mechanics_rate_hz, mechanical_samples, config.max_compile_work)?;
         for control in &controls {
             let ControlDelta::SetBlowingPressure { voice: 0, pressure_pa } = control.delta else {
                 return Err(invalid("flue pressure compiler produced a non-pressure or differently addressed control"));
@@ -211,11 +261,12 @@ impl FlueOutletPerformance {
                 .map_err(|e| GestureCompileError::Render(source_error(e)))?;
         }
         let mut launched = Vec::new();
-        launched.try_reserve_exact(config.max_block)
+        launched.try_reserve_exact(scratch_samples)
             .map_err(|_| invalid("flue callback scratch exceeds available allocation"))?;
-        launched.resize(config.max_block, 0.0);
-        let flows = vec![0.0; outlet_nodes.len()];
-        Ok(Self { voice, receiver, config, radiation, outlet_nodes, flows, schedule, controls, next: 0, launched, poisoned: false })
+        launched.resize(scratch_samples, 0.0);
+        let flows = vec![0.0; outlet_nodes.len() * mechanics_per_output];
+        Ok(Self { voice, receiver, config, radiation, outlet_nodes, flows, mechanics_rate_hz,
+            mechanics_per_output, schedule, controls, next: 0, launched, poisoned: false })
     }
 
     /// Source mechanics, material gas mapping and internal diagnostics, read-only.
@@ -236,14 +287,24 @@ impl FlueOutletPerformance {
     /// Input order for `receiver().mode_pressures`: primary then additional ports.
     #[must_use]
     pub fn outlet_nodes(&self) -> &[usize] { &self.outlet_nodes }
-    /// Samples remaining on the source/observer clock.
+    /// Actual source clock; independent of the PCM clock only when requested.
     #[must_use]
-    pub fn remaining_samples(&self) -> u64 { self.config.samples - self.voice.samples_rendered() }
+    pub const fn mechanics_rate_hz(&self) -> u32 { self.mechanics_rate_hz }
+    /// Number of complete physical frames consumed per emitted audio sample.
+    #[must_use]
+    pub const fn mechanics_per_output(&self) -> usize { self.mechanics_per_output }
+    /// OUTPUT samples remaining. Source sample counts remain available on `voice`.
+    #[must_use]
+    pub fn remaining_samples(&self) -> u64 { self.config.samples - self.samples_rendered() }
 
     fn advance_block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
-        let end = self.voice.samples_rendered() + output.len() as u64;
+        let ratio = self.mechanics_per_output;
+        let end = self.voice.samples_rendered() + output.len() as u64 * ratio as u64;
         let mut written = 0;
-        while written < output.len() {
+        // Each accepted callback ends on an audio boundary. Control segments may
+        // not: keep the partial mechanical flow trace across those boundaries.
+        let mut filled = 0;
+        while self.voice.samples_rendered() < end {
             let now = self.voice.samples_rendered();
             while let Some(control) = self.controls.get(self.next) {
                 if control.sample != now { break; }
@@ -259,32 +320,40 @@ impl FlueOutletPerformance {
             let nodes = &self.outlet_nodes;
             let flows = &mut self.flows;
             let ceiling = self.config.maximum_abs_pressure_pa;
-            let mut destinations = output[written..written + count].iter_mut();
+            let mut destinations = output[written..].iter_mut();
             self.voice.step_block_observed(&mut self.launched[..count], |line| {
                 let FlueResonator::Network(network) = line else { unreachable!("owned physical graph") };
-                for (flow, &node) in flows.iter_mut().zip(nodes) {
+                let start = filled * nodes.len();
+                for (flow, &node) in flows[start..start + nodes.len()].iter_mut().zip(nodes) {
                     *flow = network.node_frame(node).expect("owned admitted outlet").net_flow_into_node_m3_s;
                 }
-                let pressure = receiver.step(flows)
+                filled += 1;
+                if filled < ratio { return Ok(()); }
+                let pressure = receiver.step_trace(flows)
                     .map_err(|e| FlueError::Physics(AcousticRealizeError::Nonlinear(e)))?;
                 if !pressure.is_finite() || pressure.abs() > ceiling {
                     return Err(FlueError::Invalid { what: "flue microphone pressure exceeds its declared finite ceiling" });
                 }
-                *destinations.next().expect("one observation per source sample") = pressure;
+                *destinations.next().expect("one observation per complete mechanical trace") = pressure;
+                written += 1;
+                filled = 0;
                 Ok(())
             }).map_err(source_error)?;
-            written += count;
         }
+        debug_assert_eq!(filled, 0);
+        debug_assert_eq!(written, output.len());
         Ok(())
     }
 }
 
 impl PressureRenderer for FlueOutletPerformance {
-    fn samples_rendered(&self) -> u64 { self.voice.samples_rendered() }
+    fn samples_rendered(&self) -> u64 {
+        self.voice.samples_rendered() / self.mechanics_per_output as u64
+    }
     fn max_block_len(&self) -> usize { self.config.max_block }
     fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> {
         self.validate_sample_count(0)?;
-        if rate != self.config.sample_rate_hz { return Err(sizing("flue pressure output must use its actual physical sample clock")); }
+        if rate != self.config.sample_rate_hz { return Err(sizing("flue pressure output must use its admitted observation clock")); }
         Ok(())
     }
     fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {

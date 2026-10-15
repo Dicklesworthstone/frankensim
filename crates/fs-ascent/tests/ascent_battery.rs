@@ -381,8 +381,12 @@ fn stop_rules_attribute_correctly() {
     log("stop-rules", "pass", "budget + stall attributed");
 }
 
-// Re-frozen for trajectory-bit semantics v1 under bead `frankensim-nrhii`.
-const GOLDEN_HASH: u64 = 0xe185_4f98_a25e_3663;
+// Re-frozen under `frankensim-46p1j` after commit `e0a1d55d3` switched
+// `trust::engine::range::to_boundary` from f64 `(-bb + disc.sqrt()) / aa`
+// to double-double (`Dd`) arithmetic and the rationalized root `gap / (root + bb)`.
+// Stage 1 (L-BFGS: 0x7b53de8be037b1f6) and Stage 3 (Riemannian L-BFGS) trajectories
+// are bit-identical; only Stage 2 (trust-region Steihaug boundary step) changed.
+const GOLDEN_HASH: u64 = 0x7298_6dd8_f780_9f57;
 
 #[test]
 fn ascent_golden_hash() {

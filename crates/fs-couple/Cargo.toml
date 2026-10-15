@@ -13,6 +13,7 @@ layer = "L3"
 [dependencies]
 fs-aeroac = { path = "../fs-aeroac" }
 fs-blake3 = { path = "../fs-blake3" }
+fs-conduction = { path = "../fs-conduction" }
 fs-contact = { path = "../fs-contact" }
 fs-dcontact = { path = "../fs-dcontact" }
 fs-duct = { path = "../fs-duct" }
@@ -42,7 +43,6 @@ fs-vfit = { path = "../fs-vfit" }
 fs-mbd = { path = "../fs-mbd" }
 fs-ga = { path = "../fs-ga" }
 fs-alloc = { path = "../fs-alloc" }
-fs-conduction = { path = "../fs-conduction" }
 fs-geom = { path = "../fs-geom" }
 fs-io = { path = "../fs-io" }
 fs-orbit = { path = "../fs-orbit" }

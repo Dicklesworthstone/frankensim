@@ -19,7 +19,7 @@ use fs_la::factor::{Cholesky, cholesky};
 
 use crate::modal_acoustic_time::{
     ModalAcousticState, ModalAcousticTimeError, ModalAcousticTimeModel,
-    ModalAcousticWorkspace, advance_exact_zoh,
+    ModalAcousticWorkspace,
 };
 
 /// One attachment in a component's unchanged mass-normalized modal basis.
@@ -272,9 +272,9 @@ impl CoupledModalSystem {
         let mut upper_squared = 0.0_f64;
         for model in &models {
             poll(Some(gate))?;
-            for &mode in model.modes() {
+            for (mode_index, &mode) in model.modes().iter().enumerate() {
                 upper_squared = upper_squared.max(finite(mode.angular_frequency_rad_s * mode.angular_frequency_rad_s)?);
-                let response = advance_exact_zoh(mode, ModalAcousticState::default(), 1.0, dt).displacement_m_sqrt_kg;
+                let response = model.advance_exact_zoh_step(mode_index, ModalAcousticState::default(), 1.0).displacement_m_sqrt_kg;
                 if !response.is_finite() || response < 0.0 {
                     return Err(invalid("modal held-force displacement response must be finite nonnegative"));
                 }
@@ -380,8 +380,7 @@ impl CoupledModalSystem {
         let mut work = 0.0;
         for i in 0..self.models.len() {
             poll(gate)?;
-            self.candidates[i].restore_states(self.models[i].states())
-                .map_err(|source| ModalCouplingError::Component { component: i, source })?;
+            self.candidates[i].copy_states_from(&self.models[i]);
             let range = self.offsets[i]..self.offsets[i+1];
             let frame = self.candidates[i].step_into(&self.forces[range.clone()], &mut self.workspaces[i])
                 .map_err(|source| ModalCouplingError::Component { component: i, source })?;
@@ -445,11 +444,11 @@ impl CoupledModalSystem {
         let mut at = 0;
         for model in &self.models {
             poll(gate)?;
-            for (&mode, &state) in model.modes().iter().zip(model.states()) {
+            for (mode_index, &state) in model.states().iter().enumerate() {
                 self.old_q[at] = state.displacement_m_sqrt_kg;
                 // Unconstrained prediction is scratch, not an accepted component
                 // step: a stiff connection may suppress a large free prediction.
-                self.free_delta[at] = finite(advance_exact_zoh(mode, state, external[at], self.dt)
+                self.free_delta[at] = finite(model.advance_exact_zoh_step(mode_index, state, external[at])
                     .displacement_m_sqrt_kg - state.displacement_m_sqrt_kg)?;
                 at += 1;
             }

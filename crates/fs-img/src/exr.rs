@@ -1979,6 +1979,7 @@ pub fn validate_exr_raw_frame_payload_against_with_poll(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // single-pass scanline relation verification across all 5 channels
 fn verify_raw_semantic_relations(
     bytes: &[u8],
     width: usize,

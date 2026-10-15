@@ -748,14 +748,14 @@ dependencies = [
 
 [[package]]
 name = "fnp-dtype"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "half",
 ]
 
 [[package]]
 name = "fnp-linalg"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "fnp-ndarray",
  "rayon",
@@ -763,15 +763,15 @@ dependencies = [
 
 [[package]]
 name = "fnp-ndarray"
-version = "0.3.0"
+version = "0.5.0"
 
 [[package]]
 name = "fnp-runtime"
-version = "0.3.0"
+version = "0.5.0"
 
 [[package]]
 name = "fnp-ufunc"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "fnp-dtype",
  "fnp-linalg",
@@ -784,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "fnx-classes"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "fnx-runtime",
  "indexmap",
@@ -794,8 +794,9 @@ dependencies = [
 
 [[package]]
 name = "fnx-runtime"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -874,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "frankentorch-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "half",
  "num-complex",
@@ -890,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "frankentorch-kernel-cpu"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "frankentorch-core",
  "libm",
@@ -966,10 +967,13 @@ dependencies = [
  "fs-ivl",
  "fs-ladder",
  "fs-matdb",
+ "fs-material",
  "fs-math",
  "fs-qty",
  "fs-regime",
  "fs-rep-mesh",
+ "fs-solver",
+ "fs-sparse",
 ]
 
 [[package]]
@@ -1192,6 +1196,7 @@ dependencies = [
  "fs-topopt",
  "fs-uq",
  "fs-viz",
+ "fs-voi",
 ]
 
 [[package]]
@@ -1216,6 +1221,7 @@ dependencies = [
  "fs-scenario",
  "fs-solver",
  "fs-sparse",
+ "fs-thermal",
  "fs-verify",
  "fs-vvreg",
 ]
@@ -1299,6 +1305,7 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-fft",
+ "fs-ga",
  "fs-geom",
  "fs-iface",
  "fs-io",
@@ -1306,11 +1313,14 @@ dependencies = [
  "fs-matdb",
  "fs-material",
  "fs-math",
+ "fs-mbd",
+ "fs-mbd-material",
  "fs-modal",
  "fs-nlmodal",
  "fs-orbit",
  "fs-phs",
  "fs-plate",
+ "fs-ports",
  "fs-psycho",
  "fs-qty",
  "fs-query",
@@ -1319,6 +1329,8 @@ dependencies = [
  "fs-solid",
  "fs-solver",
  "fs-substrate",
+ "fs-thermal",
+ "fs-thermochem",
  "fs-tribo",
  "fs-vfit",
 ]
@@ -1418,6 +1430,7 @@ dependencies = [
  "fs-material",
  "fs-math",
  "fs-phs",
+ "fs-qty",
  "fs-vvreg",
 ]
 
@@ -1528,11 +1541,11 @@ name = "fs-feec"
 version = "0.0.1"
 dependencies = [
  "fs-blake3",
- "fs-couple",
  "fs-ivl",
  "fs-la",
  "fs-math",
  "fs-obs",
+ "fs-ports",
  "fs-propcheck",
  "fs-qty",
  "fs-rand",
@@ -1872,11 +1885,14 @@ dependencies = [
  "fs-exec",
  "fs-fft",
  "fs-matdb",
+ "fs-material",
  "fs-math",
  "fs-obs",
  "fs-qty",
  "fs-roofline",
+ "fs-solver",
  "fs-sparse",
+ "fs-thermal",
 ]
 
 [[package]]
@@ -1948,6 +1964,8 @@ dependencies = [
  "fs-matdb",
  "fs-math",
  "fs-qty",
+ "fs-thermal",
+ "fs-thermochem",
 ]
 
 [[package]]
@@ -1964,6 +1982,26 @@ version = "0.0.1"
 dependencies = [
  "fs-ga",
  "fs-math",
+]
+
+[[package]]
+name = "fs-mbd-material"
+version = "0.0.1"
+dependencies = [
+ "fs-alloc",
+ "fs-blake3",
+ "fs-evidence",
+ "fs-exec",
+ "fs-ga",
+ "fs-la",
+ "fs-lbm",
+ "fs-matdb",
+ "fs-material",
+ "fs-mbd",
+ "fs-modal",
+ "fs-qty",
+ "fs-solid",
+ "fs-thermal",
 ]
 
 [[package]]
@@ -2061,6 +2099,7 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-qty",
+ "fs-rand",
  "fs-toleralloc",
  "fs-voi",
 ]
@@ -2185,6 +2224,14 @@ dependencies = [
  "fs-solver",
  "fs-sparse",
  "fs-time",
+]
+
+[[package]]
+name = "fs-ports"
+version = "0.0.1"
+dependencies = [
+ "fs-iface",
+ "fs-qty",
 ]
 
 [[package]]
@@ -2653,6 +2700,10 @@ name = "fs-symmetry"
 version = "0.0.1"
 
 [[package]]
+name = "fs-thermal"
+version = "0.0.1"
+
+[[package]]
 name = "fs-thermochem"
 version = "0.0.1"
 dependencies = [
@@ -2749,13 +2800,17 @@ version = "0.0.1"
 dependencies = [
  "fs-adjoint",
  "fs-ascent",
+ "fs-blake3",
  "fs-cutfem",
  "fs-dwr",
+ "fs-exec",
  "fs-feec",
  "fs-ivl",
  "fs-la",
  "fs-material",
  "fs-math",
+ "fs-opt",
+ "fs-qty",
  "fs-rand",
  "fs-rep-mesh",
  "fs-solver",
@@ -2944,14 +2999,14 @@ dependencies = [
 
 [[package]]
 name = "fsci-fft"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "fsci-runtime",
 ]
 
 [[package]]
 name = "fsci-integrate"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "fsci-opt",
  "fsci-runtime",
@@ -2961,7 +3016,7 @@ dependencies = [
 
 [[package]]
 name = "fsci-linalg"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "fsci-fft",
  "fsci-runtime",
@@ -2973,17 +3028,17 @@ dependencies = [
 
 [[package]]
 name = "fsci-opt"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "fsci-runtime",
- "rand 0.10.2",
+ "rand 0.10.3",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "fsci-runtime"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "serde",
@@ -2992,7 +3047,7 @@ dependencies = [
 
 [[package]]
 name = "fsci-sparse"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "fsci-linalg",
  "fsci-runtime",
@@ -3006,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "fsci-special"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "fsci-integrate",
  "fsci-linalg",
@@ -3015,7 +3070,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "asupersync 0.5.0",
  "fsqlite-ast",
@@ -3036,7 +3091,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ast"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "fsqlite-types",
  "smallvec",
@@ -3044,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-btree"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "foldhash",
  "fsqlite-error",
@@ -3060,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-core"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "asupersync 0.5.0",
  "blake3",
@@ -3098,14 +3153,14 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-error"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "fsqlite-ext-fts5"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -3116,7 +3171,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-icu"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -3126,7 +3181,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-json"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -3138,19 +3193,19 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-misc"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
  "fsqlite-types",
  "getrandom 0.4.3",
- "rand 0.10.2",
+ "rand 0.10.3",
  "tracing",
 ]
 
 [[package]]
 name = "fsqlite-ext-rtree"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -3159,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-func"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "chrono",
  "fsqlite-error",
@@ -3169,7 +3224,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-mvcc"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "asupersync 0.5.0",
  "blake3",
@@ -3193,7 +3248,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-observability"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "fsqlite-types",
  "parking_lot",
@@ -3203,7 +3258,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-pager"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "argon2",
  "asupersync 0.5.0",
@@ -3219,7 +3274,7 @@ dependencies = [
  "fsqlite-wal",
  "hashbrown 0.17.1",
  "parking_lot",
- "rand 0.10.2",
+ "rand 0.10.3",
  "smallvec",
  "tracing",
  "xxhash-rust",
@@ -3227,7 +3282,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-parser"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "fsqlite-ast",
  "fsqlite-error",
@@ -3239,7 +3294,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-planner"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "blake3",
  "fsqlite-ast",
@@ -3255,7 +3310,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-types"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "asupersync 0.5.0",
  "bitflags",
@@ -3273,7 +3328,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-vdbe"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "asupersync 0.5.0",
  "crossbeam-deque",
@@ -3295,7 +3350,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-vfs"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "advisory-lock",
  "asupersync 0.5.0",
@@ -3312,7 +3367,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-wal"
-version = "0.4.6"
+version = "0.4.12"
 dependencies = [
  "asupersync 0.5.0",
  "blake3",
@@ -3322,7 +3377,7 @@ dependencies = [
  "fsqlite-types",
  "fsqlite-vfs",
  "parking_lot",
- "rand 0.10.2",
+ "rand 0.10.3",
  "serde",
  "tracing",
  "xxhash-rust",
@@ -4150,9 +4205,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
+checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
@@ -4355,10 +4410,11 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.151"
+version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
+ "foldhash",
  "indexmap",
  "itoa",
  "memchr",
@@ -4578,18 +4634,18 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5065,14 +5121,15 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "c2d98561b612a84ae525331a7a094429ef8a5772514ed507ff6db5f54badc971"
 dependencies = [
  "crc32fast",
  "flate2",
  "indexmap",
  "memchr",
+ "nix",
  "typed-path",
 ]
 

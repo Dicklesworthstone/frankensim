@@ -4,6 +4,8 @@
 
 /// Same-card conductive boundary with no handwritten material callback.
 pub mod material;
+/// Independent surface heats coupled through one gas and one thermal network.
+pub mod surfaces;
 
 use super::*;
 use crate::circuit_enthalpy::{self, CircuitEnthalpyCandidate, CircuitEnthalpyError,

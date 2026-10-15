@@ -29,10 +29,18 @@
 //! acceptance template belong to the .3.7 terminal harness this corpus
 //! feeds. This corpus proves its stated rows only.
 
-use fs_casebook::fnv1a64;
 use fs_ivl::predicates::{Sign, incircle, orient2d, orient3d};
 use fs_ivl::{Interval, TaylorModel1, expansion, newton};
 use std::fmt::Write as _;
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
 
 const CORPUS_REL: &str = "tests/fixtures/exact_corpus.txt";
 const MAX_LINES: usize = 4096;

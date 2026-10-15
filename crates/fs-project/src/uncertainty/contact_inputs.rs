@@ -53,8 +53,7 @@ mod tests {
             (InterfaceState::BoltedWithPattern { torque:torque(4.0),torque_half_width:torque(0.1),bolt_count:4,pattern:"corners".into() }, "contact-torque", "N*m", 3.0, 5.0),
         ] {
             let text = STUDY.replace("contact-pressure",target)
-                .replace("500000Pa",&format!("{low}{unit}"))
-                .replace("1500000Pa",&format!("{high}{unit}"));
+                .replace(":low 500000Pa :high 1500000Pa",&format!(":low {low}{unit} :high {high}{unit}"));
             let study = UncertaintyStudy::parse(&text).unwrap();
             assert_eq!(study, UncertaintyStudy::parse(study.canonical()).unwrap());
             let mut original = base(); original.interface_cards.as_mut().unwrap()[0].state = state;
@@ -79,7 +78,7 @@ mod tests {
     }
     #[test]
     fn invalid_units_ownership_class_and_nonpositive_manufacturing_bands_refuse() {
-        for text in [STUDY.replace("500000Pa","500000K"),STUDY.replace("500000Pa","0Pa")] {
+        for text in [STUDY.replace(":low 500000Pa",":low 500000K"),STUDY.replace(":low 500000Pa",":low 0Pa")] {
             assert!(UncertaintyStudy::parse(&text).is_err());
         }
         let study = || UncertaintyStudy::parse(STUDY).unwrap();
@@ -90,6 +89,6 @@ mod tests {
         assert!(study().bind(&wrong).is_err());
         // Positive random support can still be invalid once the UNCHANGED
         // manufacturing half-width is applied around a sample.
-        assert!(UncertaintyStudy::parse(&STUDY.replace("500000Pa","50000Pa")).unwrap().bind(&base()).is_err());
+        assert!(UncertaintyStudy::parse(&STUDY.replace(":low 500000Pa",":low 50000Pa")).unwrap().bind(&base()).is_err());
     }
 }

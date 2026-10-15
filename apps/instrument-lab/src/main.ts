@@ -3,30 +3,43 @@ import "@fontsource-variable/inter";
 import "@fontsource/jetbrains-mono/400.css";
 import "@fontsource/jetbrains-mono/500.css";
 import "./styles.css";
-import drumSpec from "../../../crates/fs-couple/examples/percussion/estimated_drum.fsd?raw";
-import cymbalSpec from "../../../crates/fs-couple/examples/percussion/estimated-splash.profile?raw";
+import kitSource from "../../../crates/fs-vkplate/src/kit.rs?raw";
 import { GroupPlayer, claimPlayback } from "./audio";
 import { ClipGroupView, type Manifest } from "./clipgroup";
 import { LineChart, type Series } from "./chart";
 import { BoardView, buildKeyboard, type PianoModel } from "./board3d";
 import { ModalViewer } from "./modal3d";
 import { SoundboardMixer } from "./mixer";
-import { dpr, el, fmt, fmtSci, hidpi, json, noteName, onVisible, sciNode } from "./util";
+import { dpr, el, fmt, fmtSci, hidpi, json, noteName, onVisible, sciNode, asset } from "./util";
+
+// Right after a deploy, the CDN can serve the new page a little before the new lazily loaded chunks it names
+// (Cloudflare took up to a minute), and a browser never retries a module import that failed once. Vite reports
+// such a failure as `vite:preloadError`: reload a few seconds later, at most once a minute, so a visitor who
+// arrived in that window gets a whole page instead of a section that never appears.
+window.addEventListener("vite:preloadError", (event) => {
+  const KEY = "struck:preload-reload";
+  let last = 0;
+  try { last = Number(sessionStorage.getItem(KEY)) || 0; } catch { /* storage unavailable */ }
+  if (Date.now() - last < 60_000) return; // reloaded just now: let the error stand
+  try { sessionStorage.setItem(KEY, String(Date.now())); } catch { return; } // cannot remember it: never risk a loop
+  event.preventDefault();
+  setTimeout(() => location.reload(), 3000);
+});
 
 type SeriesData = Record<string, Record<string, number[] | number>>;
 
 const $ = <T extends Element = HTMLElement>(sel: string, root: ParentNode = document): T | null => root.querySelector<T>(sel);
 const $$ = <T extends Element = HTMLElement>(sel: string, root: ParentNode = document): T[] => [...root.querySelectorAll<T>(sel)];
 
-const manifestP = json<Manifest & { performances?: Record<string, [number, string, number, number][]> }>("/data/manifest.json");
+const manifestP = json<Manifest & { performances?: Record<string, [number, string, number, number][]> }>(asset("data/manifest.json"));
 let seriesCache: Promise<SeriesData> | null = null;
-const seriesP = (): Promise<SeriesData> => (seriesCache ??= json<SeriesData>("/data/series.json"));
+const seriesP = (): Promise<SeriesData> => (seriesCache ??= json<SeriesData>(asset("data/series.json")));
 const idle = (cb: () => void): void => {
   const ric = (window as unknown as { requestIdleCallback?: (f: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
   if (ric) ric(cb, { timeout: 1500 });
   else setTimeout(cb, 300);
 };
-const pianoP = json<PianoModel>("/data/piano-model.json");
+const pianoP = json<PianoModel>(asset("data/piano-model.json"));
 
 // ------------------------------------------------------------------- navigation
 function initNav(): void {
@@ -65,7 +78,7 @@ async function initHero(): Promise<void> {
   );
   $("#hero-render-note")!.textContent = `rendered in ${fmt((ev.wall_s ?? 0) / 60, 2)} min for ${clip.duration_s.toFixed(1)} s of sound (${fmt(ev.wall_audio_ratio ?? 0)}× slower than real time)`;
 
-  const player = new GroupPlayer({ hero: "/" + clip.audio }, "hero");
+  const player = new GroupPlayer({ hero: asset(clip.audio) }, "hero");
   const btn = $<HTMLButtonElement>("#hero-play")!;
   const label = btn.querySelector("span")!;
   player.onState = (s) => {
@@ -287,7 +300,7 @@ function initViewers(): void {
 // ------------------------------------------------------------------------ live
 function initLive(): void {
   // The sections only build DOM here; no wasm is fetched until a Start button is pressed.
-  const drum = $("#live-drum-root");
+  const kit = $("#live-kit-root");
   const piano = $("#live-piano-root");
   const opened = (root: HTMLElement): void => {
     const d = root.querySelector<HTMLDetailsElement>("details.evidence");
@@ -295,46 +308,33 @@ function initLive(): void {
   };
   idle(() => {
     const jobs: Promise<void>[] = [];
-    if (drum) jobs.push(import("./live/drumSection").then((m) => { m.mountLiveDrum(drum); opened(drum); }));
+    if (kit) jobs.push(import("./live/kitStage").then((m) => { m.mountLiveKit(kit); }));
     if (piano) jobs.push(import("./live/pianoSection").then((m) => { m.mountLivePiano(piano); opened(piano); }));
     void Promise.all(jobs).then(() => {
       if (location.hash) document.querySelector(location.hash)?.scrollIntoView();
     });
   });
   // An engine start is a deliberate act: offline clips yield to it.
-  for (const root of [drum, piano]) root?.addEventListener("click", (e) => {
+  for (const root of [kit, piano]) root?.addEventListener("click", (e) => {
     const b = (e.target as HTMLElement).closest("button");
     if (b && /start/i.test(b.textContent ?? "")) claimPlayback(() => {});
   }, true);
 }
 
 // ---------------------------------------------------------------------- method
-function highlightSpec(text: string): string {
-  const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
-  return text.trimEnd().split("\n").map((line) => {
-    if (line.trim().startsWith("#")) return `<span class="c">${esc(line)}</span>`;
-    const [k, ...rest] = line.split(",");
-    if (!rest.length) return `<span class="k">${esc(line)}</span>`;
-    return `<span class="k">${esc(k!)}</span>,${rest.map((v) => `<span class="n">${esc(v)}</span>`).join(",")}`;
-  }).join("\n");
-}
-
 const REFUSALS: [string, string][] = [
-  ["percussion reference refused: BEM reports invalid diagnostics or negative radiation power beyond roundoff at 1460 Hz, input 26, formulation PlainCbie: power_interval=(-4.9e-22, -4.9e-22) … refine the acoustic solve",
-    "Every drum and cymbal render at HEAD stopped here. The diagnosis: a cymbal mode that radiates almost nothing produced a radiated power of −4.9×10⁻²² W, which is solve noise 10⁻¹⁴ times smaller than its reactive power, but the gate compared it only with floating-point summation roundoff. The fix keeps the refusal and scales it to the dense solve's own accuracy (n·ε·κ of the apparent power). Genuine sign errors, like the 1.3% Burton–Miller artifact on the drum's quadrupole modes, still refuse; the drum renders here use a 40–1000 Hz band, where the drum qualifies for plain CBIE."],
-  ["percussion reference refused: observer order budget exhausted at 24; last candidate: observer holdout refused: max=0.146, rms=0.0743",
-    "The cymbal's close-microphone transfer could not be fitted by a stable filter that passes its held-out audit (5% RMS) even at order 24. The cymbal clips on this page therefore use the far-field microphone, whose fit passed its audit at order 4."],
   ["grand_piano: audio sample 713760 after 32 frames in block: sample 713760, event 83: hammer/key has not returned for another strike",
     "A mistake in our own score: Satie's melody holds F♯4 while the left-hand chord also asks for F♯4. One physical key cannot be struck again while it is held, so the performance was refused before the 41-minute render. The chord now leaves out the held key."],
   ["grand_piano: adaptive bridge response work estimate 9667910336 exceeds 8000000000; use fewer source modes, retained modes or admitted bridge ports",
-    "An adaptive soundboard reduction to 3.2 kHz was refused against its declared work budget before it started. The renders here use an explicit 128-mode Ritz reduction of the 0–2.4 kHz board instead."],
-  ["percussion reference refused: percussion mechanics: Owner(\"FS-PLATE-BAD-SECTION: shell state exceeds its declared linearized rigid-rotation limit\")",
-    "We let the splash rock on its felts. A 2 m/s off-centre stroke exceeded the declared small-angle rigid-rotation limit at 0.03 rad, and again at the model's largest admitted limit of 0.1 rad. The linearization was refused rather than extrapolated. The rocking clip on this page is a gentler 0.6 m/s stroke, which stays inside 0.1 rad."],
-];
+    "An adaptive soundboard reduction to 3.2 kHz was refused against its declared work budget before it started. The renders here use an explicit 128-mode Ritz reduction of the 0–2.4 kHz board instead."],];
 
 async function initMethod(): Promise<void> {
-  $("#spec-drum")!.innerHTML = highlightSpec(drumSpec);
-  $("#spec-cymbal")!.innerHTML = highlightSpec(cymbalSpec);
+  // The kit's own source: the snare's description and the crash's, verbatim.
+  const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const snare = /pub fn snare\(\) -> DrumSpec \{\n([\s\S]*?)\n\}/.exec(kitSource)?.[1] ?? "";
+  const crash = /pub fn crash\(\) -> CymbalSpec \{\n\s*([\s\S]*?)\n\}/.exec(kitSource)?.[1] ?? "";
+  $("#spec-drum")!.innerHTML = esc(snare.replace(/^ {4}/gm, ""));
+  $("#spec-cymbal")!.innerHTML = esc(crash.replace(/,\s*(?=[a-z_0-9]+:)/g, ",\n").replace(/^CymbalSpec \{ /, "").replace(/ \}$/, ""));
   const pm = await pianoP;
   const table = $("#scale-table")!;
   const cols: [string, (r: PianoModel["scale_et"][number]) => string][] = [
@@ -383,6 +383,30 @@ async function initRegisterNote(): Promise<void> {
   p.textContent = `A0 is a single ${a0.L.toFixed(2)} m wound string with B = ${fmtSci(a0.B)}, so its 20th partial lies ${cents(20).toFixed(0)} cents and its 40th ${cents(40).toFixed(0)} cents sharp of the harmonic series. C6 has three short plain strings and a much shorter hammer contact.`;
 }
 
+function initKit(): void {
+  const root = $("#kit-root");
+  if (root) onVisible(root, () => void import("./kit").then((m) => m.mountKit(root)).catch(() => {
+    root.style.minHeight = "0";
+    root.textContent = "The kit could not be loaded. Reload the page to try again.";
+  }), "800px");
+}
+
+function initStrandbar(): void {
+  const root = $("#strandbar-root");
+  if (root) onVisible(root, () => void import("./strandbar").then((m) => m.mountStrandbar(root)).catch(() => {
+    root.style.minHeight = "0";
+    root.textContent = "The groove could not be loaded. Reload the page to try again.";
+  }), "800px");
+}
+
+function initPlayer(): void {
+  const root = $("#player-root");
+  if (root) onVisible(root, () => void import("./player/player").then((m) => m.mountPlayer(root)).catch(() => {
+    root.style.minHeight = "0";
+    root.textContent = "The player could not be loaded. Reload the page to try again.";
+  }), "900px");
+}
+
 function initVerisim(): void {
   const root = $("#verisim-root");
   if (root) onVisible(root, () => void import("./verisim").then((m) => m.mountVerisim(root)).catch(() => {
@@ -394,6 +418,9 @@ function initVerisim(): void {
 initNav();
 void initHero();
 initVerisim();
+initStrandbar();
+initKit();
+initPlayer();
 void initGroups();
 void initCharts();
 initViewers();

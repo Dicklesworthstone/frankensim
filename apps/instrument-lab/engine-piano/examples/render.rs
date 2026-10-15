@@ -6,6 +6,7 @@
 //!        [--partials N] [--partial-band HZ] [--full-scale PA] [--scale SUBSET.csv]
 //!        [--isolated] [--no-duplex] [--damper-points K] [--trace OUT.csv]
 //!        [--reduction MAX,KEEP_LOW,HZ,...] [--max-modes N] [--max-keys N]
+//!        [--board FILE.bin]   (a board file written by gen_board, as the browser fetches it)
 //! `--scale` + `--isolated` reproduces the reference binary run with the same
 //! sparse `--scale` (nothing else attached to the bridge, no retirement).
 use fs_live_piano::refmods::geometry;
@@ -35,6 +36,7 @@ fn run() -> Result<(), String> {
     // freshly solved FE slice instead (with `--reduction`, its source band).
     let mut embedded = true;
     let mut trace_path: Option<String> = None;
+    let mut board_path: Option<String> = None;
     let mut i = 3;
     while i < args.len() {
         let value = |i: usize| args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i]));
@@ -51,6 +53,7 @@ fn run() -> Result<(), String> {
             "--scale" => { scale_path = Some(value(i)?.clone()); i += 1; }
             "--reduction" => { reduction = Some(value(i)?.clone()); i += 1; }
             "--trace" => { trace_path = Some(value(i)?.clone()); i += 1; }
+            "--board" => { board_path = Some(value(i)?.clone()); i += 1; }
             "--isolated" => cfg.static_attachment = false,
             "--no-duplex" => cfg.duplex = false,
             other => return Err(format!("unknown option {other}")),
@@ -77,6 +80,10 @@ fn run() -> Result<(), String> {
     // `--reduction SPEC` = the offline binary's `--board-reduction SPEC` with
     // `--band` as its `--board-band-hz` source band.
     let desc = match (&reduction, embedded) {
+        _ if board_path.is_some() => {
+            let path = board_path.as_deref().unwrap_or_default();
+            Description::from_board_bytes(courses, &std::fs::read(path).map_err(|e| format!("{path}: {e}"))?)?
+        }
         (Some(spec), _) => Description::with_reduction(courses, cfg.board_band_hz, spec)?,
         (None, true) => Description::from_board_bytes(courses, fs_live_piano::kernel::BOARD_BIN)?,
         (None, false) => Description::with_courses(courses, cfg.board_band_hz)?,

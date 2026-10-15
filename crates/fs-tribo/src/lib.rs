@@ -142,6 +142,11 @@ impl<K: Ord + Clone> ExactlyOnceKeyLedger<K> {
         key: &K,
         strict_successor: Option<K>,
     ) -> Result<Self, ExactlyOnceKeyError> {
+        if let Self::RetainedSet { committed, .. } = self
+            && committed.contains(key)
+        {
+            return Err(ExactlyOnceKeyError::Duplicate);
+        }
         if self.committed_count() >= self.maximum_committed() {
             return Err(ExactlyOnceKeyError::CapacityExceeded {
                 maximum: self.maximum_committed(),
@@ -152,9 +157,6 @@ impl<K: Ord + Clone> ExactlyOnceKeyLedger<K> {
                 committed,
                 maximum_committed,
             } => {
-                if committed.contains(key) {
-                    return Err(ExactlyOnceKeyError::Duplicate);
-                }
                 let mut next = committed.clone();
                 next.insert(key.clone());
                 Ok(Self::RetainedSet {

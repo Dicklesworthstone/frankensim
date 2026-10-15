@@ -134,34 +134,64 @@ pub type IdentityMigrationReceiptId = SemanticId<IdentityMigrationReceiptSchemaV
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityMigrationWireError {
     /// The whole transport exceeds its public allocation envelope.
-    TransportLength { found: usize, max: usize },
+    TransportLength {
+        /// Observed transport length in bytes.
+        found: usize,
+        /// Maximum admitted transport length in bytes.
+        max: usize,
+    },
     /// The fixed transport domain marker is absent or changed.
     Magic,
     /// The transport version is unknown to this decoder.
-    UnsupportedVersion { found: u32 },
+    UnsupportedVersion {
+        /// Decoded wire version number.
+        found: u32,
+    },
     /// A fixed or declared-length field runs past the available bytes.
     Truncated {
+        /// Name of the truncated wire field.
         field: &'static str,
+        /// Bytes required by the field.
         needed: usize,
+        /// Remaining bytes in the transport slice.
         remaining: usize,
     },
     /// A declared variable field exceeds its field-specific bound.
     FieldLength {
+        /// Name of the wire field.
         field: &'static str,
+        /// Declared length in bytes.
         found: usize,
+        /// Maximum admitted length in bytes.
         max: usize,
     },
     /// A required UTF-8 field contains invalid bytes.
-    Utf8 { field: &'static str },
+    Utf8 {
+        /// Name of the field with invalid UTF-8.
+        field: &'static str,
+    },
     /// A closed enum or optional-field tag is outside its declared universe.
-    InvalidTag { field: &'static str, found: u8 },
+    InvalidTag {
+        /// Name of the tagged wire field.
+        field: &'static str,
+        /// Unrecognized tag byte.
+        found: u8,
+    },
     /// Extra bytes follow the complete v1 field sequence.
-    TrailingBytes { remaining: usize },
+    TrailingBytes {
+        /// Number of unconsumed trailing bytes.
+        remaining: usize,
+    },
     /// Complete decoded fields violate the receipt contract.
-    InvalidReceipt { detail: String },
+    InvalidReceipt {
+        /// Diagnostic description of the contract violation.
+        detail: String,
+    },
     /// The carried primary identity differs from independent reconstruction.
     ReceiptIdMismatch {
+        /// Primary identity carried in the wire transport.
         stored: IdentityMigrationReceiptId,
+        /// Primary identity reconstructed from decoded fields.
         derived: IdentityMigrationReceiptId,
     },
 }
@@ -215,18 +245,31 @@ impl std::error::Error for IdentityMigrationWireError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityReconcileCursorError {
     /// The transport is truncated or extended.
-    TransportLength { found: usize, expected: usize },
+    TransportLength {
+        /// Observed cursor byte length.
+        found: usize,
+        /// Exact expected cursor byte length.
+        expected: usize,
+    },
     /// The fixed cursor family marker is absent or changed.
     Magic,
     /// The cursor wire version is unknown to this decoder.
-    UnsupportedVersion { found: u32 },
+    UnsupportedVersion {
+        /// Decoded cursor wire version.
+        found: u32,
+    },
     /// Reserved bytes are nonzero and therefore not canonical v1 transport.
     ReservedBytes,
     /// The closed reconciliation-phase tag is unknown.
-    InvalidPhase { found: u8 },
+    InvalidPhase {
+        /// Unrecognized reconciliation-phase tag byte.
+        found: u8,
+    },
     /// A fixed-width cursor field violates its structural domain.
     InvalidField {
+        /// Name of the invalid cursor field.
         field: &'static str,
+        /// Structural requirement violated by the field.
         detail: &'static str,
     },
 }
@@ -1072,15 +1115,25 @@ pub enum IdentityReconcileError {
     /// Storage, bounded-envelope, or sidecar verification failed.
     Ledger(LedgerError),
     /// The cursor belongs to another physical ledger or schema context.
-    StaleCursor { field: &'static str, detail: String },
+    StaleCursor {
+        /// Cursor field that mismatched the live ledger state.
+        field: &'static str,
+        /// Explanation of the mismatch.
+        detail: String,
+    },
     /// Cancellation was observed at a bounded row boundary. The whole page was
     /// rolled back; replay this exact cursor.
-    Cancelled { resume: IdentityReconcileCursor },
+    Cancelled {
+        /// Exact cursor before the cancelled page.
+        resume: IdentityReconcileCursor,
+    },
     /// A primary reconciliation failure was followed by a rollback failure.
     /// Both diagnostics are retained because cleanup success cannot be
     /// inferred in this state.
     Cleanup {
+        /// Primary error that triggered the rollback.
         primary: Box<IdentityReconcileError>,
+        /// Rollback error encountered while aborting the page.
         rollback: LedgerError,
     },
 }
@@ -6576,36 +6629,10 @@ mod tests {
         // spells the same mutation as `SET rowid = ...`, which is why the
         // guard is a value-aware AFTER UPDATE trigger comparing OLD.id with
         // NEW.id rather than an `UPDATE OF id` trigger.
-        //
-        // The alias spelling itself is not executable on FrankenSQLite: its
-        // UPDATE assignment-target resolver (`TableSchema::column_index`,
-        // crates/fsqlite-vdbe/src/codegen.rs) matches declared columns only
-        // and never the implicit `rowid`/`_rowid_`/`oid` alias of a rowid
-        // table, so the statement fails to compile with "no such column:
-        // rowid in table ops". Assert that refusal — it is a tripwire that
-        // turns red the moment the engine grows the alias, at which point
-        // the direct alias-spelled cohort assertion below can be restored —
-        // and assert that the refused statement mutated nothing.
         let before_rowid_alias_update = ledger.begin_identity_reconciliation().unwrap();
-        let alias_spelling = ledger.conn.execute("UPDATE ops SET rowid = 3 WHERE id = 2");
-        assert!(
-            alias_spelling.is_err(),
-            "FrankenSQLite is expected to refuse the rowid alias as an UPDATE \
-             target; if it now accepts it, restore the direct alias-spelled \
-             cohort assertion here"
-        );
-        assert_eq!(
-            ledger.identity_reconcile_source_generation().unwrap(),
-            before_rowid_alias_update.source_generation(),
-            "a statement the engine refused must not advance the generation"
-        );
-        // The value-aware trigger keys on the VALUE of `ops.id`, not on the
-        // spelling that moved it, so the executable spelling of the very same
-        // physical-key move must still advance the generation exactly once
-        // and fail the captured cursor closed.
         ledger
             .conn
-            .execute("UPDATE ops SET id = 3 WHERE id = 2")
+            .execute("UPDATE ops SET rowid = 3 WHERE id = 2")
             .unwrap();
         assert_eq!(
             ledger.identity_reconcile_source_generation().unwrap(),
@@ -6631,26 +6658,24 @@ mod tests {
             )
             .unwrap();
         let before_tune_rowid_update = ledger.begin_identity_reconciliation().unwrap();
-        // Same upstream gap on the cache table: `tune` is a rowid table whose
-        // PRIMARY KEY is not an INTEGER PRIMARY KEY alias, so real SQLite
-        // accepts `SET rowid = ...` there too and FrankenSQLite does not.
+        // On `tune`, whose PRIMARY KEY is not an INTEGER PRIMARY KEY alias,
+        // FrankenSQLite refuses `UPDATE ... SET rowid = ...` when UPDATE
+        // triggers are installed (`NotImplemented`). Assert that refusal and
+        // that the refused statement mutates nothing, then verify an
+        // executable UPDATE invalidates the captured cohort.
         assert!(
             ledger
                 .conn
                 .execute("UPDATE tune SET rowid = rowid + 10")
                 .is_err(),
-            "FrankenSQLite is expected to refuse the rowid alias as an UPDATE \
-             target; if it now accepts it, restore the direct alias-spelled \
-             cohort assertion here"
+            "FrankenSQLite is expected to refuse UPDATE of the implicit rowid \
+             on a table with UPDATE triggers"
         );
         assert_eq!(
             ledger.identity_reconcile_source_generation().unwrap(),
             before_tune_rowid_update.source_generation(),
             "a statement the engine refused must not advance the generation"
         );
-        // The tune generation trigger is an unconditional AFTER UPDATE, so any
-        // executable row mutation — alias-spelled or not — must invalidate a
-        // captured cohort.
         ledger
             .conn
             .execute("UPDATE tune SET measured = '{\"moved\":1}'")

@@ -51,7 +51,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "asupersync"
-version = "0.4.10"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.4.9"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -486,7 +486,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "franken-decision"
-version = "0.4.9"
+version = "0.6.0"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.4.9"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.4.9"
+version = "0.6.0"
 dependencies = [
  "serde",
 ]
@@ -533,7 +533,7 @@ version = "0.0.1"
 
 [[package]]
 name = "fs-cmaes-viz-wasm"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "asupersync",
  "fs-alloc",
@@ -609,6 +609,7 @@ dependencies = [
 name = "fs-feec"
 version = "0.0.1"
 dependencies = [
+ "fs-ivl",
  "fs-la",
  "fs-math",
  "fs-qty",
@@ -620,6 +621,9 @@ dependencies = [
 [[package]]
 name = "fs-g1-train"
 version = "0.1.0"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "fs-ga"
@@ -827,6 +831,7 @@ version = "0.0.1"
 name = "fs-solver"
 version = "0.0.1"
 dependencies = [
+ "fs-exec",
  "fs-feec",
  "fs-la",
  "fs-math",
@@ -1058,6 +1063,12 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "linux-raw-sys"

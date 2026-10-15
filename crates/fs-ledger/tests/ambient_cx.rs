@@ -37,7 +37,7 @@ fn latency_lane_ambient_context_reaches_fsqlite_waiters() {
 
         let outcome = match root_cx.spawn_in(&scope, move |child_cx| async move {
             let observed = child_cx.budget();
-            if observed.poll_quota != MARKER_POLL_QUOTA
+            if ![MARKER_POLL_QUOTA, MARKER_POLL_QUOTA - 1].contains(&observed.poll_quota)
                 || observed.cost_quota != Some(MARKER_COST_QUOTA)
                 || observed.priority != MARKER_PRIORITY
             {

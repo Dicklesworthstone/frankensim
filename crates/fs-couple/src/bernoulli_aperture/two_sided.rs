@@ -16,13 +16,16 @@
 
 /// Exterior pressure through the shared Rayleigh and PCM interfaces.
 pub mod observer;
+/// Source-bound bore and tract walls in the same two-sided mechanical solve.
+pub mod material;
 
 use super::dynamic::{ApertureDrive, ApertureFrame, ApertureProgress, ApertureTerminal,
     ApertureTrial, DynamicAperture};
 use super::network::{NetworkNode, NodeFrame, SectionRealization, TubeNetworkSpec};
+use super::fractional::{FractionalSection, FractionalTubePolicy};
 use super::paired::{PairedAperture, PairedTrial};
 use super::viscothermal::{ViscothermalSection, ViscothermalSectionSpec,
-    with_regional_viscothermal_sections};
+    with_regional_viscothermal_sections, with_regional_fractional_viscothermal_sections};
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
@@ -190,6 +193,7 @@ struct DuctSide {
     represented: Vec<SectionRealization>,
     losses: Vec<ViscothermalSection>,
     network: WaveguideNetwork,
+    fractional: Option<(FractionalTubePolicy, Vec<FractionalSection>)>,
 }
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
@@ -227,6 +231,7 @@ pub struct TwoSidedAperture {
     valve: LoadedAperture,
     sides: [DuctSide; 2],
     limits: TwoSidedLimits,
+    material_ducts: [Option<material::MaterialDuctWalls>; 2],
 }
 impl TwoSidedAperture {
     /// Attach two quiescent networks to an unadvanced valve, preserving initial
@@ -234,6 +239,28 @@ impl TwoSidedAperture {
     /// A source already stepped, a stale gas, or a one-sided impedance refuses.
     pub fn new(valve: LoadedAperture, sources: [ApertureDuctSpec; 2],
         limits: TwoSidedLimits, gate: &CancelGate) -> Result<Self, AcousticRealizeError>
+    {
+        Self::build(valve, sources, limits, gate, None)
+    }
+
+    /// Use geometry-derived sub-sample travel on both physical sides, without
+    /// changing either material valve, source force, contact or observer model.
+    /// Each side declares its own finite-band phase budget. This is fixed-state
+    /// initialization, not a live gas/geometry change or a broadband exact delay.
+    /// Selected viscothermal cells retain ORIGINAL physical lengths and regional
+    /// gas properties through the shared fractional loss lowering. Each phase
+    /// band must cover its side's loss bands; original scattering, geometry and
+    /// memory gates still apply. No loss selection is dropped or retuned.
+    pub fn with_fractional_transits(valve: LoadedAperture, sources: [ApertureDuctSpec; 2],
+        limits: TwoSidedLimits, policies: [FractionalTubePolicy; 2], gate: &CancelGate)
+        -> Result<Self, AcousticRealizeError>
+    {
+        Self::build(valve, sources, limits, gate, Some(policies))
+    }
+
+    fn build(valve: LoadedAperture, sources: [ApertureDuctSpec; 2],
+        limits: TwoSidedLimits, gate: &CancelGate, policies: Option<[FractionalTubePolicy; 2]>)
+        -> Result<Self, AcousticRealizeError>
     {
         poll(gate)?;
         limits.validate()?;
@@ -244,15 +271,26 @@ impl TwoSidedAperture {
             || matches!(&valve, LoadedAperture::Paired(a) if a.gas().is_some_and(|g| *g != gas))
         { return Err(invalid("two-sided coupling requires an unadvanced valve with the actual inlet gas and summed load")); }
         let dt = valve.time_step_s();
-        let prepare = |source: ApertureDuctSpec| -> Result<DuctSide, AcousticRealizeError> {
+        let prepare = |source: ApertureDuctSpec, policy: Option<FractionalTubePolicy>| -> Result<DuctSide, AcousticRealizeError> {
             poll(gate)?;
-            let (graph, gases, losses) = with_regional_viscothermal_sections(
-                source.graph.clone(), source.gases.clone(), dt, &source.viscothermal, gate)?;
-            let (network, represented) = graph.realize_waveguide(&gases, dt, gate)?;
-            Ok(DuctSide { source, graph, gases, represented, losses, network })
+            let (graph, gases, losses) = match policy {
+                Some(policy) => with_regional_fractional_viscothermal_sections(
+                    source.graph.clone(), source.gases.clone(), dt, &source.viscothermal, policy, gate),
+                None => with_regional_viscothermal_sections(
+                    source.graph.clone(), source.gases.clone(), dt, &source.viscothermal, gate),
+            }?;
+            let (network, represented, fractional) = if let Some(policy) = policy {
+                let (network, represented, details) = graph.realize_fractional_waveguide(&gases, dt, policy, gate)?;
+                (network, represented, Some((policy, details)))
+            } else {
+                let (network, represented) = graph.realize_waveguide(&gases, dt, gate)?;
+                (network, represented, None)
+            };
+            Ok(DuctSide { source, graph, gases, represented, losses, network, fractional })
         };
         let [up, down] = sources;
-        let model = Self { valve, sides: [prepare(up)?, prepare(down)?], limits };
+        let model = Self { valve, sides: [prepare(up, policies.map(|p|p[0]))?,
+            prepare(down, policies.map(|p|p[1]))?], limits, material_ducts: [None, None] };
         // A lowering must preserve the exact boundary used in the mechanical solve.
         let actual_z = model.sides.iter().map(|s| s.network.inlet_impedance_pa_s_m3()).sum::<f64>();
         if actual_z.to_bits() != z.to_bits() || !model.stored_energy_j().is_finite()
@@ -275,6 +313,12 @@ impl TwoSidedAperture {
     #[must_use]
     pub fn represented_sections(&self, side: ValveSide) -> &[SectionRealization] {
         &self.sides[side.index()].represented
+    }
+    /// Selected numerical phase image and section residuals; None is the original
+    /// integer path. The represented integer count alone is not total travel here.
+    #[must_use]
+    pub fn fractional_sections(&self, side: ValveSide) -> Option<(FractionalTubePolicy, &[FractionalSection])> {
+        self.sides[side.index()].fractional.as_ref().map(|(policy, details)|(*policy, details.as_slice()))
     }
     /// Gas states in realized section order, not a substitute average atmosphere.
     #[must_use]

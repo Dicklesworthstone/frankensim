@@ -60,16 +60,28 @@ fn select(omega: &[f64], values: &[C64], dt: f64, max_order: usize)
     if !scale.is_finite() || scale == 0.0 && response.iter().any(|v|v.re != 0.0 || v.im != 0.0) {
         return Err("observer training/selection scale overflow or underflow".into());
     }
+    let mut best: Option<(DiscreteStateSpace, FitReport)> = None;
     let mut last = String::new();
     for (attempt, order) in (2..=max_order).step_by(2).enumerate() {
         match fit_observer(&frequencies, &response, dt, order) {
-            Ok((filter, maximum, rms)) => return Ok((filter, FitReport {
-                order: if scale == 0.0 { 0 } else { order }, attempts: attempt+1,
-                selection_maximum: maximum, selection_rms: rms,
-                audit_maximum: 0.0, audit_rms: 0.0,
-            }, scale)),
+            Ok((filter, maximum, rms)) => {
+                let report = FitReport {
+                    order: if scale == 0.0 { 0 } else { order }, attempts: attempt+1,
+                    selection_maximum: maximum, selection_rms: rms,
+                    audit_maximum: 0.0, audit_rms: 0.0,
+                };
+                if maximum <= MAX_RMS_ERROR && rms <= MAX_RMS_ERROR / 3.0 {
+                    return Ok((filter, report, scale));
+                }
+                if best.as_ref().is_none_or(|(_, b)| maximum < b.selection_maximum) {
+                    best = Some((filter, report));
+                }
+            }
             Err(error) => last = error.to_string(),
         }
+    }
+    if let Some((filter, report)) = best {
+        return Ok((filter, report, scale));
     }
     Err(format!("observer order budget exhausted at {max_order}; last candidate: {last}").into())
 }

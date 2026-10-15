@@ -35,11 +35,28 @@ pub enum ReverseError {
     /// Existing graph, binding, domain, resource, or cancellation refusal.
     Evaluation(OptError),
     /// A supplied physics binding disagrees with its node or declaration.
-    PhysicsBinding { node: NodeId, what: &'static str },
+    PhysicsBinding {
+        /// Live-IR node identifier.
+        node: NodeId,
+        /// Specific binding defect description.
+        what: &'static str,
+    },
     /// Preserve a model's original typed refusal and the responsible node.
-    Physics { node: NodeId, source: PhysicsError },
+    Physics {
+        /// Live-IR node identifier.
+        node: NodeId,
+        /// Underlying physics evaluation or pullback error.
+        source: PhysicsError,
+    },
     /// A provider omitted or invented derivative components.
-    PhysicsGradientLength { node: NodeId, expected: usize, actual: usize },
+    PhysicsGradientLength {
+        /// Live-IR node identifier.
+        node: NodeId,
+        /// Expected gradient component count.
+        expected: usize,
+        /// Returned gradient component count.
+        actual: usize,
+    },
     /// No smooth derivative is claimed for this reachable operation.
     Nonsmooth {
         /// Offending live-IR node.

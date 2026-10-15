@@ -168,3 +168,9 @@ fn bad_wall_inputs_keep_the_original_cold_refusal_boundaries() {
 
 #[path = "flue/radiation.rs"]
 mod radiation;
+
+#[path = "flue/fractional_loss.rs"]
+mod fractional_loss;
+
+#[path = "flue/multirate.rs"]
+mod multirate;

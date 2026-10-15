@@ -186,9 +186,16 @@ fn manifold_parameter_gradients_match_retraction_directional_derivatives() {
         let gradient = evaluation.parameter_pullback(&[1.0], None).unwrap();
         assert_eq!(gradient[0].len(), manifold.param_dim().unwrap() as usize);
         for j in 0..gradient[0].len() {
-            let mut step = vec![0.0; gradient[0].len()]; step[j] = 1e-6;
-            let plus = manifold.retract(&point, &step).unwrap(); step[j] = -1e-6;
-            let minus = manifold.retract(&point, &step).unwrap();
+            let mut unit = vec![0.0; gradient[0].len()]; unit[j] = 1.0;
+            let direction = if manifold == Manifold::So3 {
+                unit
+            } else {
+                manifold.parameter_gradient(&point, &unit).unwrap()
+            };
+            let plus_step: Vec<f64> = direction.iter().map(|d| 1e-6 * d).collect();
+            let minus_step: Vec<f64> = direction.iter().map(|d| -1e-6 * d).collect();
+            let plus = manifold.retract(&point, &plus_step).unwrap();
+            let minus = manifold.retract(&point, &minus_step).unwrap();
             assert!((gradient[0][j] - (plus[1] - minus[1]) / 2e-6).abs() < 2e-7);
         }
     }

@@ -28,7 +28,7 @@ struct Knot {
     force_n: f64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Program {
     knots: Vec<Knot>,
 }

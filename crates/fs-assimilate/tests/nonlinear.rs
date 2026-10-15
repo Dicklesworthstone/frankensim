@@ -252,8 +252,8 @@ fn nonlinear_output_envelope_counts_the_retained_affine_instrument_identity() {
 
         assert_eq!(
             long_resources.work().get(),
-            short_resources.work().get() + u128::from(identity_growth),
-            "shape-only planning charges the affine observation's retained identity bytes"
+            short_resources.work().get() + 2 * u128::from(identity_growth),
+            "planned work charges the instrument identity in the nonlinear receipt and in canonical affine record materialization"
         );
         assert_eq!(
             long_resources.output().get(),
@@ -265,6 +265,62 @@ fn nonlinear_output_envelope_counts_the_retained_affine_instrument_identity() {
             short_resources.memory().get() + identity_growth,
             "the peak memory envelope includes the retained output"
         );
+
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        let clock = VirtualClock::new();
+        for (candidate, planned_work) in [
+            (
+                &short,
+                u64::try_from(short_resources.work().get()).expect("short work fits u64"),
+            ),
+            (
+                &long,
+                u64::try_from(long_resources.work().get()).expect("long work fits u64"),
+            ),
+        ] {
+            pool.scope(|arena| {
+                let exact_cx = Cx::new(
+                    &gate,
+                    arena,
+                    TEST_STREAM,
+                    Budget {
+                        cost_quota: Some(planned_work),
+                        ..Budget::INFINITE
+                    },
+                    ExecMode::Deterministic,
+                )
+                .with_time_source(&clock);
+                let result = assimilate_nonlinear_fd(
+                    &prior,
+                    candidate,
+                    |state| 2.0 * state[0] + 1.0,
+                    &exact_cx,
+                )
+                .expect("exact runtime work matches planned work");
+                assert!(result.posterior().is_some());
+
+                let one_short_cx = Cx::new(
+                    &gate,
+                    arena,
+                    TEST_STREAM,
+                    Budget {
+                        cost_quota: Some(planned_work - 1),
+                        ..Budget::INFINITE
+                    },
+                    ExecMode::Deterministic,
+                )
+                .with_time_source(&clock);
+                assert!(matches!(
+                    assimilate_nonlinear_fd(
+                        &prior,
+                        candidate,
+                        |state| 2.0 * state[0] + 1.0,
+                        &one_short_cx,
+                    ),
+                    Err(AssimError::BudgetRefused(_))
+                ));
+            });
+        }
     });
 }
 

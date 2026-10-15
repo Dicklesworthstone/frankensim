@@ -22,9 +22,13 @@ const MAX_GROUPS: usize = 64;
 /// material identities, and MTL names are NOT constitutive material cards.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjRegion {
+    /// Contiguous range of triangle indices in `ObjDocument::soup`.
     pub triangles: Range<usize>,
+    /// Authored `o` object name, if present.
     pub object: Option<String>,
+    /// Authored `g` group names, in source order.
     pub groups: Vec<String>,
+    /// Authored `usemtl` material name, if present.
     pub material: Option<String>,
 }
 impl ObjRegion {
@@ -40,7 +44,9 @@ impl ObjRegion {
 /// not welded, scaled, reoriented or silently repaired.
 #[derive(Debug)]
 pub struct ObjDocument {
+    /// Triangulated vertex/face soup in source coordinates.
     pub soup: Soup,
+    /// Contiguous region partition covering every triangle in `soup`.
     pub regions: Vec<ObjRegion>,
     /// Unresolved `mtllib` references, in source order. Import never follows
     /// these paths (in particular, no path traversal or network I/O occurs).

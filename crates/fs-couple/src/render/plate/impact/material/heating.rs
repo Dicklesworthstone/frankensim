@@ -9,6 +9,8 @@
 pub mod transport;
 /// Explicit unloaded source refresh from thermal state, on the same transaction.
 pub mod feedback;
+/// Joint contact heating through the existing material enthalpy network.
+pub mod network;
 use fs_exec::CancelGate;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 use fs_phs::PreparedStepRecord;

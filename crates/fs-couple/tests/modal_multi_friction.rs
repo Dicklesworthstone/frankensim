@@ -120,12 +120,39 @@ fn both_sticking_ports_recover_independently_manufactured_joint_reactions() {
 #[test]
 fn second_contact_changes_the_first_reaction_through_the_same_body() {
     let mut released = joint(true);
-    let mut stopped = joint(true);
     let a = released.step(&[0.0; 2], &[drive(0.001, 1.0), drive(0.0, 0.0)]).unwrap().clone();
-    let b = stopped.step(&[0.0; 2], &[drive(0.001, 1.0), drive(-0.001, 1.0)]).unwrap().clone();
-    assert!((a.ports[0].traction_n-b.ports[0].traction_n).abs() > 1e-6);
     assert_eq!(a.ports[1].regime, ModalFrictionRegime::Released);
-    assert_eq!(b.ports[1].regime, ModalFrictionRegime::Sticking);
+    // At zero initial state, exact oscillator compliance and the bilateral
+    // spring/dashpot give the required sticking force independently of the
+    // friction solver. The original 1 N load caps static friction at 0.8 N,
+    // below the second body's required ~0.961 N: that case must slide.
+    let dt: f64 = 1.0 / 48000.0;
+    let distance = 0.001 * dt;
+    let compliance = (1.0 - (1100.0 * dt).cos()) / 1100.0_f64.powi(2);
+    let required_second = -0.01 * distance / compliance
+        - (1e4 / 2.0 + 0.2 / dt) * (2.0 * distance);
+    assert!(required_second.abs() > 0.8 && required_second.abs() < 1.6);
+    for (normal, regime) in [(1.0, ModalFrictionRegime::Sliding),
+        (2.0, ModalFrictionRegime::Sticking)] {
+        let mut stopped = joint(true);
+        let b = stopped.step(&[0.0; 2], &[drive(0.001, 1.0), drive(-0.001, normal)]).unwrap().clone();
+        assert!((a.ports[0].traction_n-b.ports[0].traction_n).abs() > 1e-6);
+        assert_eq!(b.ports[0].regime, ModalFrictionRegime::Sticking);
+        assert_eq!(b.ports[1].regime, regime);
+        let point = b.ports[1];
+        if regime == ModalFrictionRegime::Sticking {
+            assert!((point.traction_n-required_second).abs() < 1e-10);
+            assert!(point.slip_distance_m.abs() <= config().sticking_tolerance_m);
+            assert_eq!(point.dissipation_j, 0.0);
+        } else {
+            assert!(point.slip_distance_m < 0.0 && point.traction_n < 0.0);
+            let speed = point.slip_distance_m / dt;
+            let expected = -law().kinetic_coefficient(speed.abs()).unwrap() * normal;
+            assert!((point.traction_n-expected).abs() < 1e-9);
+            assert!(point.dissipation_j > 0.0);
+        }
+        assert!(b.energy_residual_j.abs() <= b.energy_tolerance_j);
+    }
 }
 
 #[test]

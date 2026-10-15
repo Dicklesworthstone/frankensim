@@ -14,8 +14,13 @@
 /** The only sample rate the live engines render. */
 export const LIVE_SAMPLE_RATE = 48_000;
 
-/** Absolute URL prefix of the static live files (served from `public/live`). */
-export const LIVE_BASE_URL = '/live';
+/**
+ * Absolute URL prefix of the static live files (served from `public/live`). A build serves them under
+ * `live/<hash of their contents>/` (vite.config.ts), so every Worker, its glue and its wasm come from one
+ * version and can be cached for good; the dev server serves them at `live/`.
+ */
+const LIVE_VERSION: string = import.meta.env.VITE_LIVE_VERSION ?? "";
+export const LIVE_BASE_URL = `${import.meta.env.BASE_URL}live${LIVE_VERSION ? `/${LIVE_VERSION}` : ""}`;
 
 /** A typed refusal from an engine: `code` is stable and machine-readable. */
 export class LiveRefusal extends Error {
@@ -51,7 +56,7 @@ export interface LiveSinkLevel {
 }
 
 export interface LiveSinkOptions {
-  /** Defaults to `/live`. */
+  /** Defaults to LIVE_BASE_URL (`live/<hash>/` in a build). */
   baseUrl?: string;
   /** Output channels of the sink node (default 2). Mono chunks are copied to every channel. */
   channels?: number;

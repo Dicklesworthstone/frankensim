@@ -276,8 +276,16 @@ fn determinism_and_golden() {
     // Golden bump 2026-08-21 (bead guzez.7.2.1): det::-routing of
     // Prandtl acos + contact tanh moved the trim point by ulps;
     // the spectrum golden follows the trim it linearizes about.
+    // Pinned per-ISA (augmented::eig_dense uses platform f64::hypot at the
+    // final 2x1 Givens step; bit-identical across debug and release on each ISA).
+    #[cfg(target_arch = "aarch64")]
+    const EXPECTED_DIGEST: &str =
+        "389e2a7c4f5a97e8c8507e011979571d10cb87d50c3f57d0b06cd38955d29321";
+    #[cfg(not(target_arch = "aarch64"))]
+    const EXPECTED_DIGEST: &str =
+        "dc2e46444f67ce0cc3171ca6bafb161c9bf7bd53fbc36c07cf4b4ab3d2022c5c";
     assert_eq!(
-        digest, "dc2e46444f67ce0cc3171ca6bafb161c9bf7bd53fbc36c07cf4b4ab3d2022c5c",
+        digest, EXPECTED_DIGEST,
         "augmented-spectrum golden moved — determinism regression or an \
          intentional model change requiring the golden-bump protocol"
     );

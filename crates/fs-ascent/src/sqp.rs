@@ -180,11 +180,12 @@ fn constraint_block(
 
 /// Residual and a scale-relative rounding allowance for one linear row.
 fn linear_residual(row: &[f64], d: &[f64], c: f64) -> Option<(f64, f64)> {
+    let d_inf = d.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
     let mut value = c;
     let mut scale = c.abs();
     for (a, x) in row.iter().zip(d) {
         value = a.mul_add(*x, value);
-        scale += (a * x).abs();
+        scale += a.abs() * x.abs().max(d_inf);
     }
     let allowance = 64.0 * f64::EPSILON * scale.max(f64::MIN_POSITIVE);
     (value.is_finite() && scale.is_finite()).then_some((value, allowance))
@@ -234,6 +235,7 @@ fn solve_inequality_qp(
             return Some(QpSolution { d, lambda: mult[..ne].to_vec(), nu });
         };
         let row = &ji[selected * n..(selected + 1) * n];
+        let row_norm_sq = row.iter().map(|v| v * v).sum::<f64>().max(f64::MIN_POSITIVE);
         let mut pending_multiplier = 0.0f64;
         loop {
             pivots_left = pivots_left.checked_sub(1)?;
@@ -247,28 +249,60 @@ fn solve_inequality_qp(
             if !rate.is_finite() {
                 return None;
             }
-            let full = if rate > 0.0 { value / rate } else { f64::INFINITY };
+            let primal_nonzero = rate > 64.0 * f64::EPSILON * row_norm_sq;
+            let full = if primal_nonzero { value / rate } else { f64::INFINITY };
+            let r_scale = r.iter().map(|v| v.abs()).fold(1.0f64, f64::max);
+            let r_tol = 64.0 * f64::EPSILON * r_scale;
             let mut partial = f64::INFINITY;
             let mut blocking = None;
             for j in 0..active.len() {
-                if r[ne + j] < 0.0 {
+                if r[ne + j] < -r_tol {
                     let bound = mult[ne + j] / -r[ne + j];
-                    if bound < partial {
-                        partial = bound;
+                    let tie_tol = 64.0 * f64::EPSILON * partial.abs().max(1.0);
+                    let clearly_smaller = bound + tie_tol < partial;
+                    let near_tie_higher_index = (bound - partial).abs() <= tie_tol
+                        && blocking.is_some_and(|prev| active[j] > active[prev]);
+                    if blocking.is_none() || clearly_smaller || near_tie_higher_index {
+                        partial = bound.min(partial);
                         blocking = Some(j);
                     }
                 }
             }
-            let t = full.min(partial);
+            if full <= partial {
+                let mut next_active = active.clone();
+                next_active.push(selected);
+                let (a_next, c_next) = constraint_block(je, ce, ji, ci, &next_active, n);
+                if let Some((d_next, mut mult_next)) =
+                    solve_qp(b, g, &a_next, &c_next, n, ne + next_active.len())
+                {
+                    let scale = mult_next.iter().map(|v| v.abs()).fold(1.0f64, f64::max);
+                    if mult_next[ne..]
+                        .iter()
+                        .all(|&value| value >= -64.0 * f64::EPSILON * scale)
+                    {
+                        for value in &mut mult_next[ne..] {
+                            *value = (*value).max(0.0);
+                        }
+                        active = next_active;
+                        d = d_next;
+                        mult = mult_next;
+                        break;
+                    }
+                }
+            }
+            let j = blocking?;
+            let t = partial;
             if !t.is_finite() || t < 0.0 {
                 return None;
             }
-            for (value, z) in d.iter_mut().zip(z) {
-                *value = t.mul_add(z, *value);
+            if primal_nonzero {
+                for (value, z) in d.iter_mut().zip(z) {
+                    *value = t.mul_add(z, *value);
+                }
             }
-            for (j, (value, r)) in mult.iter_mut().zip(r).enumerate() {
+            for (k, (value, r)) in mult.iter_mut().zip(r).enumerate() {
                 let updated = t.mul_add(r, *value);
-                if j >= ne {
+                if k >= ne {
                     let roundoff = 64.0 * f64::EPSILON * (value.abs() + (t * r).abs());
                     if !updated.is_finite() || !roundoff.is_finite() || updated < -roundoff {
                         return None;
@@ -282,22 +316,6 @@ fn solve_inequality_qp(
             if !pending_multiplier.is_finite() || d.iter().chain(&mult).any(|x| !x.is_finite()) {
                 return None;
             }
-            if full <= partial {
-                active.push(selected);
-                // Re-solve the final block instead of retaining cancellation
-                // in d + t*z when the equality-only minimizer was far away.
-                let (a, c) = constraint_block(je, ce, ji, ci, &active, n);
-                (d, mult) = solve_qp(b, g, &a, &c, n, ne + active.len())?;
-                let scale = mult.iter().map(|v| v.abs()).fold(1.0f64, f64::max);
-                for value in &mut mult[ne..] {
-                    if *value < -64.0 * f64::EPSILON * scale {
-                        return None;
-                    }
-                    *value = (*value).max(0.0);
-                }
-                break;
-            }
-            let j = blocking?;
             active.remove(j);
             mult.remove(ne + j);
         }

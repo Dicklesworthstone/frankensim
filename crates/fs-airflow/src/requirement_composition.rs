@@ -19,8 +19,11 @@ use core::fmt;
 use std::collections::BTreeSet;
 
 use fs_blake3::{ContentHash, hash_domain};
-use fs_evidence::ColorRank;
 use fs_evidence::uncertainty::{BudgetTotal, EngineeringUncertaintyBudget};
+use fs_evidence::witness::{
+    BindingWitness as EvidenceBindingWitness, WitnessedColor, compose_witnessed,
+};
+use fs_evidence::{Color, ColorRank, IntervalOp, ValidityDomain};
 use fs_exec::Cx;
 
 use crate::registered_qoi::{CandidateQoiRow, QoiSemanticId};
@@ -84,6 +87,8 @@ pub struct BindingWitness {
     pub weakest_stage: &'static str,
     /// Weakest evidence color across all contributing inputs.
     pub weakest_color: ColorRank,
+    /// Canonical binding-constraint witness set produced by `fs_evidence::witness::compose_witnessed`.
+    pub witnesses: Vec<EvidenceBindingWitness>,
 }
 
 /// Typed evaluation of one ThermalLimit against extracted QoI evidence.
@@ -317,12 +322,66 @@ pub fn compose_thermal_limits(
             let effective_limit = req.limit_kelvin;
             let achieved_margin = effective_limit - row.value;
 
-            let (outcome, weakest_color) = if outside_domain {
-                (ComplianceOutcome::OutsideDomain, ColorRank::Estimated)
-            } else if !row.value.is_finite() || (row.value < 0.0 && !row.kind.admits_negative()) {
-                (ComplianceOutcome::Corrupt, ColorRank::Estimated)
+            let producer_stage = if matches!(
+                row.semantic_id,
+                QoiSemanticId::PressureDrop | QoiSemanticId::FanPower
+            ) {
+                "fs-airflow"
             } else {
-                let outcome = match row.uncertainty.total() {
+                "fs-conduction"
+            };
+            let corrupt = !row.value.is_finite() || (row.value < 0.0 && !row.kind.admits_negative());
+            let producer_color = match (corrupt, row.color) {
+                (true, _) | (false, ColorRank::Estimated) => Color::Estimated {
+                    estimator: producer_stage.to_string(),
+                    dispersion: 0.0,
+                },
+                (false, ColorRank::Validated) => Color::Validated {
+                    regime: ValidityDomain::unconstrained().with("regime", 0.0, 1.0),
+                    dataset: producer_stage.to_string(),
+                },
+                (false, ColorRank::Verified) => Color::Verified {
+                    lo: -row.value,
+                    hi: -row.value,
+                },
+            };
+            let producer_witnessed =
+                WitnessedColor::leaf(producer_color, producer_stage, row.semantic_id.as_str())
+                    .expect("non-empty producer stage");
+            let requirement_witnessed = WitnessedColor::leaf(
+                Color::Verified {
+                    lo: effective_limit,
+                    hi: effective_limit,
+                },
+                "fs-requirement",
+                req.id.as_str(),
+            )
+            .expect("non-empty requirement stage");
+            let mut composed_witnessed =
+                compose_witnessed(&producer_witnessed, &requirement_witnessed, IntervalOp::Add)
+                    .expect("two-stage witness composition stays within MAX_WITNESSES");
+            if outside_domain {
+                let regime_witnessed = WitnessedColor::leaf(
+                    Color::Estimated {
+                        estimator: "fs-regime".to_string(),
+                        dispersion: 0.0,
+                    },
+                    "fs-regime",
+                    "outside-domain",
+                )
+                .expect("non-empty regime stage");
+                composed_witnessed =
+                    compose_witnessed(&composed_witnessed, &regime_witnessed, IntervalOp::Add)
+                        .expect("three-stage witness composition stays within MAX_WITNESSES");
+            }
+            let weakest_color = composed_witnessed.color().rank();
+
+            let outcome = if outside_domain {
+                ComplianceOutcome::OutsideDomain
+            } else if corrupt {
+                ComplianceOutcome::Corrupt
+            } else {
+                match row.uncertainty.total() {
                     BudgetTotal::Bounded {
                         conservative_half_width,
                     } if achieved_margin - conservative_half_width >= req.margin_kelvin => {
@@ -336,8 +395,7 @@ pub fn compose_thermal_limits(
                     BudgetTotal::Bounded { .. }
                     | BudgetTotal::Unknown { .. }
                     | BudgetTotal::Unbounded { .. } => ComplianceOutcome::Indeterminate,
-                };
-                (outcome, row.color)
+                }
             };
 
             match outcome {
@@ -347,21 +405,32 @@ pub fn compose_thermal_limits(
                 _ => {}
             }
 
+            let weakest_stage = if outside_domain
+                && composed_witnessed
+                    .witnesses()
+                    .iter()
+                    .any(|w| w.id.stage == "fs-regime")
+            {
+                "fs-regime"
+            } else {
+                match composed_witnessed
+                    .witnesses()
+                    .first()
+                    .map(|w| w.id.stage.as_str())
+                {
+                    Some("fs-airflow") => "fs-airflow",
+                    Some("fs-regime") => "fs-regime",
+                    _ => "fs-conduction",
+                }
+            };
+
             let witness = BindingWitness {
                 region_name: req.region_name.clone(),
                 primary_vertex: row.tie_witness_vertex,
                 tie_witness_vertex: row.tie_witness_vertex,
-                weakest_stage: if outside_domain {
-                    "fs-regime"
-                } else if matches!(
-                    row.semantic_id,
-                    QoiSemanticId::PressureDrop | QoiSemanticId::FanPower
-                ) {
-                    "fs-airflow"
-                } else {
-                    "fs-conduction"
-                },
+                weakest_stage,
                 weakest_color,
+                witnesses: composed_witnessed.witnesses().to_vec(),
             };
 
             let identity_hash = compute_evaluation_hash(req, row, outcome, weakest_color);

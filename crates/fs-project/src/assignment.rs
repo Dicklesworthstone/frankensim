@@ -1703,31 +1703,50 @@ mod containment_tests {
 
     #[test]
     fn exact_containment_refuses_an_off_plane_point_rounded_onto_the_face() {
-        // The exact plane is z = x + y, and the point is off it. At this
-        // scale the legacy f64 cross/dot sum can lose the nonzero y
-        // contribution and report zero, binding the point falsely rather
-        // than merely refusing conservatively.
-        //
-        // WHETHER it loses it is a platform question, not a claim of this
-        // test: the sum's association and any FMA contraction differ by
-        // target, and on x86-64 Linux the same expression does not land on
-        // exactly zero (measured 2026-09-03; it does on aarch64, where this
-        // test was written). So the legacy demonstration is asserted only
-        // where the platform actually reproduces the rounding, while the
-        // claim this test exists for — the EXACT predicate refuses the
-        // point — is asserted everywhere.
+        // The exact plane is z = x + y, and the point is off it by y = 0.25.
+        // In IEEE-754 f64, normal = [-1e16, -1e16, 1e16], so
+        // dot3(point, normal) evaluates (-5e31 + -2.5e15) + 5e31. Because
+        // |-2.5e15| < 0.5 * ulp(-5e31) = 2^52 ≈ 4.5036e15, the y contribution
+        // is absorbed unconditionally on every IEEE-754 target and the legacy
+        // f64 plane test falsely reports 0.0, whereas fs-ivl orient3d refuses.
         let tri = [[0.0, 0.0, 0.0], [1.0e16, 0.0, 1.0e16], [0.0, 1.0, 1.0]];
         let normal = cross3(subtract(tri[1], tri[0]), subtract(tri[2], tri[0]));
-        let point = [5.0e15, 0.5, 5.0e15];
-        if dot3(subtract(point, tri[0]), normal) == 0.0 {
-            assert!(
-                legacy_contains_point(tri, normal, point),
-                "where the legacy sum rounds the point onto the plane it also binds it"
-            );
-        }
+        let point = [5.0e15, 0.25, 5.0e15];
+        assert_eq!(dot3(subtract(point, tri[0]), normal), 0.0);
+        assert!(
+            legacy_contains_point(tri, normal, point),
+            "the legacy f64 cross/dot sum rounds the off-plane point onto the plane and binds it"
+        );
         assert!(
             !triangle_contains_point(tri, normal, point),
             "exact predicates must refuse the rounded off-plane candidate"
+        );
+    }
+
+    #[test]
+    fn exact_containment_admits_in_plane_combination_where_legacy_f64_normal_rounds_off_zero_and_refuses_one_ulp_off_plane() {
+        // u and v have dyadic coordinates at 2^-27, so their products in
+        // cross3(u, v) lose 2^-54 bits in f64 while w = 0.25 * u + 0.25 * v is
+        // representable with zero rounding error and lies strictly inside the
+        // triangle (barycentric weights 0.5, 0.25, 0.25).
+        let d = f64::from_bits((1023 - 27) << 52); // 2^-27
+        let u = [1.0, 1.0 + d, 1.0 + 2.0 * d];
+        let v = [1.0, 1.0 - d, 1.0 + 3.0 * d];
+        let tri = [[0.0, 0.0, 0.0], u, v];
+        let normal = cross3(subtract(tri[1], tri[0]), subtract(tri[2], tri[0]));
+        let in_plane = [0.5, 0.5, 0.5 + 1.25 * d];
+        assert!(
+            !legacy_contains_point(tri, normal, in_plane),
+            "legacy f64 normal rounds cross3(u, v), so dot3(w, normal) != 0.0 and falsely refuses an exact in-plane point"
+        );
+        assert!(
+            triangle_contains_point(tri, normal, in_plane),
+            "fs-ivl exact predicates admit the exact in-plane barycentric combination"
+        );
+        let one_ulp_off_plane = [in_plane[0], in_plane[1], in_plane[2].next_up()];
+        assert!(
+            !triangle_contains_point(tri, normal, one_ulp_off_plane),
+            "planting the vertex one ulp off the supporting plane must refuse deterministically"
         );
     }
 

@@ -382,6 +382,7 @@ pub const MAX_CAUSAL_GRAPH_FINDINGS: usize = 65_536;
 /// single deterministic [`CausalReceiptRule::ResourceLimit`] sentinel.
 pub const MAX_CAUSAL_RECEIPT_FINDINGS: usize = 65_536;
 const INCIDENCE_FIXED_CANONICAL_CAPACITY: usize = 1_024;
+#[allow(dead_code)]
 const NODE_FIXED_CANONICAL_CAPACITY: usize = 1_024;
 
 // `IdentityReceipt::limits()` records the encoder policy that admitted a
@@ -711,7 +712,12 @@ pub enum CausalSeedPolicy {
     NoRandomness,
     /// Counter-based stream key supplied by the caller. The key is semantic,
     /// not a worker or thread identifier.
-    CounterBased { seed: u64, stream: u64 },
+    CounterBased {
+        /// Deterministic root seed supplied by the caller.
+        seed: u64,
+        /// Logical stream identifier (independent of worker or thread ID).
+        stream: u64,
+    },
 }
 
 /// Semantic extent of one equation extraction.

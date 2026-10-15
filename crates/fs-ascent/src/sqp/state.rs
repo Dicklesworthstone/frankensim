@@ -248,8 +248,14 @@ impl SqpState {
             let current = self.report(SqpStop::IterationLimit, tol)?;
             if current.solution.converged { return self.report(SqpStop::Converged, tol); }
             if completed == additional_iters { return Ok(current); }
-            let Some(qp) = solve_inequality_qp(&self.hessian, &self.sample.gradient,
-                &self.sample.je, &self.sample.ce, &self.sample.ji, &self.sample.ci) else {
+            let mut qp = solve_inequality_qp(&self.hessian, &self.sample.gradient,
+                &self.sample.je, &self.sample.ce, &self.sample.ji, &self.sample.ci);
+            if qp.is_none() && !self.is_identity_hessian() {
+                self.reset_hessian();
+                qp = solve_inequality_qp(&self.hessian, &self.sample.gradient,
+                    &self.sample.je, &self.sample.ce, &self.sample.ji, &self.sample.ci);
+            }
+            let Some(qp) = qp else {
                 poll(cx)?;
                 return self.report(SqpStop::Stalled, tol);
             };
@@ -269,6 +275,10 @@ impl SqpState {
             let gd: f64 = self.sample.gradient.iter().zip(&qp.d).map(|(g, d)| g * d).sum();
             let slope = gd - penalty * v0;
             if !penalty.is_finite() || !slope.is_finite() || slope >= 0.0 {
+                if !self.is_identity_hessian() {
+                    self.reset_hessian();
+                    continue;
+                }
                 return self.report(SqpStop::Stalled, tol);
             }
             let mut alpha = 1.0_f64;
@@ -277,7 +287,7 @@ impl SqpState {
                 poll(cx)?;
                 if self.evaluations >= max_evals { return self.report(SqpStop::EvaluationLimit, tol); }
                 let xt: Vec<f64> = self.x.iter().zip(&qp.d).map(|(x, d)| alpha.mul_add(*d, *x)).collect();
-                if xt == self.x { return self.report(SqpStop::Stalled, tol); }
+                if xt == self.x { break; }
                 if xt.iter().any(|v| !v.is_finite()) { alpha *= 0.5; continue; }
                 self.evaluations += 1;
                 let trial = evaluate(&xt).map_err(SqpError::Evaluation)?;
@@ -285,14 +295,23 @@ impl SqpState {
                 if let Some(trial) = trial {
                     trial.validate(n, self.lambda.len(), self.nu.len())?;
                     let change = (trial.f - self.sample.f) + penalty * (violation(&trial.ce, &trial.ci) - v0);
-                    if change.is_finite() && change < 0.0 && change <= 1e-4 * alpha * slope {
+                    let trial_kkt = trial.certificate(&qp.lambda, &qp.nu)
+                        .ok_or(SqpError::Invalid("non-finite trial KKT certificate"))?;
+                    let kkt_max = kkt.stationarity.max(kkt.feasibility)
+                        .max(kkt.dual_feasibility).max(kkt.complementarity);
+                    let trial_kkt_max = trial_kkt.stationarity.max(trial_kkt.feasibility)
+                        .max(trial_kkt.dual_feasibility).max(trial_kkt.complementarity);
+                    let roundoff = 1e-10 * self.sample.f.abs().max(1.0);
+                    let armijo = change.is_finite() && change < 0.0 && change <= 1e-4 * alpha * slope;
+                    let polish = change.is_finite()
+                        && (-alpha * slope) <= roundoff
+                        && change <= roundoff
+                        && trial_kkt_max < 0.9 * kkt_max;
+                    if armijo || polish {
                         let old_g = self.sample.lagrangian_gradient(&qp.lambda, &qp.nu)
                             .ok_or(SqpError::Invalid("non-finite Lagrangian gradient"))?;
                         let new_g = trial.lagrangian_gradient(&qp.lambda, &qp.nu)
                             .ok_or(SqpError::Invalid("non-finite trial Lagrangian gradient"))?;
-                        if trial.certificate(&qp.lambda, &qp.nu).is_none() {
-                            return Err(SqpError::Invalid("non-finite trial KKT certificate"));
-                        }
                         let s: Vec<f64> = xt.iter().zip(&self.x).map(|(a, b)| a - b).collect();
                         let y: Vec<f64> = new_g.iter().zip(&old_g).map(|(a, b)| a - b).collect();
                         let mut next_b = self.hessian.clone();
@@ -319,7 +338,29 @@ impl SqpState {
                 self.rejected_trials += 1;
                 alpha *= 0.5;
             }
-            if !accepted { return self.report(SqpStop::Stalled, tol); }
+            if !accepted {
+                if !self.is_identity_hessian() {
+                    self.reset_hessian();
+                    continue;
+                }
+                return self.report(SqpStop::Stalled, tol);
+            }
+        }
+    }
+
+    fn is_identity_hessian(&self) -> bool {
+        let n = self.x.len();
+        self.hessian.iter().enumerate().all(|(idx, &v)| {
+            let expected = if idx / n == idx % n { 1.0 } else { 0.0 };
+            v == expected
+        })
+    }
+
+    fn reset_hessian(&mut self) {
+        let n = self.x.len();
+        self.hessian.fill(0.0);
+        for i in 0..n {
+            self.hessian[i * n + i] = 1.0;
         }
     }
 }

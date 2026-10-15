@@ -23,7 +23,7 @@ fn physical(cx: &Cx<'_>, fixed: f64, nonlinear: bool, direct: bool) -> (f64, f64
     let source = ScalarField::Uniform(2000.0);
     let boundary = ThermalBoundaryBuilder::new(&mesh)
         .region("fixed", |f| on_box_face(f.centroid[0],0.0), ThermalBc::dirichlet(fixed).unwrap()).unwrap()
-        .remainder("cooled", ThermalBc::robin(80.0,290.0).unwrap()).unwrap().finish().unwrap();
+        .remainder("cooled", ThermalBc::robin(15.0,290.0).unwrap()).unwrap().finish().unwrap();
     let problem = ConductionProblem {mesh:&mesh,boundary:&boundary,material:&model,
         element_materials:None,source:&source};
     let mut config = SolveConfig::default();
@@ -58,7 +58,7 @@ fn prescribed_controls_include_full_nonlinear_lift_and_direct_fixed_goal() {
             assert!((actual-expected).abs() < 2e-6*expected.abs().max(0.01),
                 "nonlinear={nonlinear} direct={direct}: {actual} vs {expected}");
             if direct { assert_eq!(value,350.0); assert_eq!(actual,1.0); }
-            else { assert!(actual > 0.0 && actual < 1.0); }
+            else { assert!(actual > 0.0 && actual < 1.0, "nonlinear={nonlinear} actual={actual} expected={expected}"); }
         } }
     });
 }

@@ -72,7 +72,7 @@ fn physical_support_torque_changes_the_shell_and_respects_force_work_and_rollbac
             assert!(a.system.step(&a.force, &cancel).is_err()); assert_eq!(a.system.state(), before.as_slice());
         }
         let f = a.system.step(&a.force, &gate).unwrap(); b.system.step(&b.force, &gate).unwrap();
-        assert_eq!(f.sample, tick + 1); supplied += f.supplied_work_j;
+        assert!((f.time_s - (tick + 1) as f64 * 2e-6).abs() < 1e-14); supplied += f.supplied_work_j;
         balance = balance.max(f.balance_residual_j.abs());
     }
     assert!(supplied > 0.0 && balance < 1e-7);

@@ -81,3 +81,11 @@ export function sciNode(v: number, digits = 2): HTMLElement {
   span.append(`${m}×10`, sup);
   return span;
 }
+
+/** The deployment's base path ("/" at the domain root, "/music/" under frankensim.org/music). */
+export const BASE = import.meta.env.BASE_URL;
+
+/** A URL for a file published with the site (data, audio, images, live engines). */
+export function asset(path: string): string {
+  return BASE + path.replace(/^\/+/, "");
+}

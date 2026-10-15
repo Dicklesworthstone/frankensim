@@ -43,7 +43,7 @@ use crate::refmods::{
     relaxation, shank, steinway_d, steinway_scale,
 };
 use fs_couple::modal_acoustic_time::{
-    ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
+    ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
 use fs_couple::pcm_wav::baffled::{BaffledPressure, RayleighMedium, SurfaceSample};
 use fs_material::{Uniaxial, WoolFelt};
@@ -191,6 +191,16 @@ impl Description {
             return Err("embedded Model D scale must contain 88 courses".into());
         }
         Self::from_board_bytes(courses, BOARD_BIN)
+    }
+
+    /// The embedded scale on a board file written by `board_bytes` (a larger
+    /// bridge-informed reduction shipped beside the engine and fetched).
+    pub fn from_board(bytes: &[u8]) -> Result<Self, String> {
+        let courses = geometry::read_scale(SCALE_CSV)?;
+        if courses.len() != 88 {
+            return Err("embedded Model D scale must contain 88 courses".into());
+        }
+        Self::from_board_bytes(courses, bytes)
     }
 
     /// Serialize the board of this description (`examples/gen_board.rs`).
@@ -387,38 +397,15 @@ fn zoh_probe(rate: u32, omega: &[f64]) -> Result<Vec<Zoh>, String> {
                 pressure_per_modal_velocity: C64::new(0.0, 0.0),
             })
             .collect();
-        let mut model = ModalAcousticTimeModel::try_new(rate, modes.clone(), ModalAcousticTimeBudget::audible_reference())
+        let model = ModalAcousticTimeModel::try_new(rate, modes, ModalAcousticTimeBudget::audible_reference())
             .map_err(|e| e.to_string())?;
-        let zeros = vec![0.0; modes.len()];
-        let mut result = vec![Zoh::default(); modes.len()];
-        let mut states: Vec<ModalAcousticState> = modes
-            .iter()
-            .map(|m| ModalAcousticState { displacement_m_sqrt_kg: 1.0 / m.angular_frequency_rad_s, velocity_m_sqrt_kg_per_s: 0.0 })
-            .collect();
-        model.restore_states(&states).map_err(|e| e.to_string())?;
-        model.step(&zeros).map_err(|e| e.to_string())?;
-        for ((t, state), mode) in result.iter_mut().zip(model.states()).zip(&modes) {
-            t.qq = state.displacement_m_sqrt_kg * mode.angular_frequency_rad_s;
-            t.vq = state.velocity_m_sqrt_kg_per_s * mode.angular_frequency_rad_s;
-        }
-        states.fill(ModalAcousticState { displacement_m_sqrt_kg: 0.0, velocity_m_sqrt_kg_per_s: 1.0 });
-        model.restore_states(&states).map_err(|e| e.to_string())?;
-        model.step(&zeros).map_err(|e| e.to_string())?;
-        for (t, state) in result.iter_mut().zip(model.states()) {
-            t.qv = state.displacement_m_sqrt_kg;
-            t.vv = state.velocity_m_sqrt_kg_per_s;
-        }
-        states.fill(ModalAcousticState::default());
-        model.restore_states(&states).map_err(|e| e.to_string())?;
-        model.step(&vec![1.0; modes.len()]).map_err(|e| e.to_string())?;
-        for (t, state) in result.iter_mut().zip(model.states()) {
-            t.bq = state.displacement_m_sqrt_kg;
-            t.bv = state.velocity_m_sqrt_kg_per_s;
-            if !t.bq.is_finite() || t.bq <= 0.0 {
+        for i in 0..chunk.len() {
+            let (qq, qv, vq, vv, bq, bv) = model.probe_linear_map(i);
+            if !bq.is_finite() || bq <= 0.0 {
                 return Err("nonpositive ZOH displacement compliance".into());
             }
+            out.push(Zoh { qq, qv, vq, vv, bq, bv });
         }
-        out.extend(result);
     }
     Ok(out)
 }
@@ -431,7 +418,52 @@ fn identity(n: usize) -> Vec<f64> {
     a
 }
 
+/// Four-lane dot product: lanes `s[0..4]` accumulate the whole 4-blocks, are
+/// combined as `(s0 + s1) + (s2 + s3)`, then the tails (`len % 4`) are added in
+/// order. Both loop shapes below produce the same blocks, tails and operation
+/// order, so the sum is bit-identical on every target; the shape is per target
+/// because LLVM vectorizes them differently (measured, optimisation pass 1):
+/// - wasm32: `as_chunks` + a single-exit zip (~5% less CPU for the whole engine
+///   in V8 than the two-exit loop, pass 1), lanes 0/1 and 2/3 as two explicit
+///   f64x2 sums (pass 28; LLVM's own vectorization paired 0/2 and 1/3 and paid
+///   shuffles for it).
+/// - elsewhere: the two-exit `(&mut ca).zip(&mut cb)` loop. Do NOT "fix" it to a
+///   single-exit (trusted-random-access) loop: AArch64's loop vectorizer then
+///   applies an ordered FP reduction (lane extracts, serial scalar adds, spills),
+///   measured 1.5-1.65x slower per dot on Apple silicon. The `split_at_checked`
+///   frame a profiler attributes to this loop is sampling skid from the four
+///   add-latency chains, which bound the loop (the sum order fixes them).
+#[cfg(target_arch = "wasm32")]
 #[inline]
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    use core::arch::wasm32::{f64x2, f64x2_add, f64x2_extract_lane, f64x2_mul, f64x2_splat};
+    let (ca, ra) = a.as_chunks::<4>();
+    let (cb, rb) = b.as_chunks::<4>();
+    let (mut lo, mut hi) = (f64x2_splat(0.0), f64x2_splat(0.0));
+    for (x, y) in ca.iter().zip(cb) {
+        lo = f64x2_add(lo, f64x2_mul(f64x2(x[0], x[1]), f64x2(y[0], y[1])));
+        hi = f64x2_add(hi, f64x2_mul(f64x2(x[2], x[3]), f64x2(y[2], y[3])));
+    }
+    let mut t = (f64x2_extract_lane::<0>(lo) + f64x2_extract_lane::<1>(lo))
+        + (f64x2_extract_lane::<0>(hi) + f64x2_extract_lane::<1>(hi));
+    for (x, y) in ra.iter().zip(rb) {
+        t += x * y;
+    }
+    t
+}
+
+/// See the wasm32 `dot` above: same sum, two-exit loop shape for native targets.
+///
+/// `inline(always)`, not `inline` (optimisation pass 6): with plain `inline`
+/// LLVM simplifies `dot` on its own first and inlines it afterwards. At call
+/// sites where both slices provably have the same length (`matvec` rows
+/// against `x`, `gl . mid`, `cross . v` over one segment) it then folds the
+/// two exits into one, and the loop vectorizer emits the slow ordered
+/// reduction anyway (ld4.2d, lane extracts, serial scalar adds). Inlined
+/// before simplification, the loop keeps the two-exit fadd.2d/fmul.2d form.
+/// Same operations in the same order, so the sums are bit-identical.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     let mut s = [0.0_f64; 4];
     let mut ca = a.chunks_exact(4);
@@ -449,6 +481,211 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     t
 }
 
+/// Pad shapes of one segment packed for the fused damper passes (1 to 4
+/// pads; otherwise empty and `damp` runs the sequential flows): for each
+/// 4-mode block `c`, `g_0[4c..4c+4], ..., g_{np-1}[4c..4c+4]`, then each
+/// pad's tail modes (`n % 4`) pad-major. Also the Gram matrix `g_t . g_j`.
+fn pack_pads(pad: &[PadPoint], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let np = pad.len();
+    if !(1..=4).contains(&np) {
+        return (Vec::new(), Vec::new());
+    }
+    let blocks = n / 4;
+    let mut pack = Vec::with_capacity(n * np);
+    for c in 0..blocks {
+        for p in pad {
+            pack.extend_from_slice(&p.shape[4 * c..4 * c + 4]);
+        }
+    }
+    for p in pad {
+        pack.extend_from_slice(&p.shape[4 * blocks..n]);
+    }
+    let mut gram = vec![0.0; np * np];
+    for t in 0..np {
+        for j in 0..np {
+            gram[t * np + j] = dot(&pad[t].shape, &pad[j].shape);
+        }
+    }
+    (pack, gram)
+}
+
+/// `[g_t . v; N]` for the `N` packed pad shapes in ONE pass over `v`; each
+/// sum has `dot`'s four-lane order. Loop shape per target as in `dot`.
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn pad_dots<const N: usize>(pack: &[f64], v: &[f64]) -> [f64; N] {
+    use core::arch::wasm32::{f64x2, f64x2_add, f64x2_extract_lane, f64x2_mul, f64x2_splat};
+    // Explicit f64x2 lanes 0/1 and 2/3 per pad (pass 28), the same sums.
+    let mut lo = [f64x2_splat(0.0); N];
+    let mut hi = [f64x2_splat(0.0); N];
+    let (cv, rv) = v.as_chunks::<4>();
+    let (cg, _) = pack.as_chunks::<4>();
+    for (x, g) in cv.iter().zip(cg.chunks_exact(N)) {
+        let xl = f64x2(x[0], x[1]);
+        let xh = f64x2(x[2], x[3]);
+        for t in 0..N {
+            lo[t] = f64x2_add(lo[t], f64x2_mul(f64x2(g[t][0], g[t][1]), xl));
+            hi[t] = f64x2_add(hi[t], f64x2_mul(f64x2(g[t][2], g[t][3]), xh));
+        }
+    }
+    let mut s = [[0.0_f64; 4]; N];
+    for t in 0..N {
+        s[t] = [f64x2_extract_lane::<0>(lo[t]), f64x2_extract_lane::<1>(lo[t]),
+            f64x2_extract_lane::<0>(hi[t]), f64x2_extract_lane::<1>(hi[t])];
+    }
+    pad_dots_finish(&s, &pack[cv.len() * 4 * N..], rv)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn pad_dots<const N: usize>(pack: &[f64], v: &[f64]) -> [f64; N] {
+    let mut s = [[0.0_f64; 4]; N];
+    let mut cv = v.chunks_exact(4);
+    let mut cg = pack.chunks_exact(4 * N);
+    for (x, g) in (&mut cv).zip(&mut cg) {
+        for t in 0..N {
+            s[t][0] += g[4 * t] * x[0];
+            s[t][1] += g[4 * t + 1] * x[1];
+            s[t][2] += g[4 * t + 2] * x[2];
+            s[t][3] += g[4 * t + 3] * x[3];
+        }
+    }
+    let rv = cv.remainder();
+    pad_dots_finish(&s, &pack[(v.len() - rv.len()) * N..], rv)
+}
+
+#[inline]
+fn pad_dots_finish<const N: usize>(s: &[[f64; 4]; N], tail: &[f64], rv: &[f64]) -> [f64; N] {
+    let rem = rv.len();
+    let mut d = [0.0; N];
+    for t in 0..N {
+        let mut acc = (s[t][0] + s[t][1]) + (s[t][2] + s[t][3]);
+        for (g, x) in tail[t * rem..(t + 1) * rem].iter().zip(rv) {
+            acc += g * x;
+        }
+        d[t] = acc;
+    }
+    d
+}
+
+/// `v += sum_t g_t * c[t]` for the `N` packed pad shapes in ONE pass (each
+/// element adds the pads in pack order).
+#[inline]
+fn pad_axpy<const N: usize>(pack: &[f64], v: &mut [f64], c: &[f64; N]) {
+    let body = v.len() / 4 * 4;
+    let (head, rv) = v.split_at_mut(body);
+    for (x, g) in head.chunks_exact_mut(4).zip(pack.chunks_exact(4 * N)) {
+        for t in 0..N {
+            x[0] += g[4 * t] * c[t];
+            x[1] += g[4 * t + 1] * c[t];
+            x[2] += g[4 * t + 2] * c[t];
+            x[3] += g[4 * t + 3] * c[t];
+        }
+    }
+    let rem = rv.len();
+    let tail = &pack[body * N..];
+    for t in 0..N {
+        for (x, g) in rv.iter_mut().zip(&tail[t * rem..(t + 1) * rem]) {
+            *x += g * c[t];
+        }
+    }
+}
+
+/// The `N` sequential exact rank-one pad flows of one segment (`damp`), fused:
+/// with `v0` the entry velocities, pad `t` (in processing order) sees
+/// `g_t . v = g_t . v0 + sum_{j before t} (g_t . g_j) c_j` and the bridge
+/// speed `beta = gl . bvel`, which each flow moves by `|gl|^2 lift_t c_t`.
+/// One multi-dot pass, an N x N recurrence, one multi-axpy pass. `beta` and
+/// `push` (= sum lift_t c_t, the bridge velocity change still owed to
+/// `bvel` along `gl`) carry across the course's segments. Returns the loss.
+///
+/// The post half (`reverse`) of step n and the pre half of step n+1 are
+/// adjacent flows on the same string velocities (between them only the
+/// receiver, which reads `bvel`), so the post half's string update is owed
+/// instead of applied: `owe = c` and the pad speeds it leaves behind,
+/// `dn = d + Gram c` (exact). The next pre half starts from `dn` instead of a
+/// multi-dot and applies `owe + c` in its one multi-axpy: one pass of each per
+/// sample instead of two. Anything else that needs `v` settles first
+/// (`settle_owed`) or reads it through `LivePiano::seg_velocity`.
+#[inline]
+fn damp_fused<const N: usize>(s: &mut ASeg, v: &mut [f64], gl_norm2: f64, beta: &mut f64, push: &mut f64, reverse: bool) -> f64 {
+    let owed = !reverse && s.owed;
+    let d: [f64; N] = if owed {
+        let mut d = [0.0_f64; N];
+        d.copy_from_slice(&s.dn[..N]);
+        d
+    } else {
+        pad_dots::<N>(&s.pad_pack, v)
+    };
+    let mut c = [0.0_f64; N];
+    let mut loss = 0.0;
+    let mut moved = false;
+    for k in 0..N {
+        let t = if reverse { N - 1 - k } else { k };
+        let p = &s.pad[t];
+        if p.coef == 0.0 {
+            continue;
+        }
+        let row = &s.pad_gram[t * N..t * N + N];
+        let mut string_speed = d[t];
+        for kk in 0..k {
+            let j = if reverse { N - 1 - kk } else { kk };
+            string_speed += row[j] * c[j];
+        }
+        let speed = string_speed + p.lift * *beta;
+        let change = p.coef * speed;
+        c[t] = change;
+        let lc = p.lift * change;
+        *beta += gl_norm2 * lc;
+        *push += lc;
+        loss += -change * speed - 0.5 * change * change * p.norm;
+        moved = true;
+    }
+    if reverse {
+        if moved {
+            for t in 0..N {
+                let row = &s.pad_gram[t * N..t * N + N];
+                let mut next = d[t];
+                for j in 0..N {
+                    next += row[j] * c[j];
+                }
+                s.dn[t] = next;
+                s.owe[t] = c[t];
+            }
+            s.owed = true;
+        }
+    } else if owed {
+        let mut total = [0.0_f64; N];
+        for t in 0..N {
+            total[t] = s.owe[t] + c[t];
+        }
+        pad_axpy::<N>(&s.pad_pack, v, &total);
+        s.owed = false;
+    } else if moved {
+        pad_axpy::<N>(&s.pad_pack, v, &c);
+    }
+    loss
+}
+
+/// Apply a segment's owed post-half damper flow (`damp_fused`) to `v`
+/// exactly as the unfused post half would have.
+#[inline]
+fn settle_owed_n<const N: usize>(s: &ASeg, v: &mut [f64]) {
+    let mut c = [0.0_f64; N];
+    c.copy_from_slice(&s.owe[..N]);
+    pad_axpy::<N>(&s.pad_pack, v, &c);
+}
+
+fn settle_owed(s: &ASeg, v: &mut [f64]) {
+    match s.pad.len() {
+        1 => settle_owed_n::<1>(s, v),
+        2 => settle_owed_n::<2>(s, v),
+        3 => settle_owed_n::<3>(s, v),
+        4 => settle_owed_n::<4>(s, v),
+        _ => {}
+    }
+}
+
 /// `out = row^T * a` for a row-major `r x r` matrix `a`.
 fn matvec_into_row(row: &[f64], a: &[f64], r: usize, out: &mut [f64]) {
     out.fill(0.0);
@@ -459,12 +696,336 @@ fn matvec_into_row(row: &[f64], a: &[f64], r: usize, out: &mut [f64]) {
     }
 }
 
+/// Native: `y[i] = dot(row_i, x)` bit for bit, four rows per sweep of `x`
+/// (pass 16), in `dot`'s two-exit loop shape (see the native `dot`).
+#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 fn matvec(a: &[f64], x: &[f64], y: &mut [f64]) {
     let r = x.len();
-    for (row, out) in a.chunks_exact(r).zip(y.iter_mut()) {
+    let n = a.chunks_exact(r).len().min(y.len());
+    let quads = n / 4;
+    for (block, out) in a[..quads * 4 * r].chunks_exact(4 * r).zip(y.chunks_exact_mut(4)) {
+        let (r0, rest) = block.split_at(r);
+        let (r1, rest) = rest.split_at(r);
+        let (r2, r3) = rest.split_at(r);
+        let mut s = [[0.0_f64; 4]; 4];
+        let mut cx = x.chunks_exact(4);
+        let mut c0 = r0.chunks_exact(4);
+        let mut c1 = r1.chunks_exact(4);
+        let mut c2 = r2.chunks_exact(4);
+        let mut c3 = r3.chunks_exact(4);
+        for ((((v, p0), p1), p2), p3) in (&mut cx).zip(&mut c0).zip(&mut c1).zip(&mut c2).zip(&mut c3) {
+            for l in 0..4 {
+                s[0][l] += p0[l] * v[l];
+                s[1][l] += p1[l] * v[l];
+                s[2][l] += p2[l] * v[l];
+                s[3][l] += p3[l] * v[l];
+            }
+        }
+        let rv = cx.remainder();
+        for (k, (o, tail)) in out.iter_mut().zip([c0.remainder(), c1.remainder(), c2.remainder(), c3.remainder()]).enumerate() {
+            let mut t = (s[k][0] + s[k][1]) + (s[k][2] + s[k][3]);
+            for (p, q) in tail.iter().zip(rv) {
+                t += p * q;
+            }
+            *o = t;
+        }
+    }
+    for (row, out) in a.chunks_exact(r).zip(y.iter_mut()).skip(quads * 4) {
         *out = dot(row, x);
     }
+}
+
+/// wasm32: `y[i] = dot(row_i, x)` bit for bit, four rows per sweep of `x`
+/// (optimisation pass 16). Per row the same four lane sums as the wasm32
+/// `dot` (lanes 0/1 and 2/3 in two f64x2 accumulators; LLVM's own
+/// vectorization of `dot` pairs lanes 0/2 and 1/3 and pays two shuffles per
+/// chunk for it), then `(s0 + s1) + (s2 + s3)` and the tail columns in order.
+/// Four rows give eight independent add chains and load `x` once per four
+/// rows. Leftover rows (`rows % 4`) use `dot`.
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn matvec(a: &[f64], x: &[f64], y: &mut [f64]) {
+    use core::arch::wasm32::{f64x2, f64x2_add, f64x2_extract_lane, f64x2_mul, f64x2_splat, v128};
+    let r = x.len();
+    let rows = a.chunks_exact(r);
+    let n = rows.len().min(y.len());
+    let (cx, rx) = x.as_chunks::<4>();
+    let body = 4 * cx.len();
+    let finish = |lo: v128, hi: v128, row: &[f64]| -> f64 {
+        let mut t = (f64x2_extract_lane::<0>(lo) + f64x2_extract_lane::<1>(lo))
+            + (f64x2_extract_lane::<0>(hi) + f64x2_extract_lane::<1>(hi));
+        for (p, q) in row[body..].iter().zip(rx) {
+            t += p * q;
+        }
+        t
+    };
+    let quads = n / 4;
+    for (block, out) in a[..quads * 4 * r].chunks_exact(4 * r).zip(y.chunks_exact_mut(4)) {
+        let (r0, rest) = block.split_at(r);
+        let (r1, rest) = rest.split_at(r);
+        let (r2, r3) = rest.split_at(r);
+        let zero = f64x2_splat(0.0);
+        let mut acc = [zero; 8];
+        let it = cx.iter()
+            .zip(r0.as_chunks::<4>().0)
+            .zip(r1.as_chunks::<4>().0)
+            .zip(r2.as_chunks::<4>().0)
+            .zip(r3.as_chunks::<4>().0);
+        for ((((v, c0), c1), c2), c3) in it {
+            let xl = f64x2(v[0], v[1]);
+            let xh = f64x2(v[2], v[3]);
+            acc[0] = f64x2_add(acc[0], f64x2_mul(f64x2(c0[0], c0[1]), xl));
+            acc[1] = f64x2_add(acc[1], f64x2_mul(f64x2(c0[2], c0[3]), xh));
+            acc[2] = f64x2_add(acc[2], f64x2_mul(f64x2(c1[0], c1[1]), xl));
+            acc[3] = f64x2_add(acc[3], f64x2_mul(f64x2(c1[2], c1[3]), xh));
+            acc[4] = f64x2_add(acc[4], f64x2_mul(f64x2(c2[0], c2[1]), xl));
+            acc[5] = f64x2_add(acc[5], f64x2_mul(f64x2(c2[2], c2[3]), xh));
+            acc[6] = f64x2_add(acc[6], f64x2_mul(f64x2(c3[0], c3[1]), xl));
+            acc[7] = f64x2_add(acc[7], f64x2_mul(f64x2(c3[2], c3[3]), xh));
+        }
+        out[0] = finish(acc[0], acc[1], r0);
+        out[1] = finish(acc[2], acc[3], r1);
+        out[2] = finish(acc[4], acc[5], r2);
+        out[3] = finish(acc[6], acc[7], r3);
+    }
+    for (row, out) in a.chunks_exact(r).zip(y.iter_mut()).skip(quads * 4) {
+        *out = dot(row, x);
+    }
+}
+
+#[cfg(test)]
+#[inline]
+fn step_string_loss(
+    v: &mut [f64],
+    c1: &[f64],
+    c2: &[f64],
+    c3: &[f64],
+    bm: f64,
+) -> (f64, f64) {
+    let mut l = [0.0_f64; 4];
+    let mut a = [0.0_f64; 4];
+    let mut cv = v.chunks_exact_mut(4);
+    let mut cc1 = c1.chunks_exact(4);
+    let mut cc2 = c2.chunks_exact(4);
+    let mut cc3 = c3.chunks_exact(4);
+    for (((vc, c1c), c2c), c3c) in (&mut cv).zip(&mut cc1).zip(&mut cc2).zip(&mut cc3) {
+        for lane in 0..4 {
+            let old = vc[lane];
+            let dv = c1c[lane] * old + c2c[lane] * bm;
+            l[lane] += (old - dv) * (old + dv);
+            a[lane] += c3c[lane] * old;
+            vc[lane] = dv;
+        }
+    }
+    let mut loss = (l[0] + l[1]) + (l[2] + l[3]);
+    let mut acc3 = (a[0] + a[1]) + (a[2] + a[3]);
+    for (((v, &c1), &c2), &c3) in cv
+        .into_remainder()
+        .iter_mut()
+        .zip(cc1.remainder())
+        .zip(cc2.remainder())
+        .zip(cc3.remainder())
+    {
+        let old = *v;
+        let dv = c1 * old + c2 * bm;
+        loss += (old - dv) * (old + dv);
+        acc3 += c3 * old;
+        *v = dv;
+    }
+    (loss, acc3)
+}
+
+#[cfg(test)]
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn step_zoh_free(
+    q: &[f64],
+    v: &mut [f64],
+    fq: &mut [f64],
+    qq: &[f64],
+    qv: &[f64],
+    vq: &[f64],
+    vv: &[f64],
+    ha: &[f64],
+) -> f64 {
+    let mut r = [0.0_f64; 4];
+    let mut cq = q.chunks_exact(4);
+    let mut cv = v.chunks_exact_mut(4);
+    let mut cfq = fq.chunks_exact_mut(4);
+    let mut cqq = qq.chunks_exact(4);
+    let mut cqv = qv.chunks_exact(4);
+    let mut cvq = vq.chunks_exact(4);
+    let mut cvv = vv.chunks_exact(4);
+    let mut cha = ha.chunks_exact(4);
+    for (((((((qc, vc), fqc), qqc), qvc), vqc), vvc), hac) in (&mut cq)
+        .zip(&mut cv)
+        .zip(&mut cfq)
+        .zip(&mut cqq)
+        .zip(&mut cqv)
+        .zip(&mut cvq)
+        .zip(&mut cvv)
+        .zip(&mut cha)
+    {
+        for lane in 0..4 {
+            let qi = qc[lane];
+            let dv = vc[lane];
+            let x = qqc[lane] * qi + qvc[lane] * dv;
+            fqc[lane] = x;
+            vc[lane] = vqc[lane] * qi + vvc[lane] * dv;
+            r[lane] += hac[lane] * (qi + x);
+        }
+    }
+    let mut reac = (r[0] + r[1]) + (r[2] + r[3]);
+    for (((((((&q, v), fq), &qq), &qv), &vq), &vv), &ha) in cq
+        .remainder()
+        .iter()
+        .zip(cv.into_remainder().iter_mut())
+        .zip(cfq.into_remainder().iter_mut())
+        .zip(cqq.remainder())
+        .zip(cqv.remainder())
+        .zip(cvq.remainder())
+        .zip(cvv.remainder())
+        .zip(cha.remainder())
+    {
+        let dv = *v;
+        let x = qq * q + qv * dv;
+        *fq = x;
+        *v = vq * q + vv * dv;
+        reac += ha * (q + x);
+    }
+    reac
+}
+
+#[cfg(test)]
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn step_zoh_forced(
+    q: &mut [f64],
+    v: &mut [f64],
+    fq: &[f64],
+    bqa: &[f64],
+    bva: &[f64],
+    ha: &[f64],
+    cross: &[f64],
+    bbar: f64,
+) -> (f64, f64) {
+    let mut r = [0.0_f64; 4];
+    let mut s = [0.0_f64; 4];
+    let mut cq = q.chunks_exact_mut(4);
+    let mut cv = v.chunks_exact_mut(4);
+    let mut cfq = fq.chunks_exact(4);
+    let mut cbqa = bqa.chunks_exact(4);
+    let mut cbva = bva.chunks_exact(4);
+    let mut cha = ha.chunks_exact(4);
+    let mut ccross = cross.chunks_exact(4);
+    for ((((((qc, vc), fqc), bqac), bvac), hac), crossc) in (&mut cq)
+        .zip(&mut cv)
+        .zip(&mut cfq)
+        .zip(&mut cbqa)
+        .zip(&mut cbva)
+        .zip(&mut cha)
+        .zip(&mut ccross)
+    {
+        for lane in 0..4 {
+            let nq = fqc[lane] + bqac[lane] * bbar;
+            let nv = vc[lane] + bvac[lane] * bbar;
+            r[lane] += hac[lane] * (qc[lane] + nq);
+            s[lane] += crossc[lane] * nv;
+            qc[lane] = nq;
+            vc[lane] = nv;
+        }
+    }
+    let mut reac = (r[0] + r[1]) + (r[2] + r[3]);
+    let mut src = (s[0] + s[1]) + (s[2] + s[3]);
+    for ((((((q, v), &fq), &bqa), &bva), &ha), &cross) in cq
+        .into_remainder()
+        .iter_mut()
+        .zip(cv.into_remainder().iter_mut())
+        .zip(cfq.remainder())
+        .zip(cbqa.remainder())
+        .zip(cbva.remainder())
+        .zip(cha.remainder())
+        .zip(ccross.remainder())
+    {
+        let nq = fq + bqa * bbar;
+        let nv = *v + bva * bbar;
+        reac += ha * (*q + nq);
+        src += cross * nv;
+        *q = nq;
+        *v = nv;
+    }
+    (reac, src)
+}
+
+#[cfg(test)]
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn step_zoh_forced_contact(
+    q: &mut [f64],
+    v: &mut [f64],
+    fq: &[f64],
+    bqa: &[f64],
+    bva: &[f64],
+    ha: &[f64],
+    cross: &[f64],
+    bqhs: &[f64],
+    bvhs: &[f64],
+    bbar: f64,
+    force: f64,
+) -> (f64, f64) {
+    let mut r = [0.0_f64; 4];
+    let mut s = [0.0_f64; 4];
+    let mut cq = q.chunks_exact_mut(4);
+    let mut cv = v.chunks_exact_mut(4);
+    let mut cfq = fq.chunks_exact(4);
+    let mut cbqa = bqa.chunks_exact(4);
+    let mut cbva = bva.chunks_exact(4);
+    let mut cha = ha.chunks_exact(4);
+    let mut ccross = cross.chunks_exact(4);
+    let mut cbqhs = bqhs.chunks_exact(4);
+    let mut cbvhs = bvhs.chunks_exact(4);
+    for ((((((((qc, vc), fqc), bqac), bvac), hac), crossc), bqhsc), bvhsc) in (&mut cq)
+        .zip(&mut cv)
+        .zip(&mut cfq)
+        .zip(&mut cbqa)
+        .zip(&mut cbva)
+        .zip(&mut cha)
+        .zip(&mut ccross)
+        .zip(&mut cbqhs)
+        .zip(&mut cbvhs)
+    {
+        for lane in 0..4 {
+            let nq = fqc[lane] + bqac[lane] * bbar + bqhsc[lane] * force;
+            let nv = vc[lane] + bvac[lane] * bbar + bvhsc[lane] * force;
+            r[lane] += hac[lane] * (qc[lane] + nq);
+            s[lane] += crossc[lane] * nv;
+            qc[lane] = nq;
+            vc[lane] = nv;
+        }
+    }
+    let mut reac = (r[0] + r[1]) + (r[2] + r[3]);
+    let mut src = (s[0] + s[1]) + (s[2] + s[3]);
+    for ((((((((q, v), &fq), &bqa), &bva), &ha), &cross), &bqhs), &bvhs) in cq
+        .into_remainder()
+        .iter_mut()
+        .zip(cv.into_remainder().iter_mut())
+        .zip(cfq.remainder())
+        .zip(cbqa.remainder())
+        .zip(cbva.remainder())
+        .zip(cha.remainder())
+        .zip(ccross.remainder())
+        .zip(cbqhs.remainder())
+        .zip(cbvhs.remainder())
+    {
+        let nq = fq + bqa * bbar + bqhs * force;
+        let nv = *v + bva * bbar + bvhs * force;
+        reac += ha * (*q + nq);
+        src += cross * nv;
+        *q = nq;
+        *v = nv;
+    }
+    (reac, src)
 }
 
 /// One string segment of the scale (speaking unison member or its duplex).
@@ -475,6 +1036,10 @@ struct Seg {
     duplex: bool,
     off: usize,
     n_max: usize,
+    /// First record of this segment in `Modes::pre`/`fin`/`hit` (wasm32
+    /// pair records, see `PreRec`).
+    #[cfg(target_arch = "wasm32")]
+    pair: usize,
     /// Chord (static) endpoint mass mu*L/3 [kg].
     endpoint_mass: f64,
     /// Chord stiffness T/L [N/m].
@@ -486,26 +1051,390 @@ struct Seg {
     strike_fraction: f64,
 }
 
+/// Everything the pre half-flow loop of `step` reads per mode, packed into one
+/// 64-byte record (one cache line, one prefetch stream) instead of eight
+/// separate arrays. Values are copies of the `Modes` constants of the same
+/// name; the ZOH free-motion map `fq = qq*q + qv*v`, `fv = vq*q + vv*v` has no
+/// other reader, so it lives only here.
+#[derive(Clone, Copy)]
+#[repr(C, align(64))]
+struct PreFlow {
+    c1: f64,
+    c2: f64,
+    c3: f64,
+    qq: f64,
+    qv: f64,
+    vq: f64,
+    vv: f64,
+    ha: f64,
+}
+
+/// What the finish loop of `step` reads per mode besides the state: the board
+/// drive `bqa = bq*a`, `bva = bv*a`, the reaction weight `ha` and the loss
+/// cross term `cross`, in one 32-byte record (one stream instead of four).
+/// `ha` and `cross` are copies of the `Modes` arrays of the same name (other
+/// readers keep those); `bqa`/`bva` live only here.
+#[derive(Clone, Copy)]
+#[repr(C, align(32))]
+struct FinFlow {
+    bqa: f64,
+    bva: f64,
+    ha: f64,
+    cross: f64,
+}
+
+/// The felt-force drive `bqhs = bq*hs`, `bvhs = bv*hs` the finish loop adds
+/// while a segment carries a contact force (16 bytes; read only there).
+#[derive(Clone, Copy)]
+#[repr(C, align(16))]
+struct HitFlow {
+    bqhs: f64,
+    bvhs: f64,
+}
+
+/// Per-mode records in each target's layout (pass 28). wasm32: two adjacent
+/// modes of one segment per record, field-major (`PreFlow2` ...), read by the
+/// two-lane kernels below. Elsewhere one mode per record, read by the scalar
+/// loops (two lanes measured 1-4 % slower natively on Apple silicon).
+#[cfg(target_arch = "wasm32")]
+type PreRec = PreFlow2;
+#[cfg(target_arch = "wasm32")]
+type FinRec = FinFlow2;
+#[cfg(target_arch = "wasm32")]
+type HitRec = HitFlow2;
+#[cfg(not(target_arch = "wasm32"))]
+type PreRec = PreFlow;
+#[cfg(not(target_arch = "wasm32"))]
+type FinRec = FinFlow;
+#[cfg(not(target_arch = "wasm32"))]
+type HitRec = HitFlow;
+
+/// The records of segment `s` (see `PreRec`).
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn recs(s: &ASeg) -> std::ops::Range<usize> {
+    s.pair..s.pair + s.n.div_ceil(2)
+}
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+fn recs(s: &ASeg) -> std::ops::Range<usize> {
+    s.off..s.off + s.n
+}
+
+/// Two adjacent modes of one segment, field-major (wasm32, pass 28): lane `l`
+/// of every field belongs to mode `off + 2j + l` of the segment, so each
+/// field is one `v128.load`. Same values as `PreFlow`; an odd last mode's
+/// record holds zeros in lane 1, which no kernel reads.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Default)]
+#[repr(C, align(16))]
+struct PreFlow2 {
+    c1: [f64; 2],
+    c2: [f64; 2],
+    c3: [f64; 2],
+    qq: [f64; 2],
+    qv: [f64; 2],
+    vq: [f64; 2],
+    vv: [f64; 2],
+    ha: [f64; 2],
+}
+
+/// `FinFlow` for two adjacent modes, field-major (as `PreFlow2`).
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Default)]
+#[repr(C, align(16))]
+struct FinFlow2 {
+    bqa: [f64; 2],
+    bva: [f64; 2],
+    ha: [f64; 2],
+    cross: [f64; 2],
+}
+
+/// `HitFlow` for two adjacent modes, field-major.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Default)]
+#[repr(C, align(16))]
+struct HitFlow2 {
+    bqhs: [f64; 2],
+    bvhs: [f64; 2],
+}
+
+/// Regroup per-mode records two modes at a time from each segment's first
+/// mode (wasm32); returns the records and each segment's first record.
+#[cfg(target_arch = "wasm32")]
+fn pair_records(segs: &[Seg], pre: &[PreFlow], fin: &[FinFlow], hit: &[HitFlow]) -> (Vec<PreFlow2>, Vec<FinFlow2>, Vec<HitFlow2>, Vec<usize>) {
+    let (mut p2, mut f2, mut h2, mut first) = (Vec::new(), Vec::new(), Vec::new(), Vec::with_capacity(segs.len()));
+    for seg in segs {
+        first.push(p2.len());
+        for j in 0..seg.n_max.div_ceil(2) {
+            let (mut p, mut f, mut h) = (PreFlow2::default(), FinFlow2::default(), HitFlow2::default());
+            for l in 0..2 {
+                if 2 * j + l >= seg.n_max {
+                    break;
+                }
+                let k = seg.off + 2 * j + l;
+                let (a, b, c) = (pre[k], fin[k], hit[k]);
+                (p.c1[l], p.c2[l], p.c3[l], p.qq[l], p.qv[l], p.vq[l], p.vv[l], p.ha[l]) = (a.c1, a.c2, a.c3, a.qq, a.qv, a.vq, a.vv, a.ha);
+                (f.bqa[l], f.bva[l], f.ha[l], f.cross[l]) = (b.bqa, b.bva, b.ha, b.cross);
+                (h.bqhs[l], h.bvhs[l]) = (c.bqhs, c.bvhs);
+            }
+            p2.push(p);
+            f2.push(f);
+            h2.push(h);
+        }
+    }
+    (p2, f2, h2, first)
+}
+
+/// Two f64 lanes as one wasm simd128 `f64x2` (pass 28). Lane-wise
+/// `mul`/`add`/`sub` are exactly the scalar operations (wasm has no fused
+/// multiply-add here), so each mode's values are bit for bit the scalar ones.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy)]
+struct F2(core::arch::wasm32::v128);
+#[cfg(target_arch = "wasm32")]
+impl F2 {
+    #[inline(always)]
+    fn ld(a: &[f64; 2]) -> Self { F2(core::arch::wasm32::f64x2(a[0], a[1])) }
+    #[inline(always)]
+    fn splat(x: f64) -> Self { F2(core::arch::wasm32::f64x2_splat(x)) }
+    #[inline(always)]
+    fn st(self, a: &mut [f64; 2]) {
+        a[0] = core::arch::wasm32::f64x2_extract_lane::<0>(self.0);
+        a[1] = core::arch::wasm32::f64x2_extract_lane::<1>(self.0);
+    }
+    #[inline(always)]
+    fn add(self, b: Self) -> Self { F2(core::arch::wasm32::f64x2_add(self.0, b.0)) }
+    #[inline(always)]
+    fn sub(self, b: Self) -> Self { F2(core::arch::wasm32::f64x2_sub(self.0, b.0)) }
+    #[inline(always)]
+    fn mul(self, b: Self) -> Self { F2(core::arch::wasm32::f64x2_mul(self.0, b.0)) }
+    /// `lane0 + lane1`.
+    #[inline(always)]
+    fn hsum(self) -> f64 {
+        core::arch::wasm32::f64x2_extract_lane::<0>(self.0) + core::arch::wasm32::f64x2_extract_lane::<1>(self.0)
+    }
+}
+
+/// Pre string-loss half-flow and exact-ZOH free motion of one segment
+/// (`step`). Returns `[loss, c3 . v, reaction]`.
+///
+/// wasm32 (pass 28): two modes per iteration. Per mode exactly the scalar
+/// operations; the three sums run in two lanes (even / odd modes of the
+/// segment), then `lane0 + lane1`, then an odd last mode. That reassociation
+/// is the only change from the scalar loop: rms diff / rms <= 1e-10 on the
+/// captured scores with every engine counter identical (wasm, pass 28); run
+/// natively, every printed energy term agrees to 9 digits and only the
+/// ~3e-13 J round-off residual moves.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn pre_seg(q: &[f64], v: &[f64], fq: &mut [f64], fv: &mut [f64], rec: &[PreRec], bm: f64) -> [f64; 3] {
+    let n = q.len();
+    let (cq, _) = q.as_chunks::<2>();
+    let (cv, _) = v.as_chunks::<2>();
+    let (cfq, _) = fq.as_chunks_mut::<2>();
+    let (cfv, _) = fv.as_chunks_mut::<2>();
+    let b = F2::splat(bm);
+    let zero = F2::splat(0.0);
+    let (mut loss, mut acc3, mut reac) = (zero, zero, zero);
+    for ((((q2, v2), fq2), fv2), p) in cq.iter().zip(cv).zip(cfq.iter_mut()).zip(cfv.iter_mut()).zip(rec) {
+        let q = F2::ld(q2);
+        let old = F2::ld(v2);
+        let dv = F2::ld(&p.c1).mul(old).add(F2::ld(&p.c2).mul(b));
+        loss = loss.add(old.sub(dv).mul(old.add(dv)));
+        acc3 = acc3.add(F2::ld(&p.c3).mul(old));
+        let x = F2::ld(&p.qq).mul(q).add(F2::ld(&p.qv).mul(dv));
+        x.st(fq2);
+        F2::ld(&p.vq).mul(q).add(F2::ld(&p.vv).mul(dv)).st(fv2);
+        reac = reac.add(F2::ld(&p.ha).mul(q.add(x)));
+    }
+    let mut out = [loss.hsum(), acc3.hsum(), reac.hsum()];
+    if n % 2 == 1 {
+        let k = n - 1;
+        let p = &rec[n / 2];
+        let (q, old) = (q[k], v[k]);
+        let dv = p.c1[0] * old + p.c2[0] * bm;
+        out[0] += (old - dv) * (old + dv);
+        out[1] += p.c3[0] * old;
+        let x = p.qq[0] * q + p.qv[0] * dv;
+        fq[k] = x;
+        fv[k] = p.vq[0] * q + p.vv[0] * dv;
+        out[2] += p.ha[0] * (q + x);
+    }
+    out
+}
+
+/// See the wasm32 `pre_seg`: the scalar loop, one mode at a time.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+fn pre_seg(q: &[f64], v: &[f64], fq: &mut [f64], fv: &mut [f64], rec: &[PreRec], bm: f64) -> [f64; 3] {
+    let (mut loss, mut acc3, mut reac) = (0.0, 0.0, 0.0);
+    let it = q.iter().zip(v.iter()).zip(fq.iter_mut()).zip(fv.iter_mut()).zip(rec.iter());
+    for ((((q, v), fq), fv), p) in it {
+        let old = *v;
+        let dv = p.c1 * old + p.c2 * bm;
+        loss += (old - dv) * (old + dv);
+        acc3 += p.c3 * old;
+        let x = p.qq * q + p.qv * dv;
+        *fq = x;
+        *fv = p.vq * q + p.vv * dv;
+        reac += p.ha * (q + x);
+    }
+    [loss, acc3, reac]
+}
+
+/// The finish loop of one segment (`step`) with the held contact force
+/// `force` (`hit` is read only when `force != 0`). Returns `[reaction, src]`;
+/// the caller adds the hammer's own reaction. wasm32: two modes per
+/// iteration, sums as in `pre_seg`.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn finish_seg(q: &mut [f64], v: &mut [f64], fq: &[f64], fv: &[f64], rec: &[FinRec], hit: &[HitRec], bbar: f64, force: f64) -> [f64; 2] {
+    let n = q.len();
+    let b = F2::splat(bbar);
+    let zero = F2::splat(0.0);
+    let (mut reac, mut src) = (zero, zero);
+    {
+        let (cq, _) = q.as_chunks_mut::<2>();
+        let (cv, _) = v.as_chunks_mut::<2>();
+        let (cfq, _) = fq.as_chunks::<2>();
+        let (cfv, _) = fv.as_chunks::<2>();
+        if force == 0.0 {
+            for ((((q2, v2), fq2), fv2), p) in cq.iter_mut().zip(cv.iter_mut()).zip(cfq).zip(cfv).zip(rec) {
+                let nq = F2::ld(fq2).add(F2::ld(&p.bqa).mul(b));
+                let nv = F2::ld(fv2).add(F2::ld(&p.bva).mul(b));
+                reac = reac.add(F2::ld(&p.ha).mul(F2::ld(q2).add(nq)));
+                src = src.add(F2::ld(&p.cross).mul(nv));
+                nq.st(q2);
+                nv.st(v2);
+            }
+        } else {
+            let f = F2::splat(force);
+            for (((((q2, v2), fq2), fv2), p), h) in cq.iter_mut().zip(cv.iter_mut()).zip(cfq).zip(cfv).zip(rec).zip(hit) {
+                let nq = F2::ld(fq2).add(F2::ld(&p.bqa).mul(b)).add(F2::ld(&h.bqhs).mul(f));
+                let nv = F2::ld(fv2).add(F2::ld(&p.bva).mul(b)).add(F2::ld(&h.bvhs).mul(f));
+                reac = reac.add(F2::ld(&p.ha).mul(F2::ld(q2).add(nq)));
+                src = src.add(F2::ld(&p.cross).mul(nv));
+                nq.st(q2);
+                nv.st(v2);
+            }
+        }
+    }
+    let mut out = [reac.hsum(), src.hsum()];
+    if n % 2 == 1 {
+        let k = n - 1;
+        let p = &rec[n / 2];
+        let (mut nq, mut nv) = (fq[k] + p.bqa[0] * bbar, fv[k] + p.bva[0] * bbar);
+        if force != 0.0 {
+            nq += hit[n / 2].bqhs[0] * force;
+            nv += hit[n / 2].bvhs[0] * force;
+        }
+        out[0] += p.ha[0] * (q[k] + nq);
+        out[1] += p.cross[0] * nv;
+        q[k] = nq;
+        v[k] = nv;
+    }
+    out
+}
+
+/// See the wasm32 `finish_seg`: the scalar loops, one mode at a time.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+fn finish_seg(q: &mut [f64], v: &mut [f64], fq: &[f64], fv: &[f64], rec: &[FinRec], hit: &[HitRec], bbar: f64, force: f64) -> [f64; 2] {
+    let (mut reac, mut src) = (0.0, 0.0);
+    if force == 0.0 {
+        let it = q.iter_mut().zip(v.iter_mut()).zip(fq.iter()).zip(fv.iter()).zip(rec.iter());
+        for ((((q, v), fq), fv), p) in it {
+            let nq = fq + p.bqa * bbar;
+            let nv = fv + p.bva * bbar;
+            reac += p.ha * (*q + nq);
+            src += p.cross * nv;
+            *q = nq;
+            *v = nv;
+        }
+    } else {
+        let it = q.iter_mut().zip(v.iter_mut()).zip(fq.iter()).zip(fv.iter()).zip(rec.iter()).zip(hit.iter());
+        for (((((q, v), fq), fv), p), h) in it {
+            let nq = fq + p.bqa * bbar + h.bqhs * force;
+            let nv = fv + p.bva * bbar + h.bvhs * force;
+            reac += p.ha * (*q + nq);
+            src += p.cross * nv;
+            *q = nq;
+            *v = nv;
+        }
+    }
+    [reac, src]
+}
+
+/// The post string-loss half-flow of one segment (`step`; `c1`/`c2`/`c3` are
+/// the segment's slices of the plain arrays). Returns `[loss, c3 . v]`.
+/// wasm32: two modes per iteration, sums as in `pre_seg`.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn post_seg(v: &mut [f64], c1: &[f64], c2: &[f64], c3: &[f64], bm: f64) -> [f64; 2] {
+    let n = v.len();
+    let b = F2::splat(bm);
+    let zero = F2::splat(0.0);
+    let (mut loss, mut acc3) = (zero, zero);
+    {
+        let (cv, _) = v.as_chunks_mut::<2>();
+        let (a1, _) = c1.as_chunks::<2>();
+        let (a2, _) = c2.as_chunks::<2>();
+        let (a3, _) = c3.as_chunks::<2>();
+        for (((v2, k1), k2), k3) in cv.iter_mut().zip(a1).zip(a2).zip(a3) {
+            let old = F2::ld(v2);
+            let dv = F2::ld(k1).mul(old).add(F2::ld(k2).mul(b));
+            loss = loss.add(old.sub(dv).mul(old.add(dv)));
+            acc3 = acc3.add(F2::ld(k3).mul(old));
+            dv.st(v2);
+        }
+    }
+    let mut out = [loss.hsum(), acc3.hsum()];
+    if n % 2 == 1 {
+        let k = n - 1;
+        let old = v[k];
+        let dv = c1[k] * old + c2[k] * bm;
+        out[0] += (old - dv) * (old + dv);
+        out[1] += c3[k] * old;
+        v[k] = dv;
+    }
+    out
+}
+
+/// See the wasm32 `post_seg`: the scalar loop, one mode at a time.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+fn post_seg(v: &mut [f64], c1: &[f64], c2: &[f64], c3: &[f64], bm: f64) -> [f64; 2] {
+    let (mut loss, mut acc3) = (0.0, 0.0);
+    for (((v, c1), c2), c3) in v.iter_mut().zip(c1.iter()).zip(c2.iter()).zip(c3.iter()) {
+        let old = *v;
+        let dv = c1 * old + c2 * bm;
+        loss += (old - dv) * (old + dv);
+        acc3 += c3 * old;
+        *v = dv;
+    }
+    [loss, acc3]
+}
+
 /// Per-mode constants (structure of arrays, bank order).
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Modes {
     omega: Vec<f64>,
     w2: Vec<f64>,
     beta: Vec<f64>,
     hs: Vec<f64>,
-    qq: Vec<f64>,
-    qv: Vec<f64>,
-    vq: Vec<f64>,
-    vv: Vec<f64>,
+    /// Pre half-flow records (see `PreFlow`, `PreRec`).
+    pre: Vec<PreRec>,
     bq: Vec<f64>,
-    /// 0.5*a, 0.5*bq*a, bq*a, bv*a with a = w^2*beta.
+    /// 0.5*a, 0.5*bq*a with a = w^2*beta.
     ha: Vec<f64>,
     hba: Vec<f64>,
-    bqa: Vec<f64>,
-    bva: Vec<f64>,
-    bqhs: Vec<f64>,
-    bvhs: Vec<f64>,
+    /// Finish-loop records (see `FinFlow`, `HitFlow`, `PreRec`).
+    fin: Vec<FinRec>,
+    hit: Vec<HitRec>,
     /// String-loss half-flow: v' = c1*v + c2*b_mid, bridge reaction -c3*v.
+    /// (The post half-flow reads these 3 of the 8 `PreFlow` fields alone, so
+    /// it keeps the plain arrays.)
     c1: Vec<f64>,
     c2: Vec<f64>,
     c3: Vec<f64>,
@@ -515,6 +1444,7 @@ struct Modes {
     lw: Vec<f64>,
 }
 
+#[derive(Clone)]
 struct PadPoint {
     shape: Vec<f64>,
     lift: f64,
@@ -524,10 +1454,14 @@ struct PadPoint {
     norm: f64,
 }
 
+#[derive(Clone)]
 struct ASeg {
     seg: usize,
     off: usize,
     n: usize,
+    /// `Seg::pair` of this segment.
+    #[cfg(target_arch = "wasm32")]
+    pair: usize,
     duplex: bool,
     member: usize,
     beta2: f64,
@@ -540,27 +1474,43 @@ struct ASeg {
     lift_total: f64,
     cdiag: f64,
     pad: Vec<PadPoint>,
+    /// Pad shapes packed for the fused damper passes (`pack_pads`); empty
+    /// unless `1 <= pad.len() <= 4`.
+    pad_pack: Vec<f64>,
+    /// Pad Gram matrix `g_t . g_j`, row-major `pad.len()` squared (same rule).
+    pad_gram: Vec<f64>,
+    /// A post-half damper flow not yet applied to `v` (`damp_fused`): its pad
+    /// coefficients `owe` and the pad speeds `g_t . v` it leaves behind `dn`.
+    owed: bool,
+    owe: [f64; 4],
+    dn: [f64; 4],
     /// Held contact force of this step [N] (speaking strings only).
     force: f64,
     src: f64,
 }
 
+#[derive(Clone)]
 struct ACourse {
     ci: usize,
     segs: Vec<ASeg>,
     /// Bridge row in the current loaded board basis and S^-1 times it.
     gl: Vec<f64>,
     resp: Vec<f64>,
+    /// Sd^-1 times the bridge row: the string-loss Schur solve is only ever
+    /// read through `gl . Sd^-1 x = hsd . x` (Sd symmetric), so no r x r product.
+    hsd: Vec<f64>,
+    /// D^-1 gl with D = diag(1/bz.bq): the low-rank (Woodbury) bridge Schur solve.
+    wy: Vec<f64>,
+    /// `gl . Sd^-1 rhs` of the current half-flow.
+    bm: f64,
     gl_norm2: f64,
     modes: usize,
     b0: f64,
     damped_now: bool,
     /// Samples since activation (diagnostic).
     age: u64,
-    /// Display shape table: rows = stations, cols = partials of the first
-    /// speaking string (bank segment `shape_seg`); empty for duplex-only keys.
-    shape: Vec<f32>,
-    shape_seg: usize,
+    /// Partial count and mode offset of the first speaking string for display
+    /// (`0` for duplex-only keys).
     shape_n: usize,
     shape_off: usize,
 }
@@ -575,6 +1525,7 @@ struct Contact {
     stored_j: f64,
 }
 
+#[derive(Clone)]
 struct Key {
     midi: u8,
     held: bool,
@@ -664,6 +1615,10 @@ pub struct LivePiano {
     bz: Vec<Zoh>,
     s_inv: Vec<f64>,
     sd_inv: Vec<f64>,
+    /// Woodbury core of the bridge Schur solve, K x K for K sounding keys:
+    /// S^-1 x = D^-1 x + Y M Y^T x, Y = [wy_k], M = W^1/2 (I - W^1/2 Y^T G W^1/2)^-1 W^1/2.
+    wmk: Vec<f64>,
+    wu: Vec<f64>,
     // Board state in loaded coordinates and scratch.
     bq: Vec<f64>,
     bvel: Vec<f64>,
@@ -671,7 +1626,6 @@ pub struct LivePiano {
     bfv: Vec<f64>,
     rhs: Vec<f64>,
     end: Vec<f64>,
-    mid: Vec<f64>,
     force_b: Vec<f64>,
     tmp: Vec<f64>,
     st_v: Vec<f64>,
@@ -700,10 +1654,85 @@ pub struct LivePiano {
     c_lift: Vec<f64>,
     c_site: Vec<crate::fastfelt::Site>,
     c_start: Vec<f64>,
-    /// Cold caches per bank segment: damper pad projections and display table.
+    /// Cold caches per course: damper pad projections and display table.
     pad_cache: Vec<Option<(usize, Vec<(Vec<f64>, f64, f64)>)>>,
     shape_cache: Vec<Option<(usize, Vec<f32>)>>,
     last_error: Option<String>,
+}
+
+/// A copy steps bit for bit as the original would from the same point: every
+/// state, constant, cache and counter is copied (the receiver keeps its
+/// transposed tap ring, see fs-couple's `BaffledPressure` clone). The scratch
+/// buffers the per-sample path fills keep the original's capacity, so a copy
+/// allocates on the hot path no more than the original does. The browser
+/// takes a copy of a freshly built engine before timing it, and plays the copy.
+impl Clone for LivePiano {
+    fn clone(&self) -> Self {
+        fn spare<T: Clone>(v: &Vec<T>) -> Vec<T> {
+            let mut copy = Vec::with_capacity(v.capacity());
+            copy.extend_from_slice(v);
+            copy
+        }
+        Self {
+            cfg: self.cfg.clone(),
+            r: self.r,
+            dt: self.dt,
+            courses: self.courses.clone(),
+            segs: self.segs.clone(),
+            m: self.m.clone(),
+            q: self.q.clone(),
+            v: self.v.clone(),
+            fq: self.fq.clone(),
+            fv: self.fv.clone(),
+            keys: self.keys.clone(),
+            g_st: self.g_st.clone(),
+            lam_s: self.lam_s.clone(),
+            c_st: self.c_st.clone(),
+            phi_s: self.phi_s.clone(),
+            phi: self.phi.clone(),
+            k_phys: self.k_phys.clone(),
+            flow: self.flow.clone(),
+            bz: self.bz.clone(),
+            s_inv: self.s_inv.clone(),
+            sd_inv: self.sd_inv.clone(),
+            wmk: spare(&self.wmk),
+            wu: spare(&self.wu),
+            bq: self.bq.clone(),
+            bvel: self.bvel.clone(),
+            bfq: self.bfq.clone(),
+            bfv: self.bfv.clone(),
+            rhs: self.rhs.clone(),
+            end: self.end.clone(),
+            force_b: self.force_b.clone(),
+            tmp: self.tmp.clone(),
+            st_v: self.st_v.clone(),
+            active: spare(&self.active),
+            busy: spare(&self.busy),
+            pending_on: spare(&self.pending_on),
+            sustain: self.sustain,
+            engagement_cached: self.engagement_cached,
+            mic: self.mic.clone(),
+            ledger: self.ledger,
+            counters: self.counters,
+            retire_clock: self.retire_clock,
+            board_freq_hz: self.board_freq_hz.clone(),
+            board_provenance: self.board_provenance.clone(),
+            exact_low_modes: self.exact_low_modes,
+            surface_xy: self.surface_xy.clone(),
+            surface_shapes: self.surface_shapes.clone(),
+            c_key: spare(&self.c_key),
+            c_member: spare(&self.c_member),
+            c_gap: spare(&self.c_gap),
+            c_force: spare(&self.c_force),
+            c_h: spare(&self.c_h),
+            c_lift: spare(&self.c_lift),
+            c_site: spare(&self.c_site),
+            c_start: spare(&self.c_start),
+            pad_cache: self.pad_cache.clone(),
+            shape_cache: self.shape_cache.clone(),
+            last_error: self.last_error.clone(),
+        }
+    }
 }
 
 const SHAPE_STATIONS: usize = 48;
@@ -794,6 +1823,7 @@ impl LivePiano {
         let dur = 0.5 * dt; // each loss half-flow spans half a step
         let half = 0.5 * dur;
         let mut m = Modes::default();
+        let (mut pre, mut fin, mut hit) = (Vec::with_capacity(n_total), Vec::with_capacity(n_total), Vec::with_capacity(n_total));
         for (k, mode) in bank.modes.iter().enumerate() {
             let z = zoh[k];
             let a = mode.a;
@@ -804,20 +1834,19 @@ impl LivePiano {
             m.w2.push(mode.omega * mode.omega);
             m.beta.push(mode.beta);
             m.hs.push(mode.hammer_shape);
-            m.qq.push(z.qq);
-            m.qv.push(z.qv);
-            m.vq.push(z.vq);
-            m.vv.push(z.vv);
+            let ha = 0.5 * a;
+            let c1 = 1.0 - dur * (mr + sr) * inv;
+            let c2 = -dur * ((mr + sr) * cross - sr * mode.beta);
+            let c3 = sr * mode.beta * inv;
+            pre.push(PreFlow { c1, c2, c3, qq: z.qq, qv: z.qv, vq: z.vq, vv: z.vv, ha });
             m.bq.push(z.bq);
-            m.ha.push(0.5 * a);
+            m.ha.push(ha);
             m.hba.push(0.5 * z.bq * a);
-            m.bqa.push(z.bq * a);
-            m.bva.push(z.bv * a);
-            m.bqhs.push(z.bq * mode.hammer_shape);
-            m.bvhs.push(z.bv * mode.hammer_shape);
-            m.c1.push(1.0 - dur * (mr + sr) * inv);
-            m.c2.push(-dur * ((mr + sr) * cross - sr * mode.beta));
-            m.c3.push(sr * mode.beta * inv);
+            fin.push(FinFlow { bqa: z.bq * a, bva: z.bv * a, ha, cross });
+            hit.push(HitFlow { bqhs: z.bq * mode.hammer_shape, bvhs: z.bv * mode.hammer_shape });
+            m.c1.push(c1);
+            m.c2.push(c2);
+            m.c3.push(c3);
             m.c4.push(sr * mode.beta * (cross - mode.beta));
             m.cross.push(cross);
             m.lw.push(half * sr * mode.beta * mode.beta * (1.0 + half * mr) * inv);
@@ -836,6 +1865,8 @@ impl LivePiano {
                 duplex: s.duplex,
                 off: s.modes.start,
                 n_max: s.modes.len(),
+                #[cfg(target_arch = "wasm32")]
+                pair: 0,
                 endpoint_mass: c.linear_density_kg_m * length / 3.0,
                 t_over_l: tension / length,
                 mass_rate,
@@ -846,6 +1877,18 @@ impl LivePiano {
             key_segs[s.course].push(si);
         }
         drop(bank);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            (m.pre, m.fin, m.hit) = (pre, fin, hit);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let (p2, f2, h2, first) = pair_records(&segs, &pre, &fin, &hit);
+            (m.pre, m.fin, m.hit) = (p2, f2, h2);
+            for (seg, f) in segs.iter_mut().zip(first) {
+                seg.pair = f;
+            }
+        }
         // Bare board (mass-normalized FE modes) with EVERY string of the scale
         // attached as a chord: mass mu*L/3 and stiffness T/L on its bridge row.
         // Its eigenbasis (the fs-modal facility, once, cold) is the fixed
@@ -970,7 +2013,7 @@ impl LivePiano {
             RayleighMedium { density: gas.density, sound_speed: gas.sound_speed })?;
         let surface_xy = desc.surface.iter().flat_map(|p| [p.position_m[0] as f32, p.position_m[1] as f32]).collect();
         let surface_shapes: Vec<f32> = desc.surface.iter().flat_map(|p| p.mode_shape.iter().map(|x| *x as f32)).collect();
-        let n_segs = segs.len();
+        let n_courses = courses.len();
         let mut piano = Self {
             acoustic_gas: gas,
             r,
@@ -993,13 +2036,14 @@ impl LivePiano {
             bz: vec![Zoh::default(); r],
             s_inv: identity(r),
             sd_inv: identity(r),
+            wmk: Vec::with_capacity(32 * 32),
+            wu: Vec::with_capacity(32),
             bq: vec![0.0; r],
             bvel: vec![0.0; r],
             bfq: vec![0.0; r],
             bfv: vec![0.0; r],
             rhs: vec![0.0; r],
             end: vec![0.0; r],
-            mid: vec![0.0; r],
             force_b: vec![0.0; r],
             tmp: vec![0.0; r],
             st_v: vec![0.0; r],
@@ -1025,8 +2069,8 @@ impl LivePiano {
             c_lift: Vec::with_capacity(96),
             c_site: Vec::with_capacity(96),
             c_start: Vec::with_capacity(96),
-            pad_cache: vec![None; n_segs],
-            shape_cache: vec![None; n_segs],
+            pad_cache: vec![None; n_courses],
+            shape_cache: vec![None; n_courses],
             last_error: None,
             cfg,
         };
@@ -1127,7 +2171,8 @@ impl LivePiano {
         loss_w += half * endpoint_drag;
         let mut pad = Vec::new();
         if !seg.duplex && self.keys[seg.course].has_damper {
-            if self.pad_cache[si].as_ref().is_none_or(|(count, _)| *count != n) {
+            let ci = seg.course;
+            if self.pad_cache[ci].as_ref().is_none_or(|(count, _)| *count != n) {
                 // The reference's estimated pad, as `damper_points` midpoint
                 // stations: y = phi*z + (x/L - sum(phi*beta))*b at each station.
                 let width = (DAMPER_WIDTH_FRACTION * seg.length_m).min(DAMPER_WIDTH_MAX_M);
@@ -1143,17 +2188,21 @@ impl LivePiano {
                     let norm_string = shape.iter().map(|g| g * g).sum::<f64>();
                     points.push((shape, lift, norm_string));
                 }
-                self.pad_cache[si] = Some((n, points));
+                self.pad_cache[ci] = Some((n, points));
             }
-            if let Some((_, points)) = &self.pad_cache[si] {
+            if let Some((_, points)) = &self.pad_cache[ci] {
                 pad = points.iter().map(|(shape, lift, norm_string)| PadPoint {
                     shape: shape.clone(), lift: *lift, norm_string: *norm_string, coef: 0.0, norm: 0.0,
                 }).collect();
             }
         }
+        let (pad_pack, pad_gram) = pack_pads(&pad, n);
         ASeg {
+            #[cfg(target_arch = "wasm32")]
+            pair: self.segs[si].pair,
             seg: si, off, n, duplex: self.segs[si].duplex, member: self.segs[si].member, beta2, mek, w_schur, loss_w, sum_c4,
-            endpoint_drag, hammer_lift, lift_total: hammer_lift + lift_bq, cdiag, pad, force: 0.0, src: 0.0,
+            endpoint_drag, hammer_lift, lift_total: hammer_lift + lift_bq, cdiag, pad, pad_pack, pad_gram,
+            owed: false, owe: [0.0; 4], dn: [0.0; 4], force: 0.0, src: 0.0,
         }
     }
 
@@ -1163,6 +2212,7 @@ impl LivePiano {
     /// motion across. Energy-continuous for activation; the relative energy of
     /// retired strings goes to `ledger.retired_j`.
     fn rebuild(&mut self, activate: &[usize], retire: &[(usize, usize)]) -> Result<(), String> {
+        self.settle_damp();
         let r = self.r;
         // Physical board motion (static coordinates) before the basis changes.
         let mut qs = vec![0.0; r];
@@ -1239,50 +2289,25 @@ impl LivePiano {
                 None => {
                     self.keys[ci].slot = Some(self.active.len());
                     self.active.push(ACourse {
-                        ci, segs: fresh, gl: vec![0.0; r], resp: vec![0.0; r], gl_norm2: 0.0, modes: 0, b0: 0.0,
-                        damped_now: false, age: 0, shape: Vec::new(), shape_seg: usize::MAX, shape_n: 0, shape_off: 0,
+                        ci, segs: fresh, gl: vec![0.0; r], resp: vec![0.0; r], hsd: vec![0.0; r], wy: vec![0.0; r], bm: 0.0, gl_norm2: 0.0, modes: 0, b0: 0.0,
+                        damped_now: false, age: 0, shape_n: 0, shape_off: 0,
                     });
                 }
             }
         }
-        // Per-key bookkeeping and the display table of its first speaking
-        // string: y(x_j) = sum_n phi_n(x_j) q_n + x_j/L * b (display only).
+        // Per-key bookkeeping (display shape table is populated lazily in snapshot()).
         for slot in 0..self.active.len() {
-            let ac = &self.active[slot];
-            let modes = ac.segs.iter().map(|s| s.n).sum();
-            let first = ac.segs.iter().find(|s| !s.duplex).map(|s| (s.seg, s.n, s.off));
-            let stale = first.is_some_and(|(seg, n, _)| seg != ac.shape_seg || n != ac.shape_n);
-            if let (Some((seg, n, _)), true) = (first, stale) {
-                if self.shape_cache[seg].as_ref().is_none_or(|(count, _)| *count != n) {
-                    let root = self.segs[seg].modal_mass_kg.sqrt();
-                    let mut shape = Vec::with_capacity(SHAPE_STATIONS * n);
-                    for j in 0..SHAPE_STATIONS {
-                        let x = (j as f64 + 0.5) / SHAPE_STATIONS as f64;
-                        for p in 1..=n {
-                            shape.push(((p as f64 * PI * x).sin() / root) as f32);
-                        }
-                    }
-                    self.shape_cache[seg] = Some((n, shape));
-                }
-            }
-            let table = match (first, stale) {
-                (Some((seg, _, _)), true) => self.shape_cache[seg].as_ref().map(|(_, shape)| shape.clone()),
-                _ => None,
-            };
             let ac = &mut self.active[slot];
-            ac.modes = modes;
-            match (first, table) {
-                (Some((seg, n, off)), Some(shape)) => {
-                    ac.shape = shape;
-                    ac.shape_seg = seg;
+            ac.modes = ac.segs.iter().map(|s| s.n).sum();
+            match ac.segs.iter().find(|s| !s.duplex).map(|s| (s.n, s.off)) {
+                Some((n, off)) => {
                     ac.shape_n = n;
                     ac.shape_off = off;
                 }
-                (None, _) => {
-                    ac.shape_seg = usize::MAX;
+                None => {
                     ac.shape_n = 0;
+                    ac.shape_off = 0;
                 }
-                _ => {}
             }
         }
         // Loaded board pencil of the CURRENT dynamic set, in the static basis:
@@ -1366,18 +2391,69 @@ impl LivePiano {
         self.sd_inv = crate::dense::spd_inverse(&loss_schur, r, "string-loss Schur complement")?;
         for ac in &mut self.active {
             matvec(&self.s_inv, &ac.gl, &mut ac.resp);
+            matvec(&self.sd_inv, &ac.gl, &mut ac.hsd);
+            for ((y, g), z) in ac.wy.iter_mut().zip(&ac.gl).zip(&self.bz) {
+                *y = z.bq * g;
+            }
         }
+        // S = D - G W G^T (D = diag(1/bz.bq), W = diag(sum w_schur)) is applied per
+        // sample through Woodbury: O(r K) instead of the dense O(r^2) product.
+        // The capacitance I - W^1/2 G^T D^-1 G W^1/2 is SPD exactly when S is.
+        let k = self.active.len();
+        let ws: Vec<f64> = self.active.iter().map(|ac| ac.segs.iter().map(|s| s.w_schur).sum::<f64>().sqrt()).collect();
+        let mut cap = identity(k);
+        for a in 0..k {
+            for b in 0..k {
+                cap[a * k + b] -= ws[a] * dot(&self.active[a].gl, &self.active[b].wy) * ws[b];
+            }
+        }
+        let cap_inv = if k > 0 { crate::dense::spd_inverse(&cap, k, "bridge Schur capacitance")? } else { Vec::new() };
+        self.wmk.clear();
+        for a in 0..k {
+            for b in 0..k {
+                self.wmk.push(ws[a] * cap_inv[a * k + b] * ws[b]);
+            }
+        }
+        self.wu.clear();
+        self.wu.resize(k, 0.0);
         self.engagement_cached = f64::NAN; // pad coefficients depend on gl
         self.counters.rebuilds += 1;
         Ok(())
     }
 
+    /// Apply every owed post-half damper flow to `v` (before a cold change of
+    /// the dynamic set reads or rewrites it).
+    fn settle_damp(&mut self) {
+        for ac in &mut self.active {
+            for s in &mut ac.segs {
+                if s.owed {
+                    settle_owed(s, &mut self.v[s.off..s.off + s.n]);
+                    s.owed = false;
+                }
+            }
+        }
+    }
+
+    /// A segment's string velocities as the mechanics define them: `v` plus
+    /// any owed post-half damper flow, applied as `settle_owed` would (for
+    /// readers that must not change the state, e.g. the display snapshot).
+    fn seg_velocity(&self, s: &ASeg) -> std::borrow::Cow<'_, [f64]> {
+        let v = &self.v[s.off..s.off + s.n];
+        if !s.owed {
+            return std::borrow::Cow::Borrowed(v);
+        }
+        let mut w = v.to_vec();
+        settle_owed(s, &mut w);
+        std::borrow::Cow::Owned(w)
+    }
+
     /// Relative (chord-following removed) energy of one dynamic string [J].
     fn segment_energy(&self, s: &ASeg, b: f64, bdot: f64) -> f64 {
         let mut e = 0.0;
-        for k in s.off..s.off + s.n {
+        let vel = self.seg_velocity(s);
+        for (k, v) in (s.off..s.off + s.n).zip(vel.iter()) {
             let x = self.q[k] - self.m.beta[k] * b;
-            let u = self.v[k] - self.m.beta[k] * bdot;
+            let u = v - self.m.beta[k] * bdot;
             e += 0.5 * u * u + 0.5 * self.m.w2[k] * x * x;
         }
         e
@@ -1576,38 +2652,81 @@ impl LivePiano {
 
     /// Exact rank-one viscous flows of every engaged pad point for half a
     /// step (`dampers.rs::rank_one`); the post half reverses the order.
+    /// The flows stay sequential in exact arithmetic; per segment they are
+    /// fused (`damp_fused`), and the bridge velocity change of a whole course
+    /// is applied to `bvel` once (it enters later flows of that course only
+    /// through the scalar `gl . bvel`, tracked exactly).
+    ///
+    /// The post half's string update is owed to the next pre half (see
+    /// `damp_fused`); a pre half that does not run a segment's flows settles it.
     fn damp(&mut self, reverse: bool) -> f64 {
         if self.sustain >= 1.0 {
+            if !reverse {
+                self.settle_damp();
+            }
             return 0.0;
         }
         let mut loss = 0.0;
         let count = self.active.len();
         for index in 0..count {
             let slot = if reverse { count - 1 - index } else { index };
-            let ac = &self.active[slot];
-            if !ac.damped_now {
+            let ac = &mut self.active[slot];
+            if !ac.damped_now || ac.segs.iter().all(|s| s.pad.is_empty()) {
+                if !reverse {
+                    for s in &mut ac.segs {
+                        if s.owed {
+                            settle_owed(s, &mut self.v[s.off..s.off + s.n]);
+                            s.owed = false;
+                        }
+                    }
+                }
                 continue;
             }
+            let mut beta = dot(&ac.gl, &self.bvel);
+            let mut push = 0.0;
             let nseg = ac.segs.len();
             for sindex in 0..nseg {
-                let s = &ac.segs[if reverse { nseg - 1 - sindex } else { sindex }];
+                let s = &mut ac.segs[if reverse { nseg - 1 - sindex } else { sindex }];
                 let np = s.pad.len();
                 let v = &mut self.v[s.off..s.off + s.n];
-                for pindex in 0..np {
-                    let p = &s.pad[if reverse { np - 1 - pindex } else { pindex }];
-                    if p.coef == 0.0 {
-                        continue;
+                let g2 = ac.gl_norm2;
+                loss += match np {
+                    0 => 0.0,
+                    1 => damp_fused::<1>(s, v, g2, &mut beta, &mut push, reverse),
+                    2 => damp_fused::<2>(s, v, g2, &mut beta, &mut push, reverse),
+                    3 => damp_fused::<3>(s, v, g2, &mut beta, &mut push, reverse),
+                    4 => damp_fused::<4>(s, v, g2, &mut beta, &mut push, reverse),
+                    _ => {
+                        // More than four pad points: the plain sequential flows.
+                        for (x, g) in self.bvel.iter_mut().zip(&ac.gl) {
+                            *x += g * push;
+                        }
+                        push = 0.0;
+                        let mut seg_loss = 0.0;
+                        for pindex in 0..np {
+                            let p = &s.pad[if reverse { np - 1 - pindex } else { pindex }];
+                            if p.coef == 0.0 {
+                                continue;
+                            }
+                            let speed = dot(&p.shape, v) + p.lift * dot(&ac.gl, &self.bvel);
+                            let change = p.coef * speed;
+                            for (x, g) in v.iter_mut().zip(&p.shape) {
+                                *x += g * change;
+                            }
+                            let lc = p.lift * change;
+                            for (x, g) in self.bvel.iter_mut().zip(&ac.gl) {
+                                *x += g * lc;
+                            }
+                            seg_loss += -change * speed - 0.5 * change * change * p.norm;
+                        }
+                        beta = dot(&ac.gl, &self.bvel);
+                        seg_loss
                     }
-                    let speed = dot(&p.shape, v) + p.lift * dot(&ac.gl, &self.bvel);
-                    let change = p.coef * speed;
-                    for (x, g) in v.iter_mut().zip(&p.shape) {
-                        *x += g * change;
-                    }
-                    let lc = p.lift * change;
-                    for (x, g) in self.bvel.iter_mut().zip(&ac.gl) {
-                        *x += g * lc;
-                    }
-                    loss += -change * speed - 0.5 * change * change * p.norm;
+                };
+            }
+            if push != 0.0 {
+                for (x, g) in self.bvel.iter_mut().zip(&ac.gl) {
+                    *x += g * push;
                 }
             }
         }
@@ -1632,64 +2751,49 @@ impl LivePiano {
         let mut board_loss = 0.0;
 
         // ---- intrinsic string loss, pre half-flow (implicit midpoint) ----
-        self.rhs.copy_from_slice(&self.bvel);
-        for ac in &self.active {
-            let mut source = 0.0;
-            for s in &ac.segs {
-                source += dot(&self.m.cross[s.off..s.off + s.n], &self.v[s.off..s.off + s.n]);
-            }
-            for (x, g) in self.rhs.iter_mut().zip(&ac.gl) {
-                *x += g * source;
-            }
-        }
-        matvec(&self.sd_inv, &self.rhs, &mut self.mid);
-        self.force_b.fill(0.0);
-        self.rhs.fill(0.0); // becomes the coupling right-hand side below
-        for ac in &mut self.active {
-            let bm = dot(&ac.gl, &self.mid);
-            let b0 = dot(&ac.gl, &self.bq);
-            ac.b0 = b0;
-            let mut reaction_loss = 0.0;
-            let mut reaction = 0.0;
-            for s in &mut ac.segs {
-                let range = s.off..s.off + s.n;
-                let (mut loss, mut acc3, mut reac) = (0.0, 0.0, 0.0);
-                let m = &self.m;
-                let it = self.q[range.clone()].iter()
-                    .zip(self.v[range.clone()].iter())
-                    .zip(self.fq[range.clone()].iter_mut())
-                    .zip(self.fv[range.clone()].iter_mut())
-                    .zip(m.c1[range.clone()].iter())
-                    .zip(m.c2[range.clone()].iter())
-                    .zip(m.c3[range.clone()].iter())
-                    .zip(m.qq[range.clone()].iter())
-                    .zip(m.qv[range.clone()].iter())
-                    .zip(m.vq[range.clone()].iter())
-                    .zip(m.vv[range.clone()].iter())
-                    .zip(m.ha[range.clone()].iter());
-                for (((((((((((q, v), fq), fv), c1), c2), c3), qq), qv), vq), vv), ha) in it {
-                    let old = *v;
-                    let dv = c1 * old + c2 * bm;
-                    loss += (old - dv) * (old + dv);
-                    acc3 += c3 * old;
-                    let x = qq * q + qv * dv;
-                    *fq = x;
-                    *fv = vq * q + vv * dv;
-                    reac += ha * (q + x);
+        if !self.active.is_empty() {
+            self.rhs.copy_from_slice(&self.bvel);
+            for ac in &self.active {
+                let mut source = 0.0;
+                for s in &ac.segs {
+                    source += dot(&self.m.cross[s.off..s.off + s.n], &self.v[s.off..s.off + s.n]);
                 }
-                string_loss += 0.5 * loss;
-                reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
-                reaction += reac + b0 * s.w_schur;
+                for (x, g) in self.rhs.iter_mut().zip(&ac.gl) {
+                    *x += g * source;
+                }
             }
-            for ((f, x), g) in self.force_b.iter_mut().zip(self.rhs.iter_mut()).zip(&ac.gl) {
-                *f += g * reaction_loss;
-                *x += g * reaction;
+            for ac in &mut self.active {
+                ac.bm = dot(&ac.hsd, &self.rhs);
             }
-        }
-        for (v, f) in self.bvel.iter_mut().zip(&self.force_b) {
-            let old = *v;
-            *v = old - dur * f;
-            string_loss += 0.5 * (old - *v) * (old + *v);
+            self.force_b.fill(0.0);
+            self.rhs.fill(0.0); // becomes the coupling right-hand side below
+            for ac in &mut self.active {
+                let bm = ac.bm;
+                let b0 = dot(&ac.gl, &self.bq);
+                ac.b0 = b0;
+                let mut reaction_loss = 0.0;
+                let mut reaction = 0.0;
+                for s in &mut ac.segs {
+                    let range = s.off..s.off + s.n;
+                    let [loss, acc3, reac] = pre_seg(&self.q[range.clone()], &self.v[range.clone()],
+                        &mut self.fq[range.clone()], &mut self.fv[range.clone()],
+                        &self.m.pre[recs(s)], bm);
+                    string_loss += 0.5 * loss;
+                    reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
+                    reaction += reac + b0 * s.w_schur;
+                }
+                for ((f, x), g) in self.force_b.iter_mut().zip(self.rhs.iter_mut()).zip(&ac.gl) {
+                    *f += g * reaction_loss;
+                    *x += g * reaction;
+                }
+            }
+            for (v, f) in self.bvel.iter_mut().zip(&self.force_b) {
+                let old = *v;
+                *v = old - dur * f;
+                string_loss += 0.5 * (old - *v) * (old + *v);
+            }
+        } else {
+            self.rhs.fill(0.0);
         }
         // ---- board loss, pre half-flow (exact matrix exponential) ----
         matvec(&self.flow, &self.bvel, &mut self.tmp);
@@ -1702,7 +2806,20 @@ impl LivePiano {
             self.bfv[j] = z.vq * self.bq[j] + z.vv * dv;
             self.rhs[j] += self.bfq[j] / z.bq;
         }
-        matvec(&self.s_inv, &self.rhs, &mut self.end);
+        // end = S^-1 rhs (Woodbury, see `rebuild`).
+        for ((e, x), z) in self.end.iter_mut().zip(&self.rhs).zip(&self.bz) {
+            *e = z.bq * x;
+        }
+        let k = self.active.len();
+        for (u, ac) in self.wu.iter_mut().zip(&self.active) {
+            *u = dot(&ac.wy, &self.rhs);
+        }
+        for (a, ac) in self.active.iter().enumerate() {
+            let c = dot(&self.wmk[a * k..(a + 1) * k], &self.wu);
+            for (e, y) in self.end.iter_mut().zip(&ac.wy) {
+                *e += y * c;
+            }
+        }
 
         // ---- hammers: free flight, implicit felt contact ----
         let mut felt_loss = 0.0;
@@ -1739,45 +2856,10 @@ impl LivePiano {
             for s in &mut ac.segs {
                 let range = s.off..s.off + s.n;
                 let m = &self.m;
-                let (mut reac, mut src) = (0.0, 0.0);
-                if s.force == 0.0 {
-                    let it = self.q[range.clone()].iter_mut()
-                        .zip(self.v[range.clone()].iter_mut())
-                        .zip(self.fq[range.clone()].iter())
-                        .zip(self.fv[range.clone()].iter())
-                        .zip(m.bqa[range.clone()].iter())
-                        .zip(m.bva[range.clone()].iter())
-                        .zip(m.ha[range.clone()].iter())
-                        .zip(m.cross[range.clone()].iter());
-                    for (((((((q, v), fq), fv), bqa), bva), ha), cross) in it {
-                        let nq = fq + bqa * bbar;
-                        let nv = fv + bva * bbar;
-                        reac += ha * (*q + nq);
-                        src += cross * nv;
-                        *q = nq;
-                        *v = nv;
-                    }
-                } else {
-                    let force = s.force;
-                    let it = self.q[range.clone()].iter_mut()
-                        .zip(self.v[range.clone()].iter_mut())
-                        .zip(self.fq[range.clone()].iter())
-                        .zip(self.fv[range.clone()].iter())
-                        .zip(m.bqa[range.clone()].iter())
-                        .zip(m.bva[range.clone()].iter())
-                        .zip(m.ha[range.clone()].iter())
-                        .zip(m.cross[range.clone()].iter())
-                        .zip(m.bqhs[range.clone()].iter())
-                        .zip(m.bvhs[range.clone()].iter());
-                    for (((((((((q, v), fq), fv), bqa), bva), ha), cross), bqhs), bvhs) in it {
-                        let nq = fq + bqa * bbar + bqhs * force;
-                        let nv = fv + bva * bbar + bvhs * force;
-                        reac += ha * (*q + nq);
-                        src += cross * nv;
-                        *q = nq;
-                        *v = nv;
-                    }
-                    reac += s.hammer_lift * force;
+                let [mut reac, src] = finish_seg(&mut self.q[range.clone()], &mut self.v[range.clone()],
+                    &self.fq[range.clone()], &self.fv[range.clone()], &m.fin[recs(s)], &m.hit[recs(s)], bbar, s.force);
+                if s.force != 0.0 {
+                    reac += s.hammer_lift * s.force;
                 }
                 reaction += reac;
                 s.src = src;
@@ -1802,44 +2884,35 @@ impl LivePiano {
         board_loss += 0.5 * self.bvel.iter().zip(&self.tmp).map(|(a, b)| a * a - b * b).sum::<f64>();
         self.bvel.copy_from_slice(&self.tmp);
         // ---- intrinsic string loss, post half-flow ----
-        self.rhs.copy_from_slice(&self.bvel);
-        for ac in &self.active {
-            let source: f64 = ac.segs.iter().map(|s| s.src).sum();
-            for (x, g) in self.rhs.iter_mut().zip(&ac.gl) {
-                *x += g * source;
-            }
-        }
-        matvec(&self.sd_inv, &self.rhs, &mut self.mid);
-        self.force_b.fill(0.0);
-        for ac in &self.active {
-            let bm = dot(&ac.gl, &self.mid);
-            let mut reaction_loss = 0.0;
-            for s in &ac.segs {
-                let range = s.off..s.off + s.n;
-                let m = &self.m;
-                let (mut loss, mut acc3) = (0.0, 0.0);
-                let it = self.v[range.clone()].iter_mut()
-                    .zip(m.c1[range.clone()].iter())
-                    .zip(m.c2[range.clone()].iter())
-                    .zip(m.c3[range.clone()].iter());
-                for (((v, c1), c2), c3) in it {
-                    let old = *v;
-                    let dv = c1 * old + c2 * bm;
-                    loss += (old - dv) * (old + dv);
-                    acc3 += c3 * old;
-                    *v = dv;
+        if !self.active.is_empty() {
+            self.rhs.copy_from_slice(&self.bvel);
+            for ac in &self.active {
+                let source: f64 = ac.segs.iter().map(|s| s.src).sum();
+                for (x, g) in self.rhs.iter_mut().zip(&ac.gl) {
+                    *x += g * source;
                 }
-                string_loss += 0.5 * loss;
-                reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
             }
-            for (f, g) in self.force_b.iter_mut().zip(&ac.gl) {
-                *f += g * reaction_loss;
+            self.force_b.fill(0.0);
+            for ac in &self.active {
+                let bm = dot(&ac.hsd, &self.rhs);
+                let mut reaction_loss = 0.0;
+                for s in &ac.segs {
+                    let range = s.off..s.off + s.n;
+                    let m = &self.m;
+                    let [loss, acc3] = post_seg(&mut self.v[range.clone()], &m.c1[range.clone()],
+                        &m.c2[range.clone()], &m.c3[range.clone()], bm);
+                    string_loss += 0.5 * loss;
+                    reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
+                }
+                for (f, g) in self.force_b.iter_mut().zip(&ac.gl) {
+                    *f += g * reaction_loss;
+                }
             }
-        }
-        for (v, f) in self.bvel.iter_mut().zip(&self.force_b) {
-            let old = *v;
-            *v = old - dur * f;
-            string_loss += 0.5 * (old - *v) * (old + *v);
+            for (v, f) in self.bvel.iter_mut().zip(&self.force_b) {
+                let old = *v;
+                *v = old - dur * f;
+                string_loss += 0.5 * (old - *v) * (old + *v);
+            }
         }
         damper_loss += self.damp(true);
 
@@ -2187,9 +3260,10 @@ impl LivePiano {
         for ac in &self.active {
             let b = dot(&ac.gl, &self.bq);
             for s in &ac.segs {
-                for k in s.off..s.off + s.n {
+                let vel = self.seg_velocity(s);
+                for (k, v) in (s.off..s.off + s.n).zip(vel.iter()) {
                     let x = self.q[k] - self.m.beta[k] * b;
-                    e += 0.5 * self.v[k] * self.v[k] + 0.5 * self.m.w2[k] * x * x;
+                    e += 0.5 * v * v + 0.5 * self.m.w2[k] * x * x;
                 }
             }
         }
@@ -2275,6 +3349,21 @@ impl LivePiano {
         let mut bare = vec![0.0; self.r];
         self.board_coordinates(&mut bare);
         out.extend(bare.iter().map(|x| *x as f32));
+        for slot in 0..self.active.len() {
+            let (ci, n) = (self.active[slot].ci, self.active[slot].shape_n);
+            if n > 0 && self.shape_cache[ci].as_ref().is_none_or(|(count, _)| *count != n) {
+                let c = &self.courses[ci];
+                let root = (0.5 * c.linear_density_kg_m * c.length_m).sqrt();
+                let mut shape = Vec::with_capacity(SHAPE_STATIONS * n);
+                for j in 0..SHAPE_STATIONS {
+                    let x = (j as f64 + 0.5) / SHAPE_STATIONS as f64;
+                    for p in 1..=n {
+                        shape.push(((p as f64 * PI * x).sin() / root) as f32);
+                    }
+                }
+                self.shape_cache[ci] = Some((n, shape));
+            }
+        }
         for ac in &self.active {
             let key = &self.keys[ac.ci];
             let b = dot(&ac.gl, &self.bq);
@@ -2288,11 +3377,16 @@ impl LivePiano {
             out.push(ac.segs.iter().filter(|s| !s.duplex).count() as f32);
             out.push(b as f32);
             let n = ac.shape_n;
+            let shape = if n > 0 {
+                self.shape_cache[ac.ci].as_ref().map(|(_, s)| s.as_slice())
+            } else {
+                None
+            };
             for j in 0..SHAPE_STATIONS {
                 let x = (j as f64 + 0.5) / SHAPE_STATIONS as f64;
                 let mut y = x * b;
-                if n > 0 {
-                    let row = &ac.shape[j * n..(j + 1) * n];
+                if let Some(table) = shape {
+                    let row = &table[j * n..(j + 1) * n];
                     for (p, g) in row.iter().enumerate() {
                         let k = ac.shape_off + p;
                         y += f64::from(*g) * (self.q[k] - self.m.beta[k] * b);

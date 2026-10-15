@@ -16,6 +16,7 @@ const MAX_BYTES: usize = 1_048_576;
 
 /// One explicit material, meridian and optional stress-free reference details.
 /// Azimuth count and frequency window are numerical choices, not timbre controls.
+#[derive(Clone)]
 pub struct Specimen {
     pub stations: Vec<ProfileStation>,
     pub rings: Vec<AnnularRelief>,

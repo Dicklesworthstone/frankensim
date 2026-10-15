@@ -57,6 +57,30 @@ pub struct RayleighMedium {
 }
 
 const MAX_HISTORY: usize = 32_768;
+/// Largest transposed tap ring (f64 entries, 16 MiB). Larger kernels keep the
+/// direct form; both forms produce bit-identical pressure.
+const MAX_TAP_RING: usize = 1 << 21;
+
+/// One kernel's contribution from one history frame: products in input order,
+/// four lanes, pairwise lane sum, then the scalar tail. The direct and the
+/// transposed forms both call this, so each tap has one fixed rounding order.
+#[inline(always)]
+fn kernel_tap(weights: &[f64], frame: &[f64]) -> f64 {
+    let mut s=[0.0_f64;4];
+    let mut cw=weights.chunks_exact(4);
+    let mut ch=frame.chunks_exact(4);
+    for (w,h) in (&mut cw).zip(&mut ch) {
+        s[0]+=w[0]*h[0];
+        s[1]+=w[1]*h[1];
+        s[2]+=w[2]*h[2];
+        s[3]+=w[3]*h[3];
+    }
+    let mut tap=(s[0]+s[1])+(s[2]+s[3]);
+    for (w,h) in cw.remainder().iter().zip(ch.remainder()) {
+        tap+=w*h;
+    }
+    tap
+}
 
 /// Explicit geometry and numerical resolution of an infinite-baffle circular
 /// outlet. The center is the origin and outward normal is +z. Its one input is
@@ -69,9 +93,10 @@ pub struct CircularOutletReceiver {
     pub radial_rings: usize,
     /// Uniform azimuthal samples per annulus, 8..=512.
     pub angular_points: usize,
-    /// Declared resolved band upper limit [Hz]. At most 0.1 of the mechanical
-    /// rate, limiting differencing/interpolation errors. Not a spectral filter
-    /// or proof that a nonlinear source has no content above this band.
+    /// Declared resolved band upper limit [Hz]. Legacy finite-difference images
+    /// admit at most 0.1 of their mechanical rate; differentiating images admit
+    /// at most 0.45 of their output rate. This controls spatial resolution; it
+    /// is not a filter or proof that a nonlinear source stays inside the band.
     pub maximum_frequency_hz: f64,
 }
 
@@ -85,6 +110,21 @@ pub struct BaffledPressure {
     /// for an existing one-mode or four-mode soundboard.
     history: Vec<f64>,
     history_frames: usize,
+    /// Transposed evaluation, a pure layout choice. When frame f is committed,
+    /// row f of this ring (parallel to `history`) receives tap_k(f) for every
+    /// kernel k. Pressure at head t then sums tap_k(t-d_k) in kernel order.
+    /// These are the same products, per-tap order and sum order as the direct
+    /// form, so the result is bit-identical. Never-written rows hold +0.0,
+    /// which equals a tap of the zero-initialized history.
+    taps: Vec<f64>,
+    /// Kernel rows packed contiguously in kernel order (transposed form only).
+    packed_weights: Vec<f64>,
+    /// Per kernel, (history_frames - delay) * kernels + k; reduce mod taps.len().
+    tap_offsets: Vec<usize>,
+    /// Address of the `history` allocation the ring mirrors; 0 = direct form.
+    /// A constructor that replaces the kernels also replaces `history` (a new
+    /// allocation while the old one is alive), so a stale ring is never used.
+    tap_history: usize,
     previous_velocity: Vec<f64>,
     acceleration: Vec<f64>,
     decimator: antialias::Decimator,
@@ -98,6 +138,24 @@ pub struct BaffledPressure {
     pub position_m: [f64; 3],
     /// FIR support, including fractional interpolation taps; not a group delay.
     pub delay_samples: (usize, usize),
+}
+/// A copy steps bit for bit as the original would from here. It keeps the
+/// original's evaluation form: when the transposed ring mirrors the original's
+/// history, the copy's ring names the copy's own history (a derived clone
+/// would keep the original's address and fall back to the direct form).
+impl Clone for BaffledPressure {
+    fn clone(&self) -> Self {
+        let transposed=self.tap_history==self.history.as_ptr() as usize;
+        let mut copy=Self { kernels:self.kernels.clone(),history:self.history.clone(),
+            history_frames:self.history_frames,taps:self.taps.clone(),
+            packed_weights:self.packed_weights.clone(),tap_offsets:self.tap_offsets.clone(),tap_history:0,
+            previous_velocity:self.previous_velocity.clone(),acceleration:self.acceleration.clone(),
+            decimator:self.decimator.clone(),differentiate_velocity:self.differentiate_velocity,
+            interpolation_delay:self.interpolation_delay,head:self.head,modes:self.modes,rate:self.rate,
+            position_m:self.position_m,delay_samples:self.delay_samples };
+        if transposed {copy.tap_history=copy.history.as_ptr() as usize;}
+        copy
+    }
 }
 impl BaffledPressure {
     /// Prepare the existing Rayleigh integral over caller-supplied velocity shapes.
@@ -157,6 +215,7 @@ impl BaffledPressure {
             output_rate, position_m, medium)?;
         receiver.differentiate_velocity = true;
         receiver.set_input_ratio((mechanics_rate / output_rate) as usize)?;
+        receiver.prepare_taps();
         Ok(receiver)
     }
 
@@ -172,11 +231,22 @@ impl BaffledPressure {
     /// for quantitative accuracy; no continuum error enclosure is claimed.
     pub fn circular_outlet(radius_m: f64, mechanical_rate: u32,
         receiver: CircularOutletReceiver, medium: RayleighMedium) -> Result<Self,String> {
+        if receiver.maximum_frequency_hz>0.1*f64::from(mechanical_rate) {
+            return Err("circular receiver requires physical geometry and explicit bounded resolution".into());
+        }
+        let surface = Self::circular_surface(radius_m, receiver, medium)?;
+        Self::new(&surface,1,mechanical_rate,receiver.position_m,medium)
+    }
+
+    // The same physical quadrature for every circular-outlet observation image.
+    // Temporal admission belongs to its selected reconstruction, not the mesh.
+    fn circular_surface(radius_m: f64, receiver: CircularOutletReceiver,
+        medium: RayleighMedium) -> Result<Vec<SurfaceSample>, String>
+    {
         if !radius_m.is_finite() || radius_m<=0.0
             || !(1..=128).contains(&receiver.radial_rings)
             || !(8..=512).contains(&receiver.angular_points)
             || !receiver.maximum_frequency_hz.is_finite() || receiver.maximum_frequency_hz<=0.0
-            || receiver.maximum_frequency_hz>0.1*f64::from(mechanical_rate)
             || !medium.sound_speed.is_finite() || medium.sound_speed<=0.0 {
             return Err("circular receiver requires physical geometry and explicit bounded resolution".into());
         }
@@ -199,7 +269,7 @@ impl BaffledPressure {
                     area_m2:patch_area,mode_shape:vec![1.0/area] });
             }
         }
-        Self::new(&surface,1,mechanical_rate,receiver.position_m,medium)
+        Ok(surface)
     }
 
     fn set_input_ratio(&mut self, ratio: usize) -> Result<(), String> {
@@ -246,10 +316,33 @@ impl BaffledPressure {
         let last=*bins.last_key_value().ok_or("empty radiation kernel")?.0;
         let history_frames=last+1;
         let samples=history_frames.checked_mul(modes).ok_or("microphone history size overflow")?;
-        Ok(Self { kernels: bins.into_iter().collect(), history: vec![0.0;samples],history_frames,
+        let mut receiver = Self { kernels: bins.into_iter().collect(), history: vec![0.0;samples],history_frames,
+            taps:Vec::new(),packed_weights:Vec::new(),tap_offsets:Vec::new(),tap_history:0,
             previous_velocity:vec![0.0;modes],acceleration:vec![0.0;modes],head:0,modes,rate:f64::from(rate),
             decimator:antialias::Decimator::new(1,modes)?,differentiate_velocity:false,interpolation_delay:0,
-            position_m,delay_samples:(first,last) })
+            position_m,delay_samples:(first,last) };
+        receiver.prepare_taps();
+        Ok(receiver)
+    }
+
+    /// Cold: build the transposed tap ring for the current kernels and the
+    /// still-zero history. Constructors call it after their final kernel
+    /// choice. Rings above MAX_TAP_RING keep the direct form.
+    fn prepare_taps(&mut self) {
+        let (frames,count)=(self.history_frames,self.kernels.len());
+        match frames.checked_mul(count) {
+            Some(ring) if ring<=MAX_TAP_RING => {
+                self.taps=vec![0.0;ring];
+                self.packed_weights=self.kernels.iter().flat_map(|(_,row)|row.iter().copied()).collect();
+                self.tap_offsets=self.kernels.iter().enumerate()
+                    .map(|(k,(delay,_))|(frames-delay)*count+k).collect();
+                self.tap_history=self.history.as_ptr() as usize;
+            }
+            _ => {
+                self.taps=Vec::new();self.packed_weights=Vec::new();self.tap_offsets=Vec::new();
+                self.tap_history=0;
+            }
+        }
     }
     pub fn multiply_adds_per_sample(&self)->usize {
         self.kernels.len()*self.modes + self.decimator.multiplies_per_output_frame()
@@ -302,16 +395,33 @@ impl BaffledPressure {
             self.decimator.preview(&self.acceleration)?
         };
         let mut pressure=0.0;
-        for (delay,weights) in &self.kernels {
-            let frame=if self.head>=*delay {self.head-*delay}else{self.head+self.history_frames-*delay};
-            let offset=frame*self.modes;
-            for (i,weight) in weights.iter().enumerate() {
-                pressure+=weight*self.history[offset+i];
+        let transposed=self.tap_history==self.history.as_ptr() as usize;
+        if !transposed {
+            for (delay,weights) in &self.kernels {
+                let frame=if self.head>=*delay {self.head-*delay}else{self.head+self.history_frames-*delay};
+                let offset=frame*self.modes;
+                pressure+=kernel_tap(weights,&self.history[offset..offset+self.modes]);
+            }
+        } else {
+            // tap_k(head-d_k), already formed when that frame was committed.
+            let ring=self.taps.len();
+            let base=self.head*self.kernels.len();
+            for &offset in &self.tap_offsets {
+                let mut index=base+offset;
+                if index>=ring {index-=ring;}
+                pressure+=self.taps[index];
             }
         }
         if !pressure.is_finite() {return Err("radiated pressure overflow".into());}
         let offset=self.head*self.modes;
         self.history[offset..offset+self.modes].copy_from_slice(filtered);
+        if transposed {
+            let count=self.kernels.len();
+            let row=&mut self.taps[self.head*count..(self.head+1)*count];
+            for (tap,weights) in row.iter_mut().zip(self.packed_weights.chunks_exact(self.modes)) {
+                *tap=kernel_tap(weights,filtered);
+            }
+        }
         self.previous_velocity.copy_from_slice(&velocity[(ratio-1)*self.modes..]);
         self.decimator.commit();
         self.head+=1;if self.head==self.history_frames{self.head=0;}
@@ -443,6 +553,55 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn transposed_taps_match_the_direct_kernel_sum_bit_for_bit() {
+        for (modes,ratio,differentiating) in [(5,1,false),(32,1,true),(37,4,false),(3,3,true)] {
+            let surface:Vec<SurfaceSample>=(0..60).map(|p| SurfaceSample{
+                position_m:[0.031*p as f64-0.9,0.017*((p*7)%23) as f64-0.2,0.0],
+                area_m2:0.01+0.0003*p as f64,
+                mode_shape:(0..modes).map(|i|((p*modes+i) as f64*0.71).sin()).collect()}).collect();
+            let build=|| {
+                let mic=if differentiating {
+                    BaffledPressure::new_multirate_differentiating(&surface,modes,48_000*ratio as u32,48_000,[0.3,0.4,1.0],medium())
+                } else {
+                    BaffledPressure::new_multirate(&surface,modes,48_000*ratio as u32,48_000,[0.3,0.4,1.0],medium())
+                };
+                mic.unwrap()
+            };
+            let mut transposed=build();
+            let mut direct=build();
+            assert_eq!(transposed.tap_history,transposed.history.as_ptr() as usize);
+            assert_eq!(transposed.taps.len(),transposed.history_frames*transposed.kernels.len());
+            assert!(transposed.kernels.len()>8);
+            direct.taps=Vec::new();direct.packed_weights=Vec::new();direct.tap_offsets=Vec::new();
+            direct.tap_history=0;
+            // Replacing kernels after construction (the plain bandlimited
+            // constructor) must fall back to the direct form, never a stale ring.
+            let replaced=BaffledPressure::new_multirate_bandlimited(&surface,modes,48_000*ratio as u32,48_000,
+                [0.3,0.4,1.0],medium()).unwrap();
+            assert_ne!(replaced.tap_history,replaced.history.as_ptr() as usize);
+            let (mut a,mut b)=(vec![0.0;modes],vec![0.0;modes]);
+            for n in 0..3*transposed.history_frames {
+                let trace:Vec<f64>=(0..ratio*modes).map(|i|((n*ratio*modes+i) as f64*0.37).sin()*1e-3).collect();
+                let p=transposed.step_trace(&trace).unwrap();
+                assert_eq!(p.to_bits(),direct.step_trace(&trace).unwrap().to_bits(),"modes {modes} ratio {ratio} n {n}");
+                transposed.mode_pressures(&mut a).unwrap();direct.mode_pressures(&mut b).unwrap();
+                assert_eq!(a,b);
+            }
+            // A copy taken mid-stream keeps its form (the transposed ring names
+            // the copy's own history) and steps bit for bit as the original.
+            for mut original in [transposed,direct] {
+                let mut copy=original.clone();
+                let form=|m:&BaffledPressure| m.tap_history==m.history.as_ptr() as usize;
+                assert_eq!(form(&copy),form(&original));
+                assert_eq!(form(&copy),!copy.taps.is_empty());
+                for n in 0..2*copy.history_frames {
+                    let trace:Vec<f64>=(0..ratio*modes).map(|i|((n*ratio*modes+i) as f64*0.53).cos()*1e-3).collect();
+                    assert_eq!(copy.step_trace(&trace).unwrap().to_bits(),original.step_trace(&trace).unwrap().to_bits());
+                }
+            }
+        }
+    }
 
 }
 
@@ -497,7 +656,7 @@ mod circular_tests {
         let mut coarse=config();coarse.radial_rings=1;coarse.angular_points=8;
         assert!(BaffledPressure::circular_outlet(0.2,48000,coarse,medium).is_err());
         for radius in [0.0,-1.0,f64::NAN,f64::MAX] {
-            assert!(BaffledPressure::circular_outlet(radius,48000,config(),medium).is_err());
+            assert!(BaffledPressure::circular_outlet(radius,48000,coarse,medium).is_err());
         }
         let mut high=config();high.maximum_frequency_hz=4801.0;
         assert!(BaffledPressure::circular_outlet(0.007,48000,high,medium).is_err());

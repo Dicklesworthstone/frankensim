@@ -235,6 +235,7 @@ impl VolumeEvidence {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 enum VolumeStage {
     Regions(DesignRegionStage),

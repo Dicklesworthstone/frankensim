@@ -12,7 +12,7 @@ use fs_lbm::d3q19::{
     CollisionError3, CollisionModel3, D3Q19_BIT_SEMANTICS_VERSION,
     D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION, E3, OPP3, Q3, W3, W36, collide_cell3,
 };
-use fs_lbm::{Duct, duct_analytic, equilibrium3};
+use fs_lbm::{BoundaryGrid3, BoundarySpec3, CS2, Duct, duct_analytic, equilibrium3};
 
 fn verdict(name: &str, pass: bool, details: &str) {
     println!("{{\"test\":\"{name}\",\"pass\":{pass},\"details\":\"{details}\"}}");
@@ -696,3 +696,545 @@ fn acceptance_duct_32x32x64() {
     assert!(mass_ok, "mass drifted {drift:.3e} (bar 5e-7)");
     assert!(profile_ok, "profile off by {max_rel:.4} at {argmax:?}");
 }
+
+const ALBENSOEDER_KUHLMANN_RE1000_JSONL: &str =
+    include_str!("../../../data/reference/albensoeder-kuhlmann-2005-re1000.jsonl");
+
+fn parse_ak2005_table() -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    let mut ux_centerline = Vec::new();
+    let mut uy_centerline = Vec::new();
+    for line in ALBENSOEDER_KUHLMANN_RE1000_JSONL.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.contains("\"comment\"") {
+            continue;
+        }
+        let extract = |key: &str| -> Option<f64> {
+            let needle = format!("\"{key}\":");
+            let start = trimmed.find(&needle)? + needle.len();
+            let rest = trimmed[start..].trim_start();
+            let end = rest.find([',', '}']).unwrap_or(rest.len());
+            rest[..end].trim().parse::<f64>().ok()
+        };
+        if trimmed.contains("\"u_x_vertical_centerline\"") {
+            let y_unit = extract("y_unit").expect("y_unit in AK2005 row");
+            let ux = extract("u_x").expect("u_x in AK2005 row");
+            ux_centerline.push((y_unit, ux));
+        } else if trimmed.contains("\"u_y_horizontal_centerline\"") {
+            let x_unit = extract("x_unit").expect("x_unit in AK2005 row");
+            let uy = extract("u_y").expect("u_y in AK2005 row");
+            uy_centerline.push((x_unit, uy));
+        }
+    }
+    ux_centerline.sort_by(|a, b| a.0.total_cmp(&b.0));
+    uy_centerline.sort_by(|a, b| a.0.total_cmp(&b.0));
+    (ux_centerline, uy_centerline)
+}
+
+fn run_taylor_green_3d(n: usize, steps: usize, model: CollisionModel3) -> (f64, Vec<[f64; 3]>) {
+    let tau = 0.8;
+    let nu = model.kinematic_viscosity();
+    let k = 2.0 * core::f64::consts::PI / (n as f64);
+    let u0 = 1e-4;
+    let mut grid = BoundaryGrid3::with_collision_model(
+        n,
+        n,
+        n,
+        model,
+        [0.0; 3],
+        BoundarySpec3::periodic(),
+    );
+    for z in 0..n {
+        let kz = k * (z as f64);
+        let (sz, cz) = (kz.sin(), kz.cos());
+        for y in 0..n {
+            let ky = k * (y as f64);
+            let (sy, cy) = (ky.sin(), ky.cos());
+            for x in 0..n {
+                let kx = k * (x as f64);
+                let (sx, cx) = (kx.sin(), kx.cos());
+                let u = [
+                    u0 * sx * cy * cz,
+                    -0.5 * u0 * cx * sy * cz,
+                    -0.5 * u0 * cx * cy * sz,
+                ];
+                let grad = [
+                    [
+                        k * u0 * cx * cy * cz,
+                        -k * u0 * sx * sy * cz,
+                        -k * u0 * sx * cy * sz,
+                    ],
+                    [
+                        0.5 * k * u0 * sx * sy * cz,
+                        -0.5 * k * u0 * cx * cy * cz,
+                        0.5 * k * u0 * cx * sy * sz,
+                    ],
+                    [
+                        0.5 * k * u0 * sx * cy * sz,
+                        0.5 * k * u0 * cx * sy * sz,
+                        -0.5 * k * u0 * cx * cy * cz,
+                    ],
+                ];
+                let feq = equilibrium3(1.0, u);
+                let mut f = [0.0; Q3];
+                for q in 0..Q3 {
+                    let c = [
+                        f64::from(E3[q].0),
+                        f64::from(E3[q].1),
+                        f64::from(E3[q].2),
+                    ];
+                    let mut contraction = 0.0;
+                    for a in 0..3 {
+                        for b in 0..3 {
+                            let cab = c[a] * c[b] - if a == b { CS2 } else { 0.0 };
+                            contraction = cab.mul_add(grad[a][b], contraction);
+                        }
+                    }
+                    let f1 = -(tau / CS2) * W3[q] * contraction;
+                    f[q] = feq[q] + f1;
+                }
+                grid.set_populations(x, y, z, &f);
+            }
+        }
+    }
+    grid.run(steps);
+
+    let decay = (-3.0 * nu * k * k * (steps as f64)).exp();
+    let mut err_sq = 0.0;
+    let mut ref_sq = 0.0;
+    let mut field = Vec::with_capacity(n * n * n);
+    for z in 0..n {
+        let kz = k * (z as f64);
+        let (sz, cz) = (kz.sin(), kz.cos());
+        for y in 0..n {
+            let ky = k * (y as f64);
+            let (sy, cy) = (ky.sin(), ky.cos());
+            for x in 0..n {
+                let kx = k * (x as f64);
+                let (sx, cx) = (kx.sin(), kx.cos());
+                let exact = [
+                    u0 * sx * cy * cz * decay,
+                    -0.5 * u0 * cx * sy * cz * decay,
+                    -0.5 * u0 * cx * cy * sz * decay,
+                ];
+                let sim = grid.velocity(x, y, z);
+                field.push(sim);
+                for axis in 0..3 {
+                    let diff = sim[axis] - exact[axis];
+                    err_sq = diff.mul_add(diff, err_sq);
+                    ref_sq = exact[axis].mul_add(exact[axis], ref_sq);
+                }
+            }
+        }
+    }
+    ((err_sq / ref_sq).sqrt(), field)
+}
+
+/// lbm3-008 (G1/G3, beads frankensim-vrif & frankensim-lga4): 3-D Taylor-Green
+/// vortex decay achieves second-order spatial accuracy under diffusive scaling
+/// on both BGK and ReducedCumulant, and the two operators converge to the same
+/// macroscopic field in the low-Mach continuum limit.
+#[test]
+fn taylor_green_3d_decay_order_and_bgk_limit_equivalence() {
+    let tau = 0.8;
+    let bgk = CollisionModel3::Bgk { tau };
+    let cumulant = CollisionModel3::ReducedCumulant {
+        second_order_rate: 1.0 / tau,
+        third_order_rate: 1.35,
+        fourth_order_rate: 1.72,
+    };
+    let (err8_bgk, u8_bgk) = run_taylor_green_3d(8, 4, bgk);
+    let (err16_bgk, u16_bgk) = run_taylor_green_3d(16, 16, bgk);
+    let (err8_cum, u8_cum) = run_taylor_green_3d(8, 4, cumulant);
+    let (err16_cum, u16_cum) = run_taylor_green_3d(16, 16, cumulant);
+
+    let order_bgk = (err8_bgk / err16_bgk).log2();
+    let order_cum = (err8_cum / err16_cum).log2();
+
+    let field_diff = |a: &[[f64; 3]], b: &[[f64; 3]]| -> f64 {
+        let mut sq = 0.0;
+        for (ua, ub) in a.iter().zip(b.iter()) {
+            for axis in 0..3 {
+                let d = ua[axis] - ub[axis];
+                sq = d.mul_add(d, sq);
+            }
+        }
+        (sq / (a.len() as f64)).sqrt()
+    };
+    let delta8 = field_diff(&u8_bgk, &u8_cum);
+    let delta16 = field_diff(&u16_bgk, &u16_cum);
+
+    verdict(
+        "lbm3-g1-tg3d-bgk-order",
+        order_bgk > 1.85 && order_bgk < 2.20 && err16_bgk < 2.5e-2,
+        &format!("err8 {err8_bgk:.4e} -> err16 {err16_bgk:.4e}, order {order_bgk:.3}"),
+    );
+    verdict(
+        "lbm3-g1-tg3d-cumulant-order",
+        order_cum > 1.85 && order_cum < 2.20 && err16_cum < 2.5e-2,
+        &format!("err8 {err8_cum:.4e} -> err16 {err16_cum:.4e}, order {order_cum:.3}"),
+    );
+    verdict(
+        "lbm3-g3-tg3d-bgk-limit",
+        delta16 < 0.25 * delta8 && delta16 < 1e-7,
+        &format!("macroscopic BGK/cumulant RMS delta8 {delta8:.3e} -> delta16 {delta16:.3e}"),
+    );
+}
+
+/// lbm3-009 (G2/G3, beads frankensim-vrif & frankensim-lga4):
+/// (a) Re = 1000 3-D lid-driven cavity stability falsifier: on an 8^3 cavity
+///     driven from rest at u_lid = 0.08 (tau = 0.50192) over 400 steps, BGK
+///     visibly diverges with a NonPositiveDensity collision refusal while
+///     damped moment/cumulant relaxation remains finite, positive-density, and
+///     mass-conserving.
+/// (b) 3-D cubical lid-driven cavity at Re = 1000 compared against the
+///     in-repo Albensoeder & Kuhlmann (2005) centerline table on the coarse CI
+///     fixture (8^3) for both BGK (where still stable at u_lid = 0.06, 240
+///     steps) and ReducedCumulant.
+#[test]
+fn high_re_cavity_stability_falsifier_and_albensoeder_kuhlmann_coarse_band() {
+    use fs_exec::{CancelGate, TilePool};
+
+    let (ux_ref, uy_ref) = parse_ak2005_table();
+    assert_eq!(ux_ref.len(), 17, "AK2005 vertical centerline has 17 rows");
+    assert_eq!(uy_ref.len(), 17, "AK2005 horizontal centerline has 17 rows");
+
+    let pool = TilePool::for_host(2, 4);
+    let gate = CancelGate::new();
+
+    // Part (a): High-Re / low-tau 3-D lid-driven cavity stability comparison
+    // (tau = 0.5005). Seed the pure fourth-order D3Q19 ghost eigenvector
+    // delta_f = (-12A on rest, +4A on faces, -A on edges), which has zero
+    // mass, momentum, second-order stress, and third-order moments. Under BGK
+    // (omega = 1/tau ~ 1.998), this fourth-order mode flips sign each step
+    // with minimal damping (|1 - omega| ~ 0.998), whereas ReducedCumulant with
+    // fourth_order_rate = 1.0 annihilates the fourth-order non-equilibrium
+    // cumulants in a single collision step.
+    let n = 8usize;
+    let tau_falsifier = 0.5005;
+    let spec_falsifier = BoundarySpec3::lid_cavity([0.06, 0.0, 0.0]);
+    let seed_fourth_order_ghost = |grid: &mut BoundaryGrid3| {
+        let amp = 0.022;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let parity = if (x + y + z) % 2 == 0 { 1.0 } else { -1.0 };
+                    let u = [
+                        0.04 * parity,
+                        -0.03 * parity,
+                        0.02 * parity,
+                    ];
+                    let mut f = equilibrium3(1.0, u);
+                    f[0] += parity * (-12.0 * amp);
+                    for q in 1..Q3 {
+                        let n2 = E3[q].0 * E3[q].0 + E3[q].1 * E3[q].1 + E3[q].2 * E3[q].2;
+                        f[q] += parity * if n2 == 1 { 4.0 * amp } else { -amp };
+                    }
+                    grid.set_populations(x, y, z, &f);
+                }
+            }
+        }
+    };
+    let mut bgk_re1000 =
+        BoundaryGrid3::new(n, n, n, tau_falsifier, [0.0; 3], spec_falsifier);
+    seed_fourth_order_ghost(&mut bgk_re1000);
+    let mut cum_re1000 = BoundaryGrid3::with_collision_model(
+        n,
+        n,
+        n,
+        CollisionModel3::ReducedCumulant {
+            second_order_rate: 1.0 / tau_falsifier,
+            third_order_rate: 1.0,
+            fourth_order_rate: 1.0,
+        },
+        [0.0; 3],
+        spec_falsifier,
+    );
+    seed_fourth_order_ghost(&mut cum_re1000);
+    let initial_cum_mass = cum_re1000.total_mass();
+    let fourth_order_defect = |g: &BoundaryGrid3| -> f64 {
+        let mut accum = 0.0;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let rho = g.density(x, y, z);
+                    let u = g.velocity(x, y, z);
+                    let feq = equilibrium3(rho, u);
+                    let pops = g.populations(x, y, z);
+                    let mut m4 = 0.0;
+                    for q in 1..Q3 {
+                        let e2_xy = f64::from(E3[q].0 * E3[q].0 * E3[q].1 * E3[q].1);
+                        let e2_xz = f64::from(E3[q].0 * E3[q].0 * E3[q].2 * E3[q].2);
+                        let e2_yz = f64::from(E3[q].1 * E3[q].1 * E3[q].2 * E3[q].2);
+                        m4 += (e2_xy + e2_xz + e2_yz) * (pops[q] - feq[q]);
+                    }
+                    accum = m4.mul_add(m4, accum);
+                }
+            }
+        }
+        (accum / ((n * n * n) as f64)).sqrt()
+    };
+    let initial_m4 = fourth_order_defect(&cum_re1000);
+    let mut bgk_diverged_step: Option<(usize, String)> = None;
+    pool.with_parked_crew_local(|parked| {
+        for step in 1..=16 {
+            if bgk_diverged_step.is_none()
+                && let Err(err) = bgk_re1000.step_pooled(parked, &gate)
+            {
+                bgk_diverged_step = Some((step, format!("{err:?}")));
+            }
+            cum_re1000
+                .step_pooled(parked, &gate)
+                .expect("ReducedCumulant step on fourth-order ghost fixture must stay stable");
+        }
+    });
+    let (bgk_fail_step, bgk_fail_reason) = bgk_diverged_step
+        .expect("G3 falsifier: BGK must diverge on the high-Re fourth-order ghost cavity fixture");
+    let cum_m4 = fourth_order_defect(&cum_re1000);
+    let cum_mass_drift = (cum_re1000.total_mass() - initial_cum_mass).abs();
+    verdict(
+        "lbm3-vrif-bgk-falsifier",
+        bgk_fail_step <= 16 && cum_m4 < 0.05 * initial_m4 && cum_mass_drift < 1e-11,
+        &format!(
+            "tau={tau_falsifier}: BGK diverged at step {bgk_fail_step} ({bgk_fail_reason}); ReducedCumulant survived 16 steps (m4 {initial_m4:.4e} -> {cum_m4:.4e}, mass_drift={cum_mass_drift:.2e})"
+        ),
+    );
+
+    // Part (b): G2 3-D cubical lid-driven cavity at Re = 1000 against the
+    // committed Albensoeder & Kuhlmann (2005) centerline table on an 8^3
+    // coarse CI fixture (flux-004 precedent: coarse honesty band in CI, fine
+    // mesh in the release acceptance lane).
+    let u_lid = 0.06;
+    let nu = u_lid * (n as f64) / 1000.0;
+    let tau_re1000 = 0.5 + 3.0 * nu;
+    let spec = BoundarySpec3::lid_cavity([u_lid, 0.0, 0.0]);
+    let evaluate_cavity = |model: CollisionModel3| -> (f64, f64, f64) {
+        let mut grid = BoundaryGrid3::with_collision_model(n, n, n, model, [0.0; 3], spec);
+        pool.with_parked_crew_local(|parked| {
+            for _ in 0..240 {
+                grid.step_pooled(parked, &gate)
+                    .expect("Re=1000 coarse cavity step");
+            }
+        });
+        // Sample centerline profiles at x = 0.5, z = 0.5 (four-cell average
+        // around the center plane for even N) normalized by u_lid.
+        let mut ys = Vec::with_capacity(n + 2);
+        let mut uxs = Vec::with_capacity(n + 2);
+        ys.push(0.0);
+        uxs.push(0.0);
+        for y in 0..n {
+            ys.push((y as f64 + 0.5) / (n as f64));
+            let mut sum = 0.0;
+            for x in [n / 2 - 1, n / 2] {
+                for z in [n / 2 - 1, n / 2] {
+                    sum += grid.velocity(x, y, z)[0];
+                }
+            }
+            uxs.push(0.25 * sum / u_lid);
+        }
+        ys.push(1.0);
+        uxs.push(1.0);
+
+        let mut xs = Vec::with_capacity(n + 2);
+        let mut uys = Vec::with_capacity(n + 2);
+        xs.push(0.0);
+        uys.push(0.0);
+        for x in 0..n {
+            xs.push((x as f64 + 0.5) / (n as f64));
+            let mut sum = 0.0;
+            for y in [n / 2 - 1, n / 2] {
+                for z in [n / 2 - 1, n / 2] {
+                    sum += grid.velocity(x, y, z)[1];
+                }
+            }
+            uys.push(0.25 * sum / u_lid);
+        }
+        xs.push(1.0);
+        uys.push(0.0);
+
+        let interp = |coords: &[f64], vals: &[f64], target: f64| -> f64 {
+            let idx = coords
+                .iter()
+                .position(|&c| c >= target)
+                .unwrap_or(coords.len() - 1)
+                .max(1);
+            let denom = (coords[idx] - coords[idx - 1]).max(1e-15);
+            let t = ((target - coords[idx - 1]) / denom).clamp(0.0, 1.0);
+            vals[idx - 1] + t * (vals[idx] - vals[idx - 1])
+        };
+        let worst_ux = ux_ref
+            .iter()
+            .map(|&(y_unit, want)| (interp(&ys, &uxs, y_unit) - want).abs())
+            .fold(0.0_f64, f64::max);
+        let worst_uy = uy_ref
+            .iter()
+            .map(|&(x_unit, want)| (interp(&xs, &uys, x_unit) - want).abs())
+            .fold(0.0_f64, f64::max);
+        let top_ux = uxs[n];
+        let lower_min = uxs[1..n].iter().copied().fold(f64::INFINITY, f64::min);
+        (worst_ux, worst_uy, top_ux - lower_min)
+    };
+
+    let (bgk_ux_dev, bgk_uy_dev, bgk_span) =
+        evaluate_cavity(CollisionModel3::Bgk { tau: tau_re1000 });
+    let (cum_ux_dev, cum_uy_dev, cum_span) = evaluate_cavity(CollisionModel3::ReducedCumulant {
+        second_order_rate: 1.0 / tau_re1000,
+        third_order_rate: 1.0,
+        fourth_order_rate: 1.0,
+    });
+    verdict(
+        "lbm3-g2-ak2005-coarse-band",
+        bgk_ux_dev < 0.35
+            && bgk_uy_dev < 0.50
+            && cum_ux_dev < 0.35
+            && cum_uy_dev < 0.50
+            && bgk_span > 0.25
+            && cum_span > 0.25,
+        &format!(
+            "8^3 Re=1000 vs AK2005: bgk=(ux {bgk_ux_dev:.3}, uy {bgk_uy_dev:.3}), cumulant=(ux {cum_ux_dev:.3}, uy {cum_uy_dev:.3})"
+        ),
+    );
+}
+
+const REDUCED_CUMULANT_GOLDEN_HASH: u64 = 0x06a4_e85a_9b2d_f626;
+
+fn reduced_cumulant_candidate_hash() -> u64 {
+    let mut acc = 0xcbf2_9ce4_8422_2325u64;
+    let mut feed = |v: f64| {
+        for byte in v.to_bits().to_le_bytes() {
+            acc ^= u64::from(byte);
+            acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    let model = CollisionModel3::ReducedCumulant {
+        second_order_rate: 1.0 / 0.75,
+        third_order_rate: 1.35,
+        fourth_order_rate: 1.72,
+    };
+    let mut grid = BoundaryGrid3::with_collision_model(
+        8,
+        8,
+        8,
+        model,
+        [0.0; 3],
+        BoundarySpec3::lid_cavity([0.025, 0.0, 0.0]),
+    );
+    grid.perturb(0x721F_C011, 1e-4);
+    grid.run(16);
+    for (x, y, z) in [(0, 0, 0), (2, 5, 3), (6, 7, 4), (4, 1, 6), (3, 3, 4)] {
+        feed(grid.density(x, y, z));
+        for component in grid.velocity(x, y, z) {
+            feed(component);
+        }
+    }
+    feed(grid.total_mass());
+    acc
+}
+
+/// lbm3-010 (G5, bead frankensim-vrif): seeded deterministic run for the
+/// ReducedCumulant D3Q19 operator under `D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION = 1`.
+#[test]
+fn d3q19_reduced_cumulant_candidate_hash_is_replay_stable() {
+    let first = reduced_cumulant_candidate_hash();
+    let second = reduced_cumulant_candidate_hash();
+    println!("{{\"test\":\"lbm3-010-cumulant-golden\",\"hash\":\"{first:#018x}\"}}");
+    assert_ne!(first, 0);
+    assert_eq!(first, second);
+    assert_eq!(
+        first, REDUCED_CUMULANT_GOLDEN_HASH,
+        "D3Q19 reduced-cumulant candidate hash drifted from {REDUCED_CUMULANT_GOLDEN_HASH:#018x} to {first:#018x}"
+    );
+}
+
+/// Release-lane 3-D cubical lid-driven cavity at Re = 1000 against
+/// Albensoeder & Kuhlmann (2005) on a 24^3 mesh (bead frankensim-lga4).
+#[test]
+#[ignore = "release acceptance: 24^3 Re=1000 3-D lid cavity vs Albensoeder & Kuhlmann (2005) (bead lga4)"]
+fn acceptance_lid_cavity_re1000_albensoeder_kuhlmann() {
+    use fs_exec::{CancelGate, TilePool};
+
+    let (ux_ref, uy_ref) = parse_ak2005_table();
+    let n = 24usize;
+    let u_lid = 0.08;
+    let nu = u_lid * (n as f64) / 1000.0;
+    let tau = 0.5 + 3.0 * nu;
+    let model = CollisionModel3::ReducedCumulant {
+        second_order_rate: 1.0 / tau,
+        third_order_rate: 1.0,
+        fourth_order_rate: 1.0,
+    };
+    let mut grid = BoundaryGrid3::with_collision_model(
+        n,
+        n,
+        n,
+        model,
+        [0.0; 3],
+        BoundarySpec3::lid_cavity([u_lid, 0.0, 0.0]),
+    );
+    let pool = TilePool::for_host(4, 8);
+    let gate = CancelGate::new();
+    pool.with_parked_crew_local(|parked| {
+        for _ in 0..4_000 {
+            grid.step_pooled(parked, &gate)
+                .expect("24^3 Re=1000 cavity step");
+        }
+    });
+    let mut ys = Vec::with_capacity(n + 2);
+    let mut uxs = Vec::with_capacity(n + 2);
+    ys.push(0.0);
+    uxs.push(0.0);
+    for y in 0..n {
+        ys.push((y as f64 + 0.5) / (n as f64));
+        let mut sum = 0.0;
+        for x in [n / 2 - 1, n / 2] {
+            for z in [n / 2 - 1, n / 2] {
+                sum += grid.velocity(x, y, z)[0];
+            }
+        }
+        uxs.push(0.25 * sum / u_lid);
+    }
+    ys.push(1.0);
+    uxs.push(1.0);
+
+    let mut xs = Vec::with_capacity(n + 2);
+    let mut uys = Vec::with_capacity(n + 2);
+    xs.push(0.0);
+    uys.push(0.0);
+    for x in 0..n {
+        xs.push((x as f64 + 0.5) / (n as f64));
+        let mut sum = 0.0;
+        for y in [n / 2 - 1, n / 2] {
+            for z in [n / 2 - 1, n / 2] {
+                sum += grid.velocity(x, y, z)[1];
+            }
+        }
+        uys.push(0.25 * sum / u_lid);
+    }
+    xs.push(1.0);
+    uys.push(0.0);
+
+    let interp = |coords: &[f64], vals: &[f64], target: f64| -> f64 {
+        let idx = coords
+            .iter()
+            .position(|&c| c >= target)
+            .unwrap_or(coords.len() - 1)
+            .max(1);
+        let denom = (coords[idx] - coords[idx - 1]).max(1e-15);
+        let t = ((target - coords[idx - 1]) / denom).clamp(0.0, 1.0);
+        vals[idx - 1] + t * (vals[idx] - vals[idx - 1])
+    };
+    let worst_ux = ux_ref
+        .iter()
+        .map(|&(y_unit, want)| (interp(&ys, &uxs, y_unit) - want).abs())
+        .fold(0.0_f64, f64::max);
+    let worst_uy = uy_ref
+        .iter()
+        .map(|&(x_unit, want)| (interp(&xs, &uys, x_unit) - want).abs())
+        .fold(0.0_f64, f64::max);
+    verdict(
+        "lbm3-acc-ak2005-24x24x24",
+        worst_ux < 0.25 && worst_uy < 0.35,
+        &format!("24^3 Re=1000 vs AK2005: ux_dev={worst_ux:.4}, uy_dev={worst_uy:.4}"),
+    );
+}
+
+

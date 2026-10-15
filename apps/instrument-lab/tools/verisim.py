@@ -32,7 +32,7 @@ def r(v, d=5):
 
 
 def load(path: Path, channel=0):
-    """RIFF/WAVE reader for the two encodings used here (16-bit PCM, 32-bit float); anything else refuses."""
+    """RIFF/WAVE reader for the encodings used here (16- and 24-bit PCM, 32-bit float); anything else refuses."""
     b = path.read_bytes()
     assert b[:4] == b"RIFF" and b[8:12] == b"WAVE", path
     fmt = data = None
@@ -50,6 +50,10 @@ def load(path: Path, channel=0):
         tag = struct.unpack("<H", fmt[24:26])[0]
     if (tag, bits) == (1, 16):
         x = np.frombuffer(data, "<i2").astype(np.float64) / 32768
+    elif (tag, bits) == (1, 24):
+        b3 = np.frombuffer(data[: len(data) // 3 * 3], np.uint8).reshape(-1, 3).astype(np.int32)
+        v = b3[:, 0] | (b3[:, 1] << 8) | (b3[:, 2] << 16)
+        x = np.where(v >= 1 << 23, v - (1 << 24), v).astype(np.float64) / (1 << 23)
     elif (tag, bits) == (3, 32):
         x = np.frombuffer(data, "<f4").astype(np.float64)
     else:
@@ -76,9 +80,12 @@ def highpass(x, f0=40.0, f1=70.0):
 def onset(x):
     # Relative to BOTH the peak and the recording's own noise floor: a pp note in a room
     # sits less than 30 dB above the hiss before it, and the hiss is not the note.
+    # The first 50 ms count as a noise floor only when steady (10th to 90th percentile within
+    # 20 dB): a render whose note starts 10 ms in holds silence and an onset there, not hiss.
     env = np.convolve(np.abs(x), np.ones(96) / 96, "same")
     head = env[: max(int(0.05 * SR), 1)]
-    noise = float(np.percentile(head, 90)) if env.argmax() > len(head) else 0.0
+    lo, hi = np.percentile(head, [10, 90])
+    noise = float(hi) if env.argmax() > len(head) and hi <= 10 * lo else 0.0
     thr = max(env.max() * 10 ** (-30 / 20), noise * 10 ** (15 / 20))
     return max(0, int(np.argmax(env > thr)) - int(0.005 * SR))
 
