@@ -12,15 +12,48 @@ pub enum HessianError {
     /// Original graph, seed, allocation, cancellation or adjoint error.
     Reverse(ReverseError),
     /// Directions require one block for every declared variable.
-    DirectionCount { expected: usize, actual: usize },
+    DirectionCount {
+        /// Number of declared variables.
+        expected: usize,
+        /// Number of supplied direction blocks.
+        actual: usize,
+    },
     /// A direction block must match its variable's point storage.
-    DirectionLength { variable: usize, expected: usize, actual: usize },
+    DirectionLength {
+        /// Variable index in declaration order.
+        variable: usize,
+        /// Expected point storage length.
+        expected: usize,
+        /// Supplied direction block length.
+        actual: usize,
+    },
     /// A direction component was not finite.
-    NonFiniteDirection { variable: usize, component: usize, bits: u64 },
+    NonFiniteDirection {
+        /// Variable index in declaration order.
+        variable: usize,
+        /// Component index within the variable's direction block.
+        component: usize,
+        /// Raw IEEE-754 bits of the non-finite value.
+        bits: u64,
+    },
     /// An explicit physics Hessian provider returned the wrong number of lanes.
-    PhysicsProductLength { node: NodeId, expected: usize, actual: usize },
+    PhysicsProductLength {
+        /// Live-IR node identifier.
+        node: NodeId,
+        /// Expected directional derivative length.
+        expected: usize,
+        /// Returned directional derivative length.
+        actual: usize,
+    },
     /// A local derivative or directional accumulation was not finite.
-    NonFiniteDerivative { node: NodeId, component: usize, bits: u64 },
+    NonFiniteDerivative {
+        /// Live-IR node identifier.
+        node: NodeId,
+        /// Scalar lane or component index.
+        component: usize,
+        /// Raw IEEE-754 bits of the non-finite value.
+        bits: u64,
+    },
 }
 
 impl From<ReverseError> for HessianError {
