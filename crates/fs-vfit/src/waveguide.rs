@@ -1,15 +1,18 @@
-//! Passive, integer-delay characteristic propagation with observable storage.
+//! Passive characteristic propagation with observable wave and optional allpass storage.
 //!
 //! This is the pure-delay/resistive-load member of the characteristic runtime,
 //! not a fitted-filter energy certificate. Two opposing N-sample delays store
 //! pressure waves. With volume-flow impedance Z, E = dt/Z sum(p+^2 + p-^2).
 //! At the far end p- = r p+, |r| <= 1; removed wave power is nonnegative.
 //! No fractional-delay interpolation, distributed loss, dispersion or radiation
-//! model is silently added. See Smith, Physical Audio Signal Processing,
+//! model is silently added. The explicit `fractional` image retains allpass energy. See Smith, Physical Audio Signal Processing,
 //! Digital Waveguide Theory, acoustic tubes and energy-density waves.
 
 /// Connected, variable-impedance characteristic sections and passive junctions.
 pub mod network;
+/// Fixed sub-sample allpass propagation with actual quadratic storage.
+pub mod fractional;
+use fractional::FractionalPair;
 
 /// Parameters of an initially quiescent bidirectional characteristic line.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -80,6 +83,7 @@ pub struct PassiveWaveguide {
     leaves: usize,
     head: usize,
     sqrt_energy_scale: f64,
+    fractional: Option<FractionalPair>,
 }
 
 impl PassiveWaveguide {
@@ -117,7 +121,7 @@ impl PassiveWaveguide {
         };
         Ok(Self {
             spec, waves: allocate(wave_len)?, energy: allocate(energy_len)?,
-            leaves, head: 0, sqrt_energy_scale: fs_math::det::sqrt(scale),
+            leaves, head: 0, sqrt_energy_scale: fs_math::det::sqrt(scale), fractional: None,
         })
     }
 
@@ -134,7 +138,11 @@ impl PassiveWaveguide {
     /// Fixed-order sum of the wave-state energies [J].
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
-        self.energy[1] + self.energy[2 * self.leaves + 1]
+        let stored = self.energy[1] + self.energy[2 * self.leaves + 1];
+        match &self.fractional {
+            None => stored,
+            Some(f) => stored + (self.wave_energy(f.state[0]) + self.wave_energy(f.state[1])),
+        }
     }
 
     fn wave_energy(&self, pressure: f64) -> f64 {
@@ -177,8 +185,7 @@ impl PassiveWaveguide {
         let incoming = self.incoming_pressure_pa();
         let incident = self.waves[self.head];
         let reflected = self.spec.reflection * incident;
-        let stored = self.replaced_root(0, self.wave_energy(outgoing))
-            + self.replaced_root(2 * self.leaves, self.wave_energy(reflected));
+        let stored = self.preview_pair_storage(outgoing, reflected)?;
         let inlet_pressure = outgoing + incoming;
         let inlet_flow = (outgoing - incoming) / self.spec.impedance_pa_s_m3;
         let frame = WaveguideFrame {
@@ -219,6 +226,11 @@ impl PassiveWaveguide {
     // A network supplies BOTH endpoint waves after validating all junctions.
     // Keep the actual two-direction shift and energy update in one owner.
     fn commit_pair(&mut self, outgoing: f64, reflected: f64) {
+        let [outgoing, reflected] = if let Some(f) = &mut self.fractional {
+            let (waves, state) = f.trial([outgoing, reflected]);
+            f.state = state;
+            waves
+        } else { [outgoing, reflected] };
         self.replace_leaf(0, self.wave_energy(outgoing));
         self.replace_leaf(2 * self.leaves, self.wave_energy(reflected));
         self.waves[self.head] = outgoing;
