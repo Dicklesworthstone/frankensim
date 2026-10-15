@@ -3,7 +3,7 @@
 // frames, so the piano can play in time with live drum pieces computed in other Workers.
 //
 // Main thread -> worker
-//   {type:'init', port, options?, aheadFrames?, chunk?, gain?, minRealtime?, snapshotHz?}
+//   {type:'init', port, options?, aheadFrames?, chunk?, gain?, minRealtime?, snapshotHz?, governor?}
 //       chunk    most frames per audio message (default 128; lane.js)
 //       gain     one fixed factor on every sample (level matching against another rendering; default 1)
 //       options  {boardCoordinates?, courseModeBudget?, maxDynamicModes?, fullScalePa?}  (0 = engine default)

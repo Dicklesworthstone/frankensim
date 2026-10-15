@@ -56,7 +56,7 @@ export interface LiveSinkLevel {
 }
 
 export interface LiveSinkOptions {
-  /** Defaults to `/live`. */
+  /** Defaults to LIVE_BASE_URL (`live/<hash>/` in a build). */
   baseUrl?: string;
   /** Output channels of the sink node (default 2). Mono chunks are copied to every channel. */
   channels?: number;

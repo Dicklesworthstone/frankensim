@@ -95,8 +95,8 @@ async function loadLevels(wasmBytes) {
 // A copy of `p` in its present state, or null when this engine cannot copy. A build serves public/live under
 // live/<content hash>/ (vite.config.ts), so the glue and the wasm come from one build; this guard stays for a
 // pairing that can still differ (a dev server mid-rebuild, a host that rewrites caching): a wasm from before
-// copies has no kitpiece_copy, so copy() throws, and an engine.js from before copies has no copy() at all. The chosen grid is then built again to play, as it was
-// before copies: the same samples, one more settle.
+// copies has no kitpiece_copy, so copy() throws, and an engine.js from before copies has no copy() at all. The
+// chosen grid is then built again to play, as it was before copies: the same samples, one more settle.
 function copyOf(p) {
   try {
     return p.copy();
@@ -107,9 +107,9 @@ function copyOf(p) {
 
 // The finest of `scales` (listed finest first) that runs `minRealtime` times faster than real time; if none
 // does, the coarsest. The grids are timed from the coarse end, stepping finer until one falls short. A finer
-// grid has more nodes and never runs faster, so this is the grid a finest-first search picks. But the grids
-// finer than the pick are never built: building is the cost of start-up (the snare takes 0.1 s at 6x, 0.5 s at
-// 2.5x).
+// grid has more nodes and never runs faster, so this is the grid a finest-first search picks. But no grid finer
+// than the first one that falls short is built: building is the cost of start-up (the snare takes 0.1 s at 6x,
+// 0.5 s at 2.5x).
 // Each grid is built once: before its build is struck and timed, a copy is kept, and the chosen grid's copy is
 // the piece that plays (`piece`; null when the engine cannot copy, see copyOf: the caller builds the grid again).
 // A copy renders exactly what a fresh `new` would, and takes under a millisecond, while a snare's or hi-hat's
