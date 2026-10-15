@@ -171,3 +171,6 @@ mod radiation;
 
 #[path = "flue/fractional_loss.rs"]
 mod fractional_loss;
+
+#[path = "flue/multirate.rs"]
+mod multirate;
