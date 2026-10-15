@@ -14,6 +14,9 @@
 //! conserve mass across arbitrarily different densities. Remote sections may
 //! retain their own frozen, common-pressure gas states and physical loads.
 
+/// Exterior pressure through the shared Rayleigh and PCM interfaces.
+pub mod observer;
+
 use super::dynamic::{ApertureDrive, ApertureFrame, ApertureProgress, ApertureTerminal,
     ApertureTrial, DynamicAperture};
 use super::network::{NetworkNode, NodeFrame, SectionRealization, TubeNetworkSpec};

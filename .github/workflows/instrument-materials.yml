@@ -51,6 +51,12 @@ on:
       - 'crates/fs-couple/src/bernoulli_aperture/paired*'
       - 'crates/fs-couple/src/bernoulli_aperture/paired/**'
       - 'crates/fs-couple/src/bernoulli_aperture/paired_network/**'
+      - 'crates/fs-couple/src/bernoulli_aperture/two_sided*'
+      - 'crates/fs-couple/src/bernoulli_aperture/two_sided/**'
+      - 'crates/fs-couple/tests/two_sided*'
+      - 'crates/fs-couple/examples/two_sided_reed.rs'
+      - 'crates/fs-vfit/src/waveguide/network.rs'
+      - 'crates/fs-vfit/tests/waveguide_pair.rs'
       - 'crates/fs-couple/src/bernoulli_aperture/dynamic/relaxation.rs'
       - 'crates/fs-couple/src/bin/music_render/duct_metadata.rs'
       - 'crates/fs-couple/examples/plate-valve-mixture*.performance'
@@ -71,6 +77,12 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Two-sided material reed physics and exterior pressure
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-vfit --test waveguide_pair -- --test-threads=1
+          cargo test -p fs-couple --no-fail-fast --test two_sided_aperture --test two_sided_pressure -- --test-threads=1
+          cargo check -p fs-couple --example two_sided_reed
       - name: Regional TMM gas ports and uniform parity
         if: ${{ !cancelled() }}
         run: |
