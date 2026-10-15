@@ -1872,13 +1872,17 @@ fn reduced_decay_record(
     // reference while bounding retained trajectory samples for a real campaign.
     input.timestep_s = 1.0e-4;
     input.maximum_steps = 10_000;
+    let nominal_contour_force_per_normal_force = input
+        .dry_contour
+        .as_ref()
+        .map_or(0.0, |channel| channel.contour_force_n / channel.normal_force_n);
     input.dry_contour = include_dry.then(|| input.dry_contour.clone()).flatten();
     input.bildsten_boundary_layer = include_boundary_layer
         .then(|| input.bildsten_boundary_layer.clone())
         .flatten();
     if let Some(channel) = input.dry_contour.as_mut() {
         channel.normal_force_n = normal_force_n;
-        channel.contour_force_n = 0.0;
+        channel.contour_force_n = normal_force_n * nominal_contour_force_per_normal_force;
     }
     let run = run_reduced_decay(&input).map_err(|error| format!("reduced decay: {error}"))?;
     let refinement = refinement_evidence(&input)
@@ -1989,7 +1993,11 @@ fn reduced_decay_record(
             .dry_contour
             .as_ref()
             .map_or(0.0, |channel| channel.contour_force_n),
-        0.0,
+        if input.dry_contour.is_some() {
+            nominal_contour_force_per_normal_force
+        } else {
+            0.0
+        },
         input
             .bildsten_boundary_layer
             .as_ref()

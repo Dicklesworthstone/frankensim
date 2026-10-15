@@ -1286,12 +1286,22 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
     resumed_receipts.extend(resumed.accepted_steps.clone());
     assert_eq!(resumed_receipts, whole.accepted_steps);
 
+    let set_synthetic_gap =
+        |rebuilt: &mut ProductionCouplingStepInput,
+         state: &fs_euler_disc_e2e::production_coupling::ProductionCouplingCheckpoint,
+         gap_m: f64| {
+            let disc_center = state.disc_state.pose().position_world();
+            rebuilt.patch.bridge.profile_support.gap_m = gap_m;
+            rebuilt.patch.bridge.profile_support.disc_arm_world_m.z = gap_m - disc_center.z;
+            rebuilt.patch.bridge.profile_support.disc_point_world_m.z = gap_m;
+        };
     let eventful = model.run_eventful_compliant_trajectory(checkpoint.clone(), 3, |state| {
         let mut rebuilt = request_for_checkpoint(&request, state);
-        rebuilt.patch.bridge.profile_support.gap_m = match state.committed_version {
+        let gap_m = match state.committed_version {
             1 => 2.0e-3,
             _ => -1.0e-6,
         };
+        set_synthetic_gap(&mut rebuilt, state, gap_m);
         Ok(rebuilt)
     });
     assert_eq!(
@@ -1352,7 +1362,7 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
         model.run_eventful_compliant_trajectory(checkpoint.clone(), 1, |state| {
             let mut rebuilt = request_for_checkpoint(&request, state);
             if state.committed_version == 1 {
-                rebuilt.patch.bridge.profile_support.gap_m = 2.0e-3;
+                set_synthetic_gap(&mut rebuilt, state, 2.0e-3);
             }
             Ok(rebuilt)
         });
@@ -1377,7 +1387,7 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
     let stopped = model.run_smooth_contact_trajectory(checkpoint.clone(), 3, |state| {
         let mut rebuilt = request_for_checkpoint(&request, state);
         if state.committed_version == 1 {
-            rebuilt.patch.bridge.profile_support.gap_m = 2.0e-3;
+            set_synthetic_gap(&mut rebuilt, state, 2.0e-3);
         }
         Ok(rebuilt)
     });

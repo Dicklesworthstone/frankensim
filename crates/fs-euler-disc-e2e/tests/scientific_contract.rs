@@ -5389,20 +5389,28 @@ fn g0_schema_migration_and_manifest_direction_are_explicit() {
     let root_manifest = include_str!("../../../Cargo.toml");
     let crate_manifest = include_str!("../Cargo.toml");
     assert!(root_manifest.contains("\"crates/fs-euler-disc-e2e\""));
-    for dependency in ["fs-blake3", "fs-evidence", "fs-govern", "fs-ir"] {
+    for dependency in ["fs-blake3", "fs-evidence", "fs-govern"] {
         assert!(
             crate_manifest.contains(&format!("{dependency} = {{ path = \"../{dependency}\" }}"))
         );
     }
-    for forbidden in [
-        "fs-contact",
-        "fs-solid",
-        "fs-lbm",
-        "fs-opt",
-        "fs-render",
-        "fs-session",
-    ] {
+    assert!(crate_manifest.contains("fs-ir = { path = \"../fs-ir\", optional = true }"));
+    assert!(crate_manifest.contains("scientific-contract = [\"dep:fs-ir\"]"));
+    for forbidden in ["fs-lbm", "fs-opt", "fs-session"] {
         assert!(!crate_manifest.contains(&format!("{forbidden} =")));
+    }
+    for lower_manifest in [
+        include_str!("../../fs-evidence/Cargo.toml"),
+        include_str!("../../fs-govern/Cargo.toml"),
+        include_str!("../../fs-ir/Cargo.toml"),
+        include_str!("../../fs-contact/Cargo.toml"),
+        include_str!("../../fs-solid/Cargo.toml"),
+        include_str!("../../fs-lbm/Cargo.toml"),
+        include_str!("../../fs-opt/Cargo.toml"),
+        include_str!("../../fs-render/Cargo.toml"),
+        include_str!("../../fs-session/Cargo.toml"),
+    ] {
+        assert!(!lower_manifest.contains("fs-euler-disc-e2e"));
     }
 }
 

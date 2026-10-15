@@ -68,10 +68,8 @@ fn patch_kinematics(
 ) -> patch_kinematics::PatchKinematics {
     let mean = 10.0;
     let relative = mean * creepage;
-    let (disc_velocity, base_velocity) = match order {
-        SurfaceOrder::DiscThenBase => (mean + relative / 2.0, mean - relative / 2.0),
-        SurfaceOrder::BaseThenDisc => (mean - relative / 2.0, mean + relative / 2.0),
-    };
+    let disc_velocity = mean + relative / 2.0;
+    let base_velocity = mean - relative / 2.0;
     compute_patch_kinematics(PatchKinematicsInput {
         surfaces: OrderedSurfacePair::try_new(id("disc"), id("base"), order).expect("ordered pair"),
         normal_world: Vec3::new(0.0, 0.0, 1.0),
@@ -268,7 +266,7 @@ fn stick_partial_slip_and_gross_slide_keep_mode_work_and_loss_explicit() {
             fs_tribo::partial_slip::PartialSlipStateKind::GrossSlide,
         ),
     ];
-    for (index, (interval, creepage, mode)) in expectations.into_iter().enumerate() {
+    for (interval, creepage, mode) in expectations {
         let state = adapter
             .initial_state(&normal_patch(), &interface(), 8)
             .expect("independent zero-history state");
@@ -277,7 +275,7 @@ fn stick_partial_slip_and_gross_slide_keep_mode_work_and_loss_explicit() {
                 &state,
                 &request(
                     interval,
-                    index as u64,
+                    0,
                     SurfaceOrder::DiscThenBase,
                     creepage,
                     0.0,

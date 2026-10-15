@@ -1289,20 +1289,22 @@ fn a_mapped_interface_applies_each_face_its_own_resistance() {
         ThermalInterfaces::new(&mesh, &boundary, vec![surface]).expect("interfaces bind");
     assert_eq!(interfaces.surface_is_mapped("bondline"), Some(true));
 
-    // The bound per-face values must be a permutation of what was supplied,
-    // with the same multiset of values.
-    let mut bound = interfaces
+    // Matching surfaces retain per-face-pair values in declared order, so
+    // each face slot must carry its own supplied resistance (not merely the
+    // same multiset under a permutation).
+    let bound = interfaces
         .surface_face_resistances("bondline")
         .expect("bound resistances");
-    let mut expected: Vec<f64> = factors
+    let expected: Vec<f64> = factors
         .iter()
         .map(|factor| AREA_SPECIFIC_RESISTANCE * factor)
         .collect();
-    bound.sort_by(f64::total_cmp);
-    expected.sort_by(f64::total_cmp);
     assert_eq!(bound.len(), expected.len());
-    for (got, want) in bound.iter().zip(expected.iter()) {
-        assert!((got - want).abs() < 1e-15, "bound {got} != supplied {want}");
+    for (index, (got, want)) in bound.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-15,
+            "face {index}: bound {got} != supplied {want}"
+        );
     }
 }
 
