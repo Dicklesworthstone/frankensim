@@ -51,6 +51,8 @@ const IDLE_DISPOSE_MS = 90_000;
  * (8.0 / 7.2 / 7.0 dB) and 7-10x (9.4 at 7x, 9.0 at 8x). So it tries 6x, the cheapest of the fine
  * plateau, and else 8x (7x is on the coarse plateau too and costs ~20 % more); each grid timed adds
  * ~0.25-0.5 s of start-up.
+ * The hats (not played today: arrange.ts leaves hi-hat notes out) try 4.5x as on the live kit
+ * (kitStage HAT_SCALES); a 4.5x hat that falls behind restarts on 5x or 6x.
  */
 const GRID: Record<PieceId, { scales: number[]; minRt: number; benchMs?: number }> = {
   kick: { scales: [5, 6, 7, 8], minRt: 1.7 },
@@ -58,8 +60,8 @@ const GRID: Record<PieceId, { scales: number[]; minRt: number; benchMs?: number 
   "snare-off": { scales: [4, 5, 6, 7, 8], minRt: 2.0 },
   "tom-12": { scales: [4, 5, 6, 7], minRt: 1.8 },
   "tom-14": { scales: [4, 5, 6, 7], minRt: 1.8 },
-  "hihat-closed": { scales: [4, 5, 6], minRt: 1.5 },
-  "hihat-open": { scales: [4, 5, 6], minRt: 1.5 },
+  "hihat-closed": { scales: [4, 4.5, 5, 6], minRt: 1.5 },
+  "hihat-open": { scales: [4, 4.5, 5, 6], minRt: 1.5 },
   crash: { scales: [3, 3.5, 4, 5, 6], minRt: 1.5 },
   ride: { scales: [3, 3.5, 4, 5, 6], minRt: 1.5 },
 };

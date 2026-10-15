@@ -113,7 +113,8 @@ Measured on the Strandbar piano part against the studio stem (RMS octave-balance
 
 `engine-kit/build-wasm.sh` compiles `fs_vkplate::live` (wasm-bindgen) into `public/live/kit/`. Each
 piece gets its own Worker (`public/live/kit/worker.js`), which times a stroke at grid scales 2.5-8
-(the snare's 6-8: its 5x and 4x sound no closer to the 1x grid than 6x) and keeps the finest that
+(the snare's 6-8: its 5x and 4x sound no closer to the 1x grid than 6x; the hats' also 4.5x: on 5x
+they ring a tonal line near 558 Hz, which 4.5x weakens or drops) and keeps the finest that
 runs 1.7x faster than real time on the device. It times from the coarse
 end and stops at the first grid that is too slow, so the costly fine grids are never built. Each
 grid is timed over the first 112 ms of a stroke, the snare's over 450 ms: its wires touch the head

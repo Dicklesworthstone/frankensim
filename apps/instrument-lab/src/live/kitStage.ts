@@ -37,6 +37,15 @@ interface PieceDef {
   scales?: number[];
 }
 
+/**
+ * The hats also try 4.5x, between 4x and 5x. On 5x a hat rings a tonal line near 558 Hz (closed
+ * standard stroke 33 dB above the local spectrum, against 23 dB at 550 Hz on the 1x grid). 4.5x keeps
+ * a weaker one (519 Hz, 28.5 dB) and is closer to the 1x grid than 5x in every measure: octave balance
+ * 9.8 against 14.9 dB (soft stroke 16.8 / 21.3, open hat 7.2 / 10.4) and 16.5 against 20.5 dB from
+ * the real hat. It costs ~1.3x 5x; 4x stays first (9.3 dB, no line) where it fits.
+ */
+const HAT_SCALES = [2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8];
+
 // Gains: each piece's 50 ms loudness matched to the real kit's (Salamander overheads), capped so a
 // standard stroke peaks at 0.55 of full scale (the live cymbals' attacks are too sharp to match).
 const PIECES: PieceDef[] = [
@@ -44,8 +53,8 @@ const PIECES: PieceDef[] = [
   { id: "snare", name: "Snare", key: "S", speed: 4.5, gain: 0.0129, kind: "drum", finish: "#c9cdd3", benchMs: 450, scales: [6, 7, 8] },
   { id: "tom-12", name: "Rack tom", key: "T", speed: 3.5, gain: 0.0276, kind: "drum", finish: "#5c1d1a" },
   { id: "tom-14", name: "Floor tom", key: "F", speed: 3.5, gain: 0.0267, kind: "drum", finish: "#5c1d1a" },
-  { id: "hihat-closed", name: "Hi-hat", key: "H", speed: 2.5, gain: 0.134, kind: "hat" },
-  { id: "hihat-open", name: "Open hi-hat", key: "O", speed: 2.5, gain: 0.134, kind: "hat" },
+  { id: "hihat-closed", name: "Hi-hat", key: "H", speed: 2.5, gain: 0.134, kind: "hat", scales: HAT_SCALES },
+  { id: "hihat-open", name: "Open hi-hat", key: "O", speed: 2.5, gain: 0.134, kind: "hat", scales: HAT_SCALES },
   { id: "crash", name: "Crash", key: "C", speed: 6.0, gain: 0.0496, kind: "cymbal" },
   { id: "ride", name: "Ride", key: "R", speed: 2.5, gain: 0.182, kind: "cymbal" },
 ];

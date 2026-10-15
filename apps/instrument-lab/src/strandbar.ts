@@ -218,7 +218,9 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       // (another tab, a busy machine) that an 85 ms buffer turned into dropouts
       const piano = new PianoLane(m, { aheadFrames: AHEAD, chunk: CHUNK, gain: data.live.piano.gain });
       const kick = new KitLane(m, "kick", { gain: data.live.kick.gain, aheadFrames: AHEAD, chunk: CHUNK, scales: [2, 2.5, 3, 3.5, 4, 5, 6], minRealtime: 1.4, fieldHz: 0 });
-      const hihat = new KitLane(m, "hihat-closed", { gain: data.live.hihat.gain, aheadFrames: AHEAD, chunk: CHUNK, scales: [2.5, 3, 3.5, 4, 5, 6], minRealtime: 1.4, fieldHz: 0 });
+      // the hat also tries 4.5x: this loop on 5x rings a 558 Hz line 27 dB above the local spectrum (the
+      // studio stem: 14 dB at 550 Hz); on 4.5x the line is gone (5 dB), as on 4x (see kitStage HAT_SCALES)
+      const hihat = new KitLane(m, "hihat-closed", { gain: data.live.hihat.gain, aheadFrames: AHEAD, chunk: CHUNK, scales: [2.5, 3, 3.5, 4, 4.5, 5, 6], minRealtime: 1.4, fieldHz: 0 });
       const meter = (id: string) => (s: LaneWorkerStats): void => {
         const h = (laneHealth[id] ??= { late: 0, gap: 0, rt: 0 });
         h.rt = s.realtime;
