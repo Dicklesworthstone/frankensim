@@ -69,3 +69,31 @@ point-kinematics, effective-mass and impulse APIs. This retains one mechanics
 owner while material-induced centroid and principal-axis changes propagate
 without moving the geometry or misplacing contact forces. The source model
 must match the state; the adapter does not infer a live material-exchange law.
+
+
+## Heat transport to mechanical configuration
+
+`thermal::heating::HeatedBody` binds each original region to its source-resolved
+solid heat-capacity chart and an explicit thermal control volume. The compiler
+copies the original mechanical mass into the thermal cell, checks the same
+material card, density claim, state context and reference volume, and creates
+the existing `fs-thermal` enthalpy timeline. Contact/boundary events are retained;
+new mass is refused. `advance_to` returns the thermal history, configured body
+and original energy audit only after all actual thermal substeps and material
+checks succeed. A hot unsupported intermediate state cannot hide behind a
+subsequent cool endpoint.
+
+`advance_with` accepts the existing `DepositionObserver` interface for generated
+heat and step-local transport. It uses `CoupledObservers`, not a second thermal
+solve, so source heat is deposited and accounted once. Source observer history,
+enthalpy history and mechanical configuration fail or succeed together. Original
+caloric data and thermal-expansion receipts remain accessible.
+
+This is one-way uniform-region solid free expansion, not constrained
+thermoelasticity. Thermal areas, reference volumes and contact conductances are
+not deformed automatically; this needs a justified small-geometry-change/Biot
+approximation. The output inertia feeds existing dynamics, but updating live
+momentum, mechanical work and stress is outside this adapter. Source claims,
+uniform-region assumptions and refinement still bound accuracy.
+
+Focused native regressions: `cargo test -p fs-mbd-material --test heating`.

@@ -1,6 +1,9 @@
 //! Shared enthalpy-state evaluation for current generation and thermal transport.
 //! The existing network owns storage/CFL/heat exchange; the current owner owns
 //! bulk and electrical-contact heating. No mass or apparent Cp is re-assigned.
+/// Same-epoch electrical interface laws, bulk transport and source history.
+pub mod interfaces;
+
 use super::*;
 use std::sync::Arc;
 use fs_conduction::transient::deposition::ContactPatch;

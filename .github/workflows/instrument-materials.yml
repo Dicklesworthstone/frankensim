@@ -12,7 +12,42 @@ on:
       - 'crates/fs-couple/tests/material_valve_assembly.rs'
       - 'crates/fs-couple/src/bowed_string.rs'
       - 'crates/fs-couple/src/bowed_string/material.rs'
+      - 'crates/fs-couple/src/render/schedule/force/coupled/contact/friction*'
+      - 'crates/fs-couple/src/render/schedule/force/coupled/contact/friction/**'
+      - 'crates/fs-couple/src/render/schedule/force/coupled/render/friction.rs'
+      - 'crates/fs-couple/tests/modal_multi_friction.rs'
+      - 'crates/fs-couple/tests/material_multi_bow.rs'
       - 'crates/fs-couple/tests/bowed_material_gas.rs'
+      - 'crates/fs-couple/tests/material_string_torsion.rs'
+      - 'crates/fs-material/src/section.rs'
+      - 'crates/fs-material/src/section/torsion.rs'
+      - 'crates/fs-material/tests/torsional_section.rs'
+      - 'crates/fs-couple/src/bowed_string/runtime/reciprocal.rs'
+      - 'crates/fs-couple/src/bowed_string/runtime/reciprocal/**'
+      - 'crates/fs-couple/tests/material_string_bank.rs'
+      - 'crates/fs-couple/tests/material_plate_chart_bank.rs'
+      - 'crates/fs-couple/src/thin_plate.rs'
+      - 'crates/fs-couple/src/thin_plate/**'
+      - 'crates/fs-couple/src/cavity_modal.rs'
+      - 'crates/fs-couple/src/cavity_modal/**'
+      - 'crates/fs-couple/tests/reciprocal_cavity.rs'
+      - 'crates/fs-couple/src/cavity_phs/piston.rs'
+      - 'crates/fs-couple/src/cavity_phs/piston/**'
+      - 'crates/fs-material/examples/material_gas_spring/**'
+      - 'crates/fs-material/src/gas*.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/performance.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/performance/force.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/performance/file*'
+      - 'crates/fs-couple/src/bernoulli_aperture/performance/file/**'
+      - 'crates/fs-couple/src/bernoulli_aperture/network/regional.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/paired*'
+      - 'crates/fs-couple/src/bernoulli_aperture/paired/**'
+      - 'crates/fs-couple/src/bernoulli_aperture/paired_network/**'
+      - 'crates/fs-couple/src/bernoulli_aperture/dynamic/relaxation.rs'
+      - 'crates/fs-couple/src/bin/music_render/duct_metadata.rs'
+      - 'crates/fs-couple/examples/plate-valve-mixture*.performance'
+      - 'crates/fs-couple/tests/music_render_wind*'
+      - 'crates/fs-couple/tests/music_render_wind/**'
       - '.github/workflows/instrument-materials.yml'
 permissions:
   contents: read
@@ -28,6 +63,49 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Uniform and regional material bending loss through coupled sound
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --lib thin_plate:: -- --test-threads=1
+      - name: Source-bound rotary inertia and torsional shear loss
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-material --test torsional_section -- --test-threads=1
+      - name: Material torsion in surface bow contact and scheduled pressure
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test material_string_torsion -- --test-threads=1
+      - name: Simultaneous material bows and original friction playback
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --no-fail-fast --test modal_multi_friction --test material_multi_bow --test modal_friction --test music_render_friction -- --test-threads=1
+      - name: Independent hereditary blades and acoustic networks
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --lib bernoulli_aperture::paired -- --test-threads=1
+      - name: Retained scalar and symmetric plate material physics
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --test plate_aperture -- --test-threads=1
+          cargo test -p fs-couple --test opposed_plate_aperture -- --test-threads=1
+      - name: Regional material geometry in shared string body and cavity mechanics
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test material_plate_chart_bank -- --test-threads=1
+      - name: Named gas material admission and pressure response
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-material --lib gas_species:: -- --test-threads=1
+      - name: Wind gas parser coupled physics and legacy parity
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --lib performance::file:: -- --test-threads=1
+      - name: Mixture wind and ensemble CLI PCM
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --test music_render_wind gas_mixture:: -- --test-threads=1
+      - name: Source-bound finite thermal storage gas and piston mechanics
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --lib cavity_phs::piston:: -- --test-threads=1
+      - name: Material-conductivity gas-spring heat and motion
+        if: ${{ !cancelled() }}
+        run: cargo test --manifest-path crates/fs-material/examples/material_gas_spring/Cargo.toml -- --test-threads=1
       - name: Existing and pressure-loaded reduction tests
         if: ${{ !cancelled() }}
         run: |
@@ -41,3 +119,16 @@ jobs:
       - name: Shared homogeneous and layered bowed-string material physics
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test bowed_material_gas -- --test-threads=1
+      - name: Shared-body sympathetic material strings
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test material_string_bank -- --test-threads=1
+      - name: Retained single-string reciprocal material tests
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --lib bowed_string::runtime::reciprocal::tests -- --test-threads=1
+      - name: Shared Helmholtz storage in reciprocal modal mechanics
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --lib cavity_modal -- --test-threads=1
+      - name: Reciprocal material strings bodies cavities and scheduled sound
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test reciprocal_cavity -- --test-threads=1

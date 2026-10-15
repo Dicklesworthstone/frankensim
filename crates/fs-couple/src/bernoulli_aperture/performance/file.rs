@@ -31,6 +31,7 @@ use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateSection
 use fs_scenario::gesture::GestureSchedule;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 mod duct;
+mod gas;
 use duct::DuctInput;
 
 /// Complete source grammar; the pressure suffix uses the existing gesture schema.
@@ -49,6 +50,13 @@ pub enum PlateValveInputError {
     Input { /// One-based header line, or zero for whole-file/gesture admission.
         line: usize, /// Failed admission condition.
         what: &'static str },
+    /// Named gas admission, retaining the material owner and source line.
+    Gas {
+        /// One-based source line.
+        line: usize,
+        /// Original material/phase/composition refusal.
+        source: fs_material::MaterialError,
+    },
     /// Mesh/section owner refusal.
     Geometry(fs_plate::PlateError),
     /// Reduction, coupled physics or material owner refusal.
@@ -60,13 +68,18 @@ impl core::fmt::Display for PlateValveInputError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Input { line, what } => write!(f,"plate-valve input line {line}: {what}"),
+            Self::Gas { line, source } => write!(f,"plate-valve gas line {line}: {source}"),
             Self::Geometry(e) => write!(f,"plate-valve geometry: {e}"),
             Self::Physics(e) => write!(f,"plate-valve physics: {e}"),
             Self::Gesture(e) => write!(f,"plate-valve gesture: {e}"),
         }
     }
 }
-impl std::error::Error for PlateValveInputError {}
+impl std::error::Error for PlateValveInputError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self { Self::Gas { source, .. } => Some(source), _ => None }
+    }
+}
 fn bad(line: usize, what: &'static str) -> PlateValveInputError { PlateValveInputError::Input { line, what } }
 fn checkpoint(gate: &CancelGate) -> Result<(),PlateValveInputError> {
     if gate.is_requested() { return Err(bad(0,"plate-valve input cancelled")); } Ok(())
@@ -122,6 +135,7 @@ pub struct PlateValvePerformance {
     renderer: AperturePerformance,
     radiation_loads: Vec<(usize, BaffledRadiationLoad)>,
     viscothermal_losses: Vec<ViscothermalSection>,
+    ambient_gas: GasState,
 }
 impl PlateValvePerformance {
     /// Parse every record, derive the actual plate and selected blade symmetry,
@@ -192,11 +206,15 @@ impl PlateValvePerformance {
             compiled_controls:renderer.pending_controls().len(),represented_tube_length_m:represented,radiation_load,
             duct_nodes,duct_sections,radiation_terminals:radiation_loads.len(),
         };
-        Ok(Self {info,renderer,radiation_loads,viscothermal_losses})
+        Ok(Self {info,renderer,radiation_loads,viscothermal_losses,ambient_gas:parsed.air})
     }
     /// Exact source facts, retained separately from the evolving physical state.
     #[must_use]
     pub const fn info(&self) -> PlateValvePerformanceInfo {self.info}
+    /// Resolved ambient/default material state. Explicit regional states remain
+    /// available on the network; this is not an independent exterior medium.
+    #[must_use]
+    pub const fn ambient_gas(&self) -> &GasState {&self.ambient_gas}
     /// Complete finite renderer with immutable access to the physical specimen.
     #[must_use]
     pub const fn renderer(&self) -> &AperturePerformance {&self.renderer}
@@ -237,8 +255,7 @@ impl Parsed {
             return Err(bad(r.line,"audio requires positive rate <=192000, full scale and at most 600 seconds/28800000 samples"));
         }
         let mut row=r.row("ambient")?;
-        let air=GasState::try_new_moist_air(row.scalar()?,row.scalar()?,row.scalar()?)
-            .map_err(|_|bad(r.line,"ambient outside the shared moist-air domain"))?;row.finish()?;
+        let air=gas::read(&mut row,None)?;row.finish()?;
         let duct=DuctInput::read(&mut r,&air,gate)?;
         let mut row=r.row("observation")?;
         let observation=match row.word()? {

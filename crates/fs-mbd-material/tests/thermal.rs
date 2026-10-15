@@ -79,7 +79,7 @@ fn rotor_acceleration(inertia: SpatialInertia) -> f64 {
             JointModel::revolute(Vec3::new(1.0,0.0,0.0),None).unwrap(),inertia),
     ]).unwrap();
     forward_dynamics(&model,BaseState::stationary(Se3::identity()),&[0.0],&[0.0],&[1.0],
-        Vec3::new(0.0,0.0,0.0),&[Wrench::zero();2]).unwrap().generalized_acceleration[0]
+        Vec3::new(0.0,0.0,0.0),&[Wrench::default();2]).unwrap().generalized_acceleration[0]
 }
 
 #[test]
@@ -224,7 +224,7 @@ fn complete_mechanism_thermal_update_preserves_topology_and_drives_existing_solv
     assert_eq!(configured.bodies()[0].inertia(),reference.bodies()[0].inertia());
     let acceleration = |model: &ArticulatedModel| forward_dynamics(model,
         BaseState::stationary(Se3::identity()),&[0.0],&[0.0],&[1.0],
-        Vec3::new(0.0,0.0,0.0),&[Wrench::zero();2]).unwrap().generalized_acceleration[0];
+        Vec3::new(0.0,0.0,0.0),&[Wrench::default();2]).unwrap().generalized_acceleration[0];
     close(acceleration(reference.model())/acceleration(configured.model()),1.03_f64.powi(2));
     assert!(expand_articulated(&reference,&[fixed],||false).is_err());
     assert!(expand_articulated(&reference,&[fixed,fixed],||false).is_err());

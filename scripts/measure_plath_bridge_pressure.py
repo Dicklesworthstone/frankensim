@@ -68,7 +68,7 @@ class RangeFile(io.RawIOBase):
             URL,
             headers={
                 "Range": f"bytes={first}-{last}",
-                "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+                "User-Agent": "frankensim-data-fetch (+https://github.com/Dicklesworthstone/frankensim)",
             },
         )
         with urllib.request.urlopen(request, timeout=60) as response:

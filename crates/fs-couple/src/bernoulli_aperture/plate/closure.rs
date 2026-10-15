@@ -6,6 +6,9 @@
 //! structural basis stays fixed; this is not a multimode or large-strain model.
 //! An opposed pair sums both blades' gap motion but has ONE contact interface:
 //! neither its contact quadrature areas nor its slit width are doubled.
+/// Matching-interface geometry for two independently moving blade modes.
+pub mod paired;
+
 use super::{AcousticRealizeError, PlateApertureReduction, invalid};
 use fs_dcontact::Obstacle;
 use crate::unilateral_contact::distributed::MAX_APERTURE_CONTACT_POINTS;

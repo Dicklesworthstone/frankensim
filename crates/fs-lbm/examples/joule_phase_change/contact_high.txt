@@ -1,0 +1,6 @@
+# Synthetic electrical contact, not measured material properties.
+# Axis: second surface liquid mass fraction. Heat share: first surface.
+liquid_fraction_b 0.25
+# fraction_b  area-specific resistance [ohm m2]
+0 0.005
+1 0.015

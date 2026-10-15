@@ -67,7 +67,9 @@ fn resistance_evolves_with_liquid_fraction_at_identical_kelvin_temperature() {
         let f=law.state_at_specific_enthalpy(cell.specific_h_j_kg).unwrap().liquid_mass_fraction();
         Ok(Some(1.0+f))
     };
-    let (next,r)=advance_joule_enthalpy(&old,0.1,StepConfig {max_dt_s:0.01,..config()},
+    // Binary-exact endpoints make the last applied epoch a finite physical
+    // interval, not a roundoff-sized decimal-time remainder with unchanged h.
+    let (next,r)=advance_joule_enthalpy(&old,0.125,StepConfig {max_dt_s:1.0/64.0,..config()},
         input(&domain,&electric,&ids,&[]),&CancelGate::new(),state).unwrap();
     near(next.temperature_k(ids[1]).unwrap(),310.0);
     assert!(r.endpoint.specific_enthalpy_j_kg[1]>40.0);

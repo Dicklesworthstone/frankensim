@@ -29,6 +29,7 @@ pub mod fiber;
 pub mod fluid_transport;
 pub mod gas;
 pub mod gas_mixture;
+pub mod gas_species;
 mod gas_state;
 pub mod moist_air;
 pub mod graph;
@@ -42,6 +43,8 @@ pub mod phase;
 pub mod plastic;
 pub mod porous;
 pub mod section;
+/// Temperature refresh of complete source-bound layered mechanical sections.
+pub mod section_temperature;
 pub mod state_point;
 pub mod tensor;
 pub mod thermal;

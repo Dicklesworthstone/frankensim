@@ -89,3 +89,41 @@ impl ContactStorage {
         out.iter().all(|v|v.is_finite())
     }
 }
+
+impl ContactStorage {
+    /// Irreversible power per obstacle, in original obstacle order [W].
+    /// `velocity` is the SAME generalized velocity/effort used by the time
+    /// equation, not an endpoint estimate. Conservative force is excluded.
+    /// Shares penetration, quadrature, unloading cap and loss_force_at with
+    /// dissipative_flow_into; no second contact law or restitution fit.
+    /// No allocation or state mutation. False invalidates the scratch output;
+    /// dimension/nonfinite-input refusal leaves it untouched.
+    pub fn dissipated_power_by_obstacle_into(&self, x:&[f64], velocity:&[f64],
+        out:&mut[f64]) -> bool {
+        let Some(prefix)=self.n_modes.checked_mul(2) else {return false;};
+        if x.len()<prefix || velocity.len()!=self.n_modes || out.len()!=self.obstacles.len()
+            || x.iter().chain(velocity).any(|v|!v.is_finite())
+            || !self.obstacles.iter().all(|ob|
+                ob.n_points.checked_mul(self.n_modes)==Some(ob.collocation.len())
+                && ob.gaps.len()==ob.n_points && ob.weights.len()==ob.n_points
+                && ob.internal_loss.is_finite() && ob.internal_loss>=0.0
+                && ob.stiffness.is_finite() && ob.stiffness>=0.0
+                && ob.alpha.is_finite() && ob.alpha>=1.0) {return false;}
+        out.fill(0.0);
+        for (ob,power) in self.obstacles.iter().zip(out.iter_mut()) {
+            if ob.internal_loss==0.0 {continue;}
+            for i in 0..ob.n_points {
+                let p=ob.penetration_at(self.n_modes,x,i);
+                if !p.is_finite() {return false;}
+                if p<=0.0 {continue;}
+                let b=&ob.collocation[i*self.n_modes..(i+1)*self.n_modes];
+                let rate=b.iter().zip(velocity).map(|(b,v)|b*v).sum::<f64>();
+                let contribution=ob.loss_force_at(i,p,rate)*rate;
+                if !contribution.is_finite() || contribution<0.0 {return false;}
+                *power+=contribution;
+            }
+            if !power.is_finite() {return false;}
+        }
+        true
+    }
+}

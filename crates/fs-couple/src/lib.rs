@@ -39,12 +39,16 @@ pub mod bowed_string;
 pub mod brass_loop;
 pub mod broadband_radiation;
 pub mod cavity_phs;
+/// Shared Helmholtz storage and neck flow in the reciprocal modal network.
+pub mod cavity_modal;
 pub mod cinematic_stem;
 pub mod driving_point;
 pub mod flue_loop;
 pub mod glottis;
 pub mod iqn_ils;
 pub mod material_assembly;
+/// Material-resolved branch heat and finite charge/flux storage on Kirchhoff circuits.
+pub mod material_circuit;
 pub mod mm_line;
 pub mod modal_acoustic_time;
 pub mod pcm_wav;

@@ -1,0 +1,109 @@
+//! Material-bound series conduction between the two energy midpoint states.
+//!
+//! G = A / (d_gas/k_gas + d_body/k_body). Each layer is represented by its
+//! uniform midpoint coefficient; this is not a resolved temperature profile,
+//! convection, contact resistance or a phase-front transport model.
+//! Reference: MIT Unified Engineering, Thermal Resistance Circuits:
+//! https://web.mit.edu/16.unified/www/FALL/thermodynamics/notes/node118.html
+
+use super::ConductanceSample;
+use super::source::ThermalMaterialPoint;
+/// Compatibility name for the shared thermal/electrical material-source refusal.
+pub use super::source::ThermalMaterialError as LayerConductionError;
+use fs_material::phase::EquilibriumPhaseState;
+use fs_material::state_point::{MaterialPropertySelection,
+    ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
+    THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point};
+use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
+use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
+use fs_qty::QuantitySpec;
+#[cfg(test)]
+use fs_qty::{Dims, Temperature};
+#[cfg(test)]
+use fs_matdb::PropertyValue;
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+
+/// Original body source, explicit condition axes, and caller-owned layer geometry.
+/// No independent gas conductivity is accepted: it comes from the same resolved
+/// midpoint that drove gas energy and piston momentum.
+pub struct MaterialConductionLayers<'a> {
+    /// Must be the SAME card that owns the body's enthalpy/phase chart.
+    pub material: &'a MaterialCard,
+    /// All external material conditions. Only the declared thermal axes change.
+    pub context: &'a QueryPoint,
+    /// Existing absolute-temperature coordinate, in kelvin.
+    pub temperature_axis: &'a str,
+    /// Optional existing dimensional scalar liquid MASS fraction coordinate.
+    /// Declare it when source conductivity depends on phase fraction. Absent
+    /// means a source model without an evolving fraction coordinate, not a
+    /// mixture rule or evidence of phase-independent conductivity.
+    pub liquid_fraction_axis: Option<&'a str>,
+    /// Exact scalar isotropic conductivity key, dimensional or static semantic.
+    pub conductivity: &'a PropertyKey,
+    /// Existing explicit claim-selection/pinning policy.
+    pub selection: MaterialPropertySelection,
+    /// Common transfer area [m2]; zero declares isolation, never missing data.
+    pub area_m2: f64,
+    /// Positive effective gas conduction distance [m].
+    pub gas_distance_m: f64,
+    /// Positive effective body conduction distance [m].
+    pub body_distance_m: f64,
+}
+
+fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
+fn semantic(kind: QuantityKind) -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+}
+
+impl MaterialConductionLayers<'_> {
+    /// Resolve the exact source at the actual midpoint T and, when declared,
+    /// liquid fraction. Preserve all other axes, quantity descriptors and source
+    /// receipts. In particular a latent plateau can change conductivity via its
+    /// fraction coordinate without inventing a temperature change.
+    ///
+    /// Both coefficients are resolved even for zero area, so missing material
+    /// data cannot silently become insulation. Explicit zero body conductivity
+    /// means insulation. Spatial homogenization, phase/pressure validity and the
+    /// effective layer lengths remain source/caller obligations.
+    pub fn resolve(
+        &self, gas: &ResolvedThermochemicalGasState, body: EquilibriumPhaseState,
+    ) -> Result<ConductanceSample<ResolvedMaterialStatePoint>, LayerConductionError> {
+        let invalid = LayerConductionError::Invalid;
+        let binding = ThermalMaterialPoint { material: self.material, context: self.context,
+            temperature_axis: self.temperature_axis, liquid_fraction_axis: self.liquid_fraction_axis };
+        let point = binding.at(body)?;
+        if !self.area_m2.is_finite() || self.area_m2 < 0.0
+            || !positive(self.gas_distance_m) || !positive(self.body_distance_m) {
+            return Err(invalid("finite nonnegative area and positive layer distances required"));
+        }
+        let q = self.conductivity.quantity();
+        if q != QuantitySpec::dimensional(THERMAL_CONDUCTIVITY_DIMS)
+            && q != semantic(QuantityKind::ThermalConductivity) {
+            return Err(invalid("scalar static thermal conductivity quantity required"));
+        }
+        let requirement = ScalarPropertyRequirement::try_with_key(self.conductivity, ScalarAdmissibility::NonNegative)
+            .map_err(LayerConductionError::Material)?;
+        let source = resolve_material_state_point(self.material, &point, &[requirement], self.selection.clone())
+            .map_err(LayerConductionError::Material)?;
+        let property = source.property(self.conductivity.name())
+            .ok_or(invalid("resolved conductivity is absent"))?;
+        binding.admit_static(property)?;
+        let kb = property.value_si();
+        let kg = gas.state().thermal_conductivity;
+        if !positive(kg) { return Err(invalid("gas midpoint conductivity is not positive and finite")); }
+        let conductance = if self.area_m2 == 0.0 || kb == 0.0 { 0.0 } else {
+            let gas_r = self.gas_distance_m/kg;
+            let body_r = self.body_distance_m/kb;
+            let total_r = gas_r+body_r;
+            let value = self.area_m2/total_r;
+            if !positive(gas_r) || !positive(body_r) || !positive(total_r) || !positive(value) {
+                return Err(invalid("layer resistance or conductance is unrepresentable"));
+            }
+            value
+        };
+        Ok(ConductanceSample { conductance_w_k: conductance, source })
+    }
+}
+
+#[cfg(test)]
+mod tests;

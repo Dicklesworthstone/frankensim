@@ -184,15 +184,7 @@ impl ResolvedThermoMaxwell {
     #[must_use]
     pub fn keys(&self) -> &[PropertyKey] { &self.keys }
 
-    /// Initialize heat feedback from the SAME material card and fixed context.
-    /// Caloric interpolation may introduce extra knots but must stay inside the
-    /// mechanical span and retain identical nonthermal coordinates and conventions.
-    /// The existing CaloricPoint admission still refuses variable spring energy,
-    /// thermal eigenstrain, density changes or phase change. No restriction is
-    /// relaxed just because both models came from a material card.
-    pub fn caloric_point<'a>(&'a self, caloric: &'a ResolvedHeatCapacityCurve,
-        temperature_k: f64, total_strain: f64, volume_m3: f64, surface_area_m2: f64)
-        -> Result<CaloricPoint<'a>, SourceError> {
+    fn validate_caloric_source(&self, caloric: &ResolvedHeatCapacityCurve) -> Result<(), SourceError> {
         let reference = &self.samples[0];
         let low = self.law.knots[0].temperature_k;
         let high = self.law.knots[self.law.knots.len()-1].temperature_k;
@@ -202,9 +194,37 @@ impl ResolvedThermoMaxwell {
                 || !same_context(&r.query_point, reference.query_point(), &self.temperature_axis)) {
             return Err(SourceError::Invalid("caloric and mechanical models must share a card, fixed context and temperature support"));
         }
+        Ok(())
+    }
+
+    /// Reference density [kg/m3] from a caloric bundle proven to belong to this
+    /// exact mechanical source context. This is the mass authority for closed
+    /// deposited specimens; callers must not pair the law with an unrelated
+    /// hand-authored density when this shared bundle is available.
+    pub fn reference_density_kg_m3(&self, caloric: &ResolvedHeatCapacityCurve)
+        -> Result<f64, SourceError> {
+        self.validate_caloric_source(caloric)?;
+        let density = caloric.curve().knots()[0].bulk_density_kg_m3;
+        if !density.is_finite() || density <= 0.0
+            || caloric.curve().knots().iter().any(|k| k.bulk_density_kg_m3 != density) {
+            return Err(SourceError::Invalid("source-bound reference density must be finite, positive and constant over the admitted thermal span"));
+        }
+        Ok(density)
+    }
+
+    /// Initialize heat feedback from the SAME material card and fixed context.
+    /// Caloric interpolation may introduce extra knots but must stay inside the
+    /// mechanical span and retain identical nonthermal coordinates and conventions.
+    /// The existing CaloricPoint admission still refuses variable spring energy,
+    /// thermal eigenstrain, density changes or phase change. No restriction is
+    /// relaxed just because both models came from a material card.
+    pub fn caloric_point<'a>(&'a self, caloric: &'a ResolvedHeatCapacityCurve,
+        temperature_k: f64, total_strain: f64, volume_m3: f64, surface_area_m2: f64)
+        -> Result<CaloricPoint<'a>, SourceError> {
+        let density = self.reference_density_kg_m3(caloric)?;
         let state = caloric.state_at_temperature(temperature_k).map_err(SourceError::Caloric)?;
         let point = self.law.birth(state.temperature_k(), total_strain).map_err(SourceError::Mechanical)?;
-        let mass = volume_m3 * caloric.curve().knots()[0].bulk_density_kg_m3;
+        let mass = volume_m3 * density;
         CaloricPoint::try_new(point, caloric.curve(), state.specific_enthalpy_j_kg(),
             mass, volume_m3, surface_area_m2).map_err(SourceError::Feedback)
     }

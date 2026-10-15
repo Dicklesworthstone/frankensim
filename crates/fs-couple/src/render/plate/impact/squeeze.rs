@@ -27,7 +27,10 @@ impl ImpactSystem {
     }
 
     pub(super) fn has_nonlinear_dissipation(&self) -> bool {
-        self.contact_loss || !self.squeeze_films.is_empty() || self.gas_film.is_some()
+        // Source-bound elastic contact also uses this callback (zero added
+        // resistance) to validate the actual discrete-gradient contact rate.
+        self.contact_loss || !self.material_contacts.is_empty()
+            || !self.squeeze_films.is_empty() || self.gas_film.is_some()
     }
 
     // Endpoint admission is necessary too: an admissible midpoint must not
@@ -50,6 +53,7 @@ impl ImpactSystem {
     pub(super) fn dissipative_flow_into(&self, x: &[f64], e: &[f64], out: &mut [f64]) -> bool {
         // The contact owner validates shapes and fills all entries, preserving
         // its existing Hunt--Crossley reaction and zeros on memory coordinates.
+        if self.validate_material_contacts(x,e).is_err() { return false; }
         if !self.contact.dissipative_flow_into(x,e,out) { return false; }
         if self.gas_film.as_ref().is_some_and(|gas|!gas.add_flow(x,e,out)) {return false;}
         if self.squeeze_films.is_empty() { return true; }
@@ -67,6 +71,7 @@ impl ImpactSystem {
     pub(super) fn dissipative_flow_tangent_into(&self, x: &[f64], e: &[f64],
         dx: &[f64], de: &[f64], out: &mut [f64]) -> bool
     {
+        if self.validate_material_contacts(x,e).is_err() { return false; }
         if !self.contact.dissipative_flow_tangent_into(x,e,dx,de,out) { return false; }
         if self.gas_film.as_ref().is_some_and(|gas|!gas.add_flow_tangent(x,e,dx,de,out)) {return false;}
         if self.squeeze_films.is_empty() { return true; }

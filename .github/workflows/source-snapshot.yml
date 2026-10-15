@@ -13,6 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: main
           persist-credentials: false
       - name: Archive the exact tracked source for local inspection
         run: |

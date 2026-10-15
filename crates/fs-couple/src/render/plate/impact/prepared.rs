@@ -73,6 +73,7 @@ impl ImpactSystem {
         &mut self, state: &mut Vec<f64>, candidate: &mut [WoolFeltState],
         before: f64, record: PreparedStepRecord, gate: &CancelGate,
     ) -> Result<ImpactFrame, ImpactError> {
+        self.validate_material_contacts(state,state)?;
         self.mechanical.validate_rigid_motion(state)?;
         for (_,offset,film) in &self.membranes { film.observe_interleaved(state,*offset)?; }
         for (_,offset,string) in &self.strings { string.observe_interleaved(state,*offset)?; }
@@ -132,7 +133,6 @@ impl PreparedImpactSystem {
     /// (Body matrix assemblies, body matrix actions) in the most recent solver
     /// attempt. Excludes contact, felt, acoustic work, residuals and LU; these
     /// counts are not timing. Substepped output reports its last internal attempt.
-    /// Counts saturate at usize::MAX; state/history acceptance is independent.
     pub fn body_tangent_work_counts(&self) -> (usize, usize) { self.body_tangents.borrow().counts() }
 
     /// Enable/disable joint kinematic/acoustic elimination for analytic Newton.
@@ -200,6 +200,15 @@ impl PreparedImpactSystem {
     /// The same input, budget, membrane-slope, felt-densification and energy
     /// refusals as the reference, plus typed prepared-solver/cancellation errors.
     pub fn step(&mut self, external: &[f64], gate: &CancelGate) -> Result<ImpactFrame, ImpactError> {
+        self.step_checked(external, gate, |_,_,_,_|Ok(()))
+    }
+
+    // Stage dependent physical states before our common acceptance gate.
+    // The callback receives the actual generalized port velocity used by fs-phs,
+    // including its Gonzalez correction. It must not mutate accepted histories.
+    pub(super) fn step_checked(&mut self, external: &[f64], gate: &CancelGate,
+        check: impl FnOnce(&ImpactSystem, &[f64], &[f64], PreparedStepRecord) -> Result<(),ImpactError>,
+    ) -> Result<ImpactFrame, ImpactError> {
         let inner = &mut self.inner;
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
         if inner.sample >= inner.config.max_steps { return Err(ImpactError::Budget); }
@@ -239,6 +248,7 @@ impl PreparedImpactSystem {
             PreparedStepError::Cancelled => ImpactError::Cancelled,
             PreparedStepError::Solver(error) => ImpactError::PreparedSolve(error),
         })?;
+        check(inner, &self.candidate, &self.output, ledger)?;
         inner.accept_step(&mut self.candidate, &mut self.histories, before, ledger, gate)
     }
 }

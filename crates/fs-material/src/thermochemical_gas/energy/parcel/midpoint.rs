@@ -13,6 +13,9 @@
 //! heat transfer, motion, entropy accounting and timestep-refinement checks.
 //! First-law sign convention: https://www.grc.nasa.gov/www/k-12/airplane/thermo1.html
 
+/// Discrete mechanical force and sensitivity pullbacks for the same midpoint state.
+pub mod mechanical_load;
+
 use super::ClosedGasParcel;
 use super::super::{GasEnergyError, GasEnergySolve, ResolvedThermochemicalGasState,
     map_root, poll, positive, root, updated_point};

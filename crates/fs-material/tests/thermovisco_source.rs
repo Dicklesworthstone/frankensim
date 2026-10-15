@@ -117,8 +117,10 @@ fn foreign_caloric_cards_or_fixed_contexts_cannot_be_bound() {
     let upper=point(320.0).with("p",100000.0).unwrap();
     let source=resolve(&a,&lower,&upper).unwrap();
     let same=caloric(&a,5.0,&lower,&upper);
+    assert_eq!(source.reference_density_kg_m3(&same).unwrap(),1000.0);
     assert!(source.caloric_point(&same,300.0,0.0,1e-6,0.001).is_ok());
     let other=caloric(&b,10.0,&lower,&upper);
+    assert!(source.reference_density_kg_m3(&other).is_err());
     assert!(source.caloric_point(&other,300.0,0.0,1e-6,0.001).is_err());
     let wrong=caloric(&a,5.0,&point(280.0).with("p",200000.0).unwrap(),
         &point(320.0).with("p",200000.0).unwrap());

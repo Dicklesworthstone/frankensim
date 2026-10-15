@@ -13,6 +13,8 @@ layer = "L3"
 [features]
 # Keep the shared enthalpy transport opt-in for ordinary LBM consumers.
 enthalpy-coupling = ["dep:fs-conduction"]
+# Optional nonlinear endpoint feedback; the existing explicit path is unchanged.
+implicit-enthalpy-coupling = ["enthalpy-coupling", "dep:fs-solver"]
 
 [dependencies]
 # Preserve the existing import spelling while selecting ONLY the shared
@@ -28,6 +30,7 @@ fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
 fs-sparse = { path = "../fs-sparse" }
+fs-solver = { path = "../fs-solver", optional = true }
 
 [dev-dependencies]
 fs-convection = { path = "../fs-convection" }

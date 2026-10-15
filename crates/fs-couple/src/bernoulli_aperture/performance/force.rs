@@ -4,6 +4,7 @@
 use super::{AperturePerformance, GestureCompileError, invalid};
 use crate::bernoulli_aperture::dynamic::force::{PlateForceFootprint, PlateForcePort};
 use crate::render::RenderError;
+use crate::bernoulli_aperture::plate::PlateApertureReduction;
 
 /// One signed physical force assignment, applied BEFORE its named source sample.
 /// It remains held until the same port receives another assignment. Zero releases
@@ -29,64 +30,37 @@ pub struct ApertureForceProgram {
 }
 #[derive(Clone, Copy)]
 struct Group { sample: u64, force_n: f64, end: usize }
-pub(super) struct ForceSchedule {
-    ports: Vec<PlateForcePort>,
-    events: Vec<ApertureForceEvent>,
+pub(in crate::bernoulli_aperture) struct ForceSchedule {
+    pub(in crate::bernoulli_aperture) ports: Vec<PlateForcePort>,
+    pub(in crate::bernoulli_aperture) events: Vec<ApertureForceEvent>,
     groups: Vec<Group>,
     next: usize,
-    applied: usize,
-    held: f64,
+    pub(in crate::bernoulli_aperture) applied: usize,
+    pub(in crate::bernoulli_aperture) held: f64,
+    pub(in crate::bernoulli_aperture) work: u64,
 }
 impl ForceSchedule {
-    /// Immutable sample preview. Clock admission guarantees no skipped group.
-    pub(super) fn candidate(&self, sample: u64) -> f64 {
-        self.groups.get(self.next).filter(|g| g.sample == sample).map_or(self.held, |g| g.force_n)
-    }
-    pub(super) fn accept(&mut self, sample: u64) {
-        if let Some(g) = self.groups.get(self.next).filter(|g| g.sample == sample) {
-            self.held = g.force_n; self.applied = g.end; self.next += 1;
-        }
-    }
-}
-impl AperturePerformance {
-    /// Bind independent mechanical actuation to THIS unadvanced physical specimen.
-    /// Pressure remains owned by the existing gesture schedule. Up to 32 ports
-    /// are projected from its retained plate, not an externally substituted basis.
-    /// Complete input admission and stable equal-time grouping occur before any
-    /// state changes. The generalized sum enters the existing nonlinear solve.
-    ///
-    /// The existing max_controls bounds pressure assignments plus raw force
-    /// assignments. max_compile_work separately bounds force projection/summation
-    /// visits; it also remains the pressure compiler's independent work bound.
-    /// No physical force magnitude is silently clipped to satisfy a solver.
-    ///
-    /// # Errors
-    /// Missing plate, advanced/poisoned/already-bound performance, invalid site,
-    /// event/clock/force, exhausted budget, or failed storage allocation.
-    pub fn with_plate_forces(mut self, mut program: ApertureForceProgram)
-        -> Result<Self, GestureCompileError>
+    // One projection/grouping owner. Callers pass REMAINING shared control/work
+    // capacity, so independent blades do not each consume the entire allowance.
+    pub(in crate::bernoulli_aperture) fn compile(plate: &PlateApertureReduction, mut program: ApertureForceProgram,
+        samples: u64, max_events: usize, max_work: u64) -> Result<Self, GestureCompileError>
     {
-        if self.poisoned || self.system.aperture().accepted_steps() != 0 || self.forces.is_some() {
-            return Err(invalid("mechanical forces must bind once before performance playback"));
-        }
         let count = program.footprints.len();
-        if count == 0 || count > 32 || program.events.len() > self.config.max_controls.saturating_sub(self.controls.len()) {
+        if count == 0 || count > 32 || program.events.len() > max_events {
             return Err(invalid("mechanical program requires 1..=32 ports and combined controls within budget"));
         }
-        let plate = self.system.aperture().plate_reduction()
-            .ok_or_else(|| invalid("physical force footprints require a retained plate specimen"))?;
         let sites: u128 = program.footprints.iter().map(|p| match p {
             PlateForceFootprint::Node(_) => 1, PlateForceFootprint::Patch(t) => t.len() as u128,
         }).sum();
         let work = sites + program.events.len() as u128 * (count as u128 + 1);
-        if work > u128::from(self.config.max_compile_work) {
+        if work > u128::from(max_work) {
             return Err(invalid("mechanical force projection exceeds the compilation work budget"));
         }
         let physics = |e| GestureCompileError::Render(RenderError::Voice(e));
         let ports: Vec<_> = program.footprints.into_iter().map(|p| plate.force_port(p))
             .collect::<Result<_, _>>().map_err(physics)?;
         for event in &program.events {
-            if event.sample >= self.config.samples || event.port >= count {
+            if event.sample >= samples || event.port >= count {
                 return Err(invalid("mechanical control names an absent port or a sample outside the performance"));
             }
             ports[event.port].generalized_force_n(event.force_n).map_err(physics)?;
@@ -111,7 +85,44 @@ impl AperturePerformance {
             }
             groups.push(Group { sample, force_n, end: i });
         }
-        self.forces = Some(ForceSchedule { ports, events: program.events, groups, next: 0, applied: 0, held: 0.0 });
+        Ok(Self { ports, events: program.events, groups, next: 0, applied: 0, held: 0.0, work: work as u64 })
+    }
+
+    /// Immutable sample preview. Clock admission guarantees no skipped group.
+    pub(in crate::bernoulli_aperture) fn candidate(&self, sample: u64) -> f64 {
+        self.groups.get(self.next).filter(|g| g.sample == sample).map_or(self.held, |g| g.force_n)
+    }
+    pub(in crate::bernoulli_aperture) fn accept(&mut self, sample: u64) {
+        if let Some(g) = self.groups.get(self.next).filter(|g| g.sample == sample) {
+            self.held = g.force_n; self.applied = g.end; self.next += 1;
+        }
+    }
+}
+impl AperturePerformance {
+    /// Bind independent mechanical actuation to THIS unadvanced physical specimen.
+    /// Pressure remains owned by the existing gesture schedule. Up to 32 ports
+    /// are projected from its retained plate, not an externally substituted basis.
+    /// Complete input admission and stable equal-time grouping occur before any
+    /// state changes. The generalized sum enters the existing nonlinear solve.
+    ///
+    /// The existing max_controls bounds pressure assignments plus raw force
+    /// assignments. max_compile_work separately bounds force projection/summation
+    /// visits; it also remains the pressure compiler's independent work bound.
+    /// No physical force magnitude is silently clipped to satisfy a solver.
+    ///
+    /// # Errors
+    /// Missing plate, advanced/poisoned/already-bound performance, invalid site,
+    /// event/clock/force, exhausted budget, or failed storage allocation.
+    pub fn with_plate_forces(mut self, program: ApertureForceProgram)
+        -> Result<Self, GestureCompileError>
+    {
+        if self.poisoned || self.system.aperture().accepted_steps() != 0 || self.forces.is_some() {
+            return Err(invalid("mechanical forces must bind once before performance playback"));
+        }
+        let plate = self.system.aperture().plate_reduction()
+            .ok_or_else(|| invalid("physical force footprints require a retained plate specimen"))?;
+        self.forces = Some(ForceSchedule::compile(plate, program, self.config.samples,
+            self.config.max_controls.saturating_sub(self.controls.len()), self.config.max_compile_work)?);
         Ok(self)
     }
     /// Specimen-derived work-conjugate ports; empty for pressure-only playback.

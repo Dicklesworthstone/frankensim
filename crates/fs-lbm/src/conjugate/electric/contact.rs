@@ -1,10 +1,11 @@
 //! Resistive, zero-thickness electrical interfaces in the existing voxel solver.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     ChtError, ElectricSetup, ElectricSolution, Node, Voxel, VoxelDomain, admit,
     finite_positive, poll, poll_every, solve_electric_field, solve_electric_impl,
+    solve_electric_field_with_contact_field,
 };
 use fs_exec::CancelGate;
 
@@ -90,6 +91,39 @@ impl ElectricSetup {
         let (nodes, rho) = resolve_cells(self, domain, temperature, resolve, gate)?;
         solve_electric_field(domain, self, nodes, &rho, contacts, gate)
     }
+
+    /// Solve with explicit open electrical faces as well as resistive contacts.
+    ///
+    /// An opening removes ONLY that face from electrical reachability, current
+    /// balance and Joule deposition. It does not remove either bulk material,
+    /// change its heat capacity, or open a thermal/mechanical contact. A face
+    /// in neither list remains perfectly connected. A face in both lists or
+    /// repeated in either orientation refuses; no ordering can silently win.
+    /// Zero resistance means a closed contact, never an opening. Infinity is
+    /// not used as a large-resistance approximation.
+    ///
+    /// Bulk laws are still queried for floating conductors. Their unreferenced
+    /// potentials are NaN and stationary current/heat are zero. A disconnected
+    /// nonzero ideal current drive refuses; a disconnected zero-current drive
+    /// has undefined voltage and zero delivered power. Capacitive transients,
+    /// arc/breakdown and motional isolated-current gauges are outside this API.
+    /// Distinct touching ideal electrodes retain the original admission refusal.
+    ///
+    /// # Errors
+    /// Existing material/solver refusals, invalid/conflicting face topology,
+    /// unrepresentable values, or cancellation. No setup or body is mutated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_with_cell_contact_topology(
+        &self, domain: &VoxelDomain, temperature: &[f64],
+        contacts: &[ElectricalContact], open_faces: &[[usize; 2]],
+        resolve: impl FnMut(usize, Voxel, f64) -> Result<Option<f64>, ChtError>,
+        gate: &CancelGate,
+    ) -> Result<ElectricSolution, ChtError> {
+        let (nodes, rho) = resolve_cells(self, domain, temperature, resolve, gate)?;
+        let field = ContactField::new(domain, &nodes, contacts, gate)?
+            .with_open_faces(domain, open_faces, gate)?;
+        solve_electric_field_with_contact_field(domain, self, nodes, &rho, field, None, gate)
+    }
 }
 
 // One material/topology admission for stationary and moving conductors.
@@ -143,7 +177,10 @@ pub(super) fn resolve_admitted_cells(
 
 /// Sparse canonical face data. Sorting the key does not discard surface order:
 /// the stored heat fraction is transformed to the lower-index cell's role.
-pub(super) struct ContactField(BTreeMap<(usize, usize), (f64, f64)>);
+pub(super) struct ContactField {
+    resistive: BTreeMap<(usize, usize), (f64, f64)>,
+    open: BTreeSet<(usize, usize)>,
+}
 
 impl ContactField {
     pub(super) fn new(
@@ -181,12 +218,40 @@ impl ContactField {
                 return Err(refuse("the physical face is declared more than once"));
             }
         }
-        Ok(Self(field))
+        Ok(Self { resistive: field, open: BTreeSet::new() })
+    }
+
+    fn with_open_faces(mut self, domain: &VoxelDomain, open_faces: &[[usize; 2]],
+        gate: &CancelGate) -> Result<Self, ChtError> {
+        if open_faces.len().saturating_add(self.resistive.len())
+            > domain.cell_count().saturating_mul(3) {
+            return Err(ChtError::InvalidInput {
+                field: "electric.open_faces", reason: "face count exceeds the Cartesian domain".into(),
+            });
+        }
+        for (index, &[a, b]) in open_faces.iter().enumerate() {
+            if index.is_multiple_of(256) { poll(gate)?; }
+            let key = (a.min(b), a.max(b));
+            if a >= domain.cell_count() || b >= domain.cell_count()
+                || !(0..6).any(|f| domain.neighbor(a, f) == Some(b))
+                || self.resistive.contains_key(&key) || !self.open.insert(key) {
+                return Err(ChtError::InvalidInput {
+                    field: "electric.open_faces",
+                    reason: format!("opening {index} ({a}, {b}) needs a unique adjacent face without a resistive assignment"),
+                });
+            }
+        }
+        poll(gate)?;
+        Ok(self)
+    }
+
+    pub(super) fn is_open(&self, a: usize, b: usize) -> bool {
+        self.open.contains(&(a.min(b), a.max(b)))
     }
 
     /// Resistance and heat fraction into `a`, independent of face traversal.
     pub(super) fn at(&self, a: usize, b: usize) -> (f64, f64) {
-        let Some(&(r, f)) = self.0.get(&(a.min(b), a.max(b))) else { return (0.0, 0.0); };
+        let Some(&(r, f)) = self.resistive.get(&(a.min(b), a.max(b))) else { return (0.0, 0.0); };
         (r, if a < b { f } else { 1.0 - f })
     }
 }

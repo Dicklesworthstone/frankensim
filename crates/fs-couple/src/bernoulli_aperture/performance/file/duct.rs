@@ -123,8 +123,7 @@ impl DuctInput {
                     // uses ambient; malformed data never selects that default.
                     let local = if row.fields.clone().next() == Some("gas") {
                         row.word()?;
-                        let local = GasState::try_new_moist_air(row.scalar()?, air.pressure, row.scalar()?)
-                            .map_err(|_|bad(r.line,"section gas is outside the shared moist-air domain"))?;
+                        let local = gas::read(&mut row, Some(air.pressure))?;
                         regional = true;
                         local
                     } else { *air };
