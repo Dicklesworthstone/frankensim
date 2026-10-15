@@ -177,17 +177,21 @@ fn csl_004_certified_mode_cannot_start_certificate_tracking_late() {
         .expect("certified mode admits");
     let mut executor = CbcExecutor::new(admission).expect("fresh authority");
     let mut keep_going = || CbcControl::Continue;
+    let tile = CbcTileShape::new(1, 1).expect("static tile");
+    let CbcRunStatus::NeedAllowance(_, minimum) = executor
+        .run(&mut keep_going, tile, 1)
+        .expect("sub-step allowance reports required minimum without spending work")
+    else {
+        panic!("1 unit must be below the first initialization visit step");
+    };
+    assert_eq!(executor.work_spent(), 0);
     assert!(matches!(
         executor
-            .run(
-                &mut keep_going,
-                CbcTileShape::new(1, 1).expect("static tile"),
-                1,
-            )
+            .run(&mut keep_going, tile, minimum)
             .expect("a partial run remains replayable"),
         CbcRunStatus::AllowanceExhausted(_)
     ));
-    assert!(executor.work_spent() > 0);
+    assert_eq!(executor.work_spent(), minimum);
     assert_eq!(
         executor.enable_certificates(),
         Err(CbcExecError::CertificatesAfterStart)
