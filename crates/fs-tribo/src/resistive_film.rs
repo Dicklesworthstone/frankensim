@@ -174,10 +174,12 @@ impl ResistiveFilm {
     }
 
     /// Number of work-conjugate mechanical coordinates.
+    #[must_use]
     pub fn port_count(&self) -> usize {
         self.ports
     }
     /// Number of retained pressure cells.
+    #[must_use]
     pub fn cell_count(&self) -> usize {
         self.cells.len()
     }
@@ -348,6 +350,7 @@ struct Solution {
     minimum_gap: f64,
 }
 impl Solution {
+    #[allow(clippy::large_stack_arrays)] // Fixed-size stack scratch for bounded MAX_CELLS elimination.
     fn new(n: usize, minimum_gap: f64) -> Self {
         Self {
             lower: [0.0; MAX_CELLS * MAX_CELLS],
