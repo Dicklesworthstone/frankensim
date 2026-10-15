@@ -686,10 +686,100 @@ fn matvec_into_row(row: &[f64], a: &[f64], r: usize, out: &mut [f64]) {
     }
 }
 
+/// Native: `y[i] = dot(row_i, x)` bit for bit, four rows per sweep of `x`
+/// (pass 16), in `dot`'s two-exit loop shape (see the native `dot`).
+#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 fn matvec(a: &[f64], x: &[f64], y: &mut [f64]) {
     let r = x.len();
-    for (row, out) in a.chunks_exact(r).zip(y.iter_mut()) {
+    let n = a.chunks_exact(r).len().min(y.len());
+    let quads = n / 4;
+    for (block, out) in a[..quads * 4 * r].chunks_exact(4 * r).zip(y.chunks_exact_mut(4)) {
+        let (r0, rest) = block.split_at(r);
+        let (r1, rest) = rest.split_at(r);
+        let (r2, r3) = rest.split_at(r);
+        let mut s = [[0.0_f64; 4]; 4];
+        let mut cx = x.chunks_exact(4);
+        let mut c0 = r0.chunks_exact(4);
+        let mut c1 = r1.chunks_exact(4);
+        let mut c2 = r2.chunks_exact(4);
+        let mut c3 = r3.chunks_exact(4);
+        for ((((v, p0), p1), p2), p3) in (&mut cx).zip(&mut c0).zip(&mut c1).zip(&mut c2).zip(&mut c3) {
+            for l in 0..4 {
+                s[0][l] += p0[l] * v[l];
+                s[1][l] += p1[l] * v[l];
+                s[2][l] += p2[l] * v[l];
+                s[3][l] += p3[l] * v[l];
+            }
+        }
+        let rv = cx.remainder();
+        for (k, (o, tail)) in out.iter_mut().zip([c0.remainder(), c1.remainder(), c2.remainder(), c3.remainder()]).enumerate() {
+            let mut t = (s[k][0] + s[k][1]) + (s[k][2] + s[k][3]);
+            for (p, q) in tail.iter().zip(rv) {
+                t += p * q;
+            }
+            *o = t;
+        }
+    }
+    for (row, out) in a.chunks_exact(r).zip(y.iter_mut()).skip(quads * 4) {
+        *out = dot(row, x);
+    }
+}
+
+/// wasm32: `y[i] = dot(row_i, x)` bit for bit, four rows per sweep of `x`
+/// (optimisation pass 16). Per row the same four lane sums as the wasm32
+/// `dot` (lanes 0/1 and 2/3 in two f64x2 accumulators; LLVM's own
+/// vectorization of `dot` pairs lanes 0/2 and 1/3 and pays two shuffles per
+/// chunk for it), then `(s0 + s1) + (s2 + s3)` and the tail columns in order.
+/// Four rows give eight independent add chains and load `x` once per four
+/// rows. Leftover rows (`rows % 4`) use `dot`.
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn matvec(a: &[f64], x: &[f64], y: &mut [f64]) {
+    use core::arch::wasm32::{f64x2, f64x2_add, f64x2_extract_lane, f64x2_mul, f64x2_splat, v128};
+    let r = x.len();
+    let rows = a.chunks_exact(r);
+    let n = rows.len().min(y.len());
+    let (cx, rx) = x.as_chunks::<4>();
+    let body = 4 * cx.len();
+    let finish = |lo: v128, hi: v128, row: &[f64]| -> f64 {
+        let mut t = (f64x2_extract_lane::<0>(lo) + f64x2_extract_lane::<1>(lo))
+            + (f64x2_extract_lane::<0>(hi) + f64x2_extract_lane::<1>(hi));
+        for (p, q) in row[body..].iter().zip(rx) {
+            t += p * q;
+        }
+        t
+    };
+    let quads = n / 4;
+    for (block, out) in a[..quads * 4 * r].chunks_exact(4 * r).zip(y.chunks_exact_mut(4)) {
+        let (r0, rest) = block.split_at(r);
+        let (r1, rest) = rest.split_at(r);
+        let (r2, r3) = rest.split_at(r);
+        let zero = f64x2_splat(0.0);
+        let mut acc = [zero; 8];
+        let it = cx.iter()
+            .zip(r0.as_chunks::<4>().0)
+            .zip(r1.as_chunks::<4>().0)
+            .zip(r2.as_chunks::<4>().0)
+            .zip(r3.as_chunks::<4>().0);
+        for ((((v, c0), c1), c2), c3) in it {
+            let xl = f64x2(v[0], v[1]);
+            let xh = f64x2(v[2], v[3]);
+            acc[0] = f64x2_add(acc[0], f64x2_mul(f64x2(c0[0], c0[1]), xl));
+            acc[1] = f64x2_add(acc[1], f64x2_mul(f64x2(c0[2], c0[3]), xh));
+            acc[2] = f64x2_add(acc[2], f64x2_mul(f64x2(c1[0], c1[1]), xl));
+            acc[3] = f64x2_add(acc[3], f64x2_mul(f64x2(c1[2], c1[3]), xh));
+            acc[4] = f64x2_add(acc[4], f64x2_mul(f64x2(c2[0], c2[1]), xl));
+            acc[5] = f64x2_add(acc[5], f64x2_mul(f64x2(c2[2], c2[3]), xh));
+            acc[6] = f64x2_add(acc[6], f64x2_mul(f64x2(c3[0], c3[1]), xl));
+            acc[7] = f64x2_add(acc[7], f64x2_mul(f64x2(c3[2], c3[3]), xh));
+        }
+        out[0] = finish(acc[0], acc[1], r0);
+        out[1] = finish(acc[2], acc[3], r1);
+        out[2] = finish(acc[4], acc[5], r2);
+        out[3] = finish(acc[6], acc[7], r3);
+    }
+    for (row, out) in a.chunks_exact(r).zip(y.iter_mut()).skip(quads * 4) {
         *out = dot(row, x);
     }
 }
