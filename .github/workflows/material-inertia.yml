@@ -4,6 +4,9 @@ on:
     branches: [main]
     paths:
       - 'crates/fs-mbd-material/**'
+      - 'crates/fs-contact/src/normal_patch/**'
+      - 'crates/fs-contact/tests/source_point*'
+      - 'crates/fs-contact/tests/source_point/**'
       - '.github/workflows/material-inertia.yml'
   workflow_dispatch:
 permissions:
@@ -48,7 +51,10 @@ jobs:
           PY
             cargo run --manifest-path tools/bootstrap/Cargo.toml
           fi
+      - name: Source-bound normal contact through the original finite-patch law
+        run: cargo test -p fs-contact --test source_point -- --test-threads=1
       - name: Exercise actual material resolution and rigid dynamics
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
