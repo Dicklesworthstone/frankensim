@@ -6,9 +6,10 @@ use super::{
     Termination, frame_total_energy, unit_shape, unit_shape_slope_at_bridge,
 };
 use crate::modal_acoustic_time::{
-    ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel, ModalAcousticWorkspace,
+    ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
+    ModalAcousticWorkspace, advance_exact_zoh,
 };
-use crate::stribeck_friction::StribeckFriction;
+use crate::stribeck_friction::{StribeckFriction, ImplicitFrictionError, solve_implicit_friction};
 use crate::thin_plate::CompactBody;
 use fs_exec::CancelGate;
 
@@ -45,9 +46,13 @@ pub struct BowedSample {
 /// The string's candidate states reuse a workspace; a plate retains its own
 /// allocation behavior. No blanket real-time guarantee is implied.
 ///
-/// Stiction uses the shared exact-ZOH port solve: the held force enforces
-/// endpoint no-slip, subject to the static friction capacity. This is not a
-/// continuous-time constraint or a new friction constitutive law. The one-way
+/// Sticking and sliding use the same exact-ZOH port response. Sticking enforces
+/// endpoint no-slip within the static capacity; sliding solves the original
+/// material-owned regularized law at the endpoint, not at the old velocity.
+/// The velocity response is cached from the shared modal transition, with no
+/// state subtraction to recover small mobilities. This is not a continuous-time
+/// constraint, a continuous-time passivity certificate or a new friction law.
+/// The one-way
 /// rigid-bridge/body approximation is unchanged. Control changes are physical
 /// inputs, not mode resets or frequency assignments.
 pub struct BowedStringState {
@@ -58,6 +63,9 @@ pub struct BowedStringState {
     model: ModalAcousticTimeModel,
     workspace: ModalAcousticWorkspace,
     shapes_at_bow: Vec<f64>,
+    // Exact-ZOH endpoint velocity row [coefficient of q, v, held modal force].
+    // Material, basis and substep are immutable; a moving bow changes only phi.
+    contact_velocity_rows: Vec<[f64; 3]>,
     bridge_force_factors: Vec<f64>,
     bridge_viscous_factors: Vec<f64>,
     plate: Option<(CompactBody, f64)>,
@@ -154,10 +162,22 @@ impl BowedStringState {
         if !sub_dt.is_finite() || sub_dt <= 0.0 {
             return Err(invalid("bow substep must have a positive finite duration"));
         }
+        // Probe the linear transition once, rather than copying its oscillator
+        // equations or subtracting two nearly equal moving-state predictions.
+        // The unit-force response starts at ZERO state; it is not inverse mass.
+        let contact_velocity_rows: Vec<[f64; 3]> = model.modes().iter().map(|&mode| {
+            let velocity = |q, v, force| advance_exact_zoh(mode, ModalAcousticState {
+                displacement_m_sqrt_kg: q, velocity_m_sqrt_kg_per_s: v,
+            }, force, sub_dt).velocity_m_sqrt_kg_per_s;
+            [velocity(1.0, 0.0, 0.0), velocity(0.0, 1.0, 0.0), velocity(0.0, 0.0, 1.0)]
+        }).collect();
+        if contact_velocity_rows.iter().flatten().any(|x| !x.is_finite()) {
+            return Err(invalid("bow contact response is not finite"));
+        }
         let peak_energy_j = frame_total_energy(&model);
         Ok(Self {
             card: card.clone(), island: config.island.clone(), stribeck,
-            gesture: config.gesture, model, workspace, shapes_at_bow,
+            gesture: config.gesture, model, workspace, shapes_at_bow, contact_velocity_rows,
             bridge_force_factors, bridge_viscous_factors, plate,
             listener_m: config.listener_m, forces: vec![0.0; card.mode_count],
             dt, sub_dt, subsamples,
@@ -293,6 +313,50 @@ impl BowedStringState {
         Ok(())
     }
 
+    // Both static and sliding branches condense the SAME conjugate force and
+    // velocity port. A material swap changes omega/zeta and phi, hence this
+    // response, without any instrument or material-name branch.
+    fn contact_response(&self) -> Result<(f64, f64), BowedRunError> {
+        let mut free_velocity = 0.0;
+        let mut mobility = 0.0;
+        for ((state, phi), row) in self.model.states().iter()
+            .zip(&self.shapes_at_bow).zip(&self.contact_velocity_rows)
+        {
+            free_velocity += phi * (row[0] * state.displacement_m_sqrt_kg
+                + row[1] * state.velocity_m_sqrt_kg_per_s);
+            mobility += phi * phi * row[2];
+        }
+        let free_relative = self.gesture.v_bow_m_s - free_velocity;
+        if !free_relative.is_finite() || !mobility.is_finite() || mobility <= 0.0 {
+            return Err(invalid("bow contact needs finite free slip and positive discrete mobility"));
+        }
+        Ok((free_relative, mobility))
+    }
+
+    fn implicit_sliding_traction(&self, free_relative: f64, mobility: f64)
+        -> Result<f64, BowedRunError>
+    {
+        let step = solve_implicit_friction(free_relative, mobility, |velocity| {
+            match &self.island {
+                FrictionIsland::Stribeck(_) | FrictionIsland::InterfaceStribeck { .. } => {
+                    let law = self.stribeck.ok_or(BowedRunError::Friction("missing Stribeck law"))?;
+                    // Preserve the interface owner's viscous strengthening term.
+                    // Numerical root trials use the declared analytic law; source
+                    // applicability is checked at both actual physical endpoints.
+                    self.island.sliding_traction(law, velocity, self.gesture.normal_force_n)
+                }
+                FrictionIsland::ViscousOnly { viscous_n_s_per_m } => Ok(viscous_n_s_per_m * velocity),
+            }
+        }).map_err(|error| match error {
+            ImplicitFrictionError::Constitutive(source) => source,
+            ImplicitFrictionError::InvalidInput(what) => BowedRunError::Friction(what),
+            ImplicitFrictionError::NonDissipative => BowedRunError::Friction("implicit contact would drive relative slip"),
+            ImplicitFrictionError::NoConvergence => BowedRunError::Friction("implicit contact did not resolve the declared sliding law"),
+        })?;
+        self.island.check_state(step.relative_velocity_m_s, self.gesture.normal_force_n)?;
+        Ok(step.traction_n)
+    }
+
     fn advance_sample(&mut self) -> Result<BowedSample, BowedRunError> {
         const CAPTURE_BASIN_M_S: f64 = 0.15;
         for _ in 0..self.subsamples {
@@ -312,36 +376,26 @@ impl BowedStringState {
                     && self.prev_v_rel.signum() != v_rel.signum()
                     && flip_speed <= CAPTURE_BASIN_M_S;
                 self.prev_v_rel = v_rel;
+                let (free_relative, mobility) = self.contact_response()?;
                 match &self.island {
                     FrictionIsland::Stribeck(_) | FrictionIsland::InterfaceStribeck { .. } => {
                         let law = self.stribeck.ok_or(BowedRunError::Friction("missing Stribeck law"))?;
                         let hold_cap = law.mu_static * self.gesture.normal_force_n;
-                        // Solve the same held-force transition that is committed
-                        // below. An acceleration correction belongs to Euler,
-                        // not to the exact-ZOH modal discretization.
-                        let pin = || -> Result<f64, BowedRunError> {
-                            self.model.held_force_for_port_velocity(
-                                &self.shapes_at_bow,
-                                self.gesture.v_bow_m_s,
-                                self.sub_dt,
-                            ).map_err(BowedRunError::Model)
-                        };
-                        if self.stuck {
-                            let p = pin()?;
-                            if p.abs() <= hold_cap { p } else {
-                                self.stuck = false;
-                                self.island.sliding_traction(law, v_rel, self.gesture.normal_force_n)?
-                            }
-                        } else if flipped || v_rel.abs() <= self.capture_tol {
-                            let p = pin()?;
-                            if p.abs() <= hold_cap { self.stuck = true; p } else {
-                                self.island.sliding_traction(law, v_rel, self.gesture.normal_force_n)?
-                            }
+                        let pin = free_relative / mobility;
+                        if (self.stuck || flipped || v_rel.abs() <= self.capture_tol)
+                            && pin.abs() <= hold_cap
+                        {
+                            self.island.check_state(0.0, self.gesture.normal_force_n)?;
+                            self.stuck = true;
+                            pin
                         } else {
-                            self.island.sliding_traction(law, v_rel, self.gesture.normal_force_n)?
+                            self.stuck = false;
+                            self.implicit_sliding_traction(free_relative, mobility)?
                         }
                     }
-                    FrictionIsland::ViscousOnly { viscous_n_s_per_m } => viscous_n_s_per_m * v_rel,
+                    FrictionIsland::ViscousOnly { .. } => {
+                        self.implicit_sliding_traction(free_relative, mobility)?
+                    }
                 }
             };
             for (q, phi) in self.forces.iter_mut().zip(&self.shapes_at_bow) { *q = traction * phi; }
@@ -487,13 +541,13 @@ mod exact_stiction_tests {
         let frame = voice.step().unwrap();
         assert!(!voice.stuck);
         assert!(frame.relative_velocity_m_s > 0.009);
-        // The actual generalized load remains the declared kinetic law.
+        // The actual load is the declared kinetic law at the NEW endpoint.
         let law = voice.stribeck.unwrap();
         let traction = cfg.island.sliding_traction(
-            law, cfg.gesture.v_bow_m_s, cfg.gesture.normal_force_n,
+            law, frame.relative_velocity_m_s, cfg.gesture.normal_force_n,
         ).unwrap();
         for (force, phi) in voice.forces.iter().zip(&voice.shapes_at_bow) {
-            assert_eq!(*force, traction * phi);
+            assert!((*force - traction * phi).abs() < 1.0e-12);
         }
     }
 
@@ -513,5 +567,80 @@ mod exact_stiction_tests {
         let force_b = b.forces[0] / b.shapes_at_bow[0];
         assert!((force_b / force_a - 3.0).abs() < 1.0e-10);
         assert!((b.total_modal_energy_j() / a.total_modal_energy_j() - 3.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn implicit_sliding_resolves_the_actual_endpoint_across_string_scales() {
+        for (length, mu, tension, bending) in [
+            (0.328, 0.003, 50.0, 1.0e-5),
+            (0.69, 0.012, 90.0, 1.0e-4),
+            (1.04, 0.04, 140.0, 1.0e-3),
+        ] {
+            let mut cfg = config(length, mu, tension, bending);
+            cfg.gesture = BowGesture::admit(0.2, 0.02, 0.13).unwrap();
+            let mut voice = BowedStringState::new(&cfg, 64).unwrap();
+            let law = voice.stribeck.unwrap();
+            for sample in 0..64 {
+                // Exercise a geometry gesture too; it changes both conjugate
+                // projections without resetting the cached material response.
+                if sample == 32 { voice.set_bow(0.2, 0.02, 0.19).unwrap(); }
+                let frame = voice.step().unwrap();
+                assert!(!voice.stuck);
+                let expected = cfg.island.sliding_traction(law,
+                    frame.relative_velocity_m_s, cfg.gesture.normal_force_n).unwrap();
+                for (force, phi) in voice.forces.iter().zip(&voice.shapes_at_bow) {
+                    assert!((*force - expected * phi).abs() < 1.0e-10);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn implicit_viscous_contact_matches_closed_form_without_explicit_reversal() {
+        for (length, mu, tension, bending) in [
+            (0.328, 0.003, 50.0, 1.0e-5),
+            (0.69, 0.012, 90.0, 1.0e-4),
+            (1.04, 0.04, 140.0, 1.0e-3),
+        ] {
+            let mut cfg = config(length, mu, tension, bending);
+            cfg.card.mode_count = 1;
+            cfg.card.zetas.truncate(1);
+            let resistance = 100_000.0;
+            cfg.island = FrictionIsland::ViscousOnly { viscous_n_s_per_m: resistance };
+            cfg.gesture = BowGesture::admit(0.2, 1.0, 0.13).unwrap();
+            let mut voice = BowedStringState::new(&cfg, 1).unwrap();
+            // Independently obtain mobility by committing a real unit-force
+            // transition, not by inspecting the cached response rows.
+            let mut unit = voice.model.clone();
+            unit.step_duration(&voice.shapes_at_bow, voice.sub_dt).unwrap();
+            let mobility: f64 = unit.states().iter().zip(&voice.shapes_at_bow)
+                .map(|(state, phi)| phi * state.velocity_m_sqrt_kg_per_s).sum();
+            assert!(resistance * mobility > 1.0); // old explicit step reverses slip
+            let expected = cfg.gesture.v_bow_m_s / (1.0 + resistance * mobility);
+            let frame = voice.step().unwrap();
+            assert!(frame.relative_velocity_m_s > 0.0);
+            assert!((frame.relative_velocity_m_s - expected).abs() < 1.0e-12);
+            let force = voice.forces[0] / voice.shapes_at_bow[0];
+            assert!((force - resistance * expected).abs() < 2.0e-9);
+        }
+    }
+
+    #[test]
+    fn sliding_callback_partition_and_release_preserve_the_physical_state() {
+        let mut cfg = config(0.328, 0.003, 50.0, 1.0e-5);
+        cfg.gesture = BowGesture::admit(0.2, 0.02, 0.13).unwrap();
+        let mut whole = BowedStringState::new(&cfg, 64).unwrap();
+        let mut pieces = BowedStringState::new(&cfg, 64).unwrap();
+        let mut a = [BowedSample::default(); 64];
+        let mut b = a;
+        whole.block(&mut a).unwrap();
+        for block in b.chunks_mut(7) { pieces.block(block).unwrap(); }
+        assert_eq!(a, b);
+        let mut free = pieces.model.clone();
+        free.step_duration(&vec![0.0; cfg.card.mode_count], pieces.sub_dt).unwrap();
+        pieces.set_bow(-0.3, 0.0, 0.13).unwrap();
+        pieces.step().unwrap();
+        assert_eq!(pieces.model.states(), free.states());
+        assert!(pieces.total_modal_energy_j() > 0.0);
     }
 }
