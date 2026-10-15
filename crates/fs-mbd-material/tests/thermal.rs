@@ -188,3 +188,54 @@ fn composite_expansion_reuses_parallel_axis_owner_and_is_binding_order_independe
     matrix_close(expanded.inertia().inertia_com(),reference.inertia().inertia_com(),1.03_f64.powi(2));
     assert!(expand_body(&reference,&[a,a],||false).is_err());
 }
+
+#[test]
+fn complete_mechanism_thermal_update_preserves_topology_and_drives_existing_solver() {
+    use fs_mbd_material::articulated::{MaterialLink,resolve_articulated};
+    use fs_mbd_material::thermal::{LinkThermalExpansion,expand_articulated};
+    let card = thermal_card("mechanism",1e-4);
+    let p = point(300.0);
+    let regions = [RegionBinding { key: "body", material: &card, point: &p,
+        geometry: VolumeMoments::cuboid(Vec3::new(1.0,2.0,3.0)).unwrap(),
+        selection: MaterialPropertySelection::SingleClaimOnly }];
+    let reference = resolve_articulated(&[
+        MaterialLink { name: "mount", parent: None, parent_from_child_zero: Se3::identity(),
+            joint: JointModel::FIXED, regions: &regions },
+        MaterialLink { name: "rotor", parent: Some(0), parent_from_child_zero: Se3::identity(),
+            joint: JointModel::revolute(Vec3::new(1.0,0.0,0.0),None).unwrap(),regions: &regions },
+    ],2,||false).unwrap();
+    let original = reference.clone();
+    let cold = path(&card,300.0,300.0);
+    let hot = path(&card,300.0,400.0);
+    let fixed_regions = [binding(&cold)];
+    let rotor_regions = [binding(&hot)];
+    let fixed = LinkThermalExpansion { link: "mount", regions: &fixed_regions };
+    let rotor = LinkThermalExpansion { link: "rotor", regions: &rotor_regions };
+    let configured = expand_articulated(&reference,&[rotor,fixed],||false).unwrap();
+    let reordered = expand_articulated(&reference,&[fixed,rotor],||false).unwrap();
+    assert_eq!(configured,reordered);
+    assert_eq!(reference,original);
+    assert!(std::ptr::eq(configured.reference(),&reference));
+    for (a,b) in configured.model().links().iter().zip(reference.model().links()) {
+        assert_eq!(a.name(),b.name()); assert_eq!(a.parent(),b.parent());
+        assert_eq!(a.joint(),b.joint()); assert_eq!(a.parent_from_child_zero(),b.parent_from_child_zero());
+        assert_eq!(a.inertia().mass(),b.inertia().mass());
+    }
+    assert_eq!(configured.bodies()[0].inertia(),reference.bodies()[0].inertia());
+    let acceleration = |model: &ArticulatedModel| forward_dynamics(model,
+        BaseState::stationary(Se3::identity()),&[0.0],&[0.0],&[1.0],
+        Vec3::new(0.0,0.0,0.0),&[Wrench::zero();2]).unwrap().generalized_acceleration[0];
+    close(acceleration(reference.model())/acceleration(configured.model()),1.03_f64.powi(2));
+    assert!(expand_articulated(&reference,&[fixed],||false).is_err());
+    assert!(expand_articulated(&reference,&[fixed,fixed],||false).is_err());
+    let foreign = LinkThermalExpansion { link: "foreign", regions: &rotor_regions };
+    assert!(expand_articulated(&reference,&[fixed,foreign],||false).is_err());
+    // Discover and then cancel at the final checkpoint, after all body work.
+    let mut checkpoints = 0;
+    expand_articulated(&reference,&[fixed,rotor],||{ checkpoints+=1; false }).unwrap();
+    let mut calls = 0;
+    assert!(matches!(expand_articulated(&reference,&[fixed,rotor],||{
+        calls+=1; calls==checkpoints
+    }),Err(MaterialInertiaError::Cancelled)));
+    assert_eq!(reference,original);
+}

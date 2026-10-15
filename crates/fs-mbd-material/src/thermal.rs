@@ -12,6 +12,9 @@
 //! relevant solvers' responsibilities. The shared strain law and source domain
 //! bound applicability; no finite-strain constitutive law is introduced here.
 
+mod articulated;
+pub use articulated::{ExpandedArticulated, LinkThermalExpansion, expand_articulated};
+
 use fs_ga::Vec3;
 use fs_material::state_point::{IntegratedIsotropicThermalExpansion, ResolvedMaterialStatePoint};
 use fs_mbd::articulated::SpatialInertia;
