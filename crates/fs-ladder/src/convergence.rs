@@ -69,6 +69,7 @@ pub struct MeshRung {
 impl MeshRung {
     /// Create a new mesh rung.
     #[must_use]
+    #[allow(clippy::too_many_arguments)] // Flat constructor binds all rung metadata fields directly.
     pub fn new(
         ordinal: usize,
         mesh_id: impl Into<String>,
@@ -192,6 +193,7 @@ pub struct ConvergenceEvaluator;
 impl ConvergenceEvaluator {
     /// Evaluate the convergence plan across all supplied rungs.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // Single end-to-end Richardson/GCI evaluation sequence.
     pub fn evaluate(plan: &ConvergencePlan) -> ConvergenceResult {
         let valid_rungs: Vec<MeshRung> = plan
             .rungs
