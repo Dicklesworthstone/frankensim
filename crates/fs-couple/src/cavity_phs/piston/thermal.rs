@@ -14,6 +14,8 @@ pub mod power;
 /// Shared material/phase coordinates for thermal and electrical responses.
 pub mod source;
 mod feedback;
+/// A thermal port for reservoirs and jointly solved finite network boundaries.
+pub mod boundary;
 
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_material::phase::{EquilibriumPhaseState, PhaseStateError,
