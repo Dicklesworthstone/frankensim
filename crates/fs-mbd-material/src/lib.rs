@@ -19,6 +19,8 @@
 pub mod articulated;
 /// Principal-frame adaptation for the existing free-body and contact APIs.
 pub mod principal;
+/// Material-driven buoyancy, displacement and hydrostatic torque.
+pub mod hydrostatic;
 
 /// Source-integrated free expansion with conserved reference material mass.
 pub mod thermal;
