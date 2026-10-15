@@ -9,6 +9,8 @@
 
 /// Live layer-resolved electrical heating through the shared thermal timeline.
 pub mod heating;
+/// Source-pinned expansion and stress on the same layer temperatures.
+pub mod expansion;
 
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};

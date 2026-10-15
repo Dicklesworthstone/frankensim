@@ -12,6 +12,10 @@
 //! closure are not modeled. A strain limit is an applicability assumption, not
 //! an experimentally established yield criterion.
 
+/// Fixed, force-controlled and elastic axial support equations.
+pub mod constraint;
+pub use constraint::AxialConstraint;
+
 use crate::state_point::{IntegratedIsotropicThermalExpansion, MaterialStatePointError};
 use super::{ConcentricElasticSection, invalid};
 
