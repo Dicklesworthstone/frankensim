@@ -10,7 +10,13 @@ description = "Source-bound material and geometry compilation to the existing ri
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+# Keep electrical spatial solvers out of ordinary material-to-dynamics users.
+electrothermal-coupling = ["dep:fs-exec", "dep:fs-lbm"]
+
 [dependencies]
+fs-exec = { path = "../fs-exec", optional = true }
+fs-lbm = { path = "../fs-lbm", optional = true, features = ["enthalpy-coupling"] }
 fs-ga = { path = "../fs-ga" }
 fs-la = { path = "../fs-la" }
 fs-matdb = { path = "../fs-matdb" }

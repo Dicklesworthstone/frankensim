@@ -3,6 +3,9 @@ use super::*;
 use crate::articulated::ResolvedArticulated;
 use crate::thermal::ExpandedArticulated;
 
+#[cfg(feature = "electrothermal-coupling")]
+mod electrical;
+
 /// Complete thermal description for one named mechanical link.
 /// Region keys are local to the link; cell and material IDs are globally unique.
 #[derive(Clone, Debug)]
