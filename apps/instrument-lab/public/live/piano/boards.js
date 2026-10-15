@@ -11,8 +11,9 @@ export const BOARD_SIZES = [128, 96, 64, 48];
 export const boardUrl = (n) => new URL(`./boards/model-d-board-2400-r${n}.bin`, import.meta.url);
 
 // Cost of the same score relative to the embedded 32-coordinate board (V8, measured on the
-// Strandbar part with the Woodbury bridge solve). Only used to pick which larger board is worth
-// fetching and measuring; the choice itself is always a measurement on this device.
+// Strandbar part with the Woodbury bridge solve; the sustained probe at the full cap gives 1.09-1.12,
+// 1.27-1.32, 1.67-1.82, 2.33-2.47). Only used to pick which larger board is worth fetching and at
+// which cap to time it; the choice itself is always a measurement on this device.
 export const RELATIVE_COST = { 32: 1, 48: 1.12, 64: 1.3, 96: 1.75, 128: 2.35 };
 
 // Speed probe on a throwaway engine: twelve keys struck together (the Strandbar part's densest
@@ -68,27 +69,45 @@ export function probeSustained(engine, { beat = 10240, settle = 4096, timed = 12
 
 // Share of the probe's cost that does not shrink with the mode cap (board, radiation, per-block work):
 // cost(cap) / cost(full) = a + (1 - a) cap / full. Measured on the probe in V8: 0.36-0.39 on 32
-// coordinates, 0.44-0.49 on 64; 96 and 128 extrapolated. Only a first guess: the cap is re-measured.
-export const FIXED_COST = { 32: 0.38, 48: 0.42, 64: 0.46, 96: 0.52, 128: 0.58 };
+// coordinates, 0.43-0.50 on 64, 0.48-0.49 on 48, 0.54-0.64 on 96, 0.70-0.73 on 128 (caps 700-1800,
+// medians of 4-6 interleaved rounds). Only a first guess: the cap is re-measured.
+export const FIXED_COST = { 32: 0.38, 48: 0.48, 64: 0.46, 96: 0.58, 128: 0.7 };
 // the mode cap at which a probe measured at `realtime` (cap `from`, cost share `a` fixed) reaches `target`
 export function capFor(realtime, target, full, a, from = full) {
   const share = (realtime / target) * (a + ((1 - a) * from) / full); // cost(cap)/cost(full) wanted
   return Math.floor((full * (share - a)) / (1 - a));
 }
 
+// The lowest starting mode cap at which each fetched board still sounds better than the next smaller
+// board at any cap. Dense player rolls (Giant Steps, Character Select, Bird blues; 20 s each) rendered
+// against 128 coordinates at the full cap 2400, mean |dB| change of 1/3-octave band levels:
+//   128: 0.16-0.20 at cap 1600, 0.26-0.37 at 1200
+//    96: 0.71-0.72 at 2400, 0.76-0.88 at 1200, 0.77-0.92 at 1000, 0.85-1.16 at 800
+//    64: 1.20-1.38 at 2400, 1.23-1.39 at 1200, 1.23-1.37 at 1000, 1.28-1.54 at 800
+//    48: 1.71-1.75 at 2400, 1.73-1.78 at 1000, 1.75-1.88 at 800;   32: 2.15-2.47 at 2400, 2.12-2.42 at 1000
+// At its floor each board beats the next smaller one in every song by 0.34 dB or more (96 at cap 800
+// by only 0.15 on Giant Steps). At these caps the governor can still buy back about 1.2x by lowering
+// the cap to its own floor, although the board-sized work does not shrink with the cap.
+export const MIN_CAP = { 128: 1200, 96: 1000, 64: 1000, 48: 1000 };
+
 // The lanes' choice of board AND mode cap, for `target` headroom on the sustained probe. The board is
-// the audible lever and the cap barely is: against a render at 128 coordinates and the full cap
-// (Giant Steps, Character Select; mean |dB| change of 1/3-octave band levels), 32 coordinates are off
-// by 2.15-2.47 dB at any cap from 1600 up, 48 by 1.71-1.77, 64 by 1.24-1.38 at caps 2400 down to 1200
-// (and 64 at cap 1200 ran faster than 32 at 2400), 96 by 0.71. So a larger board wins while it keeps
-// at least `minShare` of the full cap; otherwise the embedded board, with the cap lowered as far as
-// it needs (not below `floor`; floor >= the full cap keeps the full cap). A lowered cap is measured
-// once more on a fresh engine; if that is still more than 10 % short, it is corrected once from the
-// two points. make(bytes|null, coords, cap?) -> engine with that mode cap (per-key budget in
-// proportion; no cap = the engine's own). `full` defaults to the first engine's maxDynamicModes.
-// Returns {coordinates, bytes, cap, realtime}: realtime = the probe's speed at that cap (measured,
-// or the two-point estimate after a correction).
-export async function chooseQuality({ make, measure = probeSustained, target, full = 0, sizes = BOARD_SIZES, minShare = 0.5, floor = 400, log = () => {} }) {
+// the audible lever and the cap barely is above the floors of MIN_CAP. So the boards are ranked by
+// fidelity (`sizes`, largest first), each planned at the cap the embedded board's probe predicts for
+// it (RELATIVE_COST, FIXED_COST). A board whose predicted cap is below its floor is not fetched; the
+// best one that keeps its floor is fetched and timed once, at that cap, and taken if it reaches
+// `target` (at a lowered cap, within 10 %). If it is short, its cap is corrected once along its cost
+// line (at most a 25 % step, not below its floor) and taken if the estimate is within 10 % of `target`;
+// if a 25 % step is not enough but its own timing still puts the cap at or above its floor, it is timed
+// once more there (as the fit below). The plans follow the measured / predicted speed: after a
+// shortfall the next smaller board is planned, after a faster run than predicted a better board that
+// now keeps its floor is tried too and taken if it passes. At most two boards are fetched (about 0.3 s to build and time 64, 1.2 s 96).
+// Without one, the embedded board, with the cap lowered as far as it needs (not below `floor`; floor >=
+// the full cap keeps the full cap): a lowered cap is measured once more on a fresh engine; if that is
+// still more than 10 % short, it is corrected once from the two points. make(bytes|null, coords, cap?)
+// -> engine with that mode cap (per-key budget in proportion; no cap = the engine's own). `full`
+// defaults to the first engine's maxDynamicModes. Returns {coordinates, bytes, cap, realtime}:
+// realtime = the probe's speed at that cap (measured, or the estimate after a correction).
+export async function chooseQuality({ make, measure = probeSustained, target, full = 0, sizes = BOARD_SIZES, minCap = MIN_CAP, floor = 400, log = () => {} }) {
   const timed = (bytes, coords, cap) => {
     const engine = make(bytes, coords, cap);
     try {
@@ -115,24 +134,61 @@ export async function chooseQuality({ make, measure = probeSustained, target, fu
   };
   const realtime32 = timed(null, 0, full || undefined);
   log(`board 32: ${realtime32.toFixed(2)}x`);
-  let tries = 0;
-  for (const n of sizes) {
-    if (tries >= 2) break;
+  // A board's plan: the cap the probes so far predict for `target` (drift = measured / predicted speed
+  // of the last board timed: load that changed since the first probe, or a first probe that ran before
+  // the wasm was fully optimized), and its floor.
+  let drift = 1;
+  const plan = (n) => {
     const a = FIXED_COST[n] ?? 0.5;
-    // even at minShare of the cap this board would not reach the target: do not fetch it
-    if (realtime32 / (RELATIVE_COST[n] || n / 32) < target * (a + (1 - a) * minShare)) continue;
+    const share = (c) => a + ((1 - a) * c) / full; // cost(cap) / cost(full)
+    const atFull = (drift * realtime32) / (RELATIVE_COST[n] || n / 32);
+    const cap = atFull >= target ? full : Math.min(full, capFor(atFull, target, full, a));
+    return { a, share, atFull, cap, lowest: Math.min(full, Math.max(floor, minCap[n] ?? full / 2)) };
+  };
+  let pick = null, pickAt = sizes.length, tries = 0;
+  const tried = new Set();
+  while (tries < 2) {
+    // the best-sounding board not yet timed that is predicted to keep its floor (and beats the pick)
+    const i = sizes.findIndex((n, k) => k < pickAt && !tried.has(n) && plan(n).cap >= plan(n).lowest);
+    if (i < 0) break;
+    const n = sizes[i];
+    const { a, share, atFull, cap, lowest } = plan(n);
+    tried.add(n);
     tries += 1;
     try {
       const bytes = await fetchBoard(n);
-      const realtime = timed(bytes, n, full);
-      log(`board ${n}: ${realtime.toFixed(2)}x`);
-      if (realtime >= target) return { coordinates: n, bytes, cap: full, realtime };
-      if (capFor(realtime, target, full, a) >= minShare * full) return { coordinates: n, bytes, ...fit(bytes, n, realtime) };
+      const realtime = timed(bytes, n, cap);
+      log(`board ${n}, cap ${cap}: ${realtime.toFixed(2)}x (predicted ${(atFull / share(cap)).toFixed(2)})`);
+      drift *= (realtime * share(cap)) / atFull;
+      if (realtime >= target || (cap < full && realtime >= 0.9 * target)) {
+        // taken; a faster run than predicted may bring a better board within reach (the loop's next pass)
+        pick = { coordinates: n, bytes, cap, realtime };
+        pickAt = i;
+        continue;
+      }
+      const wanted = capFor(realtime, target, full, a, cap); // where this board's own timing puts the cap
+      const lower = Math.max(lowest, Math.ceil(0.75 * cap), Math.min(cap - 1, wanted));
+      const estimate = (realtime * share(cap)) / share(lower);
+      if (lower < cap && estimate >= 0.9 * target) {
+        log(`board ${n}, cap ${lower}: ${estimate.toFixed(2)}x (estimated)`);
+        pick = { coordinates: n, bytes, cap: lower, realtime: estimate };
+        pickAt = i;
+      } else if (wanted >= lowest && wanted < cap) {
+        // further short than a 25 % step covers (a slow moment or a pessimistic first probe): time it
+        // once more where its own timing puts the cap, as the embedded board's fit does
+        const again = timed(bytes, n, wanted);
+        log(`board ${n}, cap ${wanted}: ${again.toFixed(2)}x`);
+        drift *= (again * share(wanted)) / (realtime * share(cap));
+        if (again >= 0.9 * target) {
+          pick = { coordinates: n, bytes, cap: wanted, realtime: again };
+          pickAt = i;
+        }
+      }
     } catch (error) {
       log(`board ${n}: ${error && error.message ? error.message : error}`);
     }
   }
-  return { coordinates: 0, bytes: null, ...fit(null, 0, realtime32) };
+  return pick || { coordinates: 0, bytes: null, ...fit(null, 0, realtime32) };
 }
 
 export async function fetchBoard(n) {

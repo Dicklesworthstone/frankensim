@@ -11,9 +11,11 @@
 //                ./boards/, 1..16 = that many exact low modes. Without it the worker times a
 //                sustained workload (boards.js probeSustained) and picks board AND starting mode
 //                cap together (chooseQuality): the largest board that runs `minRealtime` times
-//                faster than real time at half the cap or more (32 first, then at most two
-//                larger ones), else the embedded board with the cap lowered until it does; 16 only
-//                when even the floor cap is expected below real time. A fixed board gets its cap
+//                faster than real time at a cap no lower than its floor (boards.js MIN_CAP; 32
+//                first, then the best board predicted to keep its floor, timed at the predicted
+//                cap; at most two larger ones), else the embedded board with the cap lowered
+//                until it does; 16 only when even the floor cap is expected below real time.
+//                A fixed board gets its cap
 //                the same way; an explicit maxDynamicModes is kept.
 //       minRealtime  the speed the measurement asks for (default 1.3)
 //       snapshotHz   display snapshots per second of AUDIO (default 0: none). With it, 'ready' also
