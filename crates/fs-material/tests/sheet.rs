@@ -17,7 +17,7 @@ fn entries() -> Vec<(&'static str, f64, Dims)> {
         ("specific_heat_capacity", 1400.0, Dims([2,0,-2,-1,0,0])),
     ]
 }
-fn card(rows: &[(&str,f64,Dims)]) -> MaterialCard {
+fn try_card(rows: &[(&str,f64,Dims)]) -> Result<MaterialCard, fs_matdb::MatDbError> {
     let mut claims = ClaimSet::new();
     for &(name,value,dims) in rows {
         claims.insert_claim(PropertyClaim {
@@ -27,11 +27,12 @@ fn card(rows: &[(&str,f64,Dims)]) -> MaterialCard {
             uncertainty: UncertaintyModel::Unstated, observations:vec![],
             provenance:Provenance {source:"synthetic effective sheet, not a measured fabric".into(),
                 license:"test-only".into(),artifact:None},
-        }).unwrap();
+        })?;
     }
     MaterialCard::assemble(MaterialStateId {chemistry:"synthetic sheet".into(),phase:"solid".into(),
-        process:"characterized construction".into(),revision:1},claims,vec![]).unwrap()
+        process:"characterized construction".into(),revision:1},claims,vec![])
 }
+fn card(rows: &[(&str,f64,Dims)]) -> MaterialCard { try_card(rows).unwrap() }
 fn adopt(rows: &[(&str,f64,Dims)]) -> ResolvedSheet {
     let requirements:Vec<_> = rows.iter().map(|&(key,_,dims)|
         ScalarPropertyRequirement::try_new(key,dims,ScalarAdmissibility::Finite).unwrap()).collect();
@@ -65,9 +66,12 @@ fn missing_sheet_data_never_becomes_bulk_plate_or_default_fabric() {
     let partial=adopt(&rows);
     assert!(partial.membrane().is_ok());assert!(partial.bending().is_err());
     let mut wrong=entries();wrong[2].2=Dims([-1,1,-2,0,0,0]);
-    assert!(adopt(&wrong).membrane().is_err()); // bulk Pa is not N/m
+    // The common source boundary already rejects bulk Pa under this sheet key.
+    assert!(try_card(&wrong).is_err());
     let mut wrong=entries();wrong[6].2=Dims([3,1,-2,0,0,0]);
-    assert!(adopt(&wrong).bending().is_err()); // coupon N m2 is not sheet N m
+    // A consumer also refuses wrong units when a source key has no registered
+    // dimension contract; either boundary must reject, never reinterpret.
+    if try_card(&wrong).is_ok() { assert!(adopt(&wrong).bending().is_err()); }
     for invalid in [0.0,-1.0] {
         let mut wrong=entries();wrong[2].1=invalid;assert!(adopt(&wrong).membrane().is_err());
     }

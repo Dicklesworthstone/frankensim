@@ -59,6 +59,8 @@ pub mod pickup;
 pub mod reed_bore;
 pub mod render;
 pub mod selector;
+/// Independent characterized sheet bending and inertia on the original DKT owner.
+pub mod sheet_plate;
 pub mod speaker;
 pub mod stribeck_friction;
 pub mod string_specimen;

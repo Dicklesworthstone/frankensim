@@ -7,6 +7,9 @@ on:
       - 'crates/fs-material/src/sheet*'
       - 'crates/fs-material/src/sheet/**'
       - 'crates/fs-material/tests/sheet.rs'
+      - 'crates/fs-material/tests/sheet/**'
+      - 'crates/fs-couple/src/sheet_plate.rs'
+      - 'crates/fs-couple/tests/sheet_plate.rs'
       - 'crates/fs-material/src/thermal.rs'
       - 'crates/fs-material/src/section_temperature*'
       - 'crates/fs-material/src/section_temperature/**'
@@ -104,6 +107,9 @@ jobs:
       - name: Source-bound effective sheet constitutive physics
         if: ${{ !cancelled() }}
         run: cargo test -p fs-material --test sheet -- --test-threads=1
+      - name: Independent sheet bending on the actual DKT and modal owners
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test sheet_plate -- --test-threads=1
       - name: Test actual electrical solve, material phase law and composed transport
         shell: bash
         run: |
