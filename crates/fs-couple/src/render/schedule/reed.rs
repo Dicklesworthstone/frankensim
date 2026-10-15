@@ -1,7 +1,8 @@
 //! Authored reed/duct performances over the existing physical and gesture owners.
 //!
 //! The file supplies primitive SI parameters, a static segmented duct, an explicit
-//! dry/humid-air or named-mixture state, and one canonical blowing-pressure track. It does not infer material identity
+//! dry/humid-air or named-mixture default, optional segment gases, and one canonical
+//! blowing-pressure track. It does not infer material identity
 //! or turn a pitch into a medium property. Pressure commands replace the fixture
 //! attack envelope; all retained reed and bore state survives release and resume.
 //! Output retains `ReedBoreVoice`'s bore-pressure plus compact-jet observation,
@@ -40,7 +41,7 @@ pub enum ReedPerformanceError {
     },
     /// Material admission retains its original cause and source line.
     Gas {
-        /// One-based ambient record line.
+        /// One-based ambient or segment record line.
         line: usize,
         /// Original species, composition or state refusal.
         source: fs_material::MaterialError,
@@ -105,6 +106,7 @@ pub struct ReedPerformance {
     info: ReedPerformanceInfo,
     renderer: ScheduledRenderer,
     ambient_gas: GasState,
+    segment_gases: Vec<GasState>,
 }
 impl ReedPerformance {
     /// Decode and admit all records before building or advancing the runtime.
@@ -136,10 +138,7 @@ impl ReedPerformance {
             || samples > u64::from(rate) * 600
         { return Err(bad(r.line, "audio requires a rate in 1..=192000 and at most 600 seconds/28800000 positive samples")); }
         let mut row = r.row("ambient")?;
-        let air = read_gas_state(&mut row.words, None).map_err(|error| match error {
-            GasInputError::Input(what) => bad(row.line, what),
-            GasInputError::Material(source) => ReedPerformanceError::Gas { line: row.line, source },
-        })?;
+        let air = row.gas(None)?;
         row.finish()?;
         let mut row = r.row("reed")?;
         let reed = BeatingReed {
@@ -166,6 +165,7 @@ impl ReedPerformance {
         let count = row.count(MAX_SEGMENTS)?; row.finish()?;
         if count == 0 { return Err(bad(r.line, "at least one axial segment is required")); }
         let mut segments = Vec::with_capacity(count);
+        let mut segment_gases = Vec::with_capacity(count);
         let mut holes = 0;
         for _ in 0..count {
             let mut row = r.next()?;
@@ -189,8 +189,17 @@ impl ReedPerformance {
                 }
                 _ => return Err(bad(r.line, "expected cylinder, cone or hole geometry")),
             };
+            let gas = match row.words.next() {
+                None => air,
+                Some("gas") => row.gas(Some(air.pressure))?,
+                Some(_) => return Err(bad(row.line, "expected an optional gas record after geometry")),
+            };
+            if gas.pressure != air.pressure {
+                return Err(bad(row.line, "regional duct gas must have the ambient static pressure; mean flow is not modeled"));
+            }
             row.finish()?;
             segments.push(segment);
+            segment_gases.push(gas);
         }
         if matches!(segments.first(), Some(Segment::ToneHole { .. }))
             || matches!(segments.last(), Some(Segment::ToneHole { .. }))
@@ -225,14 +234,14 @@ impl ReedPerformance {
             sample_rate_hz: rate, samples, full_scale_pa, segments: count, tone_holes: holes,
             massive_reed: reed.mass_kg > 0.0, gesture_events: track.events.len(), compiled_controls: controls.len(),
         };
-        let voice = ReedBoreVoice::new(&Duct { segments }, &air, reed, termination,
+        let voice = ReedBoreVoice::new_with_segment_gases(&Duct { segments }, &segment_gases, reed, termination,
             PlateBank::default(), listener_m, rate, samples as usize, None)
             .map_err(ReedPerformanceError::Model)?;
         let context = RenderContext::new(vec![RenderVoice::ReedBore(voice)], max_block);
         let renderer = ScheduledRenderer::new(context, controls, max_controls).map_err(ReedPerformanceError::Render)?;
         renderer.validate_sample_rate(rate).map_err(ReedPerformanceError::Render)?;
         renderer.validate_sample_count(samples).map_err(ReedPerformanceError::Render)?;
-        Ok(Self { info, renderer, ambient_gas: air })
+        Ok(Self { info, renderer, ambient_gas: air, segment_gases })
     }
 
     /// Original source facts, unchanged by output-clock conversion.
@@ -241,10 +250,15 @@ impl ReedPerformance {
     /// Read-only access to sample-addressed controls and retained state clocks.
     #[must_use]
     pub const fn renderer(&self) -> &ScheduledRenderer { &self.renderer }
-    /// The immutable resolved gas supplied to the reed, TMM losses, radiation
-    /// termination and compact-jet observation. No air-only absorption is added.
+    /// The immutable default medium. Segments without `gas` inherit this state;
+    /// explicit segment records may override it. No air-only absorption is added.
     #[must_use]
     pub const fn ambient_gas(&self) -> &GasState { &self.ambient_gas }
+    /// Actual gases in authored segment order, including tone-hole records.
+    /// The first drives reed density/impedance and the compact-jet proxy; the
+    /// last drives terminal radiation. These are fixed throughout playback.
+    #[must_use]
+    pub fn segment_gases(&self) -> &[GasState] { &self.segment_gases }
     /// Remaining samples on the mechanical clock.
     #[must_use]
     pub fn remaining_samples(&self) -> u64 { self.info.samples - self.renderer.samples_rendered() }
@@ -300,6 +314,12 @@ impl<'a> Reader<'a> {
     }
 }
 impl<'a> Row<'a> {
+    fn gas(&mut self, pressure: Option<f64>) -> Result<GasState, ReedPerformanceError> {
+        read_gas_state(&mut self.words, pressure).map_err(|error| match error {
+            GasInputError::Input(what) => bad(self.line, what),
+            GasInputError::Material(source) => ReedPerformanceError::Gas { line: self.line, source },
+        })
+    }
     fn word(&mut self) -> Result<&'a str, ReedPerformanceError> {
         self.words.next().ok_or_else(|| bad(self.line, "missing field"))
     }
@@ -329,3 +349,6 @@ impl<'a> Row<'a> {
 
 #[cfg(test)]
 mod gas_tests;
+
+#[cfg(test)]
+mod regional_tests;

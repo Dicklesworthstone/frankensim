@@ -165,6 +165,44 @@ impl ReedBoreVoice {
         line_samples: usize,
         wall: Option<&fs_phs::WallPin>,
     ) -> Result<Self, AcousticRealizeError> {
+        Self::with_line(physics, gas, reed, plates, listener_m, sample_rate_hz, |zc| {
+            characteristic_line(physics, gas, termination, sample_rate_hz, line_samples, zc, wall)
+                .map_err(crate::acoustic_realize::map_drive)
+        })
+    }
+
+    /// Build the same reed mechanics with one fixed gas for each duct record.
+    ///
+    /// The inlet medium supplies the Bernoulli law and existing compact-jet
+    /// proxy; each downstream region supplies its own propagation and losses.
+    /// This is not a calibrated exterior observer or an evolving composition.
+    /// All mechanical initialization and per-sample stepping are shared with
+    /// [`Self::new`]. No uniform trial duct is constructed to admit a regional one.
+    ///
+    /// # Errors
+    /// Original reed/line refusals, incomplete or unequal-pressure gas binding,
+    /// or unsupported cross-region mutual-hole interactions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_segment_gases(
+        physics: &Duct, gases: &[GasState], reed: BeatingReed,
+        termination: Termination, plates: PlateBank, listener_m: f64,
+        sample_rate_hz: u32, line_samples: usize, wall: Option<&fs_phs::WallPin>,
+    ) -> Result<Self, AcousticRealizeError> {
+        let regional = crate::driving_point::regional::RegionalDuct::new(physics, gases)
+            .map_err(|e| crate::acoustic_realize::map_drive(crate::driving_point::DrivingPointError::Duct(e)))?;
+        Self::with_line(physics, regional.inlet_gas(), reed, plates, listener_m, sample_rate_hz, |_| {
+            regional.characteristic_line(termination, sample_rate_hz, line_samples, wall, None)
+                .map_err(crate::acoustic_realize::map_drive)
+        })
+    }
+
+    // One mechanical initial state, lay-contact admission and priming operation
+    // for both physical line providers. Neither provider advances the voice.
+    fn with_line(
+        physics: &Duct, gas: &GasState, reed: BeatingReed, plates: PlateBank,
+        listener_m: f64, sample_rate_hz: u32,
+        build_line: impl FnOnce(f64) -> Result<fs_vfit::discretize::DelayedFilter, AcousticRealizeError>,
+    ) -> Result<Self, AcousticRealizeError> {
         if !crate::reed_bore::reed_parameters_valid(reed) {
             return Err(AcousticRealizeError::InvalidDescription {
                 what: "reed parameters must be physical and finite",
@@ -184,16 +222,7 @@ impl ReedBoreVoice {
             .inlet_radius();
         let area_bore = core::f64::consts::PI * inlet_r * inlet_r;
         let zc = gas.density * gas.sound_speed / area_bore;
-        let mut line = characteristic_line(
-            physics,
-            gas,
-            termination,
-            sample_rate_hz,
-            line_samples,
-            zc,
-            wall,
-        )
-        .map_err(crate::acoustic_realize::map_drive)?;
+        let mut line = build_line(zc)?;
         let lay = if reed.mass_kg > 0.0 {
             let k_lay = 1.0e7 * reed.width_m;
             let (_k, r_damp) = reed_structural(reed);

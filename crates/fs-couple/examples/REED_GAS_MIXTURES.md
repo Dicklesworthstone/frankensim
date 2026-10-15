@@ -54,7 +54,8 @@ Focused native commands, from a bootstrapped repository:
 
 ```bash
 cargo test -p fs-material --lib gas_species::input::tests
-cargo test -p fs-couple --lib render::schedule::reed::gas_tests
+cargo test -p fs-couple --lib render::schedule::reed::
+cargo test -p fs-couple --lib driving_point::regional::
 cargo test -p fs-couple --test reed_gas_mixture
 ```
 
@@ -64,7 +65,51 @@ species on a mass basis, two-mixture ensembles and refusal before file creation.
 These tests do not certify experimental timbre or remove the original TMM,
 finite-history, reed and radiation approximations.
 
-This reed format currently has one fixed gas for its whole duct. The plate-valve
-network supports prescribed regional gases; that capability is not silently
-claimed for this TMM format. Neither route evolves composition during playback,
-solves mean flow/mixing, or implements live gas replacement without state transfer.
+## Different gases along the same duct
+
+An axial or tone-hole record can append `gas` followed by the shared material
+syntax. For example, the complete `reed-regional-mixture.performance` supplies:
+
+```text
+segments 2
+cylinder 0.0015 0.2
+cylinder 0.0015 0.3 gas mixture 293.15 100000 mole 3 N2 0.4 O2 0.2 CO2 0.4
+```
+
+The first segment inherits `ambient`; the second supplies its own mixture.
+Omitted `gas` always inherits ambient, NOT the preceding segment. The alternative
+`gas 303.15 0.5` means moist air at 303.15 K and relative humidity 0.5 at ambient
+pressure. `mass` and `mole` work on segment declarations as on ambient. All
+connected segments must have the same static pressure as ambient: unequal
+pressures would require a mean-flow model, which this renderer does not supply.
+
+```bash
+cargo run --release -p fs-couple --bin music_render -- \
+  wind crates/fs-couple/examples/reed-regional-mixture.performance \
+  /tmp/reed-regional-mixture.wav --block 37
+```
+
+`ReedPerformance::segment_gases()` exposes the actual media in authored order.
+The inlet gas supplies Bernoulli density, the characteristic port and the
+existing compact-jet proxy. Each constant-medium run uses the original
+`fs-duct` cylinder/cone/wall/chimney laws; its downstream load is the following
+run's input impedance. The final gas supplies terminal radiation, and physical
+travel time sums local length/sound-speed contributions. The same FIR realization,
+reed initialization, sample stepper, pressure schedule, PCM encoder and ensemble
+path are retained. No averaging, retuning, gain correction or alternate solver
+is introduced; adjacent identical gases use the original uniform TMM call.
+
+All open/vented holes must lie in one contiguous constant-medium run so that the
+existing mutual-hole corrections remain complete. Open holes across gas-region
+boundaries refuse; their cross-region near-field law is not supplied. A hole's
+assigned gas describes its compact junction and chimney together, not a separate
+exterior gas. Closed holes can lie in different regions. The 64-record cap counts
+holes as well as axial segments. Geometry and radiation-band limits remain active.
+
+These are prescribed, stationary gas regions. Neither wind route evolves
+composition during playback, solves mean flow/mixing or thermal equilibration,
+or replaces a live medium while transferring its stored acoustic state.
+The reed observation remains bore pressure plus a compact-jet proxy, not a
+calibrated exterior microphone. Regional tests cover direct construction,
+uniform bit parity, downstream changes in massive reed motion, local radiation
+admission, and native/decimated wind and ensemble PCM through the actual CLI.

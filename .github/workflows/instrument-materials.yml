@@ -10,6 +10,14 @@ on:
       - 'crates/fs-couple/src/material_assembly*'
       - 'crates/fs-couple/src/material_assembly/**'
       - 'crates/fs-couple/tests/material_valve_assembly.rs'
+      - 'crates/fs-couple/src/driving_point*'
+      - 'crates/fs-couple/src/driving_point/**'
+      - 'crates/fs-couple/src/render.rs'
+      - 'crates/fs-couple/src/render/schedule/reed*'
+      - 'crates/fs-couple/src/render/schedule/reed/**'
+      - 'crates/fs-couple/examples/reed-*.performance'
+      - 'crates/fs-couple/tests/reed_gas_mixture*'
+      - 'crates/fs-couple/tests/reed_gas_mixture/**'
       - 'crates/fs-couple/src/bowed_string.rs'
       - 'crates/fs-couple/src/bowed_string/material.rs'
       - 'crates/fs-couple/src/render/schedule/force/coupled/contact/friction*'
@@ -63,6 +71,15 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Regional TMM gas ports and uniform parity
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --lib driving_point::regional:: -- --test-threads=1
+      - name: Regional and uniform gas reed mechanics
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --lib render::schedule::reed:: -- --test-threads=1
+      - name: Gas reed wind and ensemble CLI PCM
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test reed_gas_mixture -- --test-threads=1
       - name: Uniform and regional material bending loss through coupled sound
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --lib thin_plate:: -- --test-threads=1

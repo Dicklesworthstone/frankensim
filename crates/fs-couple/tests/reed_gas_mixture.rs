@@ -118,3 +118,6 @@ fn unsupported_materials_refuse_before_creating_either_cli_output() {
         assert!(!output.with_extension("provenance.json").exists());
     }
 }
+
+#[path = "reed_gas_mixture/regional.rs"]
+mod regional;
