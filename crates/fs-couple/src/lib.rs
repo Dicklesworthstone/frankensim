@@ -47,6 +47,8 @@ pub mod flue_loop;
 pub mod glottis;
 pub mod iqn_ils;
 pub mod material_assembly;
+/// Material-resolved branch heat and finite charge/flux storage on Kirchhoff circuits.
+pub mod material_circuit;
 pub mod mm_line;
 pub mod modal_acoustic_time;
 pub mod pcm_wav;
