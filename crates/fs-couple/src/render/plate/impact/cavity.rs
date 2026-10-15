@@ -29,6 +29,8 @@ pub mod exchange;
 pub mod neck;
 /// Prepared linear bodies, simultaneous contact and distributed air.
 pub mod prepared;
+/// Distributed air in the existing reciprocal modal/friction network.
+pub mod network;
 
 
 /// Cold-compiled acoustic storage. Interface signs are OUTWARD from the gas,
