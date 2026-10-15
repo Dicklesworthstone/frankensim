@@ -1,6 +1,6 @@
 # Material contact refresh and between-impact thermal feedback
 
-The source-bound contact runtime can now refresh an unloaded contact without
+The source-bound contact runtime can refresh an unloaded contact without
 rebuilding the simulation or resetting motion, mechanical memory, heat or time.
 The optional thermal-feedback path joins the existing owners in this order:
 
@@ -22,6 +22,15 @@ interface, normal-model and Hertz-geometry owners. It does not infer properties
 from material names, replace missing data with a typical material, or duplicate
 a constitutive formula. Every returned `SourcePointContact` owns its original
 source records and admitted operating envelope.
+
+`resolve_at_temperatures([point_a, point_b], interface_point, geometry, envelope)`
+uses each solid's actual temperature for its own modulus, Poisson ratio and yield
+stress. The independently declared interface-law temperature does not replace
+those bulk temperatures. All nonthermal coordinates and axis schemas must match.
+Every bulk property faces its own source domain, and the normal model must admit
+both bulk points and the interface point. A valid interface temperature cannot
+hide an unsupported hot or cold body. The common-temperature limit retains the
+original source identity and numbers; the old common-state binding stays strict.
 
 `ImpactSystem::refresh_unloaded_contacts` and the prepared equivalent accept
 `ContactSourceUpdate` values by existing contact key. Every changed contact must
@@ -55,36 +64,55 @@ constitutive data behind a rolled-back motion/heat step. Callbacks must propose
 rather than mutate outside physical state. Arbitrary callback side effects or
 panics are not transactional.
 
-`resolve_isothermal_contact` supplies a stricter convenience binding. It requires
-the exact original ordered bulk/interface cards, fully solid thermal states,
-the matching caloric-card identities, unchanged nonthermal coordinates and axis
-schemas, and consistent unchanged bulk/caloric densities. Both thermal stores
-must have the same temperature, because the existing isotropic contact binder
-requires a common physical state. Unequal temperatures are rejected, never
-averaged into an invented interface state. General callers may supply another
-physically justified source resolver under its own declared assumptions.
+`resolve_contact_at_temperatures` connects two accepted reservoirs to that source
+resolver. It requires the exact original ordered bulk/interface cards, fully
+solid states, matching caloric-card identities, unchanged nonthermal coordinates
+and axis schemas, and consistent unchanged bulk/caloric densities. Each bulk is
+queried at its OWN reservoir temperature. The final argument is the explicit
+interface-law temperature, supplied by the caller's physical interface trace,
+thermal model or prescribed condition. No arithmetic or effusivity-weighted
+average is selected automatically. This argument selects an interface source
+state; it is not a heat-transfer law or an additional thermal energy store.
+
+`resolve_isothermal_contact` retains the same-temperature convenience API and
+still rejects unequal temperatures. Both helpers share the source, context,
+phase and density checks. Choosing the general helper is an explicit change to
+the physical binding, not a silent relaxation of the original assumption.
 
 ```rust,ignore
-use fs_couple::render::plate::impact::material::heating::feedback::resolve_isothermal_contact;
+use fs_couple::render::plate::impact::material::heating::feedback::resolve_contact_at_temperatures;
 
 // The same cards and source selection used for this contact's initial binding.
-// thermal_network returns the canonical joint thermal proposals, not live mutations.
+// thermal_network returns canonical joint thermal proposals, not live mutations.
 let frame = heated.step_with_material_feedback(
     &forces,
     &gate,
     |contact, stores| {
-        resolve_isothermal_contact(
+        // This scenario explicitly uses side A's trace for the interface law.
+        // Other scenarios should supply their own physically justified trace.
+        let interface_temperature = stores[0].state().temperature_k();
+        resolve_contact_at_temperatures(
             contact, &cards, &reference_point, [&stores[0], &stores[1]],
+            interface_temperature,
         ).map(Some)
     },
     thermal_network,
 )?;
 ```
 
-A repeated-impact regression changes only synthetic heat-capacity data. The
-first impact has the same mechanical response. Its heat changes the accepted
-material temperature; the refreshed source then changes the next impact. The
-same original mechanical and thermal solvers run in both cases.
+The paired callback can use `advance_contact_pair` from
+`fs_conduction::interface::lumped_pair` with `trial.contact_patch_area_m2(key)`;
+see `MATERIAL_CONTACT_EXCHANGE.md`. Both finite temperatures, both contact heat
+sources and the equal/opposite conducted heat remain on the same accepted tick.
+The interface source for thermal resistance must also be explicitly bound to the
+correct partners; the normal-force model does not invent thermal conductance.
+
+Repeated-impact regressions change only synthetic heat-capacity data. The first
+impact has the same mechanical response. Its heat changes the accepted material
+temperatures; the refreshed source then changes the next impact. The asymmetric
+case changes only ONE bulk caloric card and keeps both unequal temperatures,
+rather than replacing the pair with a fictitious mean-temperature material.
+The same original mechanical and thermal solvers run in both cases.
 
 ## Exact boundary of this model
 
@@ -96,14 +124,16 @@ through a compression episode. The caller must establish that within-episode
 thermal changes and the frozen material envelope are acceptable for its problem.
 There is no automatic accuracy estimate or guarantee for this approximation.
 
-Thermal expansion, density-changing geometry, contact plasticity, unequal-body
-temperature laws, evolving adhesion and moving melt are not supplied here. The
-existing reference inertia and thermal geometry are retained. Heat partition,
-thermal lumping and contact geometry remain explicit physical inputs. No
-experimental accuracy, hard-real-time performance or full-project material
-substitutability is claimed.
+Thermal expansion, density-changing geometry, contact plasticity, spatially
+varying contact temperature, evolving adhesion and moving melt are not supplied
+here. Independently uniform body temperatures do not establish the validity of
+an isothermal half-space approximation under local flash heating. The existing
+reference inertia and thermal geometry are retained. Heat partition, thermal
+lumping and contact geometry remain explicit physical inputs. No experimental
+accuracy, hard-real-time performance or full-project material substitutability
+is claimed.
 
-Focused native checks, including the existing contact and heat regressions:
+Focused native checks, including existing contact and heat regressions:
 
 ```
 cargo test -p fs-contact --test source_point -- --test-threads=1

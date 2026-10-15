@@ -67,24 +67,43 @@ impl<'a> HeatedImpactSystem<'a> {
 }
 
 /// Resolve a same-temperature contact from the exact two thermal/material owners.
-///
-/// Both reservoirs must be fully solid and their charts must belong to the
-/// matching ordered bulk cards. Both temperatures must be equal: the existing
-/// isotropic contact binder requires a common physical state, and this adapter
-/// never averages unequal bodies. `reference` supplies every nonthermal source
-/// coordinate and its exact schema; only T is replaced with accepted temperature.
-///
-/// This fixed-geometry/fixed-inertia path refuses changed density and a mismatch
-/// between the caloric density and the bulk-contact density. Thermal expansion,
-/// changed inertial geometry and phase-change mechanics require their own owners.
-/// Source cards and interface identity must match the already bound contact;
-/// changing a material assignment is a separate explicit reconfiguration.
-/// The same reusable source resolver also serves nonthermal generic consumers.
+/// Both temperatures must be equal; this convenience API never averages bodies.
+/// All source, density, phase and context admission is shared with
+/// [`resolve_contact_at_temperatures`]. The common temperature is also the
+/// interface-law temperature, preserving the original isothermal behavior.
 pub fn resolve_isothermal_contact(contact:&MaterialContact,cards:&PointContactMaterialCards<'_>,
     reference:&QueryPoint,stores:[&CaloricReservoir<'_>;2])->Result<SourcePointContact,ImpactError> {
+    if stores[0].state().temperature_k()!=stores[1].state().temperature_k() {
+        return Err(invalid("isothermal contact refresh cannot average different body temperatures"));
+    }
+    resolve_contact_at_temperatures(contact,cards,reference,stores,stores[0].state().temperature_k())
+}
+
+/// Resolve each contact material at its own accepted reservoir temperature.
+///
+/// The ordered stores must belong to the exact original bulk cards and remain
+/// fully solid with unchanged consistent density. `reference` preserves all
+/// nonthermal coordinates and schemas. The explicit `interface_temperature_k`
+/// is used ONLY for the interface-property/model point; it does not replace
+/// either bulk temperature. It may be a declared surface trace, another thermal
+/// owner's interface state, or a prescribed condition. The caller must supply
+/// and justify that choice. No arithmetic/effusivity average is silently chosen.
+///
+/// This returns the same SourcePointContact as the generic material resolver.
+/// Use it inside `step_with_material_feedback` to retain atomic source, motion,
+/// heat and clock acceptance. That runtime refreshes only unloaded contacts and
+/// holds the source throughout compression. This function does not implement
+/// loaded thermoelastic work, thermal expansion, plasticity or moving melt.
+/// Changing card assignments or body inertia is a separate reconfiguration.
+pub fn resolve_contact_at_temperatures(contact:&MaterialContact,cards:&PointContactMaterialCards<'_>,
+    reference:&QueryPoint,stores:[&CaloricReservoir<'_>;2],interface_temperature_k:f64)
+    ->Result<SourcePointContact,ImpactError> {
     let old=contact.source().model().normal_state().elastic();
     let originals=[old.surface_a_state(),old.surface_b_state()];
     let materials=[cards.surface_a,cards.surface_b];
+    if !positive(interface_temperature_k) {
+        return Err(invalid("contact interface temperature must be finite positive kelvin"));
+    }
     if cards.interface.content_hash()!=old.interface().card_identity() {
         return Err(invalid("thermal refresh must retain the original interface card"));
     }
@@ -95,18 +114,22 @@ pub fn resolve_isothermal_contact(contact:&MaterialContact,cards:&PointContactMa
             return Err(invalid("thermal contact requires both original solid material/chart bindings"));
         }
     }
-    if stores[0].state().temperature_k()!=stores[1].state().temperature_k() {
-        return Err(invalid("isothermal contact refresh cannot average different body temperatures"));
+    // The old states may already have distinct temperatures. Compare every
+    // retained coordinate in each role rather than assuming one old bulk point.
+    for original in originals {
+        if reference.axes().len()!=original.resolved().query_point().len()
+            || !reference.axes().contains_key("T")
+            || original.resolved().query_point().iter().any(|(axis,value)|axis!="T"
+                && reference.axes().get(axis).is_none_or(|v|v.to_bits()!=value.to_bits()))
+            || reference.axis_quantities()!=original.resolved().axis_quantities() {
+            return Err(invalid("thermal refresh must retain every nonthermal coordinate and axis schema"));
+        }
     }
-    if reference.axes().len()!=old.state_point().len()
-        || !reference.axes().contains_key("T")
-        || old.state_point().iter().any(|(axis,value)|axis!="T" && reference.axes().get(axis)!=Some(value))
-        || reference.axis_quantities()!=old.surface_a_state().resolved().axis_quantities() {
-        return Err(invalid("thermal refresh must retain every nonthermal coordinate and axis schema"));
-    }
-    let point=reference.clone().with("T",stores[0].state().temperature_k())
-        .map_err(|e|ImpactError::Owner(e.to_string()))?;
-    let source=cards.resolve(&point,contact.source().geometry(),contact.source().envelope())
+    let update=|t|reference.clone().with("T",t).map_err(|e|ImpactError::Owner(e.to_string()));
+    let points=[update(stores[0].state().temperature_k())?,update(stores[1].state().temperature_k())?];
+    let interface_point=update(interface_temperature_k)?;
+    let source=cards.resolve_at_temperatures([&points[0],&points[1]],&interface_point,
+        contact.source().geometry(),contact.source().envelope())
         .map_err(|e|ImpactError::Owner(e.to_string()))?;
     let new=source.model().normal_state().elastic();
     for (i,state) in [new.surface_a_state(),new.surface_b_state()].into_iter().enumerate() {
