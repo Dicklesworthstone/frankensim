@@ -27,6 +27,7 @@ fs-modal = { path = "../fs-modal" }
 fs-nlmodal = { path = "../fs-nlmodal" }
 fs-phs = { path = "../fs-phs" }
 fs-plate = { path = "../fs-plate" }
+fs-ports = { path = "../fs-ports" }
 fs-qty = { path = "../fs-qty" }
 fs-rand = { path = "../fs-rand" }
 fs-scenario = { path = "../fs-scenario" }

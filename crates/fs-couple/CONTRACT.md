@@ -7,9 +7,10 @@ accounting without false passivity.
 
 ## Purpose and layer
 
-Layer L3 (multiphysics coupling). Dependency-light: `fs-qty` supplies the
-canonical six-base `Dims`/power dimension and `fs-iface` supplies neutral field
-function-space roles. No domain solver is a dependency.
+Layer L3 (multiphysics coupling). Domain assembly depends on physical
+solvers. The neutral vocabulary is owned by `fs-ports` and reexported here
+without conversion or duplicate types. That lower boundary depends only on
+`fs-qty` and `fs-iface`; FEEC imports it without depending on domain assembly.
 
 ## Public types and semantics
 

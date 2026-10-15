@@ -7,7 +7,7 @@
 
 #![cfg(feature = "terminal-relative")]
 
-use fs_couple::{
+use fs_ports::{
     CoordinateBinding, PortKind, PortOrientation, PortSchema, PortTimestamp, StableId,
 };
 use fs_feec::terminal_relative::{
