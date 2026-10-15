@@ -41,6 +41,24 @@ fn exact_existing_assembly_and_material_identity_are_preserved() {
     assert!(p.sheets()[0].membrane().is_err()); // no bulk/membrane data needed to use measured D
 }
 #[test]
+fn cloning_retains_native_operators_sources_and_independent_owned_storage() {
+    let original = build(sheet(0.2, 1.0), 0.31);
+    let cloned = original.clone();
+    assert_eq!(cloned.mesh().nodes, original.mesh().nodes);
+    assert_eq!(cloned.mesh().tris, original.mesh().tris);
+    assert_eq!(cloned.sheets(), original.sheets());
+    assert_eq!(cloned.grain_rad(), original.grain_rad());
+    assert_eq!(cloned.reference_mass_kg(), original.reference_mass_kg());
+    assert_eq!(cloned.model().k.val(), original.model().k.val());
+    assert_eq!(cloned.model().m.val(), original.model().m.val());
+    assert_eq!(cloned.model().dof_map, original.model().dof_map);
+    assert_ne!(cloned.mesh().nodes.as_ptr(), original.mesh().nodes.as_ptr());
+    assert_ne!(cloned.sheets().as_ptr(), original.sheets().as_ptr());
+    assert_ne!(cloned.grain_rad().as_ptr(), original.grain_rad().as_ptr());
+    drop(original);
+    assert!((cloned.reference_mass_kg() - 0.0014).abs() < 1e-16);
+}
+#[test]
 fn data_only_density_and_bending_changes_propagate_into_native_modes() {
     let base=build(sheet(0.2,1.0),0.0);let heavy=build(sheet(0.4,1.0),0.0);let stiff=build(sheet(0.2,4.0),0.0);
     assert_eq!(base.model().k.val(),heavy.model().k.val());assert_eq!(base.model().m.val(),stiff.model().m.val());
