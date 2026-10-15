@@ -9,25 +9,29 @@
 
 /// Source-bound gas/body conductivity without copied material coefficients.
 pub mod layers;
+/// State-dependent power on the same material, phase and mechanical step.
+pub mod power;
+mod feedback;
 
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_material::phase::{EquilibriumPhaseState, PhaseStateError,
     UniformEnthalpyStep, UniformEnthalpyStepInput};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 
-/// Whole-step exchange bracket and absolute residual/work limits.
+/// Whole-step source/exchange bracket and absolute residual/work limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HeatExchangeSolve {
-    /// Signed joules into the gas, containing zero. Every queried proposal must
-    /// be supported by BOTH materials and the existing piston volume bracket.
+    /// Signed joules into the gas for an exchange, or into the body for the
+    /// extra source in `powered_thermal_candidate`; the bracket contains zero.
+    /// Every queried proposal must be supported by both materials and motion.
     pub heat_bracket_j: [f64; 2],
-    /// Maximum |Q - dt G(T_body_mid - T_gas_mid)| [J].
+    /// Maximum |Q - dt G(T_body_mid - T_gas_mid)|, or |W - dt P| [J].
     pub source_tolerance_j: f64,
     /// Maximum absolute body and combined energy residual [J].
     pub energy_tolerance_j: f64,
     /// Interior safeguarded secant/bisection trials, in 1..=128. At most two
-    /// extra trials check zero exchange and one bracket endpoint. Each trial
-    /// has the separate, explicit work limits of `PistonSolve`.
+    /// extra trials check zero and one bracket endpoint. Every nested solve
+    /// retains its separate explicit work limits.
     pub maximum_iterations: usize,
 }
 
@@ -49,11 +53,11 @@ pub enum ThermalPistonError<E> {
     Piston(PistonError),
     /// Original enthalpy/phase chart refused a state.
     Thermal(PhaseStateError),
-    /// Caller-owned interface material law refused the midpoint.
+    /// Caller-owned interface or power-source law refused the midpoint.
     Interface(E),
     /// Cancellation before returning an accepted joint candidate.
     Cancelled,
-    /// No sign change in the caller's admitted exchange bracket.
+    /// No sign change in the caller's admitted source/exchange bracket.
     OutsideBracket { lower_residual_j: f64, upper_residual_j: f64 },
     /// Work exhausted or floating-point stagnation without a physical root.
     NotConverged { iterations: usize, residual_j: f64 },
@@ -72,12 +76,12 @@ impl<E: core::fmt::Display> core::fmt::Display for ThermalPistonError<E> {
             Self::Invalid(s) => write!(f, "gas/body thermal coupling: {s}"),
             Self::Piston(e) => write!(f, "gas/body thermal coupling: {e}"),
             Self::Thermal(e) => write!(f, "gas/body thermal material: {e}"),
-            Self::Interface(e) => write!(f, "gas/body thermal interface: {e}"),
+            Self::Interface(e) => write!(f, "gas/body thermal interface/source: {e}"),
             Self::Cancelled => write!(f, "gas/body thermal coupling cancelled"),
             Self::OutsideBracket { lower_residual_j, upper_residual_j } =>
-                write!(f, "heat exchange not bracketed: {lower_residual_j}, {upper_residual_j} J"),
+                write!(f, "thermal feedback not bracketed: {lower_residual_j}, {upper_residual_j} J"),
             Self::NotConverged { iterations, residual_j } =>
-                write!(f, "heat exchange did not converge in {iterations} trials: {residual_j} J"),
+                write!(f, "thermal feedback did not converge in {iterations} trials: {residual_j} J"),
         }
     }
 }
@@ -105,6 +109,8 @@ pub struct ThermalPistonStep {
     pub total_energy_residual_j: f64,
     /// Actual calls to the complete gas/piston and midpoint interface owners.
     pub exchange_trials: usize,
+    /// Gas material proposals summed across ALL exchange trials, not only the last.
+    pub material_trials: usize,
 }
 
 /// Both accepted physical states in one candidate. Neither input is mutated.
@@ -165,11 +171,8 @@ impl GasPiston {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ThermalPistonCandidate<S>, ThermalPistonError<E>> {
         poll(&mut cancelled)?;
-        let [mut lo, mut hi] = exchange.heat_bracket_j;
-        if !lo.is_finite() || !hi.is_finite() || lo >= hi || lo > 0.0 || hi < 0.0
-            || !positive(exchange.source_tolerance_j) || !positive(exchange.energy_tolerance_j)
-            || !(1..=128).contains(&exchange.maximum_iterations)
-            || !positive(body.mass_kg) || !positive(body.volume_m3)
+        feedback::admit(exchange)?;
+        if !positive(body.mass_kg) || !positive(body.volume_m3)
             || !positive(body.surface_area_m2) || !positive(body.duration_s)
             || body.duration_s != input.duration_s || !body.internal_heat_j.is_finite()
             || !input.heat_j.is_finite()
@@ -178,8 +181,8 @@ impl GasPiston {
         if body.curve.state_at_specific_enthalpy(h0)? != body.initial {
             return Err(ThermalPistonError::Invalid("initial thermal state belongs to a different source chart"));
         }
-        let mut evaluate = |q: f64, trials| -> Result<ThermalPistonCandidate<S>, ThermalPistonError<E>> {
-            poll(&mut cancelled)?;
+        let mut material_trials = 0usize;
+        feedback::solve(exchange, |q, trials, cancelled| {
             let body_heat = body.internal_heat_j - q;
             let dh = body_heat / body.mass_kg;
             let h1 = h0 + dh;
@@ -192,8 +195,9 @@ impl GasPiston {
             let thermal_midpoint = body.curve.state_at_specific_enthalpy(hm)?;
             let endpoint = body.curve.state_at_specific_enthalpy(h1)?;
             let mut next = self.clone();
-            let piston = next.step(PistonInput { heat_j: gas_heat, ..input }, controls, &mut cancelled)?;
-            poll(&mut cancelled)?;
+            let piston = next.step(PistonInput { heat_j: gas_heat, ..input }, controls, &mut *cancelled)?;
+            material_trials += piston.material_trials;
+            poll(cancelled)?;
             let sample = resolve(&piston.midpoint, thermal_midpoint).map_err(ThermalPistonError::Interface)?;
             let g = sample.conductance_w_k;
             let delta = thermal_midpoint.temperature_k() - piston.midpoint.state().temperature;
@@ -213,52 +217,16 @@ impl GasPiston {
                 || body_residual.abs() > exchange.energy_tolerance_j
                 || total.abs() > exchange.energy_tolerance_j
             { return Err(ThermalPistonError::Invalid("finite-body and coupled energy balances do not close")); }
-            Ok(ThermalPistonCandidate {
+            Ok((ThermalPistonCandidate {
                 piston: next,
                 thermal: UniformEnthalpyStep { state: endpoint, external_heat_j: -q,
                     energy_residual_tolerance_j: exchange.energy_tolerance_j, report: sample.source },
                 step: ThermalPistonStep { piston, thermal_midpoint, conductance_w_k: g,
                     exchanged_heat_j: q, source_residual_j: residual,
                     thermal_energy_change_j: stored, thermal_energy_residual_j: body_residual,
-                    total_energy_residual_j: total, exchange_trials: trials },
-            })
-        };
-        let first = evaluate(0.0, 1)?;
-        let f0 = first.step.source_residual_j;
-        if f0.abs() <= exchange.source_tolerance_j {
-            drop(evaluate); poll(&mut cancelled)?; return Ok(first);
-        }
-        // Only sample the side of zero indicated by the actual midpoint source.
-        // A non-monotone caller law may have other roots; none is inferred here.
-        let (mut fl, mut fu);
-        let edge = if f0 < 0.0 { lo = 0.0; hi } else { hi = 0.0; lo };
-        let end = evaluate(edge, 2)?;
-        let fe = end.step.source_residual_j;
-        if fe.abs() <= exchange.source_tolerance_j {
-            drop(evaluate); poll(&mut cancelled)?; return Ok(end);
-        }
-        if f0 < 0.0 { fl = f0; fu = fe; } else { fl = fe; fu = f0; }
-        if fl > 0.0 || fu < 0.0 || lo == hi {
-            return Err(ThermalPistonError::OutsideBracket { lower_residual_j: fl, upper_residual_j: fu });
-        }
-        let mut residual = f0;
-        for iteration in 1..=exchange.maximum_iterations {
-            let middle = 0.5*lo+0.5*hi;
-            let fraction = -fl/(fu-fl);
-            let q = if fraction.is_finite() && fraction > 0.1 && fraction < 0.9 {
-                (1.0-fraction)*lo+fraction*hi
-            } else { middle };
-            if q <= lo || q >= hi {
-                return Err(ThermalPistonError::NotConverged { iterations: iteration-1, residual_j: residual });
-            }
-            let candidate = evaluate(q, iteration+2)?;
-            residual = candidate.step.source_residual_j;
-            if residual.abs() <= exchange.source_tolerance_j {
-                drop(evaluate); poll(&mut cancelled)?; return Ok(candidate);
-            }
-            if residual < 0.0 { lo = q; fl = residual; } else { hi = q; fu = residual; }
-        }
-        Err(ThermalPistonError::NotConverged { iterations: exchange.maximum_iterations, residual_j: residual })
+                    total_energy_residual_j: total, exchange_trials: trials, material_trials },
+            }, residual))
+        }, &mut cancelled)
     }
 }
 
