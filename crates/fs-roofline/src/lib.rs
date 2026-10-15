@@ -627,11 +627,11 @@ impl AxisAdmissionSnapshot {
         if self.tier != AxisAdmissionTier::Attested {
             return None;
         }
-        let Some(decision_day) = self.decision_day else {
+        if self.decision_day.is_none() {
             return Some(
                 "attested baseline admission could not establish a decision day".to_string(),
             );
-        };
+        }
         match days_since_epoch_now() {
             Ok(current_day) => self.day_error_at(current_day),
             Err(error) => Some(format!(
