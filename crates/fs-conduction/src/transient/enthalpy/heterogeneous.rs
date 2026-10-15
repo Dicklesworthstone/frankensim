@@ -495,6 +495,32 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         Ok(HeterogeneousEnthalpyRadiationStepLinearization { inner, density })
     }
 
+    pub(crate) fn linearize_accepted_parameters_with_ambient_radiation_target(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        patches: &[crate::AmbientRadiationPatch],
+        accepted: EnthalpyStepSolution,
+        max_feedback_entries: usize,
+        physical_target_j: f64,
+    ) -> Result<HeterogeneousEnthalpyRadiationStepLinearization<'m>, EnthalpyAdjointError> {
+        if !physical_target_j.is_finite() || physical_target_j <= 0.0 {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "positive finite outer radiative/contact residual target required",
+            ));
+        }
+        let inner = self.inner.linearize_accepted_with_ambient_radiation_target(
+            cx, problem, interfaces, old_h, dt_s, config, patches, accepted,
+            max_feedback_entries, Some(physical_target_j),
+        )?;
+        let density = self.bind_reference_density(cx, old_h, inner.primal())?;
+        Ok(HeterogeneousEnthalpyRadiationStepLinearization { inner, density })
+    }
+
     /// Advance closed enclosure exchange with heterogeneous charts and the
     /// same fixed reference masses, contacts and phase conductivity laws.
     #[allow(clippy::too_many_arguments)]
@@ -651,6 +677,29 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
         self.bind_linearization(cx, old_h, inner)
     }
 
+    pub(crate) fn linearize_accepted_with_target(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        accepted: EnthalpyStepSolution,
+        physical_target_j: f64,
+    ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        if !physical_target_j.is_finite() || physical_target_j <= 0.0 {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "positive finite outer enthalpy residual target required",
+            ));
+        }
+        let inner = self.inner.linearize_accepted_with_target(
+            cx, problem, interfaces, old_h, dt_s, config, accepted,
+            Some(physical_target_j),
+        )?;
+        self.bind_linearization(cx, old_h, inner)
+    }
+
     fn bind_linearization(
         &self,
         cx: &Cx<'_>,
@@ -685,6 +734,15 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
 }
 
 impl HeterogeneousEnthalpyStepLinearization<'_> {
+    pub(crate) fn with_contact_temperature_feedback(
+        mut self,
+        cx: &Cx<'_>,
+        contact: &crate::interface::temperature::tangent::ContactTemperatureLinearization,
+    ) -> Result<Self, EnthalpyAdjointError> {
+        self.inner = self.inner.with_contact_temperature_feedback(cx, contact)?;
+        Ok(self)
+    }
+
     /// Attach original convective wall feedback without detaching the bound
     /// reference-density history. Ordering, units and the total nodal-factor
     /// cap are those of [`EnthalpyStepLinearization::with_robin_feedback`].
@@ -750,6 +808,15 @@ impl HeterogeneousEnthalpyStepLinearization<'_> {
 }
 
 impl<'m> HeterogeneousEnthalpyRadiationStepLinearization<'m> {
+    pub(crate) fn with_contact_temperature_feedback(
+        mut self,
+        cx: &Cx<'_>,
+        contact: &crate::interface::temperature::tangent::ContactTemperatureLinearization,
+    ) -> Result<Self, EnthalpyAdjointError> {
+        self.inner = self.inner.with_contact_temperature_feedback(cx, contact)?;
+        Ok(self)
+    }
+
     /// Attach original convection laws to the full radiation/storage tangent.
     /// [`EnthalpyStepLinearization::with_robin_feedback`] defines the matrix
     /// ordering, units and total nodal-factor cap. Radiation parameters and

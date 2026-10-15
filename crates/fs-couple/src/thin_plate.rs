@@ -657,13 +657,14 @@ pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, Acousti
         (lo, hi),
         plate.n_modes,
         plate.damping_ratio,
-        bending_loss.as_ref(),
+        bending_loss.as_ref().map(|loss| loss as &dyn ModalBendingLoss),
     )
 }
 
 /// Mechanical and modal controls for an arbitrary, possibly heterogeneous chart.
-/// Regional materials do not imply a damping law: the scalar ratio here is
-/// authored separately. Thermal transport and nonlinear membranes are absent.
+/// Regional materials do not automatically select a damping law. The scalar
+/// ratio is authored separately, and must be zero when source-bound bending
+/// loss is selected. Thermal transport and nonlinear membranes are absent.
 #[derive(Debug, Clone)]
 pub struct PlateChartRadiation {
     /// Uniform prestress and boundary support, applied to the chart boundary.
@@ -710,7 +711,7 @@ fn harvest_radiators(
     window: (f64, f64),
     n_modes: usize,
     damping_ratio: f64,
-    bending_loss: Option<&PlateBendingLoss>,
+    bending_loss: Option<&dyn ModalBendingLoss>,
 ) -> Result<Vec<CompactBody>, AcousticRealizeError> {
     if n_modes == 0
         || !damping_ratio.is_finite()
@@ -784,26 +785,12 @@ impl PlateBendingLaw {
         let thermal = admitted_thermoelastic(plate)?;
         let mut viscous_time_s = 0.0;
         if let Some(viscous) = plate.kelvin_voigt_bending {
-            let (lo, hi) = viscous.omega_band_rad_s;
-            viscous_time_s = viscous.viscosity_pa_s / plate.e1_pa;
             if !has_isotropic_elasticity(plate) || plate.damping_ratio != 0.0 {
                 return Err(AcousticRealizeError::InvalidDescription {
                     what: "Kelvin-Voigt plate loss requires isotropic elasticity and zero authored damping",
                 });
             }
-            if !viscous.viscosity_pa_s.is_finite()
-                || viscous.viscosity_pa_s < 0.0
-                || !viscous_time_s.is_finite()
-                || (viscous.viscosity_pa_s > 0.0 && viscous_time_s == 0.0)
-                || !lo.is_finite()
-                || !hi.is_finite()
-                || lo < 0.0
-                || hi < lo
-            {
-                return Err(AcousticRealizeError::InvalidDescription {
-                    what: "plate viscosity and angular-frequency applicability must be finite and nonnegative with an ordered band",
-                });
-            }
+            viscous_time_s = material_loss::viscous_time(viscous, plate.e1_pa)?;
         }
         Ok(Self {
             thermal,
@@ -882,7 +869,15 @@ impl PlateBendingLoss {
         };
         Ok(Some(Self { law, bending }))
     }
+}
 
+// Uniform and regional losses share the same certified mode harvesting.
+trait ModalBendingLoss {
+    fn modal_zeta(&self, total: &PlateModel, phi: &[f64], omega: f64)
+        -> Result<f64, AcousticRealizeError>;
+}
+
+impl ModalBendingLoss for PlateBendingLoss {
     fn modal_zeta(
         &self,
         total: &PlateModel,
@@ -1106,6 +1101,7 @@ pub struct ResolvedPlateChart {
     chart: PlateChart,
     regions: Vec<ResolvedPlateRegion>,
     region_for_element: Vec<usize>,
+    bending_viscosity: Option<Vec<IsotropicPlateBendingViscosity>>,
     mass_kg: f64,
     identity: ContentHash,
 }
@@ -1165,11 +1161,16 @@ impl ResolvedPlateChart {
             .ok_or_else(|| plate_assignment_error(Some(name), None, "unknown material region"))?;
         let mut inputs: Vec<_> = self.regions.iter().map(|r| r.input.clone()).collect();
         inputs[i].material = material.clone();
-        compile_plate_material_chart(
+        let replacement = compile_plate_material_chart(
             self.chart.mesh.clone(),
             self.chart.boundary_nodes.clone(),
             inputs,
-        )
+        )?;
+        if self.bending_viscosity.is_some() {
+            replacement.with_kelvin_voigt_bending_loss()
+        } else {
+            Ok(replacement)
+        }
     }
 }
 
@@ -1335,6 +1336,7 @@ pub fn compile_plate_material_chart(
         chart,
         regions,
         region_for_element,
+        bending_viscosity: None,
         mass_kg,
         identity: identity.finalize(),
     })
@@ -1385,47 +1387,7 @@ impl ResolvedPlateSpecimen {
                 "material plate bending viscosity requires isotropic elasticity",
             ));
         }
-        let property = self
-            .material
-            .property(KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY)
-            .ok_or_else(|| refuse("material plate loss needs kelvin_voigt_bending_viscosity"))?;
-        let viscosity_pa_s = plate_property(
-            &self.material,
-            KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
-            DynViscosity::DIMS,
-        )?;
-        let mut band = property
-            .angular_frequency_band_rad_s()
-            .map_err(|_| refuse("material plate viscosity has invalid frequency-axis semantics or bounds"))?
-            .ok_or_else(|| {
-                refuse("material plate viscosity needs an explicit omega band in rad/s or a typed frequency band")
-            })?;
-        for key in [
-            DENSITY_PROPERTY,
-            YOUNG_MODULUS_PROPERTY,
-            POISSON_RATIO_PROPERTY,
-            KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
-        ] {
-            let coefficient = self
-                .material
-                .property(key)
-                .ok_or_else(|| refuse("material plate loss needs density, E, nu and viscosity"))?;
-            if !coefficient.is_constant_at_fixed_temperature() {
-                return Err(refuse(
-                    "Kelvin-Voigt plate coefficients must be validity-wide scalar constants or temperature-only curves at fixed positive absolute T",
-                ));
-            }
-            if let Some((lo, hi)) = coefficient.angular_frequency_band_rad_s().map_err(|_| {
-                refuse("material plate coefficient has invalid frequency-axis semantics or bounds")
-            })? {
-                band = (band.0.max(lo), band.1.min(hi));
-            }
-        }
-        self.plate.kelvin_voigt_bending = Some(IsotropicPlateBendingViscosity {
-            viscosity_pa_s,
-            omega_band_rad_s: band,
-            material_state_identity: Some(self.material.identity()),
-        });
+        self.plate.kelvin_voigt_bending = Some(material_loss::resolve_viscosity(&self.material)?);
         PlateBendingLaw::new(&self.plate)?;
         Ok(self)
     }
@@ -2618,3 +2580,7 @@ mod tests {
         );
     }
 }
+
+// Source-bound regional bending loss uses the same DKT and modal owners.
+mod material_loss;
+pub use material_loss::certified_material_chart_radiators;

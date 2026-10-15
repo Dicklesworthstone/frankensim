@@ -52,6 +52,20 @@ jobs:
           PYCODE
             cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
           fi
+      - name: Test material stored cooling and radiative heat partition
+        shell: bash
+        run: |
+          set -o pipefail
+          git rev-parse HEAD > material-cooling-test.log
+          cargo test -p fs-airflow --test stored_cooling --test stored_radiation 2>&1 | tee -a material-cooling-test.log
+          cargo test -p fs-airflow --example recirculating_cooling 2>&1 | tee -a material-cooling-test.log
+      - name: Retain native material-cooling diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: material-cooling-native-diagnostics
+          path: material-cooling-test.log
+          retention-days: 1
       - name: Test actual hydraulic derivatives and coupled resistance design
         run: |
           cargo test -p fs-airflow --lib graph::sensitivity::

@@ -260,10 +260,10 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
         "{{\"schema\":\"frankensim.electrothermal.transient.result.v1\",\"authority\":\"estimated-numerical\",",
         "\"time_s\":{},\"steps\":{},\"cells\":{:?},\"cell_mass_kg\":{},\"temperature_k\":{},\"potential_v\":{},\"joule_w\":{},",
         "\"total_joule_w\":{},\"electrode_power_w\":{},\"resolved_conductivity_w_m_k\":{},",
-        "\"thermal_solves\":{},\"records\":[{}],\"materials\":[{}],\"source_states\":[{}],\"no_claim\":{}}}\n"),
+        "\"thermal_solves\":{},\"records\":[{}],\"materials\":[{}],\"source_states\":[{}],\"electrical_interfaces\":{},\"no_claim\":{}}}\n"),
         record.time_s, trajectory.records.len(), problem.domain.dims(), values(trajectory.masses.iter().copied()),
         values(last.thermal.temperature.iter().copied()), values(last.electric.potential_v.iter().copied()),
         values(last.electric.joule_w.iter().copied()), last.electric.total_joule_w, last.electric.delivered_w,
         values(trajectory.last.sources.iter().map(|s| s.k)), trajectory.thermal_solves, records, materials,
-        source_states, quote(NO_CLAIM))
+        source_states, super::super::interfaces::render(problem, &trajectory.last.interfaces), quote(NO_CLAIM))
 }

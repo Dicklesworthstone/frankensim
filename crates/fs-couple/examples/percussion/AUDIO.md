@@ -174,11 +174,18 @@ vanish because a filter agrees with those data. The reference fit is evaluated
 outside its checked band by a transient; **above-band transfer error is unknown**.
 The output anti-alias filter does not restrict the input to the 1640 Hz fit band.
 
-The retained mechanical bands are still only 50–1200 Hz for the splash and
-80–500 Hz for each head. Missing high-frequency and in-plane modes, nonlinear
-transfer convergence, fitted-filter above-band behavior, contact-time-step
-convergence and aliasing remain major accuracy gates. A 48 kHz WAV header does
-not turn this basis into a full-band cymbal crash.
+The estimated default splash still requests only 50–1200 Hz, and each default
+head still requests 80–500 Hz. The shell host no longer imposes the former
+32-mode reduction ceiling on supplied cymbal geometry: an explicit profile or
+mesh may retain as many as 192 shell coordinates, provided the complete requested
+window fits the mechanical Nyquist guard and the 131072 facet-mode cold-work
+ceiling. Every eigenmode returned in that window is retained or the build refuses;
+none is silently dropped to meet the budget. This makes multi-kHz nonlinear shell
+experiments possible without fabricating an output shimmer, but it is not a
+convergence result. Mesh resolution, in-plane/high-frequency completeness,
+nonlinear transfer convergence, radiation fitting above its verified band,
+contact-time-step convergence and aliasing remain major accuracy gates. A 48 kHz
+WAV header does not by itself turn any finite basis into a full-band cymbal crash.
 
 Exterior radiation is one-way and linear about the undeformed boundary. No
 radiation mass/damping back-coupling, deformation-updated normals, microphone

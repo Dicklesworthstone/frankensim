@@ -12,12 +12,15 @@
 //! Layer: L3 (FLUX support). Runtime deps: `std`, fs-ad (duals for
 //! energy-derived stresses/tangents), fs-blake3 (typed content identities),
 //! fs-evidence (model cards, Evidence, and V&V artifacts), fs-matdb (immutable
-//! material/model cards), fs-qty, and fs-math.
+//! material/model cards), fs-qty, fs-math, fs-thermal (shared transport),
+//! and fs-thermochem (species thermodynamics).
 
 pub mod calibrate;
 /// Irreversible mixed-mode cohesive interfaces with work and fracture accounting.
 pub mod cohesive;
 pub mod conductor;
+/// Ordered source-backed Ohmic contact resistance, distinct from bulk resistivity.
+pub mod electrical_interface;
 pub mod liquid;
 pub mod liquid_temperature;
 pub mod elastic;
@@ -26,6 +29,8 @@ pub mod fiber;
 pub mod fluid_transport;
 pub mod gas;
 pub mod gas_mixture;
+pub mod gas_species;
+mod gas_state;
 pub mod moist_air;
 pub mod graph;
 /// Contact-temperature history and explicit strength handoff for polymer welding.
@@ -38,8 +43,15 @@ pub mod phase;
 pub mod plastic;
 pub mod porous;
 pub mod section;
+/// Temperature refresh of complete source-bound layered mechanical sections.
+pub mod section_temperature;
+/// Source-bound effective sheet mass, membrane and independent bending response.
+pub mod sheet;
 pub mod state_point;
 pub mod tensor;
+pub mod thermal;
+/// Shared species thermodynamics, acoustic medium and source-backed gas transport.
+pub mod thermochemical_gas;
 /// Bounded temperature-dependent Maxwell history, thermal strain and work balance.
 pub mod thermovisco;
 pub mod visco;

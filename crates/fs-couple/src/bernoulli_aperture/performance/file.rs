@@ -1,13 +1,22 @@
 //! Supplied plate geometry, spatial closure, material memory and pressure phrase.
 //! This is a bounded source adapter over the existing physical owners. Numeric
 //! sections and supplied spectra remain authored data, not identified materials.
+//!
+//! The aperture record accepts an optional fourth field: `single-blade` (the
+//! legacy default) or `symmetric-opposed-pair`. For example,
+//! `aperture 0.0002 0.25 0.1 symmetric-opposed-pair` selects two identical mirrored
+//! blades without changing any solver. Mesh, sections and material history
+//! describe one representative blade; openings and contact clearances remain
+//! TOTAL gaps. Both blades use that same source and equal mirrored histories.
+//! Force records, when present, prescribe TOTAL force equally split between
+//! the blades. Asymmetric specimens/loads are outside this declared subspace.
 mod force;
 use super::force::ApertureForceProgram;
 use super::{AperturePerformance, AperturePerformanceConfig, ApertureObservation, CoupledAperture};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::dynamic::{ApertureState, DynamicAperture};
 use crate::bernoulli_aperture::dynamic::relaxation::{InitialApertureMemory, PlateRelaxationRegion, PlateRelaxationSpec};
-use crate::bernoulli_aperture::plate::{PlateApertureOptions, PlateApertureReduction};
+use crate::bernoulli_aperture::plate::{PlateApertureOptions, PlateApertureReduction, PlateApertureSymmetry};
 use crate::bernoulli_aperture::plate::closure::PlateClosureSpec;
 use crate::bernoulli_aperture::tube::{ApertureTube, UniformTubeSpec};
 use crate::bernoulli_aperture::network::{ApertureNetwork, NetworkNode, TubeNetworkSpec, TubeSection};
@@ -22,6 +31,7 @@ use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateSection
 use fs_scenario::gesture::GestureSchedule;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 mod duct;
+mod gas;
 use duct::DuctInput;
 
 /// Complete source grammar; the pressure suffix uses the existing gesture schema.
@@ -40,6 +50,13 @@ pub enum PlateValveInputError {
     Input { /// One-based header line, or zero for whole-file/gesture admission.
         line: usize, /// Failed admission condition.
         what: &'static str },
+    /// Named gas admission, retaining the material owner and source line.
+    Gas {
+        /// One-based source line.
+        line: usize,
+        /// Original material/phase/composition refusal.
+        source: fs_material::MaterialError,
+    },
     /// Mesh/section owner refusal.
     Geometry(fs_plate::PlateError),
     /// Reduction, coupled physics or material owner refusal.
@@ -51,13 +68,18 @@ impl core::fmt::Display for PlateValveInputError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Input { line, what } => write!(f,"plate-valve input line {line}: {what}"),
+            Self::Gas { line, source } => write!(f,"plate-valve gas line {line}: {source}"),
             Self::Geometry(e) => write!(f,"plate-valve geometry: {e}"),
             Self::Physics(e) => write!(f,"plate-valve physics: {e}"),
             Self::Gesture(e) => write!(f,"plate-valve gesture: {e}"),
         }
     }
 }
-impl std::error::Error for PlateValveInputError {}
+impl std::error::Error for PlateValveInputError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self { Self::Gas { source, .. } => Some(source), _ => None }
+    }
+}
 fn bad(line: usize, what: &'static str) -> PlateValveInputError { PlateValveInputError::Input { line, what } }
 fn checkpoint(gate: &CancelGate) -> Result<(),PlateValveInputError> {
     if gate.is_requested() { return Err(bad(0,"plate-valve input cancelled")); } Ok(())
@@ -74,12 +96,15 @@ pub struct PlateValvePerformanceInfo {
     pub samples: u64,
     /// PCM scale [Pa], not a per-part ensemble gain.
     pub full_scale_pa: f64,
-    /// Actual source-node count.
+    /// Actual source-node count on one representative blade, not duplicated nodes.
     pub nodes: usize,
-    /// Actual source-triangle count.
+    /// Actual source-triangle count on that representative blade.
     pub triangles: usize,
     /// Distinct supplied section definitions, each used by the mesh.
     pub sections: usize,
+    /// Physical moving blades represented by the selected kinematic subspace.
+    /// Two means identical mirrored blades, not independently controlled modes.
+    pub moving_blades: usize,
     /// Positive retained material-memory coordinates.
     pub memory_branches: usize,
     /// Blowing-pressure input assignments compiled on the source clock.
@@ -110,11 +135,14 @@ pub struct PlateValvePerformance {
     renderer: AperturePerformance,
     radiation_loads: Vec<(usize, BaffledRadiationLoad)>,
     viscothermal_losses: Vec<ViscothermalSection>,
+    ambient_gas: GasState,
 }
 impl PlateValvePerformance {
-    /// Parse every record, derive the actual plate, bind its spatial lay and any
-    /// supplied material memory, then compile the pressure phrase. Nothing steps
-    /// during admission. Existing owners keep their physical/solver thresholds.
+    /// Parse every record, derive the actual plate and selected blade symmetry,
+    /// bind its spatial contact and supplied material memory, then compile the
+    /// pressure phrase. Nothing steps during admission. Existing owners keep
+    /// their physical/solver thresholds. Omitting the aperture symmetry token
+    /// preserves the original single-blade construction without a conversion.
     /// Propagating intervals are lossless; an explicit viscothermal selection
     /// places gas-derived series/thermal memories along each selected section.
     /// Other graph loads retain explicit impedances, enclosed cavities, compliant walls
@@ -142,6 +170,12 @@ impl PlateValvePerformance {
         let viscothermal_losses=duct.losses.clone();
         let plate=PlateApertureReduction::from_chart(parsed.chart,parsed.plate,gate)
             .map_err(PlateValveInputError::Physics)?;
+        let plate=match parsed.symmetry {
+            PlateApertureSymmetry::SingleBlade => plate,
+            PlateApertureSymmetry::SymmetricOpposedPair => plate.into_symmetric_opposed_pair()
+                .map_err(PlateValveInputError::Physics)?,
+        };
+        let moving_blades=plate.moving_blade_count();
         if dt*(plate.stiffness_n_m()/plate.mass_kg()).sqrt()>parsed.max_angular_step {
             return Err(bad(0,"retained plate mode exceeds the declared mechanical angular-step allowance"));
         }
@@ -167,16 +201,20 @@ impl PlateValvePerformance {
         let info=PlateValvePerformanceInfo {
             input_hash:hash_domain("org.frankensim.fs-couple.plate-valve-performance.v1",bytes),
             sample_rate_hz:parsed.config.sample_rate_hz,samples:parsed.config.samples,full_scale_pa:parsed.full_scale_pa,
-            nodes:parsed.nodes,triangles:parsed.triangles,sections:parsed.sections,memory_branches,
+            nodes:parsed.nodes,triangles:parsed.triangles,sections:parsed.sections,moving_blades,memory_branches,
             force_ports:renderer.force_ports().len(),force_controls:renderer.pending_force_controls().len(),
             compiled_controls:renderer.pending_controls().len(),represented_tube_length_m:represented,radiation_load,
             duct_nodes,duct_sections,radiation_terminals:radiation_loads.len(),
         };
-        Ok(Self {info,renderer,radiation_loads,viscothermal_losses})
+        Ok(Self {info,renderer,radiation_loads,viscothermal_losses,ambient_gas:parsed.air})
     }
     /// Exact source facts, retained separately from the evolving physical state.
     #[must_use]
     pub const fn info(&self) -> PlateValvePerformanceInfo {self.info}
+    /// Resolved ambient/default material state. Explicit regional states remain
+    /// available on the network; this is not an independent exterior medium.
+    #[must_use]
+    pub const fn ambient_gas(&self) -> &GasState {&self.ambient_gas}
     /// Complete finite renderer with immutable access to the physical specimen.
     #[must_use]
     pub const fn renderer(&self) -> &AperturePerformance {&self.renderer}
@@ -196,7 +234,8 @@ impl PlateValvePerformance {
 
 struct Parsed {
     config:AperturePerformanceConfig,full_scale_pa:f64,air:GasState,duct:DuctInput,
-    observation:ApertureObservation,chart:PlateChart,plate:PlateApertureOptions,initial:ApertureState,
+    observation:ApertureObservation,chart:PlateChart,plate:PlateApertureOptions,
+    symmetry:PlateApertureSymmetry,initial:ApertureState,
     closure:PlateClosureSpec,relaxation:Option<(PlateRelaxationSpec,InitialApertureMemory)>,
     forces:Option<ApertureForceProgram>,
     max_angular_step:f64,schedule:GestureSchedule,nodes:usize,triangles:usize,sections:usize,
@@ -216,8 +255,7 @@ impl Parsed {
             return Err(bad(r.line,"audio requires positive rate <=192000, full scale and at most 600 seconds/28800000 samples"));
         }
         let mut row=r.row("ambient")?;
-        let air=GasState::try_new_moist_air(row.scalar()?,row.scalar()?,row.scalar()?)
-            .map_err(|_|bad(r.line,"ambient outside the shared moist-air domain"))?;row.finish()?;
+        let air=gas::read(&mut row,None)?;row.finish()?;
         let duct=DuctInput::read(&mut r,&air,gate)?;
         let mut row=r.row("observation")?;
         let observation=match row.word()? {
@@ -238,7 +276,12 @@ impl Parsed {
             return Err(bad(r.line,"plate requires an ordered nonnegative frequency window and angular step in (0,1]"));
         }
         let mut row=r.row("aperture")?;
-        let rest_opening_m=row.scalar()?;let max_slit_mode_variation=row.scalar()?;let max_slope=row.scalar()?;row.finish()?;
+        let rest_opening_m=row.scalar()?;let max_slit_mode_variation=row.scalar()?;let max_slope=row.scalar()?;
+        let symmetry=match row.fields.next() {
+            None | Some("single-blade") => PlateApertureSymmetry::SingleBlade,
+            Some("symmetric-opposed-pair") => PlateApertureSymmetry::SymmetricOpposedPair,
+            Some(_) => return Err(bad(r.line,"aperture symmetry must be single-blade or symmetric-opposed-pair")),
+        };row.finish()?;
         let mut row=r.row("initial")?;
         let initial=ApertureState{opening_m:row.scalar()?,opening_velocity_m_s:row.scalar()?};row.finish()?;
         let mut row=r.row("contact")?;
@@ -336,7 +379,7 @@ impl Parsed {
         if r.lines.next().is_some() {return Err(bad(r.line+1,"unexpected trailing geometry record"));}
         let config=AperturePerformanceConfig{sample_rate_hz:rate,samples,max_block,max_compile_work,max_controls};
         let schedule=decode_schedule(gestures)?;
-        Ok(Self{config,full_scale_pa,air,duct,observation,chart,plate,initial,closure,relaxation,forces,max_angular_step,
+        Ok(Self{config,full_scale_pa,air,duct,observation,chart,plate,symmetry,initial,closure,relaxation,forces,max_angular_step,
             schedule,nodes:node_count,triangles:triangle_count,sections:section_count})
     }
 }
@@ -389,5 +432,113 @@ impl<'a> Row<'a> {
     }
     fn finish(mut self)->Result<(),PlateValveInputError> {
         if self.fields.next().is_some() {return Err(bad(self.line,"unexpected extra field"));}Ok(())
+    }
+}
+
+#[cfg(test)]
+mod opposed_performance_tests {
+    use super::*;
+    use crate::pcm_wav::observation::PressureRenderer;
+
+    const INPUT: &str = include_str!("../../../examples/plate-valve.performance");
+    const APERTURE: &str = "aperture 0.0002 0.25 0.1";
+
+    fn selected(selector: &str) -> String {
+        assert_eq!(INPUT.matches(APERTURE).count(), 1);
+        INPUT.replace(APERTURE, &format!("{APERTURE} {selector}"))
+    }
+    fn load(text: &str, block: usize) -> PlateValvePerformance {
+        PlateValvePerformance::from_bytes(text.as_bytes(), block, &CancelGate::new()).unwrap()
+    }
+    fn render(text: &str, block: usize) -> Vec<f64> {
+        let voice = load(text, block);
+        let mut out = vec![0.0; voice.info().samples as usize];
+        let mut renderer = voice.into_renderer();
+        for chunk in out.chunks_mut(block) { renderer.block(chunk).unwrap(); }
+        out
+    }
+    fn same_bits(a: &[f64], b: &[f64]) {
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b) { assert_eq!(x.to_bits(), y.to_bits()); }
+    }
+    fn different_pressure(a: &[f64], b: &[f64]) {
+        assert_eq!(a.len(), b.len());
+        assert!(a.iter().chain(b).all(|v| v.is_finite()));
+        assert!(a.iter().zip(b).any(|(x, y)| (x-y).abs() > 1e-8));
+    }
+
+    #[test]
+    fn single_blade_selector_preserves_legacy_pressure_bits() {
+        let explicit = selected("single-blade");
+        assert_eq!(load(INPUT, 37).info().moving_blades, 1);
+        assert_eq!(load(&explicit, 64).info().moving_blades, 1);
+        same_bits(&render(INPUT, 37), &render(&explicit, 64));
+    }
+
+    #[test]
+    fn opposed_source_selection_changes_loaded_physics_and_preserves_callback_partitioning() {
+        let text = selected("symmetric-opposed-pair");
+        let single = load(INPUT, 37);
+        let pair = load(&text, 113);
+        assert_eq!(pair.info().moving_blades, 2);
+        assert_eq!((pair.info().nodes, pair.info().triangles, pair.info().sections), (21, 24, 1));
+        assert_eq!(pair.info().memory_branches, single.info().memory_branches);
+        let a = single.renderer().system().aperture();
+        let b = pair.renderer().system().aperture();
+        assert_eq!(b.spec().mass_kg, 0.5*a.spec().mass_kg);
+        assert_eq!(b.spec().stiffness_n_m, 0.5*a.spec().stiffness_n_m);
+        assert_eq!(b.spec().aperture.closing_pressure_pa, 0.5*a.spec().aperture.closing_pressure_pa);
+        assert_eq!(b.spec().aperture.rest_opening_m, a.spec().aperture.rest_opening_m);
+        assert_eq!(b.spec().aperture.width_m, a.spec().aperture.width_m);
+        assert_eq!(b.spec().density_kg_m3, a.spec().density_kg_m3);
+        assert_eq!(b.spec().impedance_pa_s_m3, a.spec().impedance_pa_s_m3);
+        assert_eq!(b.state(), a.state());
+        let source = b.plate_reduction().unwrap();
+        assert_eq!(source.symmetry(), PlateApertureSymmetry::SymmetricOpposedPair);
+        assert!(source.material_chart().is_none(), "numeric sections cannot mint material receipts");
+        assert_eq!(source.chart().mesh.nodes, a.plate_reduction().unwrap().chart().mesh.nodes);
+        for (one, two) in a.relaxation().unwrap().branches().iter().zip(b.relaxation().unwrap().branches()) {
+            assert!((two.stiffness/(0.5*one.stiffness)-1.0).abs() < 1e-12);
+            assert_eq!(two.relaxation_time_s, one.relaxation_time_s);
+        }
+        let pressure = render(&text, 37);
+        same_bits(&pressure, &render(&text, 113));
+        different_pressure(&render(INPUT, 37), &pressure);
+    }
+
+    #[test]
+    fn opposed_material_density_and_ambient_pressure_changes_reach_the_same_pressure_renderer() {
+        let text = selected("symmetric-opposed-pair");
+        let heavy = text.replace("0.0003 900 4000000000", "0.0003 1800 4000000000");
+        let thinner_air = text.replace("ambient 293.15 101325 0", "ambient 293.15 90000 0");
+        assert_ne!(heavy, text);
+        assert_ne!(thinner_air, text);
+        let a = load(&text, 37);
+        let b = load(&heavy, 37);
+        let c = load(&thinner_air, 37);
+        let original = a.renderer().system().aperture().spec();
+        let changed_mass = b.renderer().system().aperture().spec();
+        let changed_gas = c.renderer().system().aperture().spec();
+        assert!((changed_mass.mass_kg/original.mass_kg-2.0).abs() < 2e-5);
+        assert_eq!(changed_gas.mass_kg, original.mass_kg);
+        assert!(changed_gas.density_kg_m3 < original.density_kg_m3);
+        assert_eq!(changed_gas.aperture.rest_opening_m, original.aperture.rest_opening_m);
+        let pressure = render(&text, 37);
+        different_pressure(&pressure, &render(&heavy, 37));
+        different_pressure(&pressure, &render(&thinner_air, 37));
+    }
+
+    #[test]
+    fn unsupported_or_repeated_blade_selectors_are_not_silently_downgraded() {
+        for selector in ["independent-pair", "unknown", "2", "single-blade extra",
+            "symmetric-opposed-pair extra", "symmetric-opposed-pair symmetric-opposed-pair"]
+        {
+            assert!(PlateValvePerformance::from_bytes(selected(selector).as_bytes(), 37,
+                &CancelGate::new()).is_err(), "accepted {selector}");
+        }
+        let gate = CancelGate::new();
+        gate.request();
+        assert!(PlateValvePerformance::from_bytes(selected("symmetric-opposed-pair").as_bytes(),
+            37, &gate).is_err());
     }
 }

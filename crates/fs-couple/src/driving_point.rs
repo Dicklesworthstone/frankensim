@@ -3,7 +3,10 @@
 //!
 //! This file is the coupling-layer filling of that nameless port. A
 //! bore, a muffler, an HVAC run, and a pulse tube are the same object.
-use fs_duct::{Duct, DuctError, LossModel, Termination, input_impedance_wall};
+/// Static regional media composed at the existing TMM pressure/flow ports.
+pub mod regional;
+
+use fs_duct::{Duct, DuctError, DuctResponse, LossModel, Termination, input_impedance_wall};
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
@@ -100,6 +103,21 @@ pub fn characteristic_line_dense(
     }
     let dt = 1.0 / f64::from(sample_rate_hz);
     let geo_delay = 2.0 * length / gas.sound_speed / dt;
+    characteristic_line_response(geo_delay, termination, sample_rate_hz, n, zc, n_fft_override,
+        |omega| input_impedance_wall(physics, gas, omega, LossModel::Bessel, termination, wall))
+}
+
+// Both uniform and regional ports use the identical sampling, Fourier sign,
+// finite history and DelayedFilter admission; only the physical response differs.
+fn characteristic_line_response(
+    geo_delay: f64, termination: Termination, sample_rate_hz: u32, n: usize,
+    zc: f64, n_fft_override: Option<usize>,
+    mut response_at: impl FnMut(f64) -> Result<DuctResponse, DuctError>,
+) -> Result<DelayedFilter, DrivingPointError> {
+    if sample_rate_hz == 0 || !zc.is_finite() || zc <= 0.0 {
+        return Err(DrivingPointError::Invalid { what: "positive sample rate and finite positive port impedance required" });
+    }
+    let dt = 1.0 / f64::from(sample_rate_hz);
     if !(geo_delay >= 2.0 && geo_delay < n as f64 - 2.0) {
         return Err(DrivingPointError::Invalid {
             what: "round-trip delay does not fit the realized history",
@@ -129,9 +147,7 @@ pub fn characteristic_line_dense(
     };
     for k in 1..=n_fft / 2 {
         let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-        let response =
-            input_impedance_wall(physics, gas, omega, LossModel::Bessel, termination, wall)
-                .map_err(DrivingPointError::Duct)?;
+        let response = response_at(omega).map_err(DrivingPointError::Duct)?;
         let rac = reflectance(C64::new(response.impedance.re, response.impedance.im), zc);
         // Acoustic e^{-iωt} → DFT e^{+iωt} so the IR is causal.
         buf[k] = FftC64::new(rac.re, -rac.im);

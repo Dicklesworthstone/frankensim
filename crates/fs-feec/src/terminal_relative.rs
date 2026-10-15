@@ -14,7 +14,7 @@ use fs_blake3::identity::{
     CanonicalEncoder, CanonicalError, CanonicalLimits, CanonicalSchema, ChildSpec, Field,
     FieldSpec, IdentityReceipt, NeverCancel, SemanticId, StrongIdentity, WireType,
 };
-use fs_couple::{
+use fs_ports::{
     ConservationRole, FieldMeasureSide, PortKind, PortOrientation, PortSchema, PortValueShape,
     PowerPairing, StableId,
 };

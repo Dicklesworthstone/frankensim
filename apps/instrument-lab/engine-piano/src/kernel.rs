@@ -1588,6 +1588,8 @@ pub struct Counters {
 
 pub struct LivePiano {
     cfg: Config,
+    /// Exact admitted acoustic medium used by the Rayleigh receiver.
+    acoustic_gas: fs_material::gas::GasState,
     r: usize,
     dt: f64,
     courses: Vec<Course>,
@@ -1735,8 +1737,66 @@ impl Clone for LivePiano {
 
 const SHAPE_STATIONS: usize = 48;
 
+fn validate_acoustic_gas(gas: &fs_material::gas::GasState) -> Result<(), String> {
+    let values = [
+        gas.temperature,
+        gas.pressure,
+        gas.density,
+        gas.sound_speed,
+        gas.dynamic_viscosity,
+        gas.thermal_conductivity,
+        gas.specific_gas_constant,
+        gas.specific_heat_cp,
+        gas.prandtl,
+        gas.characteristic_impedance,
+    ];
+    if values.iter().any(|v| !v.is_finite() || *v <= 0.0)
+        || !gas.gamma.is_finite()
+        || gas.gamma <= 1.0
+        || !gas.water_mole_fraction.is_finite()
+        || !(0.0..=1.0).contains(&gas.water_mole_fraction)
+    {
+        return Err("live piano acoustic gas must be a finite positive admitted GasState".into());
+    }
+    let z = gas.density * gas.sound_speed;
+    let pr = gas.dynamic_viscosity * gas.specific_heat_cp / gas.thermal_conductivity;
+    if !z.is_finite()
+        || !pr.is_finite()
+        || (z - gas.characteristic_impedance).abs()
+            > 32.0 * f64::EPSILON * z.abs().max(gas.characteristic_impedance.abs()).max(1.0)
+        || (pr - gas.prandtl).abs()
+            > 64.0 * f64::EPSILON * pr.abs().max(gas.prandtl.abs()).max(1.0)
+    {
+        return Err("live piano acoustic gas has incoherent derived impedance or Prandtl number".into());
+    }
+    Ok(())
+}
+
 impl LivePiano {
+    /// Build with the historical declared room-air convenience medium.
     pub fn new(desc: &Description, cfg: Config) -> Result<Self, String> {
+        let gas = fs_material::gas::GasState::try_new(
+            &fs_material::gas::GasSpec::dry_air_ussa1976(),
+            293.15,
+            101_325.0,
+        )
+        .map_err(|e| e.to_string())?;
+        Self::new_with_gas(desc, cfg, gas)
+    }
+
+    /// Build the identical mechanical piano with an explicitly supplied gas.
+    ///
+    /// The gas affects only the shared Rayleigh half-space receiver in this
+    /// reduced engine: source density sets pressure gain and sound speed sets
+    /// propagation delay. String/board/hammer mechanics remain unchanged.
+    /// This is the data-only ingress for source-resolved or mixed gases; no
+    /// chemistry name or dry-air preset is inferred on this path.
+    pub fn new_with_gas(
+        desc: &Description,
+        cfg: Config,
+        gas: fs_material::gas::GasState,
+    ) -> Result<Self, String> {
+        validate_acoustic_gas(&gas)?;
         let rate = cfg.sample_rate;
         if !(8_000..=192_000).contains(&rate) {
             return Err("sample rate must lie in 8..192 kHz".into());
@@ -1938,9 +1998,8 @@ impl LivePiano {
         }
         // The library's time-domain Rayleigh half-space receiver, fed with the
         // static-basis board velocities; the FE surface shapes are projected
-        // into that same basis once, here.
-        let gas = fs_material::gas::GasState::try_new(&fs_material::gas::GasSpec::dry_air_ussa1976(), 293.15, 101_325.0)
-            .map_err(|e| e.to_string())?;
+        // into that same basis once, here. The acoustic medium is caller-owned
+        // on new_with_gas and never reconstructed from a material name.
         let surface: Vec<SurfaceSample> = desc
             .surface
             .iter()
@@ -1956,6 +2015,7 @@ impl LivePiano {
         let surface_shapes: Vec<f32> = desc.surface.iter().flat_map(|p| p.mode_shape.iter().map(|x| *x as f32)).collect();
         let n_courses = courses.len();
         let mut piano = Self {
+            acoustic_gas: gas,
             r,
             dt,
             courses,
@@ -3239,6 +3299,13 @@ impl LivePiano {
     // Observation (display only; never feeds back into the mechanics).
     // ------------------------------------------------------------------
 
+    /// Exact acoustic gas used by the receiver. This is retained separately
+    /// from mechanical material data so callers can audit medium substitutions.
+    #[must_use]
+    pub const fn acoustic_gas(&self) -> fs_material::gas::GasState {
+        self.acoustic_gas
+    }
+
     /// Physical bare-board (FE) modal displacements, mass-normalized.
     pub fn board_coordinates(&self, out: &mut [f64]) {
         let mut st = vec![0.0; self.r];
@@ -3345,5 +3412,44 @@ impl LivePiano {
         let speaking = key.segs.iter().filter(|&&s| !self.segs[s].duplex).count();
         let duplex = key.segs.len() - speaking;
         Some((n, d, speaking * n + if self.cfg.duplex { duplex * d } else { 0 }))
+    }
+}
+
+
+#[cfg(test)]
+mod acoustic_medium_tests {
+    use super::*;
+
+    fn helium_like() -> fs_material::gas::GasState {
+        fs_material::gas::GasState::try_new(
+            &fs_material::gas::GasSpec {
+                molar_mass: 4.002_602e-3,
+                gamma: 5.0 / 3.0,
+                sutherland_beta: 1.05e-6,
+                sutherland_s: 79.4,
+                conductivity: fs_material::gas::ConductivityModel::Eucken,
+            },
+            293.15,
+            101_325.0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn arbitrary_admitted_gas_passes_without_dry_air_replacement() {
+        let gas = helium_like();
+        validate_acoustic_gas(&gas).unwrap();
+        assert!(gas.sound_speed > 900.0);
+        assert!(gas.density < 0.3);
+    }
+
+    #[test]
+    fn independently_mutated_derived_gas_fields_refuse() {
+        let mut gas = helium_like();
+        gas.characteristic_impedance *= 1.1;
+        assert!(validate_acoustic_gas(&gas).is_err());
+        let mut gas = helium_like();
+        gas.prandtl = f64::NAN;
+        assert!(validate_acoustic_gas(&gas).is_err());
     }
 }

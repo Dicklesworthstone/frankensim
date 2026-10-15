@@ -24,9 +24,9 @@ pub struct Spec {
 }
 fn scalars<const N: usize>(row: &[&str]) -> Result<[f64; N], Error> {
     if row.len() != N { return Err("wrong number of physical values".into()); }
-    let mut out = [0.0; N];
+    let mut out = [0.0_f64; N];
     for (out, text) in out.iter_mut().zip(row) {
-        *out = text.parse()?;
+        *out = text.parse::<f64>()?;
         if !out.is_finite() { return Err("all physical values must be finite".into()); }
     }
     Ok(out)
@@ -151,5 +151,42 @@ impl Spec {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod scalar_tests {
+    use super::{scalars, Spec};
+
+    #[test]
+    fn physical_scalars_keep_double_precision_and_signed_values() {
+        let values = scalars::<4>(&["1e-300", "1e300", "-2.5", "-0.0"]).unwrap();
+        assert_eq!(values, [1e-300_f64, 1e300_f64, -2.5, -0.0]);
+        assert!(values[3].is_sign_negative());
+        assert_eq!(scalars::<0>(&[]).unwrap(), []);
+    }
+
+    #[test]
+    fn nonfinite_malformed_and_wrong_width_scalars_refuse() {
+        for text in ["NaN", "inf", "-inf", "1e999", "", "not-a-number"] {
+            assert!(scalars::<1>(&[text]).is_err(), "accepted {text}");
+        }
+        assert!(scalars::<2>(&["1"]).is_err());
+        assert!(scalars::<1>(&["1", "2"]).is_err());
+    }
+
+    #[test]
+    fn full_instrument_card_rejects_nonfinite_material_and_geometry() {
+        let card = include_str!("illustrative-parabolic.fsk");
+        let baseline = Spec::read(card).unwrap();
+        assert_eq!(baseline.head.radius_m, 0.3302);
+        for changed in [
+            card.replace("air,1.2,343,0", "air,NaN,343,0"),
+            card.replace("station,0,0", "station,inf,0"),
+            card.replace("creep,3000,6", "creep,3000,1e999"),
+        ] {
+            assert_ne!(changed, card);
+            assert!(Spec::read(&changed).is_err());
+        }
     }
 }

@@ -10,7 +10,18 @@ description = "Lattice Boltzmann core (fs-lbm): a D2Q9 BGK stream-and-collide so
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+# Keep the shared enthalpy transport opt-in for ordinary LBM consumers.
+enthalpy-coupling = ["dep:fs-conduction"]
+# Optional nonlinear endpoint feedback; the existing explicit path is unchanged.
+implicit-enthalpy-coupling = ["enthalpy-coupling", "dep:fs-solver"]
+
 [dependencies]
+# Preserve the existing import spelling while selecting ONLY the shared
+# timeline owner. Depending on the full FEM crate here creates a runtime
+# cycle through fs-feec -> fs-couple -> fs-aeroac -> fs-lbm, even when optional.
+# fs-conduction itself re-exports these exact types; there is no conversion.
+fs-conduction = { package = "fs-thermal", path = "../fs-thermal", optional = true }
 fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
@@ -19,6 +30,7 @@ fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
 fs-sparse = { path = "../fs-sparse" }
+fs-solver = { path = "../fs-solver", optional = true }
 
 [dev-dependencies]
 fs-convection = { path = "../fs-convection" }
@@ -28,3 +40,7 @@ fs-roofline = { path = "../fs-roofline" }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "joule_phase_change"
+required-features = ["enthalpy-coupling"]

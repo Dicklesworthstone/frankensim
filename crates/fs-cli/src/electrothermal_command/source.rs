@@ -2,13 +2,19 @@
 //! This is CLI orchestration, not a new constitutive law or discretization.
 
 pub(super) mod transient;
+mod fluid;
+pub(super) use fluid::{Fluid, load_fluid};
+pub(super) use fluid::NO_CLAIM as FLUID_NO_CLAIM;
 
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::material_coupling::{
-    MaterialCoupledSolution, MaterialCouplingConfig, solve_material_electrothermal,
+    MaterialCoupledSolution, MaterialCouplingConfig,
+};
+use fs_lbm::conjugate::material_coupling::interfaces::{
+    MaterialContact, solve as solve_material_interfaces,
 };
 use fs_lbm::conjugate::{
-    ChtError, Conductor, ElectricSetup, EnergyConfig, EnergySolution, FlowField,
+    ChtError, ElectricSetup, EnergyConfig, EnergySolution, FlowField,
     FluidProperties, SolidMaterial, ThermalSetup, VoxelDomain,
 };
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
@@ -20,6 +26,8 @@ use fs_material::state_point::{
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
+
+use super::interfaces::{self, InterfaceSource};
 
 pub(super) struct Source {
     pub pack: NormalizedMaterialCardPack,
@@ -112,6 +120,7 @@ pub(super) struct Problem {
     pub domain: VoxelDomain,
     pub material_indices: Vec<usize>,
     pub materials: Vec<Source>,
+    pub electrical_interfaces: Vec<InterfaceSource>,
     pub electric: ElectricSetup,
     pub thermal: ThermalSetup,
     pub initial_temperature: Vec<f64>,
@@ -119,11 +128,13 @@ pub(super) struct Problem {
     pub energy: EnergyConfig,
     pub max_thermal_passes: usize,
     pub conductivity_tolerance: f64,
+    pub fluid: Option<Fluid>,
 }
 
 pub(super) struct ResultField {
     pub coupled: MaterialCoupledSolution,
     pub sources: Vec<CellState>,
+    pub interfaces: Vec<MaterialContact>,
     pub thermal_solves: usize,
     pub conductivity_relative_defect: f64,
 }
@@ -151,45 +162,53 @@ impl Problem {
         storage: Option<&transient::Storage<'_>>, gate: &CancelGate,
     ) -> Result<ResultField, ChtError> {
         poll(gate)?;
+        if storage.is_some() && self.fluid.is_some() {
+            return Err(invalid("fluid.transient", "fluid scenes require a separate advective storage model; the solid-only transient path is not applicable"));
+        }
         let initial = self.states(start, gate)?;
         let mut solids = Vec::with_capacity(self.materials.len());
-        let mut electric = electric.clone();
-        electric.conductors.clear();
         for (m, source) in self.materials.iter().enumerate() {
             let cell = self.material_indices.iter().position(|&i| i == m)
                 .ok_or_else(|| invalid("material_indices", "each declared material must be assigned to a cell"))?;
             solids.push(SolidMaterial::new(source.pack.pack_id(), initial[cell].k));
-            electric.conductors.push(initial[cell].conductor.as_ref()
-                .map(|c| Conductor::new(c.resistivity_ohm_m())));
         }
-        // This command admits all-solid domains. No fluid cell consumes these
-        // reference coefficients; they do not describe invented air properties.
+        // Only all-solid scenes use this unconsumed placeholder. Fluid scenes
+        // use their exact source-resolved reference and prescribed face flux.
         let unused_fluid = FluidProperties {
             density_kg_m3: 1.0, specific_heat_j_kg_k: 1.0,
             conductivity_w_m_k: 1.0, kinematic_viscosity_m2_s: 1.0,
         };
-        let flow = FlowField::quiescent(&self.domain);
+        let quiescent = self.fluid.is_none().then(|| FlowField::quiescent(&self.domain));
+        let (fluid, flow) = match &self.fluid {
+            Some(binding) => (&binding.properties, &binding.flow),
+            None => (&unused_fluid, quiescent.as_ref().expect("all-solid quiescent field")),
+        };
         let mut thermal_solves = 0usize;
-        let coupled = solve_material_electrothermal(
-            &self.domain, &electric, thermal, start, self.coupling,
-            |_, material, temperature| {
-                self.materials[usize::from(material)].at(temperature)?.conductor
-                    .map(|c| c.resistivity_ohm_m())
-                    .ok_or_else(|| invalid("material.electrical_resistivity", "insulator requested as conductor"))
+        // Reuse the source-backed contact coupling owner. It resolves joints
+        // at both current cell temperatures, deposits their heat once, and
+        // retains exactly the contacts used by the final electrical solve.
+        let interface_solution = solve_material_interfaces(
+            &self.domain, electric, thermal, start, self.coupling,
+            |cell, _, temperature| {
+                Ok(self.materials[self.material_indices[cell]].at(temperature)?.conductor
+                    .map(|c| c.resistivity_ohm_m()))
             },
+            |temperature| interfaces::resolve(&self.electrical_interfaces, temperature, gate),
             |heated, temperature| {
-                self.solve_heat(heated, temperature, &solids, &unused_fluid, &flow,
+                self.solve_heat(heated, temperature, &solids, fluid, flow,
                     storage, &mut thermal_solves, gate)
             },
             gate,
         )?;
+        let coupled = interface_solution.coupled;
+        let interfaces = interface_solution.contacts;
         let sources = self.states(&coupled.thermal.temperature, gate)?;
         let conductivity_relative_defect = conductivity_defect(&sources, &coupled.thermal.conductivity);
         if conductivity_relative_defect > self.conductivity_tolerance {
             return Err(invalid("material.conductivity_consistency", "final conductivity differs from the thermal solve beyond tolerance"));
         }
         poll(gate)?;
-        Ok(ResultField { coupled, sources, thermal_solves, conductivity_relative_defect })
+        Ok(ResultField { coupled, sources, interfaces, thermal_solves, conductivity_relative_defect })
     }
 
     #[allow(clippy::too_many_arguments)] // existing physical owners and the accumulated work count

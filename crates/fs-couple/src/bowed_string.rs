@@ -11,10 +11,10 @@
 //!   Unit-mass shapes `phi_k(x) = sin(k pi x / L) / sqrt(mu L / 2)`
 //!   are stepped by the exact-ZOH [`ModalAcousticTimeModel`].
 //! - Bow: constant-velocity driver with EVENT-BASED COULOMB STICTION.
-//!   While stuck, a first-order acceleration/velocity correction approximates
-//!   `v_str = v_bow`, breaking away when that force exceeds `mu_static * F_n`.
-//!   The actual modal step is exact ZOH, so this is not an exact no-slip
-//!   constraint. While slipping the traction follows the regularized kinetic
+//!   The runtime uses the shared exact-ZOH endpoint response for sticking,
+//!   breaking away when the required force exceeds `mu_static * F_n`.
+//!   This is endpoint no-slip, not a continuous-time constraint. While slipping
+//!   the implicit endpoint traction follows the regularized kinetic
 //!   Stribeck curve `mu_k + (mu_s - mu_k) exp(-(v/v0)^2)`. Capture fires
 //!   when the relative velocity changes sign between sub-steps or is
 //!   already inside `stiction_m_s`: a regularized ramp alone can never
@@ -32,9 +32,11 @@
 /// Stateful performance of the same bowed-string physics, with retained contact
 /// memory, physical bow release/re-entry and bounded cancellable callbacks.
 pub mod runtime;
+/// Shared source-bound homogeneous/layered strings and arbitrary acoustic gases.
+pub mod material;
 
 use crate::modal_acoustic_time::{
-    ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeError, ModalAcousticTimeModel,
+    ModalAcousticTimeError, ModalAcousticTimeModel,
 };
 use crate::stribeck_friction::StribeckFriction;
 use crate::thin_plate::CompactBody;
@@ -141,68 +143,10 @@ impl BowedStringCard {
         ambient: fs_scenario::AmbientGas,
         sample_rate_hz: u32,
     ) -> Result<Self, crate::acoustic_realize::AcousticRealizeError> {
-        use crate::acoustic_realize::{
-            AcousticRealizeError, gas_state, mode_zeta, validate_incremental_string,
-        };
         cx.checkpoint()
-            .map_err(|_| AcousticRealizeError::Cancelled)?;
-        let string = specimen.string();
-        validate_incremental_string(&string)?;
-        let law = string
-            .kelvin_voigt_bending
-            .ok_or(AcousticRealizeError::InvalidDescription {
-                what: "material bow card requires a resolved Kelvin-Voigt bending law",
-            })?;
-        if law.material_state_identity != Some(specimen.material().identity()) {
-            return Err(AcousticRealizeError::InvalidDescription {
-                what: "bow bending loss must belong to the resolved material state",
-            });
-        }
-        let gas = gas_state(ambient)?;
-        let mut card = Self {
-            length_m: string.length_m,
-            tension_n: string.tension_n,
-            linear_density_kg_m: string.lin_density_kg_m,
-            bending_stiffness_n_m2: string.bending_stiffness_n_m2,
-            viscous_bending_n_m2_s: law.viscous_stiffness_n_m2_s,
-            mode_count: string.n_modes,
-            zetas: Vec::with_capacity(string.n_modes),
-            sample_rate_hz,
-        };
-        let mut modes = Vec::with_capacity(string.n_modes);
-        for k in 1..=string.n_modes {
-            cx.checkpoint()
-                .map_err(|_| AcousticRealizeError::Cancelled)?;
-            let omega = card.mode_omega_rad_s(k);
-            let zeta = mode_zeta(
-                &string,
-                omega,
-                k as f64 * core::f64::consts::PI / string.length_m,
-                &gas,
-            )?;
-            card.zetas.push(zeta);
-            modes.push(ModalAcousticMode {
-                angular_frequency_rad_s: omega,
-                damping_ratio: zeta,
-                pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
-            });
-        }
-        // Apply the same bandwidth and scalar admission as the actual runtime.
-        ModalAcousticTimeModel::try_new(
-            sample_rate_hz,
-            modes,
-            ModalAcousticTimeBudget::audible_reference(),
-        )
-        .map_err(|_| AcousticRealizeError::InvalidDescription {
-            what: "material bow modes violate time-domain admission",
-        })?;
-        card.validate()
-            .map_err(|_| AcousticRealizeError::InvalidDescription {
-                what: "material bow card is not physically representable",
-            })?;
-        cx.checkpoint()
-            .map_err(|_| AcousticRealizeError::Cancelled)?;
-        Ok(card)
+            .map_err(|_| crate::acoustic_realize::AcousticRealizeError::Cancelled)?;
+        let gas = crate::acoustic_realize::gas_state(ambient)?;
+        Self::from_material_specimen_with_gas(cx, specimen, &gas, sample_rate_hz)
     }
 
     /// Flexible-limit wave speed `sqrt(T/mu)` [m/s].

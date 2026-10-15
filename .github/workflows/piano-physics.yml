@@ -39,6 +39,15 @@ jobs:
       # Keep a failed bootstrap RED. Its known legacy batch-file checkout
       # mismatch must not hide independent native test results after all
       # siblings have been materialized. Missing dependencies still fail Cargo.
+      - name: Test shared material flue propagation and microphone output
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-couple --lib flue_loop::network -- --test-threads=1
+      - name: Test source-independent regional tubes
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-couple --lib bernoulli_aperture::network::regional::source_independent_tests -- --test-threads=1
+      - name: Test retained TMM flue playing loop
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-couple --test flue_gates -- --test-threads=1
       - name: Test consistent soundboard kinetic energy
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-plate --lib edge_cubic -- --test-threads=1

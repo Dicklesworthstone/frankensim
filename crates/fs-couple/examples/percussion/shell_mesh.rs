@@ -2,7 +2,7 @@
 //! original geometry, section, reduction and extrusion owners.
 use super::Error;
 use fs_plate::shell::ShellMesh;
-use fs_plate::shell::survey::{IsotropicMaterial, MeshShell};
+use fs_plate::shell::survey::{IsotropicMaterial, SurveyMaterial, MeshShell};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_BYTES: usize = 8_388_608;
@@ -12,7 +12,7 @@ pub fn parse(text: &str) -> Result<(MeshShell, [f64;2], [f64;2]), Error> {
     if text.len() > MAX_BYTES { return Err("shell mesh exceeds the 8 MiB input limit".into()); }
     let budget = super::super::mesh_budget();
     let mut nodes = BTreeMap::new(); let mut faces = BTreeMap::new();
-    let mut materials = BTreeMap::new();
+    let mut materials = BTreeMap::<usize,SurveyMaterial>::new();
     let mut band = None; let mut strike = None; let mut header = false;
     for (line, raw) in text.lines().enumerate() {
         let data = raw.split('#').next().unwrap_or("").trim();
@@ -42,6 +42,15 @@ pub fn parse(text: &str) -> Result<(MeshShell, [f64;2], [f64;2]), Error> {
                 let key = id(1)?;
                 let m = IsotropicMaterial { young_pa: number(2)?,poisson:number(3)?,density_kg_m3:number(4)? };
                 if materials.insert(key,m).is_some() { return Err(invalid().into()); }
+            }
+            "orthotropic_material" if f.len() == 10 && materials.len() < budget.max_triangles => {
+                let key=id(1)?;
+                let material=SurveyMaterial::Orthotropic {
+                    e1_pa:number(2)?,e2_pa:number(3)?,nu12:number(4)?,g12_pa:number(5)?,
+                    density_kg_m3:number(6)?,
+                    axis1_global:[number(7)?,number(8)?,number(9)?],
+                };
+                if materials.insert(key,material).is_some() {return Err(invalid().into());}
             }
             "node" if f.len() == 6 && nodes.len() < budget.max_nodes => {
                 let key = id(1)?; let p = [number(2)?,number(3)?,number(4)?]; let h = number(5)?;
@@ -82,7 +91,7 @@ pub fn parse(text: &str) -> Result<(MeshShell, [f64;2], [f64;2]), Error> {
             return Err("percussion shell mesh needs upward, nonvertical facets in its declared XY frame".into());
         }
     }
-    let shell = MeshShell::new(mesh,thickness,&assigned,budget)?;
+    let shell = MeshShell::new_with_materials(mesh,thickness,&assigned,budget)?;
     super::super::playing::shell_location(&shell.mesh.nodes,&shell.mesh.tris,strike)?;
     Ok((shell,band,strike))
 }

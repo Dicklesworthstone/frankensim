@@ -11,6 +11,7 @@ mod analytic;
 mod condensed;
 mod dissipation;
 mod relaxation;
+mod backtrack;
 use dissipation::Dissipation;
 use structure::FlowPattern;
 
@@ -86,6 +87,8 @@ pub struct StepWorkspace {
     n: usize,
     m: usize,
     max_iterations: usize,
+    backtracking_halvings: u8,
+    backtracking_work: (usize, usize),
     x: Vec<f64>,
     best: Vec<f64>,
     trial: Vec<f64>,
@@ -161,6 +164,7 @@ impl StepWorkspace {
         }
         Ok(Self {
             n, m, max_iterations: NEWTON_MAX,
+            backtracking_halvings: 0, backtracking_work: (0, 0),
             x: zeroed(n)?, best: zeroed(n)?, trial: zeroed(n)?,
             midpoint: zeroed(n)?, effort: zeroed(n)?, residual: zeroed(n)?,
             nonlinear_loss: zeroed(n)?, nonlinear_effort: zeroed(n)?,
@@ -312,6 +316,7 @@ impl StepWorkspace {
         dissipation: Option<Dissipation<'_>>, mut cancelled: F,
     ) -> Result<PreparedStepRecord, PreparedStepError> {
         self.linear_solves=(0, 0);
+        self.backtracking_work=(0, 0);
         self.jacobian_flow_products=0;
         let mut poll = || {
             if cancelled() { Err(PreparedStepError::Cancelled) } else { Ok(()) }
@@ -415,7 +420,15 @@ impl StepWorkspace {
                     .map_err(|_| PhsError::NewtonStalled { residual: rnorm })?;
             }
             poll()?;
-            for row in 0..n { self.x[row] -= self.delta[row]; }
+            if self.backtracking_halvings == 0 {
+                for row in 0..n { self.x[row] -= self.delta[row]; }
+            } else if !self.backtracked_update(sys, x0, dt, rnorm, NEWTON_TOL*scale,
+                dissipation, &mut poll)? {
+                // Leave the iterate intact, then use the SAME best-iterate / FD
+                // floor admission as any other stalled Newton update. This is
+                // not permission to accept the last rejected line-search trial.
+                stagnant = 3;
+            }
             iterations += 1;
         }
         // Re-evaluate at the accepted candidate: FD probes and best-iterate

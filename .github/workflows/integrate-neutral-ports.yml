@@ -1,0 +1,192 @@
+name: Integrate neutral port owner
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/integrate-neutral-ports.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/frankensim' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Apply the exact reviewed source-boundary extraction
+        shell: bash
+        run: |
+          git config user.name 'ChatGPT'
+          git config user.email 'noreply@openai.com'
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import subprocess
+          root = Path.cwd()
+          name = 'crates/fs-couple/src/lib.rs'
+          raw = (root / name).read_bytes()
+          if b'pub use fs_ports::*;' in raw and (root / 'crates/fs-ports/src/lib.rs').exists():
+              raise SystemExit(0)
+          oid = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+          if oid != 'f49f70cd30146665ca899bf1f18d2d37f662ac72':
+              raise SystemExit('port owner changed; review the extraction again')
+          text = raw.decode()
+          anchor = 'use core::num::NonZeroUsize;\n'
+          if text.count(anchor) != 1:
+              raise SystemExit('port implementation boundary is not unique')
+          head, body = text.split(anchor)
+          body = anchor + body
+          changes = {
+              name: head + '/// Canonical domain-neutral ports, relations, and accounting.\npub use fs_ports::*;\n',
+              'crates/fs-ports/src/lib.rs': (
+                  '//! Domain-neutral ports, thermodynamic streams, and physical accounting.\n'
+                  '//!\n//! This is the shared type owner used by FEEC and domain composition.\n'
+                  '//! It depends only on quantity and interface-space types, never solvers.\n'
+                  '//! A lossless interconnection does not establish whole-system passivity.\n\n'
+                  '#![deny(unsafe_code)]\n#![warn(missing_docs)]\n\n' + body
+              ),
+              'crates/fs-ports/Cargo.toml': '''[package]
+          name = "fs-ports"
+          version.workspace = true
+          edition.workspace = true
+          license-file.workspace = true
+          repository.workspace = true
+          authors.workspace = true
+          description = "Domain-neutral power ports, thermodynamic streams and conservation accounting"
+
+          [package.metadata.frankensim]
+          layer = "L3"
+
+          [dependencies]
+          fs-iface = { path = "../fs-iface" }
+          fs-qty = { path = "../fs-qty" }
+
+          [lints]
+          workspace = true
+          ''',
+              'crates/fs-ports/CONTRACT.md': '''# fs-ports
+
+          The L3 domain-neutral owner of the existing PortSchema v2, StreamPort v1,
+          closed-window accounting, relation admission, and scalar coupling primitives.
+          The implementation is extracted unchanged from fs-couple; that crate reexports
+          these exact types and remains the owner of assembled physical systems.
+
+          Only fs-iface and fs-qty are direct runtime dependencies. Geometry and physics
+          operators may use the common types without importing acoustic, fluid or thermal
+          solvers. No new quantities, wire versions, source authority, material laws,
+          cancellation behavior or whole-system passivity claims are introduced.
+
+          The existing fs-couple/tests/couple.rs battery continues to exercise this owner
+          through its public reexports. fs-couple/tests/port_identity.rs pins type and
+          error identity across both entry points. FEEC's terminal-relative and integral
+          batteries consume the direct fs-ports dependency.
+          ''',
+              'crates/fs-couple/tests/port_identity.rs': '''//! The solver-facing and composition-facing APIs share one nominal owner.
+          use fs_couple::{CoordinateBinding, PortKind, PortOrientation, PortTimestamp};
+
+          #[test]
+          fn electrical_schema_crosses_the_boundary_without_conversion() {
+              let stable = |s| fs_ports::StableId::new(s).unwrap();
+              let schema: fs_ports::PortSchema = PortKind::Electrical.scalar_seed_schema(
+                  stable("terminal/a"),
+                  CoordinateBinding::new(stable("basis/scalar"), stable("frame/local"),
+                      PortOrientation::OutwardFromOwner),
+                  PortTimestamp::new(stable("clock/main"), 0),
+              ).unwrap();
+              let composed: fs_couple::PortSchema = schema.clone();
+              let direct: fs_ports::PortSchema = composed;
+              assert_eq!(direct, schema);
+              assert_eq!(fs_couple::PORT_SCHEMA_VERSION, fs_ports::PORT_SCHEMA_VERSION);
+          }
+
+          #[test]
+          fn errors_and_all_retained_core_types_have_one_identity() {
+              fn same<T: 'static, U: 'static>() {
+                  assert_eq!(std::any::TypeId::of::<T>(), std::any::TypeId::of::<U>());
+              }
+              same::<fs_ports::CoupleError, fs_couple::CoupleError>();
+              same::<fs_ports::StreamPort, fs_couple::StreamPort>();
+              same::<fs_ports::ConservativeJunction, fs_couple::ConservativeJunction>();
+              same::<fs_ports::WindowAuditReport, fs_couple::WindowAuditReport>();
+              let error: fs_couple::CoupleError = fs_ports::StableId::new("").unwrap_err();
+              assert_eq!(error, fs_couple::StableId::new("").unwrap_err());
+          }
+          ''',
+          }
+          for path in list(changes)[1:]:
+              if (root / path).exists():
+                  raise SystemExit(f'refusing to overwrite new path {path}')
+          def edit(path, old, new, count=1):
+              source = changes.get(path, (root / path).read_text())
+              if source.count(old) != count:
+                  raise SystemExit(f'{path}: expected {count} exact integration anchors')
+              changes[path] = source.replace(old, new)
+          edit('Cargo.toml', '    "crates/fs-couple",',
+               '    "crates/fs-couple",\n    "crates/fs-ports",')
+          path = 'crates/fs-couple/Cargo.toml'
+          source = (root / path).read_text()
+          first, rest = source.split('[dev-dependencies]', 1)
+          anchor = 'fs-plate = { path = "../fs-plate" }'
+          if first.count(anchor) != 1:
+              raise SystemExit('couple runtime dependency anchor changed')
+          changes[path] = first.replace(anchor, anchor + '\nfs-ports = { path = "../fs-ports" }') + '[dev-dependencies]' + rest
+          edit('crates/fs-feec/Cargo.toml', 'fs-couple', 'fs-ports', count=3)
+          for path in ['crates/fs-feec/src/terminal_relative.rs',
+                       'crates/fs-feec/tests/terminal_relative.rs',
+                       'crates/fs-feec/tests/integral_topology.rs']:
+              edit(path, 'use fs_couple::', 'use fs_ports::')
+          edit('crates/fs-feec/CONTRACT.md', '`fs-blake3` and `fs-couple` dependencies',
+               '`fs-blake3` and domain-neutral `fs-ports` dependencies')
+          edit('crates/fs-couple/CONTRACT.md',
+               'Layer L3 (multiphysics coupling). Dependency-light: `fs-qty` supplies the\ncanonical six-base `Dims`/power dimension and `fs-iface` supplies neutral field\nfunction-space roles. No domain solver is a dependency.',
+               'Layer L3 (multiphysics coupling). Domain assembly depends on physical\nsolvers. The neutral vocabulary is owned by `fs-ports` and reexported here\nwithout conversion or duplicate types. That lower boundary depends only on\n`fs-qty` and `fs-iface`; FEEC imports it without depending on domain assembly.')
+          for name, content in changes.items():
+              path = root / name
+              if path.is_symlink():
+                  raise SystemExit(f'refusing symlink {name}')
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(content)
+          assert (root / 'crates/fs-ports/src/lib.rs').read_text().endswith(body)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          subprocess.run(['git', 'add', '--', *changes], check=True)
+          PY
+      - name: Execute the original port contract battery in an isolated dependency cone
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, os, re, shutil, tomllib
+          root = Path(os.environ['RUNNER_TEMP']) / 'neutral-ports'
+          root.mkdir()
+          names = ['fs-ports', 'fs-iface', 'fs-qty', 'fs-blake3']
+          for name in names:
+              dst = root / 'crates' / name
+              shutil.copytree(Path('crates') / name, dst)
+              manifest = dst / 'Cargo.toml'
+              text = manifest.read_text()
+              # Only the isolated test copy drops unrelated dev-only dependencies.
+              text = re.sub(r'(?ms)^\[dev-dependencies\]\n.*?(?=^\[|\Z)', '', text)
+              manifest.write_text(text)
+          package = tomllib.loads(Path('Cargo.toml').read_text())['workspace']['package']
+          workspace = '[workspace]\nresolver = "3"\nmembers = ["crates/*"]\n[workspace.package]\n'
+          workspace += ''.join(f'{key} = {json.dumps(value)}\n' for key, value in package.items())
+          workspace += '[workspace.lints.rust]\nunsafe_code = "deny"\nmissing_docs = "warn"\n'
+          (root / 'Cargo.toml').write_text(workspace)
+          shutil.copyfile(package['license-file'], root / package['license-file'])
+          shutil.copyfile('rust-toolchain.toml', root / 'rust-toolchain.toml')
+          suite = Path('crates/fs-couple/tests/couple.rs').read_text()
+          assert suite.count('use fs_couple::') == 1
+          tests = root / 'crates/fs-ports/tests'
+          tests.mkdir(exist_ok=True)
+          (tests / 'original_contract.rs').write_text(suite.replace('use fs_couple::', 'use fs_ports::'))
+          PY
+          cd "$RUNNER_TEMP/neutral-ports"
+          cargo test -p fs-ports --test original_contract
+      - name: Publish the coherent extraction without forcing main
+        shell: bash
+        run: |
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'refactor(physics): share neutral port types without a solver dependency cycle' -m 'Extract the existing schema, stream, relation and accounting implementation byte-for-byte into fs-ports. Keep fs-couple as its public reexport and physical assembly owner. FEEC imports fs-ports directly, breaking the optional FEEC/couple/aeroac/LBM/conduction cycle without disabling any physics feature. Add cross-boundary nominal type regressions. The original port contract battery passed in an isolated four-crate native dependency cone before publication; this is not DSR, whole-workspace, or FEEC-feature validation.'
+          git push origin HEAD:main

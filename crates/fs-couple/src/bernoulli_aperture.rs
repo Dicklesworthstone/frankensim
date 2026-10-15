@@ -16,6 +16,12 @@ pub mod plate;
 /// Stateful, explicitly parameterized moving-slit junction.
 pub mod dynamic;
 pub(crate) mod moving;
+/// Independently moving source blades sharing one fluid/contact interface.
+pub mod paired;
+/// Independent blades coupled to regional tubes and physical outlets.
+pub mod paired_network;
+/// Same-sample material valve feedback from both upstream and downstream ducts.
+pub mod two_sided;
 /// Moving aperture coupled to a geometry-bound passive uniform tube.
 pub mod tube;
 /// Moving aperture coupled to nonuniform connected tube sections and branches.
@@ -32,7 +38,7 @@ pub mod wall;
 pub struct BernoulliAperture {
     /// Rest opening `H` [m].
     pub rest_opening_m: f64,
-    /// Slit width [m].
+    /// Slit width `w` [m].
     pub width_m: f64,
     /// Pressure drop that just closes the slit [Pa].
     pub closing_pressure_pa: f64,

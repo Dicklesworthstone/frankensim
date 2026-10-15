@@ -4,6 +4,8 @@ mod embed;
 mod finite_gap;
 mod law;
 mod response_curve;
+/// Source-bound point contact shared by generic potential and port consumers.
+pub mod source;
 
 pub use embed::*;
 pub use finite_gap::*;

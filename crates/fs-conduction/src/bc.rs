@@ -366,6 +366,37 @@ impl ThermalBoundary {
         Ok(out)
     }
 
+    /// Apply actual radiative secants without inventing convection. A named
+    /// uniform zero-flux row declares no nonradiative exchange on that trace;
+    /// only the radiation owner may turn it into its positive secant Robin row.
+    /// Nonzero prescribed flux, Dirichlet and nodal laws are never overwritten.
+    /// The public convection-only replacement method remains strict.
+    pub(crate) fn with_radiative_robin_replacements(
+        &self,
+        rows: &[(usize, f64, f64)],
+    ) -> Result<ThermalBoundary, ConductionError> {
+        let mut out = self.clone();
+        let mut seen = std::collections::BTreeSet::new();
+        for &(region, coefficient, reference) in rows {
+            let admitted = match self.conditions.get(region) {
+                Some(ThermalBc::Robin {
+                    htc: ScalarField::Uniform(_), t_ref: ScalarField::Uniform(_),
+                }) => true,
+                Some(ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) }) => *flux == 0.0,
+                _ => false,
+            };
+            if !seen.insert(region) || !admitted {
+                return Err(ConductionError::Radiation {
+                    surface: self.names.get(region).cloned().unwrap_or_else(|| "<unknown>".into()),
+                    what: "radiative secant requires a unique uniform Robin or named zero-flux region".into(),
+                    fix: "declare convection or explicit absence of nonradiative heat exchange on each radiation trace".into(),
+                });
+            }
+            out.conditions[region] = ThermalBc::robin(coefficient, reference)?;
+        }
+        Ok(out)
+    }
+
     /// Clone this partition and replace selected faces from its explicit
     /// adiabatic remainder with uniform outward-flux rows.  Radiation uses
     /// this as one frozen outer-fixed-point iterate. Existing physical rows

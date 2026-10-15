@@ -48,6 +48,19 @@ pub struct SubsteppedImpactSystem {
     report: ImpactSubstepReport,
 }
 impl PreparedImpactSystem {
+    /// Opt into the shared solver's bounded residual-decreasing Newton trials.
+    /// Zero preserves the original undamped image. This changes only iteration
+    /// selection, never contact/material laws, accepted state or solver tolerances.
+    pub fn set_backtracking_limit(&mut self, halvings: u8) -> Result<(), ImpactError> {
+        self.workspace.set_backtracking_limit(halvings).map_err(ImpactError::PreparedSolve)
+    }
+
+    /// (Extra residual evaluations, reduced Newton updates) in the latest
+    /// solver attempt. Substepped execution exposes only its last leaf's counts.
+    pub fn newton_backtracking_work(&self) -> (usize, usize) {
+        self.workspace.backtracking_work()
+    }
+
     /// Enable bounded internal refinement without changing motion, history or time.
     pub fn with_substeps(self, config: ImpactSubstepConfig) -> Result<SubsteppedImpactSystem, ImpactError> {
         config.validate(self.inner.config.dt_s)?;
@@ -73,6 +86,12 @@ impl SubsteppedImpactSystem {
     pub fn set_analytic_newton(&mut self, enabled: bool) { self.prepared.set_analytic_newton(enabled); }
     pub fn set_iteration_limit(&mut self, limit: usize) -> Result<(), ImpactError> {
         self.prepared.set_iteration_limit(limit)
+    }
+
+    /// Change only Newton trial selection; accepted motion, material histories,
+    /// the outer clock and the internal refinement budget remain unchanged.
+    pub fn set_backtracking_limit(&mut self, halvings: u8) -> Result<(), ImpactError> {
+        self.prepared.set_backtracking_limit(halvings)
     }
 
     /// Advance exactly one nominal sample, or publish nothing. Only numerical

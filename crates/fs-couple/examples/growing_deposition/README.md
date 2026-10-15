@@ -70,3 +70,20 @@ Cargo and rustc are absent. Independent Python/SciPy equations exercised
 1280 growing mechanical endpoints and the timed thermal/mechanical example
 with time refinement; those checks are not execution of this Rust source or
 calibration against a printed part.
+
+
+## Declared drawing tension and slack
+
+The growing-road driver now carries an explicit `fs_solid::bridge::drawing::Drawing`
+state through every positive-time mechanical update. `Slack` preserves the prior
+zero-axial-resultant path. `TensionN(value)` applies the same positive tensile
+force to each accepted section and the beam-column equilibrium, so tension changes
+both Maxwell stress history and sag. New cells remain stress-free at their exact
+thermal birth time; the drawing load first acts on their next positive-duration
+mechanical solve. Compression is refused rather than repurposed as an unverified
+buckling model.
+
+The executable advances otherwise identical slack and 2 mN synthetic-tension
+roads on the same thermal schedule and checks that their enthalpy/cell histories
+remain identical while the tensioned geometry sags less. The force is an explicit
+input, not inferred from nozzle speed, extrusion pressure, or filament feed.

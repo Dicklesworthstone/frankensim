@@ -1,14 +1,17 @@
 //! `frankensim electrothermal`: canonical material packs -> coupled spatial fields.
-//! All-solid, fixed-geometry isotropic conduction; no invented presets.
+//! Fixed-geometry isotropic conduction with optional prescribed fluid transport.
 
 #[path = "json_read.rs"]
 #[allow(dead_code)]
 mod json;
+mod interfaces;
 mod source;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod transient_tests;
+#[cfg(test)]
+mod interface_tests;
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -34,8 +37,8 @@ const MAX_MATERIALS: usize = 64;
 const MAX_SCENE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PACK_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TOTAL_PACK_BYTES: u64 = 64 * 1024 * 1024;
-const NO_CLAIM: &str = "steady fixed-geometry all-solid isotropic ohmic/thermal conduction; source nominal values, not propagated uncertainty or experimental qualification; no phase change, thermal deformation, fluid flow, electrical contact resistance or AC effects";
-const HELP: &str = "Usage: frankensim [--json] electrothermal <scene.json> [--transient <time.json>]\n\nLoad canonical FSMCDPK material-card packs and solve spatial current, Joule\nheating and temperature together. Both resistivity and conductivity are\nre-resolved at every changed local temperature; unsupported states refuse.\nMaterial substitutions change pack data, not solver code.\n\n--transient additionally requires sourced density and heat capacity over an\nexplicit temperature interval, and advances stored energy with scheduled\nelectrode drives and authored heat sources. Cell mass remains fixed.\n\nScene schema: frankensim.electrothermal.v1. Time request schema:\nfrankensim.electrothermal.transient.v1. See docs/MATERIAL_ELECTROTHERMAL.md\nand docs/MATERIAL_ELECTROTHERMAL_TRANSIENT.md. All lengths are metres,\ntemperatures kelvin, current amperes and power watts. --json includes the\nfields, source identities and coupling/energy defects.\n";
+const NO_CLAIM: &str = "steady fixed-geometry all-solid isotropic ohmic/thermal conduction; source nominal values, not propagated uncertainty or experimental qualification; optional zero-thickness electrical interfaces use explicit heat partition; no phase change, thermal deformation, fluid flow, microscopic contact-area model or AC effects";
+const HELP: &str = "Usage: frankensim [--json] electrothermal <scene.json> [--transient <time.json>]\n\nLoad canonical FSMCDPK material-card packs and solve spatial current, Joule\nheating and temperature together. Both resistivity and conductivity are\nre-resolved at every changed local temperature; unsupported states refuse.\nMaterial substitutions change pack data, not solver code. Optional\nelectrical_interfaces bind canonical FSINTPK ordered interface cards to\nvoxel faces; contact resistance and its partitioned heat enter the same solve.\n\nAn optional fluid object assigns one material to prescribed conservative flow,\nwith sourced frozen reference transport. See docs/MATERIAL_ELECTROTHERMAL_FLUID.md.\n\n--transient additionally requires sourced density and heat capacity over an\nexplicit temperature interval, and advances stored energy with scheduled\nelectrode drives and authored heat sources. Cell mass remains fixed.\n\nScene schema: frankensim.electrothermal.v1. Time request schema:\nfrankensim.electrothermal.transient.v1. See docs/MATERIAL_ELECTROTHERMAL.md,\ndocs/MATERIAL_ELECTROTHERMAL_TRANSIENT.md and docs/ELECTRICAL_CONTACTS.md.\nAll lengths are metres, temperatures kelvin, current amperes and power watts.\n--json includes the fields, source identities and coupling/energy defects.\n";
 
 pub fn run(args: &[OsString], json: bool) -> CommandOutput {
     if args.len() == 1 && matches!(args[0].to_str(), Some("--help" | "-h")) {
@@ -50,6 +53,10 @@ pub fn run(args: &[OsString], json: bool) -> CommandOutput {
         Err(error) => return refusal(exit::INPUT, "electrothermal-input", &error, json),
     };
     if transient {
+        if problem.fluid.is_some() {
+            return refusal(exit::INPUT, "electrothermal-transient-input",
+                "fluid scenes do not support the solid-only transient storage model", json);
+        }
         let request = match source::transient::load(Path::new(&args[2]), problem.domain.cell_count()) {
             Ok(request) => request,
             Err(error) => return refusal(exit::INPUT, "electrothermal-transient-input", &error, json),
@@ -157,11 +164,28 @@ fn quantity(name: &str, dims: Dims) -> Result<Option<QuantitySpec>, String> {
     Ok(Some(QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))))
 }
 
+/// Shared fixed-coordinate parser for bulk and ordered-interface source queries.
+fn state_point(definition: &J) -> Result<QueryPoint, String> {
+    let mut point = QueryPoint::new();
+    for axis in array(definition, "state", 32)? {
+        fields(axis, &["name", "value", "kind"])?;
+        let name = string(axis, "name")?;
+        if point.axes().contains_key(name) { return Err(format!("duplicate state axis {name}")); }
+        let v = parse_qty(string(axis, "value")?).map_err(|e| e.to_string())?;
+        point = match quantity(string(axis, "kind")?, v.dims)? {
+            Some(q) => point.with_quantity(name, q, v.value),
+            None => point.with(name, v.value),
+        }.map_err(|e| e.to_string())?;
+    }
+    Ok(point)
+}
+
 fn load(path: &Path) -> Result<Problem, String> {
     let bytes = read(path, MAX_SCENE_BYTES)?;
     let root = J::parse(std::str::from_utf8(&bytes).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     fields(&root, &["schema", "cells", "cell_size_m", "materials", "material_indices",
-        "initial_temperature_k", "thermal_faces", "power_w", "contacts", "electrodes", "numerics"])?;
+        "initial_temperature_k", "thermal_faces", "power_w", "contacts", "electrodes", "numerics",
+        "fluid", "electrical_interfaces"])?;
     if string(&root, "schema")? != "frankensim.electrothermal.v1" { return Err("unsupported electrothermal schema".into()); }
     let [nx, ny, nz] = triple(required(&root, "cells")?)?;
     let cells = nx.checked_mul(ny).and_then(|n| n.checked_mul(nz))
@@ -182,17 +206,7 @@ fn load(path: &Path) -> Result<Problem, String> {
             J::Bool(value) => *value,
             _ => return Err("conducting must explicitly be true or false".into()),
         };
-        let mut point = QueryPoint::new();
-        for axis in array(definition, "state", 32)? {
-            fields(axis, &["name", "value", "kind"])?;
-            let name = string(axis, "name")?;
-            if point.axes().contains_key(name) { return Err(format!("duplicate state axis {name}")); }
-            let v = parse_qty(string(axis, "value")?).map_err(|e| e.to_string())?;
-            point = match quantity(string(axis, "kind")?, v.dims)? {
-                Some(q) => point.with_quantity(name, q, v.value),
-                None => point.with(name, v.value),
-            }.map_err(|e| e.to_string())?;
-        }
+        let point = state_point(definition)?;
         materials.push(Source::new(pack, point, string(definition, "temperature_axis")?.into(),
             quantity(string(definition, "temperature_kind")?, Temperature::DIMS)?, conducting)
             .map_err(|e| e.to_string())?);
@@ -207,6 +221,10 @@ fn load(path: &Path) -> Result<Problem, String> {
         domain.set(x, y, z, Voxel::Solid(m as u16));
         material_indices.push(m);
     }
+    let fluid = source::load_fluid(&root, &mut domain, &material_indices, &materials)?;
+    let electrical_interfaces = interfaces::load(
+        &root, path, &domain, &materials, &material_indices, &mut total_bytes,
+    )?;
     let initial_value = required(&root, "initial_temperature_k")?;
     let initial_temperature = if let Some(values) = initial_value.as_array() {
         if values.len() != cells { return Err("initial temperature field has wrong length".into()); }
@@ -244,6 +262,9 @@ fn load(path: &Path) -> Result<Problem, String> {
             if a == b || a.max(b) >= materials.len() || !pairs.insert((a.min(b), a.max(b))) {
                 return Err("contact pair must be distinct, declared and unique".into());
             }
+            if fluid.as_ref().is_some_and(|f| f.material_index == a || f.material_index == b) {
+                return Err("solid contact resistance cannot be assigned to the fluid material".into());
+            }
             let resistance = scalar(contact, "resistance_m2_k_w")?;
             if resistance < 0.0 { return Err("contact resistance cannot be negative".into()); }
             thermal.contacts.push(ContactResistance { materials: (a as u16, b as u16), resistance_m2_k_w: resistance });
@@ -277,7 +298,7 @@ fn load(path: &Path) -> Result<Problem, String> {
     if coupling.power_tolerance_w < 0.0 || !(0.0..1.0).contains(&coupling.relative_tolerance)
         || conductivity_tolerance >= 1.0 || energy.tolerance >= 1.0
     { return Err("invalid coupling or solver tolerance".into()); }
-    Ok(Problem { domain, material_indices, materials,
+    Ok(Problem { domain, material_indices, materials, fluid, electrical_interfaces,
         electric: ElectricSetup { conductors: Vec::new(), electrodes }, thermal, initial_temperature,
         coupling, energy, max_thermal_passes: budget(n, "max_thermal_passes", 1000)?, conductivity_tolerance })
 }
@@ -306,12 +327,13 @@ fn refusal(exit_code: u8, code: &str, message: &str, json: bool) -> CommandOutpu
 }
 fn render(problem: &Problem, result: &ResultField, json: bool) -> String {
     let r = &result.coupled;
+    let no_claim = if problem.fluid.is_some() { source::FLUID_NO_CLAIM } else { NO_CLAIM };
     if !json {
         return format!("Electrothermal solve: {} cells, {} coupling passes, {} thermal solves\nPeak temperature: {} K\nJoule power: {} W; electrode power: {} W\nTemperature defect: {} K; Joule-source defect: {} W/cell; conductivity relative defect: {}\n{}\n",
             problem.domain.cell_count(), r.report.passes, result.thermal_solves,
             r.thermal.temperature.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             r.electric.total_joule_w, r.electric.delivered_w, r.report.temperature_change_k,
-            r.report.joule_source_change_w, result.conductivity_relative_defect, NO_CLAIM);
+            r.report.joule_source_change_w, result.conductivity_relative_defect, no_claim);
     }
     let materials = problem.materials.iter().map(|m| format!(
         "{{\"pack\":{},\"pack_identity\":{},\"card_identity\":{}}}",
@@ -334,12 +356,14 @@ fn render(problem: &Problem, result: &ResultField, json: bool) -> String {
         "\"total_joule_w\":{},\"electrode_power_w\":{},\"thermal_balance_residual_w\":{},",
         "\"thermal_balance_relative_residual\":{},\"passes\":{},\"thermal_solves\":{},",
         "\"temperature_defect_k\":{},\"joule_source_defect_w\":{},\"conductivity_relative_defect\":{},",
-        "\"materials\":[{}],\"source_states\":[{}],\"electrodes\":[{}],\"no_claim\":{}}}\n"),
+        "\"materials\":[{}],\"source_states\":[{}],\"electrodes\":[{}],\"fluid_reference\":{},",
+        "\"electrical_interfaces\":{},\"no_claim\":{}}}\n"),
         problem.domain.dims(), problem.domain.dx(), values(r.thermal.temperature.iter().copied()),
         values(r.electric.potential_v.iter().copied()), values(r.electric.joule_w.iter().copied()),
         values(r.thermal.conductivity.iter().map(|k| k[0])), values(result.sources.iter().map(|s| s.k)),
         r.electric.total_joule_w, r.electric.delivered_w, r.thermal.report.balance.residual_w,
         r.thermal.report.balance.relative_residual, r.report.passes, result.thermal_solves,
         r.report.temperature_change_k, r.report.joule_source_change_w, result.conductivity_relative_defect,
-        materials, sources, electrodes, quote(NO_CLAIM))
+        materials, sources, electrodes, problem.fluid.as_ref().map_or_else(|| "null".into(), |f| f.render()),
+        interfaces::render(problem, &result.interfaces), quote(no_claim))
 }

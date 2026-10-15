@@ -7,13 +7,16 @@
 //! cells treated as perfect conductors, one potential each, held at a voltage or
 //! carrying a declared total current. The potential solves the discrete
 //! current balance `sum_f G_f (phi_P - phi_N) = 0` on every conductor cell,
-//! with `G_f = A_f / (rho_P w_P / 2 + rho_N w_N / 2)` between conductor
-//! cells and `A_f / (rho_P w_P / 2)` to an electrode's surface; every other
-//! face (fluid, insulating solids, the domain boundary) carries no current.
-//! Each face dissipates `G_f (phi_P - phi_N)^2`, split between its two
-//! cells in proportion to their half resistances (an electrode's half is
-//! zero), so the Joule heat equals the power the electrodes deliver,
-//! `sum_e V_e I_e` (the discrete Tellegen theorem), to solver precision.
+//! with `G_f = A_f / (rho_P w_P / 2 + rho_N w_N / 2 + R_contact)` between
+//! conductor cells; an electrode's bulk half resistance is zero. Contacts are
+//! optional explicit [`ElectricalContact`] data. Other faces retain the original
+//! perfect-contact rule; unassigned cells and the domain boundary carry no current.
+//! The legacy paths insulate all fluids; [`ElectricSetup::solve_with_cell_resistivity`]
+//! instead lets explicit material data admit either fluid or solid cells without
+//! changing their mechanical occupancy or introducing a second electrical solver.
+//! Each face dissipates `G_f (phi_P - phi_N)^2`. Bulk heat stays in its own
+//! half cells; interface heat follows the declared surface partition. Thus the
+//! returned Joule heat equals electrode power `sum_e V_e I_e` to solver precision.
 //!
 //! [`solve_electrothermal`] couples the two fields: resistivity at each
 //! cell's temperature, the potential, the Joule heat as a source, the
@@ -21,11 +24,11 @@
 //! depends on temperature).
 //!
 //! No-claims: DC only (no skin effect, inductance or capacitance); ohmic,
-//! isotropic conductors; no electrical contact resistance between
-//! conductors; electrodes are ideal equipotentials; the Picard iteration
-//! does not converge past a thermal runaway (current-driven conductors
-//! whose resistivity rises with temperature can have no steady state, and
-//! that refusal is the answer).
+//! isotropic bulk conductors and explicit zero-thickness resistive contacts;
+//! electrodes are ideal equipotentials; no contact-area or heat-partition
+//! model is inferred. The Picard iteration does not converge past a thermal
+//! runaway (current-driven conductors whose resistivity rises with temperature
+//! can have no steady state, and that refusal is the answer).
 
 use fs_exec::CancelGate;
 use fs_sparse::Coo;
@@ -36,6 +39,10 @@ use super::energy::{EnergySolution, ThermalSetup};
 use super::flow::scale_rows;
 use super::krylov::bicgstab_ilu0;
 use super::{ChtError, finite, finite_positive, poll};
+
+mod contact;
+pub mod motion;
+pub use contact::ElectricalContact;
 
 /// An ohmic conductor: `rho(T) = rho_0 (1 + alpha (T - T_ref))`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -87,7 +94,7 @@ impl Conductor {
 pub enum ElectrodeDrive {
     /// Held at this potential, V.
     Voltage(f64),
-    /// Delivers this total current into the conductors it touches, A
+    /// Delivers this total current into the conductors, A
     /// (negative: draws it); its potential is solved.
     Current(f64),
 }
@@ -107,9 +114,11 @@ pub struct Electrode {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ElectricSetup {
     /// Per solid material index: its conductor model, or `None` (an
-    /// insulator). Missing trailing entries are insulators.
+    /// insulator). Missing trailing entries are insulators. Ignored by the
+    /// explicit per-cell constitutive path, including its topology decisions.
     pub conductors: Vec<Option<Conductor>>,
-    /// Electrodes; at least one must hold a voltage.
+    /// Electrodes; grounded paths require a voltage reference.
+    /// The opt-in isolated-motion path requires this list to be empty.
     pub electrodes: Vec<Electrode>,
 }
 
@@ -163,8 +172,44 @@ impl ElectricSetup {
                 // The shared kernel checks the complete shape before evaluation.
                 resolve(cell, material, point.expect("explicit temperature field"))
             },
+            &[],
             gate,
         )
+    }
+
+    /// Solve DC conduction in material-assigned fluid AND solid cells.
+    ///
+    /// `resolve(cell, occupancy, temperature_k)` is called once per non-electrode
+    /// cell, in increasing index order. `Some(rho)` declares a finite positive
+    /// isotropic resistivity [ohm m]; `None` explicitly declares insulation.
+    /// Missing/unsupported material data must return an error, not `None`.
+    /// The caller owns cell-to-card assignments, full query coordinates and
+    /// retained receipts. Neither phase nor a material name implies conductivity.
+    /// `conductors` is ignored on this path: no dummy solid preset is required.
+    ///
+    /// Electrode geometry/drive validation, grounding, matrix assembly, current
+    /// solve and half-resistance Joule deposition are shared with the legacy
+    /// path. Ideal electrodes need no resistivity/temperature evaluation.
+    /// Mechanical occupancy is unchanged: a conducting fluid still flows and
+    /// advects heat in the existing thermal owner. An electrical electrode
+    /// designation alone does not create a mechanical wall.
+    ///
+    /// This is bulk ohmic conduction at a frozen state, not electrochemistry,
+    /// ion transport, plasma, phase change, motional EMF or magnetic forces.
+    ///
+    /// # Errors
+    /// Invalid electrode data, shape or non-electrode temperatures refuse before
+    /// invoking the law. Invalid/missing constitutive data, grounding/solver
+    /// failures, unrepresentable derived fields and cancellation abort the solve.
+    /// No partial field is returned; captured callback state remains caller-owned.
+    pub fn solve_with_cell_resistivity(
+        &self,
+        domain: &VoxelDomain,
+        temperature: &[f64],
+        resolve: impl FnMut(usize, Voxel, f64) -> Result<Option<f64>, ChtError>,
+        gate: &CancelGate,
+    ) -> Result<ElectricSolution, ChtError> {
+        self.solve_with_cell_contacts(domain, temperature, &[], resolve, gate)
     }
 }
 
@@ -180,15 +225,17 @@ pub struct ElectrodeSolution {
 /// The potential and its Joule heating.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ElectricSolution {
-    /// Potential per cell, V (NaN where no current can flow: fluid,
-    /// insulators, conductors with no path to a voltage electrode).
+    /// Potential per cell, V (NaN for electrical insulators and conductors
+    /// with no path to a voltage electrode on legacy paths). Isolated-motion
+    /// potentials use a numerical gauge, not an absolute voltage measurement.
     pub potential_v: Vec<f64>,
-    /// Joule heat per cell, W.
+    /// Joule heat per cell, W, including explicitly partitioned contact heat.
     pub joule_w: Vec<f64>,
     /// Sum of `joule_w`, W.
     pub total_joule_w: f64,
     /// Power the electrodes deliver, `sum_e V_e I_e`, W (equal to
-    /// `total_joule_w` up to the solver residual).
+    /// `total_joule_w` up to the solver residual in stationary solves; the
+    /// moving-conductor path additionally includes Lorentz mechanical power).
     pub delivered_w: f64,
     /// One entry per electrode, in order.
     pub electrodes: Vec<ElectrodeSolution>,
@@ -216,8 +263,12 @@ enum Node {
     Conductor,
 }
 
-fn admit(domain: &VoxelDomain, setup: &ElectricSetup) -> Result<Vec<Node>, ChtError> {
-    for conductor in setup.conductors.iter().flatten() {
+fn admit(
+    domain: &VoxelDomain,
+    setup: &ElectricSetup,
+    use_solid_presets: bool,
+) -> Result<Vec<Node>, ChtError> {
+    for conductor in setup.conductors.iter().flatten().filter(|_| use_solid_presets) {
         finite_positive("electric.resistivity_ohm_m", conductor.resistivity_ohm_m)?;
         finite(
             "electric.temperature_coefficient_per_k",
@@ -242,7 +293,7 @@ fn admit(domain: &VoxelDomain, setup: &ElectricSetup) -> Result<Vec<Node>, ChtEr
     let mut nodes: Vec<Node> = (0..domain.cell_count())
         .map(|c| match domain.voxel_at(c) {
             Voxel::Solid(m)
-                if setup
+                if use_solid_presets && setup
                     .conductors
                     .get(m as usize)
                     .copied()
@@ -321,6 +372,7 @@ pub fn solve_electric(
         |_, _, t, conductor| {
             Ok(t.map_or(conductor.resistivity_ohm_m, |t| conductor.resistivity(t)))
         },
+        &[],
         gate,
     )
 }
@@ -331,10 +383,11 @@ fn solve_electric_impl(
     setup: &ElectricSetup,
     temperature: Option<&[f64]>,
     mut resolve: impl FnMut(usize, u16, Option<f64>, Conductor) -> Result<f64, ChtError>,
+    contacts: &[ElectricalContact],
     gate: &CancelGate,
 ) -> Result<ElectricSolution, ChtError> {
     poll(gate)?;
-    let mut nodes = admit(domain, setup)?;
+    let nodes = admit(domain, setup, true)?;
     if temperature.is_some_and(|t| t.len() != domain.cell_count()) {
         return Err(ChtError::InvalidInput {
             field: "electric.temperature",
@@ -368,14 +421,65 @@ fn solve_electric_impl(
             rho[c] = value;
         }
     }
+    solve_electric_field(domain, setup, nodes, &rho, contacts, gate)
+}
+
+// One numerical owner for preset solids, source-resolved solids and fluids.
+// All topology and coefficients have been admitted before this boundary.
+#[allow(clippy::too_many_lines)] // reachability, assembly, solve and conservative heat
+fn solve_electric_field(
+    domain: &VoxelDomain,
+    setup: &ElectricSetup,
+    nodes: Vec<Node>,
+    rho: &[f64],
+    contacts: &[ElectricalContact],
+    gate: &CancelGate,
+) -> Result<ElectricSolution, ChtError> {
+    solve_electric_field_with_motion(domain, setup, nodes, rho, contacts, None, gate)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn solve_electric_field_with_motion(
+    domain: &VoxelDomain,
+    setup: &ElectricSetup,
+    nodes: Vec<Node>,
+    rho: &[f64],
+    contacts: &[ElectricalContact],
+    motion: Option<&mut motion::MotionCoupling<'_>>,
+    gate: &CancelGate,
+) -> Result<ElectricSolution, ChtError> {
     poll(gate)?;
+    let contact_field = contact::ContactField::new(domain, &nodes, contacts, gate)?;
+    solve_electric_field_with_contact_field(domain, setup, nodes, rho, contact_field, motion, gate)
+}
+
+// A single numerical owner consumes both resistive and explicitly open faces.
+// Existing motion APIs supply no openings, preserving their component gauges.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn solve_electric_field_with_contact_field(
+    domain: &VoxelDomain,
+    setup: &ElectricSetup,
+    mut nodes: Vec<Node>,
+    rho: &[f64],
+    contact_field: contact::ContactField,
+    mut motion: Option<&mut motion::MotionCoupling<'_>>,
+    gate: &CancelGate,
+) -> Result<ElectricSolution, ChtError> {
+    poll(gate)?;
+    let cells = domain.cell_count();
     let half = |c: usize, axis: usize| 0.5 * rho[c] * domain.widths(c)[axis];
+    // Only isolated-motion calls supply gauges. Gauge cells remain conductors
+    // in all constitutive, contact, current, heating and force operations.
+    let potential_gauges = motion.as_deref().and_then(|m| m.potential_gauges());
     // Reachability from the voltage electrodes over conducting links.
     let electrodes = setup.electrodes.len();
     let mut grounded = vec![false; cells];
     let mut electrode_grounded = vec![false; electrodes];
     let mut stack: Vec<usize> = Vec::new();
     for (c, node) in nodes.iter().enumerate() {
+        if potential_gauges.is_some() && *node == Node::Conductor {
+            grounded[c] = true; // solved with a component gauge, not discarded
+        }
         if let Node::Electrode(e) = *node
             && matches!(setup.electrodes[e].drive, ElectrodeDrive::Voltage(_))
         {
@@ -404,7 +508,7 @@ fn solve_electric_impl(
             let Some(n) = domain.neighbor(c, face) else {
                 continue;
             };
-            if grounded[n] {
+            if grounded[n] || contact_field.is_open(c, n) {
                 continue;
             }
             match (nodes[c], nodes[n]) {
@@ -435,6 +539,12 @@ fn solve_electric_impl(
     }
     for (c, node) in nodes.iter_mut().enumerate() {
         if *node == Node::Conductor && !grounded[c] {
+            if motion.is_some() {
+                return Err(ChtError::InvalidInput {
+                    field: "electric.motion",
+                    reason: format!("conducting component at cell {c} needs a voltage reference; motional currents cannot be discarded"),
+                });
+            }
             *node = Node::Off;
         }
     }
@@ -470,23 +580,47 @@ fn solve_electric_impl(
         }
         poll_every(gate, c)?;
         let r = row_of[c];
+        if potential_gauges.is_some_and(|pins| pins[c]) {
+            // Symmetric row/column elimination of phi_c = 0. This replaces a
+            // redundant balance equation, NOT the cell's physical resistance.
+            coo.push(r, r, 1.0);
+            continue;
+        }
         for face in 0..6 {
             let Some(n) = domain.neighbor(c, face) else {
                 continue;
             };
+            if contact_field.is_open(c, n) {
+                continue;
+            }
             let axis = face / 2;
             let area = domain.face_area(c, axis);
+            let (contact_r, _) = contact_field.at(c, n);
             match nodes[n] {
                 Node::Off => {}
                 Node::Conductor => {
-                    let g = area / (half(c, axis) + half(n, axis));
+                    let g = area / (half(c, axis) + half(n, axis) + contact_r);
+                    finite_positive("electric.face_conductance_s", g)?;
                     coo.push(r, r, g);
-                    coo.push(r, row_of[n], -g);
+                    if !potential_gauges.is_some_and(|pins| pins[n]) {
+                        coo.push(r, row_of[n], -g);
+                    }
+                    if let Some(m) = motion.as_deref() {
+                        b[r] -= g * m.emf(domain, c, n, face, nodes[n])?;
+                    }
                 }
                 Node::Electrode(e) => {
                     linked[e] = true;
-                    let g = area / half(c, axis);
+                    let g = area / (half(c, axis) + contact_r);
+                    finite_positive("electric.face_conductance_s", g)?;
                     coo.push(r, r, g);
+                    if let Some(m) = motion.as_deref() {
+                        let induced = g * m.emf(domain, c, n, face, nodes[n])?;
+                        b[r] -= induced;
+                        if matches!(setup.electrodes[e].drive, ElectrodeDrive::Current(_)) {
+                            b[electrode_row[e]] += induced;
+                        }
+                    }
                     match setup.electrodes[e].drive {
                         ElectrodeDrive::Voltage(v) => b[r] += g * v,
                         ElectrodeDrive::Current(_) => {
@@ -507,6 +641,11 @@ fn solve_electric_impl(
                 reason: format!("current electrode {e} touches no conductor cell"),
             });
         }
+    }
+    if motion.is_some() && b.iter().any(|value| !value.is_finite()) {
+        return Err(ChtError::InvalidInput {
+            field: "electric.motion", reason: "motional current right-hand side overflows".into(),
+        });
     }
     let mut x = vec![0.0f64; rows];
     let mut iterations = 0;
@@ -548,7 +687,8 @@ fn solve_electric_impl(
             Node::Off => f64::NAN,
         })
         .collect();
-    // Dissipation per face, split by half resistance; electrode currents.
+    // Dissipation per face: bulk heat stays local; contact heat uses its
+    // explicit surface partition. Both use the exact assembly conductance.
     let mut joule_w = vec![0.0f64; cells];
     let mut current = vec![0.0f64; electrodes];
     for c in 0..cells {
@@ -560,35 +700,74 @@ fn solve_electric_impl(
             let Some(n) = domain.neighbor(c, face) else {
                 continue;
             };
+            if contact_field.is_open(c, n) {
+                continue;
+            }
             let axis = face / 2;
             let area = domain.face_area(c, axis);
+            let (contact_r, fraction) = contact_field.at(c, n);
             match nodes[n] {
                 Node::Off => {}
                 // Each conductor pair once, from its lower cell.
                 Node::Conductor if face % 2 == 1 => {
                     let (hc, hn) = (half(c, axis), half(n, axis));
-                    let drop = potential_v[c] - potential_v[n];
-                    let heat = area / (hc + hn) * drop * drop;
-                    joule_w[c] += heat * hc / (hc + hn);
-                    joule_w[n] += heat * hn / (hc + hn);
+                    let resistance = hc + hn + contact_r;
+                    let mut drop = potential_v[c] - potential_v[n];
+                    if let Some(m) = motion.as_deref_mut() {
+                        drop += m.emf(domain, c, n, face, nodes[n])?;
+                        m.deposit(domain, c, n, face, nodes[n], area / resistance * drop)?;
+                    }
+                    let heat = area / resistance * drop * drop;
+                    if contact_r == 0.0 {
+                        // Preserve the established perfect-contact arithmetic.
+                        joule_w[c] += heat * hc / (hc + hn);
+                        joule_w[n] += heat * hn / (hc + hn);
+                    } else {
+                        let contact_heat = heat * (contact_r / resistance);
+                        joule_w[c] += heat * (hc / resistance) + fraction * contact_heat;
+                        joule_w[n] += heat * (hn / resistance) + (1.0 - fraction) * contact_heat;
+                    }
                 }
                 Node::Conductor => {}
                 Node::Electrode(e) => {
-                    let g = area / half(c, axis);
-                    let drop = electrode_potential[e] - potential_v[c];
-                    joule_w[c] += g * drop * drop;
+                    let hc = half(c, axis);
+                    let resistance = hc + contact_r;
+                    let g = area / resistance;
+                    let mut drop = electrode_potential[e] - potential_v[c];
+                    if let Some(m) = motion.as_deref_mut() {
+                        // drop is electrode -> c; the face helper is c -> electrode.
+                        drop -= m.emf(domain, c, n, face, nodes[n])?;
+                        m.deposit(domain, c, n, face, nodes[n], -g * drop)?;
+                    }
+                    let heat = g * drop * drop;
+                    if contact_r == 0.0 {
+                        joule_w[c] += heat;
+                    } else {
+                        let contact_heat = heat * (contact_r / resistance);
+                        joule_w[c] += heat * (hc / resistance) + fraction * contact_heat;
+                        joule_w[n] += (1.0 - fraction) * contact_heat;
+                    }
                     current[e] += g * drop;
                 }
             }
         }
     }
-    let total_joule_w = joule_w.iter().sum();
-    let delivered_w = electrode_potential
+    let total_joule_w: f64 = joule_w.iter().sum();
+    let delivered_w: f64 = electrode_potential
         .iter()
         .zip(&current)
         .filter(|(v, _)| v.is_finite())
         .map(|(v, i)| v * i)
         .sum();
+    if joule_w.iter().any(|q| !q.is_finite() || *q < 0.0)
+        || current.iter().any(|i| !i.is_finite())
+        || !total_joule_w.is_finite() || !delivered_w.is_finite()
+    {
+        return Err(ChtError::InvalidInput {
+            field: "electric.result",
+            reason: "current or Joule heating is unrepresentable".into(),
+        });
+    }
     poll(gate)?;
     Ok(ElectricSolution {
         potential_v,
@@ -781,4 +960,103 @@ mod material_tests {
             assert_eq!(calls, 0);
         }
     }
+
+    #[test]
+    fn fluid_material_law_conducts_without_relabeling_mechanical_cells() {
+        let domain = VoxelDomain::new(5, 1, 1, 1.0).unwrap();
+        let (_, mut setup) = bar();
+        setup.conductors.clear();
+        let gate = CancelGate::new();
+        let old = solve_electric(&domain, &setup, None, &gate).unwrap();
+        assert_eq!(old.total_joule_w, 0.0); // existing behavior remains opt-in
+        let mut visited = Vec::new();
+        let result = setup.solve_with_cell_resistivity(&domain,
+            &[f64::NAN, 300.0, 310.0, 320.0, f64::NAN],
+            |cell, occupancy, t| {
+                visited.push((cell, occupancy, t));
+                Ok(Some([2.0, 4.0, 8.0][cell - 1]))
+            }, &gate).unwrap();
+        assert_eq!(visited, vec![(1, Voxel::Fluid, 300.0), (2, Voxel::Fluid, 310.0), (3, Voxel::Fluid, 320.0)]);
+        let current = 9.0 / 14.0;
+        assert!((result.electrodes[1].current_a - current).abs() < 1e-9);
+        assert!((result.electrodes[0].current_a + current).abs() < 1e-9);
+        for (cell, rho) in [(1, 2.0), (2, 4.0), (3, 8.0)] {
+            assert!((result.joule_w[cell] - current * current * rho).abs() < 1e-9);
+        }
+        assert!((result.delivered_w - result.total_joule_w).abs() < 1e-9);
+        assert!((0..5).all(|cell| domain.voxel_at(cell) == Voxel::Fluid));
+    }
+
+    #[test]
+    fn mixed_solid_liquid_graded_path_conserves_current_and_power_for_both_drives() {
+        let domain = VoxelDomain::graded_from_fn(
+            [vec![1.0, 0.5, 2.0, 1.5, 1.0], vec![2.0], vec![3.0]],
+            |point| if point[0] < 1.5 { Voxel::Solid(7) } else { Voxel::Fluid },
+        ).unwrap();
+        let (_, mut setup) = bar();
+        setup.conductors.clear(); // electrical topology is NOT a solid table
+        let gate = CancelGate::new();
+        // Interior R = sum(rho*dx)/A = (2*.5 + 4*2 + 8*1.5)/6 = 3.5 ohm.
+        let resistance = 3.5;
+        for drive in [ElectrodeDrive::Voltage(9.0), ElectrodeDrive::Current(-2.0)] {
+            setup.electrodes[1].drive = drive;
+            let result = setup.solve_with_cell_resistivity(&domain, &[300.0; 5],
+                |cell, _, _| Ok(Some([2.0, 4.0, 8.0][cell - 1])), &gate).unwrap();
+            let current = match drive {
+                ElectrodeDrive::Voltage(v) => v / resistance,
+                ElectrodeDrive::Current(i) => i,
+            };
+            assert!((result.electrodes[1].voltage_v - current * resistance).abs() < 1e-9);
+            assert!((result.electrodes[1].current_a - current).abs() < 1e-9);
+            assert!((result.electrodes[0].current_a + current).abs() < 1e-9);
+            for (cell, r) in [(1, 1.0/6.0), (2, 8.0/6.0), (3, 2.0)] {
+                assert!((result.joule_w[cell] - current*current*r).abs() < 1e-9);
+            }
+            assert!((result.total_joule_w - current*current*resistance).abs() < 1e-9);
+            assert!((result.delivered_w - result.total_joule_w).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn per_cell_and_legacy_solid_paths_share_bit_identical_numerics() {
+        let (domain, setup) = bar();
+        let gate = CancelGate::new();
+        let legacy = solve_electric(&domain, &setup, Some(&[300.0; 5]), &gate).unwrap();
+        let cells = setup.solve_with_cell_resistivity(&domain, &[300.0; 5],
+            |_, _, _| Ok(Some(2.0)), &gate).unwrap();
+        assert_eq!(legacy, cells);
+    }
+
+    #[test]
+    fn explicit_insulation_is_not_a_fallback_for_a_missing_material_claim() {
+        let domain = VoxelDomain::new(5, 1, 1, 1.0).unwrap();
+        let (_, mut setup) = bar();
+        let gate = CancelGate::new();
+        let result = setup.solve_with_cell_resistivity(&domain, &[300.0; 5],
+            |cell, _, _| Ok(if cell == 2 { None } else { Some(2.0) }), &gate).unwrap();
+        assert!(result.potential_v[2].is_nan());
+        assert!(result.total_joule_w.abs() < 1e-20);
+        let refusal = ChtError::InvalidInput { field: "material.resistivity", reason: "missing source claim".into() };
+        assert_eq!(setup.solve_with_cell_resistivity(&domain, &[300.0; 5],
+            |_, _, _| Err(refusal.clone()), &gate), Err(refusal));
+        setup.electrodes[1].drive = ElectrodeDrive::Current(1.0);
+        assert!(setup.solve_with_cell_resistivity(&domain, &[300.0; 5],
+            |cell, _, _| Ok(if cell == 2 { None } else { Some(2.0) }), &gate).is_err());
+    }
+
+    #[test]
+    fn per_cell_queries_preflight_temperatures_and_reject_unrepresentable_laws() {
+        let domain = VoxelDomain::new(5, 1, 1, 1.0).unwrap();
+        let (_, setup) = bar();
+        let gate = CancelGate::new();
+        for temperature in [vec![300.0; 4], vec![300.0, 300.0, 300.0, f64::NAN, 300.0]] {
+            assert!(setup.solve_with_cell_resistivity(&domain, &temperature,
+                |_, _, _| panic!("whole field must be admitted before evaluating material data"), &gate).is_err());
+        }
+        for rho in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::from_bits(1)] {
+            assert!(setup.solve_with_cell_resistivity(&domain, &[300.0; 5],
+                |_, _, _| Ok(Some(rho)), &gate).is_err());
+        }
+    }
+
 }

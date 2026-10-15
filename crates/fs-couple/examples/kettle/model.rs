@@ -3,7 +3,7 @@
 //! and fs-phs owns the prepared nonlinear time step.
 use super::{spec::Spec, Error};
 use fs_couple::{modal_acoustic_time::ModalAcousticState,
-    render::plate::impact::{BodyPotential, ImpactBody, ImpactConfig, PreparedImpactSystem,
+    render::plate::impact::{BodyPotential, ImpactBody, ImpactConfig, SubsteppedImpactSystem,
         cavity::{CavityCoupling, meridian::{Budget, MeridianCavity}},
         compliant::{CompliantJaw, PadSide, PadSite, striker::FeltStriker},
         felt::KelvinBranch, membrane::MembranePotential},
@@ -15,7 +15,7 @@ use fs_plate::{ModePair, shell::{head::TensionedDisk, profile::ProfileBudget,
 use std::{collections::BTreeMap, f64::consts::{PI, TAU}};
 
 pub struct Model {
-    pub mechanics: PreparedImpactSystem,
+    pub mechanics: SubsteppedImpactSystem,
     pub cavity: CavityCoupling,
     pub air: MeridianCavity,
     pub film: TensionedDisk,
@@ -78,6 +78,14 @@ impl Model {
     where F:FnOnce(&TensionedDisk,&[ModePair])
         ->Result<Option<fs_couple::render::plate::impact::radiation::Model>,Error>
     {
+        Self::with_execution(spec,steps,gate,tensioner,super::execution::Settings::default(),bake)
+    }
+    pub fn with_execution<F>(spec:&Spec,steps:u64,gate:&CancelGate,
+        tensioner:Option<super::tuning::Tensioner>,execution:super::execution::Settings,bake:F)->Result<Self,Error>
+    where F:FnOnce(&TensionedDisk,&[ModePair])
+        ->Result<Option<fs_couple::render::plate::impact::radiation::Model>,Error>
+    {
+        execution.validate()?;
         spec.validate()?;
         if let Some(t)=&tensioner {t.admit(steps)?;}
         if steps == 0 || gate.is_requested() { return Err("positive step budget and uncancelled preparation required".into()); }
@@ -140,11 +148,11 @@ impl Model {
         if tensioner.is_some()!=edge_port.is_some() {return Err("lost edge force coordinate during composition".into());}
         let force = vec![0.0;cavity.total_modes()];
         let pickup = fs_couple::render::plate::impact::linear::wire::film_shapes(&film,&modes,&[[m[5],m[6]]])?.remove(0);
-        Ok(Self { mechanics: reference.prepare_analytic()?, cavity, air, film, modes, tip_weight, pickup, force, tensioner, edge_port })
+        Ok(Self { mechanics: execution.prepare(reference)?, cavity, air, film, modes, tip_weight, pickup, force, tensioner, edge_port })
     }
     /// Exact-sample force assignment enters the SAME accepted mechanical tick.
     /// Force scratch is restored on both success and refusal; sample/history
-    /// publication remains owned by PreparedImpactSystem, never by a scheduler.
+    /// publication remains owned by the shared impact solver, never by a scheduler.
     pub fn step(&mut self,gate:&CancelGate)->Result<fs_couple::render::plate::impact::ImpactFrame,Error> {
         if let (Some(t),Some((index,weight)))=(&self.tensioner,self.edge_port) {
             let previous=self.force[index];

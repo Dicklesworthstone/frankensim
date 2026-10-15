@@ -10,6 +10,8 @@ use fs_project::spec::dims;
 mod json;
 use json::JsonValue as J;
 
+mod material_controls;
+
 const INLET_K: f64 = 293.15;
 const INITIAL_K: f64 = 330.0;
 const DRIVEN_INLET_K: f64 = 315.0;

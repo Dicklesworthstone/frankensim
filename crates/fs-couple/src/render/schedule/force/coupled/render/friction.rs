@@ -118,52 +118,98 @@ impl ScheduledRenderer {
         }
         system.samples_rendered().checked_add(config.samples)
             .ok_or_else(|| source_invalid("friction gesture horizon overflows the physical clock"))?;
-        let track = schedule.tracks().iter().find(|t| t.id == track_id)
-            .ok_or_else(|| GestureCompileError::Track { track: track_id.into(), what: "no source track with this id" })?;
-        if !matches!(track.target, GestureTarget::BowStroke { .. }) {
-            return Err(source_invalid("friction gesture requires an explicit bow-stroke track"));
-        }
-        // Validate every authored station, including future commands, before
-        // lowering any values. A fixed port never silently ignores a moving bow.
-        for value in std::iter::once(&track.initial).chain(track.events.iter().map(|e| &e.value)) {
-            let GestureValue::Bow { station, .. } = value else {
-                return Err(source_invalid("bow track contains a non-bow value"));
-            };
-            if station.to_bits() != config.station_fraction.to_bits() {
-                return Err(source_invalid("moving bow stations require a new physical attachment model"));
-            }
-        }
-        let audio = u128::from(config.sample_rate_hz);
-        let control = u128::from(rate);
-        let ticks = if config.samples == 0 { 0 } else { u128::from(config.samples-1)*control/audio + 1 };
-        let visits = schedule.tracks().len() as u128 + track.events.len() as u128 + 1;
-        let required = ticks.checked_mul(visits).ok_or_else(|| source_invalid("friction gesture work overflows"))?;
-        if required > u128::from(config.max_work) {
-            return Err(GestureCompileError::WorkBudget { required, allowed: config.max_work });
-        }
+        let compiled = compile_friction_track(schedule, track_id, config)?;
         let voice = FrictionModalVoice::new(system, held_force, FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 })
             .map_err(GestureCompileError::Render)?;
-        let mut events = Vec::new();
-        let mut previous = None;
-        for tick in 0..ticks as u64 {
-            let GestureValue::Bow { velocity_m_per_s, normal_force_n, .. } =
-                schedule.sample_value(track_id, tick).map_err(GestureCompileError::Gesture)?
-            else { return Err(source_invalid("bow track sampled a non-bow value")); };
-            let drive = FrictionDrive { speed_m_s: velocity_m_per_s, normal_force_n };
-            voice.validate_drive(drive).map_err(GestureCompileError::Render)?;
-            let bits = [velocity_m_per_s.to_bits(), normal_force_n.to_bits()];
-            if previous == Some(bits) { continue; }
-            if events.len() == config.max_events {
-                return Err(source_invalid("friction gesture exceeds its emitted-control budget"));
-            }
-            events.try_reserve(1).map_err(|_| source_invalid("cannot reserve friction gesture controls"))?;
-            events.push(ScheduledControl {
-                sample: (u128::from(tick)*audio).div_ceil(control) as u64,
-                delta: ControlDelta::SetFrictionDrive { voice: 0, speed_m_s: velocity_m_per_s, normal_force_n },
-            });
-            previous = Some(bits);
-        }
+        let events = compiled.events.into_iter().map(|event| ScheduledControl {
+            sample: event.sample,
+            delta: ControlDelta::SetFrictionDrive { voice: 0,
+                speed_m_s: event.drive.speed_m_s, normal_force_n: event.drive.normal_force_n },
+        }).collect();
         let context = RenderContext::new(vec![RenderVoice::FrictionModal(Box::new(voice))], config.max_block);
         Self::new(context, events, config.max_events).map_err(GestureCompileError::Render)
     }
+}
+
+/// Physical drive assignment relative to the start of a performance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScheduledFrictionDrive {
+    /// Tick k is delivered at ceil(k * audio_rate / control_rate).
+    pub sample: u64,
+    /// Signed speed and nonnegative contact load held until the next assignment.
+    pub drive: FrictionDrive,
+}
+
+/// A bounded lowering of one fixed physical contact track.
+#[derive(Clone, Debug)]
+pub struct CompiledFrictionTrack {
+    /// Chronological assignments, deduplicated by the original value bits.
+    pub events: Vec<ScheduledFrictionDrive>,
+    /// Original source-track/event visit count reserved for this lowering.
+    /// Multi-contact callers debit this from a shared compilation allowance.
+    pub required_work: u64,
+}
+
+/// Compile physical friction controls for either a single voice or a joint
+/// multi-contact network. All ramp/interruption semantics stay in
+/// GestureSchedule::sample_value; there is only one friction track compiler.
+/// Other tracks are not executed. Their physical binding is the caller's job.
+///
+/// # Errors
+/// Invalid clocks/station, missing or wrong track, moving station, malformed
+/// physical inputs, or the original work/emitted-event budgets.
+pub fn compile_friction_track(schedule: &GestureSchedule, track_id: &str,
+    config: FrictionGestureConfig) -> Result<CompiledFrictionTrack, GestureCompileError>
+{
+    let rate = schedule.control_rate_hz;
+    if rate == 0 || config.sample_rate_hz == 0 || rate > config.sample_rate_hz || config.max_block == 0
+        || !config.station_fraction.is_finite() || !(0.0 < config.station_fraction && config.station_fraction < 1.0) {
+        return Err(source_invalid("friction gesture requires matching clocks, positive capacity and an interior station"));
+    }
+    let track = schedule.tracks().iter().find(|t| t.id == track_id)
+        .ok_or_else(|| GestureCompileError::Track { track: track_id.into(), what: "no source track with this id" })?;
+    if !matches!(track.target, GestureTarget::BowStroke { .. }) {
+        return Err(source_invalid("friction gesture requires an explicit bow-stroke track"));
+    }
+    // Validate every authored station, including future commands, before
+    // lowering any values. A fixed port never silently ignores a moving bow.
+    for value in std::iter::once(&track.initial).chain(track.events.iter().map(|e| &e.value)) {
+        let GestureValue::Bow { station, .. } = value else {
+            return Err(source_invalid("bow track contains a non-bow value"));
+        };
+        if station.to_bits() != config.station_fraction.to_bits() {
+            return Err(source_invalid("moving bow stations require a new physical attachment model"));
+        }
+    }
+    let audio = u128::from(config.sample_rate_hz);
+    let control = u128::from(rate);
+    let ticks = if config.samples == 0 { 0 } else { u128::from(config.samples-1)*control/audio + 1 };
+    let visits = schedule.tracks().len() as u128 + track.events.len() as u128 + 1;
+    let required = ticks.checked_mul(visits).ok_or_else(|| source_invalid("friction gesture work overflows"))?;
+    if required > u128::from(config.max_work) {
+        return Err(GestureCompileError::WorkBudget { required, allowed: config.max_work });
+    }
+    let mut events = Vec::new();
+    let mut previous = None;
+    for tick in 0..ticks as u64 {
+        let GestureValue::Bow { velocity_m_per_s, normal_force_n, .. } =
+            schedule.sample_value(track_id, tick).map_err(GestureCompileError::Gesture)?
+        else { return Err(source_invalid("bow track sampled a non-bow value")); };
+        let drive = FrictionDrive { speed_m_s: velocity_m_per_s, normal_force_n };
+        if !drive.speed_m_s.is_finite() || !drive.normal_force_n.is_finite() || drive.normal_force_n < 0.0 {
+            return Err(source_invalid("friction control requires finite speed and nonnegative normal force"));
+        }
+        let bits = [velocity_m_per_s.to_bits(), normal_force_n.to_bits()];
+        if previous == Some(bits) { continue; }
+        if events.len() == config.max_events {
+            return Err(source_invalid("friction gesture exceeds its emitted-control budget"));
+        }
+        events.try_reserve(1).map_err(|_| source_invalid("cannot reserve friction gesture controls"))?;
+        events.push(ScheduledFrictionDrive {
+            sample: (u128::from(tick)*audio).div_ceil(control) as u64,
+            drive,
+        });
+        previous = Some(bits);
+    }
+    Ok(CompiledFrictionTrack { events, required_work: required as u64 })
 }

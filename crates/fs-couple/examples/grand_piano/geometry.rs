@@ -60,6 +60,34 @@ pub struct Course {
 }
 
 impl Course {
+    /// Replace a speaking string's inertial and bending coefficients with those
+    /// of an independently resolved, perfectly bonded concentric material section.
+    /// The string PDE and its acoustic/bridge/contact coupling are unchanged:
+    /// they consume the updated physical coefficients at their normal call sites.
+    ///
+    /// This is for solid or *bonded* concentric rods, NOT a helically wound
+    /// piano bass string. The latter requires winding pitch/slip mechanics;
+    /// its effective EI must not be computed by bonding the wrap to the core.
+    /// Tension is an externally imposed prestress and is deliberately retained.
+    /// No retuning to a previous nominal pitch hides the material substitution.
+    ///
+    /// # Errors
+    /// Refuses any section/course whose derived frequency or modal mass is
+    /// unrepresentable; the original course is not mutated on failure.
+    pub fn with_bonded_material_section(
+        &self,
+        section: &fs_material::section::ConcentricElasticSection,
+    ) -> Result<Self, String> {
+        if section.inner_radius_m() != 0.0 {
+            return Err("a speaking string needs a solid concentric section, not a hollow tube".into());
+        }
+        let mut changed = *self;
+        changed.linear_density_kg_m = section.line_density_kg_m();
+        changed.flexural_rigidity_nm2 = section.bending_stiffness_n_m2();
+        changed.validate()?;
+        Ok(changed)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !(21..=108).contains(&self.midi) || !(1..=3).contains(&self.unison) {
             return Err("course needs a piano MIDI key (21..108) and 1..3 strings".into());
@@ -341,6 +369,71 @@ mod tests {
         let loose = helical_linear_density(0.001, 0.001, 0.002, 7850.0, 8960.0).unwrap();
         assert!(tight > loose);
     }
+
+    #[test]
+    fn sourced_material_substitution_changes_string_spectrum_without_solver_edits() {
+        use fs_evidence::ValidityDomain;
+        use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
+            PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
+        use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
+        use fs_material::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY,
+            MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+            resolve_material_state_point};
+        use fs_qty::{Density, Pressure};
+
+        fn section(density: f64, young: f64, bore: f64) -> ConcentricElasticSection {
+            let mut claims = ClaimSet::new();
+            for (name, dims, value) in [
+                (DENSITY_PROPERTY, Density::DIMS, density),
+                (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, young),
+            ] {
+                claims.insert_claim(PropertyClaim {
+                    key: PropertyKey::new(name, dims),
+                    value: PropertyValue::Scalar { value, dims },
+                    validity: ValidityDomain::unconstrained(),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    observations: vec![],
+                    provenance: Provenance {
+                        source: "synthetic string material integration fixture".into(),
+                        license: "CC0-1.0".into(), artifact: None,
+                    },
+                }).unwrap();
+            }
+            let card = MaterialCard::assemble(
+                MaterialStateId { chemistry: "synthetic".into(), phase: "solid".into(),
+                    process: "test".into(), revision: 0 },
+                claims, vec![],
+            ).unwrap();
+            let material = resolve_material_state_point(
+                &card, &QueryPoint::new(), &[
+                    ScalarPropertyRequirement::try_new(DENSITY_PROPERTY, Density::DIMS,
+                        ScalarAdmissibility::StrictlyPositive).unwrap(),
+                    ScalarPropertyRequirement::try_new(YOUNG_MODULUS_PROPERTY, Pressure::DIMS,
+                        ScalarAdmissibility::StrictlyPositive).unwrap(),
+                ], MaterialPropertySelection::SingleClaimOnly,
+            ).unwrap();
+            ConcentricElasticSection::try_new(bore, vec![ConcentricMaterialLayer {
+                outer_radius_m: 0.0005, material,
+            }]).unwrap()
+        }
+
+        let base = demonstration_scale().unwrap()[48];
+        let steel = section(7800.0, 200e9, 0.0);
+        let silver_like = section(10500.0, 80e9, 0.0);
+        let a = base.with_bonded_material_section(&steel).unwrap();
+        let b = base.with_bonded_material_section(&silver_like).unwrap();
+        assert_eq!(a.tension_n, base.tension_n);
+        assert_eq!(b.tension_n, base.tension_n);
+        assert_eq!(a.linear_density_kg_m, steel.line_density_kg_m());
+        assert_eq!(b.flexural_rigidity_nm2, silver_like.bending_stiffness_n_m2());
+        assert!(b.linear_density_kg_m > a.linear_density_kg_m);
+        assert!(b.flexural_rigidity_nm2 < a.flexural_rigidity_nm2);
+        assert!(b.partial_hz(1, b.tension_n) < a.partial_hz(1, a.tension_n));
+        assert!(b.modal_mass_kg() > a.modal_mass_kg());
+        assert!(base.with_bonded_material_section(&section(7800.0, 200e9, 0.0001)).is_err());
+    }
+
     #[test]
     fn malformed_or_duplicate_measurements_refuse() {
         let c = demonstration_scale().unwrap()[0];

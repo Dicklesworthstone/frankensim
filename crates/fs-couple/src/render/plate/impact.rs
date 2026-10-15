@@ -10,7 +10,8 @@
 //! Returned states are mechanics, NOT fabricated microphone pressure.
 use std::cell::RefCell;
 use std::rc::Rc;
-use fs_dcontact::{ContactStorage,Obstacle};
+use fs_dcontact::Obstacle;
+use material::refresh::LiveContactStorage as ContactStorage;
 use fs_exec::CancelGate;
 use fs_material::fiber::{Uniaxial,WoolFeltState};
 use fs_phs::{PortHamiltonian,Storage};
@@ -25,6 +26,8 @@ pub mod cavity;
 pub mod compliant;
 /// Physical, spatially localized viscous attachments.
 pub mod damping;
+/// Source-bound point contact in the same nonlinear potential/port equation.
+pub mod material;
 /// Reciprocal configuration-dependent squeeze-film pressure ports.
 pub mod squeeze;
 /// Compressible thin-gap gas storage in the same coupled time equation.
@@ -160,6 +163,8 @@ pub enum ImpactError {
     Owner(String),
     /// Prepared numerical owner refusal, without allocating an error string.
     PreparedSolve(fs_phs::PhsError),
+    /// A source-bound normal contact left its declared physical operating box.
+    MaterialContact { contact: usize, source: fs_contact::normal_patch::NormalPatchError },
     /// Gate requested cancellation before publication.
     Cancelled,
     /// An output tick exhausted its explicit internal nonlinear-solve budget.
@@ -227,6 +232,7 @@ pub struct ImpactSystem {
     system:PortHamiltonian,x:Vec<f64>,pads:Vec<Pad>,histories:Rc<RefCell<Vec<WoolFeltState>>>,
     modes:usize,config:ImpactConfig,sample:u64,
     mechanical:Rc<MechanicalStorage>,contact:Rc<ContactStorage>,contact_loss:bool,
+    material_contacts:Vec<material::MaterialContact>,
     relaxation:Option<relaxation::Memory>,
     radiation:Option<radiation::Memory>,
     squeeze_films:Vec<squeeze::ResistiveFilm>,
@@ -326,7 +332,7 @@ impl ImpactSystem {
             .map_err(|e|ImpactError::Owner(e.to_string()))?;
         let energy=system.hamiltonian(&x);
         if !energy.is_finite() || energy<0.0 || energy>config.maximum_energy_j {return Err(invalid("initial impact energy exceeds admission"));}
-        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,radiation:None,relaxation:None,squeeze_films:Vec::new(),gas_film:None})
+        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,material_contacts:Vec::new(),radiation:None,relaxation:None,squeeze_films:Vec::new(),gas_film:None})
     }
     /// Accepted mass-normalized q,p; Kelvin coordinates follow the 2*modes prefix.
     #[must_use]

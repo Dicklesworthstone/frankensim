@@ -73,6 +73,7 @@ impl ImpactSystem {
         &mut self, state: &mut Vec<f64>, candidate: &mut [WoolFeltState],
         before: f64, record: PreparedStepRecord, gate: &CancelGate,
     ) -> Result<ImpactFrame, ImpactError> {
+        self.validate_material_contacts(state,state)?;
         self.mechanical.validate_rigid_motion(state)?;
         for (_,offset,film) in &self.membranes { film.observe_interleaved(state,*offset)?; }
         for (_,offset,string) in &self.strings { string.observe_interleaved(state,*offset)?; }
@@ -200,6 +201,15 @@ impl PreparedImpactSystem {
     /// The same input, budget, membrane-slope, felt-densification and energy
     /// refusals as the reference, plus typed prepared-solver/cancellation errors.
     pub fn step(&mut self, external: &[f64], gate: &CancelGate) -> Result<ImpactFrame, ImpactError> {
+        self.step_checked(external, gate, |_,_,_,_|Ok(()))
+    }
+
+    // Stage dependent physical states before our common acceptance gate.
+    // The callback receives the actual generalized port velocity used by fs-phs,
+    // including its Gonzalez correction. It must not mutate accepted histories.
+    pub(super) fn step_checked(&mut self, external: &[f64], gate: &CancelGate,
+        check: impl FnOnce(&ImpactSystem, &[f64], &[f64], PreparedStepRecord) -> Result<(),ImpactError>,
+    ) -> Result<ImpactFrame, ImpactError> {
         let inner = &mut self.inner;
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
         if inner.sample >= inner.config.max_steps { return Err(ImpactError::Budget); }
@@ -239,6 +249,7 @@ impl PreparedImpactSystem {
             PreparedStepError::Cancelled => ImpactError::Cancelled,
             PreparedStepError::Solver(error) => ImpactError::PreparedSolve(error),
         })?;
+        check(inner, &self.candidate, &self.output, ledger)?;
         inner.accept_step(&mut self.candidate, &mut self.histories, before, ledger, gate)
     }
 }
@@ -259,3 +270,18 @@ impl ImpactSource for PreparedImpactSystem {
 #[cfg(test)]
 #[path = "condensed_tests.rs"]
 mod condensed_tests;
+
+impl PreparedImpactSystem {
+    /// Replace unloaded source contacts without rebuilding or resetting prepared
+    /// state, memory, caches or solver controls. See the reference owner's gate.
+    pub fn refresh_unloaded_contacts(&mut self,
+        updates:Vec<super::material::refresh::ContactSourceUpdate>,gate:&CancelGate,
+    )->Result<usize,ImpactError> {
+        self.inner.refresh_unloaded_contacts(updates,gate)
+    }
+
+    pub(crate) fn swap_contact_refresh(&mut self,next:super::material::refresh::ContactRefresh)
+        ->super::material::refresh::ContactRefresh {
+        self.inner.swap_contact_refresh(next)
+    }
+}

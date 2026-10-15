@@ -7,6 +7,11 @@ and flight time, and its own viscosity, conductivity, heat-capacity ratio and
 Prandtl number when viscothermal loss is selected. It is not a pitch adjustment
 or an independently filtered voice. This advances the regional-gas part of MR33.
 
+Named N2/O2/Ar/CO2/H2O mixtures with mole or mass fractions and explicit
+temperature/static pressure are also supported. See [GAS_MIXTURES.md](GAS_MIXTURES.md)
+for that additive form and controlled sound comparisons. The humid-air example
+and legacy grammar below remain unchanged.
+
 ```bash
 cargo run --release -p fs-couple --bin music_render -- \
   wind crates/fs-couple/examples/plate-valve-regional-gas.performance \

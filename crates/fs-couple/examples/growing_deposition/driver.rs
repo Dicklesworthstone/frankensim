@@ -12,6 +12,7 @@ use fs_conduction::transient::deposition::{CellId, DepositedCell, DepositionErro
     DepositionObserver, DepositionSimulation, EnergyAudit, Event, MaterialId, StepConfig};
 use fs_material::thermovisco::ThermoMaxwell;
 use fs_solid::bridge::{self, Bridge};
+use fs_solid::bridge::drawing::{Drawing, Report as DrawingReport};
 use fs_solid::deposition::LayerGeometry;
 use fs_solid::bridge::growth::CellBirth;
 
@@ -27,6 +28,8 @@ pub struct Binding<'a> {
 pub struct Config {
     pub mechanics: bridge::Config,
     pub gravity_m_s2: f64,
+    /// Explicit slack or transmitted tensile drawing force for every mechanical step.
+    pub drawing: Drawing,
     /// Admission tolerances for the initial seed and incoming reference cells.
     pub coordinate_tolerance_m: f64,
     pub volume_tolerance_m3: f64,
@@ -61,7 +64,7 @@ pub struct Report {
     pub born_cells: usize,
     pub material_point_updates: usize,
     /// Last actual equilibrium in this call; absent when no thermal step ran.
-    pub last_mechanics: Option<bridge::Report>,
+    pub last_mechanics: Option<DrawingReport>,
     /// The seed or latest birth has not yet received a positive-time solve here.
     pub birth_equilibrium_pending: bool,
 }
@@ -76,7 +79,7 @@ struct History<'a> {
     config: Config,
     updates: usize,
     births: usize,
-    last: Option<bridge::Report>,
+    last: Option<DrawingReport>,
     pending: bool,
 }
 
@@ -136,8 +139,9 @@ impl DepositionObserver for History<'_> {
             temperatures.insert((cell.id(), self.layer), thermal.temperature_k(CellId(cell.id()))?);
         }
         let mut fault = None;
-        let result = self.beam.advance_controlled(thermal.time_s(), &temperatures,
-            self.config.gravity_m_s2, &vec![0.0;self.beam.cells().len()], self.config.mechanics,
+        let result = self.beam.advance_drawn_controlled(thermal.time_s(), &temperatures,
+            self.config.gravity_m_s2, &vec![0.0;self.beam.cells().len()],
+            self.config.drawing, self.config.mechanics,
             &mut || match checkpoint() {
                 Ok(()) => false,
                 Err(error) => { fault = Some(error); true }
@@ -224,6 +228,8 @@ impl<'t, 'm> GrowingRoad<'t, 'm> {
     /// temperatures; every ordered birth supplies its real incoming mass and
     /// enthalpy-derived temperature. No final-temperature reconstruction or
     /// independent mechanics resampling is used. Births never age in advance.
+    /// The configured drawing state is applied to every positive-time mechanics step;
+    /// births themselves remain stress-free and do not receive an instantaneous load solve.
     ///
     /// Thermal, material, geometry, work-budget and cancellation failures drop
     /// BOTH proposed states. Exact-time births may leave pending equilibrium;

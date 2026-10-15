@@ -3,8 +3,9 @@
 //! The shared ambient-patch driver solves the same backward-Euler history on
 //! every radiative trial. Its area-mean law is epsilon sigma A (T_mean^4-Ta^4),
 //! applied through the existing pointwise Robin trace. This is not quadrature
-//! of T(x)^4 or enclosure exchange. [`adjoint`] differentiates the same
-//! physical endpoint, including the mean-dependent radiative feedback.
+//! of T(x)^4 or enclosure exchange. Named zero-flux traces admit radiation
+//! without convection. [`adjoint`] differentiates the same physical endpoint,
+//! including the mean-dependent radiative feedback on either trace kind.
 //!
 //! Acceptance additionally reassembles the boundary at the returned endpoint,
 //! checks the full nodal residual in joules, and closes stored energy against
@@ -56,10 +57,11 @@ impl EnthalpyBackwardEuler<'_, '_> {
     /// Advance natural-boundary enthalpy transport with implicit ambient
     /// radiation, preserving heterogeneous conductivity and finite contact.
     ///
-    /// Patches bind distinct uniform Robin regions. Initial and actual surface
-    /// area-mean temperatures must lie in each emissivity claim's support. Each inner
-    /// Newton solve starts from the SAME immutable old enthalpy; radiative
-    /// iterations do not advance time or accumulate latent heat repeatedly.
+    /// Patches bind distinct uniform Robin or named zero-flux regions. Initial
+    /// and actual surface area-mean temperatures must lie in each emissivity
+    /// claim's support. Each inner Newton solve starts from the SAME immutable
+    /// old enthalpy; radiative iterations do not advance time or accumulate
+    /// latent heat repeatedly. Zero-flux traces have no convection heat port.
     ///
     /// The coupled residual target is `max(atol, rtol*||R(h_old)||)` in joules
     /// with radiation evaluated at history. Inner residual budgets tighten to
@@ -257,14 +259,17 @@ pub(super) fn boundary_at_temperature(
             .ok_or(EnthalpyError::InvalidInput(
                 "unknown enthalpy radiation region",
             ))?;
-        let ThermalBc::Robin {
-            htc: ScalarField::Uniform(h),
-            t_ref: ScalarField::Uniform(reference),
-        } = problem.boundary.conditions()[region]
-        else {
-            return Err(EnthalpyError::InvalidInput(
-                "radiation requires a uniform Robin region",
-            ));
+        let (h, reference) = match &problem.boundary.conditions()[region] {
+            ThermalBc::Robin {
+                htc: ScalarField::Uniform(h),
+                t_ref: ScalarField::Uniform(reference),
+            } => (*h, *reference),
+            ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) } if *flux == 0.0 => {
+                (0.0, patch.ambient_temperature_k())
+            }
+            _ => return Err(EnthalpyError::InvalidInput(
+                "radiation requires a uniform Robin or named zero-flux region",
+            )),
         };
         let mut area = 0.0;
         let mut integral = 0.0;
@@ -296,5 +301,5 @@ pub(super) fn boundary_at_temperature(
     }
     Ok(problem
         .boundary
-        .with_uniform_robin_replacements(&replacements)?)
+        .with_radiative_robin_replacements(&replacements)?)
 }

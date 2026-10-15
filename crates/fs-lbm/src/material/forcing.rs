@@ -1,6 +1,10 @@
-//! Material-bound SI body forces for both existing thermal flow solvers.
+//! Material-bound SI momentum and heat sources for the existing thermal solvers.
 
-use fs_material::fluid_transport::FluidTransport;
+mod heating;
+pub use heating::transport;
+pub mod electrothermal;
+
+use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use crate::ThermalLbm;
 use crate::d3q19::ThermalLbm3;
 use crate::thermal::ThermalForcingError;
@@ -10,14 +14,16 @@ use super::{MaterialLbmError, MaterialScaling, MaterialSlab};
 // different material's density or a different plan's dx/dt conversion.
 #[derive(Clone, Copy)]
 pub(super) struct ForceUnits {
-    reference_density: f64,
+    transport: FluidTransportState,
+    cell_size_m: f64,
     timestep_s: f64,
     velocity_scale: f64,
 }
 impl ForceUnits {
     pub(super) fn from_scale<F: FluidTransport + ?Sized>(scale: &MaterialScaling<'_, F>) -> Self {
         Self {
-            reference_density: scale.transport.density_kg_m3(),
+            transport: scale.transport,
+            cell_size_m: scale.cell_size_m,
             timestep_s: scale.timestep_s,
             velocity_scale: scale.velocity_scale,
         }
@@ -26,7 +32,7 @@ impl ForceUnits {
     fn component(self, force_n_m3: f64) -> Result<f64, MaterialLbmError> {
         // Lattice force is momentum per lattice volume per lattice step,
         // NOT acceleration: F_lb = F_SI/rho_ref * dt²/dx.
-        let value = ((force_n_m3 / self.reference_density) * self.timestep_s) / self.velocity_scale;
+        let value = ((force_n_m3 / self.transport.density_kg_m3()) * self.timestep_s) / self.velocity_scale;
         if !force_n_m3.is_finite() || !value.is_finite() || (force_n_m3 != 0.0 && value == 0.0) {
             return Err(MaterialLbmError::Invalid("physical body-force density is not representable in lattice units"));
         }

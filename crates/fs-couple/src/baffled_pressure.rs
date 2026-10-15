@@ -27,6 +27,10 @@ use fs_math::det;
 #[path = "baffled_pressure_bandlimited.rs"]
 mod bandlimited;
 
+/// Multiple physical openings through the same retarded-time pressure owner.
+#[path = "baffled_pressure_openings.rs"]
+pub mod openings;
+
 /// Largest retained input basis (the established observer/decimator limit).
 pub const MAX_RAYLEIGH_INPUTS: usize = 128;
 

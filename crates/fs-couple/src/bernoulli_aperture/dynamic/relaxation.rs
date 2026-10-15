@@ -1,8 +1,14 @@
 //! Regional hereditary bending projected through the actual retained plate mode.
 //! Equilibrium stiffness remains in the plate; only additional Maxwell arms enter
-//! this state. Prestress, pressure area and the lay law are never relaxed here.
+//! this state. Prestress, pressure area and the contact law are never relaxed here.
+//! A symmetric opposed pair projects BOTH identical blades with their physical
+//! half-gap shapes. Its common memory represents equal histories, not two
+//! independently addressable blades or twice the material stiffness in gap units.
+//! Independently moving blades reuse this same projection one source plate at a
+//! time, with separate histories in each blade's own opening coordinate.
 use super::{DynamicAperture, invalid};
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::bernoulli_aperture::plate::PlateApertureReduction;
 use fs_material::visco::GeneralizedMaxwell;
 use fs_phs::RelaxationBranch;
 use fs_plate::{PlateSection, PlateSectionField, dkt_stiffness};
@@ -11,6 +17,7 @@ use fs_plate::{PlateSection, PlateSectionField, dkt_stiffness};
 #[derive(Clone, Debug)]
 pub struct PlateRelaxationRegion {
     /// Unique original triangle indices; regions must partition the whole plate.
+    /// The same material and history apply to each blade of a symmetric pair.
     pub triangles: Vec<usize>,
     /// E_inf must reproduce the source section's actual equilibrium D matrix.
     /// E_j and tau are supplied material data, not inferred from a damping ratio.
@@ -46,8 +53,10 @@ pub enum InitialApertureMemory {
     Relaxed,
     /// Zero prior viscous displacement, which can store energy in a bent plate.
     Unrelaxed,
-    /// One equivalent opening-coordinate viscous displacement [m] per positive
-    /// arm, in region/term order. Uniform history within each regional arm.
+    /// One equivalent source-opening-coordinate viscous displacement [m] per
+    /// positive arm, in region/term order. Uniform history within each regional
+    /// arm; identical mirrored histories on the symmetric-pair path. For an
+    /// independent blade this is its OWN displacement, never the combined gap.
     ViscousDisplacementM(Vec<f64>),
 }
 
@@ -65,8 +74,9 @@ impl ApertureRelaxation {
     /// Exact supplied laws, regions, source labels and numerical allowances.
     #[must_use]
     pub const fn spec(&self) -> &PlateRelaxationSpec { &self.spec }
-    /// Discrete regional phi^T K_bending phi in opening coordinates [N/m].
-    /// This excludes membrane prestress and does not modify equilibrium storage.
+    /// Sum over moving blades of regional phi^T K_bending phi in source-opening
+    /// coordinates [N/m]. Excludes prestress; does not modify equilibrium storage.
+    /// An independent single-blade reduction does not include the other blade.
     #[must_use]
     pub fn region_bending_stiffness_n_m(&self) -> &[f64] { &self.region_stiffness_n_m }
     /// Positive projected relaxing arms; projection=[1] in opening metres.
@@ -82,7 +92,7 @@ impl ApertureRelaxation {
     #[must_use]
     pub const fn dissipated_energy_j(&self) -> f64 { self.dissipated_j }
 
-    pub(super) fn restoring_force(&self, old: f64, next: f64, dt: f64)
+    pub(in crate::bernoulli_aperture) fn restoring_force(&self, old: f64, next: f64, dt: f64)
         -> Result<f64, AcousticRealizeError>
     {
         let mut force = 0.0;
@@ -92,7 +102,7 @@ impl ApertureRelaxation {
         if !force.is_finite() { return Err(invalid("aperture material restoring force overflowed")); }
         Ok(force)
     }
-    pub(super) fn preview(&self, old: f64, next: f64, dt: f64)
+    pub(in crate::bernoulli_aperture) fn preview(&self, old: f64, next: f64, dt: f64)
         -> Result<MemoryTrial, AcousticRealizeError>
     {
         let mut z_next=Vec::with_capacity(self.z.len());
@@ -107,14 +117,14 @@ impl ApertureRelaxation {
         }
         Ok(MemoryTrial {z_next,energy,loss,cumulative})
     }
-    pub(super) fn accept(&mut self, trial: MemoryTrial) {
+    pub(in crate::bernoulli_aperture) fn accept(&mut self, trial: MemoryTrial) {
         self.z=trial.z_next;self.energy_j=trial.energy;self.dissipated_j=trial.cumulative;
     }
 }
-pub(super) struct MemoryTrial {
+pub(in crate::bernoulli_aperture) struct MemoryTrial {
     z_next: Vec<f64>,
-    pub(super) energy: f64,
-    pub(super) loss: f64,
+    pub(in crate::bernoulli_aperture) energy: f64,
+    pub(in crate::bernoulli_aperture) loss: f64,
     cumulative: f64,
 }
 fn map(e: fs_phs::PhsError) -> AcousticRealizeError { AcousticRealizeError::Nonlinear(e.to_string()) }
@@ -127,10 +137,12 @@ impl DynamicAperture {
     /// their existing passive boundary/cavity/wall loads.
     ///
     /// Requires zero separate modal damping to avoid counting material loss twice.
-    /// The actual DKT matrices project each region; no stiffness, area, mass or
-    /// resonance is retuned. Proportional isotropic bending and one structural
-    /// mode only; neither prestress nor contact stiffness receives Maxwell arms.
-    /// This is supplied constitutive data, not automatic wet-cane identification.
+    /// The actual DKT matrices project each region of every represented blade;
+    /// no stiffness, area, mass or resonance is retuned. Proportional isotropic
+    /// bending and one structural opening mode only; neither prestress nor contact
+    /// stiffness receives Maxwell arms. Opposed blades share identical material
+    /// histories by the explicitly selected symmetry. This is supplied
+    /// constitutive data, not automatic wet-cane identification.
     ///
     /// # Errors
     /// Missing plate, repeated/late attachment, unmatched equilibrium sections,
@@ -143,6 +155,31 @@ impl DynamicAperture {
             return Err(invalid("plate relaxation requires one cold attachment and zero separate modal damping"));
         }
         let plate=self.plate.as_ref().ok_or_else(||invalid("material bending requires the retained physical plate"))?;
+        let displacement=self.state.opening_m-self.spec.aperture.rest_opening_m;
+        let memory=ApertureRelaxation::from_plate(plate,self.spec.time_step_s,displacement,spec,initial)?;
+        if !(memory.stored_energy_j()+self.energy_at(self.state)).is_finite() {
+            return Err(invalid("initial material energy overflow"));
+        }
+        self.relaxation=Some(memory);
+        Ok(self)
+    }
+
+    /// Accepted material state and source map, absent on the original elastic path.
+    #[must_use]
+    pub fn relaxation(&self) -> Option<&ApertureRelaxation> {self.relaxation.as_ref()}
+}
+
+impl ApertureRelaxation {
+    // One physical projection for scalar, symmetric-pair and independent-blade
+    // sources. The owner supplies the coordinate; no temporary valve or contact
+    // model is constructed just to extract a material law.
+    pub(in crate::bernoulli_aperture) fn from_plate(
+        plate: &PlateApertureReduction, time_step_s: f64, displacement: f64,
+        spec: PlateRelaxationSpec, initial: InitialApertureMemory,
+    ) -> Result<Self, AcousticRealizeError> {
+        if !time_step_s.is_finite() || time_step_s<=0.0 || !displacement.is_finite() {
+            return Err(invalid("material projection requires a finite displacement and positive clock"));
+        }
         let chart=plate.chart();let count=chart.mesh.tris.len();
         if spec.regions.is_empty() || spec.regions.len()>count || spec.max_branches>64
             || !spec.max_dt_over_tau.is_finite() || spec.max_dt_over_tau<=0.0 || spec.max_dt_over_tau>2.0
@@ -178,6 +215,9 @@ impl DynamicAperture {
                 for (local,&node) in tri.iter().enumerate() {q[3*local..3*local+3].copy_from_slice(&plate.shape_per_opening()[node]);}
                 let mut element=0.0;
                 for a in 0..9 {for b in 0..9 {element+=q[a]*ke[9*a+b]*q[b];}}
+                // q is ONE blade's physical motion per total-gap metre. Both
+                // identical blades store/lose energy; the contact area does not double.
+                element *= plate.moving_blade_count() as f64;
                 if !element.is_finite() || element<0.0 {return Err(invalid("regional projected bending energy is not finite nonnegative"));}
                 stiffness+=element;
             }
@@ -185,23 +225,22 @@ impl DynamicAperture {
             region_stiffness.push(stiffness);
             for &(modulus,tau) in &region.material.terms {
                 if modulus==0.0 {continue;} // exactly zero is no physical arm
-                if self.spec.time_step_s/tau>spec.max_dt_over_tau {return Err(invalid("material relaxation is unresolved at the admitted mechanical clock"));}
+                if time_step_s/tau>spec.max_dt_over_tau {return Err(invalid("material relaxation is unresolved at the admitted mechanical clock"));}
                 let arm=RelaxationBranch {projection:vec![1.0],stiffness:stiffness*(modulus/region.material.e_inf),relaxation_time_s:tau};
                 arm.scalar_relaxed_memory(0.0).map_err(map)?;branches.push(arm);
             }
         }
         if covered.iter().any(|x|!*x) {return Err(invalid("material map omits plate triangles"));}
-        let instantaneous=self.spec.stiffness_n_m+branches.iter().map(|a|a.stiffness).sum::<f64>();
-        let omega=(instantaneous/self.spec.mass_kg).sqrt();
-        if !omega.is_finite() || omega*self.spec.time_step_s>spec.max_angular_step {
+        let instantaneous=plate.stiffness_n_m()+branches.iter().map(|a|a.stiffness).sum::<f64>();
+        let omega=(instantaneous/plate.mass_kg()).sqrt();
+        if !omega.is_finite() || omega*time_step_s>spec.max_angular_step {
             return Err(invalid("instantaneous material stiffness exceeds the declared time resolution"));
         }
-        let equilibrium_hz=(self.spec.stiffness_n_m/self.spec.mass_kg).sqrt()/core::f64::consts::TAU;
+        let equilibrium_hz=(plate.stiffness_n_m()/plate.mass_kg()).sqrt()/core::f64::consts::TAU;
         let instant_hz=omega/core::f64::consts::TAU;
         if spec.regions.iter().any(|r|equilibrium_hz<r.band_hz.0 || instant_hz>r.band_hz.1) {
             return Err(invalid("retained equilibrium or instantaneous mode exceeds a supplied material band"));
         }
-        let displacement=self.state.opening_m-self.spec.aperture.rest_opening_m;
         if let InitialApertureMemory::ViscousDisplacementM(values)=&initial {
             if values.len()!=branches.len() {return Err(invalid("initial material history must name every positive regional arm"));}
         }
@@ -214,15 +253,28 @@ impl DynamicAperture {
             let value=arm.scalar_relaxed_memory(viscous).map_err(map)?;
             energy+=arm.scalar_stored_energy(displacement,value).map_err(map)?;z.push(value);
         }
-        if !energy.is_finite() || !(energy+self.energy_at(self.state)).is_finite() {
+        if !energy.is_finite() {
             return Err(invalid("initial material energy overflow"));
         }
-        self.relaxation=Some(ApertureRelaxation {spec,branches,region_stiffness_n_m:region_stiffness,
-            z,energy_j:energy,dissipated_j:0.0});
-        Ok(self)
+        Ok(Self {spec,branches,region_stiffness_n_m:region_stiffness,
+            z,energy_j:energy,dissipated_j:0.0})
     }
 
-    /// Accepted material state and source map, absent on the original elastic path.
-    #[must_use]
-    pub fn relaxation(&self) -> Option<&ApertureRelaxation> {self.relaxation.as_ref()}
+    /// Exact affine midpoint force F = bias + resistance * v_mid for this
+    /// accepted history. fs-phs evaluates both the held-displacement response
+    /// and the homogeneous unit-velocity basis; there is no finite difference,
+    /// duplicated Maxwell update, lagged force, or mutated trial history.
+    pub(in crate::bernoulli_aperture) fn midpoint_response(&self, old: f64, dt: f64)
+        -> Result<(f64, f64), AcousticRealizeError>
+    {
+        let bias=self.restoring_force(old,old,dt)?;
+        let mut resistance=0.0;
+        for arm in &self.branches {
+            resistance+=arm.scalar_midpoint_step(0.0,dt,0.0,dt).map_err(map)?.1;
+        }
+        if !resistance.is_finite() || resistance<0.0 {
+            return Err(invalid("material midpoint resistance is not finite nonnegative"));
+        }
+        Ok((bias,resistance))
+    }
 }

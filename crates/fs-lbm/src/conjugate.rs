@@ -93,6 +93,9 @@ mod energy;
 mod flow;
 mod krylov;
 pub mod material_coupling;
+/// Ohmic sources on conservative enthalpy timelines, including latent plateaus.
+#[cfg(feature = "enthalpy-coupling")]
+pub mod enthalpy;
 mod natural;
 mod radiation;
 mod simple;
@@ -104,9 +107,10 @@ pub use buoyant::{
     FvBuoyancyConfig, FvNaturalConvection, FvNaturalConvectionReport, fv_natural_convection,
 };
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
+pub use electric::motion::{ElectricMotionInput, MovingConductorSolution};
 pub use electric::{
-    Conductor, ElectricSetup, ElectricSolution, Electrode, ElectrodeDrive, ElectrodeSolution,
-    ElectrothermalReport, solve_electric, solve_electrothermal,
+    Conductor, ElectricSetup, ElectricSolution, ElectricalContact, Electrode, ElectrodeDrive,
+    ElectrodeSolution, ElectrothermalReport, solve_electric, solve_electrothermal,
 };
 pub use energy::{
     CellSink, CompactComponent, ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig,

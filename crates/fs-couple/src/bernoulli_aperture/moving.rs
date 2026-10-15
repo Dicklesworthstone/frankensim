@@ -16,6 +16,43 @@ pub(crate) fn volume_flow(width: f64, opening: f64, dp: f64, rho: f64) -> f64 {
     if dp < 0.0 { -flow } else { flow }
 }
 
+fn invalid() -> AcousticRealizeError {
+    AcousticRealizeError::Reed {
+        what: "continuous moving-aperture junction requires finite physical inputs and results",
+    }
+}
+
+// Return both terms of dp + a*sign(dp)*sqrt(abs(dp)) = drive.
+// Shared by a single moving face and condensed independent pressure faces.
+fn pressure_partition(drive: f64, a: f64) -> Result<(f64, f64), AcousticRealizeError> {
+    if !drive.is_finite() || !a.is_finite() || a < 0.0 { return Err(invalid()); }
+    if a == 0.0 || drive == 0.0 { return Ok((drive, 0.0)); }
+    let b = 2.0 * det::sqrt(drive.abs());
+    let scale = a.max(b);
+    let an = a / scale;
+    let bn = b / scale;
+    let s = (2.0 * (drive.abs() / scale)) / (an + det::sqrt(an * an + bn * bn));
+    let dp = drive.signum() * s * s;
+    let jet_pressure = drive.signum() * a * s;
+    if ![dp, jet_pressure].iter().all(|v| v.is_finite()) { return Err(invalid()); }
+    Ok((dp, jet_pressure))
+}
+
+/// Same Bernoulli pressure-drop solution after a caller has condensed an
+/// affine mechanical swept-flow compliance into the positive impedance.
+/// Returns dp directly so a small drop is not reconstructed by subtracting
+/// two nearly equal upstream/downstream pressures.
+pub(crate) fn fixed_opening_pressure_drop(
+    width: f64, opening: f64, rho: f64, impedance: f64, drive: f64,
+) -> Result<f64, AcousticRealizeError> {
+    if ![width, opening, rho, impedance].iter().all(|x| x.is_finite())
+        || width <= 0.0 || opening < 0.0 || rho <= 0.0 || impedance <= 0.0 {
+        return Err(invalid());
+    }
+    let a = impedance * fs_phs::bernoulli_volume_flow(width, opening, 1.0, rho);
+    Ok(pressure_partition(drive, a)?.0)
+}
+
 /// Solve the fixed-opening characteristic junction algebraically.
 /// With d = Pmouth - 2 Pminus - Z Umoving and a = Z Ujet(1 Pa),
 /// sqrt(|dp|) solves s^2 + a s = |d|. Rationalization avoids cancellation
@@ -25,9 +62,7 @@ pub(crate) fn characteristic_pressure(
     width: f64, opening: f64, rho: f64, zc: f64,
     p_minus: f64, p_m: f64, moving_flow: f64,
 ) -> Result<f64, AcousticRealizeError> {
-    let bad = || AcousticRealizeError::Reed {
-        what: "continuous moving-aperture junction requires finite physical inputs and results",
-    };
+    let bad = invalid;
     if ![width, opening, rho, zc, p_minus, p_m, moving_flow]
         .iter().all(|v| v.is_finite())
         || width <= 0.0 || opening < 0.0 || rho <= 0.0 || zc <= 0.0
@@ -44,13 +79,7 @@ pub(crate) fn characteristic_pressure(
     if a == 0.0 || drive == 0.0 {
         return Ok(no_jet);
     }
-    let b = 2.0 * det::sqrt(drive.abs());
-    let scale = a.max(b);
-    let an = a / scale;
-    let bn = b / scale;
-    let s = (2.0 * (drive.abs() / scale)) / (an + det::sqrt(an * an + bn * bn));
-    let dp = drive.signum() * s * s;
-    let jet_pressure = drive.signum() * a * s;
+    let (dp, jet_pressure) = pressure_partition(drive, a)?;
     // These are algebraically identical. Choose the subtraction/addition with
     // the smaller operand scale to avoid destroying a small outgoing pressure.
     let outgoing = if no_drop.abs().max(dp.abs()) <= no_jet.abs().max(jet_pressure.abs()) {

@@ -36,7 +36,7 @@ impl TubeNetworkSpec {
     /// Check a complete ordered mapping before allocating or advancing physics.
     /// Equal static pressure excludes an unmodeled steady pressure-driven flow.
     /// The legacy speed field must name the actual inlet, never an ignored value.
-    /// This validates finite inputs, not their empirical accuracy or gas phase.
+    /// This validates coherent inputs, not their empirical accuracy or gas phase.
     ///
     /// # Errors
     /// Incomplete/invalid states, unequal static pressures or inlet-speed mismatch.
@@ -45,12 +45,14 @@ impl TubeNetworkSpec {
             return Err(invalid("regional duct requires exactly one gas state per physical section"));
         }
         for gas in gases {
+            gas.validate_coherence()
+                .map_err(|_| invalid("regional duct needs coherent material gas states"))?;
             if ![gas.temperature, gas.pressure, gas.density, gas.sound_speed,
                 gas.dynamic_viscosity, gas.thermal_conductivity, gas.specific_gas_constant,
                 gas.specific_heat_cp, gas.prandtl, gas.characteristic_impedance]
                 .iter().all(|v| v.is_finite() && *v > 0.0)
                 || !gas.gamma.is_finite() || gas.gamma <= 1.0
-                || !gas.water_mole_fraction.is_finite() || !(0.0..1.0).contains(&gas.water_mole_fraction)
+                || !gas.water_mole_fraction.is_finite() || !(0.0..=1.0).contains(&gas.water_mole_fraction)
                 || gas.pressure.to_bits() != gases[0].pressure.to_bits()
             { return Err(invalid("regional gas states must be finite and share one static pressure")); }
         }
@@ -69,6 +71,49 @@ impl TubeNetworkSpec {
         self.validate_section_gases(gases)?;
         let i = self.inlet_section_index()?;
         self.sections[i].uniform(gases[i].sound_speed).characteristic_impedance(gases[i].density)
+    }
+
+    /// Realize this physical graph without requiring a reed/valve source.
+    /// Jets, prescribed sources and valves use the same section geometry and
+    /// fs-vfit scattering/load owner. Every section retains its own gas-derived
+    /// represented length and impedance. Initial waves and load states are zero.
+    ///
+    /// The payload budget covers the network, returned geometry and temporary
+    /// segment records, not caller-owned graph/gas copies or process RSS.
+    /// Cancellation is checked around the bounded network constructor and once
+    /// per section; no partially constructed network is returned.
+    ///
+    /// # Errors
+    /// Gas, topology, geometry, clock, memory, allocation or cancellation refusal.
+    pub fn realize_waveguide(
+        &self, gases: &[GasState], dt: f64, gate: &CancelGate,
+    ) -> Result<(WaveguideNetwork, Vec<SectionRealization>), AcousticRealizeError> {
+        let poll = || if gate.is_requested() { Err(AcousticRealizeError::Cancelled) } else { Ok(()) };
+        poll()?;
+        self.validate_section_gases(gases)?;
+        let bytes = self.sections.len().checked_mul(
+            core::mem::size_of::<NetworkSegment>() + core::mem::size_of::<SectionRealization>())
+            .ok_or_else(|| invalid("network geometry allocation size overflow"))?;
+        let budget = self.max_wave_memory_bytes.checked_sub(bytes)
+            .ok_or_else(|| invalid("network geometry payload exceeds memory allowance"))?;
+        let mut represented = Vec::new();
+        let mut segments = Vec::new();
+        represented.try_reserve_exact(self.sections.len())
+            .map_err(|_| invalid("network geometry allocation failed"))?;
+        segments.try_reserve_exact(self.sections.len())
+            .map_err(|_| invalid("network geometry allocation failed"))?;
+        for (section, gas) in self.sections.iter().zip(gases) {
+            poll()?;
+            let actual = section.realize(gas.sound_speed, gas.density, dt)?;
+            segments.push(NetworkSegment { nodes: section.nodes,
+                one_way_samples: actual.one_way_samples,
+                impedance_pa_s_m3: actual.impedance_pa_s_m3 });
+            represented.push(actual);
+        }
+        let network = WaveguideNetwork::new(&self.nodes, &segments, dt, budget)
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        poll()?;
+        Ok((network, represented))
     }
 }
 
@@ -100,5 +145,64 @@ impl ApertureNetwork {
         Some(self.section_gases.as_ref().map_or(
             (self.aperture.spec().density_kg_m3, self.spec.sound_speed_m_s),
             |gases| (gases[section].density, gases[section].sound_speed)))
+    }
+}
+
+#[cfg(test)]
+mod source_independent_tests {
+    use super::*;
+    use fs_material::gas::GasSpec;
+
+    fn gas(t: f64, p: f64) -> GasState {
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), t, p).unwrap()
+    }
+    fn graph(g: &GasState) -> TubeNetworkSpec {
+        TubeNetworkSpec {
+            nodes: vec![NetworkNode::Inlet, NetworkNode::Termination { reflection: 0.0 }],
+            sections: vec![TubeSection { nodes: [0,1], length_m: 0.3,
+                radius_m: 0.006, max_length_error_m: 0.005 }],
+            sound_speed_m_s: g.sound_speed, max_wave_memory_bytes: 100_000,
+        }
+    }
+    #[test]
+    fn same_geometry_owner_sets_impedance_and_transit_without_a_valve() {
+        let g = gas(293.15, 101325.0);
+        let spec = graph(&g);
+        let gate = CancelGate::new_clock_free();
+        let dt = 1.0/48000.0;
+        let (mut net, sections) = spec.realize_waveguide(&[g], dt, &gate).unwrap();
+        let z = spec.inlet_impedance(g.density).unwrap();
+        assert_eq!(net.inlet_impedance_pa_s_m3(), z);
+        assert_eq!(sections[0].one_way_samples, (0.3/(g.sound_speed*dt)).round() as usize);
+        assert_eq!(sections[0].represented_length_m, sections[0].one_way_samples as f64*g.sound_speed*dt);
+        for i in 0..=sections[0].one_way_samples {
+            let f = net.step(if i == 0 {1.0} else {0.0}).unwrap();
+            assert!(f.balance_residual_j().abs() < 1.0e-15);
+        }
+        assert!((net.node_frame(1).unwrap().net_flow_into_node_m3_s*z-1.0).abs() < 1.0e-12);
+    }
+    #[test]
+    fn gas_changes_real_load_and_delay_instead_of_only_an_output_gain() {
+        let gate = CancelGate::new_clock_free();
+        let a = gas(280.0, 101325.0);
+        let b = gas(320.0, 80000.0);
+        let (_, ra) = graph(&a).realize_waveguide(&[a], 1.0/48000.0, &gate).unwrap();
+        let (_, rb) = graph(&b).realize_waveguide(&[b], 1.0/48000.0, &gate).unwrap();
+        assert_ne!(ra[0].impedance_pa_s_m3, rb[0].impedance_pa_s_m3);
+        assert_ne!(ra[0].one_way_samples, rb[0].one_way_samples);
+    }
+    #[test]
+    fn stale_gas_geometry_and_memory_refuse() {
+        let gate = CancelGate::new_clock_free();
+        let g = gas(293.15, 101325.0);
+        let mut stale = g;
+        stale.density *= 2.0;
+        assert!(graph(&g).realize_waveguide(&[stale], 1.0/48000.0, &gate).is_err());
+        let mut spec = graph(&g);
+        spec.max_wave_memory_bytes = 0;
+        assert!(spec.realize_waveguide(&[g], 1.0/48000.0, &gate).is_err());
+        spec = graph(&g);
+        spec.sections[0].max_length_error_m = 0.0;
+        assert!(spec.realize_waveguide(&[g], 1.0/48000.0, &gate).is_err());
     }
 }

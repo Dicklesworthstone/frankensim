@@ -75,6 +75,182 @@ impl StribeckFriction {
     }
 }
 
+/// A force/velocity pair satisfying a discrete collocated contact equation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImplicitFrictionStep {
+    /// Traction on the driven body [N].
+    pub traction_n: f64,
+    /// Driver-minus-body velocity after the held-force step [m/s].
+    pub relative_velocity_m_s: f64,
+    /// Signed velocity residual of the constitutive/kinematic solve [m/s].
+    pub residual_m_s: f64,
+}
+
+/// A contact refusal never substitutes an explicit force or a different law.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImplicitFrictionError<E> {
+    /// Invalid input or an unrepresentable intermediate value.
+    InvalidInput(&'static str),
+    /// The caller's constitutive owner refused an evaluation.
+    Constitutive(E),
+    /// The supplied sliding law would add relative mechanical energy.
+    NonDissipative,
+    /// A discontinuity or unresolved root prevented a consistent step.
+    NoConvergence,
+}
+
+/// Solve `v = v_free - mobility * F(v)` for an odd, dissipative sliding law.
+///
+/// `mobility` is the *discrete* collocated endpoint velocity response to one
+/// newton held over this step [m/(N s)], not continuous-time inverse mass.
+/// Both quantities must come from the same transition that the caller commits.
+/// A string, a brake and a sliding mechanical port use the same scalar solve;
+/// the constitutive callback retains ownership of materials and state validity.
+///
+/// The bracket does not allow traction to reverse the slip direction. Static
+/// reaction/capture remains the caller's separate constraint solve. A
+/// velocity-weakening law can have multiple roots; this deterministic bracket
+/// selects one and does not certify uniqueness or continuous-time passivity.
+/// In particular, an interval shrinking onto a constitutive jump is NOT
+/// convergence: the velocity residual must also pass. There is no allocation.
+///
+/// # Errors
+/// Invalid response data, constitutive refusal, active traction, or failure to
+/// resolve a root to floating-point tolerance within 96 bisections.
+pub fn solve_implicit_friction<E>(
+    free_relative_velocity_m_s: f64,
+    mobility_m_per_n_s: f64,
+    mut traction: impl FnMut(f64) -> Result<f64, E>,
+) -> Result<ImplicitFrictionStep, ImplicitFrictionError<E>> {
+    if !free_relative_velocity_m_s.is_finite() {
+        return Err(ImplicitFrictionError::InvalidInput("free_relative_velocity"));
+    }
+    if !mobility_m_per_n_s.is_finite() || mobility_m_per_n_s < 0.0 {
+        return Err(ImplicitFrictionError::InvalidInput("discrete_mobility"));
+    }
+    let sign = if free_relative_velocity_m_s < 0.0 { -1.0 } else { 1.0 };
+    let speed = free_relative_velocity_m_s.abs();
+    let mut evaluate = |relative_speed: f64| {
+        let force = traction(sign * relative_speed)
+            .map_err(ImplicitFrictionError::Constitutive)?;
+        if !force.is_finite() {
+            return Err(ImplicitFrictionError::InvalidInput("traction"));
+        }
+        if force * sign < 0.0 || (relative_speed == 0.0 && force != 0.0) {
+            return Err(ImplicitFrictionError::NonDissipative);
+        }
+        let velocity_change = mobility_m_per_n_s * force;
+        if !velocity_change.is_finite() {
+            return Err(ImplicitFrictionError::InvalidInput("contact_velocity_change"));
+        }
+        let endpoint = free_relative_velocity_m_s - velocity_change;
+        let residual = sign * relative_speed - endpoint;
+        if !endpoint.is_finite() || !residual.is_finite() {
+            return Err(ImplicitFrictionError::InvalidInput("contact_residual"));
+        }
+        Ok(ImplicitFrictionStep {
+            traction_n: force,
+            relative_velocity_m_s: endpoint,
+            residual_m_s: residual,
+        })
+    };
+    // Admit the zero-slip endpoint too: this helper is not a static-reaction
+    // solver, and cannot bracket a law that invents a force at rest.
+    let at_zero = evaluate(0.0)?;
+    if speed == 0.0 {
+        return Ok(at_zero);
+    }
+    let at_free = evaluate(speed)?;
+    if mobility_m_per_n_s == 0.0 || at_free.traction_n == 0.0 {
+        return Ok(at_free);
+    }
+    let tolerance = (64.0 * f64::EPSILON * speed).max(f64::MIN_POSITIVE);
+    let (mut lo, mut hi) = (0.0, speed);
+    for _ in 0..96 {
+        let mid = lo + 0.5 * (hi - lo);
+        let candidate = evaluate(mid)?;
+        if candidate.residual_m_s.abs() <= tolerance
+            && candidate.relative_velocity_m_s * sign >= 0.0
+        {
+            return Ok(candidate);
+        }
+        if mid == lo || mid == hi {
+            break;
+        }
+        if candidate.residual_m_s * sign > 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Err(ImplicitFrictionError::NoConvergence)
+}
+
+#[cfg(test)]
+mod implicit_contact_tests {
+    use super::*;
+
+    #[test]
+    fn implicit_linear_contact_matches_closed_form_across_mechanical_scales() {
+        for free in [-3.0, -0.01, 0.0, 0.01, 3.0] {
+            for mobility in [0.0, 1.0e-6, 0.01, 1.0, 100.0] {
+                let damping = 4.0;
+                let step = solve_implicit_friction(free, mobility,
+                    |v| Ok::<_, ()>(damping * v)).unwrap();
+                let exact = free / (1.0 + mobility * damping);
+                let tol = 2.0e-12 * free.abs().max(1.0e-20);
+                assert!((step.relative_velocity_m_s - exact).abs() < tol);
+                assert!((step.traction_n - damping * exact).abs() < 4.0 * tol);
+                assert!(step.traction_n * step.relative_velocity_m_s >= 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn implicit_material_law_retains_constitutive_ownership_and_odd_symmetry() {
+        let law = StribeckFriction::try_new(0.8, 0.3, 0.05).unwrap();
+        for free in [0.01, 0.2, 2.0] {
+            for mobility in [1.0e-5, 0.01, 0.2] {
+                let solve = |sign| solve_implicit_friction(sign * free, mobility,
+                    |v| law.traction(v, 0.7)).unwrap();
+                let a = solve(1.0);
+                let b = solve(-1.0);
+                assert_eq!(a.traction_n.to_bits(), (-b.traction_n).to_bits());
+                let owned = law.traction(a.relative_velocity_m_s, 0.7).unwrap();
+                assert!((owned - a.traction_n).abs() < 1.0e-11);
+                assert!((free - mobility * a.traction_n
+                    - a.relative_velocity_m_s).abs() < 1.0e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn implicit_contact_prevents_explicit_velocity_reversal() {
+        // An explicit viscous force gives v_next = 1 - 10 * 2 = -19 m/s.
+        let step = solve_implicit_friction(1.0, 10.0,
+            |v| Ok::<_, ()>(2.0 * v)).unwrap();
+        assert!((step.relative_velocity_m_s - 1.0 / 21.0).abs() < 1.0e-12);
+        assert!(step.traction_n * step.relative_velocity_m_s > 0.0);
+    }
+
+    #[test]
+    fn implicit_contact_refuses_active_laws_bad_response_and_constitutive_jumps() {
+        assert!(matches!(solve_implicit_friction(1.0, -1.0,
+            |v| Ok::<_, ()>(v)), Err(ImplicitFrictionError::InvalidInput(_))));
+        assert!(matches!(solve_implicit_friction(f64::NAN, 1.0,
+            |v| Ok::<_, ()>(v)), Err(ImplicitFrictionError::InvalidInput(_))));
+        assert!(matches!(solve_implicit_friction(1.0, 1.0,
+            |v| Ok::<_, ()>(-v)), Err(ImplicitFrictionError::NonDissipative)));
+        assert_eq!(solve_implicit_friction(1.0, 1.0,
+            |_| Err::<f64, _>("outside material domain")),
+            Err(ImplicitFrictionError::Constitutive("outside material domain")));
+        // There is no root: left limit is -0.5 and right limit is +0.5.
+        assert_eq!(solve_implicit_friction(1.0, 1.0,
+            |v| Ok::<_, ()>(if v < 0.5 { 0.0 } else { 1.0 })),
+            Err(ImplicitFrictionError::NoConvergence));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -24,7 +24,9 @@
 use fs_duct::{Duct, FingeringTable, LossModel, Termination, impedance_sweep};
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
-use fs_vfit::discretize::{DelayedFilter, DiscretizeError, reflectance};
+use fs_vfit::discretize::{
+    DelayedFilter, DiscretizeError, modulate_delay, realize_tabulated, reflectance,
+};
 use fs_vfit::vf::FitOptions;
 
 use crate::driving_point::{DrivingPointError, characteristic_line};
@@ -98,11 +100,30 @@ pub struct WindLiftRecord {
     pub fade_samples: usize,
 }
 
+/// Same-sample reflection boundary, before the next outgoing wave is committed.
+/// `p_minus = direct_reflection * p_plus + history_pressure_pa`; both terms
+/// use the NEXT crossfade weight. The history contains no current input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindBoundary {
+    /// Instantaneous pressure reflectance (dimensionless).
+    pub direct_reflection: f64,
+    /// Delayed and filtered reflection already determined by wave history [Pa].
+    pub history_pressure_pa: f64,
+}
+
 /// Per-fingering plane-wave line bank with the char->VFIT hop.
+///
+/// Internally each line stores the strictly causal remainder one sample ahead:
+/// R(z) = r0 + z^-1 H_tail(z). The existing filter owner evaluates H_tail;
+/// no filter equation or wave propagation law is duplicated here. A junction
+/// uses `boundary_response`, then commits its solved outgoing wave with `push`.
+/// The original `incoming` accessor remains a LAST-sample observation.
 pub struct WindLineBank {
     fir_lines: Vec<DelayedFilter>,
     fir_taps: Vec<Vec<f64>>,
     vfit_lines: Vec<Option<DelayedFilter>>,
+    // Immutable zero-state images: every re-entry primes a fresh state.
+    vfit_templates: Vec<Option<DelayedFilter>>,
     labels: Vec<String>,
     active: usize,
     image: ActiveImage,
@@ -110,10 +131,14 @@ pub struct WindLineBank {
     dt: f64,
     zc: f64,
     fade_old: Option<DelayedFilter>,
-    fade_old_is_vfit: bool,
+    fade_old_direct: f64,
     fade_remaining: usize,
     fade_total: usize,
     history: std::collections::VecDeque<f64>,
+    history_capacity: usize,
+    last_incoming: f64,
+    // A downstream failure after another filter advanced cannot be resumed.
+    poisoned: bool,
     lift_log: Vec<WindLiftRecord>,
 }
 
@@ -148,16 +173,21 @@ impl WindLineBank {
             })?;
             let line =
                 characteristic_line(&duct, gas, termination, sample_rate_hz, 4096, zc, None)?;
-            let taps = probe_taps(&line);
-            fir_lines.push(line);
+            let taps = probe_taps(&line)?;
+            fir_lines.push(history_line(dt, &taps, &[])?);
             fir_taps.push(taps);
             labels.push(label.to_string());
         }
         let n = fir_lines.len();
+        if n == 0 {
+            return Err(WindLineError::Invalid { what: "wind bank requires at least one fingering" });
+        }
+        let history_capacity = fir_taps.iter().map(Vec::len).max().unwrap_or(0);
         Ok(WindLineBank {
             fir_lines,
             fir_taps,
             vfit_lines: vec![None; n],
+            vfit_templates: vec![None; n],
             labels,
             active: 0,
             image: ActiveImage::CharLine,
@@ -165,10 +195,13 @@ impl WindLineBank {
             dt,
             zc,
             fade_old: None,
-            fade_old_is_vfit: false,
+            fade_old_direct: 0.0,
             fade_remaining: 0,
             fade_total: 0,
-            history: std::collections::VecDeque::with_capacity(512),
+            history: std::collections::VecDeque::with_capacity(history_capacity),
+            history_capacity,
+            last_incoming: 0.0,
+            poisoned: false,
             lift_log: Vec::new(),
         })
     }
@@ -191,52 +224,102 @@ impl WindLineBank {
         &self.lift_log
     }
 
-    /// Push the outgoing wave; get the incoming wave (crossfaded during
-    /// a transition).
-    ///
-    /// # Errors
-    /// [`WindLineError::Discrete`] on a non-finite sample.
-    pub fn push(&mut self, outgoing: f64) -> Result<f64, WindLineError> {
-        self.history.push_back(outgoing);
-        if self.history.len() > 512 {
-            self.history.pop_front();
-        }
-        let new_in = match self.image {
-            ActiveImage::CharLine => self.fir_lines[self.active].push(outgoing)?,
-            ActiveImage::VfitHold => self.vfit_lines[self.active]
-                .as_mut()
-                .expect("hold image active implies realized")
-                .push(outgoing)?,
-        };
-        if let Some(old) = self.fade_old.as_mut() {
-            let old_in = old.push(outgoing)?;
-            self.fade_remaining -= 1;
-            let w = 1.0 - self.fade_remaining as f64 / self.fade_total as f64;
-            let mixed = (1.0 - w) * old_in + w * new_in;
-            if self.fade_remaining == 0 {
-                self.fade_old = None;
-            }
-            return Ok(mixed);
-        }
-        Ok(new_in)
+    fn check_live(&self) -> Result<(), WindLineError> {
+        if self.poisoned {
+            Err(WindLineError::Invalid { what: "wind line has a partial physical step; reconstruct it" })
+        } else { Ok(()) }
     }
 
-    /// Re-read the last incoming wave without advancing (approximation
-    /// during fades: the new line's pending value).
-    #[must_use]
-    pub fn incoming(&self) -> f64 {
-        let new_in = match self.image {
-            ActiveImage::CharLine => self.fir_lines[self.active].incoming(),
+    fn active_line(&self) -> &DelayedFilter {
+        match self.image {
+            ActiveImage::CharLine => &self.fir_lines[self.active],
             ActiveImage::VfitHold => self.vfit_lines[self.active]
-                .as_ref()
-                .expect("hold image active implies realized")
-                .incoming(),
-        };
-        if let Some(old) = self.fade_old.as_ref() {
-            let w = 1.0 - self.fade_remaining as f64 / self.fade_total as f64;
-            return (1.0 - w) * old.incoming() + w * new_in;
+                .as_ref().expect("hold image active implies realized"),
         }
-        new_in
+    }
+
+    fn active_direct(&self) -> f64 {
+        match self.image {
+            ActiveImage::CharLine => self.fir_taps[self.active][0],
+            ActiveImage::VfitHold => 0.0, // explicitly delayed by construction
+        }
+    }
+
+    /// Reflection for the NEXT junction solve, without advancing any state.
+    ///
+    /// The FIR's direct tap is not delayed or discarded. Fitted hold images
+    /// retain their original physical transit time and residual filter. During
+    /// a lift BOTH the direct term and history use the very same weight that
+    /// `push` will commit. This is an affine wave boundary, not an impedance fit
+    /// or a time-varying scattering-energy certificate.
+    ///
+    /// # Errors
+    /// A previous partial step or an unrepresentable mixed boundary.
+    pub fn boundary_response(&self) -> Result<WindBoundary, WindLineError> {
+        self.check_live()?;
+        let mut direct = self.active_direct();
+        let mut history = self.active_line().incoming();
+        if let Some(old) = self.fade_old.as_ref() {
+            let w = 1.0 - (self.fade_remaining - 1) as f64 / self.fade_total as f64;
+            direct = (1.0 - w) * self.fade_old_direct + w * direct;
+            history = (1.0 - w) * old.incoming() + w * history;
+        }
+        if !direct.is_finite() || !history.is_finite() {
+            return Err(WindLineError::Invalid { what: "wind boundary is not finite" });
+        }
+        Ok(WindBoundary { direct_reflection: direct, history_pressure_pa: history })
+    }
+
+    /// Commit an outgoing wave and return its SAME-sample incoming reflection.
+    ///
+    /// Junctions solve against `boundary_response` first; `incoming` alone is
+    /// only a diagnostic of the previous step. No allocation occurs here.
+    /// Invalid input leaves state unchanged. If a filter fails after another
+    /// participant advanced, the bank is poisoned rather than silently resumed.
+    ///
+    /// # Errors
+    /// A nonfinite input, reflected wave, filter output, or partial prior step.
+    pub fn push(&mut self, outgoing: f64) -> Result<f64, WindLineError> {
+        let boundary = self.boundary_response()?;
+        let incoming = boundary.direct_reflection * outgoing + boundary.history_pressure_pa;
+        if !outgoing.is_finite() || !incoming.is_finite() {
+            return Err(WindLineError::Invalid { what: "wind wave must be finite" });
+        }
+        let advanced = match self.image {
+            ActiveImage::CharLine => self.fir_lines[self.active].push(outgoing),
+            ActiveImage::VfitHold => self.vfit_lines[self.active]
+                .as_mut().expect("hold image active implies realized").push(outgoing),
+        };
+        if let Err(error) = advanced {
+            self.poisoned = true;
+            return Err(error.into());
+        }
+        if let Some(old) = self.fade_old.as_mut() {
+            if let Err(error) = old.push(outgoing) {
+                self.poisoned = true;
+                return Err(error.into());
+            }
+            self.fade_remaining -= 1;
+            if self.fade_remaining == 0 { self.fade_old = None; }
+        }
+        // Retain the longest COMPLETE FIR horizon, including during hold.
+        // Pop before push so a full ring never transiently reallocates.
+        if self.history.len() == self.history_capacity { self.history.pop_front(); }
+        self.history.push_back(outgoing);
+        self.last_incoming = incoming;
+        Ok(incoming)
+    }
+
+    /// Re-read the last COMPLETED incoming wave without advancing.
+    /// Use `boundary_response` for the next physical junction solve.
+    #[must_use]
+    pub fn incoming(&self) -> f64 { self.last_incoming }
+
+    fn begin_fade(&mut self, old: DelayedFilter, direct: f64, samples: usize) {
+        self.fade_old = if samples > 0 { Some(old) } else { None };
+        self.fade_old_direct = direct;
+        self.fade_remaining = samples;
+        self.fade_total = samples;
     }
 
     /// Switch fingering on the char image (carry-history + crossfade —
@@ -251,37 +334,20 @@ impl WindLineBank {
         index: usize,
         fade_samples: usize,
     ) -> Result<(), WindLineError> {
+        self.check_live()?;
         if index >= self.fir_lines.len() {
-            return Err(WindLineError::Invalid {
-                what: "unknown fingering index",
-            });
+            return Err(WindLineError::Invalid { what: "unknown fingering index" });
         }
-        let old = match self.image {
-            ActiveImage::CharLine => self.fir_lines[self.active].clone(),
-            ActiveImage::VfitHold => self.vfit_lines[self.active]
-                .as_ref()
-                .expect("realized")
-                .clone(),
-        };
-        let history = self.fir_lines[self.active].history();
-        let lifted = DelayedFilter::from_impulse_response_with_history(
-            self.dt,
-            self.fir_taps[index].clone(),
-            &history,
-        )?;
+        let old = self.active_line().clone();
+        let direct = self.active_direct();
+        // The active char line is stale while a hold image plays. The shared
+        // outgoing history is the physical source for EVERY fingering lift.
+        let history: Vec<f64> = self.history.iter().copied().collect();
+        let lifted = history_line(self.dt, &self.fir_taps[index], &history)?;
         self.lift_log.push(WindLiftRecord {
-            action: "switch-fingering/carry+fade",
-            carried: history.len(),
-            fade_samples,
+            action: "switch-fingering/carry+fade", carried: history.len(), fade_samples,
         });
-        if fade_samples > 0 {
-            self.fade_old = Some(old);
-            self.fade_old_is_vfit = self.image == ActiveImage::VfitHold;
-            self.fade_remaining = fade_samples;
-            self.fade_total = fade_samples;
-        } else {
-            self.fade_old = None;
-        }
+        self.begin_fade(old, direct, fade_samples);
         self.fir_lines[index] = lifted;
         self.active = index;
         self.image = ActiveImage::CharLine;
@@ -303,38 +369,26 @@ impl WindLineBank {
         termination: Termination,
         fade_samples: usize,
     ) -> Result<(), WindLineError> {
+        self.check_live()?;
         if !self.vfit_gate_green {
             return Err(WindLineError::ImageNotGated { image: "vfit-hold" });
         }
-        if self.image == ActiveImage::VfitHold {
-            return Ok(());
-        }
-        if self.vfit_lines[self.active].is_none() {
-            self.vfit_lines[self.active] =
+        if self.image == ActiveImage::VfitHold { return Ok(()); }
+        if self.vfit_templates[self.active].is_none() {
+            self.vfit_templates[self.active] =
                 Some(realize_hold_line(duct, gas, termination, self.dt, self.zc)?);
         }
-        // Fresh state + replay prime.
-        let mut hold = self.vfit_lines[self.active].take().expect("realized");
+        // A finite replay window is still an approximate IIR-state lift, not
+        // the infinite prehistory. Never replay it on top of a previous visit.
+        let mut hold = self.vfit_templates[self.active].as_ref().expect("realized").clone();
         let carried = self.history.len();
-        {
-            // Reset by re-realizing state through a fresh clone: replay
-            // the history into a zero-state copy.
-            for &x in &self.history {
-                let _ = hold.push(x)?;
-            }
-        }
-        let old = self.fir_lines[self.active].clone();
+        for &x in &self.history { hold.push(x)?; }
+        let old = self.active_line().clone();
+        let direct = self.active_direct();
         self.lift_log.push(WindLiftRecord {
-            action: "hop-to-hold/replay-prime+fade",
-            carried,
-            fade_samples,
+            action: "hop-to-hold/replay-prime+fade", carried, fade_samples,
         });
-        if fade_samples > 0 {
-            self.fade_old = Some(old);
-            self.fade_old_is_vfit = false;
-            self.fade_remaining = fade_samples;
-            self.fade_total = fade_samples;
-        }
+        self.begin_fade(old, direct, fade_samples);
         self.vfit_lines[self.active] = Some(hold);
         self.image = ActiveImage::VfitHold;
         Ok(())
@@ -347,46 +401,48 @@ impl WindLineBank {
     /// # Errors
     /// [`WindLineError`] refusals.
     pub fn hop_back_to_char(&mut self, fade_samples: usize) -> Result<(), WindLineError> {
-        if self.image == ActiveImage::CharLine {
-            return Ok(());
-        }
+        self.check_live()?;
+        if self.image == ActiveImage::CharLine { return Ok(()); }
         let history: Vec<f64> = self.history.iter().copied().collect();
-        let lifted = DelayedFilter::from_impulse_response_with_history(
-            self.dt,
-            self.fir_taps[self.active].clone(),
-            &history,
-        )?;
-        let old = self.vfit_lines[self.active]
-            .as_ref()
-            .expect("hold active implies realized")
-            .clone();
+        let lifted = history_line(self.dt, &self.fir_taps[self.active], &history)?;
+        let old = self.active_line().clone();
+        let direct = self.active_direct();
         self.lift_log.push(WindLiftRecord {
-            action: "hop-back-to-char/replay-prime+fade",
-            carried: history.len(),
-            fade_samples,
+            action: "hop-back-to-char/replay-prime+fade", carried: history.len(), fade_samples,
         });
-        if fade_samples > 0 {
-            self.fade_old = Some(old);
-            self.fade_old_is_vfit = true;
-            self.fade_remaining = fade_samples;
-            self.fade_total = fade_samples;
-        }
+        self.begin_fade(old, direct, fade_samples);
         self.fir_lines[self.active] = lifted;
         self.image = ActiveImage::CharLine;
         Ok(())
     }
 }
 
-/// Probe a line's FIR taps by impulse (clone; state untouched).
-fn probe_taps(line: &DelayedFilter) -> Vec<f64> {
+/// Build the strictly causal remainder using the original filter owner.
+/// Its last output is the history term needed by the NEXT boundary solve.
+/// Priming the newest sample is necessary: the carry-history constructor
+/// restores the ring, but deliberately leaves `incoming()` at zero.
+fn history_line(dt: f64, taps: &[f64], history: &[f64])
+    -> Result<DelayedFilter, WindLineError>
+{
+    if taps.len() < 4 || taps.iter().any(|x| !x.is_finite()) {
+        return Err(WindLineError::Invalid { what: "wind reflection needs at least four finite taps" });
+    }
+    let mut tail = taps[1..].to_vec();
+    tail.resize(tail.len().max(4), 0.0);
+    if let Some((&newest, earlier)) = history.split_last() {
+        let mut line = DelayedFilter::from_impulse_response_with_history(dt, tail, earlier)?;
+        line.push(newest)?;
+        Ok(line)
+    } else {
+        Ok(DelayedFilter::from_impulse_response(dt, tail)?)
+    }
+}
+
+/// Probe a zero-state line's FIR taps by impulse; no caller state changes.
+fn probe_taps(line: &DelayedFilter) -> Result<Vec<f64>, WindLineError> {
     let mut probe = line.clone();
-    (0..4096usize)
-        .map(|k| {
-            probe
-                .push(if k == 0 { 1.0 } else { 0.0 })
-                .expect("probe push")
-        })
-        .collect()
+    (0..4096usize).map(|k| probe.push(if k == 0 { 1.0 } else { 0.0 })
+        .map_err(WindLineError::Discrete)).collect()
 }
 
 /// Realize the VFIT hold image for one fingering: sweep the TMM
@@ -433,10 +489,19 @@ fn realize_hold_line(
     opts.iterations = 12;
     opts.fit_e = false;
     let prewarp = core::f64::consts::TAU * 600.0;
-    let mut line = DelayedFilter::from_tabulated(&omega, &h, delay_samples, dt, &opts, prewarp)
-        .map_err(|_| WindLineError::Invalid {
-            what: "hold-image rational realization refused",
-        })?;
+    // Preserve the ORIGINAL delay peeling and residual fit. Only the delay
+    // buffer loses one sample: the bank's pending-history boundary contributes
+    // that sample back. Passing D-1 to from_tabulated would instead change the
+    // peeled fit and silently introduce the extra delay again.
+    if !delay_samples.is_finite() || delay_samples < 3.0 {
+        return Err(WindLineError::Invalid {
+            what: "hold image needs at least three samples of physical round-trip transit",
+        });
+    }
+    let peeled = modulate_delay(&omega, &h, delay_samples * dt, 1.0)?;
+    let filter = realize_tabulated(&omega, &peeled, dt, &opts, prewarp)
+        .map_err(|_| WindLineError::Invalid { what: "hold-image rational realization refused" })?;
+    let mut line = DelayedFilter::new(delay_samples - 1.0, filter)?;
     let grid: Vec<f64> = (1..=64)
         .map(|k| core::f64::consts::TAU * 3000.0 * f64::from(k) / 64.0)
         .collect();
@@ -566,19 +631,19 @@ mod wind_articulation_tests {
             let dt = 1.0 / f64::from(RATE);
             for slot in out.iter_mut() {
                 let p_m = blowing_envelope(reed(), self.t);
-                let p_minus = self.bank.incoming();
+                let boundary = self.bank.boundary_response().expect("wave boundary");
                 let p_plus = solve_reed_wave(
                     reed(),
                     self.rho,
                     self.zc,
-                    0.0,
-                    p_minus,
+                    boundary.direct_reflection,
+                    boundary.history_pressure_pa,
                     p_m,
                     self.p_plus_prev,
                     0.0,
                 )
                 .expect("reed solve");
-                let _ = self.bank.push(p_plus).expect("push");
+                let p_minus = self.bank.push(p_plus).expect("push");
                 self.p_plus_prev = p_plus;
                 *slot = p_plus + p_minus;
                 self.t += dt;
@@ -1043,5 +1108,139 @@ mod wind_hop_tests {
             "{{\"suite\":\"fs-couple\",\"case\":\"wind-hop-policy-artifact\",\"verdict\":\
              \"pass\",\"worst_settled\":{worst_settled:.3},\"best_attack\":{best_attack:.3}}}"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod same_sample_boundary_tests {
+    use super::*;
+    use fs_vfit::discretize::{Biquad, DigitalFilter};
+
+    fn bank(taps: Vec<Vec<f64>>) -> WindLineBank {
+        let dt = 1.0 / 48_000.0;
+        let n = taps.len();
+        let capacity = taps.iter().map(Vec::len).max().unwrap();
+        WindLineBank {
+            fir_lines: taps.iter().map(|h| history_line(dt, h, &[]).unwrap()).collect(),
+            fir_taps: taps, vfit_lines: vec![None; n], vfit_templates: vec![None; n],
+            labels: (0..n).map(|i| i.to_string()).collect(), active: 0,
+            image: ActiveImage::CharLine, vfit_gate_green: true, dt, zc: 1.0e6,
+            fade_old: None, fade_old_direct: 0.0, fade_remaining: 0, fade_total: 0,
+            history: std::collections::VecDeque::with_capacity(capacity),
+            history_capacity: capacity, last_incoming: 0.0, poisoned: false,
+            lift_log: Vec::new(),
+        }
+    }
+    fn filter(dt: f64) -> DigitalFilter {
+        DigitalFilter { sections: vec![Biquad { b: [0.2, 0.1, 0.0], a: [-0.3, 0.0] }],
+            direct: 0.1, t_s: dt, prewarp: 0.0 }
+    }
+    fn close(a: f64, b: f64) {
+        assert!((a-b).abs() <= 2.0e-12 * a.abs().max(b.abs()).max(1.0), "{a} != {b}");
+    }
+
+    #[test]
+    fn same_sample_boundary_matches_direct_convolution_and_ring_wrap() {
+        let taps = vec![0.15, -0.2, 0.1, 0.05, -0.03, 0.02];
+        let mut bank = bank(vec![taps.clone()]);
+        let mut signal = Vec::new();
+        for n in 0..200 {
+            let input = f64::from(n % 17) - 8.0;
+            signal.push(input);
+            let expected: f64 = taps.iter().enumerate().take(signal.len())
+                .map(|(k, h)| h * signal[signal.len()-1-k]).sum();
+            let boundary = bank.boundary_response().unwrap();
+            assert_eq!(boundary.direct_reflection, taps[0]);
+            close(boundary.direct_reflection*input + boundary.history_pressure_pa, expected);
+            close(bank.push(input).unwrap(), expected);
+            close(bank.incoming(), expected);
+        }
+    }
+
+    #[test]
+    fn fingering_lift_keeps_more_than_512_samples_and_next_fade_weight() {
+        let mut a = vec![0.0; 1024];
+        let mut b = a.clone();
+        a[0] = 0.1; a[700] = 0.25;
+        b[0] = -0.2; b[700] = -0.3;
+        let mut bank = bank(vec![a.clone(), b.clone()]);
+        let mut history = Vec::new();
+        for n in 0..800 {
+            let x = f64::from(n % 19) - 9.0;
+            history.push(x); bank.push(x).unwrap();
+        }
+        bank.switch_fingering(1, 4).unwrap();
+        assert_eq!(bank.lift_log().last().unwrap().carried, 800);
+        for step in 1..=6 {
+            let x = f64::from(step);
+            history.push(x);
+            let w = (f64::from(step)/4.0).min(1.0);
+            let old = a[0]*x + a[700]*history[history.len()-701];
+            let new = b[0]*x + b[700]*history[history.len()-701];
+            let boundary = bank.boundary_response().unwrap();
+            close(boundary.direct_reflection, (1.0-w)*a[0]+w*b[0]);
+            close(bank.push(x).unwrap(), (1.0-w)*old+w*new);
+        }
+    }
+
+    #[test]
+    fn pending_hold_preserves_integer_and_fractional_physical_transit() {
+        let dt = 1.0/48_000.0;
+        for delay in [3.0, 3.25, 7.75, 12.0] {
+            let mut original = DelayedFilter::new(delay, filter(dt)).unwrap();
+            let mut pending = DelayedFilter::new(delay-1.0, filter(dt)).unwrap();
+            for n in 0..200 {
+                let x = f64::from(n % 11)-5.0;
+                let predicted = pending.incoming();
+                close(original.push(x).unwrap(), predicted);
+                pending.push(x).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn hold_reentry_replays_a_fresh_template_and_uses_actual_recent_waves() {
+        let taps = vec![0.1, 0.2, 0.0, -0.1, 0.05, 0.0, 0.0, 0.0];
+        let mut bank = bank(vec![taps.clone(), taps.clone()]);
+        // The template is already realized; the supplied dummy duct is never
+        // swept. Test the state lift, not TMM fitting or source calibration.
+        let template = DelayedFilter::new(2.5, filter(bank.dt)).unwrap();
+        bank.vfit_templates[0] = Some(template.clone());
+        let gas = super::wind_articulation_tests::air20();
+        let duct = Duct { segments: Vec::new() };
+        for x in [1.0, 2.0, -1.0, 4.0] { bank.push(x).unwrap(); }
+        bank.hop_to_hold(&duct, &gas, Termination::FlangedOpen, 4).unwrap();
+        for x in [3.0, -2.0, 0.5] { bank.push(x).unwrap(); }
+        bank.hop_back_to_char(0).unwrap();
+        assert!(bank.fade_old.is_none());
+        for x in [5.0, -3.0, 1.0] { bank.push(x).unwrap(); }
+        let mut expected = template;
+        for &x in &bank.history { expected.push(x).unwrap(); }
+        bank.hop_to_hold(&duct, &gas, Termination::FlangedOpen, 0).unwrap();
+        assert!(bank.fade_old.is_none());
+        close(bank.boundary_response().unwrap().history_pressure_pa, expected.incoming());
+        // Switch DIRECTLY from hold: the dormant char ring must not be used.
+        for x in [13.0, -7.0, 11.0, 2.0] { bank.push(x).unwrap(); }
+        let history: Vec<f64> = bank.history.iter().copied().collect();
+        bank.switch_fingering(1, 0).unwrap();
+        let x = 3.0;
+        let expected = taps[0]*x + taps.iter().enumerate().skip(1)
+            .map(|(k,h)| h*history[history.len()-k]).sum::<f64>();
+        close(bank.push(x).unwrap(), expected);
+    }
+
+    #[test]
+    fn nonfinite_input_does_not_mutate_wave_or_lift_history() {
+        let mut bank = bank(vec![vec![0.1, 0.2, 0.1, 0.0]]);
+        bank.push(2.0).unwrap();
+        let before = bank.boundary_response().unwrap();
+        let history = bank.history.clone();
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(bank.push(bad).is_err());
+            assert_eq!(bank.boundary_response().unwrap(), before);
+            assert_eq!(bank.history, history);
+        }
+        assert_eq!(bank.push(3.0).unwrap(), 0.1*3.0+0.2*2.0);
     }
 }

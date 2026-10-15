@@ -568,7 +568,7 @@ other crate code inherits the workspace `unsafe_code = "deny"` policy.
 ## Feature flags
 
 - `terminal-relative` — default-off [F] I13.2a schema and exact-incidence lane;
-  enables the optional `fs-blake3` and `fs-couple` dependencies.
+  enables the optional `fs-blake3` and domain-neutral `fs-ports` dependencies.
 - `moonshot-integral-topology` — default-off [M] I13.2b exact-integer checker; implies
   `terminal-relative` and cannot promote abstract algebra to physical evidence.
 

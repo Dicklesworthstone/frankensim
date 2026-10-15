@@ -2,7 +2,7 @@
 
 #![cfg(feature = "moonshot-integral-topology")]
 
-use fs_couple::{CoordinateBinding, PortKind, PortOrientation, PortTimestamp, StableId};
+use fs_ports::{CoordinateBinding, PortKind, PortOrientation, PortTimestamp, StableId};
 use fs_feec::integral_topology::{
     ExactAlgebraBudget, ExactIntegerMatrix, HomologyClassBudget, HomologyCocycleBudget,
     HomologyDecompositionBudget, HomologyGeneratorBudget, HomologyGeneratorKind,

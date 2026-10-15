@@ -6,14 +6,19 @@
 //! use this SAME A: F = -A deltaP, U_swept = -A x_dot. No face length, mass,
 //! stiffness, frequency, or closing pressure is prescribed independently.
 //!
+//! A single blade is the default. An explicitly symmetric opposed pair uses
+//! two identical copies of that source plate: each moves by half the total gap
+//! change. The same junction then has M/2, K/2 and the SAME pressure area and
+//! slit width. Material memories count both blades; contact counts one interface.
+//!
 //! This is one linear plate mode with the existing P1 displacement-trace
-//! quadrature, a uniform rest gap and one generalized lay contact. It is not a
-//! distributed reed/lay closure, fluid-loaded modal reduction or exact instrument
-//! reconstruction. The explicit slit-uniformity and linear-slope allowances are
-//! approximation limits, not experimental validation. Damping remains an
-//! independent physical input; an elastic card does not imply a loss law.
+//! quadrature, a uniform rest gap and one generalized contact. It is not a
+//! multimode reed, an asymmetric double reed, fluid-loaded modal reduction or
+//! exact instrument reconstruction. The explicit slit-uniformity and linear-slope
+//! allowances are approximation limits, not experimental validation. Damping
+//! remains an independent physical input; an elastic card does not imply loss.
 
-/// Spatial lay clearances and partially closed slit geometry.
+/// Spatial clearances and partially closed slit geometry.
 pub mod closure;
 
 use crate::thin_plate::ResolvedPlateChart;
@@ -22,8 +27,20 @@ use crate::bernoulli_aperture::{BernoulliAperture, dynamic::DynamicApertureSpec}
 use fs_exec::CancelGate;
 use fs_plate::{AssemblyOptions, PlateChart, SliceOptions, modes};
 
+/// Explicit kinematic subspace of the retained source plate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlateApertureSymmetry {
+    /// One moving blade against a stationary opposing surface.
+    SingleBlade,
+    /// Two identical mirrored blades with equal outward motion and material
+    /// history, driven by the same pressure difference. Antisymmetric motion,
+    /// unequal specimens and unequal loading are outside this reduced subspace.
+    SymmetricOpposedPair,
+}
+
 /// Physical surface motion relative to the supplied rest chart, at one node.
-/// No unit-amplitude animation or rescaling is applied after the dynamics.
+/// For a pair this is ONE blade in its local opening-positive chart; the other
+/// is its mirror. No unit-amplitude animation or rescaling follows the dynamics.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlateApertureMotion {
     /// [transverse displacement in m, two DKT rotations in rad].
@@ -49,14 +66,14 @@ pub struct PlateApertureOptions {
     pub max_triangles: usize,
     /// Unique boundary edges forming the moving slit; their total length is width.
     pub slit_edges: Vec<[usize; 2]>,
-    /// Positive mean rest opening [m].
+    /// Positive mean TOTAL rest opening [m], including on the opposed-pair path.
     pub rest_opening_m: f64,
     /// Explicit nonnegative viscous damping ratio; never inferred from elasticity.
     pub damping_ratio: f64,
-    /// Maximum |normalized slit-node motion - 1|. One DOF approximates the slit
-    /// by its mean gap; this declares how nonuniform that retained shape may be.
+    /// Maximum |normalized slit-node gap motion - 1|. One DOF approximates the
+    /// slit by its mean total gap; this declares its permitted nonuniformity.
     pub max_slit_mode_variation: f64,
-    /// Positive bound on the largest nodal rotation/P1 displacement slope.
+    /// Positive bound on each blade's largest nodal rotation/P1 displacement slope.
     pub max_slope: f64,
 }
 
@@ -77,6 +94,7 @@ impl PlateSource {
 pub struct PlateApertureReduction {
     source: PlateSource,
     options: PlateApertureOptions,
+    symmetry: PlateApertureSymmetry,
     mass_kg: f64,
     stiffness_n_m: f64,
     area_m2: f64,
@@ -227,12 +245,62 @@ impl PlateApertureReduction {
             return Err(invalid("plate aperture shape exceeds its slit-uniformity allowance or has no finite bending slope"));
         }
         checkpoint(gate)?;
-        Ok(Self { source, options, mass_kg: mass, stiffness_n_m: stiffness, area_m2: area,
+        Ok(Self { source, options, symmetry: PlateApertureSymmetry::SingleBlade,
+            mass_kg: mass, stiffness_n_m: stiffness, area_m2: area,
             width_m: width, closing_pressure_pa: closing, lambda_interval: pair.interval,
             in_window_modes: report.modes.len(), shape, slope_per_m, slit_variation: variation })
     }
 
-    /// Actual numerical chart, including the section field and support nodes.
+    /// Use two identical mirrored copies of this blade in their symmetric
+    /// opening subspace. The TOTAL rest gap and slit width remain unchanged;
+    /// each blade's displacement/rotation/velocity per total-gap metre halves.
+    /// Thus combined mass, stiffness and viscous coefficient halve, the natural
+    /// frequency and damping ratio stay fixed, and static closing pressure halves.
+    /// Both pressure faces together retain the original virtual-work area.
+    ///
+    /// The original chart and exact material receipts are retained ONCE as the
+    /// common source of both blades. Subsequent material-memory projection counts
+    /// both copies. Spatial closure describes their single shared interface, not
+    /// two lays. Contact data must be explicitly appropriate for that interface.
+    /// Initial states and all drives must respect the symmetry; independent leaf
+    /// motion, different cards, curved shells and antisymmetric modes are not
+    /// represented. This is a double-reed mechanism, not a measured oboe claim.
+    ///
+    /// # Errors
+    /// Repeated pairing or a coefficient/shape that cannot retain the exact
+    /// factor-of-two transformation in finite binary64 arithmetic.
+    pub fn into_symmetric_opposed_pair(mut self) -> Result<Self, AcousticRealizeError> {
+        if self.symmetry != PlateApertureSymmetry::SingleBlade {
+            return Err(invalid("opposed-pair reduction requires one unpaired source blade"));
+        }
+        let halves = [self.mass_kg, self.stiffness_n_m, self.closing_pressure_pa, self.slope_per_m];
+        if halves.iter().any(|&x| 0.5*x <= 0.0 || (0.5*x)*2.0 != x)
+            || self.shape.iter().flatten().any(|&x| (0.5*x)*2.0 != x)
+        {
+            return Err(invalid("opposed-pair coefficients or physical shapes underflowed"));
+        }
+        self.mass_kg *= 0.5;
+        self.stiffness_n_m *= 0.5;
+        self.closing_pressure_pa *= 0.5;
+        self.slope_per_m *= 0.5;
+        for node in &mut self.shape { for component in node { *component *= 0.5; } }
+        self.symmetry = PlateApertureSymmetry::SymmetricOpposedPair;
+        Ok(self)
+    }
+
+    /// Kinematic subspace selected at preparation; it cannot change in a voice.
+    #[must_use]
+    pub const fn symmetry(&self) -> PlateApertureSymmetry { self.symmetry }
+    /// Identical physical plates contributing structural storage and material loss.
+    /// There is still only one slit and one contact interface.
+    #[must_use]
+    pub const fn moving_blade_count(&self) -> usize {
+        match self.symmetry {
+            PlateApertureSymmetry::SingleBlade => 1,
+            PlateApertureSymmetry::SymmetricOpposedPair => 2,
+        }
+    }
+    /// Numerical chart of ONE representative blade, including sections/supports.
     #[must_use]
     pub fn chart(&self) -> &PlateChart { self.source.chart() }
     /// Original material-bound specimen, absent for authored numeric sections.
@@ -243,19 +311,19 @@ impl PlateApertureReduction {
     /// Complete caller choices retained separately from source-material authority.
     #[must_use]
     pub const fn options(&self) -> &PlateApertureOptions { &self.options }
-    /// Effective mass in the mean-slit-opening coordinate [kg].
+    /// Combined effective mass in the mean TOTAL-slit-opening coordinate [kg].
     #[must_use]
     pub const fn mass_kg(&self) -> f64 { self.mass_kg }
-    /// Restoring stiffness in that same coordinate [N/m].
+    /// Combined restoring stiffness in that same coordinate [N/m].
     #[must_use]
     pub const fn stiffness_n_m(&self) -> f64 { self.stiffness_n_m }
-    /// Uniform-pressure force area, also used for swept volume [m²].
+    /// Combined uniform-pressure force area, also used for swept volume [m²].
     #[must_use]
     pub const fn pressure_area_m2(&self) -> f64 { self.area_m2 }
-    /// Actual sum of the supplied slit edge lengths [m].
+    /// Actual sum of the supplied slit edge lengths [m]; never doubled for a pair.
     #[must_use]
     pub const fn width_m(&self) -> f64 { self.width_m }
-    /// Static closing pressure of this ONE retained mode [Pa].
+    /// Static closing pressure of this ONE retained opening mode [Pa].
     #[must_use]
     pub const fn closing_pressure_pa(&self) -> f64 { self.closing_pressure_pa }
     /// Discrete squared-frequency interval; not an omitted-mode error bound.
@@ -264,13 +332,16 @@ impl PlateApertureReduction {
     /// Number resolved in the search window; only the selected mode is retained.
     #[must_use]
     pub const fn in_window_modes(&self) -> usize { self.in_window_modes }
-    /// [w, rotation_x, rotation_y] per metre of mean slit opening change.
+    /// ONE blade's [w, rotation_x, rotation_y] per metre of TOTAL opening change,
+    /// in that blade's local opening-positive chart. For a pair the opposing
+    /// blade is its mirror. Gap motion sums both blades; elastic energy sums
+    /// their quadratic forms. This is physical surface motion, not gap motion.
     #[must_use]
     pub fn shape_per_opening(&self) -> &[[f64; 3]] { &self.shape }
-    /// Maximum slit-node departure from a uniform one-metre opening displacement.
+    /// Maximum slit-node departure from a uniform one-metre TOTAL gap change.
     #[must_use]
     pub const fn slit_mode_variation(&self) -> f64 { self.slit_variation }
-    /// Largest nodal/trace slope at this mean opening; zero at the rest geometry.
+    /// Largest per-blade nodal/trace slope; zero at the supplied rest geometry.
     #[must_use]
     pub fn max_slope_at(&self, opening_m: f64) -> f64 {
         (opening_m - self.options.rest_opening_m).abs() * self.slope_per_m
@@ -278,7 +349,7 @@ impl PlateApertureReduction {
     /// Check the declared linear-geometry domain without moving any state.
     ///
     /// # Errors
-    /// Nonfinite opening or a nodal/trace slope above the declared limit.
+    /// Nonfinite opening or a per-blade slope above the declared limit.
     pub fn validate_opening(&self, opening_m: f64) -> Result<(), AcousticRealizeError> {
         let slope = self.max_slope_at(opening_m);
         if !opening_m.is_finite() || !slope.is_finite() || slope > self.options.max_slope {
@@ -286,7 +357,8 @@ impl PlateApertureReduction {
         }
         Ok(())
     }
-    /// Reconstruct physical nodal motion from an accepted opening and velocity.
+    /// Reconstruct ONE blade's physical nodal motion from total opening/velocity.
+    /// For a pair the opposing blade mirrors this opening-positive chart.
     /// This observes the mechanical state; it does not step or renormalize it.
     ///
     /// # Errors

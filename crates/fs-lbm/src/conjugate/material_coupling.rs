@@ -4,10 +4,13 @@
 //! temperature field. No material-name defaults, constant-property inference,
 //! source extrapolation, or new current/heat discretization is introduced here.
 
+/// Source-backed electrical interfaces in the shared temperature feedback loop.
+pub mod interfaces;
+
 use fs_exec::CancelGate;
 
 use super::{
-    ChtError, ElectricSetup, ElectricSolution, EnergySolution, ThermalSetup, VoxelDomain,
+    ChtError, ElectricSetup, ElectricSolution, EnergySolution, ThermalSetup, Voxel, VoxelDomain,
     finite, poll,
 };
 
@@ -112,6 +115,66 @@ pub fn solve_material_electrothermal(
     initial_temperature_k: &[f64],
     config: MaterialCouplingConfig,
     mut resistivity: impl FnMut(usize, u16, f64) -> Result<f64, ChtError>,
+    energy: impl FnMut(&ThermalSetup, &[f64]) -> Result<EnergySolution, ChtError>,
+    gate: &CancelGate,
+) -> Result<MaterialCoupledSolution, ChtError> {
+    solve_with_electrical_owner(
+        domain, thermal, initial_temperature_k, config,
+        |temperature| electric.solve_with_resistivity(domain, temperature, &mut resistivity, gate),
+        energy, gate,
+    )
+}
+
+/// Couple material-assigned conducting fluids/solids to the existing heat owner.
+///
+/// The cell law has exactly [`ElectricSetup::solve_with_cell_resistivity`]
+/// semantics: `Some(resistivity)` means ohmic conduction, `None` is explicitly
+/// declared insulation, and unsupported material data must return an error.
+/// The legacy solid conductor table is not consulted. Electrical participation
+/// does not change a cell's flow, heat-advection or solid-contact identity.
+///
+/// `energy(heated, temperature)` receives Joule plus authored cell powers and
+/// the same state used to evaluate electrical properties. It can resolve
+/// conductivity at those states and call `EnergyConfig::solve_with_conductivity`
+/// with the existing flow field. Fluid transport and material receipts remain
+/// owned by the caller. That heat API retains its constant density/cp advection
+/// approximation; this driver adds no variable-density enthalpy transport.
+///
+/// Both entry points share one feedback loop. The electrical field is always
+/// re-solved at the returned temperature, including material applicability and
+/// electrical connectivity; convergence checks both temperature and local heat.
+/// This is fixed-geometry bulk DC ohmic/thermal coupling, not melting, species
+/// transport, electrochemistry, Lorentz forcing, magnetic induction or a claim
+/// that arbitrary temperature-dependent laws converge.
+///
+/// # Errors
+/// Budget/shape/state errors, electrical/thermal/material refusals, cancellation
+/// and failure to close both coupling defects abort without publishing a field.
+#[allow(clippy::too_many_arguments)] // explicit physical owners, state and budgets
+pub fn solve_cell_material_electrothermal(
+    domain: &VoxelDomain,
+    electric: &ElectricSetup,
+    thermal: &ThermalSetup,
+    initial_temperature_k: &[f64],
+    config: MaterialCouplingConfig,
+    mut resistivity: impl FnMut(usize, Voxel, f64) -> Result<Option<f64>, ChtError>,
+    energy: impl FnMut(&ThermalSetup, &[f64]) -> Result<EnergySolution, ChtError>,
+    gate: &CancelGate,
+) -> Result<MaterialCoupledSolution, ChtError> {
+    solve_with_electrical_owner(
+        domain, thermal, initial_temperature_k, config,
+        |temperature| electric.solve_with_cell_resistivity(domain, temperature, &mut resistivity, gate),
+        energy, gate,
+    )
+}
+
+#[allow(clippy::too_many_lines)] // one acceptance policy for all material paths
+fn solve_with_electrical_owner(
+    domain: &VoxelDomain,
+    thermal: &ThermalSetup,
+    initial_temperature_k: &[f64],
+    config: MaterialCouplingConfig,
+    mut electrical: impl FnMut(&[f64]) -> Result<ElectricSolution, ChtError>,
     mut energy: impl FnMut(&ThermalSetup, &[f64]) -> Result<EnergySolution, ChtError>,
     gate: &CancelGate,
 ) -> Result<MaterialCoupledSolution, ChtError> {
@@ -129,7 +192,7 @@ pub fn solve_material_electrothermal(
         finite("material_coupling.power_w", value)?;
     }
     let mut temperature = initial_temperature_k.to_vec();
-    let mut field = electric.solve_with_resistivity(domain, &temperature, &mut resistivity, gate)?;
+    let mut field = electrical(&temperature)?;
     let mut heated = thermal.clone();
     let mut residual = f64::INFINITY;
     for pass in 1..=config.max_passes {
@@ -145,12 +208,7 @@ pub fn solve_material_electrothermal(
         let solution = energy(&heated, &temperature)?;
         poll(gate)?;
         validate_temperature(&solution.temperature, cells)?;
-        let next = electric.solve_with_resistivity(
-            domain,
-            &solution.temperature,
-            &mut resistivity,
-            gate,
-        )?;
+        let next = electrical(&solution.temperature)?;
         validate_joule(&next, cells)?;
         let temperature_change = maximum_difference(&temperature, &solution.temperature);
         let power_change = maximum_difference(&field.joule_w, &next.joule_w);
@@ -457,4 +515,85 @@ mod tests {
         assert_eq!(scaled_defect(0.0, 0.0), 0.0);
         assert_eq!(scaled_defect(1.0, 0.0), f64::INFINITY);
     }
+
+    #[test]
+    fn fluid_feedback_matches_solid_physics_and_preserves_authored_heat() {
+        let (solid, mut electric, mut thermal) = fixture();
+        let liquid = VoxelDomain::new(3, 1, 1, 1.0).unwrap();
+        let gate = CancelGate::new();
+        thermal.power_w = vec![0.25, 0.5, 0.25];
+        let original = thermal.clone();
+        let law = |t: f64| 2.0 * (1.0 + 0.1 * (t - 300.0));
+        let reference = solve_material_electrothermal(&solid, &electric, &thermal,
+            &[300.0; 3], config(), |_, _, t| Ok(law(t)),
+            |heated, _| heat(&solid, heated, &gate), &gate).unwrap();
+        electric.conductors.clear();
+        let mut last_query = 0.0;
+        let result = solve_cell_material_electrothermal(&liquid, &electric, &thermal,
+            &[300.0; 3], config(), |cell, occupancy, t| {
+                assert_eq!(cell, 1);
+                assert_eq!(occupancy, Voxel::Fluid);
+                last_query = t;
+                Ok(Some(law(t)))
+            }, |heated, _| heat(&liquid, heated, &gate), &gate).unwrap();
+        assert_eq!(last_query, result.thermal.temperature[1]);
+        for (a, b) in reference.thermal.temperature.iter().zip(&result.thermal.temperature) {
+            assert!((a-b).abs() < 1e-9);
+        }
+        let joule = 9.0 / law(last_query);
+        assert!((result.electric.total_joule_w - joule).abs() < 1e-9);
+        assert!((result.thermal.report.balance.source_w - (1.0 + joule)).abs() < 1e-8);
+        assert!(result.report.passes > 1);
+        assert_eq!(thermal, original);
+    }
+
+    #[test]
+    fn flowing_conductor_advects_its_joule_heat_in_the_existing_energy_solver() {
+        use crate::conjugate::FlowFace;
+        let domain = VoxelDomain::new(3, 1, 1, 1.0).unwrap();
+        let (_, mut electric, thermal) = fixture();
+        electric.conductors.clear();
+        let gate = CancelGate::new();
+        let fluid = FluidProperties { density_kg_m3: 1.0, specific_heat_j_kg_k: 1.0,
+            conductivity_w_m_k: 1.0, kinematic_viscosity_m2_s: 1.0 };
+        let mut peaks = Vec::new();
+        for speed in [0.0, 4.0] {
+            let mut faces = [FlowFace::Wall; 6];
+            faces[0] = FlowFace::Fixed;
+            faces[1] = FlowFace::Fixed;
+            let flow = FlowField::from_face_velocity(&domain, faces,
+                |axis, _| if axis == 0 { speed } else { 0.0 }).unwrap();
+            let flow_before = flow.clone();
+            let result = solve_cell_material_electrothermal(&domain, &electric, &thermal,
+                &[300.0; 3], config(), |_, _, t| Ok(Some(2.0*(1.0 + 0.01*(t-300.0)))),
+                |heated, temperatures| {
+                    let conductivity: Vec<_> = temperatures.iter().map(|t| [1.0 + 0.02*(t-300.0); 3]).collect();
+                    EnergyConfig::default().solve_with_conductivity(&domain, &fluid, &[],
+                        &flow, heated, &conductivity, &gate)
+                }, &gate).unwrap();
+            let peak = result.thermal.temperature.iter().copied().fold(0.0, f64::max);
+            assert!(peak > 300.0);
+            assert!(result.electric.total_joule_w > 0.0);
+            assert!(result.thermal.report.balance.relative_residual < 1e-7);
+            assert_eq!(flow, flow_before);
+            assert!((0..3).all(|cell| domain.voxel_at(cell) == Voxel::Fluid));
+            peaks.push(peak);
+        }
+        assert!(peaks[1] < peaks[0]);
+    }
+
+    #[test]
+    fn fluid_coupling_rechecks_material_support_at_the_proposed_temperature() {
+        let domain = VoxelDomain::new(3, 1, 1, 1.0).unwrap();
+        let (_, mut electric, thermal) = fixture();
+        electric.conductors.clear();
+        let gate = CancelGate::new();
+        let refusal = invalid("material.liquid_temperature", "outside the explicit liquid property domain");
+        let result = solve_cell_material_electrothermal(&domain, &electric, &thermal,
+            &[300.0; 3], config(), |_, _, t| {
+                if t > 301.0 { Err(refusal.clone()) } else { Ok(Some(2.0)) }
+            }, |heated, _| heat(&domain, heated, &gate), &gate);
+        assert_eq!(result, Err(refusal));
+    }
+
 }

@@ -162,7 +162,18 @@ impl TsDriver {
         Self::new_with_gas(card, box_volume_m3, panel, declared_air())
     }
 
-    fn new_with_gas(
+    /// Compose the same driver in an explicitly supplied gas state.
+    ///
+    /// Density and sound speed from this state set radiation added mass,
+    /// radiation resistance, sealed-box stiffness, panel/cavity coupling and
+    /// observer pressure. This is the data-only material/composition swap path;
+    /// callers may pass a source-resolved or mixed gas without changing driver
+    /// code. The convenience constructor [`Self::new`] retains its declared
+    /// room dry-air state.
+    ///
+    /// # Errors
+    /// The same card/box/panel and pHS refusals as [`Self::new`].
+    pub fn new_with_gas(
         card: TsCard,
         box_volume_m3: Option<f64>,
         panel: Option<PanelMode>,

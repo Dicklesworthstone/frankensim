@@ -112,7 +112,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
     /// the original physical initial-residual target. Chart/material slope
     /// kinks and emissivity-validity endpoints refuse classical derivatives.
     /// Plateaus strictly inside their enthalpy interval remain differentiable.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn linearize_accepted_with_ambient_radiation(
         &self,
         cx: &Cx<'_>,
@@ -125,6 +125,26 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         accepted: EnthalpyStepSolution,
         max_feedback_entries: usize,
     ) -> Result<EnthalpyRadiationStepLinearization<'m>, EnthalpyAdjointError> {
+        self.linearize_accepted_with_ambient_radiation_target(
+            cx, problem, interfaces, old_h, dt_s, step_config, patches,
+            accepted, max_feedback_entries, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(crate) fn linearize_accepted_with_ambient_radiation_target(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        step_config: EnthalpyStepConfig,
+        patches: &[AmbientRadiationPatch],
+        accepted: EnthalpyStepSolution,
+        max_feedback_entries: usize,
+        physical_target_j: Option<f64>,
+    ) -> Result<EnthalpyRadiationStepLinearization<'m>, EnthalpyAdjointError> {
         self.admit_step(cx, problem, old_h, dt_s, step_config)?;
         let n = self.masses.len();
         admit_feedback(n, patches.len(), max_feedback_entries)?;
@@ -133,16 +153,17 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
                 "radiative endpoint length mismatch",
             ));
         }
-        let target = initial_residual_tolerance_j(
-            self,
-            cx,
-            problem,
-            interfaces,
-            old_h,
-            dt_s,
-            step_config,
-            patches,
-        )?;
+        let target = match physical_target_j {
+            Some(value) if value.is_finite() && value > 0.0 => value,
+            Some(_) => {
+                return Err(EnthalpyAdjointError::InvalidInput(
+                    "positive finite outer radiative/contact residual target required",
+                ));
+            }
+            None => initial_residual_tolerance_j(
+                self, cx, problem, interfaces, old_h, dt_s, step_config, patches,
+            )?,
+        };
         let context = StepContext {
             storage: self,
             cx,
@@ -302,6 +323,15 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
 }
 
 impl<'m> EnthalpyRadiationStepLinearization<'m> {
+    pub(crate) fn with_contact_temperature_feedback(
+        mut self,
+        cx: &Cx<'_>,
+        contact: &crate::interface::temperature::tangent::ContactTemperatureLinearization,
+    ) -> Result<Self, EnthalpyAdjointError> {
+        self.transport = self.transport.with_contact_temperature_feedback(cx, contact)?;
+        Ok(self)
+    }
+
     /// Attach consumer-owned ORIGINAL convection state laws while retaining
     /// every radiation parameter and the same accepted endpoint. See
     /// [`EnthalpyStepLinearization::with_robin_feedback`] for ordering, units,

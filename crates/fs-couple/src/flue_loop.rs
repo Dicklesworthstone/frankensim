@@ -8,7 +8,7 @@
 //! volume flow drives the pipe. Everything the island knows about the
 //! JET comes from a jet card minted by the aeroacoustic lab
 //! ([`fs_aeroac::jetcard`]); everything it knows about the PIPE comes
-//! from the typed fingering chart the wind line already consumes.
+//! from the typed fingering chart or the explicitly supplied regional tube graph.
 //!
 //! NO CARD -> REFUSE. A voice cannot be built without a jet card, and
 //! only a card whose claim class can drive a tone is admitted (the
@@ -72,7 +72,11 @@ use fs_duct::{FingeringTable, Termination};
 use fs_material::gas::GasState;
 use fs_rand::StreamKey;
 
-use crate::wind_line::{WindLineBank, WindLineError};
+use crate::wind_line::{WindBoundary, WindLineBank, WindLineError};
+
+/// Physical regional tube networks sharing the same jet-drive loop.
+pub mod network;
+use network::FlueResonator;
 
 /// Philox kernel id of the flue onset seed stream (logical identity;
 /// never a scheduling artifact).
@@ -96,6 +100,8 @@ pub enum FlueError {
     },
     /// The wind line refused.
     Line(WindLineError),
+    /// An existing material, geometry, loss, wave or observation owner refused.
+    Physics(crate::acoustic_realize::AcousticRealizeError),
     /// A claim was requested for blocks that ran outside the card's
     /// validity region (or with the wrong claim class).
     OutsideCardValidity {
@@ -117,6 +123,7 @@ impl core::fmt::Display for FlueError {
             }
             FlueError::Invalid { what } => write!(f, "invalid flue input: {what}"),
             FlueError::Line(e) => write!(f, "wind line: {e:?}"),
+            FlueError::Physics(e) => write!(f, "flue physical system: {e:?}"),
             FlueError::OutsideCardValidity {
                 blocks,
                 reynolds_seen,
@@ -134,6 +141,72 @@ impl From<WindLineError> for FlueError {
     fn from(e: WindLineError) -> Self {
         FlueError::Line(e)
     }
+}
+
+// A single same-sample boundary for the existing two propagation images.
+// The physical graph exposes the already-arrived wave; the TMM bank exposes
+// its instantaneous reflection AND the already-determined history remainder.
+impl FlueResonator {
+    fn mouth_boundary(&self) -> Result<WindBoundary, FlueError> {
+        match self {
+            Self::Tmm(line) => line.boundary_response().map_err(FlueError::Line),
+            Self::Network(_) => Ok(WindBoundary {
+                direct_reflection: 0.0, history_pressure_pa: self.incoming(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MouthStep {
+    flow_m3_s: f64,
+    outgoing_pa: f64,
+    incoming_pa: f64,
+    pressure_pa: f64,
+}
+
+// Series source + inertance + resistance, coupled to an affine wave boundary:
+//   source = L*(Q-Qold)/dt + R*Q + Pin
+//   Pin = p+ + p-; Zc*Q = p+ - p-; p- = r0*p+ + history.
+// All four quantities refer to THIS sample. Never delay r0 or substitute the
+// previous reflected sample. Eliminate in wave coordinates so r0=+/-1 remains
+// admissible when the complete physical system is nonsingular. This is an
+// acoustic port solve, not an instrument-specific oscillator or a second jet law.
+fn solve_mouth_port(
+    boundary: WindBoundary, source_pa: f64, previous_flow_m3_s: f64,
+    inertance: f64, resistance: f64, zc: f64, dt: f64,
+) -> Result<MouthStep, FlueError> {
+    let refuse = || FlueError::Invalid { what: "mouth port requires finite passive coefficients and a nonsingular wave boundary" };
+    if ![boundary.direct_reflection, boundary.history_pressure_pa, source_pa,
+        previous_flow_m3_s, inertance, resistance, zc, dt].iter().all(|x| x.is_finite())
+        || inertance < 0.0 || resistance < 0.0 || zc <= 0.0 || dt <= 0.0 {
+        return Err(refuse());
+    }
+    let r0 = boundary.direct_reflection;
+    let history = boundary.history_pressure_pa;
+    let alpha = inertance / dt;
+    let impedance = alpha + resistance;
+    let denominator = impedance*(1.0-r0) + zc*(1.0+r0);
+    if !alpha.is_finite() || !impedance.is_finite()
+        || !denominator.is_finite() || denominator <= 0.0 { return Err(refuse()); }
+    let drive = source_pa + alpha*previous_flow_m3_s;
+    // Preserve the original graph path's arithmetic for its exactly zero
+    // direct term; this is the same algebra, not a different physical model.
+    let (flow, outgoing) = if r0 == 0.0 {
+        let flow = (drive - 2.0*history)/denominator;
+        (flow, history + zc*flow)
+    } else {
+        let outgoing = (zc*drive + (impedance-zc)*history)/denominator;
+        let flow = ((1.0-r0)*outgoing-history)/zc;
+        (flow, outgoing)
+    };
+    let incoming = r0*outgoing + history;
+    let pressure = outgoing + incoming;
+    if ![drive, flow, outgoing, incoming, pressure].iter().all(|x| x.is_finite()) {
+        return Err(refuse());
+    }
+    Ok(MouthStep { flow_m3_s: flow, outgoing_pa: outgoing,
+        incoming_pa: incoming, pressure_pa: pressure })
 }
 
 /// The jet island's reduced parameters plus their provenance labels.
@@ -349,7 +422,7 @@ pub struct FlueBlockDiag {
 pub struct FlueVoice {
     island: JetIsland,
     geometry: FlueGeometry,
-    line: WindLineBank,
+    line: FlueResonator,
     rho: f64,
     nu: f64,
     zc: f64,
@@ -379,6 +452,8 @@ pub struct FlueVoice {
     seed: fs_rand::Stream,
     seed_key: StreamKey,
     block_index: u64,
+    samples: u64,
+    poisoned: bool,
     diags: Vec<FlueBlockDiag>,
 }
 
@@ -402,6 +477,21 @@ impl FlueVoice {
         voice_seed: u64,
         voice_index: u32,
     ) -> Result<FlueVoice, FlueError> {
+        Self::with_resonator(card, displacement_gain, seed_amplitude_rel, geometry,
+            gas, sample_rate_hz, voice_seed, voice_index, 1.0, 1_048_576,
+            |zc| WindLineBank::new(table, gas, termination, sample_rate_hz, zc, false)
+                .map(FlueResonator::Tmm).map_err(FlueError::Line))
+    }
+
+    // One jet/mouth initialization for both propagation images. Only the
+    // resonator factory changes; no dummy source or replacement jet algorithm.
+    #[allow(clippy::too_many_arguments)]
+    fn with_resonator(
+        card: Option<&JetCard>, displacement_gain: f64, seed_amplitude_rel: f64,
+        geometry: FlueGeometry, gas: &GasState, sample_rate_hz: u32,
+        voice_seed: u64, voice_index: u32, minimum_jet_speed: f64, max_history: usize,
+        make_line: impl FnOnce(f64) -> Result<FlueResonator, FlueError>,
+    ) -> Result<Self, FlueError> {
         let card = card.ok_or(FlueError::NoCard)?;
         let island = JetIsland::from_card(card, displacement_gain, seed_amplitude_rel)?;
         geometry.validate()?;
@@ -410,6 +500,9 @@ impl FlueVoice {
                 what: "sample rate must be positive",
             });
         }
+        gas.validate_coherence().map_err(|_| FlueError::Invalid {
+            what: "flue source requires one coherent material gas state",
+        })?;
         let rho = gas.density;
         let c = gas.sound_speed;
         let nu = gas.dynamic_viscosity / rho;
@@ -419,20 +512,30 @@ impl FlueVoice {
             });
         }
         let zc = rho * c / geometry.bore_area_m2;
-        let line = WindLineBank::new(table, gas, termination, sample_rate_hz, zc, false)?;
+        let line = make_line(zc)?;
         let s_m = geometry.mouth_area_m2();
         let inertance = rho * geometry.end_correction_m() / s_m;
         let resistance = geometry.mouth_loss_rel * rho * c / s_m;
         let dt = 1.0 / f64::from(sample_rate_hz);
-        // History long enough for the slowest admissible jet (1 m/s).
-        let max_delay = geometry.cut_up_m / (island.convection_ratio * 1.0);
-        let history_len = ((max_delay / dt).ceil() as usize).max(2) + 2;
+        // Retain the legacy 1 m/s history for TMM; the graph supplies its
+        // explicit minimum and refuses slower positive jets instead of clamping.
+        let max_delay = geometry.cut_up_m / (island.convection_ratio * minimum_jet_speed);
+        let history_samples = (max_delay / dt).ceil().max(2.0);
+        if !history_samples.is_finite() || history_samples > max_history.saturating_sub(2) as f64
+            || ![zc, s_m, inertance].iter().all(|x| x.is_finite() && *x > 0.0)
+            || !resistance.is_finite() || resistance < 0.0 {
+            return Err(FlueError::Invalid { what: "flue geometry exceeds finite coefficient or convection-history limits" });
+        }
+        let history_len = history_samples as usize + 2;
         let seed_key = StreamKey {
             seed: voice_seed,
             kernel: FLUE_SEED_KERNEL,
             tile: voice_index,
         };
         let momentum_thickness_m = island.theta_over_b * 0.5 * geometry.flue_height_m;
+        if !momentum_thickness_m.is_finite() || momentum_thickness_m <= 0.0 {
+            return Err(FlueError::Invalid { what: "jet profile must have finite positive momentum thickness" });
+        }
         Ok(FlueVoice {
             island,
             geometry,
@@ -456,9 +559,19 @@ impl FlueVoice {
             seed: seed_key.stream(),
             seed_key,
             block_index: 0,
+            samples: 0,
+            poisoned: false,
             diags: Vec::new(),
         })
     }
+
+    /// Accepted source sample count, independent of host block partitioning.
+    #[must_use]
+    pub const fn samples_rendered(&self) -> u64 { self.samples }
+
+    /// Fixed physical sample period [s]. No retuning or resampling is implied.
+    #[must_use]
+    pub const fn sample_period_s(&self) -> f64 { self.dt }
 
     /// The island's parameters and provenance.
     #[must_use]
@@ -484,13 +597,10 @@ impl FlueVoice {
     /// [`FlueError`] on a non-finite or negative pressure, or an unknown
     /// fingering.
     pub fn apply(&mut self, control: FlueControl) -> Result<(), FlueError> {
+        if self.poisoned { return Err(FlueError::Invalid { what: "flue voice is poisoned by a previous failed sample" }); }
         match control {
             FlueControl::SetBlowingPressure(p) => {
-                if !(p.is_finite() && p >= 0.0) {
-                    return Err(FlueError::Invalid {
-                        what: "blowing pressure must be finite and non-negative",
-                    });
-                }
+                self.validate_blowing_pressure(p)?;
                 self.blow_pa = p;
             }
             FlueControl::Fingering {
@@ -535,11 +645,32 @@ impl FlueVoice {
     /// # Errors
     /// [`FlueError`] on an empty block or a wind line refusal.
     pub fn step_block(&mut self, out: &mut [f64]) -> Result<(), FlueError> {
-        if out.is_empty() {
-            return Err(FlueError::Invalid {
-                what: "empty block",
-            });
+        self.step_block_observed(out, |_| Ok(()))
+    }
+
+    // Observe accepted physical ports without turning every sample into a
+    // separate diagnostic block. The jet's original p+ diagnostics stay intact.
+    // A failed sample/observer poisons this voice; partial callbacks cannot resume.
+    fn step_block_observed(
+        &mut self, out: &mut [f64],
+        observe: impl FnMut(&FlueResonator) -> Result<(), FlueError>,
+    ) -> Result<(), FlueError> {
+        self.validate_blowing_pressure(self.blow_pa)?;
+        if out.is_empty() { return Err(FlueError::Invalid { what: "empty block" }); }
+        let count = u64::try_from(out.len()).map_err(|_| FlueError::Invalid { what: "flue sample count overflow" })?;
+        if self.samples.checked_add(count).is_none() || self.block_index.checked_add(1).is_none() {
+            return Err(FlueError::Invalid { what: "flue sample or block clock overflow" });
         }
+        self.diags.try_reserve(1).map_err(|_| FlueError::Invalid { what: "cannot reserve flue block diagnostics" })?;
+        let result = self.advance_block(out, observe);
+        if result.is_err() { self.poisoned = true; }
+        result
+    }
+
+    fn advance_block(
+        &mut self, out: &mut [f64],
+        mut observe: impl FnMut(&FlueResonator) -> Result<(), FlueError>,
+    ) -> Result<(), FlueError> {
         let dt = self.dt;
         let u = self.jet_speed_m_s();
         let b = 0.5 * self.geometry.flue_height_m;
@@ -582,9 +713,8 @@ impl FlueVoice {
         // Displacement leak two decades below the amplification band.
         let leak_rate = omega_c / 100.0;
         let (l, r, zc) = (self.inertance, self.resistance, self.zc);
-        // Implicit mouth loop: p_j = L (q - q_prev)/dt + R q + p_in, with
-        // p_in = p_plus + p_minus and q = (p_plus - p_minus)/zc.
-        let denom = l / dt + r + zc;
+        // The mouth and wave boundary are solved together below. A TMM FIR
+        // can reflect instantaneously; a delayed tube graph has r0 exactly zero.
         let mut blow_work = 0.0;
         let mut source_work = 0.0;
         let mut pipe_work = 0.0;
@@ -626,11 +756,17 @@ impl FlueVoice {
             blow_work += self.blow_pa * flow * dt;
             let p_source = self.source_coeff * (flow - self.flow_prev) / dt;
             self.flow_prev = flow;
-            let p_minus = self.line.incoming();
-            let q = (p_source + (l / dt) * self.q_prev - 2.0 * p_minus) / denom;
-            let p_plus = p_minus + zc * q;
-            let p_in = p_plus + p_minus;
-            let _ = self.line.push(p_plus)?;
+            let boundary = self.line.mouth_boundary()?;
+            let mouth = solve_mouth_port(boundary, p_source, self.q_prev, l, r, zc, dt)?;
+            let (q, p_plus, p_in) = (mouth.flow_m3_s, mouth.outgoing_pa, mouth.pressure_pa);
+            if ![eta, flow, p_source, q, p_plus, p_in].iter().all(|x| x.is_finite()) {
+                return Err(FlueError::Invalid { what: "flue trial left the finite physical domain" });
+            }
+            let committed = self.line.push(p_plus)?;
+            if matches!(&self.line, FlueResonator::Tmm(_))
+                && committed.to_bits() != mouth.incoming_pa.to_bits() {
+                return Err(FlueError::Invalid { what: "mouth solve and committed reflection disagree" });
+            }
             // Ledger terms of the implicit step (exact identity).
             source_work += p_source * q * dt;
             pipe_work += p_in * q * dt;
@@ -645,6 +781,8 @@ impl FlueVoice {
             // plane is the pipe's pressure node, so the total pressure
             // there says little about the standing wave the pipe carries.
             *slot = p_plus;
+            self.samples += 1;
+            observe(&self.line)?;
         }
         let n = out.len() as f64;
         let mean = out.iter().sum::<f64>() / n;
@@ -691,6 +829,7 @@ impl FlueVoice {
     /// # Errors
     /// [`FlueError::OutsideCardValidity`] naming the excursion.
     pub fn claim_check(&self) -> Result<(), FlueError> {
+        if self.poisoned { return Err(FlueError::Invalid { what: "failed flue samples cannot support a physical claim" }); }
         let outside = self
             .diags
             .iter()
@@ -786,5 +925,101 @@ impl FlueRank {
             voice.step_block(&mut outs[v])?;
         }
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod mouth_boundary_tests {
+    use super::*;
+    use fs_material::gas::GasSpec;
+
+    #[test]
+    fn simultaneous_mouth_constraints_and_work_close_across_gas_states() {
+        // Actual material gas states, not instrument-name or timbre presets.
+        for temperature in [273.15, 293.15, 333.15] {
+            for pressure in [50_000.0, 101_325.0, 180_000.0] {
+                let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature, pressure).unwrap();
+                let geometry = FlueGeometry { flue_width_m: 0.01, flue_height_m: 0.001,
+                    cut_up_m: 0.008, labium_offset_m: 0.0, jet_angle_rad: 0.0,
+                    bore_area_m2: 3.0e-4, mouth_loss_rel: 0.05 };
+                let l = gas.density*geometry.end_correction_m()/geometry.mouth_area_m2();
+                let r = geometry.mouth_loss_rel*gas.density*gas.sound_speed/geometry.mouth_area_m2();
+                let zc = gas.density*gas.sound_speed/geometry.bore_area_m2;
+                let dt = 1.0/48_000.0;
+                for direct in [-1.0, -0.7, 0.0, 0.2, 1.0] {
+                    for history in [-50.0, 0.0, 70.0] {
+                        for source in [-500.0, 0.0, 800.0] {
+                            for previous in [-5.0e-5, 0.0, 1.0e-4] {
+                                let boundary = WindBoundary { direct_reflection: direct, history_pressure_pa: history };
+                                let step = solve_mouth_port(boundary, source, previous, l, r, zc, dt).unwrap();
+                                let q = step.flow_m3_s;
+                                let pressure_scale = source.abs() + step.pressure_pa.abs()
+                                    + (l/dt*(q-previous)).abs() + (r*q).abs() + 1.0;
+                                assert!((step.outgoing_pa-step.incoming_pa-zc*q).abs() < 1.0e-12*pressure_scale);
+                                assert!((source-l/dt*(q-previous)-r*q-step.pressure_pa).abs() < 1.0e-12*pressure_scale);
+                                assert_eq!(step.incoming_pa, direct*step.outgoing_pa+history);
+                                let work = source*q*dt;
+                                let pipe = step.pressure_pa*q*dt;
+                                let radiation = r*q*q*dt;
+                                let storage = 0.5*l*(q*q-previous*previous);
+                                let numerical = 0.5*l*(q-previous).powi(2);
+                                let scale = work.abs()+pipe.abs()+radiation+storage.abs()+numerical+1.0e-30;
+                                assert!((work-pipe-radiation-storage-numerical).abs() < 2.0e-12*scale);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_direct_boundary_preserves_the_existing_delayed_graph_equations() {
+        let (l, r, zc, dt) = (50.0, 70_000.0, 1.0e6, 1.0/48_000.0);
+        let (source, previous, history) = (250.0, 1.0e-4, -30.0);
+        let step = solve_mouth_port(WindBoundary { direct_reflection: 0.0,
+            history_pressure_pa: history }, source, previous, l, r, zc, dt).unwrap();
+        let flow = (source+(l/dt)*previous-2.0*history)/(l/dt+r+zc);
+        assert_eq!(step.flow_m3_s.to_bits(), flow.to_bits());
+        assert_eq!(step.outgoing_pa.to_bits(), (history+zc*flow).to_bits());
+    }
+
+    #[test]
+    fn mouth_and_actual_tmm_commit_use_the_same_sample_through_fingering_lifts() {
+        use fs_duct::{Duct, Fingering, HoleState, Segment};
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+        let radius = 0.0075;
+        let zc = gas.density*gas.sound_speed/(core::f64::consts::PI*radius*radius);
+        let table = FingeringTable::try_new(Duct { segments: vec![
+            Segment::Cylinder { radius, length: 0.2 },
+            Segment::ToneHole { hole_radius: 0.002, chimney_height: 0.004,
+                bore_radius: radius, state: HoleState::Closed },
+            Segment::Cylinder { radius, length: 0.2 },
+        ] }, vec![
+            Fingering { label: "closed".into(), holes: vec![HoleState::Closed] },
+            Fingering { label: "open".into(), holes: vec![HoleState::Open] },
+        ]).unwrap();
+        let mut line = WindLineBank::new(&table, &gas, Termination::FlangedOpen, 48_000, zc, false).unwrap();
+        let mut q = 0.0;
+        for sample in 0..512 {
+            if sample == 200 { line.switch_fingering(1, 32).unwrap(); }
+            let boundary = line.boundary_response().unwrap();
+            let step = solve_mouth_port(boundary, if sample < 8 { 100.0 } else { 0.0 },
+                q, 50.0, 70_000.0, zc, 1.0/48_000.0).unwrap();
+            let committed = line.push(step.outgoing_pa).unwrap();
+            assert_eq!(committed.to_bits(), step.incoming_pa.to_bits());
+            q = step.flow_m3_s;
+        }
+    }
+
+    #[test]
+    fn singular_or_nonfinite_mouth_does_not_invent_a_pressure_release() {
+        let boundary = WindBoundary { direct_reflection: -1.0, history_pressure_pa: 0.0 };
+        // Zero series impedance and pressure release give an undetermined flow.
+        assert!(solve_mouth_port(boundary, 1.0, 0.0, 0.0, 0.0, 1.0, 0.1).is_err());
+        assert!(solve_mouth_port(boundary, f64::NAN, 0.0, 1.0, 1.0, 1.0, 0.1).is_err());
+        assert!(solve_mouth_port(boundary, 1.0, 0.0, -1.0, 1.0, 1.0, 0.1).is_err());
+        assert!(solve_mouth_port(boundary, 1.0, 0.0, 1.0, 1.0, 0.0, 0.1).is_err());
     }
 }

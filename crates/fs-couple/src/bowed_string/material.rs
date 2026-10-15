@@ -1,0 +1,135 @@
+//! Source-bound bowed strings through one modal-loss lowering.
+//!
+//! Uniform specimens and perfectly bonded concentric sections reuse the same
+//! section integrals, support prescription, beam dispersion, Kelvin-Voigt
+//! dilution and oscillating-cylinder gas resistance as the general assembly.
+//! There is no instrument-name switch, equivalent-density material, copied
+//! decay envelope, or second bow stepper. Rebuild the card after a data change;
+//! this is frozen-state compilation, not a live material-history transfer.
+//!
+//! Concentric annuli are NOT helical windings: winding angle, interlayer slip,
+//! torsion and winding contact loss are not supplied by this reduction. The
+//! gas model supplies small-motion drag, not fluid added mass or turbulent flow.
+//! Body modes, friction, and observation geometry remain independent inputs.
+
+use super::BowedStringCard;
+use crate::acoustic_realize::{AcousticRealizeError, mode_zeta, validate_incremental_string};
+use crate::material_assembly::concentric::with_concentric_kelvin_voigt_section;
+use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
+use crate::string_specimen::{ResolvedStringSpecimen, StringPrestress};
+use fs_exec::Cx;
+use fs_material::gas::GasState;
+use fs_material::section::ConcentricKelvinVoigtSection;
+use fs_scenario::PrestressedString;
+
+fn poll(cx: &Cx<'_>) -> Result<(), AcousticRealizeError> {
+    cx.checkpoint().map_err(|_| AcousticRealizeError::Cancelled)
+}
+fn invalid(what: &'static str) -> AcousticRealizeError {
+    AcousticRealizeError::InvalidDescription { what }
+}
+
+impl BowedStringCard {
+    /// Lower a homogeneous material specimen in an explicitly supplied gas.
+    ///
+    /// The supplied coherent state may describe air, another ideal gas, or an
+    /// admitted mixture. Its actual density and viscosity feed the SAME drag
+    /// owner used by other string excitations. Gas sound speed does not retune
+    /// the dry structural modes. Material temperature, source band and all
+    /// solid coefficients remain those of the original immutable specimen.
+    ///
+    /// Pass this same gas to any independently constructed acoustic body and
+    /// observer; the card alone does not construct or certify a complete body.
+    /// The caller retains the specimen's original source receipts.
+    ///
+    /// # Errors
+    /// Refuses inconsistent gas, missing/foreign material loss, unsupported
+    /// moving ends/polarizations/memory, out-of-band modes and cancellation.
+    pub fn from_material_specimen_with_gas(
+        cx: &Cx<'_>,
+        specimen: &ResolvedStringSpecimen,
+        gas: &GasState,
+        sample_rate_hz: u32,
+    ) -> Result<Self, AcousticRealizeError> {
+        poll(cx)?;
+        let string = specimen.string();
+        let law = string.kelvin_voigt_bending
+            .ok_or_else(|| invalid("material bow card requires a resolved Kelvin-Voigt bending law"))?;
+        if law.material_state_identity != Some(specimen.material().identity()) {
+            return Err(invalid("bow bending loss must belong to the resolved material state"));
+        }
+        lower(cx, &string, gas, sample_rate_hz)
+    }
+
+    /// Lower a material-swappable layered member into the same bow runtime.
+    ///
+    /// Every annulus contributes its original density, elastic modulus and
+    /// bending viscosity. The common section/support adapter derives linear
+    /// mass, EI, viscous EI, diameter and tension together; the actual outer
+    /// radius drives gas drag. The intersected source band admits every mode.
+    /// The returned card uses the existing runtime's elastic AND viscous bridge
+    /// shear, so changing a coating cannot leave the old support force behind.
+    ///
+    /// The template supplies span/resolution, while prestress explicitly chooses
+    /// fixed tension, fixed extension, or target frequency. It must not carry
+    /// an inherited internal loss law. This is a bonded-section bending model,
+    /// not an assertion that a wrapped instrument string is a bonded cylinder.
+    /// Source receipts remain in the borrowed section; no averaged source is minted.
+    ///
+    /// # Errors
+    /// Shared section/support/loss refusals, unsupported string images,
+    /// inconsistent gas, mode/source bandwidth limits or cancellation.
+    pub fn from_concentric_material_section(
+        cx: &Cx<'_>,
+        template: PrestressedString,
+        section: &ConcentricKelvinVoigtSection,
+        prestress: StringPrestress,
+        gas: &GasState,
+        sample_rate_hz: u32,
+    ) -> Result<Self, AcousticRealizeError> {
+        poll(cx)?;
+        let string = with_concentric_kelvin_voigt_section(template, section, prestress)?;
+        lower(cx, &string, gas, sample_rate_hz)
+    }
+}
+
+// All material sources lower through the same bounded numerical path. Kept
+// private: a raw string carrying invented coefficients is not a sourced input.
+fn lower(
+    cx: &Cx<'_>, string: &PrestressedString, gas: &GasState, sample_rate_hz: u32,
+) -> Result<BowedStringCard, AcousticRealizeError> {
+    poll(cx)?;
+    gas.validate_coherence().map_err(|error| AcousticRealizeError::Ambient(error.to_string()))?;
+    validate_incremental_string(string)?;
+    let law = string.kelvin_voigt_bending
+        .ok_or_else(|| invalid("material bow card requires a resolved Kelvin-Voigt bending law"))?;
+    let mut card = BowedStringCard {
+        length_m: string.length_m,
+        tension_n: string.tension_n,
+        linear_density_kg_m: string.lin_density_kg_m,
+        bending_stiffness_n_m2: string.bending_stiffness_n_m2,
+        viscous_bending_n_m2_s: law.viscous_stiffness_n_m2_s,
+        mode_count: string.n_modes,
+        zetas: Vec::with_capacity(string.n_modes),
+        sample_rate_hz,
+    };
+    let mut modes = Vec::with_capacity(string.n_modes);
+    for k in 1..=string.n_modes {
+        poll(cx)?;
+        let omega = card.mode_omega_rad_s(k);
+        let zeta = mode_zeta(string, omega,
+            k as f64 * core::f64::consts::PI / string.length_m, gas)?;
+        card.zetas.push(zeta);
+        modes.push(ModalAcousticMode {
+            angular_frequency_rad_s: omega,
+            damping_ratio: zeta,
+            pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
+        });
+    }
+    ModalAcousticTimeModel::try_new(sample_rate_hz, modes,
+        ModalAcousticTimeBudget::audible_reference())
+        .map_err(|_| invalid("material bow modes violate time-domain admission"))?;
+    card.validate().map_err(|_| invalid("material bow card is not physically representable"))?;
+    poll(cx)?;
+    Ok(card)
+}
