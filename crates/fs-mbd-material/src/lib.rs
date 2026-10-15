@@ -15,6 +15,9 @@
 
 #![deny(unsafe_code)]
 
+/// Complete source-bound mechanism compilation using the existing dynamics engine.
+pub mod articulated;
+
 mod geometry;
 pub use geometry::VolumeMoments;
 

@@ -29,3 +29,26 @@ ambiguous, wrong-unit, nonpositive or unsupported density refuses. Cancellation
 is checked before work, between fixed-size region operations, and before
 publication. Sorting and each underlying material query are bounded cold-path
 operations, not a real-time cancellation-latency guarantee.
+
+`articulated::resolve_articulated` compiles complete material-defined link
+geometry into the existing `ArticulatedModel` without placeholder inertias.
+The region budget is global across all links. The existing owner still validates
+root-first topology, unique names and physical joints. Bodies and source bundles
+remain aligned with the unchanged link order. The resulting model feeds existing
+forward/inverse dynamics, forward kinematics and unconstrained free-flight APIs.
+
+`articulated::rebind_articulated` requires exactly one named material binding
+for every link of an existing model. It preserves link order, parents, zero
+transforms, joint axes and limits. Missing, duplicate or foreign bindings refuse
+instead of retaining stale mass values. Publication is atomic and never mutates
+the template or a live generalized state. This is model substitution, not an
+energy-conserving material-exchange event in a moving system.
+
+The `material_lever` executable evaluates the same geometry, joint and loads
+using two explicit synthetic density cards through actual articulated solvers:
+`cargo run -p fs-mbd-material --example material_lever -- 1000 3000`.
+It reports mass, pivot inertia, torque-driven acceleration and gravitational
+holding torque. The densities are demonstration inputs, not material measurements.
+`cargo test -p fs-mbd-material --all-targets` includes the source/geometry,
+full-mechanism and executable regressions. No independent time integrator,
+contact law, stiffness law or empirical rigid-body qualification is claimed.
