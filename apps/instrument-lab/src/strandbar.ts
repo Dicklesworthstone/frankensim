@@ -263,6 +263,17 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       const hihat = new KitLane(m, "hihat-closed", { gain: data.live.hihat.gain, aheadFrames: AHEAD, chunk: CHUNK, scales: HAT_SCALES, minRealtime: 1.4, fieldHz: 0 });
       // held from here, so a stop while they start disposes them
       lanes = { piano, kick, hihat };
+      // An engine that fails once it is ready (while the others still start, or mid-loop) has left the mix
+      // (mix.ts LaneWorker): the status says so from then on rather than play on without it.
+      let failure: string | null = null;
+      const failed = (part: string) => (e: Error): void => {
+        if (my !== session) return;
+        failure = `The live ${part} stopped (${e.message}). Stop and play again to restart it.`;
+        status.textContent = failure;
+      };
+      piano.onFailure = failed("piano");
+      kick.onFailure = failed("kick");
+      hihat.onFailure = failed("hi-hat");
       const meter = (id: string) => (s: LaneWorkerStats): void => {
         const h = (laneHealth[id] ??= { late: 0, gap: 0, rt: 0 });
         h.rt = s.realtime;
@@ -290,17 +301,8 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       spec.start();
       setPhase("playing");
       const playingText = `Both versions are playing in step. The drums run on a grid ${kr.scale}× (kick) and ${hr.scale}× (hi-hat) coarser than the studio render, chosen for this device.`;
-      status.textContent = `Pre-buffering 2.0 s of live piano (a ${pr.boardCoordinates}-coordinate soundboard) and kit (${kr.scale}× kick, ${hr.scale}× hi-hat)…`;
+      status.textContent = failure ?? `Pre-buffering 2.0 s of live piano (a ${pr.boardCoordinates}-coordinate soundboard) and kit (${kr.scale}× kick, ${hr.scale}× hi-hat)…`;
       let announcedPlaying = false;
-      // an engine that fails mid-loop leaves the mix (mix.ts LaneWorker): say so rather than play on without it
-      const failed = (part: string) => (e: Error): void => {
-        if (my !== session) return;
-        announcedPlaying = true;
-        status.textContent = `The live ${part} stopped (${e.message}). Stop and play again to restart it.`;
-      };
-      piano.onFailure = failed("piano");
-      kick.onFailure = failed("kick");
-      hihat.onFailure = failed("hi-hat");
       const pos = (): void => {
         posRaf = requestAnimationFrame(pos);
         const f = c.currentTime * SR - startFrame;
@@ -311,7 +313,7 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
         }
         if (!announcedPlaying) {
           announcedPlaying = true;
-          status.textContent = playingText;
+          status.textContent = failure ?? playingText;
         }
         const inLoop = f % data.loopFrames;
         const beat = inLoop / beatFrames;

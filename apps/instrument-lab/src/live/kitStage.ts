@@ -106,6 +106,8 @@ interface Live {
   lastStrike: { x: number; y: number; at: number } | null;
   /** a stroke's first milliseconds, replayed SLOW times slower from `at` */
   replay: { b: KitBurst; at: number; n: number } | null;
+  /** why the piece's engine stopped after it was ready (it has left the mix), or null */
+  failure: string | null;
 }
 
 export function mountLiveKit(root: HTMLElement): void {
@@ -141,7 +143,7 @@ export function mountLiveKit(root: HTMLElement): void {
 
   const g = canvas.getContext("2d")!;
   const lives = new Map<PieceId, Live>();
-  for (const def of PIECES) lives.set(def.id, { def, lane: null, ready: null, cells: null, m: 0, img: null, off: null, field: null, vref: 1e-3, kinetic: 0, kpeak: 0, force: 0, lastStrike: null, replay: null });
+  for (const def of PIECES) lives.set(def.id, { def, lane: null, ready: null, cells: null, m: 0, img: null, off: null, field: null, vref: 1e-3, kinetic: 0, kpeak: 0, force: 0, lastStrike: null, replay: null, failure: null });
   for (const def of PIECES) {
     const b = el("button", { type: "button", class: "kit-key" }, el("kbd", {}, def.key), def.name);
     b.addEventListener("click", () => hitCentre(def.id));
@@ -364,7 +366,7 @@ export function mountLiveKit(root: HTMLElement): void {
   const stop = (): void => {
     session++;
     running = false;
-    for (const L of lives.values()) { L.lane?.dispose(); L.lane = null; L.field = null; L.kinetic = 0; L.replay = null; }
+    for (const L of lives.values()) { L.lane?.dispose(); L.lane = null; L.field = null; L.kinetic = 0; L.replay = null; L.failure = null; }
     mix?.dispose();
     mix = null;
     overlay.hidden = false;
@@ -404,9 +406,14 @@ export function mountLiveKit(root: HTMLElement): void {
         };
         lane.onStats = (s) => { if (s.asleep) { L.kinetic = 0; L.kpeak = 0; } };
         lane.onBurst = (b) => { L.replay = { b, at: performance.now(), n: b.count }; L.kpeak = Math.max(L.kpeak, 1e-30); kickDraw(); };
-        // an engine that fails while playing has left the mix (mix.ts LaneWorker): say so in the readout
+        // an engine that fails once ready has left the mix (mix.ts LaneWorker): its surface goes dark (no
+        // more fields arrive to fade it) and the readout says so, also if the others are still building
         lane.onFailure = (e) => {
-          if (my === session) hud.append(el("span", { class: "kit-hud-item" }, el("b", {}, def.name), ` stopped: ${e.message}`));
+          if (my !== session) return;
+          L.failure = e.message;
+          L.field = null; L.kinetic = 0; L.kpeak = 0; L.replay = null;
+          if (running) paintHud();
+          kickDraw();
         };
         const r = await lane.ready;
         L.ready = r;
@@ -428,10 +435,7 @@ export function mountLiveKit(root: HTMLElement): void {
       running = true;
       overlay.hidden = true;
       kickDraw();
-      hud.replaceChildren(...PIECES.map((p) => {
-        const r = lives.get(p.id)!.ready!;
-        return el("span", { class: "kit-hud-item" }, el("b", {}, p.name), ` ${r.info.surfaceNodes} nodes · grid ${r.scale}× · ${r.realtime.toFixed(1)}× real time`);
-      }));
+      paintHud();
       energyLoop(my);
     } catch (e) {
       if (my !== session) return; // stopped while building: its lanes were disposed on purpose
@@ -440,6 +444,14 @@ export function mountLiveKit(root: HTMLElement): void {
     }
   }
   start.addEventListener("click", () => void begin());
+
+  function paintHud(): void {
+    hud.replaceChildren(...PIECES.map((p) => {
+      const L = lives.get(p.id)!, r = L.ready!;
+      return el("span", { class: "kit-hud-item" }, el("b", {}, p.name),
+        L.failure ? ` stopped: ${L.failure}` : ` ${r.info.surfaceNodes} nodes · grid ${r.scale}× · ${r.realtime.toFixed(1)}× real time`);
+    }));
+  }
 
   // a compact live readout of the piece played last
   const readout = el("div", { class: "kit-readout", "aria-live": "off" });

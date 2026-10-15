@@ -73,6 +73,12 @@ function versionedLive(): Plugin {
 export default defineConfig({
   plugins: [versionedLive()],
   build: { target: "es2022", sourcemap: false, chunkSizeWarningLimit: 900 },
-  // The page imports the drum and cymbal descriptions verbatim from the repo (?raw).
-  server: { port: 5199, strictPort: false, fs: { allow: ["../.."] } },
+  // The page imports the drum and cymbal descriptions verbatim from the repo (?raw). The watcher skips the
+  // engines' cargo targets (GBs) and the build outputs: watching them kept an idle dev server near a full core.
+  server: {
+    port: 5199,
+    strictPort: false,
+    fs: { allow: ["../.."] },
+    watch: { ignored: ["**/target/**", "**/dist/**", "**/dist-cf/**", "**/.wrangler/**", "**/.vercel/**"] },
+  },
 });
