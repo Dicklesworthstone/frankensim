@@ -181,7 +181,8 @@ jobs:
           tests.mkdir(exist_ok=True)
           (tests / 'original_contract.rs').write_text(suite.replace('use fs_couple::', 'use fs_ports::'))
           PY
-          cargo +stable test --manifest-path "$RUNNER_TEMP/neutral-ports/Cargo.toml" -p fs-ports --test original_contract
+          cd "$RUNNER_TEMP/neutral-ports"
+          cargo +stable test -p fs-ports --test original_contract
       - name: Publish the coherent extraction without forcing main
         shell: bash
         run: |
