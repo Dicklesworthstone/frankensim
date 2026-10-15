@@ -41,6 +41,9 @@ const IDLE_DISPOSE_MS = 90_000;
  * energy above 4 kHz at 4x and -91 dB at 6x (a bare click with no shimmer), while a kick has no
  * energy above 4 kHz even at 4x. So cymbals hold on to fine grids and the kick gives way first;
  * a piece that still falls behind while playing is restarted one grid coarser.
+ * The crash and ride try 3x and 3.5x as well: their octave balance against the 1x grid improves at
+ * every step down from 5x (crash 18.2 / 14.6 / 11.2 / 10.2 dB at 5x / 4x / 3.5x / 3x; ride 19.6 /
+ * 12.4 / 10.9 / 7.2), and 5x stays as the fallback for slower devices.
  */
 const GRID: Record<PieceId, { scales: number[]; minRt: number }> = {
   kick: { scales: [5, 6, 7, 8], minRt: 1.7 },
@@ -50,8 +53,8 @@ const GRID: Record<PieceId, { scales: number[]; minRt: number }> = {
   "tom-14": { scales: [4, 5, 6, 7], minRt: 1.8 },
   "hihat-closed": { scales: [4, 5, 6], minRt: 1.5 },
   "hihat-open": { scales: [4, 5, 6], minRt: 1.5 },
-  crash: { scales: [4, 5, 6], minRt: 1.5 },
-  ride: { scales: [4, 5, 6], minRt: 1.5 },
+  crash: { scales: [3, 3.5, 4, 5, 6], minRt: 1.5 },
+  ride: { scales: [3, 3.5, 4, 5, 6], minRt: 1.5 },
 };
 
 interface Standard {
@@ -449,7 +452,8 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     old.lane.dispose(); // drops its mix lane before the new one joins under the same name
     kits.delete(p);
     say(`${PIECE_NAMES[p]}: this device could not compute it in real time, so it restarts on a coarser grid.`, "warn");
-    const next = [scale + 1, scale + 2, 10].filter((s, i, a) => s <= 10 && a.indexOf(s) === i);
+    // whole grids only: a 3.5x piece restarts on 4x or 5x, grids with measured levels
+    const next = [Math.floor(scale) + 1, Math.floor(scale) + 2, 10].filter((s, i, a) => s <= 10 && a.indexOf(s) === i);
     await startPiece(mix, p, next);
     const h = health[p];
     if (h) h.detail += ` (restarted from ${scale}×${lostBefore > 480 ? `, after ${Math.round(lostBefore / 48)} ms were lost` : ""})`;
