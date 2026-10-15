@@ -16,6 +16,8 @@ pub mod plate;
 /// Stateful, explicitly parameterized moving-slit junction.
 pub mod dynamic;
 pub(crate) mod moving;
+/// Independently moving source blades sharing one fluid/contact interface.
+pub mod paired;
 /// Moving aperture coupled to a geometry-bound passive uniform tube.
 pub mod tube;
 /// Moving aperture coupled to nonuniform connected tube sections and branches.
