@@ -22,6 +22,11 @@ const KEY_OFFSETS: Record<string, number> = {
   KeyA: 0, KeyW: 1, KeyS: 2, KeyE: 3, KeyD: 4, KeyF: 5, KeyT: 6, KeyG: 7, KeyY: 8, KeyH: 9,
   KeyU: 10, KeyJ: 11, KeyK: 12, KeyO: 13, KeyL: 14, KeyP: 15, Semicolon: 16,
 };
+/**
+ * RMS octave-balance error [dB, 63 Hz-8 kHz] of the live piano part of Strandbar on each board against the
+ * studio render (grand_piano, 128 coordinates); public/live/piano/boards.js, README "Larger live soundboards".
+ */
+const BOARD_ERROR_DB: Record<number, number> = { 32: 2.95, 48: 2.66, 64: 1.28, 96: 0.77, 128: 0.36 };
 const SPEED_MIN = 0.5;
 const SPEED_MAX = 4.5;
 
@@ -356,6 +361,9 @@ export class LivePianoSection {
   private buildHonesty(info: PianoInfo | null): void {
     const host = q<HTMLElement>(this.root, '.lp-honesty');
     host.replaceChildren();
+    // the board this device chose at Start (0 before Start: the text then gives the range)
+    const board = info ? info.boardCoordinates : 0;
+    const exact = info ? info.boardExactLowModes : 0;
     const details = el('details', 'evidence');
     details.append(el('summary', undefined, 'What this live model is — and is not'));
     const body = el('div', 'evidence-body lp-evidence');
@@ -373,14 +381,20 @@ export class LivePianoSection {
       column('In the live model', [
         'All 88 keys of the published scale, 234 speaking strings on the bridge. Only the sounding keys are dynamic: every unison string and duplex segment, up to 200 string modes per key (low trichords keep partials to about 5–7 kHz).',
         'Every other string stays attached as a quasi-static chord (its mass and tension load the bridge); a key becomes dynamic at its strike and returns to rest when quiet.',
-        'One shared soundboard: 32 coordinates of the Model D board (16 exact modes to 639 Hz plus 16 bridge-response vectors from the 0–2400 Hz slice), with its full damping matrix.',
+        board
+          ? `One shared soundboard: ${board} coordinates of the Model D board (${exact} exact modes plus ${board - exact} bridge-response vectors from the 0–2400 Hz slice), with its full damping matrix: the largest board this device computed fast enough when you pressed Start (32 to 128).`
+          : 'One shared soundboard: a reduction of the Model D board (exact low modes plus bridge-response vectors from the 0–2400 Hz slice) with its full damping matrix, 32 to 128 coordinates: the largest this device computes fast enough, chosen when you press Start.',
         'The published hammer shank (rigid rotation plus bending), the per-key wool-felt card with crush memory and Prony relaxation, contact solved implicitly every step.',
         'The estimated damper pad on every string up to E6 (four quadrature points), and a continuous sustain pedal.',
         'Pressure from the time-domain Rayleigh integral at a microphone 1 m above the board, at a fixed 10 Pa full scale. No samples, no normalisation, no EQ, no reverb.',
       ], 'in'),
       column('Reduced or absent', [
         'One mechanical step per sample at 48 kHz; the offline reference uses four.',
-        '32 board coordinates instead of 128: measured on A3, about 10 dB less energy above 2 kHz than the offline render.',
+        !board
+          ? `32 to 128 board coordinates where the offline render keeps 128: the live piano part of Strandbar sits ${BOARD_ERROR_DB[32]} dB from the studio render in octave balance on 32 coordinates, ${BOARD_ERROR_DB[96]} dB on 96 and ${BOARD_ERROR_DB[128]} dB on 128.`
+          : board >= 128
+          ?`${board} board coordinates, as many as the offline render: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[128]} dB from the studio render in octave balance.`
+          : `${board} board coordinates instead of the offline render's 128: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[board] ?? '—'} dB from the studio render in octave balance (128 coordinates: ${BOARD_ERROR_DB[128]} dB)${board === 32 ? '; on A3, about 10 dB less energy above 2 kHz than the offline render' : ''}.`,
         'Strings of silent keys neither resonate nor absorb: offline, their dampers soak up about 10 % of an A3 strike, so the live notes decay more slowly early on (≈ −9.6 against −15.2 dB/s).',
         `A polyphony budget of ${info ? info.maxDynamicModes.toLocaleString('en-US') : '2,400'} string modes and ${info ? info.maxSoundingKeys : 24} keys. Beyond it the quietest key is returned to rest early; this is counted ("Forced out") and its energy appears as retired in the ledger. A load governor may lower the budget for new keys on a slow device, and says so.`,
         'No una corda or sostenuto, no key or action beyond the shank, no room, lid or case, no air loading of the board.',
@@ -400,7 +414,7 @@ export class LivePianoSection {
     body.append(
       chips('Published', 'pub', ['RT-0425 string scale, 84 keys', 'RT-0425 hammer mass, exponent, stiffness', 'Model D dimensions', 'Model D board drawing (Boutillon et al.)', 'Hammer shank geometry (Chabassier & Durufle)']),
       chips('Estimated', 'est', ['4 end keys of the scale', 'Felt crush and relaxation', 'Unison detune 0.8 cents', 'String loss law', 'Damper pads, 0.4 N s/m', 'Board damping 1.5 %', 'Bridge stations, rib sections']),
-      chips('Not modelled live', 'not', ['Silent-string resonance', 'Silent-string damper loss', 'Board above 32 coordinates', 'Una corda, sostenuto', 'Action beyond the shank', 'Room, lid, case']),
+      chips('Not modelled live', 'not', ['Silent-string resonance', 'Silent-string damper loss', ...(!board ? ['Board beyond what the device affords'] : board < 128 ? [`Board above ${board} coordinates`] : []), 'Una corda, sostenuto', 'Action beyond the shank', 'Room, lid, case']),
     );
     if (info) {
       const prov = el('p', 'small muted');
@@ -555,8 +569,10 @@ export class LivePianoSection {
     status.textContent = 'Starting the audio clock…';
     try {
       const ctx = await resumeContext();
-      status.textContent = 'Loading the engine and assembling 88 keys…';
-      const client = await LivePianoClient.create(ctx, {});
+      status.textContent = 'Loading the engine, assembling 88 keys and timing the soundboards this device can afford…';
+      // the largest soundboard this device computes 1.4x faster than real time (public/live/piano/boards.js);
+      // the load governor lowers the string-mode budget if playing gets heavier than the probe
+      const client = await LivePianoClient.create(ctx, { boardCoordinates: 'auto' });
       if (this.disposed) {
         client.dispose();
         return;

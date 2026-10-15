@@ -162,6 +162,7 @@ export async function chooseQuality({ make, measure = probeSustained, target, fu
     const at = (c) => fixed + ((1 - fixed) * c) / full;
     return { cap: lower, realtime: (measured * at(cap)) / at(lower) };
   };
+  if (sizes.includes(96)) prefetchLikely();
   const realtime32 = timed(null, 0, full || undefined);
   kept32 = kept; // the embedded board at the full cap, for the fit below
   kept = null;
@@ -231,38 +232,71 @@ export async function chooseQuality({ make, measure = probeSustained, target, fu
   return take({ coordinates: 0, bytes: null, ...fit(null, 0, realtime32) });
 }
 
-export async function fetchBoard(n) {
-  const response = await fetch(boardUrl(n));
-  if (!response.ok) throw new Error(`board r${n}: HTTP ${response.status}`);
-  return new Uint8Array(await response.arrayBuffer());
+// One fetch per board per Worker: a board asked for again (a prefetch, then the chooser) shares the request.
+const fetched = new Map();
+export function fetchBoard(n) {
+  let pending = fetched.get(n);
+  if (!pending) {
+    pending = fetch(boardUrl(n)).then(async (response) => {
+      if (!response.ok) throw new Error(`board r${n}: HTTP ${response.status}`);
+      return new Uint8Array(await response.arrayBuffer());
+    });
+    pending.catch(() => fetched.delete(n)); // a failed fetch is not kept: asking again retries
+    fetched.set(n, pending);
+  }
+  return pending;
 }
 
+// The board a desktop-class device usually ends up with (96 here, timed on M-class Macs), fetched while the
+// embedded board's probe runs (the network works while the probe keeps this Worker busy), so the fetch is
+// off the start-up path. Devices with fewer than 8 logical cores (phones) rarely afford 96 and fetch nothing early.
+function prefetchLikely() {
+  const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 0;
+  if (cores >= 8) fetchBoard(96).catch(() => {});
+}
+
+// The keyboard's choice (worker.js; the engine's own governor then guards the mode budget).
 // make(bytes|null, coords) -> engine; measure(engine) -> real-time factor of a probe.
-// Returns {engine, coordinates, realtime}: the largest board whose probe runs at least `target`
-// times faster than real time. Start-up cost: the embedded board plus at most two fetched ones.
+// Returns {engine, coordinates, realtime, bytes}: the largest board whose probe runs at least `target`
+// times faster than real time. Start-up cost: the embedded board plus at most two fetched ones, each
+// built once: a copy taken before its timing is the returned `engine`, in the state a new engine has
+// (null when the wasm has no copy(): the caller builds the board again). The caller frees `engine`.
 export async function chooseBoard({ make, measure = probeRealtime, target, sizes = BOARD_SIZES, log = () => {} }) {
+  const copyOf = (engine) => {
+    try {
+      return engine.copy();
+    } catch {
+      return null; // an engine_bg.wasm from before copies (see chooseQuality)
+    }
+  };
+  if (sizes.includes(96)) prefetchLikely();
   const base = make(null, 0);
+  const base0 = copyOf(base);
   const realtime32 = measure(base);
+  base.free();
   log(`board 32: ${realtime32.toFixed(2)}x`);
   let tries = 0;
   for (const n of sizes) {
     if (tries >= 2) break;
     if (realtime32 / (RELATIVE_COST[n] || n / 32) < target) continue;
     tries += 1;
-    let engine = null;
+    let engine = null, fresh = null;
     try {
       const bytes = await fetchBoard(n);
       engine = make(bytes, n);
+      fresh = copyOf(engine);
       const realtime = measure(engine);
       log(`board ${n}: ${realtime.toFixed(2)}x`);
       if (realtime >= target) {
-        base.free();
-        return { engine, coordinates: n, realtime, bytes };
+        base0?.free();
+        return { engine: fresh, coordinates: n, realtime, bytes };
       }
     } catch (error) {
       log(`board ${n}: ${error && error.message ? error.message : error}`);
+    } finally {
+      engine?.free();
     }
-    engine?.free();
+    fresh?.free();
   }
-  return { engine: base, coordinates: 0, realtime: realtime32, bytes: null };
+  return { engine: base0, coordinates: 0, realtime: realtime32, bytes: null };
 }

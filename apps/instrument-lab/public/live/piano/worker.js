@@ -290,15 +290,17 @@ async function start(message) {
   if (engineOptions.snapshotHz !== undefined) snapshotIntervalMs = engineOptions.snapshotHz > 0 ? 1000 / engineOptions.snapshotHz : 0;
   if (engineOptions.governor !== undefined) governor = Boolean(engineOptions.governor);
   await init(message.wasmUrl ? { module_or_path: message.wasmUrl } : undefined);
+  let chosen = null; // the pick's copy from before its timing, in a new engine's state (see chooseBoard)
   if (engineOptions.boardCoordinates === 'auto') {
     const pick = await chooseBoard({ make: (bytes) => makeEngine({ ...engineOptions, boardCoordinates: 0 }, bytes),
       target: Number(engineOptions.minRealtime) || 1.4 });
-    pick.engine.free();
+    chosen = pick.engine;
     boardBytes = pick.bytes;
   } else if (Number(engineOptions.boardCoordinates) > 32) {
     boardBytes = await fetchBoard(Number(engineOptions.boardCoordinates));
   }
-  engine = makeEngine(engineOptions);
+  // the same options and board as the copy (an older wasm without copy() builds it again)
+  engine = chosen ?? makeEngine(engineOptions);
   info = JSON.parse(engine.info());
   asked = { courseModeBudget: info.courseModeBudget, partialBandHz: info.partialBandHz, maxDynamicModes: info.maxDynamicModes };
   granted = { ...asked };
