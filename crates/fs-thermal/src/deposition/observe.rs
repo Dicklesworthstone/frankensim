@@ -65,7 +65,7 @@ impl DepositionObserver for () {
 impl<'a> DepositionSimulation<'a> {
     // Validate the complete generated field before changing any boundary. The
     // ordinary no-source path does not even add +0, preserving its arithmetic.
-    fn add_step_sources(&mut self, sources: &BTreeMap<CellId, f64>,
+    pub(super) fn add_step_sources(&mut self, sources: &BTreeMap<CellId, f64>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
         -> Result<Vec<(CellId, f64)>, DepositionError> {
         if sources.len() > self.cells.len() {
@@ -89,7 +89,7 @@ impl<'a> DepositionSimulation<'a> {
         Ok(authored)
     }
 
-    fn set_step_conductances(&mut self, values: &BTreeMap<u64, f64>,
+    pub(super) fn set_step_conductances(&mut self, values: &BTreeMap<u64, f64>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
         -> Result<Vec<(u64, f64)>, DepositionError> {
         if values.len() > self.links.len() {

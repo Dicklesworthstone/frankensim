@@ -27,6 +27,10 @@ pub use observe::{ContactUpdate, DepositionObserver};
 mod coverage;
 pub use coverage::{ContactPatch, ContactPatchUpdate};
 
+/// Endpoint residuals sharing the existing storage, flux and boundary owner.
+#[path = "enthalpy/backward_euler.rs"]
+pub mod backward_euler;
+
 /// Persistent physical cell identity; distinct from its source segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CellId(pub u64);
@@ -206,7 +210,7 @@ pub struct EnergyAudit {
     pub stored_energy_change_j: f64,
     /// Stored change minus incoming enthalpy minus external input, J.
     pub residual_j: f64,
-    /// Number of accepted explicit thermal substeps.
+    /// Number of accepted thermal steps (explicit substeps or implicit intervals).
     pub substeps: usize,
     /// Number of accepted physical events.
     pub events: usize,
@@ -413,13 +417,14 @@ impl<'a> DepositionSimulation<'a> {
         Ok(())
     }
 
-    fn thermal_step(
-        &mut self,
-        remaining: f64,
-        max_dt: f64,
-        audit: &mut EnergyAudit,
+    // A single owner for physical watts and the explicit stability bound.
+    // Endpoint residuals consume these watts directly, not differences between
+    // two advanced states or a second implementation of boundary/contact heat.
+    fn heat_rates(
+        &self,
+        maximum_explicit_dt: f64,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(f64, BTreeMap<CellId, f64>), DepositionError> {
+    ) -> Result<HeatRates, DepositionError> {
         // Per-cell rates and outgoing conductances; no quadratic cell searches.
         let mut temperatures = BTreeMap::new();
         let mut rates = BTreeMap::new();
@@ -451,7 +456,7 @@ impl<'a> DepositionSimulation<'a> {
             }
         }
         let mut external_w = 0.0;
-        let mut dt = remaining.min(max_dt);
+        let mut dt = maximum_explicit_dt;
         for (i, (&id, cell)) in self.cells.iter().enumerate() {
             if i % 256 == 0 {
                 checkpoint()?;
@@ -484,6 +489,18 @@ impl<'a> DepositionSimulation<'a> {
         if !positive(dt) {
             return Err(DepositionError::Arithmetic);
         }
+        Ok(HeatRates { temperatures, watts: rates, external_w, explicit_dt_s: dt })
+    }
+
+    fn thermal_step(
+        &mut self,
+        remaining: f64,
+        max_dt: f64,
+        audit: &mut EnergyAudit,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(f64, BTreeMap<CellId, f64>), DepositionError> {
+        let HeatRates { temperatures, watts: rates, external_w, explicit_dt_s: dt } =
+            self.heat_rates(remaining.min(max_dt), checkpoint)?;
         for (i, (&id, cell)) in self.cells.iter_mut().enumerate() {
             if i % 256 == 0 {
                 checkpoint()?;
@@ -498,6 +515,13 @@ impl<'a> DepositionSimulation<'a> {
         audit.external_heat_j = finite(audit.external_heat_j + finite(dt * external_w)?)?;
         Ok((dt, temperatures))
     }
+}
+
+struct HeatRates {
+    temperatures: BTreeMap<CellId, f64>,
+    watts: BTreeMap<CellId, f64>,
+    external_w: f64,
+    explicit_dt_s: f64,
 }
 
 fn validate_boundary(b: Boundary) -> Result<(), DepositionError> {
