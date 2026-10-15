@@ -16,18 +16,26 @@ use super::{FilmError, ResistiveFilm, MAX_CELLS, MAX_PORTS, dot, fail};
 /// Explicit, fixed thermal and pressure reservoir; no gas-name lookup.
 #[derive(Clone, Copy, Debug)]
 pub struct AmbientGas {
+    /// Ambient absolute pressure in pascals.
     pub pressure_pa: f64,
+    /// Ambient absolute temperature in kelvin.
     pub temperature_k: f64,
+    /// Specific gas constant R in J/(kg·K).
     pub specific_gas_constant_j_kg_k: f64,
 }
+/// Instantaneous thermodynamic and pressure state observed across the film.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GasObservation {
     /// Relative isothermal free energy, already part of joint mechanical storage.
     pub free_energy_j: f64,
+    /// Total retained gas mass in kilograms.
     pub mass_kg: f64,
+    /// Minimum cell absolute pressure in pascals.
     pub minimum_pressure_pa: f64,
+    /// Maximum cell absolute pressure in pascals.
     pub maximum_pressure_pa: f64,
 }
+/// Compressible isothermal squeeze/Poiseuille film with retained cell gas mass.
 #[derive(Clone, Debug)]
 pub struct IsothermalFilm {
     geometry: ResistiveFilm,
@@ -65,10 +73,16 @@ impl IsothermalFilm {
         }
         Ok(Self{geometry,gas,initial_gap,scales})
     }
+    /// Number of work-conjugate mechanical coordinates.
+    #[must_use]
     pub fn port_count(&self)->usize {self.geometry.port_count()}
+    /// Number of retained gas-mass cells.
+    #[must_use]
     pub fn cell_count(&self)->usize {self.geometry.cell_count()}
     /// Positive scaled masses at the declared initial ambient state.
+    #[must_use]
     pub fn initial_state(&self)->&[f64] {&self.scales}
+    /// Evaluate free energy, total gas mass, and cell pressure bounds at `(q, z)`.
     pub fn observe(&self,q:&[f64],z:&[f64])->Result<GasObservation,FilmError> {
         Ok(self.state(q,z)?.observation)
     }
@@ -111,6 +125,7 @@ impl IsothermalFilm {
         if a[..gq.len()].iter().chain(&b[..gz.len()]).any(|x|!x.is_finite()) {return fail("film gradient overflow");}
         gq.copy_from_slice(&a[..self.port_count()]);gz.copy_from_slice(&b[..self.cell_count()]);Ok(())
     }
+    /// Directional second derivative of isothermal storage along `(dq, dz)`.
     pub fn hessian_into(&self,q:&[f64],z:&[f64],dq:&[f64],dz:&[f64],
         hq:&mut[f64],hz:&mut[f64])->Result<(),FilmError> {
         if dq.len()!=self.port_count() || dz.len()!=self.cell_count() || hq.len()!=dq.len() || hz.len()!=dz.len()
