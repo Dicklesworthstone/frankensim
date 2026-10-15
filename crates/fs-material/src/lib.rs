@@ -81,6 +81,8 @@ pub struct MaterialAdmissibility {
     pub dissipation_nonnegative: bool,
     /// The energy is polyconvex (hyperelastic laws; None = unknown).
     pub polyconvex: Option<bool>,
+    /// The consistent tangent is symmetric (associative flow/elastic).
+    pub tangent_symmetric: bool,
     /// Human-readable failure-envelope statement.
     pub failure_envelope: &'static str,
 }
