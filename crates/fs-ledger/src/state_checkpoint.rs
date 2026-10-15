@@ -300,11 +300,24 @@ impl StateCheckpointReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateCheckpointDecodeError {
     /// Transport length was truncated, extended, or inconsistent.
-    Length { found: usize, expected: usize },
+    Length {
+        /// Observed byte length.
+        found: usize,
+        /// Expected byte length.
+        expected: usize,
+    },
     /// Receipt schema is newer or otherwise unsupported.
-    UnsupportedVersion { found: u32 },
+    UnsupportedVersion {
+        /// Decoded version number.
+        found: u32,
+    },
     /// Law id length was empty or exceeded the fixed API envelope.
-    LawIdLength { found: usize, max: usize },
+    LawIdLength {
+        /// Declared law id byte length.
+        found: usize,
+        /// Maximum admitted law id byte length.
+        max: usize,
+    },
     /// Law id bytes were not UTF-8.
     LawIdUtf8,
     /// Stored receipt hash did not match the semantic fields.

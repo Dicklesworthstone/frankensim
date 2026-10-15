@@ -134,34 +134,64 @@ pub type IdentityMigrationReceiptId = SemanticId<IdentityMigrationReceiptSchemaV
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityMigrationWireError {
     /// The whole transport exceeds its public allocation envelope.
-    TransportLength { found: usize, max: usize },
+    TransportLength {
+        /// Observed transport length in bytes.
+        found: usize,
+        /// Maximum admitted transport length in bytes.
+        max: usize,
+    },
     /// The fixed transport domain marker is absent or changed.
     Magic,
     /// The transport version is unknown to this decoder.
-    UnsupportedVersion { found: u32 },
+    UnsupportedVersion {
+        /// Decoded wire version number.
+        found: u32,
+    },
     /// A fixed or declared-length field runs past the available bytes.
     Truncated {
+        /// Name of the truncated wire field.
         field: &'static str,
+        /// Bytes required by the field.
         needed: usize,
+        /// Remaining bytes in the transport slice.
         remaining: usize,
     },
     /// A declared variable field exceeds its field-specific bound.
     FieldLength {
+        /// Name of the wire field.
         field: &'static str,
+        /// Declared length in bytes.
         found: usize,
+        /// Maximum admitted length in bytes.
         max: usize,
     },
     /// A required UTF-8 field contains invalid bytes.
-    Utf8 { field: &'static str },
+    Utf8 {
+        /// Name of the field with invalid UTF-8.
+        field: &'static str,
+    },
     /// A closed enum or optional-field tag is outside its declared universe.
-    InvalidTag { field: &'static str, found: u8 },
+    InvalidTag {
+        /// Name of the tagged wire field.
+        field: &'static str,
+        /// Unrecognized tag byte.
+        found: u8,
+    },
     /// Extra bytes follow the complete v1 field sequence.
-    TrailingBytes { remaining: usize },
+    TrailingBytes {
+        /// Number of unconsumed trailing bytes.
+        remaining: usize,
+    },
     /// Complete decoded fields violate the receipt contract.
-    InvalidReceipt { detail: String },
+    InvalidReceipt {
+        /// Diagnostic description of the contract violation.
+        detail: String,
+    },
     /// The carried primary identity differs from independent reconstruction.
     ReceiptIdMismatch {
+        /// Primary identity carried in the wire transport.
         stored: IdentityMigrationReceiptId,
+        /// Primary identity reconstructed from decoded fields.
         derived: IdentityMigrationReceiptId,
     },
 }
@@ -215,18 +245,31 @@ impl std::error::Error for IdentityMigrationWireError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityReconcileCursorError {
     /// The transport is truncated or extended.
-    TransportLength { found: usize, expected: usize },
+    TransportLength {
+        /// Observed cursor byte length.
+        found: usize,
+        /// Exact expected cursor byte length.
+        expected: usize,
+    },
     /// The fixed cursor family marker is absent or changed.
     Magic,
     /// The cursor wire version is unknown to this decoder.
-    UnsupportedVersion { found: u32 },
+    UnsupportedVersion {
+        /// Decoded cursor wire version.
+        found: u32,
+    },
     /// Reserved bytes are nonzero and therefore not canonical v1 transport.
     ReservedBytes,
     /// The closed reconciliation-phase tag is unknown.
-    InvalidPhase { found: u8 },
+    InvalidPhase {
+        /// Unrecognized reconciliation-phase tag byte.
+        found: u8,
+    },
     /// A fixed-width cursor field violates its structural domain.
     InvalidField {
+        /// Name of the invalid cursor field.
         field: &'static str,
+        /// Structural requirement violated by the field.
         detail: &'static str,
     },
 }
@@ -1072,15 +1115,25 @@ pub enum IdentityReconcileError {
     /// Storage, bounded-envelope, or sidecar verification failed.
     Ledger(LedgerError),
     /// The cursor belongs to another physical ledger or schema context.
-    StaleCursor { field: &'static str, detail: String },
+    StaleCursor {
+        /// Cursor field that mismatched the live ledger state.
+        field: &'static str,
+        /// Explanation of the mismatch.
+        detail: String,
+    },
     /// Cancellation was observed at a bounded row boundary. The whole page was
     /// rolled back; replay this exact cursor.
-    Cancelled { resume: IdentityReconcileCursor },
+    Cancelled {
+        /// Exact cursor before the cancelled page.
+        resume: IdentityReconcileCursor,
+    },
     /// A primary reconciliation failure was followed by a rollback failure.
     /// Both diagnostics are retained because cleanup success cannot be
     /// inferred in this state.
     Cleanup {
+        /// Primary error that triggered the rollback.
         primary: Box<IdentityReconcileError>,
+        /// Rollback error encountered while aborting the page.
         rollback: LedgerError,
     },
 }
