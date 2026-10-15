@@ -25,6 +25,9 @@ on:
       - 'crates/fs-couple/src/render/schedule/force/coupled/render/friction.rs'
       - 'crates/fs-couple/tests/modal_multi_friction.rs'
       - 'crates/fs-couple/tests/material_multi_bow.rs'
+      - 'crates/fs-couple/tests/modal_friction_interface.rs'
+      - 'crates/fs-couple/tests/material_bow_interface.rs'
+      - 'crates/fs-tribo/src/lib.rs'
       - 'crates/fs-couple/tests/bowed_material_gas.rs'
       - 'crates/fs-couple/tests/material_string_torsion.rs'
       - 'crates/fs-material/src/section.rs'
@@ -77,6 +80,9 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Source-bound interfaces in reciprocal material bow mechanics
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --no-fail-fast --test modal_friction_interface --test material_bow_interface -- --test-threads=1
       - name: Two-sided material reed physics and exterior pressure
         if: ${{ !cancelled() }}
         run: |

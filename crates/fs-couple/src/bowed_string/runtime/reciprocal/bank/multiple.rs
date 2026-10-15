@@ -133,3 +133,7 @@ impl MultiBowStringBank {
 
 /// Common gesture-clock playback of all contacts and the shared pressure observer.
 pub mod performance;
+
+
+/// Source/interface applicability retained through the existing bow performers.
+mod interface;
