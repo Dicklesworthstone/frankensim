@@ -332,7 +332,10 @@ pub enum MachineDatumAdmissionErrorV1 {
         max: usize,
     },
     /// One datum-feature identity appeared more than once.
-    DuplicateDatumFeature { feature: DatumFeatureIdV1 },
+    DuplicateDatumFeature {
+        /// Repeated datum-feature identifier.
+        feature: DatumFeatureIdV1,
+    },
     /// Two datum IDs tried to alias one typed body/feature selector.
     DuplicateDatumSelector {
         /// Lexically first datum ID selecting the target.
@@ -368,9 +371,15 @@ pub enum MachineDatumAdmissionErrorV1 {
         target_owner: SubsystemId,
     },
     /// One reference-frame identity appeared more than once.
-    DuplicateReferenceFrame { frame: DatumReferenceFrameIdV1 },
+    DuplicateReferenceFrame {
+        /// Repeated reference-frame identifier.
+        frame: DatumReferenceFrameIdV1,
+    },
     /// A tertiary datum was supplied without a secondary datum.
-    TertiaryWithoutSecondary { frame: DatumReferenceFrameIdV1 },
+    TertiaryWithoutSecondary {
+        /// Reference frame supplying a tertiary datum without a secondary datum.
+        frame: DatumReferenceFrameIdV1,
+    },
     /// A frame referenced an undeclared datum feature.
     MissingDatumReference {
         /// Frame containing the missing reference.
@@ -401,7 +410,10 @@ pub enum MachineDatumAdmissionErrorV1 {
         conflicting_body: BodyId,
     },
     /// A declared datum feature was not used by any frame.
-    UnusedDatumFeature { feature: DatumFeatureIdV1 },
+    UnusedDatumFeature {
+        /// Declared datum feature not referenced by any frame.
+        feature: DatumFeatureIdV1,
+    },
     /// Canonical aggregate identity publication failed.
     Identity(CanonicalError),
 }
