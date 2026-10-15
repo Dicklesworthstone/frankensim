@@ -7,6 +7,8 @@
 //! transport thermal history, or promote raw coefficients to sourced authority.
 
 pub mod concentric;
+/// Material-reduced reeds composed with the existing solid/gas assembly.
+pub mod valve;
 
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::gas::GasState;

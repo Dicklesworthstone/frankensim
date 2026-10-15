@@ -101,3 +101,20 @@ fn field_identity(
     // TetLinearElasticProblem validates these values before minting a card.
     Ok(hash.finalize())
 }
+
+// Dependency inversion: the acoustic renderer consumes the scenario image,
+// not fs-solid. In particular this does not add an fs-couple -> fs-solid cycle.
+impl fs_scenario::reed_source::BeatingReedSource for super::PressureLoadedValve {
+    type Admission = super::SingleModeValveAdmission;
+    type Error = ReduceError;
+
+    fn compile_beating_reed(
+        &self,
+        blowing_pressure_pa: f64,
+        attack_s: f64,
+        admission: &Self::Admission,
+    ) -> Result<fs_scenario::BeatingReed, Self::Error> {
+        self.beating_reed_checked(blowing_pressure_pa, attack_s, *admission)
+    }
+}
+

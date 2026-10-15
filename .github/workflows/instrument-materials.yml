@@ -1,0 +1,36 @@
+name: Instrument material physics
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-solid/src/reduce*'
+      - 'crates/fs-solid/src/reduce/**'
+      - 'crates/fs-solid/tests/valve_material_field.rs'
+      - 'crates/fs-scenario/src/reed_source.rs'
+      - 'crates/fs-couple/src/material_assembly*'
+      - 'crates/fs-couple/src/material_assembly/**'
+      - 'crates/fs-couple/tests/material_valve_assembly.rs'
+      - '.github/workflows/instrument-materials.yml'
+permissions:
+  contents: read
+jobs:
+  instruments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize the existing pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Existing and pressure-loaded reduction tests
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-solid --lib reduce:: -- --test-threads=1
+      - name: Anisotropic and heterogeneous material specimens
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-solid --test valve_material_field -- --test-threads=1
+      - name: Material-to-acoustic integration in an explicit gas
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test material_valve_assembly -- --test-threads=1
