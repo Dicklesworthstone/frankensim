@@ -24,6 +24,7 @@ pub mod conduction_design;
 pub mod equilibrium;
 pub mod interior;
 pub mod lbfgs;
+pub mod newton_continuation;
 pub mod nsga;
 pub mod pareto;
 pub mod projected_al;

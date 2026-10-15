@@ -142,6 +142,8 @@ impl<'a, 'p> AugmentedNewtonStudy<'a, 'p> {
     }
     /// Work already spent on successful or failed merit retargets.
     pub fn multiplier_attempts(&self) -> usize { self.multiplier_attempts }
+    /// Completed Newton iterations across merit retargets, also readable after failure.
+    pub fn newton_iterations(&self) -> usize { self.newton_iterations }
     /// Configure approximate inner Newton steps; does not weaken KKT criteria.
     pub fn set_krylov_options(&mut self, options: KrylovOptions) { self.inner.set_krylov_options(options); }
 
