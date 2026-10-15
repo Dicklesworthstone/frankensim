@@ -54,6 +54,10 @@ immutably. The build fails if what it copied differs from what it hashed. A page
 deploy asks for its old `live/<hash>/`, which is gone, and says to reload. The dev server serves
 `public/live` at `live/`.
 
+The page's data, audio, images, replays and MIDI rolls keep their paths and a one-hour cache, but a build
+hands the page each file's content hash and `util.asset()` asks for `path?v=<hash>`: a file a deploy
+changed gets a new URL, so no visitor pairs new code with an hour-old `strandbar.json` or recording.
+
 ## Grading against real recordings
 
 The "Real vs ours" section compares renders with University of Iowa Musical Instrument Samples

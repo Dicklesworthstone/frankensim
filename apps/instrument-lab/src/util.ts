@@ -85,7 +85,15 @@ export function sciNode(v: number, digits = 2): HTMLElement {
 /** The deployment's base path ("/" at the domain root, "/music/" under frankensim.org/music). */
 export const BASE = import.meta.env.BASE_URL;
 
-/** A URL for a file published with the site (data, audio, images, live engines). */
+/** Content hash of each published data, audio, image, replay and MIDI file (a build sets it; vite.config.ts). */
+const HASHES: Record<string, string> = import.meta.env.VITE_ASSET_HASHES ?? {};
+
+/**
+ * A URL for a file published with the site (data, audio, images, live engines). In a build it carries the
+ * file's content hash (`?v=`), so a file that changed in a deploy is never served from an older cache.
+ */
 export function asset(path: string): string {
-  return BASE + path.replace(/^\/+/, "");
+  const p = path.replace(/^\/+/, "");
+  const v = HASHES[p];
+  return BASE + p + (v ? `?v=${v}` : "");
 }
