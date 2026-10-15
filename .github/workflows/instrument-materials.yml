@@ -36,6 +36,8 @@ on:
       - 'crates/fs-couple/tests/material_duct_wall/**'
       - 'crates/fs-couple/src/bowed_string.rs'
       - 'crates/fs-couple/src/bowed_string/material.rs'
+      - 'crates/fs-couple/examples/material_strings.rs'
+      - 'crates/fs-couple/examples/material_strings/**'
       - 'crates/fs-couple/src/render/schedule/force.rs'
       - 'crates/fs-couple/src/render/schedule/force/program.rs'
       - 'crates/fs-couple/tests/force_program.rs'
@@ -100,6 +102,19 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Pack-driven material plucks and bowed pressure
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --example material_strings -- --test-threads=1
+      - name: Compile external material packs and render source-driven fixtures
+        if: ${{ !cancelled() }}
+        run: |
+          demo="$(mktemp -d)"
+          cp crates/fs-couple/examples/material_strings/*.tsv "$demo/"
+          cp crates/fs-couple/examples/material_strings/*.material-strings "$demo/"
+          cargo run -p xtask -- matdb-pack --manifest "$demo/wire-manifest.tsv" --out "$demo/wire.fsmatpk"
+          cargo run -p xtask -- matdb-pack --manifest "$demo/body-manifest.tsv" --out "$demo/body.fsmatpk"
+          cargo run -p fs-couple --example material_strings -- "$demo/pluck.material-strings" "$demo/pluck.wav"
+          cargo run -p fs-couple --example material_strings -- "$demo/pluck-and-bow.material-strings" "$demo/pluck-and-bow.wav"
       - name: Fractional acoustic storage and material instrument feedback
         if: ${{ !cancelled() }}
         run: |
