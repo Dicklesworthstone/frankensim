@@ -11,7 +11,9 @@ fn impedance(load:SeriesImpedanceSpec)->String {
 }
 
 pub(super) fn provenance(p:&PlateValvePerformance)->String {
-    let force_json = force_provenance(p);
+    // Report the resolved default even on an unsegmented tube. Source identity
+    // already binds the exact authored species, basis and fractions.
+    let force_json = format!(",\"ambient_gas\":{}{}", gas_state(p.ambient_gas()), force_provenance(p));
     let CoupledAperture::Network(n)=p.renderer().system() else {return force_json};
     let i=p.info();
     // Name the node even in a one-section graph: node zero need not be the inlet.
@@ -46,12 +48,8 @@ pub(super) fn provenance(p:&PlateValvePerformance)->String {
         format!("{{\"node\":{index},\"kind\":\"{kind}\"{extra}{radiation}}}")
     }).collect();
     let sections:Vec<_>=n.spec().sections.iter().zip(n.represented_sections()).enumerate().map(|(index,(s,r))| {
-        let gas=n.section_gases().map_or_else(String::new, |gases| {
-            let g=gases[index];
-            format!(",\"gas\":{{\"temperature_k\":{:e},\"static_pressure_pa\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"dynamic_viscosity_pa_s\":{:e},\"thermal_conductivity_w_m_k\":{:e},\"gamma\":{:e},\"prandtl\":{:e},\"water_mole_fraction\":{:e}}}",
-                g.temperature,g.pressure,g.density,g.sound_speed,g.dynamic_viscosity,g.thermal_conductivity,
-                g.gamma,g.prandtl,g.water_mole_fraction)
-        });
+        let gas=n.section_gases().map_or_else(String::new, |gases|
+            format!(",\"gas\":{}", gas_state(&gases[index])));
         format!("{{\"nodes\":[{},{}],\"radius_m\":{:e},\"requested_length_m\":{:e},\"represented_length_m\":{:e},\"one_way_mechanical_samples\":{},\"impedance_pa_s_m3\":{:e}{gas}}}",
             s.nodes[0],s.nodes[1],s.radius_m,s.length_m,r.represented_length_m,r.one_way_samples,r.impedance_pa_s_m3)
     }).collect();
@@ -84,4 +82,13 @@ fn force_provenance(p: &PlateValvePerformance) -> String {
     let scope = if internal { ",\"observation_scope\":\"internal coupled tube pressure; not an exterior microphone\"" } else { "" };
     format!("{scope},\"mechanical_forces\":{{\"ports\":[{}],\"events\":{},\"clock\":\"mechanical-sample-before-step\",\"initial_force_n\":0,\"scope\":\"prescribed total transverse forces on original plate; not lip-body or moving-lay dynamics\"}}",
         ports.join(","),p.info().force_controls)
+}
+
+// Serialize actual admitted states only; never re-resolve names or reconstruct
+// air from density/speed. The same snapshot vocabulary covers ambient and regions.
+fn gas_state(g: &fs_material::gas::GasState) -> String {
+    format!("{{\"temperature_k\":{:e},\"static_pressure_pa\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"dynamic_viscosity_pa_s\":{:e},\"thermal_conductivity_w_m_k\":{:e},\"gamma\":{:e},\"prandtl\":{:e},\"water_mole_fraction\":{:e},\"specific_heat_cp_j_kg_k\":{:e},\"specific_gas_constant_j_kg_k\":{:e},\"characteristic_impedance_pa_s_m\":{:e}}}",
+        g.temperature, g.pressure, g.density, g.sound_speed, g.dynamic_viscosity,
+        g.thermal_conductivity, g.gamma, g.prandtl, g.water_mole_fraction,
+        g.specific_heat_cp, g.specific_gas_constant, g.characteristic_impedance)
 }

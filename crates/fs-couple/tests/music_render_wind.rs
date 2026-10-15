@@ -133,3 +133,6 @@ fn invalid_wind_sources_clocks_and_overrides_refuse_before_creating_output_files
 
 #[path = "music_render_wind/valve.rs"]
 mod valve;
+
+#[path = "music_render_wind/gas_mixture.rs"]
+mod gas_mixture;

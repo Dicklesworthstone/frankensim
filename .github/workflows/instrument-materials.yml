@@ -22,6 +22,14 @@ on:
       - 'crates/fs-couple/src/cavity_phs/piston.rs'
       - 'crates/fs-couple/src/cavity_phs/piston/**'
       - 'crates/fs-material/examples/material_gas_spring/**'
+      - 'crates/fs-material/src/gas*.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/performance/file*'
+      - 'crates/fs-couple/src/bernoulli_aperture/performance/file/**'
+      - 'crates/fs-couple/src/bernoulli_aperture/network/regional.rs'
+      - 'crates/fs-couple/src/bin/music_render/duct_metadata.rs'
+      - 'crates/fs-couple/examples/plate-valve-mixture*.performance'
+      - 'crates/fs-couple/tests/music_render_wind*'
+      - 'crates/fs-couple/tests/music_render_wind/**'
       - '.github/workflows/instrument-materials.yml'
 permissions:
   contents: read
@@ -37,6 +45,15 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Named gas material admission and pressure response
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-material --lib gas_species:: -- --test-threads=1
+      - name: Wind gas parser coupled physics and legacy parity
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --lib performance::file:: -- --test-threads=1
+      - name: Mixture wind and ensemble CLI PCM
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test music_render_wind gas_mixture:: -- --test-threads=1
       - name: Source-bound finite thermal storage gas and piston mechanics
         if: ${{ !cancelled() }}
         run: |
