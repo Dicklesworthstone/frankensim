@@ -124,6 +124,14 @@ fn invalid(s: &'static str) -> JouleEnthalpyError { JouleEnthalpyError::Invalid(
 fn finite(x: f64) -> Result<f64, JouleEnthalpyError> {
     if x.is_finite() { Ok(x) } else { Err(invalid("nonfinite source or accumulated energy")) }
 }
+fn electrode_power(e: &super::ElectrodeSolution) -> Result<f64, JouleEnthalpyError> {
+    // An isolated ideal zero-current terminal has no defined voltage, but does
+    // exactly zero work. Do not invent a potential or accept any other NaN/Inf.
+    if e.voltage_v.is_nan() && e.current_a == 0.0 { return Ok(0.0); }
+    finite(e.voltage_v)?;
+    finite(e.current_a)?;
+    finite(e.voltage_v * e.current_a)
+}
 fn checkpoint(gate: &CancelGate) -> Result<(), DepositionError> {
     if gate.is_requested() { Err(DepositionError::Cancelled) } else { Ok(()) }
 }
@@ -188,6 +196,14 @@ impl Account<'_> {
     fn evaluate_with_contacts(&mut self, thermal: &DepositionSimulation<'_>,
         law: &ResistivityLaw<'_>, contacts: &[ElectricalContact],
     ) -> Result<EnthalpyCurrentState, JouleEnthalpyError> {
+        self.evaluate_with_contact_topology(thermal, law, contacts, &[])
+    }
+
+    // Open and closed interfaces use the same current and energy accounting.
+    // A missing material law still refuses; openings are an explicit state.
+    fn evaluate_with_contact_topology(&mut self, thermal: &DepositionSimulation<'_>,
+        law: &ResistivityLaw<'_>, contacts: &[ElectricalContact], open_faces: &[[usize; 2]],
+    ) -> Result<EnthalpyCurrentState, JouleEnthalpyError> {
         checkpoint(self.gate)?;
         if self.solves >= self.input.max_current_solves { return Err(JouleEnthalpyError::CurrentBudget); }
         self.solves += 1;
@@ -199,8 +215,8 @@ impl Account<'_> {
             specific_enthalpy_j_kg.push(thermal.cells()[&id].specific_h_j_kg);
         }
         let mut resistivity_ohm_m = vec![None; self.input.cell_ids.len()];
-        let electric = self.input.setup.solve_with_cell_contacts(
-            self.input.domain, &temperature_k, contacts,
+        let electric = self.input.setup.solve_with_cell_contact_topology(
+            self.input.domain, &temperature_k, contacts, open_faces,
             |c,_,t| {
                 let value = (law)(c, &thermal.cells()[&self.input.cell_ids[c]], t)?;
                 resistivity_ohm_m[c] = value;
@@ -211,7 +227,7 @@ impl Account<'_> {
             if !q.is_finite() || q < 0.0 { return Err(invalid("invalid electrical heat")); }
             finite(sum+q)
         })?;
-        let electrode = electric.electrodes.iter().try_fold(0.0, |sum,e| finite(sum+finite(e.voltage_v*e.current_a)?))?;
+        let electrode = electric.electrodes.iter().try_fold(0.0, |sum,e| finite(sum+electrode_power(e)?))?;
         if electric.joule_w.len() != self.input.cell_ids.len()
             || !electric.total_joule_w.is_finite() || !electric.delivered_w.is_finite()
             || (summed-electric.total_joule_w).abs() > self.input.power_tolerance_w
@@ -234,7 +250,7 @@ impl<'a> Account<'a> {
             .zip(state.electric.joule_w.iter().copied()).collect();
         self.pending_mapped_w = mapped.values().try_fold(0.0, |sum,&q| finite(sum+q))?;
         self.pending_electrode_w = state.electric.electrodes.iter()
-            .try_fold(0.0, |sum,e| finite(sum+finite(e.voltage_v*e.current_a)?))?;
+            .try_fold(0.0, |sum,e| finite(sum+electrode_power(e)?))?;
         self.last = Some(state);
         self.last_dt = None;
         Ok(mapped)

@@ -59,15 +59,59 @@ impl ElectricalInterfaceResponse<crate::conjugate::material_coupling::interfaces
     }
 }
 
+/// Explicit electrical connectivity supplied by the interface material owner.
+/// Open is a supported constitutive result, never a fallback for missing data.
+/// Both variants retain the original payload without requiring Clone.
+#[derive(Debug, PartialEq)]
+pub enum ElectricalInterfaceState<J> {
+    /// A finite, possibly perfect, ohmic contact with explicit heat partition.
+    Closed(ElectricalInterfaceResponse<J>),
+    /// Electrically open; no leakage or contact heat is manufactured. The
+    /// original material and thermal/mechanical interfaces remain present.
+    Open(J),
+}
+impl<J> ElectricalInterfaceState<J> {
+    /// Original constitutive/source payload, including while electrically open.
+    pub const fn material(&self) -> &J {
+        match self { Self::Closed(response) => response.material(), Self::Open(material) => material }
+    }
+    /// True only for a deliberately open electrical face.
+    pub const fn is_open(&self) -> bool { matches!(self, Self::Open(_)) }
+}
+impl<J> From<ElectricalInterfaceResponse<J>> for ElectricalInterfaceState<J> {
+    fn from(response: ElectricalInterfaceResponse<J>) -> Self { Self::Closed(response) }
+}
+
+// Only these checked responses can lower into the common electrical owner.
+trait InterfaceEvaluation {
+    fn applied_contact(&self, authored: ElectricalContact) -> Option<ElectricalContact>;
+}
+impl<J> InterfaceEvaluation for ElectricalInterfaceResponse<J> {
+    fn applied_contact(&self, authored: ElectricalContact) -> Option<ElectricalContact> {
+        Some(ElectricalContact { cells: authored.cells, resistance_ohm_m2: self.resistance_ohm_m2,
+            heat_fraction_to_first: self.heat_fraction_to_first })
+    }
+}
+impl<J> InterfaceEvaluation for ElectricalInterfaceState<J> {
+    fn applied_contact(&self, authored: ElectricalContact) -> Option<ElectricalContact> {
+        match self { Self::Closed(response) => response.applied_contact(authored), Self::Open(_) => None }
+    }
+}
+
 /// One unchanged contact location and its evaluated numerical/source response.
 #[derive(Debug, PartialEq)]
-pub struct ElectricalInterfaceSample<J> {
+pub struct InterfaceSample<R> {
     /// Authored topology and reference values, never rewritten as new inputs.
     pub authored: ElectricalContact,
-    /// Actual resistance/partition and their original material payload.
-    pub response: ElectricalInterfaceResponse<J>,
+    /// Actual response and its original material payload.
+    pub response: R,
 }
-impl<J> ElectricalInterfaceSample<J> {
+/// Closed-contact observation; the existing public response semantics are unchanged.
+pub type ElectricalInterfaceSample<J> = InterfaceSample<ElectricalInterfaceResponse<J>>;
+/// Open/closed observation at one declared interface location.
+pub type SwitchingInterfaceSample<J> = InterfaceSample<ElectricalInterfaceState<J>>;
+
+impl<J> InterfaceSample<ElectricalInterfaceResponse<J>> {
     /// Descriptor consumed by the existing voxel current/contact solver.
     pub fn applied(&self) -> ElectricalContact {
         ElectricalContact { cells: self.authored.cells,
@@ -75,36 +119,51 @@ impl<J> ElectricalInterfaceSample<J> {
             heat_fraction_to_first: self.response.heat_fraction_to_first }
     }
 }
+impl<J> InterfaceSample<ElectricalInterfaceState<J>> {
+    /// The applied finite contact, or None for an explicit opening. An opening
+    /// has no fabricated numeric resistance or heat-partition coefficient.
+    pub fn applied(&self) -> Option<ElectricalContact> {
+        self.response.applied_contact(self.authored)
+    }
+}
 
 /// Electrical interfaces in input order at one common physical evaluation time.
 #[derive(Debug, PartialEq)]
-pub struct ElectricalInterfaceEpoch<J> {
+pub struct InterfaceEpoch<R> {
     /// Same evaluation time as the paired bulk/thermal-transport epoch [s].
     pub time_s: f64,
     /// Complete authored contact set, each evaluated exactly once this epoch.
-    pub contacts: Vec<ElectricalInterfaceSample<J>>,
+    pub contacts: Vec<InterfaceSample<R>>,
 }
+/// Closed-contact epoch used by the original material interface entry point.
+pub type ElectricalInterfaceEpoch<J> = InterfaceEpoch<ElectricalInterfaceResponse<J>>;
+/// Open/closed epoch from the same shared physical evaluator.
+pub type SwitchingInterfaceEpoch<J> = InterfaceEpoch<ElectricalInterfaceState<J>>;
 
 /// Original Joule/thermal accounts plus the electrical interfaces they used.
 #[derive(Debug)]
-pub struct JouleInterfaceReport<F, I, J> {
+pub struct InterfaceReport<F, I, R> {
     /// Existing source, bulk/thermal material epochs and energy accounting.
     pub transport: JouleTransportReport<F, I>,
     /// Last electrical interfaces that supplied heat; None at zero duration.
-    pub last_applied: Option<Arc<ElectricalInterfaceEpoch<J>>>,
+    pub last_applied: Option<Arc<InterfaceEpoch<R>>>,
     /// Fresh endpoint support, not a source applied during the preceding step.
-    pub endpoint: Arc<ElectricalInterfaceEpoch<J>>,
+    pub endpoint: Arc<InterfaceEpoch<R>>,
 }
+/// Original finite-contact report and accessors.
+pub type JouleInterfaceReport<F, I, J> = InterfaceReport<F, I, ElectricalInterfaceResponse<J>>;
+/// Material-dependent open/closed contacts with the same current/heat accounts.
+pub type JouleSwitchingReport<F, I, J> = InterfaceReport<F, I, ElectricalInterfaceState<J>>;
 
-type InterfaceLaw<'a, F, J> = dyn Fn(usize, &ElectricalContact,
-    [&EnthalpyTransportSample<F>; 2]) -> Result<ElectricalInterfaceResponse<J>, JouleEnthalpyError> + 'a;
+type InterfaceLaw<'a, F, R> = dyn Fn(usize, &ElectricalContact,
+    [&EnthalpyTransportSample<F>; 2]) -> Result<R, JouleEnthalpyError> + 'a;
 
-struct InterfaceSource<'a, F, I, J> {
+struct InterfaceSource<'a, F, I, R> {
     transport: TransportSource<'a, F, I>,
-    interface: &'a InterfaceLaw<'a, F, J>,
-    last: Option<Arc<ElectricalInterfaceEpoch<J>>>,
+    interface: &'a InterfaceLaw<'a, F, R>,
+    last: Option<Arc<InterfaceEpoch<R>>>,
 }
-impl<F, I, J> Clone for InterfaceSource<'_, F, I, J> {
+impl<F, I, R> Clone for InterfaceSource<'_, F, I, R> {
     fn clone(&self) -> Self {
         Self { transport: self.transport.clone(), interface: self.interface, last: self.last.clone() }
     }
@@ -130,31 +189,34 @@ fn admit_interfaces(input: JouleEnthalpyInput<'_>, gate: &CancelGate) -> Result<
     Ok(())
 }
 
-impl<F, I, J> InterfaceSource<'_, F, I, J> {
+impl<F, I, R: InterfaceEvaluation> InterfaceSource<'_, F, I, R> {
     fn evaluate(&mut self, thermal: &DepositionSimulation<'_>)
         -> Result<(EnthalpyCurrentState, Arc<EnthalpyTransportEpoch<F, I>>,
-            Arc<ElectricalInterfaceEpoch<J>>), JouleEnthalpyError> {
+            Arc<InterfaceEpoch<R>>), JouleEnthalpyError> {
         let bulk = Arc::new(self.transport.prepare(thermal)?);
         let input = self.transport.account.input;
         let gate = self.transport.account.gate;
         let mut samples = Vec::with_capacity(input.contacts.len());
         let mut applied = Vec::with_capacity(input.contacts.len());
+        let mut openings = Vec::new();
         for (index, &authored) in input.contacts.iter().enumerate() {
             checkpoint(gate)?;
             let sides = authored.cells.map(|c| &bulk.cells[c]);
             let response = (self.interface)(index, &authored, sides)?;
-            let sample = ElectricalInterfaceSample { authored, response };
-            applied.push(sample.applied());
-            samples.push(sample);
+            match response.applied_contact(authored) {
+                Some(contact) => applied.push(contact),
+                None => openings.push(authored.cells),
+            }
+            samples.push(InterfaceSample { authored, response });
         }
         checkpoint(gate)?;
         let resolve = |c: usize, _: &DepositedCell, _: f64| Ok(bulk.cells[c].response.resistivity_ohm_m());
-        let current = self.transport.account.evaluate_with_contacts(thermal, &resolve, &applied)?;
-        let interfaces = Arc::new(ElectricalInterfaceEpoch { time_s: bulk.time_s, contacts: samples });
+        let current = self.transport.account.evaluate_with_contact_topology(thermal, &resolve, &applied, &openings)?;
+        let interfaces = Arc::new(InterfaceEpoch { time_s: bulk.time_s, contacts: samples });
         Ok((current, bulk, interfaces))
     }
 }
-impl<F, I, J> DepositionObserver for InterfaceSource<'_, F, I, J> {
+impl<F, I, R: InterfaceEvaluation> DepositionObserver for InterfaceSource<'_, F, I, R> {
     type Error = JouleEnthalpyError;
     fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
         self.transport.event(event, thermal)
@@ -213,6 +275,63 @@ pub fn advance_joule_enthalpy_with_material_interfaces_observed<'t, F, I, J, O: 
         -> Result<ElectricalInterfaceResponse<J>, JouleEnthalpyError>,
 ) -> Result<(DepositionSimulation<'t>, O, JouleInterfaceReport<F, I, J>),
     ObserverCouplingError<JouleEnthalpyError, O::Error>> {
+    advance_interfaces(thermal, target_s, config, input, link_ids, gate, observer,
+        resolve, resolve_link, resolve_interface)
+}
+
+/// Evolve electrically opening/reclosing interfaces on the SAME material and
+/// enthalpy timeline as bulk current, contact heating and thermal transport.
+///
+/// The callback returns an explicit supported Open or Closed state per authored
+/// location, using the same adjacent material samples as the closed-contact API.
+/// Open faces participate in electrical reachability, matrix assembly and heat
+/// deposition consistently; they carry zero current and zero contact heat. Bulk
+/// properties are still evaluated. Closed zero resistance is never an opening.
+///
+/// Only electrical connectivity changes. Mass, enthalpy, geometry and thermal
+/// contact coverage survive opening/reclosing. Independently owned heat sources
+/// and conductance laws continue to evolve the body. The payload for every
+/// interface, including an opening, is retained in applied/endpoint epochs.
+/// Missing data must be an error, never Open. Neither a phase name nor a
+/// temperature threshold is hard-coded in this driver.
+///
+/// Connectivity is sampled at actual explicit substep starts and at the final
+/// endpoint. State-triggered switches are therefore resolved to that time grid,
+/// NOT localized by an event root. Refine max_dt_s to resolve switching times;
+/// prescribed discontinuities require advance boundaries or scheduled events.
+/// The endpoint check cannot retroactively change heat delivered by a prior
+/// step. This API does not supply contact mechanics, fusion/arc kinetics,
+/// electromagnetic storage, charge transients or a general stability theorem.
+///
+/// Disconnected nonzero ideal current sources refuse. Zero-current floating
+/// terminals retain undefined voltage and exactly zero work. Any material,
+/// endpoint, budget or cancellation failure discards all candidate histories.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn advance_joule_enthalpy_with_switching_interfaces_observed<'t, F, I, J, O: DepositionObserver>(
+    thermal: &DepositionSimulation<'t>, target_s: f64, config: StepConfig,
+    input: JouleEnthalpyInput<'_>, link_ids: &[u64], gate: &CancelGate, observer: &O,
+    resolve: impl Fn(usize, &DepositedCell, f64) -> Result<EnthalpyTransport<F>, JouleEnthalpyError>,
+    resolve_link: impl Fn(&ContactPatch, [&EnthalpyTransportSample<F>; 2]) -> Result<(f64, I), JouleEnthalpyError>,
+    resolve_interface: impl Fn(usize, &ElectricalContact, [&EnthalpyTransportSample<F>; 2])
+        -> Result<ElectricalInterfaceState<J>, JouleEnthalpyError>,
+) -> Result<(DepositionSimulation<'t>, O, JouleSwitchingReport<F, I, J>),
+    ObserverCouplingError<JouleEnthalpyError, O::Error>> {
+    advance_interfaces(thermal, target_s, config, input, link_ids, gate, observer,
+        resolve, resolve_link, resolve_interface)
+}
+
+// All finite-contact and switching entry points share this transaction and
+// exactly one material evaluator, electrical solve and thermal time integrator.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn advance_interfaces<'t, F, I, R: InterfaceEvaluation, O: DepositionObserver>(
+    thermal: &DepositionSimulation<'t>, target_s: f64, config: StepConfig,
+    input: JouleEnthalpyInput<'_>, link_ids: &[u64], gate: &CancelGate, observer: &O,
+    resolve: impl Fn(usize, &DepositedCell, f64) -> Result<EnthalpyTransport<F>, JouleEnthalpyError>,
+    resolve_link: impl Fn(&ContactPatch, [&EnthalpyTransportSample<F>; 2]) -> Result<(f64, I), JouleEnthalpyError>,
+    resolve_interface: impl Fn(usize, &ElectricalContact, [&EnthalpyTransportSample<F>; 2])
+        -> Result<R, JouleEnthalpyError>,
+) -> Result<(DepositionSimulation<'t>, O, InterfaceReport<F, I, R>),
+    ObserverCouplingError<JouleEnthalpyError, O::Error>> {
     admit_map(thermal, input, gate).map_err(ObserverCouplingError::First)?;
     admit_interfaces(input, gate).map_err(ObserverCouplingError::First)?;
     let transport = TransportSource { account: Account::new(input, gate), selected: link_ids,
@@ -226,5 +345,5 @@ pub fn advance_joule_enthalpy_with_material_interfaces_observed<'t, F, I, J, O: 
     let joule = source.transport.account.finish(audit, current).map_err(ObserverCouplingError::First)?;
     let transport = JouleTransportReport { joule, last_applied: source.transport.last, endpoint: bulk };
     checkpoint(gate)?;
-    Ok((next, observer, JouleInterfaceReport { transport, last_applied: source.last, endpoint }))
+    Ok((next, observer, InterfaceReport { transport, last_applied: source.last, endpoint }))
 }
