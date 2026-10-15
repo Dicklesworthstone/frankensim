@@ -127,3 +127,5 @@ pub fn bind_baffled_environment(
     }
     Ok(BaffledEnvironment { radiation, bindings })
 }
+
+mod instruments;
