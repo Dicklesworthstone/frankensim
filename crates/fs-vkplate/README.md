@@ -73,7 +73,18 @@ which took ~75 N of the pedal force, so the "closed" hat was barely pressed.
 No rim is flat: the rim contact carries a two-lobe waviness of up to 0.15 mm (offline grid), and
 with no pedal force the shells rest at most 0.14 mm apart there, so a stroke on the open hat sets
 the rims chattering against each other (its sizzle above 4 kHz). The rim contact is lightly damped
-(Hunt-Crossley `mu` 0.08 s/m); tangential friction between the rims is still not modelled.
+(Hunt-Crossley `mu` 0.08 s/m).
+
+The rims also rub (`Friction`, dry friction coefficient 0.5). Bending moves a plate's faces sideways by
+half its thickness times its slope, so where the rims touch, the bottom shell's upper face and the top
+shell's lower face slip by (t_b/2) grad w_b + (t_t/2) grad w_t, slopes from the grid's finite
+differences. Each step, after the contacts, every rim contact's friction is the force that would stop
+that slip (stick) unless it exceeds 0.5 times the contact's normal force (slide at that force); it
+acts through the same per-node compliances as the contacts, so it is implicit and only removes
+energy. Graded against the Salamander closed hat, it brings the closed hat's octave-band decay inside
+the real-vs-real ruler (0.32 octaves from the real stroke, two real strokes 0.47, 0.95 before) at
+1.4 dB more octave-balance error (10.4 -> 11.8 dB: it is still far too dark, centroid 1.7 kHz against 11 kHz);
+the open hat, whose rims seldom touch, is unchanged (balance 4.8 dB, decay 2.6 octaves).
 
 ## Validation (`cargo test --release`)
 
@@ -86,6 +97,8 @@ the rims chattering against each other (its sizzle above 4 kHz). The rim contact
 - the four-lane contact solves match solving one contact at a time, force, penetration and every
   update bit for bit, with node-sharing and other-law contacts in the list;
 - an empty matrix adds nothing, and a NaN penetration exerts no force, alone or queued;
+- rim friction stops the slip exactly inside its cone, slides at mu N outside it, and never reverses
+  or grows the slip it acts on;
 - every piece builds on the live grid, sounds, and the kick and snare stop being stepped once
   silent; a clone, taken settled or mid-ring, renders bit for bit what the original would (`live`).
 
@@ -98,7 +111,10 @@ the 6.5-20 mm annulus round a cymbal's hole, the felt washers and the hi-hat clu
 total stiffness and damping over the first ring of nodes instead. The live hi-hats keep the rim
 contact law from before the retuning (Hunt-Crossley `mu` 3.0 s/m, set in `live.rs`) and a 5 mm
 stick tip; the offline hat's lighter rim damping (0.08 s/m) and 4 mm tip were not carried over to
-real-time play. A clone of a `Live` steps bit for bit as the original would, so the browser kit
+real-time play (at 4x the two rim laws measure the same). They rub with the same friction as offline:
+at 4x / 4.5x the closed hat's 500 Hz-1 kHz T60 falls from 1.3-2.8 s to 0.5-0.7 s, and a stroke puts
+87-91 % of its energy in its first 50 ms (65-75 % without; the real closed hat 90-93 %). On grids of
+22-25 mm it still carries little above ~3.5 kHz. A clone of a `Live` steps bit for bit as the original would, so the browser kit
 settles each grid once: it plays a clone kept from before the timing stroke.
 `apps/instrument-lab/engine-kit` compiles it for the browser.
 
@@ -117,7 +133,7 @@ tip mass (6-7 g), its Hertz constant (hickory on the target), the felt beater la
 point contact), strike points, snare-wire mass, tension and preload, felt washer stiffness and
 loss, and the hi-hat rim contact law, rest gap and waviness are declared estimates in
 `src/kit.rs`. The lumped cavity has no cavity modes; there is no shell, hoop or rim
-vibration, no tangential friction between hi-hat plates, and each piece is simulated alone (a kit
+vibration, no in-plane (membrane) slip between hi-hat plates (only the bending slip rubs), and each piece is simulated alone (a kit
 mix adds independent renders: the snare does not buzz when the kick is struck).
 
 ## Usage

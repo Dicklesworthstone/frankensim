@@ -315,6 +315,11 @@ fn cymbal_body(name: &str, c: &CymbalSpec) -> Result<Body, String> {
     cymbal_shell(name, c, true)
 }
 
+/// A cymbal's thickness at radius `x` outside the bell (the bow law of `cymbal_shell`).
+fn bow_thickness(c: &CymbalSpec, x: f64) -> f64 {
+    c.bow_thickness * (1.15 - 0.15 * x / c.radius)
+}
+
 /// A cymbal shell; `felt` puts it on a stand's felt washers (a hi-hat's top shell hangs from the
 /// clutch on the pull rod instead, so all the pedal force reaches the rims).
 fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool) -> Result<Body, String> {
@@ -419,8 +424,19 @@ pub fn hihat_with(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
     hihat_grid(gap, pedal_n, hits, rim, from, 1.0)
 }
 
+/// Dry friction coefficient between the hi-hat's bronze rims. Unlubricated copper alloys on themselves
+/// span about 0.3-1; with 0.3 and 0.5 the closed hat's octave-band decay grades inside the real-vs-real
+/// ruler (0.40 and 0.32 octaves from the Salamander stroke, two real strokes 0.47; without friction 0.95),
+/// and 0.5 is the closer of the two. The open hat, whose rims seldom touch, barely changes.
+pub const RIM_FRICTION: f64 = 0.5;
+
 /// The same on a grid `scale` times coarser (real-time play).
 pub fn hihat_grid(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64) -> Result<Piece, String> {
+    hihat_grid_mu(gap, pedal_n, hits, rim, from, scale, RIM_FRICTION)
+}
+
+/// The same with an explicit rim friction coefficient (0: the rims press but do not rub).
+pub fn hihat_grid_mu(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64) -> Result<Piece, String> {
     let (mut ts, mut bs) = hihat_spec();
     ts.grid *= scale;
     bs.grid *= scale;
@@ -461,6 +477,12 @@ pub fn hihat_grid(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
             let cos2 = if r > 0.0 { (p[0] * p[0] - p[1] * p[1]) / (r * r) } else { 1.0 };
             let local_gap = if scale <= 1.0 { eff_gap + 7.5e-5 * (1.0 - cos2) } else { eff_gap };
             ins.contacts.push(Contact::new(vec![(bi, kb, 1.0)], vec![(ti, k, 1.0)], local_gap, rim));
+            if friction > 0.0 {
+                // the faces the contact presses together rub as the shells bend (see Friction)
+                let (tb, tt) = (bow_thickness(&bs, r), bow_thickness(&ts, r));
+                let fr = Friction::between(&ins.bodies, ins.contacts.len() - 1, bi, kb, tb, ti, k, tt, friction);
+                ins.frictions.push(fr);
+            }
             pairs += 1;
         }
     }
@@ -482,7 +504,7 @@ pub fn hihat_grid(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
     mic.unbaffled = Some(ts.radius);
     ins.mics.push(mic);
     let os = pick_oversample(&mut ins, 0.6)?;
-    let notes = vec![format!("hi-hat: {} + {} nodes, {pairs} rim contact pairs, gap {:.2} mm, pedal {pedal_n} N, internal {} kHz", ins.bodies[ti].n, ins.bodies[bi].n, eff_gap * 1e3, OUT_RATE * os as f64 / 1000.0)];
+    let notes = vec![format!("hi-hat: {} + {} nodes, {pairs} rim contact pairs (friction {friction}), gap {:.2} mm, pedal {pedal_n} N, internal {} kHz", ins.bodies[ti].n, ins.bodies[bi].n, eff_gap * 1e3, OUT_RATE * os as f64 / 1000.0)];
     Ok(Piece { instrument: ins, oversample: os, settle, notes })
 }
 

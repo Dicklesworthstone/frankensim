@@ -104,7 +104,9 @@ const DRUM_MAP: Record<number, DrumRule> = {
   40: { piece: "snare", u: 0.3, v: 0.05, g: 1.05 },
   41: { piece: "tom-14", u: 0.35, v: 0.1, g: 1 },
   43: { piece: "tom-14", u: 0.3, v: 0.12, g: 1 },
-  // closed (42), pedal (44) and open (46) hi-hat: see HAT_RINGS
+  42: { piece: "hihat-closed", u: 0.85, v: 0, g: 1 },
+  44: { piece: "hihat-closed", u: 0.85, v: 0.08, g: 0.6, label: "Pedal hi-hat → a soft closed-hat stroke (the pedal's own chick is not simulated)" },
+  46: { piece: "hihat-open", u: 0.85, v: 0, g: 1 },
   45: { piece: "tom-12", u: 0.4, v: 0.1, g: 1 },
   47: { piece: "tom-12", u: 0.35, v: 0.1, g: 1 },
   48: { piece: "tom-12", u: 0.3, v: 0.12, g: 1 },
@@ -125,15 +127,11 @@ const DRUM_MAP: Record<number, DrumRule> = {
   66: { piece: "snare-off", u: 0.5, v: 0.1, g: 0.9, label: "Timbale → snare with the wires off" },
 };
 /**
- * The live hi-hat rings like a chime: struck with the pedal down it keeps sounding for seconds in
- * sustained tonal partials (70 Hz-4 kHz in its spectrogram, not the short broadband chick of a real
- * closed hat), and open it rings in the same few pure tones for over six seconds, because the
- * solver has no friction between the two cymbals. A groove's sixteenth-note hats pile up into a
- * wash of chimes, so hi-hat strokes are left out and listed. Put them back (42 and 44 to
- * "hihat-closed", 46 to "hihat-open") when the solver damps the clamp.
+ * General MIDI drum notes the kit does not play, with the reason shown in the roll's report. Empty since
+ * the hi-hats came back: the solver's rim friction (fs-vkplate Friction) stops a closed stroke within a
+ * few tenths of a second, so a groove's sixteenth-note hats no longer pile up into a wash of chimes.
  */
-const HAT_RINGS = "Hi-hat, closed, pedal and open (the live hi-hat rings like a chime)";
-const LEFT_OUT: Record<number, string> = { 42: HAT_RINGS, 44: HAT_RINGS, 46: HAT_RINGS };
+const LEFT_OUT: Record<number, string> = {};
 /** "Tempo", "Conductor", "untitled", "tk6" and the like are labels, not names. */
 const LABEL = /^(?:\s*(?:conductor|tempo|control|meta|master|global|setup|sequence|track|untitled|copyright|midi|smf|time\s*sig\w*)\b.*|\s*(?:tk|trk|tr|ch)?\s*\d*\s*)$/i;
 const GM_PERCUSSION: Record<number, string> = {

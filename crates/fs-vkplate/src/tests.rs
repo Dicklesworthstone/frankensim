@@ -239,3 +239,57 @@ fn empty_matrix_and_nan_penetration_do_nothing() {
     solve_contacts(&mut bodies, &mut contacts, &mut ContactQueue::default(), 1e-5);
     assert_eq!(contacts[0].force.to_bits(), 0.0f64.to_bits());
 }
+
+#[test]
+fn rim_friction_sticks_inside_its_cone_slides_on_it_and_only_removes_energy() {
+    // the closed hat's rim frictions on a coarse grid, each solved alone on a random step
+    let rim = Law::Power { k: 2.0e9, alpha: 1.5, mu: 0.08 };
+    let mut ins = kit::hihat_grid_mu(0.0, 80.0, &[], rim, 0.8, 6.0, 0.4).unwrap().instrument;
+    let k = ins.k();
+    for b in ins.bodies.iter_mut() {
+        b.coefs(k);
+    }
+    assert!(ins.frictions.len() >= 8, "only {} rim frictions", ins.frictions.len());
+    let mut seed = 7u64;
+    let mut rnd = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+    };
+    let slip = |bodies: &[Body], f: &Friction| {
+        let s = |t: &[(usize, usize, f64)]| t.iter().map(|&(b, i, w)| w * (bodies[b].wn[i] - bodies[b].w[i])).sum::<f64>();
+        (s(&f.sx), s(&f.sy))
+    };
+    let (mut stuck, mut slid) = (0, 0);
+    for (normal, expect_stick) in [(1.0e7, true), (1.0e-6, false)] {
+        for j in 0..ins.frictions.len() {
+            for b in ins.bodies.iter_mut() {
+                for i in 0..b.n {
+                    b.w[i] = 0.0;
+                    b.wn[i] = 1.0e-6 * rnd();
+                }
+            }
+            let c = ins.frictions[j].contact;
+            ins.contacts[c].active = true;
+            ins.contacts[c].force = normal;
+            let (bx, by) = slip(&ins.bodies, &ins.frictions[j]);
+            solve_frictions(&mut ins.bodies, &ins.contacts, &mut ins.frictions[j..j + 1], k);
+            let f = &ins.frictions[j];
+            let (ax, ay) = slip(&ins.bodies, f);
+            let before = (bx * bx + by * by).sqrt();
+            assert!(before > 0.0);
+            if expect_stick {
+                assert!(f.stuck, "friction {j} slid under {normal} N");
+                assert!((ax * ax + ay * ay).sqrt() <= 1e-9 * before, "stuck friction {j} left slip {ax:e}, {ay:e} of {before:e}");
+                stuck += 1;
+            } else {
+                assert!(!f.stuck, "friction {j} stuck under {normal} N");
+                assert!((f.force - 0.4 * normal).abs() <= 1e-12 * normal, "sliding force {} != mu N", f.force);
+                // the slip it leaves points the same way as before (it is only slowed), so the friction
+                // force, which opposes the slip, does no positive work on it
+                assert!(ax * bx + ay * by >= 0.0 && (ax * ax + ay * ay).sqrt() <= before, "friction {j} reversed or grew the slip");
+                slid += 1;
+            }
+        }
+    }
+    assert!(stuck > 0 && slid > 0);
+}

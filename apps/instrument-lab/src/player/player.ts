@@ -51,8 +51,9 @@ const IDLE_DISPOSE_MS = 90_000;
  * (8.0 / 7.2 / 7.0 dB) and 7-10x (9.4 at 7x, 9.0 at 8x). So it tries 6x, the cheapest of the fine
  * plateau, and else 8x (7x is on the coarse plateau too and costs ~20 % more); each grid timed adds
  * ~0.25-0.5 s of start-up.
- * The hats (not played today: arrange.ts leaves hi-hat notes out) try 4.5x as on the live kit
- * (kitStage HAT_SCALES); a 4.5x hat that falls behind restarts on 5x or 6x.
+ * The hats try 4.5x as on the live kit (kitStage HAT_SCALES) and skip 5x: closed with the pedal down, a
+ * stroke there keeps a 250 Hz component ringing for ~4 s (with rim friction or without), where 4x, 4.5x
+ * and 6x put 87-95 % of its energy in its first 50 ms (a real closed hat: 90-93 %).
  * The kick and the rack tom give CPU to the pieces that gain from finer grids. The kick's octave
  * balance against the 1x grid is one plateau from 3x to 8x (14.1 / 14.2 / 13.9 / 13.9 dB at 4x / 5x /
  * 6x / 7x; its 1-2 kHz beater click is gone from 3x on), so it starts at 6x, ~0.7x the work of 5x.
@@ -67,8 +68,8 @@ const GRID: Record<PieceId, { scales: number[]; minRt: number; benchMs?: number 
   "snare-off": { scales: [4, 5, 6, 7, 8], minRt: 1.5 },
   "tom-12": { scales: [5, 6], minRt: 1.8 },
   "tom-14": { scales: [4, 5, 6], minRt: 1.8 },
-  "hihat-closed": { scales: [4, 4.5, 5, 6], minRt: 1.5 },
-  "hihat-open": { scales: [4, 4.5, 5, 6], minRt: 1.5 },
+  "hihat-closed": { scales: [4, 4.5, 6], minRt: 1.5 },
+  "hihat-open": { scales: [4, 4.5, 6], minRt: 1.5 },
   crash: { scales: [3, 3.5, 4, 5, 6], minRt: 1.5 },
   ride: { scales: [3, 3.5, 4, 5, 6], minRt: 1.5 },
 };
@@ -512,8 +513,9 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     old.lane.dispose(); // drops its mix lane before the new one joins under the same name
     kits.delete(p);
     say(`${PIECE_NAMES[p]}: this device could not compute it in real time, so it restarts on a coarser grid.`, "warn");
-    // whole grids only: a 3.5x piece restarts on 4x or 5x, grids with measured levels
-    const next = [Math.floor(scale) + 1, Math.floor(scale) + 2, 10].filter((s, i, a) => s <= 10 && a.indexOf(s) === i);
+    // the piece's own coarser grids (all have measured levels), then 10x; past its list, whole grids
+    const own = GRID[p].scales.filter((s) => s > scale);
+    const next = (own.length ? [...own, 10] : [Math.floor(scale) + 1, Math.floor(scale) + 2, 10]).filter((s, i, a) => s <= 10 && a.indexOf(s) === i);
     try {
       await startPiece(m, p, next);
     } catch (e) {
@@ -1130,7 +1132,7 @@ function evidenceBody(): HTMLElement {
       p("Every pitched channel plays the one grand piano; General MIDI channel 10 plays the drum kit. Notes outside A0–C8 are moved by octaves into the keyboard. Notes that start within 30 ms on the same key are one strike, and a key held by two parts is released only when the last of them ends."),
       p("Velocity sets the hammer's speed as it leaves the escapement, log-linear between 0.6 m/s (velocity 1), 2 m/s (64, mezzo-forte) and 5 m/s (127). Controller 64 is the sustain pedal, with half-pedal positions kept. Channel volume (7) and expression (11) scale each note's velocity as it starts, and a note they fade to silence is not played; other controllers are not used."),
       p("Drum notes go to the piece their General MIDI number names: kick, snare (side stick near the rim, claps on the snare), rack and floor toms, crash (china and splash too), ride and its bell; bongos and congas to the toms, timbales to the snare with its wires off. Anything else is skipped and listed. Velocity scales the piece's standard stroke, and each stroke lands a little away from the last, so no two are identical."),
-      p("Hi-hat strokes are left out for now, and counted. The live hi-hat rings like a chime: closed, it keeps sounding for seconds in a few sustained partials below 4 kHz, where a real closed hi-hat gives a short broadband chick, and open it rings in the same pure tones for over six seconds, because the solver has no friction between the two cymbals. A groove's sixteenth-note hats would pile up into a wash of chimes."),
+      p("Hi-hats: closed strokes play the closed hat, open strokes the open one, and a pedal note a softer closed stroke (the pedal's own chick is not simulated). The two cymbals rub at their rims with dry friction, so a closed stroke dies within a few tenths of a second, as on a real hat; on the coarse grids a browser can afford, it is darker than a real hat (little above 4 kHz). The open and closed hats are separate simulations, so a closed stroke does not choke an open one still ringing."),
       p("The engines have limits, and the roll keeps within them where it can: a chord of more than ten notes keeps its bass, its top and its loudest notes; no more than sixteen strikes in any quarter second. The piano simulates 24 sounding keys at once; beyond that the quietest strings are retired early.")),
     el("div", {},
       el("h4", {}, "What is computed"),

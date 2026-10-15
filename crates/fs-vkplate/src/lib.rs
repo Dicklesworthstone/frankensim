@@ -650,6 +650,21 @@ impl Body {
         self.grid_index.get(&((x / self.h).round() as i64, (y / self.h).round() as i64)).copied()
     }
 
+    /// Finite-difference weights of dw/dx and dw/dy at node `i`: central between the two
+    /// neighbours, one-sided where the plate ends on one side (empty where it ends on both).
+    pub fn slope(&self, i: usize) -> [Vec<(usize, f64)>; 2] {
+        let (gi, gj) = ((self.xy[i][0] / self.h).round() as i64, (self.xy[i][1] / self.h).round() as i64);
+        let at = |di: i64, dj: i64| self.grid_index.get(&(gi + di, gj + dj)).copied();
+        let ih = 1.0 / self.h;
+        let d = |p: Option<usize>, m: Option<usize>| match (p, m) {
+            (Some(p), Some(m)) => vec![(p, 0.5 * ih), (m, -0.5 * ih)],
+            (Some(p), None) => vec![(p, ih), (i, -ih)],
+            (None, Some(m)) => vec![(i, ih), (m, -ih)],
+            (None, None) => vec![],
+        };
+        [d(at(1, 0), at(-1, 0)), d(at(0, 1), at(0, -1))]
+    }
+
     /// Nodes within `radius` of (x, y), equally weighted (a felt face); at least the nearest node.
     pub fn footprint(&self, x: f64, y: f64, radius: f64) -> Vec<(usize, f64)> {
         let mut v: Vec<usize> = (0..self.n)
@@ -1407,6 +1422,92 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
     q.flush(bodies, contacts, k);
 }
 
+/// Dry (Coulomb) friction between two plate surfaces that a contact presses together (a closed
+/// hi-hat's rims). Bending moves a plate's faces sideways by half its thickness times its slope
+/// (Kirchhoff: u = -z grad w), so the two faces of a contact slip against each other by
+/// s = (t_a / 2) grad w_a + (t_b / 2) grad w_b, the face below a plate moving opposite to the face
+/// above it. `sx` and `sy` hold the two slip components as weighted sums of node displacements. The
+/// friction force acts against the slip with at most `mu` times the contact's normal force, and it
+/// is solved the way the contacts are, after them in each step: the force that would stop the slip
+/// over this step (stick), limited to the cone mu N (slip). It only removes energy.
+#[derive(Clone)]
+pub struct Friction {
+    pub contact: usize,
+    pub sx: Vec<(usize, usize, f64)>,
+    pub sy: Vec<(usize, usize, f64)>,
+    pub mu: f64,
+    /// Friction force of the last step [N] (diagnostics), and whether the faces stuck.
+    pub force: f64,
+    pub stuck: bool,
+}
+
+impl Friction {
+    /// The slip of the faces between node `ia` of body `a` (its upper face) and node `ib` of body `b`
+    /// (its lower face), with plate thicknesses `ta` and `tb` there.
+    pub fn between(bodies: &[Body], contact: usize, a: usize, ia: usize, ta: f64, b: usize, ib: usize, tb: f64, mu: f64) -> Friction {
+        let [ax, ay] = bodies[a].slope(ia);
+        let [bx, by] = bodies[b].slope(ib);
+        // a face at height z above its plate's midplane moves by -z grad w: the upper face of the lower
+        // plate a (z = ta/2) by -(ta/2) grad w_a, the lower face of the upper plate b (z = -tb/2) by
+        // +(tb/2) grad w_b, so the slip of b's face over a's is (tb/2) grad w_b + (ta/2) grad w_a
+        let side = |terms: Vec<(usize, f64)>, body: usize, t: f64| terms.into_iter().map(move |(i, w)| (body, i, 0.5 * t * w));
+        let sx = side(ax, a, ta).chain(side(bx, b, tb)).collect();
+        let sy = side(ay, a, ta).chain(side(by, b, tb)).collect();
+        Friction { contact, sx, sy, mu, force: 0.0, stuck: false }
+    }
+}
+
+fn solve_frictions(bodies: &mut [Body], contacts: &[Contact], frictions: &mut [Friction], k: f64) {
+    for fr in frictions.iter_mut() {
+        let c = &contacts[fr.contact];
+        let n = if c.active { c.force } else { 0.0 };
+        if !(n > 0.0) || fr.mu <= 0.0 {
+            fr.force = 0.0;
+            fr.stuck = false;
+            continue;
+        }
+        // slip over this step as predicted (contacts included), and the slip compliance matrix
+        let inc = |t: &[(usize, usize, f64)]| t.iter().map(|&(b, i, w)| w * (bodies[b].wn[i] - bodies[b].w[i])).sum::<f64>();
+        let (dx, dy) = (inc(&fr.sx), inc(&fr.sy));
+        let (mut cxx, mut cyy, mut cxy) = (0.0, 0.0, 0.0);
+        for &(b, i, w) in &fr.sx {
+            let cm = bodies[b].compliance(i, k);
+            cxx += w * w * cm;
+            for &(b2, i2, w2) in &fr.sy {
+                if b2 == b && i2 == i {
+                    cxy += w * w2 * cm;
+                }
+            }
+        }
+        for &(b, i, w) in &fr.sy {
+            cyy += w * w * bodies[b].compliance(i, k);
+        }
+        let det = cxx * cyy - cxy * cxy;
+        if !(det > 0.0) {
+            fr.force = 0.0;
+            fr.stuck = false;
+            continue;
+        }
+        // stick: C f = -(dx, dy); outside the friction cone it slides at mu N in the same direction
+        let (mut fx, mut fy) = (-(cyy * dx - cxy * dy) / det, -(cxx * dy - cxy * dx) / det);
+        let (mag, cap) = ((fx * fx + fy * fy).sqrt(), fr.mu * n);
+        fr.stuck = mag <= cap;
+        if !fr.stuck {
+            fx *= cap / mag;
+            fy *= cap / mag;
+        }
+        for &(b, i, w) in &fr.sx {
+            let cm = bodies[b].compliance(i, k);
+            bodies[b].wn[i] += cm * w * fx;
+        }
+        for &(b, i, w) in &fr.sy {
+            let cm = bodies[b].compliance(i, k);
+            bodies[b].wn[i] += cm * w * fy;
+        }
+        fr.force = (fx * fx + fy * fy).sqrt();
+    }
+}
+
 // --------------------------------------------------------------------- instrument
 #[derive(Clone)]
 pub struct Instrument {
@@ -1415,6 +1516,8 @@ pub struct Instrument {
     pub rads: Vec<RadDamp>,
     pub links: Vec<Link>,
     pub contacts: Vec<Contact>,
+    /// Dry friction on the faces some contacts press together, solved after the contacts.
+    pub frictions: Vec<Friction>,
     pub strikes: Vec<Strike>,
     pub drives: Vec<Drive>,
     pub mics: Vec<Mic>,
@@ -1426,7 +1529,7 @@ pub struct Instrument {
 
 impl Instrument {
     pub fn new(rate: f64) -> Instrument {
-        Instrument { bodies: vec![], cavities: vec![], rads: vec![], links: vec![], contacts: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, prepared: false, cq: ContactQueue::default() }
+        Instrument { bodies: vec![], cavities: vec![], rads: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, prepared: false, cq: ContactQueue::default() }
     }
     pub fn add(&mut self, b: Body) -> usize {
         self.bodies.push(b);
@@ -1607,6 +1710,9 @@ impl Instrument {
         }
         // contacts, solved implicitly one at a time (see `solve_contacts`)
         solve_contacts(&mut self.bodies, &mut self.contacts, &mut self.cq, k);
+        if !self.frictions.is_empty() {
+            solve_frictions(&mut self.bodies, &self.contacts, &mut self.frictions, k);
+        }
         for b in self.bodies.iter_mut() {
             b.finish(k);
         }
