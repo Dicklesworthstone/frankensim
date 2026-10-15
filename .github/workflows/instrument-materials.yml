@@ -3,6 +3,15 @@ on:
   push:
     branches: [main]
     paths:
+      - 'crates/fs-vfit/src/waveguide.rs'
+      - 'crates/fs-vfit/src/waveguide/**'
+      - 'crates/fs-vfit/tests/fractional*.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/fractional*'
+      - 'crates/fs-couple/src/bernoulli_aperture/fractional/**'
+      - 'crates/fs-couple/src/bernoulli_aperture/viscothermal*'
+      - 'crates/fs-couple/src/bernoulli_aperture/viscothermal/**'
+      - 'crates/fs-couple/tests/fractional*'
+      - 'crates/fs-couple/tests/fractional*/**'
       - 'crates/fs-solid/src/reduce*'
       - 'crates/fs-solid/src/reduce/**'
       - 'crates/fs-solid/tests/valve_material_field.rs'
@@ -91,6 +100,11 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Fractional acoustic storage and material instrument feedback
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-vfit --no-fail-fast --test fractional_waveguide --test fractional_network --test waveguide_pair -- --test-threads=1
+          cargo test -p fs-couple --no-fail-fast --test fractional_tubes --test fractional_flue --test two_sided_aperture --test two_sided_pressure -- --test-threads=1
       - name: Material walls and multi-outlet flute pressure
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test material_duct_wall -- --test-threads=1
