@@ -40,12 +40,12 @@ pub(super) fn force_tolerance(config: ModalFrictionConfig, applied: f64, expecte
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn solve(law: FrictionLaw, config: ModalFrictionConfig, compliance: f64,
+pub(super) fn solve(law: &FrictionLaw, config: ModalFrictionConfig, compliance: f64,
     dt: f64, free_slip: f64, normal: f64, gate: Option<&CancelGate>)
     -> Result<(f64, ModalFrictionRegime, usize), ModalFrictionError>
 {
     if normal == 0.0 { return Ok((0.0, ModalFrictionRegime::Released, 0)); }
-    let static_mu = match law {
+    let static_mu = match *law {
         FrictionLaw::Coulomb { static_mu, .. } | FrictionLaw::Stribeck { static_mu, .. }
             | FrictionLaw::VelocityDependent { static_mu, .. } => static_mu,
     };
@@ -62,7 +62,7 @@ pub(super) fn solve(law: FrictionLaw, config: ModalFrictionConfig, compliance: f
         // Use the one-sided kinetic limit at the sticking endpoint; never
         // feed zero into the owner's strictly-positive kinetic query.
         let mu = if slip == 0.0 {
-            match law {
+            match *law {
                 FrictionLaw::Coulomb { kinetic_mu, .. } => kinetic_mu,
                 FrictionLaw::Stribeck { static_mu, .. } => static_mu,
                 FrictionLaw::VelocityDependent { mu_zero, .. } => mu_zero,
@@ -93,7 +93,7 @@ pub(super) fn solve(law: FrictionLaw, config: ModalFrictionConfig, compliance: f
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn check(law: FrictionLaw, config: ModalFrictionConfig, dt: f64,
+pub(super) fn check(law: &FrictionLaw, config: ModalFrictionConfig, dt: f64,
     drive: FrictionDrive, traction: f64, slip: f64, regime: ModalFrictionRegime,
     iterations: usize) -> Result<(f64, f64), ModalFrictionError>
 {

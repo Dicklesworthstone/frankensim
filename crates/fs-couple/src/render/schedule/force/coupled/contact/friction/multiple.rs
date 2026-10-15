@@ -229,7 +229,7 @@ impl MultiFrictionModalSystem {
                 let mut free = self.free_slip[i];
                 for j in 0..p { if j != i { free = finite(free - self.compliance[i*p+j]*self.tractions[j])?; } }
                 let point = &self.points[i];
-                let (force, regime, iterations) = scalar::solve(point.port.law, point.config,
+                let (force, regime, iterations) = scalar::solve(&point.port.law, point.config,
                     self.compliance[i*p+i], self.sample_period_s(), free, drives[i].normal_force_n, gate)?;
                 self.tractions[i] = force; self.regimes[i] = regime;
                 self.iterations[i] += iterations;
@@ -240,7 +240,7 @@ impl MultiFrictionModalSystem {
             for i in 0..p {
                 poll(gate)?;
                 let slip = finite(self.free_slip[i] - dot(&self.compliance[i*p..(i+1)*p], &self.tractions)?)?;
-                if let Err(error) = scalar::check(self.points[i].port.law, self.points[i].config,
+                if let Err(error) = scalar::check(&self.points[i].port.law, self.points[i].config,
                     self.sample_period_s(), drives[i], self.tractions[i], slip, self.regimes[i], self.iterations[i]) {
                     if failure.is_none() { failure = Some(error); }
                 }
@@ -263,7 +263,7 @@ impl MultiFrictionModalSystem {
             poll(gate)?;
             let distance = finite(drives[i].speed_m_s*self.sample_period_s())?;
             let slip = finite(distance-dot(&self.points[i].column, &self.core.network.free_delta)?)?;
-            let (dissipation, residual) = scalar::check(self.points[i].port.law, self.points[i].config,
+            let (dissipation, residual) = scalar::check(&self.points[i].port.law, self.points[i].config,
                 self.sample_period_s(), drives[i], self.tractions[i], slip, self.regimes[i], self.iterations[i])?;
             let supply = finite(self.tractions[i]*distance)?;
             loss = finite(loss+dissipation)?; work = finite(work+supply)?;

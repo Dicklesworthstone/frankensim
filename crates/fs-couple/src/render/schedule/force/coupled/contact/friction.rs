@@ -212,7 +212,7 @@ impl FrictionModalSystem {
         }
         let drive_distance = finite(drive.speed_m_s*self.network.dt)?;
         let free_slip = finite(drive_distance-free_increment)?;
-        let (traction, regime, iterations) = scalar::solve(self.port.law, self.config, self.compliance, self.network.dt, free_slip, drive.normal_force_n, gate)?;
+        let (traction, regime, iterations) = scalar::solve(&self.port.law, self.config, self.compliance, self.network.dt, free_slip, drive.normal_force_n, gate)?;
         self.forces.copy_from_slice(external);
         if traction != 0.0 {
             for (force, b) in self.forces.iter_mut().zip(&self.column) { *force = finite(*force+b*traction)?; }
@@ -220,7 +220,7 @@ impl FrictionModalSystem {
         self.network.stage_inner(&self.forces, gate)?;
         let slip = finite(drive_distance-dot(&self.column, &self.network.free_delta)?)?;
         let (loss, constitutive_residual_n) = scalar::check(
-            self.port.law, self.config, self.network.dt, drive, traction, slip, regime, iterations,
+            &self.port.law, self.config, self.network.dt, drive, traction, slip, regime, iterations,
         )?;
         let observer_pressure_pa = self.staged_observer_pressure(gate)?;
         let frame = &self.network.staged_frame;
