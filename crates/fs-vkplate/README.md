@@ -85,6 +85,7 @@ the rims chattering against each other (its sizzle above 4 kHz). The rim contact
 - the stencil rows of the sparse products sum bit for bit as their CSR rows (five pieces, signed zeros);
 - the four-lane contact solves match solving one contact at a time, force, penetration and every
   update bit for bit, with node-sharing and other-law contacts in the list;
+- an empty matrix adds nothing, and a NaN penetration exerts no force, alone or queued;
 - every piece builds on the live grid, sounds, and the kick and snare stop being stepped once
   silent; a clone, taken settled or mid-ring, renders bit for bit what the original would (`live`).
 
@@ -127,4 +128,5 @@ cargo run --release --example perform -- kick hits.csv kick.wav 17   # time_s,sp
 cargo run --release --example livebench -- 5                   # real-time factor per piece at grid x5
 cargo test --release
 ```
-Pieces: `kick snare snare-off tom-12 tom-14 hihat-closed hihat-open crash ride`.
+Pieces: `kick snare snare-off tom-12 tom-14 hihat-closed hihat-open crash ride` (`kit` also renders
+`splash`).

@@ -221,3 +221,21 @@ fn queued_contact_solves_match_solving_one_at_a_time() {
     }
     assert!(pressed > solved / 4 && pressed < solved, "only {pressed} of {solved} solves pressed");
 }
+
+#[test]
+fn empty_matrix_and_nan_penetration_do_nothing() {
+    // an empty matrix adds nothing (a default Csr has no ptr[0] for the CSR rows to slice)
+    let mut y = [0.25];
+    Csr::default().mul_add(&[], 1.0, &mut []);
+    Csr::default().mul_add(&[1.0], 2.0, &mut y);
+    assert_eq!(y, [0.25]);
+    // a NaN penetration exerts no force, solved alone or queued
+    let law = Law::Power { k: 3.0e7, alpha: 1.5, mu: 0.35 };
+    assert_eq!(contact_force(f64::NAN, 1e-6, 0.0, 0.0, law, true, 1e-5).to_bits(), 0.0f64.to_bits());
+    let mut bodies = vec![Body::point("a", 0.01), Body::point("b", 0.01)];
+    let mut contacts = vec![Contact::new(vec![(0, 0, 1.0)], vec![(1, 0, 1.0)], 0.0, law)];
+    contacts[0].force = 1.0;
+    bodies[0].wn[0] = f64::NAN;
+    solve_contacts(&mut bodies, &mut contacts, &mut ContactQueue::default(), 1e-5);
+    assert_eq!(contacts[0].force.to_bits(), 0.0f64.to_bits());
+}

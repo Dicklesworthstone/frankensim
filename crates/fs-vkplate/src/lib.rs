@@ -108,6 +108,9 @@ impl Csr {
     /// y += s * A x
     #[inline]
     pub fn mul_add(&self, x: &[f64], s: f64, y: &mut [f64]) {
+        if self.n == 0 {
+            return; // no rows (and a `Csr::default()` has no `ptr[0]` for `rows_add` to slice)
+        }
         let y = &mut y[..self.n];
         let mut i = 0;
         for r in &self.runs {
@@ -1157,7 +1160,8 @@ fn contact_force(d_pred: f64, comp: f64, force: f64, d_now: f64, law: Law, fixed
         let v = kk * pa * damp;
         if v <= 0.0 { (0.0, 0.0) } else { (v, kk * (alpha * pa1 * damp + pa * mu / k)) }
     };
-    if d_pred <= 0.0 {
+    // no penetration, or a NaN one (a state already blown up): no force, and no 60 Newton steps on NaN
+    if d_pred.is_nan() || d_pred <= 0.0 {
         return 0.0;
     }
     let (mut lo, mut hi) = (0.0, d_pred / comp);
@@ -1380,7 +1384,7 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
             d_pred -= w * bodies[b].wn[i];
             comp += w * w * bodies[b].compliance(i, k);
         }
-        if !queued || d_pred <= 0.0 {
+        if !queued || d_pred.is_nan() || d_pred <= 0.0 {
             // solved now: the queue is empty, or this contact moves nothing
             let f = contact_force(d_pred, comp, c.force, c.d_now, c.law, c.fixed_point_exit, k);
             apply_force(bodies, c, f, d_pred, comp, k);
