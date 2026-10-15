@@ -26,6 +26,8 @@ pub mod two_sided;
 pub mod tube;
 /// Moving aperture coupled to nonuniform connected tube sections and branches.
 pub mod network;
+/// Explicit sub-sample acoustic geometry with a declared phase-error budget.
+pub mod fractional;
 /// Geometry-derived reactive cavity loads for the coupled tube network.
 pub mod cavity;
 /// Sample-checked passive frequency-dependent boundary loss.
