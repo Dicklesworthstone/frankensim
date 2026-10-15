@@ -211,3 +211,7 @@ impl PairedApertureNetwork {
 
 #[cfg(test)]
 mod tests;
+
+
+/// Canonical pressure phrases and independent blade forces on the common audio pipeline.
+pub mod performance;
