@@ -14,6 +14,8 @@
 
 pub mod thermal;
 pub mod transport;
+/// Rotary inertia and explicitly sourced torsional shear loss.
+pub mod torsion;
 
 use fs_qty::{Density, DynViscosity, Pressure, QuantitySpec};
 use crate::state_point::{
