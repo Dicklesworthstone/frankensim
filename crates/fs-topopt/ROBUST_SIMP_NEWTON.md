@@ -58,32 +58,64 @@ A failed new-point preparation preserves the preceding cache and charged work.
 Older accepted tapes reconstruct their own point after a successful trial evicts
 it. Increasing `set_budget` permits recovery without refunding attempts. Use a
 real `Cx` for cancellation; `None` explicitly disables cooperative cancellation.
-Projection/penalization continuation must rebuild immutable physics bindings;
-there is no automatic continuation schedule or budget reset in this API.
+
+### Automatic immutable-stage continuation
+
+`fs_ascent::newton_continuation::NewtonContinuation` runs an explicit schedule
+of `NewtonStage` values, each borrowing its own `ReverseProblem`. It advances
+only when the current stage meets its declared numerical KKT tolerance. Only
+accepted coordinates cross the boundary: primal tapes, gradients, multipliers,
+merit history and trust radius are initialized against the new model. A failed
+or cancelled initialization leaves the preceding accepted stage available.
+
+Create ONE `SimpNewtonResources` and clone its handle into every
+`SimpNewtonModel::new_robust_with_resources` (or `new_with_resources` for ordinary
+SIMP). The models keep separate exact-point caches but share all lifetime solve
+reservations and actual Krylov work. Creating a stage does not reset the physical
+allowance. `model.work()`, `model.budget()` and `set_budget()` then refer to that
+shared account; original constructors still create independent accounts.
+
+The continuation driver separately enforces one cumulative objective/Hessian/
+multiplier budget. Every attempted stage initialization is conservatively charged
+as one objective attempt, even when admission or a physical callback fails.
+Zero-iteration calls do no solves or handoffs. Clone retains current progress;
+provider caches and work accounts stay outside, and are shared rather than reset.
+Use `active()`, `work()` and `completed_stages()` after a refusal, raise the
+relevant absolute ceiling, and run again. No stalled stage is silently skipped.
+
+Stage variables must have identical names, dimensions and Euclidean layouts.
+Reuse the SAME coordinate chart across stages: the driver cannot infer a hidden
+change of coordinate meaning inside a callback. Objectives belong to different
+models; their stage reports are not one monotone descent history. The last
+stage's KKT convergence is not a global or closed-box boundary certificate.
 
 ## Run and verify
 
 ```bash
 cargo run --release -p fs-topopt --features newton-design --example robust_simp
+cargo run --release -p fs-topopt --features newton-design --example robust_simp -- --continuation
+cargo test --release -p fs-ascent --test newton_continuation
 cargo test --release -p fs-topopt --features newton-design \
   --test robust_simp_newton --test simp_newton --test simp_hessian
 ```
 
-The example has 48 independent design cells, unequal tetrahedral cell volumes,
-two independent loads, and a dilated-volume allowance of 0.6. It reassembles the
-candidate through the older first-order robust path, checks agreement with the
-Newton report, and prints actual termination, chart-coordinate KKT residuals,
-all three volumes, and provider work. Its separate verification solves are not
-included in the optimization provider's work counter.
+Both example modes have 48 independent design cells, unequal tetrahedral cell
+volumes, two independent loads, and a dilated-volume allowance of 0.6. The
+unchanged default mode uses one fixed model. The continuation mode schedules
+`(penal, beta, offset)` as `(1,0,0)`, `(2,1,0.05)`, `(3,2,0.1)` with KKT tolerances
+`1e-4`, `3e-5`, `1e-5`; its fixed objective normalization is 100 joules. It reports
+the actual reached stage and stopping reason, rather than calling every run
+complete. Each published stage is checked by reassembly and separate solves
+through the older first-order robust path. These verification solves are not
+charged to the optimization provider's work counter.
 
-The new native integration tests cover both objective/constraint orientations
-against an analytically known uniform-density optimum, fresh physical checks,
-split replay, shared work and failed-cache budget recovery. Native compilation,
-these tests and the example were **not executed in the authoring runtime**:
-`dsr quality --tool frankensim` returned exit 127, and the alternate DSR path,
-RCH, Cargo and rustc were unavailable. Repository DSR policy remains authoritative.
-Independent dense reference equations passed 72 derivative cases; those are not
-substitutes for compiling or executing the Rust implementation.
+The six continuation regressions cover exact split runs, combined budgets,
+failed/cancelled stage entry, constrained KKT solutions and schema admission.
+Native compilation, these tests and the examples were **not executed in the
+authoring runtime**: `dsr quality --tool frankensim` returned exit 127; the
+alternate DSR path, RCH, Cargo and rustc were unavailable. Repository DSR policy
+remains authoritative. Earlier dense-reference derivative checks do not verify
+this newly added orchestration or substitute for native execution.
 
 ## Scope
 

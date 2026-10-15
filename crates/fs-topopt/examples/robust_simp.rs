@@ -15,7 +15,15 @@ use fs_topopt::pipeline::LoadCase;
 use fs_topopt::simp_newton::SimpNewtonModel;
 use fs_topopt::{DensityElasticity, DensityFilter, RobustPipeline, SimpParams};
 
+#[path = "robust_simp/continuation.rs"]
+mod continuation;
+
 fn main() -> Result<(),Box<dyn std::error::Error>> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["--continuation"] { return continuation::run(); }
+    if !args.is_empty() {
+        return Err(std::io::Error::other("usage: robust_simp [--continuation]").into());
+    }
     let (mesh, mut positions) = fs_feec::kuhn_cube(2);
     for p in &mut positions {p[0] *= p[0];}
     let elasticity = DensityElasticity::new(&mesh,&positions,1.0,0.29,&|p|p[0]==0.0);
