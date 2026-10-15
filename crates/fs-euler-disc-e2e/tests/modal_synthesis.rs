@@ -1004,12 +1004,11 @@ fn g3_parameter_set_identity_binds_every_provenance_and_model_field() {
     let baseline = admit_parameter_set(uncalibrated.clone()).unwrap();
     let baseline_identity = baseline.identity();
 
-    let mutations: [fn(&mut EulerModalParameterSetInput); 22] = [
+    let mutations: [fn(&mut EulerModalParameterSetInput); 21] = [
         |input| input.authority = ModalPresetAuthority::RepresentativeUncalibrated,
         |input| input.specimen_identity = identity("other-specimen"),
         |input| input.rig_identity = identity("other-rig"),
         |input| input.disclosure.push('.'),
-        |input| input.model.sample_rate_hz = 44_100,
         |input| input.model.budget.maximum_total_sample_frames *= 2,
         |input| input.model.budget.maximum_chunk_sample_frames /= 2,
         |input| input.model.budget.maximum_abs_displacement_m *= 0.5,
@@ -1034,6 +1033,14 @@ fn g3_parameter_set_identity_binds_every_provenance_and_model_field() {
         let changed = admit_parameter_set(changed).unwrap();
         assert_ne!(baseline_identity, changed.identity());
     }
+    let mut invalid_rate = uncalibrated.clone();
+    invalid_rate.model.sample_rate_hz = 44_100;
+    assert!(matches!(
+        admit_parameter_set(invalid_rate),
+        Err(EulerModalParameterSetError::InvalidModel(
+            ModalSynthesisError::InvalidSampleRate(44_100)
+        ))
+    ));
     let mut changed = uncalibrated.clone();
     changed.model.modes[0].base_identity = identity("other-base");
     assert_ne!(

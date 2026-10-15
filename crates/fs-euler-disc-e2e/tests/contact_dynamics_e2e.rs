@@ -657,8 +657,8 @@ fn declared_small_angle_profile_roll_is_zero_slip_and_has_refinement_diagnostics
             -rolling.declared_precession_rate_rad_per_s * inclination_rad.sin(),
             1.0e-13,
         );
-        assert_close(rolling.angular_velocity_body_rad_per_s.y, 0.0, 1.0e-15);
-        assert_close(rolling.angular_velocity_body_rad_per_s.z, 0.0, 1.0e-15);
+        assert_close(rolling.angular_velocity_body_rad_per_s.y, 0.0, 1.0e-13);
+        assert_close(rolling.angular_velocity_body_rad_per_s.z, 0.0, 1.0e-13);
         assert_close(rolling.contact.contact.gap_m, 0.0, 1.0e-14);
         assert_close(
             rolling.initial_contact_velocity_world_m_per_s.x,

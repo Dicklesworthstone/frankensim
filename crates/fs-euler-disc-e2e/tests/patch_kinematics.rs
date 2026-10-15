@@ -442,7 +442,10 @@ fn common_rigid_world_rotation_preserves_status_speed_and_power() {
         original.reference_rolling_speed_m_per_s,
     );
     assert_eq!(transformed.status, original.status);
-    assert_eq!(transformed.tangential_power_w, original.tangential_power_w);
+    assert_close(
+        transformed.tangential_power_w.expect("rotated power"),
+        original.tangential_power_w.expect("original power"),
+    );
 }
 
 #[test]

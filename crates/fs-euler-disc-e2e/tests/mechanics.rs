@@ -291,7 +291,7 @@ fn dissipative_heat_equals_irreversible_work_without_double_counting() {
     let mut request = input(vec![dissipative]);
     request.state = RigidBodyState::new(
         Pose::new(Vec3::ZERO, UnitQuaternion::IDENTITY).expect("pose"),
-        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(2.0, 0.0, 0.0),
         Vec3::ZERO,
     )
     .expect("state");
