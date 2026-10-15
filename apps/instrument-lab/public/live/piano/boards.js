@@ -118,7 +118,12 @@ export async function chooseQuality({ make, measure = probeSustained, target, fu
     try {
       if (!full) full = JSON.parse(engine.info()).maxDynamicModes;
       kept?.free();
-      kept = typeof engine.copy === 'function' ? Object.assign(engine.copy(), { engineCap: cap || full }) : null;
+      kept = null;
+      try {
+        kept = Object.assign(engine.copy(), { engineCap: cap || full });
+      } catch {
+        // a cached engine_bg.wasm older than its engine.js has no copy(): the caller builds the engine again
+      }
       return measure(engine);
     } finally {
       engine.free();
