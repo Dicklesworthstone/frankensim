@@ -1,9 +1,9 @@
 //! Joint live-IR compliance and physical-volume derivatives of raw SIMP densities.
 //!
 //! Both views borrow one owner: one exact-point linearization, immutable loads,
-//! and one lifetime work budget. The volume is the cell-volume-weighted projected
-//! density, never penalized stiffness. The native filter and elasticity solvers
-//! remain the only derivative authority. This module does not optimize by itself.
+//! and one lifetime work budget. Ordinary SIMP shares a projection; robust SIMP
+//! uses eroded compliance and dilated volume on one common filtered field.
+//! Volume is always cell-volume-weighted projected density, never stiffness.
 
 use std::cell::{Cell, RefCell};
 use std::ops::ControlFlow;
@@ -14,9 +14,10 @@ use fs_qty::Dims;
 
 use crate::compliance_newton::{COMPLIANCE_DIMS, ComplianceNewtonBudget, ComplianceNewtonWork};
 use crate::elasticity::second_order::{ComplianceError, ComplianceSolveOptions};
-use crate::pipeline::LoadCase;
-use crate::simp_second_order::SimpComplianceGoal;
-use crate::{DensityElasticity, DesignPipeline, EvaluationStop, SolveBudget, SolveControl};
+use crate::filter::DensityFilter;
+use crate::pipeline::{LoadCase, SimpParams};
+use crate::simp_second_order::{SimpComplianceGoal, robust_parameters};
+use crate::{DensityElasticity, DesignPipeline, EvaluationStop, RobustPipeline, SolveBudget, SolveControl};
 
 struct Cached<'a> {
     bits: Vec<u64>,
@@ -27,6 +28,7 @@ struct Cached<'a> {
 /// Joint raw-density physics for compliance objectives / volume constraints, or
 /// minimum-volume objectives / compliance constraints. Create the scalar views
 /// with [`Self::compliance`] and [`Self::volume`], then bind both into the IR.
+/// [`Self::new_robust`] selects eroded stiffness and dilated physical volume.
 ///
 /// Preparation reserves one forward filter, each independent load, and two
 /// transpose filters. Compliance products reserve two filters and each active
@@ -39,10 +41,12 @@ struct Cached<'a> {
 /// may evict it; evaluating an older accepted tape re-prepares that exact point.
 /// Loads, parameters, geometry and weights cannot change during the model's life.
 /// Raw densities are in [0,1]; the native second-order goal additionally requires
-/// projected densities strictly inside (1e-12,1). No endpoint Hessian, global byte
-/// admission, process checkpoint, or continuum certificate is claimed.
+/// stiffness projected densities strictly inside (1e-12,1). No endpoint Hessian,
+/// certified feature size, process checkpoint, or continuum certificate is claimed.
 pub struct SimpNewtonModel<'a> {
-    pipeline: &'a DesignPipeline,
+    filter: &'a DensityFilter,
+    params: SimpParams,
+    volume_eta: f64,
     elasticity: &'a DensityElasticity,
     loads: Vec<(Vec<f64>, f64)>,
     volumes: Vec<f64>,
@@ -58,6 +62,8 @@ impl std::fmt::Debug for SimpNewtonModel<'_> {
         f.debug_struct("SimpNewtonModel")
             .field("parameters", &self.elasticity.cells())
             .field("loads", &self.loads.len())
+            .field("compliance_threshold", &self.params.eta)
+            .field("volume_threshold", &self.volume_eta)
             .field("work", &self.work.get())
             .field("budget", &self.budget.get())
             .finish_non_exhaustive()
@@ -67,8 +73,7 @@ impl std::fmt::Debug for SimpNewtonModel<'_> {
 #[derive(Debug, Clone, Copy)]
 enum Output { Compliance, Volume }
 
-/// A named scalar view. Cloning a view shares, and cannot reset, its owner's
-/// cache or counters. Distinct IR study names are supplied explicitly by callers.
+/// A named scalar view. Cloning shares, and cannot reset, its owner's state.
 #[derive(Debug, Clone)]
 pub struct SimpNewtonGoal<'m, 'a> {
     model: &'m SimpNewtonModel<'a>,
@@ -86,20 +91,50 @@ fn finite(value: f64, quantity: &'static str) -> Result<f64, PhysicsError> {
 }
 
 impl<'a> SimpNewtonModel<'a> {
-    /// Admit immutable modeling data without performing a filter or PDE solve.
+    /// Ordinary SIMP: admit immutable modeling data without numerical solves.
     /// `volumes` must be the physical design-cell volumes, in cell order.
     pub fn new(pipeline: &'a DesignPipeline, elasticity: &'a DensityElasticity,
         loads: &[LoadCase<'_>], volumes: &[f64], options: ComplianceSolveOptions,
         budget: ComplianceNewtonBudget,
     ) -> Result<Self, PhysicsError> {
+        Self::from_parts(&pipeline.filter, pipeline.params, pipeline.params.eta,
+            elasticity, loads, volumes, options, budget)
+    }
+
+    /// Robust three-field design using `eta +/- eta_offset` from the existing
+    /// RobustPipeline. Compliance uses erosion; the volume view uses dilation.
+    /// The nominal volume is not the constraint and no adaptive target is hidden
+    /// here: the caller declares its dilated-volume allowance explicitly in IR.
+    ///
+    /// No extra Helmholtz or elasticity solves are needed compared with ordinary
+    /// joint SIMP preparation. The projections differ only in their pointwise
+    /// values/derivatives; all caches, work ceilings and continuation semantics
+    /// remain those of this owner. Zero offset reduces to ordinary SIMP.
+    pub fn new_robust(pipeline: &'a RobustPipeline, elasticity: &'a DensityElasticity,
+        loads: &[LoadCase<'_>], volumes: &[f64], options: ComplianceSolveOptions,
+        budget: ComplianceNewtonBudget,
+    ) -> Result<Self, PhysicsError> {
+        let (params, volume_eta) = robust_parameters(pipeline.params, pipeline.eta_offset)
+            .map_err(|error| match error {
+                ComplianceError::InvalidInput(message) => PhysicsError::InvalidInput(message),
+                _ => PhysicsError::InvalidInput("invalid robust thresholds"),
+            })?;
+        Self::from_parts(&pipeline.filter, params, volume_eta, elasticity, loads, volumes, options, budget)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(filter: &'a DensityFilter, p: SimpParams, volume_eta: f64,
+        elasticity: &'a DensityElasticity, loads: &[LoadCase<'_>], volumes: &[f64],
+        options: ComplianceSolveOptions, budget: ComplianceNewtonBudget,
+    ) -> Result<Self, PhysicsError> {
         let n = elasticity.cells();
-        if n == 0 || pipeline.filter.cells() != n || volumes.len() != n {
+        if n == 0 || filter.cells() != n || volumes.len() != n {
             return Err(PhysicsError::InvalidInput("SIMP mesh, filter and volume shapes must agree"));
         }
-        let p = pipeline.params;
         if !(p.e_min.is_finite() && p.e_min > 0.0 && p.e_min < 1.0
             && p.penal.is_finite() && p.penal >= 1.0 && p.beta.is_finite() && p.beta >= 0.0
-            && p.eta.is_finite() && (0.0..=1.0).contains(&p.eta)) {
+            && p.eta.is_finite() && (0.0..=1.0).contains(&p.eta)
+            && volume_eta.is_finite() && (0.0..=1.0).contains(&volume_eta)) {
             return Err(PhysicsError::InvalidInput("invalid SIMP/projection parameters"));
         }
         if !(options.tolerance.is_finite() && options.tolerance > 0.0 && options.tolerance < 1.0) {
@@ -122,7 +157,8 @@ impl<'a> SimpNewtonModel<'a> {
             for &force in load.force { finite(force, "structural force")?; }
         }
         loads.len().checked_add(3).ok_or(PhysicsError::InvalidInput("too many loads"))?;
-        Ok(Self { pipeline, elasticity, loads: loads.iter().map(|l| (l.force.to_vec(), l.weight)).collect(),
+        Ok(Self { filter, params: p, volume_eta, elasticity,
+            loads: loads.iter().map(|l| (l.force.to_vec(), l.weight)).collect(),
             volumes: volumes.to_vec(), options, budget: Cell::new(budget),
             work: Cell::new(ComplianceNewtonWork::default()), cache: RefCell::new(None),
             last_native_error: RefCell::new(None) })
@@ -138,6 +174,8 @@ impl<'a> SimpNewtonModel<'a> {
         if study.is_empty() { return Err(PhysicsError::InvalidInput("nonempty study name required")); }
         Ok(SimpNewtonGoal { model: self, study, output })
     }
+    /// Actual stiffness and physical-volume projection thresholds, in that order.
+    pub fn projection_thresholds(&self) -> (f64, f64) { (self.params.eta, self.volume_eta) }
     pub fn work(&self) -> ComplianceNewtonWork { self.work.get() }
     pub fn budget(&self) -> ComplianceNewtonBudget { self.budget.get() }
     pub fn set_budget(&self, budget: ComplianceNewtonBudget) { self.budget.set(budget); }
@@ -213,7 +251,8 @@ impl<'a> SimpNewtonModel<'a> {
         if !cache.as_ref().is_some_and(|c| c.bits.iter().zip(point).all(|(&b, x)| b == x.to_bits())) {
             let loads: Vec<_> = self.loads.iter().map(|(force, weight)| LoadCase { force, weight: *weight }).collect();
             let prepared = self.controlled(loads.len() + 3, cx, |control| {
-                let goal = SimpComplianceGoal::new(self.pipeline, self.elasticity, point, &loads, self.options, control)?;
+                let goal = SimpComplianceGoal::prepare(self.filter, self.params, self.volume_eta,
+                    self.elasticity, point, &loads, self.options, control)?;
                 let (value, gradient) = goal.volume_value_gradient(&self.volumes, control)?;
                 Ok(Cached { bits: point.iter().map(|x| x.to_bits()).collect(), goal,
                     volume: PhysicsSample { value, gradient } })
@@ -261,7 +300,7 @@ impl PhysicsHessian for SimpNewtonGoal<'_, '_> {
                     self.model.controlled(slots, cx, |control| c.goal.hessian_vector_product(direction, control))
                 }
                 Output::Volume => {
-                    if self.model.pipeline.params.beta == 0.0 { return Ok(vec![0.0; direction.len()]); }
+                    if self.model.params.beta == 0.0 { return Ok(vec![0.0; direction.len()]); }
                     self.model.controlled(2, cx, |control|
                         c.goal.volume_hessian_vector_product(&self.model.volumes, direction, control))
                 }
