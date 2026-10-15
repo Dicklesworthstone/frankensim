@@ -93,6 +93,11 @@ export class LaneDisposed extends Error {
 class LaneWorker<R> {
   readonly worker: Worker;
   readonly ready: Promise<R>;
+  /**
+   * Called once when the Worker fails after it was ready (a wasm trap mid-song: every later turn would
+   * throw again, about every 10 ms, while the lane stayed silent). The lane is disposed first.
+   */
+  onFailure: ((e: Error) => void) | null = null;
   private readonly channel = new MessageChannel();
   private settled = false;
   private attached = false;
@@ -115,11 +120,12 @@ class LaneWorker<R> {
           resolve(m as R);
         } else if (m.type === "error") {
           if (!this.settled) { this.settled = true; reject(new Error(String(m.message))); }
+          else this.fail(new Error(String(m.message)));
         } else onMessage(m);
       };
       // a module Worker that fails to load (a 404 after the site was updated, say) fires a bare Event
       this.worker.onerror = (e) => {
-        if (this.settled) return;
+        if (this.settled) { e.preventDefault(); this.fail(new Error(e.message || `${label} failed`)); return; }
         this.settled = true;
         reject(new Error(e.message || `${label} could not be loaded (if the site was just updated, reload the page)`));
       };
@@ -142,6 +148,13 @@ class LaneWorker<R> {
     if (this.attached) this.mix.dropLane(this.id);
     else this.channel.port2.close();
     if (!this.settled) { this.settled = true; this.rejectReady(new LaneDisposed(this.label)); }
+  }
+
+  private fail(e: Error): void {
+    const report = this.onFailure;
+    this.onFailure = null;
+    this.dispose();
+    report?.(e);
   }
 }
 
@@ -244,6 +257,10 @@ export class KitLane {
   stop(): void {
     this.worker.postMessage({ type: "stop" });
   }
+  /** Called once if the engine fails after it was ready; the lane has already left the mix (LaneWorker.onFailure). */
+  set onFailure(f: ((e: Error) => void) | null) {
+    this.lane.onFailure = f;
+  }
   /** Terminate the Worker and leave the mix; a `ready` still pending rejects with LaneDisposed. */
   dispose(): void {
     this.onField = this.onBurst = null;
@@ -301,6 +318,10 @@ export class PianoLane {
   }
   stop(): void {
     this.worker.postMessage({ type: "stop" });
+  }
+  /** Called once if the engine fails after it was ready; the lane has already left the mix (LaneWorker.onFailure). */
+  set onFailure(f: ((e: Error) => void) | null) {
+    this.lane.onFailure = f;
   }
   /** Terminate the Worker and leave the mix; a `ready` still pending rejects with LaneDisposed. */
   dispose(): void {

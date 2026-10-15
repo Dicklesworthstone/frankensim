@@ -267,7 +267,7 @@ export type DrumMonitor = 'batter' | 'resonant' | 'split' | 'sum';
 export interface LiveDrumOptions {
   /** Initial parameters overlaid on the reference defaults. */
   params?: DrumParamPatch;
-  /** Defaults to `/live`. */
+  /** Defaults to LIVE_BASE_URL (`live/<hash>/` in a build). */
   baseUrl?: string;
   /** Pick the highest mechanical rate sustaining `calibration.minFactor` at start (default true). */
   autoCalibrate?: boolean;

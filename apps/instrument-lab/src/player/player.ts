@@ -191,6 +191,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
   let startFrame = 0;
   let startPos = 0;
   let idleTimer = 0;
+  let claimed = false; // another player took over since the last Play (its short idle timer stands)
   let token = 0;
   const snaps: { frame: number; data: Float32Array }[] = [];
   // late: audio that reached the mixer after its moment (a real dropout); base: the count when the score last started
@@ -416,6 +417,15 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       lane.onStats = (s) => { const h = health["piano"]; if (h) { h.rt = s.realtime; h.stats = s; } };
       lane.onSnapshot = (frame, data, ep) => { if (ep >= epoch) { snaps.push({ frame, data }); if (snaps.length > 90) snaps.shift(); } };
       health["piano"] = { rt: 0, late: 0, gap: 0, base: 0, skipBase: 0, detail: "", slow: 0 };
+      lane.onFailure = (e) => {
+        // the lane has left the mix; the next Play starts a new piano
+        if (piano !== lane) return;
+        piano = null;
+        pianoReady = null;
+        delete health["piano"];
+        say(`The piano engine stopped (${e.message}). Pause and play again to restart it.`, "bad");
+        paintLanes();
+      };
       const boardTag = boardView.querySelector(".pp-board-coords");
       started.push(lane.ready.then((r) => {
         pianoReady = r;
@@ -430,16 +440,19 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       }));
     }
     for (const [p, k] of kits) if (!a.pieces.includes(p)) { k.lane.dispose(); kits.delete(p); delete health[p]; }
+    let fresh = 0; // the pieces started now; those still running from the last roll are not counted
     for (const p of a.pieces) {
       if (kits.has(p)) continue;
       warm = false;
+      fresh++;
       started.push(startPiece(m, p, GRID[p].scales));
     }
     if (started.length) {
       const total = started.length;
       let done = 0;
-      const n = a.pieces.length;
-      say(`Starting ${!pianoReady ? "the piano" : ""}${!pianoReady && n ? " and " : ""}${n ? `${n} drum piece${n > 1 ? "s" : ""}` : ""}, each in its own Worker, and measuring this device…`);
+      const n = fresh;
+      const what = [!pianoReady ? "the piano" : "", n ? `${n} drum piece${n > 1 ? "s" : ""}` : ""].filter(Boolean).join(" and ");
+      say(`Starting ${what}, ${total > 1 ? "each " : ""}in its own Worker, and measuring this device…`);
       started.forEach((p) => void p.then(() => { done++; if (phase === "warming") say(`Starting the engines… ${done} of ${total} ready`); }, () => {}));
       await Promise.all(started);
     }
@@ -471,6 +484,14 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       if ((h.slow >= 3 || (phase === "playing" && fresh > 2400)) && (h.scale ?? 8) < 10) void coarsen(p, h.scale ?? 8);
     };
     lane.onField = (f) => { if ((f.epoch ?? 0) >= epoch && kits.get(p) === entry) kit.field(p, f); };
+    lane.onFailure = (e) => {
+      // the lane has left the mix; the next Play starts the piece again
+      if (kits.get(p) !== entry) return;
+      kits.delete(p);
+      delete health[p];
+      say(`${PIECE_NAMES[p]}: its engine stopped (${e.message}). Pause and play again to restart it.`, "bad");
+      paintLanes();
+    };
     return lane.ready.then((r) => {
       entry.ready = r;
       h.scale = r.scale;
@@ -527,21 +548,32 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
 
   // ------------------------------------------------------------- transport
   async function play(from = position): Promise<void> {
-    if (!arr || phase === "warming") return;
+    // not while a roll loads either (Space): it would start the old roll under the same token as the new one
+    if (!arr || phase === "warming" || phase === "loading") return;
     clearTimeout(idleTimer);
     claimPlayback(onClaimed);
+    claimed = false;
     const my = token;
+    position = from;
     setPhase("warming");
+    // This start was cancelled: another player started (it set a short idle timer), or another roll began to
+    // load. Unless that roll is starting now, the engines that did start go after the usual idle time.
+    const cancelled = (): void => {
+      const now = phase as Phase; // set meanwhile by whatever cancelled this start
+      if (!claimed && now !== "playing" && now !== "warming") armIdle();
+    };
     try {
       const warm = await ensureEngines(arr);
-      if (my !== token || !arr) return;
-      cue(from >= arr.durationS - 0.05 ? 0 : from, warm ? LEAD_WARM_S : LEAD_COLD_S);
+      if (my !== token || !arr) { cancelled(); return; }
+      // from `position`, not `from`: the slider or the paper may have been moved while the engines started
+      cue(position >= arr.durationS - 0.05 ? 0 : position, warm ? LEAD_WARM_S : LEAD_COLD_S);
       setPhase("playing");
       say(playingLine());
     } catch (e) {
-      if (my !== token) return; // this start was cancelled (another player, another roll); its lanes went with it
+      if (my !== token) { cancelled(); return; }
       setPhase(arr ? "ready" : "empty");
       say(`The engines could not start: ${(e as Error).message}`, "bad");
+      armIdle(); // the engines that did start are not kept forever
     }
   }
 
@@ -614,14 +646,17 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
 
   function onClaimed(): void {
     // another player on the page starts: stop, and free the CPU for it soon after
-    if (phase === "playing") pause();
-    else if (phase === "warming") {
-      // a start still in progress does not go on to play over the other player
+    if (phase === "playing") {
+      pause();
+      say(`Paused at ${fmtTime(position)}: another player on the page started.`); // its engines go in 2 s, not 90
+    } else if (phase === "warming" || phase === "loading") {
+      // a start still in progress, or a roll still loading to play, does not go on to play over the other player
       token++;
       setPhase(arr ? "ready" : "empty");
       say("Stopped: another player on the page started.");
     }
     clearTimeout(idleTimer);
+    claimed = true;
     idleTimer = window.setTimeout(() => { if (phase !== "playing" && phase !== "warming") disposeEngines(); }, 2000);
   }
   registerPlayer(onClaimed);
@@ -760,7 +795,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       const tone = !h || rt === 0 ? "idle" : lost > 10 ? "bad" : rt < 1.1 ? "warn" : "ok";
       const meter = el("span", { class: "pp-meter" }, el("i", { style: `width:${Math.min(100, (rt / 4) * 100).toFixed(0)}%` }));
       const cap = id === "piano" && h?.stats?.modeCap && h.stats.fullModeCap && h.stats.modeCap < h.stats.fullModeCap ? h.stats.modeCap : 0;
-      const grid = h?.scale ? ` · ${h.scale}× grid` : id === "piano" && pianoReady ? ` · ${pianoReady.boardCoordinates} modes${cap ? ` · strings ${cap}` : ""}` : "";
+      const grid = h?.scale ? ` · ${h.scale}× grid` : id === "piano" && pianoReady ? ` · board ${pianoReady.boardCoordinates}${cap ? ` · ${cap} string modes` : ""}` : "";
       const val = !h ? "starts with Play" : rt > 0 ? `${rt.toFixed(1)}×${grid}${lost > 10 ? ` · ${lost < 1000 ? `${Math.round(lost)} ms` : `${(lost / 1000).toFixed(1)} s`} lost` : ""}` : h.stats?.asleep || h.scale ? `resting${grid}` : "measuring…";
       const row = el("div", { class: `pp-lane ${tone}`, "data-id": id, "data-rt": rt.toFixed(2), "data-late": String(h ? lostFrames(h) : 0), "data-gap": String(h ? h.gap : 0), "data-lost-ms": lost.toFixed(1) },
         el("span", { class: "pp-lane-dot", "aria-hidden": "true" }),
@@ -1091,14 +1126,14 @@ function evidenceBody(): HTMLElement {
     el("div", {},
       el("h4", {}, "The mapping"),
       p("Every pitched channel plays the one grand piano; General MIDI channel 10 plays the drum kit. Notes outside A0–C8 are moved by octaves into the keyboard. Notes that start within 30 ms on the same key are one strike, and a key held by two parts is released only when the last of them ends."),
-      p("Velocity sets the hammer's speed as it leaves the escapement, log-linear between 0.6 m/s (velocity 1), 2 m/s (64, mezzo-forte) and 5 m/s (127). Controller 64 is the sustain pedal, with half-pedal positions kept. Volume, expression and other controllers are not used."),
+      p("Velocity sets the hammer's speed as it leaves the escapement, log-linear between 0.6 m/s (velocity 1), 2 m/s (64, mezzo-forte) and 5 m/s (127). Controller 64 is the sustain pedal, with half-pedal positions kept. Channel volume (7) and expression (11) scale each note's velocity as it starts, and a note they fade to silence is not played; other controllers are not used."),
       p("Drum notes go to the piece their General MIDI number names: kick, snare (side stick near the rim, claps on the snare), rack and floor toms, crash (china and splash too), ride and its bell; bongos and congas to the toms, timbales to the snare with its wires off. Anything else is skipped and listed. Velocity scales the piece's standard stroke, and each stroke lands a little away from the last, so no two are identical."),
       p("Hi-hat strokes are left out for now, and counted. The live hi-hat rings like a chime: closed, it keeps sounding for seconds in a few sustained partials below 4 kHz, where a real closed hi-hat gives a short broadband chick, and open it rings in the same pure tones for over six seconds, because the solver has no friction between the two cymbals. A groove's sixteenth-note hats would pile up into a wash of chimes."),
       p("The engines have limits, and the roll keeps within them where it can: a chord of more than ten notes keeps its bass, its top and its loudest notes; no more than sixteen strikes in any quarter second. The piano simulates 24 sounding keys at once; beyond that the quietest strings are retired early.")),
     el("div", {},
       el("h4", {}, "What is computed"),
       p("The piano is engine-piano, the grand's own hammer, string, damper and soundboard equations for the keys that are sounding, on the largest soundboard this device keeps up with (16 to 128 coordinates, chosen for this device when the engines start). Each drum piece is fs-vkplate, the plate solver of the drum kit above, on a grid several times coarser, chosen per piece for this device when the engines start. Only the pieces a file uses are started."),
-      p("Levels: one gain per instrument and nothing else. The piano plays at 0.8 of its engine's full scale (10 Pa at the microphone); each drum piece keeps the live kit's own gain, matched to a recorded kit's balance and rescaled for the grid it runs on, so that its standard stroke is as loud on every grid (coarser grids make the crash 5 dB louder and the closed hi-hat quieter; a quiet stroke is raised only while its peak stays under the kit's cap). Measured in these same engines on the first 12 seconds of six rolls, the loudest moments reach 0.44–0.70 of full scale, so nothing clips. There is no reverb, no equaliser and no limiter."),
+      p("Levels: one gain per instrument and nothing else. The piano plays at 0.8 of its engine's full scale (10 Pa at the microphone); each drum piece keeps the live kit's own gain, matched to a recorded kit's balance and rescaled for the grid it runs on, so that its standard stroke is as loud on every grid (the crash is about 5 dB louder on its 3–4× grids than on the 5× grid the gains were matched on; a quiet stroke is raised only while its peak stays under the kit's cap). Measured in these same engines on the first 12 seconds of six rolls, the loudest moments reach 0.49–0.61 of full scale, so nothing clips. There is no reverb, no equaliser and no limiter."),
       p("The roll's library comes from a jazz chord-progression editor: its chord charts, played as choruses through that editor's own bass and comping generators (the same voicings and grooves it plays), with drum parts written for each groove. Uploaded files go through that editor's MIDI salvage pass, which repairs re-struck, orphaned and unterminated notes and says so, and its rules for naming chords and track roles."),
       p("The soundboard view is the engine's modal sum on its own surface points, heights exaggerated by the factor shown. The kit shows each piece's computed surface velocity; each piece's colour scale follows its own motion down as it decays.")));
 }

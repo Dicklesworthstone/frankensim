@@ -135,7 +135,7 @@ export function mountLiveKit(root: HTMLElement): void {
     hatMode);
   const evidence = el("details", { class: "evidence" }, el("summary", {}, "What is computed"),
     el("p", { class: "small" }, "Each piece is the same finite-difference solver as the drum kit above: tensioned Mylar heads with the air between them, von Kármán bronze shells, Hertz stick contacts, a felt beater, snare wires and a pedal-clamped hi-hat. Here it runs on a grid several times coarser (picked per piece for this device when you start), so it is cheaper and loses detail above a few kHz. A piece that has gone quiet is not stepped until it is struck again."),
-    el("p", { class: "small muted" }, "The colours are the computed transverse velocity of the surface (warm up, cool down), drawn from the solver state about 20 ms ahead of what you hear. Energy is the kinetic energy of the piece; force is the peak stick force of the last stroke. Levels: one gain per piece, matched on one grid to a real kit's recorded balance, except that the cymbals are capped so their very sharp attacks do not clip. A stroke's loudness changes with the grid (the crash is 5 dB louder on a coarser one), so each piece's gain is rescaled for the grid it runs on, from a table of that stroke measured on every grid; it is raised only while the stroke stays under the same peak cap."));
+    el("p", { class: "small muted" }, "The colours are the computed transverse velocity of the surface (warm up, cool down), drawn from the solver state about 20 ms ahead of what you hear. Energy is the kinetic energy of the piece; force is the peak stick force of the last stroke. Levels: one gain per piece, matched on one grid to a real kit's recorded balance, except that the cymbals are capped so their very sharp attacks do not clip. A stroke's loudness changes with the grid (the crash is about 5 dB louder on a 3× grid than on 5×), so each piece's gain is rescaled for the grid it runs on, from a table of that stroke measured on every grid; it is raised only while the stroke stays under the same peak cap."));
   root.replaceChildren(el("div", { class: "panel kit-live" }, stage, el("div", { class: "kit-bar" }, controls, buttons), hud, evidence));
   root.style.minHeight = "0";
 
@@ -155,6 +155,7 @@ export function mountLiveKit(root: HTMLElement): void {
   let paintStatic = true;
   const base = document.createElement("canvas");
   let raf = 0;
+  let visible = true; // the canvas is on screen (an IntersectionObserver below keeps this)
 
   const spotOf = (id: PieceId): Spot => layout[id.startsWith("hihat") ? "hat" : id]!;
   const px = (s: Spot): { cx: number; cy: number; rx: number; ry: number } => ({ cx: ox + s.cx * S, cy: oy + s.cy * S, rx: s.rx * S, ry: s.ry * S });
@@ -172,6 +173,9 @@ export function mountLiveKit(root: HTMLElement): void {
     ox = (W - 1000 * S) / 2;
     oy = (H - dh * S) / 2;
     paintStatic = true;
+    // draw() schedules its own next frame: the one already pending is cancelled, or every resize
+    // while the kit runs would start one more loop drawing the whole kit each frame
+    cancelAnimationFrame(raf);
     draw();
   }
   const ro = new ResizeObserver(resize);
@@ -266,10 +270,15 @@ export function mountLiveKit(root: HTMLElement): void {
       }
     }
     slowLabel.hidden = !slowTag;
-    if (busy || running) raf = requestAnimationFrame(draw);
+    if ((busy || running) && visible) raf = requestAnimationFrame(draw);
     else raf = 0;
   }
-  const kickDraw = (): void => { if (!raf) raf = requestAnimationFrame(draw); };
+  const kickDraw = (): void => { if (!raf && visible) raf = requestAnimationFrame(draw); };
+  // a running kit scrolled out of view is not drawn every frame; it draws again as it comes back
+  new IntersectionObserver((entries) => {
+    visible = entries.some((e) => e.isIntersecting);
+    if (visible) kickDraw();
+  }).observe(canvas);
 
   function paintField(L: Live, v: Float32Array, fade: number, fresh: boolean): void {
     const img = L.img!, cells = L.cells!;
@@ -395,6 +404,10 @@ export function mountLiveKit(root: HTMLElement): void {
         };
         lane.onStats = (s) => { if (s.asleep) { L.kinetic = 0; L.kpeak = 0; } };
         lane.onBurst = (b) => { L.replay = { b, at: performance.now(), n: b.count }; L.kpeak = Math.max(L.kpeak, 1e-30); kickDraw(); };
+        // an engine that fails while playing has left the mix (mix.ts LaneWorker): say so in the readout
+        lane.onFailure = (e) => {
+          if (my === session) hud.append(el("span", { class: "kit-hud-item" }, el("b", {}, def.name), ` stopped: ${e.message}`));
+        };
         const r = await lane.ready;
         L.ready = r;
         // map every surface node to a cell of a square image the size of the grid

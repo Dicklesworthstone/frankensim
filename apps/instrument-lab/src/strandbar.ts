@@ -170,20 +170,27 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
     const wasLoading = phase === "loading";
     session++;
     cancelAnimationFrame(posRaf);
-    try { source?.stop(); } catch { /* not started */ }
-    source?.disconnect();
+    const nodes = graph;
+    graph = [];
+    // Both paths fade out now. The live lanes have rendered up to two seconds ahead, so letting the mix
+    // ring on played the groove's next notes for as long as it rang and then cut them off.
+    if (ctx) {
+      const t = ctx.currentTime;
+      for (const gn of [preGain, liveGain]) if (gn) { gn.gain.cancelScheduledValues(t); gn.gain.setValueAtTime(gn.gain.value, t); gn.gain.linearRampToValueAtTime(0, t + 0.03); }
+      try { source?.stop(t + 0.03); } catch { /* not started */ }
+    }
+    if (source) nodes.push(source);
     source = null;
+    preGain = liveGain = null; // the switch no longer reaches a stopped session
     unStats?.();
     unStats = null;
     const l = lanes;
     lanes = null;
     const m = mix;
     mix = null;
-    const nodes = graph;
-    graph = [];
     if (l) for (const lane of [l.piano, l.kick, l.hihat]) { lane.onStats = null; lane.stop(); }
-    // let the last notes ring out through the mix before the engines go (nothing rings while loading)
-    const ringMs = wasLoading ? 0 : 1500;
+    // the engines and the nodes go once the fade is over (at once while loading: nothing sounds yet)
+    const ringMs = wasLoading ? 0 : 150;
     setTimeout(() => {
       if (l) { l.piano.dispose(); l.kick.dispose(); l.hihat.dispose(); }
       m?.dispose();
@@ -240,6 +247,8 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       if (my !== session) { m.dispose(); return; }
       mix = m;
       for (const k of Object.keys(laneHealth)) delete laneHealth[k];
+      // the meters start blank, not with the last session's speeds and dropouts
+      for (const mtr of Object.values(meters)) { mtr.value.textContent = "—"; mtr.bar.style.width = "0%"; mtr.root.classList.remove("warn", "bad"); }
       unStats = m.onStats((_f, ls) => {
         for (const [id, s] of Object.entries(ls)) {
           const h = (laneHealth[id] ??= { late: 0, gap: 0, rt: 0 });
@@ -247,7 +256,7 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
           h.gap = s.gapFrames;
         }
       });
-      // a fixed score needs no low latency: a second of look-ahead rides out CPU contention
+      // a fixed score needs no low latency: two seconds of look-ahead ride out CPU contention
       // (another tab, a busy machine) that an 85 ms buffer turned into dropouts
       const piano = new PianoLane(m, { aheadFrames: AHEAD, chunk: CHUNK, gain: data.live.piano.gain });
       const kick = new KitLane(m, "kick", { gain: data.live.kick.gain, aheadFrames: AHEAD, chunk: CHUNK, scales: KICK_SCALES, minRealtime: 1.4, fieldHz: 0 });
@@ -281,8 +290,17 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       spec.start();
       setPhase("playing");
       const playingText = `Both versions are playing in step. The drums run on a grid ${kr.scale}× (kick) and ${hr.scale}× (hi-hat) coarser than the studio render, chosen for this device.`;
-      status.textContent = `Pre-buffering 2.0 s of live piano (${pr.boardCoordinates} board modes) and kit (${kr.scale}× kick, ${hr.scale}× hi-hat)…`;
+      status.textContent = `Pre-buffering 2.0 s of live piano (a ${pr.boardCoordinates}-coordinate soundboard) and kit (${kr.scale}× kick, ${hr.scale}× hi-hat)…`;
       let announcedPlaying = false;
+      // an engine that fails mid-loop leaves the mix (mix.ts LaneWorker): say so rather than play on without it
+      const failed = (part: string) => (e: Error): void => {
+        if (my !== session) return;
+        announcedPlaying = true;
+        status.textContent = `The live ${part} stopped (${e.message}). Stop and play again to restart it.`;
+      };
+      piano.onFailure = failed("piano");
+      kick.onFailure = failed("kick");
+      hihat.onFailure = failed("hi-hat");
       const pos = (): void => {
         posRaf = requestAnimationFrame(pos);
         const f = c.currentTime * SR - startFrame;

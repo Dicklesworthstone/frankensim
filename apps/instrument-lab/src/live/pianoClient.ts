@@ -187,7 +187,7 @@ export interface PianoBenchRow {
 }
 
 export interface LivePianoOptions {
-  /** Defaults to `/live`. */
+  /** Defaults to LIVE_BASE_URL (`live/<hash>/` in a build). */
   baseUrl?: string;
   destination?: AudioNode;
   /**

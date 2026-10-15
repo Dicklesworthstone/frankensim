@@ -49,7 +49,8 @@ export class DualSpectrogram {
     this.canvas.width = w;
     this.canvas.height = h;
     this.gap = Math.round(10 * d);
-    this.stripH = Math.floor((h - this.gap) / 2);
+    // 0 on a canvas not laid out (2 px tall): a negative length would throw building the rows
+    this.stripH = Math.max(0, Math.floor((h - this.gap) / 2));
     const a = this.analysers.studio;
     const hz = a.context.sampleRate / a.fftSize;
     this.rows = new Int32Array(this.stripH);
@@ -89,13 +90,15 @@ export class DualSpectrogram {
     const c = this.canvas, g = this.ctx2d;
     const d = c.width / Math.max(1, c.getBoundingClientRect().width);
     const pps = (this.opts.pxPerSecond ?? 90) * d;
-    this.carry += ((now - this.lastT) / 1000) * pps;
+    // at most one canvas width: after a tab was hidden for minutes, one frame would otherwise build an
+    // image tens of thousands of pixels wide
+    this.carry = Math.min(c.width, this.carry + ((now - this.lastT) / 1000) * pps);
     this.lastT = now;
     if (this.stripH < 1) { this.carry = 0; return; } // nothing to draw into (a canvas not laid out yet)
     const dx = Math.floor(this.carry);
     if (dx < 1) return;
     this.carry -= dx;
-    g.drawImage(c, dx, 0, c.width - dx, c.height, 0, 0, c.width - dx, c.height);
+    if (dx < c.width) g.drawImage(c, dx, 0, c.width - dx, c.height, 0, 0, c.width - dx, c.height);
     g.fillStyle = "#07080b";
     g.fillRect(c.width - dx, this.stripH, dx, this.gap);
     for (const s of ["studio", "live"] as const) {
