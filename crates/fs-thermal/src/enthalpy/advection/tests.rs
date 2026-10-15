@@ -1,0 +1,205 @@
+//! Real timeline regressions; fixture caloric data are not measured materials.
+use std::collections::BTreeMap;
+use crate::enthalpy::*;
+use super::{Advected, MassFlow};
+use crate::observers::CoupledObservers;
+
+struct Caloric { cp: f64, latent: f64 }
+impl ThermalLaw for Caloric {
+    fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+        if !h.is_finite() || !(0.0..=1e6).contains(&h) { return Err(DepositionError::MaterialDomain); }
+        let sensible = if h < 100_000.0 { h }
+            else if h <= 100_000.0 + self.latent { 100_000.0 }
+            else { h - self.latent };
+        Ok(300.0 + sensible/self.cp)
+    }
+    fn maximum_temperature_slope(&self) -> f64 { 1.0/self.cp }
+}
+static LAW: Caloric = Caloric { cp: 2000.0, latent: 100_000.0 };
+fn cfg(dt: f64) -> StepConfig { StepConfig { max_dt_s: dt, energy_tolerance_j: 1e-7 } }
+fn budget() -> DepositionBudget {
+    DepositionBudget { max_cells: 10, max_links: 20, max_events: 30, max_substeps: 100_000 }
+}
+fn cell(id: u64, mass: f64, h: f64) -> DepositedCell {
+    DepositedCell { id: CellId(id), segment_id: id+10, body_id: 99, material_id: MaterialId(1),
+        mass_kg: mass, specific_h_j_kg: h,
+        geometry: CellGeometry { start_m: [id as f64,0.0,0.0], end_m: [id as f64+1.0,0.0,0.0],
+            volume_m3: mass/1000.0, surface_area_m2: 1.0 },
+        boundary: Boundary { ambient_k: 300.0, htc_w_m2_k: 0.0, reservoir: None, source_w: 0.0 } }
+}
+fn prepared<'a>(law: &'a dyn ThermalLaw, cells: Vec<DepositedCell>, mut extra: Vec<TimedEvent>)
+    -> DepositionSimulation<'a> {
+    let mut events: Vec<_> = cells.into_iter().map(|c| TimedEvent { time_s: 0.0, event: Event::Birth(c) }).collect();
+    events.append(&mut extra);
+    let s = DepositionSimulation::new(events, &[(MaterialId(1),law),(MaterialId(2),law)], budget()).unwrap();
+    s.advance_to(0.0,cfg(1.0),||Ok(())).unwrap().0
+}
+fn ring(rate: f64) -> Vec<MassFlow> {
+    (0..3).map(|id| MassFlow { id, a: CellId(id), b: CellId((id+1)%3), kg_s: rate }).collect()
+}
+fn close(a: f64, b: f64, tol: f64) { assert!((a-b).abs() <= tol, "{a} != {b}"); }
+
+#[test]
+fn unequal_mass_upwind_step_conserves_heat_without_external_sources() {
+    let masses = [1.0,2.0,4.0];
+    let h = [100.0,300.0,500.0];
+    let s = prepared(&LAW, (0..3).map(|i|cell(i as u64,masses[i],h[i])).collect(), vec![]);
+    let observer = Advected::new((),ring(0.25),3).unwrap();
+    let (n,o,a) = s.advance_observed(&observer,0.125,cfg(1.0),||Ok(())).unwrap();
+    assert_eq!(a.substeps,1);
+    assert_eq!(n.time_s(),0.125);
+    for i in 0..3 {
+        let c = &n.cells()[&CellId(i as u64)];
+        close(c.specific_h_j_kg,h[i]+0.125*0.25*(h[(i+2)%3]-h[i])/masses[i],1e-12);
+        assert_eq!(c.mass_kg,masses[i]);
+        assert_eq!(c.material_id,MaterialId(1));
+        assert_eq!(c.segment_id,i as u64+10);
+    }
+    close(n.energy_j(),s.energy_j(),1e-10);
+    assert_eq!(a.external_heat_j,0.0);
+    assert_eq!(a.incoming_mass_kg,0.0);
+    close(o.audit().transported_mass_kg,3.0*0.125*0.25,0.0);
+    close(o.audit().maximum_courant,0.125*0.25,0.0);
+    assert_eq!(observer.audit().substeps,0);
+}
+
+#[test]
+fn latent_enthalpy_moves_even_when_every_temperature_is_identical() {
+    let s = prepared(&LAW, vec![cell(0,1.0,110_000.0),cell(1,1.0,190_000.0),cell(2,1.0,150_000.0)], vec![]);
+    let o = Advected::new((),ring(0.5),3).unwrap();
+    let (n,_,a) = s.advance_observed(&o,0.25,cfg(1.0),||Ok(())).unwrap();
+    for id in 0..3 {
+        assert_eq!(s.temperature_k(CellId(id)).unwrap(),350.0);
+        assert_eq!(n.temperature_k(CellId(id)).unwrap(),350.0);
+    }
+    close(n.cells()[&CellId(0)].specific_h_j_kg,115_000.0,1e-10);
+    close(n.cells()[&CellId(1)].specific_h_j_kg,180_000.0,1e-10);
+    assert_eq!(a.external_heat_j,0.0);
+    close(a.residual_j,0.0,1e-9);
+}
+
+#[test]
+fn changing_only_caloric_data_changes_observed_temperature_not_transport_law() {
+    let ordinary = Caloric { cp: 2000.0, latent: 0.0 };
+    let different = Caloric { cp: 1000.0, latent: 100_000.0 };
+    let cells = vec![cell(0,1.0,110_000.0),cell(1,1.0,190_000.0),cell(2,1.0,150_000.0)];
+    let a = prepared(&ordinary,cells.clone(),vec![]);
+    let b = prepared(&different,cells,vec![]);
+    let o = Advected::new((),ring(0.5),3).unwrap();
+    let (a,_,_) = a.advance_observed(&o,0.25,cfg(1.0),||Ok(())).unwrap();
+    let (b,_,_) = b.advance_observed(&o,0.25,cfg(1.0),||Ok(())).unwrap();
+    assert_eq!(a.cells(),b.cells());
+    close(a.temperature_k(CellId(0)).unwrap(),357.5,1e-12);
+    close(b.temperature_k(CellId(0)).unwrap(),400.0,1e-12);
+}
+
+#[derive(Clone, Default)]
+struct Witness { durations: Vec<f64>, watts: f64 }
+impl DepositionObserver for Witness {
+    type Error = DepositionError;
+    fn sources(&mut self, _: &DepositionSimulation<'_>, _: &mut dyn FnMut()->Result<(),DepositionError>)
+        -> Result<BTreeMap<CellId,f64>,Self::Error> {
+        Ok(BTreeMap::from([(CellId(0),self.watts)]))
+    }
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>)->Result<(),Self::Error>{Ok(())}
+    fn step(&mut self, _: f64, dt: f64, _: &BTreeMap<CellId,f64>, _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut()->Result<(),DepositionError>)->Result<(),Self::Error>{self.durations.push(dt);Ok(())}
+}
+
+#[test]
+fn conduction_and_advection_share_a_combined_monotone_step_and_hit_events() {
+    let cells = vec![cell(0,1.0,0.0),cell(1,1.0,80_000.0),cell(2,1.0,40_000.0)];
+    let extra = vec![TimedEvent { time_s: 0.0, event: Event::Contact(ThermalLink {
+        id: 9, a: CellId(0), b: CellId(1), area_m2: 0.1, conductance_w_k: 2000.0 }) },
+        TimedEvent { time_s: 0.51, event: Event::Boundary(CellId(0),cells[0].boundary) }];
+    let s = prepared(&LAW,cells,extra);
+    let o = Advected::new(Witness::default(),ring(1.0),3).unwrap();
+    let (n,o,a) = s.advance_observed(&o,0.91,cfg(100.0),||Ok(())).unwrap();
+    // Conductive max decay = 1/s, advective = 1/s => combined dt <= 0.4s.
+    close(o.inner().durations[0],0.4,1e-15);
+    close(o.inner().durations[1],0.11,1e-15);
+    assert_eq!(a.substeps,3);
+    assert_eq!(a.events,1);
+    assert_eq!(n.time_s(),0.91);
+    for c in n.cells().values() { assert!((0.0..=80_000.0).contains(&c.specific_h_j_kg)); }
+    assert_eq!(a.external_heat_j,0.0);
+    close(a.residual_j,0.0,1e-8);
+}
+
+#[test]
+fn zero_flow_preserves_legacy_steps_and_composed_sources_are_counted_once() {
+    let s = prepared(&LAW,vec![cell(0,1.0,40_000.0),cell(1,1.0,50_000.0),cell(2,1.0,60_000.0)],vec![]);
+    let source = Witness { watts: 10.0, ..Witness::default() };
+    let (legacy,lo,la) = s.advance_observed(&source,0.5,cfg(0.125),||Ok(())).unwrap();
+    let empty = Advected::new(source.clone(),ring(0.0),3).unwrap();
+    let (wrapped,wo,wa) = s.advance_observed(&empty,0.5,cfg(0.125),||Ok(())).unwrap();
+    assert_eq!(legacy.cells(),wrapped.cells());
+    assert_eq!(lo.durations,wo.inner().durations);
+    assert_eq!(la,wa);
+    let pair = CoupledObservers::new(Advected::new((),ring(0.25),3).unwrap(),source);
+    let (n,o,a) = s.advance_observed(&pair,0.5,cfg(0.125),||Ok(())).unwrap();
+    close(a.external_heat_j,5.0,1e-12);
+    close(n.energy_j()-s.energy_j(),5.0,1e-7);
+    assert_eq!(o.first.audit().substeps,o.second.durations.len());
+    assert_ne!(n.cells()[&CellId(1)].specific_h_j_kg,legacy.cells()[&CellId(1)].specific_h_j_kg);
+}
+
+#[test]
+fn ordering_and_signed_orientation_do_not_change_solution_and_restart_replays() {
+    let s = prepared(&LAW,vec![cell(0,1.0,10_000.0),cell(1,2.0,20_000.0),cell(2,4.0,30_000.0)],vec![]);
+    let flows = ring(0.25);
+    let equivalent: Vec<_> = flows.iter().rev().map(|f| MassFlow { a:f.b,b:f.a,kg_s:-f.kg_s,..*f }).collect();
+    let a = Advected::new((),flows,3).unwrap();
+    let b = Advected::new((),equivalent,3).unwrap();
+    // dt=0.8/(0.8/0.5 + 0.25)=16/37; align the restart with that actual step.
+    let dt = 0.5/(1.0+0.5/(0.8/0.25));
+    let (whole,_,_) = s.advance_observed(&a,2.0*dt,cfg(0.5),||Ok(())).unwrap();
+    let (same,_,_) = s.advance_observed(&b,2.0*dt,cfg(0.5),||Ok(())).unwrap();
+    assert_eq!(whole.cells(),same.cells());
+    let (mid,observer,_) = s.advance_observed(&a,dt,cfg(0.5),||Ok(())).unwrap();
+    let (resumed,_,_) = mid.advance_observed(&observer,2.0*dt,cfg(0.5),||Ok(())).unwrap();
+    assert_eq!(whole.cells(),resumed.cells());
+    let reverse = Advected::new((),ring(-0.25),3).unwrap();
+    let (reversed,_,_) = s.advance_observed(&reverse,2.0*dt,cfg(0.5),||Ok(())).unwrap();
+    assert_ne!(reversed.cells(),whole.cells());
+}
+
+#[test]
+fn flow_and_material_refusals_leave_original_state_and_observer_unchanged() {
+    let cells = vec![cell(0,1.0,10_000.0),cell(1,1.0,20_000.0),cell(2,1.0,30_000.0)];
+    let s = prepared(&LAW,cells.clone(),vec![]);
+    let mut unbalanced = ring(1.0); unbalanced[1].kg_s = 2.0;
+    let mut inactive = ring(1.0); inactive[1].b = CellId(9);
+    for flows in [unbalanced,inactive,ring(f64::MAX)] {
+        let o = Advected::new(Witness::default(),flows,3).unwrap();
+        assert!(s.advance_observed(&o,1.0,cfg(1.0),||Ok(())).is_err());
+        assert_eq!(s.time_s(),0.0);
+        assert!(o.inner().durations.is_empty());
+        assert_eq!(s.cells()[&CellId(0)],cells[0]);
+    }
+    let mut mixed = cells; mixed[1].material_id = MaterialId(2);
+    let mixed = prepared(&LAW,mixed,vec![]);
+    let o = Advected::new((),ring(1.0),3).unwrap();
+    assert!(mixed.advance_observed(&o,1.0,cfg(1.0),||Ok(())).is_err());
+    let mut duplicate = ring(1.0); duplicate[1].id = 0;
+    assert!(Advected::new((),duplicate,3).is_err());
+    assert!(Advected::new((),ring(1.0),2).is_err());
+    assert!(Advected::new((),ring(f64::NAN),3).is_err());
+}
+
+#[test]
+fn cancellation_and_whole_advance_budget_reject_tentative_transport() {
+    let s = prepared(&LAW,vec![cell(0,1.0,10_000.0),cell(1,1.0,20_000.0),cell(2,1.0,30_000.0)],vec![]);
+    let o = Advected::new(Witness::default(),ring(1.0),3).unwrap();
+    let mut polls = 0;
+    let cancelled = s.advance_observed(&o,1.0,cfg(0.1),|| {
+        polls += 1;
+        if polls > 60 { Err(DepositionError::Cancelled) } else { Ok(()) }
+    });
+    assert!(matches!(cancelled,Err(DepositionError::Cancelled)));
+    assert!(matches!(s.advance_observed_limited(&o,1.0,cfg(0.1),1,||Ok(())),
+        Err(DepositionError::Budget("thermal substeps"))));
+    assert_eq!(s.time_s(),0.0);
+    assert!(o.inner().durations.is_empty());
+    assert_eq!(o.audit().substeps,0);
+}

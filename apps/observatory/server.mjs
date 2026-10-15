@@ -11,7 +11,9 @@ import {MAX_BYTES, parseNative, validateInputs} from './protocol.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 export const BUILD = 'cargo build --release -p fs-couple --example heated_section_sound';
 const assets = {'/': 'index.html', '/index.html': 'index.html', '/styles.css': 'styles.css',
-  '/app.mjs': 'app.mjs', '/visuals.mjs': 'visuals.mjs', '/protocol.mjs': 'protocol.mjs'};
+  '/app.mjs': 'app.mjs', '/visuals.mjs': 'visuals.mjs', '/protocol.mjs': 'protocol.mjs',
+  '/mesh-data.mjs': 'mesh-data.mjs', '/import-vtu.mjs': 'import-vtu.mjs',
+  '/mesh-ui.mjs': 'mesh-ui.mjs', '/mesh-view.mjs': 'mesh-view.mjs', '/mesh.css': 'mesh.css', '/mesh-raster.mjs': 'mesh-raster.mjs'};
 const types = {html: 'text/html', css: 'text/css', mjs: 'text/javascript'};
 async function ready(engine) { try { await access(engine, constants.X_OK); return (await stat(engine)).isFile(); } catch { return false; } }
 async function body(req) {

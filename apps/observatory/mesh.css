@@ -1,0 +1,29 @@
+/* Mesh mode reuses the same workspace panels, typography and focus treatments. */
+.mesh-mode .inspector>:not(#mesh-inspector),.mesh-mode #scene,.mesh-mode .scene-heading .segmented,
+.mesh-mode #field,.mesh-mode .scene-footer .layer-chips,.mesh-mode .scene-footer>.small,
+.mesh-mode .lower-grid,.mesh-mode #plot-tabs,.mesh-mode .trace-controls,.mesh-mode #zoom,
+.mesh-mode .signal-tools>label{display:none!important}
+#mesh-inspector{min-width:0}.mesh-mode .inspector{display:block}
+#mesh-inspector h2{margin-bottom:7px}#mesh-inspector select{font-size:11px}
+#mesh-inspector>label,#mesh-component-box label,#mesh-deformation-box label{margin-top:20px}
+.mesh-source-card{border:1px solid var(--line-soft);border-radius:8px;background:var(--input);padding:13px;margin:20px 0}
+.mesh-source-card strong{font:12px var(--mono);display:block;margin:9px 0}.mesh-source-card p{font-size:10px}
+.mesh-hint{margin-top:9px;font-size:10px}#mesh-inspector .mesh-check{display:flex;gap:9px;justify-content:start;align-items:center}
+.mesh-check input{accent-color:var(--accent);width:15px;height:15px}#mesh-deformation-box p{margin-top:7px;font-size:10px}
+#mesh-new-experiment{width:100%;white-space:normal}#mesh-scene{display:block;width:100%;height:100%;touch-action:none;cursor:grab}
+#mesh-scene:active{cursor:grabbing}.mesh-mode .canvas-stage{height:435px}.mesh-mode .scene-panel{background:radial-gradient(ellipse at 50% 48%,color-mix(in srgb,var(--cold) 7%,var(--panel)),var(--panel) 70%)}
+#mesh-legend{display:flex;align-items:center;justify-content:space-between;gap:20px;width:100%;min-width:0}
+#mesh-field-caption{font-size:11px;overflow-wrap:anywhere}#mesh-association{display:block;color:var(--dim);font-size:9px;margin-top:3px}
+.mesh-scale{width:210px;max-width:45%;flex-shrink:0}.mesh-ramp{height:5px;border-radius:3px;background:linear-gradient(to right,#264078,#1491a1,#8cc499,#fcbe66,#d94d2e)}
+.mesh-scale-labels{display:flex;justify-content:space-between;color:var(--muted);font:9px var(--mono);margin-top:6px;gap:10px}
+#mesh-timeline{border-top:1px solid var(--line-soft);padding:14px 20px;background:var(--input)}
+.mesh-transport{display:flex;align-items:center;gap:7px;margin-bottom:10px}.mesh-transport output{font:12px var(--mono);color:var(--text);margin-left:8px}
+.mesh-transport select{width:65px;height:29px;margin-left:auto;font-size:10px}.mesh-transport .small-button{min-width:31px}
+#mesh-play{min-width:68px}#mesh-frame-note{display:block;font:9px var(--mono);margin-top:7px;color:var(--dim)}
+.mesh-mode .metrics strong{font-size:21px}.mesh-mode .metrics strong>span{display:inline}
+.mesh-mode #channels{gap:8px;color:var(--muted);font:10px var(--mono);overflow-wrap:anywhere;display:grid}
+.mesh-mode #signal-heading{font-size:14px}.mesh-mode .scene-heading h2{font-size:17px}
+#confirm-mesh-import{margin-top:18px}#import-length-unit{max-width:260px;margin-bottom:8px}
+@media(min-width:1720px){.mesh-mode .canvas-stage{height:510px}}
+@media(max-width:850px){.mesh-mode .canvas-stage{height:380px}#mesh-inspector{display:grid;grid-template-columns:1fr 1fr;gap:4px 20px}#mesh-inspector>.panel-heading,#mesh-inspector>h2,#mesh-inspector>p,#mesh-inspector>.mesh-source-card,#mesh-new-experiment{grid-column:1/-1}#mesh-inspector>select,#mesh-inspector>input,#mesh-component-box,#mesh-deformation-box{grid-column:1/-1}#mesh-inspector>label{grid-column:1/-1;margin-top:12px}}
+@media(max-width:520px){.mesh-mode .canvas-stage{height:310px}.mesh-mode .scene-heading h2{font-size:15px}.mesh-mode .metrics strong{font-size:22px}#mesh-timeline{padding:12px}#mesh-legend{gap:8px}.mesh-scale{max-width:42%}.mesh-scale-labels{font-size:8px;flex-wrap:wrap}#mesh-inspector{display:block}.mesh-transport{gap:4px}.mesh-transport output{font-size:10px;margin-left:3px}#mesh-frame-note{font-size:8px}}

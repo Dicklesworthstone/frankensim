@@ -152,10 +152,11 @@ fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, Sourc
         Kind::Reed => {
             let p = ReedPerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
             let i = p.info();
+            let exterior_json = super::duct_metadata::reed_provenance(&p);
             (Box::new(p) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: REED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                components: 1, modes: 0, controls: i.compiled_controls, exterior_json: String::new(),
+                components: 1, modes: 0, controls: i.compiled_controls, exterior_json,
             })
         }
     };
@@ -218,10 +219,10 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     )?;
     let parts: Vec<_> = sources.iter().zip(renderer.part_info()).map(|(source, aligned)| {
         let o = aligned.observation;
-        let scope = if source.kind == Kind::Reed {
-            ",\"observation_scope\":\"bore-pressure-plus-compact-jet-proxy; not exterior microphone\""
-        } else if !source.exterior_json.is_empty() {
+        let scope = if !source.exterior_json.is_empty() {
             source.exterior_json.as_str()
+        } else if source.kind == Kind::Reed {
+            ",\"observation_scope\":\"bore-pressure-plus-compact-jet-proxy; not exterior microphone\""
         } else if source.kind == Kind::Valve {
             ",\"observation_scope\":\"internal coupled tube pressure; not an exterior microphone\""
         } else { "" };

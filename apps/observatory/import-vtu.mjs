@@ -142,7 +142,7 @@ export function parseVTU(text, {lengthUnit, time=null, title='Imported VTU field
   const connectivity=data(named('connectivity'),offsets.at(-1),{integer:true,components:1}), types=data(named('types'),nc,{integer:true,components:1});
   const cells=offsets.map((end,i)=>connectivity.slice(i?offsets[i-1]:0,end));
   const boundary=exterior(positions_m,cells,types), fields=[];
-  let values=np*3+boundary.triangles.length*4;
+  let values=np*3+boundary.triangles.length*4+connectivity.length+types.length;
   for (const [tag,association,entities] of [['PointData','point',np],['CellData','cell',nc]]) {
     const section=one(piece,tag,true); if(!section) continue; only(section,['DataArray']);
     for(const arr of section.children) {
@@ -159,5 +159,5 @@ export function parseVTU(text, {lengthUnit, time=null, title='Imported VTU field
       'Volume cells are shown by their exterior faces; interior cells and their original field values remain available to the probe. No cutting plane or volume rendering.',
       'Quads use a fixed diagonal for display. Point fields are linearly interpolated only for coloring; cell fields are never averaged across material interfaces.',
       time===null?'Static snapshot: zero is a viewer reference, not an asserted solver time.':`Recorded snapshot time explicitly supplied by the caller: ${time} s.`]},
-    mesh:{positions_m,...boundary,cell_count:nc,time_s:[time===null?0:scalar(time,'Snapshot time')],fields}});
+    mesh:{positions_m,...boundary,cell_count:nc,source_cells:cells,source_types:types,time_s:[time===null?0:scalar(time,'Snapshot time')],fields}});
 }

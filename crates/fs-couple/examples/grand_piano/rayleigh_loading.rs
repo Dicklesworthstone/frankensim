@@ -4,7 +4,7 @@
 use super::{board_geometry::SurfaceSample, engine::radiation::{self, Model, PortBasis}, linear::Bank};
 use fs_bem::helmholtz::{Medium, rayleigh_modal::{AreaSample, PreparedSurface, MAX_MODAL_RAYLEIGH_FIELDS}};
 use fs_couple::render::plate::impact::radiation::{fit, MAX_PORTS};
-use fs_math::det;
+use fs_math::{c64::C64, det};
 use std::f64::consts::TAU;
 
 /// An offline ceiling on cell-mode-frequency visits, not a time guarantee.
@@ -86,6 +86,7 @@ impl std::fmt::Display for Report {
             self.min_hz, self.max_hz, self.frequencies, self.peak_error, self.rms_error,
             self.resistance_peak_error, self.resistance_rms_error, self.reference_min_hz,
             self.reference_max_hz, self.minimum_equivalent_disc_ppw, self.sweep_terms)?;
+        write!(f, " Power-consistent area-point resistance; equivalent-disc self reactance.")?;
         if let Some(error) = self.surface_rms_error {
             write!(f, " Explicit acoustic projection: {} ports over all {} board coordinates; surface-field RMS omission {:.5}. Reported load errors include projection and fitting on the complete original matrices.", self.acoustic_ports, self.board_modes, error)?;
         }
@@ -162,12 +163,7 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
         TAU * det::exp(low + span * i as f64 / (options.samples - 1) as f64)).collect();
     omega[0] = TAU * options.min_hz;
     omega[options.samples - 1] = TAU * options.max_hz;
-    let mut data = Vec::with_capacity(options.samples);
-    for &w in &omega {
-        let mut matrix = prepared.impedance(w, medium).map_err(|e| e.to_string())?;
-        for value in &mut matrix { *value = value.scale(f64::from(options.sides)); }
-        data.push(matrix);
-    }
+    let data = sample_impedances(&prepared, &omega, medium, options.sides)?;
     let fitted = if let Some((basis, _)) = &projection {
         radiation::fit_projected(&omega, &data, basis)?
     } else { fit::fit(&omega, &data, modes)? };
@@ -183,6 +179,24 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
     };
     Ok(PreparedLoad { model: fitted.model, report, basis: projection.map(|(basis, _)| basis) })
 }
+
+// One target image serves full and explicitly projected loads. Sample ALL
+// fields before projection; do not repair a negative self-cell resistance in
+// the fitter or scale the observing microphone to hide missing work.
+fn sample_impedances(surface: &PreparedSurface, omega: &[f64], medium: Medium, sides: u8)
+    -> Result<Vec<Vec<C64>>, String> {
+    let mut data = Vec::with_capacity(omega.len());
+    for &w in omega {
+        let mut matrix = surface.power_consistent_impedance(w, medium).map_err(|e| e.to_string())?;
+        for value in &mut matrix { *value = value.scale(f64::from(sides)); }
+        data.push(matrix);
+    }
+    Ok(data)
+}
+
+#[cfg(test)]
+#[path = "rayleigh_loading_power_tests.rs"]
+mod power_tests;
 
 #[cfg(test)]
 #[path = "rayleigh_loading_tests.rs"]

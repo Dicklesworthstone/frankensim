@@ -170,3 +170,11 @@ required-features = ["newton-design"]
 [[example]]
 name = "constrained_simp"
 required-features = ["newton-design"]
+
+[[test]]
+name = "robust_simp_newton"
+required-features = ["newton-design"]
+
+[[example]]
+name = "robust_simp"
+required-features = ["newton-design"]

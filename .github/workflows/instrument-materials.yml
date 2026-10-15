@@ -28,6 +28,10 @@ on:
       - 'crates/fs-couple/tests/reed_gas_mixture*'
       - 'crates/fs-couple/tests/reed_gas_mixture/**'
       - 'crates/fs-couple/src/baffled_pressure*.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/radiation.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/radiation/**'
+      - 'crates/fs-couple/tests/baffled_environment*'
+      - 'crates/fs-couple/tests/baffled_environment/**'
       - 'crates/fs-couple/src/bernoulli_aperture/contraction.rs'
       - 'crates/fs-couple/src/bernoulli_aperture/moving.rs'
       - 'crates/fs-couple/tests/contraction_loss.rs'
@@ -107,6 +111,14 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Matched exterior reaction and instrument pressure
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --test baffled_environment -- --test-threads=1
+          cargo check -p fs-couple --example two_sided_reed
+          demo="$(mktemp -d)"
+          cargo run -p fs-couple --example two_sided_reed -- "$demo/exterior293.wav" 0.12 900 293.15
+          cargo run -p fs-couple --example two_sided_reed -- "$demo/exterior333.wav" 0.12 900 333.15
       - name: Nonlinear mouth loss and physical flute pressure
         if: ${{ !cancelled() }}
         run: |

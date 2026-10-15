@@ -12,8 +12,8 @@ impl ShellReduction {
     /// original physical rotations are retained. `facet_weights` are nonnegative
     /// multipliers of each source facet's material energy, not mode gains.
     ///
-    /// This cold query reconstructs D from the SAME retained area-integrated
-    /// membrane resultant (A=12D/h^2), at roundoff precision. It does not alter
+    /// This cold query uses the EXACT retained D, independent of membrane A
+    /// and thickness. It does not reconstruct a solid-sheet law or alter
     /// the equilibrium potential, eigenvectors, mass or any dynamic history.
     /// Constant translation is removed before spatial differencing, exactly as
     /// in the original shell projection; it creates no internal bending loss.
@@ -36,9 +36,8 @@ impl ShellReduction {
         let mut local=vec![[0.0;9];n];
         for (f,tri) in self.triangles.iter().enumerate() {
             if facet_weights[f]==0.0 {continue;}
-            let g=mesh.facet(f)?;let h=self.section_thicknesses[f];
-            let inverse=h*h/(12.0*g.area_m2);
-            let d=self.facets[f].membrane.map(|a|a*inverse);
+            let g=mesh.facet(f)?;
+            let d=self.facets[f].bending;
             if d.iter().any(|x|!x.is_finite()) {return Err(bad("shell bending section overflow"));}
             let (k,_) = crate::dkt_stiffness(&g.x,&g.y,&d,f)?;
             for (mode,row) in local.iter_mut().enumerate() {
@@ -87,7 +86,10 @@ mod tests {
     }
     #[test]
     fn weighted_flexure_matches_independent_nodal_dkt_work_and_keeps_cross_terms() {
-        let (mesh,sections,model,modes,r)=fixture();let n=modes.len();
+        check_work(fixture());
+    }
+    fn check_work((mesh,sections,model,modes,r):(ShellMesh,Vec<PlateSection>,crate::shell::ShellModel,Vec<ModePair>,ShellReduction)) {
+        let n=modes.len();
         let weights=[0.3,1.7];let kb=r.bending_stiffness(&weights,1000).unwrap();
         let q:Vec<_>=(0..n).map(|i|1e-6*(i as f64-2.3)).collect();
         let mut nodal=vec![[0.;6];mesh.nodes.len()];
@@ -110,6 +112,26 @@ mod tests {
         assert!((actual-want).abs()<1e-10*want.abs());assert!(actual>0.);
         assert!((0..n).any(|i|(0..i).any(|j|kb[i*n+j].abs()>1e-6)));
         for i in 0..n {for j in 0..n {assert_eq!(kb[i*n+j],kb[j*n+i]);}}
+    }
+    #[test]
+    fn independent_sheet_flexure_uses_retained_d_not_membrane_times_thickness_squared() {
+        use fs_material::sheet::SheetMatrix;
+        use crate::shell::{ShellSection,assemble_shell_materials};
+        let (mesh,_,_,_,_)=fixture();
+        let sections:Vec<_>=(0..mesh.tris.len()).map(|i| {
+            let angle=0.3+i as f64*0.2;
+            let plate=PlateSection {d:*SheetMatrix::orthotropic(0.003,0.0015,0.0004,0.0007)
+                .unwrap().rotated(angle).unwrap().coefficients(),thickness:0.001,density:300.};
+            ShellSection::new(plate,SheetMatrix::orthotropic(2000.,800.,150.,450.)
+                .unwrap().rotated(angle).unwrap()).unwrap()
+        }).collect();
+        let model=assemble_shell_materials(&mesh,&sections,&[0,1,2],ShellSupport::Clamped).unwrap();
+        let n=model.free;let mut k=vec![0.;n*n];let mut m=k.clone();
+        for i in 0..n {for j in 0..n {k[i*n+j]=model.k.get(i,j);m[i*n+j]=model.m.get(i,j);}}
+        let modes=fs_modal::eigh_gen_dense(&k,&m,n).unwrap();
+        let r=ShellReduction::new_materials(&mesh,&sections,&model,&modes,ReductionBudget {
+            max_modes:12,max_facet_modes:100,relative_tolerance:1e-6}).unwrap();
+        check_work((mesh,sections.iter().map(|s|*s.plate()).collect(),model,modes,r));
     }
     #[test]
     fn rigid_translation_and_pure_facet_drilling_have_no_flexural_loss() {

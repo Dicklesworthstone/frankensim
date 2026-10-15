@@ -1,10 +1,9 @@
-//! two_sided_reed NEW_OUTPUT.wav UPSTREAM_LENGTH_M SECOND_BLADE_DENSITY_KG_M3
+//! two_sided_reed NEW_OUTPUT.wav UPSTREAM_LENGTH_M SECOND_BLADE_DENSITY_KG_M3 [EXTERIOR_K]
 //! Authored plate sections and tract termination, not identified cane/anatomy.
 use fs_couple::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
 use fs_couple::bernoulli_aperture::paired::{BladeState, PairedAperture, PairedApertureLimits};
 use fs_couple::bernoulli_aperture::plate::{PlateApertureOptions, PlateApertureReduction};
-use fs_couple::bernoulli_aperture::radiation::BaffledRadiationLoad;
-use fs_couple::bernoulli_aperture::two_sided::{ApertureDuctSpec, TwoSidedAperture,
+use fs_couple::bernoulli_aperture::two_sided::{ApertureDuctSpec,
     TwoSidedLimits, ValveSide, combined_inlet_state};
 use fs_couple::bernoulli_aperture::two_sided::observer::TwoSidedPressure;
 use fs_couple::bernoulli_aperture::two_sided::observer::schedule::ScheduledTwoSidedPressure;
@@ -12,6 +11,7 @@ use fs_couple::bernoulli_aperture::performance::AperturePerformanceConfig;
 use fs_scenario::gesture::GestureSchedule;
 use fs_couple::pcm_wav::{encode_pcm16_wav, baffled::CircularOutletReceiver,
     observation::PressureRenderer};
+use fs_couple::pcm_wav::baffled::openings::duct::{DuctOpening,DuctRadiationSpec,DuctReconstruction};
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
@@ -37,21 +37,23 @@ fn plate(density: f64, gate: &CancelGate) -> Result<PlateApertureReduction, Stri
 }
 fn run() -> Result<(), String> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let [destination, length, density] = args.as_slice() else {
-        return Err("usage: two_sided_reed NEW_OUTPUT.wav UPSTREAM_LENGTH_M SECOND_BLADE_DENSITY_KG_M3".into());
+    let (destination, length, density, exterior_k) = match args.as_slice() {
+        [destination,length,density] => (destination,length,density,293.15),
+        [destination,length,density,temperature] => (destination,length,density,
+            temperature.parse::<f64>().map_err(|_| "exterior temperature must be kelvin".to_string())?),
+        _ => return Err("usage: two_sided_reed NEW_OUTPUT.wav UPSTREAM_LENGTH_M SECOND_BLADE_DENSITY_KG_M3 [EXTERIOR_K]".into()),
     };
     let length: f64 = length.parse().map_err(|_| "upstream length must be metres".to_string())?;
     let density: f64 = density.parse().map_err(|_| "blade density must be kg/m3".to_string())?;
     if !length.is_finite() || !(0.03..=1.0).contains(&length)
-        || !density.is_finite() || density <= 0.0 {
-        return Err("require upstream length in [0.03,1] m and positive finite density".into());
+        || !density.is_finite() || density <= 0.0 || !exterior_k.is_finite() || exterior_k <= 0.0 {
+        return Err("require upstream length in [0.03,1] m, positive finite density and exterior kelvin".into());
     }
     let gate = CancelGate::new_clock_free();
     let rate = 48_000;
     let dt = 1.0/f64::from(rate);
     let gas = GasState::try_new_moist_air(293.15, 101_325.0, 0.0).map_err(|e| format!("{e:?}"))?;
-    let radiation = BaffledRadiationLoad::new(0.007, gas.density, gas.sound_speed, dt, 1000.0, &gate)
-        .map_err(|e| e.to_string())?;
+    let exterior = GasState::try_new_moist_air(exterior_k, 101_325.0, 0.0).map_err(|e| format!("{e:?}"))?;
     let make_side = |length, terminal| ApertureDuctSpec {
         graph: TubeNetworkSpec {
             nodes: vec![NetworkNode::Inlet, terminal],
@@ -61,7 +63,8 @@ fn run() -> Result<(), String> {
         }, gases: vec![gas], viscothermal: vec![],
     };
     let sides = [make_side(length, NetworkNode::Termination { reflection: 0.7 }),
-        make_side(0.25, radiation.termination())];
+        // Explicit cold endpoint: the common environment installs radiation here.
+        make_side(0.25, NetworkNode::Termination { reflection: 0.0 })];
     let (inlet, load) = combined_inlet_state(&sides).map_err(|e| e.to_string())?;
     let plates = [plate(900.0, &gate)?, plate(density, &gate)?];
     for (i, p) in plates.iter().enumerate() {
@@ -76,17 +79,21 @@ fn run() -> Result<(), String> {
             maximum_abs_velocity_m_s: 100.0, maximum_energy_j: 1.0, max_evaluations: 256,
             velocity_tolerance_m_s: 1e-13, relative_tolerance: 1e-11 },
         [BladeState::default(); 2], contact).map_err(|e| e.to_string())?;
-    let model = TwoSidedAperture::new(valve.into(), sides, TwoSidedLimits {
-        maximum_energy_j: 1.0, energy_absolute_tolerance_j: 1e-16, energy_relative_tolerance: 1e-7,
-        flow_absolute_tolerance_m3_s: 1e-16, flow_relative_tolerance: 1e-8,
-    }, &gate).map_err(|e| e.to_string())?;
+    let (source,boundaries) = TwoSidedPressure::from_baffled_environment(valve.into(), sides,
+        [None,None], TwoSidedLimits {
+            maximum_energy_j: 1.0, energy_absolute_tolerance_j: 1e-16, energy_relative_tolerance: 1e-7,
+            flow_absolute_tolerance_m3_s: 1e-16, flow_relative_tolerance: 1e-8,
+        }, None, DuctRadiationSpec {
+            openings: vec![DuctOpening {network:1,node:1,center_m:[0.0;2]}], exterior:Some(exterior),
+            receiver:CircularOutletReceiver {position_m:[0.0,0.0,0.25],radial_rings:4,
+                angular_points:16,maximum_frequency_hz:1000.0},
+            reconstruction:DuctReconstruction::FiniteDifference {sample_rate_hz:rate},
+        },240,&gate).map_err(|e|e.to_string())?;
     eprintln!("represented_upstream_m={}; represented_downstream_m={}",
-        model.represented_sections(ValveSide::Upstream)[0].represented_length_m,
-        model.represented_sections(ValveSide::Downstream)[0].represented_length_m);
-    let source = TwoSidedPressure::new(model, ValveSide::Downstream, 1,
-        CircularOutletReceiver { position_m: [0.0, 0.0, 0.25], radial_rings: 4,
-            angular_points: 16, maximum_frequency_hz: 1000.0 }, rate, 240)
-        .map_err(|e| e.to_string())?;
+        source.system().represented_sections(ValveSide::Upstream)[0].represented_length_m,
+        source.system().represented_sections(ValveSide::Downstream)[0].represented_length_m);
+    eprintln!("interior_k=293.15; exterior_k={exterior_k}; exterior_density={}; exterior_speed={}; radiation_loads={}",
+        exterior.density,exterior.sound_speed,boundaries.len());
     // The common gesture compiler, not a host-block envelope, owns the source.
     let schedule = GestureSchedule::from_canonical_bytes(include_bytes!("two_sided_reed.gesture"))
         .map_err(|e| e.to_string())?;

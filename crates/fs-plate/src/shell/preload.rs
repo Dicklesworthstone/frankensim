@@ -12,8 +12,11 @@
 //! moderate rotations. Beam bending/axial laws and offsets remain linear in
 //! their reference frames. No nonconservative follower loads, beam buckling,
 //! glue creep, manufacturing stress, large-rotation bending or unstable branch.
-use super::{FacetGeometry, ShellMesh, ShellModel, ShellSupport};
-use super::stiffened::{ShellBeam, assemble_stiffened_shell};
+use super::{FacetGeometry, ShellMesh, ShellModel, ShellSupport, ShellSection};
+use super::section::Section;
+use super::stiffened::ShellBeam;
+#[cfg(test)]
+use super::stiffened::assemble_stiffened_shell;
 use crate::PlateSection;
 use fs_sparse::{Coo, Csr, DirectOrdering, LdltFactor, LdltOptions, SymbolicLdlt};
 use std::cell::Cell;
@@ -87,10 +90,10 @@ struct Correction {
     gradient: f64,
 }
 impl Element {
-    fn new(mesh: &ShellMesh, model: &ShellModel, section: &PlateSection, e: usize)
+    fn new<S: Section>(mesh: &ShellMesh, model: &ShellModel, section: &S, e: usize)
         -> Result<Self,String> {
         let geometry = mesh.facet(e).map_err(|e|e.to_string())?;
-        let membrane = section.d.map(|d| d*geometry.area_m2*12.0/section.thickness.powi(2));
+        let membrane = section.membrane().map_err(|e|e.to_string())?.map(|a| a*geometry.area_m2);
         let dofs = std::array::from_fn(|i| model.dof_map[6*mesh.tris[e][i/3]+i%3]);
         let linear = std::array::from_fn(|i| {
             let [x,y] = geometry.gradient[i/3]; let c = i%3;
@@ -297,6 +300,30 @@ pub fn equilibrate_tethered_shell(mesh:&ShellMesh,sections:&[PlateSection],
     options:PreloadOptions,
     solve: &mut impl FnMut(&PreloadProblem<'_>, Vec<f64>, usize)->Result<(Vec<f64>,usize),String>)
     ->Result<PreloadedShell,String> {
+    equilibrate_sections(mesh,sections,boundary,support,beams,loads,tethers,options,solve)
+}
+
+/// Full-coordinate nonlinear equilibrium for independently characterized A and D.
+/// Uses the original load continuation, analytic membrane force/tangent, optional
+/// beams/tethers, force-balance acceptance and stability factorization. There is
+/// no empirical drape or large-rotation bending claim. Return modes are SMALL
+/// vibrations about this equilibrium, not the unloaded `ShellReduction` basis.
+/// # Errors
+/// The same physical, solver and budget refusals as `equilibrate_tethered_shell`.
+#[allow(clippy::too_many_arguments)]
+pub fn equilibrate_shell_materials(mesh:&ShellMesh,sections:&[ShellSection],
+    boundary:&[usize],support:ShellSupport,beams:&[ShellBeam],loads:&[f64],tethers:&[ShellTether],
+    options:PreloadOptions,
+    solve: &mut impl FnMut(&PreloadProblem<'_>, Vec<f64>, usize)->Result<(Vec<f64>,usize),String>)
+    ->Result<PreloadedShell,String> {
+    equilibrate_sections(mesh,sections,boundary,support,beams,loads,tethers,options,solve)
+}
+#[allow(clippy::too_many_arguments)]
+fn equilibrate_sections<S: Section>(mesh:&ShellMesh,sections:&[S],
+    boundary:&[usize],support:ShellSupport,beams:&[ShellBeam],loads:&[f64],tethers:&[ShellTether],
+    options:PreloadOptions,
+    solve: &mut impl FnMut(&PreloadProblem<'_>, Vec<f64>, usize)->Result<(Vec<f64>,usize),String>)
+    ->Result<PreloadedShell,String> {
     if mesh.nodes.len()>10_000 || mesh.tris.len()>40_000 || loads.len()!=6*mesh.nodes.len()
         || tethers.len()>4096
         || loads.iter().any(|v|!v.is_finite()) || support==ShellSupport::Free || boundary.is_empty()
@@ -309,7 +336,7 @@ pub fn equilibrate_tethered_shell(mesh:&ShellMesh,sections:&[PlateSection],
         || !(1e-12..=1e-4).contains(&options.relative_force_tolerance) {
         return Err("invalid supported-shell preload, load cardinality or explicit budget".into());
     }
-    let model=assemble_stiffened_shell(mesh,sections,boundary,support,beams).map_err(|e|e.to_string())?;
+    let model=super::stiffened::assemble_sections(mesh,sections,boundary,support,beams).map_err(|e|e.to_string())?;
     let base=positive_factor(&model.k)?;
     let length=(0..3).map(|c| {
         let lo=mesh.nodes.iter().map(|p|p[c]).fold(f64::INFINITY,f64::min);
@@ -465,4 +492,54 @@ mod tests {
         assert!(equilibrate_tethered_shell(&mesh,&sections,&fixed,ShellSupport::Clamped,&[],
             &vec![0.;54],&bad,PreloadOptions::default(),&mut reference_newton).is_err());
     }
+    fn independent_sections(mesh:&ShellMesh,scale:f64)->Vec<ShellSection> {
+        use fs_material::sheet::SheetMatrix;
+        (0..mesh.tris.len()).map(|e| {
+            let ex=mesh.facet(e).unwrap().frame[0];let angle=0.27-ex[1].atan2(ex[0]);
+            let plate=PlateSection {d:*SheetMatrix::orthotropic(0.003,0.0015,0.0004,0.0007)
+                .unwrap().rotated(angle).unwrap().coefficients(),thickness:0.001,density:300.};
+            ShellSection::new(plate,SheetMatrix::orthotropic(2000.*scale,800.*scale,150.*scale,450.*scale)
+                .unwrap().rotated(angle).unwrap()).unwrap()
+        }).collect()
+    }
+    #[test]
+    fn independent_sheet_membrane_changes_loaded_shape_without_changing_bending_or_mass() {
+        let (mesh,_,fixed)=fixture(0.);let original=mesh.clone();
+        let soft=independent_sections(&mesh,1.);let stiff=independent_sections(&mesh,20.);
+        let base=super::super::assemble_shell_materials(&mesh,&soft,&fixed,ShellSupport::Clamped).unwrap();
+        let solve=|sections:&[ShellSection],load:&[f64]|equilibrate_shell_materials(&mesh,sections,&fixed,
+            ShellSupport::Clamped,&[],load,&[],PreloadOptions::default(),&mut reference_newton).unwrap();
+        let zero=solve(&soft,&vec![0.;54]);
+        assert!(zero.displacement.iter().all(|u|*u==0.));
+        for row in 0..base.free {assert_eq!(zero.model.k.row(row),base.k.row(row));}
+        let mut load=vec![0.;54];load[26]=-0.02;
+        let a=solve(&soft,&load);let b=solve(&stiff,&load);
+        assert!(a.displacement[26]<0. && b.displacement[26]<0.);
+        assert!(b.displacement[26].abs()<0.99*a.displacement[26].abs(),"{} vs {}",a.displacement[26],b.displacement[26]);
+        assert!(a.residual_force_n<1e-8 && b.residual_force_n<1e-8);
+        assert!(a.stored_energy_j>0. && b.stored_energy_j>0.);
+        let z=base.dof_map[26].unwrap();assert!(a.model.k.get(z,z)>base.k.get(z,z));
+        for row in 0..base.free {assert_eq!(a.model.m.row(row),base.m.row(row));assert_eq!(b.model.m.row(row),base.m.row(row));}
+        for (a,b) in soft.iter().zip(stiff) {assert_eq!(a.plate().d,b.plate().d);}
+        assert_eq!(mesh,original);
+    }
+    #[test]
+    fn independent_sheet_geometric_force_and_tangent_keep_the_same_energy() {
+        let (mesh,_,fixed)=fixture(0.008);let sections=independent_sections(&mesh,1.);
+        let model=super::super::assemble_shell_materials(&mesh,&sections,&fixed,ShellSupport::Clamped).unwrap();
+        let element=Element::new(&mesh,&model,&sections[0],0).unwrap();
+        let mut u=vec![0.;model.free];u[0]=0.0002;u[1]=-0.0001;u[2]=0.001;
+        let c=element.correction(&u);let eps=1e-7;
+        for i in 0..9 {if let Some(d)=element.dofs[i] {
+            let mut a=u.clone();let mut b=u.clone();a[d]+=eps;b[d]-=eps;
+            let ca=element.correction(&a);let cb=element.correction(&b);
+            let fd=(ca.energy-cb.energy)/(2.*eps);
+            assert!((fd-c.force[i]).abs()<1e-8*(1.+c.force[i].abs()));
+            for j in 0..9 {if element.dofs[j].is_some() {
+                let fd=(ca.force[j]-cb.force[j])/(2.*eps);
+                assert!((fd-c.tangent[9*j+i]).abs()<1e-7*(1.+c.tangent[9*j+i].abs()));
+            }}
+        }}
+    }
+
 }

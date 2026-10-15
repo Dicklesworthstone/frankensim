@@ -12,27 +12,35 @@ pub(super) struct TerminalObservation {
 
 pub(super) enum ObservationInput {
     Legacy(f64),
-    Baffled(CircularOutletReceiver),
+    Baffled { receiver: CircularOutletReceiver, exterior: Option<GasState> },
 }
 impl ObservationInput {
     pub(super) fn read(reader: &mut Reader<'_>) -> Result<Self, ReedPerformanceError> {
         let mut row = reader.next()?;
-        let observation = match row.word()? {
+        let mut observation = match row.word()? {
             "listener_m" => Self::Legacy(row.positive()?),
-            "baffled_outlet" => Self::Baffled(CircularOutletReceiver {
+            "baffled_outlet" => Self::Baffled { receiver: CircularOutletReceiver {
                 position_m: [row.scalar()?, row.scalar()?, row.scalar()?],
                 radial_rings: row.count(128)?, angular_points: row.count(512)?,
                 maximum_frequency_hz: row.positive()?,
-            }),
+            }, exterior: None },
             _ => return Err(bad(row.line, "expected listener_m or baffled_outlet observation")),
         };
         row.finish()?;
+        if reader.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("exterior") {
+            let mut row = reader.row("exterior")?;
+            let Self::Baffled { exterior, .. } = &mut observation else {
+                return Err(bad(row.line, "an exterior gas requires the physical baffled_outlet observation"));
+            };
+            *exterior = Some(row.gas(None)?);
+            row.finish()?;
+        }
         Ok(observation)
     }
 
     pub(super) fn validate_termination(&self, termination: Termination, line: usize)
         -> Result<(), ReedPerformanceError> {
-        if matches!(self, Self::Baffled(_)) && !matches!(termination, Termination::FlangedOpen) {
+        if matches!(self, Self::Baffled { .. }) && !matches!(termination, Termination::FlangedOpen) {
             return Err(bad(line, "baffled_outlet requires the same flanged terminal feedback load"));
         }
         Ok(())
@@ -47,9 +55,16 @@ impl ObservationInput {
                 .map_err(ReedPerformanceError::Model)?;
             return Ok((voice, None));
         }
-        let Self::Baffled(receiver) = self else { unreachable!("legacy returned above") };
+        let Self::Baffled { receiver, exterior } = self else { unreachable!("legacy returned above") };
         let regional = RegionalDuct::new(duct, gases)
             .map_err(|error| ReedPerformanceError::Model(map_drive(DrivingPointError::Duct(error))))?;
+        let regional = match exterior {
+            Some(gas) => regional.with_exterior_gas(gas)
+                .map_err(|error| ReedPerformanceError::Model(map_drive(DrivingPointError::Duct(error))))?,
+            None => regional,
+        };
+        // Both feedback and observation see this ONE bound exterior. It never
+        // changes internal gas, geometry or the source's Bernoulli density.
         // Use the same initializer, lay, source impedance and prime as every
         // other ReedBoreVoice. Its proxy is discarded only at the observation
         // boundary; no geometry, mechanics or pressure controls are rewritten.

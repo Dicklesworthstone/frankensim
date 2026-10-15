@@ -7,11 +7,13 @@
 //!
 //! The chart is a perfectly bonded flat linear plate, not a carved shell or a
 //! joint/slip law. Loss is either explicitly authored or selected from each
-//! region's isotropic Kelvin-Voigt source; elastic data alone do not imply loss.
+//! region's isotropic Kelvin-Voigt source. The explicit tensor constructor retains
+//! full nonproportional viscous coupling; elastic data alone do not imply loss.
 //! All strings use one authored physical bridge footprint. The compact pressure
 //! law has no propagation delay or broadband exterior-fluid back-loading.
 
 use super::*;
+use crate::plate_viscosity::{PlateViscosity, PlateViscosityLimits};
 use super::plate::SharedPlateBridge;
 use super::super::plate::{MaterialBodyCavity, reduce_radiating_body, validate_body_medium};
 use crate::thin_plate::{PlateChartRadiation, ResolvedPlateChart, certified_material_chart_radiators};
@@ -64,6 +66,38 @@ impl ReciprocalStringBank {
         body: SharedMaterialPlateChartBody, cavity: Option<MaterialBodyCavity>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
+        Self::build_material_plate_chart(cx, sources, gas, body, cavity, law, options, gate, None)
+    }
+
+    /// Keep every regional viscous cross term in the shared string/body/bow solve.
+    /// The viscosity must be bound to THIS exact chart. Material tensors are
+    /// projected on the original elastic modes alongside bridge/radiation maps,
+    /// then realized as passive dashpot columns in the original connection solver.
+    /// No diagonal modal loss, material-name dispatch or extra time solver.
+    ///
+    /// Modes remain a truncated real basis, not complex modes of the damped
+    /// continuum. Full modal C is retained; mesh/modal/time refinement is still
+    /// necessary. Strong loss outside the retained spatial basis is not certified.
+    /// Source-bound zero viscosity retains the old zero-loss arithmetic exactly.
+    /// Original material bands, network force/energy budgets and cancellation apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_viscous_material_plate_chart(
+        cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
+        body: SharedMaterialPlateChartBody, viscosity: PlateViscosity,
+        limits: PlateViscosityLimits, cavity: Option<MaterialBodyCavity>,
+        law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        Self::build_material_plate_chart(cx, sources, gas, body, cavity, law, options,
+            gate, Some((viscosity, limits)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_material_plate_chart(
+        cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
+        body: SharedMaterialPlateChartBody, cavity: Option<MaterialBodyCavity>,
+        law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
+        tensor: Option<(PlateViscosity, PlateViscosityLimits)>,
+    ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         let chart = body.specimen.chart();
         let dofs = chart.mesh.nodes.len().checked_mul(3)
@@ -85,15 +119,33 @@ impl ReciprocalStringBank {
         validate_body_medium(&gas, options.sample_rate_hz, body.listener_m, cavity.as_ref(), gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
-        let radiators = certified_material_chart_radiators(&body.specimen, r).map_err(ReciprocalStringError::Material)?;
+        if let Some((viscosity, limits)) = &tensor {
+            viscosity.preflight(&body.specimen, r.n_modes, *limits, gate)
+                .map_err(ReciprocalStringError::Material)?;
+            let channels = if viscosity.is_zero() { 0 } else { r.n_modes };
+            let links = sources.len() + channels + cavity.as_ref().map_or(0, |c|
+                1 + usize::from(c.cavity.neck_resistance_n_s_m() != 0.0));
+            if links > options.network.max_connections || links > 64 {
+                return Err(invalid("complete material damping, bridge and cavity channels exceed the original connection budget"));
+            }
+        }
+        let viscous = tensor.as_ref().map(|(v, limits)|
+            body.specimen.certified_viscous_radiators(r, v, *limits, gate)
+        ).transpose().map_err(ReciprocalStringError::Material)?;
+        let radiators = if viscous.is_none() {
+            certified_material_chart_radiators(&body.specimen, r).map_err(ReciprocalStringError::Material)?
+        } else { Vec::new() };
         poll(gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
-        let image = reduce_radiating_body(&radiators, &gas, options.sample_rate_hz,
+        let physical_radiators = viscous.as_ref().map_or(radiators.as_slice(), |v|v.radiators());
+        let mut image = reduce_radiating_body(physical_radiators, &gas, options.sample_rate_hz,
             body.modal_budget, body.listener_m, cavity.as_ref(), gate)?;
+        if let Some(v) = &viscous { image.body_connections.extend(v.damping().connections(0)); }
         let mut bank = super::plate::finish_material_body(cx, sources, &body.bridges,
             string_modes, gas, image, law, options, gate)?;
         bank.source.material_chart = Some(body);
+        bank.source.material_chart_viscosity = viscous;
         bank.source.material_cavity = cavity;
         poll(gate)?;
         Ok(bank)

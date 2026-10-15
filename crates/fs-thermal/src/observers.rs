@@ -11,7 +11,7 @@
 //! not a strongly coupled nonlinear solve or an accuracy/stability certificate.
 
 use std::collections::BTreeMap;
-use crate::enthalpy::{CellId, DepositionError, DepositionObserver, DepositionSimulation, Event};
+use crate::enthalpy::{CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer};
 
 /// Two independent observers; their order is explicit and deterministic.
 #[derive(Clone, Debug, PartialEq)]
@@ -146,6 +146,38 @@ impl<A: DepositionObserver, B: DepositionObserver> DepositionObserver for Couple
         }
         check()?;
         Ok(result)
+    }
+
+    fn heat_transfers(&mut self, thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<Vec<HeatTransfer>, Self::Error> {
+        check()?;
+        let mut result = self.first.heat_transfers(thermal, check).map_err(ObserverCouplingError::First)?;
+        check()?;
+        let other = self.second.heat_transfers(thermal, check).map_err(ObserverCouplingError::Second)?;
+        // The shared timeline admits endpoints, powers and the combined budget.
+        result.extend(other);
+        check()?;
+        Ok(result)
+    }
+
+    fn limit_timestep_s(&mut self, thermal: &DepositionSimulation<'_>, proposed_s: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<f64, Self::Error> {
+        check()?;
+        let first = self.first.limit_timestep_s(thermal, proposed_s, check)
+            .map_err(ObserverCouplingError::First)?;
+        if !first.is_finite() || first <= 0.0 || first > proposed_s {
+            return Err(DepositionError::InvalidInput("invalid first observer timestep bound").into());
+        }
+        // Sequential tightening composes additive decay restrictions. Taking
+        // min(two independent conductive+advective limits) would double-use CFL.
+        let second = self.second.limit_timestep_s(thermal, first, check)
+            .map_err(ObserverCouplingError::Second)?;
+        if !second.is_finite() || second <= 0.0 || second > first {
+            return Err(DepositionError::InvalidInput("invalid second observer timestep bound").into());
+        }
+        check()?;
+        Ok(second)
     }
 
     fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {

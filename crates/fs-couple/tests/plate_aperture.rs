@@ -149,3 +149,6 @@ mod regional_gas;
 
 #[path = "plate_aperture/forcing.rs"]
 mod forcing;
+
+#[path = "plate_aperture/two_sided_forces.rs"]
+mod two_sided_forces;

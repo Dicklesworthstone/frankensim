@@ -43,6 +43,25 @@ pub trait DepositionObserver: Clone {
     fn conductances(&mut self, _thermal: &DepositionSimulation<'_>,
         _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<u64, f64>, Self::Error> { Ok(BTreeMap::new()) }
+    /// Internal pairwise watts at the same start state, after `conductances`.
+    /// Unlike `sources`, these are conservative exchanges, not external heat.
+    /// At most `DepositionBudget::max_links` transfers may be submitted per step.
+    /// They do not cover surfaces or create conductive contacts. The supplying
+    /// owner must also restrict the timestep when its exchange law requires it.
+    fn heat_transfers(&mut self, _thermal: &DepositionSimulation<'_>,
+        _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<Vec<HeatTransfer>, Self::Error> { Ok(Vec::new()) }
+    /// Tighten the conductive/source step bound; return finite 0 < dt <= proposed.
+    /// Called after all rate hooks. This sees step-local source/conductance
+    /// overrides but unchanged enthalpy. Compose coupled decay rates, not just
+    /// independent CFL minima. This hook does not itself prove stability.
+    ///
+    /// The proposal excludes distance to the next event/end time. The kernel
+    /// clips the result to that distance AFTER this hook, so repeated tightening
+    /// cannot asymptotically approach an event without ever reaching it.
+    fn limit_timestep_s(&mut self, _thermal: &DepositionSimulation<'_>, proposed_s: f64,
+        _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<f64, Self::Error> { Ok(proposed_s) }
     fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>)
         -> Result<(), Self::Error>;
     /// Old temperatures and new enthalpy-backed temperatures on the same step.
@@ -112,10 +131,36 @@ impl<'a> DepositionSimulation<'a> {
         Ok(authored)
     }
 
+    fn add_step_transfers(&self, rates: &mut HeatRates, transfers: &[HeatTransfer],
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
+        -> Result<(), DepositionError> {
+        if transfers.len() > self.budget.max_links {
+            return Err(DepositionError::Budget("internal heat transfers"));
+        }
+        for (index, transfer) in transfers.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            if transfer.a == transfer.b || !self.cells.contains_key(&transfer.a)
+                || !self.cells.contains_key(&transfer.b) {
+                return Err(DepositionError::InvalidInput("invalid internal heat-transfer endpoints"));
+            }
+            finite(transfer.power_w)?;
+        }
+        for (index, transfer) in transfers.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            if transfer.power_w == 0.0 { continue; }
+            let a = rates.watts.get_mut(&transfer.a).expect("validated transfer endpoint");
+            *a = finite(*a - transfer.power_w)?;
+            let b = rates.watts.get_mut(&transfer.b).expect("validated transfer endpoint");
+            *b = finite(*b + transfer.power_w)?;
+        }
+        // Deliberately do not modify rates.external_w.
+        checkpoint()
+    }
+
     /// Advance thermal state and a deeply cloned observer as one candidate.
     /// Any thermal, observer, conservation, budget or cancellation error drops
     /// both. The ordinary `advance_to` delegates here with a no-op observer;
-    /// coupling never changes thermal stepping, event ordering or arithmetic.
+    /// default hooks preserve thermal stepping, event ordering and arithmetic.
     pub fn advance_observed<O: DepositionObserver>(
         &self, observer: &O, target_s: f64, config: StepConfig,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -168,10 +213,20 @@ impl<'a> DepositionSimulation<'a> {
             checkpoint()?;
             let conductances = observer.conductances(&next, &mut checkpoint)?;
             checkpoint()?;
+            let transfers = observer.heat_transfers(&next, &mut checkpoint)?;
+            checkpoint()?;
             let original_links = next.set_step_conductances(&conductances, &mut checkpoint)?;
             let authored = next.add_step_sources(&sources, &mut checkpoint)?;
-            let step = next.thermal_step(stop-start_s,
-                config.max_dt_s, &mut audit, &mut checkpoint);
+            let step: Result<_, O::Error> = (|| {
+                let mut rates = next.heat_rates(config.max_dt_s, &mut checkpoint)?;
+                next.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
+                let dt = observer.limit_timestep_s(&next, rates.explicit_dt_s, &mut checkpoint)?;
+                if !positive(dt) || dt > rates.explicit_dt_s {
+                    return Err(DepositionError::InvalidInput("invalid observer timestep bound").into());
+                }
+                rates.explicit_dt_s = dt.min(stop-start_s);
+                next.thermal_step(rates, &mut audit, &mut checkpoint).map_err(Into::into)
+            })();
             // Restore even on thermal refusal. Observations/events see authored
             // boundaries, never a generated source masquerading as a new input.
             for (id, watts) in authored {

@@ -10,6 +10,9 @@ use crate::bernoulli_aperture::two_sided::TwoSidedDrive;
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::{RenderError, schedule::{GestureCompileError, ScheduledControl}};
 use fs_scenario::gesture::GestureSchedule;
+use crate::bernoulli_aperture::performance::force::ForceSchedule;
+
+mod plate_forces;
 
 /// Finite canonical source program retaining all valve, duct and receiver state.
 /// Every control is consumed at its actual mechanical sample, even inside a host
@@ -23,6 +26,7 @@ pub struct ScheduledTwoSidedPressure {
     controls: Vec<ScheduledControl>,
     next: usize,
     held_pressure_pa: f64,
+    plate_forces: [Option<ForceSchedule>; 2],
     poisoned: bool,
 }
 fn invalid(what: &'static str) -> GestureCompileError { GestureCompileError::Invalid { what } }
@@ -61,7 +65,8 @@ impl ScheduledTwoSidedPressure {
             ..config
         };
         let controls = compile_schedule(&schedule, &mechanical_config)?;
-        Ok(Self { source, schedule, config, controls, next: 0, held_pressure_pa: 0.0, poisoned: false })
+        Ok(Self { source, schedule, config, controls, next: 0, held_pressure_pa: 0.0,
+            plate_forces: [None, None], poisoned: false })
     }
     /// Original loaded mechanics and pressure receiver. Mutable access would
     /// permit stepping around the source schedule and is intentionally absent.
@@ -86,8 +91,13 @@ impl ScheduledTwoSidedPressure {
     /// The pressure phrase is unchanged. Zero releases the actuator, not motion.
     /// The original source refuses nonexistent/nonfinite force ports; there is
     /// no new contact or lip law and no duplicated source of mechanical work.
+    /// A bound source-mesh force program owns its inputs for the whole phrase;
+    /// manual force changes then refuse instead of silently overriding the program.
     pub fn set_blade_forces(&mut self, forces_n: [f64; 2]) -> Result<(), RenderError> {
         self.validate_sample_count(0)?;
+        if self.plate_forces.iter().any(Option::is_some) {
+            return Err(RenderError::Control { what: "source-mesh force programs cannot be overridden by manual blade forces" });
+        }
         self.source.set_drive(TwoSidedDrive {
             source_pressure_pa: self.held_pressure_pa, blade_forces_n: forces_n,
         })
@@ -115,10 +125,13 @@ impl PressureRenderer for ScheduledTwoSidedPressure {
         if output.len() > self.config.max_block { return Err(sizing("two-sided phrase callback exceeds its admitted capacity")); }
         for slot in output {
             for _ in 0..self.source.mechanics_per_output() {
+                let sample = self.source.mechanical_samples_rendered();
                 let (next, pressure) = pressure_candidate(&self.controls, self.next,
-                    self.held_pressure_pa, self.source.mechanical_samples_rendered());
+                    self.held_pressure_pa, sample);
+                let forces = std::array::from_fn(|i| self.plate_forces[i].as_ref()
+                    .map_or(self.source.held.blade_forces_n[i], |f| f.candidate(sample)));
                 let drive = TwoSidedDrive {
-                    source_pressure_pa: pressure, blade_forces_n: self.source.held.blade_forces_n,
+                    source_pressure_pa: pressure, blade_forces_n: forces,
                 };
                 // Same physical/receiver step as held playback. Partial traces
                 // survive every control boundary instead of endpoint sampling.
@@ -128,6 +141,7 @@ impl PressureRenderer for ScheduledTwoSidedPressure {
                     Ok(output) => {
                         self.next = next;
                         self.held_pressure_pa = pressure;
+                        for force in self.plate_forces.iter_mut().flatten() { force.accept(sample); }
                         if let Some(p) = output { *slot = p; }
                     }
                     Err(error) => { self.poisoned = true; return Err(error); }

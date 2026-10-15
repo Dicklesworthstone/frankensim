@@ -5,6 +5,13 @@
 //! problem. Positive area cells carry signed, work-conjugate velocity shapes;
 //! every retained field contributes to the full reciprocal impedance matrix.
 //! Fields use `exp(-i omega t)`: a mass-like load has negative imaginary part.
+//!
+//! `power_consistent_impedance` instead uses the regular resistance kernel's
+//! exact diagonal limit at the SAME quadrature points as outgoing pressure.
+//! Its resistance is a hemispherical far-field Gram matrix (PSD in exact
+//! arithmetic), including signed cancelling fields. The singular reactance
+//! retains the equivalent-disc self integral; this is NOT a complete causal
+//! passivity certificate or a finite-cell Galerkin quadrature-error bound.
 use super::{HelmholtzError, Medium, MAX_DENSE_PANELS, MIN_PANELS_PER_WAVELENGTH, green};
 use fs_math::{c64::C64, det};
 use core::f64::consts::PI;
@@ -142,6 +149,36 @@ impl PreparedSurface {
     /// spatial double integral per matrix entry. Each reciprocal entry is
     /// evaluated once; data are never averaged or clipped to appear passive.
     pub fn impedance(&self, omega: f64, medium: Medium) -> Result<Vec<C64>, HelmholtzError> {
+        self.impedance_image(omega, medium, false)
+    }
+
+    /// Loading consistent with the power of the outgoing area-point field.
+    /// For `b_i = area_i * shape_i`, the resistance kernel is
+    /// `rho*omega^2/(2*pi*c) * sinc(k*distance_ij)`, including `sinc(0)=1`.
+    /// For peak complex velocity amplitudes, half the Hermitian quadratic
+    /// form of its real part equals mean outgoing hemisphere pressure power.
+    /// The sinc matrix is the angular Gram matrix of
+    /// `exp(-i*k*direction.position_i)` on this planar surface.
+    ///
+    /// Integrating the self-cell resistance over a disc but keeping all other
+    /// resistance entries at points subtracts a positive diagonal from that
+    /// Gram matrix. Cancelling fields can then radiate NEGATIVE power, even
+    /// on wavelength-resolved meshes. This image integrates the smooth real
+    /// kernel consistently; it does not clip eigenvalues or add empirical loss.
+    /// The original [`Self::impedance`] image remains available for comparison.
+    ///
+    /// Singular self reactance, work bounds, all cells/fields and reciprocal
+    /// projection are unchanged. Positive resistance alone does not establish
+    /// a causal positive-real time model: consumers must still pass their
+    /// existing passive-realization and frequency-fit gates. Floating-point
+    /// nullspace roundoff is not removed or presented as extra physical loss.
+    pub fn power_consistent_impedance(&self, omega: f64, medium: Medium)
+        -> Result<Vec<C64>, HelmholtzError> {
+        self.impedance_image(omega, medium, true)
+    }
+
+    fn impedance_image(&self, omega: f64, medium: Medium, power_consistent: bool)
+        -> Result<Vec<C64>, HelmholtzError> {
         let ppw = self.equivalent_disc_ppw(omega, medium)?;
         if ppw < MIN_PANELS_PER_WAVELENGTH {
             return Err(HelmholtzError::TooCoarse { panels_per_wavelength: ppw });
@@ -151,6 +188,13 @@ impl PreparedSurface {
         if !prefactor.im.is_finite() {
             return Err(invalid("Rayleigh pressure scale exceeds finite numerical range"));
         }
+        let resistance_scale = if power_consistent {
+            let value = (-prefactor.im * (0.25 / PI)) * k;
+            if !value.is_finite() || value <= 0.0 {
+                return Err(invalid("Rayleigh regular resistance exceeds finite numerical range"));
+            }
+            value
+        } else { 0.0 };
         let mut pressure = reserved(self.count * self.modes, "complete Rayleigh pressure fields")?;
         pressure.resize(self.count * self.modes, C64::ZERO);
         for i in 0..self.count {
@@ -159,7 +203,8 @@ impl PreparedSurface {
             // multiplying by -i*omega*rho/(2*pi) and dividing by source area.
             // 1-cos(x)=2*sin(x/2)^2 retains weak low-frequency resistance.
             let scale = medium.density * medium.sound_speed / self.areas[i];
-            let self_kernel = C64::new(2.0 * det::sin(0.5 * phase).powi(2), -det::sin(phase)).scale(scale);
+            let mut self_kernel = C64::new(2.0 * det::sin(0.5 * phase).powi(2), -det::sin(phase)).scale(scale);
+            if power_consistent { self_kernel.re = resistance_scale; }
             for mode in 0..self.modes {
                 pressure[i * self.modes + mode] = self_kernel.scale(self.weighted_shape[i * self.modes + mode]);
             }
@@ -172,7 +217,11 @@ impl PreparedSurface {
                 if !(k * r).is_finite() {
                     return Err(invalid("Rayleigh travel phase exceeds finite numerical range"));
                 }
-                let kernel = green(k, r) * prefactor;
+                let mut kernel = green(k, r) * prefactor;
+                // The shared off-diagonal kernel already has real part
+                // rho*omega*k/(2*pi)*sinc(k*r). Reuse its sine evaluation.
+                // Retain the regular limit if only the phase underflows.
+                if power_consistent && k * r == 0.0 { kernel.re = resistance_scale; }
                 for mode in 0..self.modes {
                     let a = i * self.modes + mode;
                     let b = j * self.modes + mode;
@@ -204,3 +253,6 @@ impl PreparedSurface {
 #[path = "rayleigh_modal_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "rayleigh_modal_power_tests.rs"]
+mod power_tests;

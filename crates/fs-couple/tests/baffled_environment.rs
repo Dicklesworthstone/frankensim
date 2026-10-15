@@ -102,3 +102,6 @@ fn absent_mappings_duplicate_ports_and_pressure_mismatch_do_not_become_a_boundar
     assert!(bind_baffled_environment(&mut graphs,&[&gases],radiation(Some(wrong),1),&gate).is_err());
     assert_eq!(format!("{graphs:?}"),original);
 }
+
+#[path = "baffled_environment/instruments.rs"]
+mod instruments;
