@@ -33,6 +33,11 @@
 
 const TURN_MS = 16;
 const BLOCK = 128;
+// The clock is extrapolated from the last tick for at most this long. Ticks arrive every ~5 ms while the
+// context renders, and a busy lane reads them between turns, so a longer silence means the context is
+// not rendering (suspended, interrupted, its device gone): the lane then stops rendering ahead instead of
+// filling the mixer's queue with audio for a clock that is not moving.
+const EXTRAPOLATE_MS = 1000;
 
 export function createLane(port, engine, { aheadFrames = 1024, chunk = BLOCK } = {}) {
   chunk = Math.max(BLOCK, Math.round(chunk) || BLOCK);
@@ -61,13 +66,20 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = BLOCK } =
       const at = performance.now();
       const rate = m.sampleRate || 48000;
       let frame = m.frame;
-      if (Number.isFinite(m.wallMs)) frame += (Math.max(0, Date.now() - m.wallMs - 1) * rate) / 1000;
+      if (Number.isFinite(m.wallMs)) {
+        frame += (Math.max(0, Date.now() - m.wallMs - 1) * rate) / 1000;
+        // Date.now() is wall time: a step of the system clock (NTP, waking from sleep) between the tick's
+        // send and its read would date it minutes or hours ahead, and the lane would stop rendering until
+        // the real clock got there. The context never runs ahead of this lane's own (monotonic) estimate by
+        // more than a burst of quanta, so a tick dated further ahead than that keeps its own frame.
+        if (clock.seen && frame > now() + rate / 4) frame = m.frame;
+      }
       if (!clock.seen || frame > now() - 1024 || at - clock.at > 50) clock = { frame, at, rate, seen: true };
       schedulePump();
     }
   };
 
-  const now = () => clock.frame + ((performance.now() - clock.at) * clock.rate) / 1000;
+  const now = () => clock.frame + (Math.min(EXTRAPOLATE_MS, performance.now() - clock.at) * clock.rate) / 1000;
 
   function insert(e) {
     let i = queue.length;
