@@ -1675,6 +1675,7 @@ impl Clone for LivePiano {
         }
         Self {
             cfg: self.cfg.clone(),
+            acoustic_gas: self.acoustic_gas,
             r: self.r,
             dt: self.dt,
             courses: self.courses.clone(),

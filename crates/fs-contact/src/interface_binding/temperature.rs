@@ -3,7 +3,8 @@
 //! material mixture, thermal stress or contact heat-transfer law is invented.
 use super::*;
 use fs_matdb::QueryPoint;
-use fs_qty::{QuantityKind, QuantitySpec, SemanticType, Temperature, ValueForm};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{QuantitySpec, Temperature};
 
 /// Bind the two actual bulk states and an explicit interface-law state point.
 ///

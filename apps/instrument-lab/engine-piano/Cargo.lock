@@ -517,6 +517,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-adjoint"
+version = "0.0.1"
+dependencies = [
+ "fs-ad",
+ "fs-blake3",
+ "fs-evidence",
+ "fs-exec",
+ "fs-feec",
+ "fs-geom",
+ "fs-ivl",
+ "fs-la",
+ "fs-math",
+ "fs-rep-mesh",
+ "fs-solver",
+ "fs-sparse",
+]
+
+[[package]]
 name = "fs-aeroac"
 version = "0.0.1"
 dependencies = [
@@ -566,11 +584,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-conduction"
+version = "0.0.1"
+dependencies = [
+ "fs-adjoint",
+ "fs-blake3",
+ "fs-exec",
+ "fs-feec",
+ "fs-matdb",
+ "fs-material",
+ "fs-math",
+ "fs-qty",
+ "fs-rand",
+ "fs-rep-mesh",
+ "fs-scenario",
+ "fs-solver",
+ "fs-sparse",
+ "fs-thermal",
+]
+
+[[package]]
+name = "fs-contact"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-evidence",
+ "fs-exec",
+ "fs-geom",
+ "fs-ivl",
+ "fs-la",
+ "fs-matdb",
+ "fs-material",
+ "fs-motion",
+ "fs-qty",
+ "fs-query",
+ "fs-tribo",
+]
+
+[[package]]
 name = "fs-couple"
 version = "0.0.1"
 dependencies = [
  "fs-aeroac",
  "fs-blake3",
+ "fs-conduction",
+ "fs-contact",
  "fs-dcontact",
  "fs-duct",
  "fs-evidence",
@@ -590,6 +648,8 @@ dependencies = [
  "fs-qty",
  "fs-rand",
  "fs-scenario",
+ "fs-solver",
+ "fs-thermal",
  "fs-tribo",
  "fs-vfit",
 ]
@@ -783,6 +843,7 @@ dependencies = [
  "fs-material",
  "fs-mbd",
  "fs-qty",
+ "fs-thermal",
 ]
 
 [[package]]

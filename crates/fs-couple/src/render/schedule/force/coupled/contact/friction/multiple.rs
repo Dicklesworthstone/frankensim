@@ -14,6 +14,7 @@
 
 use super::*;
 use super::super::network_response;
+use crate::modal_acoustic_time::advance_exact_zoh;
 
 /// Bounded joint setup and nonlinear work, in addition to each port's limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
