@@ -9,6 +9,8 @@ mod matching;
 pub mod nonmatching;
 /// Source-backed temperature-dependent matching-contact advancement.
 pub mod temperature;
+/// Source-backed contact-area exchange on shared finite thermal inputs.
+pub mod lumped_pair;
 mod sensitivity;
 pub use sensitivity::ContactResistanceGradient;
 

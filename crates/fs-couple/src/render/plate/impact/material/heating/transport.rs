@@ -28,6 +28,24 @@ impl<'a> ImpactThermalTrial<'a> {
     pub fn duration_s(&self) -> f64 { self.system.config.dt_s }
     /// One-based proposed mechanical sample; this has not yet been published.
     pub fn sample(&self) -> u64 { self.system.sample+1 }
+    /// Physical area of an admitted analytic circular/elliptic contact [m2].
+    /// Separation returns exactly zero. Elliptic axes, not an equivalent radius,
+    /// supply the area. A finite-gap pressure-equivalent footprint is NOT admitted
+    /// as a physical transfer area. This remains an endpoint, not a time average.
+    pub fn contact_patch_area_m2(&self,key:&str)->Result<f64,ImpactError> {
+        let p=self.contact_observation(key)?;
+        if p.finite_gap_response_identity.is_some() {
+            return Err(invalid("pressure-equivalent footprint is not a physical thermal contact area"));
+        }
+        if p.approach_m<=0.0 {return Ok(0.0);}
+        let product=match p.elliptic_patch_axes {
+            Some(axes)=>axes.semi_major_axis_m*axes.semi_minor_axis_m,
+            None=>p.patch_radius_m*p.patch_radius_m,
+        };
+        let area=std::f64::consts::PI*product;
+        if !positive(area) {return Err(invalid("thermal contact area is not representable"));}
+        Ok(area)
+    }
     /// Original material owner at the proposed mechanical endpoint. Use its
     /// footprint/pressure to resolve a thermal interface, not to redeposit loss.
     /// Source envelopes and geometry are checked by the original contact owner.

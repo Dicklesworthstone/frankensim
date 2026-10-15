@@ -130,3 +130,6 @@ fn missing_partner_debit_wrong_count_foreign_state_and_late_cancellation_roll_ba
     assert_eq!(calls,1);assert_eq!(s.reservoirs(),saved);assert_eq!(s.mechanics().state(),motion);
     s.step(&[0.0;2],&gate).unwrap();assert_eq!(s.mechanics().samples(),1);
 }
+
+#[path="contact_exchange.rs"]
+mod contact_exchange;
