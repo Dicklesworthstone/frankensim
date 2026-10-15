@@ -14,6 +14,8 @@ The three stems are mixed with one fixed gain each, chosen so the mix's low (30-
 loop's tail is folded onto its start so it repeats seamlessly. The live engines get the same
 strokes and keys, and fixed gains that give each live part the RMS of its studio part
 (measured by running the live engines' own WebAssembly in Node: tools/strandbar_live_rms.mjs).
+One master level serves both, the highest at which the studio loop peaks at -1 dBFS and the
+live parts' sum at -2 dBFS (a dB to spare for the board and grids a device picks).
 """
 from __future__ import annotations
 import json, math, re, subprocess, sys
@@ -88,13 +90,6 @@ def main(arr_path: Path, stems: Path, recording: Path, pub: Path):
     body[:len(tail)] += tail  # the next pass rings on under the start of this one
     peak = np.abs(body).max() * G
     G *= min(1.0, 10 ** (-1 / 20) / peak)
-    body *= G
-    (pub / "audio").mkdir(parents=True, exist_ok=True)
-    tmp = pub / "audio" / ".strandbar-studio.wav"
-    sf.write(tmp, body.astype(np.float32), SR, subtype="FLOAT")
-    dst = pub / "audio" / "strandbar-studio.flac"
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(tmp), "-c:a", "flac", "-sample_fmt", "s32", "-compression_level", "8", str(dst)], check=True)
-    tmp.unlink()
 
     # the same score for the live engines, in frames from the first downbeat
     fr = lambda beats: round(beats * beat * SR)
@@ -108,11 +103,27 @@ def main(arr_path: Path, stems: Path, recording: Path, pub: Path):
     events = {"loopFrames": loop, "tailFrames": len(tail), "piano": piano, "kick": kick, "hihat": hihat}
     ev_path = stems / "live-events.json"
     ev_path.write_text(json.dumps(events))
-    out = subprocess.run(["node", str(Path(__file__).parent / "strandbar_live_rms.mjs"), str(ev_path), str(pub.resolve())], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(["node", str(Path(__file__).parent / "strandbar_live_rms.mjs"), str(ev_path), str(pub.resolve()), "5", str(stems / "live")], capture_output=True, text=True, check=True).stdout
     live = json.loads(out.strip().splitlines()[-1])
     studio_rms = {k: float(np.sqrt(np.mean((g[k] * raw[k][pre:]) ** 2))) for k in raw}
     live_gain = {k: G * studio_rms[k] / live[k] for k in ("piano", "kick", "hihat")}
-    print("gains", {k: round(v, 5) for k, v in g.items()}, "G", round(G, 5), "live", {k: round(v, 5) for k, v in live_gain.items()}, "piano live realtime (node)", round(live["pianoRealtime"], 2))
+    # The live parts are summed with nothing limiting them, so their sum has to fit as well, and the
+    # studio loop comes down with it to keep the two at the same level. Measured on Node's render (board
+    # 32, 5x grid) to -2 dBFS: the boards and grids a device picks peak up to about 1 dB higher.
+    lanes = {k: np.fromfile(stems / f"live-{k}.f32", dtype="<f4").astype(np.float64) for k in live_gain}
+    live_peak = np.abs(sum(v * lanes[k] for k, v in live_gain.items())).max()
+    fit = min(1.0, 10 ** (-2 / 20) / live_peak)
+    G *= fit
+    live_gain = {k: v * fit for k, v in live_gain.items()}
+    print("gains", {k: round(v, 5) for k, v in g.items()}, "G", round(G, 5), "live", {k: round(v, 5) for k, v in live_gain.items()}, "live peak", round(live_peak * fit, 4), "piano live realtime (node)", round(live["pianoRealtime"], 2))
+
+    body *= G
+    (pub / "audio").mkdir(parents=True, exist_ok=True)
+    tmp = pub / "audio" / ".strandbar-studio.wav"
+    sf.write(tmp, body.astype(np.float32), SR, subtype="FLOAT")
+    dst = pub / "audio" / "strandbar-studio.flac"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(tmp), "-c:a", "flac", "-sample_fmt", "s32", "-compression_level", "8", str(dst)], check=True)
+    tmp.unlink()
 
     shift = arr["transpose_semitones"]
     names = {"A": [(0, "D♭maj9"), (7, "A♭maj7(13)")], "B": [(0, "Gm7"), (7, "Dm7")], "C": [(0, "E♭m9"), (7, "Fm7")], "D": [(0, "Gm7"), (5, "E♭7/D♭"), (7, "Dm7(9)")]}
@@ -136,14 +147,14 @@ def main(arr_path: Path, stems: Path, recording: Path, pub: Path):
         "live": {k: {"gain": round(v, 8)} for k, v in live_gain.items()},
         "studio": [
             {"part": "Piano", "detail": "grand_piano, Steinway D preset: all 88 strings and their dampers on one FE soundboard (128 retained board coordinates up to 2.4 kHz), felt hammers driven by the score, a Rayleigh microphone 1 m above the board.", "computeS": wall_seconds(stems, "piano")},
-            {"part": "Kick", "detail": "fs-vkplate: two Mylar heads on a 5 mm grid with the air between them, a felt beater, every stroke into the same ringing drum.", "computeS": wall_seconds(stems, "kick")},
+            {"part": "Kick", "detail": "fs-vkplate: two Mylar heads on a 4.5 mm grid with the air between them, a convex felt beater crown, every stroke into the same ringing drum.", "computeS": wall_seconds(stems, "kick")},
             {"part": "Hi-hat", "detail": "fs-vkplate: two bronze shells on a 5.5 mm grid (von Kármán shells), clamped by the pedal at their rims, stepped at 288 kHz.", "computeS": wall_seconds(stems, "hihat")},
         ],
         "liveParts": [
             {"part": "Piano", "detail": f"engine-piano: the same hammer, string and damper equations for the keys being played, on {live['pianoInfo'].get('boardCoordinates', '?')} soundboard coordinates."},
             {"part": "Kick and hi-hat", "detail": "fs-vkplate itself, compiled to WebAssembly, on a grid several times coarser (picked for this device when you press play): fewer, larger cells, so less detail above a few kHz."},
         ],
-        "balance": "Levels: one fixed gain per part. In the studio render they set the low (30–90 Hz), middle (250–2,500 Hz) and high (6–14 kHz) bands in the same proportion as the recording we matched; each live part then gets the gain that gives it the RMS of its studio part. Nothing is compressed, limited or equalised.",
+        "balance": "Levels: one fixed gain per part. In the studio render they set the low (30–90 Hz), middle (250–2,500 Hz) and high (6–14 kHz) bands in the same proportion as the recording we matched; each live part then gets the gain that gives it the RMS of its studio part, corrected for the drum grid your device runs. Both versions share one master level, low enough that neither clips. Nothing is compressed, limited or equalised.",
     }
     (pub / "data").mkdir(parents=True, exist_ok=True)
     (pub / "data" / "strandbar.json").write_text(json.dumps(data, separators=(",", ":")))
