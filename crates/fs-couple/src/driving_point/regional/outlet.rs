@@ -45,7 +45,8 @@ pub const MAX_OUTLET_TRANSFER_SAMPLES: usize = 16_384;
 /// Physical binding and finite-history choices of an outlet observation.
 #[derive(Clone, Copy, Debug)]
 pub struct OutletReceiverInfo {
-    /// Original terminal medium; also the homogeneous exterior in this image.
+    /// Homogeneous exterior used by BOTH the radiation load and receiver.
+    /// Defaults to the internal terminal medium unless explicitly bound.
     pub gas: GasState,
     /// Actual final axial radius [m], never an independent observer gain.
     pub radius_m: f64,
@@ -65,8 +66,9 @@ pub struct OutletReceiverInfo {
 ///
 /// Both stages are the existing `DelayedFilter`. Construction is cold and
 /// bounded; a sample allocates nothing. This observes the flanged terminal
-/// ONLY: side-hole and structural radiation, rooms and other exterior media
-/// are not added. No reaction force is added to the source. Its feedback must
+/// ONLY: side-hole and structural radiation and rooms are not added.
+/// The homogeneous exterior may be bound independently of the internal gas.
+/// No reaction force is added to the source. Its feedback must
 /// use the same duct and flanged load. The sampled finite-history image is not
 /// an exact broadband time-domain solution or a certified radiation match.
 #[derive(Clone, Debug)]
@@ -100,7 +102,7 @@ impl OutletPressure {
 }
 
 impl RegionalDuct {
-    /// Observe the actual flanged outlet in a homogeneous extension of its gas.
+    /// Observe the actual flanged outlet in its bound homogeneous exterior gas.
     ///
     /// `fft_samples` must be 256..=8192 and a power of two. The reed adapter
     /// obtains it from its already-admitted characteristic line, so feedback
@@ -119,7 +121,7 @@ impl RegionalDuct {
         -> Result<OutletPressure, OutletError> {
         let terminal = self.regions.last().expect("admitted nonempty regional duct");
         let radius_m = terminal.duct.segments.last().expect("admitted axial terminal").outlet_radius();
-        let gas = *self.outlet_gas();
+        let gas = *self.exterior_gas();
         // Geometry/medium/phase/history admission belongs to the shared receiver.
         let mic = BaffledPressure::circular_outlet(radius_m, sample_rate_hz, receiver,
             RayleighMedium { density: gas.density, sound_speed: gas.sound_speed })
