@@ -5,8 +5,9 @@
 //! blowing-pressure track. It does not infer material identity
 //! or turn a pitch into a medium property. Pressure commands replace the fixture
 //! attack envelope; all retained reed and bore state survives release and resume.
-//! Output retains `ReedBoreVoice`'s bore-pressure plus compact-jet observation,
-//! NOT a calibrated exterior microphone or a two-way radiation-load model.
+//! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
+//! `baffled_outlet` selects the existing terminal-only Rayleigh observation.
+//! Neither is measured calibration; the underlying reed mechanics are shared.
 
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_blake3::{ContentHash, hash_domain};
@@ -15,6 +16,8 @@ use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasInputError, read_gas_state};
 use fs_scenario::{BeatingReed, gesture::{GestureSchedule, GestureTarget}};
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::driving_point::regional::outlet::{OutletError, OutletReceiverInfo};
+mod outlet;
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::{ReedBoreVoice, RenderContext, RenderError, RenderVoice};
 use crate::thin_plate::PlateBank;
@@ -46,6 +49,8 @@ pub enum ReedPerformanceError {
         /// Original species, composition or state refusal.
         source: fs_material::MaterialError,
     },
+    /// The original terminal transfer or physical receiver refused.
+    Outlet(OutletError),
     /// The existing reed, TMM or gas realization refused.
     Model(AcousticRealizeError),
     /// The existing pressure compiler refused.
@@ -59,6 +64,7 @@ impl core::fmt::Display for ReedPerformanceError {
             Self::Input { line, what } => write!(f, "reed input line {line}: {what}"),
             Self::Gas { line, source } => write!(f, "reed gas line {line}: {source}"),
             Self::Model(e) => write!(f, "reed model: {e}"),
+            Self::Outlet(e) => write!(f, "reed outlet: {e}"),
             Self::Schedule(e) => write!(f, "reed input: {e}"),
             Self::Render(e) => write!(f, "reed render: {e}"),
         }
@@ -66,7 +72,12 @@ impl core::fmt::Display for ReedPerformanceError {
 }
 impl std::error::Error for ReedPerformanceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self { Self::Gas { source, .. } => Some(source), _ => None }
+        match self {
+            Self::Gas { source, .. } => Some(source),
+            Self::Model(source) => Some(source),
+            Self::Outlet(source) => Some(source),
+            _ => None,
+        }
     }
 }
 fn bad(line: usize, what: &'static str) -> ReedPerformanceError {
@@ -107,6 +118,7 @@ pub struct ReedPerformance {
     renderer: ScheduledRenderer,
     ambient_gas: GasState,
     segment_gases: Vec<GasState>,
+    terminal: Option<outlet::TerminalObservation>,
 }
 impl ReedPerformance {
     /// Decode and admit all records before building or advancing the runtime.
@@ -150,8 +162,7 @@ impl ReedPerformance {
         if !crate::reed_bore::reed_parameters_valid(reed) {
             return Err(bad(r.line, "reed mass, stiffness and damping must be finite and nonnegative"));
         }
-        let mut row = r.row("listener_m")?;
-        let listener_m = row.positive()?; row.finish()?;
+        let observation = outlet::ObservationInput::read(&mut r)?;
         let mut row = r.row("termination")?;
         let termination = match row.word()? {
             "closed" => Termination::Closed,
@@ -161,6 +172,7 @@ impl ReedPerformance {
             _ => return Err(bad(r.line, "unsupported static duct termination")),
         };
         row.finish()?;
+        observation.validate_termination(termination, r.line)?;
         let mut row = r.row("segments")?;
         let count = row.count(MAX_SEGMENTS)?; row.finish()?;
         if count == 0 { return Err(bad(r.line, "at least one axial segment is required")); }
@@ -234,14 +246,14 @@ impl ReedPerformance {
             sample_rate_hz: rate, samples, full_scale_pa, segments: count, tone_holes: holes,
             massive_reed: reed.mass_kg > 0.0, gesture_events: track.events.len(), compiled_controls: controls.len(),
         };
-        let voice = ReedBoreVoice::new_with_segment_gases(&Duct { segments }, &segment_gases, reed, termination,
-            PlateBank::default(), listener_m, rate, samples as usize, None)
-            .map_err(ReedPerformanceError::Model)?;
+        let (voice, terminal) = observation.build(
+            &Duct { segments }, &segment_gases, reed, termination, rate, samples as usize,
+        )?;
         let context = RenderContext::new(vec![RenderVoice::ReedBore(voice)], max_block);
         let renderer = ScheduledRenderer::new(context, controls, max_controls).map_err(ReedPerformanceError::Render)?;
         renderer.validate_sample_rate(rate).map_err(ReedPerformanceError::Render)?;
         renderer.validate_sample_count(samples).map_err(ReedPerformanceError::Render)?;
-        Ok(Self { info, renderer, ambient_gas: air, segment_gases })
+        Ok(Self { info, renderer, ambient_gas: air, segment_gases, terminal })
     }
 
     /// Original source facts, unchanged by output-clock conversion.
@@ -268,6 +280,7 @@ impl PressureRenderer for ReedPerformance {
     fn max_block_len(&self) -> usize { self.renderer.context().max_block_len() }
     fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> { self.renderer.validate_sample_rate(rate) }
     fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
+        if self.last_outlet_error().is_some() { return Err(RenderError::Poisoned); }
         self.renderer.validate_sample_count(samples)?;
         if samples > self.remaining_samples() {
             return Err(RenderError::Sizing { what: "requested pressure window exceeds the reed performance horizon" });
@@ -275,8 +288,13 @@ impl PressureRenderer for ReedPerformance {
         Ok(())
     }
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
-        self.validate_sample_count(output.len() as u64)?;
-        self.renderer.block(output)
+        // The older shared renderer's error envelope predates terminal observers.
+        // The typed owner error remains available through pressure_block and
+        // last_outlet_error; this compatibility path retains its full diagnostic.
+        self.pressure_block(output).map_err(|error| match error {
+            ReedPerformanceError::Render(error) => error,
+            error => RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string())),
+        })
     }
 }
 
