@@ -1,7 +1,7 @@
 //! Render one drum-kit piece to a 48 kHz float WAV.
 //!
 //! usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS]
-//! PIECE: kick | snare | snare-off | tom-12 | tom-14 | hihat-closed | hihat-open | crash | ride
+//! PIECE: kick | snare | snare-off | tom-12 | tom-14 | hihat-closed | hihat-open | splash | crash | ride
 use fs_vkplate::kit::{self, Piece};
 use std::time::Instant;
 
@@ -52,8 +52,11 @@ fn main() {
     eprintln!();
     let peak = out.iter().flatten().fold(0.0f64, |m, &x| m.max(x.abs()));
     let wall = t0.elapsed().as_secs_f64();
+    // the striker's contact (a drum's "striker", a cymbal's or hi-hat's "stick"), not the wires or the rims; every
+    // striker now lands in point contact, so a count of contact nodes no longer tells them apart
+    let striker = |b: usize| matches!(p.instrument.bodies[b].name.as_str(), "striker" | "stick");
     for c in &p.instrument.contacts {
-        if c.peak_force > 0.0 && c.a.len() + c.b.len() > 2 {
+        if c.peak_force > 0.0 && c.b.iter().any(|&(b, _, _)| striker(b)) {
             eprintln!("strike peak force {:.1} N", c.peak_force);
         }
     }

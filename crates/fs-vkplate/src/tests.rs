@@ -172,8 +172,9 @@ fn queued_contact_solves_match_solving_one_at_a_time() {
             apply_force(bodies, c, f, d_pred, comp, k);
         }
     }
-    // a snare whose wire list also holds contacts that share nodes with others (a sqrt-law copy, which
-    // must close the batch, and a power-law copy, which is solved alone), struck and ringing
+    // a snare whose wire list also holds contacts that share nodes with others (sqrt-law copies, which
+    // must close the batch, and power-law copies, which are solved alone), struck and ringing; the
+    // copies leave the fixed-point exit off, so a batch mixes lanes with and without it
     let build = || {
         let mut p = live::Live::new("snare", 7.0).unwrap();
         let n = p.ins.contacts.len();

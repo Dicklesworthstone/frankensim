@@ -81,8 +81,12 @@ the rims chattering against each other (its sizzle above 4 kHz). The rim contact
 - free disc: lowest elastic mode within 4 % of `lambda^2 = 5.253` (nu = 0.33);
 - crash struck at 8 m/s: bounded, finite output;
 - a hi-hat's second stroke retires the stick's earlier contact (each stroke adds one);
+- a shallow shell's auxiliary variable keeps tracking `sqrt(2V)` (live-grid ride, 2 s);
+- the stencil rows of the sparse products sum bit for bit as their CSR rows (five pieces, signed zeros);
+- the four-lane contact solves match solving one contact at a time, force, penetration and every
+  update bit for bit, with node-sharing and other-law contacts in the list;
 - every piece builds on the live grid, sounds, and the kick and snare stop being stepped once
-  silent (`live`).
+  silent; a clone, taken settled or mid-ring, renders bit for bit what the original would (`live`).
 
 ## Real time (`live`)
 
@@ -90,9 +94,12 @@ the rims chattering against each other (its sizzle above 4 kHz). The rim contact
 time in WebAssembly), struck anywhere on its playing surface, stepped in 48 kHz blocks, and not
 stepped at all once its motion is 70 dB below its peak. On grids too coarse to put four nodes in
 the 6.5-20 mm annulus round a cymbal's hole, the felt washers and the hi-hat clutch spread their
-total stiffness and damping over the first ring of nodes instead. A clone of a `Live` steps bit for
-bit as the original would, so the browser kit settles each grid once: it plays a clone kept from
-before the timing stroke. `apps/instrument-lab/engine-kit` compiles it for the browser.
+total stiffness and damping over the first ring of nodes instead. The live hi-hats keep the rim
+contact law from before the retuning (Hunt-Crossley `mu` 3.0 s/m, set in `live.rs`) and a 5 mm
+stick tip; the offline hat's lighter rim damping (0.08 s/m) and 4 mm tip were not carried over to
+real-time play. A clone of a `Live` steps bit for bit as the original would, so the browser kit
+settles each grid once: it plays a clone kept from before the timing stroke.
+`apps/instrument-lab/engine-kit` compiles it for the browser.
 
 ## Graded against a real kit
 
