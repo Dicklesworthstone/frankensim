@@ -12,6 +12,20 @@ import { ModalViewer } from "./modal3d";
 import { SoundboardMixer } from "./mixer";
 import { dpr, el, fmt, fmtSci, hidpi, json, noteName, onVisible, sciNode, asset } from "./util";
 
+// Right after a deploy, the CDN can serve the new page a little before the new lazily loaded chunks it names
+// (Cloudflare took up to a minute), and a browser never retries a module import that failed once. Vite reports
+// such a failure as `vite:preloadError`: reload a few seconds later, at most once a minute, so a visitor who
+// arrived in that window gets a whole page instead of a section that never appears.
+window.addEventListener("vite:preloadError", (event) => {
+  const KEY = "struck:preload-reload";
+  let last = 0;
+  try { last = Number(sessionStorage.getItem(KEY)) || 0; } catch { /* storage unavailable */ }
+  if (Date.now() - last < 60_000) return; // reloaded just now: let the error stand
+  try { sessionStorage.setItem(KEY, String(Date.now())); } catch { return; } // cannot remember it: never risk a loop
+  event.preventDefault();
+  setTimeout(() => location.reload(), 3000);
+});
+
 type SeriesData = Record<string, Record<string, number[] | number>>;
 
 const $ = <T extends Element = HTMLElement>(sel: string, root: ParentNode = document): T | null => root.querySelector<T>(sel);
