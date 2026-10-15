@@ -30,3 +30,7 @@ fs-evidence = { path = "../fs-evidence" }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "electrically_heated_rotor"
+required-features = ["electrothermal-coupling"]

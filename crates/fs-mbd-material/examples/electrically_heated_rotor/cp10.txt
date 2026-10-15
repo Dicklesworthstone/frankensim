@@ -1,0 +1,5 @@
+frankensim-electrothermal-material-v1
+# Synthetic demonstrator, not measurements of a named material.
+# T[K] reference_density[kg/m3] Cp[J/(kg K)] alpha[1/K] resistivity[ohm m] k[W/(m K)]
+300 2 10 0.002 5 2
+500 2 10 0.002 15 6
