@@ -4,6 +4,9 @@
 
 /// Finite circuit and thermal network feedback on this same boundary.
 pub mod network;
+/// Simultaneous signed heat contacts sharing one gas energy midpoint.
+pub mod ports;
+mod heat;
 
 use super::{ConductanceSample, GasPiston, HeatExchangeSolve, PistonInput,
     PistonSolve, PistonStep, ResolvedThermochemicalGasState, ThermalPistonError,
@@ -82,42 +85,19 @@ impl GasPiston {
         if !positive(boundary_temperature_k) || !input.heat_j.is_finite() {
             return Err(ThermalPistonError::Invalid("positive boundary temperature and finite prescribed heat required"));
         }
-        let mut material_trials = 0usize;
-        let candidate = feedback::solve(exchange, |q, trials, cancelled| {
-            let heat_j = input.heat_j + q;
-            if !heat_j.is_finite() || (q != 0.0 && heat_j == input.heat_j) {
-                return Err(ThermalPistonError::Invalid("boundary heat vanishes or overflows in gas input"));
-            }
-            let mut next = self.clone();
-            let piston = next.step(PistonInput { heat_j, ..input }, controls, &mut *cancelled)?;
-            material_trials += piston.material_trials;
-            poll(cancelled)?;
-            let sample = resolve(&piston.midpoint).map_err(ThermalPistonError::Interface)?;
-            let g = sample.conductance_w_k;
-            let delta = boundary_temperature_k - piston.midpoint.state().temperature;
-            let power = g * delta;
-            let evaluated = input.duration_s * power;
-            let residual = q - evaluated;
-            let total = piston.gas.stored_energy_change_j + piston.kinetic_energy_change_j
-                + piston.exterior_pressure_work_j - piston.external_force_work_j
-                - input.heat_j - evaluated;
-            if !g.is_finite() || g < 0.0 || !power.is_finite() || !evaluated.is_finite()
-                || !residual.is_finite() || !total.is_finite()
-                || (g != 0.0 && delta != 0.0 && power == 0.0)
-                || (power != 0.0 && evaluated == 0.0) {
-                return Err(ThermalPistonError::Invalid("unrepresentable thermal boundary source or work"));
-            }
-            let step = PistonBoundaryStep { piston, boundary_temperature_k,
-                conductance_w_k: g, exchanged_heat_j: q, evaluated_heat_j: evaluated,
-                source_residual_j: residual, total_energy_residual_j: total,
-                exchange_trials: trials, material_trials };
-            Ok((PistonBoundaryCandidate { piston: next, source: sample.source, step }, residual))
-        }, &mut cancelled)?;
-        if candidate.step.total_energy_residual_j.abs() > exchange.energy_tolerance_j {
-            return Err(ThermalPistonError::Invalid("evaluated boundary heat does not close gas and mechanical energy"));
-        }
-        poll(&mut cancelled)?;
-        Ok(candidate)
+        let candidate = heat::solve(self, input, controls, exchange, |gas| {
+            let sample = resolve(gas).map_err(ThermalPistonError::Interface)?;
+            let evaluated = heat::conductive_heat(input.duration_s, sample.conductance_w_k,
+                boundary_temperature_k, gas.state().temperature)?;
+            Ok((evaluated, sample))
+        }, cancelled)?;
+        let (piston, sample, report) = candidate.into_parts();
+        let step = PistonBoundaryStep { piston: report.piston, boundary_temperature_k,
+            conductance_w_k: sample.conductance_w_k, exchanged_heat_j: report.exchanged_heat_j,
+            evaluated_heat_j: report.evaluated_heat_j, source_residual_j: report.source_residual_j,
+            total_energy_residual_j: report.total_energy_residual_j,
+            exchange_trials: report.exchange_trials, material_trials: report.material_trials };
+        Ok(PistonBoundaryCandidate { piston, source: sample.source, step })
     }
 }
 
