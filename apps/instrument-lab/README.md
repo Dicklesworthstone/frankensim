@@ -167,7 +167,14 @@ memory-bound: run one or two such processes per L3 cache (`taskset`, `-C target-
 It balances the three parts against the recording's low/middle/high band energies, folds the
 tail onto the loop's start, writes `audio/strandbar-studio.flac` and `data/strandbar.json` (the
 same score for the live piano and kit lanes), and gives each live part the RMS of its studio part
-by running the live engines' WebAssembly in Node (`tools/strandbar_live_rms.mjs`).
+by running the live engines' WebAssembly in Node (`tools/strandbar_live_rms.mjs`, board 32 and the 5x
+grid). One master level serves both versions: the studio loop peaks at -1 dBFS at most and the live
+parts' sum at -2 dBFS, so the boards and grids a device picks stay under full scale.
+
+On the page the live lanes render two seconds ahead in 512-frame messages. Each drum keeps the finest
+grid whose timing reaches 1.4x real time (`src/strandbar.ts`): the kick from 2-8x, the hi-hat from
+2.5-6x (with 4.5x, which drops the 558 Hz line it rings on 5x) and then 8x. Strandbar does not restart
+a lane on a coarser grid while it plays, so the lists end at 8x for slow devices.
 
 ## Player piano
 

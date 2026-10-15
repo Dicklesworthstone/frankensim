@@ -33,12 +33,16 @@ const CHUNK = 512;
 const LEAD_S = 1.75;
 /**
  * The kit grids each drum may run on, finest first; the Worker keeps the finest whose timing reaches 1.4x
- * real time (kit/worker.js). The hat also tries 4.5x: this loop on 5x rings a 558 Hz line 27 dB above the
- * local spectrum (the studio stem: 14 dB at 550 Hz); on 4.5x the line is gone (5 dB), as on 4x (see kitStage
- * HAT_SCALES).
+ * real time (kit/worker.js). Strandbar has no restart on a coarser grid while it plays, so the lists go on
+ * to 8x for slow devices: with every render 4x slower, the kick and hat on 6x ran 0.92-0.96x real time and
+ * lost 2-4 s of 27, while the kick on 7x and the hat on 8x lost nothing. The hat skips 7x: the Worker times
+ * the coarse grids first on every device, a hat's build is mostly its pedal settle (8x 50 ms, 7x 0.11 s),
+ * and where 6x is too slow 7x was too (it timed under 1.4 at 4x, so 8x played).
+ * The hat also tries 4.5x: this loop on 5x rings a 558 Hz line 27 dB above the local spectrum (the studio
+ * stem: 14 dB at 550 Hz); on 4.5x the line is gone (5 dB), as on 4x (see kitStage HAT_SCALES).
  */
-const KICK_SCALES = [2, 2.5, 3, 3.5, 4, 5, 6];
-const HAT_SCALES = [2.5, 3, 3.5, 4, 4.5, 5, 6];
+const KICK_SCALES = [2, 2.5, 3, 3.5, 4, 5, 6, 7, 8];
+const HAT_SCALES = [2.5, 3, 3.5, 4, 4.5, 5, 6, 8];
 const IDLE_STATUS = "The live engines start when you press play: a piano and two drum pieces, each in its own Worker.";
 type Phase = "idle" | "loading" | "playing";
 
