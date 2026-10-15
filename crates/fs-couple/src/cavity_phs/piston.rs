@@ -5,6 +5,10 @@
 //! momentum. Both use the same midpoint pressure: there is no prescribed-motion
 //! animation, nominal-air load, or independent pressure/work approximation.
 
+/// Two source-resolved gases acting on one inertial wall and one momentum state.
+pub mod double_acting;
+mod impulse;
+
 /// Shared source-resolved rigid-body inertia coupled to the same gas dynamics.
 pub mod material;
 /// Reciprocal finite-body enthalpy/phase exchange on the same gas/momentum step.
@@ -220,7 +224,7 @@ impl GasPiston {
         mut cancelled: impl FnMut() -> bool) -> Result<PistonStep, PistonError>
     {
         poll(&mut cancelled)?;
-        let [mut lo, mut hi] = controls.volume_bracket_m3;
+        let [lo, hi] = controls.volume_bracket_m3;
         if !positive(input.duration_s) || !input.heat_j.is_finite()
             || !input.exterior_pressure_pa.is_finite() || input.exterior_pressure_pa < 0.0
             || !input.external_force_n.is_finite() || !positive(lo) || !positive(hi) || lo >= hi
@@ -228,44 +232,11 @@ impl GasPiston {
             || !positive(controls.momentum_tolerance_n_s) || !positive(controls.energy_tolerance_j)
             || !(1..=128).contains(&controls.maximum_iterations)
         { return Err(invalid("invalid piston drive, volume bracket, residual tolerances or iteration cap")); }
-        let first = self.trial(self.gas.volume_m3(), input, controls, &mut cancelled)?;
-        if first.residual.abs() <= controls.momentum_tolerance_n_s {
-            return self.finish(first, input, controls, 0, 1, &mut cancelled);
-        }
-        let lower = self.trial(lo, input, controls, &mut cancelled)?;
-        let upper = self.trial(hi, input, controls, &mut cancelled)?;
-        if lower.residual.abs() <= controls.momentum_tolerance_n_s {
-            return self.finish(lower, input, controls, 0, 3, &mut cancelled);
-        }
-        if upper.residual.abs() <= controls.momentum_tolerance_n_s {
-            return self.finish(upper, input, controls, 0, 3, &mut cancelled);
-        }
-        if lower.residual > 0.0 || upper.residual < 0.0 || lower.residual > upper.residual {
-            return Err(PistonError::OutsideBracket { lower_impulse_n_s: lower.residual,
-                upper_impulse_n_s: upper.residual });
-        }
-        let mut volume = self.gas.volume_m3();
-        let proposed = volume-first.residual/first.tangent;
-        if proposed > lo && proposed < hi { volume = proposed; }
-        else { volume = lo+0.5*(hi-lo); }
-        let mut residual = first.residual;
-        for iteration in 1..=controls.maximum_iterations {
+        let solved = impulse::solve(self.gas.volume_m3(), controls, |volume| {
             let trial = self.trial(volume, input, controls, &mut cancelled)?;
-            residual = trial.residual;
-            if residual.abs() <= controls.momentum_tolerance_n_s {
-                return self.finish(trial, input, controls, iteration, iteration+3, &mut cancelled);
-            }
-            if residual < 0.0 { lo = volume; } else { hi = volume; }
-            let proposed = volume-residual/trial.tangent;
-            let margin = 0.1*(hi-lo);
-            let next = if proposed > lo+margin && proposed < hi-margin { proposed }
-                else { lo+0.5*(hi-lo) };
-            if next <= lo || next >= hi || next == volume {
-                return Err(PistonError::NotConverged { iterations: iteration, impulse_residual_n_s: residual });
-            }
-            volume = next;
-        }
-        Err(PistonError::NotConverged { iterations: controls.maximum_iterations, impulse_residual_n_s: residual })
+            Ok(impulse::Trial { residual: trial.residual, tangent: trial.tangent, value: trial })
+        })?;
+        self.finish(solved.value, input, controls, solved.iterations, solved.proposals, &mut cancelled)
     }
 }
 
