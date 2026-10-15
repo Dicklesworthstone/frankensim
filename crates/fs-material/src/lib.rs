@@ -29,6 +29,7 @@ pub mod fiber;
 pub mod fluid_transport;
 pub mod gas;
 pub mod gas_mixture;
+pub mod gas_species;
 mod gas_state;
 pub mod moist_air;
 pub mod graph;
@@ -80,15 +81,13 @@ pub struct MaterialAdmissibility {
     pub dissipation_nonnegative: bool,
     /// The energy is polyconvex (hyperelastic laws; None = unknown).
     pub polyconvex: Option<bool>,
-    /// The consistent tangent is symmetric (associative flow/elastic).
-    pub tangent_symmetric: bool,
     /// Human-readable failure-envelope statement.
     pub failure_envelope: &'static str,
 }
 
 /// A small-strain constitutive law (Voigt 6-space) with internal state.
 /// The TANGENT CONTRACT: `tangent` must be the exact derivative of the
-/// stress returned by `stress` at the SAME converged state update — the
+/// stress returned by `stress` at the SAME converged step exactly — the
 /// conformance suite enforces this against finite differences for every
 /// law (merge-gate discipline).
 pub trait SmallStrainLaw {
