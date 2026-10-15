@@ -1058,11 +1058,16 @@ pub struct Contact {
     pub peak_force: f64,
     /// Force of the last step [N] (diagnostics).
     pub force: f64,
+    /// The force solve stops at an exact Newton fixed point (see `contact_force`). On for the snare
+    /// wires: held under load and warm-started, about one solve in five lands on its own root. Off
+    /// elsewhere: it is as exact there, but it would change every other piece's output (by rounding
+    /// for most; the open hi-hat's rim chatter decorrelates), and that has not been graded.
+    pub fixed_point_exit: bool,
 }
 
 impl Contact {
     pub fn new(a: Vec<(usize, usize, f64)>, b: Vec<(usize, usize, f64)>, gap: f64, law: Law) -> Contact {
-        Contact { a, b, gap, law, d_now: 0.0, active: true, peak_force: 0.0, force: 0.0 }
+        Contact { a, b, gap, law, d_now: 0.0, active: true, peak_force: 0.0, force: 0.0, fixed_point_exit: false }
     }
 }
 
@@ -1126,7 +1131,11 @@ impl Mic {
 /// One contact's force: the root of g(f) = f - phi(d_pred - comp f), phi(d) = K d^a (1 + mu (d - d_now)/k)
 /// clipped at zero force. g is increasing with a root in [0, d_pred / comp]: safeguarded Newton (a
 /// bisection step whenever Newton leaves the bracket), from the last force when it lies in the bracket.
-fn contact_force(d_pred: f64, comp: f64, force: f64, d_now: f64, law: Law, k: f64) -> f64 {
+/// With `fixed_exit`, a Newton step that lands exactly on the iterate stops the solve there: the
+/// correction is below half an ulp, so the iterate is the root to rounding. Without it the bracket
+/// update has just put that iterate on the bracket's edge, so the safeguard bisects away from the
+/// root and halves back down to it (30-47 iterations instead of about 3).
+fn contact_force(d_pred: f64, comp: f64, force: f64, d_now: f64, law: Law, fixed_exit: bool, k: f64) -> f64 {
     let Law::Power { k: kk, alpha, mu } = law;
     let phi = |d: f64| -> (f64, f64) {
         if d <= 0.0 {
@@ -1149,7 +1158,7 @@ fn contact_force(d_pred: f64, comp: f64, force: f64, d_now: f64, law: Law, k: f6
         let g = x - v;
         if g > 0.0 { hi = x; } else { lo = x; }
         let mut next = x - g / (1.0 + comp * dv);
-        if !(next > lo && next < hi) {
+        if !((next > lo && next < hi) || (fixed_exit && next == x)) {
             next = 0.5 * (lo + hi);
         }
         let done = (next - x).abs() <= 1e-13 * next.abs().max(1e-30) || hi - lo <= 1e-13 * hi.max(1e-30);
@@ -1165,7 +1174,7 @@ fn contact_force(d_pred: f64, comp: f64, force: f64, d_now: f64, law: Law, k: f6
 /// same order, so the same iterate, bracket and stop. Returns (next iterate, stop).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn newton_step_sqrt(x: f64, lo: &mut f64, hi: &mut f64, dp: f64, cm: f64, dn: f64, kk: f64, mu: f64, k: f64) -> (f64, bool) {
+fn newton_step_sqrt(x: f64, lo: &mut f64, hi: &mut f64, dp: f64, cm: f64, dn: f64, kk: f64, mu: f64, fixed_exit: bool, k: f64) -> (f64, bool) {
     let d = dp - cm * x;
     let pa1 = d.sqrt();
     let pa = pa1 * d;
@@ -1180,7 +1189,7 @@ fn newton_step_sqrt(x: f64, lo: &mut f64, hi: &mut f64, dp: f64, cm: f64, dn: f6
     *hi = if up { x } else { *hi };
     *lo = if up { *lo } else { x };
     let newton = x - g / (1.0 + cm * dv);
-    let next = if newton > *lo && newton < *hi { newton } else { 0.5 * (*lo + *hi) };
+    let next = if (newton > *lo && newton < *hi) | (fixed_exit & (newton == x)) { newton } else { 0.5 * (*lo + *hi) };
     let done = ((next - x).abs() <= 1e-13 * next.abs().max(1e-30)) | (*hi - *lo <= 1e-13 * hi.max(1e-30));
     (next, done)
 }
@@ -1189,7 +1198,8 @@ fn newton_step_sqrt(x: f64, lo: &mut f64, hi: &mut f64, dp: f64, cm: f64, dn: f6
 /// penetration, force and update are what solving them one at a time in list order gives.
 #[derive(Default)]
 struct ContactQueue {
-    /// Per queued contact: its index, d_pred, comp, first iterate, upper bracket, d_now, K, mu; the force.
+    /// Per queued contact: its index, d_pred, comp, first iterate, upper bracket, d_now, K, mu, fixed-point
+    /// exit; the force.
     j: Vec<usize>,
     dp: Vec<f64>,
     cm: Vec<f64>,
@@ -1198,6 +1208,7 @@ struct ContactQueue {
     dn: Vec<f64>,
     kk: Vec<f64>,
     mu: Vec<f64>,
+    fx: Vec<bool>,
     f: Vec<f64>,
     /// Per body and node, the batch that last claimed the node.
     mark: Vec<Vec<u32>>,
@@ -1222,12 +1233,18 @@ impl ContactQueue {
     /// `contact_force` for every queued contact (all a = 1.5), LANES at a time; a lane that stops
     /// takes the next contact.
     fn solve(&mut self, k: f64) {
+        // a batch with no fixed-point exit (every hi-hat batch) runs the loop without the per-lane flag
+        if self.fx.contains(&true) { self.solve_lanes::<true>(k) } else { self.solve_lanes::<false>(k) }
+    }
+
+    fn solve_lanes<const FX: bool>(&mut self, k: f64) {
         let n = self.j.len();
         self.f.clear();
         self.f.resize(n, 0.0);
         let mut at = [n; LANES];
         let (mut x, mut lo, mut hi) = ([0.5; LANES], [0.0; LANES], [1.0; LANES]);
         let (mut dp, mut cm, mut dn, mut kk, mut mu) = ([1.0; LANES], [1.0; LANES], [0.0; LANES], [0.0; LANES], [0.0; LANES]);
+        let mut fx = [false; LANES];
         let mut it = [0u32; LANES];
         let mut next = 0;
         let mut busy = 0;
@@ -1243,6 +1260,9 @@ impl ContactQueue {
                 dn[l] = self.dn[t];
                 kk[l] = self.kk[t];
                 mu[l] = self.mu[t];
+                if FX {
+                    fx[l] = self.fx[t];
+                }
                 it[l] = 0;
                 next += 1;
             }};
@@ -1257,7 +1277,7 @@ impl ContactQueue {
             // an idle lane iterates on harmless values (a halving from 0.5) and is ignored
             let mut done = [false; LANES];
             for l in 0..LANES {
-                let (nx, stop) = newton_step_sqrt(x[l], &mut lo[l], &mut hi[l], dp[l], cm[l], dn[l], kk[l], mu[l], k);
+                let (nx, stop) = newton_step_sqrt(x[l], &mut lo[l], &mut hi[l], dp[l], cm[l], dn[l], kk[l], mu[l], FX & fx[l], k);
                 x[l] = nx;
                 done[l] = stop;
                 it[l] += 1;
@@ -1289,6 +1309,7 @@ impl ContactQueue {
             for v in [&mut self.dp, &mut self.cm, &mut self.x0, &mut self.hi, &mut self.dn, &mut self.kk, &mut self.mu, &mut self.f] {
                 v.clear();
             }
+            self.fx.clear();
             self.j.clear();
         }
         self.new_batch();
@@ -1351,7 +1372,7 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
         }
         if !queued || d_pred <= 0.0 {
             // solved now: the queue is empty, or this contact moves nothing
-            let f = contact_force(d_pred, comp, c.force, c.d_now, c.law, k);
+            let f = contact_force(d_pred, comp, c.force, c.d_now, c.law, c.fixed_point_exit, k);
             apply_force(bodies, c, f, d_pred, comp, k);
             continue;
         }
@@ -1367,6 +1388,7 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
         q.dn.push(c.d_now);
         q.kk.push(kk);
         q.mu.push(mu);
+        q.fx.push(c.fixed_point_exit);
     }
     q.flush(bodies, contacts, k);
 }

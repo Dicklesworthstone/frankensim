@@ -168,7 +168,7 @@ fn queued_contact_solves_match_solving_one_at_a_time() {
                 d_pred -= w * bodies[b].wn[i];
                 comp += w * w * bodies[b].compliance(i, k);
             }
-            let f = contact_force(d_pred, comp, c.force, c.d_now, c.law, k);
+            let f = contact_force(d_pred, comp, c.force, c.d_now, c.law, c.fixed_point_exit, k);
             apply_force(bodies, c, f, d_pred, comp, k);
         }
     }

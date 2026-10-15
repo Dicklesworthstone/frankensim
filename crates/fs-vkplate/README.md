@@ -57,7 +57,10 @@ The Airy operator is factored once (banded Cholesky, row-major ordering); both t
 stream the one stored factor, which dominates a cymbal's cost on a fine grid. Contacts warm-start
 their Newton solve from the previous step's force. Contacts on disjoint nodes (the snare wires, the
 hi-hat rims) are solved four at a time, interleaved, each with the same operations it would take
-alone, so the result is the one-at-a-time result bit for bit.
+alone, so the result is the one-at-a-time result bit for bit. A snare wire's solve stops when a
+Newton step lands exactly on its own iterate (an exact fixed point) instead of bisecting away from
+it: about 3 iterations per solve instead of 10, and the applied force is within a few ulps of the
+root rather than 1e-13.
 
 ## Hi-hat
 

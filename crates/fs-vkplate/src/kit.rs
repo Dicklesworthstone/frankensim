@@ -147,7 +147,9 @@ pub fn drum(s: &DrumSpec, hits: &[(f64, f64)]) -> Result<Piece, String> {
             for k in 0..n {
                 let x = x0 + k as f64 * h;
                 if let Some(hn) = ins.bodies[ri].node_at(x, y) {
-                    ins.contacts.push(Contact::new(vec![(ri, hn, 1.0)], vec![(wi, k, 1.0)], 0.0, wr.contact));
+                    let mut c = Contact::new(vec![(ri, hn, 1.0)], vec![(wi, k, 1.0)], 0.0, wr.contact);
+                    c.fixed_point_exit = true;
+                    ins.contacts.push(c);
                 }
             }
             count += 1;
