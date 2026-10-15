@@ -80,7 +80,7 @@ fn gas_pressure_is_shared_by_strings_cavity_and_actual_output_not_a_post_effect(
 #[test]
 fn canonical_double_stop_ramps_and_pluck_share_the_original_joint_owner() {
     scoped(|cx,gate| {
-        let mut s=spec();s.strings.push(s.strings[0].clone());s.strings[1].tension=22.0;
+        let mut s=spec();s.strings.push(s.strings[0].clone());s.strings[1].prestress=StringPrestress::FixedTension(22.0);
         let track=|id:&str,string,station|GestureTrack {id:id.into(),target:GestureTarget::BowStroke {string},
             initial:GestureValue::Bow {velocity_m_per_s:0.0,normal_force_n:0.0,station},events:vec![
                 GestureEvent {time_s:0.0,transition_s:0.002,value:GestureValue::Bow {velocity_m_per_s:0.01,normal_force_n:0.0001,station}},
@@ -128,3 +128,6 @@ fn malformed_or_unobserved_controls_and_unbounded_decoder_counts_refuse() {
     assert!(input::Spec::parse(format!("{text}unconsumed\n").as_bytes()).is_err());
     assert!(input::Spec::parse(include_bytes!("pluck-and-bow.material-strings")).is_ok());
 }
+
+#[path = "tests/layered.rs"]
+mod layered;

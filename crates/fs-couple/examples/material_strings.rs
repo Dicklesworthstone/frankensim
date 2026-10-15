@@ -2,6 +2,8 @@
 //! string/body/cavity state and the existing streamed PCM writer. No preset bank.
 #[path = "material_strings/input.rs"]
 mod input;
+#[path = "material_strings/construction.rs"]
+mod construction;
 use std::{collections::BTreeMap, error::Error, fs::{File,OpenOptions}, io::{Read,Seek,Write}, path::Path};
 use fs_couple::bowed_string::runtime::reciprocal::bank::{
     MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation};
@@ -18,7 +20,9 @@ use fs_couple::render::schedule::force::{ForceInitialization,ForceRenderConfig,M
 use fs_couple::render::schedule::force::coupled::ModalCouplingConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::ModalFrictionConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::MultiFrictionConfig;
-use fs_couple::string_specimen::{with_uniform_circular_material_state,KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY as ETA};
+use fs_couple::string_specimen::{with_uniform_circular_material_state,
+    with_uniform_circular_material_and_constraints, StringGeometryConstraint, StringPrestress,
+    KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY as ETA};
 use fs_couple::thin_plate::{with_uniform_plate_material_state,PlateMaterialModel,PlateThicknessConstraint};
 use fs_exec::{CancelGate,Cx};
 use fs_matdb::{NormalizedPack,MaterialCard,MaterialStateId,QueryPoint};
@@ -44,7 +48,9 @@ fn options(rate:u32,bow:StringBowLocation) -> StringBankOptions {
             force_absolute_tolerance_n:1e-10,force_relative_tolerance:1e-9,sticking_tolerance_m:1e-12 } }
 }
 fn template(w:&input::Wire) -> PrestressedString {
-    PrestressedString { length_m:w.length,tension_n:w.tension,lin_density_kg_m:1.0,axial_stiffness_n:1.0,
+    // Extension-derived tension is filled by the original material/support owner.
+    let tension = match w.prestress { StringPrestress::FixedTension(t) => t, _ => 0.0 };
+    PrestressedString { length_m:w.length,tension_n:tension,lin_density_kg_m:1.0,axial_stiffness_n:1.0,
         width_m:1.0,n_modes:w.bending_modes,damping_ratio:0.0,rayleigh:None,bending_stiffness_n_m2:0.0,
         kelvin_voigt_bending:None,relaxation_bending:None,polarization_detune:0.0,moving_end:false }
 }
@@ -83,12 +89,7 @@ impl input::Spec {
         let mut catalog=Catalog::new(); let mut sources=Vec::with_capacity(self.strings.len());
         for wire in &self.strings {
             poll(gate)?;
-            let material=resolve(&wire.pack,&mut catalog,&mut loader,&self,false,wire.twist_modes>0)?;
-            let specimen=with_uniform_circular_material_state(template(wire),wire.radius,&material)?
-                .with_kelvin_voigt_bending_loss()?;
-            let mut source=MaterialStringSource::Homogeneous(specimen);
-            if wire.twist_modes>0 { source=source.with_torsion(SHEAR,SHEAR_ETA,wire.twist_modes)?; }
-            sources.push(source);
+            sources.push(wire.resolve_source(&mut catalog, &mut loader, &self, gate)?);
         }
         let material=resolve(&self.body.pack,&mut catalog,&mut loader,&self,true,false)?;
         let body=SharedMaterialPlateBody {
