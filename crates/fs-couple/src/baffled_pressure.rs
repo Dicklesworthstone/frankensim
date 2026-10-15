@@ -93,9 +93,10 @@ pub struct CircularOutletReceiver {
     pub radial_rings: usize,
     /// Uniform azimuthal samples per annulus, 8..=512.
     pub angular_points: usize,
-    /// Declared resolved band upper limit [Hz]. At most 0.1 of the mechanical
-    /// rate, limiting differencing/interpolation errors. Not a spectral filter
-    /// or proof that a nonlinear source has no content above this band.
+    /// Declared resolved band upper limit [Hz]. Legacy finite-difference images
+    /// admit at most 0.1 of their mechanical rate; differentiating images admit
+    /// at most 0.45 of their output rate. This controls spatial resolution; it
+    /// is not a filter or proof that a nonlinear source stays inside the band.
     pub maximum_frequency_hz: f64,
 }
 
@@ -230,11 +231,22 @@ impl BaffledPressure {
     /// for quantitative accuracy; no continuum error enclosure is claimed.
     pub fn circular_outlet(radius_m: f64, mechanical_rate: u32,
         receiver: CircularOutletReceiver, medium: RayleighMedium) -> Result<Self,String> {
+        if receiver.maximum_frequency_hz>0.1*f64::from(mechanical_rate) {
+            return Err("circular receiver requires physical geometry and explicit bounded resolution".into());
+        }
+        let surface = Self::circular_surface(radius_m, receiver, medium)?;
+        Self::new(&surface,1,mechanical_rate,receiver.position_m,medium)
+    }
+
+    // The same physical quadrature for every circular-outlet observation image.
+    // Temporal admission belongs to its selected reconstruction, not the mesh.
+    fn circular_surface(radius_m: f64, receiver: CircularOutletReceiver,
+        medium: RayleighMedium) -> Result<Vec<SurfaceSample>, String>
+    {
         if !radius_m.is_finite() || radius_m<=0.0
             || !(1..=128).contains(&receiver.radial_rings)
             || !(8..=512).contains(&receiver.angular_points)
             || !receiver.maximum_frequency_hz.is_finite() || receiver.maximum_frequency_hz<=0.0
-            || receiver.maximum_frequency_hz>0.1*f64::from(mechanical_rate)
             || !medium.sound_speed.is_finite() || medium.sound_speed<=0.0 {
             return Err("circular receiver requires physical geometry and explicit bounded resolution".into());
         }
@@ -257,7 +269,7 @@ impl BaffledPressure {
                     area_m2:patch_area,mode_shape:vec![1.0/area] });
             }
         }
-        Self::new(&surface,1,mechanical_rate,receiver.position_m,medium)
+        Ok(surface)
     }
 
     fn set_input_ratio(&mut self, ratio: usize) -> Result<(), String> {
@@ -644,7 +656,7 @@ mod circular_tests {
         let mut coarse=config();coarse.radial_rings=1;coarse.angular_points=8;
         assert!(BaffledPressure::circular_outlet(0.2,48000,coarse,medium).is_err());
         for radius in [0.0,-1.0,f64::NAN,f64::MAX] {
-            assert!(BaffledPressure::circular_outlet(radius,48000,config(),medium).is_err());
+            assert!(BaffledPressure::circular_outlet(radius,48000,coarse,medium).is_err());
         }
         let mut high=config();high.maximum_frequency_hz=4801.0;
         assert!(BaffledPressure::circular_outlet(0.007,48000,high,medium).is_err());
