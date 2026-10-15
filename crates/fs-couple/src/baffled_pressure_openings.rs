@@ -5,6 +5,11 @@
 use super::{BaffledPressure, CircularOutletReceiver, RayleighMedium, MAX_RAYLEIGH_INPUTS};
 use std::collections::BTreeMap;
 
+/// Physical duct-port binding and complete substep traces, shared by wind sources.
+#[path = "baffled_pressure_duct.rs"]
+pub mod duct;
+
+
 /// One physical circular opening in a shared stationary z=0 baffle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CircularOpening {

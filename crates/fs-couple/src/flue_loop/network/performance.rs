@@ -11,7 +11,7 @@
 use super::{FlueError, FlueResonator, FlueVoice};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::flue_loop::FlueControl;
-use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
+use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::{ControlDelta, RenderError};
 use crate::render::schedule::{
@@ -19,8 +19,13 @@ use crate::render::schedule::{
 };
 use fs_scenario::gesture::GestureSchedule;
 use fs_material::gas::GasState;
-use crate::pcm_wav::baffled::openings::CircularOpening;
+#[cfg(test)]
+use crate::pcm_wav::baffled::RayleighMedium;
+#[cfg(test)]
 use fs_vfit::waveguide::network::NetworkNode;
+use crate::pcm_wav::baffled::openings::duct::{
+    DuctPressure, DuctView, DuctOpening, DuctReconstruction, DuctRadiationSpec,
+};
 
 /// Finite physical output and explicit observation/compilation limits.
 #[derive(Clone, Copy, Debug)]
@@ -72,11 +77,10 @@ pub struct FlueRadiationInput {
 /// sample. No general allocation-free or real-time qualification is implied.
 pub struct FlueOutletPerformance {
     voice: FlueVoice,
-    receiver: BaffledPressure,
+    receiver: DuctPressure,
     config: FlueOutletConfig,
     radiation: Option<FlueRadiationInput>,
     outlet_nodes: Vec<usize>,
-    flows: Vec<f64>,
     mechanics_rate_hz: u32,
     mechanics_per_output: usize,
     schedule: GestureSchedule,
@@ -194,50 +198,28 @@ impl FlueOutletPerformance {
         }
         voice.validate_blowing_pressure(0.0).map_err(|e| GestureCompileError::Render(source_error(e)))?;
         let network = voice.network().ok_or_else(|| invalid("exterior flue pressure requires a physical tube graph, not an internal TMM pressure trace"))?;
-        let graph = network.graph();
-        let mut outlet_nodes = vec![config.outlet_node];
-        let mut centers = vec![[0.0, 0.0]];
+        if radiation.as_ref().is_some_and(|input|
+            input.additional_outlets.len() >= crate::pcm_wav::baffled::MAX_RAYLEIGH_INPUTS) {
+            return Err(invalid("flue outlet count exceeds the shared receiver input budget"));
+        }
+        let mut openings = vec![DuctOpening { network: 0, node: config.outlet_node, center_m: [0.0; 2] }];
         if let Some(input) = &radiation {
-            if input.additional_outlets.len() >= crate::pcm_wav::baffled::MAX_RAYLEIGH_INPUTS {
-                return Err(invalid("flue outlet count exceeds the shared receiver input budget"));
-            }
-            input.exterior.validate_coherence().map_err(|_| invalid("flue exterior gas is incoherent"))?;
-            for outlet in &input.additional_outlets {
-                if outlet_nodes.contains(&outlet.node) {
-                    return Err(invalid("a physical outlet cannot be counted twice at the microphone"));
-                }
-                outlet_nodes.push(outlet.node);
-                centers.push(outlet.center_m);
-            }
+            openings.extend(input.additional_outlets.iter().map(|outlet| DuctOpening {
+                network: 0, node: outlet.node, center_m: outlet.center_m,
+            }));
         }
-        let mut openings = Vec::with_capacity(outlet_nodes.len());
-        let mut local_gas = None;
-        for (&node, &center_m) in outlet_nodes.iter().zip(&centers) {
-            if !matches!(graph.nodes.get(node), Some(NetworkNode::Termination { .. }
-                | NetworkNode::Impedance { .. } | NetworkNode::Relaxation { .. })) {
-                return Err(invalid("flue outlet observation requires a passive degree-one terminal"));
-            }
-            let mut adjacent = graph.sections.iter().enumerate().filter(|(_, s)| s.nodes.contains(&node));
-            let (index, section) = adjacent.next()
-                .ok_or_else(|| invalid("flue outlet has no physical adjacent section"))?;
-            if adjacent.next().is_some() {
-                return Err(invalid("flue outlet observation requires exactly one adjacent section"));
-            }
-            let gas = network.section_gases()[index];
-            if radiation.as_ref().is_some_and(|input| input.exterior.pressure.to_bits() != gas.pressure.to_bits()) {
-                return Err(invalid("exterior and bore must share static pressure; mean interface flow is not modeled"));
-            }
-            local_gas.get_or_insert(gas);
-            openings.push(CircularOpening { center_m, radius_m: section.radius_m });
-        }
-        let gas = radiation.as_ref().map_or_else(|| local_gas.expect("primary outlet"), |input| input.exterior);
-        let medium = RayleighMedium { density: gas.density, sound_speed: gas.sound_speed };
-        let receiver = match reconstruction_rate {
-            None => BaffledPressure::circular_openings(&openings, config.sample_rate_hz,
-                config.receiver, medium),
-            Some(rate) => BaffledPressure::circular_openings_multirate_differentiating(
-                &openings, rate, config.sample_rate_hz, config.receiver, medium),
-        }.map_err(|e| GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Nonlinear(e))))?;
+        let outlet_nodes = openings.iter().map(|p| p.node).collect();
+        let reconstruction = match reconstruction_rate {
+            None => DuctReconstruction::FiniteDifference { sample_rate_hz: config.sample_rate_hz },
+            Some(rate) => DuctReconstruction::Differentiating {
+                mechanics_rate_hz: rate, output_rate_hz: config.sample_rate_hz,
+            },
+        };
+        let receiver = DuctPressure::new(&[DuctView {
+            graph: network.graph(), gases: network.section_gases(),
+        }], DuctRadiationSpec { openings, exterior: radiation.as_ref().map(|r| r.exterior),
+            receiver: config.receiver, reconstruction,
+        }).map_err(|e| GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Nonlinear(e))))?;
         let [track] = schedule.tracks() else {
             return Err(invalid("flue performance needs one explicitly typed blowing-pressure track"));
         };
@@ -264,8 +246,7 @@ impl FlueOutletPerformance {
         launched.try_reserve_exact(scratch_samples)
             .map_err(|_| invalid("flue callback scratch exceeds available allocation"))?;
         launched.resize(scratch_samples, 0.0);
-        let flows = vec![0.0; outlet_nodes.len() * mechanics_per_output];
-        Ok(Self { voice, receiver, config, radiation, outlet_nodes, flows, mechanics_rate_hz,
+        Ok(Self { voice, receiver, config, radiation, outlet_nodes, mechanics_rate_hz,
             mechanics_per_output, schedule, controls, next: 0, launched, poisoned: false })
     }
 
@@ -280,7 +261,7 @@ impl FlueOutletPerformance {
     pub const fn config(&self) -> &FlueOutletConfig { &self.config }
     /// Original shared receiver, including physical and numerical delay metadata.
     #[must_use]
-    pub const fn receiver(&self) -> &BaffledPressure { &self.receiver }
+    pub const fn receiver(&self) -> &BaffledPressure { self.receiver.receiver() }
     /// Original explicit exterior/environment input, absent for the legacy path.
     #[must_use]
     pub const fn radiation_input(&self) -> Option<&FlueRadiationInput> { self.radiation.as_ref() }
@@ -301,9 +282,8 @@ impl FlueOutletPerformance {
         let ratio = self.mechanics_per_output;
         let end = self.voice.samples_rendered() + output.len() as u64 * ratio as u64;
         let mut written = 0;
-        // Each accepted callback ends on an audio boundary. Control segments may
-        // not: keep the partial mechanical flow trace across those boundaries.
-        let mut filled = 0;
+        // The shared receiver retains partial packets across control segments.
+        // Each successful callback ends on a complete output frame.
         while self.voice.samples_rendered() < end {
             let now = self.voice.samples_rendered();
             while let Some(control) = self.controls.get(self.next) {
@@ -317,30 +297,23 @@ impl FlueOutletPerformance {
             let until = self.controls.get(self.next).map_or(end, |c| c.sample.min(end));
             let count = (until - now) as usize;
             let receiver = &mut self.receiver;
-            let nodes = &self.outlet_nodes;
-            let flows = &mut self.flows;
             let ceiling = self.config.maximum_abs_pressure_pa;
             let mut destinations = output[written..].iter_mut();
             self.voice.step_block_observed(&mut self.launched[..count], |line| {
                 let FlueResonator::Network(network) = line else { unreachable!("owned physical graph") };
-                let start = filled * nodes.len();
-                for (flow, &node) in flows[start..start + nodes.len()].iter_mut().zip(nodes) {
-                    *flow = network.node_frame(node).expect("owned admitted outlet").net_flow_into_node_m3_s;
-                }
-                filled += 1;
-                if filled < ratio { return Ok(()); }
-                let pressure = receiver.step_trace(flows)
+                let pressure = receiver.push_frame(|_, node| network.node_frame(node)
+                    .map(|frame| frame.net_flow_into_node_m3_s))
                     .map_err(|e| FlueError::Physics(AcousticRealizeError::Nonlinear(e)))?;
+                let Some(pressure) = pressure else { return Ok(()); };
                 if !pressure.is_finite() || pressure.abs() > ceiling {
                     return Err(FlueError::Invalid { what: "flue microphone pressure exceeds its declared finite ceiling" });
                 }
                 *destinations.next().expect("one observation per complete mechanical trace") = pressure;
                 written += 1;
-                filled = 0;
                 Ok(())
             }).map_err(source_error)?;
         }
-        debug_assert_eq!(filled, 0);
+        debug_assert_eq!(self.receiver.pending_frames(), 0);
         debug_assert_eq!(written, output.len());
         Ok(())
     }
