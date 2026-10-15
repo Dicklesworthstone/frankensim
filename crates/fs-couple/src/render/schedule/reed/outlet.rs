@@ -1,0 +1,124 @@
+//! Terminal observation over the unchanged physical reed and pressure scheduler.
+use super::*;
+use crate::acoustic_realize::map_drive;
+use crate::driving_point::{DrivingPointError, regional::RegionalDuct};
+use crate::driving_point::regional::outlet::OutletPressure;
+use crate::pcm_wav::baffled::CircularOutletReceiver;
+
+pub(super) struct TerminalObservation {
+    pressure: OutletPressure,
+    failure: Option<OutletError>,
+}
+
+pub(super) enum ObservationInput {
+    Legacy(f64),
+    Baffled(CircularOutletReceiver),
+}
+impl ObservationInput {
+    pub(super) fn read(reader: &mut Reader<'_>) -> Result<Self, ReedPerformanceError> {
+        let mut row = reader.next()?;
+        let observation = match row.word()? {
+            "listener_m" => Self::Legacy(row.positive()?),
+            "baffled_outlet" => Self::Baffled(CircularOutletReceiver {
+                position_m: [row.scalar()?, row.scalar()?, row.scalar()?],
+                radial_rings: row.count(128)?, angular_points: row.count(512)?,
+                maximum_frequency_hz: row.positive()?,
+            }),
+            _ => return Err(bad(row.line, "expected listener_m or baffled_outlet observation")),
+        };
+        row.finish()?;
+        Ok(observation)
+    }
+
+    pub(super) fn validate_termination(&self, termination: Termination, line: usize)
+        -> Result<(), ReedPerformanceError> {
+        if matches!(self, Self::Baffled(_)) && !matches!(termination, Termination::FlangedOpen) {
+            return Err(bad(line, "baffled_outlet requires the same flanged terminal feedback load"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn build(self, duct: &Duct, gases: &[GasState], reed: BeatingReed,
+        termination: Termination, rate: u32, samples: usize)
+        -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
+        if let Self::Legacy(distance) = self {
+            let voice = ReedBoreVoice::new_with_segment_gases(duct, gases, reed,
+                termination, PlateBank::default(), distance, rate, samples, None)
+                .map_err(ReedPerformanceError::Model)?;
+            return Ok((voice, None));
+        }
+        let Self::Baffled(receiver) = self else { unreachable!("legacy returned above") };
+        let regional = RegionalDuct::new(duct, gases)
+            .map_err(|error| ReedPerformanceError::Model(map_drive(DrivingPointError::Duct(error))))?;
+        // Use the same initializer, lay, source impedance and prime as every
+        // other ReedBoreVoice. Its proxy is discarded only at the observation
+        // boundary; no geometry, mechanics or pressure controls are rewritten.
+        let [x, y, z] = receiver.position_m;
+        let voice = ReedBoreVoice::with_line(duct, regional.inlet_gas(), reed,
+            PlateBank::default(), x.hypot(y).hypot(z), rate, |_| {
+                regional.characteristic_line(termination, rate, samples, None, None)
+                    .map_err(map_drive)
+            }).map_err(ReedPerformanceError::Model)?;
+        let grid = voice.line.history().len();
+        let mut pressure = regional.baffled_outlet(rate, grid, receiver, None)
+            .map_err(ReedPerformanceError::Outlet)?;
+        // Sample -1 exists in the original feedback history. Supply exactly
+        // that same wave once, before sample zero, to the terminal transfer.
+        pressure.step(voice.p_plus_prev).map_err(ReedPerformanceError::Outlet)?;
+        Ok((voice, Some(TerminalObservation { pressure, failure: None })))
+    }
+}
+
+impl ReedPerformance {
+    /// The selected physical receiver; None identifies the original bore/jet proxy.
+    /// Axial and exterior travel delays remain on the mechanics clock, not the
+    /// output-filter latency removed by ensemble alignment.
+    #[must_use]
+    pub fn outlet_receiver(&self) -> Option<OutletReceiverInfo> {
+        self.terminal.as_ref().map(|terminal| terminal.pressure.info())
+    }
+
+    /// Original observer failure, retained even through the legacy PressureRenderer
+    /// error envelope. Once present, all further stepping refuses as poisoned.
+    #[must_use]
+    pub fn last_outlet_error(&self) -> Option<&OutletError> {
+        self.terminal.as_ref().and_then(|terminal| terminal.failure.as_ref())
+    }
+
+    /// Emit the selected pressure while retaining typed terminal-owner failures.
+    ///
+    /// The terminal path advances the existing scheduler one sample at a time
+    /// to observe every accepted outgoing wave. The legacy path retains its
+    /// original block call. This is an observation adapter, not a new mechanical
+    /// or control stepper. No real-time performance claim is made for this path.
+    ///
+    /// # Errors
+    /// Request shape/horizon refuses before output or state changes. Physics
+    /// failures can leave a partial callback and poison the complete source;
+    /// discard that callback rather than resuming either history separately.
+    pub fn pressure_block(&mut self, output: &mut [f64]) -> Result<(), ReedPerformanceError> {
+        self.validate_sample_count(output.len() as u64).map_err(ReedPerformanceError::Render)?;
+        self.renderer.context().validate_block_len(output.len()).map_err(ReedPerformanceError::Render)?;
+        let Some(terminal) = &mut self.terminal else {
+            return self.renderer.block(output).map_err(ReedPerformanceError::Render);
+        };
+        for slot in output {
+            let mut proxy = [0.0];
+            self.renderer.block(&mut proxy).map_err(ReedPerformanceError::Render)?;
+            let RenderVoice::ReedBore(voice) = &self.renderer.context().voices[0] else {
+                unreachable!("reed performance owns exactly one reed voice")
+            };
+            match terminal.pressure.step(voice.p_plus_prev) {
+                Ok(pressure) => *slot = pressure,
+                Err(error) => {
+                    terminal.failure = Some(error.clone());
+                    return Err(ReedPerformanceError::Outlet(error));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;
