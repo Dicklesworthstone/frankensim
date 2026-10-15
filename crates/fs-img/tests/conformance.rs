@@ -19,8 +19,8 @@ const FIXED_INPUT_SEED: u64 = 0;
 const IM_003_INPUT_SEED: u64 = 0x5EED_D401_5E00_0003;
 const IM_004_INPUT_SEED: u64 = 0x5EED_F077_0000_0004;
 
-fn print_event(event: fs_obs::Event) {
-    fs_obs::lint_failure_record(&event).expect("fs-img event must be replayable");
+fn print_event(event: &fs_obs::Event) {
+    fs_obs::lint_failure_record(event).expect("fs-img event must be replayable");
     let line = event.to_jsonl();
     fs_obs::validate_line(&line).expect("fs-img event must use the fs-obs wire schema");
     println!("{line}");
@@ -43,7 +43,7 @@ fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
         },
         None,
     );
-    print_event(event);
+    print_event(&event);
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -57,7 +57,7 @@ fn custom_event(scope: &str, severity: fs_obs::Severity, name: &str, json: Strin
         },
         None,
     );
-    print_event(event);
+    print_event(&event);
 }
 
 fn finite_json_number(value: f64) -> String {

@@ -3329,9 +3329,9 @@ mod tests {
 
     #[test]
     fn g0_embedded_artifact_count_violation_is_corruption_not_resource_refusal() {
+        const ENTRY_COUNT_OFFSET: usize = 8 + 2 + 1 + 6 * 32 + 4 + 2 + 2 + 8 + 8;
         let (_, snapshot, limits, available_output_bytes) = snapshot_fixture(1);
         let mut hostile = snapshot.into_bytes();
-        const ENTRY_COUNT_OFFSET: usize = 8 + 2 + 1 + 6 * 32 + 4 + 2 + 2 + 8 + 8;
         hostile[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4].copy_from_slice(&2_u32.to_le_bytes());
         let hostile_identity =
             identity_with_poll(&hostile, &mut || true).expect("hostile snapshot identity");
