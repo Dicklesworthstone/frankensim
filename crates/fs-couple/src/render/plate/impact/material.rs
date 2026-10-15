@@ -7,6 +7,8 @@
 pub mod pair;
 /// Atomic deposition of actual contact work into finite material enthalpy.
 pub mod heating;
+/// Source refresh at zero contact storage, preserving the complete live system.
+pub mod refresh;
 
 use fs_contact::normal_patch::{NormalPatchError, PointNormalPatchReceipt};
 use fs_contact::normal_patch::source::SourcePointContact;

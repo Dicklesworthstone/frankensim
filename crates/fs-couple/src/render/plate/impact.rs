@@ -10,7 +10,8 @@
 //! Returned states are mechanics, NOT fabricated microphone pressure.
 use std::cell::RefCell;
 use std::rc::Rc;
-use fs_dcontact::{ContactStorage,Obstacle};
+use fs_dcontact::Obstacle;
+use material::refresh::LiveContactStorage as ContactStorage;
 use fs_exec::CancelGate;
 use fs_material::fiber::{Uniaxial,WoolFeltState};
 use fs_phs::{PortHamiltonian,Storage};

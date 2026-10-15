@@ -133,6 +133,7 @@ impl PreparedImpactSystem {
     /// (Body matrix assemblies, body matrix actions) in the most recent solver
     /// attempt. Excludes contact, felt, acoustic work, residuals and LU; these
     /// counts are not timing. Substepped output reports its last internal attempt.
+    /// Counts saturate at usize::MAX; state/history acceptance is independent.
     pub fn body_tangent_work_counts(&self) -> (usize, usize) { self.body_tangents.borrow().counts() }
 
     /// Enable/disable joint kinematic/acoustic elimination for analytic Newton.
@@ -269,3 +270,18 @@ impl ImpactSource for PreparedImpactSystem {
 #[cfg(test)]
 #[path = "condensed_tests.rs"]
 mod condensed_tests;
+
+impl PreparedImpactSystem {
+    /// Replace unloaded source contacts without rebuilding or resetting prepared
+    /// state, memory, caches or solver controls. See the reference owner's gate.
+    pub fn refresh_unloaded_contacts(&mut self,
+        updates:Vec<super::material::refresh::ContactSourceUpdate>,gate:&CancelGate,
+    )->Result<usize,ImpactError> {
+        self.inner.refresh_unloaded_contacts(updates,gate)
+    }
+
+    pub(crate) fn swap_contact_refresh(&mut self,next:super::material::refresh::ContactRefresh)
+        ->super::material::refresh::ContactRefresh {
+        self.inner.swap_contact_refresh(next)
+    }
+}
