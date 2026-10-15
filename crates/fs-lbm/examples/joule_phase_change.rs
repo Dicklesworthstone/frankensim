@@ -21,19 +21,37 @@ enum IntegrationMode {
     Explicit,
     #[cfg(feature = "implicit-enthalpy-coupling")]
     Implicit { difference_step_j:f64 },
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    Adaptive { difference_step_j:f64, cell_error_budget_j:f64, minimum_step_s:f64 },
 }
 impl IntegrationMode {
     fn parse_suffix(args:&mut Vec<String>)->Result<Self,Box<dyn Error>> {
-        let Some(at)=args.iter().position(|s|s=="--implicit") else {return Ok(Self::Explicit);};
-        if at<2 || at+2!=args.len() {return Err("--implicit DIFFERENCE_STEP_J must be the final argument pair".into());}
-        let scale:f64=args[at+1].parse()?;
-        if !scale.is_finite() || scale<=0.0 {return Err("implicit difference scale must be finite positive CELL joules".into());}
+        let Some(at)=args.iter().position(|s|s=="--implicit" || s=="--adaptive") else {return Ok(Self::Explicit);};
+        let adaptive=args[at]=="--adaptive";
+        let width=if adaptive {4} else {2};
+        if at<2 || at+width!=args.len() {
+            return Err("final mode must be --implicit STENCIL_J or --adaptive STENCIL_J CELL_ERROR_BUDGET_J MIN_STEP_S".into());
+        }
+        let values=args[at+1..].iter().map(|s|s.parse::<f64>()).collect::<Result<Vec<_>,_>>()?;
+        if values.iter().any(|v|!v.is_finite() || *v<=0.0) {
+            return Err("integration stencil, cell error budget and minimum step must be finite positive values".into());
+        }
         #[cfg(not(feature = "implicit-enthalpy-coupling"))]
-        { Err("rebuild with --features implicit-enthalpy-coupling to use --implicit".into()) }
+        { Err("rebuild with --features implicit-enthalpy-coupling to use implicit or adaptive evolution".into()) }
         #[cfg(feature = "implicit-enthalpy-coupling")]
-        { args.truncate(at); Ok(Self::Implicit {difference_step_j:scale}) }
+        {
+            args.truncate(at);
+            Ok(if adaptive {Self::Adaptive {difference_step_j:values[0],cell_error_budget_j:values[1],minimum_step_s:values[2]}}
+               else {Self::Implicit {difference_step_j:values[0]}})
+        }
     }
     fn is_implicit(self)->bool {self!=Self::Explicit}
+    fn is_adaptive(self)->bool {
+        #[cfg(feature = "implicit-enthalpy-coupling")]
+        {matches!(self,Self::Adaptive {..})}
+        #[cfg(not(feature = "implicit-enthalpy-coupling"))]
+        {false}
+    }
 }
 
 /// Only common physical observations cross this presentation boundary. The
@@ -48,6 +66,8 @@ struct IntervalResult<'a> {
     contact_resistance:Option<f64>,
     newton_iterations:usize,
     maximum_cell_residual_j:f64,
+    temporal_indicator_j:f64,
+    rejected_intervals:usize,
 }
 
 
@@ -123,6 +143,7 @@ struct Row {
     time:f64,temperature:f64,liquid_fraction:f64,enthalpy:f64,current:f64,
     stored:f64,electrode:f64,thermal_external:f64,residual:f64,solves:usize,conductivity:f64,contact_resistance:Option<f64>,
     newton_iterations:usize,maximum_cell_residual_j:f64,
+    temporal_indicator_j:f64,rejected_intervals:usize,
 }
 
 fn simulate(table:&Table,voltage:f64,duration:f64,max_dt:f64,emit:impl FnMut(Row))
@@ -200,6 +221,10 @@ fn simulate_with_mode(table:&Table,contact:Option<&ContactTable>,voltage:f64,dur
             #[cfg(feature = "implicit-enthalpy-coupling")]
             IntegrationMode::Implicit {difference_step_j}=>implicit::advance(
                 &heat,target,max_dt,input,table,contact,&gate,difference_step_j)?,
+            #[cfg(feature = "implicit-enthalpy-coupling")]
+            IntegrationMode::Adaptive {difference_step_j,cell_error_budget_j,minimum_step_s}=>implicit::adaptive_advance(
+                &heat,target,max_dt,input,table,contact,&gate,difference_step_j,
+                cell_error_budget_j/60.0,minimum_step_s)?,
             IntegrationMode::Explicit=> {
                 let (next,report,conductivity,contact_resistance)=if let Some(law)=contact {
                     let (next,(),r)=advance_joule_enthalpy_with_material_interfaces_observed(
@@ -221,18 +246,20 @@ fn simulate_with_mode(table:&Table,contact:Option<&ContactTable>,voltage:f64,dur
                 };
                 IntervalResult {next,electrode_j:report.electrode_energy_j,external_j:report.thermal.external_heat_j,
                     solves:report.current_solves,current_a:report.endpoint.electric.electrodes[0].current_a,
-                    conductivity,contact_resistance,newton_iterations:0,maximum_cell_residual_j:0.0}
+                    conductivity,contact_resistance,newton_iterations:0,maximum_cell_residual_j:0.0,
+                    temporal_indicator_j:0.0,rejected_intervals:0}
             }
         };
         let IntervalResult {next,electrode_j:work,external_j:external,solves:count,current_a:current,
-            conductivity,contact_resistance,newton_iterations:iterations,maximum_cell_residual_j}=result;
+            conductivity,contact_resistance,newton_iterations:iterations,maximum_cell_residual_j,
+            temporal_indicator_j,rejected_intervals}=result;
         let state=table.curve.state_at_specific_enthalpy(next.cells()[&ids[1]].specific_h_j_kg)?;
         electrode_j+=work;external_j+=external;solves+=count;newton_iterations+=iterations;
         let stored=next.energy_j()-initial_energy;
         let row=Row {time:next.time_s(),temperature:state.temperature_k(),liquid_fraction:state.liquid_mass_fraction(),
             enthalpy:next.cells()[&ids[1]].specific_h_j_kg,current,
             stored,electrode:electrode_j,thermal_external:external_j,residual:stored-external_j,solves,conductivity,contact_resistance,
-            newton_iterations,maximum_cell_residual_j};
+            newton_iterations,maximum_cell_residual_j,temporal_indicator_j,rejected_intervals};
         heat=next; // all actual electrical, enthalpy, endpoint and energy checks passed
         emit(row);last=Some(row);
     }
@@ -242,7 +269,7 @@ fn simulate_with_mode(table:&Table,contact:Option<&ContactTable>,voltage:f64,dur
 fn main()->Result<(),Box<dyn Error>> {
     let mut args:Vec<_>=std::env::args().collect();
     let mode=IntegrationMode::parse_suffix(&mut args)?;
-    if !(2..=6).contains(&args.len()) {return Err("usage: joule_phase_change MATERIAL.txt [voltage=10] [duration_s=60] [max_dt_s=0.05] [CONTACT.txt] [--implicit DIFFERENCE_STEP_J]".into());}
+    if !(2..=6).contains(&args.len()) {return Err("usage: joule_phase_change MATERIAL.txt [voltage=10] [duration_s=60] [max_dt_s=0.05] [CONTACT.txt] [--implicit STENCIL_J | --adaptive STENCIL_J CELL_ERROR_BUDGET_J MIN_STEP_S]".into());}
     let mut text=String::new();std::fs::File::open(&args[1])?.take(65_537).read_to_string(&mut text)?;
     let table=Table::parse(&text)?;
     let contact=if let Some(path)=args.get(5) {
@@ -255,14 +282,19 @@ fn main()->Result<(),Box<dyn Error>> {
     } else {
         println!("# synthetic fixed-volume phase chart; explicit Ohmic source; no melt flow or density/pressure work");
     }
-    println!("time_s,centre_K,liquid_mass_fraction,centre_h_J_kg,endpoint_current_A,stored_change_J,electrode_work_J,total_external_heat_J,thermal_defect_J,current_solves{}{}{}",
+    if mode.is_adaptive() {
+        println!("# adaptive step doubling in cell joules; accepted fine-trajectory Newton iterations; all-trial current solves; temporal indicators are estimates");
+    }
+    println!("time_s,centre_K,liquid_mass_fraction,centre_h_J_kg,endpoint_current_A,stored_change_J,electrode_work_J,total_external_heat_J,thermal_defect_J,current_solves{}{}{}{}",
         if table.local_conductivity.is_some() {",endpoint_centre_k_W_m_K"} else {""},
         if contact.is_some() {",endpoint_contact_R_ohm_m2"} else {""},
-        if mode.is_implicit() {",newton_iterations,max_interval_cell_residual_J"} else {""});
+        if mode.is_implicit() {",newton_iterations,max_interval_cell_residual_J"} else {""},
+        if mode.is_adaptive() {",max_interval_cell_temporal_indicator_J,interval_rejections"} else {""});
     simulate_with_mode(&table,contact.as_ref(),value(2,10.0)?,value(3,60.0)?,value(4,0.05)?,mode,|r| {
         let mut suffix=if table.local_conductivity.is_some() {format!(",{:.9}",r.conductivity)} else {String::new()};
         if let Some(resistance)=r.contact_resistance {suffix.push_str(&format!(",{resistance:.9}"));}
         if mode.is_implicit() {suffix.push_str(&format!(",{},{:.6e}",r.newton_iterations,r.maximum_cell_residual_j));}
+        if mode.is_adaptive() {suffix.push_str(&format!(",{:.6e},{}",r.temporal_indicator_j,r.rejected_intervals));}
         println!("{:.6},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.6e},{}{}",
             r.time,r.temperature,r.liquid_fraction,r.enthalpy,r.current,r.stored,r.electrode,r.thermal_external,r.residual,r.solves,suffix);
     })?;
@@ -272,6 +304,16 @@ fn main()->Result<(),Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "implicit-enthalpy-coupling"))]
+    #[test]
+    fn unavailable_implicit_modes_refuse_instead_of_silently_running_explicitly() {
+        for suffix in [vec!["--implicit","1e-10"],vec!["--adaptive","1e-10","0.03","1e-7"]] {
+            let mut args=vec!["example".to_string(),"bulk.txt".to_string()];
+            args.extend(suffix.into_iter().map(str::to_string));
+            let original=args.clone();
+            assert!(IntegrationMode::parse_suffix(&mut args).is_err());assert_eq!(args,original);
+        }
+    }
     #[test]
     fn same_temperature_does_not_erase_phase_dependent_electrical_response() {
         let table=Table::parse(include_str!("joule_phase_change/latent_20k.txt")).unwrap();

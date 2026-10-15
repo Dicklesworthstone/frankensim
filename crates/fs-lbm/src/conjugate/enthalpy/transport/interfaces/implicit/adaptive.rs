@@ -80,6 +80,10 @@ pub struct AdaptiveJouleReport<F, I, J> {
     pub current_solves: usize,
     /// Comparisons discarded for temporal error or nonlinear nonconvergence.
     pub rejected_intervals: usize,
+    /// Newton iterations on the accepted fine trajectory, excluding trial work.
+    pub accepted_newton_iterations: usize,
+    /// Largest physical cell residual among the accepted half steps [J].
+    pub maximum_cell_residual_j: f64,
     /// Sum of accepted indicators per cell, in stable thermal CellId order [J].
     pub estimated_cell_errors_j: Vec<(CellId, f64)>,
     /// Total accepted boundary/additional/Joule heat, counted once [J].
@@ -175,6 +179,8 @@ pub fn advance_joule_enthalpy_adaptive<'t, F, I, J>(
     let mut errors: Vec<_> = thermal.cells().keys().map(|&id|(id,0.0_f64)).collect();
     let mut last = None;
     let mut rejected = 0usize;
+    let mut accepted_newton_iterations = 0usize;
+    let mut maximum_cell_residual_j = 0.0_f64;
     let (mut external, mut electrode, mut joule, mut deposited) = (0.0,0.0,0.0,0.0);
     while state.time_s() < target_s {
         checkpoint(gate).map_err(&thermal_failure)?;
@@ -214,6 +220,11 @@ pub fn advance_joule_enthalpy_adaptive<'t, F, I, J>(
                     electrode=finite(electrode+r1.electrode_energy_j+r2.electrode_energy_j).map_err(&physical)?;
                     joule=finite(joule+r1.joule_energy_j+r2.joule_energy_j).map_err(&physical)?;
                     deposited=finite(deposited+r1.deposited_joule_j+r2.deposited_joule_j).map_err(&physical)?;
+                    accepted_newton_iterations = accepted_newton_iterations
+                        .checked_add(r1.nonlinear.iterations).and_then(|n|n.checked_add(r2.nonlinear.iterations))
+                        .ok_or_else(||fail(AdaptiveJouleError::Balance("accepted iteration counter overflow")))?;
+                    maximum_cell_residual_j = maximum_cell_residual_j
+                        .max(r1.maximum_cell_residual_j).max(r2.maximum_cell_residual_j);
                     accepted_times_s.extend([mid,end]);
                     state=fine; last=Some(r2);
                     span=if ratio<=0.125 {dt.min(config.maximum_step_s/2.0)*2.0} else {dt};
@@ -251,6 +262,7 @@ pub fn advance_joule_enthalpy_adaptive<'t, F, I, J>(
         last_step:last.ok_or_else(||fail(AdaptiveJouleError::Invalid("empty accepted trajectory")))?,
         accepted_times_s,step_attempts:attempts.get(),current_solves:work.get(),
         rejected_intervals:rejected,estimated_cell_errors_j:errors,
+        accepted_newton_iterations,maximum_cell_residual_j,
         external_heat_j:external,electrode_energy_j:electrode,joule_energy_j:joule,
         deposited_joule_j:deposited,stored_energy_change_j:stored,energy_residual_j:residual,
     }))

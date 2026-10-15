@@ -84,3 +84,69 @@ fn exact_unpowered_cold_state_and_explicit_mode_keep_their_original_meaning() {
     assert_eq!(legacy.electrode,selected.electrode);
     assert_eq!(legacy.solves,selected.solves);
 }
+
+#[test]
+fn adaptive_suffix_requires_explicit_error_and_retry_floor_without_changing_data_arguments() {
+    let strings=|s:&[&str]|s.iter().map(|s|s.to_string()).collect::<Vec<_>>();
+    let original=strings(&["example","bulk.txt","10","60","0.5","contact.txt"]);
+    let mut args=original.clone();
+    args.extend(strings(&["--adaptive","1e-10","0.03","1e-7"]));
+    let selected=IntegrationMode::parse_suffix(&mut args).unwrap();
+    assert_eq!(selected,IntegrationMode::Adaptive {
+        difference_step_j:1e-10,cell_error_budget_j:0.03,minimum_step_s:1e-7,
+    });
+    assert!(selected.is_adaptive() && selected.is_implicit());assert_eq!(args,original);
+    for bad in [
+        vec!["--adaptive","1e-10","0.03"],
+        vec!["--adaptive","1e-10","0","1e-7"],
+        vec!["--adaptive","1e-10","0.03","NaN"],
+        vec!["--adaptive","0","0.03","1e-7"],
+        vec!["--adaptive","1e-10","0.03","1e-7","--implicit","1e-10"],
+    ] {
+        let mut args=original.clone();args.extend(strings(&bad));let unchanged=args.clone();
+        assert!(IntegrationMode::parse_suffix(&mut args).is_err());assert_eq!(args,unchanged);
+    }
+}
+
+#[test]
+fn adaptive_material_files_change_phase_and_keep_one_whole_run_error_budget() {
+    let t=Table::parse(include_str!("../transport_phase_dependent.txt")).unwrap();
+    let mode=IntegrationMode::Adaptive {
+        difference_step_j:1e-10,cell_error_budget_j:0.03,minimum_step_s:1e-7,
+    };
+    let mut outputs=Vec::new();
+    for source in [include_str!("../contact_low.txt"),include_str!("../contact_high.txt")] {
+        let contact=ContactTable::parse(source,&t).unwrap();let mut rows=Vec::new();
+        simulate_with_mode(&t,Some(&contact),10.0,60.0,0.5,mode,|r|rows.push(r)).unwrap();
+        assert_eq!(rows.len(),60);assert_eq!(rows[29].time,30.0);assert_eq!(rows[59].time,60.0);
+        assert_eq!(rows[59].temperature,310.0);assert!(rows[59].stored>0.0);
+        assert!(rows.iter().any(|r|r.rejected_intervals>0));
+        assert!(rows.iter().all(|r|r.residual.abs()<1e-6 && r.maximum_cell_residual_j<=1e-8));
+        assert!(rows.iter().map(|r|r.temporal_indicator_j).sum::<f64>()<=0.03*(1.0+1e-10));
+        assert!(rows[30..].iter().all(|r|r.current==0.0 && r.electrode==rows[29].electrode));
+        assert!(rows[59].newton_iterations>0 && rows[59].solves>rows[59].newton_iterations);
+        outputs.push(rows);
+    }
+    // Independently solved three-volume equations, not named-metal measurements.
+    assert!((outputs[0][59].liquid_fraction-0.60984188).abs()<5e-4);
+    assert!((outputs[1][59].liquid_fraction-0.32909529).abs()<5e-4);
+    assert!(outputs[0][29].current>outputs[1][29].current);
+}
+
+#[test]
+fn adaptive_cold_equilibrium_is_exact_and_invalid_floor_emits_no_observations() {
+    let t=Table::parse(include_str!("../latent_20k.txt")).unwrap();
+    let mode=IntegrationMode::Adaptive {
+        difference_step_j:1e-10,cell_error_budget_j:0.03,minimum_step_s:1e-7,
+    };
+    let last=simulate_with_mode(&t,None,0.0,1.0,0.25,mode,|r| {
+        assert_eq!(r.temporal_indicator_j,0.0);assert_eq!(r.rejected_intervals,0);
+    }).unwrap();
+    assert_eq!(last.stored,0.0);assert_eq!(last.enthalpy,0.0);assert_eq!(last.newton_iterations,0);
+    let bad=IntegrationMode::Adaptive {
+        difference_step_j:1e-10,cell_error_budget_j:0.03,minimum_step_s:1.0,
+    };
+    let mut emitted=0;
+    assert!(simulate_with_mode(&t,None,10.0,1.0,0.25,bad,|_|emitted+=1).is_err());
+    assert_eq!(emitted,0);
+}

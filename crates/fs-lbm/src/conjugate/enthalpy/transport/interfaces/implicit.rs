@@ -21,7 +21,8 @@ use std::cell::{Cell, RefCell};
 pub mod adaptive;
 use fs_conduction::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
 use fs_solver::{NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport,
-    NonlinearProblem, SolverRunProgress};
+    SolverRunProgress};
+use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 
 /// Separate nonlinear work, finite-difference scale and physical residual gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -106,55 +107,11 @@ pub struct ImplicitJouleReport<F, I, J> {
     pub deposited_joule_j: f64,
 }
 
-// The nonlinear owner has infallible numerical callbacks. Retain the original
-// typed refusal out of band and poison all subsequent numerical work, rather
-// than returning a fabricated zero residual or replacing unsupported material.
-struct NumericalResidual<E> {
-    evaluate: E,
-    n: usize,
-    difference_j: f64,
-    failure: RefCell<Option<JouleEnthalpyError>>,
-}
-impl<E: Fn(&[f64]) -> Result<Vec<f64>, JouleEnthalpyError>> NumericalResidual<E> {
-    fn checked(&self, x: &[f64]) -> Result<Vec<f64>, JouleEnthalpyError> {
-        if let Some(e) = self.failure.borrow().as_ref() { return Err(e.clone()); }
-        (self.evaluate)(x)
-    }
-    fn refuse(&self, error: JouleEnthalpyError, output: &mut [f64]) {
-        output.fill(f64::NAN);
-        if self.failure.borrow().is_none() { *self.failure.borrow_mut() = Some(error); }
-    }
-    fn take_failure(&self) -> Result<(), ImplicitJouleError> {
-        match self.failure.borrow_mut().take() { Some(e) => Err(e.into()), None => Ok(()) }
-    }
-}
-impl<E: Fn(&[f64]) -> Result<Vec<f64>, JouleEnthalpyError>> NonlinearProblem for NumericalResidual<E> {
-    fn dimension(&self) -> usize { self.n }
-    fn residual(&self, x: &[f64], output: &mut [f64]) {
-        match self.checked(x) {
-            Ok(values) => output.copy_from_slice(&values),
-            Err(e) => self.refuse(e, output),
-        }
-    }
-    fn jacobian_apply(&self, x: &[f64], direction: &[f64], output: &mut [f64]) {
-        let result = (|| {
-            let scale = direction.iter().copied().map(f64::abs).fold(0.0, f64::max);
-            if !direction.iter().all(|x| x.is_finite()) { return Err(invalid("nonfinite Jacobian direction")); }
-            if scale == 0.0 { return Ok(vec![0.0; self.n]); }
-            let delta = self.difference_j / scale;
-            if !delta.is_finite() || delta <= 0.0 { return Err(invalid("unrepresentable Jacobian difference scale")); }
-            let shifted: Vec<_> = x.iter().zip(direction).map(|(&a,&d)| a + delta*d).collect();
-            if !shifted.iter().all(|a| a.is_finite()) || shifted.as_slice() == x {
-                return Err(invalid("Jacobian stencil is nonfinite or too small to change energy"));
-            }
-            let base = self.checked(x)?;
-            let other = self.checked(&shifted)?;
-            base.iter().zip(&other).map(|(&a,&b)| finite((b-a)/delta)).collect()
-        })();
-        match result {
-            Ok(values) => output.copy_from_slice(&values),
-            Err(e) => self.refuse(e, output),
-        }
+// Share numerical stencils and source-error latching with circuit coupling.
+fn numerical_error(error: FiniteDifferenceError<JouleEnthalpyError>) -> ImplicitJouleError {
+    match error {
+        FiniteDifferenceError::Source(e) => e.into(),
+        FiniteDifferenceError::Invalid(reason) => ImplicitJouleError::Invalid(reason),
     }
 }
 
@@ -243,14 +200,14 @@ fn step_counted<'t, F, I, J>(
         let conductances_w_k = bulk.links.iter().map(|s|(s.patch.link.id,s.conductance_w_k)).collect();
         Ok::<_,JouleEnthalpyError>(StepCoefficients { sources_w, conductances_w_k, payload: (current,bulk,interfaces) })
     }, ||checkpoint(gate));
-    let problem = NumericalResidual { evaluate: |x: &[f64]| evaluate(x).map(|trial| trial.residual_j().to_vec()),
-        n: step.cell_ids().len(), difference_j: config.difference_step_j, failure: RefCell::new(None) };
+    let problem = FallibleFiniteDifference::new(step.cell_ids().len(), config.difference_step_j,
+        |x: &[f64]| evaluate(x).map(|trial| trial.residual_j().to_vec())).map_err(numerical_error)?;
     let construction = NewtonKrylovState::new(&problem, initial_energy_increments_j.to_vec(), config.newton);
-    problem.take_failure()?;
+    if let Some(error) = problem.take_failure() { return Err(numerical_error(error)); }
     let mut solver = construction?;
     let result = solver.run_controlled(&problem, config.max_newton_iterations,
-        &mut || gate.is_requested() || problem.failure.borrow().is_some());
-    problem.take_failure()?;
+        &mut || gate.is_requested() || problem.has_failed());
+    if let Some(error) = problem.take_failure() { return Err(numerical_error(error)); }
     checkpoint(gate)?;
     if result.progress != SolverRunProgress::Complete { return Err(ImplicitJouleError::Interrupted(result.progress)); }
     if !result.report.converged { return Err(ImplicitJouleError::NotConverged(result.report)); }
