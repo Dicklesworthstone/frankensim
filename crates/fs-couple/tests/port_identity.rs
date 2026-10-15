@@ -4,7 +4,7 @@ use fs_couple::{CoordinateBinding, PortKind, PortOrientation, PortTimestamp};
 #[test]
 fn electrical_schema_crosses_the_boundary_without_conversion() {
     let stable = |s| fs_ports::StableId::new(s).unwrap();
-    let schema: fs_ports::PortSchema = PortKind::Electrical.scalar_seed_schema(
+    let schema: fs_ports::PortSchema = PortKind::ElectricalVoltageCurrent.scalar_seed_schema(
         stable("terminal/a"),
         CoordinateBinding::new(stable("basis/scalar"), stable("frame/local"),
             PortOrientation::OutwardFromOwner),

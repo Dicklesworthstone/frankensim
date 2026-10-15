@@ -18,6 +18,9 @@
 /// Complete source-bound mechanism compilation using the existing dynamics engine.
 pub mod articulated;
 
+/// Source-integrated free expansion with conserved reference material mass.
+pub mod thermal;
+
 mod geometry;
 pub use geometry::VolumeMoments;
 
