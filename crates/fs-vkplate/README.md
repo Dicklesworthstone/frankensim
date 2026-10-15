@@ -55,7 +55,9 @@ multiple of 48 kHz that uses at most 60 % of it. Output is decimated with a wind
 
 The Airy operator is factored once (banded Cholesky, row-major ordering); both triangular sweeps
 stream the one stored factor, which dominates a cymbal's cost on a fine grid. Contacts warm-start
-their Newton solve from the previous step's force.
+their Newton solve from the previous step's force. Contacts on disjoint nodes (the snare wires, the
+hi-hat rims) are solved four at a time, interleaved, each with the same operations it would take
+alone, so the result is the one-at-a-time result bit for bit.
 
 ## Hi-hat
 

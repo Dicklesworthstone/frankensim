@@ -1122,6 +1122,255 @@ impl Mic {
     }
 }
 
+// --------------------------------------------------------------------- contact solves
+/// One contact's force: the root of g(f) = f - phi(d_pred - comp f), phi(d) = K d^a (1 + mu (d - d_now)/k)
+/// clipped at zero force. g is increasing with a root in [0, d_pred / comp]: safeguarded Newton (a
+/// bisection step whenever Newton leaves the bracket), from the last force when it lies in the bracket.
+fn contact_force(d_pred: f64, comp: f64, force: f64, d_now: f64, law: Law, k: f64) -> f64 {
+    let Law::Power { k: kk, alpha, mu } = law;
+    let phi = |d: f64| -> (f64, f64) {
+        if d <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let pa1 = if alpha == 1.5 { d.sqrt() } else { d.powf(alpha - 1.0) };
+        let pa = pa1 * d;
+        let damp = 1.0 + mu * (d - d_now) / k;
+        let v = kk * pa * damp;
+        if v <= 0.0 { (0.0, 0.0) } else { (v, kk * (alpha * pa1 * damp + pa * mu / k)) }
+    };
+    if d_pred <= 0.0 {
+        return 0.0;
+    }
+    let (mut lo, mut hi) = (0.0, d_pred / comp);
+    // a contact held under load barely changes between steps: start from the last force
+    let mut x = if force > 0.0 && force < hi { force } else { 0.5 * hi };
+    for _ in 0..60 {
+        let (v, dv) = phi(d_pred - comp * x);
+        let g = x - v;
+        if g > 0.0 { hi = x; } else { lo = x; }
+        let mut next = x - g / (1.0 + comp * dv);
+        if !(next > lo && next < hi) {
+            next = 0.5 * (lo + hi);
+        }
+        let done = (next - x).abs() <= 1e-13 * next.abs().max(1e-30) || hi - lo <= 1e-13 * hi.max(1e-30);
+        x = next;
+        if done {
+            break;
+        }
+    }
+    x
+}
+
+/// One iteration of `contact_force`'s loop for a = 1.5, without branches: the same operations in the
+/// same order, so the same iterate, bracket and stop. Returns (next iterate, stop).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn newton_step_sqrt(x: f64, lo: &mut f64, hi: &mut f64, dp: f64, cm: f64, dn: f64, kk: f64, mu: f64, k: f64) -> (f64, bool) {
+    let d = dp - cm * x;
+    let pa1 = d.sqrt();
+    let pa = pa1 * d;
+    let damp = 1.0 + mu * (d - dn) / k;
+    let v = kk * pa * damp;
+    let dv = kk * (1.5 * pa1 * damp + pa * mu / k);
+    // phi is (0, 0) at d <= 0 (where v and dv above are not used) and wherever v <= 0
+    let zero = (d <= 0.0) | (v <= 0.0);
+    let (v, dv) = if zero { (0.0, 0.0) } else { (v, dv) };
+    let g = x - v;
+    let up = g > 0.0;
+    *hi = if up { x } else { *hi };
+    *lo = if up { *lo } else { x };
+    let newton = x - g / (1.0 + cm * dv);
+    let next = if newton > *lo && newton < *hi { newton } else { 0.5 * (*lo + *hi) };
+    let done = ((next - x).abs() <= 1e-13 * next.abs().max(1e-30)) | (*hi - *lo <= 1e-13 * hi.max(1e-30));
+    (next, done)
+}
+
+/// Contacts whose solves run interleaved. No two of a batch share a node, so each one's predicted
+/// penetration, force and update are what solving them one at a time in list order gives.
+#[derive(Default)]
+struct ContactQueue {
+    /// Per queued contact: its index, d_pred, comp, first iterate, upper bracket, d_now, K, mu; the force.
+    j: Vec<usize>,
+    dp: Vec<f64>,
+    cm: Vec<f64>,
+    x0: Vec<f64>,
+    hi: Vec<f64>,
+    dn: Vec<f64>,
+    kk: Vec<f64>,
+    mu: Vec<f64>,
+    f: Vec<f64>,
+    /// Per body and node, the batch that last claimed the node.
+    mark: Vec<Vec<u32>>,
+    batch: u32,
+}
+
+/// Solves in flight at once: independent Newton iterations overlap instead of waiting on each
+/// other's square roots and divisions.
+const LANES: usize = 4;
+
+impl ContactQueue {
+    fn new_batch(&mut self) {
+        self.batch = self.batch.wrapping_add(1);
+        if self.batch == 0 {
+            for m in self.mark.iter_mut() {
+                m.fill(0);
+            }
+            self.batch = 1;
+        }
+    }
+
+    /// `contact_force` for every queued contact (all a = 1.5), LANES at a time; a lane that stops
+    /// takes the next contact.
+    fn solve(&mut self, k: f64) {
+        let n = self.j.len();
+        self.f.clear();
+        self.f.resize(n, 0.0);
+        let mut at = [n; LANES];
+        let (mut x, mut lo, mut hi) = ([0.5; LANES], [0.0; LANES], [1.0; LANES]);
+        let (mut dp, mut cm, mut dn, mut kk, mut mu) = ([1.0; LANES], [1.0; LANES], [0.0; LANES], [0.0; LANES], [0.0; LANES]);
+        let mut it = [0u32; LANES];
+        let mut next = 0;
+        let mut busy = 0;
+        macro_rules! load {
+            ($l:expr) => {{
+                let (l, t) = ($l, next);
+                at[l] = t;
+                x[l] = self.x0[t];
+                lo[l] = 0.0;
+                hi[l] = self.hi[t];
+                dp[l] = self.dp[t];
+                cm[l] = self.cm[t];
+                dn[l] = self.dn[t];
+                kk[l] = self.kk[t];
+                mu[l] = self.mu[t];
+                it[l] = 0;
+                next += 1;
+            }};
+        }
+        for l in 0..LANES {
+            if next < n {
+                load!(l);
+                busy += 1;
+            }
+        }
+        while busy > 0 {
+            // an idle lane iterates on harmless values (a halving from 0.5) and is ignored
+            let mut done = [false; LANES];
+            for l in 0..LANES {
+                let (nx, stop) = newton_step_sqrt(x[l], &mut lo[l], &mut hi[l], dp[l], cm[l], dn[l], kk[l], mu[l], k);
+                x[l] = nx;
+                done[l] = stop;
+                it[l] += 1;
+            }
+            for l in 0..LANES {
+                if at[l] < n && (done[l] || it[l] == 60) {
+                    self.f[at[l]] = x[l];
+                    if next < n {
+                        load!(l);
+                    } else {
+                        at[l] = n;
+                        (x[l], lo[l], hi[l]) = (0.5, 0.0, 1.0);
+                        busy -= 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Solve the batch, apply its forces in list order and start a new batch.
+    fn flush(&mut self, bodies: &mut [Body], contacts: &mut [Contact], k: f64) {
+        if !self.j.is_empty() {
+            self.solve(k);
+            for t in 0..self.j.len() {
+                let c = &mut contacts[self.j[t]];
+                let f = self.f[t];
+                apply_force(bodies, c, f, self.dp[t], self.cm[t], k);
+            }
+            for v in [&mut self.dp, &mut self.cm, &mut self.x0, &mut self.hi, &mut self.dn, &mut self.kk, &mut self.mu, &mut self.f] {
+                v.clear();
+            }
+            self.j.clear();
+        }
+        self.new_batch();
+    }
+}
+
+/// Push the contact's nodes apart by force `f` and record it.
+#[inline]
+fn apply_force(bodies: &mut [Body], c: &mut Contact, f: f64, d_pred: f64, comp: f64, k: f64) {
+    if f > 0.0 {
+        for &(b, i, w) in &c.a {
+            let cm = bodies[b].compliance(i, k);
+            bodies[b].wn[i] -= w * cm * f;
+        }
+        for &(b, i, w) in &c.b {
+            let cm = bodies[b].compliance(i, k);
+            bodies[b].wn[i] += w * cm * f;
+        }
+    }
+    c.peak_force = c.peak_force.max(f);
+    c.force = f;
+    c.d_now = d_pred - comp * f;
+}
+
+/// Every active contact in list order, each solved implicitly with the others' updates applied.
+/// Runs of contacts on disjoint nodes with the sqrt law (snare wires, hi-hat rims, sticks) are
+/// queued and solved interleaved; any other contact, or one that shares a node with the queue,
+/// first flushes the queue. The result is bit-identical to solving one contact at a time.
+fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut ContactQueue, k: f64) {
+    if q.mark.len() != bodies.len() {
+        q.mark.resize_with(bodies.len(), Vec::new);
+    }
+    for (m, b) in q.mark.iter_mut().zip(bodies.iter()) {
+        if m.len() != b.n {
+            m.clear();
+            m.resize(b.n, 0);
+        }
+    }
+    q.new_batch();
+    for jc in 0..contacts.len() {
+        if !contacts[jc].active {
+            continue;
+        }
+        let Law::Power { k: kk, alpha, mu } = contacts[jc].law;
+        let queued = alpha == 1.5;
+        let c = &contacts[jc];
+        if !queued || c.a.iter().chain(&c.b).any(|&(b, i, _)| q.mark[b][i] == q.batch) {
+            q.flush(bodies, contacts, k);
+        }
+        let c = &mut contacts[jc];
+        let mut d_pred = -c.gap;
+        let mut comp = 0.0;
+        for &(b, i, w) in &c.a {
+            d_pred += w * bodies[b].wn[i];
+            comp += w * w * bodies[b].compliance(i, k);
+        }
+        for &(b, i, w) in &c.b {
+            d_pred -= w * bodies[b].wn[i];
+            comp += w * w * bodies[b].compliance(i, k);
+        }
+        if !queued || d_pred <= 0.0 {
+            // solved now: the queue is empty, or this contact moves nothing
+            let f = contact_force(d_pred, comp, c.force, c.d_now, c.law, k);
+            apply_force(bodies, c, f, d_pred, comp, k);
+            continue;
+        }
+        for &(b, i, _) in c.a.iter().chain(&c.b) {
+            q.mark[b][i] = q.batch;
+        }
+        let hi = d_pred / comp;
+        q.j.push(jc);
+        q.dp.push(d_pred);
+        q.cm.push(comp);
+        q.x0.push(if c.force > 0.0 && c.force < hi { c.force } else { 0.5 * hi });
+        q.hi.push(hi);
+        q.dn.push(c.d_now);
+        q.kk.push(kk);
+        q.mu.push(mu);
+    }
+    q.flush(bodies, contacts, k);
+}
+
 // --------------------------------------------------------------------- instrument
 pub struct Instrument {
     pub bodies: Vec<Body>,
@@ -1135,11 +1384,12 @@ pub struct Instrument {
     pub rate: f64,
     pub step_index: u64,
     prepared: bool,
+    cq: ContactQueue,
 }
 
 impl Instrument {
     pub fn new(rate: f64) -> Instrument {
-        Instrument { bodies: vec![], cavities: vec![], rads: vec![], links: vec![], contacts: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, prepared: false }
+        Instrument { bodies: vec![], cavities: vec![], rads: vec![], links: vec![], contacts: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, prepared: false, cq: ContactQueue::default() }
     }
     pub fn add(&mut self, b: Body) -> usize {
         self.bodies.push(b);
@@ -1318,71 +1568,8 @@ impl Instrument {
             c.active = true;
             c.d_now = surf - z0 - c.gap;
         }
-        // contacts, solved implicitly one at a time
-        for c in self.contacts.iter_mut() {
-            if !c.active {
-                continue;
-            }
-            let mut d_pred = -c.gap;
-            let mut comp = 0.0;
-            for &(b, i, w) in &c.a {
-                d_pred += w * self.bodies[b].wn[i];
-                comp += w * w * self.bodies[b].compliance(i, k);
-            }
-            for &(b, i, w) in &c.b {
-                d_pred -= w * self.bodies[b].wn[i];
-                comp += w * w * self.bodies[b].compliance(i, k);
-            }
-            let Law::Power { k: kk, alpha, mu } = c.law;
-            let d_now = c.d_now;
-            // phi(d) and its derivative: K d^a (1 + mu (d - d_now)/k), clipped at zero force
-            let phi = |d: f64| -> (f64, f64) {
-                if d <= 0.0 {
-                    return (0.0, 0.0);
-                }
-                let pa1 = if alpha == 1.5 { d.sqrt() } else { d.powf(alpha - 1.0) };
-                let pa = pa1 * d;
-                let damp = 1.0 + mu * (d - d_now) / k;
-                let v = kk * pa * damp;
-                if v <= 0.0 { (0.0, 0.0) } else { (v, kk * (alpha * pa1 * damp + pa * mu / k)) }
-            };
-            let mut f = 0.0;
-            if d_pred > 0.0 {
-                // g(f) = f - phi(d_pred - comp f) is increasing with a root in [0, d_pred / comp]:
-                // safeguarded Newton (a bisection step whenever Newton leaves the bracket)
-                let (mut lo, mut hi) = (0.0, d_pred / comp);
-                // a contact held under load barely changes between steps: start from the last force
-                let mut x = if c.force > 0.0 && c.force < hi { c.force } else { 0.5 * hi };
-                for _ in 0..60 {
-                    let (v, dv) = phi(d_pred - comp * x);
-                    let g = x - v;
-                    if g > 0.0 { hi = x; } else { lo = x; }
-                    let mut next = x - g / (1.0 + comp * dv);
-                    if !(next > lo && next < hi) {
-                        next = 0.5 * (lo + hi);
-                    }
-                    let done = (next - x).abs() <= 1e-13 * next.abs().max(1e-30) || hi - lo <= 1e-13 * hi.max(1e-30);
-                    x = next;
-                    if done {
-                        break;
-                    }
-                }
-                f = x;
-            }
-            if f > 0.0 {
-                for &(b, i, w) in &c.a {
-                    let cm = self.bodies[b].compliance(i, k);
-                    self.bodies[b].wn[i] -= w * cm * f;
-                }
-                for &(b, i, w) in &c.b {
-                    let cm = self.bodies[b].compliance(i, k);
-                    self.bodies[b].wn[i] += w * cm * f;
-                }
-            }
-            c.peak_force = c.peak_force.max(f);
-            c.force = f;
-            c.d_now = d_pred - comp * f;
-        }
+        // contacts, solved implicitly one at a time (see `solve_contacts`)
+        solve_contacts(&mut self.bodies, &mut self.contacts, &mut self.cq, k);
         for b in self.bodies.iter_mut() {
             b.finish(k);
         }

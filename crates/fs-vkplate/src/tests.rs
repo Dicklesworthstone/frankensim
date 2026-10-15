@@ -153,3 +153,70 @@ fn stencil_runs_sum_every_row_exactly_as_its_csr_row() {
     }
     assert!(covered > 1000, "the stencil runs cover only {covered} rows");
 }
+
+#[test]
+fn queued_contact_solves_match_solving_one_at_a_time() {
+    // the reference: every active contact in list order, each seeing the earlier ones' updates
+    fn one_at_a_time(bodies: &mut [Body], contacts: &mut [Contact], k: f64) {
+        for c in contacts.iter_mut().filter(|c| c.active) {
+            let (mut d_pred, mut comp) = (-c.gap, 0.0);
+            for &(b, i, w) in &c.a {
+                d_pred += w * bodies[b].wn[i];
+                comp += w * w * bodies[b].compliance(i, k);
+            }
+            for &(b, i, w) in &c.b {
+                d_pred -= w * bodies[b].wn[i];
+                comp += w * w * bodies[b].compliance(i, k);
+            }
+            let f = contact_force(d_pred, comp, c.force, c.d_now, c.law, k);
+            apply_force(bodies, c, f, d_pred, comp, k);
+        }
+    }
+    // a snare whose wire list also holds contacts that share nodes with others (a sqrt-law copy, which
+    // must close the batch, and a power-law copy, which is solved alone), struck and ringing
+    let build = || {
+        let mut p = live::Live::new("snare", 7.0).unwrap();
+        let n = p.ins.contacts.len();
+        for (at, from, alpha) in [(3, 9, 1.5), (11, 4, 2.0), (n - 1, 20, 1.5), (7, 7, 2.5)] {
+            let c = &p.ins.contacts[from];
+            let Law::Power { k, mu, .. } = c.law;
+            let copy = Contact::new(c.a.clone(), c.b.clone(), c.gap + 1e-7, Law::Power { k, alpha, mu });
+            p.ins.contacts.insert(at, copy);
+        }
+        p.strike(0.06, 0.02, 4.5);
+        p
+    };
+    let (mut a, mut b) = (build(), build());
+    let k = a.ins.k();
+    let mut out = [0.0f32; 64];
+    let (mut solved, mut pressed) = (0, 0);
+    for round in 0..120 {
+        a.render(&mut out, 1.0);
+        b.render(&mut out, 1.0);
+        // the same predicted positions in both: free flight plus a small push, some apart, some pressed
+        for (ins, solve) in [(&mut a.ins, true), (&mut b.ins, false)] {
+            for (bi, body) in ins.bodies.iter_mut().enumerate() {
+                for i in 0..body.n {
+                    let salt = ((i * 2654435761 + bi * 97 + round * 31) % 1009) as f64 / 1009.0 - 0.45;
+                    body.wn[i] = 2.0 * body.w[i] - body.wp[i] + salt * 4e-7;
+                }
+            }
+            if solve {
+                solve_contacts(&mut ins.bodies, &mut ins.contacts, &mut ins.cq, k);
+            } else {
+                one_at_a_time(&mut ins.bodies, &mut ins.contacts, k);
+            }
+        }
+        for (ca, cb) in a.ins.contacts.iter().zip(&b.ins.contacts) {
+            assert_eq!(ca.force.to_bits(), cb.force.to_bits(), "round {round}: force");
+            assert_eq!(ca.d_now.to_bits(), cb.d_now.to_bits(), "round {round}: d_now");
+            assert_eq!(ca.peak_force.to_bits(), cb.peak_force.to_bits(), "round {round}: peak");
+            solved += 1;
+            pressed += usize::from(ca.force > 0.0);
+        }
+        for (ba, bb) in a.ins.bodies.iter().zip(&b.ins.bodies) {
+            assert!(ba.wn.iter().zip(&bb.wn).all(|(x, y)| x.to_bits() == y.to_bits()), "round {round}: {} moved differently", ba.name);
+        }
+    }
+    assert!(pressed > solved / 4 && pressed < solved, "only {pressed} of {solved} solves pressed");
+}
