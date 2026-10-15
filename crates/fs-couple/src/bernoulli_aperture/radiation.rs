@@ -13,6 +13,9 @@
 //! unbaffled-pipe or measured-instrument accuracy is implied. Its stored near-field
 //! energy is separate from the positive loss representing escaped acoustic energy.
 
+/// A shared exterior gas for compact radiation reaction and microphone propagation.
+pub mod environment;
+
 use crate::acoustic_realize::AcousticRealizeError;
 use super::network::NetworkNode;
 use fs_exec::CancelGate;
