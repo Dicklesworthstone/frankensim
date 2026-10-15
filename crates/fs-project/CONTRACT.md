@@ -34,10 +34,11 @@ indeterminate decision is usable only in an advisory scoping context.
 
 Layer L6 (HELM). Depends on `fs-ir` (AST + both concrete syntaxes),
 `fs-scenario` (entity identities, `Violation`), `fs-matdb` (cards, receipted
-queries), `fs-io` (deterministic mesh assignments), `fs-rep-mesh` (promoted
-finite meshes), `fs-exec` (cancellation context), `fs-qty`, `fs-blake3`,
-`fs-evidence`/`fs-package`/`fs-voi` (retained decision inputs), and
-`fs-session` (the generic L6 `DecisionAssessment` projection).
+queries), `fs-io` (deterministic mesh assignments), `fs-ivl` (exact geometric
+predicates `orient3d`/`orient2d` for containment-bound interface lowering),
+`fs-rep-mesh` (promoted finite meshes), `fs-exec` (cancellation context),
+`fs-qty`, `fs-blake3`, `fs-evidence`/`fs-package`/`fs-voi` (retained decision
+inputs), and `fs-session` (the generic L6 `DecisionAssessment` projection).
 This crate persists project intent and resolves its card and geometry
 bindings; it runs no solves and admits no scenarios itself.
 
@@ -374,13 +375,16 @@ bindings; it runs no solves and admits no scenarios itself.
   holding the same immutable `ImportedMeshLibrary`, indexes only explicit
   metre (`m`) source faces per declared target, and binds each coincident
   boundary triangle to the unique outward-oriented source face that
-  CONTAINS it in exact f64 arithmetic (closed-triangle containment against
-  exact zero: the production volumetricizer's facet recovery may insert
+  CONTAINS it under `fs-ivl` exact predicates (`orient3d` for supporting-plane
+  membership and `orient2d` after dropping the dominant normal axis for
+  closed-triangle edge-side containment over the represented `f64`
+  coordinates: the production volumetricizer's facet recovery may insert
   Steiner points and re-triangulate a declared facet, so a retained trace
   triangle is a refinement of the imported face — executed on the canonical
-  two-solid fixture, whose joint recovers as a four-triangle fan; recovery
-  points not bitwise on the source plane refuse rather than bind
-  approximately). Each region's covering face winding must agree with its
+  two-solid fixture, whose joint recovers as a four-triangle fan; off-plane
+  recovery points and coordinates outside the predicates' finite
+  preliminary-arithmetic domain refuse without tolerance matching). Each
+  region's covering face winding must agree with its
   `ConductionMesh` boundary slot's outward normal. Every exact coincident
   matching-P1 pair reported by `fs_conduction::ThermalInterfaces` must be
   claimed by exactly one declared interface; that interface's own selector
