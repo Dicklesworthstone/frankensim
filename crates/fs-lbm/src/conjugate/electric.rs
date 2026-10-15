@@ -442,15 +442,31 @@ fn solve_electric_field(
 fn solve_electric_field_with_motion(
     domain: &VoxelDomain,
     setup: &ElectricSetup,
-    mut nodes: Vec<Node>,
+    nodes: Vec<Node>,
     rho: &[f64],
     contacts: &[ElectricalContact],
+    motion: Option<&mut motion::MotionCoupling<'_>>,
+    gate: &CancelGate,
+) -> Result<ElectricSolution, ChtError> {
+    poll(gate)?;
+    let contact_field = contact::ContactField::new(domain, &nodes, contacts, gate)?;
+    solve_electric_field_with_contact_field(domain, setup, nodes, rho, contact_field, motion, gate)
+}
+
+// A single numerical owner consumes both resistive and explicitly open faces.
+// Existing motion APIs supply no openings, preserving their component gauges.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn solve_electric_field_with_contact_field(
+    domain: &VoxelDomain,
+    setup: &ElectricSetup,
+    mut nodes: Vec<Node>,
+    rho: &[f64],
+    contact_field: contact::ContactField,
     mut motion: Option<&mut motion::MotionCoupling<'_>>,
     gate: &CancelGate,
 ) -> Result<ElectricSolution, ChtError> {
     poll(gate)?;
     let cells = domain.cell_count();
-    let contact_field = contact::ContactField::new(domain, &nodes, contacts, gate)?;
     let half = |c: usize, axis: usize| 0.5 * rho[c] * domain.widths(c)[axis];
     // Only isolated-motion calls supply gauges. Gauge cells remain conductors
     // in all constitutive, contact, current, heating and force operations.
@@ -492,7 +508,7 @@ fn solve_electric_field_with_motion(
             let Some(n) = domain.neighbor(c, face) else {
                 continue;
             };
-            if grounded[n] {
+            if grounded[n] || contact_field.is_open(c, n) {
                 continue;
             }
             match (nodes[c], nodes[n]) {
@@ -574,6 +590,9 @@ fn solve_electric_field_with_motion(
             let Some(n) = domain.neighbor(c, face) else {
                 continue;
             };
+            if contact_field.is_open(c, n) {
+                continue;
+            }
             let axis = face / 2;
             let area = domain.face_area(c, axis);
             let (contact_r, _) = contact_field.at(c, n);
@@ -681,6 +700,9 @@ fn solve_electric_field_with_motion(
             let Some(n) = domain.neighbor(c, face) else {
                 continue;
             };
+            if contact_field.is_open(c, n) {
+                continue;
+            }
             let axis = face / 2;
             let area = domain.face_area(c, axis);
             let (contact_r, fraction) = contact_field.at(c, n);
