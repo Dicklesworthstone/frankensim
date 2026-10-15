@@ -30,13 +30,18 @@ interface PieceDef {
    * test reads within ~5 % of its speed with a stroke every 0.56 s.
    */
   benchMs?: number;
+  /**
+   * Grid coarsenings to try, finest first (default 2.5-8). The snare stops at 6x: 5x and 4x sound no
+   * closer to the 1x grid than 6x for 1.2-1.9x the work, and timing 5x only to fail cost 0.4 s of start-up.
+   */
+  scales?: number[];
 }
 
 // Gains: each piece's 50 ms loudness matched to the real kit's (Salamander overheads), capped so a
 // standard stroke peaks at 0.55 of full scale (the live cymbals' attacks are too sharp to match).
 const PIECES: PieceDef[] = [
   { id: "kick", name: "Kick", key: "B", speed: 3.0, gain: 0.0319, kind: "kick", finish: "#5c1d1a" },
-  { id: "snare", name: "Snare", key: "S", speed: 4.5, gain: 0.0129, kind: "drum", finish: "#c9cdd3", benchMs: 450 },
+  { id: "snare", name: "Snare", key: "S", speed: 4.5, gain: 0.0129, kind: "drum", finish: "#c9cdd3", benchMs: 450, scales: [6, 7, 8] },
   { id: "tom-12", name: "Rack tom", key: "T", speed: 3.5, gain: 0.0276, kind: "drum", finish: "#5c1d1a" },
   { id: "tom-14", name: "Floor tom", key: "F", speed: 3.5, gain: 0.0267, kind: "drum", finish: "#5c1d1a" },
   { id: "hihat-closed", name: "Hi-hat", key: "H", speed: 2.5, gain: 0.134, kind: "hat" },
@@ -352,7 +357,7 @@ export function mountLiveKit(root: HTMLElement): void {
       let built = 0;
       await Promise.all(PIECES.map(async (def) => {
         const L = lives.get(def.id)!;
-        const lane = new KitLane(m, def.id, { gain: def.gain, aheadFrames: 1024, minRealtime: 1.7, benchMs: def.benchMs, fieldHz: 45 });
+        const lane = new KitLane(m, def.id, { gain: def.gain, aheadFrames: 1024, minRealtime: 1.7, benchMs: def.benchMs, scales: def.scales, fieldHz: 45 });
         L.lane = lane;
         lane.onField = (f) => {
           L.field = f;

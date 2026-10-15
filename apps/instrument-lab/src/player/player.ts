@@ -44,10 +44,17 @@ const IDLE_DISPOSE_MS = 90_000;
  * The crash and ride try 3x and 3.5x as well: their octave balance against the 1x grid improves at
  * every step down from 5x (crash 18.2 / 14.6 / 11.2 / 10.2 dB at 5x / 4x / 3.5x / 3x; ride 19.6 /
  * 12.4 / 10.9 / 7.2), and 5x stays as the fallback for slower devices.
+ * The snare is timed over 450 ms of a stroke (`benchMs`), as in the live kit: its wires touch the head
+ * from ~85 ms on and its steps then cost ~1.6x as much, so the default 112 ms test read 1.5-1.7x the
+ * speed its lane kept at 6x (and was held to 2.2 for it). Over 450 ms it reads 1.03-1.2x the lane, so
+ * the snare takes the cymbals' 1.5. Its octave balance against the 1x grid has two plateaus: 4-6x
+ * (8.0 / 7.2 / 7.0 dB) and 7-10x (9.4 at 7x, 9.0 at 8x). So it tries 6x, the cheapest of the fine
+ * plateau, and else 8x (7x is on the coarse plateau too and costs ~20 % more); each grid timed adds
+ * ~0.25-0.5 s of start-up.
  */
-const GRID: Record<PieceId, { scales: number[]; minRt: number }> = {
+const GRID: Record<PieceId, { scales: number[]; minRt: number; benchMs?: number }> = {
   kick: { scales: [5, 6, 7, 8], minRt: 1.7 },
-  snare: { scales: [4, 5, 6, 7, 8], minRt: 2.2 },
+  snare: { scales: [6, 8], minRt: 1.5, benchMs: 450 },
   "snare-off": { scales: [4, 5, 6, 7, 8], minRt: 2.0 },
   "tom-12": { scales: [4, 5, 6, 7], minRt: 1.8 },
   "tom-14": { scales: [4, 5, 6, 7], minRt: 1.8 },
@@ -419,7 +426,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
    * restarted one grid coarser (see the stats handler), and the page says so.
    */
   function startPiece(m: LiveMix, p: PieceId, scales: number[]): Promise<void> {
-    const lane = new KitLane(m, p, { gain: KIT_GAIN[p], aheadFrames: AHEAD, chunk: CHUNK, minRealtime: GRID[p].minRt, scales, fieldFrames: SR / 40, bursts: false });
+    const lane = new KitLane(m, p, { gain: KIT_GAIN[p], aheadFrames: AHEAD, chunk: CHUNK, minRealtime: GRID[p].minRt, benchMs: GRID[p].benchMs, scales, fieldFrames: SR / 40, bursts: false });
     const entry = { lane, ready: null as KitReady | null };
     kits.set(p, entry);
     const h: Health = { rt: 0, late: 0, gap: 0, base: 0, skipBase: 0, detail: "", slow: 0 };
