@@ -27,6 +27,7 @@ on:
       - 'crates/fs-couple/tests/material_string_bank.rs'
       - 'crates/fs-couple/tests/material_plate_chart_bank.rs'
       - 'crates/fs-couple/src/thin_plate.rs'
+      - 'crates/fs-couple/src/thin_plate/**'
       - 'crates/fs-couple/src/cavity_modal.rs'
       - 'crates/fs-couple/src/cavity_modal/**'
       - 'crates/fs-couple/tests/reciprocal_cavity.rs'
@@ -62,6 +63,9 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Uniform and regional material bending loss through coupled sound
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --lib thin_plate:: -- --test-threads=1
       - name: Source-bound rotary inertia and torsional shear loss
         if: ${{ !cancelled() }}
         run: cargo test -p fs-material --test torsional_section -- --test-threads=1

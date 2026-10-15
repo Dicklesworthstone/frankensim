@@ -6,23 +6,24 @@
 //! frequencies, independent receiver filters or new physical stepper.
 //!
 //! The chart is a perfectly bonded flat linear plate, not a carved shell or a
-//! joint/slip law. Its damping remains the explicitly authored chart loss model;
-//! resolving elastic source properties does not certify material-derived loss.
+//! joint/slip law. Loss is either explicitly authored or selected from each
+//! region's isotropic Kelvin-Voigt source; elastic data alone do not imply loss.
 //! All strings use one authored physical bridge footprint. The compact pressure
 //! law has no propagation delay or broadband exterior-fluid back-loading.
 
 use super::*;
 use super::plate::SharedPlateBridge;
 use super::super::plate::{MaterialBodyCavity, reduce_radiating_body, validate_body_medium};
-use crate::thin_plate::{PlateChartRadiation, ResolvedPlateChart, certified_chart_radiators};
+use crate::thin_plate::{PlateChartRadiation, ResolvedPlateChart, certified_material_chart_radiators};
 
 /// Frozen regional plate sources and the actual bridge/observer geometry.
 #[derive(Clone, Debug)]
 pub struct SharedMaterialPlateChartBody {
     /// Complete mesh, regional material identities, section/mass prescriptions.
+    /// A selected regional bending loss is retained and used in the body modes.
     pub specimen: ResolvedPlateChart,
-    /// Boundary support, prestress, eigenvalue window, retained modes, explicit
-    /// loss and nodal unit-total-force footprint. Not an authored mode bank.
+    /// Boundary support, prestress, eigenvalue window, retained modes and nodal
+    /// unit-total-force footprint. Authored damping must be zero with source loss.
     pub reduction: PlateChartRadiation,
     /// Exactly one interior bridge law per declared string. All act through the
     /// same nodal footprint, not through unrelated modal attachment vectors.
@@ -43,6 +44,8 @@ impl ReciprocalStringBank {
     ///
     /// Replacing one named region changes the actual element mass/stiffness,
     /// certified modes, signed bridge participation and radiating areas together.
+    /// Selected material viscosity contributes actual regional curvature loss,
+    /// including conservative prestress dilution, to the same retained modes.
     /// The same gas supplies string drag, cavity compression/inertia and pressure
     /// density. Material and geometry receipts remain attached through scheduling.
     /// A new realization starts at rest; this does not morph a vibrating state.
@@ -82,7 +85,7 @@ impl ReciprocalStringBank {
         validate_body_medium(&gas, options.sample_rate_hz, body.listener_m, cavity.as_ref(), gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
-        let radiators = certified_chart_radiators(chart, r).map_err(ReciprocalStringError::Material)?;
+        let radiators = certified_material_chart_radiators(&body.specimen, r).map_err(ReciprocalStringError::Material)?;
         poll(gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
