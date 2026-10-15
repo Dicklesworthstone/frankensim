@@ -90,6 +90,7 @@ impl FlueNetwork {
             }
             None => (source.graph.clone(), Vec::new()),
         };
+        for wall in &walls { poll(gate)?; wall.validate_time_step(dt).map_err(physical)?; }
         let (graph, gases, losses) = with_regional_viscothermal_sections(
             wall_graph, source.gases.clone(), dt, &source.viscothermal, gate,
         ).map_err(physical)?;
@@ -112,7 +113,8 @@ impl FlueNetwork {
     /// Original material states and their geometry-derived pressure/flow laws.
     #[must_use]
     pub fn material_walls(&self) -> &[BoundMaterialWall] { &self.walls }
-    /// Accepted displacement, velocity and storage at an original material node.
+    /// Accepted displacement, velocity and BASE mechanical storage at a material node.
+    /// Hereditary spring energy is separately available via `wall_relaxation_energy_j`.
     /// Reads the same shunt advanced by the jet/bore solve, not another oscillator.
     ///
     /// # Errors
@@ -120,7 +122,17 @@ impl FlueNetwork {
     pub fn wall_state(&self, node: usize) -> Result<WallState, FlueError> {
         let wall = self.walls.iter().find(|wall| wall.source().node == node)
             .ok_or_else(|| invalid("wall motion requires a source-bound material node"))?;
-        wall.patch().observe_waveguide(&self.physics, node).map_err(physical)
+        wall.observe_waveguide(&self.physics).map_err(physical)
+    }
+    /// Accepted hereditary spring storage [J], already included in network energy.
+    /// Adding this to `wall_state(node)?.stored_energy_j` gives complete wall storage.
+    ///
+    /// # Errors
+    /// Unbound node, mismatched material load or unavailable/nonfinite memory.
+    pub fn wall_relaxation_energy_j(&self, node: usize) -> Result<f64, FlueError> {
+        let wall = self.walls.iter().find(|wall| wall.source().node == node)
+            .ok_or_else(|| invalid("wall memory requires a source-bound material node"))?;
+        wall.relaxation_stored_energy_j(&self.physics).map_err(physical)
     }
     /// Actual lowered graph. Original node indices remain valid.
     #[must_use]
