@@ -17,6 +17,8 @@
 
 /// Complete source-bound mechanism compilation using the existing dynamics engine.
 pub mod articulated;
+/// Compatible nonuniform deformation with conserved material mass.
+pub mod deformation;
 /// Principal-frame adaptation for the existing free-body and contact APIs.
 pub mod principal;
 /// Material-driven buoyancy, displacement and hydrostatic torque.
