@@ -163,7 +163,17 @@ mod tests {
                 key: PropertyKey::with_quantity(name, quantity),
                 value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
                     knots: vec![(300.0, values[0]), (400.0, values[1])], dims },
-                validity: ValidityDomain::unconstrained().with("T", 300.0, 400.0).with("pressure", 100000.0, 100000.0),
+                validity: ValidityDomain::unconstrained()
+                    .with_quantity(
+                        "T",
+                        QuantitySpec::semantic(SemanticType::new(
+                            QuantityKind::AbsoluteTemperature,
+                            ValueForm::Static,
+                        )),
+                        300.0,
+                        400.0,
+                    )
+                    .with("pressure", 100000.0, 100000.0),
                 uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
                 observations: vec![], provenance: Provenance {
                     source: "synthetic liquid law, not measurements".into(), license: "test-only".into(), artifact: None },
