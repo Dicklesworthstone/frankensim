@@ -11,6 +11,7 @@
 //! cell-uniformity, timestep and supplied-conductance assumptions still apply.
 
 pub mod enthalpy;
+pub mod observers;
 
 /// Compatibility path for the original conduction-owned timeline. This is a
 /// re-export, not a second implementation or a conversion between state types.
