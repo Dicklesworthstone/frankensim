@@ -110,3 +110,23 @@ pub fn solve(
     )?;
     Ok(MaterialInterfaceSolution { coupled, contacts: final_contacts })
 }
+
+
+#[cfg(feature = "enthalpy-coupling")]
+impl MaterialContact {
+    /// Consume this exact source-supported surface assignment in the shared
+    /// material/enthalpy contact lane. No property is re-queried or copied into
+    /// an unrelated receipt. The expected ordered face is the current callback's
+    /// authored topology; a stale or reversed assignment refuses before current.
+    pub fn into_enthalpy_response(self, expected_cells: [usize; 2]) -> Result<
+        crate::conjugate::enthalpy::transport::interfaces::ElectricalInterfaceResponse<Self>, ChtError,
+    > {
+        if self.face.cells != expected_cells {
+            return Err(invalid("material.contact_assignment", "resolved source contact does not match the ordered enthalpy face"));
+        }
+        let face = self.face;
+        crate::conjugate::enthalpy::transport::interfaces::ElectricalInterfaceResponse::try_new(
+            self, face.resistance_ohm_m2, face.heat_fraction_to_first,
+        ).map_err(|e| invalid("material.contact_response", &e.to_string()))
+    }
+}

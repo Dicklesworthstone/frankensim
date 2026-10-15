@@ -3,10 +3,14 @@ use std::{error::Error,io::Read};
 use fs_blake3::DomainHasher;
 use fs_conduction::transient::deposition::*;
 use fs_exec::CancelGate;
-use fs_lbm::conjugate::{ChtError,ElectricSetup,Electrode,ElectrodeDrive,VoxelDomain};
+use fs_lbm::conjugate::{ChtError,ElectricalContact,ElectricSetup,Electrode,ElectrodeDrive,VoxelDomain};
 use fs_lbm::conjugate::enthalpy::{JouleEnthalpyError,JouleEnthalpyInput,advance_joule_enthalpy};
 use fs_lbm::conjugate::enthalpy::transport::{EnthalpyTransport,advance_joule_enthalpy_with_material_transport};
 use fs_material::phase::{EnthalpyPhaseKnot,EquilibriumEnthalpyPhaseCurve,EquilibriumPhaseState};
+use fs_lbm::conjugate::enthalpy::transport::interfaces::advance_joule_enthalpy_with_material_interfaces_observed;
+#[path = "joule_phase_change/contact.rs"]
+mod contact;
+use contact::ContactTable;
 
 struct Table {
     curve:EquilibriumEnthalpyPhaseCurve,
@@ -78,10 +82,27 @@ impl Table {
 #[derive(Clone,Copy,Debug)]
 struct Row {
     time:f64,temperature:f64,liquid_fraction:f64,enthalpy:f64,current:f64,
-    stored:f64,electrode:f64,thermal_external:f64,residual:f64,solves:usize,conductivity:f64,
+    stored:f64,electrode:f64,thermal_external:f64,residual:f64,solves:usize,conductivity:f64,contact_resistance:Option<f64>,
 }
 
-fn simulate(table:&Table,voltage:f64,duration:f64,max_dt:f64,mut emit:impl FnMut(Row))
+fn simulate(table:&Table,voltage:f64,duration:f64,max_dt:f64,emit:impl FnMut(Row))
+    ->Result<Row,Box<dyn Error>> {
+    simulate_with_contact(table,None,voltage,duration,max_dt,emit)
+}
+
+fn thermal_link(patch:&ContactPatch,sides:[&fs_lbm::conjugate::enthalpy::transport::EnthalpyTransportSample<EquilibriumPhaseState>;2])
+    ->Result<(f64,()),JouleEnthalpyError> {
+    // Explicit Cartesian half-cell series resistance, with no additional
+    // thermal interface resistance. Electrical resistance is a DIFFERENT law.
+    let [a,b]=sides.map(|s|s.response.conductivity_w_m_k());
+    let g=if a==0.0 || b==0.0 {0.0} else {
+        let length=sides.map(|s|s.cell.geometry.end_m[0]-s.cell.geometry.start_m[0]);
+        patch.link.area_m2/(0.5*length[0]/a+0.5*length[1]/b)
+    };
+    Ok((g,()))
+}
+
+fn simulate_with_contact(table:&Table,contact:Option<&ContactTable>,voltage:f64,duration:f64,max_dt:f64,mut emit:impl FnMut(Row))
     ->Result<Row,Box<dyn Error>> {
     if !voltage.is_finite() || !duration.is_finite() || !(0.0<duration&&duration<=600.0)
         || !max_dt.is_finite() || max_dt<=0.0 || max_dt>1.0 {
@@ -118,39 +139,42 @@ fn simulate(table:&Table,voltage:f64,duration:f64,max_dt:f64,mut emit:impl FnMut
         Electrode {lo:[0,0,0],hi:[1,1,1],drive:ElectrodeDrive::Voltage(voltage)},
         Electrode {lo:[2,0,0],hi:[3,1,1],drive:ElectrodeDrive::Voltage(0.0)},
     ]};
+    // One declared electrode/specimen interface; the other face is perfect.
+    // Dynamic response replaces this reference descriptor, never adds to it.
+    let contacts=[ElectricalContact {cells:[0,1],resistance_ohm_m2:0.0,
+        heat_fraction_to_first:contact.map_or(0.0,|law|law.heat_fraction)}];
     let (mut electrode_j,mut external_j,mut solves)=(0.0,0.0,0usize);
     let mut last=None;
     for index in 1..=60 {
         // Switch at an exact coupling endpoint, never inside a frozen-source step.
         if index==31 {electric.electrodes[0].drive=ElectrodeDrive::Voltage(0.0);}
         let target=if index==30 {0.5*duration} else {duration*(index as f64/60.0)};
-        let input=JouleEnthalpyInput {domain:&domain,setup:&electric,contacts:&[],cell_ids:&ids,
+        let input=JouleEnthalpyInput {domain:&domain,setup:&electric,contacts:if contact.is_some() {&contacts} else {&[]},cell_ids:&ids,
             max_cells:3,max_current_solves:20_001,power_tolerance_w:1e-9,energy_tolerance_j:1e-8};
-        let (next,report,conductivity)=if table.local_conductivity.is_some() {
+        let (next,report,conductivity,contact_resistance)=if let Some(law)=contact {
+            let (next,(),r)=advance_joule_enthalpy_with_material_interfaces_observed(
+                &heat,target,config,input,&[0,1],&gate,&(),
+                |_,cell,_|table.transport(cell.specific_h_j_kg),thermal_link,
+                |_,face,sides|law.response(face,sides))?;
+            let k=r.transport.endpoint.cells[1].response.conductivity_w_m_k();
+            let resistance=r.endpoint.contacts[0].response.resistance_ohm_m2();
+            (next,r.transport.joule,k,Some(resistance))
+        } else if table.local_conductivity.is_some() {
             let (next,r)=advance_joule_enthalpy_with_material_transport(&heat,target,config,input,&[0,1],&gate,
-                |_,cell,_|table.transport(cell.specific_h_j_kg),|patch,sides| {
-                    // Explicit Cartesian half-cell series resistance, with no
-                    // extra thermal interface resistance in this example.
-                    let [a,b]=sides.map(|s|s.response.conductivity_w_m_k());
-                    let g=if a==0.0 || b==0.0 {0.0} else {
-                        let length=sides.map(|s|s.cell.geometry.end_m[0]-s.cell.geometry.start_m[0]);
-                        patch.link.area_m2/(0.5*length[0]/a+0.5*length[1]/b)
-                    };
-                    Ok((g,()))
-                })?;
+                |_,cell,_|table.transport(cell.specific_h_j_kg),thermal_link)?;
             let k=r.endpoint.cells[1].response.conductivity_w_m_k();
-            (next,r.joule,k)
+            (next,r.joule,k,None)
         } else {
             let (next,r)=advance_joule_enthalpy(&heat,target,config,input,&gate,
                 |_,cell,_|table.resistivity(cell.specific_h_j_kg).map(Some))?;
-            (next,r,table.conductivity)
+            (next,r,table.conductivity,None)
         };
         let state=table.curve.state_at_specific_enthalpy(next.cells()[&ids[1]].specific_h_j_kg)?;
         electrode_j+=report.electrode_energy_j;external_j+=report.thermal.external_heat_j;solves+=report.current_solves;
         let stored=next.energy_j()-initial_energy;
         let row=Row {time:next.time_s(),temperature:state.temperature_k(),liquid_fraction:state.liquid_mass_fraction(),
             enthalpy:next.cells()[&ids[1]].specific_h_j_kg,current:report.endpoint.electric.electrodes[0].current_a,
-            stored,electrode:electrode_j,thermal_external:external_j,residual:stored-external_j,solves,conductivity};
+            stored,electrode:electrode_j,thermal_external:external_j,residual:stored-external_j,solves,conductivity,contact_resistance};
         heat=next; // all actual electrical, enthalpy, endpoint and energy checks passed
         emit(row);last=Some(row);
     }
@@ -159,15 +183,21 @@ fn simulate(table:&Table,voltage:f64,duration:f64,max_dt:f64,mut emit:impl FnMut
 
 fn main()->Result<(),Box<dyn Error>> {
     let args:Vec<_>=std::env::args().collect();
-    if !(2..=5).contains(&args.len()) {return Err("usage: joule_phase_change MATERIAL.txt [voltage=10] [duration_s=60] [max_dt_s=0.05]".into());}
+    if !(2..=6).contains(&args.len()) {return Err("usage: joule_phase_change MATERIAL.txt [voltage=10] [duration_s=60] [max_dt_s=0.05] [CONTACT.txt]".into());}
     let mut text=String::new();std::fs::File::open(&args[1])?.take(65_537).read_to_string(&mut text)?;
     let table=Table::parse(&text)?;
+    let contact=if let Some(path)=args.get(5) {
+        let mut text=String::new();std::fs::File::open(path)?.take(65_537).read_to_string(&mut text)?;
+        Some(ContactTable::parse(&text,&table)?)
+    } else {None};
     let value=|i:usize,default:f64|->Result<f64,Box<dyn Error>> {Ok(match args.get(i) {Some(s)=>s.parse()?,None=>default})};
     println!("# synthetic fixed-volume phase chart; explicit Ohmic source; no melt flow or density/pressure work");
-    println!("time_s,centre_K,liquid_mass_fraction,centre_h_J_kg,endpoint_current_A,stored_change_J,electrode_work_J,total_external_heat_J,thermal_defect_J,current_solves{}",
-        if table.local_conductivity.is_some() {",endpoint_centre_k_W_m_K"} else {""});
-    simulate(&table,value(2,10.0)?,value(3,60.0)?,value(4,0.05)?,|r| {
-        let suffix=if table.local_conductivity.is_some() {format!(",{:.9}",r.conductivity)} else {String::new()};
+    println!("time_s,centre_K,liquid_mass_fraction,centre_h_J_kg,endpoint_current_A,stored_change_J,electrode_work_J,total_external_heat_J,thermal_defect_J,current_solves{}{}",
+        if table.local_conductivity.is_some() {",endpoint_centre_k_W_m_K"} else {""},
+        if contact.is_some() {",endpoint_contact_R_ohm_m2"} else {""});
+    simulate_with_contact(&table,contact.as_ref(),value(2,10.0)?,value(3,60.0)?,value(4,0.05)?,|r| {
+        let mut suffix=if table.local_conductivity.is_some() {format!(",{:.9}",r.conductivity)} else {String::new()};
+        if let Some(resistance)=r.contact_resistance {suffix.push_str(&format!(",{resistance:.9}"));}
         println!("{:.6},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.6e},{}{}",
             r.time,r.temperature,r.liquid_fraction,r.enthalpy,r.current,r.stored,r.electrode,r.thermal_external,r.residual,r.solves,suffix);
     })?;
