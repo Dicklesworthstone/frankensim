@@ -1,6 +1,9 @@
 //! Multiple thermal contacts on ONE gas, evaluated at ONE energy midpoint.
 //! Distinct hot and cold contacts remain distinct even when their net heat is
 //! zero. No averaged temperature, repeated gas step, or inferred mixture law.
+/// Finite circuit/thermal feedback for several gases and many contacts.
+pub mod network;
+
 use super::*;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
