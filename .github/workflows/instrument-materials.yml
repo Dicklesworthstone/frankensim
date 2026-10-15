@@ -39,7 +39,8 @@ jobs:
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
       - name: Source-bound finite thermal storage gas and piston mechanics
         if: ${{ !cancelled() }}
-        run: cargo test -p fs-couple --lib cavity_phs::piston:: -- --test-threads=1
+        run: |
+          cargo test -p fs-couple --lib cavity_phs::piston:: -- --test-threads=1
       - name: Material-conductivity gas-spring heat and motion
         if: ${{ !cancelled() }}
         run: cargo test --manifest-path crates/fs-material/examples/material_gas_spring/Cargo.toml -- --test-threads=1
