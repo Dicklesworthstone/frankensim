@@ -43,6 +43,8 @@ pub mod phase;
 pub mod plastic;
 pub mod porous;
 pub mod section;
+/// Temperature refresh of complete source-bound layered mechanical sections.
+pub mod section_temperature;
 pub mod state_point;
 pub mod tensor;
 pub mod thermal;
