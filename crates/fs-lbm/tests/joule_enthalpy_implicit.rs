@@ -28,7 +28,7 @@ fn latent(l:f64) -> EquilibriumEnthalpyPhaseCurve {
 fn config() -> ImplicitJouleConfig {
     ImplicitJouleConfig { max_unknowns:8, max_newton_iterations:24, difference_step_j:1e-4,
         cell_energy_tolerance_j:1e-7, total_energy_tolerance_j:1e-7,
-        newton:NewtonKrylovConfig {absolute_tolerance:1e-9,relative_tolerance:0.0,
+        newton:NewtonKrylovConfig {absolute_tolerance:1e-9,relative_tolerance:1e-10,
             forcing_minimum:1e-4,linear_restart:8,..NewtonKrylovConfig::default()} }
 }
 fn setup(n:usize,drive:ElectrodeDrive) -> ElectricSetup {

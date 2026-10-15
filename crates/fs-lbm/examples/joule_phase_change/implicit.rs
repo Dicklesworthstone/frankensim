@@ -26,7 +26,7 @@ pub(super) fn advance<'m>(
     let controls=ImplicitJouleConfig {
         max_unknowns:3,max_newton_iterations:24,difference_step_j,
         cell_energy_tolerance_j:tolerance,total_energy_tolerance_j:tolerance,
-        newton:NewtonKrylovConfig {absolute_tolerance:tolerance/10.0,relative_tolerance:0.0,
+        newton:NewtonKrylovConfig {absolute_tolerance:tolerance/10.0,relative_tolerance:1e-10,
             forcing_minimum:1e-4,linear_restart:3,..NewtonKrylovConfig::default()},
     };
     let mut current=old.clone();let mut last=None;
