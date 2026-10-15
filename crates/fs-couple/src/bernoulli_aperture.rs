@@ -20,6 +20,8 @@ pub(crate) mod moving;
 pub mod paired;
 /// Independent blades coupled to regional tubes and physical outlets.
 pub mod paired_network;
+/// Same-sample material valve feedback from both upstream and downstream ducts.
+pub mod two_sided;
 /// Moving aperture coupled to a geometry-bound passive uniform tube.
 pub mod tube;
 /// Moving aperture coupled to nonuniform connected tube sections and branches.
