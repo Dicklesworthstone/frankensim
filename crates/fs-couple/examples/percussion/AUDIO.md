@@ -246,9 +246,19 @@ cargo run --release -p fs-couple --example percussion -- splash-wav 480 20 > spl
 
 The short splash request retains the full default source basis and 40–1640 Hz
 acoustic preparation while allowing the far-field propagation delay to elapse.
-It has not been run successfully in this session. In particular, correcting the
+In particular, correcting the
 triangle kernels does not prove that every weakly radiating elastic mode passes
 the existing power gate; far-panel discretization and fit error remain subject
 to those unchanged checks. The small vented-snare regression explicitly verifies
 that its coarse boundary refuses the default 1640 Hz band, then requests a
 resolved 40–500 Hz band covering its complete retained 80–500 Hz head window.
+
+### Close-microphone multipole near-field refusal (`frankensim-1z1gz`)
+
+Native execution confirms that `splash-wav` (`Receiver::FarField`) fits all 30 modes at `order <= 6` and renders, whereas `splash-mic` (`Receiver::FinitePoint([0.08, 0.05, 0.35])`, `range = 0.3625 m`, `radius = 0.1003 m`, `propagation_delay_s = 0.7643 ms`) fits modes 0..25 at `order <= 8` (`independent_audit_rms = 3.85e-5 .. 3.53e-2`) and refuses on mode 26 (`1077.88 Hz`, `m = 8` azimuthal multipole on the 16-sector mesh) with `max = 0.1064, rms = 0.0724` at order 6, `max = 0.1578, rms = 0.0759` at order 8, and `max = 0.146, rms = 0.0743` at order 24 against the `0.15 / 0.05` relative gate:
+
+- Peak transfer magnitude on mode 26 is `7.1169e-14 Pa/(m/s^2)` (`236 dB` below mode 0's `4.4831e-2 Pa/(m/s^2)`).
+- From `40..1000 Hz` (`k r < m`), `exterior_pressure_at_points_integrated` is dominated by the static/incompressible Laplace multipole near-field (`1.47e-15 .. 5.15e-15 Pa/(m/s^2)` with zero retardation phase `arg(p_raw) ≈ 0°`, because `Im G_k = sin(k r)/(4 pi r)` expands in even powers `r^{2l}` that are orthogonal to `cos(8 theta)` on the symmetric 16-sector mesh up to `O((k r)^17)`), before the propagating `(k a)^8` radiation term rises 50x to `7.12e-14 Pa/(m/s^2)` at `1640 Hz`.
+- When `receiver_response` peels the shared traveling-wave delay `propagation_delay_s = (range - radius)/c = 0.7643 ms` (`shift_to_enclosing_sphere(..., -propagation_delay_s)`), the zero-phase Laplace near-field acquires an anticausal phase advance `exp(+s * tau_prop)` (`+360°` across `40..1320 Hz` on `s = +i omega`) at nearly constant amplitude.
+- By Bode's gain-phase relationship, no stable proper rational model (`Re(p_k) < 0`) of any finite order can follow an anticausal phase advance `+omega * tau_prop` without simultaneous exponential gain growth; any stable fit must zero the `40..1080 Hz` near-field floor to fit the causal `1200..1640 Hz` radiative rise, leaving an irreducible `~7.2..7.6%` relative RMS residual on that `-236 dB` mode. The refusal is therefore the mathematically sound outcome of applying uniform per-mode relative holdout gates after peeling a traveling-wave delay from a finite-point multipole near-field.
+

@@ -203,7 +203,7 @@ fn shared_carrier_does_not_reindex_flexible_hands_moving_mutes_or_acoustic_sourc
         Some(Stroke {speed_m_s:0.2,position_m:Some([-0.055,0.012])}),Some(&mute),
         &mallets::Selection::default(),&shafts,None,Some(0.03),mount).unwrap();
     let old=make(None);let new=make(Some(&spec));let at=old.force.len();
-    assert_eq!(new.force.len(),at+1);assert_eq!(spec.port(new.force.len()).unwrap().coordinate,at);
+    assert_eq!(new.force.len(),at+1);assert_eq!(spec.port(new.force.len()).unwrap().translation.coordinate,at);
     for (a,b) in old.flexible_sticks.iter().zip(&new.flexible_sticks) {
         let (a,b)=(a.as_ref().unwrap(),b.as_ref().unwrap());
         assert_eq!(a.rigid_coordinate(),b.rigid_coordinate());assert_eq!(a.elastic_start(),b.elastic_start());

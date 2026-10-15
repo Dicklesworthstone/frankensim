@@ -299,3 +299,15 @@ The time fixture retains the complete requested elastic slices, true translation
 masses, and washer histories. Construction and virtual-work regressions also
 exercise different shell materials and both skin projections. Authored tests require native execution; no acoustic listening or
 real-time performance result follows from construction alone.
+
+### Native acoustic bake limit at 0.8 mm separation (`frankensim-nhf66`)
+
+Native execution of `hihat-mic crates/fs-couple/examples/percussion/estimated-hihat.fshh 24000 50 0.08 0.05 0.35 --microphone-right -0.08,0.05,0.35 --analytic-newton --impact-substeps 8 511 --strike-speed-m-s 0.8` selects `PlainCbie` across `40..1640 Hz` (`2048` panels, `panels_per_wavelength = 16.2824` at `1640 Hz`, `condition_lower_bound = 3596.634`) and refuses at `1640 Hz, input 18` (upper-shell mode 18 at `892.43 Hz`):
+
+- `surface_power = (-5.226533e-10, -2.645980e-7) W` (`power_interval = (-5.226532984933255e-10, -5.226532984929689e-10)`)
+- `positive_real_power = +2.003103e-9 W`, `negative_real_power = -2.525756e-9 W`
+- `apparent_power = 6.344901e-7 VA`, `real / apparent = -8.237375e-4` (`-0.0824%`)
+- `plane_wave_reference_power = 3.459663e-7 W`, dense-solve roundoff floor `n * eps * cond_lb * apparent = 1.037747e-15 W`
+
+Because the `0.8 mm` inter-cymbal rim separation is 30x smaller than the `24.7 mm` outer facet edges and the proper lower-shell rotation `(x, y, z) -> (x, -y, -z)` crosses quad triangulation diagonals across the gap, P0 centroid collocation (`PlainCbie`) incurs a `-8.24e-4` non-symmetric cross-gap resistance error on sub-coincident multipoles even with analytical static and `O(k^2 r^2)` double-layer regularization. This exceeds the LU roundoff floor by `5e5x` and is rightly refused by the passivity gate; the mechanical CSV (`hihat`) runs unaffected.
+
