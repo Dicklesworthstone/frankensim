@@ -21,7 +21,7 @@ Two tracks, always labelled:
 |---|---|
 | `index.html`, `src/` | the page (Vite, TypeScript, three.js; no framework) |
 | `src/live/` | live section UIs and typed clients for the engine workers |
-| `public/live/` | engine wasm + module workers + the AudioWorklet sink (static, unbundled) |
+| `public/live/` | engine wasm + module workers + the AudioWorklet sink (static, unbundled; a build serves them under `live/<hash>/`, see Rebuilding) |
 | `engine-kit/`, `engine-piano/`, `engine-drum/` | the live engines (standalone cargo workspaces) |
 | `public/live/mix-worklet.js`, `lane.js` | `fs-live-mix`: sums frame-stamped lanes from several engine Workers in lock-step with the AudioContext clock |
 | `tools/strandbar.py` | builds the Strandbar studio loop and the live engines' score and levels (`data/strandbar.json`) |
@@ -41,9 +41,18 @@ checkouts have drifted, build from an export with pinned siblings beside it
 1. Build the examples (release) with the viz patch applied in the export, then render the
    campaign; the exact command of every clip is in its "Run evidence" drawer on the page.
 2. `npm run data -- <campaign-dir> public`
-3. `engine-drum/build-wasm.sh` and the engine-piano build (see `engine-piano/`), which install
-   into `public/live/`.
+3. `engine-kit/build-wasm.sh` (it also writes `engine_levels.json`), the engine-piano build (see
+   `engine-piano/`) and, for the older drum section, `engine-drum/build-wasm.sh`; they install into
+   `public/live/`.
 4. `npm run build`, then `vercel deploy --prod --yes` (prebuilt `dist/`; see `vercel.json`).
+
+The live files are never bundled, and each Worker loads its glue, wasm and data relative to its own
+URL. So a build (`vite.config.ts`) serves the whole of `public/live` under one directory named by a
+hash of its contents, `live/<hash>/`, and the page's `LIVE_BASE_URL` points there: a page always gets
+Workers, glue and wasm from one build, and `vercel.json` and `cloudflare/_headers` cache `live/`
+immutably. The build fails if what it copied differs from what it hashed. A page left open across a
+deploy asks for its old `live/<hash>/`, which is gone, and says to reload. The dev server serves
+`public/live` at `live/`.
 
 ## Grading against real recordings
 
