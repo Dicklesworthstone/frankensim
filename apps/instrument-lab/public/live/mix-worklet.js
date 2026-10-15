@@ -7,8 +7,11 @@
 // dropped and counted (late); a lane that sent nothing for a frame contributes silence.
 //
 // Protocol
-//   main -> node.port   {type:'lane', id, port}   adopt a producer MessagePort as lane `id`
-//   main -> node.port   {type:'drop', id}         forget a lane
+//   main -> node.port   {type:'lane', id, port}   adopt a producer MessagePort as lane `id` (a lane
+//                       already under `id` is dropped first)
+//   main -> node.port   {type:'drop', id}         forget a lane and close its port
+//   main -> node.port   {type:'dispose'}          drop every lane; process() then returns false, so
+//                       the disconnected node can be collected
 //   main -> node.port   {type:'flush', id?, from?, epoch?}  discard queued audio of lane `id`
 //                       (every lane when omitted) at context frames >= `from` (default: now).
 //                       With `epoch`, only audio stamped with an older epoch is discarded, and
@@ -42,22 +45,35 @@ class FsLiveMix extends AudioWorkletProcessor {
     //        end: frame after the lane's last message, marked: it sends `rest`, streaming: older rule}
     this.lanes = new Map();
     this.quantum = 0;
+    this.alive = true;
     this.port.onmessage = (event) => this.control(event.data);
+  }
+
+  // forget lane `id`: its queued audio and its port (a port left open would keep receiving, and its
+  // audio would pile up in a queue nothing plays)
+  forget(id) {
+    const lane = this.lanes.get(id);
+    if (!lane) return;
+    lane.port.onmessage = null;
+    lane.port.close();
+    lane.queue = [];
+    this.lanes.delete(id);
   }
 
   control(message) {
     if (!message || typeof message !== 'object') return;
     if (message.type === 'lane' && message.port) {
+      this.forget(message.id);
       const lane = { port: message.port, queue: [], lateFrames: 0, gapFrames: 0, end: undefined, marked: false, streaming: false };
       message.port.onmessage = (event) => this.receive(lane, event.data);
       this.lanes.set(message.id, lane);
       message.port.postMessage({ type: 'clock', frame: currentFrame, sampleRate, wallMs: Date.now() });
     } else if (message.type === 'drop') {
-      const lane = this.lanes.get(message.id);
-      if (lane) {
-        lane.port.onmessage = null;
-        this.lanes.delete(message.id);
-      }
+      this.forget(message.id);
+    } else if (message.type === 'dispose') {
+      for (const id of [...this.lanes.keys()]) this.forget(id);
+      this.alive = false;
+      this.port.onmessage = null;
     } else if (message.type === 'flush') {
       const from = Number.isFinite(message.from) ? Math.round(message.from) : currentFrame;
       const epoch = Number.isFinite(message.epoch) ? message.epoch : undefined;
@@ -106,6 +122,7 @@ class FsLiveMix extends AudioWorkletProcessor {
   }
 
   process(_inputs, outputs) {
+    if (!this.alive) return false;
     const out = outputs[0];
     const n = out[0].length;
     const f0 = currentFrame;

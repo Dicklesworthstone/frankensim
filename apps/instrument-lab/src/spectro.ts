@@ -44,7 +44,8 @@ export class DualSpectrogram {
     const r = this.canvas.getBoundingClientRect();
     const d = Math.min(2, window.devicePixelRatio || 1);
     const w = Math.max(2, Math.round(r.width * d)), h = Math.max(2, Math.round(r.height * d));
-    if (this.canvas.width === w && this.canvas.height === h) return;
+    // a new spectrogram on a canvas an earlier one already sized (Play after Stop) still needs its rows
+    if (this.stripH > 0 && this.canvas.width === w && this.canvas.height === h) return;
     this.canvas.width = w;
     this.canvas.height = h;
     this.gap = Math.round(10 * d);
@@ -90,6 +91,7 @@ export class DualSpectrogram {
     const pps = (this.opts.pxPerSecond ?? 90) * d;
     this.carry += ((now - this.lastT) / 1000) * pps;
     this.lastT = now;
+    if (this.stripH < 1) { this.carry = 0; return; } // nothing to draw into (a canvas not laid out yet)
     const dx = Math.floor(this.carry);
     if (dx < 1) return;
     this.carry -= dx;

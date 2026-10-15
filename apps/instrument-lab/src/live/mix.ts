@@ -38,7 +38,10 @@ export async function createLiveMix(context: AudioContext, destination: AudioNod
   }
   let loading = loaded.get(context);
   if (!loading) {
-    loading = context.audioWorklet.addModule(`${LIVE_BASE_URL}/mix-worklet.js`);
+    loading = context.audioWorklet.addModule(`${LIVE_BASE_URL}/mix-worklet.js`).catch((e: unknown) => {
+      loaded.delete(context); // a failed load is not remembered: the next start tries again
+      throw new Error(`the live mixer could not be loaded (if the site was just updated, reload the page): ${(e as Error)?.message ?? e}`);
+    });
     loaded.set(context, loading);
   }
   await loading;
@@ -66,10 +69,80 @@ export async function createLiveMix(context: AudioContext, destination: AudioNod
     },
     dispose(): void {
       listeners.clear();
+      node.port.postMessage({ type: "dispose" }); // the worklet closes every lane port and stops processing
       node.port.onmessage = null;
       node.disconnect();
     },
   };
+}
+
+/** The error a lane's `ready` rejects with when the lane is disposed before its Worker is ready. */
+export class LaneDisposed extends Error {
+  constructor(label: string) {
+    super(`${label} was stopped before it was ready`);
+    this.name = "LaneDisposed";
+  }
+}
+
+/**
+ * The Worker side of a lane: the Worker, the channel whose port2 joins the mix once the Worker is
+ * ready, and a `ready` that settles exactly once. Disposing it terminates the Worker, drops the mix
+ * lane, closes the channel and rejects a `ready` still pending (with LaneDisposed), so nothing waits
+ * forever on a Worker that is gone and a `ready` that was already in flight is ignored.
+ */
+class LaneWorker<R> {
+  readonly worker: Worker;
+  readonly ready: Promise<R>;
+  private readonly channel = new MessageChannel();
+  private settled = false;
+  private attached = false;
+  private disposed = false;
+  private rejectReady: (e: Error) => void = () => {};
+
+  /** `name`: the Worker's name (devtools); `label`: how errors name it ("the snare engine"). */
+  constructor(url: string, name: string, private readonly label: string, private readonly mix: LiveMix, private readonly id: string, onMessage: (m: { type: string; [k: string]: unknown }) => void) {
+    this.worker = new Worker(url, { type: "module", name });
+    this.ready = new Promise<R>((resolve, reject) => {
+      this.rejectReady = reject;
+      this.worker.onmessage = (e: MessageEvent) => {
+        const m = e.data;
+        if (this.disposed || !m) return;
+        if (m.type === "ready") {
+          if (this.settled) return;
+          this.settled = true;
+          this.attached = true;
+          mix.attach(id, this.channel.port2);
+          resolve(m as R);
+        } else if (m.type === "error") {
+          if (!this.settled) { this.settled = true; reject(new Error(String(m.message))); }
+        } else onMessage(m);
+      };
+      // a module Worker that fails to load (a 404 after the site was updated, say) fires a bare Event
+      this.worker.onerror = (e) => {
+        if (this.settled) return;
+        this.settled = true;
+        reject(new Error(e.message || `${label} could not be loaded (if the site was just updated, reload the page)`));
+      };
+    });
+    this.ready.catch(() => {}); // a caller that awaits it sees the rejection; nobody else should
+  }
+
+  /** The producer end for the Worker's `init` message. */
+  takePort(): MessagePort {
+    return this.channel.port1;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.worker.onmessage = null;
+    this.worker.onerror = null;
+    this.worker.terminate();
+    // only a lane that joined the mix leaves it: a new lane may already be joining under the same id
+    if (this.attached) this.mix.dropLane(this.id);
+    else this.channel.port2.close();
+    if (!this.settled) { this.settled = true; this.rejectReady(new LaneDisposed(this.label)); }
+  }
 }
 
 // ------------------------------------------------------------------ kit piece lanes
@@ -132,8 +205,8 @@ export class KitLane {
   onField: ((f: KitField) => void) | null = null;
   onBurst: ((b: KitBurst) => void) | null = null;
   onStats: ((s: LaneWorkerStats) => void) | null = null;
-  private worker: Worker;
-  private mix: LiveMix;
+  private readonly lane: LaneWorker<KitReady>;
+  private readonly worker: Worker;
 
   /**
    * `chunk`: most frames per audio message (default 128; a score lane far ahead can send larger ones, see lane.js).
@@ -141,21 +214,14 @@ export class KitLane {
    */
   constructor(mix: LiveMix, piece: string, opts: { gain: number; aheadFrames?: number; chunk?: number; scales?: number[]; minRealtime?: number; benchMs?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
     this.piece = piece;
-    this.mix = mix;
-    this.worker = new Worker(`${LIVE_BASE_URL}/kit/worker.js`, { type: "module", name: `kit-${piece}` });
-    const ch = new MessageChannel();
-    const port = ch.port1;
-    this.ready = new Promise<KitReady>((resolve, reject) => {
-      this.worker.onmessage = (e: MessageEvent) => {
-        const m = e.data;
-        if (m.type === "ready") { mix.attach(piece, ch.port2); resolve(m as KitReady); }
-        else if (m.type === "field") this.onField?.(m as KitField);
-        else if (m.type === "burst") this.onBurst?.(m as KitBurst);
-        else if (m.type === "stats") this.onStats?.(m as LaneWorkerStats);
-        else if (m.type === "error") reject(new Error(m.message));
-      };
-      this.worker.onerror = (e) => reject(new Error(e.message || "kit worker failed"));
+    this.lane = new LaneWorker<KitReady>(`${LIVE_BASE_URL}/kit/worker.js`, `kit-${piece}`, `the ${piece} engine`, mix, piece, (m) => {
+      if (m.type === "field") this.onField?.(m as unknown as KitField);
+      else if (m.type === "burst") this.onBurst?.(m as unknown as KitBurst);
+      else if (m.type === "stats") this.onStats?.(m as unknown as LaneWorkerStats);
     });
+    this.worker = this.lane.worker;
+    this.ready = this.lane.ready;
+    const port = this.lane.takePort();
     this.worker.postMessage({ type: "init", piece, port, ...opts }, [port]);
   }
   strike(x: number, y: number, speed: number, frame?: number): void {
@@ -178,9 +244,11 @@ export class KitLane {
   stop(): void {
     this.worker.postMessage({ type: "stop" });
   }
+  /** Terminate the Worker and leave the mix; a `ready` still pending rejects with LaneDisposed. */
   dispose(): void {
-    this.worker.terminate();
-    this.mix.dropLane(this.piece);
+    this.onField = this.onBurst = null;
+    this.onStats = null;
+    this.lane.dispose();
   }
 }
 
@@ -202,25 +270,18 @@ export class PianoLane {
   onStats: ((s: LaneWorkerStats) => void) | null = null;
   /** engine.snapshot() for the state at context frame `frame` (only with `snapshotHz`), and its lane epoch. */
   onSnapshot: ((frame: number, data: Float32Array, epoch: number) => void) | null = null;
-  private worker: Worker;
-  private mix: LiveMix;
+  private readonly lane: LaneWorker<PianoReady>;
+  private readonly worker: Worker;
 
   /** `chunk`: most frames per audio message (default 128; a score lane far ahead can send larger ones, see lane.js). */
   constructor(mix: LiveMix, opts: { aheadFrames?: number; chunk?: number; options?: Record<string, number>; gain?: number; minRealtime?: number; snapshotHz?: number; governor?: boolean } = {}) {
-    this.mix = mix;
-    this.worker = new Worker(`${LIVE_BASE_URL}/piano/lane-worker.js`, { type: "module", name: "piano-lane" });
-    const ch = new MessageChannel();
-    const port = ch.port1;
-    this.ready = new Promise((resolve, reject) => {
-      this.worker.onmessage = (e: MessageEvent) => {
-        const m = e.data;
-        if (m.type === "ready") { mix.attach("piano", ch.port2); resolve(m as PianoReady); }
-        else if (m.type === "snapshot") this.onSnapshot?.(m.frame as number, m.data as Float32Array, (m.epoch as number) ?? 0);
-        else if (m.type === "stats") this.onStats?.(m as LaneWorkerStats);
-        else if (m.type === "error") reject(new Error(m.message));
-      };
-      this.worker.onerror = (e) => reject(new Error(e.message || "piano worker failed"));
+    this.lane = new LaneWorker<PianoReady>(`${LIVE_BASE_URL}/piano/lane-worker.js`, "piano-lane", "the piano engine", mix, "piano", (m) => {
+      if (m.type === "snapshot") this.onSnapshot?.(m.frame as number, m.data as Float32Array, (m.epoch as number) ?? 0);
+      else if (m.type === "stats") this.onStats?.(m as unknown as LaneWorkerStats);
     });
+    this.worker = this.lane.worker;
+    this.ready = this.lane.ready;
+    const port = this.lane.takePort();
     this.worker.postMessage({ type: "init", port, ...opts }, [port]);
   }
   sequence(startFrame: number, loopFrames: number, events: { offset: number; on?: number; off?: number; speed?: number }[]): void {
@@ -241,8 +302,10 @@ export class PianoLane {
   stop(): void {
     this.worker.postMessage({ type: "stop" });
   }
+  /** Terminate the Worker and leave the mix; a `ready` still pending rejects with LaneDisposed. */
   dispose(): void {
-    this.worker.terminate();
-    this.mix.dropLane("piano");
+    this.onSnapshot = null;
+    this.onStats = null;
+    this.lane.dispose();
   }
 }

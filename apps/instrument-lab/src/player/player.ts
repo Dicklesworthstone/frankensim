@@ -8,7 +8,7 @@ import "./player.css";
 import { claimPlayback, registerPlayer } from "../audio";
 import { asset, el, noteName } from "../util";
 import { createLiveAudioContext } from "../live/liveAudio";
-import { createLiveMix, KitLane, PianoLane, type KitReady, type KitScoreEvent, type LaneWorkerStats, type LiveMix, type PianoReady } from "../live/mix";
+import { createLiveMix, KitLane, LaneDisposed, PianoLane, type KitReady, type KitScoreEvent, type LaneWorkerStats, type LiveMix, type PianoReady } from "../live/mix";
 import { parsePianoSnapshot } from "../live/pianoClient";
 import { decodeMidi, MAX_MIDI_BYTES } from "../midi/smf";
 import { arrange, gmInstrument, PIECE_NAMES, type Arrangement, type PieceId } from "../midi/arrange";
@@ -141,7 +141,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
   const boardHud = el("div", { class: "pp-hud" });
   const stringsCanvas = el("canvas", { class: "pp-strings", "aria-hidden": "true", hidden: "" });
   const boardView = el("article", { class: "pp-view", "aria-label": "The live soundboard" },
-    el("header", { class: "pp-view-head" }, el("h4", {}, "Soundboard"), el("span", { class: "pp-view-tag" }, "Model D · 32 coordinates · heights ×", el("b", { class: "pp-board-scale" }, "—"))),
+    el("header", { class: "pp-view-head" }, el("h4", {}, "Soundboard"), el("span", { class: "pp-view-tag" }, "Model D", el("span", { class: "pp-board-coords" }, ""), " · heights ×", el("b", { class: "pp-board-scale" }, "—"))),
     boardStage, boardHud, stringsCanvas);
   boardStage.append(el("div", { class: "pp-stage-idle" }, "Its motion appears here as the roll plays"));
   const kitStage = el("div", { class: "pp-stage" });
@@ -378,16 +378,27 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
   }
 
   // ---------------------------------------------------------------- engines
-  async function ensureEngines(a: Arrangement): Promise<boolean> {
+  // One start at a time: a second Play (another roll picked while the engines start) waits for the
+  // first, so two calls never build two mixes or two pianos.
+  let starting: Promise<unknown> = Promise.resolve();
+  function ensureEngines(a: Arrangement): Promise<boolean> {
+    const run = starting.then(() => startEngines(a));
+    starting = run.catch(() => {});
+    return run;
+  }
+  async function startEngines(a: Arrangement): Promise<boolean> {
     ctx ??= createLiveAudioContext();
     await ctx.resume();
     const c = ctx;
     if (!mix) {
-      master = c.createGain();
-      master.gain.value = 0;
-      master.connect(c.destination);
-      mix = await createLiveMix(c, master);
-      mix.onStats((_f, lanes) => {
+      const g = c.createGain();
+      g.gain.value = 0;
+      const mx = await createLiveMix(c, g);
+      g.connect(c.destination);
+      // both assigned together, after the await: an idle disposal meanwhile cannot leave one without the other
+      master = g;
+      mix = mx;
+      mx.onStats((_f, lanes) => {
         for (const [id, s] of Object.entries(lanes)) {
           const h = health[id];
           if (!h) continue;
@@ -400,15 +411,22 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     let warm = !!piano;
     const started: Promise<unknown>[] = [];
     if (!piano) {
-      piano = new PianoLane(m, { aheadFrames: AHEAD, chunk: CHUNK, gain: PIANO_GAIN, snapshotHz: 30, minRealtime: 1.3 });
-      piano.onStats = (s) => { const h = health["piano"]; if (h) { h.rt = s.realtime; h.stats = s; } };
-      piano.onSnapshot = (frame, data, ep) => { if (ep >= epoch) { snaps.push({ frame, data }); if (snaps.length > 90) snaps.shift(); } };
+      const lane = new PianoLane(m, { aheadFrames: AHEAD, chunk: CHUNK, gain: PIANO_GAIN, snapshotHz: 30, minRealtime: 1.3 });
+      piano = lane;
+      lane.onStats = (s) => { const h = health["piano"]; if (h) { h.rt = s.realtime; h.stats = s; } };
+      lane.onSnapshot = (frame, data, ep) => { if (ep >= epoch) { snaps.push({ frame, data }); if (snaps.length > 90) snaps.shift(); } };
       health["piano"] = { rt: 0, late: 0, gap: 0, base: 0, skipBase: 0, detail: "", slow: 0 };
-      started.push(piano.ready.then((r) => {
+      const boardTag = boardView.querySelector(".pp-board-coords");
+      started.push(lane.ready.then((r) => {
         pianoReady = r;
         health["piano"]!.detail = `${r.boardCoordinates} board coordinates`;
+        if (boardTag) boardTag.textContent = ` · ${r.boardCoordinates} coordinates`;
         if (r.board) board.setBoard(r.board.xy, r.board.shapes);
         boardStage.querySelector(".pp-stage-idle")?.remove();
+      }, (e: unknown) => {
+        // a piano that failed to start is not kept: the next Play starts a new one
+        if (piano === lane) { lane.dispose(); piano = null; delete health["piano"]; }
+        throw e;
       }));
     }
     for (const [p, k] of kits) if (!a.pieces.includes(p)) { k.lane.dispose(); kits.delete(p); delete health[p]; }
@@ -422,7 +440,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       let done = 0;
       const n = a.pieces.length;
       say(`Starting ${!pianoReady ? "the piano" : ""}${!pianoReady && n ? " and " : ""}${n ? `${n} drum piece${n > 1 ? "s" : ""}` : ""}, each in its own Worker, and measuring this device…`);
-      started.forEach((p) => void p.then(() => { done++; say(`Starting the engines… ${done} of ${total} ready`); }));
+      started.forEach((p) => void p.then(() => { done++; if (phase === "warming") say(`Starting the engines… ${done} of ${total} ready`); }, () => {}));
       await Promise.all(started);
     }
     paintLanes();
@@ -458,19 +476,31 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       h.scale = r.scale;
       h.detail = `grid ${r.scale}× coarser`;
       kit.setReady(p, r);
+    }, (e: unknown) => {
+      // a piece that failed to start is not kept: the next Play starts it again
+      if (kits.get(p) === entry) { lane.dispose(); kits.delete(p); delete health[p]; }
+      throw e;
     });
   }
 
   async function coarsen(p: PieceId, scale: number): Promise<void> {
     const old = kits.get(p);
     if (!old || !mix) return;
+    const m = mix;
     const lostBefore = health[p] ? lostFrames(health[p]!) : 0;
     old.lane.dispose(); // drops its mix lane before the new one joins under the same name
     kits.delete(p);
     say(`${PIECE_NAMES[p]}: this device could not compute it in real time, so it restarts on a coarser grid.`, "warn");
     // whole grids only: a 3.5x piece restarts on 4x or 5x, grids with measured levels
     const next = [Math.floor(scale) + 1, Math.floor(scale) + 2, 10].filter((s, i, a) => s <= 10 && a.indexOf(s) === i);
-    await startPiece(mix, p, next);
+    try {
+      await startPiece(m, p, next);
+    } catch (e) {
+      // the engines were stopped meanwhile (LaneDisposed), or the new Worker failed: nothing to join
+      if (!(e instanceof LaneDisposed) && mix === m) say(`${PIECE_NAMES[p]} could not be restarted: ${(e as Error).message}`, "bad");
+      return;
+    }
+    if (mix !== m) return;
     const h = health[p];
     if (h) h.detail += ` (restarted from ${scale}×${lostBefore > 480 ? `, after ${Math.round(lostBefore / 48)} ms were lost` : ""})`;
     const k = kits.get(p);
@@ -509,7 +539,8 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       setPhase("playing");
       say(playingLine());
     } catch (e) {
-      setPhase("ready");
+      if (my !== token) return; // this start was cancelled (another player, another roll); its lanes went with it
+      setPhase(arr ? "ready" : "empty");
       say(`The engines could not start: ${(e as Error).message}`, "bad");
     }
   }
@@ -584,6 +615,12 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
   function onClaimed(): void {
     // another player on the page starts: stop, and free the CPU for it soon after
     if (phase === "playing") pause();
+    else if (phase === "warming") {
+      // a start still in progress does not go on to play over the other player
+      token++;
+      setPhase(arr ? "ready" : "empty");
+      say("Stopped: another player on the page started.");
+    }
     clearTimeout(idleTimer);
     idleTimer = window.setTimeout(() => { if (phase !== "playing" && phase !== "warming") disposeEngines(); }, 2000);
   }
@@ -1060,7 +1097,7 @@ function evidenceBody(): HTMLElement {
       p("The engines have limits, and the roll keeps within them where it can: a chord of more than ten notes keeps its bass, its top and its loudest notes; no more than sixteen strikes in any quarter second. The piano simulates 24 sounding keys at once; beyond that the quietest strings are retired early.")),
     el("div", {},
       el("h4", {}, "What is computed"),
-      p("The piano is engine-piano, the grand's own hammer, string, damper and soundboard equations for the keys that are sounding, on 32 soundboard coordinates. Each drum piece is fs-vkplate, the plate solver of the drum kit above, on a grid several times coarser, chosen per piece for this device when the engines start. Only the pieces a file uses are started."),
+      p("The piano is engine-piano, the grand's own hammer, string, damper and soundboard equations for the keys that are sounding, on the largest soundboard this device keeps up with (16 to 128 coordinates, chosen for this device when the engines start). Each drum piece is fs-vkplate, the plate solver of the drum kit above, on a grid several times coarser, chosen per piece for this device when the engines start. Only the pieces a file uses are started."),
       p("Levels: one gain per instrument and nothing else. The piano plays at 0.8 of its engine's full scale (10 Pa at the microphone); each drum piece keeps the live kit's own gain, matched to a recorded kit's balance and rescaled for the grid it runs on, so that its standard stroke is as loud on every grid (coarser grids make the crash 5 dB louder and the closed hi-hat quieter; a quiet stroke is raised only while its peak stays under the kit's cap). Measured in these same engines on the first 12 seconds of six rolls, the loudest moments reach 0.44–0.70 of full scale, so nothing clips. There is no reverb, no equaliser and no limiter."),
       p("The roll's library comes from the owner's jazz chord editor: its chord charts, played as choruses through that editor's own bass and comping generators (the same voicings and grooves it plays), with drum parts written for each groove. Uploaded files go through that editor's MIDI salvage pass, which repairs re-struck, orphaned and unterminated notes and says so, and its rules for naming chords and track roles."),
       p("The soundboard view is the engine's modal sum on its own surface points, heights exaggerated by the factor shown. The kit shows each piece's computed surface velocity; each piece's colour scale follows its own motion down as it decays.")));

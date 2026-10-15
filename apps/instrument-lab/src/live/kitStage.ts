@@ -350,28 +350,37 @@ export function mountLiveKit(root: HTMLElement): void {
     hitCentre(def.id);
   });
 
+  // every start is a session; stop() ends it, and a start still building finds out at its next await
+  let session = 0;
   const stop = (): void => {
+    session++;
     running = false;
-    for (const L of lives.values()) { L.lane?.dispose(); L.lane = null; L.field = null; L.kinetic = 0; }
+    for (const L of lives.values()) { L.lane?.dispose(); L.lane = null; L.field = null; L.kinetic = 0; L.replay = null; }
     mix?.dispose();
     mix = null;
     overlay.hidden = false;
     start.textContent = "▶ Start the kit";
     start.disabled = false;
     hud.textContent = "";
+    readout.hidden = true;
   };
-  registerPlayer(() => { if (running) stop(); });
+  // another player starting stops the kit, also while it is still being built
+  const onClaimed = (): void => { if (running || start.disabled) stop(); };
+  registerPlayer(onClaimed);
 
   async function begin(): Promise<void> {
     if (running || start.disabled) return;
-    claimPlayback(stop);
+    claimPlayback(onClaimed);
+    const my = ++session;
     start.disabled = true;
     start.textContent = "Building the kit…";
     try {
       ctx ??= createLiveAudioContext();
       await ctx.resume();
-      mix = await createLiveMix(ctx, ctx.destination);
-      const m = mix;
+      if (my !== session) return;
+      const m = await createLiveMix(ctx, ctx.destination);
+      if (my !== session) { m.dispose(); return; }
+      mix = m;
       let built = 0;
       await Promise.all(PIECES.map(async (def) => {
         const L = lives.get(def.id)!;
@@ -400,8 +409,9 @@ export function mountLiveKit(root: HTMLElement): void {
         L.off.width = L.off.height = m2;
         L.img = new ImageData(m2, m2);
         built += 1;
-        start.textContent = `Building the kit… ${built}/${PIECES.length}`;
+        if (my === session) start.textContent = `Building the kit… ${built}/${PIECES.length}`;
       }));
+      if (my !== session) return;
       running = true;
       overlay.hidden = true;
       kickDraw();
@@ -409,8 +419,9 @@ export function mountLiveKit(root: HTMLElement): void {
         const r = lives.get(p.id)!.ready!;
         return el("span", { class: "kit-hud-item" }, el("b", {}, p.name), ` ${r.info.surfaceNodes} nodes · grid ${r.scale}× · ${r.realtime.toFixed(1)}× real time`);
       }));
-      energyLoop();
+      energyLoop(my);
     } catch (e) {
+      if (my !== session) return; // stopped while building: its lanes were disposed on purpose
       stop();
       hud.textContent = `Could not start: ${(e as Error).message}`;
     }
@@ -420,8 +431,8 @@ export function mountLiveKit(root: HTMLElement): void {
   // a compact live readout of the piece played last
   const readout = el("div", { class: "kit-readout", "aria-live": "off" });
   stage.append(readout);
-  function energyLoop(): void {
-    if (!running) return;
+  function energyLoop(my: number): void {
+    if (!running || my !== session) return; // one loop per start, even after a quick stop and restart
     let best: Live | null = null;
     for (const L of lives.values()) if (L.lastStrike && (!best || L.lastStrike.at > best.lastStrike!.at)) best = L;
     if (best && best.kinetic > 0) {
@@ -430,7 +441,7 @@ export function mountLiveKit(root: HTMLElement): void {
         el("span", {}, `energy ${fmtJ(best.kinetic)}`),
         el("span", {}, `stick force ${best.force > 0 ? best.force.toFixed(0) + " N" : "—"}`));
     } else readout.hidden = true;
-    setTimeout(energyLoop, 120);
+    setTimeout(() => energyLoop(my), 120);
   }
 
   resize();

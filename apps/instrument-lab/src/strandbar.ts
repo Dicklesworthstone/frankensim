@@ -31,6 +31,15 @@ const AHEAD = 96_000;
 /** Most frames per audio message: the lanes run two seconds ahead, so 512 (a quarter of the messages; see public/live/lane.js). */
 const CHUNK = 512;
 const LEAD_S = 1.75;
+/**
+ * The kit grids each drum may run on, finest first; the Worker keeps the finest whose timing reaches 1.4x
+ * real time (kit/worker.js). The hat also tries 4.5x: this loop on 5x rings a 558 Hz line 27 dB above the
+ * local spectrum (the studio stem: 14 dB at 550 Hz); on 4.5x the line is gone (5 dB), as on 4x (see kitStage
+ * HAT_SCALES).
+ */
+const KICK_SCALES = [2, 2.5, 3, 3.5, 4, 5, 6];
+const HAT_SCALES = [2.5, 3, 3.5, 4, 4.5, 5, 6];
+const IDLE_STATUS = "The live engines start when you press play: a piano and two drum pieces, each in its own Worker.";
 type Phase = "idle" | "loading" | "playing";
 
 /** Strandbar on the studio render and on the live engines at once, with a switch between them. */
@@ -74,7 +83,7 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
     meters[id] = { root: r, value, bar };
     lanesEl.append(r);
   }
-  const status = el("p", { class: "small muted sb-status", role: "status" }, "The live engines start when you press play: a piano and two drum pieces, each in its own Worker.");
+  const status = el("p", { class: "small muted sb-status", role: "status" }, IDLE_STATUS);
   const evidence = el("details", { class: "evidence" }, el("summary", {}, "What each version computes"),
     el("div", { class: "sb-ev" },
       el("div", {}, el("h4", {}, "Studio render"), el("ul", {}, ...data.studio.map((s) => el("li", {}, el("b", {}, `${s.part}: `), `${s.detail} `, el("span", { class: "muted" }, `(${fmtDur(s.computeS)} of computing)`))))),
@@ -148,42 +157,60 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
     idleHint.hidden = p === "playing";
   }
 
+  // every start is a session: stop() ends it, and a start still loading finds out at its next await
+  let session = 0;
+  // the nodes of the session playing now (the two paths and their analysers), disconnected after it stops
+  let graph: AudioNode[] = [];
+  let unStats: (() => void) | null = null;
   const stop = (): void => {
+    const wasLoading = phase === "loading";
+    session++;
     cancelAnimationFrame(posRaf);
     try { source?.stop(); } catch { /* not started */ }
     source?.disconnect();
     source = null;
-    if (lanes) {
-      const l = lanes;
-      lanes = null;
-      l.piano.stop(); l.kick.stop(); l.hihat.stop();
-      // let the last notes ring out through the mix before the engines go
-      setTimeout(() => { l.piano.dispose(); l.kick.dispose(); l.hihat.dispose(); }, 1500);
-    }
+    unStats?.();
+    unStats = null;
+    const l = lanes;
+    lanes = null;
     const m = mix;
     mix = null;
-    setTimeout(() => m?.dispose(), 1600);
+    const nodes = graph;
+    graph = [];
+    if (l) for (const lane of [l.piano, l.kick, l.hihat]) { lane.onStats = null; lane.stop(); }
+    // let the last notes ring out through the mix before the engines go (nothing rings while loading)
+    const ringMs = wasLoading ? 0 : 1500;
+    setTimeout(() => {
+      if (l) { l.piano.dispose(); l.kick.dispose(); l.hihat.dispose(); }
+      m?.dispose();
+      for (const n of nodes) n.disconnect();
+    }, ringMs);
     spec?.stop();
     barEl.textContent = "Bar –";
     chordEl.textContent = "";
     delete chordEl.dataset.name;
+    status.textContent = IDLE_STATUS; // not "playing in step" once nothing plays
     setPhase("idle");
   };
-  registerPlayer(() => { if (phase !== "idle") stop(); });
+  const onClaimed = (): void => { if (phase !== "idle") stop(); };
+  registerPlayer(onClaimed);
 
   async function start(): Promise<void> {
-    claimPlayback(stop);
+    claimPlayback(onClaimed);
+    const my = ++session;
     setPhase("loading");
     try {
       ctx ??= createLiveAudioContext();
       await ctx.resume();
       const c = ctx;
+      if (my !== session) return;
       status.textContent = "Loading the studio render…";
       if (!buffer) {
         const res = await fetch(asset(data.audio));
         if (!res.ok) throw new Error(`studio render: HTTP ${res.status}`);
         buffer = await c.decodeAudioData(await res.arrayBuffer());
       }
+      if (my !== session) return;
       // the two signal paths: each analysed before its gain, so both spectrograms keep running
       const preIn = c.createGain();
       const liveIn = c.createGain();
@@ -193,6 +220,7 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       for (const a of [aPre, aLive]) { a.fftSize = 4096; a.smoothingTimeConstant = 0; a.minDecibels = -130; a.maxDecibels = 0; }
       preIn.connect(aPre); preIn.connect(preGain).connect(c.destination);
       liveIn.connect(aLive); liveIn.connect(liveGain).connect(c.destination);
+      graph = [preIn, liveIn, preGain, liveGain, aPre, aLive];
       preGain.gain.value = heard === "studio" ? 1 : 0;
       liveGain.gain.value = heard === "live" ? 1 : 0;
       spec?.dispose();
@@ -204,10 +232,11 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       spec.active = heard;
 
       status.textContent = "Starting the live engines and measuring this device…";
-      mix = await createLiveMix(c, liveIn);
-      const m = mix;
+      const m = await createLiveMix(c, liveIn);
+      if (my !== session) { m.dispose(); return; }
+      mix = m;
       for (const k of Object.keys(laneHealth)) delete laneHealth[k];
-      m.onStats((_f, ls) => {
+      unStats = m.onStats((_f, ls) => {
         for (const [id, s] of Object.entries(ls)) {
           const h = (laneHealth[id] ??= { late: 0, gap: 0, rt: 0 });
           h.late = s.lateFrames;
@@ -217,10 +246,10 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       // a fixed score needs no low latency: a second of look-ahead rides out CPU contention
       // (another tab, a busy machine) that an 85 ms buffer turned into dropouts
       const piano = new PianoLane(m, { aheadFrames: AHEAD, chunk: CHUNK, gain: data.live.piano.gain });
-      const kick = new KitLane(m, "kick", { gain: data.live.kick.gain, aheadFrames: AHEAD, chunk: CHUNK, scales: [2, 2.5, 3, 3.5, 4, 5, 6], minRealtime: 1.4, fieldHz: 0 });
-      // the hat also tries 4.5x: this loop on 5x rings a 558 Hz line 27 dB above the local spectrum (the
-      // studio stem: 14 dB at 550 Hz); on 4.5x the line is gone (5 dB), as on 4x (see kitStage HAT_SCALES)
-      const hihat = new KitLane(m, "hihat-closed", { gain: data.live.hihat.gain, aheadFrames: AHEAD, chunk: CHUNK, scales: [2.5, 3, 3.5, 4, 4.5, 5, 6], minRealtime: 1.4, fieldHz: 0 });
+      const kick = new KitLane(m, "kick", { gain: data.live.kick.gain, aheadFrames: AHEAD, chunk: CHUNK, scales: KICK_SCALES, minRealtime: 1.4, fieldHz: 0 });
+      const hihat = new KitLane(m, "hihat-closed", { gain: data.live.hihat.gain, aheadFrames: AHEAD, chunk: CHUNK, scales: HAT_SCALES, minRealtime: 1.4, fieldHz: 0 });
+      // held from here, so a stop while they start disposes them
+      lanes = { piano, kick, hihat };
       const meter = (id: string) => (s: LaneWorkerStats): void => {
         const h = (laneHealth[id] ??= { late: 0, gap: 0, rt: 0 });
         h.rt = s.realtime;
@@ -230,10 +259,10 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       kick.onStats = meter("kick");
       hihat.onStats = meter("hihat-closed");
       const [pr, kr, hr] = await Promise.all([piano.ready, kick.ready, hihat.ready]);
+      if (my !== session) return;
       (laneHealth["piano"] ??= { late: 0, gap: 0, rt: 0 }).board = pr.boardCoordinates;
       (laneHealth["kick"] ??= { late: 0, gap: 0, rt: 0 }).scale = kr.scale;
       (laneHealth["hihat-closed"] ??= { late: 0, gap: 0, rt: 0 }).scale = hr.scale;
-      lanes = { piano, kick, hihat };
 
       // one clock for everything: the loop and all three engines start on the same frame
       startFrame = Math.round((c.currentTime + LEAD_S) * SR);
@@ -278,6 +307,7 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       };
       pos();
     } catch (e) {
+      if (my !== session) return; // stopped while loading: its lanes were disposed on purpose
       stop();
       status.textContent = `Could not start: ${(e as Error).message}`;
     }

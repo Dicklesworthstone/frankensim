@@ -151,7 +151,8 @@ def main(arr_path: Path, stems: Path, recording: Path, pub: Path):
             {"part": "Hi-hat", "detail": "fs-vkplate: two bronze shells on a 5.5 mm grid (von Kármán shells), clamped by the pedal at their rims, stepped at 288 kHz.", "computeS": wall_seconds(stems, "hihat")},
         ],
         "liveParts": [
-            {"part": "Piano", "detail": f"engine-piano: the same hammer, string and damper equations for the keys being played, on {live['pianoInfo'].get('boardCoordinates', '?')} soundboard coordinates."},
+            # the page's piano picks its board per device (16-128 coordinates), not Node's board 32 above
+            {"part": "Piano", "detail": "engine-piano: the same hammer, string and damper equations for the keys being played, on the largest soundboard this device keeps up with (16 to 128 coordinates, picked when you press play)."},
             {"part": "Kick and hi-hat", "detail": "fs-vkplate itself, compiled to WebAssembly, on a grid several times coarser (picked for this device when you press play): fewer, larger cells, so less detail above a few kHz."},
         ],
         "balance": "Levels: one fixed gain per part. In the studio render they set the low (30–90 Hz), middle (250–2,500 Hz) and high (6–14 kHz) bands in the same proportion as the recording we matched; each live part then gets the gain that gives it the RMS of its studio part, corrected for the drum grid your device runs. Both versions share one master level, low enough that neither clips. Nothing is compressed, limited or equalised.",
