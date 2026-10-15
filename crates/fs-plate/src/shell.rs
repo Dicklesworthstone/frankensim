@@ -9,6 +9,11 @@ use crate::{PlateError, PlateSection, dkt_stiffness};
 use fs_modal::{SliceOptions, SliceReport, slice_window};
 use fs_sparse::{Coo, Csr};
 
+/// Independent effective-sheet membrane and bending sections.
+pub mod section;
+pub use section::ShellSection;
+use section::Section;
+
 /// Radially sampled shells, thickness fields and explicit surface indentations.
 pub mod profile;
 /// Explicit non-axisymmetric midsurfaces, nodal thickness and facet materials.
@@ -147,10 +152,26 @@ pub fn assemble_shell_sections(mesh: &ShellMesh, sections: &[PlateSection],
     }
     assemble(mesh, sections, false, boundary_nodes, support)
 }
-fn assemble(mesh: &ShellMesh, sections: &[PlateSection], uniform: bool,
+/// Assemble independently characterized membrane A and bending D on the SAME
+/// CST/DKT operators. Both matrices are in each facet's ex/ey frame. There is
+/// no inferred solid thickness law or second shell solver.
+/// # Errors
+/// Section count, physical admission, mesh, boundary or finite-set refusal.
+pub fn assemble_shell_materials(mesh: &ShellMesh, sections: &[ShellSection],
+    boundary_nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
+    if sections.len() != mesh.tris.len() {
+        return Err(PlateError::SectionCount { expected: mesh.tris.len(), actual: sections.len() });
+    }
+    assemble(mesh, sections, false, boundary_nodes, support)
+}
+fn assemble<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
     boundary_nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
     mesh.validate()?;
-    for section in sections { section.validate()?; }
+    let expected = if uniform { 1 } else { mesh.tris.len() };
+    if sections.len() != expected {
+        return Err(PlateError::SectionCount { expected, actual: sections.len() });
+    }
+    for section in sections { section.validate_section()?; }
     let ndof = mesh.nodes.len().checked_mul(6).ok_or(PlateError::BadSection { what: "shell DOF overflow" })?;
     let mut constrained = vec![false; ndof];
     for &node in boundary_nodes {
@@ -182,6 +203,7 @@ fn assemble(mesh: &ShellMesh, sections: &[PlateSection], uniform: bool,
                 k.push(ri,cj,value);
             }
         }
+        let section = section.plate();
         let m=section.density*section.thickness*g.area_m2/3.0;
         let jr=m*section.thickness*section.thickness/12.0;
         for &node in tri { for c in 0..6 {
@@ -196,10 +218,10 @@ fn assemble(mesh: &ShellMesh, sections: &[PlateSection], uniform: bool,
     }
     Ok(ShellModel { k:k.assemble(),m:m.assemble(),dof_map,free })
 }
-fn local_stiffness(g:&FacetGeometry, s:&PlateSection, element:usize) -> Result<[f64;324],PlateError> {
+fn local_stiffness<S: Section>(g:&FacetGeometry, s:&S, element:usize) -> Result<[f64;324],PlateError> {
     let mut k=[0.0;324];
-    // Membrane resultant modulus A = 12 D / h^2, including D16/D26.
-    let a=s.d.map(|d| (12.0/(s.thickness*s.thickness))*d);
+    // Explicit effective A, or the legacy homogeneous solid-section lowering.
+    let a=s.membrane()?;
     let mut b=[[0.0;18];3];
     for i in 0..3 {
         let [dx,dy]=g.gradient[i];
@@ -215,11 +237,11 @@ fn local_stiffness(g:&FacetGeometry, s:&PlateSection, element:usize) -> Result<[
 }
 // Project this positive remainder separately from membrane energy. Subtracting
 // two nearly equal dense stiffnesses would destroy positive small eigenvalues.
-pub(super) fn local_bending_stiffness(g:&FacetGeometry, s:&PlateSection, element:usize)
+pub(super) fn local_bending_stiffness<S: Section>(g:&FacetGeometry, s:&S, element:usize)
     -> Result<[f64;324],PlateError> {
     let mut k=[0.0;324];
-    let a=s.d.map(|d| (12.0/(s.thickness*s.thickness))*d);
-    let (kb,_) = dkt_stiffness(&g.x,&g.y,&s.d,element)?;
+    let a=s.membrane()?;
+    let (kb,_) = dkt_stiffness(&g.x,&g.y,&s.plate().d,element)?;
     let slots=[2,4,3,8,10,9,14,16,15];
     let signs=[1.0,-1.0,1.0,1.0,-1.0,1.0,1.0,-1.0,1.0];
     for i in 0..9 { for j in 0..9 { k[slots[i]*18+slots[j]]+=signs[i]*kb[9*i+j]*signs[j]; }}
