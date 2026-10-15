@@ -369,6 +369,8 @@ export function mountLiveKit(root: HTMLElement): void {
     for (const L of lives.values()) { L.lane?.dispose(); L.lane = null; L.field = null; L.kinetic = 0; L.replay = null; L.failure = null; }
     mix?.dispose();
     mix = null;
+    // nothing plays: the audio device rests until the next start resumes it
+    if (ctx?.state === "running") void ctx.suspend();
     overlay.hidden = false;
     start.textContent = "▶ Start the kit";
     start.disabled = false;

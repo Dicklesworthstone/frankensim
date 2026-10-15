@@ -168,7 +168,7 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
   let unStats: (() => void) | null = null;
   const stop = (): void => {
     const wasLoading = phase === "loading";
-    session++;
+    const ended = ++session;
     cancelAnimationFrame(posRaf);
     const nodes = graph;
     graph = [];
@@ -195,6 +195,8 @@ export async function mountStrandbar(root: HTMLElement): Promise<void> {
       if (l) { l.piano.dispose(); l.kick.dispose(); l.hihat.dispose(); }
       m?.dispose();
       for (const n of nodes) n.disconnect();
+      // nothing plays: the audio device rests until the next start resumes it (unless that start came first)
+      if (session === ended && ctx?.state === "running") void ctx.suspend();
     }, ringMs);
     spec?.stop();
     barEl.textContent = "Bar –";

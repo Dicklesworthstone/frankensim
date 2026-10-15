@@ -542,6 +542,8 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     mix = null;
     master?.disconnect();
     master = null;
+    // nothing plays: the audio device rests until the next start resumes it
+    if (ctx?.state === "running") void ctx.suspend();
     for (const k of Object.keys(health)) delete health[k];
     paintLanes();
   }
