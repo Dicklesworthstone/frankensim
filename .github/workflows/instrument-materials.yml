@@ -119,7 +119,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cargo test -p fs-vfit --no-fail-fast --test fractional_waveguide --test fractional_network --test waveguide_pair -- --test-threads=1
-          cargo test -p fs-couple --no-fail-fast --test fractional_tubes --test fractional_flue --test two_sided_aperture --test two_sided_pressure -- --test-threads=1
+          cargo test -p fs-couple --no-fail-fast --test fractional_tubes --test fractional_flue --test fractional_viscothermal --test two_sided_aperture --test two_sided_pressure -- --test-threads=1
       - name: Material walls and multi-outlet flute pressure
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test material_duct_wall -- --test-threads=1

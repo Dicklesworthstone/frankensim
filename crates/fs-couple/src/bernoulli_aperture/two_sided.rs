@@ -23,7 +23,7 @@ use super::network::{NetworkNode, NodeFrame, SectionRealization, TubeNetworkSpec
 use super::fractional::{FractionalSection, FractionalTubePolicy};
 use super::paired::{PairedAperture, PairedTrial};
 use super::viscothermal::{ViscothermalSection, ViscothermalSectionSpec,
-    with_regional_viscothermal_sections};
+    with_regional_viscothermal_sections, with_regional_fractional_viscothermal_sections};
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
@@ -244,9 +244,10 @@ impl TwoSidedAperture {
     /// changing either material valve, source force, contact or observer model.
     /// Each side declares its own finite-band phase budget. This is fixed-state
     /// initialization, not a live gas/geometry change or a broadband exact delay.
-    /// Existing viscothermal subdivision retains its original integer-length
-    /// approximation: this policy applies to the lowered graph and does not
-    /// restore source length already rounded by that separate selected image.
+    /// Selected viscothermal cells retain ORIGINAL physical lengths and regional
+    /// gas properties through the shared fractional loss lowering. Each phase
+    /// band must cover its side's loss bands; original scattering, geometry and
+    /// memory gates still apply. No loss selection is dropped or retuned.
     pub fn with_fractional_transits(valve: LoadedAperture, sources: [ApertureDuctSpec; 2],
         limits: TwoSidedLimits, policies: [FractionalTubePolicy; 2], gate: &CancelGate)
         -> Result<Self, AcousticRealizeError>
@@ -269,8 +270,12 @@ impl TwoSidedAperture {
         let dt = valve.time_step_s();
         let prepare = |source: ApertureDuctSpec, policy: Option<FractionalTubePolicy>| -> Result<DuctSide, AcousticRealizeError> {
             poll(gate)?;
-            let (graph, gases, losses) = with_regional_viscothermal_sections(
-                source.graph.clone(), source.gases.clone(), dt, &source.viscothermal, gate)?;
+            let (graph, gases, losses) = match policy {
+                Some(policy) => with_regional_fractional_viscothermal_sections(
+                    source.graph.clone(), source.gases.clone(), dt, &source.viscothermal, policy, gate),
+                None => with_regional_viscothermal_sections(
+                    source.graph.clone(), source.gases.clone(), dt, &source.viscothermal, gate),
+            }?;
             let (network, represented, fractional) = if let Some(policy) = policy {
                 let (network, represented, details) = graph.realize_fractional_waveguide(&gases, dt, policy, gate)?;
                 (network, represented, Some((policy, details)))

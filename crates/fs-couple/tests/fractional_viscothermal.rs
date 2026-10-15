@@ -164,3 +164,6 @@ fn unresolved_geometry_phase_band_and_memory_are_refused_without_relaxing_gates(
     p=policy();p.maximum_frequency_hz=f64::NAN;
     assert!(try_build(graph(g,0.4001),&[],p).is_err());
 }
+
+#[path = "fractional_viscothermal/reeds.rs"]
+mod reeds;

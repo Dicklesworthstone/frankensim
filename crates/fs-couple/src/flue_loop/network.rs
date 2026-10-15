@@ -11,6 +11,7 @@ use crate::bernoulli_aperture::network::{SectionRealization, TubeNetworkSpec};
 use crate::bernoulli_aperture::fractional::{FractionalSection, FractionalTubePolicy};
 use crate::bernoulli_aperture::viscothermal::{
     ViscothermalSection, ViscothermalSectionSpec, with_regional_viscothermal_sections,
+    with_regional_fractional_viscothermal_sections,
 };
 use crate::bernoulli_aperture::wall::WallState;
 use crate::bernoulli_aperture::wall::material::{
@@ -93,9 +94,12 @@ impl FlueNetwork {
             None => (source.graph.clone(), Vec::new()),
         };
         for wall in &walls { poll(gate)?; wall.validate_time_step(dt).map_err(physical)?; }
-        let (graph, gases, losses) = with_regional_viscothermal_sections(
-            wall_graph, source.gases.clone(), dt, &source.viscothermal, gate,
-        ).map_err(physical)?;
+        let (graph, gases, losses) = match policy {
+            Some(policy) => with_regional_fractional_viscothermal_sections(
+                wall_graph, source.gases.clone(), dt, &source.viscothermal, policy, gate),
+            None => with_regional_viscothermal_sections(
+                wall_graph, source.gases.clone(), dt, &source.viscothermal, gate),
+        }.map_err(physical)?;
         // A caller cannot provide a second, inconsistent source cross-section.
         let actual = graph.inlet_impedance_with_gases(&gases).map_err(physical)?;
         if actual.to_bits() != zc.to_bits() {
@@ -154,8 +158,8 @@ impl FlueNetwork {
     #[must_use]
     pub fn represented_sections(&self) -> &[SectionRealization] { &self.represented }
     /// Selected phase policy and residual transit of each actually lowered section.
-    /// None is the original integer image. Earlier viscothermal length rounding
-    /// remains visible in viscothermal_sections; it is not corrected by this image.
+    /// None is the original integer image. Selected viscothermal cells preserve
+    /// original physical lengths; their separate loss/error records remain visible.
     #[must_use]
     pub fn fractional_sections(&self) -> Option<(FractionalTubePolicy, &[FractionalSection])> {
         self.fractional.as_ref().map(|(policy, details)|(*policy, details.as_slice()))
@@ -269,10 +273,11 @@ impl FlueVoice {
     /// allpass has finite-band phase error and stored memory, not exact broadband
     /// delay. It cannot be changed live without a separate boundary-work law.
     ///
-    /// Viscothermal selection retains its ORIGINAL integer-length lowering and
-    /// approximation records. The phase budget below applies to the resulting
-    /// graph only; it does not restore source length already rounded by that
-    /// lowering. No selected loss or structural-wall law is silently removed.
+    /// Selected viscothermal cells use original physical lengths and regional
+    /// gas properties through the shared fractional loss lowering. The phase
+    /// band must cover each selected loss band; both the phase budget and the
+    /// original physical/scattering gates apply. No selected loss or structural
+    /// wall is silently removed, and material wall area precedes subdivision.
     ///
     /// # Errors
     /// Original jet/material/geometry refusals or fractional phase/memory limits.
