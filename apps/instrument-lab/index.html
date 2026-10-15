@@ -93,11 +93,11 @@
           <div>
             <span class="tag live">Live · WebAssembly</span>
             <h3>Computed in your browser, as you play</h3>
-            <p class="muted small">The engines run in a Web Worker and stream to an AudioWorklet. Nothing is sampled or pre-recorded.</p>
+            <p class="muted small">Each engine runs in its own Web Worker (one per drum piece) and streams to one AudioWorklet. Nothing is sampled or pre-recorded.</p>
             <ul id="versus-live">
-              <li><span>Drum</span>FrankenSim's modal engine: FE heads, eigen-solver and linear impact · rebuilds a new drum in ~30 ms · it keeps only the heads' lowest modes, so it rings longer than a real drum (the kit above does not)</li>
-              <li><span>Piano</span>the reference's own equations, for the sounding keys only · 32 soundboard coordinates · about 8 keys with pedal at 2× real time</li>
-              <li><span>Not live</span>snare wires, head stretching, BEM radiation, and the strings of keys you are not playing</li>
+              <li><span>Drum kit</span>the offline kit's own plate solver, snare wires and clamped hi-hat included, on a grid 2–8× coarser, chosen per piece for each device · a piece that has gone quiet is not stepped</li>
+              <li><span>Piano</span>the reference's own equations, for the sounding keys only · 32 soundboard coordinates at the keyboard; in Strandbar and the player, the largest board this device keeps up with, 16 to 128 · 16 keys held with the pedal down at about 2× real time</li>
+              <li><span>Not live</span>drum detail finer than the coarser grid (above a few kHz), and the strings of keys you are not playing</li>
               <li><span>Latency</span>about 35–45 ms measured headlessly, including the output device</li>
             </ul>
           </div>

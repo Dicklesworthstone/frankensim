@@ -388,7 +388,7 @@ export class LivePianoSection {
     );
     body.append(lists);
     body.append(el('h4', undefined, 'Checked against the offline reference'));
-    body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 2.3 × 10⁻⁹ relative over one second, for eight keys at three hammer speeds, and their energy books agree to about ten digits. For an isolated C4 the live model\'s pressure equals the offline renderer\'s file in all but 137 of 48,000 samples, which differ by one float32 least significant bit. Against the full offline render, the first 15 partials of A3 sit within 2.5 cents and the fitted inharmonicity is 2.42 × 10⁻⁴ (offline 2.47 × 10⁻⁴).'));
+    body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 2.3 × 10⁻⁹ relative over one second, for eight keys at three hammer speeds, and their energy books agree to about ten digits. For an isolated C4 on the same 32-coordinate board, the live model\'s pressure, compiled natively, equals the offline renderer\'s file in all but 137 of 48,000 float32 samples, which differ by at most 7.5 × 10⁻⁹ of full scale; the WebAssembly build in this tab sums its string modes in two lanes, which moves its output by less than 10⁻¹⁰ (rms, relative). Against the full offline render, the first 15 partials of A3 sit within 2.5 cents and the fitted inharmonicity is 2.42 × 10⁻⁴ (offline 2.47 × 10⁻⁴).'));
     const chips = (title: string, cls: string, items: string[]): HTMLElement => {
       const row = el('div', 'lp-chiprow');
       row.append(el('h4', undefined, title));
