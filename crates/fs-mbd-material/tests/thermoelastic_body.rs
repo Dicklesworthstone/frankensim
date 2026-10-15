@@ -42,7 +42,8 @@ fn card(name:&str,rho:f64,young:[f64;2],alpha:f64)->MaterialCard {
                 abscissa:"T".into(),abscissa_dims:Temperature::DIMS,knots:vec![(300.,lo),(400.,hi)],dims}},
             validity:ValidityDomain::unconstrained().with("T",300.,if density {300.}else{400.})
                 .with("pressure",100000.,100000.),
-            uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::LinearInside,
+            uncertainty:UncertaintyModel::Unstated,
+            interpolation:if density {InterpolationPolicy::ConstantWithinValidity}else{InterpolationPolicy::LinearInside},
             observations:vec![],provenance:Provenance {source:format!("synthetic {name}/{key}; not measured material data"),
                 license:"CC0-1.0".into(),artifact:None},
         }).unwrap();
@@ -181,3 +182,6 @@ fn cancellation_before_assembly_preserves_the_original_inventory() {
 
 #[path = "thermoelastic_body/heating.rs"]
 mod heating;
+
+#[path = "thermoelastic_body/vibration.rs"]
+mod vibration;

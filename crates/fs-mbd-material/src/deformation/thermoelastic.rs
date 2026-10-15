@@ -6,6 +6,8 @@
 //! transports the same reference matter through those actual nodes, not free
 //! isotropic scaling. Temperatures are prescribed per cell, not solved here.
 
+mod vibration;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_matdb::{MaterialCard, QueryPoint};
@@ -103,6 +105,8 @@ pub struct ThermalBody<'a> {
     stress: TetThermalStressReport,
     geometry: TetDeformedMesh,
     sources: Vec<ThermalCellSource>,
+    // Exact accepted operator inputs, never reconstructed from material names.
+    linearization: vibration::Linearization,
 }
 impl<'a> ThermalBody<'a> {
     /// Material inventory and full inertia from the ACTUAL constrained displacement.
@@ -130,9 +134,10 @@ impl<'a> TetrahedralMass<'a> {
     /// Shared FEM nodes impose compatibility; differently heated bonded cells do
     /// not get independent geometric scales. Stress, reactions, geometry quality,
     /// displacement and strain bounds must all accept before returning the body.
-    /// This is static linear elasticity on a fixed reference mesh. It is not a
-    /// heat solve, plasticity, finite-strain dynamics, a prestress-updated modal
-    /// solve or a momentum/energy-conserving transition of an already moving body.
+    /// This is static linear elasticity on a fixed reference mesh. Its exact
+    /// operator inputs are retained for `ThermalBody::initial_stress_pencil`.
+    /// It is not a heat solve, plasticity, finite-strain dynamics or a
+    /// momentum/energy-conserving transition of an already moving body.
     pub fn solve_thermal(
         &self, cells:&[ThermalCell<'_>], fixed_dofs:&[usize],
         config:ThermalSolveConfig, cx:&Cx<'_>,
@@ -197,7 +202,12 @@ impl<'a> TetrahedralMass<'a> {
         let geometry=problem.update_geometry_from_displacement(&displacement,config.maximum_nodal_displacement_m,cx)?;
         let body=self.deform(geometry.nodes_m(),||cx.checkpoint().is_err())?;
         checkpoint(cx)?;
-        Ok(ThermalBody {body,displacement,stress,geometry,sources})
+        let linearization = vibration::Linearization {
+            reference_nodes_m: self.nodes_m.clone(), materials, strains,
+            fixed_dofs: fixed_dofs.to_vec(), config,
+        };
+        checkpoint(cx)?;
+        Ok(ThermalBody {body,displacement,stress,geometry,sources,linearization})
     }
 }
 
