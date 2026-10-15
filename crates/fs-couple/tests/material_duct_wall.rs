@@ -200,3 +200,6 @@ fn material_wall_motion_closes_the_existing_pressure_flow_and_energy_equations()
 
 #[path = "material_duct_wall/hereditary.rs"]
 mod hereditary;
+
+#[path = "material_duct_wall/reeds.rs"]
+mod reeds;

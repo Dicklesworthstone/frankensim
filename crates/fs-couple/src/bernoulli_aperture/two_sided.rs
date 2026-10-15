@@ -16,6 +16,8 @@
 
 /// Exterior pressure through the shared Rayleigh and PCM interfaces.
 pub mod observer;
+/// Source-bound bore and tract walls in the same two-sided mechanical solve.
+pub mod material;
 
 use super::dynamic::{ApertureDrive, ApertureFrame, ApertureProgress, ApertureTerminal,
     ApertureTrial, DynamicAperture};
@@ -229,6 +231,7 @@ pub struct TwoSidedAperture {
     valve: LoadedAperture,
     sides: [DuctSide; 2],
     limits: TwoSidedLimits,
+    material_ducts: [Option<material::MaterialDuctWalls>; 2],
 }
 impl TwoSidedAperture {
     /// Attach two quiescent networks to an unadvanced valve, preserving initial
@@ -287,7 +290,7 @@ impl TwoSidedAperture {
         };
         let [up, down] = sources;
         let model = Self { valve, sides: [prepare(up, policies.map(|p|p[0]))?,
-            prepare(down, policies.map(|p|p[1]))?], limits };
+            prepare(down, policies.map(|p|p[1]))?], limits, material_ducts: [None, None] };
         // A lowering must preserve the exact boundary used in the mechanical solve.
         let actual_z = model.sides.iter().map(|s| s.network.inlet_impedance_pa_s_m3()).sum::<f64>();
         if actual_z.to_bits() != z.to_bits() || !model.stored_energy_j().is_finite()
