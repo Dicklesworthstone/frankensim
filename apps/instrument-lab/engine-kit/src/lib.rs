@@ -22,6 +22,11 @@ mod wasm {
         pub fn new(piece: &str, grid_scale: f64) -> Result<KitPiece, JsError> {
             Live::new(piece, grid_scale).map(|live| KitPiece { live, scale: grid_scale }).map_err(|e| JsError::new(&e))
         }
+        /// A second piece in exactly this one's state: it renders the same samples as this one would.
+        /// Building a snare or a hi-hat is almost all its settle, so a copy is far cheaper than `new`.
+        pub fn copy(&self) -> KitPiece {
+            KitPiece { live: self.live.clone(), scale: self.scale }
+        }
         /// Strike at (x, y) metres from the centre of the playing surface at `speed` m/s.
         pub fn strike(&mut self, x: f64, y: f64, speed: f64) {
             self.live.strike(x, y, speed);

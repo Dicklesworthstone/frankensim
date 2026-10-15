@@ -118,7 +118,10 @@ they ring a tonal line near 558 Hz, which 4.5x weakens or drops; the kick's 6-8,
 and the floor tom's 4-6, the grids past which they sound no closer to the 1x grid, so their CPU
 goes to the pieces that do) and keeps the finest that
 runs 1.7x faster than real time on the device. It times from the coarse
-end and stops at the first grid that is too slow, so the costly fine grids are never built. Each
+end and stops at the first grid that is too slow, so the costly fine grids are never built. It builds
+each grid once and keeps a copy from before the timing stroke, and the chosen grid's copy plays: a
+snare's or hi-hat's build is almost all its settle (wire preload, pedal; 0.1-0.9 s), a copy takes
+under a millisecond and plays the same samples. Each
 grid is timed over the first 112 ms of a stroke, the snare's over 450 ms: its wires touch the head
 from ~85 ms on and its steps then cost ~1.6x as much, so the short test promised ~1.5x the speed it
 kept under rapid tapping, and the snare dropped audio. The player (`src/player/`) times its snare

@@ -9,6 +9,10 @@ use crate::*;
 /// Every piece the live kit knows, in the order a drummer names them.
 pub const PIECES: [&str; 9] = ["kick", "snare", "snare-off", "tom-12", "tom-14", "hihat-closed", "hihat-open", "crash", "ride"];
 
+/// A clone holds every bit of the piece's state, so it steps exactly as the original would from
+/// there on. The browser kit keeps a clone of each grid it builds and times, and plays the chosen
+/// grid's clone, so that grid is not settled a second time.
+#[derive(Clone)]
 pub struct Live {
     pub ins: Instrument,
     pub name: String,
@@ -207,6 +211,30 @@ mod tests {
                 assert!(p.asleep(), "{name}: still awake after 8.4 s (kinetic {:.3e} J)", p.kinetic);
                 p.strike(0.0, 0.0, 2.0);
                 assert!(!p.asleep());
+            }
+        }
+    }
+
+    /// A clone, taken settled or mid-ring, renders bit for bit what the original goes on to render.
+    #[test]
+    fn a_clone_renders_what_the_original_would() {
+        for name in PIECES {
+            let mut a = Live::new(name, 8.0).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let mut b = a.clone();
+            let (mut x, mut y) = (vec![0.0f32; 128], vec![0.0f32; 128]);
+            for k in 0..240 {
+                if k % 60 == 0 {
+                    // the second pair is cloned mid-ring, after two strokes
+                    if k == 120 {
+                        b = a.clone();
+                    }
+                    a.strike(0.3 * a.radius, 0.0, 3.0);
+                    b.strike(0.3 * b.radius, 0.0, 3.0);
+                }
+                a.render(&mut x, 1.0);
+                b.render(&mut y, 1.0);
+                let same = x.iter().zip(&y).all(|(p, q)| p.to_bits() == q.to_bits());
+                assert!(same && a.kinetic.to_bits() == b.kinetic.to_bits() && a.force.to_bits() == b.force.to_bits(), "{name}: block {k} differs");
             }
         }
     }

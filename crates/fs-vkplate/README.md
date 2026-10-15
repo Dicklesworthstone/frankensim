@@ -90,8 +90,9 @@ the rims chattering against each other (its sizzle above 4 kHz). The rim contact
 time in WebAssembly), struck anywhere on its playing surface, stepped in 48 kHz blocks, and not
 stepped at all once its motion is 70 dB below its peak. On grids too coarse to put four nodes in
 the 6.5-20 mm annulus round a cymbal's hole, the felt washers and the hi-hat clutch spread their
-total stiffness and damping over the first ring of nodes instead. `apps/instrument-lab/engine-kit`
-compiles it for the browser.
+total stiffness and damping over the first ring of nodes instead. A clone of a `Live` steps bit for
+bit as the original would, so the browser kit settles each grid once: it plays a clone kept from
+before the timing stroke. `apps/instrument-lab/engine-kit` compiles it for the browser.
 
 ## Graded against a real kit
 

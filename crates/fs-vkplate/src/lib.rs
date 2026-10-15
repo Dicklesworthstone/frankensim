@@ -335,6 +335,7 @@ pub struct PlateSpec<'a> {
     pub muffle: Option<(f64, f64, f64, f64)>,
 }
 
+#[derive(Clone)]
 struct VonKarman {
     eh: f64,
     nb: Vec<[Option<usize>; 9]>, // C, E, W, N, S, NE, NW, SE, SW
@@ -346,6 +347,7 @@ struct VonKarman {
     curv: Vec<(f64, f64, f64)>,
 }
 
+#[derive(Clone)]
 pub struct Body {
     pub name: String,
     pub h: f64,
@@ -989,6 +991,7 @@ impl Body {
 
 // --------------------------------------------------------------------- couplings
 /// Lumped adiabatic air between heads: p = -(rho c^2 / V) dV, dV = sum of outward volume.
+#[derive(Clone)]
 pub struct Cavity {
     pub heads: Vec<usize>,
     pub volume: f64,
@@ -997,6 +1000,7 @@ pub struct Cavity {
 
 /// A hole in a head (a kick drum's front port): the air plug in it is an inertance
 /// rho L_eff / A driven by the cavity pressure; it vents the cavity and radiates as a monopole.
+#[derive(Clone)]
 pub struct Port {
     pub area: f64,
     pub length: f64,
@@ -1022,6 +1026,7 @@ impl Port {
 /// Small-ka monopole radiation resistance on the NET outward volume velocity of a group of
 /// surfaces (both heads of one drum, which sit far closer together than a wavelength), at
 /// frequency `f_ref`. Two heads moving the same way in space cancel and are barely damped.
+#[derive(Clone)]
 pub struct RadDamp {
     pub bodies: Vec<usize>,
     pub resistance: f64,
@@ -1034,6 +1039,7 @@ impl RadDamp {
 }
 
 /// Linear spring/dashpot between two nodes (or one node and ground).
+#[derive(Clone)]
 pub struct Link {
     pub a: (usize, usize),
     pub b: Option<(usize, usize)>,
@@ -1048,6 +1054,7 @@ pub enum Law {
 }
 
 /// One-sided contact: d = sum_side sign * weight * w - gap; d > 0 is interpenetration.
+#[derive(Clone)]
 pub struct Contact {
     pub a: Vec<(usize, usize, f64)>, // (body, node, weight) with sign +1
     pub b: Vec<(usize, usize, f64)>, // sign -1
@@ -1073,6 +1080,7 @@ impl Contact {
 
 /// A scheduled strike: at `time` the striker body (a point mass) is placed `clear` metres from
 /// the struck surface and launched toward it at `speed`.
+#[derive(Clone)]
 pub struct Strike {
     pub time: f64,
     pub striker: usize,
@@ -1083,6 +1091,7 @@ pub struct Strike {
 }
 
 /// Piecewise-linear external force program on one node.
+#[derive(Clone)]
 pub struct Drive {
     pub body: usize,
     pub node: usize,
@@ -1106,6 +1115,7 @@ impl Drive {
 }
 
 /// Rayleigh (baffled) pressure microphone.
+#[derive(Clone)]
 pub struct Mic {
     pub pos: [f64; 3],
     taps: Vec<(usize, usize, usize, f64, f64)>, // body, node, delay, weight lo, weight hi
@@ -1196,7 +1206,7 @@ fn newton_step_sqrt(x: f64, lo: &mut f64, hi: &mut f64, dp: f64, cm: f64, dn: f6
 
 /// Contacts whose solves run interleaved. No two of a batch share a node, so each one's predicted
 /// penetration, force and update are what solving them one at a time in list order gives.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ContactQueue {
     /// Per queued contact: its index, d_pred, comp, first iterate, upper bracket, d_now, K, mu, fixed-point
     /// exit; the force.
@@ -1394,6 +1404,7 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
 }
 
 // --------------------------------------------------------------------- instrument
+#[derive(Clone)]
 pub struct Instrument {
     pub bodies: Vec<Body>,
     pub cavities: Vec<Cavity>,

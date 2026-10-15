@@ -55,11 +55,11 @@ let burst = null;
 
 const post = (m, t) => self.postMessage(m, t ?? []);
 
-// How fast grid `scale` runs: one stroke, then 128-frame blocks timed from 256 frames after it (the first
-// touch of every buffer) until `benchMs` after it (at least 40 blocks: the default 112 ms). The timing stops
-// as soon as the window can no longer reach `minRealtime`, since the rest could only lower its speed.
-function bench(name, scale, benchMs, minRealtime) {
-  const p = new KitPiece(name, scale);
+// How fast the grid of `p` (a piece as `new` left it) runs: one stroke, then 128-frame blocks timed from 256
+// frames after it (the first touch of every buffer) until `benchMs` after it (at least 40 blocks: the default
+// 112 ms). The timing stops as soon as the window can no longer reach `minRealtime`, since the rest could only
+// lower its speed. `p` is freed.
+function bench(p, benchMs, minRealtime) {
   try {
     p.strike(0.3 * p.radius(), 0, 3);
     p.render(256, 1);
@@ -97,23 +97,37 @@ async function loadLevels(wasmBytes) {
 // grid has more nodes and never runs faster, so this is the grid a finest-first search picks. But the grids
 // finer than the pick are never built: building is the cost of start-up (the snare takes 0.2 s at 6x, 1.5 s at
 // 2.5x).
+// Each grid is built once: before its build is struck and timed, a copy is kept, and the chosen grid's copy is
+// the piece that plays. A copy renders exactly what a fresh `new` would, and takes under a millisecond, while a
+// snare's or hi-hat's build is almost all its settle (the wire preload, the pedal: 0.1-0.9 s). The timings run on
+// builds, not copies: a copy runs 1-3 % faster (its memory is laid out in one piece), so it would read high.
 // The first timing in a Worker runs while V8 is still optimizing the engine code, and can read slow. A
-// shortfall there is timed once more before it ends the search.
+// shortfall there is timed once more, on a new build, before it ends the search.
 let timed = 0;
 function choose(name, scales, minRealtime, benchMs) {
   let pick = null;
   for (let i = scales.length - 1; i >= 0; i--) {
-    let rt;
+    let kept, rt;
     try {
-      rt = bench(name, scales[i], benchMs, minRealtime);
-      if (timed++ === 0 && rt < minRealtime) rt = bench(name, scales[i], benchMs, minRealtime);
+      const built = new KitPiece(name, scales[i]);
+      kept = built.copy();
+      rt = bench(built, benchMs, minRealtime);
+      if (timed++ === 0 && rt < minRealtime) rt = bench(new KitPiece(name, scales[i]), benchMs, minRealtime);
     } catch {
       continue; // the grid needs oversampling at 48 kHz: skip it, as a finest-first search would
     }
-    if (rt < minRealtime) return pick || { scale: scales[i], realtime: rt };
-    pick = { scale: scales[i], realtime: rt };
+    if (rt < minRealtime) {
+      if (!pick) return { scale: scales[i], realtime: rt, piece: kept };
+      kept.free();
+      return pick;
+    }
+    if (pick) pick.piece.free();
+    pick = { scale: scales[i], realtime: rt, piece: kept };
   }
-  return pick || { scale: 5, realtime: bench(name, 5, benchMs, minRealtime) };
+  if (pick) return pick;
+  const built = new KitPiece(name, 5);
+  const kept = built.copy();
+  return { scale: 5, realtime: bench(built, benchMs, minRealtime), piece: kept };
 }
 
 self.onmessage = async (event) => {
@@ -129,7 +143,7 @@ self.onmessage = async (event) => {
       if (Number(m.fieldFrames) > 0) { fieldFrames = Math.max(128, Math.round(Number(m.fieldFrames))); fieldEvery = Infinity; }
       if (m.bursts === false) bursts = false;
       const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7, Number(m.benchMs) > 0 ? Number(m.benchMs) : 112);
-      piece = new KitPiece(m.piece, pick.scale);
+      piece = pick.piece;
       fix = levelFix(table, m.piece, pick.scale, pageGain);
       gain = pageGain * fix;
       const engine = {
