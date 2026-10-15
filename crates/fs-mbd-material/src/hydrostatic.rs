@@ -17,6 +17,8 @@
 //! <https://farside.ph.utexas.edu/teaching/336L/Fluidhtml/node27.html>
 
 mod geometry;
+mod step;
+pub use step::{HydrostaticStep, HydrostaticStepControls, HydrostaticStepError};
 pub use geometry::{DisplacedVolume, DisplacementMesh, MAX_DISPLACEMENT_CELLS};
 
 use fs_ga::{GaError, Se3, Vec3};

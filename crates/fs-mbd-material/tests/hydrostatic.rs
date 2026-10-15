@@ -1,5 +1,7 @@
 //! Source data -> clipped displacement -> forces, torque and actual mechanics.
 mod common;
+#[path = "hydrostatic/motion.rs"]
+mod motion;
 use common::{close, density_card, point};
 use fs_ga::{Se3, So3, So3Tangent, Twist, Vec3};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
