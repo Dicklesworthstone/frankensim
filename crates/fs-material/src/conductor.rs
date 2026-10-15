@@ -8,7 +8,7 @@
 use core::fmt;
 
 use fs_matdb::{MaterialCard, QueryPoint};
-use fs_qty::Dims;
+use fs_qty::{Dims, QuantitySpec};
 
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
@@ -41,6 +41,34 @@ pub struct ResolvedConductorState {
 }
 
 impl ResolvedConductorState {
+    /// Adopt an already resolved multiphysics bundle without querying a second
+    /// material snapshot or discarding its mechanical/thermal source receipts.
+    /// The complete original bundle and query conditions are retained intact.
+    /// This does not refresh or expand the source's domain of validity.
+    ///
+    /// # Errors
+    /// Missing/ambiguous resistivity, incompatible quantity semantics, and
+    /// nonfinite/nonpositive resistivity refuse. Extra resolved properties are
+    /// preserved rather than silently dropped.
+    pub fn try_from_material(
+        material: ResolvedMaterialStatePoint,
+    ) -> Result<Self, ConductorError> {
+        let property = material.property(ELECTRICAL_RESISTIVITY_PROPERTY)
+            .ok_or(ConductorError::InvalidInput {
+                quantity: "resolved electrical_resistivity",
+            })?;
+        let resistivity_ohm_m = property.value_si();
+        if property.requirement().quantity()
+            != QuantitySpec::dimensional(ELECTRICAL_RESISTIVITY_DIMS)
+            || !resistivity_ohm_m.is_finite() || resistivity_ohm_m <= 0.0
+        {
+            return Err(ConductorError::InvalidInput {
+                quantity: "finite positive dimension-only electrical_resistivity [ohm m]",
+            });
+        }
+        Ok(Self { material, resistivity_ohm_m })
+    }
+
     /// Exact source-resolved material bundle, including its usage receipt.
     #[must_use]
     pub const fn material(&self) -> &ResolvedMaterialStatePoint {
@@ -98,14 +126,7 @@ pub fn resolve_conductor_state(
         ScalarAdmissibility::StrictlyPositive,
     )?;
     let material = resolve_material_state_point(card, point, &[requirement], selection)?;
-    let resistivity_ohm_m = material
-        .property(ELECTRICAL_RESISTIVITY_PROPERTY)
-        .expect("the sole required conductor property was resolved")
-        .value_si();
-    Ok(ResolvedConductorState {
-        material,
-        resistivity_ohm_m,
-    })
+    ResolvedConductorState::try_from_material(material)
 }
 
 /// A uniform conductor resolved from one source-supported material state.
