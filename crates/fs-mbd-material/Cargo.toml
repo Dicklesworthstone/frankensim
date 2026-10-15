@@ -40,3 +40,7 @@ workspace = true
 [[example]]
 name = "electrically_heated_rotor"
 required-features = ["electrothermal-coupling"]
+
+[[example]]
+name = "thermal_vibration"
+required-features = ["thermoelastic-coupling"]

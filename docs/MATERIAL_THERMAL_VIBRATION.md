@@ -92,3 +92,47 @@ cargo test -p fs-mbd-material --features thermoelastic-coupling --test thermoela
 These use synthetic source claims, analytical restraint/gradient identities and
 the actual existing generalized eigensolver. They are not measured-timbre or
 named-material accuracy assertions.
+
+## Run the material-table comparison
+
+```sh
+cargo run -p fs-mbd-material --features thermoelastic-coupling \
+  --example thermal_vibration -- \
+  crates/fs-mbd-material/examples/thermal_vibration/cp10.txt 100 1 2 0.05
+
+cargo run -p fs-mbd-material --features thermoelastic-coupling \
+  --example thermal_vibration -- \
+  crates/fs-mbd-material/examples/thermal_vibration/cp20.txt 100 1 2 0.05
+```
+
+Arguments are the material file, applied watts, heater shutoff time, end time
+and maximum thermal/output step in seconds. The two files differ only in Cp;
+all coefficients are explicitly synthetic. The six SI columns are temperature,
+density, Cp, Young's modulus, Poisson ratio and linear expansion coefficient.
+Two through 256 increasing temperature rows fit within a 64 KiB input ceiling.
+All interpolation and source-domain checks use the existing material owner.
+The first temperature defines the reference configuration and zero enthalpy.
+The card assumes a solid isotropic phase and fixes source pressure at 100 kPa;
+it does not infer phase boundaries, yield, crystal structure or measurements.
+
+This example uses one unit reference tetrahedron with restrained axial motion
+and five remaining vibration DOFs. Its exposed faces cool toward the reference
+temperature with an explicitly prescribed 1 W/(m2 K) heat-transfer coefficient.
+Source shutoff is an event on the shared heat timeline. Afterward the same stored
+heat, constrained stress and spectrum continue evolving during cooling. Thermal
+surface area remains the reference area. One coarse tetrahedron demonstrates
+integration, not a spatially resolved component or acoustic source.
+
+CSV records accepted time, temperature, stored thermal energy, net external
+heat, invariant mass, deformed volume, axial stress, signed lowest eigenvalue,
+its positive frequency where resolved, and the operator identity. The material
+card identity is in the first comment. A nonpositive or sign-unresolved mode has
+an empty frequency field, never an absolute-valued invented tone. Frequencies
+are frozen-state observations; this is not an integrated vibrating trajectory.
+The example caps output intervals at 2000 and the complete run at 20000 actual
+shape solves. Material, structural, energy, work and output failures return an
+error; previously completed output rows remain valid.
+
+```sh
+cargo test -p fs-mbd-material --features thermoelastic-coupling --example thermal_vibration
+```

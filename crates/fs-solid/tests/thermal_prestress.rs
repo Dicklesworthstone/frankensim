@@ -136,3 +136,6 @@ fn all_fixed_and_cancelled_requests_do_not_publish_a_pencil() {
         assert!(matches!(p.assemble_thermal_tangent(&u,field,ContentHash([1;32]),0.1,&cx),Err(TetElasticError::Cancelled)));
     });
 }
+
+#[path = "thermal_prestress/column.rs"]
+mod column;
