@@ -6,6 +6,9 @@
 //! Only differential storage is history. Node potentials and constraint currents
 //! are algebraic efforts; they must not become independent energy stores.
 
+/// Joint finite-supply, material-enthalpy, gas and piston evolution.
+pub mod thermal;
+
 use fs_material::conductor::{ConductorError, OhmicDrive, ResolvedConductor};
 use fs_phs::circuit::{Branch, CircuitDae, CircuitError, CircuitGraph, assemble_circuit};
 use fs_phs::StepRecord;

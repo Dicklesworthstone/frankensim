@@ -37,6 +37,7 @@ fs-tribo = { path = "../fs-tribo" }
 fs-vfit = { path = "../fs-vfit" }
 
 [dev-dependencies]
+fs-mbd = { path = "../fs-mbd" }
 fs-ga = { path = "../fs-ga" }
 fs-alloc = { path = "../fs-alloc" }
 fs-conduction = { path = "../fs-conduction" }

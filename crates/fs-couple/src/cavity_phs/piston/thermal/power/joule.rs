@@ -69,7 +69,47 @@ impl core::fmt::Display for JouleHeatingError {
 }
 impl std::error::Error for JouleHeatingError {}
 
-impl MaterialJouleHeating<'_> {
+/// A whole-body material conductor with NO competing prescribed current or
+/// voltage. Ideal drives and dynamic circuits lower this SAME source binding.
+#[derive(Clone, Debug)]
+pub struct MaterialOhmicBody<'a> {
+    /// Original enthalpy-card identity and thermal/phase coordinates.
+    pub material: ThermalMaterialPoint<'a>,
+    /// Existing explicit resistivity claim selection.
+    pub selection: MaterialPropertySelection,
+    /// Fixed physical current path length [m].
+    pub length_m: f64,
+    /// Fixed physical current-carrying area [m2].
+    pub area_m2: f64,
+}
+impl MaterialOhmicBody<'_> {
+    /// Resolve the original conductor at the ACTUAL enthalpy midpoint. This is
+    /// the same geometry, source support and static-law admission as ideal Joule
+    /// heating, without inventing a zero-current drive for a dynamic circuit.
+    pub fn resolve_conductor(&self, body: EquilibriumPhaseState, body_volume_m3: f64)
+        -> Result<ResolvedConductor, JouleHeatingError> {
+        let volume = self.length_m*self.area_m2;
+        if !volume.is_finite() || volume <= 0.0 || !body_volume_m3.is_finite() || body_volume_m3 <= 0.0
+            || (volume/body_volume_m3-1.0).abs() > 64.0*f64::EPSILON {
+            return Err(JouleHeatingError::Invalid("conductor geometry must represent the whole thermal body"));
+        }
+        let point = self.material.at(body)?;
+        let conductor = resolve_uniform_conductor(self.material.material, &point, self.selection.clone(),
+            self.length_m, self.area_m2)?;
+        let property = conductor.material().property(ELECTRICAL_RESISTIVITY_PROPERTY)
+            .ok_or(JouleHeatingError::Invalid("resolved electrical resistivity is absent"))?;
+        self.material.admit_static(property)?;
+        Ok(conductor)
+    }
+}
+
+impl<'source> MaterialJouleHeating<'source> {
+    /// The exact same conductor binding without an ideal-drive assumption.
+    pub fn ohmic_body(&self) -> MaterialOhmicBody<'source> {
+        MaterialOhmicBody { material:self.material, selection:self.selection.clone(),
+            length_m:self.length_m, area_m2:self.area_m2 }
+    }
+
     /// Bind heat transport to this SAME card, condition point and phase axes.
     /// Thermal and electrical path geometries remain distinct physical inputs.
     /// Each property retains its own explicit source-selection policy.
@@ -95,17 +135,7 @@ impl MaterialJouleHeating<'_> {
     /// the electrical heat and both thermal/mechanical owners accept together.
     pub fn resolve(&self, body: EquilibriumPhaseState, body_volume_m3: f64)
         -> Result<PowerSample<JouleHeatingSample>, JouleHeatingError> {
-        let volume = self.length_m*self.area_m2;
-        if !volume.is_finite() || volume <= 0.0 || !body_volume_m3.is_finite() || body_volume_m3 <= 0.0
-            || (volume/body_volume_m3-1.0).abs() > 64.0*f64::EPSILON {
-            return Err(JouleHeatingError::Invalid("conductor geometry must represent the whole thermal body"));
-        }
-        let point = self.material.at(body)?;
-        let conductor = resolve_uniform_conductor(self.material.material, &point, self.selection.clone(),
-            self.length_m, self.area_m2)?;
-        let property = conductor.material().property(ELECTRICAL_RESISTIVITY_PROPERTY)
-            .ok_or(JouleHeatingError::Invalid("resolved electrical resistivity is absent"))?;
-        self.material.admit_static(property)?;
+        let conductor = self.ohmic_body().resolve_conductor(body, body_volume_m3)?;
         let current = conductor.current_a_for_drive(self.drive)?;
         let power = conductor.joule_power_w(current)?;
         let voltage = match self.drive {

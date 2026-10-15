@@ -161,3 +161,5 @@ fn zero_drive_cannot_hide_missing_sources_wrong_identity_geometry_or_dynamic_coe
     let (dynamic,caloric,_)=fixture(Some(1.0),"omega");
     assert!(heater(&dynamic,&context,OhmicDrive::Current(0.0)).resolve(caloric.curve().state_at_specific_enthalpy(100000.0).unwrap(),body.volume_m3).is_err());
 }
+
+mod circuit;

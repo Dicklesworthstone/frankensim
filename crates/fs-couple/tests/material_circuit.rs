@@ -35,7 +35,7 @@ fn finite_capacitor_discharge_matches_analytic_midpoint_and_branch_heat() {
     let mut circuit=rc(10.0);
     let initial=circuit.clone();
     let mut total_heat=0.0;
-    let dt=0.0005;
+    let dt=0.0005_f64;
     let factor=(1.0-dt/(2.0*10.0*0.002))/(1.0+dt/(2.0*10.0*0.002));
     for step in 1..=64 {
         let proposal=circuit.step_candidate(circuit.resistors().to_vec(),&[],dt,controls(),||false).unwrap();
