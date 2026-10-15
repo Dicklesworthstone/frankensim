@@ -126,7 +126,8 @@ export async function chooseQuality({ make, measure = probeSustained, target, fu
       try {
         kept = Object.assign(engine.copy(), { engineCap: cap || full });
       } catch {
-        // a cached engine_bg.wasm older than its engine.js has no copy(): the caller builds the engine again
+        // an engine_bg.wasm older than its engine.js (no versioned build, see vite.config.ts) has no copy():
+        // the caller builds the engine again
       }
       return measure(engine);
     } finally {

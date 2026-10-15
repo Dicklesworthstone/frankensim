@@ -92,10 +92,10 @@ async function loadLevels(wasmBytes) {
   }
 }
 
-// A copy of `p` in its present state, or null when this engine cannot copy. For up to an hour after a deploy a
-// browser or the Cloudflare edge can serve a cached engine_bg.wasm next to a newer engine.js (the wasm is cached
-// with max-age 3600, the .js revalidates): a wasm from before copies has no kitpiece_copy, so copy() throws, and
-// an engine.js from before copies has no copy() at all. The chosen grid is then built again to play, as it was
+// A copy of `p` in its present state, or null when this engine cannot copy. A build serves public/live under
+// live/<content hash>/ (vite.config.ts), so the glue and the wasm come from one build; this guard stays for a
+// pairing that can still differ (a dev server mid-rebuild, a host that rewrites caching): a wasm from before
+// copies has no kitpiece_copy, so copy() throws, and an engine.js from before copies has no copy() at all. The chosen grid is then built again to play, as it was
 // before copies: the same samples, one more settle.
 function copyOf(p) {
   try {

@@ -111,7 +111,11 @@ The live piano embeds a 32-coordinate board; `public/live/piano/boards/` holds 4
 boards (not committed, ~6 MB) that the browser fetches only when its timing probe says it can afford
 them (`boards.js`). Each board the probe times is built once: the Worker keeps a copy
 (`PianoEngine.copy()`) from before the timing and plays the chosen board's copy, which renders the same
-samples as a new engine (building board 96 takes ~0.9 s, a copy under a millisecond). They are the offline
+samples as a new engine (building board 96 takes ~0.9 s, a copy under a millisecond); an engine that cannot
+copy (a wasm from an older build) builds the chosen board again. On a device too slow for even the
+embedded board at the 700-mode start floor, the piano falls back to its 16 exact low modes, started at
+the mode cap its own timing predicts (not below 700) rather than the full 2,400; the load governor takes
+it lower from there. The boards are the offline
 binary's reductions of the same FE slice; generate them natively with the engine's `gen_board` example:
 
     gen_board public/live/piano/boards/model-d-board-2400-r64.bin 2400 64,32,200,400,800,1600,2300
@@ -131,8 +135,9 @@ goes to the pieces that do) and keeps the finest that
 runs 1.7x faster than real time on the device. It times from the coarse
 end and stops at the first grid that is too slow, so the costly fine grids are never built. It builds
 each grid once and keeps a copy from before the timing stroke, and the chosen grid's copy plays: a
-snare's or hi-hat's build is almost all its settle (wire preload, pedal; 0.1-0.9 s), a copy takes
-under a millisecond and plays the same samples. Each
+snare's or hi-hat's build is almost all its settle (wire preload, pedal; 0.05-0.9 s), a copy takes
+under a millisecond and plays the same samples. An engine that cannot copy (a wasm from an older
+build) gets the chosen grid built again, which plays the same samples. Each
 grid is timed over the first 112 ms of a stroke, the snare's over 450 ms: its wires touch the head
 from ~85 ms on and its steps then cost ~1.6x as much, so the short test promised ~1.5x the speed it
 kept under rapid tapping, and the snare dropped audio. The player (`src/player/`) times its snare
