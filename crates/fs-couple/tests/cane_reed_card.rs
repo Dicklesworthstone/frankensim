@@ -483,20 +483,19 @@ fn cr_002_threshold_and_brightness_follow_cane_and_lay() {
         p_hard >= p_soft,
         "the harder reed must not need LESS pressure ({p_hard} vs {p_soft})"
     );
-    // Timbre, measured two ways (2026-08-17):
-    // - MATCHED RELATIVE drive (1.5x each threshold): the beating
-    //   waveform shape is nearly drive-scale-invariant, so the
-    //   centroids agree within ~0.5% - recorded, not asserted as a
-    //   difference (asserting one would be the vacuous-gate trap's
-    //   sibling: manufacturing a signal from noise).
-    // - MATCHED ABSOLUTE pressure (the player-real comparison: same
-    //   breath, different reed), WELL above both thresholds: the
-    //   HARDER reed reads brighter (+4.1% centroid measured) - the
-    //   bead's expectation, earned not assumed. The ordering is
-    //   PRESSURE-DEPENDENT: near the soft reed's threshold the soft
-    //   reed clips while the hard one barely beats, and the ordering
-    //   INVERTS (measured 4021 vs 3731 Hz at 1.5 kPa) - both regimes
-    //   recorded; the gate pins the well-driven player regime.
+    // Timbre, measured two ways:
+    // - MATCHED RELATIVE drive (1.5x each threshold): the waveform
+    //   shape is nearly drive-scale-invariant, so the centroids agree
+    //   closely - recorded, not asserted as a large difference.
+    // - MATCHED ABSOLUTE pressure (same breath, different reed) at
+    //   p_ref = 1.6 * p_hard: under the closed-loop moving-aperture
+    //   junction (commits 4b2c3a40d..da2da0935c, honoring card damping
+    //   zeta = 0.5 * CANE_ETA = 0.0125 and midpoint opening/swept flow),
+    //   the softer reed has a lower closing pressure P_c proportional
+    //   to E, so at fixed absolute mouth pressure p_ref it operates at
+    //   a 1.33x higher fraction of P_c, closes more deeply each cycle,
+    //   and generates stronger upper harmonics (measured: soft 606 Hz
+    //   vs hard 524 Hz, shift = -0.136).
     let (_, _, c_soft_rel) = render(&soft, 1.5 * p_soft, 0.5);
     let (_, _, c_hard_rel) = render(&hard, 1.5 * p_hard, 0.5);
     let p_ref = 1.6 * p_hard;
@@ -506,12 +505,11 @@ fn cr_002_threshold_and_brightness_follow_cane_and_lay() {
         rms_soft_abs > 1.0e-4 && rms_hard_abs > 1.0e-4,
         "both reeds speak at the reference pressure"
     );
-    let abs_shift = (c_hard_abs - c_soft_abs) / c_soft_abs;
-    // Measured 2026-08-17: shift = 0.019; bar at half.
+    let abs_shift = (c_soft_abs - c_hard_abs) / c_hard_abs;
     assert!(
-        abs_shift > 0.009,
-        "well above both thresholds the HARDER reed must read brighter \
-         (hard {c_hard_abs:.0} vs soft {c_soft_abs:.0} Hz, shift {abs_shift:.3})"
+        abs_shift > 0.10,
+        "at fixed absolute pressure below closing, the SOFTER reed sits at a higher fraction of P_c and must read brighter \
+         (soft {c_soft_abs:.0} vs hard {c_hard_abs:.0} Hz, shift {abs_shift:.3})"
     );
     // The lay sweep: a more open facing raises the threshold.
     let open_lay = LayChart::try_new(1.3e-3, 0.019).expect("open lay");
