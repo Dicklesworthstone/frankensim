@@ -1,0 +1,24 @@
+name: Material-driven rigid dynamics
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-mbd-material/**'
+      - '.github/workflows/material-inertia.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Exercise actual material resolution and rigid dynamics
+        run: cargo test -p fs-mbd-material --all-targets

@@ -1,0 +1,24 @@
+[package]
+name = "fs-mbd-material"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Source-bound material and geometry compilation to the existing rigid-body and articulated dynamics owners"
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-ga = { path = "../fs-ga" }
+fs-matdb = { path = "../fs-matdb" }
+fs-material = { path = "../fs-material" }
+fs-mbd = { path = "../fs-mbd" }
+fs-qty = { path = "../fs-qty" }
+
+[dev-dependencies]
+fs-evidence = { path = "../fs-evidence" }
+
+[lints]
+workspace = true

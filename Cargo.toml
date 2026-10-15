@@ -99,6 +99,7 @@ members = [
     "crates/fs-plate",
     "crates/fs-plate-transient",
     "crates/fs-mbd",
+    "crates/fs-mbd-material",
     "crates/fs-contact",
     "crates/fs-tribo",
     "crates/fs-vskeleton",
