@@ -6,6 +6,9 @@
 //! gas, artificial reflection coefficient or additional propagation law is used.
 //! This is frozen, no-mean-flow acoustics, not thermal/composition transport.
 
+/// Physical outlet observation of the existing regional transfer.
+pub mod outlet;
+
 use super::{DrivingPointError, characteristic_line_response};
 use fs_duct::{Duct, DuctError, DuctResponse, HoleState, LossModel, Segment, Termination,
     input_impedance_load, input_impedance_wall};

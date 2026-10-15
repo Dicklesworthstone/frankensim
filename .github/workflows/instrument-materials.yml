@@ -73,16 +73,19 @@ jobs:
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
       - name: Regional TMM gas ports and uniform parity
         if: ${{ !cancelled() }}
-        run: cargo test -p fs-couple --lib driving_point::regional:: -- --test-threads=1
+        run: |
+          cargo test -p fs-couple --lib driving_point::regional:: -- --test-threads=1
       - name: Regional and uniform gas reed mechanics
         if: ${{ !cancelled() }}
-        run: cargo test -p fs-couple --lib render::schedule::reed:: -- --test-threads=1
+        run: |
+          cargo test -p fs-couple --lib render::schedule::reed:: -- --test-threads=1
       - name: Gas reed wind and ensemble CLI PCM
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test reed_gas_mixture -- --test-threads=1
       - name: Uniform and regional material bending loss through coupled sound
         if: ${{ !cancelled() }}
-        run: cargo test -p fs-couple --lib thin_plate:: -- --test-threads=1
+        run: |
+          cargo test -p fs-couple --lib thin_plate:: -- --test-threads=1
       - name: Source-bound rotary inertia and torsional shear loss
         if: ${{ !cancelled() }}
         run: cargo test -p fs-material --test torsional_section -- --test-threads=1
