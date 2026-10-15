@@ -10,6 +10,9 @@ on:
       - 'crates/fs-couple/src/material_assembly*'
       - 'crates/fs-couple/src/material_assembly/**'
       - 'crates/fs-couple/tests/material_valve_assembly.rs'
+      - 'crates/fs-couple/src/bowed_string.rs'
+      - 'crates/fs-couple/src/bowed_string/material.rs'
+      - 'crates/fs-couple/tests/bowed_material_gas.rs'
       - '.github/workflows/instrument-materials.yml'
 permissions:
   contents: read
@@ -27,10 +30,14 @@ jobs:
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
       - name: Existing and pressure-loaded reduction tests
         if: ${{ !cancelled() }}
-        run: cargo test -p fs-solid --lib reduce:: -- --test-threads=1
+        run: |
+          cargo test -p fs-solid --lib reduce:: -- --test-threads=1
       - name: Anisotropic and heterogeneous material specimens
         if: ${{ !cancelled() }}
         run: cargo test -p fs-solid --test valve_material_field -- --test-threads=1
       - name: Material-to-acoustic integration in an explicit gas
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test material_valve_assembly -- --test-threads=1
+      - name: Shared homogeneous and layered bowed-string material physics
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test bowed_material_gas -- --test-threads=1
