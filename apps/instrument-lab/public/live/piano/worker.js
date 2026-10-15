@@ -14,6 +14,8 @@
 //                boardCoordinates: 0/32 = the embedded board, 1..16 = that many exact low modes,
 //                48/64/96/128 = that board file from ./boards/, 'auto' = the largest board this
 //                device computes `minRealtime` (default 1.4) times faster than real time (boards.js)
+//                substeps: omitted/1 = original clock, 2/4 = explicit mechanical oversampling.
+//                The governor never changes this clock; timing probes use the same selection.
 //   {type:'cmd', name, args?, id?}
 //       noteOn(midi, speedMS)   post-escapement hammer velocity in m/s, (0, 8]
 //       noteOff(midi)
@@ -36,6 +38,7 @@
 //   {type:'error', code:'refused'|'engine'|'worker_error', message, id?, command?}
 import init, { PianoEngine } from './engine.js';
 import { chooseBoard, fetchBoard } from './boards.js';
+import { createPianoEngine } from './engine-factory.js';
 
 const CHUNK = 128;
 
@@ -172,10 +175,7 @@ function onSinkMessage(event) {
 }
 
 function makeEngine(options, bytes = boardBytes) {
-  const limits = [Number(options.courseModeBudget) || 0, Number(options.maxDynamicModes) || 0, Number(options.fullScalePa) || 0];
-  if (bytes) return PianoEngine.withBoard(sampleRate, bytes, ...limits);
-  const coords = Number(options.boardCoordinates) || 0;
-  return new PianoEngine(sampleRate, coords > 16 ? 0 : coords, ...limits);
+  return createPianoEngine(PianoEngine, sampleRate, options, bytes);
 }
 
 // Offline speed test on a separate instance: real-time factor versus the

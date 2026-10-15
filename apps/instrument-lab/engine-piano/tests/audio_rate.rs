@@ -135,3 +135,18 @@ fn partial_source_failure_never_restarts_a_missing_output_packet() {
     assert!(audio.note_on(69, 1.0).is_err());
     assert!(audio.clone().step_pressure().is_err());
 }
+
+#[test]
+fn browser_description_reports_host_clock_and_complete_numerical_latency() {
+    let (desc, cfg) = fixture();
+    for ratio in [1, 2, 4] {
+        let audio = PianoAudio::new(&desc, cfg.clone(), ratio).unwrap();
+        let info = fs_live_piano::describe_audio(&audio);
+        assert!(info.contains("\"sampleRate\":48000,"));
+        assert!(info.contains(&format!("\"mechanicalRateHz\":{},\"substeps\":{ratio},", 48000 * ratio)));
+        let (_, delay) = audio.microphone_delay_frames();
+        assert!(info.contains(&format!("\"microphoneFilterDelaySamples\":{delay},")));
+        assert!(info.contains("\"partialBandHz\":6000,"));
+        if ratio == 1 { assert_eq!(info, fs_live_piano::describe(audio.piano())); }
+    }
+}

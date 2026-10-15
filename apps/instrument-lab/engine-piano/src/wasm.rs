@@ -1,6 +1,6 @@
 //! Browser surface (wasm-bindgen). Typed refusals become JS exceptions at
-//! construction; hot-path refusals are counted and readable via `lastError`.
-use crate::kernel::{Config, Description, LivePiano};
+//! construction; hot-path failures poison continuation and are readable via lastError.
+use crate::{Config, Description, LivePiano, PianoAudio};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -17,58 +17,123 @@ pub fn install_panic_report() {
 
 #[wasm_bindgen]
 pub struct PianoEngine {
-    piano: LivePiano,
+    piano: Playback,
     snap: Vec<f32>,
+}
+
+// Keep the legacy single-rate path, including its recoverable note refusals.
+// The opt-in multirate adapter has a stricter partial-packet failure policy;
+// routing old constructors through it would change default overload behavior.
+#[derive(Clone)]
+enum Playback { Single(LivePiano), Multirate(PianoAudio) }
+impl Playback {
+    fn new(desc: &Description, cfg: Config, substeps: usize) -> Result<Self, String> {
+        if substeps == 1 { LivePiano::new(desc, cfg).map(Self::Single) }
+        else { PianoAudio::new(desc, cfg, substeps).map(Self::Multirate) }
+    }
+    fn piano(&self) -> &LivePiano {
+        match self { Self::Single(p) => p, Self::Multirate(a) => a.piano() }
+    }
+    fn info(&self) -> String {
+        match self { Self::Single(p) => crate::describe(p), Self::Multirate(a) => crate::describe_audio(a) }
+    }
+    fn note_on(&mut self, midi: u8, speed: f64) -> Result<(), String> {
+        match self { Self::Single(p) => p.note_on(midi, speed), Self::Multirate(a) => a.note_on(midi, speed) }
+    }
+    fn note_off(&mut self, midi: u8) {
+        match self { Self::Single(p) => p.note_off(midi), Self::Multirate(a) => a.note_off(midi) }
+    }
+    fn all_notes_off(&mut self) {
+        match self { Self::Single(p) => p.all_notes_off(), Self::Multirate(a) => a.all_notes_off() }
+    }
+    fn set_sustain(&mut self, value: f64) -> Result<(), String> {
+        match self { Self::Single(p) => p.set_sustain(value), Self::Multirate(a) => a.set_sustain(value) }
+    }
+    fn set_quality(&mut self, modes: usize, band: f64, total: usize) -> Result<(), String> {
+        match self { Self::Single(p) => p.set_quality(modes, band, total),
+            Self::Multirate(a) => a.set_quality(modes, band, total) }
+    }
+    fn render(&mut self, out: &mut [f32]) {
+        match self { Self::Single(p) => p.render(out), Self::Multirate(a) => {
+            let _ = a.render(out); // retained diagnostic; failed suffix is silent
+        } }
+    }
+    fn snapshot(&mut self, out: &mut Vec<f32>) {
+        match self { Self::Single(p) => p.snapshot(out), Self::Multirate(a) => a.snapshot(out) }
+    }
+    fn take_error(&mut self) -> Option<String> {
+        match self { Self::Single(p) => p.take_error(), Self::Multirate(a) => a.take_error() }
+    }
+    fn is_poisoned(&self) -> bool { matches!(self, Self::Multirate(a) if a.is_poisoned()) }
+    fn audio_stats(&self) -> (u64, f64, u64) {
+        match self { Self::Single(p) => (p.counters.samples, p.counters.peak_pa, p.counters.clipped_samples),
+            Self::Multirate(a) => (a.frames(), a.peak_pa(), a.clipped_frames()) }
+    }
+}
+
+fn config(sample_rate: u32, course_mode_budget: usize, max_dynamic_modes: usize,
+    full_scale_pa: f64) -> Config {
+    let mut cfg = Config::live(sample_rate);
+    if course_mode_budget > 0 { cfg.course_mode_budget = course_mode_budget; }
+    if max_dynamic_modes > 0 { cfg.max_dynamic_modes = max_dynamic_modes.min(1 << 24); }
+    if full_scale_pa > 0.0 { cfg.full_scale_pa = full_scale_pa; }
+    cfg
 }
 
 #[wasm_bindgen]
 impl PianoEngine {
-    /// Build the live piano from the embedded Model D scale and soundboard:
-    /// the 88-key string tables (through the reference bank), the hammers and
-    /// the Rayleigh receiver. Cold: a few hundred milliseconds.
-    /// `board_coordinates`: 0 = the complete embedded board (32 coordinates);
-    /// 1..=16 keeps only that many exact low FE modes (cheaper, duller).
-    /// Pass 0 for any other numeric argument to take the live default.
+    /// Original single-rate constructor: embedded board or its exact low prefix.
+    /// Pass 0 for a numeric quality argument to take the live default.
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: u32, board_coordinates: usize, course_mode_budget: usize, max_dynamic_modes: usize,
         full_scale_pa: f64) -> Result<PianoEngine, JsError> {
-        let mut cfg = Config::live(sample_rate);
-        if course_mode_budget > 0 { cfg.course_mode_budget = course_mode_budget; }
-        if max_dynamic_modes > 0 { cfg.max_dynamic_modes = max_dynamic_modes.min(1 << 24); }
-        if full_scale_pa > 0.0 { cfg.full_scale_pa = full_scale_pa; }
+        Self::with_oversampling(sample_rate, board_coordinates, course_mode_budget,
+            max_dynamic_modes, full_scale_pa, 1)
+    }
+
+    /// Run the original mechanics and Rayleigh observer at 1x, 2x or 4x the
+    /// host rate, then anti-alias every pressure substep before host output.
+    /// The output partial band and physical source values are unchanged.
+    /// This is not interpolation of a low-rate piano recording.
+    #[wasm_bindgen(js_name = withOversampling)]
+    pub fn with_oversampling(sample_rate: u32, board_coordinates: usize, course_mode_budget: usize,
+        max_dynamic_modes: usize, full_scale_pa: f64, substeps: usize) -> Result<PianoEngine, JsError> {
+        let cfg = config(sample_rate, course_mode_budget, max_dynamic_modes, full_scale_pa);
         let mut desc = Description::embedded().map_err(|e| JsError::new(&e))?;
         if board_coordinates > 0 && board_coordinates < desc.board.len() {
             desc = desc.truncated(board_coordinates).map_err(|e| JsError::new(&e))?;
         }
-        let piano = LivePiano::new(&desc, cfg).map_err(|e| JsError::new(&e))?;
+        let piano = Playback::new(&desc, cfg, substeps).map_err(|e| JsError::new(&e))?;
         Ok(Self { piano, snap: Vec::with_capacity(4096) })
     }
 
-    /// The same live piano on a soundboard file written by `examples/gen_board.rs`
-    /// (the offline reference's own bridge-informed reduction with more
-    /// coordinates than the embedded board, e.g. `model-d-board-2400-r64.bin`),
-    /// fetched by the page. Same scale, equations and limits as `new`.
+    /// Original single-rate external-board constructor, unchanged arguments.
     #[wasm_bindgen(js_name = withBoard)]
     pub fn with_board(sample_rate: u32, board: &[u8], course_mode_budget: usize, max_dynamic_modes: usize,
         full_scale_pa: f64) -> Result<PianoEngine, JsError> {
-        let mut cfg = Config::live(sample_rate);
-        if course_mode_budget > 0 { cfg.course_mode_budget = course_mode_budget; }
-        if max_dynamic_modes > 0 { cfg.max_dynamic_modes = max_dynamic_modes.min(1 << 24); }
-        if full_scale_pa > 0.0 { cfg.full_scale_pa = full_scale_pa; }
+        Self::with_board_oversampling(sample_rate, board, course_mode_budget,
+            max_dynamic_modes, full_scale_pa, 1)
+    }
+
+    /// The same higher-rate path with a supplied physical board reduction.
+    /// Board coordinates, damping and surface fields are not resynthesized.
+    #[wasm_bindgen(js_name = withBoardOversampling)]
+    pub fn with_board_oversampling(sample_rate: u32, board: &[u8], course_mode_budget: usize,
+        max_dynamic_modes: usize, full_scale_pa: f64, substeps: usize) -> Result<PianoEngine, JsError> {
+        let cfg = config(sample_rate, course_mode_budget, max_dynamic_modes, full_scale_pa);
         let desc = Description::from_board(board).map_err(|e| JsError::new(&e))?;
-        let piano = LivePiano::new(&desc, cfg).map_err(|e| JsError::new(&e))?;
+        let piano = Playback::new(&desc, cfg, substeps).map_err(|e| JsError::new(&e))?;
         Ok(Self { piano, snap: Vec::with_capacity(4096) })
     }
 
-    /// A second engine in exactly this engine's state: it renders bit for bit
-    /// what this one would (so a fresh engine can be timed and its copy played
-    /// without building the piano twice). Costs a copy of the engine's memory.
+    /// Copy the physical engine AND pressure-filter history; a timed copy and
+    /// an unplayed copy retain the same selected clock and quality policy.
     pub fn copy(&self) -> PianoEngine {
         PianoEngine { piano: self.piano.clone(), snap: Vec::with_capacity(self.snap.capacity()) }
     }
 
-    /// JSON statement of exactly what this model includes (see `describe`).
-    pub fn info(&self) -> String { crate::describe(&self.piano) }
+    /// JSON includes output and mechanical rates and total output-frame latency.
+    pub fn info(&self) -> String { self.piano.info() }
 
     /// Strike: POST-ESCAPEMENT hammer velocity in m/s. False when refused.
     #[wasm_bindgen(js_name = noteOn)]
@@ -81,20 +146,22 @@ impl PianoEngine {
     pub fn sustain(&mut self, value: f64) -> bool { self.piano.set_sustain(value).is_ok() }
     #[wasm_bindgen(js_name = allNotesOff)]
     pub fn all_notes_off(&mut self) { self.piano.all_notes_off(); }
-    /// Limits for keys that start sounding afterwards.
+    /// Limits for keys that start sounding afterwards, bounded by OUTPUT rate.
     #[wasm_bindgen(js_name = setQuality)]
     pub fn set_quality(&mut self, course_mode_budget: usize, partial_band_hz: f64, max_dynamic_modes: usize) -> bool {
         self.piano.set_quality(course_mode_budget, partial_band_hz, max_dynamic_modes).is_ok()
     }
 
-    /// `frames` samples of pressure / full scale (mono Float32Array).
+    /// `frames` host samples of pressure / full scale (mono Float32Array).
+    /// A failed suffix is silent and its diagnostic stays in lastError;
+    /// reading the diagnostic cannot resume a partially advanced performance.
     pub fn render(&mut self, frames: usize) -> Vec<f32> {
         let mut out = vec![0.0_f32; frames.min(8192)];
         self.piano.render(&mut out);
         out
     }
 
-    /// Flat display snapshot; layout documented at `LivePiano::snapshot`.
+    /// Flat physical-source display snapshot, not a second audio rendering.
     pub fn snapshot(&mut self) -> Vec<f32> {
         let mut snap = std::mem::take(&mut self.snap);
         self.piano.snapshot(&mut snap);
@@ -103,34 +170,37 @@ impl PianoEngine {
         copy
     }
 
-    /// `[samples, soundingKeys, dynamicModes, dynamicStrings, peakPa, clippedSamples,`
+    /// `[outputFrames, soundingKeys, dynamicModes, dynamicStrings, outputPeakPa, clippedOutputFrames,`
     /// ` forcedRetirements, retirements, contactFailures, rebuilds, noteOns, refusedNoteOns]`.
+    /// The array layout is unchanged; acoustic quantities use the host clock.
     pub fn stats(&self) -> Vec<f64> {
-        let c = self.piano.counters;
-        vec![c.samples as f64, self.piano.sounding_keys() as f64, self.piano.dynamic_modes() as f64,
-            self.piano.dynamic_strings() as f64, c.peak_pa, c.clipped_samples as f64,
+        let p = self.piano.piano();
+        let c = p.counters;
+        let (frames, peak, clipped) = self.piano.audio_stats();
+        vec![frames as f64, p.sounding_keys() as f64, p.dynamic_modes() as f64,
+            p.dynamic_strings() as f64, peak, clipped as f64,
             c.forced_retirements as f64, c.retirements as f64, c.contact_failures as f64,
             c.rebuilds as f64, c.note_ons as f64, c.refused_note_ons as f64]
     }
     #[wasm_bindgen(js_name = lastError)]
     pub fn last_error(&mut self) -> Option<String> { self.piano.take_error() }
+    #[wasm_bindgen(js_name = isPoisoned)]
+    pub fn is_poisoned(&self) -> bool { self.piano.is_poisoned() }
     /// Soundboard quadrature points, interleaved x,y in metres (for drawing).
     #[wasm_bindgen(js_name = boardSurfaceXY)]
-    pub fn board_surface_xy(&self) -> Vec<f32> { self.piano.surface_xy().to_vec() }
+    pub fn board_surface_xy(&self) -> Vec<f32> { self.piano.piano().surface_xy().to_vec() }
     /// Bare soundboard mode shapes at those points, row-major [point][mode].
     #[wasm_bindgen(js_name = boardSurfaceShapes)]
-    pub fn board_surface_shapes(&self) -> Vec<f32> { self.piano.surface_shapes().to_vec() }
+    pub fn board_surface_shapes(&self) -> Vec<f32> { self.piano.piano().surface_shapes().to_vec() }
     #[wasm_bindgen(js_name = boardModeHz)]
-    pub fn board_mode_hz(&self) -> Vec<f64> { self.piano.board_frequencies_hz().to_vec() }
-    /// Per key of the scale, five values: MIDI number, speaking length [m],
-    /// strike station as a fraction of that length, unison strings, and the
-    /// first stiff-string partial [Hz] from T, EI, mu, L (for drawing/labels).
+    pub fn board_mode_hz(&self) -> Vec<f64> { self.piano.piano().board_frequencies_hz().to_vec() }
+    /// Per key: MIDI, length [m], strike fraction, unison count, first partial [Hz].
     #[wasm_bindgen(js_name = keyGeometry)]
     pub fn key_geometry(&self) -> Vec<f64> {
-        self.piano.courses().iter().flat_map(|c| [f64::from(c.midi), c.length_m, c.strike_fraction,
+        self.piano.piano().courses().iter().flat_map(|c| [f64::from(c.midi), c.length_m, c.strike_fraction,
             c.unison as f64, c.partial_hz(1, c.tension_n)]).collect()
     }
     /// Stiff-string partial frequencies [Hz] this model retains for a key.
     #[wasm_bindgen(js_name = partialsHz)]
-    pub fn partials_hz(&self, midi: u8) -> Vec<f64> { self.piano.partials_hz(midi) }
+    pub fn partials_hz(&self, midi: u8) -> Vec<f64> { self.piano.piano().partials_hz(midi) }
 }

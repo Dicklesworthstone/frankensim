@@ -17,6 +17,8 @@
 //                until it does; 16 only when even the floor cap runs below real time (it starts
 //                at the cap its own probe predicts, not below the floor). A fixed board gets its
 //                cap the same way; an explicit maxDynamicModes is kept.
+//                substeps: omitted/1 = original clock, 2/4 = explicit mechanical oversampling.
+//                All board/cap timing probes retain this clock; event frames remain 48 kHz.
 //       minRealtime  the speed the measurement asks for (default 1.3)
 //       snapshotHz   display snapshots per second of AUDIO (default 0: none). With it, 'ready' also
 //                    carries the board geometry and the key geometry.
@@ -40,6 +42,7 @@
 //   {type:'error', message}
 import init, { PianoEngine } from './engine.js';
 import { createLane } from '../lane.js';
+import { createPianoEngine } from './engine-factory.js';
 import { BOARD_SIZES, FIXED_COST, capFor, chooseQuality, fetchBoard, probeSustained } from './boards.js';
 
 let engine = null;
@@ -127,7 +130,6 @@ self.onmessage = async (event) => {
       const o = m.options || {};
       gain = Number.isFinite(m.gain) ? m.gain : 1;
       snapEvery = Number(m.snapshotHz) > 0 ? Math.max(256, Math.round(48000 / Math.min(120, Number(m.snapshotHz)))) : 0;
-      const limits = [Number(o.courseModeBudget) || 0, Number(o.maxDynamicModes) || 0, Number(o.fullScalePa) || 0];
       // bytes: a fetched board file (PianoEngine.withBoard); otherwise the embedded board or its
       // exact low-mode truncation (coords 1..16; 0/32 = all 32 embedded coordinates). cap: a lower
       // dynamic mode cap, the per-key budget in proportion (as the governor sets it)
@@ -138,7 +140,7 @@ self.onmessage = async (event) => {
         return e;
       };
       const make = (bytes, coords, cap) => {
-        const e = bytes ? PianoEngine.withBoard(48000, bytes, ...limits) : new PianoEngine(48000, coords > 16 ? 0 : coords, ...limits);
+        const e = createPianoEngine(PianoEngine, 48000, { ...o, boardCoordinates: coords }, bytes);
         if (!full) {
           const i = JSON.parse(e.info());
           full = { courseModeBudget: i.courseModeBudget, partialBandHz: i.partialBandHz, maxDynamicModes: i.maxDynamicModes };

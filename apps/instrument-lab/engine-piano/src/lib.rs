@@ -37,16 +37,29 @@ pub fn midi_velocity_to_m_s(velocity: u8) -> f64 {
 
 /// Machine-readable statement of what the live model is (for the site).
 pub fn describe(piano: &LivePiano) -> String {
-    let c = piano.config();
     let (travel, filter) = piano.microphone_delay_samples();
-    let rate = f64::from(c.sample_rate);
+    describe_clock(piano, piano.config().sample_rate, 1,
+        (travel as f64, filter), piano.microphone_multiplies())
+}
+
+/// Host-clock description of the same physical engine, including observation
+/// latency and microphone work per emitted frame, not per mechanical substep.
+pub fn describe_audio(audio: &PianoAudio) -> String {
+    describe_clock(audio.piano(), audio.output_rate(), audio.substeps(),
+        audio.microphone_delay_frames(), audio.multiplies_per_output_frame())
+}
+
+fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
+    (travel, filter): (f64, f64), microphone_work: usize) -> String {
+    let c = piano.config();
+    let rate = f64::from(output_rate);
     let freqs = piano.board_frequencies_hz();
     let provenance: String = piano.board_provenance().chars()
         .map(|ch| if ch == '"' || ch == '\\' { '\'' } else if ch.is_control() { ' ' } else { ch }).collect();
     format!(
         concat!(
             "{{\"model\":\"reduced real-time piano (not the offline reference)\",",
-            "\"sampleRate\":{},\"mechanicalRateHz\":{},\"substeps\":1,",
+            "\"sampleRate\":{},\"mechanicalRateHz\":{},\"substeps\":{},",
             "\"keys\":{},\"speakingStrings\":{},\"tablePartials\":{},",
             "\"boardCoordinates\":{},\"boardExactLowModes\":{},\"boardCoordinateHz\":[{:.3},{:.3}],",
             "\"boardProvenance\":\"{}\",",
@@ -57,13 +70,13 @@ pub fn describe(piano: &LivePiano) -> String {
             "\"fullScalePa\":{},\"midiMaxVelocityMS\":{},\"stations\":{},",
             "\"retireRingingJ\":{:e},\"retireDampedJ\":{:e}}}"
         ),
-        c.sample_rate, c.sample_rate, piano.courses().len(), piano.total_strings(), piano.table_modes(),
+        output_rate, c.sample_rate, substeps, piano.courses().len(), piano.total_strings(), piano.table_modes(),
         piano.board_modes(), piano.board_exact_low_modes(), freqs.first().copied().unwrap_or(0.0), freqs.last().copied().unwrap_or(0.0),
         provenance,
         c.partial_band_hz, c.max_partials, c.course_mode_budget,
         c.max_courses, c.max_dynamic_modes, c.damper_points, c.duplex, c.static_attachment,
         c.microphone_m[0], c.microphone_m[1], c.microphone_m[2], travel, filter,
-        (travel as f64 + filter) / rate * 1000.0, piano.microphone_multiplies(),
+        (travel + filter) / rate * 1000.0, microphone_work,
         c.full_scale_pa, MIDI_MAXIMUM_VELOCITY_M_S, LivePiano::stations(),
         c.retire_ringing_j, c.retire_damped_j,
     )
