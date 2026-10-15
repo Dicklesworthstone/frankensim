@@ -12,6 +12,9 @@ use fs_material::{sheet::{ResolvedSheet,BENDING_PROPERTIES,BENDING_DIMS,MEMBRANE
 use fs_matdb::{MaterialCard,MaterialStateId,NormalizedPack,QueryPoint,ClaimId};
 use fs_qty::Dims;
 
+#[path="textile_sheet/membrane.rs"]
+mod membrane;
+
 type Result<T> = std::result::Result<T,Box<dyn Error>>;
 fn query(t:f64)->Result<QueryPoint> {
     Ok(QueryPoint::new().with("ftx_characterization",0.0)?.with("T",t)?)
@@ -113,8 +116,9 @@ fn run(card:&MaterialCard,lo:f64,hi:f64,duration:f64,grain:f64)->Result<()> {
 }
 fn main()->Result<()> {
     let args:Vec<_>=std::env::args().collect();
-    if args.len()!=6 && !(args.len()==4 && args[2]=="--conductivity-at") {
-        return Err("usage: textile_sheet PACK T_LOW_K T_HIGH_K SECONDS GRAIN_RAD; or textile_sheet PACK --conductivity-at T_K".into());
+    if args.len()!=6 && !(args.len()==4 && args[2]=="--conductivity-at")
+        && !(args.len()==9 && args[2]=="--membrane") {
+        return Err("usage: textile_sheet PACK T_LOW_K T_HIGH_K SECONDS GRAIN_RAD; or textile_sheet PACK --conductivity-at T_K; or textile_sheet PACK --membrane T_K STRETCH POINT_FORCE_N GRAVITY_M_S2 GRAIN_RAD MAX_ABS_STRAIN".into());
     }
     let mut bytes=Vec::new();std::fs::File::open(&args[1])?.take(64*1024*1024+1).read_to_end(&mut bytes)?;
     if bytes.len()>64*1024*1024 {return Err("material pack exceeds 64 MiB".into());}
@@ -124,6 +128,10 @@ fn main()->Result<()> {
     let card=MaterialCard::assemble(MaterialStateId {chemistry:pack.pack_id().into(),phase:"characterized sheet".into(),
         process:"imported fixed specimen/conditioning".into(),revision:0},pack.claims().clone(),vec![])?;
     println!("# source_pack={:?}; source_artifact={:?}",pack.pack_id(),pack.source_artifact());
+    if args.len()==9 {
+        return membrane::run(&card,args[3].parse()?,args[4].parse()?,args[5].parse()?,
+            args[6].parse()?,args[7].parse()?,args[8].parse()?);
+    }
     if args.len()==4 {
         let t:f64=args[3].parse()?;
         let answer=resolve_material_state_point(&card,&query(t)?,
