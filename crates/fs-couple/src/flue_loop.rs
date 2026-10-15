@@ -8,7 +8,7 @@
 //! volume flow drives the pipe. Everything the island knows about the
 //! JET comes from a jet card minted by the aeroacoustic lab
 //! ([`fs_aeroac::jetcard`]); everything it knows about the PIPE comes
-//! from the typed fingering chart the wind line already consumes.
+//! from the typed fingering chart or the explicitly supplied regional tube graph.
 //!
 //! NO CARD -> REFUSE. A voice cannot be built without a jet card, and
 //! only a card whose claim class can drive a tone is admitted (the
@@ -74,6 +74,10 @@ use fs_rand::StreamKey;
 
 use crate::wind_line::{WindLineBank, WindLineError};
 
+/// Physical regional tube networks sharing the same jet-drive loop.
+pub mod network;
+use network::FlueResonator;
+
 /// Philox kernel id of the flue onset seed stream (logical identity;
 /// never a scheduling artifact).
 pub const FLUE_SEED_KERNEL: u32 = 0x666c_7565; // "flue"
@@ -96,6 +100,8 @@ pub enum FlueError {
     },
     /// The wind line refused.
     Line(WindLineError),
+    /// An existing material, geometry, loss, wave or observation owner refused.
+    Physics(crate::acoustic_realize::AcousticRealizeError),
     /// A claim was requested for blocks that ran outside the card's
     /// validity region (or with the wrong claim class).
     OutsideCardValidity {
@@ -117,6 +123,7 @@ impl core::fmt::Display for FlueError {
             }
             FlueError::Invalid { what } => write!(f, "invalid flue input: {what}"),
             FlueError::Line(e) => write!(f, "wind line: {e:?}"),
+            FlueError::Physics(e) => write!(f, "flue physical system: {e:?}"),
             FlueError::OutsideCardValidity {
                 blocks,
                 reynolds_seen,
@@ -349,7 +356,7 @@ pub struct FlueBlockDiag {
 pub struct FlueVoice {
     island: JetIsland,
     geometry: FlueGeometry,
-    line: WindLineBank,
+    line: FlueResonator,
     rho: f64,
     nu: f64,
     zc: f64,
@@ -379,6 +386,8 @@ pub struct FlueVoice {
     seed: fs_rand::Stream,
     seed_key: StreamKey,
     block_index: u64,
+    samples: u64,
+    poisoned: bool,
     diags: Vec<FlueBlockDiag>,
 }
 
@@ -402,6 +411,21 @@ impl FlueVoice {
         voice_seed: u64,
         voice_index: u32,
     ) -> Result<FlueVoice, FlueError> {
+        Self::with_resonator(card, displacement_gain, seed_amplitude_rel, geometry,
+            gas, sample_rate_hz, voice_seed, voice_index, 1.0, 1_048_576,
+            |zc| WindLineBank::new(table, gas, termination, sample_rate_hz, zc, false)
+                .map(FlueResonator::Tmm).map_err(FlueError::Line))
+    }
+
+    // One jet/mouth initialization for both propagation images. Only the
+    // resonator factory changes; no dummy source or replacement jet algorithm.
+    #[allow(clippy::too_many_arguments)]
+    fn with_resonator(
+        card: Option<&JetCard>, displacement_gain: f64, seed_amplitude_rel: f64,
+        geometry: FlueGeometry, gas: &GasState, sample_rate_hz: u32,
+        voice_seed: u64, voice_index: u32, minimum_jet_speed: f64, max_history: usize,
+        make_line: impl FnOnce(f64) -> Result<FlueResonator, FlueError>,
+    ) -> Result<Self, FlueError> {
         let card = card.ok_or(FlueError::NoCard)?;
         let island = JetIsland::from_card(card, displacement_gain, seed_amplitude_rel)?;
         geometry.validate()?;
@@ -410,6 +434,9 @@ impl FlueVoice {
                 what: "sample rate must be positive",
             });
         }
+        gas.validate_coherence().map_err(|_| FlueError::Invalid {
+            what: "flue source requires one coherent material gas state",
+        })?;
         let rho = gas.density;
         let c = gas.sound_speed;
         let nu = gas.dynamic_viscosity / rho;
@@ -419,20 +446,30 @@ impl FlueVoice {
             });
         }
         let zc = rho * c / geometry.bore_area_m2;
-        let line = WindLineBank::new(table, gas, termination, sample_rate_hz, zc, false)?;
+        let line = make_line(zc)?;
         let s_m = geometry.mouth_area_m2();
         let inertance = rho * geometry.end_correction_m() / s_m;
         let resistance = geometry.mouth_loss_rel * rho * c / s_m;
         let dt = 1.0 / f64::from(sample_rate_hz);
-        // History long enough for the slowest admissible jet (1 m/s).
-        let max_delay = geometry.cut_up_m / (island.convection_ratio * 1.0);
-        let history_len = ((max_delay / dt).ceil() as usize).max(2) + 2;
+        // Retain the legacy 1 m/s history for TMM; the graph supplies its
+        // explicit minimum and refuses slower positive jets instead of clamping.
+        let max_delay = geometry.cut_up_m / (island.convection_ratio * minimum_jet_speed);
+        let history_samples = (max_delay / dt).ceil().max(2.0);
+        if !history_samples.is_finite() || history_samples > max_history.saturating_sub(2) as f64
+            || ![zc, s_m, inertance].iter().all(|x| x.is_finite() && *x > 0.0)
+            || !resistance.is_finite() || resistance < 0.0 {
+            return Err(FlueError::Invalid { what: "flue geometry exceeds finite coefficient or convection-history limits" });
+        }
+        let history_len = history_samples as usize + 2;
         let seed_key = StreamKey {
             seed: voice_seed,
             kernel: FLUE_SEED_KERNEL,
             tile: voice_index,
         };
         let momentum_thickness_m = island.theta_over_b * 0.5 * geometry.flue_height_m;
+        if !momentum_thickness_m.is_finite() || momentum_thickness_m <= 0.0 {
+            return Err(FlueError::Invalid { what: "jet profile must have finite positive momentum thickness" });
+        }
         Ok(FlueVoice {
             island,
             geometry,
@@ -456,9 +493,19 @@ impl FlueVoice {
             seed: seed_key.stream(),
             seed_key,
             block_index: 0,
+            samples: 0,
+            poisoned: false,
             diags: Vec::new(),
         })
     }
+
+    /// Accepted source sample count, independent of host block partitioning.
+    #[must_use]
+    pub const fn samples_rendered(&self) -> u64 { self.samples }
+
+    /// Fixed physical sample period [s]. No retuning or resampling is implied.
+    #[must_use]
+    pub const fn sample_period_s(&self) -> f64 { self.dt }
 
     /// The island's parameters and provenance.
     #[must_use]
@@ -484,13 +531,10 @@ impl FlueVoice {
     /// [`FlueError`] on a non-finite or negative pressure, or an unknown
     /// fingering.
     pub fn apply(&mut self, control: FlueControl) -> Result<(), FlueError> {
+        if self.poisoned { return Err(FlueError::Invalid { what: "flue voice is poisoned by a previous failed sample" }); }
         match control {
             FlueControl::SetBlowingPressure(p) => {
-                if !(p.is_finite() && p >= 0.0) {
-                    return Err(FlueError::Invalid {
-                        what: "blowing pressure must be finite and non-negative",
-                    });
-                }
+                self.validate_blowing_pressure(p)?;
                 self.blow_pa = p;
             }
             FlueControl::Fingering {
@@ -535,11 +579,32 @@ impl FlueVoice {
     /// # Errors
     /// [`FlueError`] on an empty block or a wind line refusal.
     pub fn step_block(&mut self, out: &mut [f64]) -> Result<(), FlueError> {
-        if out.is_empty() {
-            return Err(FlueError::Invalid {
-                what: "empty block",
-            });
+        self.step_block_observed(out, |_| Ok(()))
+    }
+
+    // Observe accepted physical ports without turning every sample into a
+    // separate diagnostic block. The jet's original p+ diagnostics stay intact.
+    // A failed sample/observer poisons this voice; partial callbacks cannot resume.
+    fn step_block_observed(
+        &mut self, out: &mut [f64],
+        observe: impl FnMut(&FlueResonator) -> Result<(), FlueError>,
+    ) -> Result<(), FlueError> {
+        self.validate_blowing_pressure(self.blow_pa)?;
+        if out.is_empty() { return Err(FlueError::Invalid { what: "empty block" }); }
+        let count = u64::try_from(out.len()).map_err(|_| FlueError::Invalid { what: "flue sample count overflow" })?;
+        if self.samples.checked_add(count).is_none() || self.block_index.checked_add(1).is_none() {
+            return Err(FlueError::Invalid { what: "flue sample or block clock overflow" });
         }
+        self.diags.try_reserve(1).map_err(|_| FlueError::Invalid { what: "cannot reserve flue block diagnostics" })?;
+        let result = self.advance_block(out, observe);
+        if result.is_err() { self.poisoned = true; }
+        result
+    }
+
+    fn advance_block(
+        &mut self, out: &mut [f64],
+        mut observe: impl FnMut(&FlueResonator) -> Result<(), FlueError>,
+    ) -> Result<(), FlueError> {
         let dt = self.dt;
         let u = self.jet_speed_m_s();
         let b = 0.5 * self.geometry.flue_height_m;
@@ -630,6 +695,9 @@ impl FlueVoice {
             let q = (p_source + (l / dt) * self.q_prev - 2.0 * p_minus) / denom;
             let p_plus = p_minus + zc * q;
             let p_in = p_plus + p_minus;
+            if ![eta, flow, p_source, q, p_plus, p_in].iter().all(|x| x.is_finite()) {
+                return Err(FlueError::Invalid { what: "flue trial left the finite physical domain" });
+            }
             let _ = self.line.push(p_plus)?;
             // Ledger terms of the implicit step (exact identity).
             source_work += p_source * q * dt;
@@ -645,6 +713,8 @@ impl FlueVoice {
             // plane is the pipe's pressure node, so the total pressure
             // there says little about the standing wave the pipe carries.
             *slot = p_plus;
+            self.samples += 1;
+            observe(&self.line)?;
         }
         let n = out.len() as f64;
         let mean = out.iter().sum::<f64>() / n;
@@ -691,6 +761,7 @@ impl FlueVoice {
     /// # Errors
     /// [`FlueError::OutsideCardValidity`] naming the excursion.
     pub fn claim_check(&self) -> Result<(), FlueError> {
+        if self.poisoned { return Err(FlueError::Invalid { what: "failed flue samples cannot support a physical claim" }); }
         let outside = self
             .diags
             .iter()
