@@ -188,7 +188,7 @@ fn kernel_probes(vertical: &str, capability: &str) -> Option<Vec<KernelProbe>> {
             Some(vec![
                 kernel_probe(
                     "crates/fs-conduction/src/interface.rs",
-                    "pub struct InterfaceResistance",
+                    "InterfaceResistance",
                 ),
                 kernel_probe(
                     "crates/fs-couple/src/lib.rs",

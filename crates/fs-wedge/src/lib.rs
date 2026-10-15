@@ -650,7 +650,7 @@ const CHT_KERNELS: [KernelReadinessEntry; 6] = [
                 evidence(
                     EvidenceKind::WorkspacePath,
                     "crates/fs-conduction/src/interface.rs",
-                    "pub struct InterfaceResistance",
+                    "InterfaceResistance",
                 ),
                 evidence(
                     EvidenceKind::WorkspacePath,
@@ -929,7 +929,7 @@ const AM_KERNELS: [KernelReadinessEntry; 5] = [
                 evidence(
                     EvidenceKind::WorkspacePath,
                     "crates/fs-conduction/CONTRACT.md",
-                    "NO PHASE CHANGE, no latent heat, no moving boundaries",
+                    "moving boundaries, free surfaces, fluid flow, ablation, or vaporization",
                 ),
             ],
             "Independent workspace probes find no moving-heat-source or phase-change kernel, and the conduction contract explicitly excludes latent heat and moving boundaries; no production melt-pool or powder-bed process model exists.",
@@ -1052,7 +1052,7 @@ const AM_COMPUTE: [ComputeCostEntry; 3] = [
                 evidence(
                     EvidenceKind::WorkspacePath,
                     "crates/fs-conduction/CONTRACT.md",
-                    "NO PHASE CHANGE, no latent heat, no moving boundaries",
+                    "moving boundaries, free surfaces, fluid flow, ablation, or vaporization",
                 ),
             ],
             "Symbolic variables are retained without fabricating an operation or wall-time estimate.",
