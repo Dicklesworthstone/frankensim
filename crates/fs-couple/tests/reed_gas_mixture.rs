@@ -121,3 +121,6 @@ fn unsupported_materials_refuse_before_creating_either_cli_output() {
 
 #[path = "reed_gas_mixture/regional.rs"]
 mod regional;
+
+#[path = "reed_gas_mixture/outlet.rs"]
+mod outlet;

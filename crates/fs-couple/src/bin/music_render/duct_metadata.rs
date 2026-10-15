@@ -84,6 +84,29 @@ fn force_provenance(p: &PlateValvePerformance) -> String {
         ports.join(","),p.info().force_controls)
 }
 
+// One description for standalone wind output and every reed ensemble source.
+pub(super) fn reed_provenance(p: &fs_couple::render::schedule::reed::ReedPerformance) -> String {
+    let (point, scope, observation_scope, receiver) = match p.outlet_receiver() {
+        None => ("bore-jet-proxy",
+            "authored reed primitives and static duct; bore-pressure plus compact-jet proxy; not a calibrated exterior microphone or material-identification claim",
+            "bore-pressure-plus-compact-jet-proxy; not exterior microphone", String::new()),
+        Some(info) => {
+            let r = info.receiver;
+            ("baffled-outlet",
+                "terminal-only Rayleigh pressure; same regional TMM and flanged feedback load; finite-history sampled approximation, not a certified broadband radiation match; no side-hole, jet, structural or room radiation; not measured calibration",
+                "terminal-only Rayleigh pressure in the bound exterior gas",
+                format!(",\"outlet_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"radius_m\":{:e},\"gas\":{},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"fft_samples\":{},\"axial_delay_mechanical_samples\":{},\"exterior_delay_mechanical_samples\":[{},{}],\"priming_source_sample\":-1,\"delay_compensated\":false}}",
+                    r.position_m[0],r.position_m[1],r.position_m[2],info.radius_m,
+                    gas_state(&info.gas),r.radial_rings,r.angular_points,r.maximum_frequency_hz,
+                    info.fft_samples,info.axial_delay_samples,info.exterior_delay_samples.0,
+                    info.exterior_delay_samples.1))
+        }
+    };
+    let regions: Vec<_> = p.segment_gases().iter().map(gas_state).collect();
+    format!(",\"pressure_point\":\"{point}\",\"model_scope\":\"{scope}\",\"observation_scope\":\"{observation_scope}\",\"ambient_gas\":{},\"segment_gases\":[{}]{receiver}",
+        gas_state(p.ambient_gas()),regions.join(","))
+}
+
 // Serialize actual admitted states only; never re-resolve names or reconstruct
 // air from density/speed. The same snapshot vocabulary covers ambient and regions.
 fn gas_state(g: &fs_material::gas::GasState) -> String {

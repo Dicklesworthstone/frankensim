@@ -44,7 +44,7 @@ pub enum ReedPerformanceError {
     },
     /// Material admission retains its original cause and source line.
     Gas {
-        /// One-based ambient or segment record line.
+        /// One-based ambient, segment or exterior record line.
         line: usize,
         /// Original species, composition or state refusal.
         source: fs_material::MaterialError,
@@ -268,7 +268,8 @@ impl ReedPerformance {
     pub const fn ambient_gas(&self) -> &GasState { &self.ambient_gas }
     /// Actual gases in authored segment order, including tone-hole records.
     /// The first drives reed density/impedance and the compact-jet proxy; the
-    /// last drives terminal radiation. These are fixed throughout playback.
+    /// last supplies the terminal internal medium. An explicit exterior can
+    /// separately supply radiation loading and observation. All are stationary.
     #[must_use]
     pub fn segment_gases(&self) -> &[GasState] { &self.segment_gases }
     /// Remaining samples on the mechanical clock.

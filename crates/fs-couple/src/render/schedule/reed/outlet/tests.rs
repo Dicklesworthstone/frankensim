@@ -84,3 +84,6 @@ fn gas_changes_reach_physical_pressure_and_invalid_observation_retains_its_error
     assert!(matches!(&error, ReedPerformanceError::Outlet(_)));
     assert!(std::error::Error::source(&error).is_some());
 }
+
+#[path = "exterior_tests.rs"]
+mod exterior;

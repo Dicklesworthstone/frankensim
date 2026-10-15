@@ -112,7 +112,8 @@ fn load(bytes:&[u8],block:usize)->Result<Loaded,String> {
     } else {
         let p=ReedPerformance::from_bytes(bytes,block).map_err(|e|e.to_string())?;
         let i=p.info();
-        let source_json=format!("\"reed_input\":{{\"schema\":\"{REED_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"segments\":{},\"tone_holes\":{},\"massive_reed\":{},\"gesture_events\":{},\"compiled_controls\":{},\"model_scope\":\"authored reed primitives and static duct; bore-pressure plus compact-jet proxy; not a calibrated exterior microphone or material-identification claim\"}}",
+        let observer_json=super::duct_metadata::reed_provenance(&p);
+        let source_json=format!("\"reed_input\":{{\"schema\":\"{REED_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"segments\":{},\"tone_holes\":{},\"massive_reed\":{},\"gesture_events\":{},\"compiled_controls\":{}{observer_json}}}",
             i.input_hash.to_hex(),i.segments,i.tone_holes,i.massive_reed,i.gesture_events,i.compiled_controls);
         Ok(Loaded{source:Box::new(p),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"reed-input",source_json})
