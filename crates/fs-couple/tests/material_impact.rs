@@ -158,3 +158,6 @@ fn material_rate_gate_rejects_candidate_and_preserves_the_accepted_transaction()
         assert!(refused);assert_ne!(p.state(),initial);
     }
 }
+
+#[path="material_impact/pair.rs"]
+mod pair_tests;

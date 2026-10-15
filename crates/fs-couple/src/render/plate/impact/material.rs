@@ -3,6 +3,9 @@
 //! Material resolution and Hertz geometry stay in fs-contact; the same
 //! fs-dcontact potential and passive port feed the original fs-phs stepper.
 //! Source envelopes survive reference, prepared, analytic and substepped use.
+/// Whole homogeneous specimens using the same bulk states for inertia and contact.
+pub mod pair;
+
 use fs_contact::normal_patch::{NormalPatchError, PointNormalPatchReceipt};
 use fs_contact::normal_patch::source::SourcePointContact;
 use fs_dcontact::Obstacle;

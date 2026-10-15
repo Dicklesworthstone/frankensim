@@ -10,9 +10,11 @@ on:
       - 'crates/fs-couple/Cargo.toml'
       - 'crates/fs-couple/src/render/plate/impact.rs'
       - 'crates/fs-couple/src/render/plate/impact/material*'
+      - 'crates/fs-couple/src/render/plate/impact/material/**'
       - 'crates/fs-couple/src/render/plate/impact/prepared.rs'
       - 'crates/fs-couple/src/render/plate/impact/squeeze.rs'
       - 'crates/fs-couple/tests/material_impact.rs'
+      - 'crates/fs-couple/tests/material_impact/**'
       - '.github/workflows/material-inertia.yml'
   workflow_dispatch:
 permissions:
