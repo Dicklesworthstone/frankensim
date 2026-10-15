@@ -5,6 +5,9 @@
 //! the plate's flow port). A bottle and a vented enclosure are the
 //! same objects. There is no guitar type.
 
+/// Nonlinear closed-gas cavity coupled to an inertial moving wall.
+pub mod piston;
+
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::air_path::{GasAbsorptionModel, absorb_pressure_history_with_model};
 use crate::thin_plate::certified_radiators;
