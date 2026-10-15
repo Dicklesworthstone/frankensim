@@ -53,13 +53,20 @@ const IDLE_DISPOSE_MS = 90_000;
  * ~0.25-0.5 s of start-up.
  * The hats (not played today: arrange.ts leaves hi-hat notes out) try 4.5x as on the live kit
  * (kitStage HAT_SCALES); a 4.5x hat that falls behind restarts on 5x or 6x.
+ * The kick and the rack tom give CPU to the pieces that gain from finer grids. The kick's octave
+ * balance against the 1x grid is one plateau from 3x to 8x (14.1 / 14.2 / 13.9 / 13.9 dB at 4x / 5x /
+ * 6x / 7x; its 1-2 kHz beater click is gone from 3x on), so it starts at 6x, ~0.7x the work of 5x.
+ * The rack tom is no further from the 1x grid at 5x than at 4x (1.3 / 2.0 dB; 6x 2.6, 7x 4.7). The
+ * floor tom keeps 4x (5x moves its 63-500 Hz bands 1.0 dB further). Neither goes past 6x.
+ * The snare with its wires off (timbale notes) takes the cymbals' 1.5 rather than 2.0, so it reaches
+ * 4x (2.0 dB from the 1x grid, against 4.1 at 5x): its 112 ms test reads ~0.9x what its lane keeps.
  */
 const GRID: Record<PieceId, { scales: number[]; minRt: number; benchMs?: number }> = {
-  kick: { scales: [5, 6, 7, 8], minRt: 1.7 },
+  kick: { scales: [6, 7, 8], minRt: 1.7 },
   snare: { scales: [6, 8], minRt: 1.5, benchMs: 450 },
-  "snare-off": { scales: [4, 5, 6, 7, 8], minRt: 2.0 },
-  "tom-12": { scales: [4, 5, 6, 7], minRt: 1.8 },
-  "tom-14": { scales: [4, 5, 6, 7], minRt: 1.8 },
+  "snare-off": { scales: [4, 5, 6, 7, 8], minRt: 1.5 },
+  "tom-12": { scales: [5, 6], minRt: 1.8 },
+  "tom-14": { scales: [4, 5, 6], minRt: 1.8 },
   "hihat-closed": { scales: [4, 4.5, 5, 6], minRt: 1.5 },
   "hihat-open": { scales: [4, 4.5, 5, 6], minRt: 1.5 },
   crash: { scales: [3, 3.5, 4, 5, 6], minRt: 1.5 },

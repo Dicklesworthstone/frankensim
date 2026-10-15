@@ -46,13 +46,22 @@ interface PieceDef {
  */
 const HAT_SCALES = [2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8];
 
+/**
+ * The kick and toms stop at the grids past which they sound no closer to the 1x grid, so the CPU
+ * goes to the pieces that do gain. The kick's octave balance against 1x is one plateau from 3x to 8x
+ * (14.1 / 14.2 / 13.9 dB at 4x / 5x / 6x), and 6x is ~0.45x the work of 4x. The rack tom is as close
+ * at 5x as at 3-4x (1.3 against 0.8-2.0 dB). The floor tom's 63-500 Hz bands stay within 0.9 dB of
+ * 3.5x down to 4x but move 1.9 dB at 5x, so it stops at 4x.
+ */
+const DONOR = { kick: [6, 7, 8], rack: [5, 6], floor: [4, 5, 6] };
+
 // Gains: each piece's 50 ms loudness matched to the real kit's (Salamander overheads), capped so a
 // standard stroke peaks at 0.55 of full scale (the live cymbals' attacks are too sharp to match).
 const PIECES: PieceDef[] = [
-  { id: "kick", name: "Kick", key: "B", speed: 3.0, gain: 0.0319, kind: "kick", finish: "#5c1d1a" },
+  { id: "kick", name: "Kick", key: "B", speed: 3.0, gain: 0.0319, kind: "kick", finish: "#5c1d1a", scales: DONOR.kick },
   { id: "snare", name: "Snare", key: "S", speed: 4.5, gain: 0.0129, kind: "drum", finish: "#c9cdd3", benchMs: 450, scales: [6, 7, 8] },
-  { id: "tom-12", name: "Rack tom", key: "T", speed: 3.5, gain: 0.0276, kind: "drum", finish: "#5c1d1a" },
-  { id: "tom-14", name: "Floor tom", key: "F", speed: 3.5, gain: 0.0267, kind: "drum", finish: "#5c1d1a" },
+  { id: "tom-12", name: "Rack tom", key: "T", speed: 3.5, gain: 0.0276, kind: "drum", finish: "#5c1d1a", scales: DONOR.rack },
+  { id: "tom-14", name: "Floor tom", key: "F", speed: 3.5, gain: 0.0267, kind: "drum", finish: "#5c1d1a", scales: DONOR.floor },
   { id: "hihat-closed", name: "Hi-hat", key: "H", speed: 2.5, gain: 0.134, kind: "hat", scales: HAT_SCALES },
   { id: "hihat-open", name: "Open hi-hat", key: "O", speed: 2.5, gain: 0.134, kind: "hat", scales: HAT_SCALES },
   { id: "crash", name: "Crash", key: "C", speed: 6.0, gain: 0.0496, kind: "cymbal" },
