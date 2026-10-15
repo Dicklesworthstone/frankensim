@@ -3,6 +3,8 @@
 //! The same admitted Hertz coefficient can feed a potential-based solver and
 //! the original finite-patch evaluator. No material-name dispatch, fitted
 //! restitution, or reimplementation of elliptic Hertz geometry is used.
+/// Complete source-card re-resolution at a shared physical state point.
+pub mod state;
 use crate::interface_binding::{BoundNormalContactLaw, BoundNormalContactModel};
 use super::{ApplicabilityInput, InputUncertainty, NormalPatchError, NormalPatchGeometry,
     NormalPatchIdentity, NormalPatchLaw, NormalPatchReceipt, NormalPatchRequest,

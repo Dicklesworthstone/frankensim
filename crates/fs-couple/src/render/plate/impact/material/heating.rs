@@ -7,6 +7,8 @@
 //! not temperature-dependent contact, expansion, melting mechanics or flash T.
 /// Existing thermal transport owners applied on the same accepted collision step.
 pub mod transport;
+/// Explicit unloaded source refresh from thermal state, on the same transaction.
+pub mod feedback;
 use fs_exec::CancelGate;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 use fs_phs::PreparedStepRecord;

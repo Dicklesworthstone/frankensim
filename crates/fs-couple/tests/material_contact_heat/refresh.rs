@@ -103,3 +103,6 @@ fn failed_batch_geometry_rate_or_cancellation_preserves_every_source() {
     s.refresh_unloaded_contacts(vec![good],&gate).unwrap();s.step(&[0.0;2],&gate).unwrap();
     assert_eq!(s.samples(),1);
 }
+
+#[path="feedback.rs"]
+mod feedback;
