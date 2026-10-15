@@ -211,3 +211,6 @@ impl FlueVoice {
 
 #[cfg(test)]
 mod tests;
+
+/// Scheduled physical outlet-pressure output through the shared audio interface.
+pub mod performance;
