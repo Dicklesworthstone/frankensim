@@ -40,11 +40,31 @@ pub struct Csr {
     pub ptr: Vec<usize>,
     pub col: Vec<usize>,
     pub val: Vec<f64>,
+    /// The grid interior as stencils: rows that `mul_add` computes without the column indices.
+    /// Built from `ptr`/`col`/`val` once, in `from_rows` (nothing edits a matrix afterwards).
+    runs: Vec<Run>,
 }
+
+/// Consecutive rows `r0..r0 + len` whose entries sit at the same offsets from the diagonal (one
+/// grid row of a stencil's interior). Offsets are ascending, so a row sums in its CSR order.
+#[derive(Clone, Debug)]
+struct Run {
+    r0: usize,
+    len: usize,
+    /// Column minus row, per entry.
+    off: Vec<isize>,
+    /// One coefficient per entry when every row has the same ones; otherwise every row's, entry-major
+    /// (`val[k * len + t]` belongs to row `r0 + t`).
+    uniform: bool,
+    val: Vec<f64>,
+}
+
+/// Shortest run worth a stencil loop.
+const MIN_RUN: usize = 4;
 
 impl Csr {
     fn from_rows(rows: &[BTreeMap<usize, f64>]) -> Csr {
-        let mut c = Csr { n: rows.len(), ptr: vec![0], col: vec![], val: vec![] };
+        let mut c = Csr { n: rows.len(), ptr: vec![0], col: vec![], val: vec![], runs: vec![] };
         for r in rows {
             for (&j, &v) in r {
                 if v != 0.0 {
@@ -54,12 +74,58 @@ impl Csr {
             }
             c.ptr.push(c.col.len());
         }
+        c.runs = c.find_runs();
         c
     }
+
+    /// Maximal runs of rows sharing one stencil shape with 3, 5 or 17 entries (a string, the
+    /// Laplacian, the bending operator).
+    fn find_runs(&self) -> Vec<Run> {
+        let (ptr, col) = (&self.ptr, &self.col);
+        let off = |i: usize| col[ptr[i]..ptr[i + 1]].iter().map(move |&j| j as isize - i as isize);
+        let mut runs = vec![];
+        let mut i = 0;
+        while i < self.n {
+            let k = ptr[i + 1] - ptr[i];
+            let mut e = i + 1;
+            if matches!(k, 3 | 5 | 17) {
+                while e < self.n && ptr[e + 1] - ptr[e] == k && off(e).eq(off(i)) {
+                    e += 1;
+                }
+            }
+            let len = e - i;
+            if len >= MIN_RUN && matches!(k, 3 | 5 | 17) {
+                let row = |t: usize| &self.val[ptr[i + t]..ptr[i + t + 1]];
+                let uniform = (1..len).all(|t| row(t).iter().zip(row(0)).all(|(a, b)| a.to_bits() == b.to_bits()));
+                let val = if uniform { row(0).to_vec() } else { (0..k).flat_map(|q| (0..len).map(move |t| row(t)[q])).collect() };
+                runs.push(Run { r0: i, len, off: off(i).collect(), uniform, val });
+            }
+            i = e;
+        }
+        runs
+    }
+
     /// y += s * A x
     #[inline]
     pub fn mul_add(&self, x: &[f64], s: f64, y: &mut [f64]) {
-        for (yi, p) in y[..self.n].iter_mut().zip(self.ptr.windows(2)) {
+        let y = &mut y[..self.n];
+        let mut i = 0;
+        for r in &self.runs {
+            self.rows_add(i, r.r0, x, s, y);
+            match r.off.len() {
+                3 => r.mul_add::<3>(x, s, y),
+                5 => r.mul_add::<5>(x, s, y),
+                _ => r.mul_add::<17>(x, s, y),
+            }
+            i = r.r0 + r.len;
+        }
+        self.rows_add(i, self.n, x, s, y);
+    }
+
+    /// y += s * A x on rows `a..b`, from the CSR arrays.
+    #[inline]
+    fn rows_add(&self, a: usize, b: usize, x: &[f64], s: f64, y: &mut [f64]) {
+        for (yi, p) in y[a..b].iter_mut().zip(self.ptr[a..=b].windows(2)) {
             let (cols, vals) = (&self.col[p[0]..p[1]], &self.val[p[0]..p[1]]);
             let mut acc = 0.0;
             for (&j, &v) in cols.iter().zip(vals) {
@@ -78,6 +144,41 @@ impl Csr {
             q += x[i] * acc;
         }
         q
+    }
+}
+
+impl Run {
+    /// y += s * A x on this run's rows: each row's products are summed in the CSR row's order
+    /// (ascending column), from 0, then scaled and added, exactly as `Csr::rows_add` does. Rows are
+    /// independent, so the compiler may compute several at once (SIMD across rows) without
+    /// changing any row's sum.
+    #[inline(always)]
+    fn mul_add<const K: usize>(&self, x: &[f64], s: f64, y: &mut [f64]) {
+        let len = self.len;
+        let y = &mut y[self.r0..self.r0 + len];
+        let xs: [&[f64]; K] = std::array::from_fn(|k| {
+            let a = (self.r0 as isize + self.off[k]) as usize;
+            &x[a..a + len]
+        });
+        if self.uniform {
+            let v: [f64; K] = std::array::from_fn(|k| self.val[k]);
+            for t in 0..len {
+                let mut acc = 0.0;
+                for k in 0..K {
+                    acc += v[k] * xs[k][t];
+                }
+                y[t] += s * acc;
+            }
+        } else {
+            let v: [&[f64]; K] = std::array::from_fn(|k| &self.val[k * len..k * len + len]);
+            for t in 0..len {
+                let mut acc = 0.0;
+                for k in 0..K {
+                    acc += v[k][t] * xs[k][t];
+                }
+                y[t] += s * acc;
+            }
+        }
     }
 }
 

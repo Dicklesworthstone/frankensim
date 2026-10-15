@@ -122,3 +122,34 @@ fn shell_auxiliary_variable_tracks_its_potential() {
     }
     assert!(worst < 0.08, "psi / sqrt(2V) drifted {:.1} % from 1 within 2 s", 100.0 * worst);
 }
+
+#[test]
+fn stencil_runs_sum_every_row_exactly_as_its_csr_row() {
+    // the grid interior is computed as stencils; every row must come out bit for bit as the CSR row
+    // (same products, same ascending-column order), signed zeros included
+    let mut covered = 0;
+    for (name, scale) in [("kick", 2.5), ("snare", 7.0), ("hihat-closed", 5.0), ("crash", 4.0), ("ride", 3.0)] {
+        let p = live::Live::new(name, scale).unwrap();
+        for b in &p.ins.bodies {
+            for m in [&b.lap, &b.stiff] {
+                covered += m.runs.iter().map(|r| r.len).sum::<usize>();
+                let val = |i: usize, salt: usize| match (i * 7919 + salt) % 13 {
+                    0 => 0.0,
+                    1 => -0.0,
+                    k => (k as f64 - 6.5) * 1.37e-3 / (1.0 + (i % 5) as f64),
+                };
+                let x: Vec<f64> = (0..b.n).map(|i| val(i, 3)).collect();
+                let y0: Vec<f64> = (0..b.n).map(|i| val(i, 11)).collect();
+                for s in [1.0, -1.0, 0.37] {
+                    let (mut ya, mut yb) = (y0.clone(), y0.clone());
+                    m.mul_add(&x, s, &mut ya);
+                    m.rows_add(0, m.n, &x, s, &mut yb);
+                    for i in 0..b.n {
+                        assert_eq!(ya[i].to_bits(), yb[i].to_bits(), "{name}@{scale} {} row {i}", b.name);
+                    }
+                }
+            }
+        }
+    }
+    assert!(covered > 1000, "the stencil runs cover only {covered} rows");
+}
