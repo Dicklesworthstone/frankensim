@@ -1,22 +1,34 @@
-# One material state drives gas-spring motion and acoustics
+# One material state drives heated gas-spring motion and acoustics
 
-This executable connects `ClosedGasParcel::mechanical_load` to the existing
-`fs-mbd::RigidBodyIntegrator`. Its Newton solve iterates the midpoint gas force
-and rigid-body motion together. The gas force tangent uses the same `rho*c^2`
-as sound propagation. Final motion changes volume; the common gas state then
-re-evaluates pressure, temperature, sound speed, impedance and transport.
-No second gas equation, species registry or rigid-body integrator is introduced.
+This executable connects the existing source-backed `ClosedGasParcel` and
+`fs-mbd::RigidBodyIntegrator`. Its Newton solve iterates gas force and body motion
+together. `midpoint_heat_volume` now resolves **simultaneous heat and volume work**
+in conservative internal-energy/volume coordinates. The exact same midpoint
+pressure supplies the piston force and gas work. The material owner supplies the
+discrete pressure derivative; the example does not implement another gas law,
+caloric inversion or rigid-body integrator.
 
 From this directory:
 
 ```sh
 cargo run --release -- mixture-a.tsv 500 0.0002 > mixture-a.csv
 cargo run --release -- mixture-b.tsv 500 0.0002 > mixture-b.csv
+# Same model and geometry, plus an explicit 100 W source during motion:
+cargo run --release -- mixture-a.tsv 500 0.0002 100 > heated-a.csv
+cargo run --release -- mixture-b.tsv 500 0.0002 100 > heated-b.csv
 cargo test
 ```
 
+The optional fourth argument is signed constant **watts**, integrated over each
+actual step before calling the material API in joules. Omitted means zero heat.
+A failed thermal or mechanical trial, invalid source domain, exhausted bounded
+solve or late cancellation publishes neither accepted owner. The existing
+no-source entry point and first twelve CSV columns remain; explicit heat input
+adds accumulated supplied heat, step gas work, step energy residual and step gas
+entropy change. `total_energy_drift_j` subtracts accumulated supplied heat.
+
 Or pass this directory's `Cargo.toml` with `--manifest-path` and the mixture
-file's path from the working directory. This small standalone example workspace
+file's path from the working directory. This standalone example workspace
 keeps the cross-owner dependency on `fs-mbd` out of the constitutive kernel and
 does not change the main workspace lockfile or production dependency graph.
 
@@ -31,22 +43,43 @@ not measured real gases. No empirical accuracy or named-gas fidelity is claimed.
 
 The piston is 0.5 kg, its area 0.01 m², initial chamber volume 0.001 m³,
 initial gas 400 K / 100000 Pa, exterior 100000 Pa and initial +x velocity
-0.2 m/s. The center-applied force preserves this initialized one-axis motion;
+0.2 m/s. The centered load preserves this initialized one-axis motion;
 there is no collision or joint-constraint solver here. Geometry, loading and
 initial conditions are explicit example inputs, not reconstructed historical data.
 
-CSV records motion, all gas observations, restoring stiffness, force residual
-and total-energy drift. Energy includes gas internal energy, rigid-body kinetic
-energy and the constant-pressure exterior's `p_ext V` contribution. The implicit
-midpoint discretization is not exactly energy conserving for nonlinear gas;
-its drift and motion must converge with timestep refinement. Four Rust tests
-cover refinement, composition swaps, failed-trial atomicity and malformed input.
-Native execution was unavailable in the authoring environment; independent
-Python equations showed refinement ratios 4.09 and 3.66 for the two fixtures,
-with final energy defects below 5e-7 J over 0.1 s at dt=0.001 s. Those results
-do not constitute a Rust test pass.
+## Energy and material coupling
 
-Frozen composition, reversible adiabatic uniform gas only. No combustion,
-relaxation, mass flow, condensation, spatial acoustic wave or audio render is
-claimed. Source-domain failures and the bounded 32-iteration coupling budget
-return errors rather than clamping the gas or publishing a partial body update.
+The same immutable material model supplies temperature-dependent heat capacity,
+pressure, sound speed, impedance and transport at the midpoint AND endpoint.
+With nonlinear heat capacity, the midpoint temperature is NOT the mean of the
+endpoint temperatures. The Newton derivative is the discrete material pressure
+response in final volume, not the static isentropic stiffness. The CSV stiffness
+observation remains the endpoint's static adiabatic `rho*c^2*area^2/volume`.
+
+Each accepted step checks, in absolute joules:
+
+`delta(gas internal energy) + delta(body kinetic energy) + p_ext*delta(volume) = supplied heat`.
+
+The original rigid-body step supplies actual kinetic-energy change; the material
+step supplies actual stored energy and pressure work. No post-step correction
+rescales momentum or gas temperature to force agreement. `advance_heated` accepts
+whole-step heat, so tests turn the source off without resetting gas or motion.
+
+Six driver tests plus the existing input test cover motion refinement, data-only
+swaps, work balance, source-off history and atomic failure/cancellation. Six more
+library tests cover the constitutive update and its analytic discrete derivatives.
+Native tests were **not run** in the authoring environment: `cargo` and `rustc`
+are unavailable. Independent Python equations ran 13 trajectories (2,896 steps),
+including a 6 J pulse and source shutoff. Maximum total-energy discrepancy was
+below 5e-13 J; heated displacement refinement ratios were 4.008 and 4.058 for the
+two mixtures. These are independent equation checks, not Rust test results.
+
+## Limits
+
+Frozen composition, spatially uniform gas and explicitly prescribed heat only.
+Midpoint is not an exact finite isentrope: reported gas entropy change is NOT
+entropy production or a certificate of nonnegative entropy production. Motion
+and thermal trajectories need timestep refinement. No combustion, mass flow,
+condensation, molecular relaxation, spatial acoustic wave or audio render is
+claimed. The material temperature brackets, original source support and
+32-iteration mechanical coupling budget remain hard refusals, not clamps.
