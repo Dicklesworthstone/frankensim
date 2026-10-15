@@ -46,7 +46,10 @@ readonly -a REQUIRED_FULL_TARGETS=(
   "fs-archive:conformance"
   "fs-ascent:frankenscipy_optimizer_oracle_casebook"
   "fs-bo:bo_study_replay"
+  "fs-bo:hetero_gp_study_replay"
   "fs-bo:mf_study_replay"
+  "fs-bo:qei_study_replay"
+  "fs-bo:sparse_gp_study_replay"
   "fs-bo:turbo_study_replay"
   "fs-casebook:casebook"
   "fs-cheb:conformance"
@@ -81,6 +84,9 @@ usage:
   bash scripts/ci/casebook_conformance_profile.sh --list nightly-full
   bash scripts/ci/casebook_conformance_profile.sh pr
   bash scripts/ci/casebook_conformance_profile.sh nightly-full
+  bash scripts/ci/casebook_conformance_profile.sh --run pr
+  bash scripts/ci/casebook_conformance_profile.sh --run nightly-full
+  bash scripts/ci/casebook_conformance_profile.sh --replay <receipt.jsonl>
   bash scripts/ci/casebook_conformance_profile.sh --self-test
 
 environment:
@@ -92,9 +98,11 @@ environment:
   FS_CASEBOOK_KILL_DRAIN_SECONDS          KILL drain period (default: 5)
 
 --check and --list run only `cargo metadata --locked --no-deps` plus source
-inspection; they do not build or execute tests. --self-test uses synthetic
-inventories and no-Cargo child processes to exercise discovery, budgets,
-cleanup, signal forwarding, and receipt isolation; it never invokes Cargo.
+inspection; they do not build or execute tests. --replay validates a recorded
+profile run JSONL stream against the live profile inventory without executing
+tests. --self-test uses synthetic inventories and no-Cargo child processes to
+exercise discovery, budgets, cleanup, signal forwarding, receipt isolation, and
+replay verification; it never invokes Cargo.
 EOF
 }
 
@@ -1242,6 +1250,136 @@ print(time.monotonic_ns() + int(sys.argv[1]) * 1_000_000)
 PY
 }
 
+replay_profile_receipt() {
+  local receipt_path="$1"
+  local pr_list full_list
+  pr_list="$(profile_targets pr)"
+  full_list="$(profile_targets nightly-full)"
+  "${PYTHON_BIN}" - "${receipt_path}" "${pr_list}" "${full_list}" 3<&0 <<'PY'
+import json
+import os
+import sys
+
+receipt_path, pr_raw, full_raw = sys.argv[1:4]
+expected_by_profile = {
+    "pr": [line for line in pr_raw.splitlines() if line],
+    "nightly-full": [line for line in full_raw.splitlines() if line],
+}
+errors = []
+
+try:
+    if receipt_path == "-":
+        with os.fdopen(3, "r", encoding="utf-8") as handle:
+            raw_lines = handle.read().splitlines()
+    else:
+        with open(receipt_path, "r", encoding="utf-8") as handle:
+            raw_lines = handle.read().splitlines()
+except OSError as error:
+    out = {
+        "schema": "frankensim-casebook-profile-replay-v1",
+        "status": "fail",
+        "profile": None,
+        "verified_targets": 0,
+        "errors": [{"code": "unreadable_receipt", "detail": f"{type(error).__name__}: {error}"}],
+    }
+    print(json.dumps(out, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(1)
+
+records = []
+for index, line in enumerate(raw_lines, 1):
+    if not line.strip():
+        continue
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError as error:
+        errors.append({"code": "invalid_json", "detail": f"line {index}: {error}"})
+        continue
+    if not isinstance(obj, dict):
+        errors.append({"code": "non_object_row", "detail": f"line {index}"})
+        continue
+    records.append(obj)
+
+if records and records[0].get("schema") == "frankensim-casebook-profile-inventory-v1":
+    inv = records.pop(0)
+    if inv.get("status") != "pass":
+        errors.append({"code": "inventory_failed", "detail": str(inv.get("status"))})
+
+start_row = None
+finish_row = None
+target_rows = []
+for index, row in enumerate(records):
+    schema = row.get("schema")
+    if schema == "frankensim-casebook-profile-run-v1" and row.get("event") == "start":
+        if start_row is not None or index != 0:
+            errors.append({"code": "misplaced_start", "detail": f"record {index}"})
+        start_row = row
+    elif schema == "frankensim-casebook-profile-run-v1" and row.get("event") == "finish":
+        if finish_row is not None or index != len(records) - 1:
+            errors.append({"code": "misplaced_finish", "detail": f"record {index}"})
+        finish_row = row
+    elif schema == "frankensim-casebook-profile-target-v1":
+        target_rows.append(row)
+    else:
+        errors.append({"code": "unexpected_schema", "detail": str(schema)})
+
+profile = start_row.get("profile") if start_row else None
+if start_row is None:
+    errors.append({"code": "missing_start", "detail": "no start event found"})
+if finish_row is None:
+    errors.append({"code": "missing_finish", "detail": "no finish event found"})
+if profile not in expected_by_profile:
+    errors.append({"code": "invalid_profile", "detail": str(profile)})
+else:
+    expected_targets = expected_by_profile[profile]
+    observed_targets = [
+        f"{row.get('package', '')}:{row.get('target', '')}" for row in target_rows
+    ]
+    if observed_targets != expected_targets:
+        errors.append({
+            "code": "target_sequence_mismatch",
+            "detail": f"expected {len(expected_targets)} targets, observed {len(observed_targets)}",
+        })
+    for row in target_rows:
+        identity = f"{row.get('package', '')}:{row.get('target', '')}"
+        if (
+            row.get("profile") != profile
+            or row.get("status") != "pass"
+            or row.get("launched") is not True
+            or row.get("exit_code") != 0
+            or row.get("budget_status") != "within"
+            or row.get("drain_status") != "not_needed"
+            or row.get("escaped_session_descendants_claimed") is not False
+            or row.get("inspection_errors") != []
+        ):
+            errors.append({"code": "target_failed", "detail": identity})
+    if finish_row is not None:
+        total_expected = len(expected_targets)
+        if (
+            finish_row.get("profile") != profile
+            or finish_row.get("status") != "pass"
+            or finish_row.get("terminal_exit_code") != 0
+            or finish_row.get("budget_status") != "within"
+            or finish_row.get("total_targets") != total_expected
+            or finish_row.get("attempted_targets") != total_expected
+            or finish_row.get("passed_targets") != total_expected
+            or finish_row.get("failed_targets") != 0
+            or finish_row.get("budget_exceeded_targets") != 0
+            or finish_row.get("unattempted_targets") != 0
+        ):
+            errors.append({"code": "finish_mismatch", "detail": str(finish_row.get("status"))})
+
+receipt = {
+    "schema": "frankensim-casebook-profile-replay-v1",
+    "status": "fail" if errors else "pass",
+    "profile": profile,
+    "verified_targets": len(target_rows) if not errors else 0,
+    "errors": errors,
+}
+print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+raise SystemExit(1 if errors else 0)
+PY
+}
+
 run_self_tests() {
   local base missing stale duplicate_required duplicate_pr duplicate_discovered
   local pr_not_required malformed scanner selector saved_discovery
@@ -1438,7 +1576,37 @@ run_self_tests() {
   fi
   REQUESTED_SIGNAL=""
 
-  printf '%s\n' '{"schema":"frankensim-casebook-profile-self-test-v2","status":"pass","cases":19,"scanner_fixture_cases":19,"cargo_invocations":0,"temporary_files":0}'
+  # Exercise deterministic replay verification over synthetic run streams.
+  saved_discovery="${DISCOVERY_ROWS}"
+  DISCOVERY_ROWS="$(
+    for target in "${PR_TARGETS[@]}"; do
+      printf 'discovered\t%s\t-\tcrates/%s/tests/%s.rs\n' \
+        "${target}" "${target%%:*}" "${target#*:}"
+    done
+  )"
+  local replay_stream
+  replay_stream="$(
+    printf '{"schema":"frankensim-casebook-profile-run-v1","event":"start","profile":"pr","total_targets":%s}\n' "${#PR_TARGETS[@]}"
+    for target in "${PR_TARGETS[@]}"; do
+      printf '{"schema":"frankensim-casebook-profile-target-v1","profile":"pr","package":"%s","target":"%s","status":"pass","launched":true,"exit_code":0,"budget_status":"within","drain_status":"not_needed","escaped_session_descendants_claimed":false,"inspection_errors":[]}\n' \
+        "${target%%:*}" "${target#*:}"
+    done
+    printf '{"schema":"frankensim-casebook-profile-run-v1","event":"finish","profile":"pr","status":"pass","terminal_exit_code":0,"budget_status":"within","total_targets":%s,"attempted_targets":%s,"passed_targets":%s,"failed_targets":0,"budget_exceeded_targets":0,"unattempted_targets":0}\n' \
+      "${#PR_TARGETS[@]}" "${#PR_TARGETS[@]}" "${#PR_TARGETS[@]}"
+  )"
+  output="$(printf '%s\n' "${replay_stream}" | replay_profile_receipt -)"
+  self_test_require_single_json_line "${output}" replay-pass
+  self_test_require_contains "${output}" '"status":"pass"' replay-pass
+  if output="$(printf '%s\n' "${replay_stream/\"status\":\"pass\"/\"status\":\"fail\"}" | replay_profile_receipt -)"; then
+    printf 'self-test tampered replay unexpectedly passed: %s\n' "${output}" >&2
+    DISCOVERY_ROWS="${saved_discovery}"
+    return 1
+  fi
+  self_test_require_single_json_line "${output}" replay-tampered
+  self_test_require_contains "${output}" '"status":"fail"' replay-tampered
+  DISCOVERY_ROWS="${saved_discovery}"
+
+  printf '%s\n' '{"schema":"frankensim-casebook-profile-self-test-v2","status":"pass","cases":21,"scanner_fixture_cases":19,"cargo_invocations":0,"temporary_files":0}'
 }
 
 if (( $# == 1 )) && [[ "$1" == "--self-test" ]]; then
@@ -1471,12 +1639,23 @@ if (( $# == 2 )) && [[ "$1" == "--list" ]]; then
   exit $?
 fi
 
-if (( $# != 1 )) || [[ "$1" != "pr" && "$1" != "nightly-full" ]]; then
+if (( $# == 2 )) && [[ "$1" == "--replay" ]]; then
+  refresh_and_validate_inventory >/dev/null
+  replay_profile_receipt "$2"
+  exit $?
+fi
+
+PROFILE_ARG=""
+if (( $# == 1 )) && [[ "$1" == "pr" || "$1" == "nightly-full" ]]; then
+  PROFILE_ARG="$1"
+elif (( $# == 2 )) && [[ "$1" == "--run" ]] && [[ "$2" == "pr" || "$2" == "nightly-full" ]]; then
+  PROFILE_ARG="$2"
+else
   usage
   exit 2
 fi
 
-readonly PROFILE="$1"
+readonly PROFILE="${PROFILE_ARG}"
 BUDGET_SECONDS="$(profile_budget "${PROFILE}")"
 readonly BUDGET_SECONDS
 refresh_and_validate_inventory
