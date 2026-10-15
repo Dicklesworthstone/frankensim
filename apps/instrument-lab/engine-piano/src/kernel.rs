@@ -1223,7 +1223,9 @@ impl F2 {
 /// operations; the three sums run in two lanes (even / odd modes of the
 /// segment), then `lane0 + lane1`, then an odd last mode. That reassociation
 /// is the only change from the scalar loop: rms diff / rms <= 1e-10 on the
-/// captured scores, every printed energy term identical.
+/// captured scores with every engine counter identical (wasm, pass 28); run
+/// natively, every printed energy term agrees to 9 digits and only the
+/// ~3e-13 J round-off residual moves.
 #[cfg(target_arch = "wasm32")]
 #[inline(always)]
 fn pre_seg(q: &[f64], v: &[f64], fq: &mut [f64], fv: &mut [f64], rec: &[PreRec], bm: f64) -> [f64; 3] {
