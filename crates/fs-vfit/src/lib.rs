@@ -4,7 +4,7 @@
 //! loads, TMM bore impedances, coupled-body mobilities) and
 //! runtime-realizable filters: identify a compact stable pole-residue
 //! model from tabulated `H(i*omega)` samples, CERTIFY passivity (grid +
-//! Hamiltonian eigenvalue test) with convex residue repair when the raw
+//! Hamiltonian eigenvalue test) with convex repair when the raw
 //! fit is active, and discretize by prewarped bilinear transform to
 //! state-space and biquad-cascade forms.
 //!
@@ -36,6 +36,8 @@ pub mod model;
 pub mod passivity;
 /// Passive frequency-dependent boundary loss with retained relaxation histories.
 pub mod relaxation;
+/// Same-sample FIR reflection and history-preserving implicit boundary menus.
+pub mod scattering;
 pub mod vf;
 /// Passive integer-delay propagation with explicit wave storage.
 pub mod waveguide;
