@@ -10,7 +10,8 @@
 //! stations are interior points, not fictitious moving ports on pinned ends.
 //! Sources remain frozen-state linear bending models; concentric layers mean
 //! perfect bonding, not helical winding/slip. Torsion, large-amplitude tension,
-//! multiple simultaneous bows and broadband radiation back-loading are absent.
+//! and broadband radiation back-loading are absent. Multiple fixed bow contacts
+//! use the existing simultaneous-friction owner through `multiple`.
 
 use super::{InteriorStringConnection, ReciprocalStringError, invalid, interior, poll};
 use crate::bowed_string::{BowedStringCard, unit_shape};
@@ -339,3 +340,6 @@ pub mod plate;
 
 /// Regional material geometry in the same reciprocal string/body network.
 pub mod chart;
+
+/// Several source-bound bow contacts without resetting the shared mechanics.
+pub mod multiple;

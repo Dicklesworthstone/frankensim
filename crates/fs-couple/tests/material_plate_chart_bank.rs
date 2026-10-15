@@ -265,3 +265,6 @@ fn cancelled_step_leaves_source_and_every_mechanical_component_unchanged() {
             body(), None, law(), options(), &stop).is_err());
     });
 }
+
+#[path = "material_plate_chart_bank/multiple.rs"]
+mod multiple;
