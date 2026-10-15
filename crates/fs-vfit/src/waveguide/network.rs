@@ -20,6 +20,8 @@ use crate::impedance::{ImpedanceState, SeriesImpedanceSpec};
 use crate::relaxation::RelaxationImpedanceSpec;
 /// Passive parallel RC admittances with typed pressure histories.
 pub mod admittance;
+/// Explicit fixed fractional transit on the same scattering and load runtime.
+pub mod fractional;
 mod load;
 mod interior;
 use load::{TerminalFrame, TerminalLoad};
@@ -101,7 +103,7 @@ pub struct NetworkFrame {
     pub inlet_flow_m3_s: f64,
     /// End-of-step wave plus reactive boundary energy [J].
     pub stored_energy_j: f64,
-    /// Energy in bidirectional delay buffers alone [J].
+    /// Energy in bidirectional buffers and optional fractional-transit states [J].
     pub wave_stored_energy_j: f64,
     /// Energy in every terminal and interior load state [J].
     pub load_stored_energy_j: f64,
@@ -325,7 +327,7 @@ impl WaveguideNetwork {
         self.lines[self.inlet_port / 2].spec.impedance_pa_s_m3
     }
 
-    /// Actual delay-buffer storage, summed in declared section order [J].
+    /// Actual buffer and fractional-transit storage in declared section order [J].
     #[must_use]
     pub fn wave_stored_energy_j(&self) -> f64 {
         self.lines.iter().fold(0.0, |sum, line| sum + line.stored_energy_j())
@@ -484,8 +486,7 @@ impl WaveguideNetwork {
         }
         let mut stored = 0.0;
         for (i, line) in self.lines.iter().enumerate() {
-            stored += line.replaced_root(0, line.wave_energy(self.departing[2 * i]))
-                + line.replaced_root(2 * line.leaves, line.wave_energy(self.departing[2 * i + 1]));
+            stored += line.preview_pair_storage(self.departing[2 * i], self.departing[2 * i + 1])?;
         }
         let wave_stored = stored;
         stored += load_stored;
