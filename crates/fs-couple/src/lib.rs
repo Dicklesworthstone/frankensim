@@ -42,6 +42,8 @@ pub mod cavity_phs;
 /// Shared Helmholtz storage and neck flow in the reciprocal modal network.
 pub mod cavity_modal;
 pub mod cinematic_stem;
+/// Finite electrical storage and per-resistor heating on the shared thermal network.
+pub mod circuit_enthalpy;
 pub mod driving_point;
 pub mod flue_loop;
 pub mod glottis;
