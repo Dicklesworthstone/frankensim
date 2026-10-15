@@ -47,13 +47,16 @@ jobs:
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
       - name: Named gas material admission and pressure response
         if: ${{ !cancelled() }}
-        run: cargo test -p fs-material --lib gas_species:: -- --test-threads=1
+        run: |
+          cargo test -p fs-material --lib gas_species:: -- --test-threads=1
       - name: Wind gas parser coupled physics and legacy parity
         if: ${{ !cancelled() }}
-        run: cargo test -p fs-couple --lib performance::file:: -- --test-threads=1
+        run: |
+          cargo test -p fs-couple --lib performance::file:: -- --test-threads=1
       - name: Mixture wind and ensemble CLI PCM
         if: ${{ !cancelled() }}
-        run: cargo test -p fs-couple --test music_render_wind gas_mixture:: -- --test-threads=1
+        run: |
+          cargo test -p fs-couple --test music_render_wind gas_mixture:: -- --test-threads=1
       - name: Source-bound finite thermal storage gas and piston mechanics
         if: ${{ !cancelled() }}
         run: |

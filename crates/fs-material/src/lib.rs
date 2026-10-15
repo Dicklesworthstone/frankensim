@@ -87,7 +87,7 @@ pub struct MaterialAdmissibility {
 
 /// A small-strain constitutive law (Voigt 6-space) with internal state.
 /// The TANGENT CONTRACT: `tangent` must be the exact derivative of the
-/// stress returned by `stress` at the SAME converged step exactly — the
+/// stress returned by `stress` at the SAME converged state update — the
 /// conformance suite enforces this against finite differences for every
 /// law (merge-gate discipline).
 pub trait SmallStrainLaw {
