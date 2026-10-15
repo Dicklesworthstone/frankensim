@@ -6,7 +6,7 @@ use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, Pro
 use fs_material::conductor::{ELECTRICAL_RESISTIVITY_PROPERTY, ELECTRICAL_RESISTIVITY_DIMS};
 use fs_material::state_point::*;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
-use fs_qty::{Density, Temperature};
+use fs_qty::{Density, Pressure, QuantitySpec, Temperature};
 use super::{Error, invalid};
 
 pub const HEADER: &str = "frankensim-electrothermal-material-v1";
@@ -18,7 +18,9 @@ pub struct Source {
     pub reference_k: f64,
 }
 pub fn point(t: f64) -> Result<QueryPoint, Error> {
-    Ok(QueryPoint::new().with("T", t)?.with("pressure", 100_000.)?)
+    Ok(QueryPoint::new()
+        .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), t)?
+        .with_quantity("pressure", QuantitySpec::dimensional(Pressure::DIMS), 100_000.)?)
 }
 
 impl Source {
@@ -65,8 +67,9 @@ impl Source {
                 key: PropertyKey::new(name, dims),
                 value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
                     knots: rows.iter().map(|r| (r[0], r[column+1])).collect(), dims },
-                validity: ValidityDomain::unconstrained().with("T", lower, upper)
-                    .with("pressure", 100_000., 100_000.),
+                validity: ValidityDomain::unconstrained()
+                    .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), lower, upper)
+                    .with_quantity("pressure", QuantitySpec::dimensional(Pressure::DIMS), 100_000., 100_000.),
                 interpolation: InterpolationPolicy::LinearInside,
                 uncertainty: UncertaintyModel::Unstated, observations: vec![],
                 provenance: Provenance { source: format!("user table {label}; not independently verified"),

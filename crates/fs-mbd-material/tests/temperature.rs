@@ -3,7 +3,7 @@ mod common;
 use common::{close, density_card};
 use fs_evidence::ValidityDomain;
 use fs_ga::Vec3;
-use fs_matdb::{InterpolationPolicy, MaterialCard, PropertyClaim, PropertyKey, PropertyValue,
+use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, PropertyClaim, PropertyKey, PropertyValue,
     Provenance, QueryPoint, UncertaintyModel};
 use fs_material::state_point::{INVERSE_TEMPERATURE_DIMS,
     LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, MaterialPropertySelection};
@@ -11,14 +11,26 @@ use fs_mbd_material::{MaterialInertiaError, RegionBinding, VolumeMoments, resolv
 use fs_mbd_material::thermal::temperature::{RegionTemperature, expand_body_at_temperatures};
 use fs_qty::{Pressure, QuantitySpec, Temperature};
 
+fn typed_domain() -> ValidityDomain {
+    ValidityDomain::unconstrained()
+        .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), 200.0, 400.0)
+        .with_quantity("pressure", QuantitySpec::dimensional(Pressure::DIMS), 100000.0, 100000.0)
+}
 fn card(alpha: f64) -> MaterialCard {
     let density = density_card("synthetic", 6.0, 2.0);
-    let mut claims = density.claims().clone();
+    // These tests exercise typed state preservation, so BOTH source laws must
+    // declare the same quantity axes as point(). Untyped is not a wildcard.
+    let mut claims = ClaimSet::new();
+    for (_, original) in density.claims().claims_ordered() {
+        let mut claim = original.clone();
+        claim.validity = typed_domain();
+        claims.insert_claim(claim).unwrap();
+    }
     claims.insert_claim(PropertyClaim {
         key: PropertyKey::new(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, INVERSE_TEMPERATURE_DIMS),
         value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
             knots: vec![(200.0,alpha),(300.0,2.0*alpha),(400.0,4.0*alpha)], dims: INVERSE_TEMPERATURE_DIMS },
-        validity: ValidityDomain::unconstrained().with("T",200.0,400.0).with("pressure",100000.0,100000.0),
+        validity: typed_domain(),
         uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
         observations: vec![], provenance: Provenance { source:"synthetic alpha, not measurements".into(),
             license:"CC0-1.0".into(), artifact:None },
@@ -85,4 +97,21 @@ fn source_refusal_and_final_cancellation_publish_no_configuration() {
     assert!(matches!(expand_body_at_temperatures(&reference,&[sample(&a,"body",350.0)],||{n+=1;n==total}),
         Err(MaterialInertiaError::Cancelled)));
     assert_eq!(reference,unchanged);
+}
+
+#[test]
+fn typed_material_sources_still_refuse_untyped_or_wrong_quantity_axes() {
+    use fs_material::state_point::MaterialStatePointError;
+    use fs_matdb::MatDbError;
+    let card = card(1e-4);
+    let untyped = QueryPoint::new().with("T",300.0).unwrap().with("pressure",100000.0).unwrap();
+    let wrong = point().with_quantity("pressure", QuantitySpec::dimensional(Temperature::DIMS),100000.0).unwrap();
+    for p in [untyped, wrong] {
+        let result = resolve_body(&[RegionBinding { key:"body",material:&card,point:&p,
+            geometry:VolumeMoments::cuboid(Vec3::new(1.0,1.0,1.0)).unwrap(),
+            selection:MaterialPropertySelection::SingleClaimOnly }],1,||false);
+        assert!(matches!(result, Err(MaterialInertiaError::Material(MaterialStatePointError::Query {
+            source: MatDbError::AxisQuantityMismatch { .. }, ..
+        }))));
+    }
 }
