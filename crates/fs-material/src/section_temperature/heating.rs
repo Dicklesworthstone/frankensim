@@ -7,10 +7,15 @@
 //! No replacement heat integrator, caloric formula or electrical law is used.
 //!
 //! Layer lumping and resistance geometry are caller modelling assumptions.
-//! Density must be constant on this fixed-volume rung. Thermal strain/work,
-//! radial temperature profiles within a layer, skin effects and melting are
-//! outside it. Source stiffness is not an explicit-stability bound: refine the
+//! Density must be constant on this fixed-volume rung. Optional axial response
+//! follows the same accepted temperatures; thermodynamic work feedback, radial
+//! temperature profiles within a layer, skin effects and melting are outside it.
+//! Source stiffness is not an explicit-stability bound: refine the
 //! supplied maximum timestep for electrical/thermal feedback independently.
+
+/// Source-pinned thermal expansion and support response on the shared clock.
+pub mod axial;
+pub use axial::SectionAxialState;
 
 use std::collections::BTreeMap;
 use fs_thermal::enthalpy::{Boundary, CellGeometry, CellId, DepositedCell,
@@ -80,6 +85,7 @@ struct HeatingObserver<'a> {
     drive: OhmicDrive,
     applied_power_w: f64,
     electrical_energy_j: f64,
+    axial: Option<SectionAxialState>,
 }
 
 /// Coupled thermal history and source-resolved mechanical section.
@@ -180,7 +186,7 @@ impl<'a> HeatedConcentricSection<'a> {
             inner = layer.outer_radius_m;
         }
         let observer = HeatingObserver { section: reference.clone(), law, interfaces, length_m,
-            drive: OhmicDrive::Current(0.0), applied_power_w: 0.0, electrical_energy_j: 0.0 };
+            drive: OhmicDrive::Current(0.0), applied_power_w: 0.0, electrical_energy_j: 0.0, axial: None };
         // Admit electrical/thermal data before allocating the thermal timeline.
         observer.electrical()?;
         for (index, &conductance) in observer.link_conductances()?.iter().enumerate() {
@@ -238,7 +244,11 @@ impl HeatingObserver<'_> {
                 return Err(SectionHeatingError::Invalid("temperature changed density on a fixed-volume constant-mass section"));
             }
         }
+        let axial = self.axial.as_ref().map(|previous| SectionAxialState::resolve(
+            &self.law, section.clone(), previous.constraint(), previous.linear_strain_limit(),
+        )).transpose()?;
         self.section = section;
+        self.axial = axial;
         Ok(())
     }
     fn electrical(&self) -> Result<ElectrothermalSectionResponse, SectionHeatingError> {

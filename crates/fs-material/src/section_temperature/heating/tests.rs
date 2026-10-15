@@ -136,3 +136,5 @@ fn foreign_caloric_sources_and_invalid_interfaces_are_not_silently_admitted() {
     invalid.area_m2 = 100.0;
     assert!(make(&[&chart_a, &chart_a], vec![invalid]));
 }
+
+mod axial;

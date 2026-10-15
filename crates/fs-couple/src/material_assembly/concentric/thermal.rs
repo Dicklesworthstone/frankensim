@@ -103,3 +103,6 @@ pub fn compile_concentric_thermal_material_assembly(
     Ok(CompiledThermoelasticConcentricAssembly { compiled, section, response,
         reference_stress_free_length_m, linear_strain_limit })
 }
+
+/// Acoustic observations of accepted, thermally constrained material histories.
+pub mod heating;
