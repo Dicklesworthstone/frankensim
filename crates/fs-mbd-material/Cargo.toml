@@ -17,6 +17,7 @@ fs-matdb = { path = "../fs-matdb" }
 fs-material = { path = "../fs-material" }
 fs-mbd = { path = "../fs-mbd" }
 fs-qty = { path = "../fs-qty" }
+fs-thermal = { path = "../fs-thermal" }
 
 [dev-dependencies]
 fs-evidence = { path = "../fs-evidence" }

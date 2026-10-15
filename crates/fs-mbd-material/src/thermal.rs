@@ -14,6 +14,8 @@
 
 /// Material-bound thermal solver temperatures drive conserved geometry and inertia.
 pub mod temperature;
+/// Shared heat transport and source-bound mechanical configuration.
+pub mod heating;
 
 mod articulated;
 pub use articulated::{ExpandedArticulated, LinkThermalExpansion, expand_articulated};
