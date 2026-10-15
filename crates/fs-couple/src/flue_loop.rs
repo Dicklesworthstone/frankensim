@@ -56,6 +56,8 @@
 //! - the energy ledger is exact for the discretization: source work =
 //!   stored mouth inertance + numerical dissipation of the implicit step
 //!   + radiation loss + work into the pipe, closure reported per block.
+//!   Optional explicit mouth contraction adds its own same-sample pressure drop
+//!   and separate nonnegative separation loss; it is never an output effect.
 //!
 //! Honesty ladder: [`JetIsland::provenance`] states which numbers are
 //! card-backed (convection ratio, profile ratio, validity, claim class)
@@ -77,6 +79,9 @@ use crate::wind_line::{WindBoundary, WindLineBank, WindLineError};
 /// Physical regional tube networks sharing the same jet-drive loop.
 pub mod network;
 use network::FlueResonator;
+
+/// Optional geometry/gas-bound separation loss in the same-sample mouth solve.
+pub mod mouth_loss;
 
 /// Philox kernel id of the flue onset seed stream (logical identity;
 /// never a scheduling artifact).
@@ -409,11 +414,14 @@ pub struct FlueBlockDiag {
     pub pipe_work_j: f64,
     /// Radiation loss at the mouth [J].
     pub radiation_loss_j: f64,
+    /// Irreversible quasi-steady separated-flow loss [J], not radiation.
+    /// Zero when the optional mouth contraction is absent.
+    pub separation_loss_j: f64,
     /// Change of stored mouth inertance energy [J].
     pub stored_delta_j: f64,
     /// Numerical dissipation of the implicit mouth step [J].
     pub numerical_dissipation_j: f64,
-    /// Ledger closure `source - (stored + numerical + radiation + pipe)`
+    /// Ledger closure `source - (stored + numerical + radiation + pipe + separation)`
     /// [J]; roundoff by construction.
     pub ledger_defect_j: f64,
 }
@@ -423,6 +431,8 @@ pub struct FlueVoice {
     island: JetIsland,
     geometry: FlueGeometry,
     line: FlueResonator,
+    gas: GasState,
+    mouth_contraction: Option<crate::bernoulli_aperture::contraction::ContractionLoss>,
     rho: f64,
     nu: f64,
     zc: f64,
@@ -540,6 +550,8 @@ impl FlueVoice {
             island,
             geometry,
             line,
+            gas: *gas,
+            mouth_contraction: None,
             rho,
             nu,
             zc,
@@ -719,6 +731,7 @@ impl FlueVoice {
         let mut source_work = 0.0;
         let mut pipe_work = 0.0;
         let mut radiation = 0.0;
+        let mut separation = 0.0;
         let mut stored_delta = 0.0;
         let mut numerical = 0.0;
         let mut pipe_side = 0usize;
@@ -757,7 +770,14 @@ impl FlueVoice {
             let p_source = self.source_coeff * (flow - self.flow_prev) / dt;
             self.flow_prev = flow;
             let boundary = self.line.mouth_boundary()?;
-            let mouth = solve_mouth_port(boundary, p_source, self.q_prev, l, r, zc, dt)?;
+            let (mouth, separation_power) = match &self.mouth_contraction {
+                Some(loss) => mouth_loss::solve(boundary, p_source, self.q_prev, l, r, zc, dt, loss)?,
+                None => (solve_mouth_port(boundary, p_source, self.q_prev, l, r, zc, dt)?, 0.0),
+            };
+            let next_separation = separation + separation_power*dt;
+            if !next_separation.is_finite() {
+                return Err(FlueError::Invalid { what: "mouth separation energy overflow" });
+            }
             let (q, p_plus, p_in) = (mouth.flow_m3_s, mouth.outgoing_pa, mouth.pressure_pa);
             if ![eta, flow, p_source, q, p_plus, p_in].iter().all(|x| x.is_finite()) {
                 return Err(FlueError::Invalid { what: "flue trial left the finite physical domain" });
@@ -767,6 +787,7 @@ impl FlueVoice {
                 && committed.to_bits() != mouth.incoming_pa.to_bits() {
                 return Err(FlueError::Invalid { what: "mouth solve and committed reflection disagree" });
             }
+            separation = next_separation;
             // Ledger terms of the implicit step (exact identity).
             source_work += p_source * q * dt;
             pipe_work += p_in * q * dt;
@@ -814,9 +835,10 @@ impl FlueVoice {
             source_work_j: source_work,
             pipe_work_j: pipe_work,
             radiation_loss_j: radiation,
+            separation_loss_j: separation,
             stored_delta_j: stored_delta,
             numerical_dissipation_j: numerical,
-            ledger_defect_j: source_work - (stored_delta + numerical + radiation + pipe_work),
+            ledger_defect_j: source_work - (stored_delta + numerical + radiation + pipe_work) - separation,
         });
         self.block_index += 1;
         Ok(())

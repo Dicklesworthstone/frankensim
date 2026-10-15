@@ -166,3 +166,7 @@ required-features = ["cutfem-marquee"]
 [[test]]
 name = "simp_newton"
 required-features = ["newton-design"]
+
+[[example]]
+name = "constrained_simp"
+required-features = ["newton-design"]

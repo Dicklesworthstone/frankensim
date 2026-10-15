@@ -120,7 +120,7 @@ export function parseCSV(csv, title = 'Imported signal') {
 }
 export function toCSV(snapshot) {
   const escape = s => `"${(/^[=+@-]/.test(s) ? "'" + s : s).replaceAll('"', '""')}"`;
-  return ['time_s,' + snapshot.traces.series.map(s => escape(`${s.label.replace(/ /g, '_')}_${s.unit.toLowerCase()}`)).join(','),
+  return ['time_s,' + snapshot.traces.series.map((s, i) => escape(`channel${i + 1}_${s.label.replace(/ /g, '_').slice(0, 64)}_${s.unit.toLowerCase()}`)).join(','),
     ...snapshot.traces.time_s.map((t, i) => [t, ...snapshot.traces.series.map(s => s.values[i])].join(','))].join('\n') + '\n';
 }
 export function audioRate(snapshot, series = snapshot.traces.series[0]) {

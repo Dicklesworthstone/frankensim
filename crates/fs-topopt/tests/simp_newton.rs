@@ -196,3 +196,6 @@ fn live_ir_uses_both_physical_nodes_with_only_one_preparation() {
         assert_eq!(model.work().solve_reservations, 5);
     });
 }
+
+#[path = "simp_newton/bounded.rs"]
+mod bounded;
