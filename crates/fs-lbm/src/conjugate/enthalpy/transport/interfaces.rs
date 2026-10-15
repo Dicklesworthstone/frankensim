@@ -5,6 +5,10 @@
 //! the caller owns surface condition, interface temperature, pressure, phase
 //! dependence and heat partition. All current/heat numerics remain unchanged.
 
+/// Closed endpoint feedback through the shared thermal and nonlinear owners.
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub mod implicit;
+
 use super::*;
 use fs_conduction::observers::{CoupledObservers, ObserverCouplingError};
 
