@@ -18,6 +18,9 @@
 //! separate conductivity fit. H2O reuses the existing water-vapor GasSpec.
 //! No arbitrary mixture is thereby eligible for the air-only ISO 9613 law.
 
+/// Shared bounded gas-record input for every material consumer.
+pub mod input;
+
 use crate::gas::{ConductivityModel, GasSpec, GasState, R_USSA_1976, saturation_pressure_water_pa};
 use crate::MaterialError;
 use fs_qty::semantic::Composition;

@@ -1,7 +1,7 @@
 //! Authored reed/duct performances over the existing physical and gesture owners.
 //!
-//! The file supplies primitive SI parameters, a static segmented duct, moist air,
-//! and one canonical blowing-pressure track. It does not infer material identity
+//! The file supplies primitive SI parameters, a static segmented duct, an explicit
+//! dry/humid-air or named-mixture state, and one canonical blowing-pressure track. It does not infer material identity
 //! or turn a pitch into a medium property. Pressure commands replace the fixture
 //! attack envelope; all retained reed and bore state survives release and resume.
 //! Output retains `ReedBoreVoice`'s bore-pressure plus compact-jet observation,
@@ -11,6 +11,7 @@ use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_duct::{Duct, HoleState, Segment, Termination};
 use fs_material::gas::GasState;
+use fs_material::gas_species::input::{GasInputError, read_gas_state};
 use fs_scenario::{BeatingReed, gesture::{GestureSchedule, GestureTarget}};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::pcm_wav::observation::PressureRenderer;
@@ -37,6 +38,13 @@ pub enum ReedPerformanceError {
         /// Failed condition.
         what: &'static str,
     },
+    /// Material admission retains its original cause and source line.
+    Gas {
+        /// One-based ambient record line.
+        line: usize,
+        /// Original species, composition or state refusal.
+        source: fs_material::MaterialError,
+    },
     /// The existing reed, TMM or gas realization refused.
     Model(AcousticRealizeError),
     /// The existing pressure compiler refused.
@@ -48,13 +56,18 @@ impl core::fmt::Display for ReedPerformanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Input { line, what } => write!(f, "reed input line {line}: {what}"),
+            Self::Gas { line, source } => write!(f, "reed gas line {line}: {source}"),
             Self::Model(e) => write!(f, "reed model: {e}"),
             Self::Schedule(e) => write!(f, "reed input: {e}"),
             Self::Render(e) => write!(f, "reed render: {e}"),
         }
     }
 }
-impl std::error::Error for ReedPerformanceError {}
+impl std::error::Error for ReedPerformanceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self { Self::Gas { source, .. } => Some(source), _ => None }
+    }
+}
 fn bad(line: usize, what: &'static str) -> ReedPerformanceError {
     ReedPerformanceError::Input { line, what }
 }
@@ -91,6 +104,7 @@ pub struct ReedPerformanceInfo {
 pub struct ReedPerformance {
     info: ReedPerformanceInfo,
     renderer: ScheduledRenderer,
+    ambient_gas: GasState,
 }
 impl ReedPerformance {
     /// Decode and admit all records before building or advancing the runtime.
@@ -122,8 +136,10 @@ impl ReedPerformance {
             || samples > u64::from(rate) * 600
         { return Err(bad(r.line, "audio requires a rate in 1..=192000 and at most 600 seconds/28800000 positive samples")); }
         let mut row = r.row("ambient")?;
-        let air = GasState::try_new_moist_air(row.scalar()?, row.scalar()?, row.scalar()?)
-            .map_err(|_| bad(r.line, "ambient is outside the shared moist-air model"))?;
+        let air = read_gas_state(&mut row.words, None).map_err(|error| match error {
+            GasInputError::Input(what) => bad(row.line, what),
+            GasInputError::Material(source) => ReedPerformanceError::Gas { line: row.line, source },
+        })?;
         row.finish()?;
         let mut row = r.row("reed")?;
         let reed = BeatingReed {
@@ -216,7 +232,7 @@ impl ReedPerformance {
         let renderer = ScheduledRenderer::new(context, controls, max_controls).map_err(ReedPerformanceError::Render)?;
         renderer.validate_sample_rate(rate).map_err(ReedPerformanceError::Render)?;
         renderer.validate_sample_count(samples).map_err(ReedPerformanceError::Render)?;
-        Ok(Self { info, renderer })
+        Ok(Self { info, renderer, ambient_gas: air })
     }
 
     /// Original source facts, unchanged by output-clock conversion.
@@ -225,6 +241,10 @@ impl ReedPerformance {
     /// Read-only access to sample-addressed controls and retained state clocks.
     #[must_use]
     pub const fn renderer(&self) -> &ScheduledRenderer { &self.renderer }
+    /// The immutable resolved gas supplied to the reed, TMM losses, radiation
+    /// termination and compact-jet observation. No air-only absorption is added.
+    #[must_use]
+    pub const fn ambient_gas(&self) -> &GasState { &self.ambient_gas }
     /// Remaining samples on the mechanical clock.
     #[must_use]
     pub fn remaining_samples(&self) -> u64 { self.info.samples - self.renderer.samples_rendered() }
@@ -306,3 +326,6 @@ impl<'a> Row<'a> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod gas_tests;
