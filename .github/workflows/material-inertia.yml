@@ -78,7 +78,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo test -p fs-mbd-material --all-targets --features electrothermal-coupling 2>&1 | tee "$RUNNER_TEMP/material-inertia.log"
+          cargo test -p fs-mbd-material --all-targets --features electrothermal-coupling,thermoelastic-coupling 2>&1 | tee "$RUNNER_TEMP/material-inertia.log"
       - name: Retain resolved dependency lock
         if: always()
         run: |

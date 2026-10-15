@@ -7,6 +7,10 @@
 //! Overlap detection, stress validity and momentum/work during a live change
 //! remain with the geometry, constitutive and time-integration owners.
 
+/// Material-driven constrained thermal deformation through the existing FEM owner.
+#[cfg(feature = "thermoelastic-coupling")]
+pub mod thermoelastic;
+
 use std::collections::BTreeSet;
 use fs_ga::Vec3;
 use fs_mbd::articulated::SpatialInertia;
