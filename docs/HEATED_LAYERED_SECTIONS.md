@@ -42,8 +42,8 @@ ambiguous, differently conditioned or unsupported data refuse; no nominal-metal
 fallback is used. The library API additionally supports full caller-supplied
 nonthermal context and per-layer absolute-temperature axis names.
 
-The same section geometry, fixed 10 N tension, pluck, ambient gas, listener and
-acoustic renderer produce the two signals. `comparison.csv` contains physical
+Without a support option, the same section geometry, fixed 10 N tension, pluck,
+ambient gas, listener and acoustic renderer produce the two signals. `comparison.csv` contains physical
 pressure samples for cold and heated states. `comparison.wav` is a stereo
 comparison, **cold on the left and heated on the right**, using the existing
 PCM encoder with one shared explicit full scale. No separate peak normalization
@@ -68,6 +68,38 @@ cargo test -p fs-couple --example heated_section_sound
 ```
 
 ## Constrained heating: retain the physical supports, not the old pitch
+
+Append `--fixed-strain STRAIN STRAIN_LIMIT` to either source mode to keep the
+physical axial strain fixed rather than restoring 10 N after heating:
+
+```sh
+cargo run -p fs-couple --example heated_section_sound -- \
+  --demo 2.0 0.2 1.0 0.01 fixed_end --fixed-strain 0.0001 0.01
+
+cargo run -p fs-couple --example heated_section_sound -- \
+  --packs core.pack sleeve.pack 0.2 1.0 0.01 fixed_end_from_packs \
+  --fixed-strain 0.0001 0.01
+```
+
+The strain is total engineering strain relative to the original common
+stress-free state at 300 K; the limit bounds every layer's thermal and elastic
+strain as well as the total strain. Both arguments are dimensionless and must
+satisfy `0 < STRAIN <= STRAIN_LIMIT < 1` for this initially taut observation.
+These are model inputs, not material yield measurements. A heated state that
+becomes slack or compressed refuses sound generation rather than being
+retensioned or clamped. The output reports both actual tensions and the heated
+per-layer stresses; CSV pressure and shared-gain stereo WAV keep their original
+meaning. No output is created until both sound observations succeed.
+
+Constrained pack input additionally requires source-declared
+`linear_thermal_expansion_coefficient` in 1/K for both original layer bundles.
+Signed coefficients, including explicit zero or negative expansion, are allowed;
+missing expansion is not zero. The original pack loader and source resolver are
+unchanged. The constrained synthetic demo explicitly supplies core alpha from
+1e-5 to 2e-5/K and sleeve alpha from 2e-5 to 4e-5/K across 300--400 K, solely as
+illustrative data. No expansion property is added to a user-supplied material.
+The no-option demonstration retains its original source data and fixed-force
+behavior.
 
 The optional `HeatedConcentricSection::with_axial_constraint` binding adds
 source-pinned thermal expansion and per-layer stress on the SAME internal
@@ -118,12 +150,13 @@ reported as a diagnostic, not added to heat or presented as a closed total-energ
 balance. Thermal geometry/reference mass stay fixed; force/spring-controlled
 strain does not move that mesh and those controls are not admitted by this
 fixed-end acoustic observer. Buckling, thermodynamic backreaction, finite strain
-and continuous sound during heating remain outside the model. The CLI example
-above retains its original fixed-force comparison; the constrained path is the
-library API shown here.
+and continuous sound during heating remain outside the model. The CLI option
+uses this same library path; no separate expansion, heating or acoustic solver
+is implemented in the example.
 
 Focused additional native check:
 
 ```sh
 cargo test -p fs-couple --test heated_constrained_section
+cargo test -p fs-couple --example heated_section_sound
 ```

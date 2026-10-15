@@ -15,6 +15,7 @@ on:
       - 'crates/fs-couple/src/material_assembly/concentric/thermal*'
       - 'crates/fs-couple/src/material_assembly/concentric/thermal/**'
       - 'crates/fs-couple/tests/heated_constrained_section.rs'
+      - 'crates/fs-couple/examples/heated_section_sound.rs'
       - 'crates/fs-lbm/Cargo.toml'
       - 'crates/fs-lbm/src/conjugate/enthalpy*'
       - 'crates/fs-lbm/src/conjugate/enthalpy/**'
@@ -114,6 +115,7 @@ jobs:
         run: |
           cargo test -p fs-material --lib section_temperature -- --test-threads=1
           cargo test -p fs-couple --test heated_constrained_section -- --test-threads=1
+          cargo test -p fs-couple --example heated_section_sound -- --test-threads=1
       - name: Shared fallible material residual bridge
         if: ${{ !cancelled() }}
         run: |
