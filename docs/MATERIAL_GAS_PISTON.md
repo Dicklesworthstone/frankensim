@@ -51,9 +51,34 @@ shared acoustic/mechanical small-signal period, and refusal/cancellation rollbac
 Run:
 
 ```sh
-cargo test -p fs-couple --lib cavity_phs::piston::tests
+cargo test -p fs-couple --lib cavity_phs::piston::
 ```
 
-The synthetic source fixture uses fs-thermochem as a test-only dependency; no
-production dependency was added. Native tests and Cargo lockfile regeneration
+The synthetic source fixture uses fs-thermochem and fs-ga as test-only
+dependencies. The material-bound adapter consumes the existing fs-mbd-material
+production owner rather than adding another density-to-inertia implementation. Native tests and Cargo lockfile regeneration
 must be run with the workspace toolchain before claiming native verification.
+
+## Solid-material and composite piston binding
+
+`piston::material::MaterialGasPiston::new(gas, body, area, velocity)` takes the
+existing `fs_mbd_material::ResolvedBody` produced by `resolve_body`. It uses the
+canonical spatial inertia's total mass and retains every region's geometry,
+source density, conditions and usage receipt. There is no separate mass knob
+that can silently disagree with the source. The body is immutable during
+evolution; `step` delegates to the exact same gas/piston dynamics above.
+
+Swap the rigid specimen's density cards or regional material assignments and
+recompile that body to change actual piston inertia, acceleration, boundary
+work and the gas's resulting thermal/acoustic state. Composite regions use the
+existing body's canonical reduction, not another mass calculation. Gas and
+solid source conditions remain independent; heating the gas does not imply
+that the rigid piston heats or expands. Instantaneously changing a live mass
+is not modeled, because that needs an explicit momentum/energy transfer law.
+
+The exposed area is an independent geometry quantity, not the specimen volume
+or gas cavity volume. Translation is constrained: rotational inertia and
+centre-of-mass offsets are retained on the body but do not generate rotation.
+Three additional Rust tests exercise density-only trajectory changes, composite
+source retention and exact agreement with the numerical mass path, and atomic
+failure/cancellation including immutable solid-source history.

@@ -21,6 +21,7 @@ fs-fft = { path = "../fs-fft" }
 fs-iface = { path = "../fs-iface" }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
+fs-mbd-material = { path = "../fs-mbd-material" }
 fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
 fs-modal = { path = "../fs-modal" }
@@ -35,6 +36,7 @@ fs-tribo = { path = "../fs-tribo" }
 fs-vfit = { path = "../fs-vfit" }
 
 [dev-dependencies]
+fs-ga = { path = "../fs-ga" }
 fs-alloc = { path = "../fs-alloc" }
 fs-conduction = { path = "../fs-conduction" }
 fs-contact = { path = "../fs-contact" }

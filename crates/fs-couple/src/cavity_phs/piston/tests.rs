@@ -53,7 +53,7 @@ fn transport(name: &str) -> SpeciesTransportMaterial {
             process: "synthetic".into(), revision: 0 },claims,vec![]).unwrap(),
         selection: MaterialPropertySelection::SingleClaimOnly }
 }
-fn gas(x: f64, slope: f64) -> ClosedGasParcel {
+pub(super) fn gas(x: f64, slope: f64) -> ClosedGasParcel {
     let model = ThermochemicalGasModel::new(FrozenIdealGasMixtureModelV1::new(
         vec![species("A",0.028,3.5,slope),species("B",0.004,2.5,0.0)],
         Composition::new(CompositionBasis::MoleFraction,vec![x,1.0-x]).unwrap()).unwrap(),
@@ -64,13 +64,13 @@ fn gas(x: f64, slope: f64) -> ClosedGasParcel {
         .with("specimen-lot",42.0).unwrap();
     ClosedGasParcel::new(model,point,0.001).unwrap()
 }
-fn controls() -> PistonSolve {
+pub(super) fn controls() -> PistonSolve {
     PistonSolve { volume_bracket_m3: [0.0007,0.0015],
         gas: GasEnergySolve { minimum_temperature_k: 200.0,maximum_temperature_k:1800.0,
             energy_tolerance_j_kg:1e-7,maximum_iterations:128 },
         momentum_tolerance_n_s:1e-10,energy_tolerance_j:1e-7,maximum_iterations:128 }
 }
-fn drive(heat_j: f64) -> PistonInput {
+pub(super) fn drive(heat_j: f64) -> PistonInput {
     PistonInput { duration_s:0.0005,heat_j,exterior_pressure_pa:100000.0,external_force_n:0.0 }
 }
 
