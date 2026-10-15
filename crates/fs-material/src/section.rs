@@ -13,6 +13,7 @@
 //! axial stress. Source validity applies at retained states, not future states.
 
 pub mod thermal;
+pub mod transport;
 
 use fs_qty::{Density, DynViscosity, Pressure, QuantitySpec};
 use crate::state_point::{
