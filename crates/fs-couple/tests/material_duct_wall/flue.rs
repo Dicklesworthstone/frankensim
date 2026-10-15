@@ -165,3 +165,6 @@ fn bad_wall_inputs_keep_the_original_cold_refusal_boundaries() {
     assert!(FlueVoice::from_material_network(Some(&card), 90.0, 1e-6, geometry(),
         source(), input(1e6), RATE, 3, 0, &gate).is_err());
 }
+
+#[path = "flue/radiation.rs"]
+mod radiation;
