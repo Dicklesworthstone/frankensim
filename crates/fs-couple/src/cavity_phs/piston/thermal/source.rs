@@ -75,7 +75,7 @@ impl ThermalMaterialPoint<'_> {
 
     // Same static-source contract for k and electrical resistivity. This does
     // not assert continuous support between samples or invent a mixture law.
-    pub(super) fn admit_static(&self, property: &ResolvedScalarProperty) -> Result<(), ThermalMaterialError> {
+    pub(crate) fn admit_static(&self, property: &ResolvedScalarProperty) -> Result<(), ThermalMaterialError> {
         let invalid = ThermalMaterialError::Invalid;
         let claim = self.material.claims().claim(property.answer().receipt.selected)
             .ok_or(invalid("selected thermal property claim is absent"))?;

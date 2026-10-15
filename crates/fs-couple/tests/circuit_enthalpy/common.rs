@@ -6,7 +6,7 @@ use fs_couple::cavity_phs::piston::thermal::power::joule::{JouleHeatingError, Ma
 use fs_evidence::ValidityDomain;
 use fs_material::conductor::ELECTRICAL_RESISTIVITY_DIMS;
 use fs_material::phase::{EquilibriumPhaseState, HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
-use fs_material::state_point::{MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS};
+use fs_material::state_point::{MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS, THERMAL_CONDUCTIVITY_DIMS};
 use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel};
 use fs_phs::circuit::{Branch, CircuitGraph};
@@ -17,12 +17,16 @@ use fs_thermal::enthalpy::*;
 pub fn point(t: f64) -> QueryPoint { QueryPoint::new().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),t).unwrap().with("lot",7.0).unwrap() }
 /// Authored synthetic source curves, not qualified physical material cards.
 pub fn material(resistance: f64, cp: f64, alpha: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
+    material_with_conductivity(resistance,cp,alpha,1.0)
+}
+pub fn material_with_conductivity(resistance: f64, cp: f64, alpha: f64, k: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     let heat = PropertyKey::new("specific_heat_capacity",SPECIFIC_HEAT_CAPACITY_DIMS);
     let density = PropertyKey::new("density",Density::DIMS);
     let resistivity = PropertyKey::new("electrical_resistivity",ELECTRICAL_RESISTIVITY_DIMS);
     let mut claims = ClaimSet::new();
     for (key,a,b) in [(heat.clone(),cp,cp),(density.clone(),1.0,1.0),
-        (resistivity,resistance*(1.0-100.0*alpha),resistance*(1.0+1700.0*alpha))] {
+        (resistivity,resistance*(1.0-100.0*alpha),resistance*(1.0+1700.0*alpha)),
+        (PropertyKey::new("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS),k,k)] {
         let dims=key.quantity().dims();
         claims.insert_claim(PropertyClaim {key,value:PropertyValue::Curve {
             abscissa:"T".into(),abscissa_dims:Temperature::DIMS,knots:vec![(200.0,a),(2000.0,b)],dims},

@@ -7,6 +7,9 @@
 //! with circuit midpoint currents and ENDPOINT material coefficients: first-order
 //! coupled accuracy in general, not a second-order or unconditional-stability claim.
 
+/// Data-only caloric/card, resistor and conductive-link bindings.
+pub mod material;
+
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use crate::material_circuit::{MaterialCircuit, MaterialCircuitCandidate, MaterialCircuitError,

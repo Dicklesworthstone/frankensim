@@ -13,6 +13,18 @@
 
 use super::*;
 
+impl DepositionSimulation<'_> {
+    /// Check a coupled material binding against the timeline's actual borrowed
+    /// caloric object, not merely one matching temperature sample or numeric ID.
+    /// This compares in-process data addresses (not unstable trait vtable
+    /// addresses); it is not portable content identity or material validation.
+    /// Cloned timeline candidates keep the same original borrowed laws.
+    pub fn uses_material_law(&self, id: MaterialId, law: &dyn ThermalLaw) -> bool {
+        self.materials.get(&id).is_some_and(|actual|
+            std::ptr::addr_eq(*actual as *const dyn ThermalLaw, law as *const dyn ThermalLaw))
+    }
+}
+
 /// Endpoint-only additions and replacements, not persistent authored inputs.
 #[derive(Debug)]
 pub struct StepCoefficients<T> {
