@@ -764,13 +764,14 @@ fn aero_014_forged_wrenches_and_overflow_do_not_consume_work_keys_or_totals() {
     assert_eq!(window.body_work_j(), 0.0);
     assert_eq!(window.relative_dissipation_j(), 0.0);
 
-    let mut overflowing_work = wrench.clone();
-    overflowing_work.receipt.relative_power_w = 0.0;
-    overflowing_work.receipt.dissipated_relative_power_w = 0.0;
-    overflowing_work.receipt.body_power_w = f64::MAX;
-    overflowing_work.receipt.ambient_boundary_power_w = f64::MAX;
+    let mut fast_input = input(Vec3::ZERO);
+    fast_input.kinematics.linear_velocity_world_m_per_s = Vec3::new(0.0, 0.0, 50.0);
+    let fast_wrench = model("fixture.transaction", 1.1)
+        .evaluate(&fast_input)
+        .expect("fast candidate result");
+    assert!(fast_wrench.receipt.body_power_w.abs() > 1.0);
     assert!(matches!(
-        window.record_once(29, 2.0, &overflowing_work),
+        window.record_once(29, f64::MAX, &fast_wrench),
         Err(ReducedAeroError::NonFiniteDerived {
             field: "work.body_work_j"
         })
