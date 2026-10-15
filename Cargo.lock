@@ -1196,6 +1196,7 @@ dependencies = [
  "fs-topopt",
  "fs-uq",
  "fs-viz",
+ "fs-voi",
 ]
 
 [[package]]
@@ -1220,6 +1221,7 @@ dependencies = [
  "fs-scenario",
  "fs-solver",
  "fs-sparse",
+ "fs-thermal",
  "fs-verify",
  "fs-vvreg",
 ]
@@ -1303,6 +1305,7 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-fft",
+ "fs-ga",
  "fs-geom",
  "fs-iface",
  "fs-io",
@@ -1310,11 +1313,14 @@ dependencies = [
  "fs-matdb",
  "fs-material",
  "fs-math",
+ "fs-mbd",
+ "fs-mbd-material",
  "fs-modal",
  "fs-nlmodal",
  "fs-orbit",
  "fs-phs",
  "fs-plate",
+ "fs-ports",
  "fs-psycho",
  "fs-qty",
  "fs-query",
@@ -1323,6 +1329,8 @@ dependencies = [
  "fs-solid",
  "fs-solver",
  "fs-substrate",
+ "fs-thermal",
+ "fs-thermochem",
  "fs-tribo",
  "fs-vfit",
 ]
@@ -1422,6 +1430,7 @@ dependencies = [
  "fs-material",
  "fs-math",
  "fs-phs",
+ "fs-qty",
  "fs-vvreg",
 ]
 
@@ -1532,11 +1541,11 @@ name = "fs-feec"
 version = "0.0.1"
 dependencies = [
  "fs-blake3",
- "fs-couple",
  "fs-ivl",
  "fs-la",
  "fs-math",
  "fs-obs",
+ "fs-ports",
  "fs-propcheck",
  "fs-qty",
  "fs-rand",
@@ -1881,7 +1890,9 @@ dependencies = [
  "fs-obs",
  "fs-qty",
  "fs-roofline",
+ "fs-solver",
  "fs-sparse",
+ "fs-thermal",
 ]
 
 [[package]]
@@ -1953,6 +1964,8 @@ dependencies = [
  "fs-matdb",
  "fs-math",
  "fs-qty",
+ "fs-thermal",
+ "fs-thermochem",
 ]
 
 [[package]]
@@ -1969,6 +1982,26 @@ version = "0.0.1"
 dependencies = [
  "fs-ga",
  "fs-math",
+]
+
+[[package]]
+name = "fs-mbd-material"
+version = "0.0.1"
+dependencies = [
+ "fs-alloc",
+ "fs-blake3",
+ "fs-evidence",
+ "fs-exec",
+ "fs-ga",
+ "fs-la",
+ "fs-lbm",
+ "fs-matdb",
+ "fs-material",
+ "fs-mbd",
+ "fs-modal",
+ "fs-qty",
+ "fs-solid",
+ "fs-thermal",
 ]
 
 [[package]]
@@ -2191,6 +2224,14 @@ dependencies = [
  "fs-solver",
  "fs-sparse",
  "fs-time",
+]
+
+[[package]]
+name = "fs-ports"
+version = "0.0.1"
+dependencies = [
+ "fs-iface",
+ "fs-qty",
 ]
 
 [[package]]
@@ -2656,6 +2697,10 @@ dependencies = [
 
 [[package]]
 name = "fs-symmetry"
+version = "0.0.1"
+
+[[package]]
+name = "fs-thermal"
 version = "0.0.1"
 
 [[package]]
