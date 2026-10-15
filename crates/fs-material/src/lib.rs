@@ -45,6 +45,8 @@ pub mod porous;
 pub mod section;
 /// Temperature refresh of complete source-bound layered mechanical sections.
 pub mod section_temperature;
+/// Source-bound effective sheet mass, membrane and independent bending response.
+pub mod sheet;
 pub mod state_point;
 pub mod tensor;
 pub mod thermal;
