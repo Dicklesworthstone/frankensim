@@ -160,7 +160,10 @@ pub(super) const BUDGET_TREND_ROWS: [BudgetTrendRow; 14] = [
         observed_metric: "nfev_at_convergence",
         unit: "objective_evaluations",
         ceiling: 18,
-        sanity_floor_exclusive: 10,
+        // A vacuous 0-step stop at x0 uses 3 objective evaluations (initial
+        // validation + fg(x0) + kkt(x0)); any 1-step accepted iterate + KKT
+        // verification requires >= 6 objective evaluations.
+        sanity_floor_exclusive: 5,
         attempts: 1,
         minimum_successes: 1,
     },

@@ -892,20 +892,6 @@ fn semantic_mismatch(payload: &ReceiptPayload) -> Option<String> {
         .iter()
         .filter(|call| call.kind == "objective-gradient")
         .count();
-    let objective_callback_indices: Vec<usize> = payload
-        .callbacks
-        .iter()
-        .enumerate()
-        .filter_map(|(index, call)| (call.kind == "objective-gradient").then_some(index))
-        .collect();
-    let terminal_adjacent_objective_pair = match objective_callback_indices.as_slice() {
-        [.., earlier, later] => {
-            *earlier + 1 == *later
-                && payload.callbacks[*earlier].point_bits == payload.report.x_bits
-                && payload.callbacks[*later].point_bits == payload.report.x_bits
-        }
-        _ => false,
-    };
     let Some(uncounted_objective_callbacks) =
         objective_callbacks.checked_sub(payload.report.evaluations)
     else {
@@ -924,11 +910,9 @@ fn semantic_mismatch(payload: &ReceiptPayload) -> Option<String> {
             uncounted_objective_callbacks == 2
         }
         Engine::InteriorPoint => (2..=3).contains(&uncounted_objective_callbacks),
-        // SQP has one initial validation. Its post-loop path performs a final
-        // objective read immediately before the KKT objective read, so the
-        // terminal adjacent pair distinguishes the otherwise uncounted +2.
-        Engine::Sqp if terminal_adjacent_objective_pair => uncounted_objective_callbacks == 3,
-        Engine::Sqp => uncounted_objective_callbacks == 1,
+        // SQP counts its initial validation and every in-loop / post-loop
+        // objective and KKT objective read.
+        Engine::Sqp => uncounted_objective_callbacks == 0,
     };
     if !accounting_matches {
         return Some(format!(

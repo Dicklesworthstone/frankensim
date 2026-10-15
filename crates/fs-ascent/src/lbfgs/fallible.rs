@@ -191,8 +191,17 @@ impl LbfgsState {
                             what: "directional derivative", component: None, bits: derivative.to_bits(),
                         });
                     }
+                    let roundoff = 1e-12 * self.f.abs().max(1.0);
+                    let approx_wolfe = (-alpha * slope) <= roundoff
+                        && (f - self.f) <= roundoff
+                        && derivative.abs() <= 0.9 * slope.abs();
+                    let f_probe = if approx_wolfe {
+                        f.min((1e-4 * alpha).mul_add(slope, self.f))
+                    } else {
+                        f
+                    };
                     last = Some((f, g, xt));
-                    Ok((f, derivative))
+                    Ok((f_probe, derivative))
                 };
                 try_strong_wolfe_with_budget(
                     &mut phi, self.f, slope, 1.0, 1e-4, 0.9, ceiling - self.evals,
