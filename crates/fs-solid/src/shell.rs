@@ -676,16 +676,17 @@ impl ShellPlate {
         // For a rigid spin omega parallel to n, curl(u) = 2 omega dot n,
         // so this removes only the independent drilling mechanism.
         let bitangent = cross(normal, tangent);
-        let mut drilling = Vec::with_capacity(12);
+        let mut drilling = Vec::with_capacity(18);
         for (node, gradient) in triangle.into_iter().zip(gradients) {
             let along_tangent = dot(gradient, tangent);
             let along_bitangent = dot(gradient, bitangent);
-            drilling.push((dof(node, 0), 0.5 * along_bitangent * tangent[0]));
-            drilling.push((dof(node, 1), 0.5 * along_bitangent * tangent[1]));
-            drilling.push((dof(node, 2), 0.5 * along_bitangent * tangent[2]));
-            drilling.push((dof(node, 0), -0.5 * along_tangent * bitangent[0]));
-            drilling.push((dof(node, 1), -0.5 * along_tangent * bitangent[1]));
-            drilling.push((dof(node, 2), -0.5 * along_tangent * bitangent[2]));
+            for component in 0..3 {
+                drilling.push((
+                    dof(node, component),
+                    0.5 * (along_bitangent * tangent[component]
+                        - along_tangent * bitangent[component]),
+                ));
+            }
             drilling.push((dof(node, 3), normal[0] / 3.0));
             drilling.push((dof(node, 4), normal[1] / 3.0));
             drilling.push((dof(node, 5), normal[2] / 3.0));
@@ -731,7 +732,7 @@ fn add_rank_one(values: &mut [f64], dimension: usize, entries: &[(usize, f64)], 
                 dimension,
                 row,
                 column,
-                scale * row_value * column_value,
+                scale * (row_value * column_value),
             );
         }
     }
