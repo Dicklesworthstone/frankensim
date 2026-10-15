@@ -85,13 +85,26 @@ pub struct SnapshotFreezeReceiptWrite {
     pub disposition: SnapshotFreezePublicationDisposition,
 }
 
+/// Return whether `receipt` records the exact same fs-exec freeze artifact as `freeze`.
+pub(super) fn matches_recorded_freeze(
+    receipt: &RecordedSnapshotFreezeReceipt,
+    freeze: &fs_exec::freeze::SnapshotFreezeReceipt,
+) -> bool {
+    receipt.freeze_identity == *freeze.identity()
+        && receipt.sealed_content_id == *freeze.sealed_content_id()
+        && receipt.payload_commitment == *freeze.payload_commitment()
+        && receipt.drained_run == freeze.drained_run()
+        && receipt.solver_instance_generation == freeze.binding().solver_instance_generation
+}
+
 /// Validate that `freeze` binds to this governor, session, and completed
 /// pause before any byte reaches the ledger.
 pub(super) fn validate_binding(
     governor_hash: ContentHash,
-    session: u64,
+    request_id: super::PauseRequestId,
     freeze: &fs_exec::freeze::SnapshotFreezeReceipt,
 ) -> Result<(), (&'static str, SessionError)> {
+    let session = request_id.session().0;
     let binding = freeze.binding();
     if binding.session != session {
         return Err((
@@ -117,6 +130,25 @@ pub(super) fn validate_binding(
             SessionError::SnapshotFreezeBindingMismatch {
                 id: session,
                 reason: "receipt does not state committed bytes",
+            },
+        ));
+    }
+    let labels = freeze.labels();
+    if labels.pause_request.as_bytes() != request_id.checkpoint_authority().as_bytes() {
+        return Err((
+            "pause_request",
+            SessionError::SnapshotFreezeBindingMismatch {
+                id: session,
+                reason: "receipt pause_request does not match pause checkpoint authority",
+            },
+        ));
+    }
+    if labels.gate_generation != request_id.gate_generation() {
+        return Err((
+            "gate_generation",
+            SessionError::SnapshotFreezeBindingMismatch {
+                id: session,
+                reason: "receipt gate_generation does not match paused gate generation",
             },
         ));
     }
@@ -175,7 +207,7 @@ pub(super) fn publish_freeze_terminal(
 
     let authority = fs_blake3::hash_domain(
         FREEZE_AUTHORITY_DOMAIN,
-        &freeze_authority_preimage(inputs.freeze),
+        &freeze_authority_preimage(&inputs),
     );
     let recorded = RecordedSnapshotFreezeReceipt {
         authority,
@@ -272,12 +304,12 @@ pub(super) fn publish_freeze_terminal(
     }
 }
 
-fn freeze_authority_preimage(freeze: &fs_exec::freeze::SnapshotFreezeReceipt) -> Vec<u8> {
-    let mut preimage = Vec::with_capacity(128);
-    preimage.extend_from_slice(freeze.identity());
-    preimage.extend_from_slice(freeze.sealed_content_id());
-    preimage.extend_from_slice(freeze.payload_commitment());
-    preimage.extend_from_slice(&freeze.drained_run().to_le_bytes());
-    preimage.extend_from_slice(&freeze.binding().solver_instance_generation.to_le_bytes());
+fn freeze_authority_preimage(inputs: &FreezePublishInputs<'_>) -> Vec<u8> {
+    let mut preimage = Vec::with_capacity(32 * 3 + 8 * 2);
+    preimage.extend_from_slice(inputs.governor_hash.as_bytes());
+    preimage.extend_from_slice(inputs.session_open_hash.as_bytes());
+    preimage.extend_from_slice(&inputs.session.to_le_bytes());
+    preimage.extend_from_slice(&inputs.request_ordinal.to_le_bytes());
+    preimage.extend_from_slice(inputs.acknowledgement_hash.as_bytes());
     preimage
 }
