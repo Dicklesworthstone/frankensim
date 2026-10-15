@@ -28,6 +28,32 @@ impl<'a> ExpandedArticulated<'a> {
     pub const fn model(&self) -> &ArticulatedModel { &self.model }
     /// Thermal geometry and receipts in the original link-tree order.
     pub fn bodies(&self) -> &[ExpandedBody<'a>] { &self.bodies }
+
+    // Shared assembly for prescribed temperatures and actual heat-transport
+    // endpoints. The original inventory, body order and topology stay bound.
+    pub(super) fn from_bodies(
+        reference: &'a ResolvedArticulated,
+        bodies: Vec<ExpandedBody<'a>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MaterialInertiaError> {
+        poll(&mut cancelled)?;
+        if bodies.len() != reference.bodies().len() {
+            return Err(MaterialInertiaError::Invalid("configured bodies must cover the reference mechanism"));
+        }
+        let mut numerical = Vec::with_capacity(bodies.len());
+        for ((link, original), body) in reference.model().links().iter()
+            .zip(reference.bodies()).zip(&bodies) {
+            poll(&mut cancelled)?;
+            if !core::ptr::eq(original, body.reference()) {
+                return Err(MaterialInertiaError::Invalid("configured body belongs to a different reference link"));
+            }
+            numerical.push(Link::new(link.name(), link.parent(), link.parent_from_child_zero(),
+                link.joint(), body.inertia()));
+        }
+        let model = ArticulatedModel::new(numerical)?;
+        poll(&mut cancelled)?;
+        Ok(Self { reference, model, bodies })
+    }
 }
 
 /// Reconfigure all link inertias from source-integrated free thermal expansion.
@@ -61,18 +87,13 @@ pub fn expand_articulated<'a>(
             return Err(MaterialInertiaError::Invalid("thermal link names must be bounded, nonblank and unique"));
         }
     }
-    let mut numerical = Vec::with_capacity(reference.model().link_count());
     let mut bodies = Vec::with_capacity(reference.bodies().len());
     for (link, original_body) in reference.model().links().iter().zip(reference.bodies()) {
         poll(&mut cancelled)?;
         let regions = by_name.remove(link.name())
             .ok_or(MaterialInertiaError::Invalid("missing or foreign thermal link assignment"))?;
         let body = expand_body(original_body, regions, &mut cancelled)?;
-        numerical.push(Link::new(link.name(), link.parent(), link.parent_from_child_zero(),
-            link.joint(), body.inertia()));
         bodies.push(body);
     }
-    let model = ArticulatedModel::new(numerical)?;
-    poll(&mut cancelled)?;
-    Ok(ExpandedArticulated { reference, model, bodies })
+    ExpandedArticulated::from_bodies(reference, bodies, cancelled)
 }

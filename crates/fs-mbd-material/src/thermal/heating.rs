@@ -24,6 +24,8 @@ use crate::{MaterialInertiaError, ResolvedBody};
 use super::{ExpandedBody, temperature::{RegionTemperature, expand_body_at_temperatures}};
 
 mod source;
+mod mechanism;
+pub use mechanism::{HeatedArticulated, LinkHeating};
 
 /// Thermal description for one complete material region; no hand-entered mass.
 #[derive(Clone, Debug)]
@@ -125,40 +127,9 @@ impl<'a> HeatedBody<'a> {
         if regions.len() != reference.regions().len() {
             return Err(HeatingError::Binding("every mechanical region needs exactly one thermal cell"));
         }
-        let total = regions.len().checked_add(events.len())
-            .ok_or(DepositionError::Budget("heated body schedule"))?;
-        if total > budget.max_events || regions.len() > budget.max_cells {
-            return Err(DepositionError::Budget("heated body initialization").into());
-        }
         regions.sort_by_key(|r| r.key);
-        let mut cells = BTreeSet::new();
-        let mut materials = BTreeSet::new();
-        let mut schedule = Vec::with_capacity(total);
-        let mut laws: Vec<(MaterialId, &'a dyn ThermalLaw)> = Vec::with_capacity(regions.len());
-        for (original, region) in reference.regions().iter().zip(&regions) {
-            checkpoint()?;
-            if original.key() != region.key || !cells.insert(region.cell_id)
-                || !materials.insert(region.material_id) {
-                return Err(HeatingError::Binding("region keys, cell IDs and material IDs must be unique and complete"));
-            }
-            source::admit(original, region, &mut checkpoint)?;
-            laws.push((region.material_id, region.caloric.curve()));
-            schedule.push(TimedEvent { time_s: 0.0, event: Event::Birth(DepositedCell {
-                id: region.cell_id, segment_id: region.segment_id, body_id: region.body_id,
-                material_id: region.material_id, mass_kg: original.inertia().mass(),
-                specific_h_j_kg: region.initial_specific_enthalpy_j_kg,
-                geometry: region.geometry, boundary: region.boundary,
-            }) });
-        }
-        for event in events {
-            checkpoint()?;
-            if matches!(&event.event, Event::Birth(_)) {
-                return Err(HeatingError::Binding("a fixed reference body cannot accept new mass"));
-            }
-            schedule.push(event);
-        }
-        let initial = DepositionSimulation::new(schedule, &laws, budget)?;
-        let (thermal, _) = initial.advance_to(0.0, config, &mut checkpoint)?;
+        let thermal = initialize(&[(reference, regions.as_slice())], events, budget,
+            config, &mut checkpoint)?;
         let configuration = configure(reference, &regions, &thermal, &mut checkpoint)?;
         checkpoint()?;
         Ok(Self { thermal, mechanics: ExpansionObserver { reference, regions, configuration } })
@@ -254,4 +225,60 @@ fn configure<'a>(reference: &'a ResolvedBody, regions: &[ThermalRegion<'_>],
     });
     if let Some(e) = error { return Err(e.into()); }
     Ok(configuration?)
+}
+
+// One physical timeline, whether the inventory belongs to one body or many
+// articulated links. Region keys are local; cell/law IDs and budgets are global.
+fn initialize<'a>(
+    inventories: &[(&ResolvedBody, &[ThermalRegion<'a>])],
+    events: Vec<TimedEvent>,
+    budget: DepositionBudget,
+    config: StepConfig,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<DepositionSimulation<'a>, HeatingError> {
+    let mut count = 0usize;
+    for &(reference, regions) in inventories {
+        checkpoint()?;
+        if regions.len() != reference.regions().len() {
+            return Err(HeatingError::Binding("every mechanical region needs exactly one thermal cell"));
+        }
+        count = count.checked_add(regions.len())
+            .ok_or(DepositionError::Budget("heated body schedule"))?;
+    }
+    let total = count.checked_add(events.len())
+        .ok_or(DepositionError::Budget("heated body schedule"))?;
+    if total > budget.max_events || count > budget.max_cells {
+        return Err(DepositionError::Budget("heated body initialization").into());
+    }
+    let mut cells = BTreeSet::new();
+    let mut materials = BTreeSet::new();
+    let mut schedule = Vec::with_capacity(total);
+    let mut laws: Vec<(MaterialId, &'a dyn ThermalLaw)> = Vec::with_capacity(count);
+    for &(reference, regions) in inventories {
+        for (original, region) in reference.regions().iter().zip(regions) {
+            checkpoint()?;
+            if original.key() != region.key || !cells.insert(region.cell_id)
+                || !materials.insert(region.material_id) {
+                return Err(HeatingError::Binding("region keys, cell IDs and material IDs must be unique and complete"));
+            }
+            source::admit(original, region, checkpoint)?;
+            laws.push((region.material_id, region.caloric.curve()));
+            schedule.push(TimedEvent { time_s: 0.0, event: Event::Birth(DepositedCell {
+                id: region.cell_id, segment_id: region.segment_id, body_id: region.body_id,
+                material_id: region.material_id, mass_kg: original.inertia().mass(),
+                specific_h_j_kg: region.initial_specific_enthalpy_j_kg,
+                geometry: region.geometry, boundary: region.boundary,
+            }) });
+        }
+    }
+    for event in events {
+        checkpoint()?;
+        if matches!(&event.event, Event::Birth(_)) {
+            return Err(HeatingError::Binding("a fixed reference body cannot accept new mass"));
+        }
+        schedule.push(event);
+    }
+    let initial = DepositionSimulation::new(schedule, &laws, budget)?;
+    let (thermal, _) = initial.advance_to(0.0, config, &mut *checkpoint)?;
+    Ok(thermal)
 }
