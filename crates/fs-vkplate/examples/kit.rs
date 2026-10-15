@@ -25,6 +25,7 @@ fn main() {
         "tom-14" => (kit::drum(&d(kit::tom(14.0)), &[(0.005, v(3.5))]), 2.5),
         "hihat-closed" => (kit::hihat(0.0, 80.0, &[(0.005, v(2.5))]), 0.8),
         "hihat-open" => (kit::hihat(0.002, 0.0, &[(0.005, v(2.5))]), 2.5),
+        "splash" => (kit::cymbal(&kit::splash(), &[(0.005, v(2.0), 0.78, 0.005)]), 2.6),
         "crash" => (kit::cymbal(&kit::crash(), &[(0.005, v(6.0), 0.95, 0.008)]), 5.0),
         "ride" => (kit::cymbal(&kit::ride(), &[(0.005, v(2.5), 0.6, 0.004)]), 4.0),
         other => {

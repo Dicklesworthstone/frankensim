@@ -332,11 +332,12 @@ fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool) -> Result<Body, String> 
     };
     // felt washers clamp the annulus round the 13 mm centre hole
     let (r1, n) = ring_nodes(c.grid, 0.0065, 0.02);
+    let mount_scale = if r < 0.15 { 0.25 } else { 1.0 };
     let (ks, cs) = if r1 > 0.02 {
         let per = PI * (0.02f64.powi(2) - 0.0065f64.powi(2)) / (n as f64 * c.grid * c.grid);
-        (9.0e7 * per, 2.7e3 * per)
+        (9.0e7 * per * mount_scale, 2.7e3 * per * mount_scale)
     } else {
-        (9.0e7, 2.7e3)
+        (9.0e7 * mount_scale, 2.7e3 * mount_scale)
     };
     Body::plate(name, &PlateSpec {
         radius: r, hole: 0.0065, grid: c.grid, edge: Edge::Free, thickness: &th, rest_height: &z,
@@ -345,6 +346,10 @@ fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool) -> Result<Body, String> 
         // felt washers: ~1e5 N/m and ~3 N s/m in all, spread over the clamped annulus
         support: if felt { Some((0.0065, r1, ks, cs)) } else { None }, muffle: None,
     })
+}
+
+pub fn splash() -> CymbalSpec {
+    CymbalSpec { name: "splash 8", radius: 0.1016, bow_thickness: 0.68e-3, bell_thickness: 1.5e-3, bell_radius: 0.039, bow_rise: 0.008, bell_rise: 0.014, grid: 4.5e-3, t60: [(500.0, 6.8), (10000.0, 3.1)] }
 }
 
 pub fn crash() -> CymbalSpec {
