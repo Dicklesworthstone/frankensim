@@ -52,7 +52,7 @@ impl TubeNetworkSpec {
                 gas.specific_heat_cp, gas.prandtl, gas.characteristic_impedance]
                 .iter().all(|v| v.is_finite() && *v > 0.0)
                 || !gas.gamma.is_finite() || gas.gamma <= 1.0
-                || !gas.water_mole_fraction.is_finite() || !(0.0..1.0).contains(&gas.water_mole_fraction)
+                || !gas.water_mole_fraction.is_finite() || !(0.0..=1.0).contains(&gas.water_mole_fraction)
                 || gas.pressure.to_bits() != gases[0].pressure.to_bits()
             { return Err(invalid("regional gas states must be finite and share one static pressure")); }
         }
