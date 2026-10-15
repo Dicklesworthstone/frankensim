@@ -1,7 +1,54 @@
 //! Contact heat is an internal source in the existing uniform thermal carrier.
 //! A transport owner proposes all stores before either physical owner commits.
 use super::*;
+use fs_contact::normal_patch::PointNormalPatchReceipt;
 use fs_material::phase::{UniformEnthalpyStep,UniformEnthalpyStepInput};
+
+/// One accepted reservoir and its actual contact work for a joint thermal solve.
+/// Keys and order are stable; the canonical input owns all physical coordinates.
+#[derive(Clone, Copy, Debug)]
+pub struct ReservoirThermalInput<'a> {
+    pub key: &'a str,
+    pub thermal: UniformEnthalpyStepInput<'a>,
+}
+
+/// Read-only, unpublished collision endpoint and simultaneous thermal requests.
+/// The mechanics are frozen during transport: this is not temperature feedback
+/// into stiffness. Observations are instantaneous endpoints, not averaged contact
+/// area, continuous collision detection, or an extra source of contact heat.
+pub struct ImpactThermalTrial<'a> {
+    system: &'a ImpactSystem,
+    next: &'a [f64],
+    inputs: &'a [ReservoirThermalInput<'a>],
+}
+impl<'a> ImpactThermalTrial<'a> {
+    /// All stores at the SAME old thermal time, in original reservoir order.
+    pub fn reservoirs(&self) -> &[ReservoirThermalInput<'a>] { self.inputs }
+    /// Exact mechanical duration shared by every reservoir request.
+    pub fn duration_s(&self) -> f64 { self.system.config.dt_s }
+    /// One-based proposed mechanical sample; this has not yet been published.
+    pub fn sample(&self) -> u64 { self.system.sample+1 }
+    /// Original material owner at the proposed mechanical endpoint. Use its
+    /// footprint/pressure to resolve a thermal interface, not to redeposit loss.
+    /// Source envelopes and geometry are checked by the original contact owner.
+    pub fn contact_observation(&self, key:&str) -> Result<PointNormalPatchReceipt,ImpactError> {
+        let (contact,c)=self.system.material_contacts().iter().enumerate()
+            .find(|(_,c)|c.key()==key).ok_or_else(||invalid("unknown thermal-trial contact"))?;
+        let (d,v)=c.kinematics(self.next,self.next)
+            .map_err(|source|ImpactError::MaterialContact {contact,source})?;
+        c.source().evaluate(&format!("{key}/thermal-trial/{}",self.sample()),d,v,self.duration_s())
+            .map_err(|source|ImpactError::MaterialContact {contact,source})
+    }
+}
+
+/// Joint thermal proposal, including independently declared outside heat.
+/// For an isolated collection this is zero even when its stores exchange heat.
+#[derive(Clone, Debug)]
+pub struct CoupledThermalStep<R> {
+    pub transfers: Vec<UniformEnthalpyStep<R>>,
+    /// Heat from outside the ENTIRE collection [J], excluding all internal links.
+    pub boundary_heat_j: f64,
+}
 
 /// Accepted heat-transfer records, retained with their concrete solver reports.
 #[derive(Clone, Debug)]
@@ -9,43 +56,78 @@ pub struct TransportedImpactFrame<R> {
     /// Combined accounting; its residual also subtracts the boundary heat below.
     pub impact: HeatedImpactFrame,
     /// Actual signed boundary heat supplied to all thermal stores this step [J].
+    /// Internal exchange cancels in this sum; individual stores retain both signs.
     pub boundary_heat_j: f64,
     /// Original thermal proposals/reports in reservoir order, without erasure.
     pub transfers: Vec<UniformEnthalpyStep<R>>,
 }
 impl<'a> HeatedImpactSystem<'a> {
-    /// Couple deposited contact work to an existing thermal transport owner.
-    ///
-    /// Every store is visited, even during separation or elastic contact: cooling
-    /// does not stop when contact stops. The request uses the current chart state,
-    /// invariant mass/geometry, actual dt and only that store's contact heat.
-    /// Pass e.g. `|_, input| environment.advance(cx,input).map_err(...)` for
-    /// fs-conduction, or another owner of UniformEnthalpyStep. The callback must
-    /// propose, not debit live reservoirs: irreversible external side effects
-    /// cannot be rolled back. Original reports publish only with complete success.
-    ///
-    /// A returned state must belong to the SAME chart. Per-step and cumulative
-    /// physical energy defects must fit the existing absolute heat allowance;
-    /// a callback cannot enlarge it by returning a larger residual tolerance.
-    /// No correction rescales heat or repairs a solver state. Adiabatic stepping
-    /// can resume from the actual returned state without replaying boundary heat.
-    /// This reporting path allocates bounded proposal storage (at most 64 stores).
+    /// Couple deposited contact work to independent thermal transport owners.
+    /// Every store is visited, including after separation. For interacting stores
+    /// use `step_with_coupled_transport`: sequential callbacks must not debit a
+    /// live partner or separately replay its heat. This convenience path shares
+    /// all chart, energy, cancellation and publication gates with that joint path.
     pub fn step_with_transport<R>(&mut self, forces:&[f64], gate:&CancelGate,
         mut transport:impl FnMut(&str,UniformEnthalpyStepInput<'_>)
             -> Result<UniformEnthalpyStep<R>,ImpactError>,
     ) -> Result<TransportedImpactFrame<R>,ImpactError> {
+        self.step_with_coupled_transport(forces,gate,|trial| {
+            let mut proposals=Vec::with_capacity(trial.inputs.len());
+            for input in trial.inputs {
+                if gate.is_requested() {return Err(ImpactError::Cancelled);}
+                proposals.push(transport(input.key,input.thermal)?);
+            }
+            let boundary_heat_j=proposals.iter().map(|p|p.external_heat_j).sum();
+            Ok(CoupledThermalStep {transfers:proposals,boundary_heat_j})
+        })
+    }
+
+    /// Propose interacting finite reservoirs together on one collision step.
+    ///
+    /// The callback is called once with ALL old thermal states, each store's
+    /// actual deposited contact work, and the unpublished mechanical endpoint.
+    /// Return exactly one canonical proposal per input, in the same order. A
+    /// finite exchange Q is -Q in its donor's `external_heat_j` and +Q in its
+    /// recipient's; it is NOT counted again as internal contact dissipation.
+    /// The signed sum must match the independently declared collection boundary
+    /// heat. In an isolated pair that declaration is zero, so a missing donor
+    /// debit refuses even when the recipient's local balance would pass.
+    ///
+    /// Reuse a thermal network/contact solver in this callback. It must propose,
+    /// not mutate live reservoirs: arbitrary callback side effects cannot be
+    /// undone. Concrete reports publish only with complete mechanical acceptance.
+    /// Every state must belong to its exact original chart. Local, cumulative
+    /// and total energy defects must fit the existing absolute heat allowance;
+    /// no returned allowance can enlarge it and no state/heat is repaired.
+    ///
+    /// The adapter does not infer topology or a heat-transfer law. Endpoint
+    /// contact gating is a time discretization, not event-resolved conduction.
+    /// Bounded request/proposal storage allocates for at most 64 reservoirs.
+    pub fn step_with_coupled_transport<R>(&mut self, forces:&[f64], gate:&CancelGate,
+        mut transport:impl FnMut(ImpactThermalTrial<'_>)
+            -> Result<CoupledThermalStep<R>,ImpactError>,
+    ) -> Result<TransportedImpactFrame<R>,ImpactError> {
         let Self {mechanics,stores,routes,heat,heat_tolerance_j,..}=self;
-        let mut proposals=Vec::with_capacity(stores.len());
+        let mut proposals=Vec::new();
         let mut inventories=Vec::with_capacity(stores.len());
         let (mut deposited,mut change,mut boundary)=(0.0,0.0,0.0);
         let mechanical=mechanics.step_checked(forces,gate,|system,next,velocity,record| {
             deposited=stage_heat(system,next,velocity,record,routes,heat)?;
-            for (i,s) in stores.iter().enumerate() {
-                if gate.is_requested() {return Err(ImpactError::Cancelled);}
-                let p=transport(&s.key,UniformEnthalpyStepInput {
+            if gate.is_requested() {return Err(ImpactError::Cancelled);}
+            let inputs:Vec<_>=stores.iter().enumerate().map(|(i,s)|ReservoirThermalInput {
+                key:&s.key,thermal:UniformEnthalpyStepInput {
                     curve:s.curve,initial:s.state,mass_kg:s.mass_kg,volume_m3:s.volume_m3,
                     surface_area_m2:s.surface_area_m2,internal_heat_j:heat[i],duration_s:system.config.dt_s,
-                })?;
+                },
+            }).collect();
+            let proposed=transport(ImpactThermalTrial {system,next,inputs:&inputs})?;
+            let declared_boundary=proposed.boundary_heat_j;
+            proposals=proposed.transfers;
+            if proposals.len()!=stores.len() {
+                return Err(invalid("coupled thermal transport must return exactly one proposal per reservoir"));
+            }
+            for ((i,s),p) in stores.iter().enumerate().zip(&proposals) {
+                if gate.is_requested() {return Err(ImpactError::Cancelled);}
                 let h=p.state.specific_enthalpy_j_kg();
                 if !p.external_heat_j.is_finite() || !p.energy_residual_tolerance_j.is_finite()
                     || p.energy_residual_tolerance_j<0.0 || p.energy_residual_tolerance_j>*heat_tolerance_j
@@ -63,7 +145,10 @@ impl<'a> HeatedImpactSystem<'a> {
                     return Err(invalid("thermal transport violates local or accumulated energy balance"));
                 }
                 change+=delta;boundary+=p.external_heat_j;
-                proposals.push(p);inventories.push((received,received_correction,external,external_correction));
+                inventories.push((received,received_correction,external,external_correction));
+            }
+            if !declared_boundary.is_finite() || (boundary-declared_boundary).abs()>*heat_tolerance_j {
+                return Err(invalid("thermal exchange does not close the declared collection boundary"));
             }
             let defect=change-deposited-boundary;
             if ![change,boundary,defect].into_iter().all(f64::is_finite) || defect.abs()>*heat_tolerance_j {

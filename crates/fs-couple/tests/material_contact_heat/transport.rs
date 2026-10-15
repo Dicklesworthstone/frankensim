@@ -103,3 +103,6 @@ fn thermal_source_failure_foreign_state_and_late_cancellation_are_atomic() {
     // Failed candidate scratch cannot poison a retry of the unchanged state.
     s.step(&[0.0;2],&gate).unwrap();assert_eq!(s.mechanics().samples(),1);
 }
+
+#[path="coupled.rs"]
+mod coupled;
