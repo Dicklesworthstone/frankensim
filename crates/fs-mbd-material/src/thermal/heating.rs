@@ -23,6 +23,10 @@ use fs_thermal::observers::{CoupledObservers, ObserverCouplingError};
 use crate::{MaterialInertiaError, ResolvedBody};
 use super::{ExpandedBody, temperature::{RegionTemperature, expand_body_at_temperatures}};
 
+/// Solved heat drives compatible constrained FEM shape, stress and inertia.
+#[cfg(feature = "thermoelastic-coupling")]
+pub mod constrained;
+
 mod source;
 mod mechanism;
 pub use mechanism::{HeatedArticulated, LinkHeating};

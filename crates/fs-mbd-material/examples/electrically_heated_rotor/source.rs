@@ -40,7 +40,7 @@ impl Source {
             if rows.len() == 256 { return Err(invalid("material table exceeds 256 rows")); }
             let columns = text.split_whitespace().collect::<Vec<_>>();
             if columns.len() != 6 { return Err(invalid(&format!("line {line}: expected six SI columns"))); }
-            let mut row = [0.0; 6];
+            let mut row: [f64; 6] = [0.0; 6];
             for (out, value) in row.iter_mut().zip(columns) {
                 *out = value.parse().map_err(|_| invalid(&format!("line {line}: invalid number")))?;
             }

@@ -178,3 +178,6 @@ fn cancellation_before_assembly_preserves_the_original_inventory() {
     assert!(matches!(result,Err(ThermalBodyError::Solid(TetElasticError::Cancelled))));
     near(original.inertia().mass(),1.);
 }
+
+#[path = "thermoelastic_body/heating.rs"]
+mod heating;

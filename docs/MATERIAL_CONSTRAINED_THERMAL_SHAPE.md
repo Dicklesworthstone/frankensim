@@ -91,3 +91,53 @@ cargo test -p fs-mbd-material --features thermoelastic-coupling --test thermoela
 Tests use synthetic material data, independent volume quadrature and analytical
 free/fully-constrained/bonded-cell references, and exercise the actual articulated
 dynamics owner. They are not empirical accuracy claims for a named material.
+
+## Actual heating and cooling histories
+
+`thermal::heating::constrained::ConstrainedHeatedBody` connects the same
+constrained solver to the existing `fs-thermal` enthalpy timeline. Construct it
+with the bound `TetrahedralMass`, complete `ConstrainedRegion` assignments,
+fixed displacement DOFs, the same shape limits, and the ordinary thermal
+schedule/budgets. A `ConstrainedRegion` reuses `ThermalRegion` for storage and
+source descriptions and adds current stiffness selection. Its storage
+`fixed_point_m` belongs only to the independent free-expansion API; it is NOT a
+constraint here. Explicit FEM supports determine compatible deformation.
+
+```rust,ignore
+let (next, report) = body.advance_to(
+    target_time_s, thermal_step_config, max_shape_solves, &cx,
+)?;
+let temperatures_and_enthalpies = next.thermal();
+let displacement_stress_geometry_and_inertia = next.configuration();
+```
+
+Initialization reuses the original source-card, caloric, full state-context,
+reference-volume and exact reference-mass admission. At each actual thermal
+substep it converts that SAME enthalpy history to cell temperatures, requires a
+solid phase, and calls the existing constrained FEM path. It does not first
+construct a contradictory independently expanded body. A bad intermediate
+source state or distorted cell refuses the entire advance even if the requested
+final temperature would be valid after cooling. All references remain intact
+for deterministic retry. Same-time queries require no additional shape solve.
+
+`max_shape_solves` tightens the original substep limit for the whole advance;
+events do not renew the budget. `report.shape_solves` counts actual accepted
+configurations, not output samples. Thermal stepping and heat accounting are
+unchanged, so no-op observers and aligned restarts keep the same heat trajectory.
+`advance_with` composes an independent generated-heat/conductance observer on
+these same steps. Its cloned history and the complete heat/shape candidate
+publish together only after source, structural and final thermal checks pass.
+
+This is quasistatic, one-way thermal-to-mechanical coupling, not a total-energy
+time integrator. Elastic stored energy is in `configuration().stress()`;
+`report.thermal` accounts for heat only. Thermoelastic work is not subtracted
+from the heat source, moving geometry does not silently update thermal contact
+areas/conductances, and the body is not advanced through a rigid-motion history.
+Thermal control volumes use the original per-cell uniform-temperature model and
+its time-refinement obligations. No exact continuum thermal-field claim follows
+from subsequently using compatible finite elements for mechanical shape.
+
+The `thermoelastic_body` target includes six additional real heat/FEM integration
+regressions: direct thermal-path and fresh-FEM parity, Cp-only data changes,
+fully restrained heating, intermediate source excursions, independent heat
+history rollback, and aligned restart/whole-advance work limits.
