@@ -88,7 +88,7 @@ run_check() {
 }
 
 run_self_test() {
-  log "self-test" "\"stage\":\"starting runner self-test\""
+  log "self-test" "\"detail\":\"starting runner self-test\""
   local count=${#TWINS[@]}
   if [ "$count" -lt 4 ]; then
     die "$EXIT_VERIFY" "insufficient hostile twins registered" "./scripts/ci/e2e_tsqr_rank_deficient.sh --self-test"
@@ -102,50 +102,49 @@ run_self_test() {
 }
 
 emit_artifacts() {
+  local cert_file="$1"
   mkdir -p "$OUT_DIR"
-  local cert_file="$OUT_DIR/certificates.jsonl"
   : > "$cert_file"
-  log "artifacts" "\"stage\":\"emitting certificates\",\"path\":\"$cert_file\""
+  log "artifacts" "\"detail\":\"emitting certificates\",\"path\":\"$cert_file\""
   probe emit-certificate-full-rank  >> "$cert_file" || die "$EXIT_PIPELINE" "full-rank certificate emission failed" "probe emit-certificate-full-rank"
   probe emit-certificate-deficient >> "$cert_file" || die "$EXIT_PIPELINE" "deficient certificate emission failed" "probe emit-certificate-deficient"
-  printf '%s\n' "$cert_file"
 }
 
 run_smoke() {
-  log "smoke" "\"stage\":\"running tsqr_rank_deficient battery\""
+  log "smoke" "\"detail\":\"running tsqr_rank_deficient battery\""
   "$CARGO_BIN" test -p fs-la --test tsqr_rank_deficient --release -- --nocapture \
     || die "$EXIT_PIPELINE" "tsqr_rank_deficient failed" "cargo test -p fs-la --test tsqr_rank_deficient --release"
 
-  log "smoke" "\"stage\":\"running tsqr_tree_gauge battery\""
+  log "smoke" "\"detail\":\"running tsqr_tree_gauge battery\""
   "$CARGO_BIN" test -p fs-la --test tsqr_tree_gauge --release -- --nocapture \
     || die "$EXIT_PIPELINE" "tsqr_tree_gauge failed" "cargo test -p fs-la --test tsqr_tree_gauge --release"
 
-  local cert_file
-  cert_file="$(emit_artifacts)"
-  log "replay" "\"stage\":\"verifying freshly emitted artifacts\",\"file\":\"<artifacts>/certificates.jsonl\""
+  local cert_file="$OUT_DIR/certificates.jsonl"
+  emit_artifacts "$cert_file"
+  log "replay" "\"detail\":\"verifying freshly emitted artifacts\",\"file\":\"<artifacts>/certificates.jsonl\""
   probe verify-certificate "$cert_file" || die "$EXIT_VERIFY" "artifact verification failed" "probe verify-certificate <certificates.jsonl>"
 
   log "smoke" "\"status\":\"pass\""
 }
 
 run_full() {
-  log "full" "\"stage\":\"policy/result surface lane\""
+  log "full" "\"detail\":\"policy/result surface lane\""
   "$CARGO_BIN" test -p fs-la --lib canonical_qr --release -- --nocapture \
     || die "$EXIT_PIPELINE" "canonical_qr unit lane failed" "cargo test -p fs-la --lib canonical_qr --release"
   "$CARGO_BIN" test -p fs-la --test canonical_qr_policy --release -- --nocapture \
     || die "$EXIT_PIPELINE" "canonical_qr_policy failed" "cargo test -p fs-la --test canonical_qr_policy --release"
 
-  log "full" "\"stage\":\"driver cancellation/resume/fork lane\""
-  "$CARGO_BIN" test -p fs-la --lib canonical_tree --release --nocapture -- --nocapture \
+  log "full" "\"detail\":\"driver cancellation/resume/fork lane\""
+  "$CARGO_BIN" test -p fs-la --lib canonical_tree --release -- --nocapture \
     || die "$EXIT_PIPELINE" "canonical_tree lane failed" "cargo test -p fs-la --lib canonical_tree --release"
 
-  log "full" "\"stage\":\"independent checker lane\""
+  log "full" "\"detail\":\"independent checker lane\""
   "$CARGO_BIN" test -p fs-la --lib canonical_check --release -- --nocapture \
     || die "$EXIT_PIPELINE" "canonical_check lane failed" "cargo test -p fs-la --lib canonical_check --release"
 
   run_smoke
 
-  log "full" "\"stage\":\"executing all hostile twins for real\""
+  log "full" "\"detail\":\"executing all hostile twins for real\""
   for t in "${TWINS[@]}"; do
     local name="${t%%:*}"
     probe "twin-$name" || die "$EXIT_NEG_MISSED" "twin not detected: $name" "./scripts/ci/e2e_tsqr_rank_deficient.sh --negative $name"
@@ -156,7 +155,7 @@ run_full() {
 
 run_negative() {
   local target="$1"
-  log "negative" "\"case\":\"$target\",\"stage\":\"executing hostile twin for real\""
+  log "negative" "\"case\":\"$target\",\"detail\":\"executing hostile twin for real\""
   case "$target" in
     list) list_cases ;;
     raw-factor-equality|tampered-certificate|unsupported-tree-claim|scale-blind-tolerance)
@@ -175,7 +174,7 @@ run_negative() {
 
 run_replay() {
   local file="$1"
-  log "replay" "\"file\":\"<artifact>\",\"stage\":\"verifying retained certificate artifact\""
+  log "replay" "\"file\":\"<artifact>\",\"detail\":\"verifying retained certificate artifact\""
   [ -f "$file" ] || die "$EXIT_USAGE" "replay file not found: $file" "./scripts/ci/e2e_tsqr_rank_deficient.sh --replay <file>"
   probe verify-certificate "$file" || die "$EXIT_VERIFY" "artifact verification failed" "./scripts/ci/e2e_tsqr_rank_deficient.sh --replay $file"
   log "replay" "\"status\":\"verified\""
