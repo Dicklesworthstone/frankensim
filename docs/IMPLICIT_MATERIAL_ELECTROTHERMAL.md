@@ -90,3 +90,66 @@ and control-volume backward Euler. It does not simulate melt motion, magnetic
 induction, mechanical work, phase kinetics or changing topology. Algebraic
 convergence does not establish nonlinear uniqueness, timestep accuracy,
 unconditional stability for arbitrary laws, or measured material validation.
+
+## Run the same material files with closed feedback
+
+The `joule_phase_change` executable accepts a final
+`--implicit DIFFERENCE_STEP_J` pair when built with the optional feature. No
+bulk or interface file format changes are required. Without that pair, its
+original explicit route and CSV columns remain unchanged. A build without the
+feature refuses the flag instead of silently running the explicit algorithm.
+
+```sh
+cargo run -p fs-lbm --features implicit-enthalpy-coupling \
+  --example joule_phase_change -- \
+  crates/fs-lbm/examples/joule_phase_change/latent_20k.txt \
+  10 60 0.25 --implicit 1e-10
+
+cargo run -p fs-lbm --features implicit-enthalpy-coupling \
+  --example joule_phase_change -- \
+  crates/fs-lbm/examples/joule_phase_change/transport_phase_dependent.txt \
+  10 60 0.25 crates/fs-lbm/examples/joule_phase_change/contact_low.txt \
+  --implicit 1e-10
+```
+
+Change `latent_20k.txt` to `latent_40k.txt` to change only latent storage data.
+Change `contact_low.txt` to `contact_high.txt` in the second command to change
+only the source-card electrical contact law. The same three physical cells,
+bulk material, thermal link law, voltage pulse and source/card resolver are
+used by both numerical routes. These fixtures are **synthetic**, not qualified
+measurements of any named metal, alloy or electrical interface.
+
+The third numeric argument remains the maximum physical timestep in seconds.
+Each of the existing 60 observation intervals is evenly subdivided to avoid
+an almost-zero floating-point tail step. Voltage is switched off exactly at
+half the requested duration. No implicit step straddles that shutoff. Once the
+power is off, stored heat and phase history continue to evolve under the same
+thermal law rather than resetting to ambient.
+
+The difference scale is in **cell joules** (not specific enthalpy or Kelvin).
+At powered cold start, only the Newton initial guess is moved eight stencil
+widths into the chart interior so mixed search directions can be evaluated.
+This does not preheat the physical initial state: every residual still measures
+storage against the original cold cells. The exactly unpowered cold case uses
+the exact zero guess. Unsupported guesses, stencils, source states and failed
+convergence are errors; no physical state is clipped or extrapolated.
+
+Per observation interval, the example bounds work by 20,000 implicit steps and
+20,001 total current solves, including all nonlinear probes and final checks.
+Each step allows 24 outer Newton attempts and uses the existing three-variable
+Krylov solve. The interval's 1e-8 J thermal allowance is divided between steps;
+a fresh aggregate storage check must also pass before emitting that row.
+Changing the stencil or timestep may require finer numerical controls; neither
+the difference scale nor a small energy residual certifies physical accuracy.
+
+Implicit CSV output appends cumulative Newton iterations and the largest local
+cell residual during the latest observation interval. The current-solve count
+includes discarded nonlinear probes, not just physical steps. `total_external`
+heat already contains the accepted Joule input and is not added to electrode
+work a second time. Earlier accepted stdout rows can exist if a later interval
+refuses; an incomplete stream must not be interpreted as a completed run.
+
+Four executable regressions cover argument/feature selection, data-only latent
+storage changes, source-card contact changes with time refinement, exact
+unpowered cold equilibrium, retained shutoff history and unchanged explicit
+behavior. They run with the existing `--example joule_phase_change` test target.
