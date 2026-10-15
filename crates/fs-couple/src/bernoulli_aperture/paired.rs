@@ -6,10 +6,13 @@
 //! -sum(Ai*vi). This is the same work-conjugate pressure/flow convention as
 //! DynamicAperture. fs-dcontact owns the ONE gap-contact potential and loss;
 //! moving owns the continuous Bernoulli law. Linear midpoint blade responses
-//! are condensed into one scalar gap-velocity equation, not merged into a
-//! fictitious oscillator. Antisymmetric motion therefore remains a real state.
+//! are condensed into a scalar gap equation for the uniform image or a coupled
+//! two-velocity equation for the spatial image, never a fictitious oscillator.
+//! Antisymmetric motion therefore remains a real state.
 //!
-//! Fixed-state one-mode blades and a uniform effective slit only. This does
+//! Fixed-state one-mode blades with a uniform slit or an explicitly selected
+//! matching-planar spatial interface. The latter retains separate nodal gaps
+//! and contact forces and solves both midpoint blade velocities. This does
 //! not add curved-shell modes, spatial material evolution, staple pressure
 //! recovery, or measured oboe/bassoon accuracy. Numerical root selection is
 //! deterministic, not a uniqueness theorem. Midpoint accuracy is second order
@@ -19,6 +22,10 @@
 //! plate valve. Material history participates in this same midpoint solve and
 //! publishes only with both blades and the connected acoustic network.
 
+/// Spatial slit/contact coupled to the original independent blade mechanics.
+mod spatial;
+
+use super::plate::closure::paired::PairedPlateClosure;
 use super::dynamic::{ApertureDrive, ApertureFrame, ApertureState};
 use super::dynamic::relaxation::{
     ApertureRelaxation, InitialApertureMemory, MemoryTrial, PlateRelaxationSpec,
@@ -63,7 +70,8 @@ pub struct PairedApertureLimits {
     pub maximum_energy_j: f64,
     /// Total nonlinear trial evaluations, including bracketing, in 1..=512.
     pub max_evaluations: usize,
-    /// Absolute residual allowance for total midpoint gap velocity [m/s].
+    /// Absolute residual allowance for uniform total-gap velocity or EACH
+    /// independently solved spatial blade midpoint velocity [m/s].
     pub velocity_tolerance_m_s: f64,
     /// Relative residual allowance, in (0,1).
     pub relative_tolerance: f64,
@@ -93,14 +101,18 @@ pub struct PairedApertureSpec {
 /// Same-clock observations without erasing either blade's state.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PairedApertureFrame {
-    /// Common fluid/contact work account; state is TOTAL gap and gap velocity.
+    /// Common fluid/contact work account. State is the reference H+x0+x1
+    /// coordinate; on a spatial interface use its probe for actual local gaps.
     pub aperture: ApertureFrame,
     /// Actual individual endpoint displacements and velocities.
     pub blades: [BladeState; 2],
     /// Midpoint upstream-minus-bore pressure [Pa].
     pub pressure_drop_pa: f64,
-    /// Shared interface force, positive in both local opening coordinates [N].
+    /// Shared uniform force, or total physical normal resultant of a spatial
+    /// interface [N]. A spatial resultant is not either generalized blade force.
     pub contact_force_n: f64,
+    /// Actual work-conjugate contact forces on the independent blade modes [N].
+    pub blade_contact_forces_n: [f64; 2],
     /// Independent blade momentum residuals in force units [N].
     pub momentum_residual_n: [f64; 2],
 }
@@ -114,6 +126,7 @@ pub struct PairedAperture {
     plates: Option<Box<[PlateApertureReduction; 2]>>,
     gas: Option<GasState>,
     relaxation: [Option<ApertureRelaxation>; 2],
+    closure: Option<Box<PairedPlateClosure>>,
     samples: u64,
 }
 
@@ -168,7 +181,7 @@ impl PairedAperture {
             .map_err(nonlinear)?;
         let contact_storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.clone()])
             .map_err(nonlinear)?;
-        let model = Self { spec, blades, contact, contact_storage, plates: None, gas: None, relaxation: [None, None], samples: 0 };
+        let model = Self { spec, blades, contact, contact_storage, plates: None, gas: None, relaxation: [None, None], closure: None, samples: 0 };
         model.validate_state(blades)?;
         Ok(model)
     }
@@ -270,7 +283,13 @@ impl PairedAperture {
         self.spec.rest_opening_m + state[0].displacement_m + state[1].displacement_m
     }
     fn energy(&self, state: [BladeState; 2]) -> f64 {
-        let mut energy = self.contact_storage.hamiltonian(&[self.gap(state), 0.0]);
+        // Public storage observes accepted states. During a numerical trial an
+        // unrepresentable spatial potential remains nonfinite and is refused
+        // by validate_energy; it is never silently replaced with zero storage.
+        let mut energy = match &self.closure {
+            Some(closure) => closure.stored_energy_j(state.map(|s|s.displacement_m)).unwrap_or(f64::NAN),
+            None => self.contact_storage.hamiltonian(&[self.gap(state), 0.0]),
+        };
         for (s, b) in state.iter().zip(&self.spec.blades) {
             energy += 0.5*b.mass_kg*s.velocity_m_s*s.velocity_m_s
                 + 0.5*b.stiffness_n_m*s.displacement_m*s.displacement_m;
@@ -287,6 +306,9 @@ impl PairedAperture {
             if let Some(plates) = &self.plates {
                 plates[i].validate_opening(plates[i].options().rest_opening_m + s.displacement_m)?;
             }
+        }
+        if let Some(closure) = &self.closure {
+            closure.validate_displacements(state.map(|s|s.displacement_m))?;
         }
         self.validate_energy(self.energy(state))
     }
@@ -365,56 +387,61 @@ impl PairedAperture {
                 || !free[i].is_finite() { return Err(invalid("paired blade midpoint response is not representable")); }
         }
         let z = self.spec.impedance_pa_s_m3;
-        let pressure_mobility = (0..2).map(|i| mobility[i]*b[i].pressure_area_m2*b[i].pressure_area_m2).sum::<f64>();
-        let denominator = 1.0 + z*pressure_mobility;
-        if !denominator.is_finite() { return Err(invalid("paired swept-flow compliance overflowed")); }
-        let mut evaluations = 0;
-        let mut evaluate = |velocity: f64| -> Result<Trial, AcousticRealizeError> {
-            evaluations += 1;
-            if evaluations > self.spec.limits.max_evaluations { return Err(invalid("paired aperture nonlinear work budget exhausted")); }
-            let next_gap = gap + dt*velocity;
-            let force = contact.response(next_gap, velocity).map_err(nonlinear)?.force;
-            let base = [free[0]+mobility[0]*force, free[1]+mobility[1]*force];
-            let moving = drive.body_flow_m3_s - b[0].pressure_area_m2*base[0] - b[1].pressure_area_m2*base[1];
-            let source = (drive.upstream_pressure_pa - 2.0*drive.incoming_pressure_pa - z*moving)/denominator;
-            let opening = f64::midpoint(gap, next_gap).max(0.0);
-            // Eliminate the independent pressure/swept-motion response first.
-            // This is the ORIGINAL continuous Bernoulli junction at its reduced
-            // impedance, not an extra source or a fixed-opening approximation.
-            let dp = super::moving::fixed_opening_pressure_drop(self.spec.width_m, opening,
-                self.spec.density_kg_m3, z/denominator, source)?;
-            let velocities = [base[0]-mobility[0]*b[0].pressure_area_m2*dp,
-                base[1]-mobility[1]*b[1].pressure_area_m2*dp];
-            let residual = velocity - velocities[0] - velocities[1];
-            let scale = velocity.abs() + velocities[0].abs() + velocities[1].abs()
-                + free[0].abs() + free[1].abs();
-            if ![velocity, next_gap, dp, residual, scale].iter().all(|x| x.is_finite()) {
-                return Err(invalid("paired aperture trial left the finite physical domain"));
-            }
-            Ok(Trial { velocity: velocities, dp, residual, scale })
-        };
-        let resolved = |t: Trial| t.residual.abs() <= self.spec.limits.velocity_tolerance_m_s
-            + self.spec.limits.relative_tolerance*t.scale;
-        let initial = evaluate(free[0]+free[1])?;
-        let trial = if resolved(initial) { initial } else {
-            let mut span = (free[0].abs()+free[1].abs()).max(0.01);
-            let (mut lo, mut hi) = (-span, span);
-            let (mut left, mut right) = (evaluate(lo)?, evaluate(hi)?);
-            while left.residual > 0.0 || right.residual < 0.0 {
-                span *= 2.0;
-                if !span.is_finite() { return Err(invalid("paired aperture root has no finite bracket")); }
-                if left.residual > 0.0 { lo = -span; left = evaluate(lo)?; }
-                if right.residual < 0.0 { hi = span; right = evaluate(hi)?; }
-            }
-            loop {
-                if resolved(left) { break left; }
-                if resolved(right) { break right; }
-                let mid = f64::midpoint(lo,hi);
-                if mid == lo || mid == hi { return Err(invalid("paired aperture unresolved gap momentum balance")); }
-                let next = evaluate(mid)?;
-                if resolved(next) { break next; }
-                if next.residual < 0.0 { lo=mid; left=next; } else { hi=mid; right=next; }
-            }
+        let trial = if let Some(closure) = &self.closure {
+            self.solve_profiled(drive, free, mobility, closure)?
+        } else {
+            let pressure_mobility = (0..2).map(|i| mobility[i]*b[i].pressure_area_m2*b[i].pressure_area_m2).sum::<f64>();
+            let denominator = 1.0 + z*pressure_mobility;
+            if !denominator.is_finite() { return Err(invalid("paired swept-flow compliance overflowed")); }
+            let mut evaluations = 0;
+            let mut evaluate = |velocity: f64| -> Result<Trial, AcousticRealizeError> {
+                evaluations += 1;
+                if evaluations > self.spec.limits.max_evaluations { return Err(invalid("paired aperture nonlinear work budget exhausted")); }
+                let next_gap = gap + dt*velocity;
+                let force = contact.response(next_gap, velocity).map_err(nonlinear)?.force;
+                let base = [free[0]+mobility[0]*force, free[1]+mobility[1]*force];
+                let moving = drive.body_flow_m3_s - b[0].pressure_area_m2*base[0] - b[1].pressure_area_m2*base[1];
+                let source = (drive.upstream_pressure_pa - 2.0*drive.incoming_pressure_pa - z*moving)/denominator;
+                let opening = f64::midpoint(gap, next_gap).max(0.0);
+                // Eliminate the independent pressure/swept-motion response first.
+                // This is the ORIGINAL continuous Bernoulli junction at its reduced
+                // impedance, not an extra source or a fixed-opening approximation.
+                let dp = super::moving::fixed_opening_pressure_drop(self.spec.width_m, opening,
+                    self.spec.density_kg_m3, z/denominator, source)?;
+                let velocities = [base[0]-mobility[0]*b[0].pressure_area_m2*dp,
+                    base[1]-mobility[1]*b[1].pressure_area_m2*dp];
+                let residual = velocity - velocities[0] - velocities[1];
+                let scale = velocity.abs() + velocities[0].abs() + velocities[1].abs()
+                    + free[0].abs() + free[1].abs();
+                if ![velocity, next_gap, dp, residual, scale].iter().all(|x| x.is_finite()) {
+                    return Err(invalid("paired aperture trial left the finite physical domain"));
+                }
+                Ok(Trial { velocity: velocities, dp, residual, scale })
+            };
+            let resolved = |t: Trial| t.residual.abs() <= self.spec.limits.velocity_tolerance_m_s
+                + self.spec.limits.relative_tolerance*t.scale;
+            let initial = evaluate(free[0]+free[1])?;
+            let trial = if resolved(initial) { initial } else {
+                let mut span = (free[0].abs()+free[1].abs()).max(0.01);
+                let (mut lo, mut hi) = (-span, span);
+                let (mut left, mut right) = (evaluate(lo)?, evaluate(hi)?);
+                while left.residual > 0.0 || right.residual < 0.0 {
+                    span *= 2.0;
+                    if !span.is_finite() { return Err(invalid("paired aperture root has no finite bracket")); }
+                    if left.residual > 0.0 { lo = -span; left = evaluate(lo)?; }
+                    if right.residual < 0.0 { hi = span; right = evaluate(hi)?; }
+                }
+                loop {
+                    if resolved(left) { break left; }
+                    if resolved(right) { break right; }
+                    let mid = f64::midpoint(lo,hi);
+                    if mid == lo || mid == hi { return Err(invalid("paired aperture unresolved gap momentum balance")); }
+                    let next = evaluate(mid)?;
+                    if resolved(next) { break next; }
+                    if next.residual < 0.0 { lo=mid; left=next; } else { hi=mid; right=next; }
+                }
+            };
+            trial
         };
         let next = [BladeState { displacement_m: old[0].displacement_m+dt*trial.velocity[0],
                 velocity_m_s: 2.0*trial.velocity[0]-old[0].velocity_m_s },
@@ -423,8 +450,18 @@ impl PairedAperture {
         self.validate_state(next)?;
         let next_gap = self.gap(next);
         let vm = trial.velocity[0]+trial.velocity[1];
-        let contact = contact.response(next_gap, vm).map_err(nonlinear)?;
-        let opening = f64::midpoint(gap,next_gap).max(0.0);
+        let (contact_forces, contact_normal, contact_loss, opening) = if let Some(closure) = &self.closure {
+            let before=old.map(|s|s.displacement_m);
+            let after=next.map(|s|s.displacement_m);
+            let response=closure.response(before,after,trial.velocity)?;
+            let middle=[f64::midpoint(before[0],after[0]),f64::midpoint(before[1],after[1])];
+            (response.forces_n,response.normal_force_n,response.dissipated_power_w,
+                closure.open_area_m2(middle)?/self.spec.width_m)
+        } else {
+            let response=contact.response(next_gap,vm).map_err(nonlinear)?;
+            ([response.force;2],response.force,response.dissipated_power,
+                f64::midpoint(gap,next_gap).max(0.0))
+        };
         let jet = super::moving::volume_flow(self.spec.width_m,opening,trial.dp,self.spec.density_kg_m3);
         let swept = -b[0].pressure_area_m2*trial.velocity[0]-b[1].pressure_area_m2*trial.velocity[1];
         let no_drop = drive.upstream_pressure_pa - drive.incoming_pressure_pa;
@@ -456,7 +493,7 @@ impl PairedAperture {
             jet_flow_m3_s: jet, swept_flow_m3_s: swept, bore_flow_m3_s: wave,
             flow_residual_m3_s: jet+swept+drive.body_flow_m3_s-wave,
             stored_energy_j: energy, storage_change_j: energy-self.stored_energy_j(),
-            dissipated_energy_j: dt*(trial.dp*jet+viscous+contact.dissipated_power)+memory_loss,
+            dissipated_energy_j: dt*(trial.dp*jet+viscous+contact_loss)+memory_loss,
             pressure_work_j: dt*trial.dp*(wave-drive.body_flow_m3_s), mechanical_work_j: mechanical,
             relaxation_energy_j: memory_energy, relaxation_loss_j: memory_loss,
         };
@@ -464,7 +501,7 @@ impl PairedAperture {
         for i in 0..2 {
             momentum[i] = b[i].mass_kg*(next[i].velocity_m_s-old[i].velocity_m_s)/dt
                 + b[i].stiffness_n_m*f64::midpoint(old[i].displacement_m,next[i].displacement_m)
-                + b[i].damping_n_s_m*trial.velocity[i]+b[i].pressure_area_m2*trial.dp-contact.force-forces[i];
+                + b[i].damping_n_s_m*trial.velocity[i]+b[i].pressure_area_m2*trial.dp-contact_forces[i]-forces[i];
             if let Some(material) = &self.relaxation[i] {
                 momentum[i] += material.restoring_force(old[i].displacement_m, next[i].displacement_m, dt)?;
             }
@@ -481,7 +518,7 @@ impl PairedAperture {
             || aperture.flow_residual_m3_s.abs() > allowance*flow_scale.max(f64::MIN_POSITIVE)
         { return Err(invalid("paired aperture refused an unresolved physical work or flow balance")); }
         Ok(PairedTrial { frame: PairedApertureFrame { aperture, blades: next, pressure_drop_pa: trial.dp,
-            contact_force_n: contact.force, momentum_residual_n: momentum }, memory })
+            contact_force_n: contact_normal, blade_contact_forces_n: contact_forces, momentum_residual_n: momentum }, memory })
     }
 }
 
@@ -490,3 +527,6 @@ mod tests;
 
 #[cfg(test)]
 mod relaxation_tests;
+
+#[cfg(test)]
+mod spatial_tests;
