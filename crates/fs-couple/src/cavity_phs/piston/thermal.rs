@@ -7,6 +7,8 @@
 //! The thermal body uses the existing negligible-pV-work enthalpy storage model.
 //! Its volume is fixed during this proposal; expansion/deformation is not inferred.
 
+/// One finite enthalpy/phase body feeding both faces of the shared gas piston.
+pub mod double_acting;
 /// Source-bound gas/body conductivity without copied material coefficients.
 pub mod layers;
 /// State-dependent power on the same material, phase and mechanical step.
