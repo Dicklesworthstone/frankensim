@@ -48,7 +48,19 @@ impl ScheduledTwoSidedPressure {
         }
         source.validate_sample_rate(config.sample_rate_hz).map_err(GestureCompileError::Render)?;
         source.validate_sample_count(config.samples).map_err(GestureCompileError::Render)?;
-        let controls = compile_schedule(&schedule, &config)?;
+        // Public window/callbacks count OUTPUT samples. The original compiler
+        // sees the actual mechanical clock, including controls within an audio
+        // frame. Work and stored-control budgets are not renewed per substep.
+        let ratio = source.mechanics_per_output();
+        let mechanical_config = AperturePerformanceConfig {
+            sample_rate_hz: source.mechanics_rate_hz(),
+            samples: config.samples.checked_mul(ratio as u64)
+                .ok_or_else(|| invalid("two-sided mechanical phrase window overflow"))?,
+            max_block: config.max_block.checked_mul(ratio)
+                .ok_or_else(|| invalid("two-sided mechanical callback size overflow"))?,
+            ..config
+        };
+        let controls = compile_schedule(&schedule, &mechanical_config)?;
         Ok(Self { source, schedule, config, controls, next: 0, held_pressure_pa: 0.0, poisoned: false })
     }
     /// Original loaded mechanics and pressure receiver. Mutable access would
@@ -58,7 +70,7 @@ impl ScheduledTwoSidedPressure {
     /// Original canonical source gestures, not a second envelope implementation.
     #[must_use]
     pub const fn schedule(&self) -> &GestureSchedule { &self.schedule }
-    /// Existing source-clock and compilation choices.
+    /// Output-clock window and the original whole-phrase compilation budgets.
     #[must_use]
     pub const fn config(&self) -> &AperturePerformanceConfig { &self.config }
     /// Source assignments committed with completely observed physical samples.
@@ -67,7 +79,7 @@ impl ScheduledTwoSidedPressure {
     /// Source assignments still on the original mechanical clock.
     #[must_use]
     pub fn pending_controls(&self) -> &[ScheduledControl] { &self.controls[self.next..] }
-    /// Remaining finite source window, independent of downstream decimation.
+    /// Remaining complete output samples, including any declared receiver tail.
     #[must_use]
     pub fn remaining_samples(&self) -> u64 { self.config.samples - self.source.samples_rendered() }
     /// Set independent opening-positive mechanical forces [N] between callbacks.
@@ -102,18 +114,24 @@ impl PressureRenderer for ScheduledTwoSidedPressure {
         if output.is_empty() { return Err(RenderError::EmptyBlock); }
         if output.len() > self.config.max_block { return Err(sizing("two-sided phrase callback exceeds its admitted capacity")); }
         for slot in output {
-            let (next, pressure) = pressure_candidate(
-                &self.controls, self.next, self.held_pressure_pa, self.samples_rendered());
-            let drive = TwoSidedDrive {
-                source_pressure_pa: pressure, blade_forces_n: self.source.held.blade_forces_n,
-            };
-            // There is one physical/receiver loop, already owned by the source.
-            // This adapter only supplies the next canonical control before it.
-            let result = self.source.set_drive(drive)
-                .and_then(|()| self.source.block(core::slice::from_mut(slot)));
-            match result {
-                Ok(()) => { self.next = next; self.held_pressure_pa = pressure; }
-                Err(error) => { self.poisoned = true; return Err(error); }
+            for _ in 0..self.source.mechanics_per_output() {
+                let (next, pressure) = pressure_candidate(&self.controls, self.next,
+                    self.held_pressure_pa, self.source.mechanical_samples_rendered());
+                let drive = TwoSidedDrive {
+                    source_pressure_pa: pressure, blade_forces_n: self.source.held.blade_forces_n,
+                };
+                // Same physical/receiver step as held playback. Partial traces
+                // survive every control boundary instead of endpoint sampling.
+                let result = self.source.set_drive(drive)
+                    .and_then(|()| self.source.advance_mechanical());
+                match result {
+                    Ok(output) => {
+                        self.next = next;
+                        self.held_pressure_pa = pressure;
+                        if let Some(p) = output { *slot = p; }
+                    }
+                    Err(error) => { self.poisoned = true; return Err(error); }
+                }
             }
         }
         Ok(())
