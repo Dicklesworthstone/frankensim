@@ -65,7 +65,9 @@ pub fn pullback_transport_controls(
         if segment.region() != regions[i] || !seen.insert(regions[i]) {
             return Err(bad("air transport controls require exact ordering and unique trace ownership"));
         }
-        finite(walls_k[i])?;
+        if !(walls_k[i].is_finite() && walls_k[i] > 0.0) {
+            return Err(bad("air transport wall temperatures in kelvin must be finite and positive"));
+        }
         finite(reference_bars[i])?;
         finite(direct_log_htc_bars[i])?;
     }
