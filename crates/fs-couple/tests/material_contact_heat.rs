@@ -139,3 +139,6 @@ fn elastic_cancellation_solver_refusal_and_route_validation_do_not_create_heat()
     assert!(heated.step(&[f64::NAN,0.0],&gate).is_err());
     assert_eq!(heated.reservoirs(),saved);assert_eq!(heated.mechanics().state(),motion);assert_eq!(heated.mechanics().samples(),sample);
 }
+
+#[path="material_contact_heat/transport.rs"]
+mod transport;

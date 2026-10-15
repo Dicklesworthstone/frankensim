@@ -5,6 +5,8 @@
 //! modal damping, felt crush, radiation and fluid losses are NOT relabelled heat.
 //! The mechanical constitutive state is frozen: this is one-way thermalization,
 //! not temperature-dependent contact, expansion, melting mechanics or flash T.
+/// Existing thermal transport owners applied on the same accepted collision step.
+pub mod transport;
 use fs_exec::CancelGate;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 use fs_phs::PreparedStepRecord;
@@ -24,6 +26,10 @@ pub struct CaloricReservoir<'a> {
     state: EquilibriumPhaseState,
     received_heat_j: f64,
     received_correction_j: f64,
+    boundary_heat_j: f64,
+    boundary_correction_j: f64,
+    adiabatic_base: EquilibriumPhaseState,
+    adiabatic_heat_j: f64,
 }
 impl<'a> CaloricReservoir<'a> {
     /// Attach an admitted initial state and invariant mass to a uniform store.
@@ -36,7 +42,8 @@ impl<'a> CaloricReservoir<'a> {
                 .map_err(|e|ImpactError::Owner(e.to_string()))? != initial {
             return Err(invalid("contact heat store needs a key, physical specimen and its own chart state"));
         }
-        Ok(Self { key,curve,mass_kg,volume_m3,surface_area_m2,initial,state:initial,received_heat_j:0.0,received_correction_j:0.0 })
+        Ok(Self { key,curve,mass_kg,volume_m3,surface_area_m2,initial,state:initial,received_heat_j:0.0,received_correction_j:0.0,
+            boundary_heat_j:0.0,boundary_correction_j:0.0,adiabatic_base:initial,adiabatic_heat_j:0.0 })
     }
     /// Stable destination name, independent of contact and mode indexing.
     pub fn key(&self) -> &str { &self.key }
@@ -52,6 +59,8 @@ impl<'a> CaloricReservoir<'a> {
     pub const fn state(&self) -> EquilibriumPhaseState { self.state }
     /// Cumulative deposited contact heat since attachment [J].
     pub const fn received_heat_j(&self) -> f64 { self.received_heat_j }
+    /// Cumulative signed boundary transfer into this store [J].
+    pub const fn boundary_heat_j(&self) -> f64 { self.boundary_heat_j }
     /// Actual chart storage change since attachment [J]; invariant to h datum.
     pub fn storage_change_j(&self) -> f64 {
         self.mass_kg*(self.state.specific_enthalpy_j_kg()-self.initial.specific_enthalpy_j_kg())
@@ -89,7 +98,7 @@ pub struct HeatedImpactFrame {
     /// Mechanical losses not routed into these stores [J]. Signed roundoff in
     /// this subtraction is disclosed, not silently labelled physical cooling.
     pub remaining_mechanical_loss_j: f64,
-    /// Mechanical balance plus actual thermal change minus deposited heat [J].
+    /// Mechanical balance plus thermal change minus contact and boundary heat [J].
     pub combined_energy_residual_j: f64,
 }
 
@@ -169,10 +178,15 @@ impl<'a> HeatedImpactSystem<'a> {
             thermal_change=0.0;
             for (i,store) in stores.iter().enumerate() {
                 if gate.is_requested() {return Err(ImpactError::Cancelled);}
+                if heat[i]==0.0 {
+                    candidate[i]=store.state;next_received[i]=store.received_heat_j;
+                    next_correction[i]=store.received_correction_j;continue;
+                }
                 let increment=heat[i]-store.received_correction_j;
                 let total=store.received_heat_j+increment;
                 next_correction[i]=(total-store.received_heat_j)-increment;
-                let h=store.initial.specific_enthalpy_j_kg()+total/store.mass_kg;
+                let h=store.adiabatic_base.specific_enthalpy_j_kg()
+                    +(total-store.adiabatic_heat_j)/store.mass_kg;
                 if !total.is_finite() || !h.is_finite() {return Err(invalid("contact thermal inventory overflow"));}
                 candidate[i]=store.curve.state_at_specific_enthalpy(h)
                     .map_err(|e|ImpactError::Owner(e.to_string()))?;
@@ -181,7 +195,7 @@ impl<'a> HeatedImpactSystem<'a> {
                 thermal_change+=store.mass_kg*(actual_h-store.state.specific_enthalpy_j_kg());
                 // Check cumulative loss of small increments as well as this step.
                 let inventory=store.mass_kg*(actual_h-store.initial.specific_enthalpy_j_kg());
-                if !inventory.is_finite() || (inventory-total).abs()>*heat_tolerance_j {
+                if !inventory.is_finite() || (inventory-total-store.boundary_heat_j).abs()>*heat_tolerance_j {
                     return Err(invalid("contact thermal inventory exceeds its joule allowance"));
                 }
             }
