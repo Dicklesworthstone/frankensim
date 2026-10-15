@@ -150,8 +150,10 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = BLOCK } =
       const due = queue.length ? queue[0].frame : undefined;
       if (engine.idle() && (due === undefined || due > horizon) && !queue.some((e) => e.frame === undefined)) {
         // silent and nothing due within reach: keep pace with the clock without stepping
-        // (never past a scheduled event, which must still land on its own frame)
-        if (next < horizon) next = Math.round(due !== undefined ? Math.min(horizon, due) : horizon);
+        // (never past a scheduled event, which must still land on its own frame). Nothing has been
+        // sent past sentEnd, so this mark also comes back when the clock does (a context that stalled
+        // while the estimate ran on): the next stroke still lands `aheadFrames` after it arrives
+        next = Math.max(sentEnd, Math.round(due !== undefined ? Math.min(horizon, due) : horizon));
         return;
       }
       if (next < t + BLOCK) {
@@ -172,7 +174,9 @@ export function createLane(port, engine, { aheadFrames = 1024, chunk = BLOCK } =
           next = resume;
         }
       }
-      if (engine.idle() && due !== undefined && due > next) next = Math.round(due); // skip silence up to the event
+      // skip silence up to the event; an idle lane has sent nothing past sentEnd, so it also steps back to an
+      // event scheduled closer than the look-ahead it kept pace at (a sequence or score starting soon)
+      if (engine.idle() && due !== undefined && due >= Math.max(sentEnd, t + BLOCK)) next = Math.round(due);
       const turnLimit = next + Math.max(BLOCK * 16, 2048);
       const stopAt = Math.min(horizon, turnLimit);
       const yieldAt = performance.now() + TURN_MS;
