@@ -36,7 +36,7 @@ impl std::error::Error for SheetPlateError {}
 /// All original source bundles, grain directions and topology beside the actual
 /// DKT pencil. Downstream modal/acoustic consumers use `model()`, not another
 /// eigensolver. Fields are immutable so the source and operator cannot drift.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SheetPlate {
     mesh: PlateMesh,
     sheets: Vec<ResolvedSheet>,
