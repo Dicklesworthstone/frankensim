@@ -92,42 +92,62 @@ async function loadLevels(wasmBytes) {
   }
 }
 
+// A copy of `p` in its present state, or null when this engine cannot copy. For up to an hour after a deploy a
+// browser or the Cloudflare edge can serve a cached engine_bg.wasm next to a newer engine.js (the wasm is cached
+// with max-age 3600, the .js revalidates): a wasm from before copies has no kitpiece_copy, so copy() throws, and
+// an engine.js from before copies has no copy() at all. The chosen grid is then built again to play, as it was
+// before copies: the same samples, one more settle.
+function copyOf(p) {
+  try {
+    return p.copy();
+  } catch {
+    return null;
+  }
+}
+
 // The finest of `scales` (listed finest first) that runs `minRealtime` times faster than real time; if none
 // does, the coarsest. The grids are timed from the coarse end, stepping finer until one falls short. A finer
 // grid has more nodes and never runs faster, so this is the grid a finest-first search picks. But the grids
-// finer than the pick are never built: building is the cost of start-up (the snare takes 0.2 s at 6x, 1.5 s at
+// finer than the pick are never built: building is the cost of start-up (the snare takes 0.1 s at 6x, 0.5 s at
 // 2.5x).
 // Each grid is built once: before its build is struck and timed, a copy is kept, and the chosen grid's copy is
-// the piece that plays. A copy renders exactly what a fresh `new` would, and takes under a millisecond, while a
-// snare's or hi-hat's build is almost all its settle (the wire preload, the pedal: 0.1-0.9 s). The timings run on
-// builds, not copies: a copy runs 1-3 % faster (its memory is laid out in one piece), so it would read high.
+// the piece that plays (`piece`; null when the engine cannot copy, see copyOf: the caller builds the grid again).
+// A copy renders exactly what a fresh `new` would, and takes under a millisecond, while a snare's or hi-hat's
+// build is almost all its settle (the wire preload, the pedal: 0.05-0.9 s). The timings run on builds, not
+// copies: a copy runs 1-3 % faster (its memory is laid out in one piece), so it would read high.
 // The first timing in a Worker runs while V8 is still optimizing the engine code, and can read slow. A
 // shortfall there is timed once more, on a new build, before it ends the search.
 let timed = 0;
 function choose(name, scales, minRealtime, benchMs) {
   let pick = null;
   for (let i = scales.length - 1; i >= 0; i--) {
-    let kept, rt;
+    let kept = null, rt;
     try {
       const built = new KitPiece(name, scales[i]);
-      kept = built.copy();
+      kept = copyOf(built);
       rt = bench(built, benchMs, minRealtime);
       if (timed++ === 0 && rt < minRealtime) rt = bench(new KitPiece(name, scales[i]), benchMs, minRealtime);
     } catch {
-      continue; // the grid needs oversampling at 48 kHz: skip it, as a finest-first search would
+      kept?.free();
+      continue; // refused (the grid needs oversampling at 48 kHz) or failed: skip it, as a finest-first search would
     }
     if (rt < minRealtime) {
       if (!pick) return { scale: scales[i], realtime: rt, piece: kept };
-      kept.free();
+      kept?.free();
       return pick;
     }
-    if (pick) pick.piece.free();
+    pick?.piece?.free();
     pick = { scale: scales[i], realtime: rt, piece: kept };
   }
   if (pick) return pick;
   const built = new KitPiece(name, 5);
-  const kept = built.copy();
-  return { scale: 5, realtime: bench(built, benchMs, minRealtime), piece: kept };
+  const kept = copyOf(built);
+  try {
+    return { scale: 5, realtime: bench(built, benchMs, minRealtime), piece: kept };
+  } catch (e) {
+    kept?.free();
+    throw e;
+  }
 }
 
 self.onmessage = async (event) => {
@@ -143,7 +163,7 @@ self.onmessage = async (event) => {
       if (Number(m.fieldFrames) > 0) { fieldFrames = Math.max(128, Math.round(Number(m.fieldFrames))); fieldEvery = Infinity; }
       if (m.bursts === false) bursts = false;
       const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7, Number(m.benchMs) > 0 ? Number(m.benchMs) : 112);
-      piece = pick.piece;
+      piece = pick.piece || new KitPiece(m.piece, pick.scale);
       fix = levelFix(table, m.piece, pick.scale, pageGain);
       gain = pageGain * fix;
       const engine = {
