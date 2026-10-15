@@ -16,13 +16,14 @@ cargo run --release -p fs-couple --example two_sided_reed -- heavy-blade.wav 0.1
 The first two runs change only upstream length in metres. The third changes
 only the second blade's density in kg/m3. Mass and resonance follow the plate
 reduction; there is no frequency input or compensating pressure adjustment.
-The fixed 5 Pa source runs for 960 samples, then releases for the remainder of
-a 4800-sample, 48 kHz window. Both blades, both ducts and all existing load
-memories keep evolving during that tail. This is a coupling experiment, not a
-calibrated sustained oboe/clarinet preset. The plate sections, 0.7 upstream
-reflectance and effective shared contact are explicitly authored numerical data.
-The downstream terminal uses the original geometry/gas-derived compact baffled
-radiation load. Distributed viscothermal loss is not selected in this example.
+The canonical `two_sided_reed.gesture` data supplies 5 Pa for 960 samples, then
+releases for the remainder of a 4800-sample, 48 kHz window. Both blades, both
+ducts and all existing load memories keep evolving during that tail. This is a
+coupling experiment, not a calibrated sustained oboe/clarinet preset. The plate
+sections, 0.7 upstream reflectance and effective shared contact are explicitly
+authored numerical data. The downstream terminal uses the original geometry/gas-
+derived compact baffled radiation load. Distributed viscothermal loss is not
+selected in this example.
 
 ## Library composition
 
@@ -60,6 +61,18 @@ one-way prescribed-flow radiation; it does not invent or double an acoustic load
 The ordinary constructors retain their finite-difference/delay approximation
 and declared frequency band. A failed callback refuses continuation.
 
+`two_sided::observer::schedule::ScheduledTwoSidedPressure` attaches an existing
+`GestureSchedule` and `AperturePerformanceConfig` to that unadvanced pressure
+source. It reuses the SAME pressure compiler and candidate-control evaluator as
+scalar and paired aperture performance, not a second sampler or envelope law.
+Controls apply at their exact mechanical sample even inside a callback or an
+output-decimation group. Independent mechanical blade forces are preserved and
+may be changed between callbacks; pressure release resets no physical state.
+Nonzero pre-held pressure, late attachment, incompatible clocks and incomplete
+control budgets refuse rather than silently replacing inputs. Inspect the
+original schedule, pending/applied controls and retained source through read-only
+accessors. The example uses this path instead of host-block pressure conditionals.
+
 The series-load approximation is described by Fritz and Wolfe, JASA 118 (2005),
 *How do clarinet players adjust the resonances of their vocal tracts for different
 playing effects*, https://arxiv.org/abs/physics/0505195 . It is not an anatomical
@@ -76,10 +89,12 @@ cargo test -p fs-couple --test two_sided_pressure
 cargo check -p fs-couple --example two_sided_reed
 ```
 
-These 11 authored tests cover network publication, original single/paired
+These 14 authored tests cover network publication, original single/paired
 mechanics, two-sided work/flow, return causality, material mass changes,
-refusals, resume and exterior pressure. Native compilation/tests and the example
-WAV have NOT been executed in the implementation environment: Cargo/rustc are
-absent. Independent Python/SciPy references passed 360 simultaneous-equation
-cases and 2304 complete two-network steps; these are equation checks, not Rust
-execution, DKT validation or measured timbre.
+refusals, resume, exterior pressure and canonical phrase timing across callback
+sizes. Native compilation/tests and the example WAV have NOT been executed in
+the implementation environment: Cargo/rustc are absent. The existing GitHub job
+has begun but dependency bootstrap failed; no native pass is inferred from a
+pending downstream test step. Independent Python/SciPy references passed 360
+simultaneous-equation cases and 2304 complete two-network steps; these are
+equation checks, not Rust execution, DKT validation or measured timbre.

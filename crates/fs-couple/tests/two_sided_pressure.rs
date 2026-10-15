@@ -99,3 +99,91 @@ fn invalid_pressure_callbacks_do_not_advance_or_overwrite_output() {
     a.block(&mut [0.0;32]).unwrap();
     assert_eq!(a.samples_rendered(),32);
 }
+
+mod scheduled {
+    use super::*;
+    use fs_couple::bernoulli_aperture::performance::AperturePerformanceConfig;
+    use fs_couple::bernoulli_aperture::two_sided::observer::schedule::ScheduledTwoSidedPressure;
+    use fs_couple::pcm_wav::observation::PressureRenderer;
+    use fs_couple::render::{ControlDelta, RenderError};
+    use fs_scenario::gesture::GestureSchedule;
+
+    fn phrase() -> GestureSchedule {
+        GestureSchedule::from_canonical_bytes(b"frankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t1e-3\tpressure-pa\t5e1\nevent\t3e-3\t0e0\tpressure-pa\t0e0\n").unwrap()
+    }
+    fn config() -> AperturePerformanceConfig {
+        AperturePerformanceConfig { sample_rate_hz: 48_000, samples: 256, max_block: 32,
+            max_compile_work: 100_000, max_controls: 16 }
+    }
+    fn scheduled() -> ScheduledTwoSidedPressure {
+        ScheduledTwoSidedPressure::new(pressure_renderer(), phrase(), config()).unwrap()
+    }
+
+    #[test]
+    fn canonical_controls_match_direct_loaded_physics_and_retain_independent_forces() {
+        let forces = [1e-5, -2e-5];
+        let mut source = pressure_renderer();
+        source.set_drive(TwoSidedDrive { source_pressure_pa: 0.0, blade_forces_n: forces }).unwrap();
+        let mut p = ScheduledTwoSidedPressure::new(source, phrase(), config()).unwrap();
+        let controls = p.pending_controls().to_vec();
+        assert!(controls.iter().any(|e| e.sample % 32 != 0));
+        let mut direct = pressure_renderer();
+        let mut held = 0.0;
+        for sample in 0..256 {
+            for event in controls.iter().filter(|e| e.sample == sample) {
+                if let ControlDelta::SetBlowingPressure { pressure_pa, .. } = event.delta { held = pressure_pa; }
+            }
+            direct.set_drive(TwoSidedDrive { source_pressure_pa: held, blade_forces_n: forces }).unwrap();
+            let (mut actual, mut expected) = ([0.0], [0.0]);
+            p.block(&mut actual).unwrap(); direct.block(&mut expected).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(p.source().last_frame(), direct.last_frame());
+        }
+        assert!(p.pending_controls().is_empty());
+        assert_eq!(p.applied_controls().len(), controls.len());
+    }
+
+    #[test]
+    fn pressure_phrase_is_callback_independent_and_release_preserves_both_wave_histories() {
+        let mut reference = scheduled();
+        let mut expected = [0.0; 256];
+        for slot in &mut expected { reference.block(core::slice::from_mut(slot)).unwrap(); }
+        for size in [7, 31, 32] {
+            let mut p = scheduled();
+            let mut actual = [0.0; 256];
+            for block in actual.chunks_mut(size) { p.block(block).unwrap(); }
+            assert_eq!(actual, expected);
+            assert_eq!(p.source().last_frame(), reference.source().last_frame());
+            assert_eq!(p.remaining_samples(), 0);
+            assert!(p.source().system().stored_energy_j() > 0.0);
+            assert_eq!(p.source().last_frame().unwrap().source_work_j, 0.0);
+            let mut untouched = [123.0];
+            assert!(p.block(&mut untouched).is_err());
+            assert_eq!(untouched, [123.0]);
+        }
+    }
+
+    #[test]
+    fn schedule_admission_and_failed_physics_do_not_publish_future_controls() {
+        let mut zero = config(); zero.samples = 0;
+        assert!(ScheduledTwoSidedPressure::new(pressure_renderer(), phrase(), zero).is_err());
+        let mut limited = config(); limited.max_controls = 1;
+        assert!(ScheduledTwoSidedPressure::new(pressure_renderer(), phrase(), limited).is_err());
+        let mut already_set = pressure_renderer(); already_set.set_drive(drive(1.0)).unwrap();
+        assert!(ScheduledTwoSidedPressure::new(already_set, phrase(), config()).is_err());
+        let mut late = pressure_renderer(); late.block(&mut [0.0]).unwrap();
+        assert!(ScheduledTwoSidedPressure::new(late, phrase(), config()).is_err());
+        let mut p = scheduled();
+        assert!(p.set_blade_forces([f64::NAN, 0.0]).is_err());
+        assert_eq!(p.samples_rendered(), 0);
+        let controls = p.pending_controls().len();
+        p.set_blade_forces([f64::MAX, 0.0]).unwrap();
+        let mut output = [123.0; 8];
+        assert!(p.block(&mut output).is_err());
+        assert_eq!(output, [123.0; 8]);
+        assert_eq!(p.samples_rendered(), 0);
+        assert_eq!(p.pending_controls().len(), controls);
+        assert!(p.applied_controls().is_empty());
+        assert!(matches!(p.validate_sample_count(0), Err(RenderError::Poisoned)));
+    }
+}

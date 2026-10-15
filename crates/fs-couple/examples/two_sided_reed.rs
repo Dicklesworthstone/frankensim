@@ -5,8 +5,11 @@ use fs_couple::bernoulli_aperture::paired::{BladeState, PairedAperture, PairedAp
 use fs_couple::bernoulli_aperture::plate::{PlateApertureOptions, PlateApertureReduction};
 use fs_couple::bernoulli_aperture::radiation::BaffledRadiationLoad;
 use fs_couple::bernoulli_aperture::two_sided::{ApertureDuctSpec, TwoSidedAperture,
-    TwoSidedDrive, TwoSidedLimits, ValveSide, combined_inlet_state};
+    TwoSidedLimits, ValveSide, combined_inlet_state};
 use fs_couple::bernoulli_aperture::two_sided::observer::TwoSidedPressure;
+use fs_couple::bernoulli_aperture::two_sided::observer::schedule::ScheduledTwoSidedPressure;
+use fs_couple::bernoulli_aperture::performance::AperturePerformanceConfig;
+use fs_scenario::gesture::GestureSchedule;
 use fs_couple::pcm_wav::{encode_pcm16_wav, baffled::CircularOutletReceiver,
     observation::PressureRenderer};
 use fs_dcontact::Obstacle;
@@ -80,16 +83,19 @@ fn run() -> Result<(), String> {
     eprintln!("represented_upstream_m={}; represented_downstream_m={}",
         model.represented_sections(ValveSide::Upstream)[0].represented_length_m,
         model.represented_sections(ValveSide::Downstream)[0].represented_length_m);
-    let mut renderer = TwoSidedPressure::new(model, ValveSide::Downstream, 1,
+    let source = TwoSidedPressure::new(model, ValveSide::Downstream, 1,
         CircularOutletReceiver { position_m: [0.0, 0.0, 0.25], radial_rings: 4,
             angular_points: 16, maximum_frequency_hz: 1000.0 }, rate, 240)
         .map_err(|e| e.to_string())?;
+    // The common gesture compiler, not a host-block envelope, owns the source.
+    let schedule = GestureSchedule::from_canonical_bytes(include_bytes!("two_sided_reed.gesture"))
+        .map_err(|e| e.to_string())?;
+    let mut renderer = ScheduledTwoSidedPressure::new(source, schedule, AperturePerformanceConfig {
+        sample_rate_hz: rate, samples: 4800, max_block: 240,
+        max_compile_work: 100_000, max_controls: 128,
+    }).map_err(|e| e.to_string())?;
     let mut pressure = vec![0.0; 4800];
     for block in pressure.chunks_mut(240) {
-        renderer.set_drive(TwoSidedDrive {
-            source_pressure_pa: if renderer.samples_rendered() < 960 { 5.0 } else { 0.0 },
-            blade_forces_n: [0.0; 2],
-        }).map_err(|e| e.to_string())?;
         renderer.block(block).map_err(|e| e.to_string())?;
     }
     // Fixed scale across every material/geometry experiment; never normalize.
@@ -98,7 +104,7 @@ fn run() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     file.write_all(&wav).and_then(|()| file.flush()).map_err(|e| e.to_string())?;
     eprintln!("full_scale_pa=0.005; clips={clips}; final_energy_j={:.10e}; source released without resets",
-        renderer.system().stored_energy_j());
+        renderer.source().system().stored_energy_j());
     Ok(())
 }
 fn main() {

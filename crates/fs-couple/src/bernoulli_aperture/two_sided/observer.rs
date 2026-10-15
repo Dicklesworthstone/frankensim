@@ -9,6 +9,9 @@ use crate::render::RenderError;
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
 
+/// Canonical source-pressure phrases on the retained two-sided physics.
+pub mod schedule;
+
 /// Bounded pressure callbacks over one retained valve and two acoustic networks.
 /// A physical/observer failure poisons the renderer: a partly completed callback
 /// cannot be resumed as though its mechanics and pressure histories still agree.
