@@ -292,3 +292,6 @@ impl MembranePatch {
 
 mod equilibrium;
 pub use equilibrium::{MembraneSolveSettings, MembraneSolution};
+
+/// Prestressed vibration and work-conjugate force/volume ports.
+pub mod vibration;

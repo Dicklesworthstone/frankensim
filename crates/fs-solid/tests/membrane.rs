@@ -175,3 +175,6 @@ fn topology_domain_cancellation_and_work_refusals_publish_no_solution() {
     assert!(matches!(p.solve(&loads,&prescribed(1.0),&zero,settings(),||false),Err(MembraneError::Unconverged(_))));
     assert!(p.solve(&loads,&prescribed(1.02),&zero,settings(),||false).is_ok());
 }
+
+#[path="membrane/vibration.rs"]
+mod vibration;
