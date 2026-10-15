@@ -19,6 +19,9 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+#[path = "steinway_resolution.rs"]
+mod resolution;
+
 const SLOPE: f64 = 0.8;
 const FIRST_RIB: f64 = 241.0;
 const LAST_RIB: f64 = 1439.0;
@@ -177,6 +180,28 @@ fn build_with_contacts(divisions: usize, published_contacts: bool) -> Result<Pre
     build_inner(divisions, published_contacts, None)
 }
 
+/// Production two-direction mechanical resolution of the same source drawing.
+/// `maximum_rib_normal_step_m` is an SI distance perpendicular to the ribs,
+/// not a pixel increment, acoustic quadrature level or global triangle diameter.
+/// Sections and beam tapers are sampled from the SAME authored source fields;
+/// this is not subdivision of a frozen piecewise-constant material mesh.
+/// Both the historical and RT-0425-projected key maps remain available.
+/// Default constructors above keep their original geometry and arithmetic.
+pub fn build_resolved(divisions: usize, maximum_rib_normal_step_m: f64,
+    published_contacts: bool) -> Result<Preset,String> {
+    if !(4..=64).contains(&divisions) {
+        return Err("resolved Model D mesh divisions must be 4..64".into());
+    }
+    let gap=resolution::drawing_gap(maximum_rib_normal_step_m,scale(),SLOPE)?;
+    let mut preset=build_inner(divisions,published_contacts,Some(gap))?;
+    // Comments are accepted by both existing geometry readers and OBJ tools;
+    // keep authority labels and every physical material row unchanged.
+    let note=format!("# mechanical mesh: {divisions} transverse divisions; maximum rib-normal row spacing {maximum_rib_normal_step_m:.17e} m; same source fields resampled, no convergence certificate\n");
+    preset.geometry.insert_str(0,&note);
+    preset.obj.insert_str(0,&note);
+    Ok(preset)
+}
+
 #[cfg(test)]
 pub(crate) fn build_probe(divisions: usize) -> Result<Preset,String> {
     if !(33..=64).contains(&divisions) { return Err("research mesh divisions must be 33..64".into()); }
@@ -202,14 +227,7 @@ fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: 
     for p in levels.windows(2) { if p[1]-p[0]>55.0 {extra.push((p[0]+p[1])*0.5);} }
     levels.extend(extra); levels.sort_by(f64::total_cmp);
     if let Some(maximum_gap)=maximum_station_gap {
-        let mut refined=Vec::new();
-        for pair in levels.windows(2) {
-            let segments=((pair[1]-pair[0])/maximum_gap).ceil() as usize;
-            for index in 1..segments {
-                refined.push(pair[0]+(pair[1]-pair[0])*index as f64/segments as f64);
-            }
-        }
-        levels.extend(refined); levels.sort_by(f64::total_cmp);
+        levels=resolution::refine(&levels,divisions,maximum_gap)?;
     }
     let mut xy=Vec::new(); let mut rows=Vec::new();
     for t in levels {
@@ -270,6 +288,9 @@ fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: 
                 }
             }
         }
+    }
+    if xy.len()>resolution::MAX_NODES || tris.len()>resolution::MAX_TRIANGLES {
+        return Err("source mesh exceeds the existing piano geometry capacity".into());
     }
     let mut edges:BTreeMap<(usize,usize),usize>=BTreeMap::new();
     for &[a,b,c] in &tris {
@@ -441,3 +462,7 @@ mod tests {
         assert_ne!(p.geometry, build(12).unwrap().geometry);
     }
 }
+
+#[cfg(test)]
+#[path = "steinway_resolution_tests.rs"]
+mod resolution_tests;
