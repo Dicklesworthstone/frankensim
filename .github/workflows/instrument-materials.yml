@@ -16,6 +16,8 @@ on:
       - 'crates/fs-couple/src/bowed_string/runtime/reciprocal.rs'
       - 'crates/fs-couple/src/bowed_string/runtime/reciprocal/**'
       - 'crates/fs-couple/tests/material_string_bank.rs'
+      - 'crates/fs-couple/tests/material_plate_chart_bank.rs'
+      - 'crates/fs-couple/src/thin_plate.rs'
       - 'crates/fs-couple/src/cavity_modal.rs'
       - 'crates/fs-couple/src/cavity_modal/**'
       - 'crates/fs-couple/tests/reciprocal_cavity.rs'
@@ -45,6 +47,9 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Regional material geometry in shared string body and cavity mechanics
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test material_plate_chart_bank -- --test-threads=1
       - name: Named gas material admission and pressure response
         if: ${{ !cancelled() }}
         run: |

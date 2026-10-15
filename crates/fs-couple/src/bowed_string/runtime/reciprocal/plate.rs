@@ -167,26 +167,51 @@ pub(super) fn reduce_material_body(
     cavity: Option<&MaterialBodyCavity>, gate: &CancelGate,
 ) -> Result<MaterialBodyImage, ReciprocalStringError> {
     poll(gate)?;
+    let description = specimen.plate();
+    if description.geometric_nonlinearity || description.n_modes == 0 {
+        return Err(invalid("shared material body requires nonempty linear modes"));
+    }
+    validate_body_medium(gas, sample_rate_hz, listener_m, cavity, gate)?;
+    // Fresh reduction only; the original DKT/modal owner is synchronous.
+    let radiators = certified_radiators(description).map_err(ReciprocalStringError::Material)?;
+    reduce_radiating_body(&radiators, gas, sample_rate_hz, modal_budget, listener_m, cavity, gate)
+}
+
+// Admission before either uniform or regional geometry enters its eigensolve.
+pub(super) fn validate_body_medium(
+    gas: &GasState, sample_rate_hz: u32, listener_m: f64,
+    cavity: Option<&MaterialBodyCavity>, gate: &CancelGate,
+) -> Result<(), ReciprocalStringError> {
+    poll(gate)?;
     gas.validate_coherence().map_err(|error| ReciprocalStringError::Material(
         AcousticRealizeError::Ambient(error.to_string())))?;
-    let description = specimen.plate();
-    if description.geometric_nonlinearity || description.n_modes == 0
-        || sample_rate_hz == 0 || !listener_m.is_finite() || listener_m <= 0.0 {
-        return Err(invalid("shared material body requires linear modes and a positive clock/distance"));
+    if sample_rate_hz == 0 || !listener_m.is_finite() || listener_m <= 0.0 {
+        return Err(invalid("shared material body requires a positive clock and observer distance"));
     }
     if let Some(c) = cavity {
         if c.cavity.gas() != gas || !c.listener_m.is_finite() || c.listener_m <= 0.0 {
             return Err(invalid("body cavity must use the exact assembly gas and a positive finite observer distance"));
         }
     }
-    // Fresh reduction only; the original DKT/modal owner is synchronous.
-    let radiators = certified_radiators(description).map_err(ReciprocalStringError::Material)?;
-    poll(gate)?;
+    Ok(())
+}
+
+// A fresh modal image from either geometry owner enters exactly the same
+// mass-normalization, signed volume, cavity and acceleration-pressure lowering.
+// No receiver states or radiation-filter history may enter this private path.
+pub(super) fn reduce_radiating_body(
+    radiators: &[crate::thin_plate::CompactBody], gas: &GasState, sample_rate_hz: u32,
+    modal_budget: ModalAcousticTimeBudget, listener_m: f64,
+    cavity: Option<&MaterialBodyCavity>, gate: &CancelGate,
+) -> Result<MaterialBodyImage, ReciprocalStringError> {
+    validate_body_medium(gas, sample_rate_hz, listener_m, cavity, gate)?;
+    if radiators.is_empty() { return Err(invalid("shared body reduction returned no modes")); }
     let mut modes = Vec::with_capacity(radiators.len());
     let mut bridge = Vec::with_capacity(radiators.len());
     let mut areas = Vec::with_capacity(radiators.len());
     let mut pressure = Vec::with_capacity(radiators.len() + usize::from(cavity.is_some()));
-    for radiator in &radiators {
+    for radiator in radiators {
+        poll(gate)?;
         let root_mass = fs_math::det::sqrt(radiator.mass_kg);
         let participation = radiator.drive_participation / root_mass;
         let area = radiator.area_m2 / root_mass;
