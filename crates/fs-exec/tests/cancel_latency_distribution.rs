@@ -80,11 +80,12 @@ pub struct LatencyDistribution {
 
 impl LatencyDistribution {
     /// Compute percentile distribution from raw sample latencies.
+    #[must_use]
     pub fn compute(mut samples: Vec<u64>, tile_ops: usize) -> Self {
         assert!(!samples.is_empty(), "samples must not be empty");
         samples.sort_unstable();
         let n = samples.len();
-        let sum: u128 = samples.iter().map(|&s| s as u128).sum();
+        let sum: u128 = samples.iter().map(|&s| u128::from(s)).sum();
         let mean_ns = (sum / n as u128) as u64;
 
         Self {
