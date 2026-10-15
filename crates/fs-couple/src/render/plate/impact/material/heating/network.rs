@@ -1,6 +1,8 @@
 //! Actual contact work enters the existing multi-cell enthalpy network once.
 //! The original network owns conduction, boundary losses, phase and subcycling.
 //! Its observer and the contact-source refresh publish with mechanics, or not at all.
+/// Source-bound thermal links driven by the mechanical contact footprint.
+pub mod contact;
 use std::collections::{BTreeMap, BTreeSet};
 use super::*;
 use super::feedback::MaterialFeedbackFrame;
@@ -73,25 +75,50 @@ impl<'m> HeatedImpactSystem<'m> {
             -> Result<Option<SourcePointContact>, ImpactError>,
     ) -> Result<NetworkImpactFrame, ImpactError>
     where O::Error: core::fmt::Display {
+        self.step_with_network_preparation(thermal, observer, bindings, config, forces, gate,
+            resolve, |_, network| Ok((network.clone(), (), BTreeSet::new())))
+            .map(|(frame, ())| frame)
+    }
+
+    // Shared path for fixed authored topology and source-driven point contacts.
+    // Preparation may only change thermal contact topology at unchanged state/time.
+    fn step_with_network_preparation<'n, O: DepositionObserver, R>(
+        &mut self, thermal: &mut DepositionSimulation<'n>, observer: &mut O,
+        bindings: &[ReservoirCell], config: StepConfig, forces: &[f64], gate: &CancelGate,
+        resolve: impl FnMut(&MaterialContact, &[CaloricReservoir<'m>])
+            -> Result<Option<SourcePointContact>, ImpactError>,
+        mut prepare: impl FnMut(&ImpactThermalTrial<'_>, &DepositionSimulation<'n>)
+            -> Result<(DepositionSimulation<'n>, R, BTreeSet<u64>), ImpactError>,
+    ) -> Result<(NetworkImpactFrame, R), ImpactError>
+    where O::Error: core::fmt::Display {
         if config.energy_tolerance_j > self.heat_tolerance_j
             || !config.energy_tolerance_j.is_finite() || config.energy_tolerance_j < 0.0 {
             return Err(invalid("network transport cannot enlarge the contact heat allowance"));
         }
         let mut staged = None;
-        let impact = self.step_with_material_feedback(forces, gate, resolve, |trial| {
+        let mut impact = self.step_with_material_feedback(forces, gate, resolve, |trial| {
+            let (prepared, report, protected_links) = prepare(&trial, thermal)?;
             let (next, next_observer, audit, proposals) = propose(
-                thermal, observer, bindings, config, &trial, gate)?;
-            staged = Some((next, next_observer, audit));
+                &prepared, observer, bindings, config, &trial, gate, protected_links)?;
+            staged = Some((next, next_observer, audit, report));
             Ok(proposals)
         })?;
         // Original source, thermal and mechanical gates have all succeeded.
         // Publication is infallible; no callback runs after this point.
-        let (next, next_observer, network) = staged.expect("accepted thermal callback ran once");
+        let (next, next_observer, network, report) = staged.expect("accepted thermal callback ran once");
+        // Keep the independently accumulated boundary audit authoritative.
+        // Per-cell exchange is reconstructed from storage; its roundoff must not
+        // be relabelled as physical outside heat in the collection report.
+        let contact_heat_j = impact.thermal.transfers.iter()
+            .map(|transfer| transfer.report.contact_heat_j).sum::<f64>();
+        let non_contact_heat_j = network.external_heat_j - contact_heat_j;
+        impact.thermal.boundary_heat_j = non_contact_heat_j;
+        impact.thermal.impact.combined_energy_residual_j =
+            impact.thermal.impact.mechanical.balance_residual_j + network.residual_j
+            + (contact_heat_j - impact.thermal.impact.deposited_heat_j);
         *thermal = next;
         *observer = next_observer;
-        Ok(NetworkImpactFrame {
-            non_contact_heat_j: impact.thermal.boundary_heat_j, impact, network,
-        })
+        Ok((NetworkImpactFrame { non_contact_heat_j, impact, network }, report))
     }
 }
 
@@ -100,6 +127,7 @@ type Proposed<'n, O> = (DepositionSimulation<'n>, O, EnergyAudit,
 fn propose<'n, O: DepositionObserver>(
     thermal: &DepositionSimulation<'n>, observer: &O, bindings: &[ReservoirCell],
     config: StepConfig, trial: &ImpactThermalTrial<'_>, gate: &CancelGate,
+    protected_links: BTreeSet<u64>,
 ) -> Result<Proposed<'n, O>, ImpactError>
 where O::Error: core::fmt::Display {
     let inputs = trial.reservoirs();
@@ -139,7 +167,7 @@ where O::Error: core::fmt::Display {
         powers.insert(id, power);
         ids.push(id);
     }
-    let source = ContactHeating { observer: observer.clone(), powers,
+    let source = ContactHeating { observer: observer.clone(), powers, protected_links,
         received: ids.iter().map(|&id|(id, (0.0, 0.0))).collect() };
     let checkpoint = || if gate.is_requested() { Err(DepositionError::Cancelled) } else { Ok(()) };
     let (next, source, audit) = thermal.advance_observed(&source, target, config, checkpoint)
@@ -176,6 +204,7 @@ struct ContactHeating<O> {
     observer: O,
     powers: BTreeMap<CellId, f64>,
     received: BTreeMap<CellId, (f64, f64)>,
+    protected_links: BTreeSet<u64>,
 }
 #[derive(Debug)]
 enum NetworkError<E> { Thermal(DepositionError), Observer(E) }
@@ -211,7 +240,11 @@ impl<O: DepositionObserver> DepositionObserver for ContactHeating<O> {
     }
     fn conductances(&mut self, thermal:&DepositionSimulation<'_>, checkpoint:&mut dyn FnMut()->Result<(),DepositionError>)
         ->Result<BTreeMap<u64,f64>,Self::Error> {
-        self.observer.conductances(thermal,checkpoint).map_err(NetworkError::Observer)
+        let values = self.observer.conductances(thermal,checkpoint).map_err(NetworkError::Observer)?;
+        if values.keys().any(|id| self.protected_links.contains(id)) {
+            return Err(DepositionError::InvalidInput("observer cannot override a source-bound physical contact link").into());
+        }
+        Ok(values)
     }
     fn step(&mut self,start:f64,dt:f64,old:&BTreeMap<CellId,f64>,thermal:&DepositionSimulation<'_>,
         checkpoint:&mut dyn FnMut()->Result<(),DepositionError>)->Result<(),Self::Error> {

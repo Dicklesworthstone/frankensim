@@ -28,6 +28,13 @@ impl<'a> ImpactThermalTrial<'a> {
     pub fn duration_s(&self) -> f64 { self.system.config.dt_s }
     /// One-based proposed mechanical sample; this has not yet been published.
     pub fn sample(&self) -> u64 { self.system.sample+1 }
+    /// Original immutable contact source, including both ordered bulk states
+    /// and the complete interface card. Observing neither mutates nor advances it.
+    pub fn contact_source(&self,key:&str)
+        ->Result<&fs_contact::normal_patch::source::SourcePointContact,ImpactError> {
+        self.system.material_contacts().iter().find(|c|c.key()==key)
+            .map(|c|c.source()).ok_or_else(||invalid("unknown thermal-trial contact"))
+    }
     /// Physical area of an admitted analytic circular/elliptic contact [m2].
     /// Separation returns exactly zero. Elliptic axes, not an equivalent radius,
     /// supply the area. A finite-gap pressure-equivalent footprint is NOT admitted
