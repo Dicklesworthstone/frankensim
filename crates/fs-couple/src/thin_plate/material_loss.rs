@@ -51,9 +51,10 @@ impl ResolvedPlateChart {
 /// geometric stiffness, so tension dilutes loss rather than acquiring it.
 /// All retained modes must lie inside every region's source-law applicability.
 ///
-/// Without a selected source loss this delegates the original chart path
-/// unchanged. Source bindings remain with the specimen, not the numeric output.
-/// This diagonal weak-loss reduction does not solve full nonproportional damping.
+/// Single- and multi-port source-bound bodies share the same reduction path.
+/// Without selected source loss the original authored chart convention remains.
+/// Source bindings remain with the specimen, not the numeric output. This
+/// diagonal weak-loss image does not solve full nonproportional damping.
 ///
 /// # Errors
 /// Invalid law/controls, nonzero authored damping alongside material loss,
@@ -61,19 +62,10 @@ impl ResolvedPlateChart {
 pub fn certified_material_chart_radiators(
     specimen: &ResolvedPlateChart, options: &PlateChartRadiation,
 ) -> Result<Vec<CompactBody>, AcousticRealizeError> {
-    let Some(viscosities) = specimen.bending_viscosity() else {
-        return certified_chart_radiators(specimen.chart(), options);
-    };
-    if options.damping_ratio != 0.0 {
-        return Err(refuse("source-bound regional bending loss requires zero authored damping"));
-    }
-    let chart = specimen.chart();
-    let projection = PlateProjection::with_force_weights(&chart.mesh, &options.unit_force_weights)?;
-    let model = chart.assemble(&[], &options.assembly).map_err(map_plate)?;
-    let loss = RegionalBendingLoss::new(specimen, viscosities, &model)?;
-    harvest_radiators(&model, &projection, options.eigenvalue_window,
-        options.n_modes, 0.0, Some(&loss))
+    ports::reduce(specimen, options, &[], 0).map(|(radiators, _)| radiators)
 }
+
+mod ports;
 
 fn refuse(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
