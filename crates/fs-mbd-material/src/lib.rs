@@ -17,6 +17,8 @@
 
 /// Complete source-bound mechanism compilation using the existing dynamics engine.
 pub mod articulated;
+/// Principal-frame adaptation for the existing free-body and contact APIs.
+pub mod principal;
 
 /// Source-integrated free expansion with conserved reference material mass.
 pub mod thermal;

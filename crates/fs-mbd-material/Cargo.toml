@@ -12,6 +12,7 @@ layer = "L3"
 
 [dependencies]
 fs-ga = { path = "../fs-ga" }
+fs-la = { path = "../fs-la" }
 fs-matdb = { path = "../fs-matdb" }
 fs-material = { path = "../fs-material" }
 fs-mbd = { path = "../fs-mbd" }

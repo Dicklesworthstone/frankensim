@@ -52,3 +52,20 @@ holding torque. The densities are demonstration inputs, not material measurement
 `cargo test -p fs-mbd-material --all-targets` includes the source/geometry,
 full-mechanism and executable regressions. No independent time integrator,
 contact law, stiffness law or empirical rigid-body qualification is claimed.
+
+`ResolvedBody::principal_body` uses the existing L1 Jacobi eigensolver on a
+scaled 3x3 inertia tensor and checks reconstruction through the actual returned
+quaternion frame before supplying the existing free-body `MassProperties`.
+Principal moments are not silently clipped. The centre-relative principal
+frame is retained together with the original source-bound body. Its measured
+relative tensor residual is distinct from source and geometric uncertainty;
+repeated moments have non-unique eigenvectors, not a smooth frame guarantee.
+
+`state_from_kinematics` maps the authored pose and origin twist to principal
+centre-of-mass pose and momenta, including omega cross centroid. The reverse
+`world_from_body` recovers the original geometry pose after free-body stepping.
+`arm_for_body_point` maps original geometric/contact points to the existing
+point-kinematics, effective-mass and impulse APIs. This retains one mechanics
+owner while material-induced centroid and principal-axis changes propagate
+without moving the geometry or misplacing contact forces. The source model
+must match the state; the adapter does not infer a live material-exchange law.
