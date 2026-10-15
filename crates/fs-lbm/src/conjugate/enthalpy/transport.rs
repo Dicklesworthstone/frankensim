@@ -216,3 +216,43 @@ pub fn advance_joule_enthalpy_with_material_transport<'t, F, I>(
     checkpoint(gate)?;
     Ok((next,JouleTransportReport {joule,last_applied:source.last,endpoint}))
 }
+
+/// The same material-resolved current/transport advance with an independent
+/// physical history on the common thermal timeline. Use a nested
+/// `fs_thermal::observers::CoupledObservers` to supply several additional owners.
+///
+/// The added observer's signed sources are combined with Joule power once,
+/// before the existing conservative heat step. Every owner observes the SAME
+/// start enthalpy, actual CFL-limited duration, event sequence and endpoint.
+/// An additional conductance owner may replace only links outside `link_ids`;
+/// competing ownership refuses even when the two values happen to be equal.
+/// The returned observer is the accepted history; the input is never mutated.
+///
+/// The thermal audit includes ALL applied sources. Electrical and transfer
+/// accounts still cover ONLY electrode work and Joule deposition. Endpoint
+/// current/material/selected-link support is rechecked before publishing either
+/// history. Additional owners must check their own endpoint support in `step`.
+/// Source callbacks and Clone obey the original no-shared-mutable-state rule.
+/// This remains explicit staggered coupling with the original refinement and
+/// fixed-geometry limitations, not a strong-coupling or passivity certificate.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn advance_joule_enthalpy_with_material_transport_observed<'t, F, I, O: DepositionObserver>(
+    thermal: &DepositionSimulation<'t>, target_s: f64, config: StepConfig,
+    input: JouleEnthalpyInput<'_>, link_ids: &[u64], gate: &CancelGate, observer: &O,
+    resolve: impl Fn(usize, &DepositedCell, f64) -> Result<EnthalpyTransport<F>, JouleEnthalpyError>,
+    resolve_link: impl Fn(&ContactPatch, [&EnthalpyTransportSample<F>; 2]) -> Result<(f64, I), JouleEnthalpyError>,
+) -> Result<(DepositionSimulation<'t>, O, JouleTransportReport<F, I>),
+    fs_conduction::observers::ObserverCouplingError<JouleEnthalpyError, O::Error>> {
+    use fs_conduction::observers::{CoupledObservers, ObserverCouplingError};
+    admit_map(thermal, input, gate).map_err(ObserverCouplingError::First)?;
+    let source = TransportSource { account: Account::new(input, gate), selected: link_ids,
+        indices: input.cell_ids.iter().copied().enumerate().map(|(c, id)| (id, c)).collect(),
+        bulk: &resolve, link: &resolve_link, last: None };
+    let owners = CoupledObservers::new(source, observer.clone());
+    let (next, owners, audit) = thermal.advance_observed(&owners, target_s, config, || checkpoint(gate))?;
+    let (mut source, observer) = owners.into_parts();
+    let (endpoint_current, endpoint) = source.evaluate(&next).map_err(ObserverCouplingError::First)?;
+    let joule = source.account.finish(audit, endpoint_current).map_err(ObserverCouplingError::First)?;
+    checkpoint(gate)?;
+    Ok((next, observer, JouleTransportReport { joule, last_applied: source.last, endpoint }))
+}

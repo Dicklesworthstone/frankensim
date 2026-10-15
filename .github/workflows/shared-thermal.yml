@@ -6,6 +6,9 @@ on:
       - 'crates/fs-thermal/**'
       - 'crates/fs-material/src/thermal.rs'
       - 'crates/fs-lbm/Cargo.toml'
+      - 'crates/fs-lbm/src/conjugate/enthalpy*'
+      - 'crates/fs-lbm/src/conjugate/enthalpy/**'
+      - 'crates/fs-lbm/tests/joule_enthalpy*'
       - 'crates/fs-conduction/src/transient/deposition.rs'
       - '.github/workflows/shared-thermal.yml'
   workflow_dispatch:
@@ -31,4 +34,66 @@ jobs:
         with:
           name: shared-thermal-source
           path: ${{ runner.temp }}/thermal-source.tar.gz
+          retention-days: 3
+  electrothermal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact tested revision
+        run: git log -1 --format='%H %s'
+      - name: Materialize pinned dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
+            # Preserve exact dependency pins; repair only this known checkout
+            # line-ending discrepancy, not any substantive upstream source.
+            python3 - <<'PY'
+          import json, pathlib, subprocess
+          root = pathlib.Path('../franken_numpy')
+          row = next(r for r in json.loads(pathlib.Path('constellation.lock').read_text())['libraries'] if r['lib'] == 'franken_numpy')
+          def git(*args):
+              return subprocess.check_output(['git', '-C', str(root), *args])
+          if git('rev-parse', 'HEAD').decode().strip() != row['git_head'] or git('config', '--local', '--get', 'frankensim.bootstrapIncomplete').strip() != b'true':
+              raise SystemExit('not the incomplete pinned NumPy clone; refusing repair')
+          name = 'legacy_numpy_code/numpy/doc/make.bat'
+          path = root / name
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit('expected an ordinary tracked batch file')
+          raw = git('cat-file', 'blob', row['git_head'] + ':' + name)
+          actual = path.read_bytes()
+          if actual == raw or actual.replace(b'\r\n', b'\n') != raw.replace(b'\r\n', b'\n'):
+              raise SystemExit('not a line-ending-only checkout discrepancy')
+          path.write_bytes(raw)
+          git('add', '--', name)
+          if git('rev-parse', ':' + name).strip() != git('rev-parse', row['git_head'] + ':' + name).strip() or path.read_bytes() != raw:
+              raise SystemExit('restoration differs from locked source or index')
+          PY
+            cargo run --manifest-path tools/bootstrap/Cargo.toml
+          fi
+      - name: Test actual electrical solve, material phase law and composed transport
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p fs-lbm --features enthalpy-coupling --test joule_enthalpy --test joule_enthalpy_transport --test joule_enthalpy_composed -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/electrothermal.log"
+      - name: Retain integration diagnostics and resolved dependency lock
+        if: always()
+        run: |
+          git diff -- Cargo.lock > "$RUNNER_TEMP/thermal-lock.diff"
+          cp Cargo.lock "$RUNNER_TEMP/thermal-Cargo.lock"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: electrothermal-validation
+          path: |
+            ${{ runner.temp }}/electrothermal.log
+            ${{ runner.temp }}/thermal-lock.diff
+            ${{ runner.temp }}/thermal-Cargo.lock
           retention-days: 3
