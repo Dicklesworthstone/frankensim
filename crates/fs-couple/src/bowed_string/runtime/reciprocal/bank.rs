@@ -103,6 +103,8 @@ pub struct MaterialStringBankSource {
     gas: GasState,
     options: StringBankOptions,
     body_connections: Vec<ModalConnection>,
+    material_plate: Option<plate::SharedMaterialPlateBody>,
+    material_cavity: Option<super::plate::MaterialBodyCavity>,
 }
 impl MaterialStringBankSource {
     /// Original string order, material/loss receipts and physical connections.
@@ -117,6 +119,12 @@ impl MaterialStringBankSource {
     /// Original receiver-to-receiver links before string-prefix remapping.
     #[must_use]
     pub fn body_connections(&self) -> &[ModalConnection] { &self.body_connections }
+    /// Original source-bound plate and complete physical bridge/observer inputs.
+    #[must_use]
+    pub const fn material_plate(&self) -> Option<&plate::SharedMaterialPlateBody> { self.material_plate.as_ref() }
+    /// Original body-air law, geometry, gas and observer, when supplied.
+    #[must_use]
+    pub const fn material_cavity(&self) -> Option<&super::plate::MaterialBodyCavity> { self.material_cavity.as_ref() }
 }
 
 /// All string/body vibration persists in ONE mechanical/friction state.
@@ -174,7 +182,7 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_plate: None, material_cavity: None }, cards, system })
     }
 
     /// Complete source assignments survive rendering and sympathetic vibration.
@@ -321,3 +329,6 @@ pub(super) fn assemble(
 pub(super) fn shape(card: &BowedStringCard, station: f64) -> Vec<f64> {
     (0..card.mode_count).map(|k| unit_shape(k, station, card.length_m, card.linear_density_kg_m)).collect()
 }
+
+/// One material-derived body and physical pressure shared by every string.
+pub mod plate;

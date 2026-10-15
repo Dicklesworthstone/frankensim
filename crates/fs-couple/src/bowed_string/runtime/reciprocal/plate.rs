@@ -130,54 +130,18 @@ impl ReciprocalMaterialString {
                 return Err(invalid("body cavity must use the exact assembly gas and a positive finite observer distance"));
             }
         }
-        // Only fresh reductions enter here; no pre-existing body or radiation
-        // memory is thrown away. The original DKT/modal owner is synchronous.
-        let radiators = certified_radiators(description).map_err(ReciprocalStringError::Material)?;
-        poll(gate)?;
-        let mut modes = Vec::with_capacity(radiators.len());
-        let mut bridge = Vec::with_capacity(radiators.len());
-        let mut areas = Vec::with_capacity(radiators.len());
+        let image = reduce_material_body(&body.specimen, &gas, options.sample_rate_hz,
+            body.modal_budget, body.listener_m, cavity.as_ref(), gate)?;
         let mut weights = vec![0.0; specimen.string().n_modes];
-        for radiator in &radiators {
-            let root_mass = fs_math::det::sqrt(radiator.mass_kg);
-            let participation = radiator.drive_participation / root_mass;
-            let area = radiator.area_m2 / root_mass;
-            // Preserve the original compact pressure owner's normalization/sign.
-            let weight = radiator.radiate_mass_normalized(1.0, gas.density, body.listener_m);
-            if !(root_mass.is_finite() && root_mass > 0.0 && participation.is_finite()
-                && area.is_finite() && weight.is_finite()) {
-                return Err(invalid("material plate port normalization must remain finite"));
-            }
-            bridge.push(participation);
-            areas.push(area);
-            weights.push(weight);
-            modes.push(ModalAcousticMode {
-                angular_frequency_rad_s: radiator.omega, damping_ratio: radiator.zeta,
-                pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
-            });
-        }
-        let receiver = ModalAcousticTimeModel::try_new(options.sample_rate_hz, modes, body.modal_budget)
-            .map_err(|source| ReciprocalStringError::Network(ModalCouplingError::Component { component: 1, source }))?;
+        weights.extend(image.pressure);
         options.connections.push(InteriorStringConnection {
             station_fraction: body.bridge_station_fraction,
-            body: ModalAttachment { component: 0, shapes: bridge },
+            body: ModalAttachment { component: 0, shapes: image.bridge },
             stiffness_n_m: body.stiffness_n_m, damping_n_s_m: body.damping_n_s_m,
             rest_extension_m: body.rest_extension_m,
         });
-        let mut bodies = vec![receiver];
-        let mut body_links = Vec::new();
-        if let Some(c) = &cavity {
-            let neck = c.cavity.neck_component(options.sample_rate_hz, c.modal_budget)
-                .map_err(ReciprocalStringError::Network)?;
-            body_links = c.cavity.connections(0, 1, &areas).map_err(ReciprocalStringError::Network)?;
-            bodies.push(neck);
-            // Same compact half-space law p=rho*Qdot/(2*pi*r) as the plate.
-            // Q is outward NECK flow, not cavity pressure or a fitted gain.
-            weights.push(gas.density * c.cavity.neck_volume_shape_m2_per_sqrt_kg()
-                / (core::f64::consts::TAU * c.listener_m));
-        }
         let mut assembled = Self::from_specimen_and_body_network(cx, specimen, gas,
-            bodies, body_links, law, options, gate)?;
+            image.bodies, image.body_connections, law, options, gate)?;
         assembled.system = assembled.system.with_acceleration_pressure(weights)
             .map_err(ReciprocalStringError::Friction)?;
         assembled.source.material_plate = Some(body);
@@ -185,4 +149,74 @@ impl ReciprocalMaterialString {
         poll(gate)?;
         Ok(assembled)
     }
+}
+
+// One body reduction for one-string and sympathetic multi-string realizations.
+// Modal mass, signed bridge/volume shapes, cavity reactions and pressure output
+// come from the same physical owners and one common gas.
+pub(super) struct MaterialBodyImage {
+    pub(super) bodies: Vec<ModalAcousticTimeModel>,
+    pub(super) bridge: Vec<f64>,
+    pub(super) pressure: Vec<f64>,
+    pub(super) body_connections: Vec<crate::render::schedule::force::coupled::ModalConnection>,
+}
+
+pub(super) fn reduce_material_body(
+    specimen: &ResolvedPlateSpecimen, gas: &GasState, sample_rate_hz: u32,
+    modal_budget: ModalAcousticTimeBudget, listener_m: f64,
+    cavity: Option<&MaterialBodyCavity>, gate: &CancelGate,
+) -> Result<MaterialBodyImage, ReciprocalStringError> {
+    poll(gate)?;
+    gas.validate_coherence().map_err(|error| ReciprocalStringError::Material(
+        AcousticRealizeError::Ambient(error.to_string())))?;
+    let description = specimen.plate();
+    if description.geometric_nonlinearity || description.n_modes == 0
+        || sample_rate_hz == 0 || !listener_m.is_finite() || listener_m <= 0.0 {
+        return Err(invalid("shared material body requires linear modes and a positive clock/distance"));
+    }
+    if let Some(c) = cavity {
+        if c.cavity.gas() != gas || !c.listener_m.is_finite() || c.listener_m <= 0.0 {
+            return Err(invalid("body cavity must use the exact assembly gas and a positive finite observer distance"));
+        }
+    }
+    // Fresh reduction only; the original DKT/modal owner is synchronous.
+    let radiators = certified_radiators(description).map_err(ReciprocalStringError::Material)?;
+    poll(gate)?;
+    let mut modes = Vec::with_capacity(radiators.len());
+    let mut bridge = Vec::with_capacity(radiators.len());
+    let mut areas = Vec::with_capacity(radiators.len());
+    let mut pressure = Vec::with_capacity(radiators.len() + usize::from(cavity.is_some()));
+    for radiator in &radiators {
+        let root_mass = fs_math::det::sqrt(radiator.mass_kg);
+        let participation = radiator.drive_participation / root_mass;
+        let area = radiator.area_m2 / root_mass;
+        let weight = radiator.radiate_mass_normalized(1.0, gas.density, listener_m);
+        if !(root_mass.is_finite() && root_mass > 0.0 && participation.is_finite()
+            && area.is_finite() && weight.is_finite()) {
+            return Err(invalid("material plate port normalization must remain finite"));
+        }
+        bridge.push(participation);
+        areas.push(area);
+        pressure.push(weight);
+        modes.push(ModalAcousticMode {
+            angular_frequency_rad_s: radiator.omega, damping_ratio: radiator.zeta,
+            pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
+        });
+    }
+    let receiver = ModalAcousticTimeModel::try_new(sample_rate_hz, modes, modal_budget)
+        .map_err(|source| ReciprocalStringError::Material(AcousticRealizeError::Modal(source)))?;
+    let mut bodies = vec![receiver];
+    let mut body_connections = Vec::new();
+    if let Some(c) = cavity {
+        bodies.push(c.cavity.neck_component(sample_rate_hz, c.modal_budget)
+            .map_err(ReciprocalStringError::Network)?);
+        body_connections = c.cavity.connections(0, 1, &areas)
+            .map_err(ReciprocalStringError::Network)?;
+        // Existing compact half-space observation, with the physical outward
+        // neck volume coordinate. No assigned oscillator frequency or gain.
+        pressure.push(gas.density * c.cavity.neck_volume_shape_m2_per_sqrt_kg()
+            / (core::f64::consts::TAU * c.listener_m));
+    }
+    poll(gate)?;
+    Ok(MaterialBodyImage { bodies, bridge, pressure, body_connections })
 }

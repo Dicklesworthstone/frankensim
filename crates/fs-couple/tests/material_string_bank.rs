@@ -242,3 +242,6 @@ fn detached_members_wrong_geometry_budgets_gas_and_cancellation_refuse() {
         assert!(ReciprocalStringBank::new(cx, vec![member(7800.0)], gas(101_325.0), vec![body(0.0)], law(), options(0), gate).is_err());
     });
 }
+
+#[path = "material_string_bank/plate.rs"]
+mod plate;
