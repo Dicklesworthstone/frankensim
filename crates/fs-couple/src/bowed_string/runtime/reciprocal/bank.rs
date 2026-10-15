@@ -112,6 +112,7 @@ pub struct MaterialStringBankSource {
     material_plate: Option<plate::SharedMaterialPlateBody>,
     material_chart: Option<chart::SharedMaterialPlateChartBody>,
     material_chart_viscosity: Option<crate::plate_viscosity::ViscousPlateImage>,
+    material_chart_bridges: Option<chart::PlateBridgeFootprints>,
     material_cavity: Option<super::plate::MaterialBodyCavity>,
 }
 impl MaterialStringBankSource {
@@ -199,7 +200,7 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_plate: None, material_chart: None, material_chart_viscosity: None, material_cavity: None }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_cavity: None }, cards, system })
     }
 
     /// Complete source assignments survive rendering and sympathetic vibration.

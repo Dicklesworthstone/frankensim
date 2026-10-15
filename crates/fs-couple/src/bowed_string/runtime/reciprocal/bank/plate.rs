@@ -146,10 +146,30 @@ pub(super) fn finish_material_body(
     string_modes: usize, gas: GasState, image: MaterialBodyImage, law: FrictionLaw,
     options: StringBankOptions, gate: &CancelGate,
 ) -> Result<ReciprocalStringBank, ReciprocalStringError> {
-    let strings = sources.into_iter().zip(bridges).map(|(source, bridge)| MaterialStringMember {
+    finish_material_body_with_ports(cx, sources, bridges, string_modes, gas, image,
+        None, law, options, gate)
+}
+
+// Common and spatial bridge inputs differ only in the physical attachment map.
+// Ports MUST belong to image's single eigenbasis; only the reducer calls here.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_material_body_with_ports(
+    cx: &Cx<'_>, sources: Vec<MaterialStringSource>, bridges: &[SharedPlateBridge],
+    string_modes: usize, gas: GasState, image: MaterialBodyImage,
+    ports: Option<&[Vec<f64>]>, law: FrictionLaw,
+    options: StringBankOptions, gate: &CancelGate,
+) -> Result<ReciprocalStringBank, ReciprocalStringError> {
+    poll(gate)?;
+    if sources.len() != bridges.len() || ports.is_some_and(|p| p.len() != sources.len()) {
+        return Err(invalid("every material string must retain exactly one body attachment"));
+    }
+    // All shape dimensions, nonzero support, finite values and constitutive
+    // limits are checked by the original reciprocal network assembler below.
+    let strings = sources.into_iter().zip(bridges).enumerate().map(|(i, (source, bridge))| MaterialStringMember {
         source, connections: vec![InteriorStringConnection {
             station_fraction: bridge.station_fraction,
-            body: ModalAttachment { component: 0, shapes: image.bridge.clone() },
+            body: ModalAttachment { component: 0,
+                shapes: ports.map_or_else(|| image.bridge.clone(), |p| p[i].clone()) },
             stiffness_n_m: bridge.stiffness_n_m, damping_n_s_m: bridge.damping_n_s_m,
             rest_extension_m: bridge.rest_extension_m,
         }],

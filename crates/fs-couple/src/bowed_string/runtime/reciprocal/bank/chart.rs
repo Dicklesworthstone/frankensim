@@ -9,8 +9,13 @@
 //! joint/slip law. Loss is either explicitly authored or selected from each
 //! region's isotropic Kelvin-Voigt source. The explicit tensor constructor retains
 //! full nonproportional viscous coupling; elastic data alone do not imply loss.
-//! All strings use one authored physical bridge footprint. The compact pressure
-//! law has no propagation delay or broadband exterior-fluid back-loading.
+//! The original constructors use a common bridge footprint; the spatial variants
+//! retain one physical footprint per string. Both share the same body eigenbasis.
+//! The compact pressure law has no delay or broadband exterior-fluid back-loading.
+
+/// Independent spatial body contacts through the same material assembly.
+pub mod spatial;
+pub use spatial::PlateBridgeFootprints;
 
 use super::*;
 use crate::plate_viscosity::{PlateViscosity, PlateViscosityLimits};
@@ -28,7 +33,7 @@ pub struct SharedMaterialPlateChartBody {
     /// unit-total-force footprint. Authored damping must be zero with source loss.
     pub reduction: PlateChartRadiation,
     /// Exactly one interior bridge law per declared string. All act through the
-    /// same nodal footprint, not through unrelated modal attachment vectors.
+    /// same nodal footprint unless explicit spatial footprints are selected.
     pub bridges: Vec<SharedPlateBridge>,
     /// Maximum full plate DOFs (three per node), checked before FE assembly.
     pub max_plate_dofs: usize,
@@ -66,7 +71,7 @@ impl ReciprocalStringBank {
         body: SharedMaterialPlateChartBody, cavity: Option<MaterialBodyCavity>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
-        Self::build_material_plate_chart(cx, sources, gas, body, cavity, law, options, gate, None)
+        Self::build_material_plate_chart(cx, sources, gas, body, cavity, law, options, gate, None, None)
     }
 
     /// Keep every regional viscous cross term in the shared string/body/bow solve.
@@ -88,7 +93,7 @@ impl ReciprocalStringBank {
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
         Self::build_material_plate_chart(cx, sources, gas, body, cavity, law, options,
-            gate, Some((viscosity, limits)))
+            gate, Some((viscosity, limits)), None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -97,6 +102,7 @@ impl ReciprocalStringBank {
         body: SharedMaterialPlateChartBody, cavity: Option<MaterialBodyCavity>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
         tensor: Option<(PlateViscosity, PlateViscosityLimits)>,
+        footprints: Option<PlateBridgeFootprints>,
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         let chart = body.specimen.chart();
@@ -116,6 +122,11 @@ impl ReciprocalStringBank {
         }
         let string_modes = super::plate::material_body_preflight(
             &sources, &body.bridges, r.n_modes, cavity.as_ref(), &options, gate)?;
+        if let Some(ports) = &footprints {
+            if ports.weights.len() != sources.len() {
+                return Err(invalid("spatial body contacts require exactly one footprint per material string"));
+            }
+        }
         validate_body_medium(&gas, options.sample_rate_hz, body.listener_m, cavity.as_ref(), gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
@@ -129,11 +140,27 @@ impl ReciprocalStringBank {
                 return Err(invalid("complete material damping, bridge and cavity channels exceed the original connection budget"));
             }
         }
-        let viscous = tensor.as_ref().map(|(v, limits)|
-            body.specimen.certified_viscous_radiators(r, v, *limits, gate)
-        ).transpose().map_err(ReciprocalStringError::Material)?;
+        // Force maps, full material damping and pressure maps must come from
+        // ONE eigenbasis, including mode signs and any degenerate eigenspace.
+        let mut ports = Vec::new();
+        let viscous = tensor.as_ref().map(|(v, limits)| {
+            if let Some(input) = &footprints {
+                let (image, projected) = body.specimen.certified_viscous_radiators_with_force_ports(
+                    r, &input.weights, input.max_projection_terms, v, *limits, gate)?;
+                ports = projected;
+                Ok(image)
+            } else { body.specimen.certified_viscous_radiators(r, v, *limits, gate) }
+        }).transpose().map_err(ReciprocalStringError::Material)?;
         let radiators = if viscous.is_none() {
-            certified_material_chart_radiators(&body.specimen, r).map_err(ReciprocalStringError::Material)?
+            if let Some(input) = &footprints {
+                let (radiators, projected) = body.specimen.certified_radiators_with_force_ports(
+                    r, &input.weights, input.max_projection_terms)
+                    .map_err(ReciprocalStringError::Material)?;
+                ports = projected;
+                radiators
+            } else {
+                certified_material_chart_radiators(&body.specimen, r).map_err(ReciprocalStringError::Material)?
+            }
         } else { Vec::new() };
         poll(gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
@@ -142,10 +169,11 @@ impl ReciprocalStringBank {
         let mut image = reduce_radiating_body(physical_radiators, &gas, options.sample_rate_hz,
             body.modal_budget, body.listener_m, cavity.as_ref(), gate)?;
         if let Some(v) = &viscous { image.body_connections.extend(v.damping().connections(0)); }
-        let mut bank = super::plate::finish_material_body(cx, sources, &body.bridges,
-            string_modes, gas, image, law, options, gate)?;
+        let mut bank = super::plate::finish_material_body_with_ports(cx, sources, &body.bridges,
+            string_modes, gas, image, footprints.as_ref().map(|_| ports.as_slice()), law, options, gate)?;
         bank.source.material_chart = Some(body);
         bank.source.material_chart_viscosity = viscous;
+        bank.source.material_chart_bridges = footprints;
         bank.source.material_cavity = cavity;
         poll(gate)?;
         Ok(bank)
