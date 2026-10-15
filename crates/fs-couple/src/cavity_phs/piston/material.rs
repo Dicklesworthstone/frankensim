@@ -6,6 +6,11 @@
 
 use super::{ClosedGasParcel, GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_mbd_material::ResolvedBody;
+use super::thermal::{ConductanceSample, ThermalPistonError};
+use super::thermal::double_acting::{DoubleHeatExchangeSolve, DoubleThermalPistonStep};
+use super::thermal::layers::{MaterialConductionLayers, LayerConductionError};
+use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStep, UniformEnthalpyStepInput};
+use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use super::double_acting::{
     DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve, DoublePistonStep,
 };
@@ -127,6 +132,71 @@ impl MaterialDoubleActingGasPiston {
         cancelled: impl FnMut() -> bool,
     ) -> Result<DoublePistonStep, PistonError> {
         self.piston.step(input, controls, cancelled)
+    }
+}
+
+/// Material-bound shared mechanics and its jointly accepted finite thermal store.
+/// The mechanical body's original density and geometry records remain attached.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialDoubleThermalPistonCandidate<S> {
+    piston: MaterialDoubleActingGasPiston,
+    thermal: UniformEnthalpyStep<[S; 2]>,
+    step: DoubleThermalPistonStep,
+}
+impl<S> MaterialDoubleThermalPistonCandidate<S> {
+    /// Accepted candidate with the original source-resolved inertial specimen.
+    pub const fn piston(&self) -> &MaterialDoubleActingGasPiston { &self.piston }
+    /// One finite thermal endpoint retaining both interface source evaluations.
+    pub const fn thermal(&self) -> &UniformEnthalpyStep<[S; 2]> { &self.thermal }
+    /// Original joint material, heat, momentum and energy accounting.
+    pub const fn step(&self) -> &DoubleThermalPistonStep { &self.step }
+    /// Publish the material-bound mechanism and thermal state together.
+    pub fn into_parts(self) -> (MaterialDoubleActingGasPiston, UniformEnthalpyStep<[S; 2]>, DoubleThermalPistonStep) {
+        (self.piston, self.thermal, self.step)
+    }
+}
+
+impl MaterialDoubleActingGasPiston {
+    /// Exchange heat with one finite material store without shedding the body's
+    /// source records or replacing its canonical inertia with a numeric mass.
+    /// The thermal store may be separate from the rigid moving specimen; its
+    /// phase/temperature do not silently deform or re-resolve that specimen.
+    /// Both gas materials, one momentum and the store publish only as a complete
+    /// candidate. Conductance callbacks must be repeatable and free of live debits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn thermal_candidate<S, E>(
+        &self, input: DoublePistonInput, thermal_body: UniformEnthalpyStepInput<'_>,
+        controls: DoublePistonSolve, exchange: DoubleHeatExchangeSolve,
+        resolve: impl FnMut(&[ResolvedThermochemicalGasState; 2], EquilibriumPhaseState)
+            -> Result<[ConductanceSample<S>; 2], E>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialDoubleThermalPistonCandidate<S>, ThermalPistonError<E>> {
+        let candidate = self.piston.thermal_candidate(input, thermal_body, controls,
+            exchange, resolve, &mut cancelled)?;
+        let (piston, thermal, step) = candidate.into_parts();
+        let candidate = MaterialDoubleThermalPistonCandidate {
+            piston: Self { body: self.body.clone(), piston }, thermal, step,
+        };
+        if cancelled() { return Err(ThermalPistonError::Cancelled); }
+        Ok(candidate)
+    }
+
+    /// Use existing source-bound gas/body conduction layers on both faces while
+    /// preserving the mechanical material binding. Swapping supported cards and
+    /// geometry changes conduction, gas response and inertia without solver edits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn thermal_layers_candidate(
+        &self, input: DoublePistonInput, thermal_body: UniformEnthalpyStepInput<'_>,
+        controls: DoublePistonSolve, exchange: DoubleHeatExchangeSolve,
+        layers: [MaterialConductionLayers<'_>; 2], cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialDoubleThermalPistonCandidate<fs_material::state_point::ResolvedMaterialStatePoint>,
+        ThermalPistonError<LayerConductionError>>
+    {
+        self.thermal_candidate(input, thermal_body, controls, exchange,
+            |gases, thermal| Ok([
+                layers[0].resolve(&gases[0], thermal)?,
+                layers[1].resolve(&gases[1], thermal)?,
+            ]), cancelled)
     }
 }
 
