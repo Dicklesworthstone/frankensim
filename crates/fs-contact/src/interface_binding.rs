@@ -7,6 +7,9 @@
 //! claim authority. A successful identity bind alone is not evidence that the
 //! card contains every property a chosen law needs.
 
+/// Explicit per-body temperature binding; the common-state API remains strict.
+pub mod temperature;
+
 use core::fmt;
 use std::collections::BTreeMap;
 
@@ -185,7 +188,9 @@ impl BoundIsotropicElasticInterface {
         &self.interface
     }
 
-    /// Complete common physical state point of both bulk materials.
+    /// Complete point used by the interface law. The common-state constructor
+    /// also uses this for both bulk materials; the temperature-aware constructor
+    /// retains each bulk point separately in its original resolved state.
     #[must_use]
     pub fn state_point(&self) -> &[(String, f64)] {
         &self.state_point
@@ -347,8 +352,10 @@ pub fn bind_dry_interface_system_card(
 ///
 /// Both material-state ids and all state-point coordinates must agree with
 /// the interface roles and with each other. This prevents a contact law from
-/// combining, for example, room-temperature disc elasticity with hot-base
-/// elasticity or a reversed material pair. The result derives only elastic
+/// accidentally mixing differently queried states or a reversed material pair.
+/// Use [`temperature::bind_isotropic_elastic_interface_at_temperatures`] to
+/// explicitly bind unequal body temperatures and an independently declared
+/// interface-law temperature. The result derives only elastic
 /// modulus and a conservative yield applicability scalar; it does not select
 /// a normal law, friction model, adhesion model, or validity limit.
 pub fn bind_isotropic_elastic_interface(
@@ -356,6 +363,21 @@ pub fn bind_isotropic_elastic_interface(
     surface_a: &IsotropicSolidStatePoint,
     surface_b: &IsotropicSolidStatePoint,
 ) -> Result<BoundIsotropicElasticInterface, InterfaceBindingError> {
+    check_surface_roles(interface, surface_a, surface_b)?;
+    if !state_points_exact_eq(
+        surface_a.resolved().query_point(),
+        surface_b.resolved().query_point(),
+    ) {
+        return Err(InterfaceBindingError::StatePointMismatch);
+    }
+    bind_elastic_properties(interface, surface_a, surface_b)
+}
+
+fn check_surface_roles(
+    interface: &BoundDryInterfaceSystem,
+    surface_a: &IsotropicSolidStatePoint,
+    surface_b: &IsotropicSolidStatePoint,
+) -> Result<(), InterfaceBindingError> {
     for (role, expected, observed) in [
         (
             "surface_a",
@@ -376,12 +398,15 @@ pub fn bind_isotropic_elastic_interface(
             });
         }
     }
-    if !state_points_exact_eq(
-        surface_a.resolved().query_point(),
-        surface_b.resolved().query_point(),
-    ) {
-        return Err(InterfaceBindingError::StatePointMismatch);
-    }
+    Ok(())
+}
+
+// Shared material combination and identity; neither constructor duplicates E*.
+fn bind_elastic_properties(
+    interface: &BoundDryInterfaceSystem,
+    surface_a: &IsotropicSolidStatePoint,
+    surface_b: &IsotropicSolidStatePoint,
+) -> Result<BoundIsotropicElasticInterface, InterfaceBindingError> {
     let reduced = surface_a
         .reduced_modulus_against(surface_b)
         .map_err(InterfaceBindingError::MaterialState)?;
@@ -411,7 +436,8 @@ pub fn bind_isotropic_elastic_interface(
 /// Bind the normal-contact interface datum to the exact ordered elastic state.
 ///
 /// The interface property bundle must originate from the same immutable card
-/// and the same complete state point as both bulk material bundles. The
+/// and the exact interface-law point retained by the elastic binding. Bulk
+/// temperatures may differ only through the explicit temperature-aware binder. The
 /// current normal-law ladder requires an explicit nonnegative
 /// [`ADHESION_ENERGY_PROPERTY`]; absence refuses rather than silently assuming
 /// a nonadhesive interface.
@@ -428,7 +454,10 @@ pub fn bind_normal_interface_state(
     if interface_state.surface_materials() != elastic.interface.surface_materials() {
         return Err(InterfaceBindingError::InterfaceStateSurfaceMismatch);
     }
-    if !state_points_exact_eq(interface_state.query_point(), elastic.state_point()) {
+    if !state_points_exact_eq(interface_state.query_point(), elastic.state_point())
+        || interface_state.axis_quantities() != elastic.surface_a_state.resolved().axis_quantities()
+        || interface_state.axis_quantities() != elastic.surface_b_state.resolved().axis_quantities()
+    {
         return Err(InterfaceBindingError::StatePointMismatch);
     }
     let adhesion = interface_state.property(ADHESION_ENERGY_PROPERTY).ok_or(
@@ -525,6 +554,18 @@ pub fn bind_normal_contact_model(
             minimum.is_finite() && maximum.is_finite() && *minimum > 0.0 && minimum <= maximum
         })
         .ok_or(InterfaceBindingError::MissingNormalContactTemperatureValidity)?;
+
+    // A valid interface-law temperature must not hide an unsupported hot/cold
+    // bulk state. Each original bulk property has already faced its own source
+    // domain; the constitutive model's domain additionally covers both bodies.
+    for bulk in [&normal_state.elastic.surface_a_state, &normal_state.elastic.surface_b_state] {
+        let bulk_point: BTreeMap<_, _> = bulk.resolved().query_point().iter().cloned().collect();
+        if !model.validity.contains(&bulk_point) {
+            return Err(InterfaceBindingError::NormalContactModelOutsideValidity {
+                model: model.content_hash(),
+            });
+        }
+    }
 
     let characteristic_rate_m_per_s =
         required_model_parameter(model, CHARACTERISTIC_RATE_PARAMETER, SPEED_DIMS, true)?;
