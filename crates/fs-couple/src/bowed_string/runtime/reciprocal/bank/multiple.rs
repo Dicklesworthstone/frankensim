@@ -129,3 +129,6 @@ impl MultiBowStringBank {
     #[must_use]
     pub fn into_parts(self) -> (MultiBowStringBankSource, MultiFrictionModalSystem) { (self.source, self.system) }
 }
+
+/// Common gesture-clock playback of all contacts and the shared pressure observer.
+pub mod performance;
