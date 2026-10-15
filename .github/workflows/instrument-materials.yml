@@ -18,6 +18,10 @@ on:
       - 'crates/fs-couple/tests/modal_multi_friction.rs'
       - 'crates/fs-couple/tests/material_multi_bow.rs'
       - 'crates/fs-couple/tests/bowed_material_gas.rs'
+      - 'crates/fs-couple/tests/material_string_torsion.rs'
+      - 'crates/fs-material/src/section.rs'
+      - 'crates/fs-material/src/section/torsion.rs'
+      - 'crates/fs-material/tests/torsional_section.rs'
       - 'crates/fs-couple/src/bowed_string/runtime/reciprocal.rs'
       - 'crates/fs-couple/src/bowed_string/runtime/reciprocal/**'
       - 'crates/fs-couple/tests/material_string_bank.rs'
@@ -58,6 +62,12 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Source-bound rotary inertia and torsional shear loss
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-material --test torsional_section -- --test-threads=1
+      - name: Material torsion in surface bow contact and scheduled pressure
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test material_string_torsion -- --test-threads=1
       - name: Simultaneous material bows and original friction playback
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --no-fail-fast --test modal_multi_friction --test material_multi_bow --test modal_friction --test music_render_friction -- --test-threads=1

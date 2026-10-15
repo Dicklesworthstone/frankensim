@@ -9,8 +9,9 @@
 //! All spans include both fixed endpoints and any afterlength. Body attachment
 //! stations are interior points, not fictitious moving ports on pinned ends.
 //! Sources remain frozen-state linear bending models; concentric layers mean
-//! perfect bonding, not helical winding/slip. Torsion, large-amplitude tension,
-//! and broadband radiation back-loading are absent. Multiple fixed bow contacts
+//! perfect bonding, not helical winding/slip. Optional sourced torsion shares
+//! the surface friction solve; large-amplitude tension and broadband radiation
+//! back-loading are absent. Multiple fixed bow contacts
 //! use the existing simultaneous-friction owner through `multiple`.
 
 use super::{InteriorStringConnection, ReciprocalStringError, invalid, interior, poll};
@@ -35,6 +36,8 @@ use fs_tribo::FrictionLaw;
 /// Original source data, not an averaged material or an authored modal preset.
 #[derive(Clone, Debug)]
 pub enum MaterialStringSource {
+    /// Original bending source extended by material-derived small-angle twist.
+    WithTorsion(Box<torsion::TorsionalStringSource>),
     /// Homogeneous circular specimen, with its complete material/loss receipts.
     Homogeneous(ResolvedStringSpecimen),
     /// Perfectly bonded annuli with per-layer elasticity, density and viscosity.
@@ -49,13 +52,15 @@ pub enum MaterialStringSource {
 }
 impl MaterialStringSource {
     fn modes(&self) -> usize {
-        match self { Self::Homogeneous(s) => s.string().n_modes,
+        match self { Self::WithTorsion(t) => t.total_modes(),
+            Self::Homogeneous(s) => s.string().n_modes,
             Self::Concentric { template, .. } => template.n_modes }
     }
     fn lower(&self, cx: &Cx<'_>, gas: &GasState, rate: u32)
         -> Result<BowedStringCard, ReciprocalStringError>
     {
         match self {
+            Self::WithTorsion(t) => return t.bending().lower(cx, gas, rate),
             Self::Homogeneous(s) => BowedStringCard::from_material_specimen_with_gas(cx, s, gas, rate),
             Self::Concentric { template, section, prestress } =>
                 BowedStringCard::from_concentric_material_section(cx, template.clone(), section, *prestress, gas, rate),
@@ -183,7 +188,7 @@ impl ReciprocalStringBank {
         }
         let connections: Vec<&[InteriorStringConnection]> = strings.iter()
             .map(|member| member.connections.as_slice()).collect();
-        let system = assemble(&cards, bodies, &connections, &body_connections, law, &options, gate)?;
+        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, law, &options, gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
@@ -193,7 +198,7 @@ impl ReciprocalStringBank {
     /// Complete source assignments survive rendering and sympathetic vibration.
     #[must_use]
     pub const fn source(&self) -> &MaterialStringBankSource { &self.source }
-    /// Derived solid coefficients; source receipts remain in `source()`.
+    /// Derived TRANSVERSE coefficients; optional torsion and receipts remain in `source()`.
     #[must_use]
     pub fn cards(&self) -> &[BowedStringCard] { &self.cards }
     /// Accepted mechanics and work/loss diagnostics, without mutable source drift.
@@ -280,8 +285,21 @@ pub(super) fn assemble(
     connections: &[&[InteriorStringConnection]], body_connections: &[ModalConnection],
     law: FrictionLaw, options: &StringBankOptions, gate: &CancelGate,
 ) -> Result<FrictionModalSystem, ReciprocalStringError> {
+    assemble_sources(cards, None, bodies, connections, body_connections, law, options, gate)
+}
+
+// Keep the original one-string API in the same assembler. Its absent source
+// extensions retain the original basis and arithmetic exactly.
+#[allow(clippy::too_many_arguments)]
+fn assemble_sources(
+    cards: &[BowedStringCard], sources: Option<&[MaterialStringMember]>,
+    bodies: Vec<ModalAcousticTimeModel>, connections: &[&[InteriorStringConnection]],
+    body_connections: &[ModalConnection], law: FrictionLaw,
+    options: &StringBankOptions, gate: &CancelGate,
+) -> Result<FrictionModalSystem, ReciprocalStringError> {
     poll(gate)?;
     if cards.is_empty() || cards.len() != connections.len() || bodies.is_empty()
+        || sources.is_some_and(|s| s.len() != cards.len())
         || options.bow.string >= cards.len() || !interior(options.bow.station_fraction) {
         return Err(invalid("reciprocal assembly requires aligned strings, bodies and an interior bow"));
     }
@@ -289,6 +307,8 @@ pub(super) fn assemble(
     let mut links = Vec::new();
     for (index, (card, connections)) in cards.iter().zip(connections).enumerate() {
         poll(gate)?;
+        let source = sources.map(|members| &members[index].source);
+        let total_modes = source.map_or(card.mode_count, MaterialStringSource::modes);
         for connection in *connections {
             let body = bodies.get(connection.body.component)
                 .ok_or_else(|| invalid("string connection names an unknown supplied body"))?;
@@ -298,18 +318,24 @@ pub(super) fn assemble(
                 || !(connection.stiffness_n_m > 0.0 || connection.damping_n_s_m > 0.0) {
                 return Err(invalid("string/body connection needs an interior station and nonzero physical ports"));
             }
+            // This support transmits transverse motion, not an invented torque.
+            let mut bridge_shape = shape(card, connection.station_fraction);
+            bridge_shape.resize(total_modes, 0.0);
             links.push(ModalConnection {
-                left: ModalAttachment { component: index, shapes: shape(card, connection.station_fraction) },
+                left: ModalAttachment { component: index, shapes: bridge_shape },
                 right: ModalAttachment { component: cards.len() + connection.body.component,
                     shapes: connection.body.shapes.clone() },
                 stiffness_n_m: connection.stiffness_n_m, damping_n_s_m: connection.damping_n_s_m,
                 rest_extension_m: connection.rest_extension_m,
             });
         }
-        let modes = (0..card.mode_count).map(|k| ModalAcousticMode {
+        let mut modes: Vec<_> = (0..card.mode_count).map(|k| ModalAcousticMode {
             angular_frequency_rad_s: card.mode_omega_rad_s(k+1), damping_ratio: card.zetas[k],
             pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
         }).collect();
+        if let Some(MaterialStringSource::WithTorsion(twist)) = source {
+            twist.append_modes(card, &mut modes, gate)?;
+        }
         components.push(ModalAcousticTimeModel::try_new(options.sample_rate_hz, modes, options.string_budget)
             .map_err(|source| ReciprocalStringError::Network(ModalCouplingError::Component { component: index, source }))?);
     }
@@ -326,8 +352,13 @@ pub(super) fn assemble(
     components.extend(bodies);
     let network = CoupledModalSystem::new(components, links, options.network, gate)
         .map_err(ReciprocalStringError::Network)?;
+    let bow_card = &cards[options.bow.string];
+    let bow_shape = match sources {
+        Some(members) => members[options.bow.string].source.surface_shape(bow_card, options.bow.station_fraction)?,
+        None => shape(bow_card, options.bow.station_fraction),
+    };
     let port = ModalFrictionPort { left: ModalAttachment { component: options.bow.string,
-        shapes: shape(&cards[options.bow.string], options.bow.station_fraction) }, right: None, law };
+        shapes: bow_shape }, right: None, law };
     FrictionModalSystem::new(network, port, options.friction, gate).map_err(ReciprocalStringError::Friction)
 }
 
@@ -343,3 +374,6 @@ pub mod chart;
 
 /// Several source-bound bow contacts without resetting the shared mechanics.
 pub mod multiple;
+
+/// Material-derived surface twisting in the same reciprocal contact solve.
+pub mod torsion;

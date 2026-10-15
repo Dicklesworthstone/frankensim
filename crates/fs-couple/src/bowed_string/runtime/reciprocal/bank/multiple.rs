@@ -92,7 +92,8 @@ impl ReciprocalStringBank {
             poll(gate)?;
             ports.push((ModalFrictionPort {
                 left: ModalAttachment { component: bow.location.string,
-                    shapes: shape(&self.cards[bow.location.string], bow.location.station_fraction) },
+                    shapes: self.source.strings[bow.location.string].source
+                        .surface_shape(&self.cards[bow.location.string], bow.location.station_fraction)? },
                 right: None, law: bow.law.clone(),
             }, bow.friction));
         }
@@ -112,7 +113,7 @@ impl MultiBowStringBank {
     /// Original material/geometry bindings and every contact in drive order.
     #[must_use]
     pub const fn source(&self) -> &MultiBowStringBankSource { &self.source }
-    /// Original material-derived coefficients; source receipts remain attached.
+    /// Original transverse coefficients; torsional sources remain attached separately.
     #[must_use]
     pub fn cards(&self) -> &[BowedStringCard] { &self.cards }
     /// Read-only state, physical pressure weights and per-contact work reports.
