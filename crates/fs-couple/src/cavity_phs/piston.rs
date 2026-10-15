@@ -7,6 +7,8 @@
 
 /// Shared source-resolved rigid-body inertia coupled to the same gas dynamics.
 pub mod material;
+/// Reciprocal finite-body enthalpy/phase exchange on the same gas/momentum step.
+pub mod thermal;
 
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve};
