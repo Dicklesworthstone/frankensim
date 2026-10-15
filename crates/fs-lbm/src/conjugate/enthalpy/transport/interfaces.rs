@@ -36,6 +36,29 @@ impl<J> ElectricalInterfaceResponse<J> {
     pub const fn heat_fraction_to_first(&self) -> f64 { self.heat_fraction_to_first }
 }
 
+impl ElectricalInterfaceResponse<crate::conjugate::material_coupling::interfaces::MaterialContact> {
+    /// Bind an existing resolved interface to the ACTUAL adjacent surfaces.
+    /// `MaterialContact` owns material/phase/process, texture-frame and ordered
+    /// surface admission. Resistance is extracted from the same retained source;
+    /// no separately copied coefficient can disagree with its usage receipt.
+    ///
+    /// The template fixes only the ordered cells. Heat partition is explicitly
+    /// supplied, independently of resistance, and may evolve with the caller's
+    /// interface model. Surface arguments must come from actual scenario/material
+    /// samples, not copies of the source card's own declarations.
+    pub fn try_from_source(
+        template: &ElectricalContact,
+        source: fs_material::electrical_interface::ResolvedElectricalInterface,
+        surfaces: [&fs_matdb::SurfaceSpec; 2],
+        heat_fraction_to_first: f64,
+    ) -> Result<Self, JouleEnthalpyError> {
+        let material = crate::conjugate::material_coupling::interfaces::MaterialContact::try_new(
+            source, template.cells, surfaces, heat_fraction_to_first,
+        )?;
+        material.into_enthalpy_response(template.cells).map_err(Into::into)
+    }
+}
+
 /// One unchanged contact location and its evaluated numerical/source response.
 #[derive(Debug, PartialEq)]
 pub struct ElectricalInterfaceSample<J> {
