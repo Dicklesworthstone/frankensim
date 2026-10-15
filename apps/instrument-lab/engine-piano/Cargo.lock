@@ -581,10 +581,12 @@ dependencies = [
  "fs-matdb",
  "fs-material",
  "fs-math",
+ "fs-mbd-material",
  "fs-modal",
  "fs-nlmodal",
  "fs-phs",
  "fs-plate",
+ "fs-ports",
  "fs-qty",
  "fs-rand",
  "fs-scenario",
@@ -755,12 +757,33 @@ dependencies = [
  "fs-matdb",
  "fs-math",
  "fs-qty",
+ "fs-thermal",
  "fs-thermochem",
 ]
 
 [[package]]
 name = "fs-math"
 version = "0.0.1"
+
+[[package]]
+name = "fs-mbd"
+version = "0.0.1"
+dependencies = [
+ "fs-ga",
+ "fs-math",
+]
+
+[[package]]
+name = "fs-mbd-material"
+version = "0.0.1"
+dependencies = [
+ "fs-ga",
+ "fs-la",
+ "fs-matdb",
+ "fs-material",
+ "fs-mbd",
+ "fs-qty",
+]
 
 [[package]]
 name = "fs-mesh"
@@ -824,6 +847,14 @@ dependencies = [
  "fs-modal",
  "fs-qty",
  "fs-sparse",
+]
+
+[[package]]
+name = "fs-ports"
+version = "0.0.1"
+dependencies = [
+ "fs-iface",
+ "fs-qty",
 ]
 
 [[package]]
@@ -958,6 +989,10 @@ version = "0.0.1"
 dependencies = [
  "fs-obs",
 ]
+
+[[package]]
+name = "fs-thermal"
+version = "0.0.1"
 
 [[package]]
 name = "fs-thermochem"
