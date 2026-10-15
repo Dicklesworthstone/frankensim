@@ -162,3 +162,7 @@ required-features = ["cutfem-marquee"]
 [[example]]
 name = "motion_stress_sdf3"
 required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "simp_newton"
+required-features = ["newton-design"]

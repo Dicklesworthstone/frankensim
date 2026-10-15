@@ -40,6 +40,8 @@ pub mod robust;
 pub mod sdf3;
 #[cfg(feature = "cutfem-marquee")]
 pub mod sdf3_goal;
+#[cfg(feature = "newton-design")]
+pub mod simp_newton;
 pub mod simp_second_order;
 pub mod stress;
 
