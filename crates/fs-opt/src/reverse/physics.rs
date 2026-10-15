@@ -5,6 +5,8 @@
 //! into certified physics. No foreign runtime, finite differences, or hidden
 //! study-name lookup is installed by this interface.
 
+pub mod box_map;
+
 use super::{ReverseError, Slot, capacity};
 use crate::{Expr, NodeId, Problem, VarId};
 use fs_exec::Cx;

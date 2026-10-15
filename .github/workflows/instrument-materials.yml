@@ -28,6 +28,11 @@ on:
       - 'crates/fs-couple/tests/reed_gas_mixture*'
       - 'crates/fs-couple/tests/reed_gas_mixture/**'
       - 'crates/fs-couple/src/baffled_pressure*.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/contraction.rs'
+      - 'crates/fs-couple/src/bernoulli_aperture/moving.rs'
+      - 'crates/fs-couple/tests/contraction_loss.rs'
+      - 'crates/fs-couple/tests/flue_contraction.rs'
+      - 'crates/fs-couple/examples/flue_contraction*'
       - 'crates/fs-couple/src/flue_loop.rs'
       - 'crates/fs-couple/src/flue_loop/**'
       - 'crates/fs-couple/src/bernoulli_aperture/wall.rs'
@@ -102,6 +107,14 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Nonlinear mouth loss and physical flute pressure
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --no-fail-fast --test contraction_loss --test flue_contraction -- --test-threads=1
+          cargo test -p fs-couple --lib flue_loop::mouth_loss:: -- --test-threads=1
+          demo="$(mktemp -d)"
+          cargo run -p fs-couple --example flue_contraction -- "$demo/linear.wav" none 101325 1
+          cargo run -p fs-couple --example flue_contraction -- "$demo/contracted.wav" 0.6 101325 1
       - name: Pack-driven material plucks and bowed pressure
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --example material_strings -- --test-threads=1

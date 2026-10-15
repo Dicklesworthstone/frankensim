@@ -24,7 +24,7 @@ fn invalid() -> AcousticRealizeError {
 
 // Return both terms of dp + a*sign(dp)*sqrt(abs(dp)) = drive.
 // Shared by a single moving face and condensed independent pressure faces.
-fn pressure_partition(drive: f64, a: f64) -> Result<(f64, f64), AcousticRealizeError> {
+pub(super) fn pressure_partition(drive: f64, a: f64) -> Result<(f64, f64), AcousticRealizeError> {
     if !drive.is_finite() || !a.is_finite() || a < 0.0 { return Err(invalid()); }
     if a == 0.0 || drive == 0.0 { return Ok((drive, 0.0)); }
     let b = 2.0 * det::sqrt(drive.abs());

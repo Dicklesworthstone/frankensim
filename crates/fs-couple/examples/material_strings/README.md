@@ -104,6 +104,57 @@ loads may ramp or reverse; zero normal load lifts that bow without silencing the
 instrument. Commands outside the observed control window and station changes
 refuse rather than disappearing or silently rebuilding geometry.
 
+## V2: independent material layers and support constraints
+
+V1 files remain accepted unchanged. V2 changes only the version header and string
+records; audio, gas, body, force, cavity and canonical bow records are identical.
+Each V2 string explicitly selects a support law and then a section construction:
+
+```text
+frankensim-material-strings-v2
+... same audio, state, gas, body and strings-count records ...
+string core.fsmatpk 0.5 0.0003 tension 20 4 3 0.8 3000 0.1
+section bonded 0.0002 1
+layer sleeve.fsmatpk 0.0003
+... remaining original records ...
+```
+
+`section homogeneous` selects the original uniform specimen. A bonded section
+uses the string record's pack for its solid core, then 1..=15 concentric sleeves
+in strictly increasing outer-radius order. The final layer must end at the
+string's declared outer radius. These are **perfectly bonded annuli**, not helical
+windings, frictional sleeves or an approximation certified for wrapped strings.
+Every layer supplies its own density, Young modulus and bending viscosity. When
+twist modes are selected, every layer also supplies shear modulus and viscosity.
+Missing sleeve data never falls back to the core. Each original source receipt,
+loss band and spatial assignment remains attached to the shared string bank.
+Repeated references load one immutable pack once, not one copy per layer.
+
+Replace `tension 20` with `extension 0.4998 0.001` to hold the 0.5 m loaded span
+against a 0.4998 m stress-free length with a declared 0.001 strain limit. The
+original support owner computes tension from the section's total EA and imposed
+strain. Replacing a layer's modulus therefore changes tension on this path; the
+`tension` path holds the explicitly applied force instead. Slack, compression,
+and out-of-limit strain refuse. No frequency target or automatic retuning is
+introduced. The section geometry describes the resolved loaded state; Poisson
+contraction, differential thermal strain and live axial creep are not supplied.
+
+The `bonded-pluck.material-strings` fixture uses the existing wire pack and a
+separate synthetic sleeve pack. After the original build commands, run:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/sleeve-manifest.tsv" --out "$demo/sleeve.fsmatpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/bonded-pluck.material-strings" "$demo/bonded-pluck.wav"
+```
+
+Change only the sleeve source or geometry to compare constructions. Plucks,
+surface torque, simultaneous bows, shared body/cavity feedback, gas loading and
+PCM all use their original owners. Torsion has no invented direct pressure gain:
+it affects sound through the physical surface/contact coupling when that coupling
+is active. None of these fixtures is a measurement of gold, silver or a real string.
+
 ## Material profile and physical limits
 
 The input profile queries **bare SI axes `T` and `omega`**, at the explicitly
@@ -113,15 +164,15 @@ required contexts need the existing general material-state API, not coercion.
 All claims use the original `SingleClaimOnly` policy. No ambiguous property,
 missing loss, out-of-domain mode, or absent shear data becomes a fallback value.
 
-Every string needs `density` [kg/m3], `young_modulus` [Pa], and
+Every homogeneous string and every bonded layer needs `density` [kg/m3], `young_modulus` [Pa], and
 `kelvin_voigt_bending_viscosity` [Pa s]. Positive `TWIST_MODES` additionally requires
 `shear_modulus` [Pa] and `kelvin_voigt_shear_viscosity` [Pa s]; zero does not query or
 infer those properties. The body additionally needs `poisson_ratio` [1]. Bending
 and shear loss must have an explicit valid angular-frequency band; all actual
 retained modes, not only the source query frequency, undergo the existing checks.
 
-This executable currently selects homogeneous circular strings, fixed tension,
-fixed rotational ends, one simply supported **isotropic flat plate**, and one
+This executable selects homogeneous or bonded circular strings, fixed tension or
+fixed-extension supports, fixed rotational ends, one simply supported **isotropic flat plate**, and one
 optional uniform-pressure cavity/circular neck. Bridges are interior transverse
 connections on the full span **including afterlength**. It does not model carved
 wood shells, torque-bearing bridge contact, f-hole geometry, distributed cavity
@@ -131,7 +182,7 @@ and neck observations retain the existing compact baffled, zero-retardation
 approximation. Source-state validity is not measured instrument-fidelity evidence.
 
 Input caps: 1 MiB performance; 8 MiB per distinct material pack and 64 MiB total
-raw packs; 8 strings, 16 bow contacts, 64 force ports, 128 complete-network modes,
+raw packs; 8 strings, at most 16 layers per string, 16 bow contacts, 64 force ports, 128 complete-network modes,
 16 plate modes; 16,384 events per input family; 262,144 compiled controls per
 family; 16,777,216 source/projection work units per compiler; at most 192 kHz,
 600 seconds or 28,800,000 samples. Existing numerical owners retain their stricter

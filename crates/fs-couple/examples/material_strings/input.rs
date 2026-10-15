@@ -14,9 +14,19 @@ pub const MAX_WORK: u64 = 16_777_216;
 
 #[derive(Clone, Debug)]
 pub struct Wire {
-    pub pack: String, pub length: f64, pub radius: f64, pub tension: f64,
+    pub pack: String, pub length: f64, pub radius: f64, pub prestress: StringPrestress,
+    pub section: WireSection,
     pub bending_modes: usize, pub twist_modes: usize, pub bridge: SharedPlateBridge,
 }
+/// V2 describes perfectly bonded circular layers, never helical winding/slip.
+#[derive(Clone, Debug)]
+pub enum WireSection {
+    Homogeneous,
+    Bonded { core_radius_m: f64, sleeves: Vec<WireLayer> },
+}
+#[derive(Clone, Debug)]
+pub struct WireLayer { pub pack: String, pub outer_radius_m: f64 }
+const MAX_LAYERS: usize = 16;
 #[derive(Clone, Debug)]
 pub struct Body {
     pub pack: String, pub length: f64, pub width: f64, pub thickness: f64,
@@ -36,7 +46,14 @@ impl Spec {
         let (header, schedule) = text.split_once("\nschedule\n")
             .ok_or("expected LF-delimited schedule followed by canonical gesture bytes")?;
         let mut r = Reader { lines: header.lines(), line: 0 };
-        r.row("frankensim-material-strings-v1")?.end()?;
+        // V1 retains its original whitespace acceptance and record semantics.
+        let mut version = r.raw_row()?;
+        let layered = match version.word()? {
+            "frankensim-material-strings-v1" => false,
+            "frankensim-material-strings-v2" => true,
+            _ => return Err("unsupported material-string input version".into()),
+        };
+        version.end()?;
         let mut row = r.row("audio")?;
         let rate: u32 = row.parse()?; let samples: u64 = row.parse()?;
         let full_scale = row.positive()?; let block = row.count(65_536)?; row.end()?;
@@ -58,11 +75,22 @@ impl Spec {
         let mut strings = Vec::with_capacity(count); let mut modes = body.modes;
         for _ in 0..count {
             let mut row = r.row("string")?;
-            let wire = Wire { pack: row.path()?, length: row.positive()?, radius: row.positive()?,
-                tension: row.positive()?, bending_modes: row.count(MAX_MODES)?, twist_modes: row.count(MAX_MODES)?,
+            let pack = row.path()?; let length = row.positive()?; let radius = row.positive()?;
+            let prestress = if layered {
+                match row.word()? {
+                    "tension" => StringPrestress::FixedTension(row.positive()?),
+                    "extension" => StringPrestress::FixedExtension {
+                        stress_free_length_m: row.positive()?, linear_strain_limit: row.positive()?,
+                    },
+                    _ => return Err("v2 support must be tension N or extension L0 STRAIN_LIMIT".into()),
+                }
+            } else { StringPrestress::FixedTension(row.positive()?) };
+            let mut wire = Wire { pack, length, radius, prestress, section: WireSection::Homogeneous,
+                bending_modes: row.count(MAX_MODES)?, twist_modes: row.count(MAX_MODES)?,
                 bridge: SharedPlateBridge { station_fraction: row.scalar()?, stiffness_n_m: row.scalar()?,
                     damping_n_s_m: row.scalar()?, rest_extension_m: 0.0 } };
             row.end()?;
+            if layered { wire.section = r.section(radius)?; }
             if wire.bending_modes == 0 || !(0.0 < wire.bridge.station_fraction && wire.bridge.station_fraction < 1.0)
                 || wire.bridge.stiffness_n_m < 0.0 || wire.bridge.damping_n_s_m < 0.0
                 || !(wire.bridge.stiffness_n_m > 0.0 || wire.bridge.damping_n_s_m > 0.0) {
@@ -168,6 +196,41 @@ impl Spec {
 struct Reader<'a> { lines: Lines<'a>, line: usize }
 struct Row<'a> { words: SplitAsciiWhitespace<'a>, line: usize }
 impl<'a> Reader<'a> {
+    fn raw_row(&mut self) -> Result<Row<'a>> {
+        self.line += 1;
+        let words = self.lines.next().ok_or_else(|| format!("missing record on line {}", self.line))?
+            .split_ascii_whitespace();
+        Ok(Row { words, line: self.line })
+    }
+    fn section(&mut self, outer_radius: f64) -> Result<WireSection> {
+        let mut row = self.row("section")?;
+        match row.word()? {
+            "homogeneous" => { row.end()?; Ok(WireSection::Homogeneous) }
+            "bonded" => {
+                let core_radius_m = row.positive()?;
+                let count = row.count(MAX_LAYERS - 1)?; row.end()?;
+                if count == 0 || core_radius_m >= outer_radius {
+                    return Err("bonded section requires a smaller solid core and 1..=15 sleeves".into());
+                }
+                let mut sleeves = Vec::with_capacity(count);
+                let mut previous = core_radius_m;
+                for _ in 0..count {
+                    let mut row = self.row("layer")?;
+                    let pack = row.path()?; let outer_radius_m = row.positive()?; row.end()?;
+                    if outer_radius_m <= previous || outer_radius_m > outer_radius {
+                        return Err("bonded radii must increase strictly within the stated outer radius".into());
+                    }
+                    previous = outer_radius_m;
+                    sleeves.push(WireLayer { pack, outer_radius_m });
+                }
+                if previous.to_bits() != outer_radius.to_bits() {
+                    return Err("last bonded layer must end at the string's stated outer radius".into());
+                }
+                Ok(WireSection::Bonded { core_radius_m, sleeves })
+            }
+            _ => Err("section must be homogeneous or bonded CORE_RADIUS SLEEVE_COUNT".into()),
+        }
+    }
     fn row(&mut self, key: &str) -> Result<Row<'a>> {
         self.line += 1;
         let mut words = self.lines.next().ok_or_else(|| format!("missing {key} on line {}", self.line))?.split_ascii_whitespace();

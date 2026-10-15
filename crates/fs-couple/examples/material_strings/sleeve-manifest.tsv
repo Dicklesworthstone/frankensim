@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	synthetic-material-string-sleeve
+redistribution	permitted	Synthetic fixture; freely redistributable, not measured material data
+citation	Manufactured bonded-sleeve integration fixture
+license	CC0-1.0
+source	fixture	sleeve.tsv	material-tsv-v1

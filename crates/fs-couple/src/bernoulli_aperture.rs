@@ -89,3 +89,6 @@ mod tests {
 
 /// Geometry-derived distributed viscous and thermal wall losses.
 pub mod viscothermal;
+
+/// Fixed-window separated flow using the shared continuous Bernoulli law.
+pub mod contraction;
