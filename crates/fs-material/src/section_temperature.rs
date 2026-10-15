@@ -7,6 +7,9 @@
 //! This is a constitutive evaluation, not a heat integrator or an assertion of
 //! constant mass when a source density varies with temperature.
 
+/// Live layer-resolved electrical heating through the shared thermal timeline.
+pub mod heating;
+
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
