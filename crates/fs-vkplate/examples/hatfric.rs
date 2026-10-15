@@ -1,12 +1,12 @@
 //! Hi-hat with rim friction: one stick stroke on a grid `scale` times the offline one.
-//! usage: hatfric SCALE FRICTION RIM_MU SECONDS OUT.wav [SPEED_M_S] [open]
+//! usage: hatfric SCALE FRICTION RIM_MU SECONDS OUT.wav [SPEED_M_S] [open|apart]
 //! (RIM_MU: the rims' Hunt-Crossley loss, 0.08 offline, 3.0 in the live module)
 use fs_vkplate::*;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() < 6 {
-        eprintln!("usage: hatfric SCALE FRICTION RIM_MU SECONDS OUT.wav [SPEED_M_S] [open]");
+        eprintln!("usage: hatfric SCALE FRICTION RIM_MU SECONDS OUT.wav [SPEED_M_S] [open|apart]");
         std::process::exit(2);
     }
     let scale: f64 = a[1].parse().unwrap();
@@ -16,8 +16,12 @@ fn main() {
     let speed: f64 = a.get(6).and_then(|v| v.parse().ok()).unwrap_or(2.5);
     let rim = Law::Power { k: 2.0e9, alpha: 1.5, mu: rim_mu };
     let t0 = std::time::Instant::now();
-    let open = a.get(7).is_some_and(|v| v == "open");
-    let (gap, pedal) = if open { (0.002, 0.0) } else { (0.0, 80.0) };
+    // open: rims resting within 0.14 mm (they chatter); apart: an open hat whose rims stay 2 mm apart
+    let (gap, pedal) = match a.get(7).map(String::as_str) {
+        Some("open") => (0.002, 0.0),
+        Some("apart") => (0.002, 1e-9),
+        _ => (0.0, 80.0),
+    };
     let mut p = kit::hihat_grid_mu(gap, pedal, &[(0.005, speed)], rim, 0.8, scale, friction).unwrap_or_else(|e| panic!("{e}"));
     for n in &p.notes {
         eprintln!("{n}");

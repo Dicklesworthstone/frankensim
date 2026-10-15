@@ -43,8 +43,11 @@ interface PieceDef {
  * a weaker one (519 Hz, 28.5 dB) and is closer to the 1x grid than 5x in every measure: octave balance
  * 9.8 against 14.9 dB (soft stroke 16.8 / 21.3, open hat 7.2 / 10.4) and 16.5 against 20.5 dB from
  * the real hat. It costs ~1.3x 5x; 4x stays first (9.3 dB, no line) where it fits.
+ * They skip 5x altogether: with the rims rubbing (fs-vkplate Friction), a closed stroke there keeps a
+ * 250 Hz component ringing ~4 s, where 2.5-4.5x, 6x and 7x put 80-99 % of its energy in its first 50 ms
+ * (8x rings ~6 s too, and stays only as the last resort of a slow device).
  */
-const HAT_SCALES = [2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8];
+const HAT_SCALES = [2.5, 3, 3.5, 4, 4.5, 6, 7, 8];
 
 /**
  * The kick and toms stop at the grids past which they sound no closer to the 1x grid, so the CPU

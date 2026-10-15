@@ -52,8 +52,8 @@ const IDLE_DISPOSE_MS = 90_000;
  * plateau, and else 8x (7x is on the coarse plateau too and costs ~20 % more); each grid timed adds
  * ~0.25-0.5 s of start-up.
  * The hats try 4.5x as on the live kit (kitStage HAT_SCALES) and skip 5x: closed with the pedal down, a
- * stroke there keeps a 250 Hz component ringing for ~4 s (with rim friction or without), where 4x, 4.5x
- * and 6x put 87-95 % of its energy in its first 50 ms (a real closed hat: 90-93 %).
+ * stroke there keeps a 250 Hz component ringing for ~4 s (with rim friction or without), where 4x, 4.5x,
+ * 6x and 7x put 87-99 % of its energy in its first 50 ms (a real closed hat: 90-93 %).
  * The kick and the rack tom give CPU to the pieces that gain from finer grids. The kick's octave
  * balance against the 1x grid is one plateau from 3x to 8x (14.1 / 14.2 / 13.9 / 13.9 dB at 4x / 5x /
  * 6x / 7x; its 1-2 kHz beater click is gone from 3x on), so it starts at 6x, ~0.7x the work of 5x.
@@ -68,8 +68,8 @@ const GRID: Record<PieceId, { scales: number[]; minRt: number; benchMs?: number 
   "snare-off": { scales: [4, 5, 6, 7, 8], minRt: 1.5 },
   "tom-12": { scales: [5, 6], minRt: 1.8 },
   "tom-14": { scales: [4, 5, 6], minRt: 1.8 },
-  "hihat-closed": { scales: [4, 4.5, 6], minRt: 1.5 },
-  "hihat-open": { scales: [4, 4.5, 6], minRt: 1.5 },
+  "hihat-closed": { scales: [4, 4.5, 6, 7], minRt: 1.5 },
+  "hihat-open": { scales: [4, 4.5, 6, 7], minRt: 1.5 },
   crash: { scales: [3, 3.5, 4, 5, 6], minRt: 1.5 },
   ride: { scales: [3, 3.5, 4, 5, 6], minRt: 1.5 },
 };
@@ -1137,7 +1137,7 @@ function evidenceBody(): HTMLElement {
     el("div", {},
       el("h4", {}, "What is computed"),
       p("The piano is engine-piano, the grand's own hammer, string, damper and soundboard equations for the keys that are sounding, on the largest soundboard this device keeps up with (16 to 128 coordinates, chosen for this device when the engines start). Each drum piece is fs-vkplate, the plate solver of the drum kit above, on a grid several times coarser, chosen per piece for this device when the engines start. Only the pieces a file uses are started."),
-      p("Levels: one gain per instrument and nothing else. The piano plays at 0.8 of its engine's full scale (10 Pa at the microphone); each drum piece keeps the live kit's own gain, matched to a recorded kit's balance and rescaled for the grid it runs on, so that its standard stroke is as loud on every grid (the crash is about 5 dB louder on its 3–4× grids than on the 5× grid the gains were matched on; a quiet stroke is raised only while its peak stays under the kit's cap). Measured in these same engines on the first 12 seconds of six rolls, the loudest moments reach 0.49–0.61 of full scale, so nothing clips. There is no reverb, no equaliser and no limiter."),
+      p("Levels: one gain per instrument and nothing else. The piano plays at 0.8 of its engine's full scale (10 Pa at the microphone); each drum piece keeps the live kit's own gain, matched to a recorded kit's balance and rescaled for the grid it runs on, so that its standard stroke is as loud on every grid (the crash is about 5 dB louder on its 3–4× grids than on the 5× grid the gains were matched on; a quiet stroke is raised only while its peak stays under the kit's cap). Measured in these same engines on the first 12 seconds of six rolls, the loudest moments reach 0.48–0.68 of full scale, so nothing clips. There is no reverb, no equaliser and no limiter."),
       p("The roll's library comes from a jazz chord-progression editor: its chord charts, played as choruses through that editor's own bass and comping generators (the same voicings and grooves it plays), with drum parts written for each groove. Uploaded files go through that editor's MIDI salvage pass, which repairs re-struck, orphaned and unterminated notes and says so, and its rules for naming chords and track roles."),
       p("The soundboard view is the engine's modal sum on its own surface points, heights exaggerated by the factor shown. The kit shows each piece's computed surface velocity; each piece's colour scale follows its own motion down as it decays.")));
 }

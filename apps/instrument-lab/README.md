@@ -182,7 +182,8 @@ parts' sum at -2 dBFS, so the boards and grids a device picks stay under full sc
 
 On the page the live lanes render two seconds ahead in 512-frame messages. Each drum keeps the finest
 grid whose timing reaches 1.4x real time (`src/strandbar.ts`): the kick from 2-8x, the hi-hat from
-2.5-6x (with 4.5x, which drops the 558 Hz line it rings on 5x) and then 8x. Strandbar does not restart
+2.5-4.5x (4.5x drops the 558 Hz line 5x rings), 6x and then 8x; 5x is skipped, where a closed stroke
+keeps a 250 Hz component ringing ~4 s even with the rims' friction. Strandbar does not restart
 a lane on a coarser grid while it plays, so the lists end at 8x for slow devices.
 
 ## Player piano

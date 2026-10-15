@@ -148,7 +148,7 @@ def main(arr_path: Path, stems: Path, recording: Path, pub: Path):
         "studio": [
             {"part": "Piano", "detail": "grand_piano, Steinway D preset: all 88 strings and their dampers on one FE soundboard (128 retained board coordinates up to 2.4 kHz), felt hammers driven by the score, a Rayleigh microphone 1 m above the board.", "computeS": wall_seconds(stems, "piano")},
             {"part": "Kick", "detail": "fs-vkplate: two Mylar heads on a 4.5 mm grid with the air between them, a convex felt beater crown, every stroke into the same ringing drum.", "computeS": wall_seconds(stems, "kick")},
-            {"part": "Hi-hat", "detail": "fs-vkplate: two bronze shells on a 5.5 mm grid (von Kármán shells), clamped by the pedal at their rims, stepped at 288 kHz.", "computeS": wall_seconds(stems, "hihat")},
+            {"part": "Hi-hat", "detail": "fs-vkplate: two bronze shells on a 5.5 mm grid (von Kármán shells), clamped by the pedal at their rims, which rub with dry friction, stepped at 288 kHz.", "computeS": wall_seconds(stems, "hihat")},
         ],
         "liveParts": [
             # the page's piano picks its board per device (16-128 coordinates), not Node's board 32 above

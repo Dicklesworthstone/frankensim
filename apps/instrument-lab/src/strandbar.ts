@@ -39,10 +39,11 @@ const LEAD_S = 1.75;
  * the coarse grids first on every device, a hat's build is mostly its pedal settle (8x 50 ms, 7x 0.11 s),
  * and where 6x is too slow 7x was too (it timed under 1.4 at 4x, so 8x played).
  * The hat also tries 4.5x: this loop on 5x rings a 558 Hz line 27 dB above the local spectrum (the studio
- * stem: 14 dB at 550 Hz); on 4.5x the line is gone (5 dB), as on 4x (see kitStage HAT_SCALES).
+ * stem: 14 dB at 550 Hz); on 4.5x the line is gone (5 dB), as on 4x (see kitStage HAT_SCALES). It skips
+ * 5x, where a closed stroke keeps a 250 Hz component ringing ~4 s (kitStage HAT_SCALES).
  */
 const KICK_SCALES = [2, 2.5, 3, 3.5, 4, 5, 6, 7, 8];
-const HAT_SCALES = [2.5, 3, 3.5, 4, 4.5, 5, 6, 8];
+const HAT_SCALES = [2.5, 3, 3.5, 4, 4.5, 6, 8];
 const IDLE_STATUS = "The live engines start when you press play: a piano and two drum pieces, each in its own Worker.";
 type Phase = "idle" | "loading" | "playing";
 
