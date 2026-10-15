@@ -11,7 +11,10 @@
 /// Tapered round-beam flexure with consistent rotary inertia.
 pub mod beam;
 
-use super::{ShellMesh, ShellModel, ShellSupport, assemble_shell_sections};
+use super::{ShellMesh, ShellModel, ShellSupport, ShellSection};
+use super::section::Section;
+#[cfg(test)]
+use super::assemble_shell_sections;
 use crate::{PlateError, PlateSection};
 use fs_sparse::{Coo, Csr};
 
@@ -70,7 +73,20 @@ fn unit(v: [f64;3]) -> Result<[f64;3], PlateError> {
 pub fn assemble_stiffened_shell(mesh: &ShellMesh, sections: &[PlateSection],
     boundary: &[usize], support: ShellSupport, beams: &[ShellBeam])
     -> Result<ShellModel, PlateError> {
-    let mut model = assemble_shell_sections(mesh, sections, boundary, support)?;
+    assemble_sections(mesh, sections, boundary, support, beams)
+}
+/// Bonded reinforcement with independent effective membrane and bending data.
+/// # Errors
+/// The same geometry, section and beam refusals as `assemble_stiffened_shell`.
+pub fn assemble_stiffened_shell_materials(mesh: &ShellMesh, sections: &[ShellSection],
+    boundary: &[usize], support: ShellSupport, beams: &[ShellBeam])
+    -> Result<ShellModel, PlateError> {
+    assemble_sections(mesh, sections, boundary, support, beams)
+}
+pub(super) fn assemble_sections<S: Section>(mesh: &ShellMesh, sections: &[S],
+    boundary: &[usize], support: ShellSupport, beams: &[ShellBeam])
+    -> Result<ShellModel, PlateError> {
+    let mut model = super::assemble(mesh, sections, false, boundary, support)?;
     if beams.is_empty() { return Ok(model); }
     let mut k = Coo::new(model.free, model.free);
     let mut m = Coo::new(model.free, model.free);

@@ -13,7 +13,8 @@
 //! gradient factors in O(facets*modes + modes^2), with no temporary allocation
 //! and no dense fourth-order modal tensor. It is NOT a real-time benchmark or
 //! a claim of adequate truncation: missing in-plane modes require enrichment.
-use super::{ShellMesh, ShellModel, local_bending_stiffness};
+use super::{ShellMesh, ShellModel, ShellSection, local_bending_stiffness};
+use super::section::Section;
 mod tangent;
 use crate::{ModePair, PlateError, PlateSection};
 /// Optional small-angle rigid pose, separate from elastic shell strain.
@@ -36,7 +37,7 @@ pub struct ReductionBudget {
 #[derive(Debug, Clone, Copy)]
 struct ModeStrain { dx:[f64;3], dy:[f64;3], linear:[f64;3] }
 #[derive(Debug, Clone)]
-struct Facet { membrane:[f64;9], strains:Vec<ModeStrain> }
+struct Facet { membrane:[f64;9], bending:[f64;9], strains:Vec<ModeStrain> }
 
 /// Mass-normalized potential and reciprocal geometric force/motion projections.
 /// It stores no dynamic state or damping; a coupling/time owner advances those.
@@ -104,7 +105,26 @@ impl ShellReduction {
         limit:RigidMotionLimit)->Result<Self,PlateError> {
         Self::build(mesh,sections,model,modes,budget,Some(limit))
     }
-    fn build(mesh:&ShellMesh, sections:&[PlateSection], model:&ShellModel,
+    /// The same geometric reduction with independent effective A and D. Its
+    /// supplied eigenpairs must belong to `assemble_shell_materials` with these
+    /// exact sections. No D-to-A conversion occurs, even in drilling or the
+    /// nonlinear membrane correction. The moderate-rotation limitation remains.
+    /// # Errors
+    /// Ordinary reduction errors, including section/pencil inconsistency.
+    pub fn new_materials(mesh:&ShellMesh, sections:&[ShellSection], model:&ShellModel,
+        modes:&[ModePair], budget:ReductionBudget)->Result<Self,PlateError> {
+        Self::build(mesh,sections,model,modes,budget,None)
+    }
+    /// Independent sections with the same explicitly admitted first-order rigid
+    /// pose image as `new_with_linearized_rigid_motion`.
+    /// # Errors
+    /// Ordinary reduction errors or invalid rigid prefix/angle restriction.
+    pub fn new_materials_with_linearized_rigid_motion(mesh:&ShellMesh,
+        sections:&[ShellSection], model:&ShellModel, modes:&[ModePair],
+        budget:ReductionBudget, limit:RigidMotionLimit)->Result<Self,PlateError> {
+        Self::build(mesh,sections,model,modes,budget,Some(limit))
+    }
+    fn build<S: Section>(mesh:&ShellMesh, sections:&[S], model:&ShellModel,
         modes:&[ModePair], budget:ReductionBudget, limit:Option<RigidMotionLimit>)->Result<Self,PlateError> {
         mesh.validate()?;
         let n=modes.len();
@@ -189,7 +209,7 @@ impl ShellReduction {
         let mut remainder=vec![0.0;nn];let mut membrane_linear=vec![0.0;nn];
         let mut facets=Vec::with_capacity(mesh.tris.len());let mut area_normals=Vec::with_capacity(mesh.tris.len());
         for (element,tri) in mesh.tris.iter().enumerate() {
-            let section=&sections[element];section.validate()?;
+            let section=&sections[element];section.validate_section()?;
             let g=mesh.facet(element)?;
             let kb=local_bending_stiffness(&g,section,element)?;
             let mut local=vec![[0.0;18];n];let mut strains=Vec::with_capacity(n);
@@ -212,7 +232,7 @@ impl ShellReduction {
                 strains.push(ModeStrain{dx,dy,linear:[dot(g.frame[0],dx),dot(g.frame[1],dy),
                     dot(g.frame[0],dy)+dot(g.frame[1],dx)]});
             }
-            let membrane=section.d.map(|d|g.area_m2*(12.0/(section.thickness*section.thickness))*d);
+            let membrane=section.membrane()?.map(|a|g.area_m2*a);
             for i in 0..n {for j in 0..=i {
                 let mut value=0.0;
                 for a in 0..18 {let mut row=0.0;for b in 0..18 {row+=kb[18*a+b]*local[j][b];}value+=local[i][a]*row;}
@@ -221,7 +241,7 @@ impl ShellReduction {
                 membrane_linear[i*n+j]+=value;
                 if i!=j {remainder[j*n+i]=remainder[i*n+j];membrane_linear[j*n+i]=membrane_linear[i*n+j];}
             }}
-            facets.push(Facet{membrane,strains});
+            facets.push(Facet{membrane,bending:section.plate().d,strains});
             area_normals.push(g.frame[2].map(|v|v*g.area_m2));
         }
         for i in 0..n {for j in 0..n {
@@ -243,7 +263,7 @@ impl ShellReduction {
         }}
         Ok(Self{omegas:modes.iter().map(|m|m.lambda.sqrt()).collect(),remainder,facets,translations,
             nodes:mesh.nodes.len(),triangles:mesh.tris.clone(),area_normals,rotations,
-            reference_positions:mesh.nodes.clone(),section_thicknesses:sections.iter().map(|s|s.thickness).collect(),rigid_motion})
+            reference_positions:mesh.nodes.clone(),section_thicknesses:sections.iter().map(|s|s.plate().thickness).collect(),rigid_motion})
     }
     /// Linear frequencies of the supplied numerical basis [rad/s]; zero denotes
     /// an explicitly supplied rigid coordinate, not an invented soft spring.

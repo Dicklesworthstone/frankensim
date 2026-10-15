@@ -84,7 +84,7 @@ mod tests {
 
     fn specimen(n:usize)->ShellReduction {
         let facets=(0..3).map(|f|Facet {
-            membrane:[4.0,0.4,0.0, 0.4,3.0,0.0, 0.0,0.0,1.2],
+            membrane:[4.0,0.4,0.0, 0.4,3.0,0.0, 0.0,0.0,1.2], bending:[0.;9],
             strains:(0..n).map(|i| {
                 let t=(1+i+5*f) as f64;
                 let dx=[0.2*t.sin(),0.1*(0.8*t).cos(),0.3*(0.6*t).sin()];
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn g0_shell_geometric_stiffness_is_not_replaced_with_a_positive_surrogate() {
         let mut law=specimen(1);law.remainder[0]=0.0;
-        law.facets=vec![Facet {membrane:[1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0],
+        law.facets=vec![Facet {membrane:[1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0], bending:[0.;9],
             strains:vec![ModeStrain {dx:[1.0,0.0,0.0],dy:[0.0;3],linear:[1.0,0.0,0.0]}]}];
         let mut matrix=[0.0];let mut scratch=[[0.0;3]];
         law.hessian_matrix(&[-0.5],&mut matrix,&mut scratch);
