@@ -1,4 +1,6 @@
 //! Synthetic source cards test constitutive propagation, not measured flute fidelity.
+#[path = "material_duct_wall/flue.rs"]
+mod flue;
 use fs_couple::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
 use fs_couple::bernoulli_aperture::wall::material::{
     AxialConstraint, MaterialWallAssignment, WallMaterialLoss, YOUNG_VISCOSITY_PROPERTY,

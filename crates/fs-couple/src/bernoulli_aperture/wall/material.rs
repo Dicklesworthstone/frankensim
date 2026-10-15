@@ -59,6 +59,17 @@ pub struct MaterialWallAssignment {
     pub loss: WallMaterialLoss,
 }
 
+/// Source assignments and explicit cold-admission limits, shared by source types.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialWallInput {
+    /// Original graph addresses and independent material states.
+    pub assignments: Vec<MaterialWallAssignment>,
+    /// Positive applicability interval [Hz]; not a low-pass or error certificate.
+    pub band_hz: [f64; 2],
+    /// Maximum admitted assignments, bounded above by 1024.
+    pub max_walls: usize,
+}
+
 /// Original state/geometry and its work-conjugate pressure/volume-flow law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundMaterialWall {

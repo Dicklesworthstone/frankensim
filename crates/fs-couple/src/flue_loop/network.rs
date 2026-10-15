@@ -11,6 +11,10 @@ use crate::bernoulli_aperture::network::{SectionRealization, TubeNetworkSpec};
 use crate::bernoulli_aperture::viscothermal::{
     ViscothermalSection, ViscothermalSectionSpec, with_regional_viscothermal_sections,
 };
+use crate::bernoulli_aperture::wall::WallState;
+use crate::bernoulli_aperture::wall::material::{
+    BoundMaterialWall, MaterialWallInput, bind_material_walls,
+};
 use crate::wind_line::WindLineBank;
 use fs_aeroac::jetcard::JetCard;
 use fs_exec::CancelGate;
@@ -41,6 +45,8 @@ pub struct FlueNetworkSpec {
 /// The jet card's estimate-only authority is not changed by this construction.
 pub struct FlueNetwork {
     source: FlueNetworkSpec,
+    wall_input: Option<MaterialWallInput>,
+    walls: Vec<BoundMaterialWall>,
     graph: TubeNetworkSpec,
     gases: Vec<GasState>,
     represented: Vec<SectionRealization>,
@@ -64,10 +70,28 @@ fn poll(gate: &CancelGate) -> Result<(), FlueError> {
 }
 
 impl FlueNetwork {
-    fn new(source: FlueNetworkSpec, dt: f64, zc: f64, gate: &CancelGate) -> Result<Self, FlueError> {
+    fn new(source: FlueNetworkSpec, wall_input: Option<MaterialWallInput>, dt: f64,
+        zc: f64, gate: &CancelGate) -> Result<Self, FlueError>
+    {
         poll(gate)?;
+        // Bind to ORIGINAL geometry before subdivision. Both operations preserve
+        // original node indices; material area must not depend on loss-cell count.
+        let (wall_graph, walls) = match &wall_input {
+            Some(input) => {
+                // Bound duplicate source storage BEFORE cloning the receipts.
+                if input.max_walls > 1024 || input.assignments.len() > input.max_walls {
+                    return Err(invalid("material wall source storage exceeds its assignment budget"));
+                }
+                if input.band_hz[1] >= 0.5 / dt {
+                    return Err(invalid("material wall applicability band must lie below the source Nyquist frequency"));
+                }
+                bind_material_walls(source.graph.clone(), input.assignments.clone(),
+                    input.band_hz, input.max_walls, gate).map_err(physical)?
+            }
+            None => (source.graph.clone(), Vec::new()),
+        };
         let (graph, gases, losses) = with_regional_viscothermal_sections(
-            source.graph.clone(), source.gases.clone(), dt, &source.viscothermal, gate,
+            wall_graph, source.gases.clone(), dt, &source.viscothermal, gate,
         ).map_err(physical)?;
         // A caller cannot provide a second, inconsistent source cross-section.
         let actual = graph.inlet_impedance_with_gases(&gases).map_err(physical)?;
@@ -76,11 +100,28 @@ impl FlueNetwork {
         }
         let (physics, represented) = graph.realize_waveguide(&gases, dt, gate).map_err(physical)?;
         poll(gate)?;
-        Ok(Self { source, graph, gases, represented, losses, physics, last: None })
+        Ok(Self { source, wall_input, walls, graph, gases, represented, losses, physics, last: None })
     }
     /// Original data before any loss-cell subdivision.
     #[must_use]
     pub const fn source(&self) -> &FlueNetworkSpec { &self.source }
+    /// Original solid assignments, frequency applicability and work limit.
+    /// Absent for legacy/raw-coefficient construction; never invented from loads.
+    #[must_use]
+    pub const fn wall_input(&self) -> Option<&MaterialWallInput> { self.wall_input.as_ref() }
+    /// Original material states and their geometry-derived pressure/flow laws.
+    #[must_use]
+    pub fn material_walls(&self) -> &[BoundMaterialWall] { &self.walls }
+    /// Accepted displacement, velocity and storage at an original material node.
+    /// Reads the same shunt advanced by the jet/bore solve, not another oscillator.
+    ///
+    /// # Errors
+    /// Unbound node, mismatching node law, or nonfinite motion.
+    pub fn wall_state(&self, node: usize) -> Result<WallState, FlueError> {
+        let wall = self.walls.iter().find(|wall| wall.source().node == node)
+            .ok_or_else(|| invalid("wall motion requires a source-bound material node"))?;
+        wall.patch().observe_waveguide(&self.physics, node).map_err(physical)
+    }
     /// Actual lowered graph. Original node indices remain valid.
     #[must_use]
     pub const fn graph(&self) -> &TubeNetworkSpec { &self.graph }
@@ -158,6 +199,43 @@ impl FlueVoice {
         geometry: FlueGeometry, source: FlueNetworkSpec, sample_rate_hz: u32,
         voice_seed: u64, voice_index: u32, gate: &CancelGate,
     ) -> Result<Self, FlueError> {
+        Self::from_network_with_walls(card, displacement_gain, seed_amplitude_rel, geometry,
+            source, None, sample_rate_hz, voice_seed, voice_index, gate)
+    }
+
+    /// The same jet and regional gas network with source-bound structural walls.
+    ///
+    /// Wall displacement returns volume flow into the SAME pressure junction that
+    /// drives the jet. Original geometry/material receipts survive viscothermal
+    /// subdivision, source stepping and `FlueOutletPerformance` rendering. Changing
+    /// a wall card changes mechanical mass/stiffness/loss, never a fitted sound gain.
+    /// The no-wall constructor retains its original path and public signature.
+    ///
+    /// Only the thin, small-motion isotropic membrane image in `wall::material`
+    /// is admitted. No axial shell propagation, orthotropic wood, dynamic material
+    /// change, exterior shell radiation, or measured flute-fidelity claim follows.
+    /// The material band is not an antialiasing filter; nonlinear out-of-band
+    /// content and displacement validity still need application-level assessment.
+    ///
+    /// # Errors
+    /// Original jet/network refusals, missing or incompatible wall data/geometry,
+    /// a wall band at/above Nyquist, exhausted admission limits or cancellation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material_network(
+        card: Option<&JetCard>, displacement_gain: f64, seed_amplitude_rel: f64,
+        geometry: FlueGeometry, source: FlueNetworkSpec, walls: MaterialWallInput,
+        sample_rate_hz: u32, voice_seed: u64, voice_index: u32, gate: &CancelGate,
+    ) -> Result<Self, FlueError> {
+        Self::from_network_with_walls(card, displacement_gain, seed_amplitude_rel, geometry,
+            source, Some(walls), sample_rate_hz, voice_seed, voice_index, gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_network_with_walls(
+        card: Option<&JetCard>, displacement_gain: f64, seed_amplitude_rel: f64,
+        geometry: FlueGeometry, source: FlueNetworkSpec, walls: Option<MaterialWallInput>,
+        sample_rate_hz: u32, voice_seed: u64, voice_index: u32, gate: &CancelGate,
+    ) -> Result<Self, FlueError> {
         poll(gate)?;
         // Preserve the no-card refusal before touching expensive reduction.
         let card = card.ok_or(FlueError::NoCard)?;
@@ -175,7 +253,7 @@ impl FlueVoice {
         let capacity = source.max_jet_history_samples;
         let voice = Self::with_resonator(Some(card), displacement_gain, seed_amplitude_rel,
             geometry, &gas, sample_rate_hz, voice_seed, voice_index, minimum, capacity,
-            |zc| FlueNetwork::new(source, 1.0 / f64::from(sample_rate_hz), zc, gate)
+            |zc| FlueNetwork::new(source, walls, 1.0 / f64::from(sample_rate_hz), zc, gate)
                 .map(|n| FlueResonator::Network(Box::new(n))))?;
         poll(gate)?;
         Ok(voice)
