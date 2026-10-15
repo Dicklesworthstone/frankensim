@@ -215,4 +215,35 @@ mod source_layers {
         assert!(matches!(result,Err(ThermalPistonError::Interface(_))));
         assert_eq!(old,saved);
     }
+    #[test]
+    fn material_bound_thermal_step_keeps_inertia_sources_and_numeric_parity() {
+        use crate::cavity_phs::piston::material::MaterialDoubleActingGasPiston;
+        use fs_ga::Vec3;
+        use fs_mbd_material::{RegionBinding, VolumeMoments, resolve_body};
+        let (card,key,chart) = material(0.2); let context = point(300.0);
+        let specimen = resolve_body(&[RegionBinding { key:"moving wall",material:&card,point:&context,
+            geometry:VolumeMoments::cuboid(Vec3::new(0.1,0.1,0.01)).unwrap(),
+            selection:MaterialPropertySelection::SingleClaimOnly }],1,||false).unwrap();
+        let wall = MaterialDoubleActingGasPiston::new(gas(0.75,0.001),gas(0.25,0.001),
+            specimen.clone(),[0.01,0.01],0.0).unwrap();
+        let saved = wall.clone();
+        let thermal = body(chart.curve(),150000.0);
+        let layers = || [layer(&card,&key,&context,0.02),layer(&card,&key,&context,0.01)];
+        let numeric = wall.piston().thermal_layers_candidate(input(),thermal,controls(),exchange(),layers(),||false).unwrap();
+        let mut polls = 0;
+        let sourced = wall.thermal_layers_candidate(input(),thermal,controls(),exchange(),layers(),||{polls+=1;false}).unwrap();
+        assert_eq!(sourced.piston().body(),&specimen);
+        assert_eq!(sourced.piston().piston(),numeric.piston());
+        assert_eq!(sourced.thermal(),numeric.thermal());
+        assert_eq!(sourced.step(),numeric.step());
+        assert_eq!(sourced.piston().piston().primary().mass_kg(),specimen.inertia().mass());
+        let mut count = 0;
+        assert!(matches!(wall.thermal_layers_candidate(input(),thermal,controls(),exchange(),layers(),
+            ||{count+=1;count==polls}),Err(ThermalPistonError::Cancelled)));
+        assert_eq!(wall,saved);
+        let (next,accepted,report) = sourced.into_parts();
+        assert_eq!(next.body(),&specimen);
+        assert_eq!(accepted.external_heat_j,-report.exchanged_heat_j.iter().sum::<f64>());
+        check(&numeric);
+    }
 }
