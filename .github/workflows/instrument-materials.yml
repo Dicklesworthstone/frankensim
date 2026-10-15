@@ -16,6 +16,9 @@ on:
       - 'crates/fs-couple/src/bowed_string/runtime/reciprocal.rs'
       - 'crates/fs-couple/src/bowed_string/runtime/reciprocal/**'
       - 'crates/fs-couple/tests/material_string_bank.rs'
+      - 'crates/fs-couple/src/cavity_modal.rs'
+      - 'crates/fs-couple/src/cavity_modal/**'
+      - 'crates/fs-couple/tests/reciprocal_cavity.rs'
       - '.github/workflows/instrument-materials.yml'
 permissions:
   contents: read
@@ -51,3 +54,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cargo test -p fs-couple --lib bowed_string::runtime::reciprocal::tests -- --test-threads=1
+      - name: Shared Helmholtz storage in reciprocal modal mechanics
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --lib cavity_modal -- --test-threads=1
+      - name: Reciprocal material strings bodies cavities and scheduled sound
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test reciprocal_cavity -- --test-threads=1

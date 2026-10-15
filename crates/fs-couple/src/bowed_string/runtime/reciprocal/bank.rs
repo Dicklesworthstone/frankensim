@@ -10,7 +10,7 @@
 //! stations are interior points, not fictitious moving ports on pinned ends.
 //! Sources remain frozen-state linear bending models; concentric layers mean
 //! perfect bonding, not helical winding/slip. Torsion, large-amplitude tension,
-//! multiple simultaneous bows and radiation back-loading are not added here.
+//! multiple simultaneous bows and broadband radiation back-loading are absent.
 
 use super::{InteriorStringConnection, ReciprocalStringError, invalid, interior, poll};
 use crate::bowed_string::{BowedStringCard, unit_shape};
@@ -102,6 +102,7 @@ pub struct MaterialStringBankSource {
     strings: Vec<MaterialStringMember>,
     gas: GasState,
     options: StringBankOptions,
+    body_connections: Vec<ModalConnection>,
 }
 impl MaterialStringBankSource {
     /// Original string order, material/loss receipts and physical connections.
@@ -113,6 +114,9 @@ impl MaterialStringBankSource {
     /// Original selected bow, shared clock and explicit model budgets.
     #[must_use]
     pub const fn options(&self) -> &StringBankOptions { &self.options }
+    /// Original receiver-to-receiver links before string-prefix remapping.
+    #[must_use]
+    pub fn body_connections(&self) -> &[ModalConnection] { &self.body_connections }
 }
 
 /// All string/body vibration persists in ONE mechanical/friction state.
@@ -139,8 +143,26 @@ impl ReciprocalStringBank {
         bodies: Vec<ModalAcousticTimeModel>, law: FrictionLaw,
         options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
+        Self::with_body_connections(cx, strings, gas, bodies, Vec::new(), law, options, gate)
+    }
+
+    /// Retain connected receiver physics such as a plate and shared cavity neck.
+    /// Extra links address the ORIGINAL body list, not the string-prefixed bank.
+    /// Their storage, force reactions and loss participate in the same bow solve
+    /// as every played and sympathetic string. Body source metadata remains the
+    /// caller's responsibility; a raw connection cannot certify its material law.
+    ///
+    /// # Errors
+    /// Same source admission as `new`, plus invalid body indices/links and the
+    /// total budget including every receiver connection. No partial bank escapes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_body_connections(
+        cx: &Cx<'_>, strings: Vec<MaterialStringMember>, gas: GasState,
+        bodies: Vec<ModalAcousticTimeModel>, body_connections: Vec<ModalConnection>,
+        law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
-        preflight(&strings, &bodies, &options)?;
+        preflight(&strings, &bodies, &options, body_connections.len())?;
         let mut cards = Vec::with_capacity(strings.len());
         for member in &strings {
             poll(gate)?;
@@ -148,11 +170,11 @@ impl ReciprocalStringBank {
         }
         let connections: Vec<&[InteriorStringConnection]> = strings.iter()
             .map(|member| member.connections.as_slice()).collect();
-        let system = assemble(&cards, bodies, &connections, law, &options, gate)?;
+        let system = assemble(&cards, bodies, &connections, &body_connections, law, &options, gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections }, cards, system })
     }
 
     /// Complete source assignments survive rendering and sympathetic vibration.
@@ -212,7 +234,7 @@ impl MaterialStringBankPerformance {
 }
 
 fn preflight(strings: &[MaterialStringMember], bodies: &[ModalAcousticTimeModel],
-    options: &StringBankOptions) -> Result<(), ReciprocalStringError>
+    options: &StringBankOptions, body_links: usize) -> Result<(), ReciprocalStringError>
 {
     if strings.is_empty() || bodies.is_empty() || strings.len() > options.network.max_modes
         || bodies.len() > options.network.max_modes || options.bow.string >= strings.len()
@@ -220,7 +242,7 @@ fn preflight(strings: &[MaterialStringMember], bodies: &[ModalAcousticTimeModel]
         return Err(invalid("string bank requires bounded members, bodies, a clock and an actual interior bow"));
     }
     let mut modes = 0usize;
-    let mut links = 0usize;
+    let mut links = body_links;
     for member in strings {
         if member.source.modes() == 0 || member.connections.is_empty() {
             return Err(invalid("every material string requires modes and a shared-body connection"));
@@ -237,13 +259,13 @@ fn preflight(strings: &[MaterialStringMember], bodies: &[ModalAcousticTimeModel]
     Ok(())
 }
 
-// One assembly for both the original one-string API and the multi-string API.
-// All actual force condensation, time stepping, friction and energy accounting
-// remain in CoupledModalSystem/FrictionModalSystem.
+// One assembly for single/multiple strings, including receiver-to-receiver links.
+// All force condensation, stepping, friction and energy accounting remain in the
+// original CoupledModalSystem/FrictionModalSystem. Body links are remapped once.
 pub(super) fn assemble(
     cards: &[BowedStringCard], bodies: Vec<ModalAcousticTimeModel>,
-    connections: &[&[InteriorStringConnection]], law: FrictionLaw,
-    options: &StringBankOptions, gate: &CancelGate,
+    connections: &[&[InteriorStringConnection]], body_connections: &[ModalConnection],
+    law: FrictionLaw, options: &StringBankOptions, gate: &CancelGate,
 ) -> Result<FrictionModalSystem, ReciprocalStringError> {
     poll(gate)?;
     if cards.is_empty() || cards.len() != connections.len() || bodies.is_empty()
@@ -277,6 +299,16 @@ pub(super) fn assemble(
         }).collect();
         components.push(ModalAcousticTimeModel::try_new(options.sample_rate_hz, modes, options.string_budget)
             .map_err(|source| ReciprocalStringError::Network(ModalCouplingError::Component { component: index, source }))?);
+    }
+    for connection in body_connections {
+        poll(gate)?;
+        if connection.left.component >= bodies.len() || connection.right.component >= bodies.len() {
+            return Err(invalid("receiver connection names an unknown original body component"));
+        }
+        let mut link = connection.clone();
+        link.left.component += cards.len();
+        link.right.component += cards.len();
+        links.push(link);
     }
     components.extend(bodies);
     let network = CoupledModalSystem::new(components, links, options.network, gate)

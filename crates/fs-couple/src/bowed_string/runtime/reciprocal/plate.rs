@@ -1,13 +1,14 @@
-//! Material string + material plate, lowered into the existing shared network.
-//! No authored modal frequencies, effective mass, bridge modal shape or gain.
+//! Material string + material plate + optional body-air cavity in one network.
+//! No authored modal frequencies, effective masses, bridge shapes or output gains.
 
 use super::*;
+use crate::cavity_modal::HelmholtzModalCavity;
 use crate::thin_plate::{ResolvedPlateSpecimen, certified_radiators};
 
 /// Source-bound receiver and physical bridge/observer geometry.
 /// The bridge is a bilateral compliant support on the FULL string span. The
 /// plate's force footprint is the existing uniform-plate reducer's footprint.
-/// This is not a carved shell, soundpost, bass bar or body-air cavity model.
+/// This is not a carved shell, soundpost or bass bar model.
 #[derive(Clone, Debug)]
 pub struct MaterialPlateBody {
     /// Exact material state, thickness/mass constraint, support and geometry.
@@ -26,65 +27,129 @@ pub struct MaterialPlateBody {
     pub listener_m: f64,
 }
 
+/// A source-derived lumped cavity on the back of the radiating plate.
+/// The plate's positive displacement is OUTWARD from the cavity. Its volume
+/// change and outward neck volume use the same signed area projections.
+#[derive(Clone, Debug)]
+pub struct MaterialBodyCavity {
+    /// Existing Helmholtz law, geometry, selected loss and coherent gas. Must
+    /// equal the assembly gas; a stale independently built cavity refuses.
+    pub cavity: HelmholtzModalCavity,
+    /// Limits for the physical neck inertia. Compression energy belongs to the
+    /// network's collective spring and is also checked by the network budget.
+    pub modal_budget: ModalAcousticTimeBudget,
+    /// Neck-to-listener distance [m], in the compact baffled observation.
+    pub listener_m: f64,
+}
+
 impl ReciprocalMaterialString {
-    /// Derive a two-way radiating string/body performance from material sources.
-    ///
-    /// `options.connections` must be empty: this constructor derives the one
-    /// bridge port from the plate's actual force footprint and modal mass. No
-    /// caller-supplied attachment shapes are ignored or substituted. All other
-    /// controls and budgets retain the common constructor's meanings.
-    ///
-    /// Changing the plate's source data changes its mass, stiffness, damping,
-    /// retained modes, bridge participation and signed radiating areas together.
-    /// The same admitted atmosphere supplies the string's drag and the body's
-    /// compact pressure density. Both material specimens survive scheduling.
-    ///
-    /// The newly reduced plate starts at rest and has no piston reaction filter.
-    /// The pressure readout uses actual endpoint acceleration INCLUDING bridge
-    /// reactions. It is not a frequency-assigned oscillator bank or one-way body
-    /// filter. This does not add fluid back-loading, propagation delay, room
-    /// acoustics, nonlinear plates or empirical instrument validation. Changing
-    /// material/environment requires a new realization, not live state transfer.
-    ///
-    /// # Errors
-    /// Conflicting supplied connections, nonlinear plates, invalid geometry or
-    /// clock, material/reduction refusal, aliasing, budgets and cancellation.
+    /// Legacy air convenience form of [`Self::from_material_plate_with_gas`].
+    /// Derive receiver modes/ports/losses from its original material and geometry.
     #[allow(clippy::too_many_arguments)]
     pub fn from_material_plate(
         cx: &Cx<'_>, specimen: ResolvedStringSpecimen, ambient: AmbientGas,
-        body: MaterialPlateBody, law: FrictionLaw, mut options: ReciprocalStringOptions,
+        body: MaterialPlateBody, law: FrictionLaw, options: ReciprocalStringOptions,
         gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        poll(gate)?;
+        let gas = crate::acoustic_realize::gas_state(ambient).map_err(ReciprocalStringError::Material)?;
+        let mut model = Self::from_material_plate_with_gas(cx, specimen, gas, body, law, options, gate)?;
+        model.source.ambient = Some(ambient);
+        Ok(model)
+    }
+
+    /// Derive reciprocal string/plate mechanics and sound in one explicit gas.
+    /// `options.connections` must be empty: the physical plate reducer supplies
+    /// the bridge footprint, not caller-authored modal shapes. No body frequency
+    /// or gain is tuned. Both original material specimens survive scheduling.
+    /// The same coherent gas supplies string drag and compact pressure density.
+    /// No piston reaction filter, room response or live gas replacement is added.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material_plate_with_gas(
+        cx: &Cx<'_>, specimen: ResolvedStringSpecimen, gas: GasState,
+        body: MaterialPlateBody, law: FrictionLaw, options: ReciprocalStringOptions,
+        gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        Self::build_material_plate(cx, specimen, gas, body, None, law, options, gate)
+    }
+
+    /// Body-air feedback in the SAME string, bridge, friction and receiver solve.
+    ///
+    /// The body mode's actual signed area drives a collective cavity compression
+    /// spring. That same spring reacts on the body AND the physical neck mass;
+    /// neck resistance dissipates through the original network's dashpot law.
+    /// The neck is not a second oscillator with an assigned Helmholtz pitch.
+    /// Its resonance, loading of the body, and resulting string motion emerge
+    /// from the coupled mass/stiffness/geometry and the supplied gas.
+    ///
+    /// Output is the compact, zero-retardation sum of actual body and outward
+    /// neck accelerations in Pa, including all accepted bridge/cavity reactions.
+    /// This is NOT a broadband matched radiation field, spatial body acoustics,
+    /// f-hole shape model, carved shell or experimental violin/cello/bass claim.
+    /// The chosen lumped law and compact observations retain their validity scope.
+    /// Changing data requires a new realization; no vibration history is erased
+    /// by an in-place material or medium swap.
+    ///
+    /// # Errors
+    /// Conflicting connection inputs, stale cavity gas, invalid geometry/limits,
+    /// unsupported material image, aliasing, source/reduction failure or cancellation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material_plate_with_cavity(
+        cx: &Cx<'_>, specimen: ResolvedStringSpecimen, gas: GasState,
+        body: MaterialPlateBody, cavity: MaterialBodyCavity, law: FrictionLaw,
+        options: ReciprocalStringOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        Self::build_material_plate(cx, specimen, gas, body, Some(cavity), law, options, gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_material_plate(
+        cx: &Cx<'_>, specimen: ResolvedStringSpecimen, gas: GasState,
+        body: MaterialPlateBody, cavity: Option<MaterialBodyCavity>, law: FrictionLaw,
+        mut options: ReciprocalStringOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         if !options.connections.is_empty() {
             return Err(invalid("material plate construction derives its bridge; supplied connections must be empty"));
         }
+        gas.validate_coherence().map_err(|e| ReciprocalStringError::Material(AcousticRealizeError::Ambient(e.to_string())))?;
         let description = body.specimen.plate();
         let count = specimen.string().n_modes.checked_add(description.n_modes)
-            .ok_or_else(|| invalid("material string/plate mode count overflow"))?;
+            .and_then(|n| n.checked_add(usize::from(cavity.is_some())))
+            .ok_or_else(|| invalid("material string/plate/cavity mode count overflow"))?;
+        let needed_links = cavity.as_ref().map_or(1, |c|
+            2 + usize::from(c.cavity.neck_resistance_n_s_m() != 0.0));
         if description.geometric_nonlinearity || description.n_modes == 0
-            || count > options.network.max_modes || options.network.max_connections == 0
+            || count > options.network.max_modes || needed_links > options.network.max_connections
             || options.sample_rate_hz == 0 || !interior(body.bridge_station_fraction)
             || !body.listener_m.is_finite() || body.listener_m <= 0.0 {
             return Err(invalid("material string/plate requires linear modes within budget, a positive clock/distance and an interior bridge"));
         }
-        let gas = crate::acoustic_realize::gas_state(ambient).map_err(ReciprocalStringError::Material)?;
-        // Only fresh geometry reductions enter here. No existing body state or
-        // radiation-filter memory is discarded during conversion.
+        if let Some(c) = &cavity {
+            if c.cavity.gas() != &gas || !c.listener_m.is_finite() || c.listener_m <= 0.0 {
+                return Err(invalid("body cavity must use the exact assembly gas and a positive finite observer distance"));
+            }
+        }
+        // Only fresh reductions enter here; no pre-existing body or radiation
+        // memory is thrown away. The original DKT/modal owner is synchronous.
         let radiators = certified_radiators(description).map_err(ReciprocalStringError::Material)?;
-        poll(gate)?; // the existing DKT/modal reduction is synchronous
+        poll(gate)?;
         let mut modes = Vec::with_capacity(radiators.len());
         let mut bridge = Vec::with_capacity(radiators.len());
+        let mut areas = Vec::with_capacity(radiators.len());
         let mut weights = vec![0.0; specimen.string().n_modes];
         for radiator in &radiators {
             let root_mass = fs_math::det::sqrt(radiator.mass_kg);
             let participation = radiator.drive_participation / root_mass;
-            // Reuse the pressure owner, including its half-space factor and sign.
+            let area = radiator.area_m2 / root_mass;
+            // Preserve the original compact pressure owner's normalization/sign.
             let weight = radiator.radiate_mass_normalized(1.0, gas.density, body.listener_m);
-            if !(root_mass.is_finite() && root_mass > 0.0 && participation.is_finite() && weight.is_finite()) {
+            if !(root_mass.is_finite() && root_mass > 0.0 && participation.is_finite()
+                && area.is_finite() && weight.is_finite()) {
                 return Err(invalid("material plate port normalization must remain finite"));
             }
             bridge.push(participation);
+            areas.push(area);
             weights.push(weight);
             modes.push(ModalAcousticMode {
                 angular_frequency_rad_s: radiator.omega, damping_ratio: radiator.zeta,
@@ -99,10 +164,24 @@ impl ReciprocalMaterialString {
             stiffness_n_m: body.stiffness_n_m, damping_n_s_m: body.damping_n_s_m,
             rest_extension_m: body.rest_extension_m,
         });
-        let mut assembled = Self::from_specimen(cx, specimen, ambient, vec![receiver], law, options, gate)?;
+        let mut bodies = vec![receiver];
+        let mut body_links = Vec::new();
+        if let Some(c) = &cavity {
+            let neck = c.cavity.neck_component(options.sample_rate_hz, c.modal_budget)
+                .map_err(ReciprocalStringError::Network)?;
+            body_links = c.cavity.connections(0, 1, &areas).map_err(ReciprocalStringError::Network)?;
+            bodies.push(neck);
+            // Same compact half-space law p=rho*Qdot/(2*pi*r) as the plate.
+            // Q is outward NECK flow, not cavity pressure or a fitted gain.
+            weights.push(gas.density * c.cavity.neck_volume_shape_m2_per_sqrt_kg()
+                / (core::f64::consts::TAU * c.listener_m));
+        }
+        let mut assembled = Self::from_specimen_and_body_network(cx, specimen, gas,
+            bodies, body_links, law, options, gate)?;
         assembled.system = assembled.system.with_acceleration_pressure(weights)
             .map_err(ReciprocalStringError::Friction)?;
         assembled.source.material_plate = Some(body);
+        assembled.source.material_cavity = cavity;
         poll(gate)?;
         Ok(assembled)
     }
