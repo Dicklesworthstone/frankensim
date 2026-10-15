@@ -4,7 +4,7 @@
 // 5x (levels.js, engine_levels.json beside the wasm).
 //
 // Main thread -> worker
-//   {type:'init', piece, port, gain?, aheadFrames?, chunk?, scales?, minRealtime?, fieldHz?, fieldFrames?, bursts?}
+//   {type:'init', piece, port, gain?, aheadFrames?, chunk?, scales?, minRealtime?, benchMs?, fieldHz?, fieldFrames?, bursts?}
 //       chunk        most frames per audio message (default 128; lane.js)
 //       fieldHz      fields per second of wall time (0: no fields)
 //       fieldFrames  instead: one field every this many AUDIO frames (even spacing however far
@@ -13,6 +13,9 @@
 //       scales       grid coarsening factors to try, finest first (default [2.5, 3, 3.5, 4, 5, 6, 7, 8])
 //       minRealtime  the finest scale that runs at least this much faster than real time wins (1.7);
 //                    timed from the coarse end (choose)
+//       benchMs      each grid is timed over this much of one stroke (default 112 ms). A piece that costs
+//                    more once it rings than at its attack needs longer: the snare's wires touch the head
+//                    from ~85 ms after a stroke, and its steps then cost ~1.6x as much
 //   {type:'strike', x, y, speed, frame?}   x, y metres from the centre; speed m/s
 //   {type:'sequence', startFrame, loopFrames, events:[{offset, x, y, speed}]}
 //   {type:'score', events:[{frame, x, y, speed}]}   a fixed score, played once
@@ -52,15 +55,27 @@ let burst = null;
 
 const post = (m, t) => self.postMessage(m, t ?? []);
 
-function bench(name, scale) {
+// How fast grid `scale` runs: one stroke, then 128-frame blocks timed from 256 frames after it (the first
+// touch of every buffer) until `benchMs` after it (at least 40 blocks: the default 112 ms). The timing stops
+// as soon as the window can no longer reach `minRealtime`, since the rest could only lower its speed.
+function bench(name, scale, benchMs, minRealtime) {
   const p = new KitPiece(name, scale);
-  p.strike(0.3 * p.radius(), 0, 3);
-  p.render(256, 1); // first touch of every buffer
-  const t0 = performance.now();
-  for (let i = 0; i < 40; i++) p.render(128, 1);
-  const ms = performance.now() - t0;
-  p.free();
-  return (40 * 128 * 1000) / 48000 / ms;
+  try {
+    p.strike(0.3 * p.radius(), 0, 3);
+    p.render(256, 1);
+    const blocks = Math.max(40, Math.round((benchMs * 48 - 256) / 128));
+    const most = (blocks * 128) / 48 / minRealtime; // wall ms a passing window may take
+    const t0 = performance.now();
+    let n = 0, ms = 0;
+    while (n < blocks && ms <= most) {
+      p.render(128, 1);
+      n++;
+      ms = performance.now() - t0;
+    }
+    return (n * 128) / 48 / ms;
+  } finally {
+    p.free();
+  }
 }
 
 // The level table, only if it was measured with this very wasm (a stale table would scale wrongly).
@@ -85,20 +100,20 @@ async function loadLevels(wasmBytes) {
 // The first timing in a Worker runs while V8 is still optimizing the engine code, and can read slow. A
 // shortfall there is timed once more before it ends the search.
 let timed = 0;
-function choose(name, scales, minRealtime) {
+function choose(name, scales, minRealtime, benchMs) {
   let pick = null;
   for (let i = scales.length - 1; i >= 0; i--) {
     let rt;
     try {
-      rt = bench(name, scales[i]);
-      if (timed++ === 0 && rt < minRealtime) rt = bench(name, scales[i]);
+      rt = bench(name, scales[i], benchMs, minRealtime);
+      if (timed++ === 0 && rt < minRealtime) rt = bench(name, scales[i], benchMs, minRealtime);
     } catch {
       continue; // the grid needs oversampling at 48 kHz: skip it, as a finest-first search would
     }
     if (rt < minRealtime) return pick || { scale: scales[i], realtime: rt };
     pick = { scale: scales[i], realtime: rt };
   }
-  return pick || { scale: 5, realtime: bench(name, 5) };
+  return pick || { scale: 5, realtime: bench(name, 5, benchMs, minRealtime) };
 }
 
 self.onmessage = async (event) => {
@@ -113,7 +128,7 @@ self.onmessage = async (event) => {
       if (Number.isFinite(m.fieldHz)) fieldEvery = m.fieldHz > 0 ? 1000 / m.fieldHz : Infinity;
       if (Number(m.fieldFrames) > 0) { fieldFrames = Math.max(128, Math.round(Number(m.fieldFrames))); fieldEvery = Infinity; }
       if (m.bursts === false) bursts = false;
-      const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7);
+      const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7, Number(m.benchMs) > 0 ? Number(m.benchMs) : 112);
       piece = new KitPiece(m.piece, pick.scale);
       fix = levelFix(table, m.piece, pick.scale, pageGain);
       gain = pageGain * fix;

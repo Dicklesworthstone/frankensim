@@ -135,8 +135,11 @@ export class KitLane {
   private worker: Worker;
   private mix: LiveMix;
 
-  /** `chunk`: most frames per audio message (default 128; a score lane far ahead can send larger ones, see lane.js). */
-  constructor(mix: LiveMix, piece: string, opts: { gain: number; aheadFrames?: number; chunk?: number; scales?: number[]; minRealtime?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
+  /**
+   * `chunk`: most frames per audio message (default 128; a score lane far ahead can send larger ones, see lane.js).
+   * `benchMs`: how much of one stroke each grid is timed over (default 112 ms; see kit/worker.js).
+   */
+  constructor(mix: LiveMix, piece: string, opts: { gain: number; aheadFrames?: number; chunk?: number; scales?: number[]; minRealtime?: number; benchMs?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
     this.piece = piece;
     this.mix = mix;
     this.worker = new Worker(`${LIVE_BASE_URL}/kit/worker.js`, { type: "module", name: `kit-${piece}` });
