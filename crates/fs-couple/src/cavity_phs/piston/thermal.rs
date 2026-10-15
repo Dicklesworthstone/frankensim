@@ -7,6 +7,9 @@
 //! The thermal body uses the existing negligible-pV-work enthalpy storage model.
 //! Its volume is fixed during this proposal; expansion/deformation is not inferred.
 
+/// Source-bound gas/body conductivity without copied material coefficients.
+pub mod layers;
+
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_material::phase::{EquilibriumPhaseState, PhaseStateError,
     UniformEnthalpyStep, UniformEnthalpyStepInput};

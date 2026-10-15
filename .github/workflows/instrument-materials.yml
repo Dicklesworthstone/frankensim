@@ -19,6 +19,9 @@ on:
       - 'crates/fs-couple/src/cavity_modal.rs'
       - 'crates/fs-couple/src/cavity_modal/**'
       - 'crates/fs-couple/tests/reciprocal_cavity.rs'
+      - 'crates/fs-couple/src/cavity_phs/piston.rs'
+      - 'crates/fs-couple/src/cavity_phs/piston/**'
+      - 'crates/fs-material/examples/material_gas_spring/**'
       - '.github/workflows/instrument-materials.yml'
 permissions:
   contents: read
@@ -34,6 +37,12 @@ jobs:
           persist-credentials: false
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Source-bound finite thermal storage gas and piston mechanics
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --lib cavity_phs::piston:: -- --test-threads=1
+      - name: Material-conductivity gas-spring heat and motion
+        if: ${{ !cancelled() }}
+        run: cargo test --manifest-path crates/fs-material/examples/material_gas_spring/Cargo.toml -- --test-threads=1
       - name: Existing and pressure-loaded reduction tests
         if: ${{ !cancelled() }}
         run: |
