@@ -146,6 +146,7 @@ pub struct FrictionModalSystem {
     forces: Vec<f64>,
     last: Option<FrictionModalFrame>,
     acceleration_pressure: Option<Vec<f64>>,
+    interface: Option<interface::DryFrictionBinding>,
 }
 
 impl FrictionModalSystem {
@@ -159,7 +160,7 @@ impl FrictionModalSystem {
         let compliance = effective_compliance(&network, &column, gate)?;
         poll(Some(gate))?;
         Ok(Self { forces: vec![0.0; network.mode_count()], network, port,
-            config, column, compliance, last: None, acceleration_pressure: None })
+            config, column, compliance, last: None, acceleration_pressure: None, interface: None })
     }
 
     /// Accepted components, with their existing basis, budgets and state.
@@ -197,6 +198,7 @@ impl FrictionModalSystem {
         if !drive.speed_m_s.is_finite() || !drive.normal_force_n.is_finite() || drive.normal_force_n < 0.0 {
             return Err(invalid("friction drive requires finite signed speed and nonnegative normal load").into());
         }
+        interface::check_endpoint(self.interface.as_ref(), &self.column, &self.network.models, drive)?;
         let before = self.network.total_energy_j()?;
         self.network.prepare_forces(external, gate, false)?;
         let mut free_increment = 0.0;
@@ -222,6 +224,8 @@ impl FrictionModalSystem {
         let (loss, constitutive_residual_n) = scalar::check(
             &self.port.law, self.config, self.network.dt, drive, traction, slip, regime, iterations,
         )?;
+        interface::check_average(self.interface.as_ref(), drive, slip, self.network.dt)?;
+        interface::check_endpoint(self.interface.as_ref(), &self.column, &self.network.candidates, drive)?;
         let observer_pressure_pa = self.staged_observer_pressure(gate)?;
         let frame = &self.network.staged_frame;
         let after = finite(frame.modal_energy_j+frame.connection_energy_j)?;
@@ -258,3 +262,7 @@ mod scalar;
 
 /// Several driven friction ports on the same retained mechanical network.
 pub mod multiple;
+
+
+/// Original dry-interface identities and domains on actual coupled contact motion.
+pub mod interface;

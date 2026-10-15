@@ -877,6 +877,14 @@ impl DryInterfaceSystemCard {
         self.applicability
     }
 
+    /// Admit a physical state without evaluating traction or allocating a receipt.
+    /// Implicit contact solvers use this same domain check on their actual
+    /// initial, work-conjugate and endpoint rates. This is not a force-law or
+    /// trajectory certificate; the solver still owns its force/work equations.
+    pub fn validate_state(&self, state: DryFrictionState) -> Result<(), TriboError> {
+        self.applicability.require_contains(state)
+    }
+
     /// Evaluates only after state-domain and tangential-speed consistency checks.
     pub fn query(
         &self,
@@ -884,7 +892,7 @@ impl DryInterfaceSystemCard {
         normal_force_n: f64,
         slip: TangentialSlip,
     ) -> Result<FrictionQueryReceipt, TriboError> {
-        self.applicability.require_contains(state)?;
+        self.validate_state(state)?;
         let slip_speed_mps = slip.speed()?;
         let mismatch = (slip_speed_mps - state.slip_speed_mps).abs();
         if mismatch > EPSILON * slip_speed_mps.max(state.slip_speed_mps).max(1.0) {

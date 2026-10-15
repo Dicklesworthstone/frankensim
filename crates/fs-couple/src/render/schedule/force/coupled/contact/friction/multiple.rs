@@ -99,6 +99,7 @@ pub struct MultiFrictionModalSystem {
     staged_ports: Vec<FrictionPortFrame>,
     frame: MultiFrictionFrame,
     accepted: bool,
+    interfaces: Vec<Option<interface::DryFrictionBinding>>,
 }
 impl FrictionModalSystem {
     /// Add prescribed friction contacts without resetting the original network.
@@ -156,7 +157,7 @@ impl MultiFrictionModalSystem {
             regimes: vec![ModalFrictionRegime::Released; p], iterations: vec![0; p],
             staged_ports: vec![FrictionPortFrame::default(); p],
             frame: MultiFrictionFrame { ports: vec![FrictionPortFrame::default(); p], ..MultiFrictionFrame::default() },
-            accepted: false })
+            accepted: false, interfaces: vec![None; p-1] })
     }
     /// Accepted components in their original basis and order.
     #[must_use] pub fn components(&self) -> &[ModalAcousticTimeModel] { self.core.components() }
@@ -205,6 +206,11 @@ impl MultiFrictionModalSystem {
             self.frame.energy_residual_j = f.energy_residual_j; self.frame.energy_tolerance_j = f.energy_tolerance_j;
             self.frame.sweeps = 1; self.accepted = true;
             return Ok(&self.frame);
+        }
+        for i in 0..p {
+            poll(gate)?;
+            interface::check_endpoint(self.interface(i), &self.points[i].column,
+                &self.core.network.models, drives[i])?;
         }
         let before = self.core.total_energy_j()?;
         self.core.network.prepare_forces(external, gate, false)?;
@@ -265,6 +271,9 @@ impl MultiFrictionModalSystem {
             let slip = finite(distance-dot(&self.points[i].column, &self.core.network.free_delta)?)?;
             let (dissipation, residual) = scalar::check(&self.points[i].port.law, self.points[i].config,
                 self.sample_period_s(), drives[i], self.tractions[i], slip, self.regimes[i], self.iterations[i])?;
+            interface::check_average(self.interface(i), drives[i], slip, self.sample_period_s())?;
+            interface::check_endpoint(self.interface(i), &self.points[i].column,
+                &self.core.network.candidates, drives[i])?;
             let supply = finite(self.tractions[i]*distance)?;
             loss = finite(loss+dissipation)?; work = finite(work+supply)?;
             absolute_work = finite(absolute_work+supply.abs())?;
@@ -294,5 +303,34 @@ impl MultiFrictionModalSystem {
         self.frame.energy_tolerance_j = tolerance; self.frame.sweeps = sweeps;
         self.frame.ports.copy_from_slice(&self.staged_ports); self.accepted = true;
         Ok(&self.frame)
+    }
+}
+
+impl MultiFrictionModalSystem {
+    /// Attach an original interface to one unchanged physical port. Existing
+    /// motion, observers, other interfaces and clocks are preserved. A source
+    /// can be attached only once and must carry the identical retained law;
+    /// previous unbound samples are not retroactively source-validated.
+    pub fn with_interface(mut self, index: usize, binding: interface::DryFrictionBinding)
+        -> Result<Self, ModalFrictionError>
+    {
+        let point = self.points.get(index).ok_or_else(|| invalid("interface names an unknown friction port"))?;
+        if self.interface(index).is_some() || point.port.law != *binding.card().friction_law() {
+            return Err(invalid("interface must match the unchanged physical port law and cannot replace a retained source").into());
+        }
+        if index == 0 {
+            self.core = self.core.with_interface(binding)?;
+        } else {
+            self.interfaces[index-1] = Some(binding);
+        }
+        Ok(self)
+    }
+    /// Source belonging to this physical contact, in original drive order.
+    /// The first binding remains in the original scalar owner, including its
+    /// exact singleton execution path; it is not copied into a competing slot.
+    #[must_use]
+    pub fn interface(&self, index: usize) -> Option<&interface::DryFrictionBinding> {
+        if index == 0 { self.core.interface() }
+        else { self.interfaces.get(index-1).and_then(Option::as_ref) }
     }
 }
