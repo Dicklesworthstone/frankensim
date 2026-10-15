@@ -87,13 +87,6 @@ pub struct ForceRenderConfig {
     pub max_projection_terms: usize,
 }
 
-struct PreparedVoice {
-    voice: RenderVoice,
-    port_shapes: Vec<Vec<f64>>,
-    force_n: Vec<f64>,
-    generalized: Vec<f64>,
-}
-
 impl ScheduledRenderer {
     /// Check the output clock against every hosted voice before connecting an
     /// audio sink. This never retunes a model or resamples its pressure history.
@@ -154,85 +147,38 @@ impl ScheduledRenderer {
     /// independently held one. No action resets a resonating state.
     pub fn from_modal_forces(
         voices: Vec<ModalForceVoice>,
-        mut events: Vec<ModalForceEvent>,
+        events: Vec<ModalForceEvent>,
         config: ForceRenderConfig,
     ) -> Result<Self, RenderError> {
         if voices.is_empty() || config.sample_rate_hz == 0 || config.max_block == 0 {
             return Err(control("physical performance needs voices, a positive sample rate and block capacity"));
         }
-        if events.len() > config.max_events {
-            return Err(sizing("physical force event budget exceeded"));
-        }
         let period = f64::from(config.sample_rate_hz).recip();
-        for voice in &voices {
+        let mut models = Vec::new();
+        let mut inputs = Vec::new();
+        for voice in voices {
             if voice.model.sample_period_s().to_bits() != period.to_bits() {
                 return Err(control("all modal images must match the declared audio sample rate"));
             }
+            inputs.push(program::PhysicalForceInput::new(voice.port_shapes, voice.initial_force_n)?);
+            models.push((voice.model, voice.initialization));
         }
-        for event in &events {
-            let voice = voices.get(event.voice)
-                .ok_or(RenderError::UnknownVoice { index: event.voice })?;
-            if event.sample == u64::MAX || event.port >= voice.port_shapes.len()
-                || !event.force_n.is_finite() {
-                return Err(control("force event needs a renderable sample, an existing port and finite newtons"));
-            }
-        }
-        events.sort_by_key(|event| event.sample);
-        let mut remaining = config.max_projection_terms;
+        let (initial, events) = program::ProjectedForceProgram::compile(inputs, events, config)?.into_parts();
         let mut prepared = Vec::new();
-        prepared.try_reserve(voices.len()).map_err(|_| sizing("cannot reserve force voices"))?;
-        for mut voice in voices {
-            charge(&mut remaining, &voice.port_shapes)?;
-            let generalized = project(&voice.port_shapes, &voice.initial_force_n)?;
-            if voice.initialization == ForceInitialization::StaticPreload {
-                voice.model.initialize_static_equilibrium(&generalized).map_err(RenderError::Modal)?;
+        prepared.try_reserve(models.len()).map_err(|_| sizing("cannot reserve force voices"))?;
+        for ((mut model, initialization), generalized) in models.into_iter().zip(initial) {
+            if initialization == ForceInitialization::StaticPreload {
+                model.initialize_static_equilibrium(&generalized).map_err(RenderError::Modal)?;
             }
-            let runtime = ModalStringVoice::new(voice.model, generalized.clone())
-                .map_err(RenderError::Modal)?;
-            prepared.push(PreparedVoice {
-                voice: RenderVoice::ModalString(runtime),
-                port_shapes: voice.port_shapes,
-                force_n: voice.initial_force_n,
-                generalized,
-            });
+            let runtime = ModalStringVoice::new(model, generalized).map_err(RenderError::Modal)?;
+            prepared.push(RenderVoice::ModalString(runtime));
         }
-        let mut controls = Vec::new();
-        let mut changed = Vec::new();
-        let mut at = 0;
-        while at < events.len() {
-            let sample = events[at].sample;
-            changed.clear();
-            while at < events.len() && events[at].sample == sample {
-                let event = events[at];
-                prepared[event.voice].force_n[event.port] = event.force_n;
-                changed.push(event.voice);
-                at += 1;
-            }
-            changed.sort_unstable();
-            changed.dedup();
-            for &index in &changed {
-                let voice = &mut prepared[index];
-                charge(&mut remaining, &voice.port_shapes)?;
-                let projected = project(&voice.port_shapes, &voice.force_n)?;
-                let count = projected.iter().zip(&voice.generalized)
-                    .filter(|(a, b)| a.to_bits() != b.to_bits()).count();
-                let total = controls.len().checked_add(count)
-                    .ok_or_else(|| sizing("projected control count overflow"))?;
-                if total > config.max_controls {
-                    return Err(sizing("projected modal control budget exceeded"));
-                }
-                controls.try_reserve(count).map_err(|_| sizing("cannot reserve projected controls"))?;
-                for (mode, (&next, &previous)) in projected.iter().zip(&voice.generalized).enumerate() {
-                    if next.to_bits() != previous.to_bits() {
-                        controls.push(ScheduledControl { sample, delta: ControlDelta::SetModalForce {
-                            voice: index, mode, force_n_per_sqrt_kg: next,
-                        }});
-                    }
-                }
-                voice.generalized = projected;
-            }
-        }
-        let context = RenderContext::new(prepared.into_iter().map(|v| v.voice).collect(), config.max_block);
+        let controls = events.into_iter().map(|event| ScheduledControl {
+            sample: event.sample, delta: ControlDelta::SetModalForce {
+                voice: event.voice, mode: event.mode, force_n_per_sqrt_kg: event.force_n_per_sqrt_kg,
+            },
+        }).collect();
+        let context = RenderContext::new(prepared, config.max_block);
         Self::new(context, controls, config.max_controls)
     }
 }
@@ -272,3 +218,6 @@ pub mod impulse;
 
 /// Join retained scheduled parts into a bounded mixed pressure performance.
 pub mod ensemble;
+
+/// State-independent physical-force compilation shared by coupled performers.
+pub mod program;
