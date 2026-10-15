@@ -5,6 +5,8 @@
 //! Source envelopes survive reference, prepared, analytic and substepped use.
 /// Whole homogeneous specimens using the same bulk states for inertia and contact.
 pub mod pair;
+/// Atomic deposition of actual contact work into finite material enthalpy.
+pub mod heating;
 
 use fs_contact::normal_patch::{NormalPatchError, PointNormalPatchReceipt};
 use fs_contact::normal_patch::source::SourcePointContact;

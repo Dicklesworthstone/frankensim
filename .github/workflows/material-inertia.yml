@@ -7,6 +7,7 @@ on:
       - 'crates/fs-contact/src/normal_patch/**'
       - 'crates/fs-contact/tests/source_point*'
       - 'crates/fs-contact/tests/source_point/**'
+      - 'crates/fs-dcontact/src/loss.rs'
       - 'crates/fs-couple/Cargo.toml'
       - 'crates/fs-couple/src/render/plate/impact.rs'
       - 'crates/fs-couple/src/render/plate/impact/material*'
@@ -15,6 +16,8 @@ on:
       - 'crates/fs-couple/src/render/plate/impact/squeeze.rs'
       - 'crates/fs-couple/tests/material_impact.rs'
       - 'crates/fs-couple/tests/material_impact/**'
+      - 'crates/fs-couple/tests/material_contact_heat*'
+      - 'crates/fs-couple/tests/material_contact_heat/**'
       - '.github/workflows/material-inertia.yml'
   workflow_dispatch:
 permissions:
@@ -61,6 +64,9 @@ jobs:
           fi
       - name: Source-bound normal contact through the original finite-patch law
         run: cargo test -p fs-contact --test source_point -- --test-threads=1
+      - name: Contact work deposited in finite material thermal storage
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test material_contact_heat -- --test-threads=1
       - name: Source-bound contact in actual coupled impact dynamics
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test material_impact -- --test-threads=1
