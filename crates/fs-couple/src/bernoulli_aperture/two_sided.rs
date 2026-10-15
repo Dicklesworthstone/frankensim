@@ -24,6 +24,7 @@ use super::dynamic::{ApertureDrive, ApertureFrame, ApertureProgress, ApertureTer
 use super::network::{NetworkNode, NodeFrame, SectionRealization, TubeNetworkSpec};
 use super::fractional::{FractionalSection, FractionalTubePolicy};
 use super::paired::{PairedAperture, PairedTrial};
+use super::modal::{ModalAperture, ModalApertureFrame};
 use super::viscothermal::{ViscothermalSection, ViscothermalSectionSpec,
     with_regional_viscothermal_sections, with_regional_fractional_viscothermal_sections};
 use crate::acoustic_realize::AcousticRealizeError;
@@ -61,6 +62,8 @@ pub enum LoadedAperture {
     Single(Box<DynamicAperture>),
     /// Two independently moving blades and their independent material memories.
     Paired(Box<PairedAperture>),
+    /// Several independent structural modes with their own signed physical ports.
+    Modal(Box<ModalAperture>),
 }
 impl From<DynamicAperture> for LoadedAperture {
     fn from(value: DynamicAperture) -> Self { Self::Single(Box::new(value)) }
@@ -68,30 +71,38 @@ impl From<DynamicAperture> for LoadedAperture {
 impl From<PairedAperture> for LoadedAperture {
     fn from(value: PairedAperture) -> Self { Self::Paired(Box::new(value)) }
 }
+impl From<ModalAperture> for LoadedAperture {
+    fn from(value: ModalAperture) -> Self { Self::Modal(Box::new(value)) }
+}
 impl LoadedAperture {
     /// Original valve clock [s]. Its load declaration is the COMBINED impedance.
     #[must_use]
     pub fn time_step_s(&self) -> f64 {
-        match self { Self::Single(a) => a.spec().time_step_s, Self::Paired(a) => a.spec().time_step_s }
+        match self { Self::Single(a) => a.spec().time_step_s, Self::Paired(a) => a.spec().time_step_s,
+            Self::Modal(a) => a.spec().time_step_s }
     }
     /// Accepted samples; a coupled refusal never changes this value.
     #[must_use]
     pub fn accepted_steps(&self) -> u64 {
-        match self { Self::Single(a) => a.accepted_steps(), Self::Paired(a) => a.accepted_steps() }
+        match self { Self::Single(a) => a.accepted_steps(), Self::Paired(a) => a.accepted_steps(),
+            Self::Modal(a) => a.accepted_steps() }
     }
     /// Original total lifetime sample budget.
     #[must_use]
     pub fn max_steps(&self) -> u64 {
-        match self { Self::Single(a) => a.spec().max_steps, Self::Paired(a) => a.spec().max_steps }
+        match self { Self::Single(a) => a.spec().max_steps, Self::Paired(a) => a.spec().max_steps,
+            Self::Modal(a) => a.spec().max_steps }
     }
     fn load(&self) -> (f64, f64) {
         match self {
             Self::Single(a) => (a.spec().density_kg_m3, a.spec().impedance_pa_s_m3),
             Self::Paired(a) => (a.spec().density_kg_m3, a.spec().impedance_pa_s_m3),
+            Self::Modal(a) => (a.spec().density_kg_m3, a.spec().impedance_pa_s_m3),
         }
     }
     fn energy(&self) -> f64 {
-        match self { Self::Single(a) => a.stored_energy_j(), Self::Paired(a) => a.stored_energy_j() }
+        match self { Self::Single(a) => a.stored_energy_j(), Self::Paired(a) => a.stored_energy_j(),
+            Self::Modal(a) => a.stored_energy_j() }
     }
     fn preview(&self, drive: ApertureDrive, forces: [f64; 2]) -> Result<ValveTrial, AcousticRealizeError> {
         match self {
@@ -100,20 +111,23 @@ impl LoadedAperture {
                 a.preview_step_with_force(drive, forces[0]).map(ValveTrial::Single)
             }
             Self::Paired(a) => a.preview(drive, forces).map(ValveTrial::Paired),
+            Self::Modal(a) => a.preview(drive, forces).map(ValveTrial::Modal),
         }
     }
     fn accept(&mut self, trial: ValveTrial) {
         match (self, trial) {
             (Self::Single(a), ValveTrial::Single(t)) => a.accept_frame(t),
             (Self::Paired(a), ValveTrial::Paired(t)) => a.accept(t),
+            (Self::Modal(a), ValveTrial::Modal(t)) => a.accept(&t),
             _ => unreachable!("candidate belongs to the exclusively held valve"),
         }
     }
 }
-enum ValveTrial { Single(ApertureTrial), Paired(PairedTrial) }
+enum ValveTrial { Single(ApertureTrial), Paired(PairedTrial), Modal(ModalApertureFrame) }
 impl ValveTrial {
     fn frame(&self) -> ApertureFrame {
-        match self { Self::Single(t) => t.frame, Self::Paired(t) => t.frame.aperture }
+        match self { Self::Single(t) => t.frame, Self::Paired(t) => t.frame.aperture,
+            Self::Modal(t) => t.aperture }
     }
 }
 
@@ -150,6 +164,7 @@ pub struct TwoSidedDrive {
     /// The actual pressure on the upstream blade face also includes tract feedback.
     pub source_pressure_pa: f64,
     /// Independent opening-positive forces [N]; second must be zero for Single.
+    /// Modal sources use their two original signed force-projection columns.
     pub blade_forces_n: [f64; 2],
 }
 
@@ -354,6 +369,7 @@ impl TwoSidedAperture {
         match &mut self.valve {
             LoadedAperture::Single(a) => a.extend_step_budget(total),
             LoadedAperture::Paired(a) => a.extend_step_budget(total),
+            LoadedAperture::Modal(a) => a.extend_step_budget(total),
         }
     }
 

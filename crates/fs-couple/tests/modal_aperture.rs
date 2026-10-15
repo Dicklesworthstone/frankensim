@@ -121,3 +121,6 @@ fn failed_modal_steps_publish_no_state_and_missing_ports_are_not_silently_ignore
     short.extend_step_budget(2).unwrap(); short.step(drive(0.),[0.;2]).unwrap();
     assert_eq!(short.accepted_steps(),2);
 }
+
+#[path = "modal_aperture/network.rs"]
+mod network;
