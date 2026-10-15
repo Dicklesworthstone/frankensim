@@ -60,6 +60,13 @@ impl PianoEngine {
         Ok(Self { piano, snap: Vec::with_capacity(4096) })
     }
 
+    /// A second engine in exactly this engine's state: it renders bit for bit
+    /// what this one would (so a fresh engine can be timed and its copy played
+    /// without building the piano twice). Costs a copy of the engine's memory.
+    pub fn copy(&self) -> PianoEngine {
+        PianoEngine { piano: self.piano.clone(), snap: Vec::with_capacity(self.snap.capacity()) }
+    }
+
     /// JSON statement of exactly what this model includes (see `describe`).
     pub fn info(&self) -> String { crate::describe(&self.piano) }
 

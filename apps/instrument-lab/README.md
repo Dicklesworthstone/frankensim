@@ -100,8 +100,10 @@ the cymbal-shimmer experiment on the kit's crash.
 
 The live piano embeds a 32-coordinate board; `public/live/piano/boards/` holds 48/64/96/128-coordinate
 boards (not committed, ~6 MB) that the browser fetches only when its timing probe says it can afford
-them (`boards.js`). They are the offline binary's reductions of the same FE slice; generate them
-natively with the engine's `gen_board` example:
+them (`boards.js`). Each board the probe times is built once: the Worker keeps a copy
+(`PianoEngine.copy()`) from before the timing and plays the chosen board's copy, which renders the same
+samples as a new engine (building board 96 takes ~0.9 s, a copy under a millisecond). They are the offline
+binary's reductions of the same FE slice; generate them natively with the engine's `gen_board` example:
 
     gen_board public/live/piano/boards/model-d-board-2400-r64.bin 2400 64,32,200,400,800,1600,2300
     # r48: 48,24,...  r96: 96,48,...  r128: 128,64,... (the studio render's reduction)

@@ -1415,7 +1415,7 @@ fn post_seg(v: &mut [f64], c1: &[f64], c2: &[f64], c3: &[f64], bm: f64) -> [f64;
 }
 
 /// Per-mode constants (structure of arrays, bank order).
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Modes {
     omega: Vec<f64>,
     w2: Vec<f64>,
@@ -1442,6 +1442,7 @@ struct Modes {
     lw: Vec<f64>,
 }
 
+#[derive(Clone)]
 struct PadPoint {
     shape: Vec<f64>,
     lift: f64,
@@ -1451,6 +1452,7 @@ struct PadPoint {
     norm: f64,
 }
 
+#[derive(Clone)]
 struct ASeg {
     seg: usize,
     off: usize,
@@ -1485,6 +1487,7 @@ struct ASeg {
     src: f64,
 }
 
+#[derive(Clone)]
 struct ACourse {
     ci: usize,
     segs: Vec<ASeg>,
@@ -1520,6 +1523,7 @@ struct Contact {
     stored_j: f64,
 }
 
+#[derive(Clone)]
 struct Key {
     midi: u8,
     held: bool,
@@ -1650,6 +1654,81 @@ pub struct LivePiano {
     pad_cache: Vec<Option<(usize, Vec<(Vec<f64>, f64, f64)>)>>,
     shape_cache: Vec<Option<(usize, Vec<f32>)>>,
     last_error: Option<String>,
+}
+
+/// A copy steps bit for bit as the original would from the same point: every
+/// state, constant, cache and counter is copied (the receiver keeps its
+/// transposed tap ring, see fs-couple's `BaffledPressure` clone). The scratch
+/// buffers the per-sample path fills keep the original's capacity, so a copy
+/// allocates on the hot path no more than the original does. The browser
+/// takes a copy of a freshly built engine before timing it, and plays the copy.
+impl Clone for LivePiano {
+    fn clone(&self) -> Self {
+        fn spare<T: Clone>(v: &Vec<T>) -> Vec<T> {
+            let mut copy = Vec::with_capacity(v.capacity());
+            copy.extend_from_slice(v);
+            copy
+        }
+        Self {
+            cfg: self.cfg.clone(),
+            r: self.r,
+            dt: self.dt,
+            courses: self.courses.clone(),
+            segs: self.segs.clone(),
+            m: self.m.clone(),
+            q: self.q.clone(),
+            v: self.v.clone(),
+            fq: self.fq.clone(),
+            fv: self.fv.clone(),
+            keys: self.keys.clone(),
+            g_st: self.g_st.clone(),
+            lam_s: self.lam_s.clone(),
+            c_st: self.c_st.clone(),
+            phi_s: self.phi_s.clone(),
+            phi: self.phi.clone(),
+            k_phys: self.k_phys.clone(),
+            flow: self.flow.clone(),
+            bz: self.bz.clone(),
+            s_inv: self.s_inv.clone(),
+            sd_inv: self.sd_inv.clone(),
+            wmk: spare(&self.wmk),
+            wu: spare(&self.wu),
+            bq: self.bq.clone(),
+            bvel: self.bvel.clone(),
+            bfq: self.bfq.clone(),
+            bfv: self.bfv.clone(),
+            rhs: self.rhs.clone(),
+            end: self.end.clone(),
+            force_b: self.force_b.clone(),
+            tmp: self.tmp.clone(),
+            st_v: self.st_v.clone(),
+            active: spare(&self.active),
+            busy: spare(&self.busy),
+            pending_on: spare(&self.pending_on),
+            sustain: self.sustain,
+            engagement_cached: self.engagement_cached,
+            mic: self.mic.clone(),
+            ledger: self.ledger,
+            counters: self.counters,
+            retire_clock: self.retire_clock,
+            board_freq_hz: self.board_freq_hz.clone(),
+            board_provenance: self.board_provenance.clone(),
+            exact_low_modes: self.exact_low_modes,
+            surface_xy: self.surface_xy.clone(),
+            surface_shapes: self.surface_shapes.clone(),
+            c_key: spare(&self.c_key),
+            c_member: spare(&self.c_member),
+            c_gap: spare(&self.c_gap),
+            c_force: spare(&self.c_force),
+            c_h: spare(&self.c_h),
+            c_lift: spare(&self.c_lift),
+            c_site: spare(&self.c_site),
+            c_start: spare(&self.c_start),
+            pad_cache: self.pad_cache.clone(),
+            shape_cache: self.shape_cache.clone(),
+            last_error: self.last_error.clone(),
+        }
+    }
 }
 
 const SHAPE_STATIONS: usize = 48;

@@ -105,18 +105,38 @@ export const MIN_CAP = { 128: 1200, 96: 1000, 64: 1000, 48: 1000 };
 // the full cap keeps the full cap): a lowered cap is measured once more on a fresh engine; if that is
 // still more than 10 % short, it is corrected once from the two points. make(bytes|null, coords, cap?)
 // -> engine with that mode cap (per-key budget in proportion; no cap = the engine's own). `full`
-// defaults to the first engine's maxDynamicModes. Returns {coordinates, bytes, cap, realtime}:
+// defaults to the first engine's maxDynamicModes. Returns {coordinates, bytes, cap, realtime, engine?}:
 // realtime = the probe's speed at that cap (measured, or the estimate after a correction).
+// Each engine is built once: a copy is taken before its timing (engine.copy(), when the wasm has it; it
+// renders bit for bit what a new engine would), the original is timed and freed, and the pick's copy is
+// returned as `engine`, built at cap `engineCap` (>= `cap`; the caller sets `cap` on it as on a new
+// engine). Building 96 takes ~0.9 s, a copy a few ms. The caller frees `engine` if it does not play it.
 export async function chooseQuality({ make, measure = probeSustained, target, full = 0, sizes = BOARD_SIZES, minCap = MIN_CAP, floor = 400, log = () => {} }) {
+  let kept = null; // the copy of the engine timed last, from before its timing
   const timed = (bytes, coords, cap) => {
     const engine = make(bytes, coords, cap);
     try {
       if (!full) full = JSON.parse(engine.info()).maxDynamicModes;
+      kept?.free();
+      kept = typeof engine.copy === 'function' ? Object.assign(engine.copy(), { engineCap: cap || full }) : null;
       return measure(engine);
     } finally {
       engine.free();
     }
   };
+  // the last timed engine's copy goes with a pick; a superseded pick's copy is freed (and the embedded
+  // board's, once a fetched board is picked)
+  const take = (p) => {
+    if (pick?.engine && pick.engine !== kept) pick.engine.free();
+    if (p.coordinates) {
+      kept32?.free();
+      kept32 = null;
+    }
+    const engine = kept;
+    kept = null;
+    return engine ? { ...p, engine, engineCap: engine.engineCap } : p;
+  };
+  let pick = null, kept32 = null;
   const fit = (bytes, coords, realtime) => {
     if (realtime >= target || floor >= full) return { cap: full, realtime };
     const a = FIXED_COST[coords || 32] ?? 0.5;
@@ -133,6 +153,8 @@ export async function chooseQuality({ make, measure = probeSustained, target, fu
     return { cap: lower, realtime: (measured * at(cap)) / at(lower) };
   };
   const realtime32 = timed(null, 0, full || undefined);
+  kept32 = kept; // the embedded board at the full cap, for the fit below
+  kept = null;
   log(`board 32: ${realtime32.toFixed(2)}x`);
   // A board's plan: the cap the probes so far predict for `target` (drift = measured / predicted speed
   // of the last board timed: load that changed since the first probe, or a first probe that ran before
@@ -145,7 +167,7 @@ export async function chooseQuality({ make, measure = probeSustained, target, fu
     const cap = atFull >= target ? full : Math.min(full, capFor(atFull, target, full, a));
     return { a, share, atFull, cap, lowest: Math.min(full, Math.max(floor, minCap[n] ?? full / 2)) };
   };
-  let pick = null, pickAt = sizes.length, tries = 0;
+  let pickAt = sizes.length, tries = 0;
   const tried = new Set();
   while (tries < 2) {
     // the best-sounding board not yet timed that is predicted to keep its floor (and beats the pick)
@@ -162,7 +184,7 @@ export async function chooseQuality({ make, measure = probeSustained, target, fu
       drift *= (realtime * share(cap)) / atFull;
       if (realtime >= target || (cap < full && realtime >= 0.9 * target)) {
         // taken; a faster run than predicted may bring a better board within reach (the loop's next pass)
-        pick = { coordinates: n, bytes, cap, realtime };
+        pick = take({ coordinates: n, bytes, cap, realtime });
         pickAt = i;
         continue;
       }
@@ -171,7 +193,7 @@ export async function chooseQuality({ make, measure = probeSustained, target, fu
       const estimate = (realtime * share(cap)) / share(lower);
       if (lower < cap && estimate >= 0.9 * target) {
         log(`board ${n}, cap ${lower}: ${estimate.toFixed(2)}x (estimated)`);
-        pick = { coordinates: n, bytes, cap: lower, realtime: estimate };
+        pick = take({ coordinates: n, bytes, cap: lower, realtime: estimate });
         pickAt = i;
       } else if (wanted >= lowest && wanted < cap) {
         // further short than a 25 % step covers (a slow moment or a pessimistic first probe): time it
@@ -180,15 +202,23 @@ export async function chooseQuality({ make, measure = probeSustained, target, fu
         log(`board ${n}, cap ${wanted}: ${again.toFixed(2)}x`);
         drift *= (again * share(wanted)) / (realtime * share(cap));
         if (again >= 0.9 * target) {
-          pick = { coordinates: n, bytes, cap: wanted, realtime: again };
+          pick = take({ coordinates: n, bytes, cap: wanted, realtime: again });
           pickAt = i;
         }
       }
     } catch (error) {
       log(`board ${n}: ${error && error.message ? error.message : error}`);
     }
+    kept?.free();
+    kept = null;
   }
-  return pick || { coordinates: 0, bytes: null, ...fit(null, 0, realtime32) };
+  if (pick) return pick;
+  // the embedded board: at the full cap its first timing's copy plays; a lowered cap is timed on an engine
+  // of its own (fit), whose copy plays
+  if (realtime32 >= target || floor >= full) kept = kept32;
+  else kept32?.free();
+  kept32 = null;
+  return take({ coordinates: 0, bytes: null, ...fit(null, 0, realtime32) });
 }
 
 export async function fetchBoard(n) {

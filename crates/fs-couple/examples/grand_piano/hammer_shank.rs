@@ -51,6 +51,7 @@ impl Geometry {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct State { pub q:[f64;2], pub v:[f64;2] }
 
+#[derive(Clone)]
 pub struct Prepared {
     dt:f64, head:[f64;2], jack:[f64;2], gravity_rigid:f64, omega2:f64,
     compliance:f64, rest_deflection:f64,

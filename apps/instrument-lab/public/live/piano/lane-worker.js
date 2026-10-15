@@ -131,14 +131,18 @@ self.onmessage = async (event) => {
       // exact low-mode truncation (coords 1..16; 0/32 = all 32 embedded coordinates). cap: a lower
       // dynamic mode cap, the per-key budget in proportion (as the governor sets it)
       let full = null; // the quality asked for (read from the first engine made)
+      // a new engine's limits for a lower cap (the same call on an unplayed copy gives it a new engine's limits)
+      const atCap = (e, cap) => {
+        if (cap && cap < full.maxDynamicModes) e.setQuality(budgetFor(full, cap), full.partialBandHz, cap);
+        return e;
+      };
       const make = (bytes, coords, cap) => {
         const e = bytes ? PianoEngine.withBoard(48000, bytes, ...limits) : new PianoEngine(48000, coords > 16 ? 0 : coords, ...limits);
         if (!full) {
           const i = JSON.parse(e.info());
           full = { courseModeBudget: i.courseModeBudget, partialBandHz: i.partialBandHz, maxDynamicModes: i.maxDynamicModes };
         }
-        if (cap && cap < full.maxDynamicModes) e.setQuality(budgetFor(full, cap), full.partialBandHz, cap);
-        return e;
+        return atCap(e, cap);
       };
       // Board and starting mode cap are chosen together by timing a sustained, damped, cap-bound
       // workload (boards.js), for `minRealtime` headroom, so the governor need not catch the first
@@ -155,13 +159,17 @@ self.onmessage = async (event) => {
       // the old last resort, 16 exact low modes, only when even the embedded board at the floor cap
       // is expected below real time
       if (!asked && !bytes && cap <= START_FLOOR_MODES && realtime < 1) {
+        pick.engine?.free();
+        pick.engine = null;
         coords = 16;
         cap = full.maxDynamicModes;
         const probe = make(null, 16);
         realtime = probeSustained(probe);
         probe.free();
       }
-      engine = make(bytes, coords, cap);
+      // the chosen board was built once, for its timing: its copy from before the timing plays
+      // (bit for bit what a new engine at this cap renders)
+      engine = pick.engine ? atCap(pick.engine, cap) : make(bytes, coords, cap);
       const info = JSON.parse(engine.info());
       const aheadFrames = m.aheadFrames || 2048;
       const gov = m.governor === false ? null : createGovernor(engine, full, aheadFrames, cap);

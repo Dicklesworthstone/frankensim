@@ -134,6 +134,24 @@ pub struct BaffledPressure {
     /// FIR support, including fractional interpolation taps; not a group delay.
     pub delay_samples: (usize, usize),
 }
+/// A copy steps bit for bit as the original would from here. It keeps the
+/// original's evaluation form: when the transposed ring mirrors the original's
+/// history, the copy's ring names the copy's own history (a derived clone
+/// would keep the original's address and fall back to the direct form).
+impl Clone for BaffledPressure {
+    fn clone(&self) -> Self {
+        let transposed=self.tap_history==self.history.as_ptr() as usize;
+        let mut copy=Self { kernels:self.kernels.clone(),history:self.history.clone(),
+            history_frames:self.history_frames,taps:self.taps.clone(),
+            packed_weights:self.packed_weights.clone(),tap_offsets:self.tap_offsets.clone(),tap_history:0,
+            previous_velocity:self.previous_velocity.clone(),acceleration:self.acceleration.clone(),
+            decimator:self.decimator.clone(),differentiate_velocity:self.differentiate_velocity,
+            interpolation_delay:self.interpolation_delay,head:self.head,modes:self.modes,rate:self.rate,
+            position_m:self.position_m,delay_samples:self.delay_samples };
+        if transposed {copy.tap_history=copy.history.as_ptr() as usize;}
+        copy
+    }
+}
 impl BaffledPressure {
     /// Prepare the existing Rayleigh integral over caller-supplied velocity shapes.
     /// `rate` is the observation clock. All allocations happen at construction.
@@ -553,6 +571,18 @@ mod tests {
                 assert_eq!(p.to_bits(),direct.step_trace(&trace).unwrap().to_bits(),"modes {modes} ratio {ratio} n {n}");
                 transposed.mode_pressures(&mut a).unwrap();direct.mode_pressures(&mut b).unwrap();
                 assert_eq!(a,b);
+            }
+            // A copy taken mid-stream keeps its form (the transposed ring names
+            // the copy's own history) and steps bit for bit as the original.
+            for mut original in [transposed,direct] {
+                let mut copy=original.clone();
+                let form=|m:&BaffledPressure| m.tap_history==m.history.as_ptr() as usize;
+                assert_eq!(form(&copy),form(&original));
+                assert_eq!(form(&copy),!copy.taps.is_empty());
+                for n in 0..2*copy.history_frames {
+                    let trace:Vec<f64>=(0..ratio*modes).map(|i|((n*ratio*modes+i) as f64*0.53).cos()*1e-3).collect();
+                    assert_eq!(copy.step_trace(&trace).unwrap().to_bits(),original.step_trace(&trace).unwrap().to_bits());
+                }
             }
         }
     }

@@ -120,7 +120,7 @@ pub struct ModalViscousLoss {
 /// constitutive coefficients or history. Successful `step_into` calls return
 /// its borrowed diagnostics. A refusal may overwrite scratch entries but never
 /// publishes a frame or changes the model's accepted state.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ModalAcousticWorkspace {
     candidate: Vec<ModalAcousticState>,
     frame: ModalAcousticFrame,

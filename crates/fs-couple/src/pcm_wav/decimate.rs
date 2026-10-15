@@ -12,7 +12,7 @@
 use fs_math::det;
 use std::f64::consts::PI;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Stage {
     ratio: usize, channels: usize, half: usize, center: f64,
     pairs: Vec<(usize, f64)>, history: Vec<f64>, head: usize,
@@ -130,7 +130,7 @@ impl Stage {
 /// One input block is exactly `ratio` interleaved mechanics frames; one output
 /// is one interleaved audio frame. All buffers are prepared once. Preview and
 /// commit let an acoustic observer reject overflow without losing filter time.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Decimator {
     stages: Vec<Stage>, buffers: Vec<Vec<f64>>, pending: bool,
     ratio: usize, channels: usize, delay: f64,
