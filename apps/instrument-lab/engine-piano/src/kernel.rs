@@ -423,8 +423,10 @@ fn identity(n: usize) -> Vec<f64> {
 /// order. Both loop shapes below produce the same blocks, tails and operation
 /// order, so the sum is bit-identical on every target; the shape is per target
 /// because LLVM vectorizes them differently (measured, optimisation pass 1):
-/// - wasm32: `as_chunks` + a single-exit zip; the lanes SLP-vectorize to f64x2.
-///   Measured ~5% less CPU for the whole engine in V8 than the two-exit loop.
+/// - wasm32: `as_chunks` + a single-exit zip (~5% less CPU for the whole engine
+///   in V8 than the two-exit loop, pass 1), lanes 0/1 and 2/3 as two explicit
+///   f64x2 sums (pass 28; LLVM's own vectorization paired 0/2 and 1/3 and paid
+///   shuffles for it).
 /// - elsewhere: the two-exit `(&mut ca).zip(&mut cb)` loop. Do NOT "fix" it to a
 ///   single-exit (trusted-random-access) loop: AArch64's loop vectorizer then
 ///   applies an ordered FP reduction (lane extracts, serial scalar adds, spills),
@@ -434,16 +436,16 @@ fn identity(n: usize) -> Vec<f64> {
 #[cfg(target_arch = "wasm32")]
 #[inline]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
+    use core::arch::wasm32::{f64x2, f64x2_add, f64x2_extract_lane, f64x2_mul, f64x2_splat};
     let (ca, ra) = a.as_chunks::<4>();
     let (cb, rb) = b.as_chunks::<4>();
-    let mut s = [0.0_f64; 4];
+    let (mut lo, mut hi) = (f64x2_splat(0.0), f64x2_splat(0.0));
     for (x, y) in ca.iter().zip(cb) {
-        s[0] += x[0] * y[0];
-        s[1] += x[1] * y[1];
-        s[2] += x[2] * y[2];
-        s[3] += x[3] * y[3];
+        lo = f64x2_add(lo, f64x2_mul(f64x2(x[0], x[1]), f64x2(y[0], y[1])));
+        hi = f64x2_add(hi, f64x2_mul(f64x2(x[2], x[3]), f64x2(y[2], y[3])));
     }
-    let mut t = (s[0] + s[1]) + (s[2] + s[3]);
+    let mut t = (f64x2_extract_lane::<0>(lo) + f64x2_extract_lane::<1>(lo))
+        + (f64x2_extract_lane::<0>(hi) + f64x2_extract_lane::<1>(hi));
     for (x, y) in ra.iter().zip(rb) {
         t += x * y;
     }
@@ -512,16 +514,24 @@ fn pack_pads(pad: &[PadPoint], n: usize) -> (Vec<f64>, Vec<f64>) {
 #[cfg(target_arch = "wasm32")]
 #[inline]
 fn pad_dots<const N: usize>(pack: &[f64], v: &[f64]) -> [f64; N] {
-    let mut s = [[0.0_f64; 4]; N];
+    use core::arch::wasm32::{f64x2, f64x2_add, f64x2_extract_lane, f64x2_mul, f64x2_splat};
+    // Explicit f64x2 lanes 0/1 and 2/3 per pad (pass 28), the same sums.
+    let mut lo = [f64x2_splat(0.0); N];
+    let mut hi = [f64x2_splat(0.0); N];
     let (cv, rv) = v.as_chunks::<4>();
     let (cg, _) = pack.as_chunks::<4>();
     for (x, g) in cv.iter().zip(cg.chunks_exact(N)) {
+        let xl = f64x2(x[0], x[1]);
+        let xh = f64x2(x[2], x[3]);
         for t in 0..N {
-            s[t][0] += g[t][0] * x[0];
-            s[t][1] += g[t][1] * x[1];
-            s[t][2] += g[t][2] * x[2];
-            s[t][3] += g[t][3] * x[3];
+            lo[t] = f64x2_add(lo[t], f64x2_mul(f64x2(g[t][0], g[t][1]), xl));
+            hi[t] = f64x2_add(hi[t], f64x2_mul(f64x2(g[t][2], g[t][3]), xh));
         }
+    }
+    let mut s = [[0.0_f64; 4]; N];
+    for t in 0..N {
+        s[t] = [f64x2_extract_lane::<0>(lo[t]), f64x2_extract_lane::<1>(lo[t]),
+            f64x2_extract_lane::<0>(hi[t]), f64x2_extract_lane::<1>(hi[t])];
     }
     pad_dots_finish(&s, &pack[cv.len() * 4 * N..], rv)
 }
@@ -1026,6 +1036,10 @@ struct Seg {
     duplex: bool,
     off: usize,
     n_max: usize,
+    /// First record of this segment in `Modes::pre`/`fin`/`hit` (wasm32
+    /// pair records, see `PreRec`).
+    #[cfg(target_arch = "wasm32")]
+    pair: usize,
     /// Chord (static) endpoint mass mu*L/3 [kg].
     endpoint_mass: f64,
     /// Chord stiffness T/L [N/m].
@@ -1078,6 +1092,328 @@ struct HitFlow {
     bvhs: f64,
 }
 
+/// Per-mode records in each target's layout (pass 28). wasm32: two adjacent
+/// modes of one segment per record, field-major (`PreFlow2` ...), read by the
+/// two-lane kernels below. Elsewhere one mode per record, read by the scalar
+/// loops (two lanes measured 1-4 % slower natively on Apple silicon).
+#[cfg(target_arch = "wasm32")]
+type PreRec = PreFlow2;
+#[cfg(target_arch = "wasm32")]
+type FinRec = FinFlow2;
+#[cfg(target_arch = "wasm32")]
+type HitRec = HitFlow2;
+#[cfg(not(target_arch = "wasm32"))]
+type PreRec = PreFlow;
+#[cfg(not(target_arch = "wasm32"))]
+type FinRec = FinFlow;
+#[cfg(not(target_arch = "wasm32"))]
+type HitRec = HitFlow;
+
+/// The records of segment `s` (see `PreRec`).
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn recs(s: &ASeg) -> std::ops::Range<usize> {
+    s.pair..s.pair + s.n.div_ceil(2)
+}
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+fn recs(s: &ASeg) -> std::ops::Range<usize> {
+    s.off..s.off + s.n
+}
+
+/// Two adjacent modes of one segment, field-major (wasm32, pass 28): lane `l`
+/// of every field belongs to mode `off + 2j + l` of the segment, so each
+/// field is one `v128.load`. Same values as `PreFlow`; an odd last mode's
+/// record holds zeros in lane 1, which no kernel reads.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Default)]
+#[repr(C, align(16))]
+struct PreFlow2 {
+    c1: [f64; 2],
+    c2: [f64; 2],
+    c3: [f64; 2],
+    qq: [f64; 2],
+    qv: [f64; 2],
+    vq: [f64; 2],
+    vv: [f64; 2],
+    ha: [f64; 2],
+}
+
+/// `FinFlow` for two adjacent modes, field-major (as `PreFlow2`).
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Default)]
+#[repr(C, align(16))]
+struct FinFlow2 {
+    bqa: [f64; 2],
+    bva: [f64; 2],
+    ha: [f64; 2],
+    cross: [f64; 2],
+}
+
+/// `HitFlow` for two adjacent modes, field-major.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Default)]
+#[repr(C, align(16))]
+struct HitFlow2 {
+    bqhs: [f64; 2],
+    bvhs: [f64; 2],
+}
+
+/// Regroup per-mode records two modes at a time from each segment's first
+/// mode (wasm32); returns the records and each segment's first record.
+#[cfg(target_arch = "wasm32")]
+fn pair_records(segs: &[Seg], pre: &[PreFlow], fin: &[FinFlow], hit: &[HitFlow]) -> (Vec<PreFlow2>, Vec<FinFlow2>, Vec<HitFlow2>, Vec<usize>) {
+    let (mut p2, mut f2, mut h2, mut first) = (Vec::new(), Vec::new(), Vec::new(), Vec::with_capacity(segs.len()));
+    for seg in segs {
+        first.push(p2.len());
+        for j in 0..seg.n_max.div_ceil(2) {
+            let (mut p, mut f, mut h) = (PreFlow2::default(), FinFlow2::default(), HitFlow2::default());
+            for l in 0..2 {
+                if 2 * j + l >= seg.n_max {
+                    break;
+                }
+                let k = seg.off + 2 * j + l;
+                let (a, b, c) = (pre[k], fin[k], hit[k]);
+                (p.c1[l], p.c2[l], p.c3[l], p.qq[l], p.qv[l], p.vq[l], p.vv[l], p.ha[l]) = (a.c1, a.c2, a.c3, a.qq, a.qv, a.vq, a.vv, a.ha);
+                (f.bqa[l], f.bva[l], f.ha[l], f.cross[l]) = (b.bqa, b.bva, b.ha, b.cross);
+                (h.bqhs[l], h.bvhs[l]) = (c.bqhs, c.bvhs);
+            }
+            p2.push(p);
+            f2.push(f);
+            h2.push(h);
+        }
+    }
+    (p2, f2, h2, first)
+}
+
+/// Two f64 lanes as one wasm simd128 `f64x2` (pass 28). Lane-wise
+/// `mul`/`add`/`sub` are exactly the scalar operations (wasm has no fused
+/// multiply-add here), so each mode's values are bit for bit the scalar ones.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy)]
+struct F2(core::arch::wasm32::v128);
+#[cfg(target_arch = "wasm32")]
+impl F2 {
+    #[inline(always)]
+    fn ld(a: &[f64; 2]) -> Self { F2(core::arch::wasm32::f64x2(a[0], a[1])) }
+    #[inline(always)]
+    fn splat(x: f64) -> Self { F2(core::arch::wasm32::f64x2_splat(x)) }
+    #[inline(always)]
+    fn st(self, a: &mut [f64; 2]) {
+        a[0] = core::arch::wasm32::f64x2_extract_lane::<0>(self.0);
+        a[1] = core::arch::wasm32::f64x2_extract_lane::<1>(self.0);
+    }
+    #[inline(always)]
+    fn add(self, b: Self) -> Self { F2(core::arch::wasm32::f64x2_add(self.0, b.0)) }
+    #[inline(always)]
+    fn sub(self, b: Self) -> Self { F2(core::arch::wasm32::f64x2_sub(self.0, b.0)) }
+    #[inline(always)]
+    fn mul(self, b: Self) -> Self { F2(core::arch::wasm32::f64x2_mul(self.0, b.0)) }
+    /// `lane0 + lane1`.
+    #[inline(always)]
+    fn hsum(self) -> f64 {
+        core::arch::wasm32::f64x2_extract_lane::<0>(self.0) + core::arch::wasm32::f64x2_extract_lane::<1>(self.0)
+    }
+}
+
+/// Pre string-loss half-flow and exact-ZOH free motion of one segment
+/// (`step`). Returns `[loss, c3 . v, reaction]`.
+///
+/// wasm32 (pass 28): two modes per iteration. Per mode exactly the scalar
+/// operations; the three sums run in two lanes (even / odd modes of the
+/// segment), then `lane0 + lane1`, then an odd last mode. That reassociation
+/// is the only change from the scalar loop: rms diff / rms <= 1e-10 on the
+/// captured scores, every printed energy term identical.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn pre_seg(q: &[f64], v: &[f64], fq: &mut [f64], fv: &mut [f64], rec: &[PreRec], bm: f64) -> [f64; 3] {
+    let n = q.len();
+    let (cq, _) = q.as_chunks::<2>();
+    let (cv, _) = v.as_chunks::<2>();
+    let (cfq, _) = fq.as_chunks_mut::<2>();
+    let (cfv, _) = fv.as_chunks_mut::<2>();
+    let b = F2::splat(bm);
+    let zero = F2::splat(0.0);
+    let (mut loss, mut acc3, mut reac) = (zero, zero, zero);
+    for ((((q2, v2), fq2), fv2), p) in cq.iter().zip(cv).zip(cfq.iter_mut()).zip(cfv.iter_mut()).zip(rec) {
+        let q = F2::ld(q2);
+        let old = F2::ld(v2);
+        let dv = F2::ld(&p.c1).mul(old).add(F2::ld(&p.c2).mul(b));
+        loss = loss.add(old.sub(dv).mul(old.add(dv)));
+        acc3 = acc3.add(F2::ld(&p.c3).mul(old));
+        let x = F2::ld(&p.qq).mul(q).add(F2::ld(&p.qv).mul(dv));
+        x.st(fq2);
+        F2::ld(&p.vq).mul(q).add(F2::ld(&p.vv).mul(dv)).st(fv2);
+        reac = reac.add(F2::ld(&p.ha).mul(q.add(x)));
+    }
+    let mut out = [loss.hsum(), acc3.hsum(), reac.hsum()];
+    if n % 2 == 1 {
+        let k = n - 1;
+        let p = &rec[n / 2];
+        let (q, old) = (q[k], v[k]);
+        let dv = p.c1[0] * old + p.c2[0] * bm;
+        out[0] += (old - dv) * (old + dv);
+        out[1] += p.c3[0] * old;
+        let x = p.qq[0] * q + p.qv[0] * dv;
+        fq[k] = x;
+        fv[k] = p.vq[0] * q + p.vv[0] * dv;
+        out[2] += p.ha[0] * (q + x);
+    }
+    out
+}
+
+/// See the wasm32 `pre_seg`: the scalar loop, one mode at a time.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+fn pre_seg(q: &[f64], v: &[f64], fq: &mut [f64], fv: &mut [f64], rec: &[PreRec], bm: f64) -> [f64; 3] {
+    let (mut loss, mut acc3, mut reac) = (0.0, 0.0, 0.0);
+    let it = q.iter().zip(v.iter()).zip(fq.iter_mut()).zip(fv.iter_mut()).zip(rec.iter());
+    for ((((q, v), fq), fv), p) in it {
+        let old = *v;
+        let dv = p.c1 * old + p.c2 * bm;
+        loss += (old - dv) * (old + dv);
+        acc3 += p.c3 * old;
+        let x = p.qq * q + p.qv * dv;
+        *fq = x;
+        *fv = p.vq * q + p.vv * dv;
+        reac += p.ha * (q + x);
+    }
+    [loss, acc3, reac]
+}
+
+/// The finish loop of one segment (`step`) with the held contact force
+/// `force` (`hit` is read only when `force != 0`). Returns `[reaction, src]`;
+/// the caller adds the hammer's own reaction. wasm32: two modes per
+/// iteration, sums as in `pre_seg`.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn finish_seg(q: &mut [f64], v: &mut [f64], fq: &[f64], fv: &[f64], rec: &[FinRec], hit: &[HitRec], bbar: f64, force: f64) -> [f64; 2] {
+    let n = q.len();
+    let b = F2::splat(bbar);
+    let zero = F2::splat(0.0);
+    let (mut reac, mut src) = (zero, zero);
+    {
+        let (cq, _) = q.as_chunks_mut::<2>();
+        let (cv, _) = v.as_chunks_mut::<2>();
+        let (cfq, _) = fq.as_chunks::<2>();
+        let (cfv, _) = fv.as_chunks::<2>();
+        if force == 0.0 {
+            for ((((q2, v2), fq2), fv2), p) in cq.iter_mut().zip(cv.iter_mut()).zip(cfq).zip(cfv).zip(rec) {
+                let nq = F2::ld(fq2).add(F2::ld(&p.bqa).mul(b));
+                let nv = F2::ld(fv2).add(F2::ld(&p.bva).mul(b));
+                reac = reac.add(F2::ld(&p.ha).mul(F2::ld(q2).add(nq)));
+                src = src.add(F2::ld(&p.cross).mul(nv));
+                nq.st(q2);
+                nv.st(v2);
+            }
+        } else {
+            let f = F2::splat(force);
+            for (((((q2, v2), fq2), fv2), p), h) in cq.iter_mut().zip(cv.iter_mut()).zip(cfq).zip(cfv).zip(rec).zip(hit) {
+                let nq = F2::ld(fq2).add(F2::ld(&p.bqa).mul(b)).add(F2::ld(&h.bqhs).mul(f));
+                let nv = F2::ld(fv2).add(F2::ld(&p.bva).mul(b)).add(F2::ld(&h.bvhs).mul(f));
+                reac = reac.add(F2::ld(&p.ha).mul(F2::ld(q2).add(nq)));
+                src = src.add(F2::ld(&p.cross).mul(nv));
+                nq.st(q2);
+                nv.st(v2);
+            }
+        }
+    }
+    let mut out = [reac.hsum(), src.hsum()];
+    if n % 2 == 1 {
+        let k = n - 1;
+        let p = &rec[n / 2];
+        let (mut nq, mut nv) = (fq[k] + p.bqa[0] * bbar, fv[k] + p.bva[0] * bbar);
+        if force != 0.0 {
+            nq += hit[n / 2].bqhs[0] * force;
+            nv += hit[n / 2].bvhs[0] * force;
+        }
+        out[0] += p.ha[0] * (q[k] + nq);
+        out[1] += p.cross[0] * nv;
+        q[k] = nq;
+        v[k] = nv;
+    }
+    out
+}
+
+/// See the wasm32 `finish_seg`: the scalar loops, one mode at a time.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+fn finish_seg(q: &mut [f64], v: &mut [f64], fq: &[f64], fv: &[f64], rec: &[FinRec], hit: &[HitRec], bbar: f64, force: f64) -> [f64; 2] {
+    let (mut reac, mut src) = (0.0, 0.0);
+    if force == 0.0 {
+        let it = q.iter_mut().zip(v.iter_mut()).zip(fq.iter()).zip(fv.iter()).zip(rec.iter());
+        for ((((q, v), fq), fv), p) in it {
+            let nq = fq + p.bqa * bbar;
+            let nv = fv + p.bva * bbar;
+            reac += p.ha * (*q + nq);
+            src += p.cross * nv;
+            *q = nq;
+            *v = nv;
+        }
+    } else {
+        let it = q.iter_mut().zip(v.iter_mut()).zip(fq.iter()).zip(fv.iter()).zip(rec.iter()).zip(hit.iter());
+        for (((((q, v), fq), fv), p), h) in it {
+            let nq = fq + p.bqa * bbar + h.bqhs * force;
+            let nv = fv + p.bva * bbar + h.bvhs * force;
+            reac += p.ha * (*q + nq);
+            src += p.cross * nv;
+            *q = nq;
+            *v = nv;
+        }
+    }
+    [reac, src]
+}
+
+/// The post string-loss half-flow of one segment (`step`; `c1`/`c2`/`c3` are
+/// the segment's slices of the plain arrays). Returns `[loss, c3 . v]`.
+/// wasm32: two modes per iteration, sums as in `pre_seg`.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn post_seg(v: &mut [f64], c1: &[f64], c2: &[f64], c3: &[f64], bm: f64) -> [f64; 2] {
+    let n = v.len();
+    let b = F2::splat(bm);
+    let zero = F2::splat(0.0);
+    let (mut loss, mut acc3) = (zero, zero);
+    {
+        let (cv, _) = v.as_chunks_mut::<2>();
+        let (a1, _) = c1.as_chunks::<2>();
+        let (a2, _) = c2.as_chunks::<2>();
+        let (a3, _) = c3.as_chunks::<2>();
+        for (((v2, k1), k2), k3) in cv.iter_mut().zip(a1).zip(a2).zip(a3) {
+            let old = F2::ld(v2);
+            let dv = F2::ld(k1).mul(old).add(F2::ld(k2).mul(b));
+            loss = loss.add(old.sub(dv).mul(old.add(dv)));
+            acc3 = acc3.add(F2::ld(k3).mul(old));
+            dv.st(v2);
+        }
+    }
+    let mut out = [loss.hsum(), acc3.hsum()];
+    if n % 2 == 1 {
+        let k = n - 1;
+        let old = v[k];
+        let dv = c1[k] * old + c2[k] * bm;
+        out[0] += (old - dv) * (old + dv);
+        out[1] += c3[k] * old;
+        v[k] = dv;
+    }
+    out
+}
+
+/// See the wasm32 `post_seg`: the scalar loop, one mode at a time.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+fn post_seg(v: &mut [f64], c1: &[f64], c2: &[f64], c3: &[f64], bm: f64) -> [f64; 2] {
+    let (mut loss, mut acc3) = (0.0, 0.0);
+    for (((v, c1), c2), c3) in v.iter_mut().zip(c1.iter()).zip(c2.iter()).zip(c3.iter()) {
+        let old = *v;
+        let dv = c1 * old + c2 * bm;
+        loss += (old - dv) * (old + dv);
+        acc3 += c3 * old;
+        *v = dv;
+    }
+    [loss, acc3]
+}
+
 /// Per-mode constants (structure of arrays, bank order).
 #[derive(Default)]
 struct Modes {
@@ -1085,15 +1421,15 @@ struct Modes {
     w2: Vec<f64>,
     beta: Vec<f64>,
     hs: Vec<f64>,
-    /// Pre half-flow record per mode (see `PreFlow`).
-    pre: Vec<PreFlow>,
+    /// Pre half-flow records (see `PreFlow`, `PreRec`).
+    pre: Vec<PreRec>,
     bq: Vec<f64>,
     /// 0.5*a, 0.5*bq*a with a = w^2*beta.
     ha: Vec<f64>,
     hba: Vec<f64>,
-    /// Finish-loop records per mode (see `FinFlow`, `HitFlow`).
-    fin: Vec<FinFlow>,
-    hit: Vec<HitFlow>,
+    /// Finish-loop records (see `FinFlow`, `HitFlow`, `PreRec`).
+    fin: Vec<FinRec>,
+    hit: Vec<HitRec>,
     /// String-loss half-flow: v' = c1*v + c2*b_mid, bridge reaction -c3*v.
     /// (The post half-flow reads these 3 of the 8 `PreFlow` fields alone, so
     /// it keeps the plain arrays.)
@@ -1119,6 +1455,9 @@ struct ASeg {
     seg: usize,
     off: usize,
     n: usize,
+    /// `Seg::pair` of this segment.
+    #[cfg(target_arch = "wasm32")]
+    pair: usize,
     duplex: bool,
     member: usize,
     beta2: f64,
@@ -1343,6 +1682,7 @@ impl LivePiano {
         let dur = 0.5 * dt; // each loss half-flow spans half a step
         let half = 0.5 * dur;
         let mut m = Modes::default();
+        let (mut pre, mut fin, mut hit) = (Vec::with_capacity(n_total), Vec::with_capacity(n_total), Vec::with_capacity(n_total));
         for (k, mode) in bank.modes.iter().enumerate() {
             let z = zoh[k];
             let a = mode.a;
@@ -1357,12 +1697,12 @@ impl LivePiano {
             let c1 = 1.0 - dur * (mr + sr) * inv;
             let c2 = -dur * ((mr + sr) * cross - sr * mode.beta);
             let c3 = sr * mode.beta * inv;
-            m.pre.push(PreFlow { c1, c2, c3, qq: z.qq, qv: z.qv, vq: z.vq, vv: z.vv, ha });
+            pre.push(PreFlow { c1, c2, c3, qq: z.qq, qv: z.qv, vq: z.vq, vv: z.vv, ha });
             m.bq.push(z.bq);
             m.ha.push(ha);
             m.hba.push(0.5 * z.bq * a);
-            m.fin.push(FinFlow { bqa: z.bq * a, bva: z.bv * a, ha, cross });
-            m.hit.push(HitFlow { bqhs: z.bq * mode.hammer_shape, bvhs: z.bv * mode.hammer_shape });
+            fin.push(FinFlow { bqa: z.bq * a, bva: z.bv * a, ha, cross });
+            hit.push(HitFlow { bqhs: z.bq * mode.hammer_shape, bvhs: z.bv * mode.hammer_shape });
             m.c1.push(c1);
             m.c2.push(c2);
             m.c3.push(c3);
@@ -1384,6 +1724,8 @@ impl LivePiano {
                 duplex: s.duplex,
                 off: s.modes.start,
                 n_max: s.modes.len(),
+                #[cfg(target_arch = "wasm32")]
+                pair: 0,
                 endpoint_mass: c.linear_density_kg_m * length / 3.0,
                 t_over_l: tension / length,
                 mass_rate,
@@ -1394,6 +1736,18 @@ impl LivePiano {
             key_segs[s.course].push(si);
         }
         drop(bank);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            (m.pre, m.fin, m.hit) = (pre, fin, hit);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let (p2, f2, h2, first) = pair_records(&segs, &pre, &fin, &hit);
+            (m.pre, m.fin, m.hit) = (p2, f2, h2);
+            for (seg, f) in segs.iter_mut().zip(first) {
+                seg.pair = f;
+            }
+        }
         // Bare board (mass-normalized FE modes) with EVERY string of the scale
         // attached as a chord: mass mu*L/3 and stiffness T/L on its bridge row.
         // Its eigenbasis (the fs-modal facility, once, cold) is the fixed
@@ -1703,6 +2057,8 @@ impl LivePiano {
         }
         let (pad_pack, pad_gram) = pack_pads(&pad, n);
         ASeg {
+            #[cfg(target_arch = "wasm32")]
+            pair: self.segs[si].pair,
             seg: si, off, n, duplex: self.segs[si].duplex, member: self.segs[si].member, beta2, mek, w_schur, loss_w, sum_c4,
             endpoint_drag, hammer_lift, lift_total: hammer_lift + lift_bq, cdiag, pad, pad_pack, pad_gram,
             owed: false, owe: [0.0; 4], dn: [0.0; 4], force: 0.0, src: 0.0,
@@ -2278,23 +2634,9 @@ impl LivePiano {
                 let mut reaction = 0.0;
                 for s in &mut ac.segs {
                     let range = s.off..s.off + s.n;
-                    let (mut loss, mut acc3, mut reac) = (0.0, 0.0, 0.0);
-                    let m = &self.m;
-                    let it = self.q[range.clone()].iter()
-                        .zip(self.v[range.clone()].iter())
-                        .zip(self.fq[range.clone()].iter_mut())
-                        .zip(self.fv[range.clone()].iter_mut())
-                        .zip(m.pre[range.clone()].iter());
-                    for ((((q, v), fq), fv), p) in it {
-                        let old = *v;
-                        let dv = p.c1 * old + p.c2 * bm;
-                        loss += (old - dv) * (old + dv);
-                        acc3 += p.c3 * old;
-                        let x = p.qq * q + p.qv * dv;
-                        *fq = x;
-                        *fv = p.vq * q + p.vv * dv;
-                        reac += p.ha * (q + x);
-                    }
+                    let [loss, acc3, reac] = pre_seg(&self.q[range.clone()], &self.v[range.clone()],
+                        &mut self.fq[range.clone()], &mut self.fv[range.clone()],
+                        &self.m.pre[recs(s)], bm);
                     string_loss += 0.5 * loss;
                     reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
                     reaction += reac + b0 * s.w_schur;
@@ -2373,38 +2715,10 @@ impl LivePiano {
             for s in &mut ac.segs {
                 let range = s.off..s.off + s.n;
                 let m = &self.m;
-                let (mut reac, mut src) = (0.0, 0.0);
-                if s.force == 0.0 {
-                    let it = self.q[range.clone()].iter_mut()
-                        .zip(self.v[range.clone()].iter_mut())
-                        .zip(self.fq[range.clone()].iter())
-                        .zip(self.fv[range.clone()].iter())
-                        .zip(m.fin[range.clone()].iter());
-                    for ((((q, v), fq), fv), p) in it {
-                        let nq = fq + p.bqa * bbar;
-                        let nv = fv + p.bva * bbar;
-                        reac += p.ha * (*q + nq);
-                        src += p.cross * nv;
-                        *q = nq;
-                        *v = nv;
-                    }
-                } else {
-                    let force = s.force;
-                    let it = self.q[range.clone()].iter_mut()
-                        .zip(self.v[range.clone()].iter_mut())
-                        .zip(self.fq[range.clone()].iter())
-                        .zip(self.fv[range.clone()].iter())
-                        .zip(m.fin[range.clone()].iter())
-                        .zip(m.hit[range.clone()].iter());
-                    for (((((q, v), fq), fv), p), h) in it {
-                        let nq = fq + p.bqa * bbar + h.bqhs * force;
-                        let nv = fv + p.bva * bbar + h.bvhs * force;
-                        reac += p.ha * (*q + nq);
-                        src += p.cross * nv;
-                        *q = nq;
-                        *v = nv;
-                    }
-                    reac += s.hammer_lift * force;
+                let [mut reac, src] = finish_seg(&mut self.q[range.clone()], &mut self.v[range.clone()],
+                    &self.fq[range.clone()], &self.fv[range.clone()], &m.fin[recs(s)], &m.hit[recs(s)], bbar, s.force);
+                if s.force != 0.0 {
+                    reac += s.hammer_lift * s.force;
                 }
                 reaction += reac;
                 s.src = src;
@@ -2444,18 +2758,8 @@ impl LivePiano {
                 for s in &ac.segs {
                     let range = s.off..s.off + s.n;
                     let m = &self.m;
-                    let (mut loss, mut acc3) = (0.0, 0.0);
-                    let it = self.v[range.clone()].iter_mut()
-                        .zip(m.c1[range.clone()].iter())
-                        .zip(m.c2[range.clone()].iter())
-                        .zip(m.c3[range.clone()].iter());
-                    for (((v, c1), c2), c3) in it {
-                        let old = *v;
-                        let dv = c1 * old + c2 * bm;
-                        loss += (old - dv) * (old + dv);
-                        acc3 += c3 * old;
-                        *v = dv;
-                    }
+                    let [loss, acc3] = post_seg(&mut self.v[range.clone()], &m.c1[range.clone()],
+                        &m.c2[range.clone()], &m.c3[range.clone()], bm);
                     string_loss += 0.5 * loss;
                     reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
                 }
