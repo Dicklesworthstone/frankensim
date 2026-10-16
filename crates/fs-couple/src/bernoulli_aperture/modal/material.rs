@@ -7,6 +7,7 @@ use crate::thin_plate::{PlateChartRadiation, ResolvedPlateChart};
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
+use crate::plate_viscosity::{PlateViscosity, PlateViscosityLimits};
 
 /// Original plate reduction plus explicit spatial and work limits.
 #[derive(Clone, Debug)]
@@ -42,6 +43,8 @@ pub struct MaterialModalPlate {
     shapes: Vec<Vec<f64>>,
     width_m: f64,
     slit_weights: Vec<f64>,
+    viscosity: Option<PlateViscosity>,
+    viscosity_matrix: Option<Vec<f64>>,
 }
 fn poll(gate: &CancelGate) -> Result<(), AcousticRealizeError> {
     if gate.is_requested() { Err(AcousticRealizeError::Cancelled) } else { Ok(()) }
@@ -59,8 +62,14 @@ impl MaterialModalPlate {
     /// Original length-integrated slit width [m]. It is not multiplied by modes.
     pub const fn width_m(&self) -> f64 { self.width_m }
 
+    /// Original regional tensor selection; absent on the diagonal-loss image.
+    pub fn viscosity(&self) -> Option<&PlateViscosity> { self.viscosity.as_ref() }
+    /// Full local C [N s/m] in this plate's retained physical modal coordinates.
+    pub fn viscosity_matrix_n_s_m(&self) -> Option<&[f64]> { self.viscosity_matrix.as_deref() }
+
     fn reduce(source: ResolvedPlateChart, options: ModalPlateOptions, first: usize,
-        blade: usize, dt: f64, gate: &CancelGate) -> Result<Self, AcousticRealizeError>
+        blade: usize, dt: f64, gate: &CancelGate,
+        tensor: Option<(PlateViscosity, PlateViscosityLimits)>) -> Result<Self, AcousticRealizeError>
     {
         poll(gate)?;
         let mesh = &source.chart().mesh;
@@ -105,8 +114,15 @@ impl MaterialModalPlate {
         let mut nodal_ports = vec![vec![0.0; n]; n];
         for (i,row) in nodal_ports.iter_mut().enumerate() { row[i] = 1.0; }
         poll(gate)?;
-        let (bodies,ports) = source.certified_radiators_with_force_ports(
-            &options.reduction, &nodal_ports, options.max_projection_terms)?;
+        let (bodies,ports,projected) = if let Some((law,limits)) = &tensor {
+            let (image,ports) = source.certified_viscous_radiators_with_force_ports(
+                &options.reduction, &nodal_ports, options.max_projection_terms, law, *limits, gate)?;
+            (image.radiators().to_vec(), ports, Some(image.damping().matrix_per_s().to_vec()))
+        } else {
+            let (bodies,ports) = source.certified_radiators_with_force_ports(
+                &options.reduction, &nodal_ports, options.max_projection_terms)?;
+            (bodies,ports,None)
+        };
         poll(gate)?;
         if bodies.len() != options.reduction.n_modes || ports.len() != n
             || ports.iter().any(|p|p.len() != bodies.len()) {
@@ -114,6 +130,7 @@ impl MaterialModalPlate {
         }
         let mut shapes = vec![vec![0.0; bodies.len()]; n];
         let mut modes = Vec::with_capacity(bodies.len());
+        let mut coordinate_scale = Vec::with_capacity(bodies.len());
         for (i,body) in bodies.iter().enumerate() {
             poll(gate)?;
             let root_mass = body.mass_kg.sqrt();
@@ -124,13 +141,27 @@ impl MaterialModalPlate {
             }
             for (row,port) in shapes.iter_mut().zip(&ports) { row[i] = port[i]*root_mass/scale; }
             let mass = body.mass_kg/scale/scale;
+            coordinate_scale.push(root_mass/scale);
             let gap = weights.iter().zip(&shapes).map(|(w,row)|w*row[i]).sum();
             let mut force = [0.0;2]; force[blade] = body.drive_participation/scale;
             modes.push(ApertureMode { mass_kg:mass, stiffness_n_m:mass*body.omega*body.omega,
                 damping_n_s_m:2.0*body.zeta*body.omega*mass,
                 pressure_area_m2:body.area_m2/scale, gap_projection:gap, force_projection:force });
         }
-        Ok(Self { source, options, first, modes, shapes, width_m:width, slit_weights:weights })
+        // Transform BOTH axes of C from the owner's mass-normalized coordinates.
+        // The pressure/gap/force columns above came from that identical eigensolve.
+        // Never divide by the mean slit displacement or discard signed cross terms.
+        let viscosity_matrix = projected.map(|c| {
+            let count = modes.len();
+            let mut physical = vec![0.0; count*count];
+            for i in 0..count { for j in i..count {
+                let value = c[count*i+j]*coordinate_scale[i]*coordinate_scale[j];
+                physical[count*i+j] = value; physical[count*j+i] = value;
+            } }
+            physical
+        });
+        Ok(Self { source, options, first, modes, shapes, width_m:width, slit_weights:weights,
+            viscosity: tensor.map(|(law,_)|law), viscosity_matrix })
     }
 
     pub(super) fn validate_state(&self, all: &[BladeState]) -> Result<(), AcousticRealizeError> {
@@ -178,18 +209,55 @@ impl ModalAperture {
         max_steps:u64, limits:PairedApertureLimits, state:Vec<BladeState>,
         contact:Obstacle, gate:&CancelGate) -> Result<Self,AcousticRealizeError>
     {
+        Self::from_material_images(plates.into_iter().map(|(s,o)|(s,o,None)).collect(),
+            rest_opening_m,gas,impedance_pa_s_m3,time_step_s,max_steps,limits,state,contact,gate)
+    }
+
+    /// Select full source-derived anisotropic/regional viscosity for one or two
+    /// material blades. Each tuple is (source, reduction, viscosity, loss limits).
+    /// The existing plate owner projects C, force, pressure and every displacement
+    /// trace on ONE basis per blade; the original coupled modal solver consumes
+    /// the complete transformed C, not modal damping ratios or a waveform filter.
+    ///
+    /// Scalar material loss and authored damping must be absent. An explicit
+    /// zero tensor can leave either blade lossless. Plates share fluid/contact
+    /// coupling but do not acquire an invented solid-to-solid damping matrix.
+    /// Source identity, tensor orientation and applicability stay attached.
+    /// No viscosity is inferred from an elastic card or material name.
+    ///
+    /// All original geometry, clock, spatial, nonlinear and energy limits remain.
+    /// This adds fixed-state Kelvin-Voigt loss, NOT Maxwell histories, distributed
+    /// closure, curved-shell physics or a measured timbre claim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_viscous_material_plates(
+        plates: Vec<(ResolvedPlateChart, ModalPlateOptions, PlateViscosity, PlateViscosityLimits)>,
+        rest_opening_m:f64, gas:GasState, impedance_pa_s_m3:f64, time_step_s:f64,
+        max_steps:u64, limits:PairedApertureLimits, state:Vec<BladeState>,
+        contact:Obstacle, gate:&CancelGate) -> Result<Self,AcousticRealizeError>
+    {
+        Self::from_material_images(plates.into_iter().map(|(s,o,c,l)|(s,o,Some((c,l)))).collect(),
+            rest_opening_m,gas,impedance_pa_s_m3,time_step_s,max_steps,limits,state,contact,gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_material_images(
+        plates: Vec<(ResolvedPlateChart, ModalPlateOptions, Option<(PlateViscosity, PlateViscosityLimits)>)>,
+        rest_opening_m:f64, gas:GasState, impedance_pa_s_m3:f64, time_step_s:f64,
+        max_steps:u64, limits:PairedApertureLimits, state:Vec<BladeState>,
+        contact:Obstacle, gate:&CancelGate) -> Result<Self,AcousticRealizeError>
+    {
         poll(gate)?;
         gas.validate_coherence().map_err(super::nonlinear)?;
         if !(1..=2).contains(&plates.len()) { return Err(invalid("modal valve needs one or two original plates")); }
-        let count = plates.iter().try_fold(0usize,|n,(_,o)|n.checked_add(o.reduction.n_modes))
+        let count = plates.iter().try_fold(0usize,|n,(_,o,_)|n.checked_add(o.reduction.n_modes))
             .ok_or_else(||invalid("material modal count overflow"))?;
         if count == 0 || count > MAX_MODES || state.len() != count {
             return Err(invalid("material modal state must match every requested mode within the shared limit"));
         }
         let mut retained = Vec::with_capacity(plates.len());
         let mut modes = Vec::with_capacity(count);
-        for (blade,(source,options)) in plates.into_iter().enumerate() {
-            let plate = MaterialModalPlate::reduce(source,options,modes.len(),blade,time_step_s,gate)?;
+        for (blade,(source,options,tensor)) in plates.into_iter().enumerate() {
+            let plate = MaterialModalPlate::reduce(source,options,modes.len(),blade,time_step_s,gate,tensor)?;
             modes.extend_from_slice(&plate.modes); retained.push(plate);
         }
         let width = retained[0].width_m;
@@ -198,6 +266,18 @@ impl ModalAperture {
         }
         let mut valve = Self::new(ModalApertureSpec {rest_opening_m,width_m:width,modes,
             density_kg_m3:gas.density,impedance_pa_s_m3,time_step_s,max_steps,limits},state,contact)?;
+        if retained.iter().any(|p|p.viscosity_matrix.is_some()) {
+            let mut matrix = vec![0.0; count*count];
+            for plate in &retained {
+                let c = plate.viscosity_matrix.as_ref().ok_or_else(||
+                    invalid("full modal loss requires an explicit tensor selection on every blade"))?;
+                let n = plate.modes.len();
+                for i in 0..n { for j in 0..n {
+                    matrix[count*(plate.first+i)+plate.first+j] = c[n*i+j];
+                } }
+            }
+            valve = valve.with_viscosity(matrix,gate)?;
+        }
         valve.material_plates = retained; valve.material_gas = Some(gas);
         valve.validate_state(&valve.state)?;
         poll(gate)?;

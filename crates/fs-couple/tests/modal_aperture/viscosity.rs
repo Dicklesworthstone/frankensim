@@ -130,3 +130,6 @@ fn full_viscosity_refuses_invalid_laws_and_failed_steps_preserve_accepted_state(
     assert_eq!(mixed.viscosity_matrix_n_s_m(),Some(c.as_slice()));
     mixed.step(drive(30.0),[0.0;2]).unwrap();
 }
+
+#[path = "viscosity/material.rs"]
+mod material;

@@ -62,11 +62,55 @@ the accepted modal coordinates. A density, modulus, geometry or selected
 viscosity substitution is therefore a source-data change before construction,
 not a change to the pressure/contact or acoustic-network code.
 
+## Full material viscosity, including cross-mode reactions
+
+`ModalAperture::from_viscous_material_plates` accepts one or two tuples of
+`(ResolvedPlateChart, ModalPlateOptions, PlateViscosity, PlateViscosityLimits)`.
+Its remaining physical/state/contact arguments are the same as
+`from_material_plates`. The original diagonal-loss constructor stays unchanged.
+
+Create each `PlateViscosity` with `PlateViscosity::from_chart` and the six explicit
+reduced plane-stress viscosity property names. The same shared material owner
+used for instrument bodies resolves region orientation, thickness, source identity
+and elastic/viscous applicability. Elastic properties do not imply viscosity;
+missing data, inconsistent source identity or incompatible loss selection refuses.
+Separate authored modal damping and scalar material bending loss must be absent.
+An explicit zero tensor permits one blade to remain lossless.
+
+The existing `certified_viscous_radiators_with_force_ports` projects the complete
+viscous matrix on the SAME eigenbasis that supplies every physical port. For
+mass-normalized C and physical coordinate conversion Q = S q, the reed receives
+S^T C S. Both matrix axes are transformed, including signs and cross terms.
+Matrices for independent blades occupy separate blocks; fluid/contact couples
+the blades without inventing a solid-to-solid dashpot between them.
+
+The running valve factors M + (dt/2) C + (dt/2)^2 K once through the shared
+linear-algebra owner. Free motion, pressure and contact use that SAME response
+inside the original nonlinear slit solve. The final force is C v_mid and the
+accounted loss is dt v_mid^T C v_mid. No old-velocity force, split damping step,
+modal refit or output filter substitutes for this reaction. Full pressure, force,
+energy and spatial checks still precede accepted-state publication. Construction
+and each linear solve reject unresolved arithmetic instead of adding a loss floor.
+
+`material_plates()[i].viscosity()` retains the original regional tensor source;
+`viscosity_matrix_n_s_m()` exposes the admitted full matrix, locally per plate or
+for the complete valve. The lower-level `with_viscosity` accepts an authored
+matrix but does NOT confer material identity. Explicit undamped rows are allowed;
+the remaining block must be positive definite. Other nonzero singular matrices
+are currently refused, not regularized. Zero full loss uses the original arithmetic.
+
+The existing upstream/downstream networks, source-pressure scheduler, material
+walls, exterior reaction and multirate microphone require no alternative runtime.
+Changing viscosity data now changes that coupled mechanical trajectory. This
+still requires temporal refinement: the undamped omega*dt guard is not a damping-
+rate error certificate. A fixed Kelvin-Voigt tensor is not a Maxwell history,
+a measured wet-cane law, or proof of real-instrument fidelity.
+
 ## Explicit approximation and failure boundaries
 
-This is a fixed, linear plate basis with diagonal viscous damping and one
-uniform effective slit. It is NOT the existing independent-blade hereditary or
-spatial-contact image. Nonproportional damping, Maxwell memory, curved shells,
+This is a fixed, linear plate basis with an explicitly selected diagonal or full
+viscous damping model and one uniform effective slit. It is NOT the existing independent-blade hereditary or
+spatial-contact image. Maxwell memory, curved shells,
 distributed opposing-surface closure, nonlinear blade mechanics, live material
 changes and calibrated instrument timbre are not claimed.
 
@@ -89,7 +133,7 @@ performer semantics, not a fabricated zero-pressure sample.
 cargo test -p fs-couple --test modal_aperture -- --test-threads=1
 ```
 
-Eleven authored tests cover original paired-mechanics correspondence, signed
+The original eleven authored tests cover original paired-mechanics correspondence, signed
 basis changes, zero-gap swept-volume modes, refusal/horizon behavior, independent
 wave-owner correspondence, multirate pressure, source identity, material density
 and viscosity changes, spatial guards and actual material-pair microphone output.
@@ -102,3 +146,14 @@ signed basis changes, 4096 source steps, 512 generalized-eigenbasis port cases
 and 2048 two-sided network steps. Maximum source velocity disagreement was
 1.34e-15 m/s and combined network energy residual 4.47e-23 J. These validate
 reference equations, not Rust execution, the DKT implementation or real reeds.
+
+Seven additional Rust regression sources cover full matrix mechanics, manufactured
+momentum/flow/work, cross-mode transfer, signed congruence, passive decay, source
+projection, data-only viscosity substitutions, 4x multirate pressure, zero-loss
+parity and invalid bindings. They are part of the SAME `modal_aperture` target.
+They were authored but not run in the implementation container (no Rust tools).
+Independent full-matrix reference checks ran 160 simultaneous contact/flow cases,
+160 signed basis cases and 1024 isolated steps. Further references ran 256
+full-matrix basis projections and 3072 six-mode two-network steps, with a maximum
+combined energy residual of 8.38e-24 J. These do not execute Rust, DKT, or the
+pressure renderer and are not experimental validation.
