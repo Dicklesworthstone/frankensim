@@ -6,6 +6,7 @@ use crate::bowed_string::runtime::reciprocal::bank::{MaterialStringSource,
 use crate::bowed_string::runtime::reciprocal::plate::MaterialBodyCavity;
 use crate::cavity_modal::{HelmholtzModalCavity, CavityNeckLoss};
 use crate::modal_acoustic_time::{ModalAcousticTimeBudget, ModalAcousticTimeModel, ModalAcousticMode};
+use crate::modal_acoustic_time::ModalAcousticState;
 use crate::render::schedule::force::coupled::{CoupledModalSystem, ModalCouplingConfig};
 use crate::render::schedule::force::coupled::contact::friction::{FrictionDrive, ModalFrictionConfig};
 use crate::render::schedule::force::coupled::render::friction::FrictionGestureConfig;
@@ -101,41 +102,225 @@ fn build(cx:&Cx<'_>,gate:&CancelGate,b:SharedMaterialPlateChartBody,selected:boo
 fn drive()->FrictionDrive {FrictionDrive {speed_m_s:0.01,normal_force_n:0.01}}
 fn close(a:f64,b:f64) {assert!((a-b).abs()<=2e-9*(a.abs()+b.abs()).max(1e-24),"{a} != {b}");}
 
+// Independent continuous spectral solution in energy coordinates y=[W*q,v]:
+// y'=A*y+G*f, A=[0,W;-W,-C]. For distinct poles lambda_k, its projectors are
+// P_k=product_{j!=k}(A-lambda_j*I)/(lambda_k-lambda_j). The held-force
+// equilibrium is [W^-1*f,0], so delta_y=sum expm1(lambda_k*h)*P_k*(y-y_eq).
+// Complex QR supplies only the poles; no production exponential/ZOH is used.
+fn tensor_exact_increment(
+    omega: &[f64],
+    c: &[f64],
+    dt: f64,
+) -> impl Fn(&[ModalAcousticState], &[f64]) -> Vec<f64> {
+    let omega = omega.to_vec();
+    let n = omega.len();
+    let d = 2 * n;
+    let mut a = vec![C64::ZERO; d * d];
+    for i in 0..n {
+        a[(2 * i) * d + 2 * i + 1] = C64::from_re(omega[i]);
+        a[(2 * i + 1) * d + 2 * i] = C64::from_re(-omega[i]);
+        for j in 0..n {
+            a[(2 * i + 1) * d + 2 * j + 1] = C64::from_re(-c[n * i + j]);
+        }
+    }
+    let poles = fs_la::eigen_complex::eig(&a, d).unwrap();
+    let mut projectors = Vec::with_capacity(d);
+    let mut increments = Vec::with_capacity(d);
+    for (k, &lambda) in poles.iter().enumerate() {
+        let mut p = vec![C64::ZERO; d * d];
+        for i in 0..d {
+            p[d * i + i] = C64::ONE;
+        }
+        for (j, &mu) in poles.iter().enumerate() {
+            if j == k {
+                continue;
+            }
+            assert!(
+                (lambda - mu).abs() > 1e-8 * lambda.abs().max(mu.abs()),
+                "distinct physical poles required"
+            );
+            let mut next = vec![C64::ZERO; d * d];
+            for row in 0..d {
+                for col in 0..d {
+                    let mut value = C64::ZERO;
+                    for inner in 0..d {
+                        let entry = a[d * row + inner] - if row == inner { mu } else { C64::ZERO };
+                        value = value + entry * p[d * inner + col];
+                    }
+                    next[d * row + col] = value / (lambda - mu);
+                }
+            }
+            p = next;
+        }
+        // Stable complex expm1 avoids losing the small forced displacement
+        // by subtracting an equilibrium from two nearly identical endpoints.
+        let z = lambda.scale(dt);
+        let cosine = fs_math::det::cos(z.im);
+        let real = fs_math::det::expm1(z.re) * cosine - 2.0 * fs_math::det::sin(0.5 * z.im).powi(2);
+        let imaginary = fs_math::det::exp(z.re) * fs_math::det::sin(z.im);
+        increments.push(C64::new(real, imaginary));
+        projectors.push(p);
+    }
+    move |old: &[ModalAcousticState], force: &[f64]| {
+        let mut initial = vec![0.0; d];
+        for i in 0..n {
+            initial[2 * i] = omega[i] * old[i].displacement_m_sqrt_kg - force[i] / omega[i];
+            initial[2 * i + 1] = old[i].velocity_m_sqrt_kg_per_s;
+        }
+        let mut delta = vec![0.0; d];
+        for row in 0..d {
+            let mut value = C64::ZERO;
+            let mut scale = 0.0;
+            for (p, &increment) in projectors.iter().zip(&increments) {
+                let projected =
+                    (0..d).fold(C64::ZERO, |sum, j| sum + p[d * row + j].scale(initial[j]));
+                let term = increment * projected;
+                value = value + term;
+                scale += term.abs();
+            }
+            assert!(
+                value.im.abs() <= 2e-9 * scale.max(1e-24),
+                "conjugate pole reconstruction"
+            );
+            delta[row] = value.re / if row % 2 == 0 { omega[row / 2] } else { 1.0 };
+        }
+        delta
+    }
+}
+
 #[test]
 fn full_dkt_tensor_drives_cross_mode_reactions_and_physical_dissipation() {
-    let gate=CancelGate::new_clock_free();let b=body(1.0);let v=tensor(&b);
-    let (image,ports)=b.specimen.certified_viscous_radiators_with_force_ports(&b.reduction,
-        &[b.reduction.unit_force_weights.clone()],1000,&v,limits(),&gate).unwrap();
-    for (i,r) in image.radiators().iter().enumerate() { close(ports[0][i],r.drive_participation/r.mass_kg.sqrt()); }
-    let n=image.damping().mode_count();assert_eq!(n,3);
-    let c=image.damping().matrix_per_s();
-    assert!((0..n*n).any(|i|i/n!=i%n && c[i].abs()>1e-8),"cross terms must not vanish");
-    let links=image.damping().connections(0);assert_eq!(links.len(),n);
-    for i in 0..n {for j in 0..n {
-        close(c[n*i+j],links.iter().map(|l|l.damping_n_s_m*l.left.shapes[i]*l.left.shapes[j]).sum());
-    }}
-    let model=ModalAcousticTimeModel::try_new(48000,image.radiators().iter().map(|r|ModalAcousticMode {
-        angular_frequency_rad_s:r.omega,damping_ratio:r.zeta,pressure_per_modal_velocity:C64::ZERO,
-    }).collect(),ModalAcousticTimeBudget::audible_reference()).unwrap();
-    let mut system=CoupledModalSystem::new(vec![model],links.clone(),config(),&gate).unwrap();
-    let mut total_work=0.0;let mut total_loss=0.0;
-    for k in 0..512 {
-        let old=system.components()[0].states().to_vec();
-        let f=system.step(&[if k<32 {0.001} else {0.0},0.0,0.0]).unwrap().clone();
-        let delta:Vec<_>=system.components()[0].states().iter().zip(old)
-            .map(|(a,b)|a.displacement_m_sqrt_kg-b.displacement_m_sqrt_kg).collect();
-        for i in 0..n {
-            let expected=-(0..n).map(|j|c[n*i+j]*delta[j]*48000.0).sum::<f64>();
-            let actual=links.iter().zip(&f.connection_forces_n).map(|(l,f)|l.left.shapes[i]*f).sum();
-            close(expected,actual);
-        }
-        let heat=(0..n).map(|i|(0..n).map(|j|delta[i]*c[n*i+j]*delta[j]*48000.0).sum::<f64>()).sum();
-        close(heat,f.connection_dissipation_j);assert!(f.energy_residual_j.abs()<=f.energy_tolerance_j);
-        total_work+=f.external_work_j;total_loss+=f.component_dissipation_j+f.connection_dissipation_j;
+    let gate = CancelGate::new_clock_free();
+    let b = body(1.0);
+    let v = tensor(&b);
+    let (image, ports) = b
+        .specimen
+        .certified_viscous_radiators_with_force_ports(
+            &b.reduction,
+            &[b.reduction.unit_force_weights.clone()],
+            1000,
+            &v,
+            limits(),
+            &gate,
+        )
+        .unwrap();
+    for (i, r) in image.radiators().iter().enumerate() {
+        close(ports[0][i], r.drive_participation / r.mass_kg.sqrt());
     }
-    assert!((system.total_energy_j().unwrap()+total_loss-total_work).abs()<1e-14);
-    assert!(system.components()[0].states()[1].velocity_m_sqrt_kg_per_s.abs()>1e-15,
-        "a force in mode one must produce the cross-mode viscous reaction");
+    let n = image.damping().mode_count();
+    assert_eq!(n, 3);
+    let c = image.damping().matrix_per_s();
+    assert!(
+        (0..n * n).any(|i| i / n != i % n && c[i].abs() > 1e-8),
+        "cross terms must not vanish"
+    );
+    let links = image.damping().connections(0);
+    assert_eq!(links.len(), n);
+    for i in 0..n {
+        for j in 0..n {
+            close(
+                c[n * i + j],
+                links
+                    .iter()
+                    .map(|l| l.damping_n_s_m * l.left.shapes[i] * l.left.shapes[j])
+                    .sum(),
+            );
+        }
+    }
+    // The selected full tensor owns all loss; no intrinsic modal loss is added.
+    assert!(image.radiators().iter().all(|r| r.zeta == 0.0));
+    let omega: Vec<_> = image.radiators().iter().map(|r| r.omega).collect();
+    for factor in [1_u32, 2, 4] {
+        let rate = 48_000 * factor;
+        let dt = f64::from(rate).recip();
+        let exact = tensor_exact_increment(&omega, c, dt);
+        let model = ModalAcousticTimeModel::try_new(
+            rate,
+            image
+                .radiators()
+                .iter()
+                .map(|r| ModalAcousticMode {
+                    angular_frequency_rad_s: r.omega,
+                    damping_ratio: r.zeta,
+                    pressure_per_modal_velocity: C64::ZERO,
+                })
+                .collect(),
+            ModalAcousticTimeBudget::audible_reference(),
+        )
+        .unwrap();
+        let mut system =
+            CoupledModalSystem::new(vec![model], links.clone(), config(), &gate).unwrap();
+        let mut total_work = 0.0;
+        let mut total_loss = 0.0;
+        for k in 0..512 * factor {
+            let old = system.components()[0].states().to_vec();
+            let force = [if k < 32 * factor { 0.001 } else { 0.0 }, 0.0, 0.0];
+            let delta = exact(&old, &force);
+            let expected_force: Vec<_> = (0..n)
+                .map(|i| {
+                    -(0..n)
+                        .map(|j| {
+                            c[n * i + j] * (old[j].velocity_m_sqrt_kg_per_s + delta[2 * j + 1])
+                        })
+                        .sum::<f64>()
+                })
+                .collect();
+            if k == 0 {
+                // Plant a true trapezoidal step of this same tensor pencil:
+                // (I+h*C/2+h^2*W^2/4)*v1=h*f from q0=v0=0.
+                let mut midpoint: Vec<_> = c.iter().map(|v| 0.5 * dt * v).collect();
+                for i in 0..n {
+                    midpoint[n * i + i] += 1.0 + 0.25 * dt * dt * omega[i] * omega[i];
+                }
+                let mut velocity: Vec<_> = force.iter().map(|f| dt * f).collect();
+                fs_la::factor::cholesky(&midpoint, n)
+                    .unwrap()
+                    .solve(&mut velocity);
+                assert!(
+                    (0..n).any(|i| {
+                        let planted = -(0..n).map(|j| c[n * i + j] * velocity[j]).sum::<f64>();
+                        (planted - expected_force[i]).abs()
+                            > 2e-9 * (planted.abs() + expected_force[i].abs()).max(1e-24)
+                    }),
+                    "trapezoid must fail the unchanged exact reaction tolerance at {rate} Hz"
+                );
+            }
+            let f = system.step(&force).unwrap().clone();
+            for i in 0..n {
+                let actual = links
+                    .iter()
+                    .zip(&f.connection_forces_n)
+                    .map(|(l, f)| l.left.shapes[i] * f)
+                    .sum();
+                close(expected_force[i], actual);
+            }
+            // Exact integral(v^T*C*v)=f.delta(q)-delta(H). Both increments
+            // here come from the independent spectral trajectory above, not the
+            // production endpoint or ledger. Use factored energy differences.
+            let heat = (0..n)
+                .map(|i| {
+                    force[i] * delta[2 * i]
+                        - omega[i].powi(2)
+                            * (old[i].displacement_m_sqrt_kg + 0.5 * delta[2 * i])
+                            * delta[2 * i]
+                        - (old[i].velocity_m_sqrt_kg_per_s + 0.5 * delta[2 * i + 1])
+                            * delta[2 * i + 1]
+                })
+                .sum();
+            close(heat, f.connection_dissipation_j);
+            assert!(f.energy_residual_j.abs() <= f.energy_tolerance_j);
+            total_work += f.external_work_j;
+            total_loss += f.component_dissipation_j + f.connection_dissipation_j;
+        }
+        assert!((system.total_energy_j().unwrap() + total_loss - total_work).abs() < 1e-14);
+        assert!(
+            system.components()[0].states()[1]
+                .velocity_m_sqrt_kg_per_s
+                .abs()
+                > 1e-15,
+            "a force in mode one must produce the cross-mode viscous reaction"
+        );
+    }
 }
 
 #[test]
