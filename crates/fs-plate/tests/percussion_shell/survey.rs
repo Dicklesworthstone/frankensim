@@ -10,6 +10,14 @@ fn budget() -> ProfileBudget {
 fn bronze() -> IsotropicMaterial {
     IsotropicMaterial { young_pa: 112.6e9, poisson: 0.342, density_kg_m3: 8607.0 }
 }
+/// Enum variants have no functional-update syntax: edit a copy of an orthotropic fixture.
+fn edited(mut m: SurveyMaterial, edit: impl FnOnce(&mut f64, &mut f64, &mut [f64; 3])) -> SurveyMaterial {
+    let SurveyMaterial::Orthotropic { e2_pa, g12_pa, axis1_global, .. } = &mut m else {
+        panic!("orthotropic fixture expected")
+    };
+    edit(e2_pa, g12_pa, axis1_global);
+    m
+}
 fn panel() -> ShellMesh {
     ShellMesh::new(vec![[0.,0.,0.], [0.1,0.,0.], [0.1,0.1,0.], [0.,0.1,0.]],
         vec![[0,1,2],[0,2,3]]).unwrap()
@@ -160,7 +168,7 @@ fn global_orthotropic_axis_reaches_each_facet_without_mesh_diagonal_grain_jumps(
     // of frame: mass is identical and the material remains admissible.
     let mut rotated=mesh;
     for p in &mut rotated.nodes { let x=p[0];p[0]=-p[1];p[1]=x; }
-    let rotated_material=SurveyMaterial::Orthotropic {axis1_global:[0.,1.,0.],..material};
+    let rotated_material=edited(material, |_, _, axis| *axis=[0.,1.,0.]);
     let same=MeshShell::new_with_materials(rotated,h,&[rotated_material;2],budget()).unwrap();
     assert!((same.mass_kg-anisotropic.mass_kg).abs()<1e-14);
 }
@@ -172,10 +180,10 @@ fn orthotropic_survey_refuses_missing_or_normal_only_material_axes() {
         axis1_global:[1.,0.,0.],
     };
     for material in [
-        SurveyMaterial::Orthotropic {axis1_global:[0.,0.,0.],..base},
-        SurveyMaterial::Orthotropic {axis1_global:[0.,0.,1.],..base},
-        SurveyMaterial::Orthotropic {e2_pa:0.0,..base},
-        SurveyMaterial::Orthotropic {g12_pa:f64::NAN,..base},
+        edited(base, |_, _, axis| *axis=[0.,0.,0.]),
+        edited(base, |_, _, axis| *axis=[0.,0.,1.]),
+        edited(base, |e2, _, _| *e2=0.0),
+        edited(base, |_, g12, _| *g12=f64::NAN),
     ] {
         assert!(MeshShell::new_with_materials(panel(),vec![0.001;4],&[material;2],budget()).is_err());
     }
