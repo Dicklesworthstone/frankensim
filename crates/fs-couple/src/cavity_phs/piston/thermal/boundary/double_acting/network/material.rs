@@ -61,3 +61,62 @@ impl DoubleActingGasPiston {
         }
     }
 }
+
+use crate::cavity_phs::piston::material::MaterialDoubleActingGasPiston;
+
+/// Circuit, finite thermal network and original material-bound moving specimen.
+/// No numeric-only mechanism escapes while its density/geometry source is lost.
+pub struct MaterialPistonNetworkCandidate<'m> {
+    thermal: DepositionSimulation<'m>,
+    circuit: MaterialCircuit,
+    piston: MaterialDoubleActingGasPiston,
+    report: DoubleNetworkReport<MaterialNetworkSample, ResolvedMaterialStatePoint>,
+}
+impl<'m> MaterialPistonNetworkCandidate<'m> {
+    /// Proposed original thermal cells, laws and pending-event history.
+    pub const fn thermal(&self) -> &DepositionSimulation<'m> { &self.thermal }
+    /// Proposed original finite electrical history.
+    pub const fn circuit(&self) -> &MaterialCircuit { &self.circuit }
+    /// Both gases and momentum with the original canonical body inertia/source.
+    pub const fn piston(&self) -> &MaterialDoubleActingGasPiston { &self.piston }
+    /// Unchanged actual circuit, thermal, gas and mechanical work accounts.
+    pub const fn report(&self) -> &DoubleNetworkReport<MaterialNetworkSample, ResolvedMaterialStatePoint> { &self.report }
+    /// Publish all histories together; no returned heat is an additional source.
+    pub fn into_parts(self) -> (DepositionSimulation<'m>, MaterialCircuit, MaterialDoubleActingGasPiston,
+        DoubleNetworkReport<MaterialNetworkSample, ResolvedMaterialStatePoint>) {
+        (self.thermal, self.circuit, self.piston, self.report)
+    }
+}
+
+impl MaterialDoubleActingGasPiston {
+    /// Advance the material-bound specimen through the SAME circuit/thermal/gas
+    /// solve. Density and geometry remain owned by its original ResolvedBody;
+    /// there is no competing mass input and no source resampling on publication.
+    ///
+    /// Both gas endpoints, momentum, exposed areas and material records are
+    /// carried into the existing material mechanism constructor unchanged. This
+    /// rebinds ownership only: it performs no second timestep or constitutive
+    /// update. Thermal cell temperatures do not silently heat, expand, melt or
+    /// soften the rigid mechanical specimen, which may be a different body.
+    ///
+    /// Changing supported cards before constructing the material body or thermal
+    /// network changes the ensuing coupled response through data. Replacing a
+    /// live body's mass or chemical energy without accounting is not supported.
+    #[allow(clippy::too_many_arguments)]
+    pub fn material_network_candidate<'m>(
+        &self, binding: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
+        circuit: &MaterialCircuit, ports: &[f64], drive: DoubleNetworkDrive, controls: NetworkGasSolve,
+        geometry: [GasConductionGeometry; 2], guess_j: &[f64], mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialPistonNetworkCandidate<'m>, MaterialDoubleNetworkError> {
+        let candidate = self.piston().material_network_candidate(binding, thermal, target_s,
+            circuit, ports, drive, controls, geometry, guess_j, &mut cancelled)?;
+        let (thermal, circuit, next, report) = candidate.into_parts();
+        let piston = Self::new(next.primary().gas().clone(), next.opposing().clone(), self.body().clone(),
+            [next.primary().area_m2(), next.opposing_area_m2()], next.primary().velocity_m_s())
+            .map_err(|e| -> MaterialDoubleNetworkError {
+                CircuitEnthalpyError::Source(NetworkGasError::Boundary(ThermalPistonError::from(e)))
+            })?;
+        if cancelled() { return Err(CircuitEnthalpyError::Cancelled); }
+        Ok(MaterialPistonNetworkCandidate { thermal, circuit, piston, report })
+    }
+}

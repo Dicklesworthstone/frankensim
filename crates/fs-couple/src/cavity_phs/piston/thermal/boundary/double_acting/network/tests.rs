@@ -182,3 +182,72 @@ fn independent_external_supply_and_final_cancellation_keep_all_histories_atomic(
     assert_eq!(old,saved); assert_eq!(thermal.cells(),&old_cells);
     assert_eq!(thermal.time_s(),0.0); assert_eq!(circuit.charges_c(),&[0.1]);
 }
+
+fn mechanical_body(density: f64) -> fs_mbd_material::ResolvedBody {
+    let mut claims=ClaimSet::new();
+    claims.insert_claim(PropertyClaim { key: PropertyKey::new("density",Density::DIMS),
+        value: PropertyValue::Curve { abscissa: "T".into(),abscissa_dims: Temperature::DIMS,
+            knots: vec![(200.0,density),(800.0,density)],dims: Density::DIMS },
+        validity: ValidityDomain::unconstrained().with("T",200.0,800.0),
+        uncertainty: UncertaintyModel::Unstated,interpolation: InterpolationPolicy::LinearInside,
+        observations: vec![],provenance: Provenance { source: "synthetic inertial specimen".into(),
+            license: "CC0-1.0".into(),artifact: None } }).unwrap();
+    let card=MaterialCard::assemble(MaterialStateId { chemistry: "synthetic wall".into(),phase: "solid".into(),
+        process: "authored".into(),revision: 0 },claims,vec![]).unwrap();
+    fs_mbd_material::resolve_body(&[fs_mbd_material::RegionBinding {
+        key: "piston",material: &card,point: &point(400.0),
+        geometry: fs_mbd_material::VolumeMoments::cuboid(fs_ga::Vec3::new(0.1,0.1,0.01)).unwrap(),
+        selection: MaterialPropertySelection::SingleClaimOnly }],1,||false).unwrap()
+}
+
+#[test]
+fn source_bound_mechanism_keeps_inertia_and_identical_network_equations() {
+    use crate::cavity_phs::piston::material::MaterialDoubleActingGasPiston;
+    let (a,ca)=card(0.2,2.0); let (b,cb)=card(0.4,4.0);
+    let cards=[a,b]; let curves=[ca,cb]; let point=point(400.0);
+    let key=PropertyKey::new("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS);
+    let cells=cells(&cards,&curves,&point,&key); let resistors=resistors();
+    let binding=MaterialNetwork { cells: &cells,resistors: &resistors,links: &[] };
+    let thermal=initial(&curves,[400.0;2]); let circuit=circuit(&binding,&thermal,1.0);
+    let mut velocities=Vec::new();
+    for density in [1000.0,8000.0] {
+        let body=mechanical_body(density);
+        let owner=MaterialDoubleActingGasPiston::new(gas(0.75,0.001),gas(0.25,0.001),body.clone(),[0.01;2],0.0).unwrap();
+        let plain=owner.piston().material_network_candidate(&binding,&thermal,0.0005,&circuit,&[],
+            drive(0.0005),solve(),geometry(),&[0.0;2],||false).unwrap();
+        let bound=owner.material_network_candidate(&binding,&thermal,0.0005,&circuit,&[],
+            drive(0.0005),solve(),geometry(),&[0.0;2],||false).unwrap();
+        assert_eq!(bound.piston().body(),&body);
+        assert_eq!(bound.piston().piston(),plain.boundary().piston());
+        assert_eq!(&bound.report().boundary,plain.boundary().step());
+        assert_eq!(bound.thermal().cells(),plain.network().thermal().cells());
+        assert_eq!(bound.circuit().charges_c(),plain.network().circuit().charges_c());
+        near(bound.piston().piston().primary().mass_kg(),density*0.0001);
+        velocities.push(bound.piston().piston().primary().velocity_m_s());
+        let (_,_,accepted,report)=bound.into_parts();
+        assert_eq!(accepted.body(),owner.body());
+        assert!(report.coupled.total_energy_residual_j.abs()<=solve().total_energy_tolerance_j);
+    }
+    assert!((velocities[0]-velocities[1]).abs()>1e-9);
+}
+
+#[test]
+fn final_material_rebinding_cancellation_returns_no_partial_network() {
+    use crate::cavity_phs::piston::material::MaterialDoubleActingGasPiston;
+    let (a,ca)=card(0.2,2.0); let (b,cb)=card(0.4,4.0);
+    let cards=[a,b]; let curves=[ca,cb]; let point=point(400.0);
+    let key=PropertyKey::new("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS);
+    let cells=cells(&cards,&curves,&point,&key); let resistors=resistors();
+    let binding=MaterialNetwork { cells: &cells,resistors: &resistors,links: &[] };
+    let thermal=initial(&curves,[500.0,300.0]); let saved_cells=thermal.cells().clone();
+    let circuit=circuit(&binding,&thermal,0.1);
+    let owner=MaterialDoubleActingGasPiston::new(gas(0.75,0.001),gas(0.25,0.001),mechanical_body(4000.0),[0.01;2],0.0).unwrap();
+    let before=owner.clone(); let mut polls=0;
+    owner.material_network_candidate(&binding,&thermal,0.0005,&circuit,&[],drive(0.0005),solve(),geometry(),&[0.0;2],
+        || { polls+=1; false }).unwrap();
+    let mut seen=0;
+    assert!(matches!(owner.material_network_candidate(&binding,&thermal,0.0005,&circuit,&[],drive(0.0005),solve(),geometry(),&[0.0;2],
+        || { seen+=1; seen==polls }),Err(CircuitEnthalpyError::Cancelled)));
+    assert_eq!(owner,before); assert_eq!(thermal.cells(),&saved_cells);
+    assert_eq!(thermal.time_s(),0.0); assert_eq!(circuit.charges_c(),&[0.1]);
+}
