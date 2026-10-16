@@ -192,6 +192,35 @@ pub fn step_candidate<'m, S, E>(
     cancelled: impl FnMut() -> bool,
 ) -> Result<CircuitEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
     let cancel = RefCell::new(cancelled);
+    driven_candidate(thermal, target_s, input, controls, initial_energy_increments_j, |state, _remaining| {
+        let coefficients = resolve(state).map_err(CircuitEnthalpyError::Source)?;
+        let circuit = input.circuit.step_candidate(coefficients.resistors, input.ports,
+            target_s-thermal.time_s(), controls.circuit, || (*cancel.borrow_mut())())?;
+        Ok(DrivenCoefficients { circuit, sources_w:coefficients.sources_w,
+            conductances_w_k:coefficients.conductances_w_k, source:coefficients.source, circuit_trials:1 })
+    }, || (*cancel.borrow_mut())())
+}
+
+// A coupled driver may determine circuit ports from another physical owner.
+// Keep branch heat deposition, cell residuals and the Newton/acceptance path
+// identical to the ordinary circuit path. This is crate-private: callers cannot
+// substitute a forged electrical endpoint or turn a trial into live history.
+pub(crate) struct DrivenCoefficients<S> {
+    pub circuit: MaterialCircuitCandidate,
+    pub sources_w: BTreeMap<CellId, f64>,
+    pub conductances_w_k: BTreeMap<u64, f64>,
+    pub source: S,
+    pub circuit_trials: usize,
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn driven_candidate<'m, S, E>(
+    thermal: &DepositionSimulation<'m>, target_s: f64,
+    input: CircuitEnthalpyInput<'_>, controls: CircuitEnthalpySolve,
+    initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>, usize) -> Result<DrivenCoefficients<S>, CircuitEnthalpyError<E>>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<CircuitEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
+    let cancel = RefCell::new(cancelled);
     let checkpoint = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
     checkpoint()?;
     controls.newton.validate()?;
@@ -219,10 +248,13 @@ pub fn step_candidate<'m, S, E>(
     let evaluate = |x: &[f64]| step.evaluate(x, |state| {
         checkpoint()?;
         if trials.get() >= controls.maximum_circuit_trials { return Err(CircuitEnthalpyError::CircuitBudget); }
-        trials.set(trials.get()+1);
-        let coefficients = resolve(state).map_err(CircuitEnthalpyError::Source)?;
-        let circuit: MaterialCircuitCandidate = input.circuit.step_candidate(coefficients.resistors,
-            input.ports, dt, controls.circuit, || (*cancel.borrow_mut())())?;
+        let remaining = controls.maximum_circuit_trials-trials.get();
+        let coefficients = resolve(state, remaining)?;
+        if coefficients.circuit_trials == 0 || coefficients.circuit_trials > remaining {
+            return Err(CircuitEnthalpyError::CircuitBudget);
+        }
+        trials.set(trials.get()+coefficients.circuit_trials);
+        let circuit = coefficients.circuit;
         let mut powers = BTreeMap::new();
         for branch in &circuit.step().resistors {
             checkpoint()?;

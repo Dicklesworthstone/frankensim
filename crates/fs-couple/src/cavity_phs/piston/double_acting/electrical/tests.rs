@@ -29,20 +29,20 @@ fn circuit(r:f64,charge:f64,extra:bool)->MaterialCircuit {
     MaterialCircuit::new(CircuitGraph { node_count:if extra {4} else {3},branches,transformers:vec![] },
         vec![resistor(r)],vec![],vec![charge],if extra {&[0.0,0.0]} else {&[0.0]}).unwrap()
 }
-fn piston(velocity:f64)->DoubleActingGasPiston {
+pub(super) fn piston(velocity:f64)->DoubleActingGasPiston {
     DoubleActingGasPiston::new(GasPiston::new(gas(0.75,0.001),1.0,0.01,velocity).unwrap(),
         gas(0.75,0.001),0.01).unwrap()
 }
-fn input()->DoublePistonInput { DoublePistonInput { duration_s:0.0005,heat_j:[0.0;2],external_force_n:0.0 } }
-fn mechanical()->DoublePistonSolve { DoublePistonSolve {
+pub(super) fn input()->DoublePistonInput { DoublePistonInput { duration_s:0.0005,heat_j:[0.0;2],external_force_n:0.0 } }
+pub(super) fn mechanical()->DoublePistonSolve { DoublePistonSolve {
     piston:gas_controls(),opposing_gas:gas_controls().gas,volume_tolerance_m3:1e-15 } }
-fn solve()->ElectricalMotionSolve { ElectricalMotionSolve {
+pub(super) fn solve()->ElectricalMotionSolve { ElectricalMotionSolve {
     circuit:MaterialCircuitSolve { energy_tolerance_j:1e-8,power_tolerance_w:1e-8 },
     newton:NewtonKrylovConfig { absolute_tolerance:1e-11,relative_tolerance:0.0,forcing_minimum:1e-4,
         linear_restart:4,..NewtonKrylovConfig::default() },maximum_iterations:32,maximum_trials:300,
     difference_velocity_m_s:1e-4,velocity_tolerance_m_s:1e-9,energy_tolerance_j:1e-7,
 } }
-fn electrical<'a>(c:&'a MaterialCircuit,inputs:&'a [f64],factor:f64)->ElectricalMotionInput<'a> {
+pub(super) fn electrical<'a>(c:&'a MaterialCircuit,inputs:&'a [f64],factor:f64)->ElectricalMotionInput<'a> {
     ElectricalMotionInput { circuit:c,resistors:c.resistors(),inputs,
         port:TranslationalCircuitPort { branch:2,factor_n_a:factor } }
 }

@@ -6,6 +6,9 @@
 //! material resistance, both gases and momentum stay with their original owners.
 //! This is a lumped frozen-field approximation, not a magnetic field solver.
 
+/// Finite material heat and reciprocal electrical work on the same shared motion.
+pub mod network;
+
 use super::{DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve, DoublePistonStep};
 use crate::material_circuit::{MaterialCircuit, MaterialCircuitCandidate, MaterialCircuitError,
     MaterialCircuitSolve, MaterialCircuitStep, MaterialResistor};
