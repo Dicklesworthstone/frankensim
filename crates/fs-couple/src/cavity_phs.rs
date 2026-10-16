@@ -12,9 +12,10 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::air_path::{GasAbsorptionModel, absorb_pressure_history_with_model};
 use crate::thin_plate::certified_radiators;
 use fs_material::gas::GasState;
+use fs_phs::linear_exact::{LinearPropagator, LinearSplitBudget, split_quadratic, step_split};
 use fs_phs::{
     MouthFlange, PortHamiltonian, QuadraticStorage, compact_radiation_impedance,
-    helmholtz_resonator_flow, step, transformer,
+    helmholtz_resonator_flow, transformer,
 };
 
 /// Typed refusal of the plate–cavity clock.
@@ -121,8 +122,13 @@ pub fn realize_plate_cavity(
     sample_rate_hz: u32,
     listener_m: f64,
 ) -> Result<Vec<f64>, CavityPhsError> {
-    realize_with_absorption(spec, force_n, sample_rate_hz, listener_m,
-        GasAbsorptionModel::StokesKirchhoff)
+    realize_with_absorption(
+        spec,
+        force_n,
+        sample_rate_hz,
+        listener_m,
+        GasAbsorptionModel::StokesKirchhoff,
+    )
 }
 
 /// Explicit terrestrial-air realization using the spec's relative humidity.
@@ -138,8 +144,15 @@ pub fn realize_plate_cavity_in_air(
     sample_rate_hz: u32,
     listener_m: f64,
 ) -> Result<Vec<f64>, CavityPhsError> {
-    realize_with_absorption(spec, force_n, sample_rate_hz, listener_m,
-        GasAbsorptionModel::Iso9613Air { relative_humidity: spec.relative_humidity })
+    realize_with_absorption(
+        spec,
+        force_n,
+        sample_rate_hz,
+        listener_m,
+        GasAbsorptionModel::Iso9613Air {
+            relative_humidity: spec.relative_humidity,
+        },
+    )
 }
 
 fn realize_with_absorption(
@@ -198,13 +211,24 @@ fn realize_with_absorption(
     // clock.
     let sys =
         transformer(plate, cavity, 1, 0, 1.0).map_err(|e| CavityPhsError::Phs(e.to_string()))?;
+    // Prepare the complete coupled operator, not two independently exact
+    // components connected by a trapezoidal reaction.
+    let linear = split_quadratic(
+        &sys,
+        LinearSplitBudget {
+            max_modes: sys.state_dim(),
+            max_omega_dt: core::f64::consts::PI,
+        },
+    )
+    .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
     let dt = 1.0 / f64::from(sample_rate_hz);
     let mut x = vec![0.0; sys.state_dim()];
     let mut out = Vec::with_capacity(force_n.len());
     let two_pi = 2.0 * core::f64::consts::PI;
     let n_plate = 2 * n_m;
     for &f_ext in force_n {
-        let rec = step(&sys, &x, &[f_ext], dt).map_err(|e| CavityPhsError::Phs(e.to_string()))?;
+        let rec = step_split(&sys, &linear, LinearPropagator::ExactZoh, &x, &[f_ext], dt)
+            .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
         let mut p_obs = 0.0;
         for k in 0..n_m {
             let acc = (rec.x[2 * k + 1] - x[2 * k + 1]) / dt;
@@ -263,6 +287,67 @@ mod tests {
     fn air_at(temperature_k: f64) -> GasState {
         GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature_k, 101_325.0)
             .expect("admitted dry air")
+    }
+
+    #[test]
+    fn full_plate_cavity_transformer_has_unwarped_coupled_eigenfrequencies() {
+        use fs_math::det;
+        let gas = air_at(293.15);
+        let plate = plate_force_and_flow(&[6_000.0], &[0.0], &[1.0], &[0.08]).unwrap();
+        let cavity =
+            helmholtz_resonator_flow(0.02, 0.02, 0.06, gas.density, gas.sound_speed, 0.0).unwrap();
+        let sys = transformer(plate, cavity, 1, 0, 1.0).unwrap();
+        let split = split_quadratic(
+            &sys,
+            LinearSplitBudget {
+                max_modes: 4,
+                max_omega_dt: core::f64::consts::PI,
+            },
+        )
+        .unwrap();
+        let frequencies = split.angular_frequencies_rad_s();
+        let (low, high) = (frequencies[0], frequencies[3]);
+        assert!(low > 0.0 && high > low);
+        for z in [0.1, 1.0, 2.5] {
+            let dt = z / high;
+            let mut map = [[0.0; 4]; 4];
+            for column in 0..4 {
+                let mut initial = [0.0; 4];
+                initial[column] = 1.0;
+                let record = step_split(
+                    &sys,
+                    &split,
+                    LinearPropagator::ExactZoh,
+                    &initial,
+                    &[0.0],
+                    dt,
+                )
+                .unwrap();
+                for row in 0..4 {
+                    map[row][column] = record.x[row];
+                }
+            }
+            // A lossless four-state map has poles exp(+-i theta_0),
+            // exp(+-i theta_1). Recover both cosines from trace E and trace E².
+            let trace: f64 = (0..4).map(|i| map[i][i]).sum();
+            let square_trace: f64 = (0..4)
+                .map(|i| (0..4).map(|j| map[i][j] * map[j][i]).sum::<f64>())
+                .sum();
+            let sum = 0.5 * trace;
+            let sum_squares = 0.25 * (square_trace + 4.0);
+            let difference = det::sqrt(2.0 * sum_squares - sum * sum);
+            let measured = [
+                det::acos(0.5 * (sum + difference)) / dt,
+                det::acos(0.5 * (sum - difference)) / dt,
+            ];
+            for (observed, expected) in measured.into_iter().zip([low, high]) {
+                let cents = 1200.0 * det::ln(observed / expected) / core::f64::consts::LN_2;
+                assert!(
+                    cents.abs() <= 0.01,
+                    "coupled plate/cavity defect: {cents} cents at omega*dt={z}"
+                );
+            }
+        }
     }
 
     fn panel(volume: f64) -> PlateCavitySpec {
@@ -389,8 +474,12 @@ mod tests {
                 gas.temperature = 200.0;
                 gas.water_mole_fraction = 0.01;
             }),
-            ("finite inconsistent pressure", |gas: &mut GasState| gas.pressure *= 2.0),
-            ("finite inconsistent impedance", |gas: &mut GasState| gas.characteristic_impedance *= 2.0),
+            ("finite inconsistent pressure", |gas: &mut GasState| {
+                gas.pressure *= 2.0
+            }),
+            ("finite inconsistent impedance", |gas: &mut GasState| {
+                gas.characteristic_impedance *= 2.0
+            }),
         ] {
             let mut forged = admitted;
             mutate(&mut forged);
@@ -430,8 +519,14 @@ mod tests {
         let input = pulse(64, 1.0);
         let air = realize_plate_cavity(&spec, &input, 8000, 1.0).unwrap();
         let composition = Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap();
-        spec.gas = GasState::try_new_mixture(&[GasSpec::water_vapor_nist()],
-            &composition, 450.0, 100000.0, Some(0)).unwrap();
+        spec.gas = GasState::try_new_mixture(
+            &[GasSpec::water_vapor_nist()],
+            &composition,
+            450.0,
+            100000.0,
+            Some(0),
+        )
+        .unwrap();
         assert_eq!(spec.gas.water_mole_fraction, 1.0);
         let steam = realize_plate_cavity(&spec, &input, 8000, 1.0).unwrap();
         assert_eq!(steam.len(), input.len());
