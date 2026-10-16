@@ -128,7 +128,7 @@ impl HelmholtzModalCavity {
     pub fn neck_component(&self, sample_rate_hz: u32, budget: ModalAcousticTimeBudget)
         -> Result<ModalAcousticTimeModel, ModalCouplingError>
     {
-        ModalAcousticTimeModel::try_new(sample_rate_hz, vec![ModalAcousticMode {
+        ModalAcousticTimeModel::try_new_with_free_coordinates(sample_rate_hz, vec![ModalAcousticMode {
             angular_frequency_rad_s: 0.0, damping_ratio: 0.0,
             pressure_per_modal_velocity: C64::ZERO,
         }], budget).map_err(|source| ModalCouplingError::Component { component: 0, source })
