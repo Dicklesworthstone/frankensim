@@ -41,7 +41,7 @@ pub fn parse(text: &str) -> Result<(MeshShell, [f64;2], [f64;2]), Error> {
             "material" if f.len() == 5 && materials.len() < budget.max_triangles => {
                 let key = id(1)?;
                 let m = IsotropicMaterial { young_pa: number(2)?,poisson:number(3)?,density_kg_m3:number(4)? };
-                if materials.insert(key,m).is_some() { return Err(invalid().into()); }
+                if materials.insert(key,SurveyMaterial::Isotropic(m)).is_some() { return Err(invalid().into()); }
             }
             "orthotropic_material" if f.len() == 10 && materials.len() < budget.max_triangles => {
                 let key=id(1)?;
