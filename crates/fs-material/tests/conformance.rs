@@ -5,6 +5,7 @@
 //! fixture behavior; calibration round-trip; admissibility machine
 //! checks.
 
+use fs_material::hyper::{FibreInvariants, OgdenTerm, Volumetric};
 use fs_material::tensor::{contract, rotate, rotation};
 use fs_material::{
     Hyperelastic, HyperelasticModel, IsotropicElastic, J2Plasticity, ManderConcrete,
@@ -49,6 +50,34 @@ fn steel() -> IsotropicElastic {
 
 fn j2() -> J2Plasticity {
     J2Plasticity::new(steel(), 400e6, 2e9).expect("j2")
+}
+
+fn ogden_model() -> HyperelasticModel {
+    HyperelasticModel::Ogden {
+        terms: vec![
+            OgdenTerm {
+                mu_pa: 0.6e6,
+                alpha: 1.3,
+            },
+            OgdenTerm {
+                mu_pa: -0.01e6,
+                alpha: -2.0,
+            },
+        ],
+        volumetric: Volumetric::Quadratic { kappa: 5e6 },
+    }
+}
+
+fn hgo_model() -> HyperelasticModel {
+    HyperelasticModel::HolzapfelGasserOgden {
+        c10: 0.4e6,
+        k1: 0.1e6,
+        k2: 1.0,
+        dispersion: 0.1,
+        fibres: vec![[1., 0., 0.]],
+        invariants: FibreInvariants::Full,
+        volumetric: Volumetric::Quadratic { kappa: 5e6 },
+    }
 }
 
 /// FD-vs-tangent gate for a small-strain law at one strain/state point.
@@ -113,6 +142,8 @@ fn mt_001_consistent_tangent_gate_every_law() {
             c01: 0.1e6,
             kappa: 5.0e6,
         },
+        ogden_model(),
+        hgo_model(),
     ] {
         let law = Hyperelastic::new(model, 3.0).expect("hyper");
         for _ in 0..8 {
@@ -196,7 +227,7 @@ fn mt_001_consistent_tangent_gate_every_law() {
     verdict(
         "mt-001",
         "FD tangent gate green for iso/ortho elastic, J2 through a cycle, NH/MR 9x9, \
-         Menegotto-Pinto + Mander + wool felt through cyclic histories",
+         Ogden/HGO 9x9, Menegotto-Pinto + Mander + wool felt through cyclic histories",
     );
 }
 
@@ -223,34 +254,36 @@ fn mt_002_frame_indifference() {
             assert!((a - b).abs() < 1e-3, "isotropy/objectivity broke");
         }
         // Hyperelastic objectivity: P(QF) = Q P(F).
-        let nh = Hyperelastic::new(
+        for model in [
             HyperelasticModel::NeoHookean {
                 mu: 1.0e6,
                 lambda: 4.0e6,
             },
-            3.0,
-        )
-        .expect("nh");
-        let mut f = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-        for v in &mut f {
-            *v += (lcg(&mut seed) * 2.0 - 1.0) * 0.12;
-        }
-        let p = nh.piola(&f).expect("p");
-        let fm = [[f[0], f[1], f[2]], [f[3], f[4], f[5]], [f[6], f[7], f[8]]];
-        let qf = fs_material::tensor::matmul3(&q, &fm);
-        let qf_flat = [
-            qf[0][0], qf[0][1], qf[0][2], qf[1][0], qf[1][1], qf[1][2], qf[2][0], qf[2][1],
-            qf[2][2],
-        ];
-        let p_qf = nh.piola(&qf_flat).expect("p(QF)");
-        let pm = [[p[0], p[1], p[2]], [p[3], p[4], p[5]], [p[6], p[7], p[8]]];
-        let qp = fs_material::tensor::matmul3(&q, &pm);
-        for i in 0..3 {
-            for j in 0..3 {
-                assert!(
-                    (p_qf[3 * i + j] - qp[i][j]).abs() < 1e-3,
-                    "hyperelastic objectivity broke at ({i},{j})"
-                );
+            ogden_model(),
+            hgo_model(),
+        ] {
+            let nh = Hyperelastic::new(model, 3.0).expect("hyperelastic");
+            let mut f = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+            for v in &mut f {
+                *v += (lcg(&mut seed) * 2.0 - 1.0) * 0.12;
+            }
+            let p = nh.piola(&f).expect("p");
+            let fm = [[f[0], f[1], f[2]], [f[3], f[4], f[5]], [f[6], f[7], f[8]]];
+            let qf = fs_material::tensor::matmul3(&q, &fm);
+            let qf_flat = [
+                qf[0][0], qf[0][1], qf[0][2], qf[1][0], qf[1][1], qf[1][2], qf[2][0], qf[2][1],
+                qf[2][2],
+            ];
+            let p_qf = nh.piola(&qf_flat).expect("p(QF)");
+            let pm = [[p[0], p[1], p[2]], [p[3], p[4], p[5]], [p[6], p[7], p[8]]];
+            let qp = fs_material::tensor::matmul3(&q, &pm);
+            for i in 0..3 {
+                for j in 0..3 {
+                    assert!(
+                        (p_qf[3 * i + j] - qp[i][j]).abs() < 1e-3,
+                        "hyperelastic objectivity broke at ({i},{j})"
+                    );
+                }
             }
         }
     }
@@ -610,6 +643,31 @@ fn check_card_completeness() {
 
 #[test]
 fn mt_006_admissibility_machine_checks() {
+    assert_eq!(
+        Hyperelastic::new(ogden_model(), 3.0)
+            .unwrap()
+            .admissibility()
+            .polyconvex,
+        None
+    );
+    assert_eq!(
+        Hyperelastic::new(hgo_model(), 3.0)
+            .unwrap()
+            .admissibility()
+            .polyconvex,
+        Some(true)
+    );
+    let mut isochoric = hgo_model();
+    if let HyperelasticModel::HolzapfelGasserOgden { invariants, .. } = &mut isochoric {
+        *invariants = FibreInvariants::Isochoric;
+    }
+    assert_eq!(
+        Hyperelastic::new(isochoric, 3.0)
+            .unwrap()
+            .admissibility()
+            .polyconvex,
+        None
+    );
     // Polyconvexity spot test: W(F + t a⊗b) is convex in t along random
     // rank-one directions (necessary condition, sampled).
     let mut seed = 0x3A7_0006u64;

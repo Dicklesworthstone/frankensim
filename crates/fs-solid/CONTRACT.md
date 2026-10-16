@@ -572,8 +572,9 @@ of uncertain temperature/stiffness/orientation, or experimental validation.
 nodal_forces_n, body_force_n_m3, budget, settings }.solve(cx)` is the 3-D
 Total-Lagrangian counterpart of `hyper2d`: P1 tetrahedra (constant `F` per
 element, so one card evaluation is exact quadrature), the `fs-material`
-energy cards (Neo-Hookean, Mooney–Rivlin; exact AD Piola stress and
-nested-dual 9x9 tangent), DEAD loads (nodal forces, body force per reference
+energy cards (Neo-Hookean, Mooney–Rivlin, decoupled Ogden, HGO/GOH;
+AD Piola stress and consistent 9x9 tangent, with coalescence-safe spectral
+derivatives for Ogden), DEAD loads (nodal forces, body force per reference
 volume lumped to vertices), and linear ramping over `load_steps`. Each
 Newton step solves `K_ff d = -r_f - K_fp dp` so pending prescribed motion
 enters through the consistent linearization; trial states that invert an
@@ -891,7 +892,12 @@ preload, modal Rayleigh damping and an 8 s synthetic record (energy balance <
   frictional adjoints/VJPs, dynamics/time stepping, and fs-scenario
   contact-law coefficient wiring. Plasticity flow remains successor
   scope (fs-material's plastic module wires in later).
-- Ogden energies (fs-material's recorded no-claim propagates).
+- Ogden cards use the existing HyperTetProblem material interface unchanged;
+  `tests/hyper3.rs::ogden_card_solves_uniaxial_bar` compares reactions and
+  lateral motion against an independent compressible material-point root on
+  three affine P1 mesh rungs (1e-8 relative reaction band). This establishes
+  card consumption and the affine patch response, with no P1 locking claim
+  or intrinsic soft-tissue calibration.
 - Rod SE(3) DYNAMICS (fs-time symplectic wiring) and analytic rod
   tangents; 3D frames/lattices assembled from rods (topo-truss's
   consumer pass); J2 continuum element wiring (the fs-material card

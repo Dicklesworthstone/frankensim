@@ -239,6 +239,111 @@ fn neo_hookean_uniaxial_stretch_matches_closed_form() {
 }
 
 #[test]
+fn ogden_card_solves_uniaxial_bar() {
+    use fs_material::hyper::{OgdenTerm, Volumetric};
+    // Authored constitutive fixture in Pa, retaining the published exponent
+    // signs. Moderate bulk/shear ratio avoids making a locking claim for P1.
+    let terms = [
+        OgdenTerm {
+            mu_pa: 0.63,
+            alpha: 1.3,
+        },
+        OgdenTerm {
+            mu_pa: 0.0012,
+            alpha: 5.,
+        },
+        OgdenTerm {
+            mu_pa: -0.01,
+            alpha: -2.,
+        },
+    ];
+    let kappa = 20. * 0.4225;
+    let material = Hyperelastic::new(
+        HyperelasticModel::Ogden {
+            terms: terms.to_vec(),
+            volumetric: Volumetric::Quadratic { kappa },
+        },
+        5.,
+    )
+    .unwrap();
+    let stretch = 1.4;
+    // Independent traction-free compressible material-point root. These
+    // scalar principal stresses do not call the production AD/eigen path.
+    let stresses = |j: f64| {
+        let s = [stretch, (j / stretch).sqrt(), (j / stretch).sqrt()];
+        let tau = s.map(|l| {
+            terms
+                .iter()
+                .map(|p| {
+                    p.mu_pa
+                        * fs_math::det::exp(
+                            p.alpha
+                                * fs_math::det::ln(
+                                    l * fs_math::det::exp(-fs_math::det::ln(j) / 3.),
+                                ),
+                        )
+                })
+                .sum::<f64>()
+        });
+        let mean = tau.iter().sum::<f64>() / 3.;
+        core::array::from_fn::<_, 3, _>(|i| (tau[i] - mean + kappa * j * (j - 1.)) / s[i])
+    };
+    let (mut lo, mut hi) = (1., 1.2);
+    assert!(stresses(lo)[1] < 0. && stresses(hi)[1] > 0.);
+    for _ in 0..80 {
+        let mid = 0.5 * (lo + hi);
+        if stresses(mid)[1] > 0. {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let j = 0.5 * (lo + hi);
+    let nominal = stresses(j)[0];
+    let lateral = (j / stretch).sqrt();
+    // The exact solution is affine, so P1 represents it exactly at every
+    // rung. The measured band covers nonlinear/linear solver error only.
+    for n in [[1, 1, 1], [2, 1, 1], [4, 2, 2]] {
+        let size = [2., 1., 1.];
+        let (nodes, tets) = box_mesh(n, size);
+        let mut prescribed = Vec::new();
+        for (node, &x) in nodes.iter().enumerate() {
+            if x[0].abs() < 1e-12 {
+                prescribed.push((3 * node, 0.));
+            }
+            if (x[0] - size[0]).abs() < 1e-12 {
+                prescribed.push((3 * node, (stretch - 1.) * size[0]));
+            }
+            if x[1].abs() < 1e-12 {
+                prescribed.push((3 * node + 1, 0.));
+            }
+            if x[2].abs() < 1e-12 {
+                prescribed.push((3 * node + 2, 0.));
+            }
+        }
+        let solution =
+            with_cx(|cx| problem(&nodes, &tets, &material, &prescribed, &[], 4).solve(cx)).unwrap();
+        let axial: f64 = solution
+            .reactions_n
+            .iter()
+            .filter(|(dof, _)| *dof % 3 == 0 && (nodes[*dof / 3][0] - size[0]).abs() < 1e-12)
+            .map(|(_, force)| *force)
+            .sum();
+        let error = (axial - nominal).abs() / nominal.abs();
+        assert!(error < 1e-8, "{n:?}: reaction {axial} vs {nominal}");
+        for (x, u) in nodes.iter().zip(&solution.displacement_m) {
+            assert!((u[0] - (stretch - 1.) * x[0]).abs() < 1e-8);
+            for d in [1, 2] {
+                assert!((u[d] - (lateral - 1.) * x[d]).abs() < 1e-8);
+            }
+        }
+        println!(
+            "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"ogden_card_solves_uniaxial_bar\",\"tier\":\"G1\",\"mesh\":{n:?},\"observed_relative_reaction_error\":{error},\"tolerance\":1e-8,\"locking_claim\":false,\"verdict\":\"pass\"}}"
+        );
+    }
+}
+
+#[test]
 fn tangent_is_the_derivative_of_the_internal_force() {
     let (nodes, tets) = box_mesh([2, 2, 2], [1.0, 1.0, 1.0]);
     for material in [

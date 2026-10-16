@@ -6,8 +6,8 @@ thermodynamic guardrails, hysteresis, uncertainty — plus source-closed,
 multi-case questions whose execution and assessment identities stay distinct.
 
 Ambition tags: elastic/hyperelastic/J2/RC-fiber laws + calibration [S];
-multi-case identifiability authority schema [F]; Ogden staged [F, no-claim
-below].
+multi-case identifiability authority schema [F]. Ogden and tension-only
+HGO/GOH are [S] constitutive laws; specimen/tissue calibration is separate.
 
 ## Purpose and layer
 
@@ -305,10 +305,47 @@ homogenization, the P2 milestone.
 - `J2Plasticity`: radial-return mapping with linear isotropic hardening
   and the Simo–Hughes algorithmic moduli
   `C = κ I⊗I + 2μθ I_dev − 2μθ̄ n̂⊗n̂`.
-- `Hyperelastic` (`NeoHookean`, `MooneyRivlin`): stored energies written
+- `Hyperelastic` (`NeoHookean`, `MooneyRivlin`, decoupled `Ogden`,
+  `HolzapfelGasserOgden`): stored energies written
   ONCE generic over the fs-ad `Real` scalar; `piola` is the exact dual
   gradient, `tangent` the exact nested-dual Hessian (9×9). `det F ≤ 0`
-  refuses structurally.
+  and nonfinite states refuse structurally. Ogden uses the original
+  `mu/alpha` convention: infinitesimal shear `mu = sum(mu_p alpha_p)/2`.
+  At most eight finite terms with `mu_p alpha_p > 0` are admitted, including
+  negative-mu/negative-alpha terms. The shared principal-stretch helper uses
+  the existing symmetric Jacobi owner; a spectral trace lift carries the
+  exact value/gradient/Hessian through repeated roots, using the analytic
+  divided-difference limit without perturbing stretches or differentiating
+  eigenvectors. Derivatives above second order are not claimed.
+  HGO admits at most four explicitly unit reference directions, `c10 > 0`,
+  `k1 >= 0`, `k2 > 0`, dispersion in `[0,1/3]`, and an explicit full or
+  isochoric structural invariant. Its energy per family is
+  `k1/(2 k2) (exp(k2 <E>_+²)-1)`. At zero dispersion `I4 <= 1` contributes
+  exactly zero; with dispersion, tension refers to the distributed
+  structural strain `E`, preserving C1 continuity and direction independence
+  at dispersion 1/3. The inactive-side Hessian is returned at E=0; a
+  two-sided Hessian there is not claimed. A single aligned family supplies
+  `2 k1 (lambda²-1) exp(k2 (lambda²-1)²) lambda²` incompressible Cauchy
+  stress; two identical families supply twice this value.
+  New variants enforce all principal stretches in `[1/limit,limit]` with
+  eight-EPSILON eigensolver boundary roundoff; limit*(1+1e-12) refuses.
+  Legacy NH/MR retain their existing card-only stretch limit (an explicit
+  remaining admission gap). Both new variants offer quadratic or log-squared
+  bulk energies and separate distortional/bulk accessors. Full-invariant
+  HGO's fibre accessor intentionally retains volume dependence.
+- `hyper::cards` instantiates strict, dimensioned `ConstitutiveModelCard`s
+  for `ogden-decoupled` v1 and `hgo-dispersed` v1 and registers the real
+  stress/tangent/energy factories in `graph::LawRegistry`. Graph inputs are
+  H=F-I, outputs P, so the zero-input admission probe is the reference state.
+  Moduli require Pa, exponents/directions/counts/selectors are dimensionless;
+  missing/extra parameters, fractional counts, versions and undeclared
+  invariant selectors refuse. FSMODPK v1 remains unchanged.
+  Polyconvexity is parameter-derived: Ogden sufficient exponents are
+  alpha>=3/2 (F power perspective) or alpha<=-3 (cof F perspective), with
+  positive coefficients and convex bulk. Full-invariant HGO has convex
+  positive-part structural energy. Other sets return `None`; no numerical
+  spot check upgrades an unknown result to a proof. Log-squared bulk is
+  certified only on declared J<=e, where its second derivative is nonnegative.
 - `Uniaxial` trait + the RC flagship pair: `MenegottoPintoSteel`
   (R0/a1/a2 curvature degradation, Bauschinger via branch-state
   asymptote intersection) and `ManderConcrete` (confined envelope
@@ -654,11 +691,20 @@ bitwise determinism.
   vein.
 
 
-- **Ogden is staged, not shipped**: its principal-stretch energy needs
-  eigenvalue derivatives through fs-ad duals. The upstream blocker is
-  now RESOLVED (bead t88x: asin/acos/atan/atan2 on `Real` + Dual chain
-  rules); the staged Ogden law itself remains follow-up work here.
-  Until then NH/MR are the hyperelastic set.
+- **No intrinsic tissue calibration is inferred from the law family.**
+  `tests/hyperelastic_ogden_hgo.rs` gates Ogden-1972's published three-term
+  analytic nominal curves under prescribed J=1 with lateral-pressure
+  elimination (uniaxial 1..7.5, equibiaxial 1..4.5, pure shear 1..5, 1e-3)
+  and HGO one-/two-family incompressible Cauchy oracles (1e-6). Separate
+  traction-free finite-bulk roots measure the O(1/kappa) modelling residual:
+  finite kappa/mu=1e4 is not identically incompressible. The literal 1e-3
+  finite-bulk Ogden endpoint band and 1e-6 HGO band at kappa/c10=1e5 are
+  contradicted by the exact specified laws; tests retain those counterexamples
+  and their derived residuals rather than changing the law or widening gates.
+  Treloar observations retrieved/digitized by Bucchi & Hearn (2013, Appendix A)
+  are diagnostic only: source uncertainty, redistribution licence and fit band
+  are unstated. The M8-W1 ledger row and direct original Ogden source check
+  remain unqualified; literature coefficients are not a calibrated tissue card.
 - **Mander cyclic rules are the simplified elastic-unload variant**
   (declared on the card): no cyclic stiffness degradation beyond the
   residual-strain rule, no tension stiffening. Full Mander cyclic rules

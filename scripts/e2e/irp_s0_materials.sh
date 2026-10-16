@@ -25,6 +25,11 @@ readonly -a PRONY_TENSOR_LOWERING_TESTS=(
   g0_term_count_and_band_refusals
   g0_lowered_tensor_is_bitwise_deterministic
 )
+readonly -a HYPERELASTIC_TESTS=(
+  g2_treloar_ogden1972_reference_curves
+  g1_hgo_fibre_uniaxial_analytic
+  g0_reference_state_and_coalescent_stretches
+)
 
 list() {
   local test
@@ -33,6 +38,9 @@ list() {
   done
   for test in "${PRONY_TENSOR_LOWERING_TESTS[@]}"; do
     printf 'fs-material:prony_tensor_lowering::%s\n' "$test"
+  done
+  for test in "${HYPERELASTIC_TESTS[@]}"; do
+    printf 'fs-material:hyperelastic_ogden_hgo::%s\n' "$test"
   done
 }
 
@@ -50,8 +58,14 @@ check() {
       return 1
     }
   done
-  printf 'IRP S0: %s prony_tensor + %s prony_tensor_lowering tests present\n' \
-    "${#PRONY_TENSOR_TESTS[@]}" "${#PRONY_TENSOR_LOWERING_TESTS[@]}"
+  for test in "${HYPERELASTIC_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-material/tests/hyperelastic_ogden_hgo.rs" || {
+      printf 'missing test: %s\n' "$test" >&2
+      return 1
+    }
+  done
+  printf 'IRP S0: %s prony_tensor + %s prony_tensor_lowering + %s hyperelastic tests present\n' \
+    "${#PRONY_TENSOR_TESTS[@]}" "${#PRONY_TENSOR_LOWERING_TESTS[@]}" "${#HYPERELASTIC_TESTS[@]}"
 }
 
 run() {
@@ -71,7 +85,7 @@ run() {
   export CARGO_BUILD_JOBS=12
   export CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
 
-  local -a prony_command lowering_command
+  local -a prony_command lowering_command hyperelastic_command
   if [[ -n "${IRP_S0_PRONY_TENSOR_BIN:-}" ]]; then
     prony_command=("$IRP_S0_PRONY_TENSOR_BIN" --exact --test-threads=1 --show-output "${PRONY_TENSOR_TESTS[@]}")
   else
@@ -82,12 +96,19 @@ run() {
   else
     lowering_command=("$cargo_bin" test --locked -j 12 -p fs-material --test prony_tensor_lowering -- --exact --test-threads=1 --show-output "${PRONY_TENSOR_LOWERING_TESTS[@]}")
   fi
+  if [[ -n "${IRP_S0_HYPERELASTIC_BIN:-}" ]]; then
+    hyperelastic_command=("$IRP_S0_HYPERELASTIC_BIN" --exact --test-threads=1 --show-output "${HYPERELASTIC_TESTS[@]}")
+  else
+    hyperelastic_command=("$cargo_bin" test --locked -j 12 -p fs-material --test hyperelastic_ogden_hgo -- --exact --test-threads=1 --show-output "${HYPERELASTIC_TESTS[@]}")
+  fi
 
   {
     printf 'host=%s\ngit_head=%s\nstarted_utc=%s\n' "$host" "$git_head" "$started"
     printf '%q ' "${prony_command[@]}"
     printf '\n'
     printf '%q ' "${lowering_command[@]}"
+    printf '\n'
+    printf '%q ' "${hyperelastic_command[@]}"
     printf '\n'
   } >"${output_dir}/command.txt"
 
@@ -98,9 +119,12 @@ run() {
   (cd "$REPO_ROOT" && "${lowering_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
   status=$?
   if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  (cd "$REPO_ROOT" && "${hyperelastic_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
   set -e
 
-  for test in "${PRONY_TENSOR_TESTS[@]}" "${PRONY_TENSOR_LOWERING_TESTS[@]}"; do
+  for test in "${PRONY_TENSOR_TESTS[@]}" "${PRONY_TENSOR_LOWERING_TESTS[@]}" "${HYPERELASTIC_TESTS[@]}"; do
     if ! grep -Fqx "test ${test} ... ok" "${output_dir}/stdout.log" "${output_dir}/stderr.log"; then
       printf 'missing or failed: %s\n' "$test" >&2
       missing=1
@@ -127,7 +151,7 @@ for name in ("stdout.log", "stderr.log"):
             row = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(row, dict) or row.get("suite") != "irp-s0":
+        if not isinstance(row, dict) or row.get("suite") not in ("irp-s0", "irp-s0-materials"):
             continue
         row.update(
             host=host,
