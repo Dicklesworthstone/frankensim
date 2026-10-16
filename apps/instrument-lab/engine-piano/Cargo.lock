@@ -557,6 +557,7 @@ dependencies = [
  "fs-blake3",
  "fs-casebook",
  "fs-exec",
+ "fs-fft",
  "fs-fmm",
  "fs-geom",
  "fs-la",
@@ -565,6 +566,7 @@ dependencies = [
  "fs-phs",
  "fs-rep-mesh",
  "fs-solver",
+ "fs-vfit",
 ]
 
 [[package]]
@@ -869,6 +871,8 @@ dependencies = [
 name = "fs-modal"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
+ "fs-exec",
  "fs-la",
  "fs-math",
  "fs-sparse",

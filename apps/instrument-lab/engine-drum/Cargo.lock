@@ -851,6 +851,8 @@ dependencies = [
 name = "fs-modal"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
+ "fs-exec",
  "fs-la",
  "fs-math",
  "fs-sparse",
