@@ -104,9 +104,12 @@ fn ordered_interface_drives_bowed_motion_from_its_declared_law() {
         let omega = cfg.card.mode_omega_rad_s(1);
         let phi = (core::f64::consts::PI * 0.2).sin()
             / (cfg.card.linear_density_kg_m * cfg.card.length_m / 2.0).sqrt();
-        let force = kinetic + (0.8 - kinetic) * (-25.0_f64).exp();
-        let expected = phi * phi * force * (omega / 48_000.0).sin() / omega;
         let run = run_bowed(&cfg).unwrap();
+        // Evaluate the simultaneous interface law at its endpoint slip,
+        // then check that traction against the independent exact response.
+        let slip = 0.2 - run.bow_point_velocity_m_s[0];
+        let force = kinetic + (0.8 - kinetic) * (-(slip / 0.04).powi(2)).exp();
+        let expected = phi * phi * force * (omega / 48_000.0).sin() / omega;
         assert!((run.bow_point_velocity_m_s[0] - expected).abs() < 1.0e-12);
         velocities.push(run.bow_point_velocity_m_s[0]);
         let mut authored = cfg.clone();
@@ -233,11 +236,12 @@ fn ordered_interface_velocity_strengthening_reaches_bowed_motion() {
                 let phi = (core::f64::consts::PI * 0.2).sin()
                     / (cfg.card.linear_density_kg_m * cfg.card.length_m / 2.0).sqrt();
                 let dt = 1.0 / f64::from(cfg.card.sample_rate_hz);
-                let force = normal
-                    * (0.4 + 0.4 * (-(speed / 0.04).powi(2)).exp() + slope * speed.abs())
-                    * speed.signum();
-                let expected = phi * phi * force * (omega * dt).sin() / omega;
                 let run = run_bowed(&cfg).unwrap();
+                let slip = speed - run.bow_point_velocity_m_s[0];
+                let force = normal
+                    * (0.4 + 0.4 * (-(slip / 0.04).powi(2)).exp() + slope * slip.abs())
+                    * slip.signum();
+                let expected = phi * phi * force * (omega * dt).sin() / omega;
                 assert!((run.bow_point_velocity_m_s[0] - expected).abs() < 1.0e-12);
                 responses.push(run.bow_point_velocity_m_s[0]);
             }
@@ -264,6 +268,19 @@ fn bending_stiffness_reaches_bowed_motion_energy_and_bridge_force() {
         cfg.subsamples = 1;
         let dt = 1.0 / f64::from(cfg.card.sample_rate_hz);
         let norm = (cfg.card.linear_density_kg_m * cfg.card.length_m / 2.0).sqrt();
+        // Sum the exact modal mobilities, then eliminate viscous traction:
+        // traction=c*speed/(1+c*sum(phi_i²*sin(omega_i*dt)/omega_i)).
+        let mobility: f64 = (1..=3)
+            .map(|mode| {
+                let kappa = mode as f64 * core::f64::consts::PI / cfg.card.length_m;
+                let omega = ((cfg.card.tension_n * kappa.powi(2) + ei * kappa.powi(4))
+                    / cfg.card.linear_density_kg_m)
+                    .sqrt();
+                let phi = (mode as f64 * core::f64::consts::PI * 0.2).sin() / norm;
+                phi * phi * (omega * dt).sin() / omega
+            })
+            .sum();
+        let traction = 0.01 * 0.2 / (1.0 + 0.01 * mobility);
         let mut velocity = 0.0;
         let mut energy = 0.0;
         let mut bridge = 0.0;
@@ -281,7 +298,7 @@ fn bending_stiffness_reaches_bowed_motion_energy_and_bridge_force() {
                 );
             }
             let phi = (mode as f64 * core::f64::consts::PI * 0.2).sin() / norm;
-            let force = phi * 0.002; // Initial rest, 0.01 N s/m times 0.2 m/s.
+            let force = phi * traction;
             let q = force * (1.0 - (omega * dt).cos()) / omega.powi(2);
             let v = force * (omega * dt).sin() / omega;
             velocity += phi * v;
@@ -339,11 +356,13 @@ fn viscous_bending_reaches_bridge_shear_and_modal_decay() {
     let dt = 1.0 / f64::from(card.sample_rate_hz);
     let norm = (card.linear_density_kg_m * card.length_m / 2.0).sqrt();
     let phi = (core::f64::consts::PI * 0.2).sin() / norm;
-    let force = 0.002 * phi;
     let wd = (omega * omega - decay * decay).sqrt();
+    let unit_v = (-decay * dt).exp() * (wd * dt).sin() / wd;
+    let traction = 0.01 * 0.2 / (1.0 + 0.01 * phi * phi * unit_v);
+    let force = traction * phi;
     let q = force / omega.powi(2)
         * (1.0 - (-decay * dt).exp() * ((wd * dt).cos() + decay / wd * (wd * dt).sin()));
-    let v = force * (-decay * dt).exp() * (wd * dt).sin() / wd;
+    let v = force * unit_v;
     let elastic = (card.tension_n * kappa + card.bending_stiffness_n_m2 * kappa.powi(3)) / norm * q;
     let shear = card.viscous_bending_n_m2_s * kappa.powi(3) / norm * v;
     let log = run_bowed(&cfg).unwrap();
