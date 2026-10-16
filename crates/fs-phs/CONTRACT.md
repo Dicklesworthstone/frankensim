@@ -280,8 +280,30 @@ differential row; algebraic rows omit the state terms and use factor one.
 When the Gonzalez quotient is active under its existing cancellation guard,
 `gamma_(4*n+8)*(|H0|+|H1|+sum(|dg_i*dx_i|))` is additionally propagated through
 `|dx_i|/sum(dx^2)` and the absolute flow operator. These operands and operation
-counts compute the floor; neither an observed residual nor a fitted noise
-constant defines it. Kirchhoff uses `gamma_3*(|y_a|+|y_b|)` for its subtraction.
+counts compute the pointwise floor; neither an observed residual nor a fitted
+noise constant defines it. At a vanishing increment this pointwise model alone
+is insufficient: the best iterate can be `x1=x0`, with no quotient term, while
+every nearby Newton trial amplifies energy-subtraction roundoff.
+
+For storage exposing a borrowed exact quadratic matrix through
+`Storage::exact_quadratic_matrix`, and no nonlinear dissipation callback, a local
+attainable-residual envelope also applies. Write `E` for the energy roundoff
+above, `B_i = factor_i*sum_j(|J_ij|+|R_ij|)`, and
+`L_i = 1_(i differential) + B_i*||Q||_inf/2`. Descriptor multiplier efforts
+replace the corresponding `Q` rows with identity rows, so their effort bound
+uses `max(||Q||_inf,1)/2`. The ideal quadratic residual is affine with row
+Lipschitz bound `L_i`. Moving a distance at most `rho` from its root changes that
+row by at most `L_i*rho`, while a Gonzalez correction evaluated at increment
+length `rho` contributes at most `E*B_i/rho`. Minimizing their sum gives
+`rho_i^2=E*B_i/L_i` and `2*sqrt(L_i*E*B_i)`. Only when the actual increment
+satisfies `||x1-x0||_2^2 <= rho_i^2` is this local envelope added to that row's
+pointwise floor. Thus the `x1=x0` endpoint has a finite attainable allowance;
+ordinary steps and nonquadratic laws retain the pointwise model. The borrowed
+matrix hook preserves prepared stepping's no-allocation guarantee. A nonlinear
+dissipation callback disables this extension because its slope is not supplied
+by `Q`. Explicit requests below either computed floor still refuse.
+
+Kirchhoff uses `gamma_3*(|y_a|+|y_b|)` for its subtraction.
 This conditional floating-point envelope assumes conforming, read-only storage
 and dissipation callbacks. It does not bound callback evaluation error,
 constitutive error, finite-difference truncation, conditioning of a trajectory,
@@ -289,8 +311,8 @@ or discretization error, and it mints no physical validation authority.
 
 G0/G4 `tests/newton_refusal.rs` covers all four sites, a consistent staircase
 Hamiltonian, cap/next-up, explicit below-floor, exact update caps, the real reed
-lamella's visible default floor, a dropped-floor mutant, and unchanged caller
-buffers after refusal. The native regression and music-baseline lanes remain
+lamella's full stationary tail and visible default floor, a dropped-floor mutant,
+and unchanged caller buffers after refusal. The native regression and music-baseline lanes remain
 required before any closure or golden change.
 
 Typed `PhsError` (symmetry class, PSD, dimensions, Newton stall, port
