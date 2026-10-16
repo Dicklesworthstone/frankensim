@@ -78,19 +78,43 @@ impl SupportedStrings {
     pub fn new(wires: &[WireSpan], stretching: Option<StringStretching>, support: TranslatingSupport)
         -> Result<Self, ImpactError>
     {
+        Self::prepare(wires, support, |_| stretching)
+    }
+
+    /// Use one independent stretching law per wire, in original wire order.
+    /// Mass, bending, tension and damping still come from each WireSpan. None
+    /// explicitly selects that wire's linear limit; no neighboring wire's EA
+    /// or loss is borrowed. The support's slope ceiling also applies to each.
+    /// This is the SAME mass transformation, storage and support reaction as new.
+    pub fn with_individual_stretching(wires: &[WireSpan], stretching: &[Option<StringStretching>],
+        support: TranslatingSupport) -> Result<Self, ImpactError>
+    {
+        if stretching.len() != wires.len() {
+            return Err(invalid("each supported wire requires its own explicit stretching selection"));
+        }
+        Self::prepare(wires, support, |i| stretching[i])
+    }
+
+    fn prepare(wires: &[WireSpan], support: TranslatingSupport,
+        stretching: impl Fn(usize) -> Option<StringStretching>) -> Result<Self, ImpactError>
+    {
         support.validate()?;
-        if let Some(s)=stretching {s.validate()?;}
         let count=wires.iter().try_fold(0usize,|n,w|n.checked_add(w.damping_per_s.len()))
             .ok_or_else(||invalid("supported wire mode count overflow"))?;
         if wires.is_empty() || wires.len()>32 || count==0 || count>=MAX_IMPACT_MODES {
             return Err(invalid("supported wires exceed the bounded complete mechanical basis"));
         }
-        let law=StringStretching {axial_rigidity_n:stretching.map_or(0.0,|s|s.axial_rigidity_n),
-            maximum_slope:stretching.map_or(support.maximum_slope,|s|s.maximum_slope.min(support.maximum_slope))};
         let mut potentials=Vec::with_capacity(wires.len());let mut ranges=Vec::with_capacity(wires.len());
         let mut translation=Vec::with_capacity(count);let mut damping=Vec::with_capacity(count);
         let mut total_mass=support.mass_kg;let mut residual_mass=support.mass_kg;let mut frequencies=Vec::with_capacity(count);
-        for wire in wires {
+        for (index, wire) in wires.iter().enumerate() {
+            let selected = stretching(index);
+            if let Some(law) = selected { law.validate()?; }
+            let law = StringStretching {
+                axial_rigidity_n: selected.map_or(0.0, |s| s.axial_rigidity_n),
+                maximum_slope: selected.map_or(support.maximum_slope,
+                    |s| s.maximum_slope.min(support.maximum_slope)),
+            };
             let n=wire.damping_per_s.len();
             let body=wire.stretching_body(vec![ModalAcousticState::default();n],law)?;
             let BodyPotential::String(potential)=body.potential else {return Err(invalid("wire preparation changed its storage image"));};
@@ -152,6 +176,66 @@ impl SupportedStrings {
                 displacement_m_sqrt_kg:s[0],velocity_m_sqrt_kg_per_s:s[1]}).collect(),
             damping_per_s:vec![0.0;self.mode_count()]}
     }
+    /// Initialize independent relative string motion without dropping the rail's
+    /// declared translation or velocity. Input order is wire order, then each
+    /// wire's original mass-normalized modes. This is a cold coordinate change,
+    /// not a state reset, equilibrium solve or running-history transfer.
+    /// Kinetic cross terms are kept by z_i=q_i+c_i*X and their velocity analogue.
+    /// The host still owns time integration and the complete energy ceiling.
+    pub fn body_with_relative_states(&self, relative: &[ModalAcousticState])
+        -> Result<ImpactBody, ImpactError>
+    {
+        if relative.len() != self.support_coordinate() || relative.iter().any(|s|
+            !s.displacement_m_sqrt_kg.is_finite() || !s.velocity_m_sqrt_kg_per_s.is_finite()) {
+            return Err(invalid("supported initialization needs every finite relative wire coordinate"));
+        }
+        let mut body = self.body();
+        for (absolute, local) in body.initial.iter_mut().zip(relative) {
+            absolute.displacement_m_sqrt_kg += local.displacement_m_sqrt_kg;
+            absolute.velocity_m_sqrt_kg_per_s += local.velocity_m_sqrt_kg_per_s;
+        }
+        let state: Vec<_> = body.initial.iter().flat_map(|s|
+            [s.displacement_m_sqrt_kg, s.velocity_m_sqrt_kg_per_s]).collect();
+        self.observe_interleaved(&state, 0)?;
+        let q: Vec<_> = body.initial.iter().map(|s| s.displacement_m_sqrt_kg).collect();
+        let energy = self.potential(&q) + body.initial.iter()
+            .map(|s| 0.5 * s.velocity_m_sqrt_kg_per_s.powi(2)).sum::<f64>();
+        if !energy.is_finite() {
+            return Err(invalid("supported initial kinetic or potential energy is unrepresentable"));
+        }
+        Ok(body)
+    }
+
+    /// Work-conjugate ABSOLUTE point displacement/force row [1/sqrt(kg)].
+    /// Its dot product with accepted normalized velocity is physical point
+    /// velocity. Its transpose applies a signed force without omitting the
+    /// support reaction. Both endpoints follow the common translating rail.
+    /// Interior sine shapes come from the original string-collocation owner.
+    pub fn absolute_shape(&self, wire: usize, station_fraction: f64)
+        -> Result<Vec<f64>, ImpactError>
+    {
+        let r = self.0.ranges.get(wire).ok_or_else(|| invalid("unknown supported wire"))?;
+        if !station_fraction.is_finite() || !(0.0..=1.0).contains(&station_fraction) {
+            return Err(invalid("supported point station must lie on its physical span"));
+        }
+        let mut row = vec![0.0; self.mode_count()];
+        if station_fraction == 0.0 || station_fraction == 1.0 {
+            row[self.support_coordinate()] = self.force_weight();
+            return Ok(row);
+        }
+        let source = &self.0.wires[wire];
+        let shape = fs_dcontact::string_collocation(source.length_m(), source.linear_density_kg_m,
+            &[station_fraction * source.length_m()], r.len())
+            .map_err(|e| ImpactError::Owner(e.to_string()))?;
+        row[r.clone()].copy_from_slice(&shape);
+        let cross = shape.iter().zip(&self.0.translation[r.clone()]).map(|(b,c)| b*c).sum::<f64>();
+        row[self.support_coordinate()] = (1.0 - cross) * self.force_weight();
+        if row.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("supported absolute point projection overflows"));
+        }
+        Ok(row)
+    }
+
     fn relative(&self,z:&[f64],q:&mut[f64])->bool {
         if z.len()!=self.mode_count() || q.len()!=self.support_coordinate()
             || z.iter().any(|v|!v.is_finite()) {return false;}
@@ -249,3 +333,7 @@ impl SupportedStrings {
 #[cfg(test)]
 #[path = "supported_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "supported_heterogeneous_tests.rs"]
+mod heterogeneous_tests;
