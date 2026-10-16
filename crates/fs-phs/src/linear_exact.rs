@@ -123,6 +123,7 @@ pub struct LinearSplit {
     frequencies: Vec<f64>,
     frequency_basis: Vec<f64>,
     budget: LinearSplitBudget,
+    pole_rate_bound: f64,
 }
 
 fn refuse(what: &'static str) -> PhsError {
@@ -306,6 +307,44 @@ pub fn split_quadratic(
         }
         frequencies.push(det::sqrt(omega2));
     }
+    // Bound the FULL linear generator in balanced energy coordinates. This
+    // includes non-diagonal damping and gyroscopic/interconnection entries.
+    let mut infinity_norm = 0.0_f64;
+    let mut columns = vec![0.0; n];
+    for i in 0..n {
+        let wi = if values[i] > 0.0 {
+            det::sqrt(values[i])
+        } else {
+            1.0
+        };
+        let mut row = 0.0;
+        for j in 0..n {
+            let wj = if values[j] > 0.0 {
+                det::sqrt(values[j])
+            } else {
+                1.0
+            };
+            let mut jr = 0.0;
+            for a in 0..n {
+                for b in 0..n {
+                    jr +=
+                        basis[a * n + i] * (sys.j[a * n + b] - sys.r[a * n + b]) * basis[b * n + j];
+                }
+            }
+            let entry = (wi * jr * values[j] / wj).abs();
+            row += entry;
+            columns[j] += entry;
+        }
+        if !row.is_finite() {
+            return Err(refuse("linear pole-rate norm overflow"));
+        }
+        infinity_norm = infinity_norm.max(row);
+    }
+    let one_norm = columns.into_iter().fold(0.0_f64, f64::max);
+    let pole_rate_bound = det::sqrt(infinity_norm) * det::sqrt(one_norm);
+    if !pole_rate_bound.is_finite() {
+        return Err(refuse("linear spectral norm bound overflow"));
+    }
     Ok(LinearSplit {
         n,
         m,
@@ -318,6 +357,7 @@ pub fn split_quadratic(
         frequencies,
         frequency_basis,
         budget,
+        pole_rate_bound,
     })
 }
 
@@ -341,6 +381,11 @@ fn checked_eigh(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), PhsError> {
 }
 
 impl LinearSplit {
+    /// Conservative upper bound on magnitudes of ALL linear poles [1/s].
+    #[must_use]
+    pub fn pole_rate_bound_rad_s(&self) -> f64 {
+        self.pole_rate_bound
+    }
     /// Frequencies of all energy-basis coordinates [rad/s], ascending.
     /// Each oscillatory pair occurs twice; zero modes remain present.
     #[must_use]
@@ -392,6 +437,70 @@ impl LinearSplit {
         }
         Ok(correction)
     }
+}
+
+/// Render stepping with exact quadratic propagation and a resolved-band
+/// Gonzalez fallback for an explicitly declared nonlinear remainder. No
+/// storage probe, modified Hamiltonian, silent fallback or modal truncation.
+pub fn step_render(
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+) -> Result<StepRecord, PhsError> {
+    if split.quadratic.exact {
+        return step_split(sys, split, LinearPropagator::ExactZoh, x0, u, dt);
+    }
+    if sys.n != split.n
+        || sys.m != split.m
+        || sys.j != split.j
+        || sys.r != split.r
+        || sys.g != split.g
+        || sys.storage.quadratic_part().as_ref() != Some(&split.quadratic)
+    {
+        return Err(refuse("render split does not match J/R/G/storage"));
+    }
+    admit_midpoint_band(split.pole_rate_bound, dt).map_err(PhsError::TimeResolution)?;
+    crate::step(sys, x0, u, dt)
+}
+
+/// Upper bound on the linear oscillatory pole magnitudes of an effort-joined
+/// descriptor. The algebraic velocity constraint is an orthogonal projection
+/// in the quadratic energy coordinates; its norm is one. Thus the full
+/// differential generator's spectral-norm bound also bounds its restriction
+/// to that constraint. No constraint stiffness or multiplier mass is invented.
+pub fn descriptor_pole_rate_bound(sys: &crate::DescriptorPortHamiltonian) -> Result<f64, PhsError> {
+    let part = sys
+        .storage
+        .quadratic_part()
+        .ok_or_else(|| refuse("descriptor storage has no explicit quadratic part"))?;
+    let n = sys.n_diff;
+    if part.matrix.len() != sys.n * sys.n {
+        return Err(refuse("descriptor quadratic shape"));
+    }
+    let mut q = vec![0.0; n * n];
+    let mut j = vec![0.0; n * n];
+    let mut r = vec![0.0; n * n];
+    for a in 0..n {
+        for b in 0..n {
+            q[a * n + b] = part.matrix[a * sys.n + b];
+            j[a * n + b] = sys.j[a * sys.n + b];
+            r[a * n + b] = sys.r[a * sys.n + b];
+        }
+    }
+    let quadratic = crate::QuadraticStorage::new(q, n)?;
+    let differential = PortHamiltonian::new(n, 0, j, r, vec![], Box::new(quadratic))?;
+    let split = split_quadratic(
+        &differential,
+        LinearSplitBudget {
+            max_modes: n,
+            max_omega_dt: core::f64::consts::PI,
+        },
+    )?;
+    // A zero-energy coordinate has no oscillatory restoring force, but can
+    // receive motion. The bound above retains its generator entries as well.
+    Ok(split.pole_rate_bound)
 }
 
 /// Step the complete state. Errors publish no state and never switch propagator.
@@ -717,6 +826,77 @@ mod tests {
             let cents = 1200.0 * det::ln(phase / (beta * cap)) / core::f64::consts::LN_2;
             assert!(cents.abs() <= 1.0, "{zeta}: {cents} cents");
         }
+    }
+
+    #[test]
+    fn descriptor_band_bounds_the_actual_common_velocity_mode() {
+        let a = mass_spring_damper(1.0, 1.0, 0.0).unwrap();
+        let b = mass_spring_damper(1.0, 4.0, 0.0).unwrap();
+        let sys = crate::join_port(a, b, 0, 0).unwrap();
+        let bound = descriptor_pole_rate_bound(&sys).unwrap();
+        let dt = MIDPOINT_ONE_CENT_ANGULAR_STEP / bound;
+        assert!(admit_midpoint_band(bound, dt).is_ok());
+        assert!(admit_midpoint_band(bound, dt * (1.0 + 1e-10)).is_err());
+        let omega = det::sqrt(2.5);
+        for scale in [0.25, 0.5, 1.0] {
+            let h = dt * scale;
+            let rec = crate::step_descriptor(&sys, &[1e-4, 0.0, 1e-4, 0.0, 0.0], &[], h).unwrap();
+            let q = 0.5 * (rec.x[0] + rec.x[2]);
+            let v = 0.5 * (rec.x[1] + rec.x[3]);
+            let phase = det::atan2(-v / omega, q);
+            let cents = 1200.0 * det::ln(phase / (omega * h)) / core::f64::consts::LN_2;
+            assert!(cents.abs() <= 1.0, "{cents}");
+        }
+    }
+
+    #[test]
+    fn quadratic_metadata_survives_relaxation_and_full_galerkin_transport() {
+        let base = mass_spring_damper(2.0, 3.0, 0.2).unwrap();
+        let expanded = base
+            .with_relaxation_branches(vec![crate::RelaxationBranch {
+                projection: vec![1.0, 0.0],
+                stiffness: 4.0,
+                relaxation_time_s: 0.3,
+            }])
+            .unwrap();
+        let part = expanded.storage.quadratic_part().unwrap();
+        assert!(part.exact);
+        assert_eq!(
+            part.matrix,
+            vec![7.0, 0.0, -2.0, 0.0, 0.5, 0.0, -2.0, 0.0, 1.0]
+        );
+        let basis = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+        let reduced = crate::reduce_galerkin(&expanded, &basis, 3).unwrap();
+        let transported = reduced.storage.quadratic_part().unwrap();
+        assert!(transported.exact);
+        assert_eq!(
+            transported.matrix,
+            vec![7.0, -2.0, 0.0, -2.0, 1.0, 0.0, 0.0, 0.0, 0.5]
+        );
+        let split = split_quadratic(&reduced, budget(3)).unwrap();
+        let record = step_render(&reduced, &split, &[0.1, 0.02, 0.3], &[0.5], 0.2).unwrap();
+        assert!(record.balance_residual().abs() < 1e-12);
+        let nonlinear = crate::duffing_oscillator(1.0, 1.0, 2.0, 0.0).unwrap();
+        let reduced_nonlinear =
+            crate::reduce_galerkin(&nonlinear, &[1.0, 0.0, 0.0, 1.0], 2).unwrap();
+        assert!(!reduced_nonlinear.storage.quadratic_part().unwrap().exact);
+    }
+
+    #[test]
+    fn render_step_keeps_nonlinear_storage_and_refuses_unresolved_clocks() {
+        let nonlinear = crate::duffing_oscillator(1.0, 1.0, 7.0, 0.0).unwrap();
+        let split = split_quadratic(&nonlinear, budget(2)).unwrap();
+        assert!(step_render(&nonlinear, &split, &[0.3, 0.2], &[0.0], 0.04).is_ok());
+        assert!(matches!(
+            step_render(&nonlinear, &split, &[0.3, 0.2], &[0.0], 0.040_001),
+            Err(PhsError::TimeResolution(ResolvedBandError::Outside { .. }))
+        ));
+        let record = step_render(&nonlinear, &split, &[0.3, 0.2], &[0.0], 0.04).unwrap();
+        assert!(record.balance_residual().abs() <= 1e-12 * nonlinear.hamiltonian(&[0.3, 0.2]));
+        let linear = mass_spring_damper(1.0, 1.0, 0.0).unwrap();
+        let linear_split = split_quadratic(&linear, budget(2)).unwrap();
+        let exact = step_render(&linear, &linear_split, &[1.0, 0.0], &[0.0], 2.5).unwrap();
+        relative(exact.x[0], det::cos(2.5), 1.0, 1e-12);
     }
 
     // G1: independent closed-form underdamped oscillator, mass = 1.

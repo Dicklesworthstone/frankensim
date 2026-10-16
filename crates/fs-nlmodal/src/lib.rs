@@ -132,6 +132,19 @@ impl SosModalStorage {
 }
 
 impl Storage for SosModalStorage {
+    fn quadratic_part(&self) -> Option<fs_phs::linear_exact::QuadraticPart> {
+        let n = 2 * self.n_modes();
+        let mut matrix = vec![0.0; n * n];
+        for (k, w) in self.omegas.iter().enumerate() {
+            matrix[2 * k * n + 2 * k] = w * w;
+            matrix[(2 * k + 1) * n + 2 * k + 1] = 1.0;
+        }
+        Some(fs_phs::linear_exact::QuadraticPart {
+            matrix,
+            exact: self.channels.iter().all(|channel| channel.coefficient == 0.0),
+        })
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         let n = self.n_modes();
         let mut h = 0.0;
@@ -998,7 +1011,26 @@ pub fn single_mode_beta(storage: &SosModalStorage, k: usize) -> f64 {
 
 #[cfg(test)]
 mod fd_probe {
-    use super::{SineMode, fd_coupling, fd_d2, sample_sine};
+    use super::{SineMode, SosModalStorage, StressChannel, fd_coupling, fd_d2, sample_sine};
+    use fs_phs::Storage;
+
+    #[test]
+    fn quadratic_metadata_preserves_the_live_stress_remainder() {
+        let mut storage = SosModalStorage {
+            omegas: vec![2.0, 3.0],
+            channels: vec![StressChannel { coefficient: 7.0, coupling: vec![1.0, 0.0, 0.0, 2.0] }],
+        };
+        let part = storage.quadratic_part().unwrap();
+        assert!(!part.exact);
+        assert_eq!(part.matrix, vec![4.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0,
+            0.0,0.0,9.0,0.0, 0.0,0.0,0.0,1.0]);
+        let x = [1.0, 2.0, 3.0, 4.0];
+        let linear = 0.5 * (4.0 + 4.0 + 81.0 + 16.0);
+        assert_eq!(storage.hamiltonian(&x), linear + 0.25 * 7.0 * 19.0_f64.powi(2));
+        storage.channels[0].coefficient = 0.0;
+        assert!(storage.quadratic_part().unwrap().exact);
+        assert_eq!(storage.hamiltonian(&x), linear);
+    }
 
     #[test]
     fn sine_second_derivative_orders_agree_at_center() {
