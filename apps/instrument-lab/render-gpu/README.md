@@ -94,6 +94,8 @@ A hi-hat adds a stick contact per stroke, so chunks are padded to the same strok
 | tom-12, 0.3 s | 1.1e-9 | 0.00 dB |
 | closed hi-hat, 0.65 s, two strokes | 3.3e-8 (never above 1e-3) | 0.00 dB |
 | snare | 7e-8 until the second stroke, about 300 ms in | within 0.22 dB |
+| crash, 0.15 s, two strokes (GPU render against an M4 CPU render, 48 kHz float WAVs) | 1.2e-6 | 0.00 dB |
+| ride, likewise | 7.5e-6 | 0.00 dB |
 
 The whole closed hi-hat step agrees with the CPU to 3e-8 over the run: von Kármán shells, 1204 rim contacts with friction, clutch links and the pedal drive. The snare's buzzing wires are chaotic, so after the second stroke the two renders differ sample by sample but not in their spectrum.
 
