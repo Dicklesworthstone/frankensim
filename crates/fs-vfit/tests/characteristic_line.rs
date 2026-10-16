@@ -30,7 +30,7 @@ fn open_cylinder_reflectance_returns_an_inverted_pulse() {
         0.25 * omega0,
         8.0 * omega0,
         80,
-        LossModel::AllRegime,
+        LossModel::Bessel,
         Termination::UnflangedOpen,
     )
     .expect("sweep");

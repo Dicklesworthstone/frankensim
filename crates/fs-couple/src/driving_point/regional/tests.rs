@@ -28,7 +28,7 @@ fn uniform_binding_keeps_complete_tmm_and_fir_bit_identical() {
         Segment::Cone { inlet_radius: 0.001, outlet_radius: 0.0008, length: 0.15 }] };
     let gas = air();
     let regional = RegionalDuct::new(&duct, &vec![gas; duct.segments.len()]).unwrap();
-    for loss in [LossModel::Lossless, LossModel::Bessel, LossModel::AllRegime] {
+    for loss in [LossModel::Lossless, LossModel::Bessel] {
         for termination in [Termination::Closed, Termination::IdealOpen, Termination::UnflangedOpen] {
             for f in [173.0, 389.0, 997.0] {
                 let omega = core::f64::consts::TAU*f;

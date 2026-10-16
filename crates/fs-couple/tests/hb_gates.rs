@@ -107,7 +107,7 @@ impl OrbitProblem for ReedHb {
             &self.duct,
             &self.gas,
             omega,
-            LossModel::AllRegime,
+            LossModel::Bessel,
             Termination::IdealOpen,
         )
         .expect("bore impedance")
@@ -128,7 +128,7 @@ fn first_resonance(duct: &Duct, gas: &GasState) -> f64 {
         TAU * 80.0,
         TAU * 700.0,
         6_000,
-        LossModel::AllRegime,
+        LossModel::Bessel,
         Termination::IdealOpen,
     )
     .expect("sweep");
@@ -283,7 +283,7 @@ fn hb_001_reed_threshold_fd_predicts_td_confirms() {
         "{{\"suite\":\"fs-couple\",\"case\":\"hb-001-reed-threshold\",\
          \"hb_threshold_pa\":{threshold:.1},\"closing_pa\":{p_close},\
          \"ratio\":{ratio:.3},\"td_onset_pa\":{onset:.1},\"fd_td_delta_rel\":{delta_rel:.3},\
-         \"harmonics\":9,\"bore_authority\":\"plane-TMM AllRegime IdealOpen\",\
+         \"harmonics\":9,\"bore_authority\":\"plane-TMM Bessel IdealOpen\",\
          \"verdict\":\"pass\"}}"
     );
 }
@@ -333,7 +333,7 @@ impl OrbitProblem for LipHb {
             &self.duct,
             &self.gas,
             omega,
-            LossModel::AllRegime,
+            LossModel::Bessel,
             Termination::IdealOpen,
         )
         .expect("bore impedance")
@@ -373,7 +373,7 @@ fn hb_002_brass_slot_map_locks_on_impedance_peaks() {
         TAU * 30.0,
         TAU * 500.0,
         12_000,
-        LossModel::AllRegime,
+        LossModel::Bessel,
         Termination::IdealOpen,
     )
     .expect("sweep");
@@ -440,7 +440,7 @@ fn hb_002_brass_slot_map_locks_on_impedance_peaks() {
     println!(
         "frankensim-hb-receipt-v1\nkind\tbrass-slot-map\nlocks\t{locks:?}\n\
 refused-tensions\t{refused}\nlock-in-zone\tnarrow (single 5 Hz cell at 270)\n\
-bore-authority\tplane-TMM AllRegime IdealOpen"
+bore-authority\tplane-TMM Bessel IdealOpen"
     );
     // The map is honestly narrow: one lock survives the guard at this
     // operating point. Gating existence + slot capture, not breadth.
@@ -500,7 +500,7 @@ bore-authority\tplane-TMM AllRegime IdealOpen"
     println!(
         "{{\"suite\":\"fs-couple\",\"case\":\"hb-002-brass-slots\",\"locks\":{locks:?},\
          \"peaks_hz\":{peak_hz:?},\"slots_visited\":{},\
-         \"bore_authority\":\"plane-TMM AllRegime IdealOpen (regenerate on the MM matrix \
+         \"bore_authority\":\"plane-TMM Bessel IdealOpen (regenerate on the MM matrix \
          when T-Brass lands it)\",\"verdict\":\"pass\"}}",
         slots_visited.len()
     );
@@ -524,7 +524,7 @@ fn hb_003_truncation_falsifier_produces_the_disagreement_receipt() {
          \"delta_rel\":{delta_rel:.4},\
          \"island\":\"quasistatic reed H=4e-4 w=1.2e-2 p_close=2000\",\
          \"stepper\":\"fs-orbit hb-aft-newton (masked, FD Jacobian)\",\
-         \"bore\":\"plane-TMM cylinder r=7.5mm L=0.33m AllRegime IdealOpen\",\
+         \"bore\":\"plane-TMM cylinder r=7.5mm L=0.33m Bessel IdealOpen\",\
          \"disposition\":\"open discrepancy attached to the registry row; the \
          truncation is DISCLOSED structure and N=1 is below the admitted floor\"}}"
     );
@@ -649,7 +649,7 @@ fn diag_hb002_lock_scan() {
         TAU * 30.0,
         TAU * 500.0,
         12_000,
-        LossModel::AllRegime,
+        LossModel::Bessel,
         Termination::IdealOpen,
     )
     .expect("sweep");

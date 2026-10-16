@@ -462,7 +462,7 @@ fn realize_hold_line(
         core::f64::consts::TAU * 120.0,
         core::f64::consts::TAU * 3000.0,
         160,
-        LossModel::AllRegime,
+        LossModel::Bessel,
         termination,
     )
     .map_err(|_| WindLineError::Invalid {
@@ -601,6 +601,59 @@ mod wind_articulation_tests {
             stiffness_n_m: 0.0,
             damping_ratio: 0.35,
         }
+    }
+
+    /// G3: before/after hold-sweep peaks. For this uniform cylinder the
+    /// old interpolation selected WideTube over the WHOLE declared band,
+    /// so that surviving benchmark arm is the exact old-law comparator.
+    /// First native measurement must be retained before freezing the
+    /// requested measured-shift-times-five regression band (central lane).
+    #[test]
+    fn hold_image_bessel_shift_recorded() {
+        use fs_duct::{Segment, impedance_peaks, segment_wave};
+        let start = std::time::Instant::now();
+        let gas = air20();
+        let duct = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.0075,
+                length: 0.33,
+            }],
+        };
+        assert!(
+            segment_wave(&gas, 0.0075, core::f64::consts::TAU * 120.0, LossModel::WideTube)
+                .unwrap()
+                .shear_number >= 10.0
+        );
+        let sweep = |loss| {
+            impedance_sweep(
+                &duct, &gas,
+                core::f64::consts::TAU * 120.0, core::f64::consts::TAU * 3000.0,
+                32000, loss, Termination::FlangedOpen,
+            ).unwrap()
+        };
+        let old = sweep(LossModel::WideTube);
+        let new = sweep(LossModel::Bessel);
+        let peaks = |s: &[fs_duct::DuctResponse]| -> Vec<f64> {
+            impedance_peaks(s).into_iter().take(4).map(|i| {
+                let left = fs_math::det::ln(s[i - 1].impedance.abs());
+                let mid = fs_math::det::ln(s[i].impedance.abs());
+                let right = fs_math::det::ln(s[i + 1].impedance.abs());
+                let offset = 0.5 * (left - right) / (left - 2.0 * mid + right);
+                s[i].omega + offset * (s[i + 1].omega - s[i].omega)
+            }).collect()
+        };
+        let old_peaks = peaks(&old);
+        let new_peaks = peaks(&new);
+        assert_eq!(old_peaks.len(), 4);
+        assert_eq!(new_peaks.len(), 4);
+        let mut max_abs_cents = 0.0_f64;
+        for (index, (&before, &after)) in old_peaks.iter().zip(&new_peaks).enumerate() {
+            let cents = 1200.0 * fs_math::det::ln(after / before) / core::f64::consts::LN_2;
+            assert!(cents.is_finite());
+            max_abs_cents = max_abs_cents.max(cents.abs());
+            println!("{{\"case\":\"hold_image_bessel_shift_recorded\",\"inputs\":\"authored uniform-cylinder hold fixture, old rv>=10 branch=WideTube\",\"rung\":{index},\"axis\":\"peak\",\"observed\":{cents:e},\"old_hz\":{},\"new_hz\":{},\"oracle\":\"historical wide branch\",\"tol\":\"finite measurement; freeze 5x band after first native run\",\"verdict\":\"pass\",\"elapsed_ms\":{}}}", before/core::f64::consts::TAU, after/core::f64::consts::TAU, start.elapsed().as_millis());
+        }
+        println!("{{\"case\":\"hold-image-max-absolute-cents\",\"inputs\":\"authored uniform-cylinder hold fixture\",\"observed\":{max_abs_cents:e},\"oracle\":\"historical wide branch\",\"tol\":\"finite measurement; freeze 5x band after first native run\",\"verdict\":\"pass\",\"elapsed_ms\":{}}}", start.elapsed().as_millis());
     }
 
     pub(crate) struct Loop {
@@ -791,7 +844,7 @@ mod wind_articulation_tests {
                 core::f64::consts::TAU * 80.0,
                 core::f64::consts::TAU * 1200.0,
                 6000,
-                LossModel::AllRegime,
+                LossModel::Bessel,
                 Termination::FlangedOpen,
             )
             .expect("sweep");
@@ -871,7 +924,7 @@ mod wind_articulation_tests {
                 core::f64::consts::TAU * 80.0,
                 core::f64::consts::TAU * 1200.0,
                 6000,
-                LossModel::AllRegime,
+                LossModel::Bessel,
                 Termination::FlangedOpen,
             )
             .expect("sweep");
