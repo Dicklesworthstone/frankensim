@@ -71,6 +71,34 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Typed refusals. Display strings carry stable `FS-PLATE-*` codes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlateError {
+    /// Invalid director or its incident-facet angle envelope.
+    BadDirector {
+        /// Nodal index, or the first absent index for a count mismatch.
+        node: usize,
+    },
+    /// Invalid support frame, node, or repeated constraint.
+    BadConstraint {
+        /// Failed invariant.
+        what: &'static str,
+    },
+    /// Explicit shell-work limit exceeded before assembly allocation.
+    Budget {
+        /// Resource name.
+        what: &'static str,
+        /// Requested size.
+        requested: usize,
+        /// Caller limit.
+        limit: usize,
+    },
+    /// The caller cancelled shell assembly.
+    Cancelled,
+    /// Static stiffness factorization refused.
+    StaticFactor(fs_sparse::LdltError),
+    /// Stiffness has a negative direction or the solve failed its residual gate.
+    StaticSolve {
+        /// Failed invariant.
+        what: &'static str,
+    },
     /// A piecewise section field does not cover exactly the mesh elements.
     SectionCount {
         /// Required number of sections.
@@ -110,6 +138,19 @@ pub enum PlateError {
 impl core::fmt::Display for PlateError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::BadDirector { node } => write!(f, "FS-PLATE-BAD-DIRECTOR: node {node}"),
+            Self::BadConstraint { what } => write!(f, "FS-PLATE-BAD-CONSTRAINT: {what}"),
+            Self::Budget {
+                what,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "FS-PLATE-BUDGET: {what} requests {requested}, limit {limit}"
+            ),
+            Self::Cancelled => write!(f, "FS-PLATE-CANCELLED"),
+            Self::StaticFactor(error) => write!(f, "FS-PLATE-STATIC-FACTOR: {error}"),
+            Self::StaticSolve { what } => write!(f, "FS-PLATE-STATIC-SOLVE: {what}"),
             PlateError::SectionCount { expected, actual } => write!(
                 f,
                 "FS-PLATE-SECTION-COUNT: expected {expected} element sections, got {actual}"

@@ -27,6 +27,9 @@ pub mod stiffened;
 /// Static dead loading and vibrations about the resulting stable equilibrium.
 pub mod preload;
 
+/// Shear-deformable triangular shells with condensed rotation enrichment.
+pub mod mitc;
+
 /// Relative membrane-spin stabilization; numerical, not a material property.
 pub const DRILLING_ALPHA: f64 = 1e-3;
 

@@ -9,6 +9,77 @@ stiffness, offset stiffener beams, and modal analysis through
 Layer: **L3 FLUX** (deps: fs-material L3, fs-modal L1, fs-sparse L1).
 Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
 
+`shell` already owns spatial membrane/bending mechanics (the legacy CST/DKT
+faceted operator), independently specified A/D sections, preload and radiation
+projection. `shell::mitc` adds the separate shear-deformable triangle for IRP
+M1.2-W1a. The legacy `assemble`, DKT stiffness and drilling constant are
+unchanged. This new path never selects DKT as a fallback.
+
+The new element uses Lee, Lee & Bathe (2014),
+doi:10.1016/j.compstruc.2014.02.005, Eqs.6–8 and 15–17/Table 1: three physical
+displacement/rotation nodes, two internal director rotations, cubic rotation
+interpolation, six interior covariant shear tying points and the published
+nonzero twisting distance 1/10000. The bubble stiffness is statically
+condensed; the consistent mass undergoes the same congruence. This is a
+small-strain, faceted-midsurface, linear-through-thickness shear-shell rung,
+not an exact curved CAD chart, finite-strain shell, or 3-D solid cross-check.
+Geometric director-gradient terms enter bending, including the displacement
+terms needed to preserve rigid rotation on a curved component.
+
+`NodalDirectors::new` requires explicit finite unit directions, a positive
+minimum facet-normal dot product, alignment with every incident facet, and
+the same bound between incident facets. A kink outside that declared envelope
+refuses; junctions require separate component surfaces and an external tie.
+No director smoothing or material defaults are inferred. `ShearShellSection`
+requires independent positive-definite membrane A, bending D and transverse
+shear, an explicit positive shear correction, areal mass, rotary inertia and
+material angle. Its solid constructor requires BOTH transverse shear moduli.
+There is no material B coupling or loss. New material-frame trigonometry uses
+`fs_math::det`; `SheetMatrix::rotated` is not used by this path.
+
+Supports declare a component mask and either global axes or a proper local
+orthonormal frame. Repeated support declarations on one node refuse rather
+than silently combining frames. A `MitcShellModel` retains an ordinary
+`ShellModel` pencil plus the nodal support-coordinate transforms. Its
+`project_load` and `expand` are the work-conjugate physical-coordinate map;
+the pencil's `dof_map` alone must not be read as global coordinates when a
+local support is present. `modes_shell(model.pencil(), ...)` uses the existing
+eigensolver, and physical mode observation must use `expand`. The separate
+wrapper avoids changing the legacy public `ShellModel` layout or existing
+CST/DKT consumers.
+
+The third nodal rotation is a numerical drilling gauge. The physical element
+depends on `theta × director` and is blind to a node's director-axis rotation.
+One area-averaged relative membrane-spin equation per node fixes that gauge;
+unlike multiple facet penalties, it does not impose incompatible spin targets
+on a curved fan. Its positive strength is an explicit numerical input, not a
+material modulus. Both the flat patch and every finest benchmark carry the
+required alpha=1e-4/1e-3/1e-2 displacement-insensitivity check (<1e-4 relative).
+Consistent translational and enriched rotary mass is explicit; `ShellMass`
+also exposes a separate nodal lumped choice. Drilling inertia is a coordinate
+regularization, not a measured physical loss or rotational material law.
+
+`MitcBudget` checks node/triangle caps before assembly allocation. Assembly
+polls its caller cancellation callback before work, per element and per
+quadrature point and publishes no partial pencil. Static solves use only
+`fs-sparse` factorization, refuse singular/indefinite stiffness and require
+an independently recomputed true residual <=1e-8 relative. They project full
+world force/moment loads and return full world displacement/rotation values.
+Sequential COO assembly and deterministic math specify same-host replay;
+no new cross-ISA bitwise claim is made.
+
+The new source tests are `shell::mitc::tests` and
+`tests/shell_obstacle_course.rs`: G0 rigid motions, membrane/bending/shear
+patches, mass, directors, support frames and cap/cap+1 refusals; G1 thin-limit
+square-plate convergence; G3 node relabeling; and the Scordelis–Lo, pinched
+cylinder, cut-out hemisphere and full-hemisphere G2 pointwise envelopes.
+The obstacle target retains regular and counter-seeded distorted ladders,
+observed orders and drilling checks. A separate report logs the legacy DKT
+model-form rung without making it the acceptance path. Source presence and
+formatting do not establish those numerical results: central native execution,
+the existing CST/DKT and piano/percussion tests, both WASM cones and the
+unchanged string golden remain required before .47/DEF-11 qualification.
+
 ## Public types and semantics
 - `PlateSection::{orthotropic, isotropic}` — bending rigidity D from
   engineering constants: `D11 = E1h³/12(1−ν12ν21)` etc., `D33 = G12h³/12`.
@@ -275,13 +346,12 @@ These are discretization checks, not a
 measured piano bridge-mobility or high-band convergence claim.
 
 ## No-claim boundaries
-- Bending only: NO membrane/in-plane DOFs, so no drilling stabilization is
-  needed or present, and in-plane load paths (shear walls, arch action) are
-  out of scope. Coupled membrane-bending (curved/arched shells, flat-facet
-  shell assembly) is a recorded follow-up (bead kj3s0 closed with this as
-  a trigger-deferred item; tracked under 3ez8g.12.2), triggered by the first curved-geometry
-  consumer.
-- MITC4 quads are NOT implemented (DKT triangles only); trigger-deferred
+- The planar `PlateChart` is bending-only; the spatial `shell` owner has
+  membrane/in-plane DOFs and relative-spin stabilization. Its CST/DKT model
+  is a Kirchhoff model-form rung; the separate MITC3+ path supplies transverse
+  shear. Neither source presence nor a pointwise obstacle-course band proves
+  arbitrary shell geometry, instrument acoustics or measured material fidelity.
+- MITC4 quads are NOT implemented (the new shear path is triangular); trigger-deferred
   at the kj3s0 close (lands with the first quad-mesh consumer or a DKT
   validation gap). Arbitrary 2D planar triangulations are admitted via
   `PlateMesh::from_unstructured` (bead 3ez8g.3.9); 3D CAD surface/solid meshes
