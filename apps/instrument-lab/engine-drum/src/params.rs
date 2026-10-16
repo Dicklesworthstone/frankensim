@@ -43,7 +43,7 @@ pub struct HeadParams {
     pub tension_n_m: f64,
     /// Viscous modal damping ratio (q'' + 2 zeta w q' + w^2 q = f).
     pub damping_ratio: f64,
-    /// Optional equilibrated affine tension variation (zero = uniform).
+    /// Equilibrated affine and harmonic tension variation (zero = uniform).
     pub tension_variation: TensionVariation,
 }
 
@@ -160,9 +160,19 @@ fn vector<const N: usize>(key: &str, value: &Value) -> Result<[f64; N], Refusal>
         _ => Err(bad(format!("\"{key}\" must be an array of exactly {N} finite numbers"))),
     }
 }
-fn variation(key: &str, value: &Value) -> Result<TensionVariation, Refusal> {
+fn variation(
+    key: &str,
+    value: &Value,
+    existing: TensionVariation,
+) -> Result<TensionVariation, Refusal> {
     let v: [f64; 7] = vector(key, value)?;
-    Ok(TensionVariation { constant_n_m: [v[0], v[1], v[2]], gradient_n_m2: [v[3], v[4], v[5], v[6]], ..TensionVariation::default() })
+    // The affine control owns seven coefficients, not the independent lug
+    // harmonics. Preserve those on partial live edits and in either JSON order.
+    Ok(TensionVariation {
+        constant_n_m: [v[0], v[1], v[2]],
+        gradient_n_m2: [v[3], v[4], v[5], v[6]],
+        ..existing
+    })
 }
 fn harmonics(key: &str, value: &Value) -> Result<[[f64;2]; TENSION_HARMONIC_COUNT], Refusal> {
     match value {
@@ -201,8 +211,12 @@ impl DrumParams {
                 }
                 "batter_damping_ratio" => self.batter.damping_ratio = scalar(k, value)?,
                 "resonant_damping_ratio" => self.resonant.damping_ratio = scalar(k, value)?,
-                "batter_tension_variation" => self.batter.tension_variation = variation(k, value)?,
-                "resonant_tension_variation" => self.resonant.tension_variation = variation(k, value)?,
+                "batter_tension_variation" => {
+                    self.batter.tension_variation = variation(k, value, self.batter.tension_variation)?;
+                }
+                "resonant_tension_variation" => {
+                    self.resonant.tension_variation = variation(k, value, self.resonant.tension_variation)?;
+                }
                 "batter_tension_harmonics" => self.batter.tension_variation.harmonics_n_m = harmonics(k,value)?,
                 "resonant_tension_harmonics" => self.resonant.tension_variation.harmonics_n_m = harmonics(k,value)?,
                 "young_pa" => self.young_pa = scalar(k, value)?,
@@ -405,9 +419,14 @@ mod tests {
         let d=DrumParams::default();
         let mut values=vec![0.0;2*TENSION_HARMONIC_COUNT];
         values[2*(10-2)]=120.0; values[2*(10-2)+1]=-35.0;
-        let json=format!("{{\"batter_tension_harmonics\":{}}}",json::numbers(&values));
+        let json=format!(
+            "{{\"batter_tension_harmonics\":{},\"batter_tension_variation\":[20,10,2,1,-2,3,-4]}}",
+            json::numbers(&values)
+        );
         let tuned=d.overlay_json(&json).unwrap();
         assert_eq!(tuned.batter.tension_variation.harmonics_n_m[8],[120.0,-35.0]);
+        assert_eq!(tuned.batter.tension_variation.constant_n_m, [20.0, 10.0, 2.0]);
+        assert_eq!(tuned.batter.tension_variation.gradient_n_m2, [1.0, -2.0, 3.0, -4.0]);
         tuned.validate().unwrap();
         let again=DrumParams::default().overlay_json(&tuned.to_json()).unwrap();
         assert_eq!(tuned,again);
@@ -416,6 +435,71 @@ mod tests {
         assert_eq!(plain.heads[0].film.model.m,built.heads[0].film.model.m);
         assert!(plain.heads[0].modes.iter().zip(&built.heads[0].modes)
             .any(|(a,b)|(a.lambda-b.lambda).abs()>1e-8*a.lambda.max(1.0)));
+    }
+
+
+    #[test]
+    fn affine_and_harmonic_controls_commute_for_both_heads() {
+        let initial = DrumParams::default();
+        let values: Vec<_> = (0..2 * TENSION_HARMONIC_COUNT)
+            .map(|i| i as f64 - 10.0)
+            .collect();
+        for head in ["batter", "resonant"] {
+            let affine = format!("\"{head}_tension_variation\":[20,10,2,1,-2,3,-4]");
+            let harmonic = format!("\"{head}_tension_harmonics\":{}", json::numbers(&values));
+            let affine_first = initial.overlay_json(&format!("{{{affine},{harmonic}}}")).unwrap();
+            let harmonic_first = initial.overlay_json(&format!("{{{harmonic},{affine}}}")).unwrap();
+            let sequential = initial
+                .overlay_json(&format!("{{{harmonic}}}")).unwrap()
+                .overlay_json(&format!("{{{affine}}}")).unwrap();
+            assert_eq!(affine_first, harmonic_first);
+            assert_eq!(affine_first, sequential);
+            affine_first.validate().unwrap();
+            assert!(!initial.same_structure(&affine_first));
+            let round_trip = initial.overlay_json(&sequential.to_json()).unwrap();
+            assert_eq!(round_trip, sequential);
+            assert!(round_trip.same_structure(&sequential));
+            let (changed, unchanged, original) = if head == "batter" {
+                (sequential.batter, sequential.resonant, initial.resonant)
+            } else {
+                (sequential.resonant, sequential.batter, initial.batter)
+            };
+            assert_eq!(unchanged, original);
+            assert_eq!(changed.tension_variation.constant_n_m, [20.0, 10.0, 2.0]);
+            assert_eq!(changed.tension_variation.gradient_n_m2, [1.0, -2.0, 3.0, -4.0]);
+            for (pair, expected) in changed.tension_variation.harmonics_n_m.iter()
+                .zip(values.chunks_exact(2)) {
+                assert_eq!(pair.as_slice(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_zero_edits_clear_only_the_requested_tension_component() {
+        let mut initial = DrumParams::default();
+        for head in [&mut initial.batter, &mut initial.resonant] {
+            head.tension_variation.constant_n_m = [20.0, 10.0, 2.0];
+            head.tension_variation.gradient_n_m2 = [1.0, -2.0, 3.0, -4.0];
+            head.tension_variation.harmonics_n_m = [[12.0, -3.0]; TENSION_HARMONIC_COUNT];
+        }
+        let zeros = json::numbers(&[0.0; 2 * TENSION_HARMONIC_COUNT]);
+        for name in ["batter", "resonant"] {
+            let mut expected = initial;
+            let head = if name == "batter" { &mut expected.batter } else { &mut expected.resonant };
+            head.tension_variation.constant_n_m = [0.0; 3];
+            head.tension_variation.gradient_n_m2 = [0.0; 4];
+            let affine_reset = initial.overlay_json(&format!(
+                "{{\"{name}_tension_variation\":[0,0,0,0,0,0,0]}}"
+            )).unwrap();
+            assert_eq!(affine_reset, expected);
+            let mut expected = initial;
+            let head = if name == "batter" { &mut expected.batter } else { &mut expected.resonant };
+            head.tension_variation.harmonics_n_m = [[0.0; 2]; TENSION_HARMONIC_COUNT];
+            let harmonic_reset = initial.overlay_json(&format!(
+                "{{\"{name}_tension_harmonics\":{zeros}}}"
+            )).unwrap();
+            assert_eq!(harmonic_reset, expected);
+        }
     }
 
     #[test]
