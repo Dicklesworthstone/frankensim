@@ -16,6 +16,7 @@ readonly -a EXPECTED_TESTS=(
   "fs-vvreg:instrument_data:row_permutation_is_lookup_invariant"
   "fs-vvreg:instrument_data:committed_ledger_parses_and_every_artifact_resolves"
   "fs-vvreg:instrument_data:committed_ledger_has_no_orphan_instrument_data_files"
+  "fs-vvreg:instrument_data:committed_clarinet_grader_receipts_are_fixture_only"
   "fs-vvreg:instrument_data:committed_ledger_seed_covers_existing_music_sources"
   "fs-vvreg:instrument_data:falsifier_licence_mismatch_is_caught"
 )

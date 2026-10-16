@@ -688,6 +688,59 @@ fn committed_ledger_has_no_orphan_instrument_data_files() {
     );
 }
 
+#[test]
+fn committed_clarinet_grader_receipts_are_fixture_only() {
+    let start = Instant::now();
+    let text = committed_text();
+    let ledger = committed();
+    for (source_id, path) in [
+        (
+            "clarinet-grader-repro-ad22351b4",
+            "data/instruments/grades/clarinet/m7.1-w1-repro-ad22351b4.json",
+        ),
+        (
+            "clarinet-grader-repro-aeb0c36ee",
+            "data/instruments/grades/clarinet/m7.1-w1-repro-aeb0c36ee.json",
+        ),
+        (
+            "clarinet-grader-receipt-log",
+            "data/instruments/grades/clarinet/receipt.jsonl",
+        ),
+    ] {
+        let row = ledger.by_source(source_id).expect("grader provenance row");
+        assert_eq!(row.item, "M7.1-W1");
+        assert_eq!(row.kind, DataKind::Method);
+        assert_eq!(row.decision, Decision::FixtureOnly);
+        assert_eq!(row.digitization, Digitization::Authored);
+        assert_eq!(row.uncertainty, UncertaintyStatement::Unstated);
+        assert_eq!(row.licence, "FrankenSim-Original-Work");
+        assert_eq!(row.redistribution, Redistribution::Permitted);
+        let artifact = ArtifactRef::Table(path.into());
+        assert_eq!(row.artifacts, vec![artifact.clone()]);
+        assert_eq!(ledger.for_artifact(&artifact), vec![row]);
+        assert!(retained_path(&ledger, Path::new(path)));
+        // G3: removing the source row restores the original orphan, even
+        // though the receipt still exists. No directory exclusion hides it.
+        let prefix = format!("{source_id}\t");
+        let without_source = text
+            .lines()
+            .filter(|line| !line.starts_with(&prefix))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let missing = parse_instrument_data_ledger(&without_source).unwrap();
+        assert!(!retained_path(&missing, Path::new(path)));
+        event(
+            "committed_clarinet_grader_receipts_are_fixture_only",
+            &[source_id],
+            Some(Path::new(path)),
+            1,
+            1,
+            start,
+            "pass",
+        );
+    }
+}
+
 const SEED_PACKS: &[&str] = &[
     "cane-arundo-damping-scielo-mr20170795",
     "cane-arundo-reedblank-mdpi-ma18122759",
