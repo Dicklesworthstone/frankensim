@@ -205,10 +205,7 @@ fn resolve_load(
 fn duct_axial_length(duct: &Duct) -> f64 {
     duct.segments
         .iter()
-        .map(|s| match *s {
-            Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => length,
-            Segment::ToneHole { .. } => 0.0,
-        })
+        .map(Segment::axial_length)
         .sum()
 }
 

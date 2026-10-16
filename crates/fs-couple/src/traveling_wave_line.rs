@@ -93,11 +93,7 @@ impl TravelingWaveLine {
         let length: f64 = physics
             .segments
             .iter()
-            .map(|s| match *s {
-                fs_duct::Segment::Cylinder { length, .. }
-                | fs_duct::Segment::Cone { length, .. } => length,
-                fs_duct::Segment::ToneHole { .. } => 0.0,
-            })
+            .map(fs_duct::Segment::axial_length)
             .sum();
         if !(length > 0.0) {
             return Err(TravelingWaveError::Invalid {

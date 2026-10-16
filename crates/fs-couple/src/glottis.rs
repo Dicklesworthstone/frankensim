@@ -254,6 +254,7 @@ impl GlottalIsland {
             .segments
             .first()
             .and_then(|s| match *s {
+                fs_duct::Segment::Profile { ref profile, .. } => Some(profile.inlet_radius()),
                 fs_duct::Segment::Cylinder { radius, .. } => Some(radius),
                 fs_duct::Segment::Cone { inlet_radius, .. } => Some(inlet_radius),
                 fs_duct::Segment::ToneHole { .. } => None,

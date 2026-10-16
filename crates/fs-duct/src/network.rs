@@ -453,7 +453,7 @@ pub fn network_chain_two_port(
                 let rv = crate::segment_wave(gas, hole_radius, omega, chimney_loss)?.shear_number;
                 ([C64::ONE, C64::ZERO, admittance, C64::ONE], rv)
             } else {
-                chain_owned(&Duct { segments: vec![*s] }, gas, omega, loss, zref)?
+                chain_owned(&Duct { segments: vec![s.clone()] }, gas, omega, loss, zref)?
             };
             m = crate::mul2(m, block);
             shear = shear.min(rv);
@@ -539,10 +539,7 @@ impl DuctNetwork {
             let mut length = 0.0;
             for s in &e.duct.segments {
                 validate_segment(s)?;
-                length += match *s {
-                    Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => length,
-                    Segment::ToneHole { .. } => 0.0,
-                };
+                length += s.axial_length();
             }
             if !length.is_finite() || length <= 0.0 {
                 return Err(bad("network edge needs positive finite axial length"));

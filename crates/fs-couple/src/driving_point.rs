@@ -157,10 +157,7 @@ fn duct_axial_length(physics: &Duct) -> f64 {
     physics
         .segments
         .iter()
-        .map(|s| match *s {
-            Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => length,
-            Segment::ToneHole { .. } => 0.0,
-        })
+        .map(Segment::axial_length)
         .sum()
 }
 
@@ -181,6 +178,9 @@ pub fn sealed_volume_compliance_gain(
     let mut volume = 0.0_f64;
     for seg in &physics.segments {
         match *seg {
+            // The optional closed-volume shortcut has no profile-volume
+            // quadrature. Full frequency-domain propagation remains available.
+            Segment::Profile { .. } => return None,
             Segment::Cylinder { radius, length } => {
                 volume += core::f64::consts::PI * radius * radius * length;
             }

@@ -30,6 +30,81 @@ use fs_material::gas::{GasSpec, GasState};
 
 const TAU: f64 = core::f64::consts::TAU;
 
+/// G2: the existing Duct chain embeds smooth DATA between cylinders;
+/// an independent closed-form ABCD product carries the same table load.
+#[test]
+fn dt_007_smooth_profile_chain() {
+    use fs_duct::{RadiusProfile, RiccatiSteps, TabulatedLoad, input_impedance_tabulated};
+    use fs_math::{c64::C64, det};
+    use std::sync::Arc;
+    let start=std::time::Instant::now();
+    let gas=air();
+    let (r0,flare,length)=(0.005,2.0,0.5);
+    let rout=r0*det::exp(flare*length/2.0);
+    let profile=Arc::new(RadiusProfile::exponential(r0,flare,length).unwrap());
+    let load=C64::new(1.5e6,0.0);
+    let table=TabulatedLoad::try_new(vec![TAU*10.0,TAU*1500.0],vec![load,load],"analytic resistive mouth",0.0).unwrap();
+    let mul=|a:[C64;4],b:[C64;4]| [
+        a[0]*b[0]+a[1]*b[2],a[0]*b[1]+a[1]*b[3],
+        a[2]*b[0]+a[3]*b[2],a[2]*b[1]+a[3]*b[3],
+    ];
+    let cylinder=|radius:f64,l:f64,w:f64| {
+        let theta=w*l/gas.sound_speed;
+        let z=gas.density*gas.sound_speed/(core::f64::consts::PI*radius*radius);
+        [C64::from_re(det::cos(theta)),C64::new(0.0,-z*det::sin(theta)),
+         C64::new(0.0,-det::sin(theta)/z),C64::from_re(det::cos(theta))]
+    };
+    let exact=|w:f64| {
+        // p=exp(-m*x/2)y, y''+beta^2*y=0, and U=S*p'/(i*w*rho).
+        let b2=(w/gas.sound_speed)*(w/gas.sound_speed)-flare*flare/4.0;
+        let (c,s)=if b2>0.0 {
+            let b=det::sqrt(b2); (det::cos(b*length),det::sin(b*length)/b)
+        } else if b2<0.0 {
+            let b=det::sqrt(-b2); let e=det::exp(b*length);
+            ((e+1.0/e)/2.0,(e-1.0/e)/(2.0*b))
+        } else { (1.0,length) };
+        let area=core::f64::consts::PI*r0*r0;
+        let e=det::exp(flare*length/2.0);
+        let horn=[C64::from_re(e*(c-flare*s/2.0)),C64::new(0.0,-w*gas.density/area/e*s),
+            C64::new(0.0,-e*area*w/(gas.density*gas.sound_speed*gas.sound_speed)*s),
+            C64::from_re((c+flare*s/2.0)/e)];
+        let m=mul(mul(cylinder(r0,0.05,w),horn),cylinder(rout,0.04,w));
+        (m[0]*load+m[1])/(m[2]*load+m[3])
+    };
+    // Independent log-parabolic peak positions on the declared uniform
+    // frequency grid, applied equally to the two computed impedance rows.
+    let peaks=|rows:&[C64]|->Vec<f64> {
+        rows.windows(3).enumerate().filter_map(|(i,row)| {
+            let (a,b,c)=(det::ln(row[0].abs()),det::ln(row[1].abs()),det::ln(row[2].abs()));
+            if b>a && b>c {
+                let offset=0.5*(a-c)/(a-2.0*b+c);
+                Some(40.0+960.0*(i as f64+1.0+offset)/99.0)
+            } else {None}
+        }).collect()
+    };
+    let expected:Vec<_>=(0..100).map(|i|exact(TAU*(40.0+960.0*f64::from(i)/99.0))).collect();
+    let expected_peaks=peaks(&expected);
+    assert!(expected_peaks.len()>=2);
+    for steps in [1024,2048,4096,8192] {
+        let duct=Duct {segments:vec![Segment::Cylinder {radius:r0,length:0.05},
+            Segment::Profile {profile:Arc::clone(&profile),steps:RiccatiSteps(steps)},
+            Segment::Cylinder {radius:rout,length:0.04}]};
+        let mut worst=0.0_f64;
+        let mut observed=Vec::new();
+        for (i,&want) in expected.iter().enumerate() {
+            let omega=TAU*(40.0+960.0*i as f64/99.0);
+            let got=input_impedance_tabulated(&duct,&gas,omega,LossModel::Lossless,&table,None).unwrap();
+            let error=(got.impedance-want).abs()/want.abs();
+            worst=worst.max(error); observed.push(got.impedance);
+        }
+        let actual_peaks=peaks(&observed);
+        assert_eq!(actual_peaks.len(),expected_peaks.len());
+        let peak_error=actual_peaks.iter().zip(&expected_peaks).map(|(a,b)|(a/b-1.0).abs()).fold(0.0,f64::max);
+        assert!(worst<1e-9 && peak_error<1e-9,"steps={steps}: Zerr={worst:e}, peakerr={peak_error:e}");
+        eprintln!("{{\"suite\":\"fs-duct\",\"case\":\"dt-007\",\"profile\":\"exp\",\"inputs\":\"analytic cylinder .05m, exp S0*exp(2x) .5m, cylinder .04m; resistive TabulatedLoad1.5e6 Pa s/m3; air293.15K\",\"axis\":\"Magnus steps\",\"rung\":{steps},\"steps\":{steps},\"observed\":{worst:e},\"z_rel_err\":{worst:e},\"peak_rel_err\":{peak_error:e},\"oracle\":\"independent closed-form ABCD product\",\"tol\":1e-9,\"verdict\":\"pass\",\"elapsed_us\":{}}}",start.elapsed().as_micros());
+    }
+}
+
 /// G2: the additive exact-WH termination transports through a lossless
 /// cylinder according to the independent closed-form acoustic two-port.
 #[test]

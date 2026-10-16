@@ -69,6 +69,9 @@
 //! multimodal structure by ~15 cents.
 
 pub mod modal;
+/// Smooth plane-wave profiles and declared integration/slice axes.
+pub mod profile;
+pub use profile::{ConeSlices, RadiusProfile, RiccatiSteps};
 /// Generic frequency-domain duct graphs, loops and labelled N-port impedances.
 pub mod network;
 /// Exact thin-wall unflanged radiation load below the axisymmetric cutoff.
@@ -94,6 +97,8 @@ pub const MAX_RADIATION_KA: f64 = 1.0;
 /// Typed refusals with stable `FS-DUCT-*` codes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DuctError {
+    /// A smooth-profile step-boundary cancellation published no partial port.
+    Cancelled { completed_steps: usize },
     /// The exact LS dominant-mode solution stops at the first axisymmetric cutoff.
     LevineSchwingerCutoff {
         /// Requested acoustic radius.
@@ -134,6 +139,8 @@ pub enum DuctError {
 impl core::fmt::Display for DuctError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            DuctError::Cancelled { completed_steps } => write!(f,
+                "FS-DUCT-CANCELLED: profile propagation stopped after {completed_steps} complete steps"),
             DuctError::LevineSchwingerCutoff { ka, cutoff } => write!(f,
                 "FS-DUCT-LS-CUTOFF: ka = {ka:.12e} must be below first axisymmetric cutoff {cutoff:.12e}"),
             DuctError::BadParameter { what } => write!(f, "FS-DUCT-BAD-PARAMETER: {what}"),
@@ -198,8 +205,13 @@ fn hole_sigma(state: HoleState) -> f64 {
 }
 
 /// One duct segment. Lengths and radii in metres.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Segment {
+    /// Shared validated smooth radius data, with an explicit integration axis.
+    Profile {
+        profile: std::sync::Arc<RadiusProfile>,
+        steps: RiccatiSteps,
+    },
     /// Straight cylinder.
     Cylinder {
         /// Bore radius [m].
@@ -243,6 +255,7 @@ impl Segment {
     fn validate(&self) -> Result<(), DuctError> {
         let ok = |v: f64| v > 0.0 && v.is_finite();
         let valid = match *self {
+            Segment::Profile { steps, .. } => return steps.validate(),
             Segment::Cylinder { radius, length } => ok(radius) && ok(length),
             Segment::Cone {
                 inlet_radius,
@@ -272,6 +285,7 @@ impl Segment {
 
     fn mean_radius(&self) -> f64 {
         match *self {
+            Segment::Profile { ref profile, .. } => profile.eval(profile.length()/2.0),
             Segment::Cylinder { radius, .. } => radius,
             Segment::Cone {
                 inlet_radius,
@@ -286,6 +300,7 @@ impl Segment {
     #[must_use]
     pub fn inlet_radius(&self) -> f64 {
         match *self {
+            Segment::Profile { ref profile, .. } => profile.inlet_radius(),
             Segment::Cylinder { radius, .. } => radius,
             Segment::Cone { inlet_radius, .. } => inlet_radius,
             Segment::ToneHole { bore_radius, .. } => bore_radius,
@@ -296,9 +311,19 @@ impl Segment {
     #[must_use]
     pub fn outlet_radius(&self) -> f64 {
         match *self {
+            Segment::Profile { ref profile, .. } => profile.outlet_radius(),
             Segment::Cylinder { radius, .. } => radius,
             Segment::Cone { outlet_radius, .. } => outlet_radius,
             Segment::ToneHole { bore_radius, .. } => bore_radius,
+        }
+    }
+
+    /// Physical axial extent; a compact shunt adds no main-bore length.
+    pub fn axial_length(&self) -> f64 {
+        match *self {
+            Segment::Profile { ref profile, .. } => profile.length(),
+            Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => length,
+            Segment::ToneHole { .. } => 0.0,
         }
     }
 }
@@ -609,7 +634,7 @@ fn basis_pair(segment: &Segment, wave: &SegmentWave, t: f64, forward: bool) -> (
             let dp = (C64::new(0.0, sign) * k - C64::from_re(1.0 / x)) * p;
             (p, dp.scale(area) * series)
         }
-        Segment::ToneHole { .. } => {
+        Segment::ToneHole { .. } | Segment::Profile { .. } => {
             unreachable!("tone holes are handled by the chain loop, not the basis builder")
         }
     }
@@ -857,12 +882,18 @@ fn tone_hole_t_junction(
 }
 
 /// Enough spherical substations that each slice's `|Δr|/r` is
-/// about 1/5, clamped to `[2, 12]`. A lossless cone with no wall
+/// about 1/5, with at least two and a named refusal above the cap.
+/// A lossless cone with no wall
 /// stays one transfer (the exact `e^{±ikx}/x` 2-port).
-fn cone_loss_slices(r_in: f64, r_out: f64) -> usize {
-    let rmin = r_in.min(r_out).max(1.0e-9);
-    let n = ((r_out - r_in).abs() / (0.2 * rmin)).ceil() as usize;
-    n.clamp(2, 12)
+fn cone_loss_slices(r_in: f64, r_out: f64) -> Result<usize, DuctError> {
+    ConeSlices::Auto.count(r_in,r_out)
+}
+
+// Single midpoint material seam shared by the cone kernel and its
+// bitwise ZK cross-check. Constitutive arithmetic stays in segment_wave.
+fn cone_midpoint_wave(state:&GasState,ra:f64,rb:f64,omega:f64,loss:LossModel)
+    ->Result<SegmentWave,DuctError> {
+    segment_wave(state,f64::midpoint(ra,rb),omega,loss)
 }
 
 /// Cascaded spherical 2-ports, each with `k, Zc` at the slice's
@@ -877,7 +908,15 @@ fn cone_lossy_matrix(
     loss: LossModel,
     wall: Option<&WallPin>,
 ) -> Result<([C64; 4], f64), DuctError> {
-    let n = cone_loss_slices(inlet_radius, outlet_radius);
+    cone_lossy_matrix_axis(inlet_radius,outlet_radius,length,state,omega,loss,wall,ConeSlices::Auto)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cone_lossy_matrix_axis(
+    inlet_radius:f64,outlet_radius:f64,length:f64,state:&GasState,omega:f64,
+    loss:LossModel,wall:Option<&WallPin>,slices:ConeSlices,
+) -> Result<([C64;4],f64),DuctError> {
+    let n = slices.count(inlet_radius,outlet_radius)?;
     let dx = length / n as f64;
     let mut m = [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE];
     let mut min_rv = f64::INFINITY;
@@ -887,7 +926,7 @@ fn cone_lossy_matrix(
         let ra = inlet_radius + (outlet_radius - inlet_radius) * t0;
         let rb = inlet_radius + (outlet_radius - inlet_radius) * t1;
         let r_loc = f64::midpoint(ra, rb);
-        let mut wave = segment_wave(state, r_loc, omega, loss)?;
+        let mut wave = cone_midpoint_wave(state, ra, rb, omega, loss)?;
         if let Some(w) = wall {
             let slope = (rb - ra) / dx;
             let slant = (1.0 + slope * slope).sqrt();
@@ -912,7 +951,7 @@ fn cone_lossy_matrix(
 fn segment_matrix(segment: &Segment, wave: &SegmentWave) -> Result<[C64; 4], DuctError> {
     let length = match *segment {
         Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => length,
-        Segment::ToneHole { .. } => {
+        Segment::ToneHole { .. } | Segment::Profile { .. } => {
             unreachable!("tone holes are handled by the chain loop, not the basis builder")
         }
     };
@@ -1188,10 +1227,7 @@ fn input_impedance_core(
                 hole_sites.push((acc, hole_radius * sigma.sqrt(), bore_radius));
             }
         } else {
-            acc += match *segment {
-                Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => length,
-                Segment::ToneHole { .. } => 0.0,
-            };
+            acc += segment.axial_length();
         }
     }
     // Chain matrix input -> outlet.
@@ -1199,7 +1235,14 @@ fn input_impedance_core(
     let mut min_rv = f64::INFINITY;
     let mut hole_i = 0usize;
     for segment in &duct.segments {
-        let s = if let Segment::ToneHole {
+        let s = if let Segment::Profile { ref profile,steps } = *segment {
+            if wall.is_some() {
+                return Err(DuctError::BadParameter {what:"smooth profile wall pins require a resolved wall image"});
+            }
+            let t=profile::profile_matrix(profile,state,omega,loss,steps)?;
+            min_rv=min_rv.min(t.min_shear_number);
+            t.matrix
+        } else if let Segment::ToneHole {
             hole_radius,
             chimney_height,
             bore_radius,
@@ -1647,7 +1690,9 @@ mod tests {
         for (n,err) in [12,24,48].into_iter().zip(errors) {
             println!("{{\"case\":\"narrow_cone_bessel_no_fallback\",\"inputs\":\"analytic 0.5..2mm cone, 50Hz, length 0.1m\",\"axis\":\"slices\",\"rung\":{n},\"observed\":{err:e},\"oracle\":\"96-slice A coefficient\",\"order\":{order},\"tol\":\"decreasing; order 1.5..3; final <1%\",\"verdict\":\"pass\",\"elapsed_ms\":{}}}",start.elapsed().as_millis());
         }
-        let (production,_)=cone_lossy_matrix(0.0005,0.002,0.1,&gas,omega,LossModel::Bessel,None).unwrap();
+        // The former capped Auto path was exactly 12 slices here. Pin
+        // that discretization explicitly now that Auto is uncapped.
+        let (production,_)=cone_lossy_matrix_axis(0.0005,0.002,0.1,&gas,omega,LossModel::Bessel,None,ConeSlices::Fixed(12)).unwrap();
         assert!((production[0]-values[0][0]).abs()/production[0].abs()<1e-13);
     }
 
@@ -2719,7 +2764,7 @@ mod tone_hole_tests {
             state: HoleState::Open,
         };
         let with_hole = Duct {
-            segments: vec![up, hole, down],
+            segments: vec![up.clone(), hole, down.clone()],
         };
         let z_full = input_impedance(
             &with_hole,
@@ -2734,7 +2779,7 @@ mod tone_hole_tests {
         // parallel with the shunt, then back through the upstream tube.
         let z_down = input_impedance(
             &Duct {
-                segments: vec![down],
+                segments: vec![down.clone()],
             },
             &state,
             omega,
@@ -2773,14 +2818,14 @@ mod tone_hole_tests {
         let peak = |hole_state: HoleState| -> f64 {
             let duct = Duct {
                 segments: vec![
-                    up,
+                    up.clone(),
                     Segment::ToneHole {
                         hole_radius: 3.0e-3,
                         chimney_height: 2.0e-3,
                         bore_radius: bore,
                         state: hole_state,
                     },
-                    down,
+                    down.clone(),
                 ],
             };
             first_peak_hz(&duct, 80.0, 400.0)

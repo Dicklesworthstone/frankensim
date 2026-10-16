@@ -78,6 +78,7 @@ impl RegionalDuct {
                 regions.push(Region { duct: Duct { segments: Vec::new() }, gas: *gas });
             }
             match *segment {
+                Segment::Profile { .. } => {}
                 Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => {
                     if !length.is_finite() || length <= 0.0 {
                         return Err(invalid("regional axial lengths must be positive and finite"));
@@ -103,13 +104,10 @@ impl RegionalDuct {
                     }
                 }
             }
-            regions.last_mut().expect("run just admitted").duct.segments.push(*segment);
+            regions.last_mut().expect("run just admitted").duct.segments.push(segment.clone());
         }
         let one_way_time_s = regions.iter().map(|region| {
-            let length: f64 = region.duct.segments.iter().map(|segment| match *segment {
-                Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => length,
-                Segment::ToneHole { .. } => 0.0,
-            }).sum();
+            let length: f64 = region.duct.segments.iter().map(Segment::axial_length).sum();
             length / region.gas.sound_speed
         }).sum::<f64>();
         if !one_way_time_s.is_finite() || one_way_time_s <= 0.0 {

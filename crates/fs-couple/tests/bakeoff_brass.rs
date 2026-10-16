@@ -103,7 +103,7 @@ fn shared_cards_digest() -> fs_blake3::ContentHash {
                     bytes.extend_from_slice(&outlet_radius.to_bits().to_le_bytes());
                     bytes.extend_from_slice(&length.to_bits().to_le_bytes());
                 }
-                Segment::ToneHole { .. } => unreachable!("brass fixtures have no holes"),
+                Segment::ToneHole { .. } | Segment::Profile { .. } => unreachable!("brass fixtures use only cylinders/cones"),
             }
         }
     }

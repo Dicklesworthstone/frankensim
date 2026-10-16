@@ -160,14 +160,14 @@ pub struct ModalResponse {
 /// Slices for one cone segment in the modal staircase: at least the
 /// scalar path's loss-slice count, at least one per 2% radius change,
 /// and at least eight — the ladder discloses the effect of doubling.
-fn staircase_slices(inlet: f64, outlet: f64) -> usize {
+fn staircase_slices(inlet: f64, outlet: f64) -> Result<usize,DuctError> {
     let ratio = if outlet > inlet {
         outlet / inlet
     } else {
         inlet / outlet
     };
     let by_ratio = (50.0 * det::ln(ratio)).ceil() as usize;
-    crate::cone_loss_slices(inlet, outlet).max(by_ratio).max(8)
+    Ok(crate::cone_loss_slices(inlet, outlet)?.max(by_ratio).max(8))
 }
 
 /// Flatten a `Duct` into uniform stations (cylinders pass through; cones
@@ -185,7 +185,7 @@ fn stations_of(duct: &Duct, extra_slices: usize) -> Result<Vec<ModalStation>, Du
                 outlet_radius,
                 length,
             } => {
-                let slices = staircase_slices(inlet_radius, outlet_radius) * extra_slices.max(1);
+                let slices = staircase_slices(inlet_radius, outlet_radius)? * extra_slices.max(1);
                 let dl = length / slices as f64;
                 for i in 0..slices {
                     let t = (i as f64 + 0.5) / slices as f64;
@@ -196,6 +196,11 @@ fn stations_of(duct: &Duct, extra_slices: usize) -> Result<Vec<ModalStation>, Du
             Segment::ToneHole { .. } => {
                 return Err(DuctError::BadParameter {
                     what: "the multimodal image has no tone holes (v1 no-claim; use the plane-wave image)",
+                });
+            }
+            Segment::Profile { .. } => {
+                return Err(DuctError::BadParameter {
+                    what: "smooth profiles require continuous multimodal propagation; use the plane-wave image",
                 });
             }
         }

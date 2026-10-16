@@ -12,6 +12,69 @@ same object, and every medium property derives from
 
 ## Public types and semantics
 
+### Smooth plane-wave profiles (IRP M2.1-W3a)
+
+`profile::RadiusProfile` admits SI data through `exponential(r0,area_flare,L)`
+(`S=S0 exp(area_flare*x)`), `power(r0,x0,exponent,L)`
+(`r=r0 ((x0+x)/x0)^exponent`) and `spline(stations,endpoint_slopes)`.
+Spline stations remain accessible unchanged; None chooses natural ends and
+Some([left,right]) supplies dr/dx for a clamped C2 cubic. Every cubic span
+must have a strictly positive Bernstein control hull. This is conservative
+positivity admission, not clipping or a certificate of specimen uncertainty.
+The measured-data owner (e.g. fs-scenario's BoreProfile::stations()) retains
+source records and uncertainties; this acoustic image consumes its SI values.
+
+`Segment::Profile { profile: Arc<RadiusProfile>, steps: RiccatiSteps }` embeds
+that data in the existing Duct chain. Segment is Clone, no longer Copy; no
+second duct type or global profile registry exists. `Segment::axial_length`
+also includes profiles. The profile carries no material defaults: propagation
+takes the caller's GasState, frequency, loss model, mouth load and step axis.
+
+`profile_matrix` integrates [p,Z_ref U] backward with fourth-order, two-node
+Magnus and a traceless 2x2 exponential. Forward off-diagonal coefficients are
+`i k Zc/Z_ref` and `i k Z_ref/Zc` under exp(-i omega t), from the existing
+`segment_wave` at BOTH quadrature radii. Exact Bessel ZK therefore has one
+constitutive owner. `profile_impedance` returns inlet p/U and mouth-pressure/
+inlet-flow and mouth-flow/inlet-flow ratios; (+infinity,0) is a rigid load.
+Transfer evolution crosses scalar impedance poles without dividing by p or U.
+Extreme transfer conditioning/overflow still refuses; arbitrary long strongly
+evanescent chains need the separate scattering-composition work item.
+
+`RiccatiSteps` and `ConeSlices::{Auto,Fixed}` admit 1..=65536. Auto preserves
+the old minimum-two, relative-radius rule whenever it was <=12, removes its
+upper clamp and refuses above the named cap. `cone_matrix` returns the actual
+slice count. Existing 12-slice narrow-cone comparison now requests Fixed(12)
+explicitly; Auto is a different, live axis. Cylinder/tone-hole golden arithmetic
+is unchanged. Profile wall pins and the multimodal profile image refuse by
+name: this module converges to Webster's plane-wave equation, not to 3-D.
+
+Determinism is fixed-order sequential det:: arithmetic. `profile_matrix_controlled`
+polls a caller cancellation closure before each step and returns
+FS-DUCT-CANCELLED with the completed count, publishing no partial transfer.
+The ordinary profile/chain calls are synchronous, with no ambient Cx claim.
+
+G2 profile tests compare 100-frequency exponential and order-3/2 Bessel-horn
+impedances to independent analytic solutions at1e-9, including exponential
+cutoff/evanescence. Constant cylinders (lossless/Bessel) and lossless cones
+match existing exact bases at1e-12. Finite lossy-cone coefficients vary with
+radius, so that image is checked against the continuous limit with the cone
+slice ladder, not asserted equal to one frozen-radius cone. G1 fs-mms gates
+Magnus order4, clamped-spline station order4 and spherical-slice order2 within
+0.2; mandatory coarse rungs remain visible and finer slices reach1e-8.
+`duct_conformance::dt_007_smooth_profile_chain` checks the existing chain with
+a TabulatedLoad against independent ABCD impedance/peak positions at1e-9.
+G0 cap/cap+1, invalid data, cancellation and G5 bitwise-repeat tests accompany
+these claims. Native verification is required before promotion.
+
+Coordinator ruling2858 corrects two incompatible literal bead criteria:
+closed-form exponential and lossless conical two-ports satisfy1e-12; finite
+lossy cones instead converge under the2±0.2 gate, with a bitwise check of
+every midpoint material sample against the shared exact-ZK owner and of the
+resulting64-slice cascade. The4/8/16/32/64 rungs remain, extended through4096
+so the actual finest pair meets1e-8. No acceptance band is widened.
+
+### Segment chains and terminations
+
 `levine_schwinger::{LsQuadrature,LsSolution,levine_schwinger,
 levine_schwinger_impedance}` adds the original thin-wall unflanged-pipe
 Wiener–Hopf solution (Levine & Schwinger, Phys. Rev. 73, 383–406, p.383 and

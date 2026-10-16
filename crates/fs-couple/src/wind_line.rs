@@ -478,11 +478,7 @@ fn realize_hold_line(
     let length: f64 =
         duct.segments
             .iter()
-            .map(|s| match *s {
-                fs_duct::Segment::Cylinder { length, .. }
-                | fs_duct::Segment::Cone { length, .. } => length,
-                fs_duct::Segment::ToneHole { .. } => 0.0,
-            })
+            .map(fs_duct::Segment::axial_length)
             .sum();
     let delay_samples = 2.0 * length / gas.sound_speed / dt;
     let mut opts = FitOptions::new(12);
