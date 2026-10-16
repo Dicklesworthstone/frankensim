@@ -233,7 +233,13 @@ fn decision_consistency_rules_refuse_each_violation() {
         vec![(10, "admit"), (6, "unknown")],
         vec![(10, "admit-facts-only"), (7, "refused")],
         vec![(9, "figure-digitized"), (7, "facts-only"), (8, "stated")],
-        vec![(9, "figure-digitized"), (8, "unstated")],
+        vec![(10, "admit"), (9, "figure-digitized"), (8, "unstated")],
+        vec![
+            (10, "admit-facts-only"),
+            (9, "figure-digitized"),
+            (8, "unstated"),
+        ],
+        vec![(9, "figure-digitized"), (8, "unstated"), (13, "-")],
         vec![(9, "table-transcribed"), (13, "-")],
     ];
     for decision in ["refuse", "pending-hunt", "pending-permission"] {
@@ -356,6 +362,111 @@ fn identifiers_dates_and_artifact_paths_are_checked() {
         bad.len(),
         start,
     );
+}
+
+#[test]
+fn figure_digitization_requires_error_for_acceptance_but_records_fixtures() {
+    let start = Instant::now();
+    let mut fields = fixture_fields();
+    fields[9] = "figure-digitized".to_owned();
+    fields[13] =
+        "GRAPH-READ; digitization error unstated; not admissible for acceptance renders".to_owned();
+    assert_eq!(
+        parse_fields(&fields).unwrap().rows()[0].decision,
+        Decision::FixtureOnly
+    );
+    let mut refusals = 0;
+    for decision in [Decision::Admit, Decision::AdmitFactsOnly] {
+        fields[10] = decision.tag().to_owned();
+        assert_eq!(
+            parse_fields(&fields).unwrap_err().kind,
+            LedgerErrorKind::Inconsistent(
+                "acceptance of figure digitization requires stated or bounded error"
+            )
+        );
+        refusals += 1;
+        for uncertainty in [UncertaintyStatement::Stated, UncertaintyStatement::Bounded] {
+            fields[8] = uncertainty.tag().to_owned();
+            assert_eq!(parse_fields(&fields).unwrap().rows()[0].decision, decision);
+        }
+        fields[8] = UncertaintyStatement::Unstated.tag().to_owned();
+    }
+    fields[10] = Decision::FixtureOnly.tag().to_owned();
+    for notes in ["-", " - "] {
+        fields[13] = notes.to_owned();
+        assert_eq!(
+            parse_fields(&fields).unwrap_err().kind,
+            LedgerErrorKind::Inconsistent("non-authored fixture requires a note naming its defect")
+        );
+        refusals += 1;
+    }
+    fields[13] = String::new();
+    assert_eq!(
+        parse_fields(&fields).unwrap_err().kind,
+        LedgerErrorKind::MissingField("notes")
+    );
+    refusals += 1;
+    schema_event(
+        "figure_digitization_requires_error_for_acceptance_but_records_fixtures",
+        refusals,
+        start,
+    );
+}
+
+#[test]
+fn committed_graph_read_packs_are_fixture_only() {
+    let start = Instant::now();
+    let text = committed_text();
+    let ledger = parse_instrument_data_ledger(&text).unwrap();
+    for slug in [
+        "music-wire-nbs-c447",
+        "bronze-gunmetal-damping-rsic508",
+        "brass-yellow-half-hard-damping-nasa-tn-d1467",
+    ] {
+        // Generic artifact lookups deliberately expose provenance, including
+        // fixtures. They confer no acceptance authority.
+        let rows = ledger.for_artifact(&ArtifactRef::Matdb(slug.to_owned()));
+        assert_eq!(rows.len(), 1, "expected one source decision for {slug}");
+        let row = rows[0];
+        assert_eq!(row.decision, Decision::FixtureOnly);
+        assert_ne!(row.decision, Decision::Admit);
+        assert_ne!(row.decision, Decision::AdmitFactsOnly);
+        assert_eq!(row.digitization, Digitization::FigureDigitized);
+        assert_eq!(row.uncertainty, UncertaintyStatement::Unstated);
+        assert!(
+            row.notes
+                .contains("GRAPH-READ in properties.tsv; digitization error unstated")
+        );
+        assert!(row.notes.contains(
+            "not admissible for acceptance renders until re-digitized with a stated bound"
+        ));
+
+        let original = text
+            .lines()
+            .skip(2)
+            .find(|line| line.split('\t').next() == Some(row.source_id.as_str()))
+            .unwrap();
+        let mut fields: Vec<_> = original.split('\t').map(str::to_owned).collect();
+        for decision in [Decision::Admit, Decision::AdmitFactsOnly] {
+            fields[10] = decision.tag().to_owned();
+            assert_eq!(
+                parse_fields(&fields).unwrap_err().kind,
+                LedgerErrorKind::Inconsistent(
+                    "acceptance of figure digitization requires stated or bounded error"
+                ),
+                "fixture promotion must refuse for {slug}"
+            );
+        }
+        event(
+            "committed_graph_read_packs_are_fixture_only",
+            &[&row.source_id],
+            Some(Path::new(INSTRUMENT_DATA_LEDGER_LOCATOR)),
+            1,
+            2,
+            start,
+            "pass",
+        );
+    }
 }
 
 #[test]

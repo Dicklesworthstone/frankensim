@@ -429,16 +429,25 @@ fn parse_row(fields: &[&str]) -> Result<LedgerRow, LedgerErrorKind> {
         ));
     }
     if row.digitization == Digitization::FigureDigitized
-        && (row.redistribution != Redistribution::Permitted
-            || row.uncertainty == UncertaintyStatement::Unstated)
+        && row.redistribution != Redistribution::Permitted
     {
         return Err(LedgerErrorKind::Inconsistent(
-            "figure digitization requires permission and stated or bounded error",
+            "figure digitization requires permitted redistribution",
+        ));
+    }
+    // M8-W1 disposition (Agent Mail 2493): preserve unbounded historical
+    // transcriptions as fixtures, while refusing their acceptance promotion.
+    if row.digitization == Digitization::FigureDigitized
+        && matches!(row.decision, Decision::Admit | Decision::AdmitFactsOnly)
+        && row.uncertainty == UncertaintyStatement::Unstated
+    {
+        return Err(LedgerErrorKind::Inconsistent(
+            "acceptance of figure digitization requires stated or bounded error",
         ));
     }
     if row.decision == Decision::FixtureOnly
         && row.digitization != Digitization::Authored
-        && row.notes == "-"
+        && row.notes.trim() == "-"
     {
         return Err(LedgerErrorKind::Inconsistent(
             "non-authored fixture requires a note naming its defect",

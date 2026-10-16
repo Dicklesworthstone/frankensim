@@ -14,7 +14,13 @@ It preserves domain-manifest licence tokens (including the legacy non-SPDX
 `NASA-NTRS-Public-Use-Permitted`), checks vocabulary, dates, 4096-byte field
 caps, source uniqueness, specimen identity and retention/digitization rules,
 and returns source-sorted, order-independent lookups. `unknown` licences are
-pending-only; non-authored fixtures require a defect note. Licence catalogue
+pending-only; non-authored fixtures require a defect note. Figure digitization
+requires permitted redistribution, and `admit`/`admit-facts-only` additionally
+require stated or bounded error. Per M8-W1 disposition (Agent Mail 2493),
+historical graph-read data with unstated error may be recorded as `fixture-only`
+with the defect named; they remain inadmissible for acceptance renders. Generic
+source/artifact lookups include these fixtures and are not acceptance queries;
+consumers must check the decision before use. Licence catalogue
 membership, permission authenticity and the truth of a defect note are not
 proved by syntax. G0/G3 `tests/instrument_data.rs` binds the committed rows to
 matdb licences/redistribution, acoustic cases/absences and retained paths, checks

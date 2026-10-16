@@ -10,6 +10,8 @@ readonly -a EXPECTED_TESTS=(
   "fs-vvreg:instrument_data:duplicate_source_id_refuses"
   "fs-vvreg:instrument_data:field_byte_cap_and_cap_plus_one"
   "fs-vvreg:instrument_data:decision_consistency_rules_refuse_each_violation"
+  "fs-vvreg:instrument_data:figure_digitization_requires_error_for_acceptance_but_records_fixtures"
+  "fs-vvreg:instrument_data:committed_graph_read_packs_are_fixture_only"
   "fs-vvreg:instrument_data:identifiers_dates_and_artifact_paths_are_checked"
   "fs-vvreg:instrument_data:row_permutation_is_lookup_invariant"
   "fs-vvreg:instrument_data:committed_ledger_parses_and_every_artifact_resolves"
