@@ -1495,16 +1495,17 @@ pub fn baffled_piston_face_impedance(
     Ok(result)
 }
 
-/// Historical polar-cell rule, retained only as a G3 discretization oracle.
-/// The three former owners differed only in equivalent-disc self arithmetic
-/// and the final p/U conversion. All three are accumulated in the same pass.
+/// One historical polar-cell rule, retained as a G3 discretization comparison.
+/// The former bem, phs and thin_plate copies had the same cells and kernel;
+/// their equivalent-disc self terms and p/U conversion were algebraically
+/// equivalent. They are one algorithm, not three independent oracles.
 #[cfg(test)]
-fn historical_ring_pistons(
+fn historical_ring_piston(
     radius: f64,
     k: f64,
     medium: Medium,
     rings: usize,
-) -> Result<[C64; 3], HelmholtzError> {
+) -> Result<C64, HelmholtzError> {
     if !(radius > 0.0 && radius.is_finite() && k > 0.0 && k.is_finite()) || rings == 0 {
         return Err(HelmholtzError::BadParameter {
             what: "piston radius, wavenumber, and ring count must be positive and finite",
@@ -1533,38 +1534,25 @@ fn historical_ring_pistons(
     }
     let omega_rho = k * medium.sound_speed * medium.density;
     let total_area = core::f64::consts::PI * radius * radius;
-    let mut mean_p = [C64::ZERO; 3];
+    let mut mean_p = C64::ZERO;
     for (i, &(xi, ai)) in cells.iter().enumerate() {
-        let mut integral = [C64::ZERO; 3];
+        let mut integral = C64::ZERO;
         for (j, &(yj, aj)) in cells.iter().enumerate() {
             if i == j {
                 let ac = (ai / core::f64::consts::PI).sqrt();
                 let self_term = (expik(k * ac) - C64::ONE) * C64::new(0.0, k).recip();
-                let split = C64::new(
-                    det::sin(k * ac) / k.max(1e-18),
-                    (1.0 - det::cos(k * ac)) / k.max(1e-18),
-                );
-                for (slot, value) in integral.iter_mut().zip([self_term, split, split]) {
-                    *slot = *slot + value.scale(2.0 * core::f64::consts::PI);
-                }
+                integral = integral + self_term.scale(2.0 * core::f64::consts::PI);
             } else {
                 let dx = xi[0] - yj[0];
                 let dy = xi[1] - yj[1];
                 let r = (dx * dx + dy * dy).sqrt();
-                let value = expik(k * r).scale(aj / r);
-                for slot in &mut integral {
-                    *slot = *slot + value;
-                }
+                integral = integral + expik(k * r).scale(aj / r);
             }
         }
         // p(x_i) = -(i omega rho / 2 pi) v INT e^{ikr}/r dA, v = 1.
-        for (slot, value) in mean_p.iter_mut().zip(integral) {
-            let p_i = value * C64::new(0.0, -omega_rho / (2.0 * core::f64::consts::PI));
-            *slot = *slot + p_i.scale(ai / total_area);
-        }
+        let p_i = integral * C64::new(0.0, -omega_rho / (2.0 * core::f64::consts::PI));
+        mean_p = mean_p + p_i.scale(ai / total_area);
     }
-    // Historical fs-phs published p/U; compare in common p/v units.
-    mean_p[1] = C64::new(mean_p[1].re / total_area, mean_p[1].im / total_area).scale(total_area);
     Ok(mean_p)
 }
 
@@ -2692,44 +2680,104 @@ mod tests {
         );
     }
 
-    /// G3: retain all three former quadrature algebras as test-only oracles.
-    /// The weakly singular self-cell approximation limits convergence order;
-    /// fit and report it, rather than claiming a smooth-quadrature order.
+    /// G3: compare the one historical polar rule and an independent smooth
+    /// disk-overlap integral with the closed form. Equivalent-disc replacement
+    /// of the singular near field is not a smooth midpoint rule: the leading
+    /// O(h) contribution can cancel other errors on coarse meshes. In particular
+    /// 8 -> 16 rings reverses before 16 -> 32 -> 64 improves. This is not an
+    /// observed error floor, nor evidence for three independent implementations.
     #[test]
-    fn ring_quadratures_converge_to_closed_form() {
+    fn historical_ring_and_overlap_integral_match_piston() {
         let start = std::time::Instant::now();
         let air = Medium::air();
-        let oracle = baffled_piston_face_impedance(1.0, 1.0, air).unwrap();
-        let mut errors: [Vec<f64>; 3] = core::array::from_fn(|_| Vec::new());
+        let closed = baffled_piston_face_impedance(1.0, 1.0, air).unwrap();
+        let relative_error = |candidate: C64| (candidate - closed).abs() / closed.abs();
+        let mut errors = Vec::new();
         for rings in [8, 16, 32, 64] {
-            let values = historical_ring_pistons(1.0, 1.0, air, rings).unwrap();
-            for (index, z) in values.into_iter().enumerate() {
-                let err = (z - oracle).abs() / oracle.abs();
-                if let Some(previous) = errors[index].last() {
-                    assert!(err < *previous);
-                }
-                errors[index].push(err);
-                println!(
-                    "{{\"case\":\"ring_quadratures_converge_to_closed_form\",\"inputs\":\"analytic unit disk, ka=1; historical owner {index}\",\"axis\":\"rings\",\"rung\":{rings},\"observed\":{err:e},\"oracle\":\"Bessel-Struve\",\"tol\":\"record-only; final rung < 0.01\",\"verdict\":\"pass\",\"elapsed_ms\":{}}}",
-                    start.elapsed().as_millis()
-                );
-            }
-        }
-        for (index, values) in errors.into_iter().enumerate() {
-            assert!(values[3] < 0.01, "owner {index}: {values:?}");
-            let ladder = fs_mms::RefinementLadder::new(
-                vec![1.0 / 8.0, 1.0 / 16.0, 1.0 / 32.0, 1.0 / 64.0],
-                values,
-            )
-            .unwrap();
-            let fit = fs_mms::fit_order(&ladder);
+            let value = historical_ring_piston(1.0, 1.0, air, rings).unwrap();
+            let err = relative_error(value);
+            errors.push(err);
             println!(
-                "{{\"case\":\"ring-order\",\"inputs\":\"historical owner {index}; analytic disk\",\"axis\":\"rings\",\"observed\":{},\"rms_residual\":{},\"tol\":\"record-only\",\"verdict\":\"pass\",\"elapsed_ms\":{}}}",
-                fit.observed,
-                fit.rms_residual,
+                "{{\"case\":\"historical-ring-piston\",\"inputs\":\"unit disk, ka=1; one historical algorithm\",\"axis\":\"rings\",\"rung\":{rings},\"observed\":{err:e},\"oracle\":\"Bessel-Struve\",\"tol\":\"record coarse reversal; final rung < 0.002\",\"verdict\":\"measured\",\"elapsed_ms\":{}}}",
                 start.elapsed().as_millis()
             );
+            if rings == 64 {
+                assert!(err < 0.002, "final historical error: {errors:?}");
+                // The same acceptance band must reject a planted 1% load error.
+                assert!(relative_error(value.scale(1.01)) > 0.002);
+            }
         }
+        assert!(errors[1] > errors[0], "coarse cancellation: {errors:?}");
+        assert!(errors[3] < errors[2] && errors[2] < errors[1]);
+        let ladder = fs_mms::RefinementLadder::new(
+            vec![1.0 / 16.0, 1.0 / 32.0, 1.0 / 64.0],
+            errors[1..].to_vec(),
+        )
+        .unwrap();
+        let fit = fs_mms::fit_order(&ladder);
+        println!(
+            "{{\"case\":\"historical-ring-order\",\"inputs\":\"unit disk, ka=1; 16/32/64 rings\",\"axis\":\"rings\",\"observed\":{},\"rms_residual\":{},\"tol\":\"record-only\",\"verdict\":\"measured\",\"elapsed_ms\":{}}}",
+            fit.observed,
+            fit.rms_residual,
+            start.elapsed().as_millis()
+        );
+
+        // Independently reduce the double Rayleigh integral by convolution:
+        // A(r) = area of overlap of two unit disks separated by r,
+        // Z_face = -i k rho c / pi * INT_0^2 A(r) exp(i k r) dr.
+        // Set r=2 sin(theta): A=2(pi/2-theta-sin(theta)cos(theta)).
+        // This removes the square-root endpoint and the 1/r singularity;
+        // composite Simpson now has a smooth, fourth-order integrand. It calls
+        // neither J1/H1 nor the historical equivalent-disc cell kernel.
+        let overlap_integral = |intervals: usize| {
+            let step = core::f64::consts::FRAC_PI_2 / intervals as f64;
+            let mut sum = C64::ZERO;
+            for index in 0..=intervals {
+                let theta = index as f64 * step;
+                let (s, c) = (det::sin(theta), det::cos(theta));
+                let overlap = 2.0 * (core::f64::consts::FRAC_PI_2 - theta - s * c);
+                let weight = if index == 0 || index == intervals {
+                    1.0
+                } else if index % 2 == 1 {
+                    4.0
+                } else {
+                    2.0
+                };
+                sum = sum + expik(2.0 * s).scale(overlap * 2.0 * c * weight);
+            }
+            sum * C64::new(0.0, -rho_c() * step / (3.0 * core::f64::consts::PI))
+        };
+        let mut overlap_errors = Vec::new();
+        for intervals in [64, 128, 256, 512] {
+            let value = overlap_integral(intervals);
+            let err = relative_error(value);
+            if let Some(previous) = overlap_errors.last() {
+                assert!(err < *previous);
+            }
+            overlap_errors.push(err);
+            println!(
+                "{{\"case\":\"disk-overlap-piston\",\"inputs\":\"unit disk, ka=1; independent Rayleigh convolution\",\"axis\":\"Simpson intervals\",\"rung\":{intervals},\"observed\":{err:e},\"oracle\":\"Bessel-Struve\",\"tol\":\"decreasing; final rung < 1e-10\",\"verdict\":\"measured\",\"elapsed_ms\":{}}}",
+                start.elapsed().as_millis()
+            );
+            if intervals == 512 {
+                assert!(err < 1e-10);
+                assert!(relative_error(value.scale(1.01)) > 1e-10);
+                assert!((value - closed.scale(1.01)).abs() / value.abs() > 1e-10);
+            }
+        }
+        let ladder = fs_mms::RefinementLadder::new(
+            vec![1.0 / 64.0, 1.0 / 128.0, 1.0 / 256.0, 1.0 / 512.0],
+            overlap_errors,
+        )
+        .unwrap();
+        let fit = fs_mms::fit_order(&ladder);
+        assert!((3.8..4.2).contains(&fit.observed), "{fit:?}");
+        println!(
+            "{{\"case\":\"disk-overlap-order\",\"inputs\":\"unit disk, ka=1\",\"axis\":\"Simpson intervals\",\"observed\":{},\"rms_residual\":{},\"tol\":\"3.8..4.2\",\"verdict\":\"pass\",\"elapsed_ms\":{}}}",
+            fit.observed,
+            fit.rms_residual,
+            start.elapsed().as_millis()
+        );
     }
 
     #[test]

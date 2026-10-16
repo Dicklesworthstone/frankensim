@@ -1,4 +1,4 @@
-use super::super::historical_ring_pistons;
+use super::super::historical_ring_piston;
 use super::*;
 use core::f64::consts::TAU;
 
@@ -31,7 +31,7 @@ fn modal_piston_matches_existing_owner_and_independent_small_ka_terms() {
     for ka in [0.02, 0.05, 0.1] {
         let k = ka / radius;
         let z = prepared.impedance(k * air.sound_speed, air).unwrap()[0].scale(1.0 / area);
-        let existing = historical_ring_pistons(radius, k, air, 24).unwrap()[0];
+        let existing = historical_ring_piston(radius, k, air, 24).unwrap();
         assert!((z - existing).abs() / existing.abs() < 2e-12, "piston identity at ka={ka}");
         let normalized = z.scale(1.0 / (air.density * air.sound_speed));
         let resistance = 0.5 * ka * ka;
