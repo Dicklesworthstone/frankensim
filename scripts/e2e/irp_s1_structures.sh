@@ -11,6 +11,11 @@ readonly -a EXPECTED_TESTS=(
   g1_free_free_bar_eigen_ladder
 )
 readonly REDUCE_TEST='reduce::reduce_tests::rl_005_tet10_cantilever_card'
+readonly -a HEX_TESTS=(
+  g1_roller_block_exact_p_modes_order
+  g2_slender_square_bar_free_free_vs_timoshenko
+  g3_hex27_vs_tet10_same_bar
+)
 readonly -a OUTLINE_TESTS=(
   g0_cdt_conforms_to_outline_and_holes
   g0_quality_bound
@@ -35,6 +40,7 @@ list() {
   local test
   for test in "${EXPECTED_TESTS[@]}"; do printf 'fs-solid:tet10::%s\n' "$test"; done
   printf 'fs-solid:lib::%s\n' "$REDUCE_TEST"
+  for test in "${HEX_TESTS[@]}"; do printf 'fs-solid:hex::%s\n' "$test"; done
   for test in "${SHELL_TESTS[@]}"; do printf 'fs-plate:shell_obstacle_course::%s\n' "$test"; done
   for test in "${OUTLINE_TESTS[@]}"; do printf 'fs-mesh:planar_outline::%s\n' "$test"; done
   for test in "${ARCHING_TESTS[@]}"; do printf 'fs-plate:arched_outline_shell::%s\n' "$test"; done
@@ -48,6 +54,9 @@ check() {
     }
   done
   grep -Fq 'fn rl_005_tet10_cantilever_card(' "${REPO_ROOT}/crates/fs-solid/src/reduce/tests.rs"
+  for test in "${HEX_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-solid/tests/hex.rs" || return 1
+  done
   for test in "${SHELL_TESTS[@]}"; do
     grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-plate/tests/shell_obstacle_course.rs" || {
       printf 'missing shell test: %s\n' "$test" >&2; return 1;
@@ -76,7 +85,7 @@ run() {
   git_head="$(git -C "$REPO_ROOT" rev-parse HEAD)"
   host="$(uname -n)"
   printf 'IRP S1 live receipt: %s\n' "$output_dir"
-  local -a tet_command lib_command shell_command outline_command arching_command
+  local -a tet_command lib_command shell_command outline_command arching_command hex_command
   if [[ -n "${IRP_S1_TET10_BIN:-}" && -n "${IRP_S1_LIB_BIN:-}" && -n "${IRP_S1_SHELL_BIN:-}" ]]; then
     tet_command=("$IRP_S1_TET10_BIN" --exact --test-threads=1 --show-output "${EXPECTED_TESTS[@]}")
     lib_command=("$IRP_S1_LIB_BIN" --exact --test-threads=1 --show-output "$REDUCE_TEST")
@@ -96,6 +105,11 @@ run() {
   else
     arching_command=(cargo test --locked -j 12 -p fs-plate --test arched_outline_shell -- --exact --test-threads=1 --show-output "${ARCHING_TESTS[@]}")
   fi
+  if [[ -n "${IRP_S1_HEX_BIN:-}" ]]; then
+    hex_command=("$IRP_S1_HEX_BIN" --exact --test-threads=1 --show-output "${HEX_TESTS[@]}")
+  else
+    hex_command=(cargo test --locked -j 12 -p fs-solid --test hex -- --exact --test-threads=1 --show-output "${HEX_TESTS[@]}")
+  fi
   {
     printf 'host=%s\ngit_head=%s\nstarted_utc=%s\n' "$host" "$git_head" "$started"
     printf '%q ' "${tet_command[@]}"; printf '\n'
@@ -103,6 +117,7 @@ run() {
     printf '%q ' "${shell_command[@]}"; printf '\n'
     printf '%q ' "${outline_command[@]}"; printf '\n'
     printf '%q ' "${arching_command[@]}"; printf '\n'
+    printf '%q ' "${hex_command[@]}"; printf '\n'
   } >"${output_dir}/command.txt"
   export CARGO_BUILD_JOBS=12
   export CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
@@ -122,8 +137,11 @@ run() {
   (cd "$REPO_ROOT" && "${arching_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
   status=$?
   if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  (cd "$REPO_ROOT" && "${hex_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
   set -e
-  for test in "${EXPECTED_TESTS[@]}" "$REDUCE_TEST" "${SHELL_TESTS[@]}" "${OUTLINE_TESTS[@]}" "${ARCHING_TESTS[@]}"; do
+  for test in "${EXPECTED_TESTS[@]}" "$REDUCE_TEST" "${SHELL_TESTS[@]}" "${OUTLINE_TESTS[@]}" "${ARCHING_TESTS[@]}" "${HEX_TESTS[@]}"; do
     if ! grep -Fqx "test ${test} ... ok" "${output_dir}/stdout.log" "${output_dir}/stderr.log"; then
       printf 'missing or failed: %s\n' "$test" >&2; missing=1
     fi

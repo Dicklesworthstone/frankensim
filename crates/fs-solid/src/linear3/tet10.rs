@@ -11,11 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fs_exec::Cx;
 use fs_feec::highorder::simplex::duffy_quadrature;
-use fs_sparse::Coo;
 
 use super::{
     TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetMaterialField, determinant3,
-    free_dof_map, inverse3, maximum_edge_length, signed_tet_determinant, validate_connectivity,
+    inverse3, maximum_edge_length, signed_tet_determinant, validate_connectivity,
 };
 
 /// `v0..v3`, then `(0,1),(1,2),(0,2),(0,3),(1,3),(2,3)`.
@@ -266,29 +265,17 @@ impl QuadraticTetProblem<'_> {
     /// quadrature point is a cancellation boundary. No partial result escapes.
     pub fn assemble(&self, cx: &Cx<'_>) -> Result<TetElasticAssembly, TetElasticError> {
         self.validate(cx)?;
-        let (free_dofs, reduced) = free_dof_map(
-            self.nodes_m.len(),
-            self.fixed_dofs,
-            self.budget.maximum_free_dofs,
-        )?;
-        let n = free_dofs.len();
-        let mut stiffness = Coo::new(n, n);
-        let mut mass = Coo::new(n, n);
         let kq = duffy_quadrature(self.quadrature.stiffness_points_per_dir);
         let mq = duffy_quadrature(self.quadrature.mass_points_per_dir);
-        let mut total_mass_kg = 0.0;
-        let mut minimum_scaled_jacobian = f64::INFINITY;
-        let mut element_volumes_m3 = Vec::with_capacity(self.elements.len());
-        for (element, tet) in self.elements.iter().enumerate() {
-            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-            let nodes = tet.map(|i| self.nodes_m[i]);
-            let h = maximum_edge_length([nodes[0], nodes[1], nodes[2], nodes[3]]);
-            let material = self.materials.at(element);
-            let mut ke = [[0.0; 30]; 30];
-            let mut me = [[0.0; 30]; 30];
-            let mut volume = 0.0;
-            for (point, &(lambda, weight)) in kq.iter().enumerate() {
-                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        super::isoparametric::assemble::<10, 30, _>(
+            self.nodes_m,
+            self.elements,
+            self.materials,
+            self.fixed_dofs,
+            self.budget,
+            &kq,
+            &mq,
+            |nodes, lambda, element, point| {
                 let p = tet10_point(
                     nodes,
                     lambda,
@@ -296,125 +283,17 @@ impl QuadraticTetProblem<'_> {
                     element,
                     point,
                 )?;
-                minimum_scaled_jacobian =
-                    minimum_scaled_jacobian.min(p.determinant_m3 / (h * h * h));
-                let b = mandel_b(p.gradients);
-                let mut cb = [[0.0; 30]; 6];
-                for i in 0..6 {
-                    for j in 0..30 {
-                        for k in 0..6 {
-                            cb[i][j] += material.stiffness_mandel_pa[i][k] * b[k][j];
-                        }
-                    }
-                }
-                let dv = weight * p.determinant_m3;
-                for i in 0..30 {
-                    for j in i..30 {
-                        let entry: f64 = (0..6).map(|k| b[k][i] * cb[k][j]).sum();
-                        ke[i][j] += dv * entry;
-                    }
-                }
-            }
-            for (point, &(lambda, weight)) in mq.iter().enumerate() {
-                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-                let p = tet10_point(
-                    nodes,
-                    lambda,
-                    self.budget.minimum_scaled_jacobian,
-                    element,
-                    kq.len() + point,
-                )?;
-                minimum_scaled_jacobian =
-                    minimum_scaled_jacobian.min(p.determinant_m3 / (h * h * h));
-                let dv = weight * p.determinant_m3;
-                volume += dv;
-                for a in 0..10 {
-                    for b in a..10 {
-                        let v = material.density_kg_m3 * dv * p.shapes[a] * p.shapes[b];
-                        for c in 0..3 {
-                            me[3 * a + c][3 * b + c] += v;
-                        }
-                    }
-                }
-            }
-            for i in 0..30 {
-                for j in i..30 {
-                    if !ke[i][j].is_finite() || !me[i][j].is_finite() {
-                        return Err(TetElasticError::InvalidMaterial {
-                            what: "nonfinite quadratic element matrix",
-                        });
-                    }
-                    ke[j][i] = ke[i][j];
-                    me[j][i] = me[i][j];
-                }
-            }
-            for i in 0..30 {
-                let Some(row) = reduced[3 * tet[i / 3] + i % 3] else {
-                    continue;
-                };
-                for j in 0..30 {
-                    let Some(col) = reduced[3 * tet[j / 3] + j % 3] else {
-                        continue;
-                    };
-                    if ke[i][j] != 0.0 {
-                        stiffness.push(row, col, ke[i][j]);
-                    }
-                    if me[i][j] != 0.0 {
-                        mass.push(row, col, me[i][j]);
-                    }
-                }
-            }
-            element_volumes_m3.push(volume);
-            total_mass_kg += material.density_kg_m3 * volume;
-        }
-        if !(total_mass_kg.is_finite() && total_mass_kg > 0.0) {
-            return Err(TetElasticError::InvalidMaterial {
-                what: "nonfinite quadratic total mass",
-            });
-        }
-        let stiffness = stiffness.assemble();
-        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-        let mass = mass.assemble();
-        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-        if (0..n).any(|row| {
-            stiffness
-                .row(row)
-                .1
-                .iter()
-                .chain(mass.row(row).1)
-                .any(|v| !v.is_finite())
-        }) {
-            return Err(TetElasticError::InvalidMaterial {
-                what: "nonfinite assembled quadratic matrix",
-            });
-        }
-        Ok(TetElasticAssembly {
-            stiffness,
-            mass,
-            free_dofs,
-            total_mass_kg,
-            minimum_scaled_jacobian,
-            element_volumes_m3,
-        })
+                let h = maximum_edge_length([nodes[0], nodes[1], nodes[2], nodes[3]]);
+                Ok(super::isoparametric::Point {
+                    shapes: p.shapes,
+                    gradients: p.gradients,
+                    determinant: p.determinant_m3,
+                    scaled_jacobian: p.determinant_m3 / (h * h * h),
+                })
+            },
+            cx,
+        )
     }
-}
-
-fn mandel_b(gradients: [[f64; 3]; 10]) -> [[f64; 30]; 6] {
-    let mut b = [[0.0; 30]; 6];
-    for (a, g) in gradients.iter().enumerate() {
-        let c = 3 * a;
-        let s = core::f64::consts::FRAC_1_SQRT_2;
-        b[0][c] = g[0];
-        b[1][c + 1] = g[1];
-        b[2][c + 2] = g[2];
-        b[3][c] = s * g[1];
-        b[3][c + 1] = s * g[0];
-        b[4][c + 1] = s * g[2];
-        b[4][c + 2] = s * g[1];
-        b[5][c] = s * g[2];
-        b[5][c + 2] = s * g[0];
-    }
-    b
 }
 
 /// A caller's source-surface projection; no surface or material is guessed.

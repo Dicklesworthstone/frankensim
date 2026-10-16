@@ -74,6 +74,7 @@ pub use hyper3::{
     HyperLoadStep, HyperTetError, HyperTetProblem, HyperTetSettings, HyperTetSolution,
 };
 pub use linear::{Formulation, LinearProblem, PlaneKind};
+pub use linear3::hex::{HexConnectivity, HexElasticProblem, HexFamily, HexQuadrature};
 pub use linear3::{
     MandelStiffness6, TetAssemblyBudget, TetDeformedMesh, TetElasticAssembly, TetElasticError,
     TetElasticMaterial, TetLinearElasticProblem, TetMaterialField, TetStaticSolveConfig,

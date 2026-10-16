@@ -34,6 +34,50 @@ The signed Jacobian must be finite, positive and above the scaled quality floor
 at every stiffness and mass quadrature point. The P1 arithmetic, thermal loads,
 thermal prestress and stress-recovery paths remain unchanged.
 
+`linear3::hex` (IRP M1.3-W1b) adds the fully integrated isoparametric HEX20
+serendipity and HEX27 tensor-Q2 families. They use the **same** const-generic
+Mandel/consistent-mass/COO assembler extracted from TET10, the same material
+field, fixed-DOF map, `TetElasticAssembly` carrier and fs-modal eigen path.
+Canonical node coordinates and Gmsh-12/17 permutations live in L2 fs-mesh's
+`structured_hex`; fs-solid now has a runtime dependency on that owner. The
+historical `maximum_tetrahedra` budget counts hex elements too. Family and
+connectivity cardinality must agree. Shared corners/edges/HEX27 face centres
+have one global node per topological entity; duplicate cells and conflicting
+node roles refuse. This checks conformity, not arbitrary cell intersections.
+
+`HexQuadrature` requires 3..=12 Gauss-Legendre points per direction for both
+operators. A 2x2x2 rule refuses `UnderIntegrated`: a test-only contraction
+counts its HEX20 hourglass modes and cross-checks full-rule stiffness. Mass
+is always consistent, SPD on admitted test meshes; HEX20 corner row sums are
+negative and row-sum lumping is not available. Every stiffness/mass Gauss
+point checks signed Jacobian and the declared scaled floor. General curved
+maps still require a quadrature ladder; 3x3x3 is exact for affine mass/stiffness,
+not a curved-map accuracy certificate. The common kernel retains TET10's
+ordered local triangle arithmetic and polls Cx per element and quadrature point.
+
+`tests/hex.rs` specifies G0 partition/Kronecker/gradient identities (1e-14),
+six rigid modes, exact mass/first moments (1e-14), quadratic bending completeness
+(1e-10), topology/Jacobian/underintegration/cap/cap+1/cancellation refusals, and
+Gmsh permutation checks. HEX27 reproduces quadratic physical fields under the
+tested trilinear distortion; HEX20's loss there is logged, not qualified away
+(Arnold, Boffi & Falk 2002, https://arxiv.org/abs/math/0005036).
+G1 roller-face P waves use an fs-mms OrderGate on three x-refinement rungs.
+G2 square free-free bars (L/h=50, nu=.3) gate the first three bending pairs and
+first axial mode to Timoshenko/Cowper and c/(2L), respectively (0.1 percent),
+after a three-rung fs-mms-fitted Richardson frequency estimate <=0.02 percent.
+The Timoshenko characteristic is solved by deterministic Newton and checked
+against independent free-end shear/moment residuals; Euler-Bernoulli is a
+diagnostic only. The scalar oracle follows the cosh-scaled free-free equation
+in Khasawneh & Segalman 2019, Table 7, https://arxiv.org/abs/1811.03222.
+G3 compares the first six HEX27/TET10 modes on the same bar within the sum of
+their three-rung discretization estimates plus propagated eigen residuals.
+These are estimated discretization bounds, not certified continuum enclosures.
+All new numerical gates require central native execution before qualification.
+No mixed/incompressible stabilization, reduced-integration stabilization,
+finite-strain hexes, inside-element material variation or global injectivity
+claim is introduced. Distorted bending-dominated parts require HEX27/TET10;
+HEX20's affine benchmark does not qualify it on arbitrary distorted geometry.
+
 Stiffness and mass use the existing `fs-feec` positive-weight collapsed Duffy
 rule. Required counts are respectively 3..=12 and 4..=12 per direction: affine
 stiffness has degree two and consistent mass degree four, while the Duffy map
