@@ -280,7 +280,14 @@ fn acoustic_compressibility_predicts_the_small_signal_mechanical_period() {
 
 #[test]
 fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
+    use fs_ports::PortedModule;
+
     let mut piston = GasPiston::new(gas(0.75, 0.001), 1.0, 0.01, 0.0).unwrap();
+    // Keep an actual accepted window, including its lazily expanded transfer
+    // cache. GasPiston's physical-state PartialEq deliberately omits ports,
+    // so every refusal below also compares the complete account explicitly.
+    piston.step(drive(0.0), controls(), || false).unwrap();
+    assert!(piston.last_window_transfers().is_some());
     let before = piston.clone();
     for input in [
         PistonInput {
@@ -295,20 +302,40 @@ fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
     ] {
         assert!(piston.step(input, controls(), || false).is_err());
         assert_eq!(piston, before);
+        assert_eq!(piston.ports, before.ports);
     }
-    assert!(
-        piston
-            .step(
-                drive(20.0),
-                PistonSolve {
-                    maximum_iterations: 1,
-                    ..controls()
-                },
-                || false
-            )
-            .is_err()
-    );
+    // The resolved 50 us / 20 J trial now converges in one correction.
+    // At 200 us / 300 J the same gas requires another Newton correction,
+    // without leaving its source domain or the unchanged omega*dt <= 0.04
+    // clock guard. A matched full-budget trial proves the refusal reason.
+    let nonlinear = PistonInput {
+        duration_s: 0.0002,
+        ..drive(300.0)
+    };
+    let medium = piston.gas().state().state();
+    let omega = (medium.density * medium.sound_speed.powi(2) * piston.area_m2().powi(2)
+        / (piston.mass_kg() * piston.gas().volume_m3()))
+    .sqrt();
+    assert!(omega * nonlinear.duration_s < 0.04);
+    let mut resolved = before.clone();
+    let accepted = resolved.step(nonlinear, controls(), || false).unwrap();
+    assert!(accepted.iterations > 1);
+    assert!(accepted.momentum_residual_n_s.abs() <= controls().momentum_tolerance_n_s);
+    assert!(accepted.total_energy_residual_j.abs() <= controls().energy_tolerance_j);
+    assert_ne!(resolved.ports, before.ports);
+    assert!(matches!(
+        piston.step(
+            nonlinear,
+            PistonSolve {
+                maximum_iterations: 1,
+                ..controls()
+            },
+            || false
+        ),
+        Err(PistonError::NotConverged { iterations: 1, .. })
+    ));
     assert_eq!(piston, before);
+    assert_eq!(piston.ports, before.ports);
     assert!(matches!(
         piston.step(
             drive(20.0),
@@ -321,6 +348,7 @@ fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
         Err(PistonError::OutsideBracket { .. })
     ));
     assert_eq!(piston, before);
+    assert_eq!(piston.ports, before.ports);
     let mut count = 0;
     let mut probe = piston.clone();
     probe
@@ -338,4 +366,5 @@ fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
         Err(PistonError::Cancelled)
     ));
     assert_eq!(piston, before);
+    assert_eq!(piston.ports, before.ports);
 }
