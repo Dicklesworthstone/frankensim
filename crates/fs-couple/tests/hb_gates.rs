@@ -766,7 +766,8 @@ struct LossCounterfactual<'a, P> {
     zc: f64,
     admittance_slot: usize,
     conjugate_acoustic: bool,
-    historical: bool,
+    historical_dc: bool,
+    historical_ac: bool,
 }
 
 impl<P: OrbitProblem> OrbitProblem for LossCounterfactual<'_, P> {
@@ -781,7 +782,12 @@ impl<P: OrbitProblem> OrbitProblem for LossCounterfactual<'_, P> {
     }
     fn port(&self, s: C64) -> Vec<C64> {
         let mut port = self.inner.port(s);
-        if self.historical {
+        let historical = if s.im == 0.0 {
+            self.historical_dc
+        } else {
+            self.historical_ac
+        };
+        if historical {
             let omega = s.im.abs().max(TAU * DC_FLOOR_HZ);
             let z = historical_cylinder_impedance(self.gas, self.radius, self.length, omega);
             // Keep the convention fixed between the two loss laws.
@@ -859,7 +865,8 @@ fn diag_hb002_lock_scan() {
                 zc: problem.zc(),
                 admittance_slot: 8,
                 conjugate_acoustic: true,
-                historical,
+                historical_dc: historical,
+                historical_ac: historical,
             };
             let _ = write!(
                 line,
@@ -924,8 +931,17 @@ fn diag_hb003_harmonic_convergence_table() {
                 tolerance: 1.0e-9,
                 deflate_equilibrium: false,
             };
-            for historical in [false, true] {
-                if historical && (pm != 1200.0 || ![9, 11].contains(&n)) {
+            // Localize the measured loss-law regression without changing
+            // the acceptance problem. Its DC row evaluates a 1Hz floor
+            // in the old narrow interpolation; positive harmonics are
+            // already above rv=10. Separate those two substitutions.
+            for (law, historical_dc, historical_ac) in [
+                ("exact-Bessel", false, false),
+                ("historical-interpolation", true, true),
+                ("historical-DC-only", true, false),
+                ("historical-AC-only", false, true),
+            ] {
+                if (historical_dc || historical_ac) && (pm != 1200.0 || ![9, 11].contains(&n)) {
                     continue;
                 }
                 let counterfactual = LossCounterfactual {
@@ -936,12 +952,8 @@ fn diag_hb003_harmonic_convergence_table() {
                     zc: make.zc(),
                     admittance_slot: 0,
                     conjugate_acoustic: false,
-                    historical,
-                };
-                let law = if historical {
-                    "historical-interpolation"
-                } else {
-                    "exact-Bessel"
+                    historical_dc,
+                    historical_ac,
                 };
                 match [0.6f64, 0.35].iter().find_map(|&g| {
                     solve_hb(
@@ -955,9 +967,13 @@ fn diag_hb003_harmonic_convergence_table() {
                     .ok()
                 }) {
                     Some(o) => println!(
-                        "law={law} pm={pm} N={n}: f={:.2} a1={:.4}",
+                        "law={law} pm={pm} N={n}: f={:.17e} a1={:.17e} dc={:.17e} dc_admittance={:.17e} residual={:.17e} iterations={}",
                         o.omega / TAU,
-                        o.first_harmonic_amplitude(0)
+                        o.first_harmonic_amplitude(0),
+                        o.coeffs[0][0].re,
+                        counterfactual.port(C64::ZERO)[0].re,
+                        o.residual,
+                        o.residual_trace.len()
                     ),
                     None => println!("law={law} pm={pm} N={n}: refused"),
                 }
