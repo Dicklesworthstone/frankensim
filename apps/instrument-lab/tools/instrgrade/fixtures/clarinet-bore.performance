@@ -1,0 +1,17 @@
+frankensim-reed-performance-v1
+audio 48000 96000 20000
+ambient 293.15 101325 0
+reed 0.0004 0.013 6000 0 0 0.35
+listener_m 1
+termination flanged
+segments 1
+cylinder 0.0073 0.57
+compile_limits 100000 2048
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	700
+tracks	1
+track	blow	blowing-pressure
+initial	pressure-pa	0e0
+events	1
+event	0e0	1e-2	pressure-pa	2.8e3
