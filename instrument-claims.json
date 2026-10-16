@@ -913,6 +913,26 @@
     },
     {
       "filling": "bar",
+      "image": "linear3-burton-miller-hertz",
+      "qoi": "bar-s1-module-ladders",
+      "owner_crates": ["fs-couple", "fs-solid", "fs-modal", "fs-bem", "fs-contact", "fs-tribo"],
+      "exactness": ["X-Est"],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {"kind": "test", "ref": "crates/fs-couple/tests/bar_s1_linear3_bar.rs::uniform_prism_3d_ladder_converges_to_free_free_beam_theory"},
+        {"kind": "test", "ref": "crates/fs-couple/tests/bar_s1_linear3_bar.rs::undercut_bar_ladder_reports_modes_with_uncertainty"},
+        {"kind": "test", "ref": "crates/fs-couple/tests/bar_s1_linear3_bar.rs::bem_panel_ladder_converges_modal_radiated_pressure"},
+        {"kind": "test", "ref": "crates/fs-couple/tests/bar_s1_linear3_bar.rs::material_hertz_mallet_contact_time_matches_closed_form"},
+        {"kind": "test", "ref": "scripts/e2e/music/bar_s1.sh"}
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "IRP Bar-S1 (.266), native batch pending. Existing generic owners composed only in a test fixture: four P1 rungs, free-free Timoshenko cross-check with frozen 1% gate, one-cent refusal routed to TET10, three Burton-Miller panel rungs, material Hertz impact and a replayed time ladder. Indian rosewood E_L and authored density; missing transverse constants are correlated hardwood-ratio design scenarios, not rosewood coverage. Synthetic cut depth targets 1:3 on a declared 3-D design grid and scales to ET Db5; targets are not independent validation. Ideal elastic silicone sphere with sourced E and declared nu uncertainty. Wood/head loss and decay unknown. One-way, five-pole narrow-band diagnostic observation; finite-body contact, modal truncation, supports, resonator and acoustic loading unqualified. Central script generates before/after Iowa grades; no instrument acceptance or live-default promotion. Reuses canonical owners; no new production abstractions, dependencies, schemas or golden changes."
+    },
+    {
+      "filling": "bar",
       "image": "modal-zoh",
       "qoi": "freefree-ratio-gate",
       "owner_crates": ["fs-couple"],
