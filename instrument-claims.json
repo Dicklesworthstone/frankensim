@@ -3,6 +3,26 @@
   "doctrine": "Music-program claims registry (bead frankensim-music-claims-registry-mc31g; program root frankensim-music-v8-root-3ez8g). D19: a claim is a (filling, image, qoi) row, never prose. D21: rows transition gate status (ungated|green|refused) and are never deleted; xtask check-instrument-claims refuses removal against the committed predecessor. D25: live_default=yes requires gate=green AND a budget_row (real-time is a measured claim). Seed state 2026-08-14: every currently-live image enters ungated with empty evidence - nothing is green until a per-track gates bead lands reviewed evidence. Flags are string enums because the in-house JSON parser collapses booleans.",
   "rows": [
     {
+      "filling": "structural-modal",
+      "image": "computed-broadband-receiver",
+      "qoi": "held-force-off-resonance-pressure",
+      "owner_crates": ["fs-couple", "fs-vfit", "fs-phs"],
+      "exactness": ["X-Est"],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {"kind": "test", "ref": "crates/fs-couple/tests/broadband_modal_transfer.rs::off_resonance_transfer_matches_pulsating_sphere"},
+        {"kind": "test", "ref": "crates/fs-couple/tests/broadband_modal_transfer.rs::order_ladder_converges_and_axis_is_live"},
+        {"kind": "test", "ref": "crates/fs-couple/tests/broadband_modal_transfer.rs::fit_grid_density_converges"},
+        {"kind": "test", "ref": "crates/fs-couple/tests/broadband_modal_transfer.rs::integer_delay_is_exact_fractional_delay_converges"},
+        {"kind": "test", "ref": "scripts/e2e/music_modal_broadband.sh"}
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "IRP M5.2-W2 (.169): opt-in one-way receiver from declared computed modal-velocity samples, augmented mode/filter exact held-force ZOH, explicit bandlimited sampled-pressure fractional delay. Native verification pending: 1e-6 sphere amplitude/radian and piston pole/grid plus delay ladders are authored gates, not green evidence. Producer discretization estimates remain separate and EstimateOnly. No instrument fidelity, general causal/passive load, full-band continuum enclosure, or coupled/nonlinear within-step observer claim. Bar/guitar/violin-pizzicato consumers must supply their own explicit source-basis samples. Legacy narrow-band defaults and goldens are unchanged."
+    },
+    {
       "filling": "wind-reed",
       "image": "tmm",
       "qoi": "fingering-peak-cents",

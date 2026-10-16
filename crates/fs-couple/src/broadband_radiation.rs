@@ -17,6 +17,9 @@ use fs_vfit::discretize::{
 };
 use fs_vfit::{FitOptions, VfError, vector_fit};
 
+/// Producer-neutral modal-velocity samples and continuous fits for exact ZOH.
+pub mod modal;
+
 /// Maximum frequencies in either offline solve grid.
 pub const MAX_BROADBAND_FREQUENCIES: usize = 512;
 /// Maximum input-channel-frequency cells retained for fitting.

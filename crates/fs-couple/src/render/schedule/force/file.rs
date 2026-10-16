@@ -57,6 +57,8 @@ mod contact;
 mod friction;
 /// File-driven static design over the same authored mechanical models.
 pub mod design;
+/// Explicit broadband receiver block over the same parser and force compiler.
+pub mod broadband;
 
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_blake3::{ContentHash, hash_domain};

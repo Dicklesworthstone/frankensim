@@ -73,6 +73,49 @@ These are admission ceilings, not performance guarantees.
 
 ## Replay and scope
 
+An independent v1 performance can opt into computed broadband receivers by
+appending this block after its last force event:
+
+```text
+broadband VOICE_COUNT
+transfer PRODUCER_ID DELAY_S PRODUCER_REL_ERROR ORDER ITERATIONS DELAY_HALF MAX_REL_ERROR TRAINING_COUNT HELD_OUT_COUNT
+frequency OMEGA H0_RE H0_IM ... H_LAST_RE H_LAST_IM
+... exactly TRAINING_COUNT complete frequency rows ...
+withheld OMEGA H0_RE H0_IM ... H_LAST_RE H_LAST_IM
+... exactly HELD_OUT_COUNT complete withheld rows, then the remaining voices ...
+```
+
+Each voice needs its own block in original voice order. Samples are computed
+pressure per generalized modal velocity in Pa s/(m sqrt(kg)), under
+`exp(-i omega t)`, including `DELAY_S`. Both grids must be increasing, positive,
+disjoint, below Nyquist, and withheld points must lie inside the training band.
+Declare the actual producer identity (for example an fs-bem run hash) and its
+discretization error estimate separately from `MAX_REL_ERROR`; neither is inferred
+or absorbed into the fitting budget. Both grids cap at 512 points. The complete
+4096-mode basis is retained in batches of at most 256 input fields.
+
+The receiver fits a continuous proper rational operator, removes the declared
+pure delay before fitting, and advances the augmented mode/filter system exactly
+under the original held forces. It uses no velocity differences or Tustin warp.
+The fractional delay uses an explicit centered Blackman/sinc kernel with the
+declared half-length, admitting only causal taps within the physical delay.
+An integer delay is exact. Acoustic filter/delay history starts at zero; this is
+bandlimited interpolation of sampled pressure, not exact within-step retiming of
+the continuous held-force images. The receiver does not load the mechanical mode.
+
+Admission measures the maximum relative error on the withheld computed operator,
+including the actual delay kernel. It is a sampled estimate, not a rigorous
+continuum bound. The sidecar retains `EstimateOnly`, producer uncertainty, fit
+controls, actual fractional delay, and the observed error. Constant samples with
+zero delay retain bitwise narrow-band equilibrium-relative observation. Coupled
+or nonlinear v2-v5 trajectories refuse this independent-mode observer.
+
+Use `scripts/e2e/music_lane.sh --fixture modal-broadband --out-dir NEW_PATH
+--binary MUSIC_RENDER --qualification-log NATIVE_BROADBAND_TEST_STDOUT` for the
+analytic sphere replay/refusal lane and the native three-axis qualification
+receipts. Native qualification includes the exact held-sinusoid endpoint oracle;
+an unheld continuous sinusoid is a different forcing problem.
+
 The sidecar records the exact input-byte hash, mode/voice/event counts, output
 scale, statistics, and the finalized WAV hash. Moving identical input to another
 path does not change those identities. Editing whitespace does change the input

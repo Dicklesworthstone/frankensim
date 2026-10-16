@@ -8,6 +8,8 @@ use fs_couple::render::schedule::force::file::{
     MODAL_MULTI_CONTACT_PERFORMANCE_SCHEMA, MODAL_FRICTION_PERFORMANCE_SCHEMA, ModalPerformance,
 };
 use super::{RATE, create_outputs, json_string, stream_output};
+#[path = "modal_broadband.rs"]
+mod broadband;
 
 fn options(args: &[String]) -> Result<(&str, &str, usize, bool), String> {
     let mut paths = Vec::new();
@@ -50,6 +52,11 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     let mut bytes = Vec::new();
     input.take((MAX_MODAL_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("modal input read failed: {e}"))?;
+    if fs_couple::render::schedule::force::file::broadband::BroadbandModalPerformance::has_section(
+        &bytes,
+    ) {
+        return broadband::run(&bytes, output, &sidecar, block, decimate);
+    }
     let performance = ModalPerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
     let info = performance.info();
     if !decimate && info.sample_rate_hz != RATE {

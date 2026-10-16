@@ -667,6 +667,7 @@
     "crates/fs-couple/tests/bowed_file.rs",
     "crates/fs-couple/tests/bowed_gates.rs",
     "crates/fs-couple/tests/bowed_runtime.rs",
+    "crates/fs-couple/tests/broadband_modal_transfer.rs",
     "crates/fs-couple/tests/cane_reed_card.rs",
     "crates/fs-couple/tests/cavity_network.rs",
     "crates/fs-couple/tests/couple.rs",

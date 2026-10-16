@@ -172,7 +172,21 @@ fn quadratic(a: &[f64], x: &[f64]) -> f64 {
 // Bounded scaling/squaring with a converged Taylor series at ||A||_inf <= 1/2.
 // Dense work is deliberately capped; no sparse, cancellation-latency or
 // allocation-free claim. These caps apply before forming the block matrix.
-fn exponential(a: &[f64], n: usize) -> Result<Vec<f64>, PhsError> {
+/// Exponential of a finite real square operator with at most 256 rows.
+/// Reuses the exact-ZOH owner's deterministic scaling/squaring algorithm.
+/// The caller includes the requested duration in `a`.
+///
+/// # Errors
+/// Refuses invalid shape, nonfinite entries, work-cap overflow or failure of
+/// the bounded Taylor/scaling iteration. No stability certificate is inferred.
+pub fn exponential(a: &[f64], n: usize) -> Result<Vec<f64>, PhsError> {
+    if n == 0
+        || n > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
+        || n.checked_mul(n) != Some(a.len())
+        || a.iter().any(|x| !x.is_finite())
+    {
+        return Err(refuse("invalid or oversized exponential operator"));
+    }
     let mut norm = 0.0_f64;
     for row in a.chunks_exact(n) {
         norm = norm.max(row.iter().map(|v| v.abs()).sum());
@@ -845,6 +859,19 @@ fn gonzalez(
 mod tests {
     use super::*;
     use crate::{QuadraticStorage, ScalarLaw, SeparableStorage, mass_spring_damper};
+
+    #[test]
+    fn public_exponential_shape_cap_and_scalar_oracle() {
+        assert_eq!(
+            exponential(&vec![0.0; 256 * 256], 256).unwrap(),
+            identity(256)
+        );
+        assert!(exponential(&[], 257).is_err());
+        assert!(exponential(&[], 0).is_err());
+        assert!(exponential(&[0.0; 3], 2).is_err());
+        assert!(exponential(&[f64::NAN], 1).is_err());
+        assert!((exponential(&[-0.37], 1).unwrap()[0] - det::exp(-0.37)).abs() < 2e-15);
+    }
 
     fn budget(n: usize) -> LinearSplitBudget {
         LinearSplitBudget {
