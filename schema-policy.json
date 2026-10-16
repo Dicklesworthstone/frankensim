@@ -328,9 +328,34 @@
         {
           "test": "ec_006_legacy_string_scenarios_migrate_mechanically",
           "location": "crates/fs-scenario/tests/entity_identity.rs"
+        },
+        {
+          "test": "sc_013_measured_tolerance_source_minor_bump_decodes_prior_with_receipt",
+          "location": "crates/fs-scenario/tests/conformance.rs"
         }
       ],
       "deprecation_horizon": "a legacy IR version stays decodable for one major version after the release that supersedes it"
+    },
+    {
+      "id": "scenario.assembly",
+      "title": "The scenario-bound Assembly Description sidecar",
+      "owner": "fs-scenario",
+      "version_kind": "integer-const",
+      "version_constant": "ASSEMBLY_DESCRIPTION_SCHEMA_VERSION",
+      "version_location": "crates/fs-scenario/src/assembly.rs",
+      "current_version": "1",
+      "lockstep": [],
+      "surface": [
+        "canonical bounded assembly bytes and their content hash bound to unchanged canonical scenario IR",
+        "persistent catalog identities and replayed rename/import/retirement receipts",
+        "generic physical parts, material-state citations and explicit unknown properties, interfaces, typed configuration assignments and provenance, observers and required reference state",
+        "measured and reconstructed tolerance sources, carried in the sidecar rather than a historical scenario.ir tolerance encoding"
+      ],
+      "minor_bump": "may only clarify documentation without changing canonical bytes; this strict format has no ignorable-field channel",
+      "major_bump": "any field, tag, order or identity-preimage change requires a new integer version and an explicit predecessor migration or named refusal",
+      "migration_obligation": "no-predecessor",
+      "migration_evidence": [],
+      "deprecation_horizon": "a predecessor assembly version stays decodable for one major version after its successor is released"
     },
     {
       "id": "matdb.pack",
