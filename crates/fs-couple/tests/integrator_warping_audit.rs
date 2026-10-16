@@ -118,7 +118,7 @@ const PATHS: &[AuditRow] = &[
     AuditRow {
         path: "bernoulli_aperture::PairedAperture",
         integrator: Integrator::GonzalezMidpoint,
-        bound: None,
+        bound: Some(fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP),
         owner: Owner::Paired,
     },
     AuditRow {
@@ -647,6 +647,42 @@ fn dynamic_aperture_refuses_beyond_one_cent_resolved_band() {
         )
     };
     assert!(make(cap / (1.0 + 1e-12)).is_ok());
+    assert!(matches!(
+        make(cap + 1e-12),
+        Err(
+            fs_couple::acoustic_realize::AcousticRealizeError::TimeResolution(
+                fs_phs::linear_exact::ResolvedBandError::Outside { .. }
+            )
+        )
+    ));
+}
+
+#[test]
+fn paired_aperture_refuses_beyond_one_cent_resolved_band() {
+    let cap = fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP;
+    let blade = ApertureBlade {
+        mass_kg: 1.0,
+        stiffness_n_m: 1.0,
+        damping_n_s_m: 0.0,
+        pressure_area_m2: 1e-9,
+    };
+    let make = |dt| {
+        PairedAperture::new(
+            PairedApertureSpec {
+                rest_opening_m: REST,
+                width_m: 0.01,
+                blades: [blade; 2],
+                density_kg_m3: 1.2,
+                impedance_pa_s_m3: 1e6,
+                time_step_s: dt,
+                max_steps: 1,
+                limits: limits(),
+            },
+            [BladeState::default(); 2],
+            obstacle(),
+        )
+    };
+    assert!(make(cap / (1.0 + 2e-12)).is_ok());
     assert!(matches!(
         make(cap + 1e-12),
         Err(

@@ -182,6 +182,7 @@ impl PairedAperture {
         let contact_storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.clone()])
             .map_err(nonlinear)?;
         let model = Self { spec, blades, contact, contact_storage, plates: None, gas: None, relaxation: [None, None], closure: None, samples: 0 };
+        model.admit_linear_clock()?;
         model.validate_state(blades)?;
         Ok(model)
     }
@@ -359,6 +360,7 @@ impl PairedAperture {
     pub(super) fn preview(&self, drive: ApertureDrive, forces: [f64; 2])
         -> Result<PairedTrial, AcousticRealizeError>
     {
+        self.admit_linear_clock()?;
         if self.samples >= self.spec.max_steps { return Err(invalid("paired aperture step budget exhausted")); }
         if ![drive.upstream_pressure_pa, drive.incoming_pressure_pa, drive.body_flow_m3_s,
             forces[0], forces[1]].iter().all(|x| x.is_finite()) {
@@ -519,6 +521,28 @@ impl PairedAperture {
         { return Err(invalid("paired aperture refused an unresolved physical work or flow balance")); }
         Ok(PairedTrial { frame: PairedApertureFrame { aperture, blades: next, pressure_drop_pa: trial.dp,
             contact_force_n: contact_normal, blade_contact_forces_n: contact_forces, momentum_residual_n: momentum }, memory })
+    }
+}
+
+impl PairedAperture {
+    fn admit_linear_clock(&self) -> Result<(), AcousticRealizeError> {
+        let blades = self.spec.blades;
+        let weights = blades.map(|b| b.pressure_area_m2 / fs_math::det::sqrt(b.mass_kg));
+        let weight_sum = weights.iter().map(|a| a.abs()).sum::<f64>();
+        let mut rate = 0.0_f64;
+        for (i,b) in blades.iter().enumerate() {
+            let loss = b.damping_n_s_m / b.mass_kg
+                + self.spec.impedance_pa_s_m3 * weights[i].abs() * weight_sum;
+            let mut local = fs_math::det::sqrt(b.stiffness_n_m / b.mass_kg) + loss;
+            if let Some(memory) = self.relaxation[i].as_ref().filter(|m| !m.branches().is_empty()) {
+                let instantaneous = b.stiffness_n_m + memory.branches().iter().map(|arm| arm.stiffness).sum::<f64>();
+                local = 2.0 * fs_math::det::sqrt(instantaneous / b.mass_kg) + loss;
+                for arm in memory.branches() { local = local.max(2.0 / arm.relaxation_time_s); }
+            }
+            rate = rate.max(local);
+        }
+        fs_phs::linear_exact::admit_midpoint_band(rate, self.spec.time_step_s)
+            .map_err(AcousticRealizeError::TimeResolution)
     }
 }
 
