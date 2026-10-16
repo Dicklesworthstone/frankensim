@@ -2949,3 +2949,98 @@ fn sc_012_hundred_thousand_frame_adversaries_are_bounded() {
         ),
     );
 }
+
+#[test]
+fn sc_013_measured_tolerance_source_minor_bump_decodes_prior_with_receipt() {
+    use fs_scenario::assembly::{
+        AssemblyAttachmentRule, AssemblyDescription, AssemblyInput, DEFAULT_ASSEMBLY_BUDGET,
+        ReferenceState,
+    };
+    use fs_scenario::entity::{
+        EntityCatalog, EntityDeclaration, Tolerance, ToleranceKind, ToleranceSource,
+    };
+    let legacy = parse_ir(LEGACY_MINIMAL_IR).unwrap();
+    let canonical = write_ir(legacy.scenario());
+    let pinned =
+        ContentHash::from_hex("f74494d0152c0587c611cdab5dcc2f96baca05bfe50fa13a18f4a64ada15bffc")
+            .unwrap();
+    assert_eq!(hash_bytes(canonical.as_bytes()), pinned);
+    for authority in [
+        ToleranceSource::Measured {
+            ledger_row: "test-fixture:measured".into(),
+            method: "test-fixture:calipers".into(),
+        },
+        ToleranceSource::Reconstructed {
+            ledger_row: "test-fixture:scan".into(),
+            route: "test-fixture:reconstruction".into(),
+        },
+    ] {
+        for source in [LEGACY_MINIMAL_IR, canonical.as_str()] {
+            let mut catalog = EntityCatalog::new();
+            let root = catalog
+                .declare(EntityDeclaration::assembly("test-fixture:authority"))
+                .unwrap();
+            let part = catalog
+                .declare(EntityDeclaration::part(root, "test-fixture:part"))
+                .unwrap();
+            catalog
+                .declare_tolerance(Tolerance::new(
+                    part,
+                    ToleranceKind::Flatness,
+                    QtyAny::new(1e-4, Dims([1, 0, 0, 0, 0, 0])),
+                    vec![],
+                    authority.clone(),
+                ))
+                .unwrap();
+            let input = AssemblyInput {
+                root,
+                catalog,
+                parts: vec![],
+                interfaces: vec![],
+                configurations: vec![],
+                observers: vec![],
+                reference_state: Some(ReferenceState::Unloaded),
+            };
+            let (description, receipt) =
+                AssemblyDescription::attach_to_ir(source, input, DEFAULT_ASSEMBLY_BUDGET).unwrap();
+            let bytes = description.to_bytes(DEFAULT_ASSEMBLY_BUDGET).unwrap();
+            assert_eq!(description.scenario_ir_hash(), pinned);
+            assert!(
+                receipt
+                    .rules()
+                    .contains(&AssemblyAttachmentRule::PreserveScenarioV2)
+            );
+            assert!(
+                receipt
+                    .rules()
+                    .contains(&AssemblyAttachmentRule::AttachAssemblyV1)
+            );
+            assert!(receipt.verifies(source.as_bytes(), canonical.as_bytes(), &bytes));
+            assert!(!receipt.verifies(
+                format!("{source} ").as_bytes(),
+                canonical.as_bytes(),
+                &bytes
+            ));
+            if source == LEGACY_MINIMAL_IR {
+                assert!(
+                    receipt
+                        .dimension_crosswalk()
+                        .unwrap()
+                        .verifies(source.as_bytes(), canonical.as_bytes())
+                );
+            } else {
+                assert!(receipt.dimension_crosswalk().is_none());
+            }
+            let decoded =
+                AssemblyDescription::from_bytes(&bytes, legacy.scenario(), DEFAULT_ASSEMBLY_BUDGET)
+                    .unwrap();
+            assert_eq!(decoded.input().catalog.tolerances()[0].source(), &authority);
+            assert_eq!(decoded.to_bytes(DEFAULT_ASSEMBLY_BUDGET).unwrap(), bytes);
+            assert_eq!(write_ir(legacy.scenario()), canonical);
+        }
+    }
+    verdict(
+        "sc-013",
+        "additive measured/reconstructed authority sidecar preserves scenario v1/v2 and retains actual source/attachment receipts; no old tolerance IR grammar is claimed",
+    );
+}

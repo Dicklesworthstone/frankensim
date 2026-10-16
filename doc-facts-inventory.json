@@ -1340,6 +1340,7 @@
     "crates/fs-roofline/tests/manifest_tamper.rs",
     "crates/fs-roofline/tests/production_seal.rs",
     "crates/fs-roofline/tests/regress.rs",
+    "crates/fs-scenario/tests/assembly_description.rs",
     "crates/fs-scenario/tests/bc_role_refusal.rs",
     "crates/fs-scenario/tests/conformance.rs",
     "crates/fs-scenario/tests/design.rs",

@@ -25,6 +25,9 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_qty::{Dims, QtyAny};
 use std::fmt;
 
+mod assembly_wire;
+pub(crate) use assembly_wire::{read_assembly_catalog, write_assembly_catalog};
+
 /// Domain separation for entity identity derivation (wire-stable).
 const ENTITY_ID_DOMAIN: &str = "fs-scenario/entity-id/v1";
 /// Domain separation for geometry fingerprints (wire-stable).
@@ -1139,11 +1142,25 @@ pub enum ToleranceSource {
         /// Why this value was assumed.
         rationale: String,
     },
+    /// A measurement, cited through the cross-domain source ledger.
+    Measured {
+        /// Source row identity; resolution is a consumer responsibility.
+        ledger_row: String,
+        /// Measurement protocol.
+        method: String,
+    },
+    /// A reconstructed coordinate bound rather than an assumed tolerance.
+    Reconstructed {
+        /// Source row identity.
+        ledger_row: String,
+        /// Reconstruction/calibration route.
+        route: String,
+    },
 }
 
 impl ToleranceSource {
     /// The free-text field that must be nonempty for this source.
-    fn nonempty_fields(&self) -> [(&'static str, &str); 2] {
+    pub(crate) fn nonempty_fields(&self) -> [(&'static str, &str); 2] {
         match self {
             ToleranceSource::Drawing { sheet, note } => [("sheet", sheet.as_str()), ("note", note)],
             ToleranceSource::Standard { clause } => {
@@ -1151,6 +1168,12 @@ impl ToleranceSource {
             }
             ToleranceSource::Assumed { rationale } => {
                 [("rationale", rationale.as_str()), ("rationale", rationale)]
+            }
+            ToleranceSource::Measured { ledger_row, method } => {
+                [("ledger_row", ledger_row), ("method", method)]
+            }
+            ToleranceSource::Reconstructed { ledger_row, route } => {
+                [("ledger_row", ledger_row), ("route", route)]
             }
         }
     }
@@ -1162,6 +1185,8 @@ impl ToleranceSource {
             ToleranceSource::Drawing { .. } => "drawing",
             ToleranceSource::Standard { .. } => "standard",
             ToleranceSource::Assumed { .. } => "assumed",
+            ToleranceSource::Measured { .. } => "measured",
+            ToleranceSource::Reconstructed { .. } => "reconstructed",
         }
     }
 }
@@ -3517,7 +3542,7 @@ impl EntityCatalog {
                         "tolerance row {row} declares a {} source with an empty {field}",
                         tolerance.source.label()
                     ),
-                    fix: "name the drawing sheet/note, the standard clause, or the assumption's rationale"
+                    fix: "name the drawing sheet/note, standard clause, assumption rationale, or measured/reconstructed ledger row and method/route"
                         .to_string(),
                 });
             }

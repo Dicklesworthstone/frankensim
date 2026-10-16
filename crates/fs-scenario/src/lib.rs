@@ -195,3 +195,10 @@ impl fmt::Display for ScenarioError {
 }
 
 impl std::error::Error for ScenarioError {}
+
+/// Generic scenario-bound physical assembly descriptions and shared parameter paths.
+pub mod assembly;
+pub use assembly::{
+    AssemblyBudget, AssemblyDescription, AssemblyError, AssemblyInput, ConfigurationState,
+    ParameterKey, ParameterPath, StateProvenance,
+};

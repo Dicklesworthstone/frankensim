@@ -430,6 +430,7 @@ per-schema compatibility and deprecation rules, is
 | Euler claim and minimum-evidence policy | `fs-euler-disc-e2e` | 1 | no predecessor yet; unknown versions refuse |
 | Euler structural checker and local evidence-reference assessment protocol | `fs-euler-disc-e2e` | 1 | no predecessor; the receipt decoder and complete canonical assessment-log reader refuse mismatches, while other bytes are identity preimages |
 | Scenario IR | `fs-scenario` | 2 | migrates, with a receipt |
+| Assembly Description sidecar | `fs-scenario` | 1 | no predecessor yet; other versions refuse |
 | FSMATPK material pack family | `fs-matdb` | 1 | no predecessor yet |
 | Design-ledger schema | `fs-ledger` | 20 | migrates in place, history intact |
 | Source manifest + SPDX projection | `xtask` | `frankensim-source-manifest-v1` | no predecessor yet |

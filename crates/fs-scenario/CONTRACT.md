@@ -21,6 +21,41 @@ flagships.
 
 ## Public types and semantics
 
+- `assembly` (IRP M6.1-W1a) is the generic, frozen `scenario.assembly` v1
+  sidecar bound to the exact canonical scenario IR hash (route B). Its parts
+  cover strings, shells, solids, ducts, cavities, valve patterns and driven
+  bodies; interfaces cite power-port schemas or contact/glue laws by content
+  identity. Geometry names a parametric generator with dimensioned values or
+  an imported fingerprint/representation/source row. Materials cite a card,
+  physical query point, frame/layer and explicit `Unknown { property, bound }`
+  values; `require_known` refuses attempts to default an unavailable property.
+  `ParameterPath`, dimensioned `ParameterKey`, `ConfigurationState` and reserved
+  `StateProvenance` have one definition in `assembly.rs` for downstream gesture,
+  performance, anatomy, validity and coupling consumers. Structural admission
+  checks references, dimensions, finite quantities, duplication, named
+  provenance, an explicit reference/load state and caller-selected caps.
+  Canonical bytes use shortest-round-trip finite quantity strings and six SI
+  exponents. The catalog transport replays existing identity operations and
+  compares every receipt; display renames preserve entity/parameter identities.
+  `ToleranceSource::{Measured,Reconstructed}` name their ledger row and method
+  or reconstruction route, with non-empty-field checks. These fields live in
+  the new sidecar: the old positional `scenario.ir` has no catalog/tolerance
+  encoding. `attach_to_ir` retains exact source and canonical identities and
+  an `AssemblyAttachmentReceipt` naming every applied dimension,
+  canonicalization, preservation and attachment rule. Existing scenario v1/v2
+  decode and canonical hashes are unchanged.
+
+  G0/G3/G5 tests in `tests/assembly_description.rs` cover every part/interface
+  kind, round-trip bytes/hash, IR pins, typed refusals, cap/cap+1, rename receipts
+  and bounded decoding. `sc_013_measured_tolerance_source_minor_bump_decodes_prior_with_receipt`
+  covers the additive authority/attachment route with existing migration receipts.
+  This pure, finite metadata codec performs no simulation, file I/O, material
+  resolution or geometry reconstruction; it has no unsafe boundary or new runtime
+  dependency. No scientific validity, calibration authenticity, module-domain
+  admission, legal source rights or playable instrument is implied. Rendering
+  and its cancellation/refinement obligations remain downstream; no runtime
+  kernel or mandatory compute scope is introduced by this schema item.
+
 - `acoustic` — description-only types for composing generic physics
   (`AmbientGas`, `PrestressedString` as a 1-D prestressed waveguide
   with an optional moving attachment end,

@@ -15,7 +15,7 @@ matter how stable it looks or how many consumers have started reading it.
 
 ## The frozen set
 
-Thirteen schemas are promised. Each has a policy record in `schema-policy.json`
+The schemas below are promised. Each has a policy record in `schema-policy.json`
 carrying its version location, compatibility promise, migration obligation, and
 deprecation horizon.
 
@@ -30,6 +30,7 @@ deprecation horizon.
 | `euler.claim-policy` | `fs-euler-disc-e2e` | `EULER_CLAIM_POLICY_SCHEMA_VERSION` | 1 |
 | `euler.protocol` | `fs-euler-disc-e2e` | `EULER_PROTOCOL_SCHEMA_VERSION` | 1 |
 | `scenario.ir` | `fs-scenario` | `SCENARIO_IR_VERSION` | 2 |
+| `scenario.assembly` | `fs-scenario` | `ASSEMBLY_DESCRIPTION_SCHEMA_VERSION` | 1 |
 | `matdb.pack` | `fs-matdb` | `MATDB_STRESS_PACK_SCHEMA_VERSION` | 7 |
 | `ledger.schema` | `fs-ledger` | `SCHEMA_VERSION` | 20 |
 | `sbom.source_manifest` | `xtask` | `SCHEMA` | `frankensim-source-manifest-v1` |
@@ -39,6 +40,18 @@ The registry is authoritative; this table is a reading aid. `check-schemas`
 reads each constant out of its declared source file and refuses if the recorded
 value has drifted, so the promise cannot describe a format that no longer
 exists.
+
+`scenario.assembly` is the long-lived Assembly Description sidecar (IRP
+M6.1-W1a, route B), bound to the hash of canonical scenario IR v2. Its bounded
+codec preserves typed parts, catalog identities and replayed identity receipts,
+interfaces, materials/unknowns, parameter assignments, configuration provenance,
+observers and an explicit reference state. Measured and reconstructed tolerance
+authority is encoded in this new sidecar. The old positional `scenario.ir`
+grammar never encoded `EntityCatalog` or tolerances, so attaching these records
+does not change that grammar, its version or its pinned canonical hashes.
+`AssemblyAttachmentReceipt` names the applied preservation/attachment rules and
+retains any existing v1 dimension crosswalk or v2 source-canonicalization receipt.
+It does not claim migration from a nonexistent historical tolerance encoding.
 
 Five of these carry a **lockstep set**: constants that must move in the same
 commit. The registry records every current binding:
@@ -73,7 +86,7 @@ enforces the matching evidence.
 - **`no-predecessor`** — the schema has never been bumped, so there is nothing
   to migrate from. Held by `euler.scientific-contract`,
   `euler.owner-matrix`, `euler.claim-policy`, `euler.protocol`, `study.fsim`,
-  `sbom.source_manifest`, and `maturity.registry`.
+  `scenario.assembly`, `sbom.source_manifest`, and `maturity.registry`.
 
 `no-predecessor` is the load-bearing case. It may cite no evidence, and the
 check additionally refuses any `no-predecessor` record whose current version has
