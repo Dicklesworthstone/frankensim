@@ -258,6 +258,7 @@ impl StepWorkspace {
         scale: f64,
         iterations: usize,
         stagnant: usize,
+        nonlinear_dissipation: bool,
     ) -> Result<SolveCertificate, PhsError> {
         let floor = crate::newton::residual_rounding_floor(
             sys.storage.as_ref(),
@@ -269,7 +270,7 @@ impl StepWorkspace {
             &self.forcing,
             dt,
             self.n,
-            &self.nonlinear_loss,
+            if nonlinear_dissipation { &self.nonlinear_loss } else { &[] },
         );
         let c = self.solve_budget.unwrap_or_default().certificate(
             NewtonSite::Prepared,
@@ -448,7 +449,7 @@ impl StepWorkspace {
                 let residual = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
                     &mut self.midpoint, &mut self.effort, &mut self.residual,
                     dissipation, &mut self.nonlinear_loss)?;
-                self.certify(sys, x0, dt, residual, scale, iterations, stagnant)?;
+                self.certify(sys, x0, dt, residual, scale, iterations, stagnant, dissipation.is_some())?;
                 break;
             }
             if let Some(action) = hessian {
@@ -508,8 +509,16 @@ impl StepWorkspace {
         let solver_residual = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
             &mut self.midpoint, &mut self.effort, &mut self.residual,
                 dissipation, &mut self.nonlinear_loss)?;
-        let solver_certificate =
-            self.certify(sys, x0, dt, solver_residual, scale, iterations, stagnant)?;
+        let solver_certificate = self.certify(
+            sys,
+            x0,
+            dt,
+            solver_residual,
+            scale,
+            iterations,
+            stagnant,
+            dissipation.is_some(),
+        )?;
         let mut dissipated = 0.0;
         for row in 0..n {
             let mut value = 0.0;

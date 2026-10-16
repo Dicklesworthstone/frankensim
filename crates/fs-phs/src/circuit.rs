@@ -422,6 +422,11 @@ impl CircuitDae {
             Err(PhsError::NewtonStalled { residual }) => {
                 Err(CircuitError::InconsistentInitialConditions { residual })
             }
+            Err(PhsError::NewtonRefused { certificate }) => {
+                Err(CircuitError::InconsistentInitialConditions {
+                    residual: certificate.residual,
+                })
+            }
             Err(e) => Err(CircuitError::Phs(e)),
         }
     }
@@ -693,6 +698,14 @@ mod circuit_tests {
             ),
             "V-across-C with a contradicting charge must refuse ({clash:?})"
         );
+        if let Err(CircuitError::InconsistentInitialConditions { residual }) = clash {
+            assert!(residual.is_finite() && residual > 0.0);
+        }
+        // Domain mapping must not hide a malformed call as an IC conflict.
+        assert!(matches!(
+            dae.consistent_initial_state(&[], &[12.0]),
+            Err(CircuitError::Phs(PhsError::Dimension { .. }))
+        ));
         println!("{{\"suite\":\"fs-phs\",\"case\":\"kd-004-refusals\",\"verdict\":\"pass\"}}");
     }
 

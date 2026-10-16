@@ -303,21 +303,42 @@ fn noise_floor_converged_iterate_still_accepted() {
     let sys = mass_spring_damper(3e-6, 120.0, 0.02).unwrap();
     let mut x = vec![0.0, 0.0];
     let mut raised = None;
-    for _ in 0..10_000 {
+    // Run through the stationary tail. Stopping at the first raised certificate
+    // hid the later best-at-entry refusal in the coupled reed casebook.
+    for _ in 0..60_000 {
         let record = step(&sys, &x, &[0.03], 2e-5).unwrap();
         let c = record.solver_certificate.unwrap();
         assert_eq!(c.requested_budget, 1e-13 * c.scale);
         assert_eq!(c.effective_budget, c.requested_budget.max(c.rounding_floor));
         assert!(c.residual <= c.effective_budget);
-        if c.floor_raised && (record.x[0] - 2.5e-4).abs() <= 1e-6 * 2.5e-4 {
+        if c.floor_raised
+            && c.residual > c.requested_budget
+            && (record.x[0] - 2.5e-4).abs() <= 1e-6 * 2.5e-4
+        {
             raised = Some(c);
-            break;
         }
         x = record.x;
     }
+    assert!((x[0] - 2.5e-4).abs() <= 1e-6 * 2.5e-4);
+    assert!(x[1].abs() <= 1e-8);
     let c = raised.expect("quasi-static reed must expose its computed roundoff allowance");
     assert!(c.rounding_floor > c.requested_budget);
     assert_eq!(admit_default_newton_iterate(c).unwrap(), c);
+    let mut explicit = c;
+    explicit.floor_raised = false;
+    explicit.effective_budget = explicit.requested_budget;
+    assert_eq!(
+        admit_newton_iterate(explicit),
+        Err(PhsError::BudgetBelowRoundingFloor {
+            certificate: explicit
+        })
+    );
+    let mut above_cap = c;
+    above_cap.residual = above_cap.effective_budget.next_up();
+    assert!(matches!(
+        admit_default_newton_iterate(above_cap),
+        Err(PhsError::NewtonRefused { .. })
+    ));
     let mut mutant = c;
     mutant.rounding_floor = 0.0;
     assert!(

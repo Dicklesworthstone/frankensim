@@ -195,6 +195,9 @@ pub fn arithmetic_rounding_floor(operations: usize, magnitude: f64) -> f64 {
 /// Arithmetic floor for x1-x0-dt*((J-R)dg+Gu), or unscaled algebraic rows.
 /// Gonzalez's energy-subtraction quotient contributes an additional propagated
 /// envelope when the SAME cancellation guard used by the DG owner is active.
+/// Exact quadratic storage additionally supplies a local attainable-residual
+/// envelope at vanishing increments, where a best-at-entry iterate otherwise
+/// drops the quotient noise encountered by every nearby Newton trial.
 /// This does not estimate finite-difference truncation or callback model error.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn residual_rounding_floor(
@@ -225,13 +228,28 @@ pub(crate) fn residual_rounding_floor(
             .sum::<f64>();
     let energy_floor =
         arithmetic_rounding_floor(n.saturating_mul(4).saturating_add(8), energy_magnitude);
+    // Only declared exact quadratics establish the midpoint Jacobian here.
+    // A quadratic *part* of a nonlinear law cannot justify this bound.
+    let quadratic_slope = storage
+        .exact_quadratic_matrix()
+        .filter(|matrix| additional_flow.is_empty() && matrix.len() == n.saturating_mul(n) && n > 0)
+        .map(|matrix| {
+            let norm = matrix
+                .chunks_exact(n)
+                .map(|row| row.iter().map(|v| v.abs()).sum::<f64>())
+                .fold(0.0_f64, f64::max);
+            // Descriptor multipliers are midpoint efforts, not Q*x.
+            0.5 * if n_diff < n { norm.max(1.0) } else { norm }
+        });
     let mut floor = 0.0_f64;
     for row in 0..n {
         let mut flow_magnitude =
             gu[row].abs() + additional_flow.get(row).copied().unwrap_or(0.0).abs();
         let mut propagated = 0.0;
+        let mut flow_norm = 0.0;
         for col in 0..n {
             let operator = j[row * n + col].abs() + r[row * n + col].abs();
+            flow_norm += operator;
             flow_magnitude += operator * effort[col].abs();
             if length2 > guard * guard && col < n_diff {
                 propagated += operator * energy_floor * ((x[col] - x0[col]).abs() / length2);
@@ -250,6 +268,73 @@ pub(crate) fn residual_rounding_floor(
             return f64::INFINITY;
         }
         floor = floor.max(candidate);
+        if let Some(quadratic_slope) = quadratic_slope {
+            // F_quad = x-x0-dt*((J-R)*Q*(x+x0)/2+Gu).
+            // In a radius rho, its row changes by at most L*rho. Gonzalez's
+            // rounded energy subtraction contributes at most E*B/rho. The
+            // minimum sum is 2*sqrt(L*E*B), at rho^2=E*B/L. This is a local
+            // attainable floor, not a claim that the quotient at dx=0 is noisy.
+            let slope = if row < n_diff { 1.0 } else { 0.0 } + factor * flow_norm * quadratic_slope;
+            let noise = factor * flow_norm * energy_floor;
+            if slope > 0.0 && length2 <= noise / slope {
+                let attainable = 2.0 * fs_math::det::sqrt(slope * noise);
+                if !attainable.is_finite() {
+                    return f64::INFINITY;
+                }
+                floor = floor.max(candidate + attainable);
+            }
+        }
     }
     floor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{QuadraticStorage, discrete_gradient};
+
+    #[test]
+    fn g0_quadratic_stationary_floor_is_local_and_explicit_requests_stay_strict() {
+        // At this near-stationary lamella state, an unchanged iterate has the
+        // independently known displacement residual dt*p/m. Every nonzero DG
+        // trial reintroduces the ill-conditioned H1-H0 correction.
+        let (mass, stiffness, damping, dt) = (3e-6, 120.0, 0.02, 2e-5);
+        let storage = QuadraticStorage::new(vec![stiffness, 0.0, 0.0, 1.0 / mass], 2).unwrap();
+        let initial = [0.03 / stiffness, 1e-14];
+        let j = [0.0, 1.0, -1.0, 0.0];
+        let r = [0.0, 0.0, 0.0, damping];
+        let forcing = [0.0, 0.03];
+        let floor_at = |x: &[f64], nonlinear_loss: &[f64]| {
+            let effort = discrete_gradient(&storage, &initial, x);
+            residual_rounding_floor(
+                &storage,
+                &initial,
+                x,
+                &effort,
+                &j,
+                &r,
+                &forcing,
+                dt,
+                2,
+                nonlinear_loss,
+            )
+        };
+        let floor = floor_at(&initial, &[]);
+        let residual = dt * initial[1] / mass;
+        let c =
+            SolveBudget::default().certificate(NewtonSite::Step, residual, initial[0], floor, 3, 3);
+        assert!(residual > c.requested_budget);
+        assert_eq!(
+            admit_newton_iterate(c),
+            Err(PhsError::BudgetBelowRoundingFloor { certificate: c })
+        );
+        assert!(admit_default_newton_iterate(c.with_rounding_allowance()).is_ok());
+        // A callback can have a nonzero tangent even when its current loss is
+        // zero. Do not infer a quadratic full equation from a zero loss value.
+        assert!(floor_at(&initial, &[0.0, 0.0]) < residual);
+        // Away from the derived roundoff neighborhood both paths must retain
+        // the same pointwise arithmetic floor, with no quadratic allowance.
+        let far = [initial[0] + 1e-6, initial[1] + 1e-8];
+        assert_eq!(floor_at(&far, &[]), floor_at(&far, &[0.0, 0.0]));
+    }
 }
