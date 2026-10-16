@@ -81,6 +81,13 @@ pub trait Storage {
     fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
         None
     }
+
+    /// Borrow an exact quadratic Q for allocation-free residual-resolution bounds.
+    /// `None` when a nonzero remainder exists or no contiguous view is available.
+    /// The matrix has the same symmetric PSD semantics as `QuadraticStorage`.
+    fn exact_quadratic_matrix(&self) -> Option<&[f64]> {
+        None
+    }
 }
 
 /// Quadratic storage `H = x^T Q x / 2` with `Q` symmetric PSD
@@ -110,6 +117,10 @@ impl QuadraticStorage {
 }
 
 impl Storage for QuadraticStorage {
+    fn exact_quadratic_matrix(&self) -> Option<&[f64]> {
+        Some(&self.q)
+    }
+
     fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
         Some(linear_exact::QuadraticPart { matrix: self.q.clone(), exact: true })
     }
