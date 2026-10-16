@@ -8,7 +8,7 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_material::gas_species::input::{
     GasInputError, GasRecord, ThermochemicalSources, read_gas_record,
 };
-use fs_scenario::{RadiatingPlate, gesture::{GestureSchedule, GestureTarget, GestureValue}};
+use fs_scenario::{RadiatingPlate, gesture::{GestureSchedule, GestureValue}};
 use crate::bowed_string::{BowGesture, BowedRunConfig, BowedRunError, BowedStringCard, FrictionIsland, Termination};
 use crate::render::{RenderContext, RenderError, RenderVoice, schedule::ScheduledRenderer};
 use crate::stribeck_friction::StribeckFriction;
@@ -206,7 +206,7 @@ impl BowedPerformance {
             return Err(bad(0, "gesture bytes must be canonical without ignored fields or trailing records"));
         }
         let [track] = schedule.tracks() else { return Err(bad(0, "exactly one bow track is required")); };
-        if track.target != (GestureTarget::BowStroke { string: 0 }) || schedule.control_rate_hz > rate {
+        if fs_scenario::gesture::path::legacy_member(&track.target,"bow")!=Some(0) || schedule.control_rate_hz > rate {
             return Err(bad(0, "the only track must target bow string zero on a control rate no greater than mechanics"));
         }
         // Use the same last tick and tick/rate comparison as the actual sampler.

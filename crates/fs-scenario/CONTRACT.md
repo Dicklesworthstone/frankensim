@@ -21,6 +21,31 @@ flagships.
 
 ## Public types and semantics
 
+- `gesture::path` (IRP M5.3-W2a) binds commands to the existing
+  `assembly::ParameterPath`. Writable declarations are the union of typed
+  configuration assignments; geometry/material values are not implicitly
+  writable. Conflicting dimensions, unknown paths, duplicate command ownership
+  and value/parameter dimension mismatch refuse by path. Structured bow/fret/
+  termination commands retain component units in GestureValue and use their
+  reserved dimensionless command keys. `resolve_aliases` records the original
+  schedule hash, immutable description hash and resulting schedule. All sixteen
+  v1 aliases resolve by canonical parameter key in declared part order (root
+  first); out-of-count indices refuse. The alias vocabulary is isolated here;
+  new consumers bind exact paths, not numeric member aliases.
+
+  V1 canonical bytes and derive-key domain remain unchanged. V2 encodes
+  `param`, entity token, key and six signed SI exponents; tracks sort by entity
+  token then key. Its separate v2 domain prevents cross-version identity reuse.
+  V2 decoding demands exact canonical bytes; v1 parsing retains its historical
+  behavior. Legacy-only constructors remain compatibility adapters for existing
+  callers. Mixed alias/path construction refuses until explicitly resolved.
+  No path moves a mechanism or provides conservative state projection (M5.3-W2b).
+  Work is synchronous admission over supplied data with no partial publication;
+  encoded counts are bounded by the available records before allocation.
+  G0 `gesture_paths` checks all aliases, exact round trips, units, unknown paths,
+  cap/cap+1, migration identities and independently pinned committed v1 corpus
+  hashes; G5 checks ordering and persistent identity under display renames.
+
 - `performance` (IRP M6.2-W1) is a frozen v1 sidecar bound to one Assembly
   Description hash, raw SMF bytes, note-chart/policy and dynamics hashes, and a
   declared observation-prior hash. Format 0/1 import uses bounded pure-Rust

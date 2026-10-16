@@ -384,6 +384,7 @@ fn validate(
     let mut targets = Vec::new();
     for b in &policy.bindings {
         if b.path.entity != desc.input().root
+            || matches!(&b.target,GestureTarget::Parameter(p) if p!=&b.path || matches!(p.parameter.name.as_str(),"prestress"|"rest_aperture"|"tension"))
             || matches!(
                 b.target,
                 GestureTarget::PreStress

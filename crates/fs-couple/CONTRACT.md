@@ -30,6 +30,28 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Typed gesture consumer bindings
+
+`gesture_path::bind_paths` binds each description-validated parameter path to
+an explicit existing pressure voice or actual material-string bow member.
+Every source path requires a destination; incompatible/unconsumed paths return
+`GestureError::NoConsumer { path }`. `BoundPaths` retains the original resolved
+v2 schedule, alias-migration identity, description and exact destination map for
+render provenance. V2 schedules remain typed throughout lowering and call the
+original pressure/friction sampling loops without changing time rounding, ramps, station
+checks, integration, cancellation, force transfer or stored physical state.
+Numeric u8 alias decoding is isolated in fs-scenario's compatibility module;
+typed destination members use usize without a legacy u8 conversion.
+The existing single-string, material-bank and simultaneous-bow entry points have
+path-bound counterparts returning that provenance alongside their renderer.
+Legacy file entry points remain v1 compatibility adapters; a typed schedule
+requires description admission and explicit path bindings. No new consumer or
+silent fallback is invented for topology events, frets, valves, pitch, prestress
+or terminations. G0 `gesture_schedule::unconsumed_targets_reach_a_typed_consumer_or_refusal`
+checks every alias and bitwise pressure-control equivalence; original render
+equivalence tests remain unchanged. Addressing alone establishes no physical
+validation or conservative topology-change claim.
+
 ### Declared per-note control resolution
 
 `description::per_note` resolves `MinimumThresholdPressure` using a model-only

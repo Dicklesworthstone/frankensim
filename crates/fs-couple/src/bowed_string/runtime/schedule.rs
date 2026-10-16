@@ -8,7 +8,7 @@
 
 use super::{BowedRenderOutcome, BowedRunError, BowedSample, BowedStringState};
 use fs_exec::CancelGate;
-use fs_scenario::gesture::{GestureError, GestureSchedule, GestureTarget, GestureValue};
+use fs_scenario::gesture::{GestureError, GestureSchedule, GestureValue};
 
 /// One complete bow input, applied before its absolute voice-clock sample.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -82,6 +82,41 @@ pub struct ScheduledBowedRenderer {
 }
 
 impl ScheduledBowedRenderer {
+    /// Bind a description-validated bow path to this single-string state.
+    /// Keep the returned binding for v2 performance provenance.
+    pub fn from_path(
+        state: BowedStringState,
+        source: &fs_scenario::gesture::ResolvedSchedule,
+        path: &fs_scenario::assembly::ParameterPath,
+        samples: u64,
+        max_work: u64,
+        max_events: usize,
+    ) -> Result<(Self, crate::gesture_path::BoundPaths), BowedScheduleError> {
+        use crate::gesture_path::{PathBinding, PathInput, bind_paths};
+        let bound = bind_paths(
+            source,
+            &[PathBinding {
+                path: path.clone(),
+                input: PathInput::Bow { member: 0 },
+            }],
+        )
+        .map_err(BowedScheduleError::Gesture)?;
+        let id = source
+            .track(path)
+            .map_err(BowedScheduleError::Gesture)?
+            .id
+            .clone();
+        let renderer = Self::new_admitted(
+            state,
+            source.schedule(),
+            &id,
+            samples,
+            max_work,
+            max_events,
+            Some(path),
+        )?;
+        Ok((renderer, bound))
+    }
     /// Compile one admitted bow track using the ACTUAL destination audio rate.
     ///
     /// `samples` is the additional, half-open performance horizon. `max_work`
@@ -101,6 +136,12 @@ impl ScheduledBowedRenderer {
         max_work: u64,
         max_events: usize,
     ) -> Result<Self, BowedScheduleError> {
+        Self::new_admitted(state,schedule,track_id,samples,max_work,max_events,None)
+    }
+
+    fn new_admitted(state:BowedStringState,schedule:&GestureSchedule,track_id:&str,
+        samples:u64,max_work:u64,max_events:usize,path:Option<&fs_scenario::assembly::ParameterPath>)
+        ->Result<Self,BowedScheduleError> {
         state.check_live().map_err(BowedScheduleError::Voice)?;
         let control_rate = schedule.control_rate_hz;
         let audio_rate = state.sample_rate_hz();
@@ -111,7 +152,7 @@ impl ScheduledBowedRenderer {
             .ok_or_else(|| BowedScheduleError::Gesture(GestureError::UnknownControlId {
                 requested: track_id.to_string(),
             }))?;
-        if !matches!(track.target, GestureTarget::BowStroke { .. }) {
+        if !crate::gesture_path::matches_input(track,crate::gesture_path::PathInput::Bow {member:0},path) {
             return Err(invalid("the selected track must target a bow stroke"));
         }
         let start = state.samples_rendered();
@@ -287,7 +328,7 @@ mod tests {
     use super::*;
     use crate::bowed_string::{BowGesture, BowedRunConfig, BowedStringCard, FrictionIsland, Termination};
     use crate::stribeck_friction::StribeckFriction;
-    use fs_scenario::gesture::{GestureEvent, GestureTrack};
+    use fs_scenario::gesture::{GestureEvent, GestureTrack, GestureTarget};
 
     fn config() -> BowedRunConfig {
         BowedRunConfig {

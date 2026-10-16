@@ -25,17 +25,26 @@
 //! selects named configurations through a declared chart; note numbers never
 //! become omega anywhere in a physics path.
 
+use crate::assembly::ParameterPath;
 use fs_blake3::{ContentHash, DomainHasher};
+pub mod path;
+pub use path::{ResolvedSchedule, resolve_aliases};
 
 /// Schema-versioned hash domain for schedule identities.
 pub const GESTURE_SCHEDULE_HASH_DOMAIN: &str = "org.frankensim.fs-scenario.gesture-schedule.v1";
 /// Canonical-bytes schema line.
 pub const GESTURE_SCHEDULE_SCHEMA: &str = "frankensim-gesture-schedule-v1";
+/// Frozen typed-path wire format. V1 retains its original bytes and hash domain.
+pub const GESTURE_SCHEDULE_SCHEMA_VERSION: u32 = 2;
+pub const GESTURE_SCHEDULE_SCHEMA_V2: &str = "frankensim-gesture-schedule-v2";
+pub const GESTURE_SCHEDULE_HASH_DOMAIN_V2: &str = "org.frankensim.fs-scenario.gesture-schedule.v2";
 
 /// What a track controls. Each variant documents the ONE value variant
 /// it accepts and the fs-qty dimension of that value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GestureTarget {
+    /// A dimensioned writable parameter declared by an Assembly Description.
+    Parameter(ParameterPath),
     /// Valve crook insertion (value: `LengthM`, dimension L). The length
     /// is the crook-delta receipt's number; 0 = valve up.
     ValveInsertedLength {
@@ -105,6 +114,9 @@ impl GestureTarget {
     /// type-level unit law).
     #[must_use]
     pub fn accepts(&self, value: &GestureValue) -> bool {
+        if let Self::Parameter(p) = self {
+            return path::accepts(p, value);
+        }
         matches!(
             (self, value),
             (
@@ -143,6 +155,9 @@ impl GestureTarget {
     /// than a ramped continuous quantity.
     #[must_use]
     pub fn is_event(&self) -> bool {
+        if let Self::Parameter(p) = self {
+            return matches!(p.parameter.name.as_str(), "fret" | "strike" | "termination");
+        }
         matches!(
             self,
             GestureTarget::HammerStrike { .. }
@@ -268,13 +283,19 @@ impl GestureValue {
             (Self::Multiplier(a), Self::Multiplier(b)) => Self::Multiplier(lerp(*a, *b)),
             (Self::TensionN(a), Self::TensionN(b)) => Self::TensionN(lerp(*a, *b)),
             (Self::PressurePa(a), Self::PressurePa(b)) => Self::PressurePa(lerp(*a, *b)),
-            (Self::VelocityMPerS(a), Self::VelocityMPerS(b)) => {
-                Self::VelocityMPerS(lerp(*a, *b))
-            }
+            (Self::VelocityMPerS(a), Self::VelocityMPerS(b)) => Self::VelocityMPerS(lerp(*a, *b)),
             (Self::AngleRad(a), Self::AngleRad(b)) => Self::AngleRad(lerp(*a, *b)),
             (
-                Self::Bow { velocity_m_per_s: av, normal_force_n: af, station: ax },
-                Self::Bow { velocity_m_per_s: bv, normal_force_n: bf, station: bx },
+                Self::Bow {
+                    velocity_m_per_s: av,
+                    normal_force_n: af,
+                    station: ax,
+                },
+                Self::Bow {
+                    velocity_m_per_s: bv,
+                    normal_force_n: bf,
+                    station: bx,
+                },
             ) => Self::Bow {
                 velocity_m_per_s: lerp(*av, *bv),
                 normal_force_n: lerp(*af, *bf),
@@ -331,11 +352,33 @@ pub struct GestureSchedule {
     /// Control clock [Hz] (fixed; no wall time anywhere).
     pub control_rate_hz: u32,
     tracks: Vec<GestureTrack>,
+    wire_version: u8,
 }
 
 /// Typed refusals — nothing silently no-ops.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GestureError {
+    AliasUnresolved {
+        target: String,
+        index: usize,
+    },
+    UnknownParameter {
+        path: String,
+    },
+    DimensionMismatch {
+        path: String,
+        expected: fs_qty::Dims,
+        actual: fs_qty::Dims,
+    },
+    ParameterValueMismatch {
+        path: String,
+    },
+    DuplicateParameter {
+        path: String,
+    },
+    NoConsumer {
+        path: String,
+    },
     /// A structural parameter is unusable.
     Invalid {
         /// Diagnosis.
@@ -372,6 +415,32 @@ pub enum GestureError {
 impl core::fmt::Display for GestureError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::AliasUnresolved { target, index } => write!(
+                f,
+                "FS-SCENARIO-GESTURE-ALIAS: {target}[{index}] has no declared path"
+            ),
+            Self::UnknownParameter { path } => {
+                write!(f, "FS-SCENARIO-GESTURE-PATH: unknown parameter {path}")
+            }
+            Self::DimensionMismatch {
+                path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "FS-SCENARIO-GESTURE-DIMENSION: {path}: expected {expected:?}, actual {actual:?}"
+            ),
+            Self::ParameterValueMismatch { path } => write!(
+                f,
+                "FS-SCENARIO-GESTURE-VALUE: {path} rejects the value variant"
+            ),
+            Self::DuplicateParameter { path } => write!(
+                f,
+                "FS-SCENARIO-GESTURE-PATH: repeated command ownership at {path}"
+            ),
+            Self::NoConsumer { path } => {
+                write!(f, "FS-SCENARIO-GESTURE-CONSUMER: no consumer for {path}")
+            }
             GestureError::Invalid { what } => write!(f, "FS-SCENARIO-GESTURE: {what}"),
             GestureError::UnitMismatch { track } => write!(
                 f,
@@ -410,7 +479,7 @@ impl GestureSchedule {
     /// [`GestureError`] naming the violated law and track.
     pub fn try_new(
         control_rate_hz: u32,
-        tracks: Vec<GestureTrack>,
+        mut tracks: Vec<GestureTrack>,
     ) -> Result<GestureSchedule, GestureError> {
         if control_rate_hz == 0 {
             return Err(GestureError::Invalid {
@@ -418,7 +487,28 @@ impl GestureSchedule {
             });
         }
         let mut seen = std::collections::BTreeSet::new();
+        let mut paths = std::collections::BTreeSet::new();
+        let typed = tracks
+            .iter()
+            .any(|t| matches!(t.target, GestureTarget::Parameter(_)));
+        if typed
+            && tracks
+                .iter()
+                .any(|t| !matches!(t.target, GestureTarget::Parameter(_)))
+        {
+            return Err(GestureError::Invalid {
+                what: "resolve legacy aliases before combining with typed paths",
+            });
+        }
         for track in &tracks {
+            if let GestureTarget::Parameter(p) = &track.target {
+                path::validate_path(p)?;
+                if !paths.insert((p.entity, p.parameter.name.clone())) {
+                    return Err(GestureError::DuplicateParameter {
+                        path: path::path_name(p),
+                    });
+                }
+            }
             if track.id.trim().is_empty() {
                 return Err(GestureError::Invalid {
                     what: "track ids must be non-empty",
@@ -430,6 +520,23 @@ impl GestureSchedule {
                 });
             }
             let check_value = |value: &GestureValue| -> Result<(), GestureError> {
+                if let GestureTarget::Parameter(p) = &track.target {
+                    let actual = path::value_dimensions(value);
+                    if p.parameter.dims != actual {
+                        return Err(GestureError::DimensionMismatch {
+                            path: path::path_name(p),
+                            expected: p.parameter.dims,
+                            actual,
+                        });
+                    }
+                    if !path::accepts(p, value)
+                        || core::mem::discriminant(value) != core::mem::discriminant(&track.initial)
+                    {
+                        return Err(GestureError::ParameterValueMismatch {
+                            path: path::path_name(p),
+                        });
+                    }
+                }
                 if !track.target.accepts(value) {
                     return Err(GestureError::UnitMismatch {
                         track: track.id.clone(),
@@ -456,7 +563,16 @@ impl GestureSchedule {
                         what: "transitions must be finite non-negative",
                     });
                 }
-                if track.target.is_event() && event.transition_s != 0.0 {
+                if (track.target.is_event()
+                    || (typed
+                        && matches!(
+                            event.value,
+                            GestureValue::Fret { .. }
+                                | GestureValue::StrikeVelocity { .. }
+                                | GestureValue::TerminationSwap { .. }
+                        )))
+                    && event.transition_s != 0.0
+                {
                     return Err(GestureError::Invalid {
                         what: "event-like targets take step events only",
                     });
@@ -464,10 +580,35 @@ impl GestureSchedule {
                 check_value(&event.value)?;
             }
         }
+        if typed {
+            tracks.sort_by_key(|t| encode_target(&t.target));
+        }
         Ok(GestureSchedule {
             control_rate_hz,
             tracks,
+            wire_version: if typed { 2 } else { 1 },
         })
+    }
+
+    /// Construct only typed tracks, including an explicitly v2 empty schedule.
+    pub fn try_new_v2(
+        control_rate_hz: u32,
+        tracks: Vec<GestureTrack>,
+    ) -> Result<Self, GestureError> {
+        if tracks
+            .iter()
+            .any(|t| !matches!(t.target, GestureTarget::Parameter(_)))
+        {
+            return Err(GestureError::Invalid {
+                what: "v2 schedules require resolved parameter paths",
+            });
+        }
+        let mut schedule = Self::try_new(control_rate_hz, tracks)?;
+        schedule.wire_version = 2;
+        Ok(schedule)
+    }
+    pub fn schema_version(&self) -> u32 {
+        u32::from(self.wire_version)
     }
 
     /// The track list (read-only; admission owns mutation).
@@ -486,9 +627,11 @@ impl GestureSchedule {
     /// [`GestureError::UnknownControlId`]; `Invalid` for event or compound tracks.
     /// Bow consumers use [`Self::sample_value`] to retain all three coordinates.
     pub fn sample(&self, id: &str, tick: u64) -> Result<f64, GestureError> {
-        self.sample_value(id, tick)?.scalar().ok_or(GestureError::Invalid {
-            what: "compound continuous tracks are read with sample_value, not sample",
-        })
+        self.sample_value(id, tick)?
+            .scalar()
+            .ok_or(GestureError::Invalid {
+                what: "compound continuous tracks are read with sample_value, not sample",
+            })
     }
 
     /// Sample a continuous track without discarding its physical value type.
@@ -532,15 +675,20 @@ impl GestureSchedule {
             let elapsed = until - event.time_s;
             if event.transition_s > 0.0 && elapsed < event.transition_s {
                 let f = elapsed / event.transition_s;
-                value = value.ramp_towards(target, f).ok_or_else(|| {
-                    GestureError::UnitMismatch { track: track.id.clone() }
-                })?;
+                value =
+                    value
+                        .ramp_towards(target, f)
+                        .ok_or_else(|| GestureError::UnitMismatch {
+                            track: track.id.clone(),
+                        })?;
             } else {
                 value = target.clone();
             }
         }
         if !value.finite() || !value.in_range() {
-            return Err(GestureError::OutOfRange { track: track.id.clone() });
+            return Err(GestureError::OutOfRange {
+                track: track.id.clone(),
+            });
         }
         Ok(value)
     }
@@ -577,7 +725,11 @@ impl GestureSchedule {
     #[must_use]
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
         let mut s = String::new();
-        s.push_str(GESTURE_SCHEDULE_SCHEMA);
+        s.push_str(if self.wire_version == 2 {
+            GESTURE_SCHEDULE_SCHEMA_V2
+        } else {
+            GESTURE_SCHEDULE_SCHEMA
+        });
         s.push('\n');
         s.push_str(&format!("control_rate_hz\t{}\n", self.control_rate_hz));
         s.push_str(&format!("tracks\t{}\n", self.tracks.len()));
@@ -604,7 +756,11 @@ impl GestureSchedule {
     /// Domain-separated content hash of the canonical bytes.
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
-        let mut h = DomainHasher::new(GESTURE_SCHEDULE_HASH_DOMAIN);
+        let mut h = DomainHasher::new(if self.wire_version == 2 {
+            GESTURE_SCHEDULE_HASH_DOMAIN_V2
+        } else {
+            GESTURE_SCHEDULE_HASH_DOMAIN
+        });
         h.update(&self.to_canonical_bytes());
         h.finalize()
     }
@@ -626,9 +782,11 @@ impl GestureSchedule {
             *at += 1;
             Ok(line)
         };
-        if next(&mut at)? != GESTURE_SCHEDULE_SCHEMA {
-            return Err(GestureError::Decode { line: 1 });
-        }
+        let version = match next(&mut at)? {
+            GESTURE_SCHEDULE_SCHEMA => 1,
+            GESTURE_SCHEDULE_SCHEMA_V2 => 2,
+            _ => return Err(GestureError::Decode { line: 1 }),
+        };
         let rate_line = next(&mut at)?;
         let control_rate_hz = rate_line
             .strip_prefix("control_rate_hz\t")
@@ -638,6 +796,9 @@ impl GestureSchedule {
             .strip_prefix("tracks\t")
             .and_then(|v| v.parse::<usize>().ok())
             .ok_or(GestureError::Decode { line: at })?;
+        if n_tracks > lines.len() / 3 {
+            return Err(GestureError::Decode { line: at });
+        }
         let mut tracks = Vec::with_capacity(n_tracks);
         for _ in 0..n_tracks {
             let header = next(&mut at)?;
@@ -649,8 +810,13 @@ impl GestureSchedule {
                 .next()
                 .ok_or(GestureError::Decode { line: at })?
                 .to_string();
-            let target = decode_target(&cols.collect::<Vec<_>>().join("\t"))
-                .ok_or(GestureError::Decode { line: at })?;
+            let target_text = cols.collect::<Vec<_>>().join("\t");
+            let target = if version == 2 {
+                path::decode(&target_text).map(GestureTarget::Parameter)
+            } else {
+                decode_target(&target_text)
+            }
+            .ok_or(GestureError::Decode { line: at })?;
             let initial_line = next(&mut at)?;
             let initial = initial_line
                 .strip_prefix("initial\t")
@@ -660,6 +826,9 @@ impl GestureSchedule {
                 .strip_prefix("events\t")
                 .and_then(|v| v.parse::<usize>().ok())
                 .ok_or(GestureError::Decode { line: at })?;
+            if n_events > lines.len().saturating_sub(at) {
+                return Err(GestureError::Decode { line: at });
+            }
             let mut events = Vec::with_capacity(n_events);
             for _ in 0..n_events {
                 let line = next(&mut at)?;
@@ -692,12 +861,21 @@ impl GestureSchedule {
                 events,
             });
         }
-        GestureSchedule::try_new(control_rate_hz, tracks)
+        let schedule = if version == 2 {
+            GestureSchedule::try_new_v2(control_rate_hz, tracks)?
+        } else {
+            GestureSchedule::try_new(control_rate_hz, tracks)?
+        };
+        if version == 2 && (at != lines.len() || schedule.to_canonical_bytes() != bytes) {
+            return Err(GestureError::Decode { line: at });
+        }
+        Ok(schedule)
     }
 }
 
 fn encode_target(t: &GestureTarget) -> String {
     match t {
+        GestureTarget::Parameter(p) => path::encode(p),
         GestureTarget::ValveInsertedLength { valve } => format!("valve-length\t{valve}"),
         GestureTarget::ToneHoleSigma { hole } => format!("hole-sigma\t{hole}"),
         GestureTarget::SlideLength => "slide-length".to_string(),
@@ -1034,6 +1212,7 @@ mod gesture_tests {
                 let bytes = GestureSchedule {
                     control_rate_hz: 100,
                     tracks: tracks.clone(),
+                    wire_version: 1,
                 }
                 .to_canonical_bytes();
                 assert!(matches!(
@@ -1213,72 +1392,143 @@ mod compound_sampling_tests {
 
     #[test]
     fn bow_ramps_reverse_move_and_release_without_scalar_panics() {
-        let schedule = GestureSchedule::try_new(8, vec![GestureTrack {
-            id: "bow".into(),
-            target: GestureTarget::BowStroke { string: 2 },
-            initial: bow(0.0, 0.0, 0.25),
-            events: vec![
-                GestureEvent { time_s: 0.0, transition_s: 1.0, value: bow(1.0, 4.0, 0.75) },
-                // Interrupt at (0.5 m/s, 2 N, 0.5), not the first target.
-                GestureEvent { time_s: 0.5, transition_s: 0.5, value: bow(-0.5, 0.0, 0.25) },
-                GestureEvent { time_s: 0.875, transition_s: 0.0, value: bow(-0.25, 0.0, 0.5) },
-            ],
-        }]).unwrap();
-        let decoded = GestureSchedule::from_canonical_bytes(&schedule.to_canonical_bytes()).unwrap();
+        let schedule = GestureSchedule::try_new(
+            8,
+            vec![GestureTrack {
+                id: "bow".into(),
+                target: GestureTarget::BowStroke { string: 2 },
+                initial: bow(0.0, 0.0, 0.25),
+                events: vec![
+                    GestureEvent {
+                        time_s: 0.0,
+                        transition_s: 1.0,
+                        value: bow(1.0, 4.0, 0.75),
+                    },
+                    // Interrupt at (0.5 m/s, 2 N, 0.5), not the first target.
+                    GestureEvent {
+                        time_s: 0.5,
+                        transition_s: 0.5,
+                        value: bow(-0.5, 0.0, 0.25),
+                    },
+                    GestureEvent {
+                        time_s: 0.875,
+                        transition_s: 0.0,
+                        value: bow(-0.25, 0.0, 0.5),
+                    },
+                ],
+            }],
+        )
+        .unwrap();
+        let decoded =
+            GestureSchedule::from_canonical_bytes(&schedule.to_canonical_bytes()).unwrap();
         for source in [&schedule, &decoded] {
             assert_eq!(source.sample_value("bow", 0).unwrap(), bow(0.0, 0.0, 0.25));
-            assert_eq!(source.sample_value("bow", 2).unwrap(), bow(0.25, 1.0, 0.375));
+            assert_eq!(
+                source.sample_value("bow", 2).unwrap(),
+                bow(0.25, 1.0, 0.375)
+            );
             assert_eq!(source.sample_value("bow", 4).unwrap(), bow(0.5, 2.0, 0.5));
             assert_eq!(source.sample_value("bow", 6).unwrap(), bow(0.0, 1.0, 0.375));
             assert_eq!(source.sample_value("bow", 7).unwrap(), bow(-0.25, 0.0, 0.5));
-            assert_eq!(source.sample_value("bow", 800).unwrap(), bow(-0.25, 0.0, 0.5));
-            assert!(matches!(source.sample("bow", 0), Err(GestureError::Invalid { .. })));
-            assert!(matches!(source.events_at("bow", 0), Err(GestureError::Invalid { .. })));
+            assert_eq!(
+                source.sample_value("bow", 800).unwrap(),
+                bow(-0.25, 0.0, 0.5)
+            );
+            assert!(matches!(
+                source.sample("bow", 0),
+                Err(GestureError::Invalid { .. })
+            ));
+            assert!(matches!(
+                source.events_at("bow", 0),
+                Err(GestureError::Invalid { .. })
+            ));
         }
         assert_eq!(schedule.content_hash(), decoded.content_hash());
     }
 
     #[test]
     fn typed_scalar_sampling_preserves_existing_interrupted_pressure_arithmetic() {
-        let schedule = GestureSchedule::try_new(8, vec![GestureTrack {
-            id: "pressure".into(),
-            target: GestureTarget::BlowingPressure,
-            initial: GestureValue::PressurePa(0.0),
-            events: vec![
-                GestureEvent { time_s: 0.0, transition_s: 1.0, value: GestureValue::PressurePa(4.0) },
-                GestureEvent { time_s: 0.5, transition_s: 0.5, value: GestureValue::PressurePa(0.0) },
-            ],
-        }]).unwrap();
-        for (tick, expected) in [0.0_f64, 0.5, 1.0, 1.5, 2.0, 1.5, 1.0, 0.5, 0.0].into_iter().enumerate() {
-            assert_eq!(schedule.sample("pressure", tick as u64).unwrap().to_bits(), expected.to_bits());
-            assert_eq!(schedule.sample_value("pressure", tick as u64).unwrap(), GestureValue::PressurePa(expected));
+        let schedule = GestureSchedule::try_new(
+            8,
+            vec![GestureTrack {
+                id: "pressure".into(),
+                target: GestureTarget::BlowingPressure,
+                initial: GestureValue::PressurePa(0.0),
+                events: vec![
+                    GestureEvent {
+                        time_s: 0.0,
+                        transition_s: 1.0,
+                        value: GestureValue::PressurePa(4.0),
+                    },
+                    GestureEvent {
+                        time_s: 0.5,
+                        transition_s: 0.5,
+                        value: GestureValue::PressurePa(0.0),
+                    },
+                ],
+            }],
+        )
+        .unwrap();
+        for (tick, expected) in [0.0_f64, 0.5, 1.0, 1.5, 2.0, 1.5, 1.0, 0.5, 0.0]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                schedule.sample("pressure", tick as u64).unwrap().to_bits(),
+                expected.to_bits()
+            );
+            assert_eq!(
+                schedule.sample_value("pressure", tick as u64).unwrap(),
+                GestureValue::PressurePa(expected)
+            );
         }
     }
 
     #[test]
     fn finite_opposite_velocities_do_not_overflow_the_ramp_difference() {
-        let mut schedule = GestureSchedule::try_new(2, vec![GestureTrack {
-            id: "bow".into(),
-            target: GestureTarget::BowStroke { string: 0 },
-            initial: bow(-f64::MAX, 1.0, 0.25),
-            events: vec![GestureEvent {
-                time_s: 0.0, transition_s: 1.0, value: bow(f64::MAX, 0.0, 0.75),
+        let mut schedule = GestureSchedule::try_new(
+            2,
+            vec![GestureTrack {
+                id: "bow".into(),
+                target: GestureTarget::BowStroke { string: 0 },
+                initial: bow(-f64::MAX, 1.0, 0.25),
+                events: vec![GestureEvent {
+                    time_s: 0.0,
+                    transition_s: 1.0,
+                    value: bow(f64::MAX, 0.0, 0.75),
+                }],
             }],
-        }]).unwrap();
+        )
+        .unwrap();
         assert_eq!(schedule.sample_value("bow", 1).unwrap(), bow(0.0, 0.5, 0.5));
-        assert!(matches!(schedule.sample_value("absent", 0), Err(GestureError::UnknownControlId { .. })));
+        assert!(matches!(
+            schedule.sample_value("absent", 0),
+            Err(GestureError::UnknownControlId { .. })
+        ));
         schedule.control_rate_hz = 0;
-        assert!(matches!(schedule.sample_value("bow", 0), Err(GestureError::Invalid { .. })));
+        assert!(matches!(
+            schedule.sample_value("bow", 0),
+            Err(GestureError::Invalid { .. })
+        ));
     }
 
     #[test]
     fn typed_sampling_does_not_convert_strikes_into_continuous_controls() {
-        let schedule = GestureSchedule::try_new(100, vec![GestureTrack {
-            id: "hammer".into(),
-            target: GestureTarget::HammerStrike { string: 0 },
-            initial: GestureValue::StrikeVelocity { velocity_m_per_s: 0.0 },
-            events: Vec::new(),
-        }]).unwrap();
-        assert!(matches!(schedule.sample_value("hammer", 0), Err(GestureError::Invalid { .. })));
+        let schedule = GestureSchedule::try_new(
+            100,
+            vec![GestureTrack {
+                id: "hammer".into(),
+                target: GestureTarget::HammerStrike { string: 0 },
+                initial: GestureValue::StrikeVelocity {
+                    velocity_m_per_s: 0.0,
+                },
+                events: Vec::new(),
+            }],
+        )
+        .unwrap();
+        assert!(matches!(
+            schedule.sample_value("hammer", 0),
+            Err(GestureError::Invalid { .. })
+        ));
     }
 }

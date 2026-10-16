@@ -13,7 +13,7 @@
 
 use super::{ControlDelta, GatedRenderOutcome, RenderContext, RenderError};
 use fs_exec::CancelGate;
-use fs_scenario::gesture::{GestureSchedule, GestureTarget};
+use fs_scenario::gesture::GestureSchedule;
 
 /// Lower one pressure track onto an audio sample clock before rendering.
 ///
@@ -47,7 +47,7 @@ pub fn pressure_gesture_controls(
     if !schedule
         .tracks()
         .iter()
-        .any(|track| track.id == track_id && track.target == GestureTarget::BlowingPressure)
+        .any(|track| track.id == track_id && fs_scenario::gesture::path::legacy_member(&track.target,"blowing_pressure")==Some(0))
     {
         return Err(RenderError::Control {
             what: "pressure gesture binding requires an existing blowing-pressure track",
@@ -89,6 +89,21 @@ pub fn pressure_gesture_controls(
         }
     }
     Ok(events)
+}
+
+/// Bind exact, description-validated parameter paths, then use the existing
+/// pressure compiler. Retain the returned source binding in render provenance.
+pub fn compile_pressure_paths(
+    source: &fs_scenario::gesture::ResolvedSchedule,
+    bindings: &[crate::gesture_path::PathBinding],
+    audio_rate_hz: u32,
+    samples: u64,
+    max_work: u64,
+) -> Result<(Vec<ScheduledControl>, crate::gesture_path::BoundPaths), GestureCompileError> {
+    let bound =
+        crate::gesture_path::bind_paths(source, bindings).map_err(GestureCompileError::Gesture)?;
+    let controls = bound.pressure_controls(audio_rate_hz, samples, max_work)?;
+    Ok((controls, bound))
 }
 
 /// One input assignment on the context-relative, absolute sample clock.
@@ -439,7 +454,13 @@ pub fn compile_pressure_gestures(
     samples: u64,
     max_work: u64,
 ) -> Result<Vec<ScheduledControl>, GestureCompileError> {
-    use fs_scenario::gesture::GestureTarget;
+    compile_pressure_gestures_admitted(schedule,bindings,audio_rate_hz,samples,max_work,None)
+}
+
+pub(crate) fn compile_pressure_gestures_admitted(
+    schedule:&GestureSchedule,bindings:&[PressureGestureBinding],audio_rate_hz:u32,
+    samples:u64,max_work:u64,paths:Option<&[crate::gesture_path::PathBinding]>,
+) ->Result<Vec<ScheduledControl>,GestureCompileError> {
     use std::collections::BTreeSet;
 
     let rate = schedule.control_rate_hz;
@@ -470,7 +491,12 @@ pub fn compile_pressure_gestures(
                 "voice has more than one pressure track",
             ));
         }
-        if !matches!(track.target, GestureTarget::BlowingPressure) {
+        let input=crate::gesture_path::PathInput::BlowingPressure {voice:binding.voice};
+        let accepts=match paths {
+            Some(paths)=>paths.iter().any(|p|p.input==input && crate::gesture_path::matches_input(track,input,Some(&p.path))),
+            None=>crate::gesture_path::matches_input(track,input,None),
+        };
+        if !accepts {
             return Err(track_error(
                 &binding.track,
                 "target is not a blowing-pressure input",

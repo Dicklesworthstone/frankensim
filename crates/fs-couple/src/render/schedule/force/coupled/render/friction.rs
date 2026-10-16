@@ -5,7 +5,7 @@
 use super::super::contact::friction::{FrictionDrive, FrictionModalSystem};
 use crate::render::{ControlDelta, RenderContext, RenderError, RenderVoice};
 use crate::render::schedule::{GestureCompileError, ScheduledControl, ScheduledRenderer};
-use fs_scenario::gesture::{GestureSchedule, GestureTarget, GestureValue};
+use fs_scenario::gesture::{GestureSchedule, GestureValue};
 
 /// One real two-way network, with held external modal forces and surface inputs.
 /// A callback refusal poisons this wrapper; the lower physical owner still
@@ -73,6 +73,26 @@ impl FrictionModalVoice {
 fn invalid(what: &'static str) -> RenderError { RenderError::Control { what } }
 fn source_invalid(what: &'static str) -> GestureCompileError { GestureCompileError::Invalid { what } }
 
+/// Exact path binding for one existing fixed physical contact. The returned
+/// binding retains the original v2 identity beside the compiled controls.
+pub fn compile_friction_path(
+    source: &fs_scenario::gesture::ResolvedSchedule,
+    path: &fs_scenario::assembly::ParameterPath,
+    config: FrictionGestureConfig,
+) -> Result<(CompiledFrictionTrack, crate::gesture_path::BoundPaths), GestureCompileError> {
+    use crate::gesture_path::{PathBinding, PathInput, bind_paths};
+    let bound = bind_paths(
+        source,
+        &[PathBinding {
+            path: path.clone(),
+            input: PathInput::Bow { member: 0 },
+        }],
+    )
+    .map_err(GestureCompileError::Gesture)?;
+    let controls = bound.friction_controls(path, config)?;
+    Ok((controls, bound))
+}
+
 /// Explicit physical binding and offline work/storage limits.
 #[derive(Clone, Copy, Debug)]
 pub struct FrictionGestureConfig {
@@ -110,6 +130,13 @@ impl ScheduledRenderer {
         system: FrictionModalSystem, held_force: Vec<f64>, schedule: &GestureSchedule,
         track_id: &str, config: FrictionGestureConfig,
     ) -> Result<Self, GestureCompileError> {
+        Self::from_friction_gesture_admitted(system,held_force,schedule,track_id,config,None)
+    }
+
+    pub(crate) fn from_friction_gesture_admitted(
+        system:FrictionModalSystem,held_force:Vec<f64>,schedule:&GestureSchedule,
+        track_id:&str,config:FrictionGestureConfig,path:Option<&fs_scenario::assembly::ParameterPath>,
+    )->Result<Self,GestureCompileError> {
         let rate = schedule.control_rate_hz;
         if rate == 0 || config.sample_rate_hz == 0 || rate > config.sample_rate_hz || config.max_block == 0
             || system.sample_period_s().to_bits() != f64::from(config.sample_rate_hz).recip().to_bits()
@@ -118,7 +145,7 @@ impl ScheduledRenderer {
         }
         system.samples_rendered().checked_add(config.samples)
             .ok_or_else(|| source_invalid("friction gesture horizon overflows the physical clock"))?;
-        let compiled = compile_friction_track(schedule, track_id, config)?;
+        let compiled = compile_friction_track_admitted(schedule, track_id, config,path)?;
         let voice = FrictionModalVoice::new(system, held_force, FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 })
             .map_err(GestureCompileError::Render)?;
         let events = compiled.events.into_iter().map(|event| ScheduledControl {
@@ -158,9 +185,17 @@ pub struct CompiledFrictionTrack {
 /// # Errors
 /// Invalid clocks/station, missing or wrong track, moving station, malformed
 /// physical inputs, or the original work/emitted-event budgets.
-pub fn compile_friction_track(schedule: &GestureSchedule, track_id: &str,
-    config: FrictionGestureConfig) -> Result<CompiledFrictionTrack, GestureCompileError>
-{
+pub fn compile_friction_track(
+    schedule: &GestureSchedule,
+    track_id: &str,
+    config: FrictionGestureConfig,
+) -> Result<CompiledFrictionTrack, GestureCompileError> {
+    compile_friction_track_admitted(schedule,track_id,config,None)
+}
+
+pub(crate) fn compile_friction_track_admitted(schedule:&GestureSchedule,track_id:&str,
+    config:FrictionGestureConfig,path:Option<&fs_scenario::assembly::ParameterPath>)
+    ->Result<CompiledFrictionTrack,GestureCompileError> {
     let rate = schedule.control_rate_hz;
     if rate == 0 || config.sample_rate_hz == 0 || rate > config.sample_rate_hz || config.max_block == 0
         || !config.station_fraction.is_finite() || !(0.0 < config.station_fraction && config.station_fraction < 1.0) {
@@ -168,7 +203,7 @@ pub fn compile_friction_track(schedule: &GestureSchedule, track_id: &str,
     }
     let track = schedule.tracks().iter().find(|t| t.id == track_id)
         .ok_or_else(|| GestureCompileError::Track { track: track_id.into(), what: "no source track with this id" })?;
-    if !matches!(track.target, GestureTarget::BowStroke { .. }) {
+    if !crate::gesture_path::matches_input(track,crate::gesture_path::PathInput::Bow {member:0},path) {
         return Err(source_invalid("friction gesture requires an explicit bow-stroke track"));
     }
     // Validate every authored station, including future commands, before

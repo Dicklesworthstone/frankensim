@@ -7,14 +7,47 @@ use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::{RenderError, schedule::GestureCompileError};
 use crate::render::schedule::force::coupled::contact::friction::FrictionDrive;
 use crate::render::schedule::force::coupled::render::friction::{
-    FrictionGestureConfig, compile_friction_track,
+    FrictionGestureConfig, compile_friction_track_admitted,
 };
-use fs_scenario::gesture::{GestureSchedule, GestureTarget};
+use fs_scenario::gesture::GestureSchedule;
 
 fn source_invalid(what: &'static str) -> GestureCompileError { GestureCompileError::Invalid { what } }
 fn render_invalid(what: &'static str) -> RenderError { RenderError::Control { what } }
 
 impl MultiBowStringBank {
+    /// Bind one typed path per actual contact, in the source's contact order.
+    /// Return the v2 source for provenance; all physical steps remain unchanged.
+    pub fn into_scheduled_paths(
+        self,
+        source: &fs_scenario::gesture::ResolvedSchedule,
+        paths: &[fs_scenario::assembly::ParameterPath],
+        config: MultiBowPerformanceConfig,
+    ) -> Result<(MultiBowPerformance, crate::gesture_path::BoundPaths), GestureCompileError> {
+        use crate::gesture_path::{PathBinding, PathInput, bind_paths};
+        if paths.len() != self.source.bows().len() {
+            return Err(source_invalid(
+                "one typed path is required per physical bow contact",
+            ));
+        }
+        let bindings: Vec<_> = paths
+            .iter()
+            .zip(self.source.bows())
+            .map(|(path, bow)| PathBinding {
+                path: path.clone(),
+                input: PathInput::Bow {
+                    member: bow.location.string,
+                },
+            })
+            .collect();
+        let bound = bind_paths(source, &bindings).map_err(GestureCompileError::Gesture)?;
+        let tracks = paths
+            .iter()
+            .map(|p| source.track(p).map(|t| t.id.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(GestureCompileError::Gesture)?;
+        let performance = self.into_scheduled_admitted(source.schedule().clone(), tracks, config,Some(paths))?;
+        Ok((performance, bound))
+    }
     /// Compile a complete finite performance on the unchanged physical clock.
     ///
     /// Exactly one distinct track per contact, in `source().bows()` order, must name its
@@ -33,9 +66,17 @@ impl MultiBowStringBank {
     /// # Errors
     /// Incomplete/wrong/duplicate tracks, station/clock mismatch, source inputs,
     /// total compilation/event budgets, unrepresentable horizon or allocation.
-    pub fn into_scheduled(self, schedule: GestureSchedule, tracks: Vec<String>, config: MultiBowPerformanceConfig)
-        -> Result<MultiBowPerformance, GestureCompileError>
-    {
+    pub fn into_scheduled(
+        self,
+        schedule: GestureSchedule,
+        tracks: Vec<String>,
+        config: MultiBowPerformanceConfig,
+    ) -> Result<MultiBowPerformance, GestureCompileError> {
+        self.into_scheduled_admitted(schedule,tracks,config,None)
+    }
+
+    fn into_scheduled_admitted(self,schedule:GestureSchedule,tracks:Vec<String>,config:MultiBowPerformanceConfig,
+        paths:Option<&[fs_scenario::assembly::ParameterPath]>)->Result<MultiBowPerformance,GestureCompileError> {
         let rate = self.source.bank().options().sample_rate_hz;
         let base_sample = self.system.samples_rendered();
         if config.samples == 0 || config.max_block == 0 || tracks.len() != self.source.bows().len()
@@ -49,15 +90,20 @@ impl MultiBowStringBank {
             if tracks[..port].contains(name) {
                 return Err(source_invalid("each physical bow requires its own explicit track binding"));
             }
-            let target = schedule.tracks().iter().find(|t| &t.id == name).map(|t| &t.target);
-            if !matches!(target, Some(GestureTarget::BowStroke { string }) if usize::from(*string) == bow.location.string) {
+            let source_track = schedule.tracks().iter().find(|t| &t.id == name);
+            let path=paths.and_then(|p|p.get(port));
+            let accepts=match path {
+                Some(path)=>source_track.is_some_and(|t|crate::gesture_path::matches_input(t,crate::gesture_path::PathInput::Bow {member:bow.location.string},Some(path))),
+                None=>source_track.and_then(|t|fs_scenario::gesture::path::legacy_member(&t.target,"bow"))==Some(bow.location.string),
+            };
+            if !accepts {
                 return Err(source_invalid("bow track must address the actual material string at that contact"));
             }
-            let compiled = compile_friction_track(&schedule, name, FrictionGestureConfig {
+            let compiled = compile_friction_track_admitted(&schedule, name, FrictionGestureConfig {
                 sample_rate_hz: rate, samples: config.samples, max_block: config.max_block,
                 max_work: remaining_work, max_events: config.max_events-events.len(),
                 station_fraction: bow.location.station_fraction,
-            })?;
+            },path)?;
             remaining_work -= compiled.required_work;
             events.try_reserve(compiled.events.len())
                 .map_err(|_| source_invalid("cannot reserve complete bow controls"))?;

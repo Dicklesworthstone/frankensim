@@ -47,6 +47,7 @@ pub mod circuit_enthalpy;
 pub mod description;
 pub mod driving_point;
 pub mod flue_loop;
+pub mod gesture_path;
 pub mod glottis;
 pub mod iqn_ils;
 pub mod material_assembly;

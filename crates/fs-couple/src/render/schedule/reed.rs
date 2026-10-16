@@ -16,7 +16,7 @@ use fs_material::gas::GasState;
 use fs_material::gas_species::input::{
     GasInputError, GasRecord, ThermochemicalSources, read_gas_record,
 };
-use fs_scenario::{BeatingReed, gesture::{GestureSchedule, GestureTarget}};
+use fs_scenario::{BeatingReed, gesture::GestureSchedule};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::regional::outlet::{OutletError, OutletReceiverInfo};
 mod outlet;
@@ -255,7 +255,7 @@ impl ReedPerformance {
         if r.lines.next().is_some() { return Err(bad(r.line + 1, "unexpected trailing header record")); }
         let schedule = decode_schedule(schedule_text)?;
         let [track] = schedule.tracks() else { return Err(bad(0, "exactly one pressure track is required")); };
-        if track.target != GestureTarget::BlowingPressure || schedule.control_rate_hz == 0
+        if fs_scenario::gesture::path::legacy_member(&track.target,"blowing_pressure")!=Some(0) || schedule.control_rate_hz == 0
             || schedule.control_rate_hz > rate {
             return Err(bad(0, "only blowing pressure is supported, at a control rate no greater than mechanics"));
         }

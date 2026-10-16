@@ -30,7 +30,7 @@ use crate::string_specimen::{ResolvedStringSpecimen, StringPrestress};
 use fs_exec::{CancelGate, Cx};
 use fs_material::gas::GasState;
 use fs_material::section::ConcentricKelvinVoigtSection;
-use fs_scenario::{PrestressedString, gesture::{GestureSchedule, GestureTarget}};
+use fs_scenario::{PrestressedString, gesture::GestureSchedule};
 use fs_tribo::FrictionLaw;
 
 /// Original source data, not an averaged material or an authored modal preset.
@@ -222,15 +222,61 @@ impl ReciprocalStringBank {
     #[must_use]
     pub fn into_parts(self) -> (MaterialStringBankSource, FrictionModalSystem) { (self.source, self.system) }
 
+    /// Bind an exact declared path to the actual source-selected material member.
+    pub fn into_scheduled_path(
+        self,
+        source: &fs_scenario::gesture::ResolvedSchedule,
+        path: &fs_scenario::assembly::ParameterPath,
+        config: FrictionGestureConfig,
+    ) -> Result<
+        (
+            MaterialStringBankPerformance,
+            crate::gesture_path::BoundPaths,
+        ),
+        GestureCompileError,
+    > {
+        use crate::gesture_path::{PathBinding, PathInput, bind_paths};
+        let bound = bind_paths(
+            source,
+            &[PathBinding {
+                path: path.clone(),
+                input: PathInput::Bow {
+                    member: self.source.options.bow.string,
+                },
+            }],
+        )
+        .map_err(GestureCompileError::Gesture)?;
+        let track = source
+            .track(path)
+            .map_err(GestureCompileError::Gesture)?
+            .id
+            .clone();
+        let performance = self.into_scheduled_admitted(source.schedule(), &track, config,Some(path))?;
+        Ok((performance, bound))
+    }
+
     /// Bind an existing bow track without dropping unplayed strings or body state.
     /// Its string index must name the ACTUAL selected member; a matching station
     /// on a different string is not the same physical contact.
-    pub fn into_scheduled(self, schedule: &GestureSchedule, track: &str,
-        config: FrictionGestureConfig) -> Result<MaterialStringBankPerformance, GestureCompileError>
-    {
+    pub fn into_scheduled(
+        self,
+        schedule: &GestureSchedule,
+        track: &str,
+        config: FrictionGestureConfig,
+    ) -> Result<MaterialStringBankPerformance, GestureCompileError> {
+        self.into_scheduled_admitted(schedule,track,config,None)
+    }
+
+    fn into_scheduled_admitted(self,schedule:&GestureSchedule,track:&str,
+        config:FrictionGestureConfig,path:Option<&fs_scenario::assembly::ParameterPath>)
+        ->Result<MaterialStringBankPerformance,GestureCompileError> {
         let bow = self.source.options.bow;
-        let target = schedule.tracks().iter().find(|t| t.id == track).map(|t| &t.target);
-        if !matches!(target, Some(GestureTarget::BowStroke { string }) if usize::from(*string) == bow.string)
+        let source_track = schedule.tracks().iter().find(|t| t.id == track);
+        let accepts=match path {
+            Some(path)=>source_track.is_some_and(|t|crate::gesture_path::matches_input(t,crate::gesture_path::PathInput::Bow {member:bow.string},Some(path))),
+            None=>source_track.and_then(|t|fs_scenario::gesture::path::legacy_member(&t.target,"bow"))==Some(bow.string),
+        };
+        if !accepts
             || config.station_fraction.to_bits() != bow.station_fraction.to_bits()
             || config.sample_rate_hz != self.source.options.sample_rate_hz {
             return Err(GestureCompileError::Invalid {
@@ -238,7 +284,7 @@ impl ReciprocalStringBank {
             });
         }
         let external = vec![0.0; self.system.mode_count()];
-        let renderer = ScheduledRenderer::from_friction_gesture(self.system, external, schedule, track, config)?;
+        let renderer = ScheduledRenderer::from_friction_gesture_admitted(self.system, external, schedule, track, config,path)?;
         Ok(MaterialStringBankPerformance { source: self.source, renderer })
     }
 }

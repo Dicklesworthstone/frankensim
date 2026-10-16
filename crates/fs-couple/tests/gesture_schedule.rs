@@ -14,6 +14,117 @@ use fs_scenario::gesture::{
     GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue,
 };
 
+#[path = "../../fs-scenario/tests/support/gesture_description.rs"]
+mod path_fixture;
+
+#[test]
+fn unconsumed_targets_reach_a_typed_consumer_or_refusal() {
+    use fs_couple::gesture_path::{PathBinding, PathInput, bind_paths};
+    use fs_scenario::gesture::{GestureError, resolve_aliases};
+    let (description, cases) = path_fixture::fixture();
+    for (alias, path, initial) in cases {
+        let expected_path = fs_scenario::gesture::path::path_name(&path);
+        let next = match &initial {
+            GestureValue::PressurePa(_) => Some(GestureValue::PressurePa(3000.0)),
+            GestureValue::Bow { .. } => Some(GestureValue::Bow {
+                velocity_m_per_s: 0.2,
+                normal_force_n: 0.03,
+                station: 0.2,
+            }),
+            _ => None,
+        };
+        let events = next
+            .into_iter()
+            .map(|value| GestureEvent {
+                time_s: 0.003,
+                transition_s: 0.002,
+                value,
+            })
+            .collect();
+        let legacy = GestureSchedule::try_new(
+            1000,
+            vec![GestureTrack {
+                id: "command".into(),
+                target: alias,
+                initial: initial.clone(),
+                events,
+            }],
+        )
+        .unwrap();
+        let resolved = resolve_aliases(&legacy, &description).unwrap();
+        assert!(
+            matches!(bind_paths(&resolved,&[]),Err(GestureError::NoConsumer {path:p}) if p==expected_path)
+        );
+        let input = if matches!(initial, GestureValue::Bow { .. }) {
+            PathInput::Bow { member: 0 }
+        } else {
+            PathInput::BlowingPressure { voice: 0 }
+        };
+        let bound = bind_paths(
+            &resolved,
+            &[PathBinding {
+                path: path.clone(),
+                input,
+            }],
+        );
+        match initial {
+            GestureValue::PressurePa(_) => {
+                let bound = bound.unwrap();
+                let actual = bound.pressure_controls(48_000, 480, 100_000).unwrap();
+                let expected = compile_pressure_gestures(
+                    &legacy,
+                    &[PressureGestureBinding {
+                        track: "command".into(),
+                        voice: 0,
+                    }],
+                    48_000,
+                    480,
+                    100_000,
+                )
+                .unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(
+                    bound.source().schedule().content_hash(),
+                    resolved.schedule().content_hash()
+                );
+            }
+            GestureValue::Bow { .. } => {
+                use fs_couple::render::schedule::force::coupled::render::friction::{
+                    FrictionGestureConfig, compile_friction_track,
+                };
+                let bound = bound.unwrap();
+                let wide = bind_paths(
+                    &resolved,
+                    &[PathBinding {
+                        path: path.clone(),
+                        input: PathInput::Bow { member: 300 },
+                    }],
+                )
+                .unwrap();
+                assert_eq!(wide.bindings()[0].input, PathInput::Bow { member: 300 });
+                let config = FrictionGestureConfig {
+                    sample_rate_hz: 48_000,
+                    samples: 480,
+                    max_block: 64,
+                    max_work: 100_000,
+                    max_events: 100,
+                    station_fraction: 0.2,
+                };
+                let controls = bound.friction_controls(&path, config).unwrap();
+                let expected = compile_friction_track(&legacy, "command", config).unwrap();
+                assert_eq!(controls.events, expected.events);
+                assert_eq!(controls.required_work, expected.required_work);
+                assert!(controls.events.len() > 1);
+                assert_eq!(controls.events[0].drive.speed_m_s, 0.1);
+                assert_eq!(controls.events[0].drive.normal_force_n, 0.01);
+            }
+            _ => {
+                assert!(matches!(bound,Err(GestureError::NoConsumer {path:p}) if p==expected_path))
+            }
+        }
+    }
+}
+
 #[test]
 fn signed_gesture_ramp_is_finite_through_the_public_sampler() {
     let schedule = GestureSchedule::try_new(

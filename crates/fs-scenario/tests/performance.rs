@@ -330,6 +330,20 @@ fn pf_009_commands_cannot_target_physical_state() {
         import_smf(&one(), &d, &p, &t, limits()),
         Err(PerformanceError::PhysicalStateCommand { .. })
     ));
+    let mut redirected = p.bindings[0].path.clone();
+    redirected.entity = airway;
+    p.bindings[0].target = GestureTarget::Parameter(redirected);
+    assert!(matches!(
+        import_smf(&one(), &d, &p, &t, limits()),
+        Err(PerformanceError::PhysicalStateCommand { .. })
+    ));
+    p.bindings[0].path.parameter = ParameterKey::new("prestress", Dims::NONE);
+    p.bindings[0].target = GestureTarget::Parameter(p.bindings[0].path.clone());
+    p.bindings[0].initial = GestureValue::Multiplier(1.0);
+    assert!(matches!(
+        import_smf(&one(), &d, &p, &t, limits()),
+        Err(PerformanceError::PhysicalStateCommand { .. })
+    ));
 }
 #[test]
 fn pf_010_controllers_require_named_rules_and_units() {

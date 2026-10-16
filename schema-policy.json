@@ -358,6 +358,30 @@
       "deprecation_horizon": "a predecessor assembly version stays decodable for one major version after its successor is released"
     },
     {
+      "id": "scenario.gesture",
+      "title": "Typed-path gesture schedules with frozen v1 aliases",
+      "owner": "fs-scenario",
+      "version_kind": "integer-const",
+      "version_constant": "GESTURE_SCHEDULE_SCHEMA_VERSION",
+      "version_location": "crates/fs-scenario/src/gesture.rs",
+      "current_version": "2",
+      "lockstep": [],
+      "surface": [
+        "v2 canonical schedule bytes ordered by persistent entity token then parameter key, with six SI dimension exponents",
+        "v2 org.frankensim.fs-scenario.gesture-schedule.v2 derive-key content hash domain",
+        "v1 bytes, content hash domain and all sixteen legacy aliases retained unchanged",
+        "description-bound alias resolution records original schedule hash, description hash and resulting v2 hash; writable declarations are configuration assignment paths"
+      ],
+      "minor_bump": "documentation only; canonical bytes, hash domains and parameter interpretation remain identical",
+      "major_bump": "any field, tag, ordering, dimension encoding or hash preimage change requires a new version and explicit migration or named refusal",
+      "migration_obligation": "auto-migration-receipt",
+      "migration_evidence": [
+        { "test": "legacy_targets_resolve_as_aliases", "location": "crates/fs-scenario/tests/gesture_paths.rs" },
+        { "test": "v1_example_corpus_hashes_are_unchanged", "location": "crates/fs-scenario/tests/gesture_paths.rs" }
+      ],
+      "deprecation_horizon": "v1 committed gesture artifacts remain decodable with their original content hashes"
+    },
+    {
       "id": "scenario.performance",
       "title": "The assembly-bound Performance sidecar",
       "owner": "fs-scenario",

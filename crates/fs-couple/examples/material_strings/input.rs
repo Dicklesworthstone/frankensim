@@ -178,8 +178,8 @@ impl Spec {
         let last_tick = (samples-1)*u64::from(schedule.control_rate_hz)/u64::from(rate);
         let last_time = last_tick as f64/f64::from(schedule.control_rate_hz);
         for track in schedule.tracks() {
-            let GestureTarget::BowStroke { string } = track.target else { return Err("only physical bow tracks are supported".into()); };
-            if usize::from(string) >= strings.len() { return Err("bow track names an absent material string".into()); }
+            let string = fs_scenario::gesture::path::legacy_member(&track.target,"bow").ok_or("only physical bow tracks are supported")?;
+            if string >= strings.len() { return Err("bow track names an absent material string".into()); }
             let GestureValue::Bow { station, .. } = track.initial else { return Err("complete initial bow value required".into()); };
             for event in &track.events {
                 if event.time_s > last_time { return Err("bow command starts after the last observed control tick".into()); }
