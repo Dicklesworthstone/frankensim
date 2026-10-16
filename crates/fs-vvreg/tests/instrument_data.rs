@@ -432,14 +432,23 @@ fn committed_graph_read_packs_are_fixture_only() {
         assert_ne!(row.decision, Decision::Admit);
         assert_ne!(row.decision, Decision::AdmitFactsOnly);
         assert_eq!(row.digitization, Digitization::FigureDigitized);
-        assert_eq!(row.uncertainty, UncertaintyStatement::Unstated);
+        assert_eq!(row.uncertainty, UncertaintyStatement::Bounded);
         assert!(
             row.notes
-                .contains("GRAPH-READ in properties.tsv; digitization error unstated")
+                .contains("GRAPH-READ in properties.tsv; digitization error bounded only")
+        );
+        assert!(
+            row.notes
+                .contains("experimental scatter and model discrepancy remain unstated")
         );
         assert!(row.notes.contains(
-            "not admissible for acceptance renders until re-digitized with a stated bound"
+            "not admissible for acceptance renders until all promotion prerequisites hold"
         ));
+        for file in ["digitization.tsv", "source-page.pdf"] {
+            assert!(row.artifacts.contains(&ArtifactRef::Table(format!(
+                "data/matdb/seed-v1/{slug}/{file}"
+            ))));
+        }
 
         let original = text
             .lines()
@@ -447,6 +456,9 @@ fn committed_graph_read_packs_are_fixture_only() {
             .find(|line| line.split('\t').next() == Some(row.source_id.as_str()))
             .unwrap();
         let mut fields: Vec<_> = original.split('\t').map(str::to_owned).collect();
+        // Repairing acquisition error does not promote a fixture. Removing
+        // that error again must retain the original promotion refusal gate.
+        fields[8] = UncertaintyStatement::Unstated.tag().to_owned();
         for decision in [Decision::Admit, Decision::AdmitFactsOnly] {
             fields[10] = decision.tag().to_owned();
             assert_eq!(

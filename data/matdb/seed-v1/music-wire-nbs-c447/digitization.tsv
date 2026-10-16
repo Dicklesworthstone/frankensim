@@ -1,0 +1,23 @@
+frankensim.figure-extraction.v1
+source_url	https://nvlpubs.nist.gov/nistpubs/Legacy/circ/nbscircular447.pdf
+source_sha256	b7fa7b6126c78665d8227eb4dfeb4fe299cd63fc28d0402b3fb269f9b39a0837
+source_pages	234,239 (one-based PDF); printed 228,233; Figures 80,89
+retained_file	source-page.pdf
+retained_sha256	68cb5dadb9bc8e179a411a85f071cbfbfb5ffd60a91c72686c7d347fb66fe37c
+figure	89; curve 1, music wire; retained PDF page 2
+authority	fixture-only; extraction bounds only; experimental scatter and model discrepancy unstated; no confidence probability
+method	Independent manual selections on Poppler 26.04.0 full-page 150/300 dpi gray rasters; separate calibrations; origin top-left, zero-based pixels; no recording fit
+repeatability	GoldHarbor passes A/B; RusticPlateau independently selected/calibrated pass C at 240 dpi, using 0/0.20 inch and 350/200 kip/in2 ticks, not the A/B tick pairs. Repeated reads of one figure are not independent experiments
+source_resolution	Retained page2 contains 117 ppi continuous-tone background and 350 ppi foreground/mask; Poppler rasters at 150,300,240 dpi do not add optical information. Reading resolution is one raster pixel; all coordinates refer to full-page rasters
+bound_rule	For each pass evaluate all eight combinations of read_p +/- read_radius and both ordinate anchors +/- anchor_radius under the affine calibration, including scale_to_property. The published nominal +/- half_width encloses the union over A/B/C, including rounding. Bounds are conditional on the documented curve-selection boxes, not on unknown printed-curve/model errors
+pass_C_boxes	At 240 dpi, x0=966 at0in and x1=1443 at0.20in. Target-x/calibration/rounding boxes: x1011..1017 at0.02in has curve y690..706; x1392..1398 at0.18in has curve y936..940. The read radii enclose these vertical strokes plus half-pixel rounding. Gray<128 run inspection aided manual curve1 identification; no curve fit
+pixel_boxes	A: x selection bands 630..638 and 869..877; B: 1260..1277 and 1738..1755; read radii enclose line thickness, pixel rounding and target-x/calibration ambiguity
+density	7827.8 kg/m3 evaluates Figure 80 hot-rolled formula 1000*(7.855-0.032*0.85); carbon range 0.70..1.00 gives 7823..7832.6 kg/m3, NOT a confidence or experimental bound; no graph extraction error assigned
+scope	Interior diameters 0.02 and 0.18 in only; former 0.20 in claim lies beyond the plotted curve; no interpolation/extrapolation claim
+claim	pass	dpi	abscissa_scale	x0_pixel	x0_value	x1_pixel	x1_value	target_x	read_x	ordinate_p0	ordinate_v0	ordinate_p1	ordinate_v1	read_p	read_radius	anchor_radius	scale_to_property	value_unit	nominal	half_width
+tensile-strength-0p02in	A	150	linear	604	0	975.5	0.25	0.02	633.72	754.5	150	380.5	400	437.5	8.5	2	6.894757293168	MPa	2497	60
+tensile-strength-0p02in	B	300	linear	1357	0.05	1655	0.15	0.02	1267.6	1208.5	250	910.5	350	873.5	20	3	6.894757293168	MPa	2497	60
+tensile-strength-0p18in	A	150	linear	604	0	975.5	0.25	0.18	871.48	754.5	150	380.5	400	586	2	2	6.894757293168	MPa	1808	25
+tensile-strength-0p18in	B	300	linear	1357	0.05	1655	0.15	0.18	1744.4	1208.5	250	910.5	350	1173	4	3	6.894757293168	MPa	1808	25
+tensile-strength-0p02in	C	240	linear	966	0	1443	0.20	0.02	1013.7	728.5	350	1086.5	200	698.5	8.5	2	6.894757293168	MPa	2497	60
+tensile-strength-0p18in	C	240	linear	966	0	1443	0.20	0.18	1395.3	728.5	350	1086.5	200	938.5	3	2	6.894757293168	MPa	1808	25

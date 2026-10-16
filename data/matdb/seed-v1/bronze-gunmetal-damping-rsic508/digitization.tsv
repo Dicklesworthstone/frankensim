@@ -1,0 +1,19 @@
+frankensim.figure-extraction.v1
+source_url	https://ntrs.nasa.gov/api/citations/19670002730/downloads/19670002730.pdf
+source_sha256	706c8976fbdb67b1abfd586225529715acb665e12b05dff12134ec24be8ed090
+source_pages	35 (one-based PDF); printed 26; Figure 7
+retained_file	source-page.pdf
+retained_sha256	4985129a783606569f3a3db5e0638dd976cf8d3b7d233a5f686426d71ae17010
+figure	7; Gun Metal horizontal bar; retained PDF page 1
+authority	fixture-only; extraction bounds only; experimental scatter and model discrepancy unstated; no confidence probability
+method	Independent manual selections on Poppler 26.04.0 full-page 150/300 dpi gray rasters; A uses 0/5-percent ticks, B uses 0/10-percent ticks; origin top-left, zero-based pixels
+repeatability	GoldHarbor passes A/B; RusticPlateau independently selected/calibrated pass C at 240 dpi against the 0/10-percent ticks. Repeated reads of one bar are not independent experiments
+source_resolution	Retained page contains a 2368x3146 one-bit 300 ppi scan. Poppler rasters at150,300,240 dpi do not add optical information. Reading resolution is one raster pixel; coordinates are full-page, top-left origin
+bound_rule	For each pass evaluate all eight combinations of read_p +/- read_radius and both ordinate anchors +/- anchor_radius under the affine calibration. Nominal +/- half_width encloses the A/B/C union including rounding; units are percentage points. The bound is conditional on the identified bar/stroke boxes, not experimental scatter or model discrepancy
+pass_C_boxes	240dpi 0/10-percent anchors x512/x1098, each +/-2px; Gun Metal bar right-edge ink x564..569 at y1135..1155; center567 +/-3px includes stroke and half-pixel reading. Hatched interior and printed label are excluded; gray<128 run inspection aided manual bar selection
+pixel_boxes	A bar tip 352..355 at y=707..722; B tip 705..711 at y=1414..1445; radii cover stroke width and pixel selection; horizontal ordinate is percent, not SI fraction
+scope	5000 psi surface shear stress only; printed 88% Cu,10% Zn,2% Sn retained verbatim; no correction to bell-bronze composition; 293 K is the pack's nominal room-temperature label, not a measured temperature
+claim	pass	dpi	abscissa_scale	x0_pixel	x0_value	x1_pixel	x1_value	target_x	read_x	ordinate_p0	ordinate_v0	ordinate_p1	ordinate_v1	read_p	read_radius	anchor_radius	scale_to_property	value_unit	nominal	half_width
+specific-damping-capacity-5ksi	A	150	none	-	-	-	-	-	353.5	319.5	0	502.5	5	353.5	1.5	1.5	1	%	0.94	0.10
+specific-damping-capacity-5ksi	B	300	none	-	-	-	-	-	708	638.5	0	1373.5	10	708	3	3	1	%	0.94	0.10
+specific-damping-capacity-5ksi	C	240	none	-	-	-	-	-	567	512	0	1098	10	567	3	2	1	%	0.94	0.10
