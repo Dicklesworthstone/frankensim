@@ -97,7 +97,8 @@ The rest of the GPU run's wall time is the CPU's contact steps (about 1.1 ms eac
 The 4 s excerpt on trj's RTX 4090 matches the CPU render made on the M5 Ultra:
 
 - 1.2e-14 relative RMS (max 3.6e-12 Pa at a 3.8 Pa peak) and 0.0000 dB in every octave;
-- the same stored energy to 9 digits; ledger closure 2e-14 J.
+- the same stored energy to 9 digits; ledger closure 2e-14 J;
+- step by step (`FS_PIANO_GPU_CHECK=64`, 35,000 steps): state 9.2e-15 relative, board trace 8.7e-14, contact positions 6e-18 m, losses 3.2e-13.
 
 Speed was not measurable there. The host ran at load 160, so its CPU work took about ten times longer than usual: damper rebuilds took 49 s instead of under 0.3 s. The GPU stepped at 325 µs per step. Measuring on a quiet host is bead frankensim-y3yoo.
 

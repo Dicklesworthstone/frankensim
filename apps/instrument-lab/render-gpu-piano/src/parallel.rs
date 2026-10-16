@@ -42,8 +42,16 @@ impl SpinBarrier {
             self.count.store(0, Ordering::Relaxed);
             self.generation.fetch_add(1, Ordering::Release);
         } else {
+            // spin briefly (phases are tens of microseconds), then yield: on an oversubscribed host a
+            // pure spin would keep a descheduled thread from ever arriving
+            let mut spins = 0u32;
             while self.generation.load(Ordering::Acquire) == g {
-                std::hint::spin_loop();
+                if spins < 20_000 {
+                    spins += 1;
+                    std::hint::spin_loop();
+                } else {
+                    std::thread::yield_now();
+                }
             }
         }
     }
@@ -137,7 +145,8 @@ pub fn threads() -> usize {
             return n.max(1);
         }
     }
-    std::thread::available_parallelism().map_or(1, |n| n.get())
+    // the phases stop scaling at about 16 threads (one board row or group run each is too little work)
+    std::thread::available_parallelism().map_or(1, |n| n.get().min(16))
 }
 
 impl Parallel {

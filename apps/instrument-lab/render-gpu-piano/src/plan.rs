@@ -117,8 +117,7 @@ pub struct Pad {
     pub lift: Vec<f64>,
     pub norm: Vec<f64>,
     pub factor: Vec<f64>,
-    /// per direction: w (modes), alpha, loss, speed and change (stations, in pass order)
-    pub w: [Vec<f64>; 2],
+    /// per direction: alpha, loss, speed and change (stations, in pass order)
     pub alpha: [f64; 2],
     pub unit_loss: [f64; 2],
     pub speed: [Vec<f64>; 2],
@@ -548,7 +547,6 @@ impl Program {
                 lift: pad.lift.clone(),
                 norm: pad.norm.clone(),
                 factor: pad.factor.clone(),
-                w: [pad.unit[0].w.clone(), pad.unit[1].w.clone()],
                 alpha: [pad.unit[0].alpha, pad.unit[1].alpha],
                 unit_loss: [pad.unit[0].loss, pad.unit[1].loss],
                 speed: [pad.unit[0].speed.clone(), pad.unit[1].speed.clone()],
@@ -576,7 +574,7 @@ impl Program {
         lifted: &[bool],
         sustain: f64,
     ) -> Result<(), String> {
-        let (n, r, np) = (self.n, self.r, self.pads.len());
+        let (r, np) = (self.r, self.pads.len());
         let Some(d) = d else {
             self.dampers = Dampers {
                 active: vec![],
@@ -591,7 +589,6 @@ impl Program {
         for (pad, image) in self.pads.iter_mut().zip(&d.pads) {
             pad.factor.clone_from(&image.factor);
             for dir in 0..2 {
-                pad.w[dir].clone_from(&image.unit[dir].w);
                 pad.alpha[dir] = image.unit[dir].alpha;
                 pad.unit_loss[dir] = image.unit[dir].loss;
                 pad.speed[dir].clone_from(&image.unit[dir].speed);
@@ -629,7 +626,6 @@ impl Program {
                 bridge.data[p * r..(p + 1) * r].copy_from_slice(self.gm.row(pad.group));
             }
         }
-        let _ = n;
         let bt = bridge.transpose();
         let mut out = Dampers {
             active: active.clone(),

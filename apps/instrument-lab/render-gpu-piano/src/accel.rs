@@ -91,8 +91,9 @@ pub struct Piano {
 }
 
 /// The accelerator for `instrument`, or None (with the reason on stderr) to render on the CPU. The
-/// backend is chosen by FS_PIANO_GPU: auto (default), metal, cuda, cpu or off. FS_PIANO_GPU_CHECK=N
-/// compares the first N steps of every stretch with the CPU's own step and limits stretches to N.
+/// backend is chosen by FS_PIANO_GPU: auto (default: the GPU, else `cores`), metal, cuda, cores (the
+/// phase emulator on the CPU cores), cpu (the same on one core) or off. FS_PIANO_GPU_CHECK=N compares
+/// the first N steps of every stretch with the CPU's own step and limits stretches to N.
 pub fn factory(instrument: &mut Instrument) -> Option<Box<dyn Accelerator>> {
     let choice = std::env::var("FS_PIANO_GPU").unwrap_or_else(|_| "auto".into());
     if choice == "off" {
@@ -265,7 +266,7 @@ fn select(choice: &str, program: &Program) -> Result<Box<dyn Backend>, String> {
         #[cfg(not(feature = "gpu"))]
         "auto" => Err("no GPU backend in this build".into()),
         other => Err(format!(
-            "FS_PIANO_GPU={other} is not available in this build (auto, metal on macOS, cuda elsewhere, cpu, off)"
+            "FS_PIANO_GPU={other} is not available in this build (auto, metal on macOS, cuda elsewhere, cores, cpu, off)"
         )),
     }
 }

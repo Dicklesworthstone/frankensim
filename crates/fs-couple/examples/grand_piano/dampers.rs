@@ -150,7 +150,8 @@ struct Unit {
 
 /// `Prepared::gpu_image`: the pads (string mode range, bridge row and |row|^2; per station its shape,
 /// lift, norm and factor in station order) with their unit responses per direction (0 forward, 1
-/// reverse; speed and change in pass order), and the bridge Gram matrix.
+/// reverse: board amount moved, loss, and per station the speed and change in pass order), and the
+/// bridge Gram matrix.
 #[derive(Clone, Debug)]
 #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
 pub struct DamperImage {
@@ -174,7 +175,6 @@ pub struct PadImage {
 #[derive(Clone, Debug)]
 #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
 pub struct UnitImage {
-    pub w: Vec<f64>,
     pub alpha: f64,
     pub loss: f64,
     pub speed: Vec<f64>,
@@ -409,7 +409,7 @@ impl Prepared {
                 norm: red.norm[p].clone(), factor: red.factor[p].clone(),
                 unit: [0, 1].map(|d| {
                     let u = &red.unit[d][p];
-                    UnitImage { w: u.w.clone(), alpha: u.alpha, loss: u.loss, speed: u.speed.clone(), change: u.change.clone() }
+                    UnitImage { alpha: u.alpha, loss: u.loss, speed: u.speed.clone(), change: u.change.clone() }
                 }),
             }).collect(),
         }

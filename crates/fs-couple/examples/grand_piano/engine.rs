@@ -499,7 +499,8 @@ impl Instrument {
     /// and catch, from `positions` (each contact's string position after the step, which with zero
     /// contact force is also its predicted free position). A transcription of `mechanics_step` with
     /// every contact force zero; keep the two in step. Ok(None), changing nothing, when a contact
-    /// could engage (gap above `-clearance_m`): that step belongs to the CPU. Returns the step's
+    /// could engage (gap above `-clearance_m`, or felt still compressed at the start): that step
+    /// belongs to the CPU. Returns the step's
     /// (jack work, shank, felt, felt relaxation, catch) energies, also added to the ledger.
     #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
     pub fn advance_hammers_external(&mut self,positions:&[f64],clearance_m:f64)->Result<Option<[f64;5]>,Error>{
@@ -526,10 +527,15 @@ impl Instrument {
                 } else {h.on_rest=false;}
             }
         }
+        // The contact solve of mechanics_step gives exactly zero force only when the felt is free at
+        // both ends of the step: the hammer ends below the string, and it starts with no elastic
+        // compression left (just after a contact the felt can still be compressed).
         for c in 0..nc {
             let ci=self.bank.strings[self.bank.contact_strings[c]].course;
+            if !self.hammers[ci].active||!self.contacts[c].enabled {continue;}
             let gap=self.contact_hammer_projection[c]*self.hammer_free[ci]-positions[c]-self.contact_recession_m[c];
-            if self.hammers[ci].active&&self.contacts[c].enabled&&gap> -clearance_m {
+            let start=self.contacts[c].overlap-self.creep[c].deformation(&self.contacts[c].memory);
+            if gap> -clearance_m||start>0.0 {
                 self.hammers.copy_from_slice(&saved);
                 return Ok(None);
             }
