@@ -633,6 +633,80 @@ fn hb_004_below_threshold_refuses_by_name() {
 
 // --- Diagnostic lanes (ignored by default; run with --ignored) --------
 
+/// Counterfactual for .76 attribution only, on the two cylinder fixtures.
+/// It reconstructs the REMOVED law; acceptance problems keep exact Bessel.
+/// Above rv=10 the old AllRegime branch was precisely WideTube. Below it
+/// this is the former Poiseuille/isothermal interpolation, in p/U units.
+fn historical_cylinder_impedance(gas: &GasState, radius: f64, length: f64, omega: f64) -> C64 {
+    let rv = radius * fs_math::det::sqrt(gas.density * omega / gas.dynamic_viscosity);
+    if rv >= fs_duct::MIN_SHEAR_NUMBER {
+        return input_impedance(
+            &Duct {
+                segments: vec![Segment::Cylinder { radius, length }],
+            },
+            gas,
+            omega,
+            LossModel::WideTube,
+            Termination::IdealOpen,
+        )
+        .unwrap()
+        .impedance;
+    }
+    let area = core::f64::consts::PI * radius * radius;
+    let rt = rv * fs_math::det::sqrt(gas.prandtl);
+    let cad = area / (gas.density * gas.sound_speed * gas.sound_speed);
+    let z = C64::new(
+        8.0 * gas.dynamic_viscosity / (area * radius * radius),
+        omega * 4.0 * gas.density / (3.0 * area),
+    );
+    let y = C64::new(
+        (gas.gamma - 1.0) * cad * omega * (rt * rt / 16.0).min(0.5),
+        omega * cad * (1.0 + (gas.gamma - 1.0) / (1.0 + 0.25 * rt * rt)),
+    );
+    let gamma = (z * y).sqrt();
+    let k = C64::new(gamma.im, gamma.re);
+    let zc = (z * y.recip()).sqrt();
+    // Ideal-open cylinder: Z_in=-i Zc tan(k L). The exponential quotient
+    // is the analytic equivalent of the original two-port basis solve.
+    let phase = 2.0 * k.re * length;
+    let roundtrip = C64::new(fs_math::det::cos(phase), fs_math::det::sin(phase))
+        .scale(fs_math::det::exp(-2.0 * k.im * length));
+    zc * (C64::ONE - roundtrip) / (C64::ONE + roundtrip)
+}
+
+struct LossCounterfactual<'a, P> {
+    inner: &'a P,
+    gas: &'a GasState,
+    radius: f64,
+    length: f64,
+    zc: f64,
+    admittance_slot: usize,
+    historical: bool,
+}
+
+impl<P: OrbitProblem> OrbitProblem for LossCounterfactual<'_, P> {
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+    fn island(&self, t: f64, x: &[f64], out: &mut [f64]) {
+        self.inner.island(t, x, out);
+    }
+    fn autonomous(&self) -> bool {
+        self.inner.autonomous()
+    }
+    fn port(&self, s: C64) -> Vec<C64> {
+        let mut port = self.inner.port(s);
+        if self.historical {
+            let omega = s.im.abs().max(TAU * DC_FLOOR_HZ);
+            port[self.admittance_slot] =
+                historical_cylinder_impedance(self.gas, self.radius, self.length, omega)
+                    .recip()
+                    .scale(self.zc);
+        }
+        port
+    }
+}
+
 #[test]
 #[ignore = "diagnostic: per-tension HB convergence detail for hb-002"]
 fn diag_hb002_lock_scan() {
@@ -686,30 +760,55 @@ fn diag_hb002_lock_scan() {
             deflate_equilibrium: true,
         };
         let mut line = format!("f_lip={f_lip:.0}:");
-        for &guess in &[1.5e-4f64, 3.0e-4, 5.0e-4, 8.0e-4] {
-            let omega = TAU * f_lip * 1.05;
-            let u_h = problem.width_m
-                * (2.0 * problem.blowing_pressure_pa / problem.gas.density).sqrt()
-                * problem.zc()
-                / LIP_P_SCALE;
-            let y = problem.port(C64::new(0.0, omega))[8];
-            let x1 = C64::new(0.5 * guess, 0.0);
-            let v1 = C64::new(0.0, 0.5 * guess * omega);
-            let p1 = x1.scale(u_h) * y.recip();
-            let anchor = HbAnchor::Autonomous { omega_guess: omega };
-            let seed =
-                fs_orbit::seed_from_first_harmonics(&[x1, v1, p1], budget.harmonics, &anchor);
-            match fs_orbit::solve_hb_seeded(&problem, anchor, seed, &budget) {
-                Ok(o) => {
-                    let _ = write!(
-                        line,
-                        " g{guess:.0e}=LOCK f={:.1} a={:.2e};",
-                        o.omega / TAU,
-                        o.first_harmonic_amplitude(0)
-                    );
+        for historical in [false, true] {
+            // The recorded pre-.76 lock was at270. Hold every solver/island
+            // input fixed there and change ONLY the evaluated loss law.
+            if historical && f_lip != 270.0 {
+                continue;
+            }
+            let counterfactual = LossCounterfactual {
+                inner: &problem,
+                gas: &problem.gas,
+                radius: 0.006,
+                length: 1.4,
+                zc: problem.zc(),
+                admittance_slot: 8,
+                historical,
+            };
+            let _ = write!(
+                line,
+                " law={};",
+                if historical {
+                    "historical-interpolation"
+                } else {
+                    "exact-Bessel"
                 }
-                Err(e) => {
-                    let _ = write!(line, " g{guess:.0e}=refused({e});");
+            );
+            for &guess in &[1.5e-4f64, 3.0e-4, 5.0e-4, 8.0e-4] {
+                let omega = TAU * f_lip * 1.05;
+                let u_h = problem.width_m
+                    * (2.0 * problem.blowing_pressure_pa / problem.gas.density).sqrt()
+                    * problem.zc()
+                    / LIP_P_SCALE;
+                let y = counterfactual.port(C64::new(0.0, omega))[8];
+                let x1 = C64::new(0.5 * guess, 0.0);
+                let v1 = C64::new(0.0, 0.5 * guess * omega);
+                let p1 = x1.scale(u_h) * y.recip();
+                let anchor = HbAnchor::Autonomous { omega_guess: omega };
+                let seed =
+                    fs_orbit::seed_from_first_harmonics(&[x1, v1, p1], budget.harmonics, &anchor);
+                match fs_orbit::solve_hb_seeded(&counterfactual, anchor, seed, &budget) {
+                    Ok(o) => {
+                        let _ = write!(
+                            line,
+                            " g{guess:.0e}=LOCK f={:.1} a={:.2e};",
+                            o.omega / TAU,
+                            o.first_harmonic_amplitude(0)
+                        );
+                    }
+                    Err(e) => {
+                        let _ = write!(line, " g{guess:.0e}=refused({e});");
+                    }
                 }
             }
         }
@@ -739,23 +838,42 @@ fn diag_hb003_harmonic_convergence_table() {
                 tolerance: 1.0e-9,
                 deflate_equilibrium: false,
             };
-            match [0.6f64, 0.35].iter().find_map(|&g| {
-                solve_hb(
-                    &make,
-                    HbAnchor::Autonomous {
-                        omega_guess: omega_res,
-                    },
-                    g,
-                    &budget,
-                )
-                .ok()
-            }) {
-                Some(o) => println!(
-                    "pm={pm} N={n}: f={:.2} a1={:.4}",
-                    o.omega / TAU,
-                    o.first_harmonic_amplitude(0)
-                ),
-                None => println!("pm={pm} N={n}: refused"),
+            for historical in [false, true] {
+                if historical && (pm != 1200.0 || ![9, 11].contains(&n)) {
+                    continue;
+                }
+                let counterfactual = LossCounterfactual {
+                    inner: &make,
+                    gas: &make.gas,
+                    radius: 0.0075,
+                    length: 0.33,
+                    zc: make.zc(),
+                    admittance_slot: 0,
+                    historical,
+                };
+                let law = if historical {
+                    "historical-interpolation"
+                } else {
+                    "exact-Bessel"
+                };
+                match [0.6f64, 0.35].iter().find_map(|&g| {
+                    solve_hb(
+                        &counterfactual,
+                        HbAnchor::Autonomous {
+                            omega_guess: omega_res,
+                        },
+                        g,
+                        &budget,
+                    )
+                    .ok()
+                }) {
+                    Some(o) => println!(
+                        "law={law} pm={pm} N={n}: f={:.2} a1={:.4}",
+                        o.omega / TAU,
+                        o.first_harmonic_amplitude(0)
+                    ),
+                    None => println!("law={law} pm={pm} N={n}: refused"),
+                }
             }
         }
     }
