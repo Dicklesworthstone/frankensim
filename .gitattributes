@@ -1,2 +1,0 @@
-# Retained external corpus inputs are byte-exact evidence artifacts.
-data/cad-import-corpus/sources/** -diff -text

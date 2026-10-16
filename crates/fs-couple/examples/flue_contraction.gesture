@@ -1,8 +1,0 @@
-frankensim-gesture-schedule-v1
-control_rate_hz	1000
-tracks	1
-track	blow	blowing-pressure
-initial	pressure-pa	0e0
-events	2
-event	0e0	1e-2	pressure-pa	3e2
-event	6e-2	2e-3	pressure-pa	0e0

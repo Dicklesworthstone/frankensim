@@ -7,6 +7,8 @@
 //! implied. The opt-in [`midpoint`] update couples heat and volume work in
 //! conservative coordinates; it is not an exact finite isentropic operation.
 
+/// Conservative composition/model replacement at fixed mass, volume and total internal energy.
+pub mod composition;
 /// Work-conjugate mechanical loads using the common acoustic compressibility.
 pub mod mechanics;
 /// Simultaneous heating and volume work through the original material laws.

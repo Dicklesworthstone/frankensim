@@ -1,2 +1,0 @@
-# Synthetic SI material, not calibrated measurements: rho cp k mu resistivity alpha Tref
-1000 1000 100 1 1 0 300

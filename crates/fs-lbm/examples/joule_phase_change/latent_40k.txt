@@ -1,8 +1,0 @@
-# Synthetic values; not calibrated measurements of a named material.
-# density [kg/m3], fixed thermal conductivity [W/(m K)]
-1000 0.01
-# h [J/kg], T [K], liquid mass fraction, electrical resistivity [ohm m]
-0 300 0 1
-10000 310 0 1
-50000 310 1 2
-150000 410 1 2

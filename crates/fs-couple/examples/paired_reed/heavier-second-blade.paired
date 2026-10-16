@@ -1,7 +1,0 @@
-# Only blade 1 density differs from equal-blades.paired; all drives are unchanged.
-frankensim-paired-reed-v1
-audio 48000 14400
-gas 293.15 101325 0
-blade 4e9 0.3 900 0.0003 0.02
-blade 4e9 0.3 1800 0.0003 0.02
-pressure 5 480 4800 480

@@ -1,4 +1,0 @@
-module FrankenSimCore {
-    header "frankensim_apple.h"
-    export *
-}

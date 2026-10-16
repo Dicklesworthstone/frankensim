@@ -1,6 +1,0 @@
-frankensim.matdb-manifest.v1
-pack_id	synthetic-material-string-wire
-redistribution	permitted	Synthetic fixture; freely redistributable, not measured material data
-citation	Manufactured material-string integration fixture
-license	CC0-1.0
-source	fixture	wire.tsv	material-tsv-v1

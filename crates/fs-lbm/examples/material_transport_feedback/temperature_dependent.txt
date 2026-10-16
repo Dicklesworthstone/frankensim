@@ -1,9 +1,0 @@
-# Explicitly synthetic, not calibrated measurements. Same density and Cp.
-# Only the temperature-dependent k and mu data differ from constant.txt.
-1000 1000
-# Temperature [K], conductivity [W/(m K)], dynamic viscosity [Pa s]
-290 500 2
-300 1000 1
-320 3000 0.25
-350 6000 0.1
-400 11000 0.05

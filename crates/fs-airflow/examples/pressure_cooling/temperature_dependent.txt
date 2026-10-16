@@ -1,8 +1,0 @@
-# Same four properties at the 300 K inlet; only their temperature laws differ.
-material=illustrative-temperature-dependent-liquid
-source=Authored pressure-cooling numerical example, not measurements
-license=CC0-1.0
-pressure_pa=100000
-# T_K  rho_kg_m3  Cp_J_kg_K  k_W_m_K  mu_Pa_s
-250 1050 1500 0.35 0.0025
-450 850 3500 0.95 0.0005

@@ -1,3 +1,0 @@
-# Synthetic comparison: only the heat-capacity datum changes.
-# density [kg/m3]   cp [J/(kg K)]   conductivity [W/(m K)]   viscosity [Pa s]
-1000 2000 2 0.1

@@ -1,8 +1,0 @@
-# Synthetic sensitivity data, not a measured metal or polymer. CC0-1.0.
-frankensim.thermovisco.v1
-equilibrium 100000000
-branch 300000000 1
-# T[K] modulus_scale[1] relaxation_scale[1] free_strain[1] Cp[J/(kg K)] rho[kg/m3] k[W/(m K)]
-state 280 1 1 0 10 1000 10
-state 300 1 1 0 10 1000 10
-state 320 1 0.05 0 10 1000 10

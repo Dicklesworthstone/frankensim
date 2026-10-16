@@ -1,7 +1,0 @@
-# Synthetic SI data, not calibrated measurements. Fixed density and Cp:
-1000 1000
-# T[K] k[W/(m K)] mu[Pa s] resistivity[ohm m]
-290 100 1 0.8
-300 100 1 1.0
-310 100 1 1.2
-330 100 1 1.6

@@ -1,8 +1,0 @@
-# Synthetic solid; only Cp differs between the two comparison tables.
-material=illustrative-stored-solid
-source=Authored solid/coolant storage example, not measurements
-license=CC0-1.0
-pressure_pa=100000
-# T_K rho_kg_m3 Cp_J_kg_K k_W_m_K
-250 1000 500 5
-450 1000 500 5

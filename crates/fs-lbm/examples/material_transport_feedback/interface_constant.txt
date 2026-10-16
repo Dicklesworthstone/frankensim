@@ -1,7 +1,0 @@
-# Synthetic electrical interface, not measured properties of any material pair.
-# Both surface Kelvin temperatures must be supported. Interpolation uses their mean.
-# film_K  area_specific_resistance_ohm_m2  heat_fraction_to_first_surface
-290 0.02 0.75
-300 0.02 0.75
-310 0.02 0.75
-330 0.02 0.75
