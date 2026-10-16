@@ -130,6 +130,22 @@ struct Reduced {
     norm: Vec<Vec<f64>>,
     factor: Vec<Vec<f64>>,
     key: Option<(u64, u64)>,
+    /// `apply_superposed`'s per-direction unit responses (built with `factor`) and the pads' bridge Gram
+    /// matrix b_p . b_q (constant).
+    unit: [Vec<Unit>; 2],
+    gram: Vec<f64>,
+}
+
+/// One pad's chain driven by beta = 1 with its string modes at rest, in one direction: the modes it
+/// leaves behind, the board amount it moves (sum of lift change), its loss, and per station (in pass
+/// order) the speed and change, for the cross term of the loss.
+#[derive(Clone, Default)]
+struct Unit {
+    w: Vec<f64>,
+    alpha: f64,
+    loss: f64,
+    speed: Vec<f64>,
+    change: Vec<f64>,
 }
 
 /// Frozen displacement/force projections in the Bank's loaded coordinates.
@@ -227,7 +243,115 @@ impl Prepared {
             p.points.iter().map(|pt| pt.shape.iter().map(|g| g * g).sum::<f64>() + pt.lift * pt.lift * nb2).collect()
         }).collect();
         let factor = norm.iter().map(|n| vec![0.0; n.len()]).collect();
-        self.reduced = Some(Reduced { bridge_norm2, norm, factor, key: None });
+        let np = self.pads.len();
+        let mut gram = vec![0.0; np * np];
+        for p in 0..np {
+            for q in 0..np {
+                gram[p * np + q] = self.pads[p].bridge.iter().zip(&self.pads[q].bridge).map(|(a, b)| a * b).sum();
+            }
+        }
+        self.reduced = Some(Reduced { bridge_norm2, norm, factor, key: None, unit: [vec![], vec![]], gram });
+    }
+
+    /// Rebuild the station factors (and the unit responses) when the pedal or the interval changed.
+    fn refresh(&mut self, engagement: f64, dt: f64) {
+        let Some(red) = self.reduced.as_mut() else { return };
+        let key = (engagement.to_bits(), dt.to_bits());
+        if red.key == Some(key) { return; }
+        for (pi, pad) in self.pads.iter().enumerate() {
+            let drag = pad.drag_ns_m * engagement / pad.points.len() as f64;
+            for (f, &n) in red.factor[pi].iter_mut().zip(&red.norm[pi]) {
+                *f = if drag == 0.0 { 0.0 } else { det::expm1(-drag*n*(0.5*dt)) / n };
+            }
+        }
+        for (d, units) in red.unit.iter_mut().enumerate() {
+            *units = self.pads.iter().enumerate().map(|(pi, pad)| {
+                let n = pad.points.len();
+                let mut u = Unit { w: vec![0.0; pad.modes.len()], ..Unit::default() };
+                let mut beta = 1.0;
+                for t in 0..n {
+                    let i = if d == 0 { t } else { n - 1 - t };
+                    let pt = &pad.points[i];
+                    let speed = pt.shape.iter().zip(&u.w).map(|(g, x)| g * x).sum::<f64>() + pt.lift * beta;
+                    let change = red.factor[pi][i] * speed;
+                    for (x, g) in u.w.iter_mut().zip(&pt.shape) { *x += g * change; }
+                    beta += pt.lift * red.bridge_norm2[pi] * change;
+                    u.alpha += pt.lift * change;
+                    u.loss += -change*speed-0.5*change*change*red.norm[pi][i];
+                    u.speed.push(speed);
+                    u.change.push(change);
+                }
+                u
+            }).collect();
+        }
+        red.key = Some(key);
+    }
+
+    /// `apply_reduced` reorganised so that every pad's work is independent (for parallel hardware), with
+    /// the same flows and loss in exact arithmetic. A pad's chain is linear in its string modes v and the
+    /// scalar beta = b . v_board it starts from, so it is the chain run from (v, 0) plus beta times its
+    /// unit response (the chain run from (0, 1), fixed until the pedal moves). Pads touch disjoint string
+    /// modes and couple only through the board: the beta pad p starts from is b_p . v_board plus
+    /// sum over the pads before it of (b_p . b_q) times the board amount q moved, a recurrence over the
+    /// bridge Gram matrix. The loss, quadratic in (v, beta), splits the same way.
+    pub fn apply_superposed(&mut self, velocity: &mut [f64], dt: f64, sustain: f64,
+        lifted: impl Fn(usize) -> bool) -> Result<f64, &'static str> {
+        if velocity.len() != self.dimension || velocity.iter().any(|x| !x.is_finite())
+            || !dt.is_finite() || dt <= 0.0 || dt > 1.0
+            || !sustain.is_finite() || !(0.0..=1.0).contains(&sustain) {
+            return Err("invalid damper velocity, duration or pedal control");
+        }
+        if sustain == 1.0 { return Ok(0.0); }
+        if self.reduced.is_none() { return Err("reduced dampers were not selected"); }
+        self.refresh((1.0-sustain).powi(2), dt);
+        let red = self.reduced.as_ref().expect("selected above");
+        let np = self.pads.len();
+        let active: Vec<usize> = (0..np).filter(|&p| !lifted(self.pads[p].course)).collect();
+        let (strings, board) = velocity.split_at_mut(self.board_start);
+        let mut loss = 0.0;
+        for d in 0..2 {
+            let order: Vec<usize> = if d == 0 { active.clone() } else { active.iter().rev().copied().collect() };
+            // every pad from beta = 0 (independent), with the cross term of its loss
+            let mut a = vec![0.0; np];
+            let mut l01 = vec![0.0; np];
+            for &p in &order {
+                let pad = &self.pads[p];
+                let unit = &red.unit[d][p];
+                let v = &mut strings[pad.modes.clone()];
+                let n = pad.points.len();
+                // the run from beta = 0 still moves its own beta (by lift |b|^2 change per station)
+                let mut own = 0.0;
+                for t in 0..n {
+                    let i = if d == 0 { t } else { n - 1 - t };
+                    let pt = &pad.points[i];
+                    let speed = pt.shape.iter().zip(v.iter()).map(|(g, x)| g * x).sum::<f64>() + pt.lift * own;
+                    let change = red.factor[p][i] * speed;
+                    for (x, g) in v.iter_mut().zip(&pt.shape) { *x += g * change; }
+                    own += pt.lift * red.bridge_norm2[p] * change;
+                    a[p] += pt.lift * change;
+                    loss += -change*speed-0.5*change*change*red.norm[p][i];
+                    l01[p] += -(change*unit.speed[t] + unit.change[t]*speed) - change*unit.change[t]*red.norm[p][i];
+                }
+            }
+            // the betas, pad by pad in pass order: the board as it was, plus the pads already through
+            let mut beta = vec![0.0; np];
+            for (k, &p) in order.iter().enumerate() {
+                let mut x: f64 = self.pads[p].bridge.iter().zip(board.iter()).map(|(b, v)| b * v).sum();
+                for &q in &order[..k] {
+                    x += red.gram[p * np + q] * (a[q] + red.unit[d][q].alpha * beta[q]);
+                }
+                beta[p] = x;
+            }
+            for &p in &order {
+                let unit = &red.unit[d][p];
+                let b = beta[p];
+                for (x, w) in strings[self.pads[p].modes.clone()].iter_mut().zip(&unit.w) { *x += w * b; }
+                loss += b * l01[p] + b * b * unit.loss;
+                let moved = a[p] + unit.alpha * b;
+                for (x, g) in board.iter_mut().zip(&self.pads[p].bridge) { *x += g * moved; }
+            }
+        }
+        Ok(loss)
     }
 
     /// Whether `use_reduced` was selected.
@@ -250,17 +374,9 @@ impl Prepared {
         }
         if sustain == 1.0 { return Ok(0.0); }
         let engagement = (1.0-sustain).powi(2);
-        let Some(red) = self.reduced.as_mut() else { return Err("reduced dampers were not selected"); };
-        let key = (engagement.to_bits(), dt.to_bits());
-        if red.key != Some(key) {
-            for (pi, pad) in self.pads.iter().enumerate() {
-                let drag = pad.drag_ns_m * engagement / pad.points.len() as f64;
-                for (f, &n) in red.factor[pi].iter_mut().zip(&red.norm[pi]) {
-                    *f = if drag == 0.0 { 0.0 } else { det::expm1(-drag*n*(0.5*dt)) / n };
-                }
-            }
-            red.key = Some(key);
-        }
+        if self.reduced.is_none() { return Err("reduced dampers were not selected"); }
+        self.refresh(engagement, dt);
+        let red = self.reduced.as_mut().expect("selected above");
         let (strings, board) = velocity.split_at_mut(self.board_start);
         let mut loss = 0.0;
         let mut run = |pi: usize, forward: bool| {
@@ -445,17 +561,22 @@ mod tests {
         let full = Prepared::new(&spec, &courses, &b).unwrap();
         let mut fast = Prepared::new(&spec, &courses, &b).unwrap();
         fast.use_reduced();
+        let mut superposed = Prepared::new(&spec, &courses, &b).unwrap();
+        superposed.use_reduced();
         assert!(fast.is_reduced() && !full.is_reduced());
         let v0: Vec<f64> = (0..b.v.len()).map(|i| ((i*37 % 11) as f64 - 5.0)*0.01).collect();
         for (pedal, lifted_course) in [(0.0, None), (0.4, None), (0.0, Some(0usize)), (0.0, Some(1)), (0.4, None), (1.0, None)] {
             let lifted = |ci: usize| Some(ci) == lifted_course;
-            let (mut a, mut r) = (v0.clone(), v0.clone());
+            let (mut a, mut r, mut u) = (v0.clone(), v0.clone(), v0.clone());
             let la = full.apply(&mut a, 0.002, pedal, lifted).unwrap();
             let lr = fast.apply_reduced(&mut r, 0.002, pedal, lifted).unwrap();
-            for (k, (x, y)) in a.iter().zip(&r).enumerate() {
+            let lu = superposed.apply_superposed(&mut u, 0.002, pedal, lifted).unwrap();
+            for (k, ((x, y), z)) in a.iter().zip(&r).zip(&u).enumerate() {
                 assert!((x-y).abs() <= 1e-14, "pedal {pedal}, lifted {lifted_course:?}: coordinate {k} {x} vs {y}");
+                assert!((x-z).abs() <= 1e-14, "superposed, pedal {pedal}, lifted {lifted_course:?}: coordinate {k} {x} vs {z}");
             }
             assert!((la-lr).abs() <= 1e-12*la.abs().max(1e-30), "loss {la} vs {lr}");
+            assert!((la-lu).abs() <= 1e-12*la.abs().max(1e-30), "superposed loss {la} vs {lu}");
             if pedal < 1.0 { assert!(la > 0.0 && a != v0, "the dampers did nothing"); }
         }
         // the full chain is still required for an unprepared set
