@@ -27,7 +27,9 @@ fn scheduled(block:usize,load:BaffledRadiationLoad) -> AperturePerformance {
 
 #[test]
 fn radiation_geometry_fixes_both_reactive_storage_and_frequency_dependent_loss() {
-    let a=load();let branch=a.load();let term=branch.terms()[0];
+    let a=load();
+    let branch=a.load();
+    let term=branch.terms()[0];
     let alpha=8.0/(3.0*core::f64::consts::PI);
     let z=uniform().characteristic_impedance(1.2).unwrap();
     assert!((term.resistance_pa_s_m3/z-2.0*alpha*alpha).abs()<1e-14);
@@ -37,7 +39,7 @@ fn radiation_geometry_fixes_both_reactive_storage_and_frequency_dependent_loss()
     // Independent frequencies, neither construction endpoints nor its 32-row grid.
     for f in [71.0,271.0,823.0,1421.0] {
         let (r,x)=fs_phs::baffled_piston_impedance(1.2,a.sound_speed_m_s(),a.radius_m(),
-            core::f64::consts::TAU*f,10).unwrap();
+            core::f64::consts::TAU*f).unwrap();
         for discrete in [true,false] {
             let (rr,xx)=a.impedance_at(f,discrete).unwrap();
             assert!((rr-r).hypot(xx-x)/r.hypot(x)<0.05);
@@ -45,12 +47,14 @@ fn radiation_geometry_fixes_both_reactive_storage_and_frequency_dependent_loss()
         }
     }
     let denser=BaffledRadiationLoad::new(a.radius_m(),2.4,a.sound_speed_m_s(),a.time_step_s(),1500.0,&CancelGate::new()).unwrap();
-    let d=denser.load();assert_eq!(d.terms()[0].rate_per_s,term.rate_per_s);
+    let d=denser.load();
+    assert_eq!(d.terms()[0].rate_per_s,term.rate_per_s);
     assert_eq!(d.terms()[0].resistance_pa_s_m3,2.0*term.resistance_pa_s_m3);
     assert!(a.impedance_at(1501.0,false).is_err());
     assert!(BaffledRadiationLoad::new(a.radius_m(),1.2,a.sound_speed_m_s(),a.time_step_s(),10000.0,&CancelGate::new()).is_err());
     assert!(BaffledRadiationLoad::new(a.radius_m(),1.2,a.sound_speed_m_s(),0.001,1500.0,&CancelGate::new()).is_err());
-    let gate=CancelGate::new();gate.request();
+    let gate=CancelGate::new();
+    gate.request();
     assert!(BaffledRadiationLoad::new(a.radius_m(),1.2,a.sound_speed_m_s(),a.time_step_s(),1500.0,&gate).is_err());
 }
 

@@ -1180,7 +1180,7 @@ fn baffled_piston_sits_on_the_rayleigh_mass() {
     let rho = 1.2;
     let c = 343.0;
     let omega = 800.0;
-    let (rr, xx) = baffled_piston_impedance(rho, c, a, omega, 8).expect("piston");
+    let (rr, xx) = baffled_piston_impedance(rho, c, a, omega).expect("piston");
     let area = core::f64::consts::PI * a * a;
     let z0 = rho * c / area;
     let ka = omega / c * a;
@@ -1195,6 +1195,66 @@ fn baffled_piston_sits_on_the_rayleigh_mass() {
         (rr / z0 - 0.5 * ka * ka).abs() < 0.25 * (0.5 * ka * ka).max(1.0e-6),
         "low-ka piston R/Z0"
     );
+}
+
+/// G2: analytic closed-form values, small-ka coefficients and high-ka limit.
+#[test]
+fn piston_closed_form_certified() {
+    let start = std::time::Instant::now();
+    let (rho, c, a) = (1.2, 343.0, 0.02);
+    let z0 = rho * c / (core::f64::consts::PI * a * a);
+    for (ka, r, x) in [
+        (0.5, 0.119898828510133, -0.3969146724038888),
+        (5.0, 0.9913054507662277, -0.17836649841890762),
+        (100.0, 1.0005430453818238, -0.006519375112490656),
+    ] {
+        let (rr, xx) = baffled_piston_impedance(rho, c, a, ka * c / a).unwrap();
+        assert!((rr / z0 / r - 1.0).abs() <= 1e-13, "R at ka={ka}");
+        assert!((xx / z0 / x - 1.0).abs() <= 1e-13, "X at ka={ka}");
+    }
+    let ka = 1e-3;
+    let (r, x) = baffled_piston_impedance(rho, c, a, ka * c / a).unwrap();
+    let r = r / z0;
+    let x = x / z0;
+    let leading_x = -8.0 * ka / (3.0 * core::f64::consts::PI);
+    let second_x = leading_x * (1.0 - 4.0 * ka * ka / 15.0);
+    assert!((r - 0.5 * ka * ka).abs() < 1e-12);
+    // Independent 180-decimal defining-series evaluation at ka=1e-3.
+    assert!((x - (-0.0008488261368031041)).abs() < 1e-12);
+    assert!((x - second_x).abs() < 1e-12);
+    // The bead's leading-reactance-only 1e-12 band at ka=1e-3 is
+    // mathematically inconsistent: retain the exact cubic remainder.
+    assert!((x - leading_x).abs() > 1e-12);
+    // H1(2ka)/ka = alpha*ka*(1 - 4ka²/15 + 16ka⁴/525 - ...).
+    // At ka=1e-3 these terms decrease strictly. The alternating-series
+    // remainder gives 0 < X+alpha*ka <= alpha*ka*4ka²/15.
+    // The final 1e-18 allows binary64 rounding of X and the leading term.
+    let remainder_bound = -leading_x * 4.0 * ka * ka / 15.0;
+    assert!(x > leading_x && x - leading_x <= remainder_bound + 1e-18);
+    assert!(((x - leading_x) / (-leading_x * 4.0 * ka * ka / 15.0) - 1.0).abs() < 2e-7);
+    let (r_hi, x_hi) = baffled_piston_impedance(rho, c, a, 1e6 * c / a).unwrap();
+    assert!((r_hi / z0 - 1.0).abs() < 1e-9);
+    assert!((x_hi / z0).abs() < 1e-6);
+    println!(
+        "{{\"case\":\"piston_closed_form_certified\",\"inputs\":\"analytic Bessel-Struve; 180-decimal reference\",\"observed\":{},\"oracle\":\"O(ka^3) reactance remainder\",\"tol\":1e-12,\"verdict\":\"pass\",\"elapsed_ms\":{}}}",
+        (x - second_x).abs(),
+        start.elapsed().as_millis()
+    );
+}
+
+/// G0: no defaults, no silent underflow/overflow, every physical input checked.
+#[test]
+fn piston_closed_form_refuses_invalid_parameters() {
+    let valid = [1.2, 343.0, 0.02, 800.0];
+    for index in 0..4 {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut p = valid;
+            p[index] = bad;
+            assert!(baffled_piston_impedance(p[0], p[1], p[2], p[3]).is_err());
+        }
+    }
+    assert!(baffled_piston_impedance(1.2, 343.0, 1e-300, 800.0).is_err());
+    assert!(baffled_piston_impedance(1.2, 343.0, 1e300, 800.0).is_err());
 }
 
 #[test]

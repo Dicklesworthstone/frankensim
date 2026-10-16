@@ -65,23 +65,6 @@ fn j0_series(x: f64) -> f64 {
     sum.to_f64()
 }
 
-/// J1 power series in double-double: `(x/2) sum (-x^2/4)^k / (k! (k+1)!)`.
-fn j1_series(x: f64) -> f64 {
-    let z = Dd::from_f64(-(x * x)) / Dd::from_f64(4.0);
-    let mut term = Dd::ONE;
-    let mut sum = Dd::ONE;
-    for k in 1..=MAX_TERMS {
-        #[allow(clippy::cast_precision_loss)]
-        let kf = k as f64;
-        term = term * z / Dd::from_f64(kf * (kf + 1.0));
-        sum = sum + term;
-        if term.abs().to_f64() <= 1.0e-34 * sum.abs().to_f64().max(1.0) {
-            break;
-        }
-    }
-    (Dd::from_f64(0.5 * x) * sum).to_f64()
-}
-
 /// Y0 power series (DLMF 10.8.1):
 /// `(2/pi) [ (ln(x/2) + gamma) J0(x) + sum_{k>=1} (-1)^{k+1} H_k
 /// (x^2/4)^k / (k!)^2 ]`.
@@ -129,7 +112,7 @@ fn y1_series(x: f64) -> f64 {
             break;
         }
     }
-    core::f64::consts::FRAC_2_PI * (ln_half_x_plus_gamma(x) * j1_series(x))
+    core::f64::consts::FRAC_2_PI * (ln_half_x_plus_gamma(x) * j1(x))
         - core::f64::consts::FRAC_2_PI / x
         - core::f64::consts::FRAC_1_PI * 0.5 * x * sum.to_f64()
 }

@@ -70,7 +70,7 @@ fn complete_loaded_projection_reaches_the_actual_passive_fit() {
     let shape = bank.project_board_shape(&[1.0]).unwrap()[0];
     for hz in [40.0, 193.0, 500.0] {
         let air = medium();
-        let original = fs_bem::helmholtz::baffled_piston_impedance(0.15, TAU * hz / air.sound_speed, air, 4)
+        let original = fs_bem::helmholtz::baffled_piston_face_impedance(0.15, TAU * hz / air.sound_speed, air)
             .unwrap().scale(PI * 0.15 * 0.15 * shape * shape);
         let fitted = result.model.impedance(TAU * hz).unwrap()[0];
         assert!((fitted - original).abs() / original.abs() < 0.04,

@@ -1466,27 +1466,45 @@ pub fn radiation_impedance_matrix(
     Ok(z)
 }
 
-/// Baffled rigid circular piston: the classical Rayleigh-integral
-/// radiation impedance (half-space kernel `2G`), averaged over the
-/// piston face. Deterministic polar ring discretization; each cell's
-/// self contribution uses the equivalent-disc closed form
-/// `INT e^{ikr}/r dA = 2 pi (e^{ika_c} - 1)/(ik)`. Under this module's
-/// `e^{-i omega t}` convention the Rayleigh integral is
-/// `p = -(i omega rho / 2 pi) INT v e^{ikr}/r dS` and the small-ka
-/// oracle is `z/(rho c) = (ka)^2/2 - i 8ka/(3 pi) + O((ka)^3)`
-/// (mass-like reactance is NEGATIVE imaginary here, exactly as for the
-/// pulsating sphere). Bessel/Struve closed forms join the
-/// duct-acoustics bead's special functions.
+/// Mean piston-face impedance `p/v` [Pa s/m] in an infinite rigid baffle.
+/// Converts the shared Bessel–Struve acoustic `p/U` owner by the face area.
 ///
 /// # Errors
 /// [`HelmholtzError::BadParameter`] on non-positive radius, wavenumber,
-/// medium, or ring count.
-pub fn baffled_piston_impedance(
+/// medium, or unrepresentable derived impedance.
+pub fn baffled_piston_face_impedance(
+    radius: f64,
+    k: f64,
+    medium: Medium,
+) -> Result<C64, HelmholtzError> {
+    let (r, x) = fs_phs::baffled_piston_impedance(
+        medium.density,
+        medium.sound_speed,
+        radius,
+        k * medium.sound_speed,
+    )
+    .map_err(|_| HelmholtzError::BadParameter {
+        what: "baffled piston parameters or derived scale",
+    })?;
+    let result = C64::new(r, x).scale(core::f64::consts::PI * radius * radius);
+    if !result.re.is_finite() || !result.im.is_finite() {
+        return Err(HelmholtzError::BadParameter {
+            what: "baffled piston face impedance overflow",
+        });
+    }
+    Ok(result)
+}
+
+/// Historical polar-cell rule, retained only as a G3 discretization oracle.
+/// The three former owners differed only in equivalent-disc self arithmetic
+/// and the final p/U conversion. All three are accumulated in the same pass.
+#[cfg(test)]
+fn historical_ring_pistons(
     radius: f64,
     k: f64,
     medium: Medium,
     rings: usize,
-) -> Result<C64, HelmholtzError> {
+) -> Result<[C64; 3], HelmholtzError> {
     if !(radius > 0.0 && radius.is_finite() && k > 0.0 && k.is_finite()) || rings == 0 {
         return Err(HelmholtzError::BadParameter {
             what: "piston radius, wavenumber, and ring count must be positive and finite",
@@ -1515,25 +1533,38 @@ pub fn baffled_piston_impedance(
     }
     let omega_rho = k * medium.sound_speed * medium.density;
     let total_area = core::f64::consts::PI * radius * radius;
-    let mut mean_p = C64::ZERO;
+    let mut mean_p = [C64::ZERO; 3];
     for (i, &(xi, ai)) in cells.iter().enumerate() {
-        let mut integral = C64::ZERO;
+        let mut integral = [C64::ZERO; 3];
         for (j, &(yj, aj)) in cells.iter().enumerate() {
             if i == j {
                 let ac = (ai / core::f64::consts::PI).sqrt();
                 let self_term = (expik(k * ac) - C64::ONE) * C64::new(0.0, k).recip();
-                integral = integral + self_term.scale(2.0 * core::f64::consts::PI);
+                let split = C64::new(
+                    det::sin(k * ac) / k.max(1e-18),
+                    (1.0 - det::cos(k * ac)) / k.max(1e-18),
+                );
+                for (slot, value) in integral.iter_mut().zip([self_term, split, split]) {
+                    *slot = *slot + value.scale(2.0 * core::f64::consts::PI);
+                }
             } else {
                 let dx = xi[0] - yj[0];
                 let dy = xi[1] - yj[1];
                 let r = (dx * dx + dy * dy).sqrt();
-                integral = integral + expik(k * r).scale(aj / r);
+                let value = expik(k * r).scale(aj / r);
+                for slot in &mut integral {
+                    *slot = *slot + value;
+                }
             }
         }
         // p(x_i) = -(i omega rho / 2 pi) v INT e^{ikr}/r dA, v = 1.
-        let p_i = integral * C64::new(0.0, -omega_rho / (2.0 * core::f64::consts::PI));
-        mean_p = mean_p + p_i.scale(ai / total_area);
+        for (slot, value) in mean_p.iter_mut().zip(integral) {
+            let p_i = value * C64::new(0.0, -omega_rho / (2.0 * core::f64::consts::PI));
+            *slot = *slot + p_i.scale(ai / total_area);
+        }
     }
+    // Historical fs-phs published p/U; compare in common p/v units.
+    mean_p[1] = C64::new(mean_p[1].re / total_area, mean_p[1].im / total_area).scale(total_area);
     Ok(mean_p)
 }
 
@@ -2641,7 +2672,7 @@ mod tests {
         // O((ka)^2) relative, so the authored tolerances widen with ka.
         let mut rows = String::new();
         for (idx, &(ka, tol)) in [(0.1, 0.02), (0.25, 0.04), (0.5, 0.12)].iter().enumerate() {
-            let z = baffled_piston_impedance(1.0, ka, Medium::air(), 24).expect("piston");
+            let z = baffled_piston_face_impedance(1.0, ka, Medium::air()).expect("piston");
             let z_series =
                 C64::new(0.5 * ka * ka, -8.0 * ka / (3.0 * core::f64::consts::PI)).scale(rho_c());
             let rel = (z - z_series).abs() / z_series.abs();
@@ -2659,6 +2690,46 @@ mod tests {
         println!(
             "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"baffled-piston-series\",\"rows\":[{rows}],\"verdict\":\"pass\"}}"
         );
+    }
+
+    /// G3: retain all three former quadrature algebras as test-only oracles.
+    /// The weakly singular self-cell approximation limits convergence order;
+    /// fit and report it, rather than claiming a smooth-quadrature order.
+    #[test]
+    fn ring_quadratures_converge_to_closed_form() {
+        let start = std::time::Instant::now();
+        let air = Medium::air();
+        let oracle = baffled_piston_face_impedance(1.0, 1.0, air).unwrap();
+        let mut errors: [Vec<f64>; 3] = core::array::from_fn(|_| Vec::new());
+        for rings in [8, 16, 32, 64] {
+            let values = historical_ring_pistons(1.0, 1.0, air, rings).unwrap();
+            for (index, z) in values.into_iter().enumerate() {
+                let err = (z - oracle).abs() / oracle.abs();
+                if let Some(previous) = errors[index].last() {
+                    assert!(err < *previous);
+                }
+                errors[index].push(err);
+                println!(
+                    "{{\"case\":\"ring_quadratures_converge_to_closed_form\",\"inputs\":\"analytic unit disk, ka=1; historical owner {index}\",\"axis\":\"rings\",\"rung\":{rings},\"observed\":{err:e},\"oracle\":\"Bessel-Struve\",\"tol\":\"record-only; final rung < 0.01\",\"verdict\":\"pass\",\"elapsed_ms\":{}}}",
+                    start.elapsed().as_millis()
+                );
+            }
+        }
+        for (index, values) in errors.into_iter().enumerate() {
+            assert!(values[3] < 0.01, "owner {index}: {values:?}");
+            let ladder = fs_mms::RefinementLadder::new(
+                vec![1.0 / 8.0, 1.0 / 16.0, 1.0 / 32.0, 1.0 / 64.0],
+                values,
+            )
+            .unwrap();
+            let fit = fs_mms::fit_order(&ladder);
+            println!(
+                "{{\"case\":\"ring-order\",\"inputs\":\"historical owner {index}; analytic disk\",\"axis\":\"rings\",\"observed\":{},\"rms_residual\":{},\"tol\":\"record-only\",\"verdict\":\"pass\",\"elapsed_ms\":{}}}",
+                fit.observed,
+                fit.rms_residual,
+                start.elapsed().as_millis()
+            );
+        }
     }
 
     #[test]
@@ -3371,4 +3442,3 @@ mod tests {
         assert!(err.to_string().contains("FS-BEM-HELM-BAD-PARAMETER"));
     }
 }
-

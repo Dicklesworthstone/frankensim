@@ -137,8 +137,15 @@ everywhere: this is screening, not a viscous truth source.
   result hashes. Every field is deterministic except `elapsed_ms`
   (wall-clock run evidence); `estimated_dense_bytes` is a deterministic
   3 x 16 n^2 model, not a measured RSS.
-- `baffled_piston_impedance` — Rayleigh-integral piston (half-space),
-  validated against the Bessel-free small-ka series.
+- `baffled_piston_face_impedance` — mean face `p/v` in an infinite baffle,
+  converted by area from the sole `fs_phs::baffled_piston_impedance` owner
+  (Bessel–Struve closed form, acoustic `p/U`). Historical ring algebras
+  from bem, phs and thin_plate survive only in a test oracle. G3
+  `ring_quadratures_converge_to_closed_form` requires decreasing errors
+  on 8/16/32/64 rings, final complex relative error < 1%, and reports
+  observed orders and RMS fit residuals via fs-mms (no order gate for the
+  singular self-cell rule). Native orders remain batch-pending, not measured
+  here. No unbaffled-pipe or nonuniform-face equivalence is claimed.
 - `HelmholtzError` — stable `FS-BEM-HELM-*` refusals: bad parameter,
   too-coarse (< 6 panels/wavelength), dense work cap (8192 panels),
   shape mismatch, singular; optional geometry preparation additionally reports

@@ -45,8 +45,11 @@ impl BaffledRadiationLoad {
     /// All 32 positive frequencies spanning (0, maximum_frequency_hz] must meet
     /// fixed 5% relative complex AND radiation-resistance checks for the analogue
     /// and discrete responses. The analytical zero-frequency limits are exact.
-    /// The disk oracle uses its existing eight-ring positive-area quadrature;
-    /// that oracle's spatial error is not removed from the discrepancy report.
+    /// The oracle is the shared closed-form Bessel–Struve piston; it has no
+    /// spatial quadrature error. The analogue-model test requires at most
+    /// 2.2% complex and 4.2% resistance discrepancy on ka ∈ (0, 0.5]
+    /// (a sampled estimate pending native qualification;
+    /// `compact_load_two_term_exact_and_error_recorded` records the grid).
     ///
     /// `dt*fmax <= 0.1` limits temporal warping and `ka_max <= 0.5` declares the
     /// low-frequency model domain. They do not prove that an arbitrary transient
@@ -55,10 +58,14 @@ impl BaffledRadiationLoad {
     /// # Errors
     /// Invalid/unrepresentable geometry or medium, cancellation, an unresolved
     /// clock, oracle failure, or either checked discrepancy above 5%.
-    pub fn new(radius_m: f64, density_kg_m3: f64, sound_speed_m_s: f64,
-        time_step_s: f64, maximum_frequency_hz: f64, gate: &CancelGate)
-        -> Result<Self, AcousticRealizeError>
-    {
+    pub fn new(
+        radius_m: f64,
+        density_kg_m3: f64,
+        sound_speed_m_s: f64,
+        time_step_s: f64,
+        maximum_frequency_hz: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, AcousticRealizeError> {
         if ![radius_m,density_kg_m3,sound_speed_m_s,time_step_s,maximum_frequency_hz]
             .iter().all(|v| v.is_finite() && *v > 0.0)
         { return Err(invalid("baffled radiation requires positive finite geometry, fluid, clock and band")); }
@@ -84,7 +91,7 @@ impl BaffledRadiationLoad {
             if gate.is_requested() {return Err(invalid("baffled radiation construction cancelled"));}
             let frequency=maximum_frequency_hz*f64::from(i)/32.0;
             let omega=core::f64::consts::TAU*frequency;
-            let (r,x)=fs_phs::baffled_piston_impedance(density_kg_m3,sound_speed_m_s,radius_m,omega,8)
+            let (r,x)=fs_phs::baffled_piston_impedance(density_kg_m3,sound_speed_m_s,radius_m,omega)
                 .map_err(|e|AcousticRealizeError::Nonlinear(e.to_string()))?;
             if !r.is_finite() || r<=0.0 || !x.is_finite() {
                 return Err(invalid("Rayleigh radiation oracle returned unresolved resistance or reactance"));
@@ -154,5 +161,50 @@ impl BaffledRadiationLoad {
         let r=x*ratio;
         if ![r,x].iter().all(|v|v.is_finite()) {return Err(invalid("baffled impedance response overflowed"));}
         Ok((r,-x))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// G3: coefficients derived from the two exact low-ka terms, then a
+    /// fixed 512-point full-domain discrepancy measurement, without fitting.
+    #[test]
+    fn compact_load_two_term_exact_and_error_recorded() {
+        let start = std::time::Instant::now();
+        let c = core::f64::consts::TAU;
+        let a = BaffledRadiationLoad::new(1.0, 1.0, c, 1e-4, 0.5, &CancelGate::new()).unwrap();
+        let alpha = 8.0 / (3.0 * core::f64::consts::PI);
+        let z0 = c / core::f64::consts::PI;
+        let term = a.load.terms()[0];
+        let inertance = term.resistance_pa_s_m3 / term.rate_per_s;
+        let resistance_coefficient = term.resistance_pa_s_m3 / (term.rate_per_s * term.rate_per_s);
+        assert!((inertance / (z0 * alpha / c) - 1.0).abs() < 1e-14);
+        assert!((resistance_coefficient / (z0 * 0.5 / (c * c)) - 1.0).abs() < 1e-14);
+        let (mut worst_complex, mut worst_r) = (0.0_f64, 0.0_f64);
+        for i in 1..=512 {
+            let ka = 0.5 * f64::from(i) / 512.0;
+            let (r, x) = fs_phs::baffled_piston_impedance(1.0, c, 1.0, ka * c).unwrap();
+            let (rr, xx) = a.impedance_at(ka, false).unwrap();
+            worst_complex = worst_complex.max((rr - r).hypot(xx - x) / r.hypot(x));
+            worst_r = worst_r.max((rr / r - 1.0).abs());
+        }
+        assert!(worst_complex < 0.022 && worst_r < 0.042);
+        println!(
+            "{{\"case\":\"compact_load_two_term_exact_and_error_recorded\",\"inputs\":\"analytic piston; ka in (0,0.5], 512 frequencies\",\"observed\":{worst_complex:e},\"resistance_error\":{worst_r:e},\"oracle\":\"Bessel-Struve\",\"tol\":0.022,\"resistance_tol\":0.042,\"verdict\":\"pass\",\"elapsed_ms\":{}}}",
+            start.elapsed().as_millis()
+        );
+    }
+
+    /// G0: exact existing domain admission; cap accepted and cap+1 refused.
+    #[test]
+    fn compact_baffled_load_domain_boundaries() {
+        let make = |dt, f| {
+            BaffledRadiationLoad::new(1.0, 1.0, core::f64::consts::TAU, dt, f, &CancelGate::new())
+        };
+        assert!(make(0.2, 0.5).is_ok()); // ka=0.5, dt*fmax=0.1.
+        assert!(make(0.2, 0.5 * (1.0 + 1e-9)).is_err());
+        assert!(make(0.2 * (1.0 + 1e-9), 0.5).is_err());
     }
 }

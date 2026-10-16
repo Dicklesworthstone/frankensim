@@ -13,6 +13,7 @@ layer = "L3"
 [dependencies]
 fs-casebook = { path = "../fs-casebook" }
 fs-math = { path = "../fs-math" }
+fs-phs = { path = "../fs-phs" }
 fs-fmm = { path = "../fs-fmm" }
 fs-geom = { path = "../fs-geom" }
 fs-la = { path = "../fs-la" }
@@ -21,6 +22,7 @@ fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-solver = { path = "../fs-solver" }
 
 [dev-dependencies]
+fs-mms = { path = "../fs-mms" }
 
 [lints]
 workspace = true

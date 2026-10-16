@@ -1,5 +1,5 @@
+use super::super::historical_ring_pistons;
 use super::*;
-use super::super::baffled_piston_impedance;
 use core::f64::consts::TAU;
 
 fn medium() -> Medium { Medium { density: 1.2, sound_speed: 343.0 } }
@@ -31,7 +31,7 @@ fn modal_piston_matches_existing_owner_and_independent_small_ka_terms() {
     for ka in [0.02, 0.05, 0.1] {
         let k = ka / radius;
         let z = prepared.impedance(k * air.sound_speed, air).unwrap()[0].scale(1.0 / area);
-        let existing = baffled_piston_impedance(radius, k, air, 24).unwrap();
+        let existing = historical_ring_pistons(radius, k, air, 24).unwrap()[0];
         assert!((z - existing).abs() / existing.abs() < 2e-12, "piston identity at ka={ka}");
         let normalized = z.scale(1.0 / (air.density * air.sound_speed));
         let resistance = 0.5 * ka * ka;
@@ -246,4 +246,3 @@ fn expanded_fields_refuse_excess_work_before_geometry_allocation() {
     for cell in &mut excess_fields { cell.mode_shape = vec![1.0; MAX_MODAL_RAYLEIGH_FIELDS + 1]; }
     assert!(PreparedSurface::new(&excess_fields).is_err());
 }
-

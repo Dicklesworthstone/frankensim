@@ -3,7 +3,7 @@
 //! Geometry + orthotropic section go in; `fs-plate` assembles the DKT
 //! pencil and `fs-modal` returns inertia-certified eigenpairs. A
 //! guitar top, a bulkhead, and a panel are the same object. Radiation
-//! reaction is the baffled-piston small-`ka` series fitted by
+//! reaction is the shared exact baffled-piston impedance fitted by
 //! `fs-vfit`, not a named instrument radiator.
 
 use crate::acoustic_realize::AcousticRealizeError;
@@ -180,15 +180,19 @@ impl CompactBody {
         Ok(self.radiate(acc, rho, listener_m))
     }
 
-    fn attach_piston_load(&mut self, gas: &GasState, sample_rate_hz: u32) {
+    fn attach_piston_load(
+        &mut self,
+        gas: &GasState,
+        sample_rate_hz: u32,
+    ) -> Result<(), AcousticRealizeError> {
         if self.rad.is_some() || self.area_m2 == 0.0 {
-            return;
+            return Ok(());
         }
         let radius = (self.piston_area_m2 / core::f64::consts::PI).sqrt();
-        if let Some(filter) = piston_radiation_filter(radius, gas, sample_rate_hz) {
-            let state = filter.zero_state();
-            self.rad = Some((filter, state));
-        }
+        let filter = piston_radiation_filter(radius, gas, sample_rate_hz)?;
+        let state = filter.zero_state();
+        self.rad = Some((filter, state));
+        Ok(())
     }
 }
 
@@ -606,12 +610,20 @@ impl PlateBank {
     }
 
     /// Fit a baffled-piston radiation impedance onto every linear
-    /// compact radiator. A failed identification leaves that body
-    /// unloaded — it does not invent a damper.
-    pub fn attach_radiation_loads(&mut self, gas: &GasState, sample_rate_hz: u32) {
+    /// compact radiator. Refuses if impedance evaluation or identification fails.
+    ///
+    /// # Errors
+    /// Invalid piston parameters or a failed passive realization. Callers must
+    /// discard an assembly whose construction refuses.
+    pub fn attach_radiation_loads(
+        &mut self,
+        gas: &GasState,
+        sample_rate_hz: u32,
+    ) -> Result<(), AcousticRealizeError> {
         for body in &mut self.linear {
-            body.attach_piston_load(gas, sample_rate_hz);
+            body.attach_piston_load(gas, sample_rate_hz)?;
         }
+        Ok(())
     }
 }
 
@@ -657,7 +669,9 @@ pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, Acousti
         (lo, hi),
         plate.n_modes,
         plate.damping_ratio,
-        bending_loss.as_ref().map(|loss| loss as &dyn ModalBendingLoss),
+        bending_loss
+            .as_ref()
+            .map(|loss| loss as &dyn ModalBendingLoss),
     )
 }
 
@@ -873,8 +887,12 @@ impl PlateBendingLoss {
 
 // Uniform and regional losses share the same certified mode harvesting.
 trait ModalBendingLoss {
-    fn modal_zeta(&self, total: &PlateModel, phi: &[f64], omega: f64)
-        -> Result<f64, AcousticRealizeError>;
+    fn modal_zeta(
+        &self,
+        total: &PlateModel,
+        phi: &[f64],
+        omega: f64,
+    ) -> Result<f64, AcousticRealizeError>;
 }
 
 impl ModalBendingLoss for PlateBendingLoss {
@@ -1741,104 +1759,53 @@ fn thermoelastic_zeta(
     Ok(fs_material::visco::loss_factor_to_zeta(eta))
 }
 
-/// Rayleigh-integral baffled-piston face impedance `Z = p/v` under
-/// `e^{-iωt}` (mass-like `Im Z < 0`). This is the same half-space
-/// kernel as `fs_bem::helmholtz::baffled_piston_impedance`, written
-/// here so couple does not depend on bem (cycle through feec).
-fn baffled_piston_impedance(radius: f64, omega: f64, gas: &GasState, rings: usize) -> Option<C64> {
-    if !(radius > 0.0 && omega > 0.0 && rings > 0) {
-        return None;
-    }
-    let k = omega / gas.sound_speed;
-    if !(k > 0.0 && k.is_finite()) {
-        return None;
-    }
-    let mut cells: Vec<([f64; 2], f64)> = Vec::new();
-    for m in 0..rings {
-        let r0 = radius * m as f64 / rings as f64;
-        let r1 = radius * (m + 1) as f64 / rings as f64;
-        let rc = f64::midpoint(r0, r1);
-        let sectors = 6 * (m + 1);
-        let band_area = core::f64::consts::PI * (r1 * r1 - r0 * r0);
-        for sct in 0..sectors {
-            let th = core::f64::consts::TAU * (sct as f64 + 0.5) / sectors as f64;
-            cells.push((
-                [rc * det::cos(th), rc * det::sin(th)],
-                band_area / sectors as f64,
-            ));
-        }
-    }
-    let omega_rho = omega * gas.density;
-    let total_area = core::f64::consts::PI * radius * radius;
-    let mut mean_p = C64::new(0.0, 0.0);
-    for (i, &(xi, ai)) in cells.iter().enumerate() {
-        let mut integral = C64::new(0.0, 0.0);
-        for (j, &(yj, aj)) in cells.iter().enumerate() {
-            if i == j {
-                let ac = (ai / core::f64::consts::PI).sqrt();
-                let ka_c = k * ac;
-                let self_term = C64::new(
-                    det::sin(ka_c) / k.max(1.0e-18),
-                    (1.0 - det::cos(ka_c)) / k.max(1.0e-18),
-                );
-                integral = integral + self_term.scale(2.0 * core::f64::consts::PI);
-            } else {
-                let dx = xi[0] - yj[0];
-                let dy = xi[1] - yj[1];
-                let r = det::sqrt(dx * dx + dy * dy);
-                let kr = k * r;
-                integral = integral + C64::new(det::cos(kr), det::sin(kr)).scale(aj / r);
-            }
-        }
-        let p_i = integral * C64::new(0.0, -omega_rho / (2.0 * core::f64::consts::PI));
-        mean_p = mean_p + p_i.scale(ai / total_area);
-    }
-    Some(mean_p)
-}
-
 /// Baffled-piston `Z(ω) = p/v` fitted as a passive discrete filter.
 fn piston_radiation_filter(
     radius: f64,
     gas: &GasState,
     sample_rate_hz: u32,
-) -> Option<DigitalFilter> {
-    if !(radius > 0.0 && sample_rate_hz > 0) {
-        return None;
+) -> Result<DigitalFilter, AcousticRealizeError> {
+    if !(radius > 0.0 && radius.is_finite() && sample_rate_hz > 0) {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "piston radiation radius and sample rate",
+        });
     }
     let dt = 1.0 / f64::from(sample_rate_hz);
     let nyquist = core::f64::consts::PI / dt;
     let omega_lo = 40.0_f64.min(0.05 * nyquist);
     let omega_hi = (0.40 * nyquist).max(omega_lo * 4.0);
     if !(omega_hi > omega_lo) {
-        return None;
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "piston radiation fit band",
+        });
     }
     let n = 24usize;
-    // Rayleigh-integral face impedance (same kernel as fs-bem, no
-    // bem dep). Small-ka series is the fallback if a ring solve
-    // refuses. Acoustics `e^{-iωt}` → vfit `e^{+iωt}` via conjugate.
+    // Acoustic p/U → face p/v by the geometric area. Acoustics
+    // e^{-iωt} → vfit e^{+iωt} by conjugation, without a fallback.
     let mut omega = Vec::with_capacity(n);
     let mut z = Vec::with_capacity(n);
-    let zc = gas.density * gas.sound_speed;
+    let area = core::f64::consts::PI * radius * radius;
     for k in 0..n {
         let t = k as f64 / (n as f64 - 1.0);
         let w = omega_lo * det::exp(t * det::ln(omega_hi / omega_lo));
-        let z_face = baffled_piston_impedance(radius, w, gas, 8).unwrap_or_else(|| {
-            let ka = w * radius / gas.sound_speed;
-            C64::new(
-                zc * 0.5 * ka * ka,
-                -zc * 8.0 * ka / (3.0 * core::f64::consts::PI),
-            )
-        });
+        let (r, x) = fs_phs::baffled_piston_impedance(gas.density, gas.sound_speed, radius, w)
+            .map_err(|_| AcousticRealizeError::InvalidDescription {
+                what: "piston radiation impedance refused",
+            })?;
+        let z_face = C64::new(r, x).scale(area);
         omega.push(w);
         z.push(C64::new(z_face.re, -z_face.im));
     }
     if omega.len() < 8 {
-        return None;
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "piston radiation fit samples",
+        });
     }
     let mut opts = FitOptions::new(3);
     opts.fit_e = false;
     opts.iterations = 8;
-    realize_tabulated_impedance(&omega, &z, dt, &opts, omega[omega.len() / 2]).ok()
+    realize_tabulated_impedance(&omega, &z, dt, &opts, omega[omega.len() / 2])
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
 fn ss_omega11(section: &PlateSection, a: f64, b: f64) -> f64 {
@@ -2026,7 +1993,7 @@ mod tests {
                 let scaled: Vec<_> = phi.iter().map(|v| scale * v).collect();
                 let mut body = projection.mode(&model, &scaled, 100.0, 0.01).unwrap();
                 if loaded {
-                    body.attach_piston_load(&gas, 48_000);
+                    body.attach_piston_load(&gas, 48_000).expect("piston load");
                     assert!(body.rad.is_some());
                 }
                 let mut history = Vec::new();
@@ -2533,12 +2500,45 @@ mod tests {
             101_325.0,
         )
         .expect("air");
-        let z = baffled_piston_impedance(0.05, 2.0e3, &gas, 8).expect("z");
-        assert!(z.re > 0.0, "resistance must be positive");
+        let (r, x) =
+            fs_phs::baffled_piston_impedance(gas.density, gas.sound_speed, 0.05, 2.0e3).expect("z");
+        assert!(r > 0.0, "resistance must be positive");
+        assert!(x < 0.0, "mass-like reactance is negative under e^{{-iωt}}");
+    }
+
+    /// G0: an invalid gas used to fall through the Option into the low-ka
+    /// formula. It now refuses by name; a physical gas at the same ka still
+    /// has a well-defined closed-form load.
+    #[test]
+    fn thin_plate_refuses_instead_of_low_ka_fallback() {
+        let mut gas = GasState::try_new(
+            &fs_material::gas::GasSpec::dry_air_ussa1976(),
+            293.15,
+            101_325.0,
+        )
+        .unwrap();
+        let ka = 1e-3;
         assert!(
-            z.im < 0.0,
-            "mass-like reactance is negative under e^{{-iωt}}"
+            fs_phs::baffled_piston_impedance(
+                gas.density,
+                gas.sound_speed,
+                0.05,
+                ka * gas.sound_speed / 0.05
+            )
+            .is_ok()
         );
+        // The former ring path returned None at non-finite wave number,
+        // then silently manufactured a low-ka value using the same gas.
+        gas.sound_speed = 0.0;
+        let result = piston_radiation_filter(0.05, &gas, 48_000);
+        assert!(matches!(
+            result,
+            Err(AcousticRealizeError::InvalidDescription {
+                what: "piston radiation impedance refused"
+            })
+        ));
+        assert!(piston_radiation_filter(f64::NAN, &gas, 48_000).is_err());
+        assert!(piston_radiation_filter(0.05, &gas, 0).is_err());
     }
 
     #[test]
