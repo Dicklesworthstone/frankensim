@@ -68,6 +68,8 @@ pub mod sheet_plate;
 pub mod speaker;
 pub mod stribeck_friction;
 pub mod string_specimen;
+/// Full tensor material memory coupled to structural inertia and force ports.
+pub mod tensor_material;
 pub mod thin_plate;
 pub mod tract;
 // TOMBSTONE-3ez8g.13.5: dead module, deny new consumers (see its header).
