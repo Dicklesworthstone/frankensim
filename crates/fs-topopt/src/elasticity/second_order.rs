@@ -146,8 +146,8 @@ impl<'a> ComplianceGoal<'a> {
         if !(options.tolerance.is_finite() && options.tolerance > 0.0 && options.tolerance < 1.0) {
             return Err(ComplianceError::InvalidInput("relative tolerance must lie in (0, 1)"));
         }
-        if loads.is_empty() || !loads.iter().any(|case| case.weight > 0.0) {
-            return Err(ComplianceError::InvalidInput("at least one positive-weight load is required"));
+        if loads.is_empty() {
+            return Err(ComplianceError::InvalidInput("at least one structural load case is required"));
         }
         for (e, &m) in moduli.iter().enumerate() {
             if e % 256 == 0 { control.checkpoint("compliance-admission")?; }

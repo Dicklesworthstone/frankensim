@@ -199,8 +199,8 @@ impl<'a> SimpNewtonModel<'a> {
             }
             total = finite(total + v, "total physical volume")?;
         }
-        if loads.is_empty() || !loads.iter().any(|l| l.weight > 0.0) {
-            return Err(PhysicsError::InvalidInput("at least one positive-weight load required"));
+        if loads.is_empty() {
+            return Err(PhysicsError::InvalidInput("at least one structural load case required"));
         }
         for load in loads {
             if load.force.len() != elasticity.n() || !(load.weight.is_finite() && load.weight >= 0.0) {

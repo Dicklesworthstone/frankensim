@@ -101,8 +101,8 @@ impl<'a> SimpComplianceGoal<'a> {
                 return Err(ComplianceError::InvalidInput("raw densities must lie in [0, 1]"));
             }
         }
-        if loads.is_empty() || !loads.iter().any(|l| l.weight > 0.0) {
-            return Err(ComplianceError::InvalidInput("at least one positive-weight load required"));
+        if loads.is_empty() {
+            return Err(ComplianceError::InvalidInput("at least one structural load case required"));
         }
         for load in loads {
             if load.force.len() != elasticity.n() || !(load.weight.is_finite() && load.weight >= 0.0) {

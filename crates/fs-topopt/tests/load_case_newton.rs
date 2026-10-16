@@ -185,3 +185,53 @@ fn live_ir_can_impose_multiple_load_case_limits_without_force_cross_terms() {
     add_scaled(&mut expected_hessian,multipliers[1]/s1.value,&hv1);
     close(&hv[0],&expected_hessian,5e-9);
 }
+
+
+#[test]
+fn zero_weight_aggregate_allows_volume_objective_with_only_case_constraints() {
+    let (pipeline, elasticity, a, b, volumes) = fixture();
+    let loads = [LoadCase { force: &a, weight: 0.0 }, LoadCase { force: &b, weight: 0.0 }];
+    let model = SimpNewtonModel::new(&pipeline, &elasticity, &loads, &volumes, options(), budget()).unwrap();
+    let aggregate = model.compliance("unused-aggregate").unwrap();
+    let case0 = model.load_case_compliance(0, "case-0").unwrap();
+    let case1 = model.load_case_compliance(1, "case-1").unwrap();
+    let volume = model.volume("volume").unwrap();
+    let n = elasticity.cells();
+    let x = vec![0.5;n];
+
+    let zero = aggregate.value_gradient(&x,None).unwrap();
+    assert_eq!(zero.value,0.0);
+    assert!(zero.gradient.iter().all(|&g| g == 0.0));
+    let work = model.work();
+    let c0 = case0.value_gradient(&x,None).unwrap();
+    let c1 = case1.value_gradient(&x,None).unwrap();
+    assert!(c0.value > 0.0 && c1.value > 0.0);
+    assert_eq!(model.work().solve_reservations,work.solve_reservations+2);
+    let before = model.work();
+    assert_eq!(aggregate.hessian_vector_product(&x,&vec![1.0;n],None).unwrap(),vec![0.0;n]);
+    assert_eq!(model.work(),before,"zero weighted aggregate must not spend tangent solves");
+
+    let mut builder = ProblemBuilder::new();
+    let var = builder.var("raw density",Manifold::Rn {dim:n as u32},Dims::NONE).unwrap();
+    let v = builder.pde_residual("volume",var,true,Dims::NONE).unwrap();
+    let p0 = builder.pde_residual("case-0",var,true,COMPLIANCE_DIMS).unwrap();
+    let p1 = builder.pde_residual("case-1",var,true,COMPLIANCE_DIMS).unwrap();
+    builder.objective(v,Sense::Minimize,1.0).unwrap();
+    let one = builder.konst(1.0,Dims::NONE).unwrap();
+    let s0 = builder.konst(c0.value,COMPLIANCE_DIMS).unwrap();
+    let s1 = builder.konst(c1.value,COMPLIANCE_DIMS).unwrap();
+    let q0 = builder.div(p0,s0).unwrap();
+    let q1 = builder.div(p1,s1).unwrap();
+    let r0 = builder.sub(q0,one).unwrap();
+    let r1 = builder.sub(q1,one).unwrap();
+    builder.constraint(r0,ConstraintKind::LeZero,"case 0 cap").unwrap();
+    builder.constraint(r1,ConstraintKind::LeZero,"case 1 cap").unwrap();
+    let problem = builder.finish();
+    let oracle = ReverseProblem::new_with_physics(&problem,
+        ReverseLimits {max_nodes:256,max_scalar_slots:8192},
+        &[PhysicsBinding {node:v,model:&volume},PhysicsBinding {node:p0,model:&case0},
+          PhysicsBinding {node:p1,model:&case1}],None).unwrap();
+    let tape = oracle.evaluate(&[x]).unwrap();
+    assert_eq!(tape.constraint_values(),&[0.0,0.0]);
+    assert!(tape.objective_value().is_finite());
+}
