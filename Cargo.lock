@@ -5075,10 +5075,12 @@ name = "xtask"
 version = "0.0.1"
 dependencies = [
  "fs-alloc",
+ "fs-bem",
  "fs-blake3",
  "fs-cli",
  "fs-conduction",
  "fs-couple",
+ "fs-duct",
  "fs-evidence",
  "fs-exec",
  "fs-govern",
@@ -5091,6 +5093,7 @@ dependencies = [
  "fs-qty",
  "fs-scenario",
  "fs-solid",
+ "fs-thermochem",
  "fs-tropical",
  "fs-vvreg",
 ]
