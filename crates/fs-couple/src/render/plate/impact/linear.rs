@@ -2,13 +2,14 @@
 //!
 //! This is a compiler into the existing modal/contact owners, NOT a time
 //! integrator. Independent linear bodies use their exact held-force transition;
-//! bilateral reactions use the once-factored coupling system; only the normal
-//! contact reactions are nonlinear. A two-head drum therefore does not put
+//! bilateral stiffness and damping use the complete retained linear exponential;
+//! only the normal contact reactions are nonlinear. A two-head drum does not put
 //! every head coordinate into the reference host's dense FD Newton solve.
 //!
 //! The admitted Hamiltonian, damping and contact coefficients are unchanged.
-//! Finite-step coupling is not the exact exponential of the coupled continuum,
-//! nor bit-identical to the Gonzalez reference. Compare by time refinement.
+//! Disconnected linear blocks retain every original coordinate and force port.
+//! Each block keeps the dense exponential capacity limit. Nonlinear contact
+//! exchange still needs time refinement against the Gonzalez reference.
 //! Nonlinear shells and felt are not silently linearized. Normal contacts keep
 //! complete signed rows across every original body, including flexible shafts.
 //! Volume springs and viscous dampers likewise retain one complete signed
@@ -400,35 +401,112 @@ mod free_drag_tests {
 
     #[test]
     fn inertial_drag_preserves_mass_force_work_and_discrete_decay() {
-        let gate = CancelGate::new_clock_free(); let dt = 1.0/20_000.0;
+        let gate = CancelGate::new_clock_free();
+        let dt = 1.0 / 20_000.0;
         for drag in [0.0, 100.0, 10_000.0, 100_000.0] {
             let (mut body, tip) = ImpactBody::free_mass(0.04, 0.0, 0.03).unwrap();
             body.damping_per_s[0] = drag;
-            let mut system = LinearImpactSystem::new(vec![body], vec![], vec![], config(20_000), &gate).unwrap();
+            let mut system =
+                LinearImpactSystem::new(vec![body], vec![], vec![], config(20_000), &gate).unwrap();
             let initial = system.frame().stored_energy_j;
             let (mut q, mut p, mut work, mut loss) = (0.0, 0.006, 0.0, 0.0);
             for step in 0..100 {
-                let force = if step < 20 { 0.008*tip } else { 0.0 };
-                let next = ((1.0-0.5*drag*dt)*p+dt*force)/(1.0+0.5*drag*dt);
-                let displacement = 0.5*dt*(p+next);
-                let expected_loss = dt*drag*(0.5*(p+next)).powi(2);
-                let previous_energy = 0.5*p*p;
-                q += displacement; p = next;
+                let force = if step < 20 { 0.008 * tip } else { 0.0 };
+                // p'=F-drag*p, q'=p. Integrate the held-force solution
+                // and drag*p(t)^2 independently of the owner's ledger.
+                let (next, displacement, expected_loss) = if drag == 0.0 {
+                    (p + dt * force, dt * p + 0.5 * dt * dt * force, 0.0)
+                } else {
+                    let decay = fs_math::det::exp(-drag * dt);
+                    let one_minus = -fs_math::det::expm1(-drag * dt);
+                    let steady = force / drag;
+                    let transient = p - steady;
+                    (
+                        steady + transient * decay,
+                        steady * dt + transient * one_minus / drag,
+                        drag * steady * steady * dt
+                            + 2.0 * steady * transient * one_minus
+                            + 0.5
+                                * transient
+                                * transient
+                                * (-fs_math::det::expm1(-2.0 * drag * dt)),
+                    )
+                };
+                let previous_energy = 0.5 * p * p;
+                q += displacement;
+                p = next;
                 let frame = system.step(&[force], &gate).unwrap();
-                work += frame.supplied_work_j; loss += frame.dissipated_energy_j;
-                assert!((system.state()[0]-q).abs() < 1e-12);
-                assert!((system.state()[1]-p).abs() < 1e-11);
-                assert!((frame.supplied_work_j-force*displacement).abs() < 1e-12);
-                assert!((frame.dissipated_energy_j-expected_loss).abs() < 1e-12);
+                work += frame.supplied_work_j;
+                loss += frame.dissipated_energy_j;
+                assert!((system.state()[0] - q).abs() < 1e-12);
+                assert!((system.state()[1] - p).abs() < 1e-11);
+                assert!((frame.supplied_work_j - force * displacement).abs() < 1e-12);
+                assert!((frame.dissipated_energy_j - expected_loss).abs() < 1e-12);
                 // The exact-ZOH owner reports work minus storage change, with
                 // signed summation roundoff. Do not clamp production loss or
                 // require an exactly positive floating-point zero in this host.
-                let roundoff = 256.0*f64::EPSILON*(previous_energy
-                    +frame.stored_energy_j+frame.supplied_work_j.abs()+expected_loss);
+                let roundoff = 256.0
+                    * f64::EPSILON
+                    * (previous_energy
+                        + frame.stored_energy_j
+                        + frame.supplied_work_j.abs()
+                        + expected_loss);
                 assert!(frame.dissipated_energy_j >= -roundoff);
-                assert!((frame.stored_energy_j+loss-initial-work).abs() < 1e-10);
+                assert!((frame.stored_energy_j + loss - initial - work).abs() < 1e-10);
             }
-            if drag > 0.0 { assert!(loss > 0.0); }
+            if drag > 0.0 {
+                assert!(loss > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn inertial_drag_reference_keeps_its_midpoint_work_and_decay_identity() {
+        // Keep the original midpoint oracle on the actual Gonzalez owner.
+        // The largest drag needs dt*100000 <= .04; 3.2 MHz resolves all
+        // four cases without changing drag, force, or the 5 ms horizon.
+        let rate = 3_200_000_u32;
+        let dt = f64::from(rate).recip();
+        let gate = CancelGate::new_clock_free();
+        for drag in [0.0, 100.0, 10_000.0, 100_000.0] {
+            let (mut body, tip) = ImpactBody::free_mass(0.04, 0.0, 0.03).unwrap();
+            body.damping_per_s[0] = drag;
+            let mut system = super::super::ImpactSystem::new(
+                vec![body],
+                vec![],
+                vec![],
+                vec![],
+                super::super::ImpactConfig {
+                    dt_s: dt,
+                    max_steps: u64::from(rate / 200),
+                    maximum_energy_j: 10.0,
+                    energy_absolute_tolerance_j: 1e-10,
+                    energy_relative_tolerance: 1e-8,
+                    maximum_generalized_force: 10_000.0,
+                },
+            )
+            .unwrap();
+            let initial = system.stored_energy_j();
+            let (mut q, mut p, mut work, mut loss) = (0.0, 0.006, 0.0, 0.0);
+            for step in 0..rate / 200 {
+                let force = if step < rate / 1000 { 0.008 * tip } else { 0.0 };
+                let next = ((1.0 - 0.5 * drag * dt) * p + dt * force) / (1.0 + 0.5 * drag * dt);
+                let displacement = 0.5 * dt * (p + next);
+                let expected_loss = dt * drag * (0.5 * (p + next)).powi(2);
+                q += displacement;
+                p = next;
+                let frame = system.step(&[force], &gate).unwrap();
+                work += frame.supplied_work_j;
+                loss += frame.dissipated_energy_j;
+                assert!((system.state()[0] - q).abs() < 1e-12);
+                assert!((system.state()[1] - p).abs() < 1e-11);
+                assert!((frame.supplied_work_j - force * displacement).abs() < 1e-12);
+                assert!((frame.dissipated_energy_j - expected_loss).abs() < 1e-12);
+                assert!((frame.stored_energy_j + loss - initial - work).abs() < 1e-10);
+            }
+            if drag > 0.0 {
+                assert!(loss > 0.0);
+            }
         }
     }
 
@@ -438,14 +516,46 @@ mod free_drag_tests {
             let gate = CancelGate::new_clock_free();
             let (mut body, _) = ImpactBody::free_mass(1.0, 0.0, 0.01).unwrap();
             body.damping_per_s[0] = 400.0;
-            let mut s = LinearImpactSystem::new(vec![body], vec![], vec![], config(rate), &gate).unwrap();
-            for _ in 0..rate/100 { s.step(&[0.0], &gate).unwrap(); }
-            let exact_p = 0.01*(-4.0_f64).exp();
-            let exact_q = (0.01-exact_p)/400.0;
-            (s.state()[1]-exact_p).abs()+400.0*(s.state()[0]-exact_q).abs()
+            let mut s =
+                LinearImpactSystem::new(vec![body.clone()], vec![], vec![], config(rate), &gate)
+                    .unwrap();
+            let mut reference = super::super::ImpactSystem::new(
+                vec![body],
+                vec![],
+                vec![],
+                vec![],
+                super::super::ImpactConfig {
+                    dt_s: f64::from(rate).recip(),
+                    max_steps: 2_000,
+                    maximum_energy_j: 10.0,
+                    energy_absolute_tolerance_j: 1e-10,
+                    energy_relative_tolerance: 1e-8,
+                    maximum_generalized_force: 10_000.0,
+                },
+            )
+            .unwrap();
+            for _ in 0..rate / 100 {
+                s.step(&[0.0], &gate).unwrap();
+                reference.step(&[0.0], &gate).unwrap();
+            }
+            let exact_p = 0.01 * (-4.0_f64).exp();
+            let exact_q = (0.01 - exact_p) / 400.0;
+            let error = |x: &[f64]| (x[1] - exact_p).abs() + 400.0 * (x[0] - exact_q).abs();
+            assert!(
+                error(s.state()) <= 1e-10,
+                "exact damped trajectory: {}",
+                error(s.state())
+            );
+            error(reference.state())
         };
-        let coarse = run(20_000); let fine = run(40_000);
-        assert!(coarse > 1e-10 && fine < 0.3*coarse, "{coarse:e} -> {fine:e}");
+        let errors = [20_000, 40_000, 80_000].map(run);
+        for pair in errors.windows(2) {
+            let (coarse, fine) = (pair[0], pair[1]);
+            assert!(
+                coarse > 1e-10 && fine < 0.3 * coarse,
+                "{coarse:e} -> {fine:e}"
+            );
+        }
     }
 
     #[test]

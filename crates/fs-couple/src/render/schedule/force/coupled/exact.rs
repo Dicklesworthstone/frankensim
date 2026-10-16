@@ -8,13 +8,15 @@ use fs_phs::linear_exact::{
 use fs_phs::{PortHamiltonian, QuadraticStorage, StepRecord};
 
 pub(super) struct ExactNetwork {
-    system: PortHamiltonian,
-    split: LinearSplit,
-    rest_force: Vec<f64>,
-    component_r: Vec<f64>,
-    connection_r: Vec<f64>,
+    blocks: Vec<(Vec<usize>, ExactBlock)>,
+    count: usize,
 }
 
+// Diagonal component dynamics and held inputs cannot connect distinct K/C
+// islands. A permutation therefore makes the full generator block diagonal;
+// its exponential and each resistance integral are the direct sum of these
+// exact blocks. Contacts still act through the complete original force vector.
+// This changes no retained coordinate, physical limit or dense-block capacity.
 impl ExactNetwork {
     pub(super) fn new(
         models: &[ModalAcousticTimeModel],
@@ -23,6 +25,175 @@ impl ExactNetwork {
         count: usize,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
+        let modes: Vec<_> = models
+            .iter()
+            .flat_map(|m| m.modes().iter().copied())
+            .collect();
+        if count == 0
+            || modes.len() != count
+            || columns.len() != links.len()
+            || columns.iter().any(|c| c.len() != count)
+        {
+            return Err(invalid("complete modal island layout"));
+        }
+        let mut labels: Vec<_> = (0..count).collect();
+        let root = |parents: &[usize], mut i: usize| {
+            while parents[i] != i {
+                i = parents[i];
+            }
+            i
+        };
+        for (column, link) in columns.iter().zip(links) {
+            poll(Some(gate))?;
+            if link.stiffness_n_m == 0.0 && link.damping_n_s_m == 0.0 {
+                continue;
+            }
+            let mut members = column.iter().enumerate().filter(|(_, v)| **v != 0.0);
+            if let Some((first, _)) = members.next() {
+                for (next, _) in members {
+                    let (a, b) = (root(&labels, first), root(&labels, next));
+                    if a != b {
+                        labels[a.max(b)] = a.min(b);
+                    }
+                }
+            }
+        }
+        let mut groups = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+        for index in 0..count {
+            groups.entry(root(&labels, index)).or_default().push(index);
+        }
+        let mut blocks = Vec::with_capacity(groups.len());
+        for indices in groups.into_values() {
+            poll(Some(gate))?;
+            let local_modes: Vec<_> = indices.iter().map(|&i| modes[i]).collect();
+            let local_columns: Vec<Vec<_>> = columns
+                .iter()
+                .map(|c| indices.iter().map(|&i| c[i]).collect())
+                .collect();
+            let block = ExactBlock::new(&local_modes, &local_columns, links, gate)?;
+            blocks.push((indices, block));
+        }
+        Ok(Self { blocks, count })
+    }
+
+    fn local_state(indices: &[usize], x: &[f64]) -> Vec<f64> {
+        indices
+            .iter()
+            .flat_map(|&i| [x[2 * i], x[2 * i + 1]])
+            .collect()
+    }
+
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        self.blocks
+            .iter()
+            .map(|(indices, b)| b.system.hamiltonian(&Self::local_state(indices, x)))
+            .sum()
+    }
+
+    pub(super) fn advance(
+        &self,
+        models: &[ModalAcousticTimeModel],
+        external: &[f64],
+        dt: f64,
+    ) -> Result<(StepRecord, Vec<f64>, Vec<f64>), ModalCouplingError> {
+        if external.len() != self.count || external.iter().any(|v| !v.is_finite()) {
+            return Err(invalid(
+                "external forces must match every original modal coordinate",
+            ));
+        }
+        let x = flatten(models);
+        let mut u = vec![0.0; self.count];
+        let mut record = StepRecord {
+            x: vec![0.0; 2 * self.count],
+            y: vec![0.0; self.count],
+            delta_h: 0.0,
+            dissipated: 0.0,
+            supplied: 0.0,
+            newton_iters: 0,
+            solver_residual: 0.0,
+            solver_certificate: None,
+        };
+        for (indices, block) in &self.blocks {
+            let local_external: Vec<_> = indices.iter().map(|&i| external[i]).collect();
+            let local_u = block.held_input(&local_external)?;
+            let local = step_render(
+                &block.system,
+                &block.split,
+                &Self::local_state(indices, &x),
+                &local_u,
+                dt,
+            )
+            .map_err(ModalCouplingError::Propagation)?;
+            for (j, &i) in indices.iter().enumerate() {
+                record.x[2 * i..2 * i + 2].copy_from_slice(&local.x[2 * j..2 * j + 2]);
+                record.y[i] = local.y[j];
+                u[i] = local_u[j];
+            }
+            record.delta_h = finite(record.delta_h + local.delta_h)?;
+            record.dissipated = finite(record.dissipated + local.dissipated)?;
+            record.supplied = finite(record.supplied + local.supplied)?;
+        }
+        Ok((record, x, u))
+    }
+
+    pub(super) fn response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
+        if column.len() != self.count {
+            return Err(invalid("complete contact force column"));
+        }
+        let mut response = vec![0.0; self.count];
+        for (indices, block) in &self.blocks {
+            let local_column: Vec<_> = indices.iter().map(|&i| column[i]).collect();
+            for (&i, value) in indices.iter().zip(block.response(&local_column, dt)?) {
+                response[i] = value;
+            }
+        }
+        Ok(response)
+    }
+
+    fn losses(
+        &self,
+        x: &[f64],
+        u: &[f64],
+        dt: f64,
+        total: f64,
+    ) -> Result<(f64, f64), ModalCouplingError> {
+        let (mut component, mut connection) = (0.0, 0.0);
+        for (indices, block) in &self.blocks {
+            let local_x = Self::local_state(indices, x);
+            let local_u: Vec<_> = indices.iter().map(|&i| u[i]).collect();
+            let block_total = if self.blocks.len() == 1 {
+                total
+            } else {
+                // Recover this island's independently integrated total for
+                // the existing channel split, never apportion a global loss.
+                step_render(&block.system, &block.split, &local_x, &local_u, dt)
+                    .map_err(ModalCouplingError::Propagation)?
+                    .dissipated
+            };
+            let (a, b) = block.losses(&local_x, &local_u, dt, block_total)?;
+            component = finite(component + a)?;
+            connection = finite(connection + b)?;
+        }
+        Ok((component, connection))
+    }
+}
+
+struct ExactBlock {
+    system: PortHamiltonian,
+    split: LinearSplit,
+    rest_force: Vec<f64>,
+    component_r: Vec<f64>,
+    connection_r: Vec<f64>,
+}
+
+impl ExactBlock {
+    fn new(
+        modes: &[crate::modal_acoustic_time::ModalAcousticMode],
+        columns: &[Vec<f64>],
+        links: &[ConnectionLaw],
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        let count = modes.len();
         let n = count
             .checked_mul(2)
             .ok_or_else(|| invalid("full linear state extent"))?;
@@ -43,19 +214,17 @@ impl ExactNetwork {
         let mut r = vec![0.0; n * n];
         let mut g = vec![0.0; n * count];
         let mut at = 0;
-        for model in models {
+        for mode in modes {
             poll(Some(gate))?;
-            for mode in model.modes() {
-                let qi = 2 * at;
-                let pi = qi + 1;
-                q[qi * n + qi] = mode.angular_frequency_rad_s.powi(2);
-                q[pi * n + pi] = 1.0;
-                j[qi * n + pi] = 1.0;
-                j[pi * n + qi] = -1.0;
-                g[pi * count + at] = 1.0;
-                r[pi * n + pi] = 2.0 * mode.damping_ratio * mode.angular_frequency_rad_s;
-                at += 1;
-            }
+            let qi = 2 * at;
+            let pi = qi + 1;
+            q[qi * n + qi] = mode.angular_frequency_rad_s.powi(2);
+            q[pi * n + pi] = 1.0;
+            j[qi * n + pi] = 1.0;
+            j[pi * n + qi] = -1.0;
+            g[pi * count + at] = 1.0;
+            r[pi * n + pi] = 2.0 * mode.damping_ratio * mode.angular_frequency_rad_s;
+            at += 1;
         }
         let component_r = r.clone();
         let mut connection_r = vec![0.0; n * n];
@@ -106,19 +275,6 @@ impl ExactNetwork {
             .zip(&self.rest_force)
             .map(|(f, r)| finite(f + r))
             .collect()
-    }
-
-    pub(super) fn advance(
-        &self,
-        models: &[ModalAcousticTimeModel],
-        external: &[f64],
-        dt: f64,
-    ) -> Result<(StepRecord, Vec<f64>, Vec<f64>), ModalCouplingError> {
-        let x = flatten(models);
-        let u = self.held_input(external)?;
-        let record = step_render(&self.system, &self.split, &x, &u, dt)
-            .map_err(ModalCouplingError::Propagation)?;
-        Ok((record, x, u))
     }
 
     pub(super) fn response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
@@ -254,7 +410,7 @@ pub(super) fn stage(
         let (rec, x, u) = exact.advance(&network.models, external, network.dt)?;
         poll(gate)?;
         let (comp_loss, conn_loss) = exact.losses(&x, &u, network.dt, rec.dissipated)?;
-        let h_x = exact.system.hamiltonian(&x);
+        let h_x = exact.hamiltonian(&x);
         (rec.x, x, u, comp_loss, conn_loss, h_x)
     } else {
         if external.len() != network.mode_count() || external.iter().any(|v| !v.is_finite()) {
@@ -656,13 +812,22 @@ mod tests {
         let cap = (fs_phs::linear_exact::MAX_LINEAR_EXPONENTIAL_BLOCK_DIM - 2) / 6;
         let models = vec![model; cap + 1];
         let gate = CancelGate::new();
-        assert!(ExactNetwork::new(&models[..cap], &[], &[], cap, &gate).is_ok());
+        // Capacity belongs to a genuinely connected exponential block.
+        // Disconnected original coordinates must never consume that capacity.
+        let links = [ConnectionLaw {
+            stiffness_n_m: 1.0,
+            damping_n_s_m: 0.0,
+            rest_extension_m: 0.0,
+        }];
+        assert!(ExactNetwork::new(&models[..cap], &[vec![1.0; cap]], &links, cap, &gate).is_ok());
         assert!(matches!(
-            ExactNetwork::new(&models, &[], &[], cap + 1, &gate),
+            ExactNetwork::new(&models, &[vec![1.0; cap + 1]], &links, cap + 1, &gate),
             Err(ModalCouplingError::Propagation(
                 fs_phs::PhsError::LinearSplitBudget { .. }
             ))
         ));
+        let independent = ExactNetwork::new(&models, &[], &[], cap + 1, &gate).unwrap();
+        assert_eq!(independent.blocks.len(), cap + 1);
         let mut network = network(48_000, 1000.0);
         let before = flatten(network.components());
         gate.request();
@@ -672,5 +837,70 @@ mod tests {
         ));
         assert_eq!(flatten(network.components()), before);
         assert_eq!(network.samples_rendered(), 0);
+    }
+
+    #[test]
+    fn noncontiguous_islands_match_the_complete_pencil_and_contact_response() {
+        let base = network(48_000, 1_000.0);
+        let models: Vec<_> = base.components().iter().cloned().cycle().take(4).collect();
+        let modes: Vec<_> = models
+            .iter()
+            .flat_map(|m| m.modes().iter().copied())
+            .collect();
+        let columns = [vec![1.0, 0.0, -0.7, 0.0], vec![0.0, -0.3, 0.0, 1.0]];
+        let links = [
+            ConnectionLaw {
+                stiffness_n_m: 2e5,
+                damping_n_s_m: 70.0,
+                rest_extension_m: 1e-9,
+            },
+            ConnectionLaw {
+                stiffness_n_m: 3e5,
+                damping_n_s_m: 90.0,
+                rest_extension_m: -2e-9,
+            },
+        ];
+        let gate = CancelGate::new();
+        let islands = ExactNetwork::new(&models, &columns, &links, 4, &gate).unwrap();
+        assert_eq!(
+            islands
+                .blocks
+                .iter()
+                .map(|b| b.0.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![0, 2], vec![1, 3]]
+        );
+        let full = ExactBlock::new(&modes, &columns, &links, &gate).unwrap();
+        let dt = 1.0 / 48_000.0;
+        let external = [1e-4, -2e-4, 3e-4, -4e-4];
+        let (actual, x, u) = islands.advance(&models, &external, dt).unwrap();
+        assert_eq!(u, full.held_input(&external).unwrap());
+        let expected = step_render(&full.system, &full.split, &x, &u, dt).unwrap();
+        let close = |a: f64, b: f64| {
+            assert!(
+                (a - b).abs() <= 1e-12 * a.abs().max(b.abs()).max(1e-20),
+                "{a:e} != {b:e}"
+            )
+        };
+        for (&a, &b) in actual.x.iter().zip(&expected.x) {
+            close(a, b);
+        }
+        close(actual.delta_h, expected.delta_h);
+        close(actual.supplied, expected.supplied);
+        close(actual.dissipated, expected.dissipated);
+        let losses = islands.losses(&x, &u, dt, actual.dissipated).unwrap();
+        let full_losses = full.losses(&x, &u, dt, expected.dissipated).unwrap();
+        assert!(losses.0 > 0.0 && losses.1 > 0.0);
+        close(losses.0, full_losses.0);
+        close(losses.1, full_losses.1);
+        let contact = [1.0, -2.0, 0.3, 0.4];
+        for (a, b) in islands
+            .response(&contact, dt)
+            .unwrap()
+            .into_iter()
+            .zip(full.response(&contact, dt).unwrap())
+        {
+            close(a, b);
+        }
     }
 }

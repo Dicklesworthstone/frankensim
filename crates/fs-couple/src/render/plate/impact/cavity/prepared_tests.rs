@@ -56,37 +56,94 @@ fn uniform_prepared_cavity_is_the_original_volume_without_extra_coordinates() {
 
 #[test]
 fn three_body_air_port_converges_to_independent_coupled_eigen_dynamics() {
-    let air = basis(); let overlaps = [0.05, 0.03, -0.04, 0.02];
-    let a = air.rho0*air.c0*air.c0/0.01;
+    let air = basis();
+    let overlaps = [0.05, 0.03, -0.04, 0.02];
+    let a = air.rho0 * air.c0 * air.c0 / 0.01;
     // Independently assemble the full coupled Hessian, NOT a pairwise spring
     // approximation. The air cross term couples both heads to one inertia.
-    let mut k = vec![0.0; 9]; k[0] = 800.0_f64.powi(2); k[4] = 900.0_f64.powi(2);
-    for column in [[0.05, -0.04, 0.0], [0.03, 0.02, 1000.0/a.sqrt()]] {
-        for i in 0..3 { for j in 0..3 { k[i*3+j] += a*column[i]*column[j]; } }
-    }
-    let eigen = fs_modal::eigh_gen_dense(&k, &[1.,0.,0.,0.,1.,0.,0.,0.,1.], 3).unwrap();
-    let time = 0.004; let mut exact = [0.0; 6];
-    for pair in eigen {
-        let w = pair.lambda.sqrt(); let amplitude = pair.phi[0]*1e-5;
+    let mut k = vec![0.0; 9];
+    k[0] = 800.0_f64.powi(2);
+    k[4] = 900.0_f64.powi(2);
+    for column in [[0.05, -0.04, 0.0], [0.03, 0.02, 1000.0 / a.sqrt()]] {
         for i in 0..3 {
-            exact[2*i] += amplitude*pair.phi[i]*(w*time).cos();
-            exact[2*i+1] -= amplitude*pair.phi[i]*w*(w*time).sin();
+            for j in 0..3 {
+                k[i * 3 + j] += a * column[i] * column[j];
+            }
+        }
+    }
+    let eigen = fs_modal::eigh_gen_dense(&k, &[1., 0., 0., 0., 1., 0., 0., 0., 1.], 3).unwrap();
+    let time = 0.004;
+    let mut exact = [0.0; 6];
+    for pair in eigen {
+        let w = pair.lambda.sqrt();
+        let amplitude = pair.phi[0] * 1e-5;
+        for i in 0..3 {
+            exact[2 * i] += amplitude * pair.phi[i] * (w * time).cos();
+            exact[2 * i + 1] -= amplitude * pair.phi[i] * w * (w * time).sin();
         }
     }
     let run = |rate| {
         let gate = CancelGate::new_clock_free();
-        let (mut system, _) = CavityCoupling::new(&air, 2, &overlaps, &[0.0; 2]).unwrap()
-            .build_linear(vec![body(800.0, 1e-5, 0.0), body(900.0, 0.0, 0.0)],
-                vec![], 0.1, config(rate), &gate).unwrap();
+        let compiled = CavityCoupling::new(&air, 2, &overlaps, &[0.0; 2]).unwrap();
+        let (mut reference, _) = compiled
+            .clone()
+            .build(
+                vec![body(800.0, 1e-5, 0.0), body(900.0, 0.0, 0.0)],
+                vec![],
+                vec![],
+                ImpactConfig {
+                    dt_s: f64::from(rate).recip(),
+                    max_steps: 20_000,
+                    maximum_energy_j: 20.0,
+                    energy_absolute_tolerance_j: 1e-10,
+                    energy_relative_tolerance: 1e-7,
+                    maximum_generalized_force: 10_000.0,
+                },
+                &gate,
+            )
+            .unwrap();
+        let (mut system, _) = compiled
+            .build_linear(
+                vec![body(800.0, 1e-5, 0.0), body(900.0, 0.0, 0.0)],
+                vec![],
+                0.1,
+                config(rate),
+                &gate,
+            )
+            .unwrap();
         let energy = system.frame().stored_energy_j;
-        for _ in 0..(time*f64::from(rate)).round() as usize { system.step(&[0.0; 3], &gate).unwrap(); }
+        for _ in 0..(time * f64::from(rate)).round() as usize {
+            system.step(&[0.0; 3], &gate).unwrap();
+            reference.step(&[0.0; 3], &gate).unwrap();
+        }
         assert!(system.state()[3].abs() > 1e-6 && system.state()[5].abs() > 1e-6);
-        assert!((system.frame().stored_energy_j-energy).abs() < 1e-10);
-        system.state().iter().zip(exact).enumerate().map(|(i, (x, y))|
-            (x-y).abs()*if i%2 == 0 {1000.0} else {1.0}).fold(0.0, f64::max)
+        assert!((system.frame().stored_energy_j - energy).abs() < 1e-10);
+        let error = |state: &[f64]| {
+            state
+                .iter()
+                .zip(exact)
+                .enumerate()
+                .map(|(i, (x, y))| (x - y).abs() * if i % 2 == 0 { 1000.0 } else { 1.0 })
+                .fold(0.0, f64::max)
+        };
+        assert!(
+            error(system.state()) <= 1e-10,
+            "exact coupled eigen-dynamics: {}",
+            error(system.state())
+        );
+        error(reference.state())
     };
-    let coarse = run(20_000); let fine = run(40_000);
-    assert!(coarse > 1e-10 && fine < 0.35*coarse, "second-order refinement: {coarse:e} -> {fine:e}");
+    // The prepared owner is exact, so its error cannot demonstrate a nonzero
+    // h^2 term. Retain the original order gate on the real Gonzalez reference,
+    // with three rungs inside its unchanged one-cent admission band.
+    let errors = [40_000, 80_000, 160_000].map(run);
+    for pair in errors.windows(2) {
+        let (coarse, fine) = (pair[0], pair[1]);
+        assert!(
+            coarse > 1e-10 && fine < 0.35 * coarse,
+            "second-order refinement: {coarse:e} -> {fine:e}"
+        );
+    }
 }
 
 #[test]
@@ -251,41 +308,115 @@ fn neck(averages: Vec<f64>) -> super::super::neck::CavityNeck {
 
 #[test]
 fn resistive_neck_has_physical_helmholtz_decay_and_exact_flow_loss() {
-    let mut air = basis(); air.omegas.truncate(1); air.lambdas.truncate(1); air.interface.truncate(1);
+    let mut air = basis();
+    air.omegas.truncate(1);
+    air.lambdas.truncate(1);
+    air.interface.truncate(1);
     let opening = neck(vec![1.0]);
-    let inertance = air.rho0*opening.effective_length_m/opening.area_m2;
-    let omega2 = air.c0.powi(2)*opening.area_m2/(air.lambdas[0]*opening.effective_length_m);
-    let beta = opening.resistance_pa_s_m3/(2.0*inertance);
-    let wd = (omega2-beta*beta).sqrt(); let time = 0.005;
-    let exact_volume = opening.initial_volume_m3*(-beta*time).exp()
-        *((wd*time).cos()+beta/wd*(wd*time).sin());
-    let exact_flow = -opening.initial_volume_m3*(-beta*time).exp()*omega2/wd*(wd*time).sin();
+    let inertance = air.rho0 * opening.effective_length_m / opening.area_m2;
+    let omega2 = air.c0.powi(2) * opening.area_m2 / (air.lambdas[0] * opening.effective_length_m);
+    let beta = opening.resistance_pa_s_m3 / (2.0 * inertance);
+    let wd = (omega2 - beta * beta).sqrt();
+    let time = 0.005;
+    let exact = |t: f64| {
+        (
+            opening.initial_volume_m3
+                * (-beta * t).exp()
+                * ((wd * t).cos() + beta / wd * (wd * t).sin()),
+            -opening.initial_volume_m3 * (-beta * t).exp() * omega2 / wd * (wd * t).sin(),
+        )
+    };
+    let (exact_volume, exact_flow) = exact(time);
+    let energy_at = |t: f64| {
+        let (v, u) = exact(t);
+        0.5 * inertance * (u * u + omega2 * v * v)
+    };
     let run = |rate: u32| {
         let gate = CancelGate::new_clock_free();
         // Fixed-wall gas limit: the spectator structural mode is disconnected.
-        let compiled = CavityCoupling::new(&air, 1, &[0.0], &[0.0]).unwrap()
-            .with_necks(vec![opening.clone()], &gate).unwrap();
-        let (mut s, probe) = compiled.build_linear(vec![body(800.0,0.0,0.0)], vec![],
-            0.1, config(rate), &gate).unwrap();
-        let initial = s.frame().stored_energy_j; let mut loss = 0.0;
-        for _ in 0..rate/200 {
-            let old_flow = probe.neck_observation(s.state(),0).unwrap().volume_flow_m3_s;
-            let f = s.step(&[0.0;2], &gate).unwrap();
-            let n = probe.neck_observation(s.state(),0).unwrap();
-            let mean_flow = 0.5*(old_flow+n.volume_flow_m3_s);
-            let expected_loss = opening.resistance_pa_s_m3*mean_flow*mean_flow/f64::from(rate);
-            assert!((f.dissipated_energy_j-expected_loss).abs() < 1e-15);
+        let compiled = CavityCoupling::new(&air, 1, &[0.0], &[0.0])
+            .unwrap()
+            .with_necks(vec![opening.clone()], &gate)
+            .unwrap();
+        let (mut reference, _) = compiled
+            .clone()
+            .build(
+                vec![body(800.0, 0.0, 0.0)],
+                vec![],
+                vec![],
+                ImpactConfig {
+                    dt_s: f64::from(rate).recip(),
+                    max_steps: 20_000,
+                    maximum_energy_j: 20.0,
+                    energy_absolute_tolerance_j: 1e-10,
+                    energy_relative_tolerance: 1e-7,
+                    maximum_generalized_force: 10_000.0,
+                },
+                &gate,
+            )
+            .unwrap();
+        let (mut s, probe) = compiled
+            .build_linear(
+                vec![body(800.0, 0.0, 0.0)],
+                vec![],
+                0.1,
+                config(rate),
+                &gate,
+            )
+            .unwrap();
+        let initial = s.frame().stored_energy_j;
+        let mut loss = 0.0;
+        let mut reference_loss = 0.0;
+        for step in 0..rate / 200 {
+            let old_flow = probe
+                .neck_observation(reference.state(), 0)
+                .unwrap()
+                .volume_flow_m3_s;
+            let f = s.step(&[0.0; 2], &gate).unwrap();
+            let n = probe.neck_observation(s.state(), 0).unwrap();
+            // R*integral(U(t)^2 dt) = H(t0)-H(t1), independently from the
+            // analytic damped Helmholtz trajectory. Endpoint mean-flow loss
+            // belongs only to the Gonzalez reference, not the exact owner.
+            let expected_loss = energy_at(f64::from(step) / f64::from(rate))
+                - energy_at(f64::from(step + 1) / f64::from(rate));
+            assert!((f.dissipated_energy_j - expected_loss).abs() < 1e-15);
+            let r = reference.step(&[0.0; 2], &gate).unwrap();
+            let reference_flow = probe
+                .neck_observation(reference.state(), 0)
+                .unwrap()
+                .volume_flow_m3_s;
+            let mean_flow = 0.5 * (old_flow + reference_flow);
+            let midpoint_loss =
+                opening.resistance_pa_s_m3 * mean_flow * mean_flow / f64::from(rate);
+            assert!((r.dissipated_energy_j - midpoint_loss).abs() < 1e-15);
+            reference_loss += r.dissipated_energy_j;
+            assert!((r.stored_energy_j + reference_loss - initial).abs() < 1e-13);
             loss += f.dissipated_energy_j;
-            assert!((f.stored_energy_j+loss-initial).abs() < 1e-13);
-            assert!((n.driving_pressure_pa+air.rho0*air.c0.powi(2)/air.lambdas[0]*n.displaced_volume_m3).abs() < 1e-10);
-            assert_eq!(&s.state()[..2], &[0.0;2]);
+            assert!((f.stored_energy_j + loss - initial).abs() < 1e-13);
+            assert!(
+                (n.driving_pressure_pa
+                    + air.rho0 * air.c0.powi(2) / air.lambdas[0] * n.displaced_volume_m3)
+                    .abs()
+                    < 1e-10
+            );
+            assert_eq!(&s.state()[..2], &[0.0; 2]);
         }
         assert!(loss > 0.0 && s.frame().stored_energy_j < initial);
-        let n = probe.neck_observation(s.state(),0).unwrap();
-        (n.displaced_volume_m3-exact_volume).abs()*omega2.sqrt()+(n.volume_flow_m3_s-exact_flow).abs()
+        let n = probe.neck_observation(s.state(), 0).unwrap();
+        let error =
+            |v: f64, u: f64| (v - exact_volume).abs() * omega2.sqrt() + (u - exact_flow).abs();
+        assert!(error(n.displaced_volume_m3, n.volume_flow_m3_s) <= 1e-12);
+        let n = probe.neck_observation(reference.state(), 0).unwrap();
+        error(n.displaced_volume_m3, n.volume_flow_m3_s)
     };
-    let coarse = run(20_000); let fine = run(40_000);
-    assert!(coarse > 1e-12 && fine < 0.3*coarse, "{coarse:e} -> {fine:e}");
+    let errors = [40_000, 80_000, 160_000].map(run);
+    for pair in errors.windows(2) {
+        let (coarse, fine) = (pair[0], pair[1]);
+        assert!(
+            coarse > 1e-12 && fine < 0.3 * coarse,
+            "{coarse:e} -> {fine:e}"
+        );
+    }
 }
 
 #[test]
