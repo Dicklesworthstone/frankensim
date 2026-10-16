@@ -5097,6 +5097,7 @@ dependencies = [
  "fs-matdb",
  "fs-matdb-store",
  "fs-material",
+ "fs-math",
  "fs-obs",
  "fs-phs",
  "fs-qty",
