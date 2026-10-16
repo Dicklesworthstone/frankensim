@@ -600,13 +600,68 @@ unresolved-shear-layer stability asymmetry (BGK/RR3/CM survive,
 projected Regularized destabilizes — also the mode-discrimination
 control); bitwise determinism of every non-BGK path.
 
+## D3Q27 and shared reference transport (IRP M3.2-W1)
+
+`d3q27` represents all independent central moments/cumulants through (2,2,2).
+Geier et al. (2015), doi:10.1016/j.camwa.2015.05.001 section4 is the collision
+reference. A separable central transform and normalized multivariate
+generating-function recurrence retain all fourth/fifth/sixth couplings. This
+is not D3Q19's ReducedCumulant projection. All ten publication-order relaxation
+rates are explicit, including separate bulk/shear groups and the diagonal
+cubic-alias corrections (58--63). The central-moment operator uses Gaussian
+central targets; cumulant equilibria above degree2 are zero. Midpoint forcing
+changes the first cumulants/central moments as in85--87; finite-force flow
+accuracy remains a downstream qualification, separate from conservation.
+
+CollisionConfig27 requires model/rates or BGK tau and a Mach cap in (0,0.3].
+Tau must exceed0.5 and each rate must be strictly in (0,2). Nonfinite state,
+force or parameters, nonpositive density and excessive Mach refuse. No
+population clipping, adaptive rates or unspecified defaults are introduced.
+BGK explicitly chooses a quadratic or factorized equilibrium; like-polynomial
+D3Q19 BGK is the lattice control.
+
+`lattice3::Grid3<L,Q>` shares checked dense reference transport between D3Q27
+and an adapter calling the existing D3Q19 cell owner. Collision, force,
+periodic axes, immutable solid mask, initial populations and cell/Mach caps
+are required inputs. Nonperiodic exterior and solid links use stationary
+halfway bounce-back. Fixed64-cell tiles share arithmetic between serial Cx
+and pooled KernelRunner execution. Three buffers preserve published state and
+step count on collision, pool or cancellation refusal. Cancellation is polled
+at each tile and before publication. The library spawns no threads itself;
+specialized D3Q19 sparse/boundary/SIMD owners are not redirected or duplicated.
+
+AcousticScalingPlan::from_gas uses the supplied GasState nu=mu/rho and c plus
+explicit dx, maximum physical speed and Mach cap. It returns dt=sqrt(1/3)dx/c,
+nu_lu=nu*dt/dx^2, tau=0.5+3nu_lu and the existing ScalingPlan. Invalid,
+excessive-Mach and unrepresentable scalings refuse.
+
+`tests/d3q27_battery.rs` specifies exact rational G0 lattice laws, equilibrium
+and10000-state conservation at1e-14, independent set-partition cumulant
+oracles through degree6, refusal boundaries, G4 cancellation and G5 actual
+workers1/2/7. Its new product-state collision hash has an independent dyadic
+oracle; native reproduction is pending. G1 requires >=1.8 shear-decay error
+order on200/100/50micrometre acoustic rungs and live, shrinking higher-rate
+spread. G2 uses three Gaussian axial-jet cross-section rungs and Fourier
+angular interpolation: all D3Q27 collisions decrease m4/m0 below0.5%, while
+same-polynomial D3Q19 BGK must be at least2x worse, or the fixture is refused.
+The rotational fixture uses diffusive scaling, separate from the fixed-c
+acoustic ladder. `scripts/e2e/music/lbm_qualification.sh` retains both release
+lanes. Numeric gates await central native execution; no green claim is made.
+
+This is not a White--Chong nozzle reproduction, full jet/edge-tone campaign,
+total-energy/NSF solver, 3-D multiblock refinement, transparent boundary,
+high-Re stability/performance, cross-ISA identity or instrument acceptance.
+M3.2-W2a/W3a and M1.1-W8 must consume the explicit API and qualify their own
+physics. Historical D3Q19 arithmetic and semantic/golden versions are unchanged.
+
 ## No-claim boundaries
 
 - D3Q19 grids remain BGK + Guo on a dense set of aligned SoA tiles. The
   selectable central-moment and `ReducedCumulant` cell operators are
   deterministic `O(Q^3)` correctness references: they are unforced and have no
-  performance or high-Re stability claim. D3Q27, a production cumulant
-  collision, normalized drag/lift histories, and bandwidth roofline /
+  performance or high-Re stability claim. D3Q27 has the separate checked full
+  collision/reference-grid surface above, pending native qualification.
+  Normalized drag/lift histories and bandwidth roofline /
   fs-tilelang kernels remain staged. The sparse active-tile layer
   (`d3q19::sparse`) claims determinism and active-set memory proportionality
   only — NOT throughput (the GLUP/s perf lane is bead 712t): its collision is
