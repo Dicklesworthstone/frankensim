@@ -1,6 +1,7 @@
 //! Browser surface (wasm-bindgen). Typed refusals become JS exceptions at
 //! construction; hot-path failures poison continuation and are readable via lastError.
 use crate::{Config, Description, LivePiano, PianoAudio};
+use crate::preparation::{self, PreparationReport, Tuning};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -19,6 +20,7 @@ pub fn install_panic_report() {
 pub struct PianoEngine {
     piano: Playback,
     snap: Vec<f32>,
+    preparation: Option<PreparationReport>,
 }
 
 // Keep the legacy single-rate path, including its recoverable note refusals.
@@ -104,7 +106,7 @@ impl PianoEngine {
             desc = desc.truncated(board_coordinates).map_err(|e| JsError::new(&e))?;
         }
         let piano = Playback::new(&desc, cfg, substeps).map_err(|e| JsError::new(&e))?;
-        Ok(Self { piano, snap: Vec::with_capacity(4096) })
+        Ok(Self { piano, snap: Vec::with_capacity(4096), preparation: None })
     }
 
     /// Original single-rate external-board constructor, unchanged arguments.
@@ -123,17 +125,55 @@ impl PianoEngine {
         let cfg = config(sample_rate, course_mode_budget, max_dynamic_modes, full_scale_pa);
         let desc = Description::from_board(board).map_err(|e| JsError::new(&e))?;
         let piano = Playback::new(&desc, cfg, substeps).map_err(|e| JsError::new(&e))?;
-        Ok(Self { piano, snap: Vec::with_capacity(4096) })
+        Ok(Self { piano, snap: Vec::with_capacity(4096), preparation: None })
+    }
+
+    /// Prepare physical courses BEFORE all live string/bridge/hammer lowering.
+    /// Empty board bytes select the embedded board and its optional exact prefix;
+    /// a supplied board uses its complete basis and requires coordinates = 0.
+    /// Empty scale text preserves existing courses. Empty tuning preserves their
+    /// tensions; otherwise the packet is A4, bass[4], treble[4], band (0 = none).
+    /// Imported CSVs are not retuned unless that packet is explicitly supplied.
+    #[wasm_bindgen(js_name = withPreparation)]
+    pub fn with_preparation(sample_rate: u32, board: &[u8], board_coordinates: usize,
+        course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
+        substeps: usize, scale_csv: &str, tuning: &[f64]) -> Result<PianoEngine, JsError> {
+        let policy = Tuning::from_values(tuning).map_err(|e| JsError::new(&e))?;
+        if !board.is_empty() && board_coordinates != 0 {
+            return Err(JsError::new("supplied board preparation requires board_coordinates = 0"));
+        }
+        let mut desc = if board.is_empty() { Description::embedded() }
+            else { Description::from_board(board) }.map_err(|e| JsError::new(&e))?;
+        if board_coordinates > 0 && board_coordinates < desc.board.len() {
+            desc = desc.truncated(board_coordinates).map_err(|e| JsError::new(&e))?;
+        }
+        let report = preparation::prepare(&mut desc,
+            if scale_csv.is_empty() { None } else { Some(scale_csv) }, policy)
+            .map_err(|e| JsError::new(&e))?;
+        let cfg = config(sample_rate, course_mode_budget, max_dynamic_modes, full_scale_pa);
+        let piano = Playback::new(&desc, cfg, substeps).map_err(|e| JsError::new(&e))?;
+        Ok(Self { piano, snap: Vec::with_capacity(4096), preparation: Some(report) })
     }
 
     /// Copy the physical engine AND pressure-filter history; a timed copy and
     /// an unplayed copy retain the same selected clock and quality policy.
     pub fn copy(&self) -> PianoEngine {
-        PianoEngine { piano: self.piano.clone(), snap: Vec::with_capacity(self.snap.capacity()) }
+        PianoEngine { piano: self.piano.clone(), snap: Vec::with_capacity(self.snap.capacity()),
+            preparation: self.preparation.clone() }
     }
 
     /// JSON includes output and mechanical rates and total output-frame latency.
-    pub fn info(&self) -> String { self.piano.info() }
+    pub fn info(&self) -> String {
+        let mut info = self.piano.info();
+        if let Some(report) = &self.preparation {
+            // Both existing description owners produce one complete JSON object.
+            let _ = info.pop();
+            info.push_str(",\"scalePreparation\":");
+            info.push_str(&report.json());
+            info.push('}');
+        }
+        info
+    }
 
     /// Strike: POST-ESCAPEMENT hammer velocity in m/s. False when refused.
     #[wasm_bindgen(js_name = noteOn)]
