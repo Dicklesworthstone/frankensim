@@ -19,6 +19,36 @@ ordered ladder remains supported exactly as a path-graph specialization.
 
 ## Public types and semantics
 
+- `axis::{RefinableAxis, ErrorModel, Coordinate, RungRecord}` declare algebraic,
+  spectral/tail, operator, residual and statistical axes with actual module
+  dimensions, units, QoIs, regimes, residuals and elapsed seconds. `Unknown`
+  refuses; there are no authored solver-residual or timing defaults here.
+- `axis::evaluate_axis` retains all measurements, records duplicate realized
+  resolutions as DEAD, and requires three distinct valid resolutions plus an
+  independently named sensitivity fixture. A regime change or malformed rung
+  refuses the axis instead of silently dropping it. A flat main-study QoI is
+  legal (`Unresolved` order) if the separate sensitivity fixture is informative.
+- `convergence::fit_power_law` fits `f0 + C h^p` by deterministic variable
+  projection using **all** rungs and their actual, potentially nonuniform
+  resolution coordinates. The explicit `AnalysisPolicy` sets the bounded power
+  search, fit tolerance, formal-order agreement, adjacent coefficient spread
+  and minimum refinement ratio. GCI uses Fs=1.25 and the actual finest-pair
+  ratio only when monotonicity and every asymptotic check pass. Zero fine QoIs,
+  unresolved, scattered and oscillatory sequences carry no relative GCI.
+- Non-algebraic `bound_targets` bind declared bounds to named QoIs with matching
+  units on every rung. Other measured QoIs are `ObservedOnly`: a flow residual
+  or IR tail cannot silently become an error bound on pitch or spectral level.
+- `axis::{CoupledGroup, LadderReport}` require simultaneous joint refinement,
+  declared product invariants (such as time step times FFT length), explicit
+  deterministic/seed-ensemble declarations, matched single/joint resolutions,
+  and signed finest-reference interaction terms. `complete()` means complete
+  measurements and interpretation, not that a Q2 accuracy band passed.
+  The report retains inputs/outputs in declaration order and hashes its framed
+  internal representation with domain-separated fs-blake3. Timings are retained
+  and therefore different measured timings intentionally change its identity.
+- Legacy `ConvergenceEvaluator` delegates to the same power-law arithmetic,
+  retains all valid rungs, and preserves its API. Its preexisting color contract
+  is retained; new axis reports do not mint Verified authority from a GCI.
 - `ModelId`, `ModelCardRef`, `CostModelRef`, `DiscrepancyModelRef`,
   `TransferRef`, `QueryEvidenceRef`, `EdgeId`, and `FidelityGraphId` are
   non-confusable wrappers over exact 32-byte roots.
@@ -144,6 +174,13 @@ None.
 
 ## Conformance tests
 
+`tests/axis_ladder.rs` (IRP M5.5-W1): G1 manufactured powers 1/2/4 on
+uniform and nonuniform ladders (order tolerance 0.02); ASME fine-grid GCI
+hand values (relative tolerance 1e-12); oscillatory, scattered, wrong-order,
+zero/flat, two-rung, unknown-model, missing-bound and changed-regime refusals;
+G3 capped-axis liveness and coupled physical-duration invariants; all-rung
+legacy regression; G5 content identity and measured-input binding.
+
 `tests/ladder.rs` (Proposal 3, 12 cases): total rung ordering; out-of-range
 rung structured error; adjacency empty in the correct direction at the ends;
 the G0 approximation property (`restrict∘prolongate = identity`,
@@ -175,6 +212,16 @@ determinism.
 
 ## No-claim boundaries
 
+- A finite-rung power-law/GCI study estimates discretization error; it does not
+  certify a continuum solution or validate physical realism. The leading-power
+  least-squares classification follows the Eça--Hoekstra (JCP 262, 2014)
+  approach, not the full multi-power model-selection/uncertainty procedure.
+  Missing stability/conditioning maps from an operator or residual norm into
+  an acoustic QoI remain explicit `ObservedOnly` measurements. Joint interaction
+  terms use the finest available rung as reference, not an exact solution.
+  See also NASA/NPARC's grid-convergence tutorial for the constant `E/h^p`
+  asymptotic requirement and the Fs=1.25 three-or-more-grid GCI convention:
+  <https://www.grc.nasa.gov/www/wind/valid/tutorial/spatconv.html>.
 - Typed roots assert exact binding, not truth, provenance, or promotion. In
   particular, current `fs-evidence::DiscrepancyModel` does not yet expose a
   durable native artifact identity; the empirical edge-population successor

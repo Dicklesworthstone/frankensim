@@ -10,6 +10,189 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::Color;
 use std::fmt::Write as _;
 
+use crate::axis::{AnalysisPolicy, AxisVerdict};
+
+/// All-rung leading-power least-squares diagnostics. The coefficient test
+/// implements the constant E/h^p asymptotic requirement; it never averages
+/// unequal refinement ratios. This is the leading-power classification seam
+/// of Eça & Hoekstra (JCP 262, 2014), not their full multi-model uncertainty
+/// procedure or an uncertainty certificate for scattered data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PowerFit {
+    /// Number of points included in the fit.
+    pub points: usize,
+    /// Positive fitted power, if identifiable in the declared search interval.
+    pub observed_order: Option<f64>,
+    /// Fitted zero-resolution intercept.
+    pub continuum: Option<f64>,
+    /// RMS fit residual divided by the full observable range.
+    pub relative_rms: Option<f64>,
+    /// Maximum relative deviation of adjacent error coefficients.
+    pub coefficient_spread: Option<f64>,
+    /// Classification and optional relative fine-grid GCI.
+    pub verdict: AxisVerdict,
+}
+
+// At fixed p solve the two-parameter least-squares problem y = a + b x^p.
+// Both coordinates and observations are scaled before entering this function.
+fn linear_power_fit(data: &[(f64, f64)], p: f64) -> Option<(f64, f64, f64)> {
+    let n = data.len() as f64;
+    let mean_x = data
+        .iter()
+        .map(|(h, _)| fs_math::det::pow(*h, p))
+        .sum::<f64>()
+        / n;
+    let mean_y = data.iter().map(|(_, y)| *y).sum::<f64>() / n;
+    let mut variance = 0.0;
+    let mut covariance = 0.0;
+    for &(h, y) in data {
+        let x = fs_math::det::pow(h, p) - mean_x;
+        variance += x * x;
+        covariance += x * (y - mean_y);
+    }
+    if !variance.is_finite() || variance <= f64::MIN_POSITIVE {
+        return None;
+    }
+    let b = covariance / variance;
+    let a = mean_y - b * mean_x;
+    let sse = data
+        .iter()
+        .map(|(h, y)| {
+            let e = y - a - b * fs_math::det::pow(*h, p);
+            e * e
+        })
+        .sum::<f64>();
+    (a.is_finite() && b.is_finite() && sse.is_finite()).then_some((a, b, sse))
+}
+
+/// Fit `f(h)=f0+C h^p` to ALL supplied points. Positive finite h values
+/// must be ordered coarse to fine. Observations may have either sign.
+///
+/// GCI uses Fs=1.25 and the actual finest pair's ratio, only after monotonicity,
+/// all-rung least-squares fit, formal-order agreement, and adjacent coefficient
+/// consistency pass. Zero/roundoff-sized fine values have no relative GCI.
+#[must_use]
+pub fn fit_power_law(data: &[(f64, f64)], formal_order: f64, policy: &AnalysisPolicy) -> PowerFit {
+    let mut result = PowerFit {
+        points: data.len(),
+        observed_order: None,
+        continuum: None,
+        relative_rms: None,
+        coefficient_spread: None,
+        verdict: AxisVerdict::InsufficientRungs,
+    };
+    if data.len() < 3 {
+        return result;
+    }
+    if !policy.valid()
+        || !formal_order.is_finite()
+        || formal_order <= 0.0
+        || formal_order > policy.maximum_order
+        || data
+            .iter()
+            .any(|(h, y)| !h.is_finite() || *h <= 0.0 || !y.is_finite())
+        || data
+            .windows(2)
+            .any(|w| w[0].0 / w[1].0 < policy.minimum_refinement_ratio)
+    {
+        result.verdict = AxisVerdict::Refused {
+            reason: "invalid algebraic fit declaration or resolution sequence".into(),
+        };
+        return result;
+    }
+    let lo = data.iter().map(|(_, y)| *y).fold(f64::INFINITY, f64::min);
+    let hi = data
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let scale = hi - lo;
+    let roundoff = 128.0 * f64::EPSILON * lo.abs().max(hi.abs()).max(f64::MIN_POSITIVE);
+    if !scale.is_finite() || scale <= roundoff {
+        result.verdict = AxisVerdict::Unresolved;
+        return result;
+    }
+    let scaled: Vec<_> = data
+        .iter()
+        .map(|(h, y)| (*h / data[0].0, (*y - lo) / scale))
+        .collect();
+    let differences: Vec<_> = scaled.windows(2).map(|w| w[0].1 - w[1].1).collect();
+    let monotone = differences.iter().all(|d| *d > 0.0) || differences.iter().all(|d| *d < 0.0);
+    // Deterministic bounded variable projection: coarse bracketing followed by
+    // golden-section minimization. Every objective evaluation includes all rungs.
+    let minimum = 0.05;
+    let step = (policy.maximum_order - minimum) / 128.0;
+    let mut best = 0_usize;
+    let mut best_sse = f64::INFINITY;
+    for i in 0..=128_usize {
+        let p = minimum + i as f64 * step;
+        let sse = linear_power_fit(&scaled, p).map_or(f64::INFINITY, |(_, _, s)| s);
+        if sse < best_sse {
+            best = i;
+            best_sse = sse;
+        }
+    }
+    let mut left = minimum + best.saturating_sub(1) as f64 * step;
+    let mut right = minimum + (best + 1).min(128) as f64 * step;
+    let golden = (fs_math::det::sqrt(5.0) - 1.0) * 0.5;
+    for _ in 0..96 {
+        let a = right - golden * (right - left);
+        let b = left + golden * (right - left);
+        let fa = linear_power_fit(&scaled, a).map_or(f64::INFINITY, |(_, _, s)| s);
+        let fb = linear_power_fit(&scaled, b).map_or(f64::INFINITY, |(_, _, s)| s);
+        if fa <= fb {
+            right = b;
+        } else {
+            left = a;
+        }
+    }
+    let p = 0.5 * (left + right);
+    let Some((a, b, sse)) = linear_power_fit(&scaled, p) else {
+        result.verdict = AxisVerdict::Scattered;
+        return result;
+    };
+    let rms = fs_math::det::sqrt(sse / data.len() as f64);
+    result.observed_order = Some(p);
+    result.continuum = Some(lo + scale * a);
+    result.relative_rms = Some(rms);
+    let coefficient_spread = scaled
+        .windows(2)
+        .map(|w| {
+            let c =
+                (w[0].1 - w[1].1) / (fs_math::det::pow(w[0].0, p) - fs_math::det::pow(w[1].0, p));
+            ((c - b) / b).abs()
+        })
+        .fold(0.0_f64, f64::max);
+    result.coefficient_spread = Some(coefficient_spread);
+    if !monotone {
+        let alternating = differences.windows(2).all(|w| w[0] * w[1] < 0.0);
+        result.verdict = if alternating {
+            AxisVerdict::Oscillatory
+        } else {
+            AxisVerdict::Scattered
+        };
+    } else if rms > policy.relative_fit_tolerance {
+        result.verdict = AxisVerdict::Scattered;
+    } else if coefficient_spread > policy.asymptotic_tolerance
+        || (p - formal_order).abs() > policy.order_tolerance
+        || p <= minimum + step * 1e-6
+        || p >= policy.maximum_order - step * 1e-6
+        || data.windows(2).any(|w| (w[0].1 - w[1].1).abs() <= roundoff)
+    {
+        result.verdict = AxisVerdict::PreAsymptotic { observed_order: p };
+    } else {
+        let fine = data[data.len() - 1];
+        let medium = data[data.len() - 2];
+        let denominator = fs_math::det::pow(medium.0 / fine.0, p) - 1.0;
+        let gci = (fine.1.abs() > roundoff && denominator > 0.0)
+            .then(|| 1.25 * ((medium.1 - fine.1) / fine.1).abs() / denominator);
+        result.verdict = AxisVerdict::Asymptotic {
+            observed_order: p,
+            gci: gci.filter(|g| g.is_finite()),
+        };
+    }
+    result
+}
+
 /// Status of the discretization convergence evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConvergenceStatus {
@@ -227,148 +410,63 @@ impl ConvergenceEvaluator {
             };
         }
 
-        // Take the 3 finest rungs (h1 < h2 < h3)
-        let r1 = &sorted_rungs[0];
-        let r2 = &sorted_rungs[1];
-        let r3 = &sorted_rungs[2];
-
-        let h1 = r1.h;
-        let h2 = r2.h;
-        let h3 = r3.h;
-
-        let f1 = r1.qoi_value;
-        let f2 = r2.qoi_value;
-        let f3 = r3.qoi_value;
-
-        let e21 = f2 - f1;
-        let e32 = f3 - f2;
-
-        // Monotonicity check
-        let is_monotone = (e21 * e32) > 0.0;
-        if !is_monotone {
-            let dispersion = (f1 - f2).abs().max((f2 - f3).abs());
-            return ConvergenceResult {
-                qoi_name: plan.target_qoi.clone(),
-                status: ConvergenceStatus::Oscillatory,
-                theoretical_order: plan.theoretical_order,
-                observed_order: None,
-                fit_residual: None,
-                richardson_extrapolated_qoi: None,
-                discretization_error_gci: Some(dispersion),
-                evidence_color: Color::Estimated {
-                    estimator: "oscillatory-ladder-envelope".to_string(),
-                    dispersion,
-                },
-                admitted_rungs: sorted_rungs,
-                rejection_reason: Some(
-                    "non-monotone oscillatory behavior across mesh refinement ladder".to_string(),
-                ),
-            };
-        }
-
-        // Compute refinement ratio r21 and r32
-        let r21 = h2 / h1;
-        let r32 = h3 / h2;
-        let avg_r = (r21 + r32) * 0.5;
-
-        let ratio = (e32 / e21).abs();
-        if ratio < 1e-12 || avg_r <= 1.0 + 1e-6 {
-            return ConvergenceResult {
-                qoi_name: plan.target_qoi.clone(),
-                status: ConvergenceStatus::PreAsymptotic,
-                theoretical_order: plan.theoretical_order,
-                observed_order: None,
-                fit_residual: None,
-                richardson_extrapolated_qoi: None,
-                discretization_error_gci: Some((f1 - f2).abs()),
-                evidence_color: Color::Estimated {
-                    estimator: "degenerate-refinement-ratio".to_string(),
-                    dispersion: (f1 - f2).abs(),
-                },
-                admitted_rungs: sorted_rungs,
-                rejection_reason: Some(
-                    "refinement ratio or difference is near machine precision; cannot fit order"
-                        .to_string(),
-                ),
-            };
-        }
-
-        // Apparent order of convergence p = ln(|e32/e21|) / ln(avg_r)
-        let observed_p = fs_math::det::ln(ratio) / fs_math::det::ln(avg_r);
-        if !observed_p.is_finite() || observed_p <= 0.0 {
-            return ConvergenceResult {
-                qoi_name: plan.target_qoi.clone(),
-                status: ConvergenceStatus::PreAsymptotic,
-                theoretical_order: plan.theoretical_order,
-                observed_order: None,
-                fit_residual: None,
-                richardson_extrapolated_qoi: None,
-                discretization_error_gci: Some((f1 - f2).abs()),
-                evidence_color: Color::Estimated {
-                    estimator: "non-finite-observed-order".to_string(),
-                    dispersion: (f1 - f2).abs(),
-                },
-                admitted_rungs: sorted_rungs,
-                rejection_reason: Some(
-                    "observed convergence order is non-positive or non-finite".to_string(),
-                ),
-            };
-        }
-
-        // Richardson extrapolation: f_ext = f1 + (f1 - f2)/(r21^p - 1)
-        let r_p = avg_r.powf(observed_p);
-        let richardson_ext = if (r_p - 1.0).abs() > 1e-6 {
-            Some(f1 + (f1 - f2) / (r_p - 1.0))
-        } else {
-            None
+        // Preserve the legacy result shape and finest-first admitted order,
+        // while sharing the all-rung, nonuniform analysis with axis studies.
+        let data: Vec<_> = sorted_rungs
+            .iter()
+            .rev()
+            .map(|r| (r.h, r.qoi_value))
+            .collect();
+        let policy = AnalysisPolicy {
+            maximum_order: 32.0,
+            order_tolerance: 0.5,
+            relative_fit_tolerance: 0.01,
+            asymptotic_tolerance: 0.05,
+            minimum_refinement_ratio: 1.1,
         };
-
-        // ASME V&V 20 Grid Convergence Index: GCI = (1.25 * |(f1 - f2)/f1|) / (r21^p - 1)
-        let rel_diff = if f1.abs() > 1e-12 {
-            ((f1 - f2) / f1).abs()
-        } else {
-            (f1 - f2).abs()
-        };
-        let gci = if (r_p - 1.0).abs() > 1e-6 {
-            Some((1.25 * rel_diff) / (r_p - 1.0).abs())
-        } else {
-            None
-        };
-
-        // Classify asymptotic vs pre-asymptotic
-        let order_diff = (observed_p - plan.theoretical_order).abs();
-        let status = if order_diff <= 0.5 && observed_p > 0.5 {
-            ConvergenceStatus::Asymptotic
-        } else {
-            ConvergenceStatus::PreAsymptotic
-        };
-
-        let evidence_color = match status {
-            ConvergenceStatus::Asymptotic => {
-                let lo = f1 - gci.unwrap_or(0.01) * f1.abs();
-                let hi = f1 + gci.unwrap_or(0.01) * f1.abs();
-                Color::Verified {
-                    lo: lo.min(hi),
-                    hi: lo.max(hi),
-                }
+        let fit = fit_power_law(&data, plan.theoretical_order, &policy);
+        let (status, gci) = match fit.verdict {
+            AxisVerdict::Asymptotic { gci, .. } => (ConvergenceStatus::Asymptotic, gci),
+            AxisVerdict::Oscillatory | AxisVerdict::Scattered => {
+                (ConvergenceStatus::Oscillatory, None)
             }
-            _ => Color::Estimated {
-                estimator: "pre-asymptotic-gci".to_string(),
-                dispersion: gci.unwrap_or(0.05),
-            },
+            _ => (ConvergenceStatus::PreAsymptotic, None),
         };
-
+        let fine = sorted_rungs[0].qoi_value;
+        let dispersion = data
+            .iter()
+            .map(|(_, y)| (*y - fine).abs())
+            .fold(0.0, f64::max);
+        let evidence_color = if let Some(gci) = gci {
+            // Retain the legacy color contract. Axis reports intentionally make
+            // no Verified claim from an empirical Richardson estimate.
+            let half_width = gci * fine.abs();
+            Color::Verified {
+                lo: fine - half_width,
+                hi: fine + half_width,
+            }
+        } else {
+            Color::Estimated {
+                estimator: "all-rung-convergence-no-gci".into(),
+                dispersion,
+            }
+        };
         ConvergenceResult {
             qoi_name: plan.target_qoi.clone(),
             status,
             theoretical_order: plan.theoretical_order,
-            observed_order: Some(observed_p),
-            fit_residual: Some(order_diff),
-            richardson_extrapolated_qoi: richardson_ext,
+            observed_order: fit.observed_order,
+            fit_residual: fit.relative_rms,
+            richardson_extrapolated_qoi: if status == ConvergenceStatus::Asymptotic {
+                fit.continuum
+            } else {
+                None
+            },
             discretization_error_gci: gci,
             evidence_color,
             admitted_rungs: sorted_rungs,
-            rejection_reason: None,
+            rejection_reason: (status != ConvergenceStatus::Asymptotic)
+                .then(|| format!("{:?}", fit.verdict)),
         }
     }
 }

@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+pub mod axis;
 pub mod convergence;
 mod graph;
 
