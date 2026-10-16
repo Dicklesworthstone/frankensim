@@ -1081,6 +1081,7 @@ dependencies = [
  "fs-blake3",
  "fs-casebook",
  "fs-duct",
+ "fs-exec",
  "fs-fmm",
  "fs-geom",
  "fs-la",
