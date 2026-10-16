@@ -6,6 +6,7 @@
 pub mod derham;
 pub(crate) mod fma;
 pub mod hex;
+pub mod material;
 pub mod quad1d;
 pub mod simplex;
 pub mod vecfam;
