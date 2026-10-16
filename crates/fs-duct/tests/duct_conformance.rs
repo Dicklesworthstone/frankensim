@@ -30,6 +30,77 @@ use fs_material::gas::{GasSpec, GasState};
 
 const TAU: f64 = core::f64::consts::TAU;
 
+/// G2: the additive exact-WH termination transports through a lossless
+/// cylinder according to the independent closed-form acoustic two-port.
+#[test]
+fn dt_006_levine_schwinger_thin_wall_termination() {
+    use fs_duct::levine_schwinger::{
+        LS_MAX_KA, LsQuadrature, levine_schwinger, levine_schwinger_impedance,
+    };
+    use fs_math::{c64::C64, det};
+    let state = air();
+    let radius = 0.008;
+    let length = 0.30;
+    let duct = cylinder(radius, length);
+    let q = LsQuadrature { nodes: 256 };
+    let zc = state.density * state.sound_speed / (core::f64::consts::PI * radius * radius);
+    for i in 0..50 {
+        let start = std::time::Instant::now();
+        let ka = 0.01 + (3.8 - 0.01) * f64::from(i) / 49.0;
+        let omega = ka * state.sound_speed / radius;
+        let load = levine_schwinger_impedance(&state, radius, omega, q).expect("exact mouth load");
+        let phase = omega / state.sound_speed * length;
+        let (c, s) = (det::cos(phase), det::sin(phase));
+        // Algebraically the requested tan(kL) transfer, scaled by cos(kL)
+        // to avoid a removable tangent pole at a quarter-wave frequency.
+        let want = (load.scale(c) - C64::new(0.0, zc * s))
+            / (C64::from_re(zc * c) - C64::new(0.0, s) * load).scale(1.0 / zc);
+        let got = input_impedance(
+            &duct,
+            &state,
+            omega,
+            LossModel::Lossless,
+            Termination::UnflangedThinWall { quadrature: q },
+        )
+        .expect("exact LS TMM termination");
+        let error = (got.impedance - want).abs() / want.abs();
+        assert!(
+            error < 1e-10,
+            "ka={ka}: {:?} vs {want:?}, relative {error}",
+            got.impedance
+        );
+        let ls = levine_schwinger(ka, q).unwrap();
+        let reference = levine_schwinger(ka, LsQuadrature { nodes: 512 }).unwrap();
+        let quadrature_error = (ls.r_abs / reference.r_abs - 1.0)
+            .abs()
+            .max((ls.l_over_a / reference.l_over_a - 1.0).abs());
+        assert!(quadrature_error < 1e-3);
+        eprintln!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"dt-006\",\"inputs\":{{\"fixture\":\"0.30m x 8mm lossless cylinder\",\"provenance\":\"LS1948 p383/V16; independent analytic two-port transport\",\"ka\":{ka}}},\"ka\":{ka},\"nodes\":256,\"r_abs\":{},\"l_over_a\":{},\"ref_r_abs\":{},\"ref_l_over_a\":{},\"observed\":{{\"input_re\":{},\"input_im\":{}}},\"oracle\":{{\"input_re\":{},\"input_im\":{}}},\"rel_err\":{quadrature_error},\"err\":{error},\"tol\":1e-10,\"reference_tol\":1e-3,\"verdict\":\"pass\",\"elapsed_us\":{}}}",
+            ls.r_abs,
+            ls.l_over_a,
+            reference.r_abs,
+            reference.l_over_a,
+            got.impedance.re,
+            got.impedance.im,
+            want.re,
+            want.im,
+            start.elapsed().as_micros()
+        );
+    }
+    let omega = (*LS_MAX_KA * (1.0 + 1e-9)) * state.sound_speed / radius;
+    assert!(matches!(
+        input_impedance(
+            &duct,
+            &state,
+            omega,
+            LossModel::Lossless,
+            Termination::UnflangedThinWall { quadrature: q }
+        ),
+        Err(DuctError::LevineSchwingerCutoff { .. })
+    ));
+}
+
 fn air() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air")
 }

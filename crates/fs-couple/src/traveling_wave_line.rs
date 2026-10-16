@@ -85,6 +85,11 @@ impl TravelingWaveLine {
         n: usize,
         zc: f64,
     ) -> Result<Self, TravelingWaveError> {
+        if matches!(termination, Termination::UnflangedThinWall { .. }) {
+            return Err(TravelingWaveError::Invalid {
+                what: "exact Levine-Schwinger termination requires the exact-FIR driving_point path",
+            });
+        }
         let length: f64 = physics
             .segments
             .iter()
@@ -170,4 +175,36 @@ fn reflection_magnitude(zr: f64, zi: f64, zc: f64) -> f64 {
     let re = (nr * dr + zi * di) / den;
     let im = (zi * dr - nr * di) / den;
     det::sqrt(re * re + im * im)
+}
+
+#[cfg(test)]
+#[allow(deprecated)]
+mod tests {
+    use super::*;
+    use fs_duct::{Segment, levine_schwinger::LsQuadrature};
+    use fs_material::gas::GasSpec;
+
+    #[test]
+    fn exact_ls_refuses_the_tombstoned_one_pole_line() {
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap();
+        let duct = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.008,
+                length: 0.30,
+            }],
+        };
+        let error = TravelingWaveLine::from_duct(
+            &duct,
+            &gas,
+            Termination::UnflangedThinWall {
+                quadrature: LsQuadrature { nodes: 256 },
+            },
+            48000,
+            8192,
+            1.0,
+        )
+        .unwrap_err();
+        assert!(matches!(error, TravelingWaveError::Invalid { .. }));
+        assert!(error.to_string().contains("exact-FIR driving_point"));
+    }
 }
