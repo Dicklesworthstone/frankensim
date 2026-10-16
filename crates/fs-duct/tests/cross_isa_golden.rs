@@ -85,11 +85,12 @@ fn sweep_digest(duct: &Duct, air: &GasState, peak_count_out: &mut usize) -> u64 
 /// counts (counts mixed as integers — no float round trip).
 /// First frozen 0xd6e9_724c_5414_cf8d (aarch64-apple and x86_64-linux
 /// debug, 2026-08-23, bead frankensim-music-v8-root-3ez8g.13.4).
-/// Re-frozen for `fs-duct:tmm-bits` v2: the Bessel `Zc` is now conjugated
-/// into the `e^{-iωt}` basis, which moves every lossy sweep bit. x86_64
-/// release reproduced 2026-10-16. Debug, and aarch64, are recorded in
-/// `golden-couplings.json`.
-const GOLDEN_HASH: u64 = 0xc8fe_a91a_babb_faa3;
+/// v2 (0xc8fe_a91a_babb_faa3, x86_64 debug and release at 435133058):
+/// the Bessel `Zc` conjugated into the `e^{-iωt}` basis.
+/// v3: the open holes' flanged mouths are the multimodal flanged-pipe
+/// load, which moves the three-closed sweep. x86_64 release reproduced
+/// 2026-10-16. Two-mode status is in `golden-couplings.json`.
+const GOLDEN_HASH: u64 = 0xacaf_4b34_dc44_eb57;
 
 #[test]
 fn tmm_sweep_digest_is_cross_isa_golden() {

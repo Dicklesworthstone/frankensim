@@ -79,6 +79,9 @@ pub mod network;
 /// Exact thin-wall unflanged radiation load below the axisymmetric cutoff.
 pub mod levine_schwinger;
 pub use levine_schwinger::{LsQuadrature, LsSolution, LS_MAX_KA, levine_schwinger_impedance};
+/// Multimodal flanged circular-pipe radiation load, continuous in `ka`.
+pub mod flanged;
+pub use flanged::{FLANGED_MAX_KA, FLANGED_MAX_MODES, FLANGED_MODES, flanged_pipe_impedance};
 
 use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::GasState;
@@ -99,7 +102,9 @@ pub const MAX_RADIATION_KA: f64 = 1.0;
 /// Bit semantics of the TMM response (`golden-couplings.json` surface
 /// `fs-duct:tmm-bits`). Version 2: Bessel and wall-folded `Zc` are the
 /// `e^{-iωt}` (conjugated) characteristic impedance, tied to `k`.
-pub const TMM_BIT_SEMANTICS_VERSION: u32 = 2;
+/// Version 3: `FlangedOpen` (bells and open tone holes) is the multimodal
+/// flanged-pipe load ([`flanged_pipe_impedance`]) at every `ka`.
+pub const TMM_BIT_SEMANTICS_VERSION: u32 = 3;
 
 /// Typed refusals with stable `FS-DUCT-*` codes.
 #[derive(Debug, Clone, PartialEq)]
@@ -1090,7 +1095,8 @@ pub fn absorbed_spherical_pressure(
 /// Termination impedance at the outlet.
 ///
 /// # Errors
-/// [`DuctError::RadiationKaTooLarge`] beyond the low-`ka` fit ceiling.
+/// [`DuctError::RadiationKaTooLarge`] beyond the unflanged low-`ka` fit
+/// ceiling or [`FLANGED_MAX_KA`].
 fn termination_impedance(
     termination: Termination,
     state: &GasState,
@@ -1117,21 +1123,18 @@ fn termination_impedance(
             // e^{-i omega t} (the fs-bem pinned convention).
             Ok((Some(C64::new(0.25 * ka * ka, -0.6133 * ka).scale(z0)), ka))
         }
-        Termination::FlangedOpen => {
-            if ka > MAX_RADIATION_KA {
-                let (rr, xx) = fs_phs::baffled_piston_impedance(
-                    state.density,
-                    state.sound_speed,
-                    radius,
-                    omega,
-                )
-                .map_err(|_| DuctError::BadParameter {
-                    what: "baffled piston radiation",
-                })?;
-                return Ok((Some(C64::new(rr, xx)), ka));
-            }
-            Ok((Some(C64::new(0.5 * ka * ka, -0.8216 * ka).scale(z0)), ka))
-        }
+        // One multimodal flanged-pipe model for every ka. The old fit
+        // (0.8216 a) below ka = 1 and piston (8/(3π) a) above it jumped,
+        // which no causal line can realize.
+        Termination::FlangedOpen => Ok((
+            Some(flanged::flanged_pipe_impedance(
+                state,
+                radius,
+                omega,
+                flanged::FLANGED_MODES,
+            )?),
+            ka,
+        )),
     }
 }
 

@@ -437,11 +437,22 @@ divergence-theorem closure/orientation pin on the lathe).
   model is claimed; validation against measured instrument
   impedance remains the brass-gates bead's scope.
 - Unflanged radiation is the low-`ka` Levine–Schwinger fit
-  (ceiling 1.0, refused by name). A flanged mouth uses that fit
-  below `ka = 1` and the shared closed-form Bessel–Struve baffled piston
-  (`fs_phs::baffled_piston_impedance`, same half-space kernel as
-  `fs_bem::helmholtz`) above it. A full exterior BEM of an
-  unflanged pipe is still the recorded successor.
+  (ceiling 1.0, refused by name). A flanged mouth, a bell or an open
+  tone hole, is ONE multimodal flanged-pipe model at every `ka`
+  (`flanged_pipe_impedance`, Zorumski 1973). The aperture radiation
+  matrix over `FLANGED_MODES = 16` axisymmetric duct modes comes from the
+  King spectral integral, and evanescent modes are eliminated by Schur
+  complement. One mode is exactly the closed-form piston
+  (`fs_phs::baffled_piston_impedance`). Measured ladder at `ka = 1e-3`:
+  end correction 0.8488 → 0.8330 → 0.8263 → 0.8236 → 0.8224 → 0.8221 a
+  for 1/2/4/8/16/24 modes, toward the flanged-pipe 0.8216 a (Norris &
+  Sheng 1989).
+  - The previous fit-below / piston-above switch jumped by ~0.19 z0 at
+    `ka = 1`, which no causal characteristic line can realize.
+  - Refused above `FLANGED_MAX_KA = 20`.
+  - The plane-mode TMM above a bore's first cross-mode cutoff stays the
+    disclosed 1-D boundary.
+  - A full exterior BEM of an unflanged pipe is still the recorded successor.
 - Tone holes are the compact T-junction (Nederveen series + Dalmont
   inner + chimney wall law + `Y = σ Y_open + (1−σ) Y_closed` vent
   mix + mutual series `t_m ∝ e^{−s/a}` from neighboring open

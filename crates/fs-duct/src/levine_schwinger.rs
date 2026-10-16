@@ -95,7 +95,8 @@ impl LsSolution {
 
 // Legendre roots and weights on (0,1), with symmetric construction and fixed
 // summation order. No endpoints are sampled, so logarithmic limits stay limits.
-fn gauss_legendre(n: usize) -> Vec<(f64, f64)> {
+// Shared with the flanged-pipe radiation quadrature.
+pub(crate) fn gauss_legendre(n: usize) -> Vec<(f64, f64)> {
     let mut rule = vec![(0.0, 0.0); n];
     for i in 0..n.div_ceil(2) {
         let mut z = det::cos(PI * (i as f64 + 0.75) / (n as f64 + 0.5));
