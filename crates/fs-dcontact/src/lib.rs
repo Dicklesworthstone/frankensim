@@ -490,6 +490,15 @@ impl ContactStorage {
 }
 
 impl Storage for ContactStorage {
+    fn quadratic_part(&self) -> Option<fs_phs::linear_exact::QuadraticPart> {
+        let mut part = self.inner.quadratic_part()?;
+        // Contact remains in the original nonlinear Hamiltonian; an inactive
+        // trial point never proves that a unilateral potential is absent.
+        part.exact &= self.obstacles.iter().all(|ob| ob.stiffness==0.0
+            || ob.weights.iter().all(|w| *w==0.0));
+        Some(part)
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         let mut h = self.inner.hamiltonian(x);
         for ob in &self.obstacles {
