@@ -212,6 +212,8 @@ impl Storage for SumStorage {
 /// Typed refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhsError {
+    /// A non-exact render block exceeded its one-cent temporal band.
+    TimeResolution(linear_exact::ResolvedBandError),
     /// Frequency matching crosses the caller's band or the tangent pole.
     FrequencyMatchUnadmitted {
         /// Largest angular frequency times step [rad].
@@ -263,6 +265,7 @@ pub enum PhsError {
 impl core::fmt::Display for PhsError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            PhsError::TimeResolution(error) => core::fmt::Display::fmt(error,f),
             PhsError::FrequencyMatchUnadmitted { omega_dt } => write!(f,
                 "frequency matching refuses omega*dt={omega_dt}; require the declared band and omega*dt < pi"),
             PhsError::LinearSplitBudget { what } => write!(f, "linear split refused: {what}"),
@@ -373,6 +376,25 @@ struct RelaxationStorage {
 }
 
 impl Storage for RelaxationStorage {
+    fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
+        let base = self.base.quadratic_part()?;
+        let n = self.base_dim.checked_add(self.couplings.len())?;
+        if base.matrix.len()!=self.base_dim.checked_mul(self.base_dim)? {return None;}
+        let mut matrix = vec![0.0;n.checked_mul(n)?];
+        for i in 0..self.base_dim {for j in 0..self.base_dim {
+            matrix[i*n+j] = base.matrix[i*self.base_dim+j];
+        }}
+        for (arm,b) in self.couplings.iter().enumerate() {
+            let z = self.base_dim+arm;
+            for i in 0..self.base_dim {
+                for j in 0..self.base_dim {matrix[i*n+j]+=b[i]*b[j];}
+                matrix[i*n+z]=-b[i];matrix[z*n+i]=-b[i];
+            }
+            matrix[z*n+z]=1.0;
+        }
+        Some(linear_exact::QuadraticPart {matrix,exact:base.exact})
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         let mut h = self.base.hamiltonian(&x[..self.base_dim]);
         for (k, b) in self.couplings.iter().enumerate() {
@@ -1524,6 +1546,20 @@ impl ReducedStorage {
 }
 
 impl Storage for ReducedStorage {
+    fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
+        let inner = self.inner.quadratic_part()?;
+        if inner.matrix.len()!=self.n.checked_mul(self.n)? {return None;}
+        let mut matrix = vec![0.0;self.k.checked_mul(self.k)?];
+        for i in 0..self.k {for j in i..self.k {
+            let mut value = 0.0;
+            for a in 0..self.n {for b in 0..self.n {
+                value += self.v[a*self.k+i]*inner.matrix[a*self.n+b]*self.v[b*self.k+j];
+            }}
+            matrix[i*self.k+j]=value;matrix[j*self.k+i]=value;
+        }}
+        Some(linear_exact::QuadraticPart {matrix,exact:inner.exact})
+    }
+
     fn hamiltonian(&self, xr: &[f64]) -> f64 {
         self.inner.hamiltonian(&self.lift(xr))
     }
