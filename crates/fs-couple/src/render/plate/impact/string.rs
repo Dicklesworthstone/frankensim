@@ -51,6 +51,9 @@ pub struct StringPotential {
     storage: Rc<SosModalStorage>,
     stretching: StringStretching,
     rest_tension_n: f64,
+    // Private potential-only lift coordinate in metres, never a new unit-mass
+    // oscillator. SupportedStrings applies its physical kinetic transformation.
+    affine_endpoint: bool,
 }
 impl core::fmt::Debug for StringPotential {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -88,7 +91,7 @@ impl WireSpan {
             return Err(invalid("derived string stretching channel is unrepresentable"));
         }
         let potential = StringPotential { storage: Rc::new(storage), stretching,
-            rest_tension_n: self.tension_n };
+            rest_tension_n: self.tension_n, affine_endpoint: false };
         let mut q = [0.0; MAX_IMPACT_MODES];
         for (i, s) in body.initial.iter().enumerate() { q[i] = s.displacement_m_sqrt_kg; }
         potential.observe(&q[..n])?;
@@ -100,6 +103,34 @@ impl StringPotential {
     pub fn mode_count(&self) -> usize { self.storage.omegas.len() }
     pub fn omegas(&self) -> &[f64] { &self.storage.omegas }
     pub fn slope_limit(&self) -> f64 { self.stretching.maximum_slope }
+
+    /// Extend the SAME stress channel by the affine lift w(s)=s*X/L+u(s)
+    /// (or (1-s/L)*X+u). Since u vanishes at both ends, integral(u')=0:
+    /// strain = sum(e_n*q_n^2)/4 + X^2/(2 L^2). The linear lift stores
+    /// T0*X^2/(2L); its curvature is zero, so EI is not counted again.
+    /// Only potential/gradient/Hessian/observation are consumed by the support.
+    pub(super) fn with_affine_endpoint(self, length_m: f64) -> Result<Self, ImpactError> {
+        let n = self.mode_count();
+        let stiffness = self.rest_tension_n / length_m;
+        let strain_weight = 2.0 / length_m / length_m;
+        if self.affine_endpoint || n >= MAX_IMPACT_MODES
+            || !length_m.is_finite() || length_m <= 0.0
+            || !stiffness.is_finite() || stiffness <= 0.0
+            || !strain_weight.is_finite() || strain_weight <= 0.0 {
+            return Err(invalid("affine string endpoint exceeds finite geometry or coordinate budget"));
+        }
+        let mut storage = SosModalStorage {
+            omegas: self.storage.omegas.clone(),
+            channels: self.storage.channels.clone(),
+        };
+        let old = &storage.channels[0].coupling;
+        let mut coupling = vec![0.0; (n + 1) * (n + 1)];
+        for i in 0..n { coupling[i*(n+1)..i*(n+1)+n].copy_from_slice(&old[i*n..(i+1)*n]); }
+        coupling[n*(n+1)+n] = strain_weight;
+        storage.channels[0].coupling = coupling;
+        storage.omegas.push(det::sqrt(stiffness));
+        Ok(Self { storage: Rc::new(storage), affine_endpoint: true, ..self })
+    }
 
     fn valid_coordinates(&self, q: &[f64]) -> bool {
         q.len() == self.mode_count() && q.iter().all(|v| v.is_finite())
@@ -143,7 +174,11 @@ impl StringPotential {
         let n = self.mode_count(); let ch = &self.storage.channels[0];
         let mut s = 0.0; let mut slope_bound = 0.0;
         for i in 0..n {
-            let e = ch.coupling[i*n+i]; s += e*q[i]*q[i]; slope_bound += det::sqrt(e)*q[i].abs();
+            let e = ch.coupling[i*n+i]; s += e*q[i]*q[i];
+            // Sine modes have mean-square slope = peak^2/2; a linear lift
+            // has constant slope. Do not give its bound an artificial sqrt(2).
+            let weight = if self.affine_endpoint && i + 1 == n { 0.5 * e } else { e };
+            slope_bound += det::sqrt(weight)*q[i].abs();
         }
         let additional_strain = 0.25*s;
         let tension_n = self.rest_tension_n + self.stretching.axial_rigidity_n*additional_strain;
