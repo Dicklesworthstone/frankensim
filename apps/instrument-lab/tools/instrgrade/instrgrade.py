@@ -24,7 +24,34 @@ from pathlib import Path
 
 import numpy as np
 
-GRADER_VERSION = "instrgrade-1"
+from descriptors import (  # noqa: E402
+    AnalysisTooShort,
+    GraderRefusalError,
+    MissingBandSplitFrequency,
+    MissingNoiseFloorEstimate,
+    Partial,
+    am_fm_modulation_spectrum,
+    band_split_statistics,
+    beats,
+    blackman_harris,
+    compute_window_erb_profiles,
+    cyclo_coherence,
+    erb_matrix_distance_db,
+    estimate_noise_floor_db,
+    fit_stiff_string_law,
+    hnr_band,
+    intonation_fingerprint,
+    jitter_and_shimmer,
+    null_baselines,
+    partial_envelopes,
+    partial_onset_order,
+    spectral_flux_db,
+    track_partials,
+    two_slope_decay,
+    windows,
+)
+
+GRADER_VERSION = "instrgrade-2"
 SR = 48000
 NOTE = {"C": 0, "Db": 1, "D": 2, "Eb": 3, "E": 4, "F": 5, "Gb": 6, "G": 7, "Ab": 8, "A": 9, "Bb": 10, "B": 11}
 NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
@@ -91,11 +118,33 @@ def write_wav(path: Path, x: np.ndarray, sr: int = SR):
                            struct.pack("<IHHIIHH", 16, 3, 1, sr, sr * 4, 4, 32) + b"data" + struct.pack("<I", len(data)) + data)
 
 
-def highpass(x, f0=30.0, f1=50.0):
+def highpass(x, f0_expected=None, declared_family_corner=50.0, *, f0=None, f1=None):
+    """Note-aware raised-cosine FFT high-pass: f1 = min(declared_family_corner, 0.5 * f0_expected)."""
+    x = np.asarray(x, dtype=np.float64)
     n = 1 << int(np.ceil(np.log2(len(x) + SR // 2)))
     X = np.fft.rfft(x, n)
     f = np.fft.rfftfreq(n, 1 / SR)
-    g = np.clip((f - f0) / (f1 - f0), 0, 1)
+    if f0 is not None and f1 is not None:
+        f0_use, f1_use = float(f0), float(f1)
+    else:
+        if isinstance(f0_expected, str):
+            f_note = hz_of(midi_of(f0_expected))
+        elif f0_expected is not None and math.isfinite(float(f0_expected)) and float(f0_expected) > 0:
+            f_note = float(f0_expected)
+        else:
+            # Detect low-frequency fundamental (< 100 Hz) if no explicit note hint was supplied
+            low_mask = (f >= 20.0) & (f <= 100.0)
+            mid_mask = (f > 100.0) & (f <= 2000.0)
+            p_spec = np.abs(X) ** 2
+            low_pk = float(p_spec[low_mask].max()) if low_mask.any() else 0.0
+            mid_pk = float(p_spec[mid_mask].max()) if mid_mask.any() else 0.0
+            if low_pk > 0.05 * max(mid_pk, 1e-30):
+                f_note = float(f[low_mask][int(np.argmax(p_spec[low_mask]))])
+            else:
+                f_note = 2.0 * float(declared_family_corner)
+        f1_use = min(float(declared_family_corner), 0.5 * f_note)
+        f0_use = 0.6 * f1_use
+    g = np.clip((f - f0_use) / max(f1_use - f0_use, 1e-6), 0, 1)
     X *= 0.5 - 0.5 * np.cos(np.pi * g)
     return np.fft.irfft(X, n)[: len(x)]
 
@@ -218,21 +267,17 @@ def yin_track(x, fmin=40.0, fmax=2000.0, frame=2048, hop=480, thresh=0.15):
 THIRD_OCT = 1000 * 2 ** (np.arange(-14, 15) / 3)  # 62.5 Hz .. 16 kHz centres
 
 
-def steady_window(x, kind):
+def steady_window(x, kind, noise_floor_db=None, *, allow_unended_decay=True):
     """Analysis window relative to the (already onset-aligned) note."""
-    dur = len(x) / SR
-    if kind == "sustained":
-        t0 = 0.30
-        t1 = min(1.10, dur - 0.10)
-        if t1 - t0 < 0.25:
-            t0, t1 = 0.12 * dur, 0.9 * dur
-    else:  # decaying: early sound carries the timbre
-        t0, t1 = 0.02, min(0.52, dur)
-    return t0, t1
+    nf = noise_floor_db if noise_floor_db is not None else estimate_noise_floor_db(x)
+    w = windows(x, kind, nf, sr=SR, allow_unended_decay=allow_unended_decay)
+    return w["sustain"]
 
 
 def spectrum(x, t0, t1, nfft=1 << 18):
     seg = x[int(t0 * SR):int(t1 * SR)]
+    if len(seg) == 0:
+        seg = x
     seg = seg * np.hanning(len(seg))
     s = np.abs(np.fft.rfft(seg, nfft)) ** 2
     return np.fft.rfftfreq(nfft, 1 / SR), s
@@ -262,12 +307,27 @@ def partial_ratios(f, s, fmin=100.0, fmax=12000.0, n=5):
         if len(picked) >= n:
             break
     picked.sort()
-    return [float(q) for q in picked], [float(q / picked[0]) for q in picked]
+    return [float(q) for q in picked], [float(q / picked[0]) for q in picked] if picked else []
 
 
-def describe(x, kind="sustained", f0_hint=None, chord=False, inharmonic=False):
+def describe(
+    x,
+    kind="sustained",
+    f0_hint=None,
+    chord=False,
+    inharmonic=False,
+    *,
+    noise_floor_db=None,
+    band_split_hz=None,
+    allow_unended_decay=False,
+    _skip_q3_heavy=False,
+):
     """x is onset-aligned. Returns a dict of descriptors (all dB values relative, not absolute)."""
-    t0, t1 = steady_window(x, kind)
+    x = np.asarray(x, dtype=np.float64)
+    nf_db = float(noise_floor_db) if noise_floor_db is not None else estimate_noise_floor_db(x)
+    allow_unended = allow_unended_decay or (noise_floor_db is None)
+    win_dict = windows(x, kind, nf_db, sr=SR, allow_unended_decay=allow_unended)
+    t0, t1 = win_dict["sustain"]
     tr = yin_track(x[int(t0 * SR):int(t1 * SR)], fmin=30.0, fmax=2400.0)
     good = tr[(tr[:, 2] > 0.7) & np.isfinite(tr[:, 1])] if len(tr) else tr
     f0 = float(np.median(good[:, 1])) if len(good) else (f0_hint or float("nan"))
@@ -280,34 +340,33 @@ def describe(x, kind="sustained", f0_hint=None, chord=False, inharmonic=False):
         return None
     periodicity = float(np.median(tr[:, 2])) if len(tr) else 0.0
     f, s = spectrum(x, t0, t1)
-    tot = s[(f > 40) & (f < 16000)].sum() + 1e-30
-    # refine f0 from harmonic peaks (least squares on k*f0)
-    harm = []
+    tot = s[(f > 25) & (f < 16000)].sum() + 1e-30
+
     kmax = int(min(30, 15000 // f0)) if f0 and f0 > 0 else 0
-    pk = []
-    for k in range(1, kmax + 1):
-        lo, hi = k * f0 * 0.975, k * f0 * 1.025
-        sel = (f >= lo) & (f <= hi)
-        if not sel.any():
-            break
-        j = np.argmax(s[sel])
-        fk = f[sel][j]
-        # integrate +-1.5% band so window leakage does not bias levels
-        band = (f >= fk * 0.99) & (f <= fk * 1.01)
-        harm.append(10 * np.log10(s[band].sum() / tot + 1e-30))
-        pk.append((k, fk))
-    harm = np.array(harm)
-    if chord or inharmonic:
-        harm = np.array([])
-    if len(pk) >= 3 and not (chord or inharmonic):
-        ks = np.array([p[0] for p in pk], float)
-        fs = np.array([p[1] for p in pk], float)
-        f0r = float(np.sum(ks * fs) / np.sum(ks * ks))
+    partials = track_partials(
+        x,
+        f0,
+        kmax=kmax,
+        sr=SR,
+        fit_inharmonicity=not (chord or inharmonic),
+        t_window=(t0, t1),
+    )
+    if partials and not (chord or inharmonic):
+        ks_arr = np.array([p.k for p in partials], dtype=np.float64)
+        fs_arr = np.array([p.mean_f_hz for p in partials], dtype=np.float64)
+        lv_arr = np.array([p.mean_level_db for p in partials], dtype=np.float64)
+        hi_snr = lv_arr >= (float(np.max(lv_arr)) - 55.0)
+        if int(hi_snr.sum()) >= 3:
+            w_arr = 10.0 ** ((lv_arr[hi_snr] - float(np.max(lv_arr))) / 20.0)
+            f0r, b_fit = fit_stiff_string_law(ks_arr[hi_snr], fs_arr[hi_snr], w_arr)
+        else:
+            f0r, b_fit = float(f0), 0.0
+        harm = np.array([p.mean_level_db for p in partials], dtype=np.float64)
     else:
-        f0r = f0
-    # third-octave envelope (dB re total)
-    # Smooth third-octave envelope: Gaussian weights in log2(f) (FWHM = 1/3 octave), so a small pitch
-    # shift moves energy continuously between neighbouring bands instead of jumping at a hard edge.
+        f0r, b_fit = float(f0), 0.0
+        harm = np.array([], dtype=np.float64)
+
+    # Smooth third-octave envelope: Gaussian weights in log2(f) (FWHM = 1/3 octave)
     bands = []
     lf = np.log2(np.maximum(f, 1.0))
     sig = (1 / 3) / 2.3548
@@ -315,43 +374,113 @@ def describe(x, kind="sustained", f0_hint=None, chord=False, inharmonic=False):
         w = np.exp(-0.5 * ((lf - math.log2(fc)) / sig) ** 2)
         bands.append(10 * np.log10((s * w).sum() / (tot * 1.0645 * sig * 3) + 1e-30))
     bands = np.array(bands)
-    # harmonic-to-noise: harmonic bins (+-3% of f0 around k f0) vs rest, 80 Hz..10 kHz
+
+    # Tracked-partial HNR (±3 bin widths around tracked partials, including stiff partials)
+    seg_sustain = x[int(t0 * SR):int(t1 * SR)]
+    if len(seg_sustain) < 64:
+        seg_sustain = x
+    if partials:
+        hnr = hnr_band(seg_sustain, partials, (80.0, 10000.0), sr=SR)
+    else:
+        m_fallback = (f > 80) & (f < 10000)
+        hm = np.zeros_like(f, bool)
+        for k_idx in range(1, int(10000 // f0r) + 1):
+            hm |= np.abs(f - k_idx * f0r) < 0.03 * f0r
+        hnr = float(10 * np.log10((s[m_fallback & hm].sum() + 1e-30) / (s[m_fallback & ~hm].sum() + 1e-30)))
+
     m = (f > 80) & (f < 10000)
-    hm = np.zeros_like(f, bool)
-    for k in range(1, int(10000 // f0r) + 1):
-        hm |= np.abs(f - k * f0r) < 0.03 * f0r
-    hnr = 10 * np.log10((s[m & hm].sum() + 1e-30) / (s[m & ~hm].sum() + 1e-30))
     centroid = float((f[m] * s[m]).sum() / (s[m].sum() + 1e-30))
     hi_share = 10 * np.log10(s[(f > 5000) & (f < 16000)].sum() / tot + 1e-30)
     odd = sum(10 ** (h / 10) for i, h in enumerate(harm[:10]) if (i + 1) % 2 == 1 and i > 0)
     even = sum(10 ** (h / 10) for i, h in enumerate(harm[:10]) if (i + 1) % 2 == 0)
     oe = 10 * np.log10((odd + 1e-30) / (even + 1e-30))
-    # f0 stability
     if len(good) > 3:
         c = 1200 * np.log2(good[:, 1] / np.median(good[:, 1]))
         f0_sd = float(np.std(c))
     else:
         f0_sd = float("nan")
-    # attack: onset -> 90% of steady RMS (sustained) or peak (decaying)
+
+    # Attack: onset -> 90% of steady RMS (sustained) or peak (decaying)
     e = np.sqrt(np.convolve(x * x, np.ones(240) / 240, "same"))
     if kind == "sustained":
-        target = np.median(e[int(t0 * SR):int(t1 * SR)])
+        target = np.median(e[int(t0 * SR):int(t1 * SR)]) if int(t1 * SR) > int(t0 * SR) else e.max()
     else:
         target = e[: int(0.3 * SR)].max()
-    a10 = np.argmax(e > 0.1 * target) / SR
-    a90 = np.argmax(e > 0.9 * target) / SR
-    out = dict(f0=f0r, periodicity=periodicity, f0_sd_cents=f0_sd, harm_db=harm.tolist(), bands_db=bands.tolist(),
-               hnr_db=float(hnr), centroid_hz=centroid, centroid_rel=centroid / f0r, hi_share_db=float(hi_share),
-               odd_even_db=float(oe), attack_ms=1000 * (a90 - a10), window=[t0, t1])
+    a10 = float(np.argmax(e > 0.1 * target) / SR)
+    a90 = float(np.argmax(e > 0.9 * target) / SR)
+    attack_dur_s = max(1.0 / SR, a90 - a10)
+    log_attack_time = float(math.log10(attack_dur_s))
+
+    cyclo_k1 = cyclo_coherence(seg_sustain, f0r, k=1, partials=partials, sr=SR)
+    windows_serializable = {k_w: [float(v_w[0]), float(v_w[1])] for k_w, v_w in win_dict.items()}
+    out = dict(
+        f0=f0r,
+        inharmonicity_B=float(b_fit),
+        periodicity=periodicity,
+        f0_sd_cents=f0_sd,
+        harm_db=harm.tolist(),
+        bands_db=bands.tolist(),
+        hnr_db=float(hnr),
+        cyclo_coherence_kf0=float(cyclo_k1),
+        centroid_hz=centroid,
+        centroid_rel=centroid / f0r,
+        hi_share_db=float(hi_share),
+        odd_even_db=float(oe),
+        attack_ms=1000.0 * (a90 - a10),
+        log_attack_time_log10_s=log_attack_time,
+        window=[float(t0), float(t1)],
+        windows=windows_serializable,
+        noise_floor_db=float(nf_db),
+    )
     pf, pr = partial_ratios(f, s)
     out.update(peak_hz=pf, peak_ratios=pr)
-    # Subharmonic (period-doubling) energy relative to the fundamental's harmonic family.
     sub = (np.abs(f - 0.5 * f0r) < 0.03 * f0r) | (np.abs(f - 1.5 * f0r) < 0.03 * f0r)
     fam = (np.abs(f - f0r) < 0.03 * f0r) | (np.abs(f - 2 * f0r) < 0.03 * f0r)
     out["subharmonic_db"] = float(10 * np.log10((s[sub].sum() + 1e-30) / (s[fam].sum() + 1e-30)))
     out.update(amp_fluct(x, f0r, t0, t1))
     if kind == "decaying":
-        out.update(decay_profile(x, f0r))
+        out.update(decay_profile(x, f0r, t1=win_dict["release"][1], partials=partials))
+
+    if not _skip_q3_heavy:
+        erb_profiles = compute_window_erb_profiles(x, win_dict, sr=SR)
+        out["erb_profiles"] = erb_profiles
+        int_fp = intonation_fingerprint(partials, f0r, B=b_fit)
+        p_envs = partial_envelopes(partials)
+        p_onsets = [float(p.onset_s) for p in partials]
+        onset_tau = partial_onset_order(p_onsets)
+        cyclo_multi = [
+            float(cyclo_k1),
+            float(cyclo_coherence(seg_sustain, f0r, k=2, partials=partials, sr=SR)),
+            float(cyclo_coherence(seg_sustain, f0r, k=3, partials=partials, sr=SR)),
+        ]
+        out["q3"] = dict(
+            partial_onset_order=dict(value=float(onset_tau), onsets_s=p_onsets, unit="kendall_tau"),
+            partial_envelopes=dict(value=p_envs, unit="db_per_s_and_hz"),
+            partial_freqs_and_B=dict(
+                f0_hz=float(f0r),
+                B=float(b_fit),
+                partial_freqs_hz=[float(p.mean_f_hz) for p in partials],
+                unit="Hz",
+            ),
+            cyclo_coherence_kf0=dict(value=float(cyclo_k1), harmonics=cyclo_multi, unit="coherence"),
+            intonation_fingerprint=dict(value=int_fp, unit="cents"),
+        )
+        flux_db = spectral_flux_db(x, sr=SR)
+        am_fm = am_fm_modulation_spectrum(partials, f0r)
+        jit, shim = jitter_and_shimmer(partials, good[:, 1] if len(good) else None)
+        desc_block = dict(
+            log_attack_time_log10_s=dict(value=float(log_attack_time), unit="log10_s"),
+            spectral_flux_db=dict(value=float(flux_db), unit="dB"),
+            am_fm_modulation=am_fm,
+            jitter_rel=dict(value=float(jit), unit="ratio"),
+            shimmer_db=dict(value=float(shim), unit="dB"),
+            band_hnr_db=dict(value=float(hnr), band_hz=[80.0, 10000.0], unit="dB"),
+            fs_psycho=dict(owner="M7.5-W1", status="pending_m7_5_w1"),
+        )
+        if band_split_hz is not None:
+            desc_block["band_split"] = band_split_statistics(seg_sustain, partials, band_split_hz, sr=SR)
+            out["band_split_hz"] = float(band_split_hz)
+        out["descriptors"] = desc_block
     return out
 
 
@@ -377,33 +506,62 @@ def amp_fluct(x, f0, t0, t1, nh=6, n=4096, hop=480):
     return dict(amp_fluct_db=float(np.median(sds)) if sds else float("nan"))
 
 
-def decay_profile(x, f0, t0=0.05, t1=1.5, nh=8):
-    """dB/s slopes of broadband RMS and of the first harmonics (STFT, 4096/1024)."""
-    n, hop = 4096, 1024
-    t1 = min(t1, len(x) / SR - 0.1)
-    frames = range(int(t0 * SR), int(t1 * SR) - n, hop)
+def decay_profile(x, f0, t0=0.04, t1=None, nh=8, partials=None):
+    """Two-slope decay and beat analysis down to the noise-floor horizon t1."""
+    n, hop = 2048, 480
+    dur = len(x) / SR
+    t1_use = min(dur - 0.02, float(t1) if t1 is not None else dur - 0.02)
+    if t1_use <= t0 + n / SR:
+        t0 = 0.0
+        t1_use = dur
+    frames = range(int(t0 * SR), max(int(t0 * SR) + 1, int(t1_use * SR) - n), hop)
     win = np.hanning(n)
     ff = np.fft.rfftfreq(n, 1 / SR)
     rows, tt = [], []
     for s0 in frames:
+        if s0 + n > len(x):
+            break
         X = np.abs(np.fft.rfft(x[s0:s0 + n] * win)) ** 2
         rows.append(X)
         tt.append((s0 + n / 2) / SR)
     if len(rows) < 4:
-        return dict(decay_db_s=float("nan"), harm_decay_db_s=[])
+        return dict(
+            decay_db_s=float("nan"),
+            slope1_db_s=float("nan"),
+            slope2_db_s=float("nan"),
+            knee_s=float("nan"),
+            decay_residual_db=float("nan"),
+            beat_rate_hz=0.0,
+            beat_depth_db=0.0,
+            decay_frame_hop_s=hop / SR,
+            harm_decay_db_s=[],
+        )
     R = np.array(rows)
-    tt = np.array(tt)
+    tt = np.array(tt, dtype=np.float64)
     bb = 10 * np.log10(R.sum(axis=1) + 1e-30)
     slope = float(np.polyfit(tt, bb, 1)[0])
+    s1, s2, knee, resid = two_slope_decay(bb, tt)
+    beat_rate, beat_depth = beats(bb, tt)
     hd = []
     for k in range(1, nh + 1):
-        sel = np.abs(ff - k * f0) < max(0.02 * k * f0, 15)
+        fk = float(partials[k - 1].mean_f_hz) if (partials and k - 1 < len(partials)) else k * f0
+        sel = np.abs(ff - fk) < max(0.025 * fk, 15.0)
         if not sel.any():
             break
         lv = 10 * np.log10(R[:, sel].sum(axis=1) + 1e-30)
         ok = lv > lv.max() - 50
         hd.append(float(np.polyfit(tt[ok], lv[ok], 1)[0]) if ok.sum() > 3 else float("nan"))
-    return dict(decay_db_s=slope, harm_decay_db_s=hd)
+    return dict(
+        decay_db_s=slope,
+        slope1_db_s=float(s1),
+        slope2_db_s=float(s2),
+        knee_s=float(knee),
+        decay_residual_db=float(resid),
+        beat_rate_hz=float(beat_rate),
+        beat_depth_db=float(beat_depth),
+        decay_frame_hop_s=float(hop / SR),
+        harm_decay_db_s=hd,
+    )
 
 
 # ------------------------------------------------------------------------ distances
@@ -421,9 +579,28 @@ def distance(da, db, nharm=20):
     env = rms_gap(da["bands_db"], db["bands_db"])
     harm = rms_gap(da["harm_db"][:nharm], db["harm_db"][:nharm])
     spec = float(math.hypot(env, harm)) if np.isfinite(harm) else float(env * math.sqrt(2))
-    return dict(env_db=env, harm_db=harm, spec_db=spec,
-                hnr_gap=da["hnr_db"] - db["hnr_db"], centroid_ratio=da["centroid_rel"] / db["centroid_rel"],
-                hi_share_gap=da["hi_share_db"] - db["hi_share_db"])
+    out = dict(
+        env_db=env,
+        harm_db=harm,
+        spec_db=spec,
+        hnr_gap=da["hnr_db"] - db["hnr_db"],
+        centroid_ratio=da["centroid_rel"] / db["centroid_rel"],
+        hi_share_gap=da["hi_share_db"] - db["hi_share_db"],
+    )
+    if "erb_profiles" in da and "erb_profiles" in db:
+        att_d = erb_matrix_distance_db(da["erb_profiles"]["attack"], db["erb_profiles"]["attack"])
+        sus_d = erb_matrix_distance_db(da["erb_profiles"]["sustain"], db["erb_profiles"]["sustain"])
+        rel_d = erb_matrix_distance_db(da["erb_profiles"]["release"], db["erb_profiles"]["release"])
+        out.update(
+            attack_erb_distance_db=att_d,
+            sustain_erb_distance_db=sus_d,
+            release_erb_distance_db=rel_d,
+        )
+    if "q3" in da and "q3" in db:
+        on_a = da["q3"]["partial_onset_order"]["onsets_s"]
+        on_b = db["q3"]["partial_onset_order"]["onsets_s"]
+        out["partial_onset_order_tau"] = partial_onset_order(on_a, on_b)
+    return out
 
 
 # ---------------------------------------------------------------- reference library
@@ -455,9 +632,9 @@ def build_library(wav_dir: Path, cache: Path):
         meta = parse_ref_name(p.stem)
         if not meta["range"] or not meta["dyn"]:
             continue
-        x = highpass(load(p))
-        spans = segment_scale(x)
         exp = expected_notes(meta["range"])
+        x = highpass(load(p), hz_of(exp[0]) if exp else None)
+        spans = segment_scale(x)
         if len(exp) > 2 and len(spans) < len(exp) / 2:
             spans = segment_by_pitch(x, exp)
         kind = "decaying" if (meta["art"] == "pizz" or meta["inst"] in ("guitar", "xylophone", "piano")) else "sustained"
@@ -487,7 +664,8 @@ def build_library(wav_dir: Path, cache: Path):
 
 
 def ref_audio(entry, wav_dir: Path, dur=None):
-    x = highpass(load(Path(wav_dir) / entry["file"]))
+    f0_exp = hz_of(entry["note"]) if "note" in entry and entry["note"] is not None else None
+    x = highpass(load(Path(wav_dir) / entry["file"]), f0_exp)
     a = int(entry["start"] * SR)
     b = int(entry["end"] * SR) if dur is None else a + int(dur * SR)
     return x[a:b]

@@ -25,8 +25,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-from instrgrade import (GRADER_VERSION, SR, describe, distance, find, highpass, hz_of, load, midi_of, nearest_instruments, onset,
-                        ref_audio, rulers, write_wav, cents)
+from instrgrade import (GRADER_VERSION, SR, cents, describe, distance, find, highpass, hz_of, load, midi_of, nearest_instruments,
+                        null_baselines, onset, ref_audio, rulers, write_wav)
 
 import matplotlib
 
@@ -51,7 +51,7 @@ LIBPATH = S / "grade" / os.environ.get("LIBFILE", "library.json")
 LIB = json.loads(LIBPATH.read_text())
 TOOLDIR = Path(__file__).resolve().parent
 TOOL_SHA256 = {name: hashlib.sha256((TOOLDIR / name).read_bytes()).hexdigest()
-               for name in ("instrgrade.py", "grade_run.py", "radiate.py", "summarize.py", "buildlib.py", "uiowa-links.json")}
+               for name in ("instrgrade.py", "descriptors.py", "grade_run.py", "radiate.py", "summarize.py", "buildlib.py", "uiowa-links.json")}
 GIT = subprocess.run(["git", "-C", str(TOOLDIR), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
 CONTEXT = dict(grader_version=GRADER_VERSION, library_sha256=hashlib.sha256(LIBPATH.read_bytes()).hexdigest(),
                tool_sha256=TOOL_SHA256, host=platform.node(), git_sha=GIT.stdout.strip() or None,
@@ -79,7 +79,15 @@ def receipt(candidate, result, started, target=None):
                 reference_note=target["name"] if target else candidate.get("chord"),
                 reference_dynamic=target["dyn"] if target else candidate.get("dyn"),
                 reference_wav_sha256=hashlib.sha256((WAVDIR / target["file"]).read_bytes()).hexdigest() if target else None,
+                windows=result.get("windows"),
+                band_split_hz=result.get("band_split_hz"),
                 spec_db=observed, env_db=dist.get("env_db"), harm_db=dist.get("harm_db"),
+                attack_erb_distance_db=dist.get("attack_erb_distance_db"),
+                sustain_erb_distance_db=dist.get("sustain_erb_distance_db"),
+                release_erb_distance_db=dist.get("release_erb_distance_db"),
+                q3=result.get("q3"),
+                descriptors=result.get("descriptors"),
+                baselines=result.get("baselines"),
                 rulers=result.get("rulers"), expected_db=expected, tolerance_db=tolerance,
                 conversion_cmd=candidate.get("conversion_cmd", os.environ.get("IRP_CONVERSION_CMD")),
                 render_git_sha=candidate.get("render_git_sha"), render_command=candidate.get("render_command"),
@@ -101,7 +109,8 @@ def rms(x):
 
 
 def prep_candidate(c):
-    x = highpass(load(Path(c["wav"])))
+    f0_exp = hz_of(midi_of(c["note"])) if "note" in c else (hz_of(midi_of(c["chord"][0])) if c.get("chord") else None)
+    x = highpass(load(Path(c["wav"])), f0_exp)
     if "t0" in c:
         x = x[int(c["t0"] * SR):int(c["t1"] * SR)]
     o = onset(x)
@@ -180,18 +189,19 @@ for c in CANDS:
         RECEIPTS.append(receipt(c, result, candidate_started))
         continue
     kind = c.get("kind", "sustained")
+    band_split_hz = c.get("band_split_hz")
     if c.get("chord"):
         real = real_chord(c["chord"], c["dyn"], c["inst"], c.get("stagger_s", 0.08))
         f0_hint = hz_of(midi_of(c["chord"][0]))
-        dr = describe(highpass(real), kind, f0_hint, chord=True)
-        do = describe(ours, kind, f0_hint, chord=True)
+        dr = describe(highpass(real, f0_hint), kind, f0_hint, chord=True, band_split_hz=band_split_hz)
+        do = describe(ours, kind, f0_hint, chord=True, band_split_hz=band_split_hz)
         target = None
         rl = {"other_dynamic": [], "neighbour": [], "other_instruments": {}}
         for shift in (1, 2, -1):
             nb = [__import__("instrgrade").name_of(midi_of(n) + shift) for n in c["chord"]]
             rc = real_chord(nb, c["dyn"], c["inst"], c.get("stagger_s", 0.08))
             if rc is not None:
-                rl["neighbour"].append(distance(dr, describe(highpass(rc), kind, f0_hint, chord=True))["spec_db"])
+                rl["neighbour"].append(distance(dr, describe(highpass(rc, f0_hint), kind, f0_hint, chord=True))["spec_db"])
     else:
         nm = midi_of(c["note"])
         cand_t = find(LIB, c["inst"], nm, dyn=c.get("dyn"), art=c.get("art"))
@@ -206,9 +216,9 @@ for c in CANDS:
         target = cand_t[0]
         real = ref_audio(target, WAVDIR)
         inh = c["inst"] in ("xylophone", "marimba")
-        dr = target["desc"]
-        do = describe(ours, kind, hz_of(nm), inharmonic=inh)
-        rl = rulers(LIB, target)
+        dr = describe(real, kind, hz_of(nm), inharmonic=inh, band_split_hz=band_split_hz)
+        do = describe(ours, kind, hz_of(nm), inharmonic=inh, band_split_hz=band_split_hz)
+        rl = rulers(LIB, dict(target, desc=dr))
     if do is None:
         result = dict(id=c["id"], grader_version=GRADER_VERSION, error="no pitch found in candidate")
         results.append(result)
@@ -217,9 +227,42 @@ for c in CANDS:
     dist = distance(do, dr)
     near = nearest_instruments(LIB, do, do["f0"], kind) if not c.get("chord") else []
     same_ruler = min(rl.get("other_dynamic") or [float("nan")]) if rl else float("nan")
-    res = dict(id=c["id"], grader_version=GRADER_VERSION, label=c["label"], inst=c["inst"], target=(target["file"] + "@" + target["name"] + "." + target["dyn"]) if target else "chord",
-               ours_f0=do["f0"], ours_cents_vs_et=cents(do["f0"], hz_of(round(69 + 12 * math.log2(do["f0"] / 440)))),
-               ours=do, real=dr, distance=dist, rulers=rl, nearest=near[:6])
+    baselines = null_baselines(dr, cand_spec_db=dist["spec_db"], dyn_ruler_db=same_ruler)
+    q3_summary = dict(
+        attack_erb_distance_db=dict(value=dist.get("attack_erb_distance_db"), unit="dB"),
+        partial_onset_order_vs_reference=dict(value=dist.get("partial_onset_order_tau"), unit="kendall_tau"),
+        ours=do.get("q3"),
+        real=dr.get("q3"),
+    )
+    desc_summary = dict(
+        erb_distance_db=dict(
+            attack_db=dist.get("attack_erb_distance_db"),
+            sustain_db=dist.get("sustain_erb_distance_db"),
+            release_db=dist.get("release_erb_distance_db"),
+            unit="dB",
+        ),
+        ours=do.get("descriptors"),
+        real=dr.get("descriptors"),
+    )
+    res = dict(
+        id=c["id"],
+        grader_version=GRADER_VERSION,
+        label=c["label"],
+        inst=c["inst"],
+        target=(target["file"] + "@" + target["name"] + "." + target["dyn"]) if target else "chord",
+        windows=do.get("windows"),
+        band_split_hz=band_split_hz,
+        ours_f0=do["f0"],
+        ours_cents_vs_et=cents(do["f0"], hz_of(round(69 + 12 * math.log2(do["f0"] / 440)))),
+        ours=do,
+        real=dr,
+        distance=dist,
+        q3=q3_summary,
+        descriptors=desc_summary,
+        baselines=baselines,
+        rulers=rl,
+        nearest=near[:6],
+    )
     if rl and rl.get("neighbour"):
         res["ratio_to_neighbour_ruler"] = dist["spec_db"] / max(1e-9, float(np.median(rl["neighbour"])))
     if rl and rl.get("other_dynamic"):

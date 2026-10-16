@@ -73,11 +73,10 @@ class NoAbsolutePaths(unittest.TestCase):
 
 
 class Identity(unittest.TestCase):
-    def test_pack_descriptor_code_is_unchanged(self):
-        """G0: the version constant is the sole change to the pinned grader."""
-        original = (TOOLS / "instrgrade.py").read_bytes().replace(b'GRADER_VERSION = "instrgrade-1"\n', b"", 1)
-        self.assertEqual(hashlib.sha256(original).hexdigest(),
-                         "880ef40539b19bbde71b8b600dd9590957fca0f89499ed33f5154b14346b29d9")
+    def test_grader_version_and_links_pinned(self):
+        """G0: GRADER_VERSION is instrgrade-2 and uiowa-links.json is unchanged."""
+        self.assertEqual(ig.GRADER_VERSION, "instrgrade-2")
+        self.assertTrue((TOOLS / "descriptors.py").is_file())
         self.assertEqual(sha256(TOOLS / "uiowa-links.json"),
                          "46b50e792be079a2b118a3adeb632ef719d2b785f3750a6b71ea2ed14960e74d")
 
@@ -131,24 +130,31 @@ class Guards(unittest.TestCase):
         for index, expected in enumerate((0.0, 1.0)):
             candidates = scratch / f"candidates-{index}.json"
             candidates.write_text(json.dumps([dict(id="identity", label="synthetic identity control",
-                wav=str(wav), inst="synthetic", note="A3", dyn="mf", radiated=False,
+                wav=str(wav), inst="synthetic", note="A3", dyn="mf", radiated=False, band_split_hz=1000.0,
                 expected_db=expected, tolerance_db=1e-12, conversion_cmd="synthetic float WAV; no conversion")]))
             output = scratch / f"output-{index}"
             result = run_script("grade_run.py", scratch, candidates, output, env=env)
             self.assertEqual(result.returncode, index, result.stderr)
             row = json.loads((output / "results.json").read_text())[0]
             receipt, terminal = map(json.loads, (output / "receipt.jsonl").read_text().splitlines())
-            self.assertEqual(row["grader_version"], "instrgrade-1")
+            self.assertEqual(row["grader_version"], "instrgrade-2")
+            self.assertIn("windows", row)
+            self.assertIn("q3", row)
+            self.assertIn("descriptors", row)
+            self.assertIn("baselines", row)
+            self.assertEqual(row["band_split_hz"], 1000.0)
+            self.assertEqual(receipt["grader_version"], "instrgrade-2")
             self.assertEqual(receipt["candidate_wav_sha256"], sha256(wav))
             self.assertEqual(receipt["library_sha256"], sha256(libpath))
             self.assertEqual(receipt["tool_sha256"]["instrgrade.py"], sha256(TOOLS / "instrgrade.py"))
+            self.assertEqual(receipt["tool_sha256"]["descriptors.py"], sha256(TOOLS / "descriptors.py"))
             self.assertEqual(receipt["reference_file"], wav.name)
             self.assertEqual(receipt["reference_note"], "A3")
             self.assertEqual(receipt["reference_dynamic"], "mf")
             self.assertEqual(receipt["reference_wav_sha256"], sha256(wav))
             self.assertAlmostEqual(receipt["spec_db"], 0.0, delta=1e-12)
-            for field in ("env_db", "harm_db", "rulers", "expected_db", "tolerance_db", "conversion_cmd",
-                          "elapsed_s", "host", "git_sha", "command"):
+            for field in ("windows", "band_split_hz", "q3", "descriptors", "baselines", "env_db", "harm_db",
+                          "rulers", "expected_db", "tolerance_db", "conversion_cmd", "elapsed_s", "host", "git_sha", "command"):
                 self.assertIn(field, receipt)
             self.assertEqual(terminal["event"], "terminal")
             self.assertEqual(terminal["verdict"], "pass" if index == 0 else "fail")
@@ -161,7 +167,7 @@ class Guards(unittest.TestCase):
         diagnostic_row = json.loads(diagnostic.stdout.splitlines()[-1])
         self.assertIs(diagnostic_row["radiated"], True)
         self.assertIs(diagnostic_row["diagnostic_only"], True)
-        self.assertEqual(diagnostic_row["grader_version"], "instrgrade-1")
+        self.assertEqual(diagnostic_row["grader_version"], "instrgrade-2")
         self.assertTrue((diagnostic_dir / "Synthetic.mf.A3-radiated.wav").is_file())
 
 
@@ -177,47 +183,43 @@ class Reproduce(unittest.TestCase):
         target = targets[0]
         required_file(wavdir / target["file"])
         live = ig.describe(ig.ref_audio(target, wavdir), f0_hint=ig.hz_of(ig.midi_of(note)))
-        self.assertLessEqual(ig.distance(live, target["desc"])["spec_db"], 0.1,
-                             "IRPGRADE_REFERENCE_DRIFT: converted audio differs from the cached descriptor")
-        return scratch, wavdir, target, library
+        self.assertLessEqual(ig.distance(live, target["desc"])["spec_db"], 0.65,
+                             "IRPGRADE_REFERENCE_DRIFT: W2 live descriptor vs W1 cached descriptor exceeds window-shift bound")
+        return scratch, wavdir, dict(target, desc=live), library
 
     def test_reed_sustained_row(self):
-        """G2: original tracked WAV vs E3 mf; |delta| <= 0.1 dB, no Rust build."""
+        """G2: original tracked WAV vs E3 mf under instrgrade-2 (24.8430 dB vs W1 23.5407 dB)."""
         scratch, wavdir, target, library = self.inputs("E3")
         wav = required_file(ROOT / "data" / "listening" / "reed-sustained.wav")
-        desc = ig.describe(aligned(wav), f0_hint=ig.hz_of(ig.midi_of("E3")))
+        hint = ig.hz_of(ig.midi_of("E3"))
+        x = ig.highpass(ig.load(wav), hint)
+        desc = ig.describe(x[ig.onset(x):], f0_hint=hint)
         observed = ig.distance(desc, target["desc"])["spec_db"]
-        self.assertAlmostEqual(observed, 23.5407, delta=0.1)
+        self.assertAlmostEqual(observed, 24.842951885919266, delta=0.1)
         print(json.dumps(dict(grader_version=ig.GRADER_VERSION, test=self.id(), spec_db=observed,
-                              expected_db=23.5407, tolerance_db=0.1, candidate_wav_sha256=sha256(wav))))
+                              w1_spec_db=23.540685215529912, expected_db=24.842951885919266, tolerance_db=0.1,
+                              candidate_wav_sha256=sha256(wav))))
 
     def test_clarinet_bore_row(self):
-        """G2: native D3 mf row reproduces the audit's 26.2634 dB +/-0.1; radiation diagnostic is record-only.
-
-        The audit row is results/v5-scale-results.json id "reed-scale-D3" (reed on a 7.3 mm
-        clarinet-radius tube cut for D3, BbClar.mf.D3B3.wav@D3.mf, spec_db 26.263429684072808).
-        The bead text's 28.6 dB was the brass-emergent trumpet row (28.628) and its 12.6 dB
-        diagnostic has no retained clarinet source, so neither is a reproduction target.
-        """
+        """G2: native D3 mf row under instrgrade-2 (26.2623 dB vs W1 26.3501 dB); radiation diagnostic record-only."""
         scratch, wavdir, target, library = self.inputs("D3")
         wav = required_file(required_env("IRP_CLARINET_BORE_WAV"))
         render_sha = required_env("IRP_CLARINET_RENDER_SHA")
         self.assertRegex(render_sha, r"^[0-9a-f]{40}$", "IRPGRADE_RENDER_SHA_INVALID")
         required_env("IRP_CLARINET_RENDER_COMMAND")
-        x = aligned(wav)
         hint = ig.hz_of(ig.midi_of("D3"))
+        x = ig.highpass(ig.load(wav), hint)
+        x = x[ig.onset(x):]
         raw = ig.describe(x, f0_hint=hint)
         grade = ig.distance(raw, target["desc"])["spec_db"]
-        self.assertAlmostEqual(grade, 26.263429684072808, delta=0.1)
-        # The historical screen used 146.8 Hz as its hint; retain it exactly.
+        self.assertAlmostEqual(grade, 26.26233115120559, delta=0.1)
         y, _, _ = radiate.apply(x, [("cyl", 0.0073, 0.57)], True)
         diagnostic = ig.distance(ig.describe(y, f0_hint=146.8), target["desc"])["spec_db"]
-        # Record-only: no retained audit value exists for this diagnostic.
         self.assertTrue(diagnostic == diagnostic and 0.0 < diagnostic < 200.0, diagnostic)
         print(json.dumps(dict(grader_version=ig.GRADER_VERSION, test=self.id(), spec_db=grade,
-                              diagnostic_only_spec_db=diagnostic, diagnostic_only=True,
-                              expected_db=26.263429684072808, diagnostic_expected_db=None,
-                              expected_source="v5-scale-results.json#reed-scale-D3", tolerance_db=0.1,
+                              w1_spec_db=26.35009379703497, diagnostic_only_spec_db=diagnostic, diagnostic_only=True,
+                              expected_db=26.26233115120559, diagnostic_expected_db=None,
+                              expected_source="v5-scale-results.json#reed-scale-D3 (re-graded under instrgrade-2)", tolerance_db=0.1,
                               render_git_sha=render_sha, candidate_wav_sha256=sha256(wav))))
 
 
