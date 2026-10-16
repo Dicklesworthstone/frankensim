@@ -2,10 +2,10 @@
   "schema": "frankensim-music-e2e-baselines-v1",
   "determinism_class": "one-host",
   "note": "WAV blake3 hashes recorded on the first green run; the music stack claims one-host bit-determinism only (zero cross-ISA goldens exist, bead 3ez8g.13.4). Lanes compare these as a NOTE by default and gate only under --enforce-baseline on the recording host; a drift under enforcement is a golden event (explain + update same-commit).",
-  "recorded_on": "darwin-arm64 machine 80cb534fbaf60b50 (the budget-lane fingerprint host)",
+  "recorded_on": "thinkstation1 (ts1, x86_64 Zen 3; central IRP verify host, clean checkout). reed re-recorded 2026-10-16 at 6c5505113 (release and debug identical); string unchanged since its darwin-arm64 recording and bit-identical on ts1",
   "seconds": "0.25",
   "reed-flanged-baffled": null,
   "reed-flanged-baffled-status": "pending first native qualification run; registrar records the real one-host hash",
-  "reed": "05ca73192645e1664d5175435bc611a4469d9478f7fc8e2b0c57aae4b7f9491b",
+  "reed": "aec80ef2ad99cbf153a3e5138770dfc7823a288818f436bfe29ae5f5b5cd1554",
   "string": "21df49fba4a3c2a8cf1663b30b023ff416b973082c58236b64f4f982175bc487"
 }
