@@ -1114,7 +1114,6 @@ fn termination_impedance(
                     state.sound_speed,
                     radius,
                     omega,
-                    8,
                 )
                 .map_err(|_| DuctError::BadParameter {
                     what: "baffled piston radiation",
