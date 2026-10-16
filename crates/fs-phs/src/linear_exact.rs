@@ -947,4 +947,38 @@ mod tests {
             Err(PhsError::LinearSplitBudget { .. })
         ));
     }
+
+    #[test]
+    fn coupled_quadratic_block_retains_off_diagonal_storage_and_loss() {
+        let sys = PortHamiltonian::new(
+            2,
+            0,
+            vec![0.0, 1.0, -1.0, 0.0],
+            vec![0.2, 0.1, 0.1, 0.3],
+            vec![],
+            Box::new(QuadraticStorage::new(vec![5.0, 4.0, 4.0, 5.0], 2).unwrap()),
+        )
+        .unwrap();
+        let split = split_quadratic(&sys, budget(2)).unwrap();
+        let (dt, initial) = (0.17, [0.3, -0.2]);
+        let record =
+            step_split(&sys, &split, LinearPropagator::ExactZoh, &initial, &[], dt).unwrap();
+        // Independently multiply (J-R)Q: [[2.6,3.7],[-6.7,-5.9]].
+        // For A=alpha I+B, trace B=0 and B²=-beta² I,
+        // exp(Ah)=exp(alpha h)[cos(beta h)I+sin(beta h)B/beta].
+        let a = [2.6, 3.7, -6.7, -5.9];
+        let alpha = 0.5 * (a[0] + a[3]);
+        let beta = det::sqrt(a[0] * a[3] - a[1] * a[2] - alpha * alpha);
+        let envelope = det::exp(alpha * dt);
+        let s = det::sin(beta * dt) / beta;
+        let c = det::cos(beta * dt);
+        for i in 0..2 {
+            let expected = envelope
+                * (c * initial[i]
+                    + s * ((a[i * 2] - if i == 0 { alpha } else { 0.0 }) * initial[0]
+                        + (a[i * 2 + 1] - if i == 1 { alpha } else { 0.0 }) * initial[1]));
+            relative(record.x[i], expected, 1.0, 1e-12);
+        }
+        assert!(record.balance_residual().abs() <= 1e-12 * sys.hamiltonian(&initial));
+    }
 }

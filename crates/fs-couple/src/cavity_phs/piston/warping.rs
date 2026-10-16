@@ -1,0 +1,108 @@
+//! G1 small-signal map of the actual source-backed gas/momentum owner.
+use super::tests::{controls, drive, gas};
+use super::*;
+use fs_material::thermochemical_gas::energy::entropy::GasEntropySolve;
+use fs_math::det;
+
+fn advance(omega: f64, dt: f64, coordinate: usize, signed_amplitude: f64) -> [f64; 2] {
+    let mut parcel = gas(0.75, 0.0);
+    let initial_volume = parcel.volume_m3();
+    let area = 0.01;
+    let medium = parcel.state().state();
+    let mass = medium.density * medium.sound_speed * medium.sound_speed * area * area
+        / (initial_volume * omega * omega);
+    let exterior_pressure = medium.pressure;
+    let q = if coordinate == 0 {
+        signed_amplitude
+    } else {
+        0.0
+    };
+    let v = if coordinate == 1 {
+        omega * signed_amplitude
+    } else {
+        0.0
+    };
+    if q != 0.0 {
+        parcel
+            .set_volume_isentropic(
+                initial_volume + area * q,
+                GasEntropySolve {
+                    minimum_temperature_k: 200.0,
+                    maximum_temperature_k: 1800.0,
+                    entropy_tolerance_j_kg_k: 1e-11,
+                    maximum_iterations: 128,
+                },
+                || false,
+            )
+            .unwrap();
+    }
+    let mut model = GasPiston::new(parcel, mass, area, v).unwrap();
+    let mut solve = controls();
+    solve.momentum_tolerance_n_s = 1e-14;
+    solve.energy_tolerance_j = 1e-10;
+    solve.gas.energy_tolerance_j_kg = 1e-10;
+    model
+        .step(
+            PistonInput {
+                duration_s: dt,
+                exterior_pressure_pa: exterior_pressure,
+                ..drive(0.0)
+            },
+            solve,
+            || false,
+        )
+        .unwrap();
+    [
+        (model.gas().volume_m3() - initial_volume) / area,
+        model.velocity_m_s() / omega,
+    ]
+}
+
+fn phase(omega: f64, dt: f64, amplitude: f64) -> f64 {
+    let columns: Vec<_> = (0..2)
+        .map(|coordinate| {
+            let plus = advance(omega, dt, coordinate, amplitude);
+            let minus = advance(omega, dt, coordinate, -amplitude);
+            [
+                (plus[0] - minus[0]) / (2.0 * amplitude),
+                (plus[1] - minus[1]) / (2.0 * amplitude),
+            ]
+        })
+        .collect();
+    let re = 0.5 * (columns[0][0] + columns[1][1]);
+    let determinant = columns[0][0] * columns[1][1] - columns[1][0] * columns[0][1];
+    assert!(determinant > re * re);
+    det::atan2(det::sqrt(determinant - re * re), re).abs()
+}
+
+#[test]
+fn piston_small_signal_warping_matches_midpoint_on_amplitude_ladder() {
+    let omega = core::f64::consts::TAU * 1_000.0;
+    for z in [0.1, 1.0, 2.5] {
+        let expected = 2.0 * det::atan(0.5 * z);
+        let mut observed = Vec::new();
+        for amplitude in [1e-4, 5e-5, 2.5e-5] {
+            let measured = phase(omega, z / omega, amplitude);
+            let defect = 1200.0 * det::ln(measured / expected) / core::f64::consts::LN_2;
+            observed.push(defect.abs());
+            println!(
+                "{{\"path\":\"cavity_phs::piston::GasPiston\",\"integrator\":\"midpoint gas/momentum\",\"omega_hz\":1000,\"sample_rate_hz\":{},\"omega_dt\":{},\"amplitude_m\":{},\"measured_cents\":{},\"predicted_cents\":{},\"linearization_error_cents\":{},\"tolerance_cents\":0.01,\"verdict\":\"requires-migration\"}}",
+                omega / z,
+                z,
+                amplitude,
+                1200.0 * det::ln(measured / z) / core::f64::consts::LN_2,
+                1200.0 * det::ln(expected / z) / core::f64::consts::LN_2,
+                defect
+            );
+        }
+        assert!(
+            observed[2] < 0.01,
+            "source-backed linear limit differs by {} cents",
+            observed[2]
+        );
+        assert!(
+            observed[0] > observed[2],
+            "amplitude axis must affect the linearization error"
+        );
+    }
+}
