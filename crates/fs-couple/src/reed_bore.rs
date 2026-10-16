@@ -266,6 +266,40 @@ pub(crate) fn solve_reed_wave_fast(
     u_body: f64,
     stats: &mut FastSolveStats,
 ) -> Result<f64, AcousticRealizeError> {
+    solve_reed_wave_fast_tolerance(
+        reed,
+        rho,
+        zc,
+        r0,
+        p_minus_hist,
+        p_m,
+        guess,
+        u_body,
+        stats,
+        NEWTON_STEP_TOL,
+    )
+}
+
+// Same guarded Newton algorithm, with an explicit dimensionless relative
+// pressure-step tolerance for convergence studies. No physics/control changes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_reed_wave_fast_tolerance(
+    reed: BeatingReed,
+    rho: f64,
+    zc: f64,
+    r0: f64,
+    p_minus_hist: f64,
+    p_m: f64,
+    guess: f64,
+    u_body: f64,
+    stats: &mut FastSolveStats,
+    step_tolerance: f64,
+) -> Result<f64, AcousticRealizeError> {
+    if !step_tolerance.is_finite() || step_tolerance <= 0.0 || step_tolerance > 1.0 {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "Newton step tolerance must be in (0, 1]",
+        });
+    }
     // Shared closed-branch early-out: identical bytes in both modes
     // (no aperture flow at all), so it is not a solver-work sample.
     if let Some(closed_plus) = closed_reed_wave(reed, zc, r0, p_minus_hist, p_m, u_body) {
@@ -308,7 +342,7 @@ pub(crate) fn solve_reed_wave_fast(
         }
         // Converged on an UNDOUBLED full step; a backtracked step means
         // "still descending", never "done".
-        let converged = halvings == 0 && full_step.abs() <= NEWTON_STEP_TOL * (1.0 + p_new.abs());
+        let converged = halvings == 0 && full_step.abs() <= step_tolerance * (1.0 + p_new.abs());
         p = p_new;
         f = f_new;
         if converged {
@@ -570,7 +604,7 @@ pub(crate) fn solve_reed_wave(
 }
 
 #[allow(clippy::too_many_arguments)] // one coherent junction record
-fn reed_flow_mismatch(
+pub(crate) fn reed_flow_mismatch(
     reed: BeatingReed,
     rho: f64,
     zc: f64,
