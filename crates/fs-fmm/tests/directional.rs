@@ -508,6 +508,7 @@ fn dfmm_translation_rotation_invariance() {
 
 #[test]
 fn dfmm_caps_refuse() {
+    let started = Instant::now();
     let (points, normals) = fixture(16);
     let kernel = HelmholtzSingle {
         k: 370.0 / side(&points),
@@ -617,6 +618,13 @@ fn dfmm_caps_refuse() {
             ..
         })
     ));
+    emit(
+        "dfmm-caps",
+        format!(
+            "{{\"case\":\"dfmm-caps\",\"inputs\":\"analytic two-cluster cloud; cone/order/rank/depth/coefficient/oracle boundaries\",\"axis\":\"cap-plus-one\",\"rung\":1,\"observed\":{needed},\"oracle\":\"cap accepted; one past refused by name\",\"err\":0,\"tol\":0,\"verdict\":\"refused\",\"elapsed_s\":{}}}",
+            started.elapsed().as_secs_f64()
+        ),
+    );
 }
 
 #[test]
@@ -627,6 +635,7 @@ fn dfmm_bitwise_repeat() {
         k: 130.0 / side(&points),
     };
     for kind in 0..4 {
+        let started = Instant::now();
         let o = options(1e-5, 1);
         let a = operator(kind, &kernel, &points, &normals, o.clone());
         let b = operator(kind, &kernel, &points, &normals, o);
@@ -634,5 +643,12 @@ fn dfmm_bitwise_repeat() {
         assert_eq!(reference, bits(&a.potentials(&q).unwrap()));
         assert_eq!(reference, bits(&b.potentials(&q).unwrap()));
         assert_eq!(a.stats(), b.stats());
+        emit(
+            "dfmm-bitwise",
+            format!(
+                "{{\"case\":\"dfmm-bitwise\",\"inputs\":\"analytic two-cluster cloud, repeated apply and independent reconstruction\",\"seed\":{SEED},\"axis\":\"kernel-kind\",\"rung\":{kind},\"observed\":0,\"err\":0,\"tol\":0,\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+                started.elapsed().as_secs_f64()
+            ),
+        );
     }
 }
