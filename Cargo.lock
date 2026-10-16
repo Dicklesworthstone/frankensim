@@ -1078,12 +1078,16 @@ dependencies = [
 name = "fs-bem"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-casebook",
+ "fs-duct",
  "fs-fmm",
  "fs-geom",
  "fs-la",
  "fs-material",
  "fs-math",
+ "fs-mms",
+ "fs-phs",
  "fs-rep-mesh",
  "fs-solver",
 ]
@@ -1255,6 +1259,7 @@ dependencies = [
  "asupersync 0.6.0",
  "fs-alloc",
  "fs-blake3",
+ "fs-dcontact",
  "fs-evidence",
  "fs-exec",
  "fs-ga",
@@ -1264,6 +1269,7 @@ dependencies = [
  "fs-matdb",
  "fs-material",
  "fs-motion",
+ "fs-phs",
  "fs-qty",
  "fs-query",
  "fs-tribo",
@@ -1310,12 +1316,14 @@ dependencies = [
  "fs-iface",
  "fs-io",
  "fs-la",
+ "fs-ladder",
  "fs-matdb",
  "fs-material",
  "fs-math",
  "fs-mbd",
  "fs-mbd-material",
  "fs-modal",
+ "fs-modalid",
  "fs-nlmodal",
  "fs-orbit",
  "fs-phs",
@@ -1431,7 +1439,10 @@ dependencies = [
  "fs-math",
  "fs-phs",
  "fs-qty",
+ "fs-rand",
  "fs-vvreg",
+ "fsci-runtime",
+ "fsci-special",
 ]
 
 [[package]]
@@ -1681,6 +1692,7 @@ dependencies = [
 name = "fs-fmm"
 version = "0.0.1"
 dependencies = [
+ "fs-math",
  "fs-obs",
 ]
 
@@ -2211,8 +2223,11 @@ dependencies = [
  "fs-evidence",
  "fs-matdb",
  "fs-material",
+ "fs-math",
+ "fs-mms",
  "fs-modal",
  "fs-qty",
+ "fs-rand",
  "fs-sparse",
 ]
 
@@ -2603,6 +2618,7 @@ dependencies = [
  "fs-cutfem",
  "fs-evidence",
  "fs-exec",
+ "fs-feec",
  "fs-ga",
  "fs-ivl",
  "fs-la",
@@ -2610,6 +2626,7 @@ dependencies = [
  "fs-material",
  "fs-math",
  "fs-mesh",
+ "fs-mms",
  "fs-modal",
  "fs-phs",
  "fs-qty",
