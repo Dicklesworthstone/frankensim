@@ -2,6 +2,8 @@
 //! The caller supplies the other side's temperature for THIS nonlinear trial.
 //! A finite network must debit the returned signed heat and accept both endpoints.
 
+/// Two thermal ports sharing one paired-gas momentum solve.
+pub mod double_acting;
 /// Finite circuit and thermal network feedback on this same boundary.
 pub mod network;
 /// Simultaneous signed heat contacts sharing one gas energy midpoint.
