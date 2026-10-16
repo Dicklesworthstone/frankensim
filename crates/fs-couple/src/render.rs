@@ -575,6 +575,8 @@ impl core::fmt::Display for RenderError {
     }
 }
 
+impl std::error::Error for RenderError {}
+
 /// One voice slot: the admitted performance images this context can host.
 #[allow(clippy::large_enum_variant)] // a handful of voice slots; boxing would ripple the API
 pub enum RenderVoice {
