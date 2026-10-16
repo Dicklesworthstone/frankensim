@@ -35,7 +35,7 @@ render-gpu --precompile sm_89                                        # fill the 
 - The compiled kernel is cached in `~/.cache/fs-render-gpu/`.
 - A compile takes about 5 s on an idle host. On a heavily loaded build host it can take 15 minutes. In that case, run `--precompile` elsewhere (only NVRTC is needed, no GPU) and copy the cache directory over.
 
-**Without a GPU,** `--chunks` and `--batch` run one CPU thread per simulation.
+**Without a GPU,** `--chunks` and `--batch` run one CPU thread per simulation. On macOS (no CUDA) that is the fast path for a long piece: the Strandbar hi-hat (17.4 s, 32 chunks) took 793 s on an M5 Ultra's 36 cores, on a busy host, against 2551 s rendered continuously on one core.
 
 ## How it works
 
