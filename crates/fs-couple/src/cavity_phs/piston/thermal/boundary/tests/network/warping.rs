@@ -65,7 +65,7 @@ fn network_piston_observed_order_is_one() {
     // Four solutions give three actual differences and two observed orders.
     // The thermal endpoint, electrical material and moving gas all execute;
     // no backward-Euler scalar surrogate stands in for this production path.
-    let rungs = [40, 80, 160, 320];
+    let rungs = [160, 320, 640, 1280];
     let values: Vec<_> = rungs.into_iter().map(trajectory).collect();
     let errors: Vec<_> = values
         .windows(2)

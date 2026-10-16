@@ -11,8 +11,18 @@ use std::io::Cursor;
 
 #[test]
 fn cavity_feedback_changes_observed_pressure_without_radiating_acoustic_coordinates_directly() {
-    let radiation=artifact();
-    let make=|standing:bool,connected:bool| {
+    const MECHANICS_RATE: u32 = 192_000;
+    let radiation = ImpactRadiation::from_velocity_samples(
+        &samples(),
+        BroadbandRadiationControls {
+            sample_rate_hz: f64::from(MECHANICS_RATE),
+            ..controls()
+        },
+        0.08,
+        343.0,
+    )
+    .unwrap();
+    let make = |standing: bool, connected: bool| {
         let (striker,weight)=ImpactBody::free_mass(0.04,-0.0001,0.2).unwrap();
         let receiver=ImpactBody {potential:BodyPotential::Linear(vec![core::f64::consts::TAU*300.0]),
             initial:vec![ModalAcousticState::default()],damping_per_s:vec![3.0]};
@@ -21,20 +31,25 @@ fn cavity_feedback_changes_observed_pressure_without_radiating_acoustic_coordina
         let count=if standing {2}else{1};
         let cavity=CavityModes {omegas:if standing {vec![0.0,core::f64::consts::TAU*700.0]}else{vec![0.0]},
             lambdas:vec![0.01;count],interface:vec![vec![1.0];count],loss_factor:0.0,rho0:1.2,c0:343.0};
-        let mut coupling=vec![0.0;2*count];coupling[count..].fill(0.04);
-        let config=ImpactConfig {dt_s:1.0/f64::from(RATE),max_steps:1028,maximum_energy_j:10.0,
+        let mut coupling = vec![0.0; 2 * count];
+        coupling[count..].fill(0.04);
+        let config=ImpactConfig {dt_s:1.0/f64::from(MECHANICS_RATE),max_steps:4112,maximum_energy_j:10.0,
             energy_absolute_tolerance_j:1e-10,energy_relative_tolerance:1e-7,maximum_generalized_force:1000.0};
         let (system,air)=CavityCoupling::new(&cavity,2,&coupling,&vec![0.0;count]).unwrap()
             .build(vec![striker,receiver],if connected {vec![contact]}else{vec![]},vec![],config,
                 &CancelGate::new_clock_free()).unwrap();
-        let n=air.total_modes();let mut weights=vec![0.0;n];weights[1]=1.0;
+        let n = air.total_modes();
+        let mut weights = vec![0.0; n];
+        weights[1] = 1.0;
         let source=ImpactPressureRenderer::new(system.prepare().unwrap(),&radiation,
             vec![VelocityProjection {input_id:"surface_velocity_m_s".into(),weights}],
-            vec![0.0;n],listener(1.0),RATE,97).unwrap();
-        DecimatedRenderer::new(source,RATE,RATE/4,43).unwrap()
+            vec![0.0;n],listener(1.0),MECHANICS_RATE,97).unwrap();
+        DecimatedRenderer::new(source, MECHANICS_RATE, RATE / 4, 43).unwrap()
     };
-    let mut baseline=make(true,true);let mut compact=make(false,true);
-    let mut actual=vec![0.0;257];let mut old=vec![0.0;257];
+    let mut baseline = make(true, true);
+    let mut compact = make(false, true);
+    let mut actual = vec![0.0; 257];
+    let mut old = vec![0.0; 257];
     for (a,b) in actual.chunks_mut(17).zip(old.chunks_mut(17)) {baseline.block(a).unwrap();compact.block(b).unwrap();}
     assert!(actual.iter().any(|v|v.abs()>1e-6));
     assert!(actual.iter().zip(&old).any(|(a,b)|(a-b).abs()>1e-6),"standing-wave feedback must change receiver sound");

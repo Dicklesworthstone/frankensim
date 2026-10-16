@@ -248,7 +248,7 @@ mod viscous_tests {
             pluck: Some(Pluck { station_frac: 0.25, height_m: 1e-5 }), bow: None, blow: None,
             reed: None, soundboard: None, body_modes: vec![], plate: None, cavity: None,
             obstacles: vec![], contact_texture: None, listener: Listener { distance_m: 1.0 },
-            sample_rate_hz: 16000, duration_s: 0.008 }
+            sample_rate_hz: 128000, duration_s: 0.008 }
     }
 
     #[test]
@@ -270,7 +270,7 @@ mod viscous_tests {
         let ra = a.realize().unwrap();
         let rb = b.realize().unwrap();
         assert_eq!(ra.gas, rb.gas);
-        assert_eq!(ra.pressure_pa.len(), 128);
+        assert_eq!(ra.pressure_pa.len(), 1024);
         assert!(ra.pressure_pa.iter().chain(&rb.pressure_pa).all(|v| v.is_finite()));
         assert!(ra.pressure_pa.iter().any(|v| *v != 0.0));
         assert_ne!(ra.pressure_pa, rb.pressure_pa);
