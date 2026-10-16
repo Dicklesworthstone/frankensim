@@ -30,7 +30,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
     [--hammers materials.fsh] [--string-sections bonded.fsss]
     [--hammer-footprints faces.fshp]
-    [--dampers estimated | point | pads.fspd] [--string-stretching axial.fspx]
+    [--dampers estimated | point | pads.fspd] [--fast-dampers] [--string-stretching axial.fspx]
     [--string-polarization bridge-frames.fspp]
     [--cavity enclosure.fspc]
     [--rayleigh-loading sides,min_hz,max_hz,samples]
@@ -134,6 +134,10 @@ Felt pads additionally require supplied geometry, travel speed and material
 cards. MIDI/CSV key, sustain and sostenuto controls move their contact height;
 felt contact, stored energy and signed actuator work enter the mechanics solve.
 It requires --render. See DAMPERS.md for SI formats and model limits.
+--fast-dampers carries the spatial viscous pads' flows on reduced coordinates:
+each pad's stations move the board along one bridge direction, so a station
+needs only its string's modes and one scalar. Same flows in exact arithmetic,
+different rounding; about 3x less damper work. Off by default (the reference).
 --string-polarization adds both transverse directions of each physical string.
 Its complete per-key file supplies bridge sites, 3-D arms, string/hammer axes
 and lateral damper ratios. The same board solve projects both bridge rows;
@@ -270,7 +274,7 @@ struct Options {
     hammers: Option<String>, string_sections: Option<String>, hammer_footprints: Option<String>, dampers: Option<String>,
     string_stretching: Option<String>, string_polarization: Option<String>, cavity: Option<String>,
     midi: Option<String>, midi_mapping: midi::Mapping,
-    concert_pitch: Option<f64>, stretch_tuning: Option<f64>, raw_tensions: bool,
+    concert_pitch: Option<f64>, stretch_tuning: Option<f64>, raw_tensions: bool, fast_dampers: bool,
     rt0425_bridge_contacts: bool, rt0425_hammer_stiffness: bool,
     rt0425_hammer_dissipation: bool, rt0425_string_damping: bool,
     equilibrate_board_mass: bool, consistent_board_mass: bool, edge_cubic_board_mass: bool,
@@ -291,7 +295,7 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self { render: None, scale: None, board: None, board_geometry: None,
-            performance: None, preset: None, hammers: None, string_sections: None, hammer_footprints: None, dampers: None, concert_pitch: None, stretch_tuning: None, raw_tensions: false,
+            performance: None, preset: None, hammers: None, string_sections: None, hammer_footprints: None, dampers: None, concert_pitch: None, stretch_tuning: None, raw_tensions: false, fast_dampers: false,
             rt0425_bridge_contacts: false, rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false, rt0425_string_damping: false,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
@@ -319,6 +323,7 @@ impl Options {
             if !seen.insert(flag.as_str()) { return Err(format!("duplicate option {flag}")); }
             if flag == "--diagnostic-volume" { options.diagnostic_volume = true; continue; }
             if flag == "--raw-tensions" { options.raw_tensions = true; continue; }
+            if flag == "--fast-dampers" { options.fast_dampers = true; continue; }
             if flag == "--rt0425-bridge-contacts" { options.rt0425_bridge_contacts = true; continue; }
             if flag == "--rt0425-hammer-stiffness" { options.rt0425_hammer_stiffness = true; continue; }
             if flag == "--rt0425-hammer-dissipation" { options.rt0425_hammer_dissipation = true; continue; }
@@ -684,6 +689,9 @@ fn prepare_instrument_with_board_damping(scale: Vec<geometry::Course>, modes: &[
     let mut piano = prepare_instrument_with_admitted_materials(scale, modes, options, text.as_deref(), stretching, polarization)?;
     if let Some(c) = physical_damping { piano.configure_bare_board_damping(c)?; }
     if let Some(spec) = &dampers { piano.configure_damper_spec(spec)?; }
+    if options.fast_dampers && !piano.use_reduced_dampers() {
+        return Err("--fast-dampers needs spatial dampers (--dampers estimated, a pad file, or a preset)".into());
+    }
     Ok(piano)
 }
 fn prepare_instrument_with_hammers(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],

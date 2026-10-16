@@ -426,6 +426,11 @@ impl Instrument {
         self.felt_dampers=Some(prepared);
         Ok(())
     }
+    /// Carry the spatial dampers' flows on reduced coordinates (`--fast-dampers`; see
+    /// `dampers::Prepared::apply_reduced`). False when no spatial dampers are configured.
+    pub fn use_reduced_dampers(&mut self)->bool{
+        match &mut self.spatial_dampers {Some(d)=>{d.use_reduced();true} None=>false}
+    }
     pub fn felt_damper_resolution(&self)->Option<(usize,usize)>{
         self.felt_dampers.as_ref().map(felt_dampers::Prepared::resolution)
     }
@@ -557,10 +562,12 @@ impl Instrument {
         // The finite-gap owner supplies actual contact forces in mechanics.
         // Even explicit free rows must remain free of the fallback drag image.
         if self.felt_dampers.is_some() {return Ok(0.0);}
-        if let Some(dampers)=&self.spatial_dampers {
+        if let Some(dampers)=&mut self.spatial_dampers {
             let hammers=&self.hammers;
-            return dampers.apply(&mut self.bank.v,dt,self.sustain,
-                |ci|hammers[ci].held||hammers[ci].latched).map_err(Error::Contact);
+            let lifted=|ci:usize|hammers[ci].held||hammers[ci].latched;
+            let applied=if dampers.is_reduced() {dampers.apply_reduced(&mut self.bank.v,dt,self.sustain,lifted)}
+                else {dampers.apply(&mut self.bank.v,dt,self.sustain,lifted)};
+            return applied.map_err(Error::Contact);
         }
         if !self.damper_drag_ns_m.is_finite()||self.damper_drag_ns_m<0.0{return Err(Error::InvalidControl);}
         let mut loss=0.0;

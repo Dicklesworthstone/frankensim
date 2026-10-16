@@ -122,6 +122,16 @@ struct StringPad {
     points: Vec<Point>,
 }
 
+/// `apply_reduced`'s constants: per pad |bridge|^2, per station its norm |shape|^2 + lift^2 |bridge|^2,
+/// and per station expm1(-drag norm dt) / norm for the engagement and interval they were last built for
+/// (they change only with the pedal).
+struct Reduced {
+    bridge_norm2: Vec<f64>,
+    norm: Vec<Vec<f64>>,
+    factor: Vec<Vec<f64>>,
+    key: Option<(u64, u64)>,
+}
+
 /// Frozen displacement/force projections in the Bank's loaded coordinates.
 /// Does not contain, duplicate, reset or truncate any resonator state.
 pub struct Prepared {
@@ -129,6 +139,7 @@ pub struct Prepared {
     dimension: usize,
     board_start: usize,
     cells: usize,
+    reduced: Option<Reduced>,
 }
 impl Prepared {
     pub fn new(spec: &Specification, courses: &[Course], bank: &Bank) -> Result<Self, String> {
@@ -205,7 +216,79 @@ impl Prepared {
             pads.push(StringPad { course: s.course, modes: s.modes.clone(), bridge: s.bridge.clone(),
                 drag_ns_m, points });
         }
-        Ok(Self { pads, dimension, board_start, cells })
+        Ok(Self { pads, dimension, board_start, cells, reduced: None })
+    }
+
+    /// Select `apply_reduced` for this damper set (`--fast-dampers`). The default `apply` keeps its
+    /// order of arithmetic; this one carries the same flows on fewer coordinates.
+    pub fn use_reduced(&mut self) {
+        let bridge_norm2: Vec<f64> = self.pads.iter().map(|p| p.bridge.iter().map(|b| b * b).sum()).collect();
+        let norm: Vec<Vec<f64>> = self.pads.iter().zip(&bridge_norm2).map(|(p, &nb2)| {
+            p.points.iter().map(|pt| pt.shape.iter().map(|g| g * g).sum::<f64>() + pt.lift * pt.lift * nb2).collect()
+        }).collect();
+        let factor = norm.iter().map(|n| vec![0.0; n.len()]).collect();
+        self.reduced = Some(Reduced { bridge_norm2, norm, factor, key: None });
+    }
+
+    /// Whether `use_reduced` was selected.
+    pub fn is_reduced(&self) -> bool { self.reduced.is_some() }
+
+    /// `apply`'s palindrome of exact rank-one flows, carried on fewer coordinates. Every station of a pad
+    /// moves the board along that pad's one bridge direction b, scaled by the station's lift, so a pad's
+    /// run of stations needs only its string modes and the scalar beta = b . v_board: a station's speed is
+    /// shape . v_string + lift beta, its update moves beta by lift |b|^2 change, and the board takes one
+    /// update b sum(lift change) at the end of the run. The flows, their order and the reported loss are
+    /// those of `apply` in exact arithmetic; the rounding differs. Per station the work falls from three
+    /// passes over (string modes + board coordinates) to two over the string modes, and the norms and the
+    /// expm1 factors are computed once per pedal value instead of at every station.
+    pub fn apply_reduced(&mut self, velocity: &mut [f64], dt: f64, sustain: f64,
+        lifted: impl Fn(usize) -> bool) -> Result<f64, &'static str> {
+        if velocity.len() != self.dimension || velocity.iter().any(|x| !x.is_finite())
+            || !dt.is_finite() || dt <= 0.0 || dt > 1.0
+            || !sustain.is_finite() || !(0.0..=1.0).contains(&sustain) {
+            return Err("invalid damper velocity, duration or pedal control");
+        }
+        if sustain == 1.0 { return Ok(0.0); }
+        let engagement = (1.0-sustain).powi(2);
+        let Some(red) = self.reduced.as_mut() else { return Err("reduced dampers were not selected"); };
+        let key = (engagement.to_bits(), dt.to_bits());
+        if red.key != Some(key) {
+            for (pi, pad) in self.pads.iter().enumerate() {
+                let drag = pad.drag_ns_m * engagement / pad.points.len() as f64;
+                for (f, &n) in red.factor[pi].iter_mut().zip(&red.norm[pi]) {
+                    *f = if drag == 0.0 { 0.0 } else { det::expm1(-drag*n*(0.5*dt)) / n };
+                }
+            }
+            red.key = Some(key);
+        }
+        let (strings, board) = velocity.split_at_mut(self.board_start);
+        let mut loss = 0.0;
+        let mut run = |pi: usize, forward: bool| {
+            let pad = &self.pads[pi];
+            let v = &mut strings[pad.modes.clone()];
+            let nb2 = red.bridge_norm2[pi];
+            let mut beta: f64 = pad.bridge.iter().zip(board.iter()).map(|(b, x)| b * x).sum();
+            let mut moved = 0.0;
+            let n = pad.points.len();
+            for t in 0..n {
+                let i = if forward { t } else { n - 1 - t };
+                let pt = &pad.points[i];
+                let speed = pt.shape.iter().zip(v.iter()).map(|(g, x)| g * x).sum::<f64>() + pt.lift * beta;
+                let change = red.factor[pi][i] * speed;
+                for (x, g) in v.iter_mut().zip(&pt.shape) { *x += g * change; }
+                beta += pt.lift * nb2 * change;
+                moved += pt.lift * change;
+                loss += -change*speed-0.5*change*change*red.norm[pi][i];
+            }
+            for (x, b) in board.iter_mut().zip(&pad.bridge) { *x += b * moved; }
+        };
+        for (pi, pad) in self.pads.iter().enumerate() {
+            if !lifted(pad.course) { run(pi, true); }
+        }
+        for (pi, pad) in self.pads.iter().enumerate().rev() {
+            if !lifted(pad.course) { run(pi, false); }
+        }
+        Ok(loss)
     }
 
     /// Number of damped scalar direction fields; a two-plane string may count twice.
@@ -350,11 +433,43 @@ mod tests {
         }
     }
     #[test]
+    fn reduced_coordinates_carry_the_same_flows_and_losses_as_the_full_chain() {
+        // two pads sharing a two-mode board through different bridge rows: the board couples them
+        let low = Course { midi: 57, length_m: 1.4, ..course() };
+        let courses = [low, course()];
+        let rows: [f64; 88] = std::array::from_fn(|i| 0.02*i as f64 - 0.3);
+        let board = [BoardMode { frequency_hz: 100.0, damping_ratio: 0.0, bridge: [0.1;88], volume: 0.1 },
+            BoardMode { frequency_hz: 173.0, damping_ratio: 0.0, bridge: rows, volume: 0.05 }];
+        let b = Bank::new(&courses, &board, 192_000, 21_600.0, 32, false).unwrap();
+        let spec = Specification::read(&format!("{HEADER}\npad,57,0.40,0.50,0.4\npad,69,0.33,0.37,0.4\n"), &courses).unwrap();
+        let full = Prepared::new(&spec, &courses, &b).unwrap();
+        let mut fast = Prepared::new(&spec, &courses, &b).unwrap();
+        fast.use_reduced();
+        assert!(fast.is_reduced() && !full.is_reduced());
+        let v0: Vec<f64> = (0..b.v.len()).map(|i| ((i*37 % 11) as f64 - 5.0)*0.01).collect();
+        for (pedal, lifted_course) in [(0.0, None), (0.4, None), (0.0, Some(0usize)), (0.0, Some(1)), (0.4, None), (1.0, None)] {
+            let lifted = |ci: usize| Some(ci) == lifted_course;
+            let (mut a, mut r) = (v0.clone(), v0.clone());
+            let la = full.apply(&mut a, 0.002, pedal, lifted).unwrap();
+            let lr = fast.apply_reduced(&mut r, 0.002, pedal, lifted).unwrap();
+            for (k, (x, y)) in a.iter().zip(&r).enumerate() {
+                assert!((x-y).abs() <= 1e-14, "pedal {pedal}, lifted {lifted_course:?}: coordinate {k} {x} vs {y}");
+            }
+            assert!((la-lr).abs() <= 1e-12*la.abs().max(1e-30), "loss {la} vs {lr}");
+            if pedal < 1.0 { assert!(la > 0.0 && a != v0, "the dampers did nothing"); }
+        }
+        // the full chain is still required for an unprepared set
+        let mut v = v0.clone();
+        let mut plain = Prepared::new(&spec, &courses, &b).unwrap();
+        assert!(plain.apply_reduced(&mut v, 0.002, 0.0, |_| false).is_err());
+        assert_eq!(v, v0);
+    }
+    #[test]
     fn symmetric_shared_port_flow_converges_to_the_full_damping_operator() {
         // Deliberately noncommuting rows, with eigenanalysis ONLY as test oracle.
         let d = Prepared { pads: vec![StringPad { course: 0, modes: 0..2, bridge: vec![],
             drag_ns_m: 1.0, points: vec![Point { shape: vec![1.0,0.0], lift: 0.0 },
-                Point { shape: vec![1.0,1.0], lift: 0.0 }] }], dimension: 2, board_start: 2, cells: 2 };
+                Point { shape: vec![1.0,1.0], lift: 0.0 }] }], dimension: 2, board_start: 2, cells: 2, reduced: None };
         let eig = fs_modal::eigh_gen_dense(&[1.0,0.5,0.5,0.5], &[1.0,0.0,0.0,1.0], 2).unwrap();
         let initial = [0.3,-0.2]; let time = 0.8; let mut exact = [0.0;2];
         for e in eig {
