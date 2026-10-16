@@ -2234,6 +2234,7 @@ dependencies = [
  "fs-modal",
  "fs-qty",
  "fs-rand",
+ "fs-rep-nurbs",
  "fs-sparse",
 ]
 
@@ -2533,9 +2534,12 @@ dependencies = [
  "fs-ivl",
  "fs-ledger",
  "fs-math",
+ "fs-mesh",
  "fs-motion",
+ "fs-plate",
  "fs-qty",
  "fs-rand",
+ "fs-rep-nurbs",
 ]
 
 [[package]]
