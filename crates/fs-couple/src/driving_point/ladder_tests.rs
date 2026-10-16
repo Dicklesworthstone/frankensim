@@ -573,7 +573,7 @@ fn converged_line_passive_without_clipping() {
         sample_rate_hz: 24_000,
         n_modes: 3,
         extra_slices: 1,
-        loss: LossModel::WideTube,
+        loss: LossModel::Bessel,
     };
     let mm_bank = crate::mm_line::MmLineBank::new(
         &[brass],

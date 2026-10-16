@@ -45,6 +45,15 @@ pub enum MmLineError {
     Duct(DuctError),
     /// The realized line refused.
     Discrete(DiscretizeError),
+    /// The shared line ladder reached `max_taps` before every combo converged.
+    LadderUnconverged {
+        /// Ceiling reached [taps].
+        max_taps: usize,
+        /// Worst combo's fourth-quarter tail energy at the ceiling.
+        tail_energy: f64,
+        /// Worst combo's first-three-peak shift [cents] at the ceiling.
+        peak_shift_cents: f64,
+    },
 }
 
 impl core::fmt::Display for MmLineError {
@@ -53,6 +62,15 @@ impl core::fmt::Display for MmLineError {
             MmLineError::Invalid { what } => write!(f, "FS-COUPLE-MMLINE: {what}"),
             MmLineError::Duct(e) => write!(f, "FS-COUPLE-MMLINE duct: {e}"),
             MmLineError::Discrete(e) => write!(f, "FS-COUPLE-MMLINE line: {e:?}"),
+            MmLineError::LadderUnconverged {
+                max_taps,
+                tail_energy,
+                peak_shift_cents,
+            } => write!(
+                f,
+                "FS-COUPLE-MMLINE: line ladder reached {max_taps} taps before convergence \
+                 (worst tail_energy {tail_energy:.3e}, worst peak shift {peak_shift_cents:.3} c)"
+            ),
         }
     }
 }
@@ -114,9 +132,14 @@ pub struct MmComboReceipt {
     pub table_bins: usize,
     /// DFT bins served by the analytic fallback.
     pub fallback_bins: usize,
-    /// Peak `|R|` over the realization grid BEFORE passivity
-    /// enforcement (> 1 means the enforcement clipped).
+    /// Peak `|R|` over the 4x-oversampled realization grid (must satisfy `<= 1 + 1e-12` without clipping).
     pub peak_reflectance: f64,
+    /// Number of [`crate::driving_point::LineLadder`] rungs evaluated to reach convergence.
+    pub rungs_tried: usize,
+    /// Relative energy in the fourth quarter `[3*n_fft/4 .. n_fft)` at convergence.
+    pub tail_energy: f64,
+    /// Worst shift in cents of the first three impedance peaks vs the preceding rung.
+    pub peak_shift_cents: f64,
 }
 
 /// A record of one valve switch's state lift.
@@ -148,6 +171,40 @@ pub struct MmLineBank {
     fade_total: usize,
 }
 
+/// Evaluate `mm_input_impedance`, falling back to `LossModel::Bessel` only when
+/// `LossModel::WideTube` refuses a low-frequency DFT bin below `s = 10`.
+fn mm_impedance_at(
+    duct: &Duct,
+    gas: &GasState,
+    omega: f64,
+    config: &MmLineConfig,
+    termination: Termination,
+) -> Result<ModalResponse, MmLineError> {
+    match mm_input_impedance(
+        duct,
+        gas,
+        omega,
+        config.loss,
+        termination,
+        config.n_modes,
+        config.extra_slices,
+    ) {
+        Ok(r) => Ok(r),
+        Err(DuctError::TooNarrow { .. }) if matches!(config.loss, LossModel::WideTube) => Ok(
+            mm_input_impedance(
+                duct,
+                gas,
+                omega,
+                LossModel::Bessel,
+                termination,
+                config.n_modes,
+                config.extra_slices,
+            )?,
+        ),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Sample the plane-mode load for one DFT bin under the splice policy.
 fn resolve_load(
     duct: &Duct,
@@ -157,46 +214,38 @@ fn resolve_load(
     load: &MmLoad<'_>,
 ) -> Result<(ModalResponse, bool), MmLineError> {
     match load {
-        MmLoad::Analytic(t) => Ok((
-            mm_input_impedance(
-                duct,
-                gas,
-                omega,
-                config.loss,
-                *t,
-                config.n_modes,
-                config.extra_slices,
-            )?,
-            false,
-        )),
+        MmLoad::Analytic(t) => Ok((mm_impedance_at(duct, gas, omega, config, *t)?, false)),
         MmLoad::TabulatedWithFallback { table, fallback } => {
             let (lo, hi) = table.support();
             if omega >= lo && omega <= hi {
-                Ok((
-                    mm_input_impedance_tabulated(
-                        duct,
-                        gas,
-                        omega,
-                        config.loss,
-                        table,
-                        config.n_modes,
-                        config.extra_slices,
-                    )?,
-                    true,
-                ))
+                let resp = match mm_input_impedance_tabulated(
+                    duct,
+                    gas,
+                    omega,
+                    config.loss,
+                    table,
+                    config.n_modes,
+                    config.extra_slices,
+                ) {
+                    Ok(r) => r,
+                    Err(DuctError::TooNarrow { .. })
+                        if matches!(config.loss, LossModel::WideTube) =>
+                    {
+                        mm_input_impedance_tabulated(
+                            duct,
+                            gas,
+                            omega,
+                            LossModel::Bessel,
+                            table,
+                            config.n_modes,
+                            config.extra_slices,
+                        )?
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                Ok((resp, true))
             } else {
-                Ok((
-                    mm_input_impedance(
-                        duct,
-                        gas,
-                        omega,
-                        config.loss,
-                        *fallback,
-                        config.n_modes,
-                        config.extra_slices,
-                    )?,
-                    false,
-                ))
+                Ok((mm_impedance_at(duct, gas, omega, config, *fallback)?, false))
             }
         }
     }
@@ -219,8 +268,10 @@ fn input_radius(duct: &Duct) -> Result<f64, MmLineError> {
     }
 }
 
-/// Eight-round-trip FFT sizing under the driving_point clamp-first
-/// discipline (u6pph precedent; bead frankensim-mxw6x): the grid
+/// Eight-round-trip FFT sizing for the [`MatrixFirLine`] bake-off arm.
+/// [`MmLineBank`] uses the shared convergence ladder instead (bead .82).
+/// This is the driving_point clamp-first discipline (u6pph precedent;
+/// bead frankensim-mxw6x): the grid
 /// DENSIFIES to fit eight round trips of the bore, and only an authored
 /// hard ceiling refuses — typed and loud. Sizing must never grow first
 /// and clamp after, which silently truncates reflectance memory into
@@ -245,12 +296,17 @@ fn mm_fft_taps_for(geo_delay: f64) -> Result<usize, MmLineError> {
 }
 
 impl MmLineBank {
-    /// Realize one exact-FIR plane-mode line per valve combination. All
-    /// combos share one FFT size (from the LONGEST bore) so the switch
-    /// lift is a plain history copy.
+    /// Realize one exact-FIR plane-mode line per valve combination.
+    ///
+    /// All combos share the bank's FFT size, so the switch lift is a plain
+    /// history copy. That size comes from the [`crate::driving_point::LineLadder`]
+    /// convergence ladder over every combo jointly. Passivity
+    /// (`max |R(e^{iωΔt})| <= 1`) is verified on the 4x-oversampled grid
+    /// without `1/peak` clipping.
     ///
     /// # Errors
-    /// [`MmLineError`] on refusal (geometry, authority, realization).
+    /// [`MmLineError`] on refusal: geometry, authority, non-passivity, or
+    /// [`MmLineError::LadderUnconverged`] at the ladder ceiling.
     #[allow(clippy::too_many_lines)] // one realization pipeline
     pub fn new(
         ducts: &[Duct],
@@ -270,11 +326,18 @@ impl MmLineBank {
             });
         }
         let dt = 1.0 / f64::from(config.sample_rate_hz);
-        // Shared FFT size from the longest combo (4 round trips, the
-        // driving_point clamp).
-        let mut n_fft = 0usize;
+        let r_in = input_radius(&ducts[0])?;
+        let zc0 = gas.density * gas.sound_speed / (core::f64::consts::PI * r_in * r_in);
+        let ladder = crate::driving_point::LineLadder::default();
+
+        let mut max_geo_delay = 0.0_f64;
         let mut delays = Vec::with_capacity(ducts.len());
         for duct in ducts {
+            if (input_radius(duct)? - r_in).abs() > 1e-12 * r_in {
+                return Err(MmLineError::Invalid {
+                    what: "every combo must share the input radius (one zc)",
+                });
+            }
             let length = duct_axial_length(duct);
             if !(length > 0.0) {
                 return Err(MmLineError::Invalid {
@@ -287,85 +350,170 @@ impl MmLineBank {
                     what: "round-trip delay below two samples",
                 });
             }
+            if !(4.0 * geo_delay <= ladder.max_taps as f64) {
+                return Err(MmLineError::Invalid {
+                    what: "round trip does not fit the 65536-tap line ladder",
+                });
+            }
+            max_geo_delay = max_geo_delay.max(geo_delay);
             delays.push(geo_delay);
-            // Eight round trips: the horn's low-frequency reflection
-            // memory is long (measured: a 4-trip tail left the lowest
-            // peak 92 cents flat from wrap-around aliasing). Densify or
-            // refuse loudly — never truncate.
-            let want = mm_fft_taps_for(geo_delay)?;
-            n_fft = n_fft.max(want);
         }
-        let r_in = input_radius(&ducts[0])?;
-        let zc0 = gas.density * gas.sound_speed / (core::f64::consts::PI * r_in * r_in);
-        let fft = Fft::new(n_fft);
+
+        // DC: each combo's own plane-reflectance limit (DC flow resistance
+        // keeps a lossy bore off -1). A fixed -1 that disagrees with bin 1 is
+        // a spectral jump, which leaves an N-independent tail in the IR.
+        let r_dc: Vec<C64> = ducts
+            .iter()
+            .map(|duct| {
+                resolve_load(duct, gas, 1.0e-3, config, load)
+                    .ok()
+                    .map(|(resp, _)| {
+                        reflectance(
+                            C64::new(resp.plane_impedance.re, resp.plane_impedance.im),
+                            zc0,
+                        )
+                    })
+                    .filter(|r| r.re.is_finite())
+                    .map_or(C64::new(-1.0, 0.0), |r| C64::new(r.re.clamp(-1.0, 1.0), 0.0))
+            })
+            .collect();
+
+        // Shared convergence ladder (DEF-02, bead .82). One FFT size for
+        // every combo keeps the switch lift a plain history copy. Start at
+        // four round trips of the longest bore and double until EVERY combo
+        // has tail energy < tail_tol and first-three-peak shift < peak_tol.
+        struct Rung {
+            r_pos: Vec<C64>,
+            from_table: Vec<bool>,
+            peaks: Vec<f64>,
+            ir: Vec<f64>,
+            peak: f64,
+            tail_energy: f64,
+            shift: f64,
+        }
+        let mut rungs: Vec<Rung> = ducts
+            .iter()
+            .map(|_| Rung {
+                r_pos: Vec::new(),
+                from_table: Vec::new(),
+                peaks: Vec::new(),
+                ir: Vec::new(),
+                peak: 0.0,
+                tail_energy: f64::INFINITY,
+                shift: f64::INFINITY,
+            })
+            .collect();
+        let mut n_fft = ((4.0 * max_geo_delay).ceil() as usize)
+            .max(256)
+            .next_power_of_two()
+            .min(ladder.max_taps / 2)
+            .max(256);
+        let mut rungs_tried = 0usize;
+        loop {
+            rungs_tried += 1;
+            let half = n_fft / 2;
+            let mut all_converged = true;
+            for (combo, duct) in ducts.iter().enumerate() {
+                let rung = &mut rungs[combo];
+                let mut r_pos = vec![C64::ZERO; half + 1];
+                let mut from_table = vec![false; half + 1];
+                r_pos[0] = r_dc[combo];
+                let fresh: Vec<usize> = if rung.r_pos.is_empty() {
+                    (1..=half).collect()
+                } else {
+                    // Reuse the even bins (bit-identical frequencies).
+                    for (k_prev, (&v, &t)) in rung.r_pos.iter().zip(&rung.from_table).enumerate() {
+                        r_pos[2 * k_prev] = v;
+                        from_table[2 * k_prev] = t;
+                    }
+                    (1..half).step_by(2).collect()
+                };
+                for k in fresh {
+                    let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
+                    let (response, table) = resolve_load(duct, gas, omega, config, load)?;
+                    from_table[k] = table;
+                    r_pos[k] = reflectance(
+                        C64::new(response.plane_impedance.re, response.plane_impedance.im),
+                        zc0,
+                    );
+                }
+                let geo_delay = delays[combo];
+                let ir = crate::driving_point::realize_reflectance_ir_from_positive_spectrum(
+                    &r_pos, n_fft, geo_delay, true,
+                );
+                let total_energy: f64 = ir.iter().map(|&h| h * h).sum();
+                let tail_sum: f64 = ir[3 * (n_fft / 4)..].iter().map(|&h| h * h).sum();
+                let tail_energy = if total_energy > 0.0 {
+                    tail_sum / total_energy
+                } else {
+                    0.0
+                };
+                let (peak, peaks) = crate::driving_point::analyze_reflectance_ir(&ir, dt, geo_delay);
+                let shift = if rungs_tried == 1 {
+                    f64::INFINITY
+                } else if rung.peaks.is_empty() && peaks.is_empty() {
+                    0.0
+                } else if rung.peaks.is_empty() || peaks.is_empty() {
+                    f64::INFINITY
+                } else {
+                    let take = rung.peaks.len().min(peaks.len()).min(3);
+                    rung.peaks[..take]
+                        .iter()
+                        .zip(&peaks[..take])
+                        .map(|(&a, &b)| (1200.0 * (b / a).log2()).abs())
+                        .fold(0.0_f64, f64::max)
+                };
+                all_converged &= (n_fft as f64) > geo_delay + 2.0
+                    && tail_energy < ladder.tail_tol
+                    && shift < ladder.peak_tol_cents;
+                *rung = Rung {
+                    r_pos,
+                    from_table,
+                    peaks,
+                    ir,
+                    peak,
+                    tail_energy,
+                    shift,
+                };
+            }
+            if all_converged {
+                break;
+            }
+            if n_fft >= ladder.max_taps {
+                return Err(MmLineError::LadderUnconverged {
+                    max_taps: ladder.max_taps,
+                    tail_energy: rungs.iter().map(|r| r.tail_energy).fold(0.0, f64::max),
+                    peak_shift_cents: rungs.iter().map(|r| r.shift).fold(0.0, f64::max),
+                });
+            }
+            n_fft *= 2;
+        }
+
         let mut lines = Vec::with_capacity(ducts.len());
         let mut taps = Vec::with_capacity(ducts.len());
         let mut receipts = Vec::with_capacity(ducts.len());
-        for (combo, duct) in ducts.iter().enumerate() {
-            if (input_radius(duct)? - r_in).abs() > 1e-12 * r_in {
+        for (combo, (rung, &label)) in rungs.into_iter().zip(labels).enumerate() {
+            if rung.peak > 1.0 + 1.0e-12 {
                 return Err(MmLineError::Invalid {
-                    what: "every combo must share the input radius (one zc)",
+                    what: "realized multimodal line violates 4x-oversampled passivity",
                 });
             }
-            let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
-            let mut table_bins = 0usize;
-            let mut fallback_bins = 0usize;
-            // DC: a bore terminated by any open/radiating load reflects
-            // pressure with sign flip at zero frequency.
-            buf[0] = FftC64::new(-1.0, 0.0);
-            for k in 1..=n_fft / 2 {
-                let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-                let (response, from_table) = resolve_load(duct, gas, omega, config, load)?;
-                if from_table {
-                    table_bins += 1;
-                } else {
-                    fallback_bins += 1;
-                }
-                let rac = reflectance(
-                    C64::new(response.plane_impedance.re, response.plane_impedance.im),
-                    zc0,
-                );
-                // Acoustic e^{-i omega t} -> DFT e^{+i omega t}: conjugate
-                // so the realized impulse response is CAUSAL (the pinned
-                // trap; ml-006 is the executable witness).
-                buf[k] = FftC64::new(rac.re, -rac.im);
-                if k != n_fft / 2 {
-                    buf[n_fft - k] = FftC64::new(rac.re, rac.im);
-                }
-            }
-            let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];
-            fft.inverse(&mut buf, &mut scratch);
-            let mut ir: Vec<f64> = buf.iter().map(|c| c.re).collect();
-            // Passivity is enforced ON THE STORED TAPS (a valve switch
-            // rebuilds from them; enforcing only the live line would
-            // resurrect an unenforced reflectance mid-performance), and
-            // on a 4x OVERSAMPLED grid: the DTFT of the realized FIR can
-            // overshoot |R| > 1 BETWEEN the realization bins (Gibbs
-            // ringing), and an inter-bin active line screams at a
-            // parasitic frequency (executed: a crook combo locked onto a
-            // 7.3 kHz inter-bin overshoot until this densification).
-            let grid: Vec<f64> = (1..=2 * n_fft)
-                .map(|k| core::f64::consts::TAU * k as f64 / (4.0 * n_fft as f64 * dt))
-                .collect();
-            let peak = dtft_peak(&ir, dt, &grid);
-            if peak > 1.0 {
-                let scale = 1.0 / peak;
-                for tap in &mut ir {
-                    *tap *= scale;
-                }
-            }
-            let line = DelayedFilter::from_impulse_response(dt, ir.clone())?;
+            let table_bins = rung.from_table[1..].iter().filter(|&&t| t).count();
+            lines.push(DelayedFilter::from_impulse_response(dt, rung.ir.clone())?);
+            taps.push(rung.ir);
             receipts.push(MmComboReceipt {
-                label: labels[combo].to_string(),
+                label: label.to_string(),
                 n_fft,
                 round_trip_samples: delays[combo],
                 table_bins,
-                fallback_bins,
-                peak_reflectance: peak,
+                fallback_bins: n_fft / 2 - table_bins,
+                peak_reflectance: rung.peak,
+                rungs_tried,
+                tail_energy: rung.tail_energy,
+                peak_shift_cents: rung.shift,
             });
-            taps.push(ir);
-            lines.push(line);
         }
+
         Ok(MmLineBank {
             lines,
             taps,
@@ -514,6 +662,7 @@ impl MmLineBank {
 }
 
 /// Peak `|DTFT|` of a tap vector over a frequency grid.
+#[cfg(test)]
 fn dtft_peak(taps: &[f64], dt: f64, omegas: &[f64]) -> f64 {
     let mut peak = 0.0f64;
     for &w in omegas {
@@ -567,37 +716,43 @@ impl MatrixFirLine {
         let length = duct_axial_length(duct);
         let geo_delay = 2.0 * length / gas.sound_speed / dt;
         let n_fft = mm_fft_taps_for(geo_delay)?;
+        let half = n_fft / 2;
         let r_in = input_radius(duct)?;
-        let fft = Fft::new(n_fft);
-        // One spectrum buffer per matrix entry.
-        let mut spectra = vec![vec![FftC64::new(0.0, 0.0); n_fft]; n * n];
-        for (m, spectrum) in spectra.iter_mut().enumerate() {
+        // One positive-frequency spectrum buffer per matrix entry.
+        let mut r_pos_mat = vec![vec![C64::ZERO; half + 1]; n * n];
+        for (m, r_pos) in r_pos_mat.iter_mut().enumerate() {
             // DC: plane reflects -1 off the open mouth; higher modes are
             // fully evanescent at DC (no propagating reflection).
-            spectrum[0] = if m == 0 {
-                FftC64::new(-1.0, 0.0)
+            r_pos[0] = if m == 0 {
+                C64::new(-1.0, 0.0)
             } else {
-                FftC64::new(0.0, 0.0)
+                C64::ZERO
             };
         }
-        for k in 1..=n_fft / 2 {
+        for k in 1..=half {
             let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
             let (response, _) = resolve_load(duct, gas, omega, config, load)?;
-            let zc = modal_characteristic_impedances(gas, r_in, omega, config.loss, n)?;
-            let r = modal_reflection_from_impedance(&response.impedance_matrix, &zc, n)?;
-            for (m, spectrum) in spectra.iter_mut().enumerate() {
-                let v = r[m];
-                spectrum[k] = FftC64::new(v.re, -v.im);
-                if k != n_fft / 2 {
-                    spectrum[n_fft - k] = FftC64::new(v.re, v.im);
+            let zc = match modal_characteristic_impedances(gas, r_in, omega, config.loss, n) {
+                Ok(zc) => zc,
+                Err(DuctError::TooNarrow { .. })
+                    if matches!(config.loss, LossModel::WideTube) =>
+                {
+                    modal_characteristic_impedances(gas, r_in, omega, LossModel::Bessel, n)?
                 }
+                Err(e) => return Err(e.into()),
+            };
+            let r = modal_reflection_from_impedance(&response.impedance_matrix, &zc, n)?;
+            for (m, r_pos) in r_pos_mat.iter_mut().enumerate() {
+                r_pos[k] = r[m];
             }
         }
         let mut taps = Vec::with_capacity(n * n);
-        let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];
-        for mut spectrum in spectra {
-            fft.inverse(&mut spectrum, &mut scratch);
-            taps.push(spectrum.iter().map(|c| c.re).collect::<Vec<f64>>());
+        for r_pos in &r_pos_mat {
+            taps.push(
+                crate::driving_point::realize_reflectance_ir_from_positive_spectrum(
+                    r_pos, n_fft, geo_delay, false,
+                ),
+            );
         }
         Ok(MatrixFirLine {
             n_modes: n,
@@ -740,12 +895,15 @@ mod mm_line_tests {
         Duct { segments }
     }
 
+    // Exact Bessel losses (.76). WideTube refuses below shear number 10, and
+    // mixing it with Bessel per DFT bin is a spectral kink the convergence
+    // ladder rightly refuses.
     fn config() -> MmLineConfig {
         MmLineConfig {
             sample_rate_hz: 24_000,
             n_modes: 3,
             extra_slices: 1,
-            loss: LossModel::WideTube,
+            loss: LossModel::Bessel,
         }
     }
 
@@ -1048,19 +1206,26 @@ mod mm_line_tests {
         let bank = MmLineBank::new(&combos, &["open"], &gas, &load, &cfg).expect("bank");
         let receipt = &bank.receipts()[0];
         // The STORED taps (what a switch rebuilds from) must satisfy
-        // |R| <= 1 on the realization grid.
+        // |R| <= 1 on the realization grid without 1/peak clipping.
         let dt = 1.0 / 24_000.0;
         let grid: Vec<f64> = (1..=receipt.n_fft / 2)
             .map(|k| core::f64::consts::TAU * k as f64 / (receipt.n_fft as f64 * dt))
             .collect();
         let peak_after = super::dtft_peak(&bank.taps[0], dt, &grid);
-        let pass = peak_after <= 1.0 + 1e-9 && receipt.peak_reflectance.is_finite();
+        let pass = peak_after <= 1.0 + 1e-12
+            && receipt.peak_reflectance <= 1.0 + 1e-12
+            && receipt.n_fft >= 1024
+            && receipt.rungs_tried >= 1
+            && receipt.tail_energy.is_finite();
         verdict(
             "ml-004-per-line-passivity",
             pass,
             &format!(
-                "stored-tap |R| peak {peak_after:.6} (pre-enforcement {:.6}), n_fft {}",
-                receipt.peak_reflectance, receipt.n_fft
+                "stored-tap |R| peak {peak_after:.6} (4x-oversampled {:.6}), n_fft {}, rungs_tried {}, tail_energy {:.3e}",
+                receipt.peak_reflectance,
+                receipt.n_fft,
+                receipt.rungs_tried,
+                receipt.tail_energy,
             ),
         );
     }
@@ -1156,6 +1321,11 @@ mod mm_line_tests {
             ));
         }
         let table = TabulatedLoad::try_new(omegas, zs, "bell", 1.0e-6).expect("table");
+        // The bell table and its analytic fallback disagree at the table's
+        // band edges: a jump in R(ω). A jump leaves an N-independent tail in
+        // the realized IR, so the converged ladder must REFUSE the splice by
+        // name instead of realizing it silently. Until bakes are band-complete
+        // (.100), a spliced load is not a convergent line.
         let spliced = MmLineBank::new(
             &combos,
             &["open"],
@@ -1165,10 +1335,16 @@ mod mm_line_tests {
                 fallback: Termination::FlangedOpen,
             },
             &cfg,
-        )
-        .expect("spliced bank");
-        let r = &spliced.receipts()[0];
-        let splice_disclosed = r.table_bins > 0 && r.fallback_bins > 0;
+        );
+        let splice_refused = matches!(spliced, Err(MmLineError::LadderUnconverged { .. }));
+        let splice_detail = match &spliced {
+            Ok(b) => format!(
+                "REALIZED table_bins={} fallback_bins={}",
+                b.receipts()[0].table_bins,
+                b.receipts()[0].fallback_bins
+            ),
+            Err(e) => format!("refused: {e}"),
+        };
         // Refusals.
         let empty = MmLineBank::new(&[], &[], &gas, &load, &cfg).is_err();
         let mismatch = MmLineBank::new(&combos, &["a", "b"], &gas, &load, &cfg).is_err();
@@ -1176,44 +1352,47 @@ mod mm_line_tests {
         let unknown = bank2.switch(5, 0).is_err();
         let mut matrix = MatrixFirLine::new(&combos[0], &gas, &load, &cfg).expect("matrix");
         let short_push = matrix.push(&[1.0]).is_err();
-        let pass = causal && splice_disclosed && empty && mismatch && unknown && short_push;
+        let pass = causal && splice_refused && empty && mismatch && unknown && short_push;
         verdict(
             "ml-006-causality-splice-refusals",
             pass,
             &format!(
-                "causal head/tail {:.1}x; splice table_bins={} fallback_bins={}; \
+                "causal head/tail {:.1}x; splice {splice_detail}; \
                  refusals {empty}/{mismatch}/{unknown}/{short_push}",
                 (head / tail.max(1e-300)),
-                r.table_bins,
-                r.fallback_bins
             ),
         );
     }
 
-    /// Regression for bead frankensim-mxw6x: the sizing helper must
-    /// DENSIFY past 4096 taps when eight round trips demand it (the old
+    /// Regression for bead frankensim-mxw6x and pexfp.82. The shared ladder
+    /// must stop only at a CONVERGED rung (tail and peaks; the old
     /// grow-then-clamp silently truncated long bores), and must refuse
-    /// typed-and-loud only past the authored ceiling. Short-bore
-    /// behavior is unchanged (existing ml-* gates still green).
+    /// typed-and-loud only past the authored 65536-tap ceiling.
     #[test]
     fn ml_007_fft_densifies_or_refuses_never_truncates() {
         let cfg = config();
         let gas = air20();
         let load = MmLoad::Analytic(Termination::FlangedOpen);
-        // Round-trip delay g = 2L/c * fs: choose L so ceil(8g) lands in
-        // (4096, 8192] => realized grid must be 8192, not clamped 4096.
+        // Round-trip delay g = 2L/c * fs = 700 samples. The ladder starts at
+        // four round trips (4096) and must stop only once the tail and the
+        // first three peaks converge, on more than one rung.
         let fs = f64::from(cfg.sample_rate_hz);
         let c = gas.sound_speed;
         let long_l = 700.0f64 * c / (2.0 * fs);
         let long = Duct {
             segments: vec![Segment::Cylinder {
-                radius: 0.02,
+                radius: 0.004,
                 length: long_l,
             }],
         };
         let bank = MmLineBank::new(std::slice::from_ref(&long), &["open"], &gas, &load, &cfg)
             .expect("long bore densifies instead of truncating");
-        let dense_ok = bank.receipts()[0].n_fft == 8192;
+        let ladder = crate::driving_point::LineLadder::default();
+        let receipt = &bank.receipts()[0];
+        let dense_ok = receipt.n_fft >= 4096
+            && receipt.rungs_tried >= 2
+            && receipt.tail_energy < ladder.tail_tol
+            && receipt.peak_shift_cents < ladder.peak_tol_cents;
         // Ceiling refusal: a bore demanding far beyond 65536 taps is
         // refused with the authored message rather than truncated.
         let absurd = Duct {
@@ -1234,9 +1413,14 @@ mod mm_line_tests {
             "ml-007-fft-densify-or-refuse",
             pass,
             &format!(
-                "dense n_fft={} (want 8192); ceiling refusal={refused}; \
-                 matrix path ok={matrix_long}",
-                bank.receipts()[0].n_fft
+                "converged n_fft={} after {} rungs (tail {:.3e} < {:e}, shift {:.4} c < {}); \
+                 ceiling refusal={refused}; matrix path ok={matrix_long}",
+                receipt.n_fft,
+                receipt.rungs_tried,
+                receipt.tail_energy,
+                ladder.tail_tol,
+                receipt.peak_shift_cents,
+                ladder.peak_tol_cents
             ),
         );
     }

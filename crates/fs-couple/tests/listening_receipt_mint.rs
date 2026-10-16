@@ -149,7 +149,7 @@ fn mint_brass_listening_artifact() {
         sample_rate_hz: 24_000,
         n_modes: 3,
         extra_slices: 1,
-        loss: LossModel::WideTube,
+        loss: LossModel::Bessel,
     };
     let bore = |crook: f64| -> Duct {
         let mut segments = vec![Segment::Cylinder {

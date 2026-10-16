@@ -403,7 +403,8 @@ pub(crate) mod brass_loop_tests {
             sample_rate_hz: 24_000,
             n_modes: 3,
             extra_slices: 1,
-            loss: LossModel::WideTube,
+            // Exact Bessel (.76): the line ladder refuses a WideTube/Bessel kink.
+            loss: LossModel::Bessel,
         }
     }
 

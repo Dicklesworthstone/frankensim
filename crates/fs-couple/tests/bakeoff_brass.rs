@@ -157,7 +157,7 @@ fn loop_lock_hz(n_modes: usize) -> f64 {
         sample_rate_hz: 24_000,
         n_modes,
         extra_slices: 1,
-        loss: LossModel::WideTube,
+        loss: LossModel::Bessel,
     };
     let load = MmLoad::Analytic(Termination::FlangedOpen);
     let combos = [loop_bore()];
