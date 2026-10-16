@@ -44,7 +44,7 @@ impl ReedBoreVoice {
             listener_m,
             sample_rate_hz,
             |zc| {
-                crate::driving_point::characteristic_line_dense(
+                crate::driving_point::characteristic_line_realized(
                     physics,
                     gas,
                     termination,

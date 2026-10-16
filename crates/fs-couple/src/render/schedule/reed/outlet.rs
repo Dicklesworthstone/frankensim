@@ -90,7 +90,7 @@ impl ObservationInput {
         let [x, y, z] = receiver.position_m;
         let voice = ReedBoreVoice::with_line(duct, regional.inlet_gas(), reed,
             PlateBank::default(), x.hypot(y).hypot(z), rate, |_| {
-                regional.characteristic_line(termination, rate, samples, None, None)
+                regional.characteristic_line_realized(termination, rate, samples, None, None)
                     .map_err(map_drive)
             }).map_err(ReedPerformanceError::Model)?;
         let grid = voice.line.history().len();
