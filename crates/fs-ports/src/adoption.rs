@@ -3,12 +3,57 @@
 //! These are schema contracts, not integrators. In particular, a skew matrix
 //! establishes only interface power cancellation, never component passivity.
 
-use crate::{ConservativeJunction, CoupleError, IntegratedWindowTransfer, PortSchema, StableId};
+use crate::{
+    ConservativeJunction, CoupleError, IntegratedWindowTransfer, PortSchema, StableId,
+    WindowAuditReport,
+};
+
+/// Conversion between an owner's coordinates and its canonical SI port schema.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PortCoordinateChart {
+    /// Values already use the schema's coherent SI effort and flow.
+    CanonicalSi,
+    /// Mass-normalized modal coordinates, NOT point force/velocity samples.
+    /// For reference mass M, F = f_q sqrt(M), v = q_dot / sqrt(M).
+    /// Raw owner units remain N/sqrt(kg) and m sqrt(kg)/s, respectively.
+    MassNormalized {
+        /// Explicit coordinate reference mass [kg], not a specimen modal mass.
+        reference_mass_kg: f64,
+        /// Optional original signed swept-volume projection [m²/sqrt(kg)].
+        /// This labels the pressure-work pullback; it is not a point-force area.
+        volume_projection_m2_per_sqrt_kg: Option<f64>,
+    },
+}
+
+/// Whether a module can supply a physical accounting-window energy audit.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ModuleWindowAudit {
+    /// The module has no accepted physical step yet.
+    NotStepped,
+    /// A complete retained account; violations remain visible in the report.
+    Available(Box<WindowAuditReport>),
+    /// A named owner or physical acceptance input is missing.
+    Unavailable {
+        /// Module whose accepted step is being described.
+        owner: StableId,
+        /// Specific missing owner, tolerance, or refused transfer input.
+        reason: String,
+    },
+}
 
 /// A module's ordered schemas and actual, accepted physical-time transfers.
 pub trait PortedModule {
     /// Stable order: index i identifies the same port in every accepted window.
     fn port_schemas(&self) -> &[PortSchema];
+
+    /// One explicit coordinate chart per schema, in the same stable order.
+    fn port_coordinate_charts(&self) -> &[PortCoordinateChart];
+
+    /// Internal N-way relations, after the owner's declared power charts.
+    fn junction_schemas(&self) -> &[JunctionSchema];
+
+    /// Physical duration used to pre-integrate the last accepted exchanges [s].
+    fn last_window_duration_s(&self) -> Option<f64>;
 
     /// Last accepted step, integrated in physical time, positive into the owner.
     ///
@@ -16,10 +61,16 @@ pub trait PortedModule {
     /// Rejected trials must preserve this record. Before any accepted step this
     /// returns `None`; it must never substitute a fabricated zero-step account.
     fn last_window_transfers(&self) -> Option<&[IntegratedWindowTransfer]>;
+
+    /// A failed observation never fabricates a zero transfer or changes motion.
+    fn last_window_transfer_error(&self) -> Option<&CoupleError>;
+
+    /// Audit the accepted account, or name the unavailable physical input.
+    fn audit_last_window(&self) -> Result<ModuleWindowAudit, CoupleError>;
 }
 
 /// Admission ceiling, including every endpoint of a relation.
-pub const MAX_JUNCTION_PORTS: usize = 256;
+pub const MAX_JUNCTION_PORTS: usize = 4097;
 
 /// A lossless relation in the schemas' common, power-conjugate coordinates.
 #[derive(Clone, Debug, PartialEq)]

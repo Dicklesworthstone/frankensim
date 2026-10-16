@@ -22,7 +22,7 @@ last accepted step, positive into the module. Rejection preserves the preceding
 record; before the first accepted step it is `None`. Logical ticks never replace
 physical-time integration. Schema admission alone grants no energy closure.
 
-`JunctionSchema` describes 2..=256 conjugate endpoints using common effort,
+`JunctionSchema` describes 2..=4097 conjugate endpoints using common effort,
 common flow, or an exactly skew finite Dirac matrix. Sign pullbacks apply to
 both power factors. Pairwise metadata admission is the existing
 `ConservativeJunction::new` contract, including orientation, clocks and roles.
@@ -33,3 +33,10 @@ dimension relabelling is not a chart. No new solver or wire version is added.
 G0 unit tests in `adoption::tests` cover N=2/3/64, cap and cap+1, exact two-port
 admission parity, and non-skew/sign/identity refusal. They establish structural
 power cancellation, not whole-system passivity or component audit closure.
+
+Coordinate charts accompany canonical schemas. A mass-normalized chart retains
+the raw N/sqrt(kg), m sqrt(kg)/s units and an explicit reference-mass conversion;
+it does not claim a physical point force or measured modal mass. The signed
+volume projection, when present, is retained separately. `ModuleWindowAudit`
+distinguishes a real report, no accepted step, and a named unavailable physical
+account. Observation errors are visible through `last_window_transfer_error`.

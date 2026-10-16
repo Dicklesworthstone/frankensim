@@ -8,7 +8,10 @@
 #![warn(missing_docs)]
 
 pub mod adoption;
-pub use adoption::{JunctionLaw, JunctionSchema, MAX_JUNCTION_PORTS, PortedModule};
+pub use adoption::{
+    JunctionLaw, JunctionSchema, MAX_JUNCTION_PORTS, ModuleWindowAudit, PortCoordinateChart,
+    PortedModule,
+};
 
 use core::num::NonZeroUsize;
 use std::sync::Arc;

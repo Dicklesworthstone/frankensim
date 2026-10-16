@@ -58,6 +58,8 @@ pub mod piano_vertical;
 pub mod pickup;
 /// Full source-derived viscous tensors on the shared DKT and modal runtime.
 pub mod plate_viscosity;
+/// Accepted-step port schemas and physical accounting adapters.
+pub mod port_adoption;
 pub mod reed_bore;
 pub mod render;
 pub mod selector;

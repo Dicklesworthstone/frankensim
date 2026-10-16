@@ -50,6 +50,8 @@ pub struct SharedCavity {
     column: Vec<f64>,
     surface_modes: usize,
     external: Vec<f64>,
+    ports: crate::port_adoption::ModulePorts,
+    old_q: Vec<f64>,
 }
 impl SharedCavity {
     /// Keep every surface's states and connect their SUMMED volume displacement
@@ -57,9 +59,13 @@ impl SharedCavity {
     /// The original pair lowering supplies each shape and constitutive number;
     /// the existing whole-column solver retains inter-surface cross terms.
     pub fn new(
-        source: HelmholtzModalCavity, surfaces: Vec<CavitySurface>, sample_rate_hz: u32,
-        neck_initial: ModalAcousticState, neck_budget: ModalAcousticTimeBudget,
-        config: ModalCouplingConfig, gate: &CancelGate,
+        source: HelmholtzModalCavity,
+        surfaces: Vec<CavitySurface>,
+        sample_rate_hz: u32,
+        neck_initial: ModalAcousticState,
+        neck_budget: ModalAcousticTimeBudget,
+        config: ModalCouplingConfig,
+        gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
         if surfaces.is_empty() || surfaces.len()>64 {
@@ -72,6 +78,7 @@ impl SharedCavity {
             return Err(network_invalid("shared cavity exceeds the original mode budget"));
         }
         let neck_index=surfaces.len();
+        let mut charts = Vec::with_capacity(count);
         let mut models=Vec::with_capacity(neck_index+1);
         let mut column=vec![0.0;count];
         let mut offset=0;
@@ -82,6 +89,10 @@ impl SharedCavity {
                 return Err(network_invalid("surface volume projection must match its original modes"));
             }
             let pair=source.connections(index,neck_index,&surface.outward_volume_shapes)?;
+            charts.extend(surface.outward_volume_shapes.iter().map(|&projection|
+                fs_ports::PortCoordinateChart::MassNormalized {
+                    reference_mass_kg: 1.0, volume_projection_m2_per_sqrt_kg: Some(projection),
+                }));
             let spring=&pair[0];
             let end=offset+surface.model.modes().len();
             column[offset..end].copy_from_slice(&spring.left.shapes);
@@ -105,7 +116,35 @@ impl SharedCavity {
             stiffness_n_m:source.compression_stiffness_n_m(),damping_n_s_m:0.0,rest_extension_m:0.0}];
         if let Some(loss)=loss {links.push(loss);}
         let system=CoupledModalSystem::new_with_columns(models,links,config,gate)?;
-        let result=Self {source,system,column,surface_modes,external:vec![0.0;count]};
+        let names: Vec<_> = (0..surface_modes)
+            .map(|i| format!("surface/generalized/{i}"))
+            .collect();
+        let mut kinds: Vec<_> = names
+            .iter()
+            .map(|s| (s.as_str(), fs_ports::PortKind::MechanicalForceVelocity))
+            .collect();
+        kinds.push(("neck/exterior", fs_ports::PortKind::FluidPressureFlux));
+        let mut ports = crate::port_adoption::ModulePorts::new("shared-cavity", kinds);
+        charts.push(fs_ports::PortCoordinateChart::CanonicalSi);
+        ports.charts = charts;
+        // The retained signed-volume shapes pull each surface into pressure /
+        // volume-flow coordinates. One extra endpoint owns compression storage.
+        ports.junctions.push(crate::port_adoption::junction(
+            "shared-cavity",
+            "compression-volume",
+            neck_index + 2,
+            fs_ports::PortKind::FluidPressureFlux,
+            false,
+        ));
+        let result = Self {
+            source,
+            system,
+            column,
+            surface_modes,
+            external: vec![0.0; count],
+            ports,
+            old_q: vec![0.0; count],
+        };
         result.observe()?;
         if gate.is_requested() {return Err(ModalCouplingError::Cancelled);}
         Ok(result)
@@ -123,8 +162,12 @@ impl SharedCavity {
     /// already comes from the collective compression connection.
     /// No allocation occurs here. Rejection leaves all accepted states/clock
     /// unchanged; scratch forces may be overwritten and are recomputed on retry.
-    pub fn step(&mut self, surface_force:&[f64], exterior_neck_pressure_pa:f64,
-        gate:&CancelGate)->Result<&CoupledModalFrame,ModalCouplingError> {
+    pub fn step(
+        &mut self,
+        surface_force: &[f64],
+        exterior_neck_pressure_pa: f64,
+        gate: &CancelGate,
+    ) -> Result<&CoupledModalFrame, ModalCouplingError> {
         if gate.is_requested() {return Err(ModalCouplingError::Cancelled);}
         if surface_force.len()!=self.surface_modes || surface_force.iter().any(|v|!v.is_finite())
             || !exterior_neck_pressure_pa.is_finite() {
@@ -134,7 +177,49 @@ impl SharedCavity {
         if !neck_force.is_finite() {return Err(network_invalid("exterior neck pressure force overflow"));}
         self.external[..self.surface_modes].copy_from_slice(surface_force);
         self.external[self.surface_modes]=neck_force;
-        self.system.step_under_gate(&self.external,gate)
+        for (old, state) in self
+            .old_q
+            .iter_mut()
+            .zip(self.system.components().iter().flat_map(|m| m.states()))
+        {
+            *old = state.displacement_m_sqrt_kg;
+        }
+        let before = self.system.total_energy_j()?;
+        let (sample, after, loss, tolerance) = {
+            let frame = self.system.step_under_gate(&self.external, gate)?;
+            (
+                frame.sample,
+                frame.modal_energy_j + frame.connection_energy_j,
+                frame.component_dissipation_j + frame.connection_dissipation_j,
+                frame.energy_tolerance_j,
+            )
+        };
+        let old_q = &self.old_q;
+        let external = &self.external;
+        self.ports.accept(
+            crate::port_adoption::StepAccount {
+                tick: sample,
+                duration_s: self.system.sample_period_s(),
+                storage_change_j: Some(after - before),
+                loss_j: Some(loss),
+                included_work_j: 0.0,
+                entropy_change_j_k: 0.0,
+                tolerance_j: Some(tolerance),
+                unavailable: None,
+            },
+            self.system
+                .components()
+                .iter()
+                .flat_map(|m| m.states())
+                .enumerate()
+                .map(|(i, state)| {
+                    crate::port_adoption::PortTransfer::work(
+                        external[i] * (state.displacement_m_sqrt_kg - old_q[i]),
+                        true,
+                    )
+                }),
+        );
+        Ok(self.system.last_frame().expect("step accepted"))
     }
 
     /// Pure observation of the already accepted network. An observation error
@@ -168,3 +253,5 @@ impl SharedCavity {
 
 #[cfg(test)]
 mod tests;
+
+crate::port_adoption::impl_ported_module!(SharedCavity, ports);
