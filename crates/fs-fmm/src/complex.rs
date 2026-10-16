@@ -548,6 +548,17 @@ impl<'k> FmmC64<'k> {
         self.geometry.side
     }
 
+    /// Nonempty direct-interaction leaf groups, in the matvec's fixed tree order.
+    /// Every point occurs exactly once. A consumer may subdivide these groups
+    /// for a bounded block-Jacobi preconditioner without rebuilding the tree.
+    pub fn near_field_blocks(&self) -> impl Iterator<Item = &[usize]> {
+        self.geometry
+            .cells
+            .values()
+            .filter(|cell| cell.leaf)
+            .map(|cell| cell.points.as_slice())
+    }
+
     /// JSON tree/work statistics; coefficient slots are counted in C64 units.
     #[must_use]
     pub fn stats(&self) -> String {
@@ -569,4 +580,29 @@ fn validate_output(out: Vec<C64>) -> Result<Vec<C64>, FmmError> {
         return Err(FmmError::NonFiniteOutput { index });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod near_block_tests {
+    use super::*;
+
+    #[test]
+    fn near_blocks_partition_indices_in_fixed_order() {
+        let points = (0..40)
+            .map(|i| [f64::from(i % 5), f64::from((i / 5) % 4), f64::from(i / 20)])
+            .collect();
+        let kernel = crate::HelmholtzSingle { k: 0.25 };
+        let op = FmmC64::new(&kernel, points, 2, 4).unwrap();
+        let first: Vec<_> = op.near_field_blocks().map(<[usize]>::to_vec).collect();
+        assert_eq!(
+            first,
+            op.near_field_blocks()
+                .map(<[usize]>::to_vec)
+                .collect::<Vec<_>>()
+        );
+        assert!(first.len() > 1 && first.iter().all(|block| !block.is_empty()));
+        let mut indices: Vec<_> = first.into_iter().flatten().collect();
+        indices.sort_unstable();
+        assert_eq!(indices, (0..40).collect::<Vec<_>>());
+    }
 }

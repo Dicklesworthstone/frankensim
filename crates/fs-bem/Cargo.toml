@@ -13,6 +13,7 @@ layer = "L3"
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
 fs-casebook = { path = "../fs-casebook" }
+fs-exec = { path = "../fs-exec" }
 fs-math = { path = "../fs-math" }
 fs-phs = { path = "../fs-phs" }
 fs-fmm = { path = "../fs-fmm" }

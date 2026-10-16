@@ -116,6 +116,13 @@ order-dependent admission and complex passes. It uses the same exactly-once
 near/far pair partition. `direct` remains a separate, bounded quadratic oracle;
 `potentials` never falls back to it.
 
+`FmmC64::near_field_blocks()` borrows each nonempty leaf's original point
+indices in deterministic tree order. The blocks partition all input indices
+exactly once. Callers can split these lists to build bounded local
+preconditioners; the method adds no kernel evaluation or change to the pair
+partition. The `near_blocks_partition_indices_in_fixed_order` unit test checks
+this partition directly; BEM exercises it through block-Jacobi solves.
+
 The outgoing convention is `exp(-i omega t)`, `G=exp(ikr)/(4 pi r)`, matching
 `fs-bem::helmholtz`. Shipped kernels are `HelmholtzSingle`, `HelmholtzDouble`
 (`dG/dn_y`), `HelmholtzAdjointDouble` (`dG/dn_x`), `HelmholtzGradient` (one
