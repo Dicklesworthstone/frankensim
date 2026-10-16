@@ -83,9 +83,13 @@ fn sweep_digest(duct: &Duct, air: &GasState, peak_count_out: &mut usize) -> u64 
 
 /// Combined golden over two fingerings' full sweeps plus their peak
 /// counts (counts mixed as integers — no float round trip).
-/// Verified bit-identical aarch64-apple and x86_64-linux (debug) on
-/// 2026-08-23, bead frankensim-music-v8-root-3ez8g.13.4.
-const GOLDEN_HASH: u64 = 0xd6e9_724c_5414_cf8d;
+/// First frozen 0xd6e9_724c_5414_cf8d (aarch64-apple and x86_64-linux
+/// debug, 2026-08-23, bead frankensim-music-v8-root-3ez8g.13.4).
+/// Re-frozen for `fs-duct:tmm-bits` v2: the Bessel `Zc` is now conjugated
+/// into the `e^{-iωt}` basis, which moves every lossy sweep bit. x86_64
+/// release reproduced 2026-10-16. Debug, and aarch64, are recorded in
+/// `golden-couplings.json`.
+const GOLDEN_HASH: u64 = 0xc8fe_a91a_babb_faa3;
 
 #[test]
 fn tmm_sweep_digest_is_cross_isa_golden() {

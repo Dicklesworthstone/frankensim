@@ -94,6 +94,11 @@ pub const MIN_SHEAR_NUMBER: f64 = 10.0;
 /// Low-`ka` radiation-fit validity ceiling.
 pub const MAX_RADIATION_KA: f64 = 1.0;
 
+/// Bit semantics of the TMM response (`golden-couplings.json` surface
+/// `fs-duct:tmm-bits`). Version 2: Bessel and wall-folded `Zc` are the
+/// `e^{-iωt}` (conjugated) characteristic impedance, tied to `k`.
+pub const TMM_BIT_SEMANTICS_VERSION: u32 = 2;
+
 /// Typed refusals with stable `FS-DUCT-*` codes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DuctError {
@@ -461,24 +466,19 @@ fn apply_wall_to_wave(
     // Cylinder `Y' = 2πa/Z'` is per axial metre. A taper's surface
     // element is `ds = slant dx`.
     let y_w = C64::new(y_phs.re, -y_phs.im).scale(slant);
-    let j = C64::new(0.0, 1.0);
-    let z_series = j * wave.wavenumber * wave.characteristic_impedance;
-    let y_gas = j * wave.wavenumber * wave.characteristic_impedance.recip();
+    // The basis pair is `e^{-iωt}`: `Z'₋ = −i k Zc`, `Y'₋ = −i k / Zc`.
+    // The telegraph pair is its conjugate. `i k Zc` is not: for a lossy
+    // wave it flips the sign of the series resistance.
+    let minus_j = C64::new(0.0, -1.0);
+    let z_series = (minus_j * wave.wavenumber * wave.characteristic_impedance).conj();
+    let y_gas = (minus_j * wave.wavenumber * wave.characteristic_impedance.recip()).conj();
     let y_shunt = y_gas + y_w;
     if y_shunt.abs() < 1.0e-30 {
         return Err(DuctError::BadParameter {
             what: "wall shunt cancelled the gas admittance",
         });
     }
-    // Helmholtz `k` from `k² = −Z'Y'`. Prefer the decaying forward
-    // branch (`Im k >= 0`, then `Re k >= 0`). `sqrt(Z'Y')` is the
-    // telegraph `γ`; a mass-dominated wall makes `Z'Y'` positive
-    // real, where `-i sqrt(Z'Y')` is the *growing* wave.
-    let k = select_forward_decaying((z_series * y_shunt).scale(-1.0).sqrt());
-    let mut zc = (z_series * y_shunt.recip()).sqrt();
-    if zc.re < 0.0 {
-        zc = zc.scale(-1.0);
-    }
+    let (k, zc) = helmholtz_wave_from_telegraph(z_series, y_shunt);
     let area = core::f64::consts::PI * radius * radius;
     Ok(SegmentWave {
         wavenumber: k,
@@ -514,6 +514,20 @@ fn helmholtz_from_telegraph(mut gamma: C64) -> C64 {
     select_forward_decaying(C64::new(gamma.im, gamma.re))
 }
 
+/// `e^{-iωt}` basis `(k, Zc)` from a `+iω` telegraph pair `(Z', Y')`.
+///
+/// `k = i conj(γ)` for the decaying `γ = √(Z'Y')`, and `Zc` is tied
+/// to that same `k` through `k Zc = i Z'₋ = i conj(Z')`, so the pair
+/// cannot land on opposite branches. `Zc = conj(Z'/γ)`: the telegraph
+/// `√(Z'/Y')` itself is the `+iω` value, and using it unconjugated left
+/// `k Zc` real in the diffusive limit, so an open narrow tube read
+/// `Z_in(0⁺) = −i R'L` (a frequency-independent reactance).
+fn helmholtz_wave_from_telegraph(z_series: C64, y_shunt: C64) -> (C64, C64) {
+    let k = helmholtz_from_telegraph((z_series * y_shunt).sqrt());
+    let zc = C64::new(0.0, 1.0) * z_series.conj() / k;
+    (k, zc)
+}
+
 fn wide_tube_wave(
     state: &GasState,
     radius: f64,
@@ -547,9 +561,7 @@ fn wide_tube_wave(
 /// Full Zwikker–Kosten `k` and `Zc` from `F(r_v)` at this frequency.
 fn bessel_wave(state: &GasState, radius: f64, omega: f64) -> Result<SegmentWave, DuctError> {
     let (z_series, y_shunt, rv) = bessel_telegraph_pair(state, radius, omega)?;
-    let k = helmholtz_from_telegraph((z_series * y_shunt).sqrt());
-    let mut zc = (z_series * y_shunt.recip()).sqrt();
-    if zc.re < 0.0 { zc = zc.scale(-1.0); }
+    let (k, zc) = helmholtz_wave_from_telegraph(z_series, y_shunt);
     let area = core::f64::consts::PI * radius * radius;
     Ok(SegmentWave { wavenumber: k, characteristic_impedance: zc,
         specific_impedance: zc.scale(area), shear_number: rv })

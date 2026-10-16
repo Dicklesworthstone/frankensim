@@ -21,6 +21,9 @@
 //! - dt-005: radiation end corrections are QUANTITATIVE — the
 //!   unflanged (0.6133 a) and flanged (0.8216 a) loads move the
 //!   quarter-wave peak by the textbook effective-length ratios.
+//! - dt-008: the diffusive limit is Poiseuille. An open narrow tube
+//!   reads `Z_in(0⁺) → R'L = 8μL/(πa⁴)` (real), with a rigid or a
+//!   yielding wall, and a wall-loaded line stays passive.
 
 use fs_duct::{
     Duct, DuctError, LossModel, Segment, Termination, impedance_peaks, impedance_sweep,
@@ -416,5 +419,82 @@ fn dt_005_end_corrections_are_quantitative() {
         "{{\"suite\":\"fs-duct\",\"case\":\"dt-005-end-corrections\",\"f_ideal\":{f_ideal:.2},\
          \"f_unflanged\":{f_unflanged:.2},\"f_flanged\":{f_flanged:.2},\
          \"dev_unflanged\":{dev_u:.4},\"dev_flanged\":{dev_f:.4},\"verdict\":\"pass\"}}"
+    );
+}
+
+/// G2: below the diffusion corner `ω ≪ 1/(R'C'L²)` an open (`p = 0`)
+/// narrow tube is a pure Poiseuille resistor: `Z_in = R'L (1 + O(ω))`
+/// with `R' = 8μ/(πa⁴)`, independent of the wall (the shunt enters at
+/// `O(Z'Y'L²)`). The basis pair is `e^{-iωt}`, so the telegraph `Zc`
+/// must be conjugated into it; reusing the `+iω` value left `k Zc`
+/// real and read `Z_in(0⁺) = −i R'L`, and the wall fold flipped the
+/// series resistance (`Re Z_in < 0`, `|R| > 1`).
+#[test]
+fn dt_008_diffusive_limit_is_poiseuille_and_walls_stay_passive() {
+    use fs_duct::input_impedance_wall;
+    use fs_phs::WallPin;
+    let start = std::time::Instant::now();
+    let state = air();
+    let (radius, length) = (0.001, 0.5);
+    let duct = cylinder(radius, length);
+    let r_poiseuille =
+        8.0 * state.dynamic_viscosity * length / (core::f64::consts::PI * radius * radius * radius * radius);
+    let soft = WallPin {
+        surface_density: 15.0,
+        stiffness_per_area: 3.0e5,
+        resistance: 8000.0,
+    };
+    let omega = 1.0e-3;
+    for (label, wall, tol) in [("rigid", None, 1.0e-4), ("soft", Some(&soft), 1.0e-3)] {
+        let z = input_impedance_wall(
+            &duct,
+            &state,
+            omega,
+            LossModel::Bessel,
+            Termination::IdealOpen,
+            wall,
+        )
+        .expect("diffusive Z_in")
+        .impedance;
+        let re_dev = (z.re / r_poiseuille - 1.0).abs();
+        let im_rel = z.im.abs() / r_poiseuille;
+        assert!(
+            re_dev < tol && im_rel < tol,
+            "{label} wall: Z_in(ω=1e-3) = {:.6e}{:+.6e}i, want R'L = {r_poiseuille:.6e} \
+             (Re dev {re_dev:.3e}, |Im|/R'L {im_rel:.3e}, tol {tol:e})",
+            z.re,
+            z.im
+        );
+    }
+    // Passivity over the band where the soft wall's mass-spring corner
+    // (√(K/σ)/2π ≈ 22.5 Hz) and the diffusion corner both live.
+    let mut min_re = f64::INFINITY;
+    for i in 0..=240 {
+        let f = 0.05 * fs_math::det::exp(core::f64::consts::LN_10 * f64::from(i) / 40.0);
+        for wall in [None, Some(&soft)] {
+            let z = input_impedance_wall(
+                &duct,
+                &state,
+                TAU * f,
+                LossModel::Bessel,
+                Termination::IdealOpen,
+                wall,
+            )
+            .expect("sweep Z_in")
+            .impedance;
+            assert!(
+                z.re >= 0.0,
+                "Re Z_in = {:.3e} < 0 at {f:.3} Hz (wall {})",
+                z.re,
+                wall.is_some()
+            );
+            min_re = min_re.min(z.re / r_poiseuille);
+        }
+    }
+    println!(
+        "{{\"suite\":\"fs-duct\",\"case\":\"dt-008-diffusive-poiseuille\",\
+         \"r_poiseuille\":{r_poiseuille:.6e},\"min_re_over_rp\":{min_re:.3e},\
+         \"elapsed_ms\":{},\"verdict\":\"pass\"}}",
+        start.elapsed().as_millis()
     );
 }
