@@ -147,7 +147,7 @@ fn neck_is_a_real_free_inertia_without_a_hidden_compression_spring() {
 }
 
 #[test]
-fn fixed_wall_cavity_matches_the_original_phs_midpoint_state_and_energy() {
+fn fixed_wall_cavity_matches_the_original_phs_exact_state_and_energy() {
     let geo = geometry(); let g = gas(101_325.0); let resistance = 2_000.0;
     let source = fs_phs::helmholtz_resonator(geo.volume_m3, geo.neck_radius_m,
         geo.neck_length_m, g.density, g.sound_speed, resistance).unwrap();
@@ -155,25 +155,40 @@ fn fixed_wall_cavity_matches_the_original_phs_midpoint_state_and_energy() {
     let inverse_mass = source.effort(&[0.0, 1.0])[1];
     let cavity = HelmholtzModalCavity::new(geo, g, CavityNeckLoss::Resistance(resistance)).unwrap();
     let mut neck = cavity.neck_component(48_000, ModalAcousticTimeBudget::audible_reference()).unwrap();
-    let mut volume = 1.0e-7; let mut momentum = 0.0;
+    let initial_volume = 1.0e-7;
+    let initial_momentum = 0.0;
     let root_mass = cavity.neck_mass_kg().sqrt();
     neck.restore_states(&[ModalAcousticState {
-        displacement_m_sqrt_kg: root_mass*volume/cavity.neck_area_m2(),
+        displacement_m_sqrt_kg: root_mass*initial_volume/cavity.neck_area_m2(),
         velocity_m_sqrt_kg_per_s: 0.0,
     }]).unwrap();
     let gate = CancelGate::new_clock_free();
     let mut network = CoupledModalSystem::new(vec![body(), neck],
         cavity.connections(0, 1, &[0.0]).unwrap(), config(), &gate).unwrap();
-    let initial = source.hamiltonian(&[volume, momentum]); let mut loss = 0.0;
+    let initial = source.hamiltonian(&[initial_volume, initial_momentum]);
+    let mut loss = 0.0;
     let dt = network.sample_period_s();
-    let a = 0.5*dt*resistance*inverse_mass;
-    let b = 0.25*dt*dt*inverse_compliance*inverse_mass;
-    for _ in 0..128 {
-        // Independent 2x2 midpoint solution in the ORIGINAL volume/momentum
-        // coordinates, not a second physical law or a production integrator.
-        let next_volume = ((1.0+a-b)*volume+dt*inverse_mass*momentum)/(1.0+a+b);
-        momentum = 2.0*(next_volume-volume)/(dt*inverse_mass)-momentum;
-        volume = next_volume;
+    let alpha = 0.5 * resistance * inverse_mass;
+    let damped_squared = inverse_compliance * inverse_mass - alpha * alpha;
+    assert!(damped_squared > 0.0, "fixture must be underdamped");
+    let damped = det::sqrt(damped_squared);
+    for step in 1..=128 {
+        // Independent analytic exponential in the ORIGINAL volume/momentum
+        // coordinates: A=[[0,1/M],[-1/C,-R/M]], (A+alpha I)^2=-wd^2 I.
+        // The complete network migrated to exact ZOH in fd531af88. Midpoint
+        // has a different finite-step map, so it is no longer a parity oracle.
+        // Evaluate from the initial state to avoid reference-step accumulation;
+        // do not call the production modal or pHS exponential owner.
+        let time = f64::from(step) * dt;
+        let sine_over_damped = det::sin(damped * time) / damped;
+        let cosine = det::cos(damped * time);
+        let decay = det::exp(-alpha * time);
+        let volume = decay
+            * ((cosine + alpha * sine_over_damped) * initial_volume
+                + inverse_mass * sine_over_damped * initial_momentum);
+        let momentum = decay
+            * (-inverse_compliance * sine_over_damped * initial_volume
+                + (cosine - alpha * sine_over_damped) * initial_momentum);
         let frame = network.step(&[0.0;2]).unwrap();
         loss += frame.component_dissipation_j+frame.connection_dissipation_j;
         let state = network.components()[1].states()[0];
