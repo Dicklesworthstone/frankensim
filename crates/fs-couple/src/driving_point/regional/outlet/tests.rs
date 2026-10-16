@@ -34,7 +34,8 @@ fn a_matched_delay_becomes_the_exact_delayed_physical_difference_not_a_wrapped_e
         Ok(DuctResponse { omega, impedance: C64::new(zc, 0.0),
             min_shear_number: f64::INFINITY, mouth_ka: 0.0,
             u_mouth_over_u_in: C64::new((omega*time).cos(), (omega*time).sin()),
-            p_mouth_over_u_in: C64::new(0.0, 0.0) })
+            p_mouth_over_u_in: C64::new(0.0, 0.0),
+            condition_estimate:1.0,composition:fs_duct::compose::CompositionMode::ImpedanceRecursion })
     }).unwrap();
     assert_eq!(actual_delay, delay);
     assert_eq!(kernel.len(), 256 + delay);

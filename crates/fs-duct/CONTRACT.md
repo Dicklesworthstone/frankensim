@@ -511,3 +511,73 @@ invalid/singular cases, G3 exact node-reindexing and G5 bitwise repeat. Addition
 tests cover self-loops, supplied-junction stamps and actual exact-LS consumption.
 The existing `cross_isa_golden` chain is unchanged and must still pass centrally.
 The new tests emit stderr JSON receipts. Numeric claims await native execution.
+
+## Stable composition (IRP M2.1-W9)
+
+`compose` derives local power-wave two-ports from the existing cylinder/cone
+bases and constitutive `SegmentWave`. Forward and backward amplitudes are
+referenced at opposite endpoints, so only `exp(i*k*L)` with Im(k)>=0 is
+evaluated. Spherical endpoint slopes and area factors are retained. Lossy
+cones keep their existing midpoint slice axis. Smooth profiles expose the
+same local Magnus steps through a shared callback; the stable chain never
+forms their global ABCD product. `profile_matrix` retains its explicit matrix
+export and original operation order inside its representable envelope.
+
+`compose_chain` offers load-to-input reflection recursion and an independently
+ordered Redheffer cross-check. Mouth transfers accumulate local forward-wave
+ratios, with log magnitudes and fixed-order unit phases to avoid intermediate
+product underflow. A final unrepresentable attenuated tail rounds to zero;
+this is not an interval enclosure of subnormal amplitudes. Feedback ratios may
+exceed one in a standing wave or at an area change: that physical gain is not
+clipped. Cancellation estimates for the internal denominators and input-flow
+normalization must not exceed the declared bound, inclusively. Above it the
+call returns `Singular`, with no partial/nonfinite physical response published.
+The default bound is 1e12; block/mode caps are 131072/32. A strongly damped
+matched line remains well-conditioned even when its ABCD chart is unusable.
+These are numerical sensitivity estimates, not certified forward-error bounds.
+
+The ordinary `input_impedance_core` first evaluates this stable rule, including
+the pole guard. To preserve the existing cross-ISA/reed bit semantics, it may
+then use the EXACT historical ABCD operation graph only when the unloaded
+transfer-condition indicator `4/|S21|^2` is <=1e8 and that evaluation is finite.
+`DuctResponse::composition` records `LegacyAbcd` or the stable route and
+`condition_estimate` reports terminated feedback sensitivity. An unrepresentable
+ABCD indicator is `None`, not a fabricated finite bound. Outside this numerical
+compatibility envelope the raw product is not evaluated. No golden constant or
+baseline is re-pinned; the compatibility feedback estimate must also be <=1e8.
+Debug/release cross-ISA proof remains a native gate under
+`docs/GOLDEN_POLICY.md`. The driving-point LineLadder is not changed here.
+
+`ChainResult` includes the physical closed-cap pressure transfer. The historical
+`DuctResponse::p_mouth_over_u_in==0` closed-mouth radiation sentinel is retained,
+as required by its existing contract/tests. Both return zero closed-cap flow.
+The positive real power-wave reference must match at connected ports. Supplied
+feature scattering matrices own their passivity, units and evanescent-basis
+qualification; algebraic composition does not mint that evidence. Generic
+equal-mode Redheffer products use the existing complex LU; modal diagonal
+reflection propagation calls the same bounded primitive with its exact prior
+multiplication order. No second factorization or loss model is introduced.
+
+Network assembly now consumes the finite admittance `(I-S)(I+S)^-1/R` from this
+same owner, including long opaque edges. `network_chain_two_port` remains an
+explicit finite, conditioned ABCD export; graph assembly no longer depends on
+its envelope or reconstructs ABCD through opposite signed load probes. Existing
+network nodal/admittance condition caps remain 1e10. Local compact corrections
+remain explicit and disabled means no inner/series/mutual correction.
+
+Controlled composition polls cancellation between blocks, profile/cone steps,
+matrix rows and existing LU rows. Default APIs remain synchronous with an
+uncancelled caller; supplied external matrix entries are not themselves a
+convergence certificate. All new arithmetic uses deterministic shared owners;
+there is no stochastic seed, material default or instrument-shaped solver.
+
+`src/compose/tests.rs` contains G2 1e-12 closed-form/DD fixtures: the 10m, 1mm
+Bessel tube at 20kHz (and 100/1000m overflow extensions), a declared 50-segment
+18kHz staircase stop-band horn and a 24-closed-hole 15kHz lattice. Their first
+native receipts report the old response defect/refusal and determinant digit
+loss alongside the independent DD result. Further gates cover 1e-13 legacy
+overlap across cylinder/cone/profile/hole/wall data, exact cylinder transfers,
+the two rules, condition/block/mode cap boundaries, cancellation, multiport
+unit-column solutions, opaque network admittance and G5 repeats. No previous
+tolerance, assert, golden or line-ladder baseline is weakened. Native proof,
+wasm compilation, causality and reed rerender remain pending centrally.

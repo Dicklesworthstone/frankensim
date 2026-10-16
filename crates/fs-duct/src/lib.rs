@@ -69,6 +69,8 @@
 //! multimodal structure by ~15 cents.
 
 pub mod modal;
+/// Stable wave/reflection and Redheffer composition with explicit conditioning.
+pub mod compose;
 /// Smooth plane-wave profiles and declared integration/slice axes.
 pub mod profile;
 pub use profile::{ConeSlices, RadiusProfile, RiccatiSteps};
@@ -137,7 +139,7 @@ pub enum DuctError {
     },
     /// The duct has no segments.
     EmptyDuct,
-    /// A dense solve refused (degenerate basis).
+    /// Singular local algebra or a declared composition condition bound exceeded.
     Singular,
 }
 
@@ -399,6 +401,10 @@ pub struct DuctResponse {
     /// Mouth pressure over inlet volume-velocity (`Z_L U_mouth / U_in`).
     /// Zero at a closed termination.
     pub p_mouth_over_u_in: C64,
+    /// Terminated feedback/input-flow cancellation estimate, not ABCD growth.
+    pub condition_estimate:f64,
+    /// Exact legacy-bit compatibility or the stable composition route.
+    pub composition:compose::CompositionMode,
 }
 
 /// Viscothermal wavenumber and characteristic impedance for a tube of
@@ -1175,6 +1181,7 @@ pub fn input_impedance_wall(
 }
 
 /// How the mouth load is supplied to the chain.
+#[derive(Clone,Copy)]
 enum LoadSpec {
     /// One of the closed analytic terminations (with their own validity
     /// refusals, including the low-`ka` ceiling).
@@ -1218,6 +1225,13 @@ fn input_impedance_core(
     load: LoadSpec,
     wall: Option<&WallPin>,
 ) -> Result<DuctResponse, DuctError> {
+    compose::evaluate(duct,state,omega,loss,load,wall)
+}
+
+// Exact historical operation graph inside the explicit compatibility envelope.
+fn input_impedance_legacy(
+    duct:&Duct,state:&GasState,omega:f64,loss:LossModel,load:LoadSpec,wall:Option<&WallPin>,
+) -> Result<DuctResponse,DuctError> {
     if duct.segments.is_empty() {
         return Err(DuctError::EmptyDuct);
     }
@@ -1361,6 +1375,8 @@ fn input_impedance_core(
         mouth_ka,
         u_mouth_over_u_in,
         p_mouth_over_u_in,
+        condition_estimate:1.0,
+        composition:compose::CompositionMode::LegacyAbcd,
     })
 }
 
