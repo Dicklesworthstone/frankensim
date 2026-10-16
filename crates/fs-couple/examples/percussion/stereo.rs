@@ -1,12 +1,18 @@
 //! One source, one mechanical/decimation clock, one or two physical receivers.
 //! BEM boundary solves are shared; receiver response, fitting, delays and filter
 //! histories remain independent. Mono uses this same path with one receiver.
+//! FRANKENSIM_BEM_THREADS=1..64 selects cold frequency workers (default 1).
+//! Additional workers each need a dense frequency workspace; the static
+//! geometry is shared, and mechanical/PCM clocks and acoustic gates are unchanged.
 use super::*;
 use fs_bem::helmholtz::PreparedCbieGeometry;
 use fs_couple::pcm_wav::encode_pcm16_wav_interleaved;
 
 #[path = "observer_fit.rs"]
 mod observer_fit;
+
+#[path = "radiation_sweep.rs"]
+mod radiation_sweep;
 
 #[path = "radiation_spec.rs"]
 pub mod radiation_spec;
@@ -124,8 +130,28 @@ fn reciprocal_geometry<'a>(surface:&'a SpherePanels,k_max:f64,spec:radiation_spe
     Ok(geometry)
 }
 
+// Only small, owned response rows cross threads. No geometry, quadrature,
+// LU factorization, or non-Send example error escapes its frequency solve.
+struct FrequencySample {
+    values: Vec<Vec<C64>>,
+    impedance: Option<Vec<C64>>,
+    ppw: f64,
+    condition: f64,
+    backward_residual: f64,
+    flux_defect: f64,
+}
+
 fn bake_scene_image(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
     gate:&CancelGate,load:bool,reciprocal:bool)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
+    if gate.is_requested() {return Err("radiation preparation cancelled".into());}
+    bake_scene_image_with_threads(boundary,receivers,spec,gate,load,reciprocal,
+        radiation_sweep::threads_from_env()?)
+}
+
+// Explicit worker count keeps tests independent of process-global environment
+// mutation. Every production front door selects it once, before preparation.
+fn bake_scene_image_with_threads(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
+    gate:&CancelGate,load:bool,reciprocal:bool,threads:usize)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
     if gate.is_requested() {return Err("radiation preparation cancelled".into());}
     // A vent can require the reciprocal image independently of file selection.
     // Ordinary one-way and loaded sources can now select it as well. Never
@@ -180,10 +206,14 @@ fn bake_scene_image(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec
         omega[omega.len()-1]/medium.sound_speed,spec,count,omega.len(),gate)?)}else{None};
     let reciprocal_observations=reciprocal.as_ref().map(|source|observations.reciprocal(source,gate)).transpose()?;
     let mut maximum_backward_residual=0.0_f64;let mut maximum_flux_defect=0.0_f64;
-    // Solve the highest frequency first: the BEM owner's wavelength guard can
-    // reject an underresolved band before spending work on its lower samples.
-    for index in (0..omega.len()).rev() {
+    // Highest frequency stays first and alone. Remaining samples may run in
+    // parallel, but their values and diagnostics merge in original serial order.
+    radiation_sweep::run(omega.len(),threads,|index| -> Result<FrequencySample,Error> {
         if gate.is_requested() {return Err("radiation preparation cancelled".into());}
+        let mut sample=FrequencySample {
+            values:vec![vec![C64::ZERO;count];receivers.len()],impedance:None,
+            ppw:f64::INFINITY,condition:0.0,backward_residual:0.0,flux_defect:0.0,
+        };
         let w=omega[index];let k=w/medium.sound_speed;
         let fields=acceleration_fields(&refined.weights,w);
         let field_refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
@@ -192,20 +222,21 @@ fn bake_scene_image(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec
             // shared across all sources. Invalid quadrature refuses cold.
             let observation=reciprocal_observations.as_ref().ok_or("missing reciprocal receiver scene")?.prepare(k,gate)?;
             let solutions=geometry.solve_batch(k,medium,&field_refs,||gate.is_requested())?;
+            if solutions.len()!=count {return Err("BEM source batch lost a mechanical input".into());}
             for (input,solution) in solutions.iter().enumerate() {
-                ppw=ppw.min(solution.panels_per_wavelength);
-                maximum_backward_residual=maximum_backward_residual.max(solution.backward_residual);
-                maximum_flux_defect=maximum_flux_defect.max(solution.flux_balance);
+                sample.ppw=sample.ppw.min(solution.panels_per_wavelength);
+                sample.backward_residual=sample.backward_residual.max(solution.backward_residual);
+                sample.flux_defect=sample.flux_defect.max(solution.flux_balance);
                 for channel in 0..receivers.len() {
                     if gate.is_requested() {return Err("reciprocal observation cancelled".into());}
-                    values[channel][input][index]=observation.response(channel,solution)?;
+                    sample.values[channel][input]=observation.response(channel,solution)?;
                 }
             }
             if load {
                 let traces:Vec<&[C64]>=solutions.iter().map(|s|s.pressure.as_slice()).collect();
-                impedances[index]=feedback::project_pressures(&surface,&refined.weights,&traces,w)?;
+                sample.impedance=Some(feedback::project_pressures(&surface,&refined.weights,&traces,w)?);
             }
-            continue;
+            return Ok(sample);
         }
         // Independent bounded receiver quadrature, prepared ONCE per frequency.
         let observation=observations.prepare(k,gate)?;
@@ -224,13 +255,22 @@ fn bake_scene_image(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec
                     w/core::f64::consts::TAU,solution.radiated_power_roundoff_interval,
                     solution.panels_per_wavelength,solution.condition_lower_bound).into());
             }
-            ppw=ppw.min(solution.panels_per_wavelength);condition=condition.max(solution.condition_lower_bound);
+            sample.ppw=sample.ppw.min(solution.panels_per_wavelength);sample.condition=sample.condition.max(solution.condition_lower_bound);
             for channel in 0..receivers.len() {
-                values[channel][input][index]=observation.response(channel,solution)?;
+                sample.values[channel][input]=observation.response(channel,solution)?;
             }
         }
-        if load {impedances[index]=feedback::project(&surface,&refined.weights,&solutions,w)?;}
-    }
+        if load {sample.impedance=Some(feedback::project(&surface,&refined.weights,&solutions,w)?);}
+        Ok(sample)
+    },|index,sample| {
+        ppw=ppw.min(sample.ppw);condition=condition.max(sample.condition);
+        maximum_backward_residual=maximum_backward_residual.max(sample.backward_residual);
+        maximum_flux_defect=maximum_flux_defect.max(sample.flux_defect);
+        for (channel,row) in sample.values.into_iter().enumerate() {
+            for (input,value) in row.into_iter().enumerate() {values[channel][input][index]=value;}
+        }
+        if let Some(impedance)=sample.impedance {impedances[index]=impedance;}
+    })?;
     let fitted=if load {
         if gate.is_requested() {return Err("radiation load fitting cancelled".into());}
         let f=feedback::fit::fit(&omega,&impedances,count)?;
@@ -338,3 +378,7 @@ mod tests;
 #[cfg(test)]
 #[path = "reciprocal_playback_tests.rs"]
 mod reciprocal_playback_tests;
+
+#[cfg(test)]
+#[path = "radiation_sweep/bem_tests.rs"]
+mod parallel_bem_tests;
