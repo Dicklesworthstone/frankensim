@@ -1101,7 +1101,7 @@ fn rigid_impact(law: fs_tribo::HertzSpherePlane, steps: usize) -> (f64, f64) {
 #[test]
 fn material_hertz_mallet_contact_time_matches_closed_form() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    use fs_contact::normal_patch::law::*;
+    use fs_contact::normal_patch::*;
     let started = Instant::now();
     let law = hertz_law(HEAD_E, HEAD_NU);
     let (oracle, delta) = closed_contact_time(law);
