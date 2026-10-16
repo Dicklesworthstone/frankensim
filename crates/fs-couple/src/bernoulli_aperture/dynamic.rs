@@ -223,6 +223,7 @@ impl DynamicAperture {
             attack_s: 0.0,
         };
         let model = Self { spec, reed, lay, contact_storage, plate: None, closure: None, relaxation: None, state, accepted_steps: 0 };
+        model.admit_linear_clock()?;
         let (stiffness, damping) = reed_structural(reed);
         if !reed_pressure_face(reed).is_finite() || !stiffness.is_finite()
             || !damping.is_finite() || !model.energy_at(state).is_finite()
@@ -380,6 +381,7 @@ impl DynamicAperture {
     pub(super) fn preview_step_with_force(&self, drive: ApertureDrive, force_n: f64)
         -> Result<ApertureTrial, AcousticRealizeError>
     {
+        self.admit_linear_clock()?;
         if !force_n.is_finite() {
             return Err(invalid("aperture mechanical force must be finite newtons"));
         }
@@ -506,6 +508,28 @@ impl DynamicAperture {
             *slot = self.step(*drive)?;
         }
         Ok(ApertureProgress { completed: inputs.len(), terminal: ApertureTerminal::Complete })
+    }
+}
+
+impl DynamicAperture {
+    fn admit_linear_clock(&self) -> Result<(), AcousticRealizeError> {
+        let s = self.spec;
+        let omega = fs_math::det::sqrt(s.stiffness_n_m / s.mass_kg);
+        let area = reed_pressure_face(self.reed);
+        // The passive characteristic load contributes at most Z*A² to C;
+        // positive jet admittance can only reduce that instantaneous load.
+        let damping_rate = 2.0 * s.damping_ratio * omega
+            + s.impedance_pa_s_m3 * area * area / s.mass_kg;
+        let mut rate = omega + damping_rate;
+        if let Some(memory) = self.relaxation.as_ref().filter(|m| !m.branches().is_empty()) {
+            let instantaneous = s.stiffness_n_m + memory.branches().iter().map(|b| b.stiffness).sum::<f64>();
+            // In coordinates [omega_inf*q, v, omega_inf*epsilon_j],
+            // mechanical row sums are <=2*omega_inf+c/m and arm rows <=2/tau.
+            rate = 2.0 * fs_math::det::sqrt(instantaneous / s.mass_kg) + damping_rate;
+            for branch in memory.branches() { rate = rate.max(2.0 / branch.relaxation_time_s); }
+        }
+        fs_phs::linear_exact::admit_midpoint_band(rate, s.time_step_s)
+            .map_err(AcousticRealizeError::TimeResolution)
     }
 }
 

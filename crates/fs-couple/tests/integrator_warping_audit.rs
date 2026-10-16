@@ -112,7 +112,7 @@ const PATHS: &[AuditRow] = &[
     AuditRow {
         path: "bernoulli_aperture::DynamicAperture",
         integrator: Integrator::GonzalezMidpoint,
-        bound: None,
+        bound: Some(fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP),
         owner: Owner::Dynamic,
     },
     AuditRow {
@@ -618,6 +618,43 @@ fn valve_angular_step_cap_and_cap_plus_one() {
     ] {
         assert!(admit_modal_angular_step(cap, dt).is_err());
     }
+}
+
+#[test]
+fn dynamic_aperture_refuses_beyond_one_cent_resolved_band() {
+    let cap = fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP;
+    let make = |dt| {
+        DynamicAperture::new(
+            DynamicApertureSpec {
+                aperture: BernoulliAperture {
+                    rest_opening_m: REST,
+                    width_m: 0.01,
+                    closing_pressure_pa: 1e6,
+                },
+                mass_kg: 1.0,
+                stiffness_n_m: 1.0,
+                damping_ratio: 0.0,
+                density_kg_m3: 1.2,
+                impedance_pa_s_m3: 1e6,
+                time_step_s: dt,
+                max_steps: 1,
+            },
+            ApertureState {
+                opening_m: REST,
+                opening_velocity_m_s: 0.0,
+            },
+            obstacle(),
+        )
+    };
+    assert!(make(cap / (1.0 + 1e-12)).is_ok());
+    assert!(matches!(
+        make(cap + 1e-12),
+        Err(
+            fs_couple::acoustic_realize::AcousticRealizeError::TimeResolution(
+                fs_phs::linear_exact::ResolvedBandError::Outside { .. }
+            )
+        )
+    ));
 }
 
 #[test]
