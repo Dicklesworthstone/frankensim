@@ -1978,3 +1978,6 @@ pub fn canonical_row(entry: &RegistryEntry) -> String {
     row.push('}');
     row
 }
+
+/// Cross-domain instrument source ledger and explicit retention decisions.
+pub mod instrument_data;

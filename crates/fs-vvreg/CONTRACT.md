@@ -7,6 +7,26 @@ refused until it is one.
 
 ## Purpose and layer
 
+`instrument_data` (IRP M8-W1) parses the 14-column, two-header-line
+`data/instruments/ledger.tsv` source index without I/O or embedded assets.
+It preserves domain-manifest licence tokens (including the legacy non-SPDX
+`Work-of-the-US-Government-Public-Use-Permitted` and
+`NASA-NTRS-Public-Use-Permitted`), checks vocabulary, dates, 4096-byte field
+caps, source uniqueness, specimen identity and retention/digitization rules,
+and returns source-sorted, order-independent lookups. `unknown` licences are
+pending-only; non-authored fixtures require a defect note. Licence catalogue
+membership, permission authenticity and the truth of a defect note are not
+proved by syntax. G0/G3 `tests/instrument_data.rs` binds the committed rows to
+matdb licences/redistribution, acoustic cases/absences and retained paths, checks
+orphans and seed coverage, and falsifies a licence mismatch with tolerance zero.
+`reference:` resolution remains explicitly deferred to M8-W6a. New M8 data must
+add ledger rows and pass these checks; M6.3-W1 imports must use this parser and
+require an admitted source/specimen linking licence and uncertainty. Decisions
+do not mint evidence colours or establish measured geometry/material fidelity.
+This finite metadata parser has no compute scope, cancellation, unsafe boundary,
+new dependency or feature gate; source acquisition and consumer admission remain
+separate operations.
+
 Layer UTIL (versioned registry data + fail-closed citation, corpus-query, and
 standards-source gates). Depends on `fs-blake3` (domain-separated content
 identity), `fs-evidence` (`Evidence<T>` plus claim-color caps), and `fs-qty`
