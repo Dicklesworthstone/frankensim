@@ -31,6 +31,8 @@ use fs_math::{c64::C64,det};
 use core::f64::consts::{PI,TAU};
 mod geometry;
 use geometry::*;
+/// Open P1 pressure-jump screens using the same singular triangle moments.
+pub mod open_screen;
 mod field;
 pub use field::Solution;
 mod ports;
@@ -310,16 +312,12 @@ fn regular_real(k:f64,r:f64)->(f64,f64) {
 struct Wave {weight:f64,coefficients:Vec<C64>}
 impl Prepared<'_> {
     fn waves(&self,k:f64,cancelled:&mut impl FnMut()->bool)->Result<Vec<Wave>,HelmholtzError> {
-        let segments=1_usize<<self.budget.angular_refinement;
-        let mut waves=Vec::with_capacity(64*segments*segments);
-        for block in 0..segments {for polar in 0..8 {for azimuth in 0..8*segments {
+        let mut waves=Vec::new();
+        for (direction,weight) in directions(self.budget.angular_refinement) {
             poll(cancelled)?;
-            let mu=-1.0+2.0*(block as f64+X8[polar])/segments as f64;
-            let phi=TAU*(azimuth as f64+0.5)/(16*segments) as f64;
-            let radial=(1.0-mu*mu).sqrt();let direction=[radial*det::cos(phi),radial*det::sin(phi),mu];
             let coefficients=self.wave_coefficients(k,direction)?;
-            waves.push(Wave {weight:2.0*W8[polar]/segments as f64*TAU/(16*segments) as f64,coefficients});
-        }}}
+            waves.push(Wave {weight,coefficients});
+        }
         Ok(waves)
     }
     fn wave_coefficients(&self,k:f64,direction:Point)->Result<Vec<C64>,HelmholtzError> {
