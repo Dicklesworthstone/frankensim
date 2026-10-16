@@ -88,6 +88,19 @@ pub trait Storage {
     fn exact_quadratic_matrix(&self) -> Option<&[f64]> {
         None
     }
+
+    /// Optional cancellation-stable evaluation of the Gonzalez numerator
+    /// `H(b)-H(a)-gradient(midpoint).(b-a)`, with the supplied componentwise
+    /// midpoint. This is the SAME energy remainder, not a modified potential,
+    /// approximate midpoint gradient or algebraic admission allowance.
+    ///
+    /// Return `None` unless every stored-energy contribution is accounted for.
+    /// The default retains the original endpoint-energy subtraction. Callbacks
+    /// must be read-only and allocation-free for prepared stepping. An analytic
+    /// Newton tangent must use the same numerator as the residual.
+    fn midpoint_energy_remainder(&self, _a: &[f64], _b: &[f64], _midpoint: &[f64]) -> Option<f64> {
+        None
+    }
 }
 
 /// Quadratic storage `H = x^T Q x / 2` with `Q` symmetric PSD
@@ -1116,7 +1129,10 @@ fn discrete_gradient_into_unchecked(
         .fold(f64::MIN_POSITIVE, |acc, &v| acc.max(v.abs()));
     let dx_floor = 1.0e-14 * state_scale;
     if dx_norm_sq > dx_floor * dx_floor {
-        let corr = (storage.hamiltonian(b) - storage.hamiltonian(a) - mid_dot) / dx_norm_sq;
+        let remainder = storage
+            .midpoint_energy_remainder(a, b, mid)
+            .unwrap_or_else(|| storage.hamiltonian(b) - storage.hamiltonian(a) - mid_dot);
+        let corr = remainder / dx_norm_sq;
         for i in 0..n {
             dg[i] += corr * (b[i] - a[i]);
         }
