@@ -587,6 +587,7 @@ fn ad_011_import_and_retirement_receipts_survive_round_trip() {
         EntityDeclaration::part(input.root, "test-fixture:import-new").with_fingerprint(f);
     let new = declaration.identity();
     let revision = ImportRevision {
+        label: "test-fixture:matching-fingerprint-import".into(),
         event: RebindEvent::Import,
         scope: ImportScope::Partial,
         entities: vec![ImportedEntity {
@@ -602,6 +603,7 @@ fn ad_011_import_and_retirement_receipts_survive_round_trip() {
     input
         .catalog
         .apply_import(&ImportRevision {
+            label: "test-fixture:changed-fingerprint-remesh".into(),
             event: RebindEvent::Remesh,
             scope: ImportScope::Partial,
             entities: vec![ImportedEntity {
@@ -615,6 +617,7 @@ fn ad_011_import_and_retirement_receipts_survive_round_trip() {
     input
         .catalog
         .apply_import(&ImportRevision {
+            label: "test-fixture:asserted-correspondence-migration".into(),
             event: RebindEvent::RevisionMigration,
             scope: ImportScope::Partial,
             entities: vec![ImportedEntity {
