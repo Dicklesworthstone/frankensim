@@ -4,6 +4,20 @@ use super::*;
 use fs_material::thermochemical_gas::energy::entropy::GasEntropySolve;
 use fs_math::det;
 
+const ENERGY_BUDGET_J: f64 = 1e-10;
+
+fn phase_controls(gas_mass_kg: f64) -> PistonSolve {
+    let mut solve = controls();
+    solve.momentum_tolerance_n_s = 1e-14;
+    solve.energy_tolerance_j = ENERGY_BUDGET_J;
+    // The material closure takes J/kg, while the outer piston gate takes J.
+    // Reserve one eighth of that unchanged outer budget for material energy:
+    // m*epsilon_u=epsilon_E/8. Midpoint's own quarter-budget inversions then
+    // get epsilon_E/(32*m), rather than a dimensionally unrelated 2.5e-11 J/kg.
+    solve.gas.energy_tolerance_j_kg = ENERGY_BUDGET_J / (8.0 * gas_mass_kg);
+    solve
+}
+
 fn advance(omega: f64, dt: f64, coordinate: usize, signed_amplitude: f64) -> [f64; 2] {
     let mut parcel = gas(0.75, 0.0);
     let initial_volume = parcel.volume_m3();
@@ -37,11 +51,9 @@ fn advance(omega: f64, dt: f64, coordinate: usize, signed_amplitude: f64) -> [f6
             .unwrap();
     }
     let mut model = GasPiston::new(parcel, mass, area, v).unwrap();
-    let mut solve = controls();
-    solve.momentum_tolerance_n_s = 1e-14;
-    solve.energy_tolerance_j = 1e-10;
-    solve.gas.energy_tolerance_j_kg = 1e-10;
-    model
+    let gas_mass = model.gas().mass_kg();
+    let solve = phase_controls(gas_mass);
+    let report = model
         .step(
             PistonInput {
                 duration_s: dt,
@@ -52,10 +64,39 @@ fn advance(omega: f64, dt: f64, coordinate: usize, signed_amplitude: f64) -> [f6
             || false,
         )
         .unwrap();
+    assert!(report.total_energy_residual_j.abs() <= ENERGY_BUDGET_J);
+    assert!(report.gas.energy_residual_j.abs() <= ENERGY_BUDGET_J / 8.0);
+    assert!(gas_mass * report.gas.midpoint_energy_residual_j_kg.abs() <= ENERGY_BUDGET_J / 8.0);
     [
         (model.gas().volume_m3() - initial_volume) / area,
         model.velocity_m_s() / omega,
     ]
+}
+
+#[test]
+fn phase_energy_budget_resolves_material_ulps_in_joules() {
+    let parcel = gas(0.75, 0.0);
+    let u = parcel.state().specific_internal_energy_j_kg();
+    let quantum = u.next_up() - u;
+    let m = parcel.mass_kg();
+    let solve = phase_controls(m);
+    // The previous request became 2.5e-11 J/kg inside midpoint, below one
+    // representable increment of the actual NASA-9 specific internal energy.
+    // Its reported 2^-33 J/kg refusal is about two such increments, not a
+    // 1e-10 J defect in this approximately 0.66 g parcel.
+    assert!(quantum > 0.25e-10);
+    assert!(2.0 * m * quantum < ENERGY_BUDGET_J / 8.0);
+    assert!(0.25 * solve.gas.energy_tolerance_j_kg > quantum);
+    assert_eq!(solve.energy_tolerance_j, ENERGY_BUDGET_J);
+    // Exercise the real source-backed pressure/energy solve at all amplitudes;
+    // the phase test and every physical residual gate still use their old bands.
+    let omega = core::f64::consts::TAU * 1_000.0;
+    for amplitude in [1e-4, 5e-5, 2.5e-5] {
+        for coordinate in 0..2 {
+            let x = advance(omega, 0.02 / omega, coordinate, amplitude);
+            assert!(x.into_iter().all(f64::is_finite));
+        }
+    }
 }
 
 fn phase(omega: f64, dt: f64, amplitude: f64) -> f64 {

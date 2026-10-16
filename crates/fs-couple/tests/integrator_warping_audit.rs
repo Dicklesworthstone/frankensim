@@ -1,7 +1,8 @@
 //! G1/G5 linear propagation audit. The closure test fails on unmeasured owners
 //! and on undeclared non-exact bands. A measured integration tolerance alone
 //! is not instrument fidelity. Network/piano companions keep their actual
-//! owner-local observables until joined to this inventory.
+//! owner-local observables, joined from successful native runs at this HEAD
+//! and host through FS_IRP_NETWORK_AUDIT_LOG and FS_IRP_PIANO_AUDIT_LOG.
 
 use fs_couple::bernoulli_aperture::BernoulliAperture;
 use fs_couple::bernoulli_aperture::dynamic::{
@@ -46,7 +47,8 @@ enum Owner {
     Uncoupled,
     Exact,
     Speaker,
-    SeparateTest,
+    Network,
+    Piano(u8),
 }
 struct AuditRow {
     path: &'static str,
@@ -170,25 +172,25 @@ const PATHS: &[AuditRow] = &[
         path: "cavity_phs::piston::thermal::boundary::network",
         integrator: Integrator::FirstOrder,
         bound: None,
-        owner: Owner::SeparateTest,
+        owner: Owner::Network,
     },
     AuditRow {
         path: "engine-piano::PianoAudio 1x",
         integrator: Integrator::Trapezoidal,
         bound: None,
-        owner: Owner::SeparateTest,
+        owner: Owner::Piano(1),
     },
     AuditRow {
         path: "engine-piano::PianoAudio 2x",
         integrator: Integrator::Trapezoidal,
         bound: None,
-        owner: Owner::SeparateTest,
+        owner: Owner::Piano(2),
     },
     AuditRow {
         path: "engine-piano::PianoAudio 4x",
         integrator: Integrator::Trapezoidal,
         bound: None,
-        owner: Owner::SeparateTest,
+        owner: Owner::Piano(4),
     },
 ];
 
@@ -488,7 +490,9 @@ fn advance(owner: Owner, omega: f64, rate: u32, z: [f64; 2]) -> [f64; 2] {
                 omega,
             )
         }
-        Owner::SeparateTest | Owner::Speaker => panic!("separate observation seam required"),
+        Owner::Network | Owner::Piano(_) | Owner::Speaker => {
+            panic!("separate observation seam required")
+        }
     }
 }
 
@@ -562,6 +566,158 @@ fn metadata(output: std::io::Result<std::process::Output>) -> String {
     value
 }
 
+// Only the canonical flat JSONL emitted by the two named companion tests is
+// consumed here. This is not a general JSON parser or a replacement test owner.
+fn companion_field<'a>(line: &'a str, name: &str) -> &'a str {
+    let key = format!("\"{name}\":");
+    let mut fields = line.match_indices(&key);
+    let (offset, _) = fields.next().expect("required companion field");
+    assert!(fields.next().is_none(), "duplicate companion field {name}");
+    line[offset + key.len()..]
+        .split([',', '}'])
+        .next()
+        .unwrap()
+        .trim()
+}
+fn companion_text<'a>(line: &'a str, name: &str) -> &'a str {
+    let value = companion_field(line, name)
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .expect("quoted companion field");
+    assert!(!value.contains(['"', '\\']), "canonical unescaped field");
+    value
+}
+fn companion_number(line: &str, name: &str) -> f64 {
+    let value: f64 = companion_field(line, name)
+        .parse()
+        .expect("numeric companion field");
+    assert!(value.is_finite(), "finite companion field {name}");
+    value
+}
+fn companion_rows(variable: &str, path: &str, git: &str, host: &str) -> Vec<String> {
+    let file = std::env::var_os(variable).unwrap_or_else(|| {
+        panic!("run the real companion test with --nocapture and set {variable}")
+    });
+    let log = std::fs::read_to_string(file).expect("read native companion test output");
+    let outcomes: Vec<_> = log
+        .lines()
+        .filter(|l| l.starts_with("test result:"))
+        .collect();
+    assert!(
+        !outcomes.is_empty() && outcomes.iter().all(|l| l.starts_with("test result: ok.")),
+        "{variable} must come from a successful test run"
+    );
+    let rows: Vec<_> = log
+        .lines()
+        .filter_map(|line| {
+            // libtest can prefix the first --nocapture line with the test name.
+            let start = line.find("{\"path\":")?;
+            let row = &line[start..];
+            (companion_text(row, "path") == path).then(|| {
+                assert_eq!(companion_text(row, "git_sha"), git, "stale companion HEAD");
+                assert_eq!(
+                    companion_text(row, "host"),
+                    host,
+                    "different companion host"
+                );
+                row.to_owned()
+            })
+        })
+        .collect();
+    assert_eq!(
+        rows.len(),
+        3,
+        "all three companion rungs/factors required exactly once"
+    );
+    rows
+}
+
+fn measured_companion(row: &AuditRow, git: &str, host: &str) {
+    match row.owner {
+        Owner::Network => {
+            let mut rows = companion_rows("FS_IRP_NETWORK_AUDIT_LOG", row.path, git, host);
+            rows.sort_by(|a, b| {
+                companion_number(a, "steps").total_cmp(&companion_number(b, "steps"))
+            });
+            let mut errors = Vec::new();
+            for (i, (record, steps)) in rows.iter().zip([160.0, 320.0, 640.0]).enumerate() {
+                assert_eq!(companion_text(record, "integrator"), "FirstOrder");
+                assert_eq!(companion_number(record, "steps"), steps);
+                assert_eq!(companion_number(record, "next_steps"), 2.0 * steps);
+                assert!((companion_number(record, "dt_s") * steps - 0.02).abs() < 1e-15);
+                let temperature = companion_number(record, "temperature_k");
+                let next = companion_number(record, "next_temperature_k");
+                if i != 0 {
+                    assert_eq!(
+                        companion_number(&rows[i - 1], "next_temperature_k"),
+                        temperature
+                    );
+                }
+                let error = (temperature - next).abs();
+                assert!(error > 1e-6, "refinement must exceed solver noise");
+                assert!((error - companion_number(record, "next_rung_difference_k")).abs() < 1e-12);
+                errors.push(error);
+                println!("{record}");
+            }
+            for pair in errors.windows(2) {
+                let order = det::ln(pair[0] / pair[1]) / core::f64::consts::LN_2;
+                assert!(
+                    (order - 1.0).abs() <= 0.1,
+                    "actual first-order companion: {order}"
+                );
+            }
+        }
+        Owner::Piano(factor) => {
+            let rows = companion_rows(
+                "FS_IRP_PIANO_AUDIT_LOG",
+                "engine-piano::PianoAudio",
+                git,
+                host,
+            );
+            let factors: std::collections::BTreeSet<_> =
+                rows.iter().map(|r| companion_field(r, "factor")).collect();
+            assert_eq!(
+                factors,
+                ["1", "2", "4"]
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+            );
+            let record = rows
+                .iter()
+                .find(|r| companion_number(r, "factor") == f64::from(factor))
+                .unwrap();
+            assert_eq!(
+                companion_text(record, "integrator"),
+                "exact local ZOH plus finite-step coupled solve"
+            );
+            let rate = 48_000.0 * f64::from(factor);
+            assert_eq!(companion_number(record, "sample_rate_hz"), rate);
+            assert_eq!(companion_number(record, "tolerance_cents"), 1.0);
+            let omega = core::f64::consts::TAU * companion_number(record, "omega_hz");
+            assert!(omega > 0.0);
+            assert!((companion_number(record, "omega_dt") - omega / rate).abs() < 1e-12);
+            let a = companion_number(record, "window_a_omega_rad_s");
+            let b = companion_number(record, "window_b_omega_rad_s");
+            assert!(a > 0.0 && b > 0.0);
+            let measured = cents(0.5 * (a + b) / omega);
+            let discrepancy = cents(a / b).abs();
+            assert!((measured - companion_number(record, "measured_cents")).abs() < 1e-6);
+            assert!(
+                (discrepancy - companion_number(record, "window_difference_cents")).abs() < 1e-6
+            );
+            assert!(
+                discrepancy < 1.0 && measured.abs() + 0.5 * discrepancy <= 1.0,
+                "{}: {measured} cents, window discrepancy {discrepancy}; migration required",
+                row.path
+            );
+            // This is the bead's actual PianoAudio coupled-eigenproblem
+            // observable, not an exact-map claim or a fabricated global guard.
+            println!("{record}");
+        }
+        _ => panic!("not a companion owner"),
+    }
+}
+
 #[test]
 fn midpoint_warping_matches_atan_formula() {
     for rate in [48_000, 96_000, 192_000] {
@@ -584,11 +740,8 @@ fn available_render_linear_owners_are_measured_without_promoting_unmigrated_path
     );
     let host = metadata(std::process::Command::new("uname").arg("-n").output());
     for row in PATHS {
-        if matches!(row.owner, Owner::SeparateTest) {
-            println!(
-                "{{\"path\":\"{}\",\"integrator\":\"{:?}\",\"measured_cents\":null,\"verdict\":\"requires-owner-local-audit\",\"git_sha\":\"{}\",\"host\":\"{}\"}}",
-                row.path, row.integrator, git_sha, host
-            );
+        if matches!(row.owner, Owner::Network | Owner::Piano(_)) {
+            measured_companion(row, &git_sha, &host);
             continue;
         }
         for rate in [48_000, 96_000, 192_000] {
@@ -673,12 +826,21 @@ fn every_render_path_is_listed_with_integrator_and_measured_warping() {
             "render paths must be named once"
         );
         let exact = matches!(row.integrator, Integrator::ExactZoh);
-        if matches!(row.owner, Owner::SeparateTest)
-            || (!exact
-                && !row.bound.is_some_and(|z| {
-                    z > 0.0 && z <= fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP
-                }))
-        {
+        // The FirstOrder row is measured by a four-solution order ladder;
+        // PianoAudio by its public coupled-board observations at all factors.
+        // Both have already executed mandatory companion checks above. Neither
+        // may substitute a scalar midpoint control for its actual owner.
+        let resolved = match row.owner {
+            Owner::Network => matches!(row.integrator, Integrator::FirstOrder),
+            Owner::Piano(_) => matches!(row.integrator, Integrator::Trapezoidal),
+            _ => {
+                exact
+                    || row.bound.is_some_and(|z| {
+                        z > 0.0 && z <= fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP
+                    })
+            }
+        };
+        if !resolved {
             unresolved.push(row.path);
         }
     }
@@ -1027,7 +1189,11 @@ mod piston_map {
             .unwrap();
         }
         let mut model = GasPiston::new(gas, mass, area, omega * amplitude * z[1]).unwrap();
-        model
+        // Allocate material error in J, then convert to the source's J/kg.
+        // Midpoint reserves another factor four for its two inversions.
+        let gas_mass = model.gas().mass_kg();
+        let energy_budget_j = 1e-10;
+        let record = model
             .step(
                 PistonInput {
                     duration_s: dt,
@@ -1040,16 +1206,18 @@ mod piston_map {
                     gas: GasEnergySolve {
                         minimum_temperature_k: 200.0,
                         maximum_temperature_k: 1800.0,
-                        energy_tolerance_j_kg: 1e-10,
+                        energy_tolerance_j_kg: energy_budget_j / (8.0 * gas_mass),
                         maximum_iterations: 128,
                     },
                     momentum_tolerance_n_s: 1e-14,
-                    energy_tolerance_j: 1e-10,
+                    energy_tolerance_j: energy_budget_j,
                     maximum_iterations: 128,
                 },
                 || false,
             )
             .unwrap();
+        assert!(record.total_energy_residual_j.abs() <= energy_budget_j);
+        assert!(record.gas.energy_residual_j.abs() <= energy_budget_j / 8.0);
         [
             (model.gas().volume_m3() - volume) / area,
             model.velocity_m_s() / omega,

@@ -75,17 +75,10 @@ fn network_piston_observed_order_is_one() {
         values[0][2] < 1.0 && values[0][3] > 0.1,
         "circuit and gas axes must be live"
     );
-    for (i, error) in errors.iter().enumerate() {
+    for error in &errors {
         assert!(
             *error > 1e-6,
             "temperature refinement must exceed solver noise"
-        );
-        println!(
-            "{{\"path\":\"cavity_phs::piston::thermal::boundary::network\",\"integrator\":\"FirstOrder\",\"dt_s\":{},\"steps\":{},\"temperature_k\":{},\"next_rung_difference_k\":{},\"verdict\":\"requires-migration\"}}",
-            0.02 / f64::from(rungs[i]),
-            rungs[i],
-            values[i][0],
-            error
         );
     }
     for pair in errors.windows(2) {
@@ -93,6 +86,39 @@ fn network_piston_observed_order_is_one() {
         assert!(
             (order - 1.0).abs() <= 0.1,
             "actual network-piston order={order}; differences={errors:?}"
+        );
+    }
+    let metadata = |output: std::io::Result<std::process::Output>| {
+        let output = output.unwrap();
+        assert!(output.status.success());
+        let value = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+        assert!(
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+        );
+        value
+    };
+    let git = metadata(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output(),
+    );
+    let host = metadata(std::process::Command::new("uname").arg("-n").output());
+    for (i, error) in errors.iter().enumerate() {
+        // Both raw endpoints let the inventory recompute the differences and
+        // both observed orders instead of trusting a verdict string.
+        println!(
+            "{{\"path\":\"cavity_phs::piston::thermal::boundary::network\",\"integrator\":\"FirstOrder\",\"dt_s\":{},\"steps\":{},\"next_steps\":{},\"temperature_k\":{},\"next_temperature_k\":{},\"next_rung_difference_k\":{},\"verdict\":\"first-order-convergence\",\"git_sha\":\"{}\",\"host\":\"{}\"}}",
+            0.02 / f64::from(rungs[i]),
+            rungs[i],
+            rungs[i + 1],
+            values[i][0],
+            values[i + 1][0],
+            error,
+            git,
+            host
         );
     }
 }

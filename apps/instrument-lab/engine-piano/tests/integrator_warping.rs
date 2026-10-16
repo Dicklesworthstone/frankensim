@@ -125,6 +125,14 @@ fn coupled_board_modes_per_factor() {
     assert!(git.status.success() && host.status.success());
     let git = String::from_utf8(git.stdout).unwrap();
     let host = String::from_utf8(host.stdout).unwrap();
+    for value in [git.trim(), host.trim()] {
+        assert!(
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+        );
+    }
     for factor in [1, 2, 4] {
         let (desc, cfg, exact) = fixture();
         let mut audio = PianoAudio::new(&desc, cfg, factor).unwrap();
@@ -158,14 +166,21 @@ fn coupled_board_modes_per_factor() {
             window_difference < 1.0,
             "high-mode estimate is not stationary: {window_difference} cents"
         );
-        // Disclosure only: M1.1-W3 owns the live-path migration. No phase
-        // threshold relabels this existing finite-step coupling as exact.
+        // This is the measured two-coordinate domain, not a universal band
+        // for the full live piano. Include half the inter-window discrepancy
+        // in its one-cent allowance; never relabel finite-step coupling exact.
+        assert!(
+            cents.abs() + 0.5 * window_difference <= 1.0,
+            "factor {factor}: {cents} cents, window discrepancy {window_difference}; migrate the coupled solve"
+        );
         println!(
-            "{{\"path\":\"engine-piano::PianoAudio\",\"integrator\":\"exact local ZOH plus finite-step coupled solve\",\"factor\":{},\"omega_hz\":{},\"sample_rate_hz\":{},\"omega_dt\":{},\"measured_cents\":{},\"window_difference_cents\":{},\"predicted_cents\":null,\"tolerance_cents\":null,\"verdict\":\"disclosure-only\",\"git_sha\":\"{}\",\"host\":\"{}\"}}",
+            "{{\"path\":\"engine-piano::PianoAudio\",\"integrator\":\"exact local ZOH plus finite-step coupled solve\",\"factor\":{},\"omega_hz\":{},\"sample_rate_hz\":{},\"omega_dt\":{},\"window_a_omega_rad_s\":{},\"window_b_omega_rad_s\":{},\"measured_cents\":{},\"window_difference_cents\":{},\"predicted_cents\":null,\"tolerance_cents\":1,\"verdict\":\"measured-coupled-fixture\",\"git_sha\":\"{}\",\"host\":\"{}\"}}",
             factor,
             exact[1] / core::f64::consts::TAU,
             OUTPUT_RATE * factor as u32,
             exact[1] / f64::from(OUTPUT_RATE * factor as u32),
+            a,
+            b,
             cents,
             window_difference,
             git.trim(),
