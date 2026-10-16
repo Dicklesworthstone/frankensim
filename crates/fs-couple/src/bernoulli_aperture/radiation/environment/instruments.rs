@@ -38,10 +38,14 @@ impl TwoSidedPressure {
     /// partially running system or pressure output is returned.
     #[allow(clippy::too_many_arguments)]
     pub fn from_baffled_environment(
-        valve: LoadedAperture, sources: [ApertureDuctSpec; 2],
-        walls: [Option<MaterialWallInput>; 2], limits: TwoSidedLimits,
-        policies: Option<[FractionalTubePolicy; 2]>, radiation: DuctRadiationSpec,
-        max_block: usize, gate: &CancelGate,
+        valve: LoadedAperture,
+        sources: [ApertureDuctSpec; 2],
+        walls: [Option<MaterialWallInput>; 2],
+        limits: TwoSidedLimits,
+        policies: Option<[FractionalTubePolicy; 2]>,
+        radiation: DuctRadiationSpec,
+        max_block: usize,
+        gate: &CancelGate,
     ) -> Result<(Self, Vec<BaffledOutletBinding>), RenderError> {
         poll(gate).map_err(RenderError::Voice)?;
         let rate = radiation.reconstruction.mechanics_rate_hz();
@@ -63,7 +67,13 @@ impl TwoSidedPressure {
         let system = TwoSidedAperture::with_material_walls(
             valve, sources, walls, limits, policies, gate).map_err(RenderError::Voice)?;
         let (radiation, bindings) = environment.into_parts();
-        let performer = Self::with_radiation(system, radiation, max_block)?;
+        let performer = Self::with_observation_policy(
+            system,
+            radiation,
+            max_block,
+            crate::pcm_wav::observation::ObservationPolicy::Acceptance,
+            &bindings,
+        )?;
         poll(gate).map_err(RenderError::Voice)?;
         Ok((performer, bindings))
     }

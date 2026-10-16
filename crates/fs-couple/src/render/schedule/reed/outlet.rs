@@ -15,6 +15,17 @@ pub(super) enum ObservationInput {
     Baffled { receiver: CircularOutletReceiver, exterior: Option<GasState> },
 }
 impl ObservationInput {
+    pub(super) fn validate_policy(
+        &self,
+        policy: ObservationPolicy,
+    ) -> Result<(), ReedPerformanceError> {
+        if policy == ObservationPolicy::Acceptance && matches!(self, Self::Legacy(_)) {
+            return Err(ReedPerformanceError::Observation(
+                ObservationError::LegacyListenerInAcceptance,
+            ));
+        }
+        Ok(())
+    }
     pub(super) fn read(reader: &mut Reader<'_>) -> Result<Self, ReedPerformanceError> {
         let mut row = reader.next()?;
         let mut observation = match row.word()? {
@@ -83,6 +94,10 @@ impl ObservationInput {
         Ok((voice, Some(TerminalObservation { pressure, failure: None })))
     }
 }
+
+#[cfg(test)]
+#[path = "outlet/qualification.rs"]
+mod qualification;
 
 impl ReedPerformance {
     /// The selected physical receiver; None identifies the original bore/jet proxy.

@@ -54,6 +54,118 @@ fn blades(p:&TwoSidedPressure)->[BladeState;2] {
     *a.blade_states()
 }
 
+/// G3: the actual accepted terminal flow, not an independently rebuilt source.
+#[test]
+fn two_sided_pressure_matches_owner() {
+    use fs_couple::pcm_wav::baffled::{BaffledPressure, RayleighMedium};
+    let exterior = gas(333.15);
+    let mut actual = performer(exterior, 1);
+    let declaration = actual.radiation();
+    let port = declaration.openings[0];
+    let side = if port.network == 0 {
+        ValveSide::Upstream
+    } else {
+        ValveSide::Downstream
+    };
+    let section = actual
+        .system()
+        .graph(side)
+        .sections
+        .iter()
+        .find(|s| s.nodes.contains(&port.node))
+        .unwrap();
+    let mut owner = BaffledPressure::circular_outlet_multirate_differentiating(
+        section.radius_m,
+        RATE,
+        RATE,
+        declaration.receiver,
+        RayleighMedium {
+            density: exterior.density,
+            sound_speed: exterior.sound_speed,
+        },
+    )
+    .unwrap();
+    let mut peak = 0.0_f64;
+    let start = std::time::Instant::now();
+    for sample in 0..STEPS {
+        actual
+            .set_drive(drive(if sample < 173 { 50.0 } else { 0.0 }))
+            .unwrap();
+        let mut out = [0.0];
+        actual.block(&mut out).unwrap();
+        let flow = actual
+            .system()
+            .node_frame(side, port.node)
+            .unwrap()
+            .net_flow_into_node_m3_s;
+        assert_eq!(out[0].to_bits(), owner.step(&[flow]).unwrap().to_bits());
+        peak = peak.max(out[0].abs());
+    }
+    assert!(peak > 0.0);
+    println!(
+        "{{\"case\":\"two_sided_pressure_matches_owner\",\"inputs\":\"authored paired valve and two physical gas-bound ducts; terminal volume flow\",\"observed\":0,\"err\":0,\"tol\":0,\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+        start.elapsed().as_secs_f64()
+    );
+}
+
+/// G0: load provenance must agree with receiver media before publication.
+#[test]
+fn reaction_receiver_gas_mismatch_refuses() {
+    use fs_couple::pcm_wav::observation::ObservationPolicy;
+    let (valve, [up, down]) = reed();
+    let mut graphs = [up.graph, down.graph];
+    let environment = bind_baffled_environment(
+        &mut graphs,
+        &[&up.gases, &down.gases],
+        observation(gas(293.15), 1),
+        &CancelGate::new_clock_free(),
+    )
+    .unwrap();
+    let (mut receiver, bindings) = environment.into_parts();
+    receiver.exterior = Some(gas(333.15));
+    let [a, b] = graphs;
+    let system = TwoSidedAperture::new(
+        valve,
+        [
+            ApertureDuctSpec { graph: a, ..up },
+            ApertureDuctSpec { graph: b, ..down },
+        ],
+        limits(),
+        &CancelGate::new_clock_free(),
+    )
+    .unwrap();
+    let error = TwoSidedPressure::with_observation_policy(
+        system,
+        receiver,
+        64,
+        ObservationPolicy::Acceptance,
+        &bindings,
+    )
+    .err()
+    .unwrap();
+    assert!(
+        error.to_string().contains("reaction/receiver gas mismatch"),
+        "{error}"
+    );
+}
+
+/// G5: reconstruction, mechanics and control history replay across callback sizes.
+#[test]
+fn observer_bitwise_repeat() {
+    let (mut a, mut b) = (performer(gas(333.15), 1), performer(gas(333.15), 1));
+    a.set_drive(drive(50.0)).unwrap();
+    b.set_drive(drive(50.0)).unwrap();
+    let (mut x, mut y) = ([0.0; 1024], [0.0; 1024]);
+    for part in x.chunks_mut(64) {
+        a.block(part).unwrap();
+    }
+    for part in y.chunks_mut(7) {
+        b.block(part).unwrap();
+    }
+    assert!(x.iter().any(|v| *v != 0.0));
+    assert!(x.iter().zip(y).all(|(a, b)| a.to_bits() == b.to_bits()));
+}
+
 #[test]
 fn one_environment_matches_manual_original_owners_at_each_multirate_sample() {
     for ratio in [1,2,4] {

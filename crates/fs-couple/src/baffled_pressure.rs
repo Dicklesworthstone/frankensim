@@ -666,3 +666,7 @@ mod circular_tests {
 #[cfg(test)]
 #[path = "baffled_pressure_differentiating_tests.rs"]
 mod differentiating_tests;
+
+#[cfg(test)]
+#[path = "baffled_pressure_qualification.rs"]
+mod qualification;

@@ -4,7 +4,8 @@
 //! radiation reaction is inferred. Declare radiative mechanical loads in the ducts.
 use super::{LoadedAperture, TwoSidedAperture, TwoSidedDrive, TwoSidedFrame, ValveSide};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver};
-use crate::pcm_wav::observation::PressureRenderer;
+use crate::pcm_wav::observation::{ObservationError, ObservationPolicy, PressureRenderer};
+use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
 use crate::render::RenderError;
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
@@ -30,6 +31,7 @@ pub struct TwoSidedPressure {
     completed: u64,
     last: Option<TwoSidedFrame>,
     poisoned: bool,
+    observation_policy: ObservationPolicy,
 }
 fn sizing(what: &'static str) -> RenderError { RenderError::Sizing { what } }
 fn observation(error: String) -> RenderError {
@@ -65,9 +67,29 @@ impl TwoSidedPressure {
     /// # Errors
     /// Late attachment, clock mismatch, zero callback bound, invalid ports/gas,
     /// or original receiver geometry, bandwidth and history-budget admission.
-    pub fn with_radiation(system: TwoSidedAperture, radiation: DuctRadiationSpec,
-        max_block: usize) -> Result<Self, RenderError>
-    {
+    pub fn with_radiation(
+        system: TwoSidedAperture,
+        radiation: DuctRadiationSpec,
+        max_block: usize,
+    ) -> Result<Self, RenderError> {
+        Self::with_observation_policy(
+            system,
+            radiation,
+            max_block,
+            ObservationPolicy::Diagnostic,
+            &[],
+        )
+    }
+
+    /// Acceptance requires one retained, actual reaction binding per opening.
+    /// The raw one-way constructor remains an explicitly diagnostic observer.
+    pub fn with_observation_policy(
+        system: TwoSidedAperture,
+        radiation: DuctRadiationSpec,
+        max_block: usize,
+        policy: ObservationPolicy,
+        bindings: &[BaffledOutletBinding],
+    ) -> Result<Self, RenderError> {
         let mechanics = radiation.reconstruction.mechanics_rate_hz();
         let rate = radiation.reconstruction.output_rate_hz();
         if system.valve.accepted_steps() != 0 || mechanics == 0 || max_block == 0
@@ -78,9 +100,48 @@ impl TwoSidedPressure {
             DuctView { graph: &system.sides[0].graph, gases: &system.sides[0].gases },
             DuctView { graph: &system.sides[1].graph, gases: &system.sides[1].gases },
         ], radiation).map_err(observation)?;
-        Ok(Self { system, receiver, rate, max_block,
-            held: TwoSidedDrive::default(), gate: CancelGate::new_clock_free(), completed: 0,
-            last: None, poisoned: false })
+        if policy == ObservationPolicy::Acceptance || !bindings.is_empty() {
+            let source = receiver.source();
+            if bindings.len() != source.openings.len() {
+                return Err(observation(
+                    ObservationError::UnmatchedReactionLoad.to_string(),
+                ));
+            }
+            for opening in &source.openings {
+                let mut found = bindings.iter().filter(|b| b.opening() == *opening);
+                let binding = found.next().ok_or_else(|| {
+                    observation(ObservationError::UnmatchedReactionLoad.to_string())
+                })?;
+                if found.next().is_some() {
+                    return Err(observation(
+                        ObservationError::UnmatchedReactionLoad.to_string(),
+                    ));
+                }
+                binding
+                    .validate_receiver(
+                        &system.sides[opening.network].graph,
+                        source,
+                        *receiver.exterior_gas(),
+                    )
+                    .map_err(|e| observation(e.to_string()))?;
+            }
+        }
+        Ok(Self {
+            system,
+            receiver,
+            rate,
+            max_block,
+            held: TwoSidedDrive::default(),
+            gate: CancelGate::new_clock_free(),
+            completed: 0,
+            last: None,
+            poisoned: false,
+            observation_policy: policy,
+        })
+    }
+    /// Admission scope, retained independently of the source's mechanical clock.
+    pub const fn observation_policy(&self) -> ObservationPolicy {
+        self.observation_policy
     }
     /// Set physical supplies between callbacks; zero releases the source/actuator,
     /// not the retained vibration. A refused input changes neither held control

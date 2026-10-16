@@ -2,7 +2,7 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use fs_blake3::ContentHash;
-use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
+use fs_couple::pcm_wav::observation::{DecimatedRenderer, ObservationPolicy, PressureRenderer};
 use fs_couple::render::schedule::reed::{ReedPerformance, REED_PERFORMANCE_SCHEMA};
 use fs_couple::bernoulli_aperture::performance::{ApertureObservation, AperturePerformance, CoupledAperture};
 use fs_couple::bernoulli_aperture::performance::file::{PlateValvePerformance, MAX_PLATE_VALVE_PERFORMANCE_BYTES, PLATE_VALVE_PERFORMANCE_SCHEMA};
@@ -10,13 +10,18 @@ use fs_couple::bernoulli_aperture::radiation::BaffledRadiationLoad;
 use fs_exec::CancelGate;
 use super::{RATE, create_outputs, json_string, stream_output};
 
-fn options(args: &[String]) -> Result<(&str, &str, usize, bool), String> {
+fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy), String> {
     let mut paths = Vec::new();
     let mut block = None;
     let mut decimate = false;
+    let mut policy = ObservationPolicy::Diagnostic;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--acceptance" => {
+                if policy == ObservationPolicy::Acceptance { return Err("--acceptance may only be supplied once".into()); }
+                policy = ObservationPolicy::Acceptance;
+            }
             "--decimate" => {
                 if decimate { return Err("--decimate may only be supplied once".into()); }
                 decimate = true;
@@ -34,9 +39,9 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool), String> {
         }
     }
     let [input, output] = paths.as_slice() else {
-        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate]".into());
+        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance]".into());
     };
-    Ok((*input, *output, block.unwrap_or(512), decimate))
+    Ok((*input, *output, block.unwrap_or(512), decimate, policy))
 }
 
 // A physical propagation delay is source geometry, not an output/filter latency
@@ -77,10 +82,13 @@ struct Loaded {
     source: Box<dyn PressureRenderer>, rate:u32, samples:u64, full_scale_pa:f64,
     hash:ContentHash, fixture:&'static str, source_json:String,
 }
-fn load(bytes:&[u8],block:usize)->Result<Loaded,String> {
+fn load(bytes: &[u8], block: usize, policy: ObservationPolicy) -> Result<Loaded, String> {
     // Exact versioned source header selects the existing owner; filenames and
     // instrument labels never choose geometry or material constants.
     if bytes.starts_with(b"frankensim-plate-valve-performance-v1\n") {
+        if policy == ObservationPolicy::Acceptance {
+            return Err("--acceptance selects the explicit ReedPerformance flanged-development path; plate-valve files require explicit matched-load builder admission".into());
+        }
         let p=PlateValvePerformance::from_bytes(bytes,block,&CancelGate::new()).map_err(|e|e.to_string())?;
         let i=p.info();let a=p.renderer().system().aperture();
         let plate=a.plate_reduction().expect("plate file retains its specimen");
@@ -112,10 +120,11 @@ fn load(bytes:&[u8],block:usize)->Result<Loaded,String> {
         Ok(Loaded{source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"plate-valve-input",source_json})
     } else {
-        let p=ReedPerformance::from_bytes(bytes,block).map_err(|e|e.to_string())?;
+        let p=ReedPerformance::from_bytes_with_policy(bytes,block,policy).map_err(|e|e.to_string())?;
         let i=p.info();
         let observer_json=super::duct_metadata::reed_provenance(&p);
-        let source_json=format!("\"reed_input\":{{\"schema\":\"{REED_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"segments\":{},\"tone_holes\":{},\"massive_reed\":{},\"gesture_events\":{},\"compiled_controls\":{}{observer_json}}}",
+        let policy_name=if policy==ObservationPolicy::Acceptance {"acceptance"} else {"diagnostic"};
+        let source_json=format!("\"reed_input\":{{\"schema\":\"{REED_PERFORMANCE_SCHEMA}\",\"observation_policy\":\"{policy_name}\",\"blake3\":\"{}\",\"segments\":{},\"tone_holes\":{},\"massive_reed\":{},\"gesture_events\":{},\"compiled_controls\":{}{observer_json}}}",
             i.input_hash.to_hex(),i.segments,i.tone_holes,i.massive_reed,i.gesture_events,i.compiled_controls);
         Ok(Loaded{source:Box::new(p),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"reed-input",source_json})
@@ -123,7 +132,7 @@ fn load(bytes:&[u8],block:usize)->Result<Loaded,String> {
 }
 
 pub(super) fn run(args: &[String]) -> Result<(), String> {
-    let (input, output, block, decimate) = options(args)?;
+    let (input, output, block, decimate, policy) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
     if output == sidecar.as_path() || output.exists() || sidecar.exists() {
@@ -133,7 +142,7 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     let mut bytes = Vec::new();
     file.take((MAX_PLATE_VALVE_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("wind input read failed: {e}"))?;
-    let loaded=load(&bytes,block)?;
+    let loaded=load(&bytes,block,policy)?;
     if !decimate && loaded.rate != RATE {
         return Err("non-48000-Hz mechanics require explicit --decimate; no implicit resampling".into());
     }
@@ -153,7 +162,9 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     let rendered = stream_output::render_waveform(
         &mut renderer, &mut audio, samples, block, loaded.full_scale_pa,
     )?;
-    let input_hash = loaded.hash.to_hex();let wav_hash = rendered.hash.to_hex();let fixture=loaded.fixture;
+    let input_hash = loaded.hash.to_hex();
+    let wav_hash = rendered.hash.to_hex();
+    let fixture=loaded.fixture;
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"{fixture}\",\
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
@@ -175,4 +186,31 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
         \"wav_blake3\":\"{wav_hash}\",\"input_blake3\":\"{input_hash}\"}}",
         json_string(&output.display().to_string()), rendered.clipped, rendered.peak_pa, rendered.rms_pa);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wind_observation_policy_is_explicit_and_duplicate_flag_refuses() {
+        let args = vec!["source.performance".into(), "out.wav".into()];
+        assert_eq!(options(&args).unwrap().4, ObservationPolicy::Diagnostic);
+        let mut accepted = args;
+        accepted.push("--acceptance".into());
+        assert_eq!(options(&accepted).unwrap().4, ObservationPolicy::Acceptance);
+        accepted.push("--acceptance".into());
+        assert!(options(&accepted).is_err());
+    }
+
+    #[test]
+    fn acceptance_rejects_legacy_listener_before_creating_audio() {
+        let physical = include_str!("../../../examples/reed-flanged-baffled.performance");
+        let legacy = physical.replace("baffled_outlet 0 0 0.5 4 16 1000", "listener_m 0.5");
+        let error = load(legacy.as_bytes(), 37, ObservationPolicy::Acceptance)
+            .err()
+            .unwrap();
+        assert!(error.contains("diagnostic-only"), "{error}");
+        assert!(load(physical.as_bytes(), 37, ObservationPolicy::Acceptance).is_ok());
+    }
 }

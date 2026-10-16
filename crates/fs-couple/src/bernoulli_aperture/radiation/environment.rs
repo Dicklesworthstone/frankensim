@@ -22,6 +22,46 @@ pub struct BaffledOutletBinding {
     load: BaffledRadiationLoad,
 }
 impl BaffledOutletBinding {
+    /// Verify a retained load against the actual graph and observation medium.
+    /// A caller's separately supplied gas label cannot override installed physics.
+    pub fn validate_receiver(
+        &self,
+        graph: &TubeNetworkSpec,
+        radiation: &DuctRadiationSpec,
+        exterior: GasState,
+    ) -> Result<(), crate::pcm_wav::observation::ObservationError> {
+        use crate::pcm_wav::baffled::RayleighMedium;
+        use crate::pcm_wav::observation::{ObservationError, validate_reaction_medium};
+        validate_reaction_medium(
+            RayleighMedium {
+                density: self.load.density_kg_m3(),
+                sound_speed: self.load.sound_speed_m_s(),
+            },
+            RayleighMedium {
+                density: exterior.density,
+                sound_speed: exterior.sound_speed,
+            },
+        )?;
+        let matches_node = graph.nodes.get(self.opening.node) == Some(&self.load.termination());
+        let mut adjacent = graph
+            .sections
+            .iter()
+            .filter(|s| s.nodes.contains(&self.opening.node));
+        let section = adjacent.next();
+        if !matches_node
+            || section.is_none_or(|s| s.radius_m != self.load.radius_m())
+            || adjacent.next().is_some()
+            || !radiation.openings.contains(&self.opening)
+            || self.load.time_step_s().to_bits()
+                != (1.0 / f64::from(radiation.reconstruction.mechanics_rate_hz())).to_bits()
+            || radiation.receiver.maximum_frequency_hz > self.load.maximum_frequency_hz()
+        {
+            return Err(ObservationError::ReactionBinding {
+                what: "terminal, radius, clock or band differs from the installed load",
+            });
+        }
+        Ok(())
+    }
     /// Network/node identity and original physical location in the baffle.
     pub const fn opening(&self) -> DuctOpening { self.opening }
     /// Actual adjacent bore state. It is NOT replaced with the exterior gas.

@@ -18,7 +18,7 @@ use fs_scenario::{BeatingReed, gesture::{GestureSchedule, GestureTarget}};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::regional::outlet::{OutletError, OutletReceiverInfo};
 mod outlet;
-use crate::pcm_wav::observation::PressureRenderer;
+use crate::pcm_wav::observation::{ObservationError, ObservationPolicy, PressureRenderer};
 use crate::render::{ReedBoreVoice, RenderContext, RenderError, RenderVoice};
 use crate::thin_plate::PlateBank;
 use super::{GestureCompileError, PressureGestureBinding, ScheduledRenderer, compile_pressure_gestures};
@@ -35,6 +35,8 @@ const MAX_WORK: u64 = 16_777_216;
 /// Syntax, model and scheduling refusals retain their owning diagnostics.
 #[derive(Debug)]
 pub enum ReedPerformanceError {
+    /// An observation is diagnostic-only or has inconsistent physical media.
+    Observation(ObservationError),
     /// Invalid source record, with a one-based header line (zero for the file).
     Input {
         /// Header line, or zero for whole-file/schedule admission.
@@ -61,6 +63,7 @@ pub enum ReedPerformanceError {
 impl core::fmt::Display for ReedPerformanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Observation(e) => write!(f, "reed observation: {e}"),
             Self::Input { line, what } => write!(f, "reed input line {line}: {what}"),
             Self::Gas { line, source } => write!(f, "reed gas line {line}: {source}"),
             Self::Model(e) => write!(f, "reed model: {e}"),
@@ -73,6 +76,7 @@ impl core::fmt::Display for ReedPerformanceError {
 impl std::error::Error for ReedPerformanceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Observation(source) => Some(source),
             Self::Gas { source, .. } => Some(source),
             Self::Model(source) => Some(source),
             Self::Outlet(source) => Some(source),
@@ -119,6 +123,7 @@ pub struct ReedPerformance {
     ambient_gas: GasState,
     segment_gases: Vec<GasState>,
     terminal: Option<outlet::TerminalObservation>,
+    observation_policy: ObservationPolicy,
 }
 impl ReedPerformance {
     /// Decode and admit all records before building or advancing the runtime.
@@ -133,6 +138,16 @@ impl ReedPerformance {
     /// Malformed/oversized input, unsupported or unobserved gestures, exhausted
     /// compilation budgets, or the existing physical owner's domain refusal.
     pub fn from_bytes(bytes: &[u8], max_block: usize) -> Result<Self, ReedPerformanceError> {
+        Self::from_bytes_with_policy(bytes, max_block, ObservationPolicy::Diagnostic)
+    }
+
+    /// Select acceptance explicitly. Legacy listener_m is diagnostic-only;
+    /// a baffled receiver retains the SAME flanged feedback and exterior gas.
+    pub fn from_bytes_with_policy(
+        bytes: &[u8],
+        max_block: usize,
+        policy: ObservationPolicy,
+    ) -> Result<Self, ReedPerformanceError> {
         if bytes.len() > MAX_REED_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(bad(0, "source exceeds 1 MiB or callback capacity is outside 1..=65536"));
         }
@@ -163,6 +178,7 @@ impl ReedPerformance {
             return Err(bad(r.line, "reed mass, stiffness and damping must be finite and nonnegative"));
         }
         let observation = outlet::ObservationInput::read(&mut r)?;
+        observation.validate_policy(policy)?;
         let mut row = r.row("termination")?;
         let termination = match row.word()? {
             "closed" => Termination::Closed,
@@ -253,12 +269,25 @@ impl ReedPerformance {
         let renderer = ScheduledRenderer::new(context, controls, max_controls).map_err(ReedPerformanceError::Render)?;
         renderer.validate_sample_rate(rate).map_err(ReedPerformanceError::Render)?;
         renderer.validate_sample_count(samples).map_err(ReedPerformanceError::Render)?;
-        Ok(Self { info, renderer, ambient_gas: air, segment_gases, terminal })
+        Ok(Self {
+            info,
+            renderer,
+            ambient_gas: air,
+            segment_gases,
+            terminal,
+            observation_policy: policy,
+        })
     }
 
     /// Original source facts, unchanged by output-clock conversion.
     #[must_use]
-    pub const fn info(&self) -> ReedPerformanceInfo { self.info }
+    pub const fn info(&self) -> ReedPerformanceInfo {
+        self.info
+    }
+    /// Admission scope; diagnostic output must not be used as acceptance audio.
+    pub const fn observation_policy(&self) -> ObservationPolicy {
+        self.observation_policy
+    }
     /// Read-only access to sample-addressed controls and retained state clocks.
     #[must_use]
     pub const fn renderer(&self) -> &ScheduledRenderer { &self.renderer }

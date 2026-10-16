@@ -12,6 +12,9 @@ use crate::render::{RenderError, schedule::ScheduledRenderer};
 /// Latency-aligned acoustic superposition of independently clocked mechanics.
 pub mod ensemble;
 
+mod policy;
+pub use policy::{ObservationError, ObservationPolicy, validate_reaction_medium};
+
 /// A mono pressure producer on its OUTPUT sample clock.
 ///
 /// Admission methods must not advance any state. A failed physical callback

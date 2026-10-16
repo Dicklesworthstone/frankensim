@@ -16,7 +16,8 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use super::network::ApertureNetwork;
 use super::tube::{ApertureTube, TubeDrive};
-use crate::pcm_wav::observation::PressureRenderer;
+use crate::pcm_wav::observation::{ObservationError, ObservationPolicy, PressureRenderer, validate_reaction_medium};
+use super::radiation::BaffledRadiationLoad;
 use crate::render::{ControlDelta, RenderError};
 use crate::render::schedule::{
     GestureCompileError, PressureGestureBinding, ScheduledControl, compile_pressure_gestures,
@@ -103,6 +104,7 @@ pub struct AperturePerformance {
     poisoned: bool,
     forces: Option<force::ForceSchedule>,
     mechanical_work_j: f64,
+    observation_policy: ObservationPolicy,
 }
 fn receiver_error(error: String) -> RenderError {
     RenderError::Voice(AcousticRealizeError::Nonlinear(error))
@@ -111,6 +113,76 @@ fn sizing(what: &'static str) -> RenderError { RenderError::Sizing { what } }
 fn invalid(what: &'static str) -> GestureCompileError { GestureCompileError::Invalid { what } }
 
 impl AperturePerformance {
+    /// Bind acceptance to an actual installed load, including its medium, radius,
+    /// clock and resolved band. A numeric reflection is diagnostic-only.
+    /// The load is checked against the exclusively owned network before return.
+    pub fn new_with_observation_policy(
+        system: CoupledAperture,
+        observation: ApertureObservation,
+        schedule: GestureSchedule,
+        config: AperturePerformanceConfig,
+        exterior: Option<GasState>,
+        reaction: Option<BaffledRadiationLoad>,
+        policy: ObservationPolicy,
+    ) -> Result<Self, GestureCompileError> {
+        let mut source = Self::new_in_medium(system, observation, schedule, config, exterior)?;
+        if policy == ObservationPolicy::Acceptance || reaction.is_some() {
+            let load = reaction.ok_or_else(|| {
+                GestureCompileError::Render(receiver_error(
+                    ObservationError::UnmatchedReactionLoad.to_string(),
+                ))
+            })?;
+            let medium = source.baffled_medium().ok_or_else(|| {
+                GestureCompileError::Render(receiver_error(
+                    ObservationError::UnmatchedReactionLoad.to_string(),
+                ))
+            })?;
+            validate_reaction_medium(
+                RayleighMedium {
+                    density: load.density_kg_m3(),
+                    sound_speed: load.sound_speed_m_s(),
+                },
+                medium,
+            )
+            .map_err(|e| GestureCompileError::Render(receiver_error(e.to_string())))?;
+            let matched = match (&source.system, observation) {
+                (
+                    CoupledAperture::Network(network),
+                    ApertureObservation::NetworkBaffled { node, receiver },
+                ) => {
+                    let mut adjacent = network
+                        .spec()
+                        .sections
+                        .iter()
+                        .filter(|s| s.nodes.contains(&node));
+                    network.spec().nodes.get(node) == Some(&load.termination())
+                        && adjacent
+                            .next()
+                            .is_some_and(|s| s.radius_m == load.radius_m())
+                        && adjacent.next().is_none()
+                        && receiver.maximum_frequency_hz <= load.maximum_frequency_hz()
+                        && load.time_step_s().to_bits()
+                            == (1.0 / f64::from(config.sample_rate_hz)).to_bits()
+                }
+                _ => false,
+            };
+            if !matched {
+                return Err(GestureCompileError::Render(receiver_error(
+                    ObservationError::ReactionBinding {
+                        what: "terminal, radius, clock or band differs from the installed load",
+                    }
+                    .to_string(),
+                )));
+            }
+        }
+        source.observation_policy = policy;
+        Ok(source)
+    }
+
+    /// The observation's admitted use, independent of mechanics or recording fidelity.
+    pub const fn observation_policy(&self) -> ObservationPolicy {
+        self.observation_policy
+    }
     /// Compile and admit the complete pressure phrase without advancing physics.
     /// No source command may begin after the last observed control tick. Ramps
     /// extending beyond the window retain only their actually observed portion.
@@ -147,10 +219,13 @@ impl AperturePerformance {
         Self::new_in_medium(system, observation, schedule, config, Some(exterior))
     }
 
-    fn new_in_medium(system: CoupledAperture, observation: ApertureObservation,
-        schedule: GestureSchedule, config: AperturePerformanceConfig,
-        exterior_gas: Option<GasState>) -> Result<Self, GestureCompileError>
-    {
+    fn new_in_medium(
+        system: CoupledAperture,
+        observation: ApertureObservation,
+        schedule: GestureSchedule,
+        config: AperturePerformanceConfig,
+        exterior_gas: Option<GasState>,
+    ) -> Result<Self, GestureCompileError> {
         let a = system.aperture();
         if config.sample_rate_hz == 0 || config.samples == 0 || config.max_block == 0
             || a.accepted_steps() != 0 || config.samples > a.spec().max_steps
@@ -207,7 +282,8 @@ impl AperturePerformance {
         };
         let controls = compile_schedule(&schedule, &config)?;
         Ok(Self { system, observation, receiver, exterior_gas, config, schedule, controls, next: 0,
-            held_pressure_pa: 0.0, poisoned: false, forces: None, mechanical_work_j: 0.0 })
+            held_pressure_pa: 0.0, poisoned: false, forces: None, mechanical_work_j: 0.0,
+            observation_policy: ObservationPolicy::Diagnostic })
     }
 
     /// Read-only physical system; callers cannot step it behind the sample clock.
@@ -373,3 +449,6 @@ pub(in crate::bernoulli_aperture) fn pressure_candidate(controls: &[ScheduledCon
 
 #[cfg(test)]
 mod exterior_tests;
+
+#[cfg(test)]
+mod qualification;
