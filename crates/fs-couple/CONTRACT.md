@@ -35,7 +35,8 @@ modal owner is the control. Midpoint phase is compared to
 
 | Current path | Linear owner | Current band / audit boundary |
 | --- | --- | --- |
-| KC, glottis, speaker, nonlinear plate, cavity, ODE chains and lip oscillator | Gonzalez midpoint | No common phase-budget admission; common linear-owner map only |
+| KC, glottis, nonlinear plate, cavity, ODE chains and lip oscillator | Gonzalez midpoint | No common phase-budget admission; common linear-owner map only |
+| TsDriver speaker coil/cone/panel | Full coupled exact ZOH | Held voltage, independently integrated current/work/loss; dense reference step, not an allocation-free callback |
 | ImpactSystem | Gonzalez midpoint | omega*dt < 0.9*pi; the guard permits more than 600 cents of phase defect |
 | Dynamic/Paired/ModalAperture and uniform condensation | Midpoint response | Material-modal adapter caps its caller's bound at 1; authored constructors have no common angular guard |
 | CoupledModalSystem | Exact component ZOH plus trapezoidal reactions | Coupled algebraic Nyquist bound; measured against the exact two-body eigenproblem |
@@ -52,6 +53,8 @@ source-backed thermochemical and thermal/electrical fixtures. All new audit
 tests still require native central verification. This inventory does not close
 M5.2-W1: production migrations, resolved-band refusals, complete descriptor and
 piano measurements, and audible golden qualification remain outstanding.
+The speaker migration has a held-voltage time-partition regression and a
+public-state pole audit; the other listed midpoint paths still require migration.
 
 - `PORT_SCHEMA_VERSION = 2`; `StableId` admits a canonical transport-safe ID.
 - `PortValueShape` distinguishes scalar, non-empty vector/tensor, and field
