@@ -75,10 +75,14 @@ impl TensorProny {
             }
             Ok(rows)
         };
-        let equilibrium_rows = project(&self.parameters.equilibrium_factor)?;
+        let equilibrium_rows = project(&self.equilibrium_gram)?;
         let mut branches = Vec::with_capacity(self.branches().len());
-        for branch in self.branches() {
-            branches.push(ProjectedPronyBranch { rows: project(&branch.factor)?, tau_s: branch.tau_s });
+        for (branch, factor) in self.branches().iter().zip(&self.factors) {
+            let gram_rows = branch.resolved_gram_rows(factor);
+            branches.push(ProjectedPronyBranch {
+                rows: project(&gram_rows)?,
+                tau_s: branch.tau_s,
+            });
         }
         let mut equilibrium = vec![0.0; n*n];
         for i in 0..n {
@@ -119,7 +123,7 @@ impl ProjectedTensorProny {
             for i in 0..6 { out[i] += column[i]*value; }
         }
         let m = mandel(&out); let norm2 = dot(&m, &m);
-        if !finite(&out) || !norm2.is_finite() || det::sqrt(norm2) > self.model.parameters.strain_limit {
+        if !finite(&out) || !norm2.is_finite() || det::sqrt(norm2) > self.model.strain_limit {
             return Err(invalid("projected strain exceeds original small-strain domain"));
         }
         Ok(out)

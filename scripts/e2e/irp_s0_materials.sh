@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# IRP S0 materials & media subset, following material_sources.sh receipt conventions.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+readonly REPO_ROOT
+readonly -a PRONY_TENSOR_TESTS=(
+  g0_admission_requires_pd_equilibrium_psd_branches_positive_tau
+  g0_random_multiaxial_histories_never_create_energy
+  g1_isotropic_proportional_law_reduces_to_scalar_maxwell_bitwise
+  g1_kelvin_constructor_matches_general_form
+  g3_rotation_preserves_spectrum_and_dissipation
+  g1_kramers_kronig_consistency
+  g1_relaxation_function_fourier_matches_complex_modulus
+  g0_plane_stress_schur_complement_is_passive_and_matches_elastic_limit
+  g0_out_of_band_refuses
+)
+readonly -a PRONY_TENSOR_LOWERING_TESTS=(
+  g0_scalar_target_reproduces_lower_to_prony_bitwise
+  g1_kelvin_fractional_target_lowers_per_mode_within_certificate
+  g1_complex_engineering_constants_target_lowers_with_psd_branches
+  g1_plane_stress_schur_target_lowers
+  g1_certificate_encloses_dense_independent_check
+  g3_dropping_any_branch_breaks_the_certificate
+  g0_term_count_and_band_refusals
+  g0_lowered_tensor_is_bitwise_deterministic
+)
+
+list() {
+  local test
+  for test in "${PRONY_TENSOR_TESTS[@]}"; do
+    printf 'fs-material:prony_tensor::%s\n' "$test"
+  done
+  for test in "${PRONY_TENSOR_LOWERING_TESTS[@]}"; do
+    printf 'fs-material:prony_tensor_lowering::%s\n' "$test"
+  done
+}
+
+check() {
+  local test
+  for test in "${PRONY_TENSOR_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-material/tests/prony_tensor.rs" || {
+      printf 'missing test: %s\n' "$test" >&2
+      return 1
+    }
+  done
+  for test in "${PRONY_TENSOR_LOWERING_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-material/tests/prony_tensor_lowering.rs" || {
+      printf 'missing test: %s\n' "$test" >&2
+      return 1
+    }
+  done
+  printf 'IRP S0: %s prony_tensor + %s prony_tensor_lowering tests present\n' \
+    "${#PRONY_TENSOR_TESTS[@]}" "${#PRONY_TENSOR_LOWERING_TESTS[@]}"
+}
+
+run() {
+  check
+  local output_dir started git_head host producer_exit=0 status=0 test missing=0
+  output_dir="$(mktemp -d "${IRP_S0_RECEIPT_BASE:-${TMPDIR:-/tmp}}/frankensim-irp-s0.XXXXXX")"
+  started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  git_head="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  host="$(uname -n)"
+  printf 'IRP S0 live receipt: %s\n' "$output_dir"
+
+  local cargo_bin="${CARGO_BIN:-cargo}"
+  if [[ -x "/Users/jemanuel/.rustup/toolchains/nightly-2026-07-06-aarch64-apple-darwin/bin/cargo" ]]; then
+    cargo_bin="/Users/jemanuel/.rustup/toolchains/nightly-2026-07-06-aarch64-apple-darwin/bin/cargo"
+  fi
+  export RCH_CARGO_WRAPPER_BYPASS=1
+  export CARGO_BUILD_JOBS=12
+  export CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
+
+  local -a prony_command lowering_command
+  if [[ -n "${IRP_S0_PRONY_TENSOR_BIN:-}" ]]; then
+    prony_command=("$IRP_S0_PRONY_TENSOR_BIN" --exact --test-threads=1 --show-output "${PRONY_TENSOR_TESTS[@]}")
+  else
+    prony_command=("$cargo_bin" test --locked -j 12 -p fs-material --test prony_tensor -- --exact --test-threads=1 --show-output "${PRONY_TENSOR_TESTS[@]}")
+  fi
+  if [[ -n "${IRP_S0_PRONY_TENSOR_LOWERING_BIN:-}" ]]; then
+    lowering_command=("$IRP_S0_PRONY_TENSOR_LOWERING_BIN" --exact --test-threads=1 --show-output "${PRONY_TENSOR_LOWERING_TESTS[@]}")
+  else
+    lowering_command=("$cargo_bin" test --locked -j 12 -p fs-material --test prony_tensor_lowering -- --exact --test-threads=1 --show-output "${PRONY_TENSOR_LOWERING_TESTS[@]}")
+  fi
+
+  {
+    printf 'host=%s\ngit_head=%s\nstarted_utc=%s\n' "$host" "$git_head" "$started"
+    printf '%q ' "${prony_command[@]}"
+    printf '\n'
+    printf '%q ' "${lowering_command[@]}"
+    printf '\n'
+  } >"${output_dir}/command.txt"
+
+  set +e
+  (cd "$REPO_ROOT" && "${prony_command[@]}") >"${output_dir}/stdout.log" 2>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  (cd "$REPO_ROOT" && "${lowering_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  set -e
+
+  for test in "${PRONY_TENSOR_TESTS[@]}" "${PRONY_TENSOR_LOWERING_TESTS[@]}"; do
+    if ! grep -Fqx "test ${test} ... ok" "${output_dir}/stdout.log" "${output_dir}/stderr.log"; then
+      printf 'missing or failed: %s\n' "$test" >&2
+      missing=1
+    fi
+  done
+  if ! grep -Eq '^test result: ok\. [1-9][0-9]* passed' "${output_dir}/stdout.log" "${output_dir}/stderr.log"; then
+    missing=1
+  fi
+
+  python3 -I - "$output_dir" "$host" "$git_head" "$started" "$producer_exit" "$missing" <<'PY'
+import datetime
+import json
+import pathlib
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+host, head, started = sys.argv[2:5]
+producer_exit, missing = map(int, sys.argv[5:7])
+command = (directory / "command.txt").read_text()
+events = []
+for name in ("stdout.log", "stderr.log"):
+    for line in (directory / name).read_text(errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("suite") != "irp-s0":
+            continue
+        row.update(
+            host=host,
+            git_head=head,
+            command=command,
+            utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        )
+        events.append(row)
+with (directory / "events.jsonl").open("w") as output:
+    for event in events:
+        output.write(json.dumps(event, allow_nan=False) + "\n")
+passed = producer_exit == 0 and missing == 0 and bool(events)
+summary = dict(
+    schema="frankensim.irp-s0-materials.e2e.v1",
+    host=host,
+    git_head=head,
+    started_utc=started,
+    producer_exit=producer_exit,
+    missing_or_failed=missing,
+    events=len(events),
+    command_file="command.txt",
+    stdout_log="stdout.log",
+    stderr_log="stderr.log",
+    events_log="events.jsonl",
+    verdict="pass" if passed else "failed",
+)
+(directory / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+sys.exit(0 if passed else 1)
+PY
+}
+
+case "${1:---check}" in
+  --list) list ;;
+  --check) check ;;
+  --run) run ;;
+  *) printf 'usage: %s [--list|--check|--run]\n' "$0" >&2; exit 2 ;;
+esac

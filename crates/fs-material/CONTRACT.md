@@ -432,6 +432,10 @@ perturbation, no RNG state) → fit → lower → single-DOF velocity-Verlet
 ring-down → re-measure η from the decay envelope, one JSON line per
 stage, bit-identical across reruns except `elapsed_ms`.
 
+`visco::tensor` (`TensorProny`, `PronyBranch`, `TensorPronyState`, `Mandel6`, IRP M0.2-W2a) extends the runtime Prony model to passive anisotropic 6×6 Mandel tensors (`[xx, yy, zz, √2 xy, √2 yz, √2 zx]`). Admission requires a symmetric positive-definite equilibrium stiffness `C_eq ≻ 0` (diagonally scaled Cholesky + deterministic Jacobi eigendecomposition via `fs_la::eigen::jacobi_eigh`), an optional positive-semidefinite Kelvin–Voigt tensor `kv_pa_s ⪰ 0`, at most 64 relaxation branches `(C_j, τ_j)` with `C_j ⪰ 0` (eigenvalues verified non-negative without clipping) and `τ_j > 0`, and a finite applicability band `band_rad_s`. Each branch is factored once at admission as `C_j = L_j L_jᵀ`. Constructors include general `TensorProny::new`, shared-eigenbasis `TensorProny::kelvin(c_eq, per_mode)`, and `TensorProny::isotropic(k, g)` (whose pure shear and pure volumetric histories reduce bit-for-bit to scalar `GeneralizedMaxwell::step`). Frame rotation `TensorProny::rotated` uses the single crate-wide Mandel Bond rotation owner `tensor::rotate_mandel` (`C → Q_6 C Q_6ᵀ`, shared with `fs-solid::linear3`). `TensorProny::plane_stress_complex` computes the frequency-dependent complex Schur complement `(Q′(ω), Q″(ω))` in any ordered `MaterialPlane` and checks passivity (`Re Q ≻ 0`, `Im Q ⪰ 0`) at `ω`; it does not claim a frequency-independent branch-wise plane-stress Prony series (lowering a plane-stress Schur target to reduced-plane Prony branches is M0.2-W2b's responsibility). Time stepping `TensorProny::step` advances `q_j ∈ ℝ⁶` componentwise via `prony_ramp` and integrates dashpot heat by polarization as a sum of squares `A_j ‖L_jᵀ (q_{j,0} + h_j δ)‖² + R_j ‖L_jᵀ δ‖² ≥ 0` with no clamp, closing `work = Δψ + dissipated` to `≤ 1e-12` relative. Intrinsic material loss only is represented here; thermoelastic, contact, support, and acoustic radiation losses are separate owners and are not folded into `TensorProny`.
+
+`visco::tensor::lower` (`TensorComplexModulus`, `KelvinFractional`, `ComplexEngineering`, `PlaneStressTarget`, `TensorLoweringTolerance`, `TensorCertificate`, `LoweredTensorModel`, `lower_tensor_to_prony`, IRP M0.2-W2b) lowers causal frequency-domain anisotropic complex-modulus targets `C*(ω) = C′(ω) + i C″(ω)` to passive `TensorProny` laws over `[f_lo_hz, f_hi_hz]`: 1×1 scalar `FractionalZener` targets delegate to `lower_to_prony` bit-identically; shared-eigenbasis `KelvinFractional` targets solve Lawson–Hanson NNLS (`visco::nnls`) per Kelvin mode on the shared log-spaced `τ` ladder; general non-commuting targets (`ComplexEngineering`, `PlaneStressTarget`) solve PSD-constrained weighted least squares in a simultaneously diagonalized congruence basis at the band midpoint with `jacobi_eigh` PSD cone projection inside the iteration loop (`ViscoError::FitDiverged` on cap exhaustion, no post-fit clipping). `TensorCertificate` certifies `grid_sup_storage + lipschitz_term` and `grid_sup_loss + lipschitz_term` on a 512-point log-spaced verification grid using generalized eigenvalue relative quadratic-form errors `|λ(C_fit − C, C)|` plus the inter-sample Lipschitz enclosure `L · Δln(ω) / 2`, refusing with `ViscoError::FitTolerance` when either bound exceeds `TensorLoweringTolerance`.
+
 ## Invariants
 
 1. **Tangent consistency (the merge gate)**: every law's tangent matches
@@ -559,6 +563,24 @@ recovery from an offset start with negated-loss mutation refusal,
 degenerate-input refusals, and the η ≥ 0 / monotone-relaxation property
 sweep. `visco_casebook` is the end-to-end lane (fit noise floor,
 certified lowering, ring-down η within an authored, measured gate).
+
+`tests/prony_tensor.rs` (9 tests, suite `irp-s0` / `prony_tensor`):
+PD/PSD/τ admission refusals, 64 random multiaxial energy-closure and
+non-negative dissipation histories, bitwise isotropic reduction to
+scalar `GeneralizedMaxwell`, Kelvin constructor vs general assembly,
+SO(3) Bond rotation spectrum/dissipation invariance, Kramers–Kronig
+consistency, Fourier-quadrature relaxation vs complex modulus,
+plane-stress complex Schur complement passivity and elastic limit,
+and out-of-band refusal.
+
+`tests/prony_tensor_lowering.rs` (8 tests, suite `irp-s0` / `prony_tensor_lowering`):
+1×1 scalar bitwise reproduction of `lower_to_prony`, KelvinFractional
+shared-eigenbasis per-mode lowering within storage/loss certificates,
+orthotropic `ComplexEngineering` non-commuting lowering with PSD
+branches, `PlaneStressTarget` Schur-complement lowering, 65,536-point
+independent dense-grid enclosure check, branch-removal mutation breaking
+the certificate, term-count/band/tolerance/divergence refusals, and
+bitwise determinism across repeated runs.
 
 `src/gas.rs` moist battery — the two-source saturation rule (Buck vs
 the independent Alduchov–Eskridge Magnus constants, ≤0.5% across the

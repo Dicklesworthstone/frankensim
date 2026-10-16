@@ -16,7 +16,6 @@
 //! no measured-material, temperature-shift or fractional-lowering claim.
 use crate::{Tangent6, Voigt};
 use fs_math::det;
-use std::sync::Arc;
 
 mod projection;
 pub use projection::{ProjectedPronyBranch, ProjectedTensorProny, TensorProjectionBudget};
@@ -92,102 +91,194 @@ fn positive_factor(c: &Tangent6) -> Result<Tangent6> {
     Ok(core::array::from_fn(|i| core::array::from_fn(|j| l[j][i])))
 }
 
-/// One Maxwell tensor. Factor rows have units sqrt(Pa); tau is in seconds.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TensorPronyBranch { factor: Tangent6, stiffness: Tangent6, tau_s: f64 }
-impl TensorPronyBranch {
+pub use crate::visco::tensor::{PronyBranch, PronyBranch as TensorPronyBranch, TensorProny};
+
+impl PronyBranch {
     /// Construct any PSD tensor, including zero/rank-deficient tensors, as B^T B.
     pub fn from_gram_rows(factor: Tangent6, tau_s: f64) -> Result<Self> {
-        if !tau_s.is_finite() || tau_s <= 0.0 { return Err(invalid("relaxation time must be finite and positive")); }
+        if !tau_s.is_finite() || tau_s <= 0.0 {
+            return Err(invalid("relaxation time must be finite and positive"));
+        }
         let stiffness = gram(&factor)?;
-        Ok(Self { factor, stiffness, tau_s })
+        Ok(Self {
+            c_pa: stiffness,
+            tau_s,
+            gram_rows: Some(factor),
+        })
     }
     /// Convenience for a strictly SPD Mandel stiffness; no repair is performed.
     pub fn from_stiffness_mandel(stiffness: Tangent6, tau_s: f64) -> Result<Self> {
         Self::from_gram_rows(positive_factor(&stiffness)?, tau_s)
     }
     /// Actual factor-defined Mandel stiffness [Pa].
-    pub fn stiffness_mandel(&self) -> &Tangent6 { &self.stiffness }
+    pub fn stiffness_mandel(&self) -> &Tangent6 {
+        &self.c_pa
+    }
     /// Relaxation time [s].
-    pub fn relaxation_time_s(&self) -> f64 { self.tau_s }
+    pub fn relaxation_time_s(&self) -> f64 {
+        self.tau_s
+    }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct Parameters { equilibrium: Tangent6, equilibrium_factor: Tangent6,
-    branches: Vec<TensorPronyBranch>, strain_limit: f64 }
-
-/// Immutable material shared by its independent, model-bound histories.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TensorProny { parameters: Arc<Parameters> }
 impl TensorProny {
     /// Admit an SPD equilibrium tensor and up to MAX_BRANCHES PSD branches.
     /// `strain_limit` bounds the Frobenius norm of the small-strain tensor.
     /// Factorization changes the represented equilibrium by rounding only.
-    pub fn new_mandel(equilibrium: Tangent6, branches: Vec<TensorPronyBranch>,
-        strain_limit: f64) -> Result<Self> {
+    pub fn new_mandel(
+        equilibrium: Tangent6,
+        branches: Vec<TensorPronyBranch>,
+        strain_limit: f64,
+    ) -> Result<Self> {
         if branches.len() > MAX_BRANCHES || !strain_limit.is_finite() || strain_limit <= 0.0 {
-            return Err(invalid("invalid branch count or positive finite strain bound"));
+            return Err(invalid(
+                "invalid branch count or positive finite strain bound",
+            ));
         }
-        let equilibrium_factor = positive_factor(&equilibrium)?;
-        let equilibrium = gram(&equilibrium_factor)?;
+        let equilibrium_gram = positive_factor(&equilibrium)?;
+        let c_eq = gram(&equilibrium_gram)?;
+        let c_eq_factor =
+            core::array::from_fn(|i| core::array::from_fn(|j| equilibrium_gram[j][i]));
         // The instantaneous tensor must be representable too.
-        let mut instantaneous = equilibrium;
-        for branch in &branches { for i in 0..6 { for j in 0..6 {
-            instantaneous[i][j] += branch.stiffness[i][j];
-            if !instantaneous[i][j].is_finite() { return Err(invalid("instantaneous stiffness overflow")); }
-        } } }
-        Ok(Self { parameters: Arc::new(Parameters { equilibrium, equilibrium_factor, branches, strain_limit }) })
+        let mut instantaneous = c_eq;
+        let mut factors = Vec::with_capacity(branches.len());
+        let mut resolved_branches = Vec::with_capacity(branches.len());
+        for branch in branches {
+            if !branch.tau_s.is_finite() || branch.tau_s <= 0.0 {
+                return Err(invalid("relaxation time must be finite and positive"));
+            }
+            let gram_rows = match branch.gram_rows {
+                Some(g) => g,
+                None => {
+                    let l = crate::visco::tensor::psd_factor(&branch.c_pa)
+                        .map_err(|_| invalid("branch stiffness must be positive semidefinite"))?;
+                    core::array::from_fn(|i| core::array::from_fn(|j| l[j][i]))
+                }
+            };
+            let stiffness = gram(&gram_rows)?;
+            let factor = core::array::from_fn(|i| core::array::from_fn(|j| gram_rows[j][i]));
+            for i in 0..6 {
+                for j in 0..6 {
+                    instantaneous[i][j] += stiffness[i][j];
+                    if !instantaneous[i][j].is_finite() {
+                        return Err(invalid("instantaneous stiffness overflow"));
+                    }
+                }
+            }
+            factors.push(factor);
+            resolved_branches.push(PronyBranch {
+                c_pa: stiffness,
+                tau_s: branch.tau_s,
+                gram_rows: Some(gram_rows),
+            });
+        }
+        let branch_tags = crate::visco::tensor::default_branch_tags(resolved_branches.len());
+        Ok(Self {
+            c_eq,
+            c_eq_factor,
+            equilibrium_gram,
+            kv_pa_s: None,
+            kv_factor: None,
+            branches: resolved_branches,
+            factors,
+            band_rad_s: (0.0, f64::MAX),
+            strain_limit,
+            iso_k3_eq_pa: None,
+            branch_tags,
+        })
     }
     /// Convert an existing tensor-shear stress/strain tangent (e.g. elastic::
     /// IsotropicElastic::stiffness) without doubling shear stiffness.
-    pub fn from_tensor_shear(equilibrium: Tangent6, branches: Vec<TensorPronyBranch>,
-        strain_limit: f64) -> Result<Self> {
-        let c = core::array::from_fn(|i| core::array::from_fn(|j|
-            (WEIGHTS[i]/WEIGHTS[j])*equilibrium[i][j]));
+    pub fn from_tensor_shear(
+        equilibrium: Tangent6,
+        branches: Vec<TensorPronyBranch>,
+        strain_limit: f64,
+    ) -> Result<Self> {
+        let c = core::array::from_fn(|i| {
+            core::array::from_fn(|j| (WEIGHTS[i] / WEIGHTS[j]) * equilibrium[i][j])
+        });
         Self::new_mandel(c, branches, strain_limit)
     }
-    /// Retained branches, in caller order; none are pruned or fitted.
-    pub fn branches(&self) -> &[TensorPronyBranch] { &self.parameters.branches }
     /// Actual equilibrium Mandel stiffness [Pa].
-    pub fn equilibrium_mandel(&self) -> &Tangent6 { &self.parameters.equilibrium }
+    pub fn equilibrium_mandel(&self) -> &Tangent6 {
+        &self.c_eq
+    }
     /// Virgin zero-strain, relaxed history. No state can be rebound to another law.
     pub fn history(&self) -> TensorPronyHistory {
-        TensorPronyHistory { model: self.clone(), strain: [0.0;6], stress: [0.0;6],
-            q: vec![[0.0;6];self.branches().len()], stored: 0.0, work: 0.0, heat: 0.0 }
+        TensorPronyHistory {
+            model: self.clone(),
+            strain: [0.0; 6],
+            stress: [0.0; 6],
+            q: vec![[0.0; 6]; self.branches().len()],
+            stored: 0.0,
+            work: 0.0,
+            heat: 0.0,
+        }
     }
     /// Full storage/loss tensors for exp(+i omega t), matching visco::modulus.
     /// The loss matrix is PSD; its OFF-DIAGONAL entries need not be positive.
     pub fn modulus_mandel(&self, omega: f64) -> Result<(Tangent6, Tangent6)> {
-        if !omega.is_finite() || omega < 0.0 { return Err(invalid("frequency must be finite and nonnegative")); }
-        let mut storage = self.parameters.equilibrium;
-        let mut loss = [[0.0;6];6];
-        for branch in self.branches() {
-            let z = omega*branch.tau_s;
-            // Stable at both ends, including overflow of positive omega*tau.
-            let (re, im) = if z <= 1.0 { (z*(z/(1.0+z*z)), z/(1.0+z*z)) }
-                else { let u=1.0/z; (1.0/(1.0+u*u), u/(1.0+u*u)) };
-            for i in 0..6 { for j in 0..6 {
-                storage[i][j] += re*branch.stiffness[i][j];
-                loss[i][j] += im*branch.stiffness[i][j];
-            } }
+        if !omega.is_finite() || omega < 0.0 {
+            return Err(invalid("frequency must be finite and nonnegative"));
         }
-        if storage.iter().flatten().chain(loss.iter().flatten()).any(|v| !v.is_finite()) {
+        let mut storage = self.c_eq;
+        let mut loss = [[0.0; 6]; 6];
+        if let Some(kv) = &self.kv_pa_s {
+            for i in 0..6 {
+                for j in 0..6 {
+                    loss[i][j] += omega * kv[i][j];
+                }
+            }
+        }
+        for branch in self.branches() {
+            let z = omega * branch.tau_s;
+            // Stable at both ends, including overflow of positive omega*tau.
+            let (re, im) = if z <= 1.0 {
+                (z * (z / (1.0 + z * z)), z / (1.0 + z * z))
+            } else {
+                let u = 1.0 / z;
+                (1.0 / (1.0 + u * u), u / (1.0 + u * u))
+            };
+            for i in 0..6 {
+                for j in 0..6 {
+                    storage[i][j] += re * branch.c_pa[i][j];
+                    loss[i][j] += im * branch.c_pa[i][j];
+                }
+            }
+        }
+        if storage
+            .iter()
+            .flatten()
+            .chain(loss.iter().flatten())
+            .any(|v| !v.is_finite())
+        {
             return Err(invalid("modulus overflow"));
         }
-        Ok((storage,loss))
+        Ok((storage, loss))
     }
     /// Exact endpoint stress derivative for a prescribed linear strain ramp.
     /// Returned tensor uses the crate's tensor-shear Voigt convention.
     pub fn tangent(&self, dt_s: f64) -> Result<Tangent6> {
-        if !dt_s.is_finite() || dt_s < 0.0 { return Err(invalid("time step must be finite and nonnegative")); }
-        let mut c = self.parameters.equilibrium;
-        for branch in self.branches() {
-            let r = dt_s/branch.tau_s;
-            let b = if r == 0.0 {1.0} else {-det::expm1(-r)/r};
-            for i in 0..6 { for j in 0..6 { c[i][j] += b*branch.stiffness[i][j]; } }
+        if !dt_s.is_finite() || dt_s < 0.0 {
+            return Err(invalid("time step must be finite and nonnegative"));
         }
-        for i in 0..6 { for j in 0..6 { c[i][j] *= WEIGHTS[j]/WEIGHTS[i]; } }
-        if c.iter().flatten().any(|v| !v.is_finite()) { return Err(invalid("tangent overflow")); }
+        let mut c = self.c_eq;
+        for branch in self.branches() {
+            let r = dt_s / branch.tau_s;
+            let b = if r == 0.0 { 1.0 } else { -det::expm1(-r) / r };
+            for i in 0..6 {
+                for j in 0..6 {
+                    c[i][j] += b * branch.c_pa[i][j];
+                }
+            }
+        }
+        for i in 0..6 {
+            for j in 0..6 {
+                c[i][j] *= WEIGHTS[j] / WEIGHTS[i];
+            }
+        }
+        if c.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(invalid("tangent overflow"));
+        }
         Ok(c)
     }
 }
@@ -232,11 +323,11 @@ impl TensorPronyHistory {
         let next_strain = mandel(&strain);
         let norm2 = dot(&next_strain,&next_strain);
         if !dt_s.is_finite() || dt_s < 0.0 || !finite(&next_strain) || !norm2.is_finite()
-            || det::sqrt(norm2) > self.model.parameters.strain_limit {
+            || det::sqrt(norm2) > self.model.strain_limit {
             return Err(invalid("invalid time step or strain outside declared small-strain domain"));
         }
         let delta = core::array::from_fn(|i| next_strain[i]-self.strain[i]);
-        let eq = &self.model.parameters.equilibrium_factor;
+        let eq = &self.model.equilibrium_gram;
         let old_eq = apply(eq,&self.strain); let delta_eq = apply(eq,&delta);
         let next_eq = apply(eq,&next_strain);
         let mut stress = [0.0;6]; transpose_add(eq,&next_eq,&mut stress);
@@ -244,14 +335,19 @@ impl TensorPronyHistory {
         let mut work = (0..6).fold(0.0, |sum,i| sum+(old_eq[i]+0.5*delta_eq[i])*delta_eq[i]);
         let mut heat = 0.0;
         let mut q = self.q.clone();
-        for (q,branch) in q.iter_mut().zip(self.model.branches()) {
+        for ((q, branch), factor) in q
+            .iter_mut()
+            .zip(self.model.branches())
+            .zip(&self.model.factors)
+        {
             poll(&mut cancelled)?;
-            let d = apply(&branch.factor,&delta);
+            let gram_rows = branch.resolved_gram_rows(factor);
+            let d = apply(&gram_rows, &delta);
             for i in 0..6 {
                 let (next,mean,loss) = ramp(q[i],d[i],dt_s/branch.tau_s);
                 q[i]=next; work += mean*d[i]; heat += loss;
             }
-            stored += 0.5*dot(q,q); transpose_add(&branch.factor,q,&mut stress);
+            stored += 0.5*dot(q,q); transpose_add(&gram_rows,q,&mut stress);
         }
         let residual = work-(stored-self.stored)-heat;
         let total_work=self.work+work; let total_heat=self.heat+heat;
@@ -268,23 +364,8 @@ impl TensorPronyHistory {
     }
 }
 
-// Independent unit-stiffness Maxwell channel in factor coordinates. The same
-// analytical ramp used by scalar visco::GeneralizedMaxwell is the test oracle.
-// Completing the square keeps heat nonnegative without work-minus-storage
-// cancellation: A(q0+h*delta)^2 + R*delta^2.
-fn ramp(q0: f64, delta: f64, r: f64) -> (f64,f64,f64) {
-    if r == 0.0 { return (q0+delta,q0+0.5*delta,0.0); }
-    let a=det::exp(-r); let s=-det::expm1(-r); let b=s/r; let h=b/(1.0+a);
-    let (c,remainder)=if r<0.1 {
-        let c=0.5+r*(-1.0/6.0+r*(1.0/24.0+r*(-1.0/120.0+r*(1.0/720.0
-            +r*(-1.0/5040.0+r*(1.0/40320.0+r*(-1.0/362880.0+r/3628800.0)))))));
-        let r2=r*r;
-        (c,r*(1.0/12.0+r2*(-1.0/120.0+r2*(17.0/20160.0
-            +r2*(-31.0/362880.0+r2*691.0/79833600.0)))))
-    } else { ((1.0-b)/r,(1.0-2.0*h)/r) };
-    let shifted=q0+h*delta;
-    let loss=(0.5*s*(1.0+a))*shifted*shifted+(remainder*delta)*delta;
-    (a*q0+b*delta,b*q0+c*delta,loss)
+fn ramp(q0: f64, delta: f64, r: f64) -> (f64, f64, f64) {
+    crate::visco::prony_ramp(q0, delta, r)
 }
 
 #[cfg(test)]

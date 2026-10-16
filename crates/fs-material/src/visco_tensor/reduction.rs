@@ -48,40 +48,6 @@ fn solve3(mut a:Complex3,mut b:Complex3)->Result<Complex3> {
 }
 
 impl TensorProny {
-    /// Express this material in a new fixed spatial frame: epsilon' = Q epsilon Q^T.
-    /// Q must be a finite proper orthogonal rotation. Every Gram factor changes
-    /// as B' = B T^T, retaining PSD and branch rank without diagonalizing C_j.
-    /// This is a coordinate transformation, not evolution of rotating matter.
-    pub fn rotated(&self,q:[[f64;3];3])->Result<Self> {
-        if q.iter().flatten().any(|v|!v.is_finite()) {return Err(invalid("nonfinite material rotation"));}
-        for i in 0..3 {for j in 0..3 {
-            let value=(0..3).fold(0.0,|sum,k|sum+q[i][k]*q[j][k]);
-            let target=if i==j {1.0}else{0.0};
-            if !value.is_finite() || (value-target).abs()>256.0*f64::EPSILON {
-                return Err(invalid("material frame must be orthogonal"));
-            }
-        }}
-        let determinant=q[0][0]*(q[1][1]*q[2][2]-q[1][2]*q[2][1])
-            -q[0][1]*(q[1][0]*q[2][2]-q[1][2]*q[2][0])
-            +q[0][2]*(q[1][0]*q[2][1]-q[1][1]*q[2][0]);
-        if (determinant-1.0).abs()>512.0*f64::EPSILON {return Err(invalid("material frame must be a proper rotation"));}
-        let mut t=[[0.0;6];6];
-        for j in 0..6 {
-            let mut unit=[0.0;6];unit[j]=1.0/WEIGHTS[j];
-            let column=mandel(&crate::tensor::rotate(&unit,&q));
-            for i in 0..6 {t[i][j]=column[i];}
-        }
-        let transform=|b:&Tangent6| -> Tangent6 {
-            core::array::from_fn(|i|core::array::from_fn(|j|
-                (0..6).fold(0.0,|sum,k|sum+b[i][k]*t[j][k])))
-        };
-        let branches=self.branches().iter().map(|b|
-            TensorPronyBranch::from_gram_rows(transform(&b.factor),b.tau_s))
-            .collect::<Result<Vec<_>>>()?;
-        let factor=transform(&self.parameters.equilibrium_factor);
-        Self::new_mandel(gram(&factor)?,branches,self.parameters.strain_limit)
-    }
-
     /// Harmonic plane stress normal to local z, with exp(+i omega t).
     /// Eliminate zz, yz, zx strain from the whole frequency-dependent tensor.
     /// This is NOT a time-domain Prony fit or branch-by-branch condensation.
@@ -100,7 +66,7 @@ impl TensorProny {
             reduced[i][j]=value;
         }}
         Ok(PlaneStressModulus {mandel:reduced,normal_extension:solve,
-            strain_limit:self.parameters.strain_limit})
+            strain_limit:self.strain_limit})
     }
 }
 

@@ -38,6 +38,10 @@ use fs_ad::Real;
 use fs_ad::dual::gradient;
 use fs_math::det;
 
+/// Passive full-tensor Prony (generalized Maxwell) viscoelastic law in Mandel coordinates.
+pub mod tensor;
+pub use tensor::{Mandel6, PronyBranch, TensorProny, TensorPronyState};
+
 /// Typed refusals of the viscoelastic layer. Display strings carry stable
 /// `FS-MAT-VISCO-*` codes.
 #[derive(Debug, Clone, PartialEq)]
@@ -448,7 +452,7 @@ pub struct PronyState {
 // integral rather than subtracting nearly equal work/storage quantities:
 // A*(q0+h*delta)² + R*delta², A=(1-exp(-2r))/2,
 // h=tanh(r/2)/r, R=(r-2*tanh(r/2))/r² >= 0.
-fn prony_ramp(q0: f64, delta: f64, r: f64) -> (f64, f64, f64) {
+pub(crate) fn prony_ramp(q0: f64, delta: f64, r: f64) -> (f64, f64, f64) {
     if r == 0.0 {
         return (q0 + delta, q0 + 0.5 * delta, 0.0);
     }
@@ -522,6 +526,42 @@ impl LoweredModel {
     pub fn loss_factor_checked(&self, omega: f64) -> Result<f64, ViscoError> {
         let (ep, epp) = self.modulus_checked(omega)?;
         Ok(epp / ep)
+    }
+
+    /// Read-only diagnostic: supremum relative storage-modulus error
+    /// `max_ω |E′_prony(ω) − E′_frac(ω)| / E′_frac(ω)` over the verification grid.
+    #[must_use]
+    pub fn sup_rel_storage_error(&self, fz: &FractionalZener) -> f64 {
+        let mut worst = 0.0f64;
+        let log_lo = det::ln(self.band.0);
+        let log_hi = det::ln(self.band.1);
+        let n = self.verification_points.max(2);
+        for i in 0..n {
+            let t = i as f64 / (n - 1) as f64;
+            let w = det::exp(log_lo + t * (log_hi - log_lo));
+            let (fe, _) = fz.modulus(w);
+            let (ge, _) = self.model.modulus(w);
+            worst = worst.max((ge - fe).abs() / fe.abs().max(1e-300));
+        }
+        worst
+    }
+
+    /// Read-only diagnostic: supremum relative loss-modulus error
+    /// `max_ω |E″_prony(ω) − E″_frac(ω)| / E″_frac(ω)` over the verification grid.
+    #[must_use]
+    pub fn sup_rel_loss_error(&self, fz: &FractionalZener) -> f64 {
+        let mut worst = 0.0f64;
+        let log_lo = det::ln(self.band.0);
+        let log_hi = det::ln(self.band.1);
+        let n = self.verification_points.max(2);
+        for i in 0..n {
+            let t = i as f64 / (n - 1) as f64;
+            let w = det::exp(log_lo + t * (log_hi - log_lo));
+            let (_, fi) = fz.modulus(w);
+            let (_, gi) = self.model.modulus(w);
+            worst = worst.max((gi - fi).abs() / fi.abs().max(1e-300));
+        }
+        worst
     }
 }
 
@@ -647,7 +687,7 @@ pub fn lower_to_prony(
 
 /// Lawson–Hanson non-negative least squares (dense, deterministic): solve
 /// `min ‖A x − b‖` s.t. `x ≥ 0`. Sizes here are tiny (≤ 64 unknowns).
-fn nnls(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+pub(crate) fn nnls(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     let mut passive = vec![false; cols];
     let mut x = vec![0.0f64; cols];
     for _outer in 0..(2 * cols + 4) {

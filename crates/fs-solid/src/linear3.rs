@@ -3032,69 +3032,11 @@ fn rotate_mandel_stiffness(
     principal: MandelStiffness6,
     rotation: [[f64; 3]; 3],
 ) -> MandelStiffness6 {
-    let transform = mandel_rotation(rotation);
-    let mut world = [[0.0; 6]; 6];
-    for a in 0..6 {
-        for b in 0..6 {
-            for p in 0..6 {
-                for q in 0..6 {
-                    world[a][b] =
-                        transform[a][p].mul_add(principal[p][q] * transform[b][q], world[a][b]);
-                }
-            }
-        }
-    }
-    // Rotation is mathematically symmetric; retain the original orthotropic
-    // operation tree and its deterministic triangle convention. Input symmetry
-    // is checked before this step; this is not a projection of noisy source data.
-    for row in 0..6 {
-        for column in 0..row {
-            world[row][column] = world[column][row];
-        }
-    }
-    world
+    fs_material::tensor::rotate_mandel(principal, rotation)
 }
 
 fn mandel_rotation(rotation: [[f64; 3]; 3]) -> [[f64; 6]; 6] {
-    let basis = mandel_basis();
-    let mut transform = [[0.0; 6]; 6];
-    for principal in 0..6 {
-        let mut rotated = [[0.0; 3]; 3];
-        for i in 0..3 {
-            for j in 0..3 {
-                for p in 0..3 {
-                    for q in 0..3 {
-                        rotated[i][j] = rotation[i][p]
-                            .mul_add(basis[principal][p][q] * rotation[j][q], rotated[i][j]);
-                    }
-                }
-            }
-        }
-        for world in 0..6 {
-            for i in 0..3 {
-                for j in 0..3 {
-                    transform[world][principal] =
-                        basis[world][i][j].mul_add(rotated[i][j], transform[world][principal]);
-                }
-            }
-        }
-    }
-    transform
-}
-
-fn mandel_basis() -> [[[f64; 3]; 3]; 6] {
-    let mut basis = [[[0.0; 3]; 3]; 6];
-    basis[0][0][0] = 1.0;
-    basis[1][1][1] = 1.0;
-    basis[2][2][2] = 1.0;
-    let shear = core::f64::consts::FRAC_1_SQRT_2;
-    basis[3][0][1] = shear;
-    basis[3][1][0] = shear;
-    basis[4][1][2] = shear;
-    basis[4][2][1] = shear;
-    basis[5][2][0] = shear;
-    basis[5][0][2] = shear;
-    basis
+    fs_material::tensor::mandel_rotation(rotation)
 }
 
 fn determinant3(a: [[f64; 3]; 3]) -> f64 {
