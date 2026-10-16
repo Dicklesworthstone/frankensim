@@ -1,4 +1,4 @@
-//! Scalar-gap condensation of an arbitrary independent-mode midpoint response.
+//! Scalar-gap condensation of an arbitrary linear mechanical midpoint response.
 //! Pressure and swept volume use the same signed projection. Gap/contact use
 //! their own projection: modes that hardly move the slit can still sweep fluid.
 use super::dynamic::ApertureDrive;
@@ -33,11 +33,40 @@ pub(super) fn solve(
         .iter().any(|&len| len != n) {
         return Err(invalid("uniform aperture needs matching bounded modal projections"));
     }
+    let mut pressure_response = [0.0; MAX_MODES];
+    let mut contact_response = [0.0; MAX_MODES];
+    for i in 0..n {
+        pressure_response[i] = mobility[i]*area[i];
+        contact_response[i] = mobility[i]*gap_shape[i];
+    }
+    solve_response(free, &pressure_response[..n], &contact_response[..n], area,
+        gap_shape, gap, dt, width, rho, z, drive, limits, obstacle)
+}
+
+/// Same scalar contact/flow solve with an already condensed FULL mechanical
+/// response: v = free + contact_response*F - pressure_response*dp. A symmetric
+/// passive mechanical owner provides both columns from the SAME factorization.
+/// Off-diagonal damping therefore does not need another Bernoulli/contact law.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn solve_response(
+    free: &[f64], pressure_response: &[f64], contact_response: &[f64],
+    area: &[f64], gap_shape: &[f64], gap: f64, dt: f64, width: f64, rho: f64,
+    z: f64, drive: ApertureDrive, limits: PairedApertureLimits, obstacle: &Obstacle,
+) -> Result<UniformTrial, AcousticRealizeError> {
+    let n = free.len();
+    if n == 0 || n > MAX_MODES
+        || [pressure_response.len(), contact_response.len(), area.len(), gap_shape.len()]
+            .iter().any(|&len| len != n)
+        || free.iter().chain(pressure_response).chain(contact_response).chain(area)
+            .chain(gap_shape).any(|x| !x.is_finite()) {
+        return Err(invalid("uniform aperture needs matching finite mechanical response columns"));
+    }
     let contact = ApertureContactStep::new(obstacle, gap)
         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-    let pressure_mobility = (0..n).map(|i| mobility[i]*area[i]*area[i]).sum::<f64>();
+    let pressure_mobility = (0..n).map(|i| pressure_response[i]*area[i]).sum::<f64>();
     let denominator = 1.0 + z*pressure_mobility;
-    if !denominator.is_finite() || denominator <= 0.0 {
+    if !pressure_mobility.is_finite() || pressure_mobility < 0.0
+        || !denominator.is_finite() || denominator <= 0.0 {
         return Err(invalid("uniform aperture swept-flow response overflowed"));
     }
     let mut evaluations = 0;
@@ -52,7 +81,7 @@ pub(super) fn solve(
         let mut velocities = [0.0; MAX_MODES];
         let mut moving = drive.body_flow_m3_s;
         for i in 0..n {
-            velocities[i] = free[i] + mobility[i]*gap_shape[i]*force;
+            velocities[i] = free[i] + contact_response[i]*force;
             moving -= area[i]*velocities[i];
         }
         let source = (drive.upstream_pressure_pa - 2.0*drive.incoming_pressure_pa - z*moving)/denominator;
@@ -62,7 +91,7 @@ pub(super) fn solve(
         let mut residual = velocity;
         let mut scale = velocity.abs();
         for i in 0..n {
-            velocities[i] -= mobility[i]*area[i]*dp;
+            velocities[i] -= pressure_response[i]*dp;
             residual -= gap_shape[i]*velocities[i];
             scale += (gap_shape[i]*velocities[i]).abs() + (gap_shape[i]*free[i]).abs();
         }

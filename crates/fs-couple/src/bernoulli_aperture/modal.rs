@@ -4,8 +4,9 @@
 //! A and g are separate signed projections; neither is a fitted sound gain.
 //! Contact and continuous Bernoulli flow remain in their original owners. The
 //! scalar solve generalizes the existing independent-blade midpoint condensation.
-//! This is a fixed linear modal basis, diagonal viscous loss and a uniform
-//! effective slit, not distributed closure, hereditary material or curved flow.
+//! This is a fixed linear modal basis and a uniform effective slit. An optional
+//! full passive viscosity matrix retains cross-mode loss in the SAME midpoint
+//! solve; distributed closure, hereditary material and curved flow remain separate.
 
 use super::dynamic::{ApertureDrive, ApertureFrame, ApertureState};
 use super::paired::{BladeState, PairedApertureLimits};
@@ -16,6 +17,7 @@ use fs_dcontact::{ContactStorage, Obstacle};
 use fs_phs::Storage;
 /// Original regional material plates and same-basis spatial ports.
 pub mod material;
+mod viscosity;
 
 /// One fixed-basis mode, in a physical metre-valued coordinate.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -80,6 +82,7 @@ pub struct ModalAperture {
     samples: u64,
     material_plates: Vec<material::MaterialModalPlate>,
     material_gas: Option<fs_material::gas::GasState>,
+    viscosity: Option<viscosity::ApertureViscosity>,
 }
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
@@ -99,7 +102,8 @@ impl ModalAperture {
     /// There is no named-instrument preset or inferred damping. Modal sign and
     /// scaling belong to the supplied projections, including the force ports.
     /// A successful construction does not validate omitted modes or mean-gap
-    /// closure. Nonproportional damping and hereditary laws require other images.
+    /// closure. Select full viscosity explicitly with `with_viscosity`;
+    /// hereditary laws require a different material-history image.
     pub fn new(spec: ModalApertureSpec, state: Vec<BladeState>, obstacle: Obstacle)
         -> Result<Self, AcousticRealizeError>
     {
@@ -132,7 +136,7 @@ impl ModalAperture {
         let contact_storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![obstacle.clone()])
             .map_err(nonlinear)?;
         let model = Self { spec, state, obstacle, contact_storage, samples: 0,
-            material_plates: Vec::new(), material_gas: None };
+            material_plates: Vec::new(), material_gas: None, viscosity: None };
         model.validate_state(&model.state)?;
         Ok(model)
     }
@@ -217,16 +221,24 @@ impl ModalAperture {
             external[i] = m.force_projection[0]*forces[0] + m.force_projection[1]*forces[1];
             let d = m.mass_kg + h*m.damping_n_s_m + h*h*m.stiffness_n_m;
             mobility[i] = h/d;
-            free[i] = (m.mass_kg*s.velocity_m_s - h*m.stiffness_n_m*s.displacement_m + h*external[i])/d;
+            let rhs = m.mass_kg*s.velocity_m_s - h*m.stiffness_n_m*s.displacement_m + h*external[i];
+            free[i] = if self.viscosity.as_ref().is_some_and(|c| c.is_active()) { rhs } else { rhs/d };
             area[i] = m.pressure_area_m2; shape[i] = m.gap_projection;
             if !d.is_finite() || d <= 0.0 || !mobility[i].is_finite() || mobility[i] <= 0.0
                 || !free[i].is_finite() { return Err(invalid("modal midpoint response is not representable")); }
         }
         let gap = self.gap(&self.state);
         let z = self.spec.impedance_pa_s_m3;
-        let trial = uniform::solve(&free[..n], &mobility[..n], &area[..n], &shape[..n],
-            gap, dt, self.spec.width_m, self.spec.density_kg_m3, z, drive,
-            self.spec.limits, &self.obstacle)?;
+        let trial = if let Some(c) = self.viscosity.as_ref().filter(|c| c.is_active()) {
+            c.solve_free(&mut free[..n])?;
+            uniform::solve_response(&free[..n], c.pressure_response(), c.contact_response(),
+                &area[..n], &shape[..n], gap, dt, self.spec.width_m,
+                self.spec.density_kg_m3, z, drive, self.spec.limits, &self.obstacle)?
+        } else {
+            uniform::solve(&free[..n], &mobility[..n], &area[..n], &shape[..n],
+                gap, dt, self.spec.width_m, self.spec.density_kg_m3, z, drive,
+                self.spec.limits, &self.obstacle)?
+        };
         let next: Vec<_> = self.state.iter().zip(&trial.velocity).map(|(s,v)| BladeState {
             displacement_m: s.displacement_m + dt*v, velocity_m_s: 2.0*v - s.velocity_m_s,
         }).collect();
@@ -245,8 +257,12 @@ impl ModalAperture {
             no_drop - trial.dp
         } else { drive.incoming_pressure_pa + load_pressure };
         let wave = (outgoing - drive.incoming_pressure_pa)/z;
-        let viscous: f64 = self.spec.modes.iter().zip(&trial.velocity)
-            .map(|(m,v)| m.damping_n_s_m*v*v).sum();
+        let mut viscous_force = [0.0; MAX_MODES];
+        let viscous = if let Some(c) = self.viscosity.as_ref().filter(|c| c.is_active()) {
+            c.force_and_power(&trial.velocity[..n], &mut viscous_force[..n])?
+        } else {
+            self.spec.modes.iter().zip(&trial.velocity).map(|(m,v)| m.damping_n_s_m*v*v).sum()
+        };
         let mechanical: f64 = external[..n].iter().zip(&trial.velocity).map(|(f,v)| dt*f*v).sum();
         let energy = self.energy(&next);
         let aperture = ApertureFrame {
@@ -262,11 +278,15 @@ impl ModalAperture {
             pressure_work_j: dt*trial.dp*(wave - drive.body_flow_m3_s), mechanical_work_j: mechanical,
             relaxation_energy_j: 0.0, relaxation_loss_j: 0.0,
         };
-        let momentum: Vec<_> = self.spec.modes.iter().enumerate().map(|(i,m)|
-            m.mass_kg*(next[i].velocity_m_s - self.state[i].velocity_m_s)/dt
-            + m.stiffness_n_m*f64::midpoint(self.state[i].displacement_m, next[i].displacement_m)
-            + m.damping_n_s_m*trial.velocity[i] + area[i]*trial.dp
-            - shape[i]*contact.force - external[i]).collect();
+        let momentum: Vec<_> = self.spec.modes.iter().enumerate().map(|(i,m)| {
+            let residual = m.mass_kg*(next[i].velocity_m_s - self.state[i].velocity_m_s)/dt
+                + m.stiffness_n_m*f64::midpoint(self.state[i].displacement_m, next[i].displacement_m)
+                + m.damping_n_s_m*trial.velocity[i] + area[i]*trial.dp
+                - shape[i]*contact.force - external[i];
+            if self.viscosity.as_ref().is_some_and(|c| c.is_active()) {
+                residual + viscous_force[i]
+            } else { residual }
+        }).collect();
         let flow_scale = jet.abs() + swept.abs() + drive.body_flow_m3_s.abs() + wave.abs();
         let scale = self.stored_energy_j() + energy + aperture.pressure_work_j.abs()
             + mechanical.abs() + aperture.dissipated_energy_j.abs();

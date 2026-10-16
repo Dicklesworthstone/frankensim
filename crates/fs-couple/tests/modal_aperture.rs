@@ -127,3 +127,6 @@ mod network;
 
 #[path = "modal_aperture/material.rs"]
 mod material;
+
+#[path = "modal_aperture/viscosity.rs"]
+mod viscosity;
