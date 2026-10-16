@@ -78,15 +78,18 @@ fn phase(omega: f64, dt: f64, amplitude: f64) -> f64 {
 #[test]
 fn piston_small_signal_warping_matches_midpoint_on_amplitude_ladder() {
     let omega = core::f64::consts::TAU * 1_000.0;
-    for z in [0.1, 1.0, 2.5] {
+    for z in [0.01, 0.02, 0.03] {
         let expected = 2.0 * det::atan(0.5 * z);
         let mut observed = Vec::new();
-        for amplitude in [1e-4, 5e-5, 2.5e-5] {
+        // q/(V/A) ranges from 1.3e-3 to 3.3e-4: small enough for
+        // linearization, large enough to resolve that axis above material ULPs.
+        for amplitude in [0.1, 0.05, 0.025] {
             let measured = phase(omega, z / omega, amplitude);
             let defect = 1200.0 * det::ln(measured / expected) / core::f64::consts::LN_2;
             observed.push(defect.abs());
+            assert!((1200.0 * det::ln(measured / z) / core::f64::consts::LN_2).abs() <= 1.0);
             println!(
-                "{{\"path\":\"cavity_phs::piston::GasPiston\",\"integrator\":\"midpoint gas/momentum\",\"omega_hz\":1000,\"sample_rate_hz\":{},\"omega_dt\":{},\"amplitude_m\":{},\"measured_cents\":{},\"predicted_cents\":{},\"linearization_error_cents\":{},\"tolerance_cents\":0.01,\"verdict\":\"requires-migration\"}}",
+                "{{\"path\":\"cavity_phs::piston::GasPiston\",\"integrator\":\"midpoint gas/momentum\",\"omega_hz\":1000,\"sample_rate_hz\":{},\"omega_dt\":{},\"amplitude_m\":{},\"measured_cents\":{},\"predicted_cents\":{},\"linearization_error_cents\":{},\"tolerance_cents\":0.01,\"verdict\":\"resolved-band\"}}",
                 omega / z,
                 z,
                 amplitude,
@@ -105,4 +108,42 @@ fn piston_small_signal_warping_matches_midpoint_on_amplitude_ladder() {
             "amplitude axis must affect the linearization error"
         );
     }
+}
+
+#[test]
+fn piston_phase_band_cap_and_cap_plus_one_are_transactional() {
+    let parcel = gas(0.75, 0.0);
+    let initial = parcel.state().state();
+    let area = 0.01;
+    let omega = core::f64::consts::TAU * 1_000.0;
+    let mass = initial.density * initial.sound_speed.powi(2) * area * area
+        / (parcel.volume_m3() * omega * omega);
+    let pressure = initial.pressure;
+    let mut model = GasPiston::new(parcel, mass, area, 0.0).unwrap();
+    let cap = fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP;
+    model
+        .step(
+            PistonInput {
+                duration_s: cap / omega * (1.0 - 1e-12),
+                exterior_pressure_pa: pressure,
+                ..drive(0.0)
+            },
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let before = model.clone();
+    assert!(matches!(
+        model.step(
+            PistonInput {
+                duration_s: cap / omega * (1.0 + 1e-10),
+                exterior_pressure_pa: pressure,
+                ..drive(0.0)
+            },
+            controls(),
+            || false
+        ),
+        Err(PistonError::TimeResolution(_))
+    ));
+    assert_eq!(model, before);
 }
