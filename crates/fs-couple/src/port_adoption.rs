@@ -130,6 +130,21 @@ impl ModulePorts {
         self.last = Some(account);
         self.integrated = OnceLock::new();
     }
+    /// An independent observation may refuse after the physical owner accepts.
+    /// Retain that refusal without manufacturing transfers or changing motion.
+    pub(crate) fn accept_result(
+        &mut self,
+        account: StepAccount,
+        ports: Result<Vec<PortTransfer>, CoupleError>,
+    ) {
+        match ports {
+            Ok(ports) => self.accept(account, ports),
+            Err(error) => {
+                self.accept(account, []);
+                self.integrated = OnceLock::from(Err(error));
+            }
+        }
+    }
     fn integrated(&self) -> Option<&Result<Vec<IntegratedWindowTransfer>, CoupleError>> {
         let account = self.last.as_ref()?;
         Some(self.integrated.get_or_init(|| {
@@ -456,4 +471,44 @@ pub(crate) fn junction(
     };
     JunctionSchema::try_new(id(&format!("{owner}/junction/{name}")), ports, law)
         .expect("admitted owner count, canonical conjugate charts and unit signs")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn g0_observation_refusal_is_visible_and_next_acceptance_replaces_it() {
+        let mut ports = ModulePorts::mechanical("observation-test", 1);
+        let account = StepAccount {
+            tick: 1,
+            duration_s: 0.01,
+            storage_change_j: Some(0.0),
+            loss_j: Some(0.0),
+            included_work_j: 0.0,
+            entropy_change_j_k: 0.0,
+            tolerance_j: Some(1e-12),
+            unavailable: None,
+        };
+        let error = CoupleError::ModuleObservationFailed {
+            owner: "observation-test".into(),
+            reason: "independent loss integral refused".into(),
+        };
+        ports.accept_result(account.clone(), Err(error.clone()));
+        assert_eq!(ports.duration_s(), Some(0.01));
+        assert!(ports.transfers().is_none());
+        assert_eq!(ports.transfer_error(), Some(&error));
+        assert_eq!(ports.audit(), Err(error));
+        ports.accept_result(
+            StepAccount { tick: 2, ..account },
+            Ok(vec![PortTransfer::work(0.0, true)]),
+        );
+        assert_eq!(ports.next_tick(), 3);
+        assert!(ports.transfer_error().is_none());
+        assert_eq!(ports.transfers().unwrap()[0].energy_into().value(), 0.0);
+        let ModuleWindowAudit::Available(report) = ports.audit().unwrap() else {
+            panic!("replacement accepted account missing")
+        };
+        assert!(report.violations().is_empty());
+    }
 }

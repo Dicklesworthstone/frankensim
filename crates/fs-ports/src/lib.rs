@@ -5371,6 +5371,14 @@ fn reject_relation_port_alias(id: &StableId, port: &PortSchema) -> Result<(), Co
 /// A structured coupling failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoupleError {
+    /// An accepted module step could not supply its independent port observation.
+    /// This diagnostic does not reject or replace the accepted physical state.
+    ModuleObservationFailed {
+        /// Module whose observation failed.
+        owner: String,
+        /// Original observation owner's refusal.
+        reason: String,
+    },
     /// An N-port relation has an invalid size, sign vector or Dirac matrix.
     InvalidJunction {
         /// First malformed field; no tolerance is applied to structural laws.
