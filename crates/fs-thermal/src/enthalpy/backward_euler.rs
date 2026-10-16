@@ -14,6 +14,28 @@
 use super::*;
 
 impl DepositionSimulation<'_> {
+    /// Evaluate the ORIGINAL thermal rate owner's external power at this state.
+    /// Trial sources add to authored sources; link replacements keep their
+    /// original coverage. Internal link transfers are excluded from the result.
+    /// No time, enthalpy, event cursor or accepted coefficient is changed.
+    ///
+    /// Coupled consumers can pass only their independent external sources here,
+    /// omitting internal Joule/gas transfers, to measure supply without deriving
+    /// it by subtraction from an already combined energy account. This is one
+    /// bounded rate evaluation, not a thermal step or an energy certificate.
+    pub fn external_step_power_w(
+        &self, sources_w: &BTreeMap<CellId, f64>, conductances_w_k: &BTreeMap<u64, f64>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, DepositionError> {
+        checkpoint()?;
+        let mut trial = self.clone();
+        trial.set_step_conductances(conductances_w_k, &mut checkpoint)?;
+        trial.add_step_sources(sources_w, &mut checkpoint)?;
+        let power = trial.heat_rates(f64::MAX, &mut checkpoint)?.external_w;
+        checkpoint()?;
+        finite(power)
+    }
+
     /// Check a coupled material binding against the timeline's actual borrowed
     /// caloric object, not merely one matching temperature sample or numeric ID.
     /// This compares in-process data addresses (not unstable trait vtable

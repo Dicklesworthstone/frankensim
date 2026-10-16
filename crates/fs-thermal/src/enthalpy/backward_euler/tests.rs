@@ -154,3 +154,38 @@ fn g4_invalid_trials_and_every_cancelled_evaluation_leave_the_old_history_untouc
     assert_eq!(old.time_s(), 0.0);
     assert_eq!(old.cells()[&CellId(1)].specific_h_j_kg, 40.0);
 }
+
+
+#[test]
+fn external_rate_query_reuses_native_boundaries_without_internal_transfers() {
+    let mut hot = cell(1,1.0,10.0);
+    hot.boundary = Boundary { ambient_k: 300.0,htc_w_m2_k: 2.0,
+        reservoir: Some(Reservoir { area_m2: 1.0,conductance_w_k: 3.0,temperature_k: 320.0 }),source_w: 4.0 };
+    let old = simulation(&SENSIBLE,vec![hot,cell(2,1.0,0.0)],Some(0.5),vec![]);
+    let sources = [(CellId(1),5.0),(CellId(2),-2.0)].into();
+    let links = [(9,2.0)].into();
+    // Cell 1 has 6 - 1 contact - 1 reservoir = 4 m2 exposed.
+    // Ambient -80 W, reservoir +30 W, authored +4 W, additions +3 W.
+    near(old.external_step_power_w(&sources,&links,||Ok(())).unwrap(),-43.0);
+    let step = BackwardEulerStep::new(&old,0.5,||Ok(())).unwrap();
+    let trial = step.evaluate(&[0.0,0.0], |_| Ok::<_,DepositionError>(StepCoefficients {
+        sources_w: sources.clone(),conductances_w_k: links.clone(),payload: () }),||Ok(())).unwrap();
+    near(trial.audit().external_heat_j,-21.5);
+    assert_eq!(old.time_s(),0.0); assert_eq!(old.cells()[&CellId(1)].boundary.source_w,4.0);
+    assert_eq!(old.links()[&9].conductance_w_k,0.5);
+}
+
+#[test]
+fn external_rate_query_refuses_invalid_maps_and_late_cancellation_without_mutation() {
+    let old = simulation(&SENSIBLE,vec![cell(1,1.0,10.0)],None,vec![]);
+    let sources = [(CellId(1),5.0)].into(); let links = BTreeMap::new();
+    assert!(old.external_step_power_w(&[(CellId(9),1.0)].into(),&links,||Ok(())).is_err());
+    let mut polls=0;
+    old.external_step_power_w(&sources,&links,|| { polls+=1; Ok(()) }).unwrap();
+    let mut count=0;
+    assert!(matches!(old.external_step_power_w(&sources,&links,|| {
+        count+=1; if count==polls { Err(DepositionError::Cancelled) } else { Ok(()) }
+    }),Err(DepositionError::Cancelled)));
+    assert_eq!(old.time_s(),0.0); assert_eq!(old.cells()[&CellId(1)].specific_h_j_kg,10.0);
+    assert_eq!(old.cells()[&CellId(1)].boundary.source_w,0.0);
+}

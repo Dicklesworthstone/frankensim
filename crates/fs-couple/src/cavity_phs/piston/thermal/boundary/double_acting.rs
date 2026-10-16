@@ -1,6 +1,9 @@
 //! Two thermal ports on ONE two-gas/mechanical proposal, without extra stores.
 //! Finite counterparts must debit the signed heat and publish all endpoints.
 
+/// Existing finite circuit/enthalpy network on both gas ports.
+pub mod network;
+
 use super::{ConductanceSample, ResolvedThermochemicalGasState, ThermalPistonError,
     feedback, heat, poll, positive};
 use super::super::double_acting::DoubleHeatExchangeSolve;
