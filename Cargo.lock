@@ -1976,9 +1976,11 @@ dependencies = [
  "fs-blake3",
  "fs-casebook",
  "fs-evidence",
+ "fs-la",
  "fs-matdb",
  "fs-math",
  "fs-qty",
+ "fs-rand",
  "fs-thermal",
  "fs-thermochem",
 ]
