@@ -18,8 +18,13 @@ pub const HEADER: &str = "frankensim-piano-felt-dampers-v1";
 const MAX_BYTES: u64 = 1024 * 1024;
 const MAX_CONTACTS: usize = 88 * MAX_SITES;
 const MAX_PROJECTION_TERMS: usize = 4_000_000;
-const FORCE_ABS: f64 = 1e-5;
+// Converged contact force: absolute 1e-9 N. Pads press on a ringing string with forces down to
+// 1e-4 N and below (light touch, half pedal, a returning pad); a 1e-5 N tolerance let the accepted
+// force miss the felt's own discrete force by up to 15% there, and the accounted damping went negative.
+const FORCE_ABS: f64 = 1e-9;
 const FORCE_REL: f64 = 1e-8;
+/// Trials of one step that take the local root whole; later ones average it with the held force.
+const DIRECT_TRIALS: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
 struct Pad {
@@ -277,6 +282,8 @@ pub struct Prepared {
     dt: f64,
     physical_pads: usize,
     in_step: bool,
+    /// Corrections of the present step (see DIRECT_TRIALS).
+    trials: usize,
 }
 
 impl Prepared {
@@ -481,6 +488,7 @@ impl Prepared {
             dt,
             physical_pads,
             in_step: false,
+            trials: 0,
         })
     }
 
@@ -544,6 +552,7 @@ impl Prepared {
         }
         self.regather()?;
         self.in_step = true;
+        self.trials = 0;
         Ok(())
     }
 
@@ -653,11 +662,14 @@ impl Prepared {
                 &mut output[..n],
             )?;
             for row in 0..n {
-                // An exactly separated constitutive branch carries no force.
-                // Do not leave a sub-tolerance warm force doing spurious work
-                // indefinitely after lift; re-predict with exact zero instead.
-                self.corrected_force[first + row] = if output[row] == 0. {
-                    0.
+                // The local solve uses the group's exact compliance, so its root is the converged
+                // force unless other groups or string stretching moved the strings meanwhile: take
+                // it whole (an exactly separated branch gives exact zero, so no sub-tolerance warm
+                // force keeps doing spurious work after lift). If the trials of a step keep failing,
+                // average with the held force instead, a damped iteration coupled groups cannot
+                // drive into oscillation.
+                self.corrected_force[first + row] = if self.trials < DIRECT_TRIALS || output[row] == 0. {
+                    output[row]
                 } else {
                     0.5 * self.force[first + row] + 0.5 * output[row]
                 };
@@ -665,6 +677,7 @@ impl Prepared {
         }
         self.force.copy_from_slice(&self.corrected_force);
         self.regather()?;
+        self.trials += 1;
         Ok(false)
     }
 

@@ -15,8 +15,11 @@ name = "fs_live_piano"
 crate-type = ["cdylib", "rlib"]
 # The library includes the reference example's source files; their own unit
 # tests need the complete example tree, so this crate's tests live in tests/.
+# `bench = false` too: a bench target would compile the library with cfg(test)
+# (it did under `cargo check --all-targets`) and so pull those tests in.
 test = false
 doctest = false
+bench = false
 
 [package.metadata.frankensim]
 layer = "L6"
