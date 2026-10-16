@@ -424,6 +424,47 @@ fn baffled_plate_radiation_efficiency() {
     );
 }
 
+// Shared latitude vertices keep the retained triangle surface exactly closed.
+// Unlike 320/1280/5120 icospheres, all THREE rungs resolve ka=10 at >=6 ppw.
+fn resolved_sphere(latitude: usize) -> SpherePanels {
+    let longitude = 2 * latitude;
+    let mut vertices = vec![[0.0, 0.0, 1.0]];
+    for j in 1..latitude {
+        let theta = PI * j as f64 / latitude as f64;
+        for i in 0..longitude {
+            let phi = TAU * i as f64 / longitude as f64;
+            vertices.push([
+                theta.sin() * phi.cos(),
+                theta.sin() * phi.sin(),
+                theta.cos(),
+            ]);
+        }
+    }
+    let south = vertices.len();
+    vertices.push([0.0, 0.0, -1.0]);
+    let ring = |j: usize, i: usize| 1 + j * longitude + i % longitude;
+    let mut triangles = Vec::new();
+    for i in 0..longitude {
+        triangles.push([vertices[0], vertices[ring(0, i)], vertices[ring(0, i + 1)]]);
+        for j in 0..latitude - 2 {
+            let (a, b, c, d) = (
+                ring(j, i),
+                ring(j + 1, i),
+                ring(j + 1, i + 1),
+                ring(j, i + 1),
+            );
+            triangles.push([vertices[a], vertices[b], vertices[c]]);
+            triangles.push([vertices[a], vertices[c], vertices[d]]);
+        }
+        triangles.push([
+            vertices[ring(latitude - 2, i)],
+            vertices[south],
+            vertices[ring(latitude - 2, i + 1)],
+        ]);
+    }
+    SpherePanels::from_triangles(triangles).unwrap()
+}
+
 /// G2, sphere radius 1 m. Derivation: p_l=A*h_l^(1)(kr)*P_l and
 /// v_l=k*p_l'/(i*w*rho) give z_l=i*rho*c*h_l/h_l'. For l=0 this
 /// reduces to (-i*x)/(1-i*x). For translation, integral cos²(theta)dS=S/3;
@@ -444,8 +485,9 @@ fn sphere_modal_loading_closed_forms() {
                 .scale(area * medium.density * medium.sound_speed / (3.0 * (4.0 + x4))),
         ];
         let mut finest = None;
-        for subdivision in [2, 3, 4] {
-            let surface = SpherePanels::icosphere(1.0, subdivision).unwrap();
+        let mut admitted = 0;
+        for (rung, latitude) in [24, 32, 40].into_iter().enumerate() {
+            let surface = resolved_sphere(latitude);
             let shapes = vec![
                 vec![1.0; surface.areas().len()],
                 surface.normals().iter().map(|n| n[2]).collect(),
@@ -464,6 +506,7 @@ fn sphere_modal_loading_closed_forms() {
             );
             match result {
                 Ok(bake) => {
+                    admitted += 1;
                     let row = &bake.rows()[0];
                     let z = row.impedance();
                     let mut worst = 0.0_f64;
@@ -471,7 +514,7 @@ fn sphere_modal_loading_closed_forms() {
                         let error = (z[mode * 2 + mode] - oracle[mode]).abs() / oracle[mode].abs();
                         worst = worst.max(error);
                         println!(
-                            "{{\"suite\":\"fs-bem\",\"case\":\"modal-loading-sphere\",\"inputs\":\"analytic sphere a=1m; NASA WR68-12 B-9/B-18\",\"axis\":\"panels\",\"rung\":{subdivision},\"ka\":{ka},\"panels\":{},\"mode\":{mode},\"observed\":[{},{}],\"oracle\":[{},{}],\"err\":{error},\"min_eig_re\":{},\"tol\":1e-3,\"verdict\":\"{}\",\"elapsed_s\":{}}}",
+                            "{{\"suite\":\"fs-bem\",\"case\":\"modal-loading-sphere\",\"inputs\":\"analytic sphere a=1m; NASA WR68-12 B-9/B-18\",\"axis\":\"panels\",\"rung\":{rung},\"ka\":{ka},\"panels\":{},\"mode\":{mode},\"observed\":[{},{}],\"oracle\":[{},{}],\"err\":{error},\"min_eig_re\":{},\"tol\":1e-3,\"verdict\":\"{}\",\"elapsed_s\":{}}}",
                             surface.areas().len(),
                             z[mode * 2 + mode].re,
                             z[mode * 2 + mode].im,
@@ -482,12 +525,12 @@ fn sphere_modal_loading_closed_forms() {
                             started.elapsed().as_secs_f64()
                         );
                     }
-                    if subdivision == 4 {
+                    if rung == 2 {
                         finest = Some(worst);
                     }
                 }
                 Err(error) => println!(
-                    "{{\"suite\":\"fs-bem\",\"case\":\"modal-loading-sphere\",\"inputs\":\"analytic sphere a=1m\",\"axis\":\"panels\",\"rung\":{subdivision},\"ka\":{ka},\"panels\":{},\"err\":\"{}\",\"tol\":1e-3,\"verdict\":\"refused\",\"elapsed_s\":{}}}",
+                    "{{\"suite\":\"fs-bem\",\"case\":\"modal-loading-sphere\",\"inputs\":\"analytic sphere a=1m\",\"axis\":\"panels\",\"rung\":{rung},\"ka\":{ka},\"panels\":{},\"err\":\"{}\",\"tol\":1e-3,\"verdict\":\"refused\",\"elapsed_s\":{}}}",
                     surface.areas().len(),
                     error,
                     started.elapsed().as_secs_f64()
@@ -495,7 +538,7 @@ fn sphere_modal_loading_closed_forms() {
             }
         }
         assert!(
-            finest.is_some_and(|e| e <= 1e-3),
+            admitted == 3 && finest.is_some_and(|e| e <= 1e-3),
             "strict sphere qualification unmet at ka={ka}: {finest:?}; refine the numerical owner, never relax 1e-3"
         );
     }
