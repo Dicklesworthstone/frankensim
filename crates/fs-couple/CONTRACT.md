@@ -2142,3 +2142,33 @@ spread; gt-006 guitar-strum listening digest chain (Unadjudicated).
   nasal branch (named refusals); mouth radiation is IdealOpen v1 (the
   compact-mouth Z bake is the recorded refinement — the radiation-fit
   ka ceiling forbids UnflangedOpen at full audio band).
+
+### IRP radiated observation admission (M2.6-W0)
+
+`pcm_wav::observation::ObservationPolicy` distinguishes `Acceptance` from
+`Diagnostic`. `ReedPerformance::from_bytes_with_policy` refuses `listener_m`
+under Acceptance; its physical outlet still requires the unchanged flanged
+feedback load and uses one exterior gas for feedback and reception. The raw
+voice, positional reed CLI fixture and legacy baseline remain diagnostics.
+`music_render wind --acceptance` selects the flanged-development path explicitly.
+
+`TwoSidedPressure::with_observation_policy` and
+`AperturePerformance::new_with_observation_policy` require the actual installed
+reaction binding under Acceptance. They check the load's identity, radius,
+clock, band and exterior density/sound speed (relative tolerance 1e-12).
+`from_baffled_environment` uses that checked path. Observation adds no second
+reaction load, changes no bore gas and never changes a termination to admit it.
+Existing one-way builders retain Diagnostic scope.
+
+G1/G2 analytic tests in `baffled_pressure_qualification.rs` check on-axis piston
+pressure at z/a=2,10,100 and signed 2J1(x)/x directivity at ka=0.5,2,5 within
+1e-3, with radial/angular refinement. The on-axis fixture uses a=25 mm to
+respect the existing z>=50 mm domain; the far-field fixture uses a=7 mm.
+The band parameter is admission metadata: its ladder checks invariant kernels
+and live spatial/temporal refusals, not waveform convergence as the band changes.
+G0 checks the finite-difference 0.1-rate and differentiating 0.45-rate caps at
+cap and cap+1 Hz. G3/G5 adapter tests compare the same accepted terminal flow
+against the shared owner and repeat pressure bitwise across callback sizes.
+These are authored infinite-baffle fixtures, not real-instrument fidelity or a
+full-band reaction match. Native qualification remains required; rustfmt alone
+does not establish the numerical claims.
