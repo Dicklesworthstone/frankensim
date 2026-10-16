@@ -1,8 +1,8 @@
-// Convert existing native fs-viz ASCII output; does not run or approximate physics.
+// Convert existing native ASCII VTU/VTR output; does not run or approximate physics.
 import {readFile, writeFile, stat} from 'node:fs/promises';
-import {parseVTU} from '../import-vtu.mjs';
+import {parseVTK} from '../import-vtu.mjs';
 import {MESH_LIMITS, joinFrames} from '../mesh-data.mjs';
-const usage='node apps/observatory/tools/vtu-to-observatory.mjs --units m --output result.json [--times 0,0.1,0.2] frame0.vtu [frame1.vtu ...]';
+const usage='node apps/observatory/tools/vtu-to-observatory.mjs --units m --output result.json [--times 0,0.1,0.2] frame0.vtu|vtr [frame1.vtu|vtr ...]';
 async function main() {
   const args=process.argv.slice(2), files=[]; let lengthUnit,output,times;
   for(let i=0;i<args.length;i++) {
@@ -18,14 +18,14 @@ async function main() {
   const snapshots=[]; let bytes=0;
   for(let i=0;i<files.length;i++) {
     bytes+=(await stat(files[i])).size; if(bytes>MESH_LIMITS.bytes)throw new Error('Sequence exceeds the aggregate 32 MiB input budget.');
-    snapshots.push(parseVTU(await readFile(files[i],'utf8'),{lengthUnit}));
+    snapshots.push(parseVTK(await readFile(files[i],'utf8'),{lengthUnit}));
   }
   const result=times?joinFrames(snapshots,times):snapshots[0];
   if(times) {
     result.source.notes=result.source.notes.filter(n=>!n.startsWith('Static snapshot:'));
     result.source.notes.push('Recorded frame times explicitly supplied through --times. Frames are replayed without interpolation.');
   }
-  result.title=files.length>1?'Recorded VTU field sequence':'VTU field snapshot';
+  result.title=files.length>1?'Recorded VTK field sequence':'VTK field snapshot';
   const json=JSON.stringify(result)+'\n'; if(Buffer.byteLength(json)>MESH_LIMITS.bytes)throw new Error('Converted snapshot exceeds 32 MiB.');
   await writeFile(output,json,{flag:'wx'});
   console.log(`Wrote ${result.mesh.time_s.length} frame(s), ${result.mesh.fields.length} field(s), ${result.mesh.triangles.length} exterior triangles. No physics was computed.`);

@@ -1,4 +1,4 @@
-// Narrow offline reader for fs-viz::VtuWriter::write_ascii and compatible VTU.
+// Shared offline reader for fs-viz ASCII VTU and cooling-cht ASCII VTR exports.
 // No external entities, remote references, binary payloads or XML evaluation.
 import {MESH_SCHEMA, MESH_LIMITS, fail, scalar, validateMeshSnapshot} from './mesh-data.mjs';
 const numeric = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
@@ -100,7 +100,6 @@ export function exterior(points,cells,types) {
         const side=dot(normal,sub(centroid(ids),a).map(x=>x/scale));
         if (side===0) fail('Degenerate volume cell.');
         if (side>0) f.reverse();
-        // This is a convex-cell display admission, not global mesh certification.
         const n=side>0?normal.map(x=>-x):normal;
         for(const id of ids) if (!f.includes(id) && !(dot(n,sub(points[id],a).map(x=>x/scale))<0)) fail('Nonconvex volume cell.');
       }
@@ -127,7 +126,9 @@ export function parseVTU(text, {lengthUnit, time=null, title='Imported VTU field
   if (typeof text!=='string' || new TextEncoder().encode(text).length>MESH_LIMITS.bytes) fail('VTU exceeds 32 MiB.');
   if (/<!DOCTYPE|<!ENTITY|<!\[CDATA\[/i.test(text)) fail('DTD, entities and CDATA are not supported.');
   const vtk=xml(text.replace(/^\uFEFF/,''));
-  if (vtk.tag!=='VTKFile'||vtk.attrs.type!=='UnstructuredGrid'||vtk.attrs.compressor) fail('Expected uncompressed UnstructuredGrid VTU.');
+  if (vtk.tag!=='VTKFile'||vtk.attrs.compressor) fail('Expected an uncompressed VTKFile.');
+  if (vtk.attrs.type==='RectilinearGrid') return rectilinear(vtk,{lengthUnit,time,title:title==='Imported VTU fields'?'Imported VTR fields':title});
+  if (vtk.attrs.type!=='UnstructuredGrid') fail('Expected UnstructuredGrid VTU or RectilinearGrid VTR.');
   only(vtk,['UnstructuredGrid']); const grid=one(vtk,'UnstructuredGrid'); only(grid,['Piece']); const piece=one(grid,'Piece');
   only(piece,['Points','Cells','PointData','CellData']);
   const np=uint(piece.attrs.NumberOfPoints,'point count',MESH_LIMITS.points), nc=uint(piece.attrs.NumberOfCells,'cell count',MESH_LIMITS.cells);
@@ -141,8 +142,20 @@ export function parseVTU(text, {lengthUnit, time=null, title='Imported VTU field
   if(offsets.some((v,i)=>v<1 || v>(i+1)*8 || (i>0 && v<=offsets[i-1]))) fail('Invalid cell offsets.');
   const connectivity=data(named('connectivity'),offsets.at(-1),{integer:true,components:1}), types=data(named('types'),nc,{integer:true,components:1});
   const cells=offsets.map((end,i)=>connectivity.slice(i?offsets[i-1]:0,end));
-  const boundary=exterior(positions_m,cells,types), fields=[];
-  let values=np*3+boundary.triangles.length*4+connectivity.length+types.length;
+  const boundary=exterior(positions_m,cells,types);
+  const fields=fieldsOf(piece,np,nc,np*3+boundary.triangles.length*4+connectivity.length+types.length);
+  return validateMeshSnapshot({schema:MESH_SCHEMA,title,source:{model:'Imported ASCII VTU / fs-viz compatible',
+    material:'Field values supplied by the imported file; source is not authenticated',notes:[
+      `Coordinates explicitly interpreted as ${lengthUnit} and converted to metres. Field Unit attributes are retained without conversion.`,
+      'Volume cells are shown by their exterior faces; interior cells and their original field values remain available to the probe. No cutting plane or volume rendering.',
+      'Quads use a fixed diagonal for display. Point fields are linearly interpolated only for coloring; cell fields are never averaged across material interfaces.',
+      time===null?'Static snapshot: zero is a viewer reference, not an asserted solver time.':`Recorded snapshot time explicitly supplied by the caller: ${time} s.`]},
+    mesh:{positions_m,...boundary,cell_count:nc,source_cells:cells,source_types:types,time_s:[time===null?0:scalar(time,'Snapshot time')],fields}});
+}
+
+// Both native export paths share field admission; association and units never change.
+function fieldsOf(piece,np,nc,values) {
+  const fields=[];
   for (const [tag,association,entities] of [['PointData','point',np],['CellData','cell',nc]]) {
     const section=one(piece,tag,true); if(!section) continue; only(section,['DataArray']);
     for(const arr of section.children) {
@@ -153,11 +166,55 @@ export function parseVTU(text, {lengthUnit, time=null, title='Imported VTU field
       fields.push({label:arr.attrs.Name,unit:arr.attrs.Unit||'unspecified',association,components,values:[data(arr,entities*components)]});
     }
   }
-  return validateMeshSnapshot({schema:MESH_SCHEMA,title,source:{model:'Imported ASCII VTU / fs-viz compatible',
+  return fields;
+}
+
+function extent(value) {
+  const parts=(value||'').trim().split(/\s+/);
+  if(parts.length!==6 || parts.some(v=>!/^[-+]?\d+$/.test(v)||!Number.isSafeInteger(Number(v)))) fail('Invalid rectilinear extent.');
+  const e=parts.map(Number);
+  if([0,2,4].some(i=>e[i+1]<e[i] || e[i+1]-e[i]+1>MESH_LIMITS.points)) fail('Reversed or excessive rectilinear extent.');
+  return e;
+}
+// VTK point/cell order is x-fastest, then y, then z. Nonzero extent origins
+// label indices; they do NOT translate coordinate arrays or reorder field values.
+// See docs.vtk.org/en/latest/vtk_file_formats/vtkxml_file_format.html.
+function rectilinear(vtk,{lengthUnit,time,title}) {
+  only(vtk,['RectilinearGrid']);const grid=one(vtk,'RectilinearGrid');only(grid,['Piece']);
+  const piece=one(grid,'Piece');only(piece,['Coordinates','PointData','CellData']);
+  const whole=extent(grid.attrs.WholeExtent), e=extent(piece.attrs.Extent);
+  if(e.some((v,i)=>v!==whole[i])) fail('Partial rectilinear pieces are not supported; export the whole grid as one piece.');
+  const dims=[0,2,4].map(i=>e[i+1]-e[i]+1), active=[0,1,2].filter(i=>dims[i]>1);
+  if(active.length<2) fail('A rectilinear display requires at least two nontrivial axes.');
+  const strides=[1,dims[0],dims[0]*dims[1]], counts=dims.map(n=>Math.max(1,n-1));
+  const np=dims.reduce((a,b)=>a*b,1),nc=counts.reduce((a,b)=>a*b,1);
+  if(np>MESH_LIMITS.points||nc>MESH_LIMITS.cells) fail('Rectilinear grid exceeds the point/cell budget.');
+  const boundaryCount=active.length===3 ? 4*(counts[0]*counts[1]+counts[0]*counts[2]+counts[1]*counts[2]) : nc*2;
+  if(boundaryCount>MESH_LIMITS.triangles || np*3+nc*(active.length===3?9:5)+boundaryCount*4>MESH_LIMITS.values) fail('Rectilinear grid exceeds the display working-set budget.');
+  const coordinates=one(piece,'Coordinates');only(coordinates,['DataArray']);
+  if(coordinates.children.length!==3) fail('Expected three coordinate arrays in X/Y/Z order.');
+  const scale={m:1,cm:.01,mm:.001}[lengthUnit];
+  const axes=coordinates.children.map((arr,i)=>{
+    const values=data(arr,dims[i],{components:1}).map(v=>v*scale);
+    if(values.some((v,j)=>Math.abs(v)>1e30||!Number.isFinite(v)||(j>0&&v<=values[j-1]))) fail('Rectilinear coordinates must be finite, strictly increasing, and within display range.');
+    return values;
+  });
+  const positions_m=[],cells=[],types=[];
+  for(let k=0;k<dims[2];k++)for(let j=0;j<dims[1];j++)for(let i=0;i<dims[0];i++)positions_m.push([axes[0][i],axes[1][j],axes[2][k]]);
+  for(let k=0;k<counts[2];k++)for(let j=0;j<counts[1];j++)for(let i=0;i<counts[0];i++) {
+    const p=i+j*strides[1]+k*strides[2];
+    if(active.length===3){const y=strides[1],z=strides[2];cells.push([p,p+1,p+1+y,p+y,p+z,p+1+z,p+1+y+z,p+y+z]);types.push(12);}
+    else{const a=strides[active[0]],b=strides[active[1]];cells.push([p,p+a,p+a+b,p+b]);types.push(9);}
+  }
+  const boundary=exterior(positions_m,cells,types);
+  const fields=fieldsOf(piece,np,nc,np*3+boundary.triangles.length*4+nc*(active.length===3?9:5));
+  return validateMeshSnapshot({schema:MESH_SCHEMA,title,source:{model:'Imported ASCII VTR / rectilinear grid',
     material:'Field values supplied by the imported file; source is not authenticated',notes:[
       `Coordinates explicitly interpreted as ${lengthUnit} and converted to metres. Field Unit attributes are retained without conversion.`,
-      'Volume cells are shown by their exterior faces; interior cells and their original field values remain available to the probe. No cutting plane or volume rendering.',
-      'Quads use a fixed diagonal for display. Point fields are linearly interpolated only for coloring; cell fields are never averaged across material interfaces.',
+      `WholeExtent ${e.join(' ')}. Point and cell indices retain VTK X-fastest ordering; no field resampling or material averaging.`,
+      'Hexahedral volumes are displayed by exterior faces. Planar grids retain their original quadrilateral cells. Missing field units remain unspecified.',
       time===null?'Static snapshot: zero is a viewer reference, not an asserted solver time.':`Recorded snapshot time explicitly supplied by the caller: ${time} s.`]},
     mesh:{positions_m,...boundary,cell_count:nc,source_cells:cells,source_types:types,time_s:[time===null?0:scalar(time,'Snapshot time')],fields}});
 }
+// Prefer this name in new consumers; parseVTU remains the compatible entrypoint.
+export const parseVTK = parseVTU;
