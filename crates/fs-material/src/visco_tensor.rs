@@ -18,6 +18,9 @@ use crate::{Tangent6, Voigt};
 use fs_math::det;
 use std::sync::Arc;
 
+mod projection;
+pub use projection::{ProjectedPronyBranch, ProjectedTensorProny, TensorProjectionBudget};
+
 mod reduction;
 pub use reduction::{Complex3, HarmonicPlateSection, PlaneStressModulus};
 
