@@ -17,6 +17,14 @@ use fs_qty::Dims;
 #[path = "matdb_pack_cli/thermochemical.rs"]
 mod thermochemical;
 
+#[path = "matdb_pack_cli/digitization.rs"]
+mod digitization;
+
+#[test]
+fn g2_g3_redigitized_metal_source_bounds_reach_consumers() {
+    digitization::source_bounds_reach_consumers();
+}
+
 /// Source acquisition checks exercise the real offline compiler and typed
 /// evaluator. They establish source transport, not experimental validation.
 mod common_material_acquisition {

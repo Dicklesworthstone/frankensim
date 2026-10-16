@@ -8,6 +8,7 @@ readonly TEST_FILE="${REPO_ROOT}/xtask/tests/matdb_pack_cli.rs"
 readonly MATERIAL_SOURCE_HOST="$(uname -n)"
 readonly MATERIAL_SOURCE_GIT_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 readonly -a EXPECTED_TESTS=(
+  "g2_g3_redigitized_metal_source_bounds_reach_consumers"
   "common_material_acquisition::g1_g3_sourced_nasa9_mixture_reaches_duct_radiation_cavity"
   "common_material_acquisition::g2_g3_sourced_nasa9_species_match_janaf"
   "common_material_acquisition::g2_sourced_humid_air_sound_speed_vs_cramer"
