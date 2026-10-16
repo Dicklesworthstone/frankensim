@@ -206,22 +206,21 @@ pub fn j0(x: f64) -> f64 {
 }
 
 /// Bessel function of the first kind, order 1 (odd; all finite `x`).
-#[must_use]
-pub fn j1(x: f64) -> f64 {
-    if x.is_nan() {
-        return f64::NAN;
+pub use fs_math::special::bessel_j1 as j1;
+
+#[cfg(test)]
+mod shared_j1_tests {
+    /// G3: the former public aeroac entry point has exactly the shared
+    /// owner's bits, including its signed-zero and NaN policies.
+    #[test]
+    fn bessel_j1_matches_fs_aeroac() {
+        for x in [-200.0, -18.0, -0.0, 0.0, 1e-4, 1.0, 18.0, 36.0, 200.0] {
+            assert_eq!(
+                super::j1(x).to_bits(),
+                fs_math::special::bessel_j1(x).to_bits()
+            );
+        }
     }
-    if x.is_infinite() {
-        return 0.0;
-    }
-    let ax = x.abs();
-    let v = if ax <= SPLIT {
-        j1_series(ax)
-    } else {
-        jy_asymptotic(1.0, ax).0
-    };
-    // Odd symmetry including the sign of zero (j1(-0.0) = -0.0).
-    if x.is_sign_negative() { -v } else { v }
 }
 
 /// Bessel function of the second kind, order 0 (`x > 0`; NaN

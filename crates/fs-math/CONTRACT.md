@@ -115,6 +115,18 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   `QdError`, `from_parts` and `renormalize` enforce canonical non-overlapping
   representation, and byte conversions round-trip deterministically.
   Precision is a value representation, never certification authority.
+- `special::{bessel_j1, struve_h1, one_minus_two_j1_over_x}` — shared real
+  circular-piston special functions, with double-double defining series and
+  generated, optimally truncated Hankel/Struve asymptotics (DLMF 10.2.2,
+  10.17.3, 11.2.1, 11.6.1). J1 is odd, H1 is even; the cancellation-free
+  remainder has value zero at zero. Fixed iteration caps bound the work.
+  G2 tests target 1e-13 relative on [1e-4, 200] against independent
+  180-decimal landmarks, a quad-double series rung through 80 and the
+  dev-only fsci-special Struve oracle above 80. Series/asymptotic overlap
+  at H1's named switch 36 targets 1e-14 absolute. These new tests await native
+  qualification; they do not inherit the strict-core golden's measured proof.
+  Relative error is ill-conditioned at J1 zeros; no uniform relative bound
+  over neighborhoods of zeros or an interval enclosure is claimed.
 
 ## Invariants
 - No platform libm on any strict path (sqrt excepted: IEEE-exact).

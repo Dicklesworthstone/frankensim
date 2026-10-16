@@ -34,8 +34,8 @@
 //! validity boundary of the wide-tube model is a CONTRACT disclosure,
 //! not a hidden assumption.
 //!
-//! Bessel functions: `J0`/`J1` are generated in-crate from their power
-//! series in double-double arithmetic (`fs_math::dd`) — no coefficient
+//! Bessel functions: `J0` uses a double-double series and `J1` uses the
+//! shared `fs_math::special` owner — no coefficient
 //! tables, no transcription — with the roots of `J1` found by bisection +
 //! Newton between interlacing brackets. Arguments are bounded by
 //! `gamma_{N_MAX}` (mode counts are capped), where the series is
@@ -76,22 +76,8 @@ pub fn bessel_j0(x: f64) -> f64 {
     sum.to_f64()
 }
 
-/// `J1(x)` by power series in double-double arithmetic.
-#[must_use]
-pub fn bessel_j1(x: f64) -> f64 {
-    let q = Dd::from_f64(-0.25 * x * x);
-    let mut term = Dd::from_f64(0.5 * x);
-    let mut sum = term;
-    for k in 1..=60u32 {
-        let kk = f64::from(k);
-        term = term * q * Dd::from_f64(1.0 / (kk * (kk + 1.0)));
-        sum = sum + term;
-        if term.hi.abs() < 1e-30 * sum.hi.abs().max(1e-30) {
-            break;
-        }
-    }
-    sum.to_f64()
-}
+/// Shared deterministic real J₁ owner (double-double series/Hankel expansion).
+pub use fs_math::special::bessel_j1;
 
 /// The first `count` POSITIVE roots of `J1` (the rigid-wall m = 0 radial
 /// eigenvalues `gamma_n`, n >= 1; `gamma_0 = 0` is the plane mode and is
