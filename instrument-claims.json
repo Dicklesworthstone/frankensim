@@ -3,6 +3,28 @@
   "doctrine": "Music-program claims registry (bead frankensim-music-claims-registry-mc31g; program root frankensim-music-v8-root-3ez8g). D19: a claim is a (filling, image, qoi) row, never prose. D21: rows transition gate status (ungated|green|refused) and are never deleted; xtask check-instrument-claims refuses removal against the committed predecessor. D25: live_default=yes requires gate=green AND a budget_row (real-time is a measured claim). Seed state 2026-08-14: every currently-live image enters ungated with empty evidence - nothing is green until a per-track gates bead lands reviewed evidence. Flags are string enums because the in-house JSON parser collapses booleans.",
   "rows": [
     {
+      "filling":"frequency-domain-duct",
+      "image":"stable-power-wave-composition",
+      "qoi":"impedance-and-mouth-transfer-under-attenuation",
+      "owner_crates":["fs-duct"],
+      "exactness":["X-Est"],
+      "gate":"ungated",
+      "live_default":"no",
+      "determinism":"one-host",
+      "evidence":[
+        {"kind":"test","ref":"crates/fs-duct/src/compose/tests.rs::stable_composition_ill_conditioned_cases"},
+        {"kind":"test","ref":"crates/fs-duct/src/compose/tests.rs::stable_composition_matches_abcd_when_well_conditioned"},
+        {"kind":"test","ref":"crates/fs-duct/src/compose/tests.rs::stable_composition_transfer_functions"},
+        {"kind":"test","ref":"crates/fs-duct/src/compose/tests.rs::scattering_rule_equals_impedance_recursion"},
+        {"kind":"test","ref":"crates/fs-duct/src/compose/tests.rs::condition_estimate_refuses_above_bound"},
+        {"kind":"test","ref":"crates/fs-duct/src/compose/tests.rs::stable_composition_bitwise_repeat"},
+        {"kind":"test","ref":"crates/fs-duct/tests/cross_isa_golden.rs::tmm_sweep_digest_is_cross_isa_golden"}
+      ],
+      "budget_row":null,
+      "corpus_refs":[],
+      "notes":"IRP .80, native batch pending. Stable endpoint wave ports, reflection recursion/Redheffer and logarithmic transfer products reuse existing material, cone and Magnus owners. Closed input uses a reported exact legacy-bit compatibility mode only inside the declared transfer envelope; otherwise no raw ABCD product is evaluated. Scalar, generic multiport, modal decay and network admittance share the owner. Strict independent DD/closed-form 1e-12 and existing-fixture 1e-13 gates are authored, not green. Explicit sensitivity/block/mode caps; no new physical approximation, instrument-shaped production code, dependency, schema or golden bump. Existing closed-mouth radiation sentinel is retained. No measured performance, full 3D/modal feature qualification or real-instrument fidelity claim. Driving-point ladder is untouched; central causality, reed and cross-ISA proofs remain required."
+    },
+    {
       "filling":"exterior-radiation",
       "image":"open-p1-jump-and-robin-burton-miller",
       "qoi":"thin-disc-impedance-scattering-and-impedance-sphere",

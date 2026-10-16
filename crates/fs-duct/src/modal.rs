@@ -160,7 +160,7 @@ pub struct ModalResponse {
 /// Slices for one cone segment in the modal staircase: at least the
 /// scalar path's loss-slice count, at least one per 2% radius change,
 /// and at least eight — the ladder discloses the effect of doubling.
-fn staircase_slices(inlet: f64, outlet: f64) -> Result<usize,DuctError> {
+fn staircase_slices(inlet: f64, outlet: f64) -> Result<usize, DuctError> {
     let ratio = if outlet > inlet {
         outlet / inlet
     } else {
@@ -557,22 +557,18 @@ fn mm_core(
 
     // Recurse from the mouth backward: load -> propagate through the
     // last station -> (junction -> propagate) for every earlier station.
-    let propagate = |r: &mut Vec<C64>, wave: &ModalWave, length: f64| {
+    let propagate = |r: &mut Vec<C64>, wave: &ModalWave, length: f64| -> Result<(), DuctError> {
         let e: Vec<C64> = wave
             .k
             .iter()
             .map(|&kn| crate::exp_i(kn.scale(length)))
             .collect();
-        for i in 0..n {
-            for j in 0..n {
-                r[i * n + j] = e[i] * r[i * n + j] * e[j];
-            }
-        }
+        crate::compose::propagate_reflection(r, &e)
     };
     let mut wave_here = mouth_wave;
     let mut r = r_load;
     let last = stations.len() - 1;
-    propagate(&mut r, &wave_here, stations[last].length);
+    propagate(&mut r, &wave_here, stations[last].length)?;
     for idx in (0..last).rev() {
         let st = &stations[idx];
         let wave_up = modal_wave(state, st.radius, omega, loss, &gammas)?;
@@ -593,7 +589,7 @@ fn mm_core(
             };
             r = reflection_from_impedance(&z_up, &wave_up.zc, n)?;
         }
-        propagate(&mut r, &wave_up, st.length);
+        propagate(&mut r, &wave_up, st.length)?;
         wave_here = wave_up;
     }
 

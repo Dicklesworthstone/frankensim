@@ -322,6 +322,63 @@ pub fn profile_matrix_controlled<F: FnMut() -> bool>(
     steps: RiccatiSteps,
     cancel: &mut F,
 ) -> Result<ProfileTransfer, DuctError> {
+    let mut m = [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE];
+    let (min_shear, zref) =
+        for_each_profile_step(profile, state, omega, loss, steps, cancel, |e, _| {
+            m = mul2(e, m);
+            if m.iter().any(|&v| !finite(v)) {
+                Err(DuctError::Singular)
+            } else {
+                Ok(())
+            }
+        })?;
+    m[1] = m[1].scale(zref);
+    m[2] = m[2].scale(1.0 / zref);
+    if m.iter().any(|&v| !finite(v)) {
+        return Err(DuctError::Singular);
+    }
+    Ok(ProfileTransfer {
+        matrix: m,
+        min_shear_number: min_shear,
+        steps_used: steps.0,
+    })
+}
+
+/// Same local Magnus owner, exposing resolved physical two-ports in inlet to
+/// outlet order. Stable composition never has to form the full profile ABCD.
+pub(crate) fn profile_blocks_controlled<F: FnMut() -> bool>(
+    profile: &RadiusProfile,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    steps: RiccatiSteps,
+    cancel: &mut F,
+) -> Result<(Vec<[C64; 4]>, f64), DuctError> {
+    steps.validate()?;
+    let mut blocks = Vec::with_capacity(steps.0);
+    let (rv, _) =
+        for_each_profile_step(profile, state, omega, loss, steps, cancel, |mut e, zref| {
+            e[1] = e[1].scale(zref);
+            e[2] = e[2].scale(1.0 / zref);
+            if e.iter().any(|&v| !finite(v)) {
+                return Err(DuctError::Singular);
+            }
+            blocks.push(e);
+            Ok(())
+        })?;
+    blocks.reverse();
+    Ok((blocks, rv))
+}
+
+fn for_each_profile_step<F: FnMut() -> bool>(
+    profile: &RadiusProfile,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    steps: RiccatiSteps,
+    cancel: &mut F,
+    mut visit: impl FnMut([C64; 4], f64) -> Result<(), DuctError>,
+) -> Result<(f64, f64), DuctError> {
     steps.validate()?;
     if !positive(omega) || !positive(state.density) || !positive(state.sound_speed) {
         return Err(bad("profile gas/frequency must be positive and finite"));
@@ -334,7 +391,6 @@ pub fn profile_matrix_controlled<F: FnMut() -> bool>(
     let h = -profile.length / steps.0 as f64;
     let root3 = det::sqrt(3.0);
     let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
-    let mut m = [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE];
     let mut min_shear = f64::INFINITY;
     let mut local = |x: f64| -> Result<(C64, C64), DuctError> {
         let wave = segment_wave(state, profile.radius(x)?, omega, loss)?;
@@ -354,21 +410,9 @@ pub fn profile_matrix_controlled<F: FnMut() -> bool>(
         let (a2, b2) = local(x + c2 * h)?;
         let d = (a1 * b2 - a2 * b1).scale(-root3 * h * h / 12.0);
         let e = exp_traceless(d, (a1 + a2).scale(h / 2.0), (b1 + b2).scale(h / 2.0))?;
-        m = mul2(e, m);
-        if m.iter().any(|&v| !finite(v)) {
-            return Err(DuctError::Singular);
-        }
+        visit(e, zref)?;
     }
-    m[1] = m[1].scale(zref);
-    m[2] = m[2].scale(1.0 / zref);
-    if m.iter().any(|&v| !finite(v)) {
-        return Err(DuctError::Singular);
-    }
-    Ok(ProfileTransfer {
-        matrix: m,
-        min_shear_number: min_shear,
-        steps_used: steps.0,
-    })
+    Ok((min_shear, zref))
 }
 
 /// Finite p/U mouth load, or (+infinity,0) for a rigid cap. Zero is

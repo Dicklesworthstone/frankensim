@@ -357,10 +357,8 @@ fn inverse(a: &[C64], n: usize) -> Result<(Vec<C64>, f64), DuctError> {
     Ok((inv, condition))
 }
 
-// Recover the chain's linear two-port from two independent boundary columns.
-// +/- Zref are algebraic probes, not external active loads in the network.
-// This consumes the existing full chain implementation without duplicating its
-// cone/profile/loss/tone-hole physics or changing its golden operation tree.
+// Consume the canonical local-wave composition. Opposite signed load probes
+// cannot recover an opaque chain: their tiny through response is unobservable.
 fn chain_owned(
     duct: &Duct,
     gas: &GasState,
@@ -368,21 +366,44 @@ fn chain_owned(
     loss: LossModel,
     zref: f64,
 ) -> Result<([C64; 4], f64), DuctError> {
-    let plus = crate::input_impedance_load(duct, gas, omega, loss, C64::from_re(zref), None)?;
-    let minus = crate::input_impedance_load(duct, gas, omega, loss, C64::from_re(-zref), None)?;
-    let fp = plus.u_mouth_over_u_in.recip();
-    let fm = minus.u_mouth_over_u_in.recip();
-    let pp = plus.impedance * fp;
-    let pm = minus.impedance * fm;
-    Ok((
-        [
-            (pp - pm).scale(0.5 / zref),
-            (pp + pm).scale(0.5),
-            (fp - fm).scale(0.5 / zref),
-            (fp + fm).scale(0.5),
-        ],
-        plus.min_shear_number.min(minus.min_shear_number),
-    ))
+    let _reference = zref;
+    let options = crate::compose::ComposeOptions::default();
+    let chain = crate::compose::duct_chain(duct, gas, omega, loss, None, options, true, || false)?;
+    let (s, _) = crate::compose::compose_scattering(&chain.blocks, options, &mut || false)?;
+    Ok((s.abcd()?, chain.min_shear_number))
+}
+
+/// Stable pressure-to-inward-flow stamp, including opaque/strongly attenuating
+/// edges for which a finite well-conditioned ABCD export does not exist.
+pub fn network_chain_admittance(
+    duct: &Duct,
+    gas: &GasState,
+    omega: f64,
+    loss: LossModel,
+    corrections: JunctionCorrections,
+) -> Result<([C64; 4], f64, f64), DuctError> {
+    validate_medium(gas, omega)?;
+    if duct.segments.len() > MAX_NETWORK_SEGMENTS {
+        return Err(bad("network segment cap exceeded"));
+    }
+    let options = crate::compose::ComposeOptions {
+        maximum_condition: MAX_NETWORK_CONDITION,
+        ..crate::compose::ComposeOptions::default()
+    };
+    let chain = crate::compose::duct_chain(
+        duct,
+        gas,
+        omega,
+        loss,
+        None,
+        options,
+        corrections == JunctionCorrections::ChainLocal,
+        || false,
+    )?;
+    let (s, condition) = crate::compose::compose_scattering(&chain.blocks, options, &mut || false)?;
+    let (y, c) = s.admittance(MAX_NETWORK_CONDITION)?;
+    let (_, yc) = inverse(&y, 2)?;
+    Ok((y, condition.max(c).max(yc), chain.min_shear_number))
 }
 
 /// Compute the complete chain's physical ABCD block and reject an unqualified
@@ -453,7 +474,15 @@ pub fn network_chain_two_port(
                 let rv = crate::segment_wave(gas, hole_radius, omega, chimney_loss)?.shear_number;
                 ([C64::ONE, C64::ZERO, admittance, C64::ONE], rv)
             } else {
-                chain_owned(&Duct { segments: vec![s.clone()] }, gas, omega, loss, zref)?
+                chain_owned(
+                    &Duct {
+                        segments: vec![s.clone()],
+                    },
+                    gas,
+                    omega,
+                    loss,
+                    zref,
+                )?
             };
             m = crate::mul2(m, block);
             shear = shear.min(rv);
@@ -667,16 +696,8 @@ pub fn network_port_impedance(
     let mut edge_conditions = Vec::with_capacity(edges.len());
     let mut shear = f64::INFINITY;
     for e in edges {
-        let block = network_chain_two_port(&e.duct, gas, omega, loss, e.corrections)?;
-        let [a, b, _, d] = block.abcd;
-        if b.abs() == 0.0 || !finite(b) {
-            return Err(DuctError::Singular);
-        }
-        let binv = b.recip();
-        // Reciprocity is the analytic Wronskian det(M)=1, checked above.
-        // Using that identity avoids independent floating-point off-diagonals.
-        let stamp = [d * binv, -binv, -binv, a * binv];
-        let (_, admittance_condition) = inverse(&stamp, 2)?;
+        let (stamp, condition, edge_shear) =
+            network_chain_admittance(&e.duct, gas, omega, loss, e.corrections)?;
         let endpoint = |node: usize, end: EdgeEnd| {
             if matches!(net.nodes[node].boundary, NodeBoundary::JunctionMultiport(_)) {
                 terminal_slots
@@ -697,11 +718,8 @@ pub fn network_port_impedance(
                 }
             }
         }
-        edge_conditions.push((
-            e.id.clone(),
-            block.condition_estimate.max(admittance_condition),
-        ));
-        shear = shear.min(block.min_shear_number);
+        edge_conditions.push((e.id.clone(), condition));
+        shear = shear.min(edge_shear);
     }
     let (inv, condition) = inverse(&y, n)?;
     let port_nodes: Vec<usize> = net
