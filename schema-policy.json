@@ -358,6 +358,27 @@
       "deprecation_horizon": "a predecessor assembly version stays decodable for one major version after its successor is released"
     },
     {
+      "id": "scenario.performance",
+      "title": "The assembly-bound Performance sidecar",
+      "owner": "fs-scenario",
+      "version_kind": "integer-const",
+      "version_constant": "PERFORMANCE_SCHEMA_VERSION",
+      "version_location": "crates/fs-scenario/src/performance.rs",
+      "current_version": "1",
+      "lockstep": [],
+      "surface": [
+        "bounded Standard MIDI File bytes bound to one Assembly Description hash",
+        "hashes of declared note chart, velocity bins, controller ownership, dynamics and observation prior",
+        "ordered model-only per-note objective/domain declarations with optional resolved SI values and evaluation receipt identities",
+        "integer rational tempo integration with complete-integral ceiling to control ticks; no note-number to frequency conversion"
+      ],
+      "minor_bump": "documentation clarifications only; canonical bytes and interpretation must remain unchanged",
+      "major_bump": "any wire field, tag, order, hash preimage or interpretation change requires a new integer version and predecessor migration or named refusal",
+      "migration_obligation": "no-predecessor",
+      "migration_evidence": [],
+      "deprecation_horizon": "a predecessor Performance version stays decodable for one major version after its successor is released"
+    },
+    {
       "id": "matdb.pack",
       "title": "The FSMATPK material pack family",
       "owner": "fs-matdb",

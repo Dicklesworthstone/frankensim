@@ -21,6 +21,28 @@ flagships.
 
 ## Public types and semantics
 
+- `performance` (IRP M6.2-W1) is a frozen v1 sidecar bound to one Assembly
+  Description hash, raw SMF bytes, note-chart/policy and dynamics hashes, and a
+  declared observation-prior hash. Format 0/1 import uses bounded pure-Rust
+  parsing and the ceiling of the complete rational PPQ tempo integral. Running
+  status and velocity-zero note-off are supported. SMPTE, overlap/polyphony,
+  SysEx, undeclared channel commands, missing mappings/tempo/dynamics and budget
+  excess refuse. Named configurations, explicit velocity bins, physical control
+  ranges and controller rules determine scalar root-level player commands;
+  physical part states, tissue prestress, rest aperture and string tension
+  prescriptions refuse. Structured articulation needs its own declared adapter.
+  A MIDI note never becomes a frequency. Fixed controls cite measurements or
+  authored performance; free controls declare objective/domain and must carry
+  resolved SI values plus evaluation receipts before lowering. Lowering returns
+  the gesture schedule and render provenance retaining all receipts. Consumers
+  must retain that provenance beside the rendered artifact. Decoding requires
+  the original hashed interpretation inputs. Work is synchronous, capped before
+  score allocation, and publishes no partial artifact; model evaluation and its
+  cancellation belong to fs-couple. G0 tests `performance::pf_001`–`pf_011`
+  cover exact ticks, caps, named refusals, command ownership and provenance;
+  G5 covers canonical replay. No score import establishes specimen fidelity,
+  asymptotic onset, spectral agreement, or calibration authority.
+
 - `assembly::generators` (IRP M6.1-W2) admits measured `BoreProfile`,
   `OutlineWithHoles` and `ArchingSurface` tables. Each observation retains exact
   SI binary64 values, absolute bounds, row citation and method. Missing rows

@@ -27,6 +27,7 @@ pub mod frame;
 pub mod gesture;
 pub mod ir;
 pub mod payload;
+pub mod performance;
 #[cfg(feature = "rans-rung")]
 pub mod rans_adjudication;
 #[cfg(feature = "rans-rung")]

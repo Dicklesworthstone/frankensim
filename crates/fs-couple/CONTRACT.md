@@ -30,6 +30,27 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Declared per-note control resolution
+
+`description::per_note` resolves `MinimumThresholdPressure` using a model-only
+monotone onset predicate and explicit SI domain, pressure tolerance and maximum
+evaluations. Its API takes no audio/reference input. The non-oscillating lower
+and oscillating upper bracket, every probe, model identity, objective, target,
+note, domain and budget enter a deterministic content-addressed receipt.
+`record_resolution` binds the receipt to the corresponding Performance control;
+`fs_scenario::performance::lower` retains it in render provenance. Other declared
+objectives remain representable but refuse this pressure-specific resolver.
+Model identities must bind initial conditions and the predeclared observable;
+evaluation cancellation is the model's responsibility. The search is bounded
+and synchronous and publishes only a completed result. Monotonicity is an
+explicit model obligation; a sampled bracket is not a proof of global
+monotonicity or asymptotic bifurcation onset. G1 `per_note_rule::pn_001` uses
+the existing reed fixture's 0.25 s sustained-pressure observable with 18.75 Pa
+bisection width; G0 `pn_002`–`pn_004` cover API shape, provenance and refusals.
+The authored four-note `music_lane.sh --fixture midi-reed` exercises MIDI,
+lowering, model-only resolution, schedule rendering, replay and named refusal.
+This fixture is plumbing evidence and makes no reed realism claim.
+
 ### Port-schema adoption contract
 
 `PortedModule` exposes stable local schemas, coordinate charts, internal N-way

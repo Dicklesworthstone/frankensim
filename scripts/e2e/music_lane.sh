@@ -35,7 +35,7 @@ QUALIFICATION_LOG=""
 
 usage() {
   printf '%s\n' \
-    'usage: scripts/e2e/music_lane.sh --fixture <reed|string|reed-flanged-baffled> --out-dir PATH [options]' \
+    'usage: scripts/e2e/music_lane.sh --fixture <reed|string|reed-flanged-baffled|modal-broadband|midi-reed> --out-dir PATH [options]' \
     '' \
     'Options:' \
     '  --binary PATH        music_render executable (default: auto-discover under' \
@@ -70,7 +70,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$FIXTURE" == "reed" || "$FIXTURE" == "string" || "$FIXTURE" == "reed-flanged-baffled" || "$FIXTURE" == "modal-broadband" ]] || die '--fixture must be reed, string, reed-flanged-baffled or modal-broadband'
+[[ "$FIXTURE" == "reed" || "$FIXTURE" == "string" || "$FIXTURE" == "reed-flanged-baffled" || "$FIXTURE" == "modal-broadband" || "$FIXTURE" == "midi-reed" ]] || die '--fixture must be reed, string, reed-flanged-baffled, modal-broadband or midi-reed'
 [[ -n "$OUT_DIR" ]] || die '--out-dir is required'
 [[ ! -e "$OUT_DIR" ]] || die "refusing to overwrite existing out dir: $OUT_DIR"
 ON_AXIS_ERROR=""
@@ -100,6 +100,14 @@ if [[ -z "$BINARY" ]]; then
 fi
 [[ -n "$BINARY" && -x "$BINARY" ]] || \
   die 'music_render binary not found; build it (cargo build -p fs-couple --bin music_render) or pass --binary'
+
+if [[ "$FIXTURE" == "midi-reed" ]]; then
+  [[ "$SECONDS_ARG" == "0.25" ]] || die 'midi-reed owns its authored 0.5 s score duration; omit --seconds'
+  args=(--out-dir "$OUT_DIR" --binary "$BINARY")
+  if [[ "$DRY_RUN" == 1 ]]; then args+=(--dry-run); fi
+  if [[ "$ENFORCE_BASELINE" == 1 ]]; then args+=(--enforce-baseline); fi
+  exec bash scripts/e2e/midi_reed_lane.sh "${args[@]}"
+fi
 
 if [[ "$FIXTURE" == "modal-broadband" ]]; then
   [[ "$SECONDS_ARG" == "0.25" && "$ENFORCE_BASELINE" == 0 ]] || die 'modal-broadband has a pinned 0.25 s replay window and uses the required native qualification log as its numerical baseline'

@@ -21,8 +21,9 @@
 //!
 //! BOUNDARY (binding, from the plan): a valve gesture is an INSERTED
 //! LENGTH, a key gesture is a HOLE STATE, a fret gesture is a LENGTH +
-//! OBSTACLE — never a mechanism simulation. MIDI import is deliberately
-//! absent; note numbers never become omega anywhere in a physics path.
+//! OBSTACLE — never a mechanism simulation. MIDI import in `performance`
+//! selects named configurations through a declared chart; note numbers never
+//! become omega anywhere in a physics path.
 
 use fs_blake3::{ContentHash, DomainHasher};
 
