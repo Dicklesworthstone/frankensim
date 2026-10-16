@@ -95,10 +95,13 @@ KERNEL_SIGNATURE {
     CG real* g_ = ((DIR) == 0 ? GTM0 : GTM1) + TOFF[mp] + lane * pns;                                  \
     CG real* l_ = ((DIR) == 0 ? LAM0 : LAM1) + TOFF[mp] + lane * pns;                                  \
     real c_ = R(0.0), gc_ = R(0.0), lu_ = R(0.0);                                                      \
-    UNROLL_ALL                                                                                         \
-    for (int x_ = 0; x_ < 32; x_++) {                                                                  \
-      const real ux_ = shfl(su, x_);                                                                   \
-      if (mine && x_ < pns) { c_ = c_ + t_[x_] * ux_; gc_ = gc_ + g_[x_] * ux_; lu_ = lu_ + l_[x_] * ux_; } \
+    /* the pad's stations, in fours (pns <= 32, so every shuffled lane exists) */                     \
+    for (int x0_ = 0; x0_ < pns; x0_ += 4) {                                                           \
+      UNROLL_ALL                                                                                       \
+      for (int x_ = x0_; x_ < x0_ + 4; x_++) {                                                         \
+        const real ux_ = shfl(su, x_);                                                                 \
+        if (mine && x_ < pns) { c_ = c_ + t_[x_] * ux_; gc_ = gc_ + g_[x_] * ux_; lu_ = lu_ + l_[x_] * ux_; } \
+      }                                                                                                \
     }                                                                                                  \
     sc = c_; sgc = gc_;                                                                                \
     const real mv_ = warp_sum(mine ? ((DIR) == 0 ? MU0 : MU1)[pst + lane] * su : R(0.0));              \
@@ -170,9 +173,9 @@ KERNEL_SIGNATURE {
         const int ms_ = PSTART[p_], m_ = PEND[p_] - ms_, base_ = PST[p_], ns_ = PST[p_ + 1] - base_;   \
         CG real* col_ = SHAPE + PSH[p_] + (k_ - ms_);                                                  \
         real acc_ = R(0.0), odd_ = R(0.0);                                                             \
-        UNROLL_ALL                                                                                     \
-        for (int i_ = 0; i_ < 32; i_ += 2) {                                                           \
-          if (i_ < ns_) acc_ = acc_ + col_[i_ * m_] * tc[base_ - st0_ + i_];                           \
+        UNROLL                                                                                         \
+        for (int i_ = 0; i_ < ns_; i_ += 2) {                                                          \
+          acc_ = acc_ + col_[i_ * m_] * tc[base_ - st0_ + i_];                                         \
           if (i_ + 1 < ns_) odd_ = odd_ + col_[(i_ + 1) * m_] * tc[base_ - st0_ + i_ + 1];             \
         }                                                                                              \
         tv[k_ - bs] = tv[k_ - bs] + (acc_ + odd_);                                                     \
