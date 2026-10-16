@@ -159,6 +159,49 @@ everywhere: this is screening, not a viscous truth source.
 
 ## Invariants
 
+### Solid-mode radiation loading (IRP M2.5-W4a)
+
+`modal_loading` consolidates the original Helmholtz source batches and complete
+power-consistent Rayleigh loading. Closed bodies require retained outward closed
+triangle geometry through the existing `near_field::Geometry` admission. Planar
+cells carry physical square metres and every signed mode trace. Both routes
+retain the work-conjugate projection `Z_rs = integral phi_r p_s dS`; no structural
+mode or cross term is discarded, and a BEM basis above 256 fields is partitioned
+deterministically into complete batches. The caller declares the output-entry
+budget for the full frequency sweep and a provenance hash. The bake declaration
+hash includes geometry, all traces, route, medium, frequencies and budget.
+
+Rows use `exp(-i omega t)`: resistance is `Re Z`, added mass is `-Im Z/omega`.
+The unchanged matrix must have relative reciprocity defect at most 1e-12 and
+minimum resistance eigenvalue at least `-1e-12 ||Z||_F`, with a resolved full
+eigendecomposition residual. Failed numerical data refuse instead of being
+symmetrized, eigenvalue-clipped or supplied with extra damping. This is a
+sampled floating-point diagnostic, not an interval or positive-real certificate.
+Frequency lookup admits exact declared samples only; it does not extrapolate.
+Cancellation is checked before geometry work, each frequency/source batch, and
+publication. Original dense factorization still has no mid-call cancellation.
+
+`tests/modal_loading.rs` contains G0 passivity and cap boundaries, G5 replay,
+257-field batch equivalence, an independent Rayleigh double sum of the declared
+point/disc quadrature, a three-rung six-mode plate-efficiency ladder against an
+independent angular sine-transform integral (2%), and the strict pulsating and
+translating sphere closed forms (1e-3). The sphere reference is Sutherland
+WR68-12, NASA 19690015869, Appendix B equations B-9/B-18 and Fig.8, re-derived
+under this time convention. The Wallace paper (JASA 51, 1972, 946-952,
+doi:10.1121/1.1912943) full-text figure/equation digits were not available; the
+independent integral is not claimed as a digitized-paper comparison.
+
+Native execution is pending. Existing Burton-Miller accuracy/low-frequency
+resistance limits below remain in force: the strict sphere tests may expose
+those limits, and their 1e-3 threshold must not be relaxed. Sampled PSD does not
+provide the M2.5-W3b causal passive MIMO realization, a solid-mesh-to-acoustic
+mortar transfer, or the required source-backed free-aluminium-bar loaded-pole
+comparison. The existing vibroacoustic casebook consumes planar bake rows and
+checks loaded frequency-response force/power balance; it does not satisfy the
+bar's 0.1-cent frequency/2% decay requirement. Full M2.5-W4a remains open for
+these numerical and composition gates. No piano example or panel-bits golden
+was changed.
+
 1. G0 Gauss identity: the assembled Neumann operator applied to ones
    gives −1 at every centroid within discretization tolerance
    (bem-001) — sign conventions cannot drift silently.

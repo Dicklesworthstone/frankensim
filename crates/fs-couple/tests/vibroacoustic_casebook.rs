@@ -141,6 +141,116 @@ fn build_model(
     (model, cavity, structure)
 }
 
+/// G3 data seam: the generic modal bake feeds the existing loaded FRF without
+/// fitting, reprojection, or changing its velocity sign. This plate regression
+/// does not qualify a free-solid bar's loaded poles or a time-domain MIMO fit.
+#[test]
+fn modal_loading_bake_feeds_loaded_frequency_response() {
+    use fs_bem::helmholtz::rayleigh_modal::AreaSample;
+    use fs_bem::modal_loading::{LoadingRoute, SurfaceModeTraces, modal_radiation_loading};
+    let started = std::time::Instant::now();
+    let plate = plate_basis((40.0, 400.0));
+    let cells: Vec<_> = plate
+        .node_points
+        .iter()
+        .zip(&plate.node_areas)
+        .enumerate()
+        .map(|(i, (&point, &area))| AreaSample {
+            position_m: point,
+            area_m2: area,
+            mode_shape: plate.node_shapes.iter().map(|mode| mode[i]).collect(),
+        })
+        .collect();
+    let omegas = [50.0, 95.0, 200.0].map(|hz| 2.0 * PI * hz);
+    let bake = modal_radiation_loading(
+        SurfaceModeTraces::PlanarBaffled { samples: &cells },
+        LoadingRoute::PlanarBaffledRayleigh,
+        &omegas,
+        fs_bem::helmholtz::Medium::air(),
+        fs_blake3::hash_domain(
+            "analytic-plate-fixture",
+            b"2024-T3 NASA TN-D6448 p15; SS .4x.3x.002m; 12x9 cells",
+        ),
+        3 * plate.omegas.len() * plate.omegas.len(),
+        || false,
+    )
+    .unwrap();
+    let mut changed = false;
+    for &omega in &omegas {
+        let z = bake.at_omega(omega).unwrap().impedance();
+        let (model, cavity, structure) = build_model(&plate, 0.01, 0.005, 8, Some(z.to_vec()));
+        let (unloaded, _, _) = build_model(&plate, 0.01, 0.005, 8, None);
+        let coupling = assemble_coupling(&structure, &cavity, &plate.node_areas).unwrap();
+        let ns = structure.omegas.len();
+        let na = cavity.omegas.len();
+        let mut force = vec![C64::ZERO; ns];
+        force[0] = C64::ONE;
+        let response = model.frf(omega, &force).unwrap();
+        let free = unloaded.frf(omega, &force).unwrap();
+        changed |= response
+            .b
+            .iter()
+            .zip(free.b)
+            .any(|(a, b)| (*a - b).abs() > 1e-10 * a.abs());
+        let mut residual = 0.0_f64;
+        for r in 0..ns {
+            let wr2 = structure.omegas[r] * structure.omegas[r];
+            let mut applied = C64::new(wr2 - omega * omega, -0.01 * wr2) * response.b[r];
+            for q in 0..na {
+                applied = applied - response.a[q].scale(coupling[r * na + q]);
+            }
+            for s in 0..ns {
+                applied = applied - C64::new(0.0, omega) * z[r * ns + s] * response.b[s];
+            }
+            residual = residual.hypot((applied - force[r]).abs());
+        }
+        assert!(
+            residual <= 1e-10,
+            "loaded dynamic-equation residual {residual}"
+        );
+        assert!(response.power.radiated >= 0.0);
+        assert!(response.power.balance_residual.abs() < 1e-10);
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"modal-loading-frequency-consumer\",\"inputs\":\"analytic SS aluminium plate; NASA TN-D6448 p15; physical node areas\",\"omega\":{omega},\"observed\":{residual},\"oracle\":\"independent modal force balance\",\"radiated_power_w\":{},\"tol\":1e-10,\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+            response.power.radiated,
+            started.elapsed().as_secs_f64()
+        );
+    }
+    assert!(changed, "the loading data must change the coupled response");
+}
+
+#[test]
+fn modal_loading_agrees_with_original_panel_projection() {
+    use fs_bem::helmholtz::{Formulation, Medium, radiation_impedance_matrix};
+    use fs_bem::modal_loading::{LoadingRoute, SurfaceModeTraces, modal_radiation_loading};
+    let surface = fs_bem::panel3d::SpherePanels::icosphere(1.0, 0).unwrap();
+    let shapes = vec![
+        vec![1.0; surface.areas().len()],
+        vec![-0.5; surface.areas().len()],
+    ];
+    let medium = Medium::air();
+    let panel_z =
+        radiation_impedance_matrix(&surface, 1.0, medium, Formulation::BurtonMiller).unwrap();
+    let original = project_radiation_impedance(&panel_z, surface.areas(), &shapes).unwrap();
+    let bake = modal_radiation_loading(
+        SurfaceModeTraces::ClosedBody {
+            surface: &surface,
+            shapes: &shapes,
+        },
+        LoadingRoute::ClosedBodyBem(Formulation::BurtonMiller),
+        &[medium.sound_speed],
+        medium,
+        fs_blake3::hash_domain("analytic-sphere-fixture", b"a=1m; constant signed traces"),
+        4,
+        || false,
+    )
+    .unwrap();
+    let norm = original.iter().fold(0.0_f64, |s, z| s.hypot(z.abs()));
+    for (&a, &b) in bake.rows()[0].impedance().iter().zip(&original) {
+        assert!((a - b).abs() <= 1e-12 * norm);
+    }
+}
+
 #[test]
 fn acoustic_medium_is_the_gas_primitive_at_room_conditions() {
     // Doctrine link (owner 2026-08-08): media are DERIVED, not

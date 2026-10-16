@@ -218,6 +218,8 @@ impl From<FmmError> for BemError {
 }
 
 pub mod helmholtz;
+/// Complete structural-mode loading through the existing BEM and Rayleigh owners.
+pub mod modal_loading;
 /// Geometry-admitted, adaptively integrated finite receivers near closed surfaces.
 pub mod near_field;
 pub mod panel2d;

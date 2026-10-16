@@ -27,6 +27,15 @@ pub const MAX_MODAL_RAYLEIGH_FIELDS: usize = 128;
 /// complete sweep. No cells or fields are silently discarded to meet this cap.
 pub const MAX_MODAL_RAYLEIGH_WORK: u64 = 2_200_000_000;
 
+/// Admit a declared number of per-frequency Rayleigh scalar-work units.
+/// This is also the allocation-free boundary used by sweep planners.
+pub fn admit_modal_work(work: u128) -> Result<(), HelmholtzError> {
+    if work > u128::from(MAX_MODAL_RAYLEIGH_WORK) {
+        return Err(invalid("Rayleigh loading exceeds the per-frequency modal work limit"));
+    }
+    Ok(())
+}
+
 /// One positive-area quadrature cell on the radiator's plane, in SI units.
 #[derive(Clone, Debug)]
 pub struct AreaSample {
@@ -78,9 +87,7 @@ impl PreparedSurface {
         }
         let cells = count as u64;
         let fields = modes as u64;
-        if cells * fields * (cells + fields) > MAX_MODAL_RAYLEIGH_WORK {
-            return Err(invalid("Rayleigh loading exceeds the per-frequency modal work limit"));
-        }
+        admit_modal_work(u128::from(cells) * u128::from(fields) * u128::from(cells + fields))?;
         let mut areas = reserved(count, "complete Rayleigh cell areas")?;
         let mut radii = reserved(count, "complete Rayleigh cell radii")?;
         let mut weighted_shape = reserved(count * modes, "complete Rayleigh weighted shapes")?;
