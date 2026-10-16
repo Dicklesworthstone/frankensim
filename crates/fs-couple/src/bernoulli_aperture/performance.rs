@@ -22,6 +22,7 @@ use crate::render::schedule::{
     GestureCompileError, PressureGestureBinding, ScheduledControl, compile_pressure_gestures,
 };
 use fs_scenario::gesture::GestureSchedule;
+use fs_material::gas::GasState;
 
 /// Existing reciprocal physical systems; both retain their accepted state.
 pub enum CoupledAperture {
@@ -93,6 +94,7 @@ pub struct AperturePerformance {
     system: CoupledAperture,
     observation: ApertureObservation,
     receiver: Option<BaffledPressure>,
+    exterior_gas: Option<GasState>,
     config: AperturePerformanceConfig,
     schedule: GestureSchedule,
     controls: Vec<ScheduledControl>,
@@ -121,11 +123,56 @@ impl AperturePerformance {
         schedule: GestureSchedule, config: AperturePerformanceConfig)
         -> Result<Self, GestureCompileError>
     {
+        Self::new_in_medium(system, observation, schedule, config, None)
+    }
+
+    /// Observe an unadvanced network in an independently resolved exterior gas.
+    /// The geometry and outward volume flow remain the selected terminal's.
+    /// This selects only the receiver medium: an existing authored load is NOT
+    /// replaced. Use the same exterior when deriving a matched radiation load.
+    /// No internal gas, aperture, cavity, wall or material-memory state changes.
+    ///
+    /// The network must retain its complete section gases so common static
+    /// pressure can be checked. Legacy scalar-only tubes cannot supply that
+    /// condition and refuse; use an explicitly gas-bound one-section network.
+    /// The original constructor retains its local-gas path without conversion.
+    ///
+    /// # Errors
+    /// Original clock/schedule/receiver refusal, incoherent exterior, unequal
+    /// pressure, missing section gas binding or a non-exterior observation.
+    pub fn new_with_exterior_gas(system: CoupledAperture, observation: ApertureObservation,
+        schedule: GestureSchedule, config: AperturePerformanceConfig, exterior: GasState)
+        -> Result<Self, GestureCompileError>
+    {
+        Self::new_in_medium(system, observation, schedule, config, Some(exterior))
+    }
+
+    fn new_in_medium(system: CoupledAperture, observation: ApertureObservation,
+        schedule: GestureSchedule, config: AperturePerformanceConfig,
+        exterior_gas: Option<GasState>) -> Result<Self, GestureCompileError>
+    {
         let a = system.aperture();
         if config.sample_rate_hz == 0 || config.samples == 0 || config.max_block == 0
             || a.accepted_steps() != 0 || config.samples > a.spec().max_steps
             || a.spec().time_step_s.to_bits() != (1.0 / f64::from(config.sample_rate_hz)).to_bits()
         { return Err(invalid("aperture performance requires a matching clock, positive capacity/window and an unadvanced complete physical system")); }
+        if let Some(exterior) = exterior_gas {
+            exterior.validate_coherence().map_err(|e|
+                GestureCompileError::Render(receiver_error(e.to_string())))?;
+            let (CoupledAperture::Network(network), ApertureObservation::NetworkBaffled {node, ..})
+                = (&system, observation) else {
+                    return Err(invalid("independent exterior requires a gas-bound network outlet observation"));
+                };
+            let gases = network.section_gases()
+                .ok_or_else(|| invalid("independent exterior requires complete internal gas states"))?;
+            let mut adjacent = network.spec().sections.iter().enumerate()
+                .filter(|(_, s)| s.nodes.contains(&node));
+            let (index, _) = adjacent.next()
+                .ok_or_else(|| invalid("exterior observation has no adjacent section"))?;
+            if adjacent.next().is_some() || gases[index].pressure != exterior.pressure {
+                return Err(invalid("exterior observation requires a degree-one port and common static pressure; mean flow is not modeled"));
+            }
+        }
         let receiver = match (&system, observation) {
             (_, ApertureObservation::Inlet) | (CoupledAperture::Tube(_), ApertureObservation::TubeTerminal) => None,
             (CoupledAperture::Network(m), ApertureObservation::NetworkNode(n)) if n < m.spec().nodes.len() => None,
@@ -147,8 +194,11 @@ impl AperturePerformance {
                 let (index, section)=m.spec().sections.iter().enumerate().find(|(_,s)|s.nodes.contains(&node))
                     .ok_or_else(||invalid("baffled network terminal has no physical section"))?;
                 let (density, sound_speed)=m.section_medium(index).expect("existing outlet section");
-                // The exterior is a homogeneous extension of this outlet gas,
-                // not of the inlet region. No cross-medium refraction is implied.
+                let (density, sound_speed) = exterior_gas.map_or((density, sound_speed),
+                    |gas| (gas.density, gas.sound_speed));
+                // Omission is the exact original local-gas choice. An explicit
+                // exterior describes the pressure-matched outlet environment,
+                // not a replacement for the bore's propagation properties.
                 Some(BaffledPressure::circular_outlet(section.radius_m,config.sample_rate_hz,receiver,
                     RayleighMedium {density,sound_speed})
                     .map_err(|e|GestureCompileError::Render(receiver_error(e)))?)
@@ -156,7 +206,7 @@ impl AperturePerformance {
             _ => return Err(invalid("pressure observation is not a node or terminal of the supplied system")),
         };
         let controls = compile_schedule(&schedule, &config)?;
-        Ok(Self { system, observation, receiver, config, schedule, controls, next: 0,
+        Ok(Self { system, observation, receiver, exterior_gas, config, schedule, controls, next: 0,
             held_pressure_pa: 0.0, poisoned: false, forces: None, mechanical_work_j: 0.0 })
     }
 
@@ -177,6 +227,29 @@ impl AperturePerformance {
     /// rate-conversion or ensemble alignment must not remove it.
     #[must_use]
     pub fn baffled_receiver(&self) -> Option<&BaffledPressure> { self.receiver.as_ref() }
+    /// Explicitly bound exterior, absent on the legacy local-gas path.
+    #[must_use]
+    pub const fn exterior_gas(&self) -> Option<&GasState> { self.exterior_gas.as_ref() }
+    /// Actual density and sound speed used by the receiver, not the source inlet.
+    #[must_use]
+    pub fn baffled_medium(&self) -> Option<RayleighMedium> {
+        if self.receiver.is_none() { return None; }
+        if let Some(gas) = self.exterior_gas {
+            return Some(RayleighMedium { density: gas.density, sound_speed: gas.sound_speed });
+        }
+        match (&self.system, self.observation) {
+            (CoupledAperture::Tube(t), ApertureObservation::TubeBaffled(_)) =>
+                Some(RayleighMedium { density: t.aperture().spec().density_kg_m3,
+                    sound_speed: t.spec().sound_speed_m_s }),
+            (CoupledAperture::Network(n), ApertureObservation::NetworkBaffled {node, ..}) => {
+                let (index, _) = n.spec().sections.iter().enumerate()
+                    .find(|(_, s)| s.nodes.contains(&node))?;
+                let (density, sound_speed) = n.section_medium(index)?;
+                Some(RayleighMedium { density, sound_speed })
+            }
+            _ => None,
+        }
+    }
     /// Controls committed with successful mechanical samples, never ahead of them.
     #[must_use]
     pub fn applied_controls(&self) -> &[ScheduledControl] { &self.controls[..self.next] }
@@ -297,3 +370,6 @@ pub(in crate::bernoulli_aperture) fn pressure_candidate(controls: &[ScheduledCon
     }
     (next, pressure)
 }
+
+#[cfg(test)]
+mod exterior_tests;
