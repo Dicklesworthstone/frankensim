@@ -95,7 +95,7 @@ ordinary Rust test failure as well as a canonical error event.
 - SIMD-batched near field and precomputed M2L tables (perf lanes).
 - Gradient outputs (consumers run per-component kernels today;
   a fused gradient pass is follow-up).
-- Periodic/boundary-image variants; high-kD directional oscillatory kernels.
+- Periodic/boundary-image variants.
 - Recoverable allocator exhaustion for internal tree/map/pass buffers. Work is
   bounded before those allocations, but allocator failure remains process-level.
 - The `fmm-003/measurement` timing rows are diagnostic observations, not
@@ -174,3 +174,97 @@ signs, check analytic outgoing phase, and check pair partition and input errors.
 historical runtime golden. Existing fmm-001..003 stay intact. Native comparison
 against a baseline run is still required to claim historic measurement identity;
 elapsed timing rows are diagnostic and cannot be bitwise reproducibility claims.
+
+## Directional Helmholtz extension (IRP M2.5-W5b)
+
+`FmmC64::new_directional` and the normal-layer constructors
+`new_double_directional`, `new_adjoint_double_directional`, and
+`new_hypersingular_directional` preserve the existing `potentials`, `direct`,
+`near_field_blocks` and `stats` interface. They reuse W5a's Cartesian kernel
+channels, normal factoring, Chebyshev nodes/barycentric weights, and exact point
+near field. No BEM self term or quadrature is introduced. Entire requests with
+root kD below `low_freq_threshold` delegate to W5a without changing its operation
+tree. The frozen real source-operation-tree fingerprint remains unchanged.
+
+High-frequency pairs use cube-face angular bins with resolution proportional
+to cell k*side. Only levels with active interactions or nested bases admit an
+angular grid; unused coarser levels store no cones or expansions. Each accepted
+pair uses the nearest quantized direction u and the centered factorization
+`exp(ik u.(x-c_t)) K_u(x,y) exp(-ik u.(y-c_s))`. K_u is interpolated at the
+existing tensor Chebyshev grids. Upward and downward transfers include the
+phase difference between a parent direction and its nearest child direction.
+Zero-direction transfers retain the ordinary low-frequency arithmetic.
+This is the nested plane-wave interpolation of Messner, Schanz & Darve (2012),
+doi:10.1016/j.jcp.2011.09.027, and Borm & Melenk, arXiv:1510.07189 section 2.2.
+
+Repeated translation offsets share compressed demodulated M2L blocks. Full
+residual pivoting forms low-rank factors until the entire grid block's relative
+Frobenius residual meets `compression_tolerance` (default 0.01 times the
+requested tolerance). Pivots break ties by lowest index; coefficient/work
+budgets include stored factors, residual-matrix scratch and rank vectors.
+`max_rank` is explicit, capped at 1728; exhaustion is a named refusal. The
+three-rung diagonal singular-value oracle independently checks rank, residual,
+rescaling and exact cap boundaries. This rounded matrix residual is not an
+interval enclosure or a global field-error certificate. One-use blocks retain
+uncompressed matrix-free tensor M2L rather than paying for unused compression.
+`ComplexKernel::translation_invariant` defaults to false; only declared
+translation-invariant kernels share offset blocks. Normal channels and the
+shipped single/gradient kernels have that property.
+
+The dual-tree partition accepts equal-size cells only if center distance >=
+4*side and, for directional cells, `3*k*side^2 <= distance-sqrt(3)*side`.
+Unaccepted pairs descend both trees. At leaves they use the exact point
+kernel, with self excluded by index. Every pair occurs exactly once; the
+partition unit test checks all point pairs independently. There is no global
+direct fallback to hide a cap or unqualified regime.
+
+`DirectionalOptions` makes tolerance, order, angular resolution, low-frequency
+threshold, leaf capacity, compression tolerance/rank and active-level cone cap
+explicit. The parameter
+indicator 4^-p selects minimum orders 5/9/12 for tolerances 1e-3/1e-5/1e-7.
+It is an interpolation design indicator, not a measured or rigorous relative
+error certificate for arbitrary charge cancellation or custom kernels.
+`DirectionalAccuracy` refuses tighter requests than the implemented order
+range or a request whose supplied order is below that selector. Native oracle
+ladders remain the accuracy authority on their declared domains.
+
+The existing point, coefficient-slot, near-pair, cell-pair scan and translation
+ceilings are retained. Directional work admission counts actual M2L channel
+products (compressed or tensor), interlevel transfers and leaf interpolation
+before complex pass allocation. Coupling setup has its own application of the
+unchanged translation-work ceiling. Storage accounts for source and target
+active cone sets, retained factors and transient coefficients/matrices.
+New explicit limits are depth 10 and 16,777,216
+directions in any active level's angular grid; this grid is sparse, not an
+allocation of every possible cone. All cap failures return named
+`WorkEnvelopeExceeded` diagnostics. No order, cap or tolerance silently changes.
+
+`DirectionalStats` reports active-level angular grid sizes (zero on unused
+levels), active source/target expansions, pair scans, high-frequency and total
+M2L pairs, exact near pairs, work, coefficient storage, coupling ranks/residuals,
+setup work and parameter indicator. Its memory figure counts retained logical
+directional coefficient/index/interaction payload, not base geometry,
+preparation scratch, allocator overhead or measured process RSS. `direct_at_targets` is an
+independent bounded direct oracle for at most 1000 caller-selected indices,
+also subject to the existing point-pair budget; it is never the production
+`potentials` implementation.
+
+`tests/directional.rs` emits schema-validated fs-obs measurements under
+`fs-fmm/directional`. High-kD 20/50/130/370 and tolerance 1e-3/1e-5/1e-7 ladders
+cover all Helmholtz channels, including separate far-only checks, a distributed
+sphere and a >16384-point sampled-direct case. Overlap checks both methods
+against direct and each other; rigid transforms, bitwise replay, and cone,
+order, depth, charge and oracle caps have focused tests. The performance domain
+is a growing cylindrical surface, radius .02 m, 8 points/ring, axial spacing
+.125 m, k=5/m, N=4096/8192/16384/32768. Both surface sampling directions retain
+fixed points per wavelength. Quiet-host median matvec time and counted work,
+both alone and including preparation, must each have a fitted exponent <=1.3
+over that ladder. This is a finite,
+declared family, not a generic large-sphere or hardware-independent complexity
+claim. Unfused p^6 translations and active-cone storage can refuse much larger
+or less slender distributions under the retained caps.
+
+All new numerical, scaling and resource claims remain pending central native
+verification until the bead's run receipt exists. Traversal and cone ties are
+deterministic on a platform/profile. Passes remain synchronous without mid-pass
+cancellation; BEM continues to poll at its matvec boundaries.

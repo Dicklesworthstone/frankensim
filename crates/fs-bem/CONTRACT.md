@@ -241,6 +241,19 @@ everywhere: this is screening, not a viscous truth source.
 
 ### `helmholtz::iterative` (IRP M2.5-W5c)
 
+The optional `IterativeOptions::directional` (M2.5-W5b) selects the directional
+FmmC64 constructors through this same operator/state API. Its explicit order
+and leaf capacity become the effective values, and all directional parameters
+participate in checkpoint cross-wiring checks. `None` preserves the original
+W5a route and kD>10 refusal. Dynamic layers and the RHS use the directional
+owner; zero-k closures reuse its low-frequency W5a path, retaining the same
+centroid quadrature. Each route keeps its own declared FMM approximation error.
+`bem_directional_matches_dense_above_w5a_regime` exercises a slender authored
+flared surface at k=8/m and root kD>10, with a three-order ladder, true GMRES
+residual, and finest pressure error <=10*GMRES tolerance against dense LU.
+Directional statistics travel in the existing resource receipt. This does not
+claim a new full-band bell bake or relax resolution/solver/admission gates.
+
 `IterativeRadiation::prepare/start/advance/finish` and
 `solve_radiation_iterative` solve the existing constant-panel Burton-Miller
 system through complex fs-fmm double/mixed matvecs and fs-solver `GmresState`.
@@ -253,10 +266,11 @@ The actual dense Burton-Miller arm uses centroid off-diagonal kernels and
 equivalent-disc self terms, not the triangle quadrature used by Plain CBIE.
 The iterative path reuses those exact parent self terms and the same point
 kernels in adjacent leaves; it introduces no second singular quadrature.
-Static double/mixed row closures use the same FMM order and traversal as the
-dynamic operator. Accordingly the static constant-density identities close
-under that discrete operator; FMM approximation of the static row sums remains
-part of the operator error, independently tested against dense LU.
+Static double/mixed row closures use the same effective order. W5a shares its
+traversal with the dynamic operator; directional zero-k closures select W5a's
+low-frequency partition. The static constant-density identities close under
+the computed zero-k operator. Static-sum and cross-route FMM approximation
+remain part of the operator error, independently tested against dense LU.
 
 `IterativeOptions` explicitly declares GMRES tolerance, restart (1..256),
 iteration cap, FMM order/leaf capacity, and near-field storage budget.

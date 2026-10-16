@@ -720,3 +720,84 @@ fn bem_iterative_input_and_near_storage_boundaries() {
         Err(IterativeError::Cancelled { matvecs: 0 })
     ));
 }
+
+#[test]
+fn bem_directional_matches_dense_above_w5a_regime() {
+    let profile: Vec<_> = (0..10)
+        .map(|i| {
+            let t = i as f64 / 9.0;
+            (2.0 * t, 0.02 + 0.02 * t * t)
+        })
+        .collect();
+    let bell = fs_bem::radiation_bake::lathe_profile(&profile, 32).unwrap();
+    let mask = bell.driven_mask();
+    let surface = SpherePanels::from_triangles(bell.triangles).unwrap();
+    let v: Vec<_> = mask
+        .iter()
+        .map(|&m| if m { C64::ONE } else { C64::ZERO })
+        .collect();
+    let k = 8.0;
+    let gate = CancelGate::new_clock_free();
+    assert!(matches!(
+        solve_radiation_iterative(
+            &surface,
+            k,
+            Medium::air(),
+            &v,
+            Formulation::BurtonMiller,
+            &opts(),
+            &gate
+        ),
+        Err(IterativeError::Fmm(
+            fs_fmm::FmmError::HelmholtzRegime { .. }
+        ))
+    ));
+    let dense = solve_radiation(&surface, k, Medium::air(), &v, Formulation::BurtonMiller).unwrap();
+    let mut errors = Vec::new();
+    for p in [5, 6, 7] {
+        let mut directional = fs_fmm::DirectionalOptions::for_tolerance(1e-3).unwrap();
+        directional.order = p;
+        directional.low_freq_threshold = 0.5;
+        directional.leaf_capacity = 128;
+        let o = IterativeOptions {
+            directional: Some(directional),
+            ..opts()
+        };
+        let (actual, report, receipt) = solve_radiation_iterative(
+            &surface,
+            k,
+            Medium::air(),
+            &v,
+            Formulation::BurtonMiller,
+            &o,
+            &gate,
+        )
+        .unwrap();
+        let error = relative(&actual.pressure, &dense.pressure);
+        emit(
+            "bem-directional-dense",
+            &surface,
+            k,
+            &o,
+            &report,
+            &receipt,
+            error,
+            10.0 * o.tol,
+            "directional-order",
+            p,
+        );
+        assert_eq!(receipt.fmm_order, p);
+        assert!(
+            receipt
+                .fmm_stats
+                .iter()
+                .all(|s| s.contains("\"directional\":true"))
+        );
+        assert!(report.converged_euclidean());
+        errors.push(error);
+    }
+    assert!(
+        errors[2] < errors[0] && errors[2] <= 10.0 * opts().tol,
+        "directional BM dense error: {errors:?}"
+    );
+}

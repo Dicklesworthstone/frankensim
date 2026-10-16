@@ -1,8 +1,9 @@
 //! Matrix-free version of the existing centroid Burton-Miller discretization.
 //!
 //! Adjacent-leaf pairs use fs-fmm's exact point kernels. Self integrals and
-//! jumps reuse the dense owner's equivalent-disc rule. Static row closures use
-//! the SAME FMM discretization as the dynamic operator, preserving N0[1]=0.
+//! jumps reuse the dense owner's equivalent-disc rule. Static row closures
+//! retain the same point quadrature and effective interpolation order. The
+//! directional route's zero-k owner uses the low-frequency partition.
 //! FMM approximation error is distinct from the recomputed GMRES residual;
 //! callers must qualify the explicit order against dense/refinement oracles.
 
@@ -14,8 +15,8 @@ use super::{
 use crate::{BemError, panel3d::SpherePanels};
 use fs_exec::CancelGate;
 use fs_fmm::{
-    FmmC64, FmmError, HelmholtzAdjointDouble, HelmholtzDouble, HelmholtzHypersingular,
-    HelmholtzSingle,
+    DirectionalOptions, FmmC64, FmmError, HelmholtzAdjointDouble, HelmholtzDouble,
+    HelmholtzHypersingular, HelmholtzSingle,
 };
 use fs_la::eigen_complex::{LuComplex, lu_complex};
 use fs_math::c64::C64;
@@ -47,6 +48,9 @@ pub struct IterativeOptions {
     /// Explicit interpolation order; never silently increased or reduced.
     pub fmm_order: usize,
     pub leaf_capacity: usize,
+    /// Explicit high-kD route. None retains W5a and its named kD refusal.
+    /// When present, its order and leaf capacity are the effective FMM values.
+    pub directional: Option<DirectionalOptions>,
     pub precond: Preconditioner,
     /// Maximum stored complex entries across all inverse-preconditioner blocks.
     pub max_near_entries: usize,
@@ -60,11 +64,71 @@ impl Default for IterativeOptions {
             max_iters: 600,
             fmm_order: 4,
             leaf_capacity: 128,
+            directional: None,
             precond: Preconditioner::NearFieldBlockJacobi {
                 max_block_panels: 32,
             },
             max_near_entries: 4_194_304,
         }
+    }
+}
+
+enum NormalLayer {
+    Double,
+    Adjoint,
+    Mixed,
+}
+impl IterativeOptions {
+    fn normal_fmm(
+        &self,
+        layer: NormalLayer,
+        k: f64,
+        points: Vec<[f64; 3]>,
+        normals: Vec<[f64; 3]>,
+    ) -> Result<FmmC64<'static>, FmmError> {
+        match (layer, &self.directional) {
+            (NormalLayer::Double, Some(o)) => {
+                FmmC64::new_double_directional(HelmholtzDouble { k }, points, normals, o.clone())
+            }
+            (NormalLayer::Adjoint, Some(o)) => FmmC64::new_adjoint_double_directional(
+                HelmholtzAdjointDouble { k },
+                points,
+                normals,
+                o.clone(),
+            ),
+            (NormalLayer::Mixed, Some(o)) => FmmC64::new_hypersingular_directional(
+                HelmholtzHypersingular { k },
+                points,
+                normals,
+                o.clone(),
+            ),
+            (NormalLayer::Double, None) => FmmC64::new_double(
+                HelmholtzDouble { k },
+                points,
+                normals,
+                self.fmm_order,
+                self.leaf_capacity,
+            ),
+            (NormalLayer::Adjoint, None) => FmmC64::new_adjoint_double(
+                HelmholtzAdjointDouble { k },
+                points,
+                normals,
+                self.fmm_order,
+                self.leaf_capacity,
+            ),
+            (NormalLayer::Mixed, None) => FmmC64::new_hypersingular(
+                HelmholtzHypersingular { k },
+                points,
+                normals,
+                self.fmm_order,
+                self.leaf_capacity,
+            ),
+        }
+    }
+    fn effective_order(&self) -> usize {
+        self.directional
+            .as_ref()
+            .map_or(self.fmm_order, |o| o.order)
     }
 }
 
@@ -265,44 +329,21 @@ impl<'a> IterativeRadiation<'a> {
         }
         let points = || surface.centroids().to_vec();
         let normals = || surface.normals().to_vec();
-        let double = FmmC64::new_double(
-            HelmholtzDouble { k },
-            points(),
-            normals(),
-            options.fmm_order,
-            options.leaf_capacity,
-        )?;
+        let double = options.normal_fmm(NormalLayer::Double, k, points(), normals())?;
         poll(gate)?;
-        let mixed = FmmC64::new_hypersingular(
-            HelmholtzHypersingular { k },
-            points(),
-            normals(),
-            options.fmm_order,
-            options.leaf_capacity,
-        )?;
+        let mixed = options.normal_fmm(NormalLayer::Mixed, k, points(), normals())?;
         let weights: Vec<_> = surface.areas().iter().map(|&a| C64::from_re(a)).collect();
-        // Both static closures use the same point distribution, traversal and
-        // explicit order as the actual operator. No dense row scans occur.
+        // Both static closures use the same point quadrature and effective
+        // order. W5a also shares traversal; the directional zero-k call uses
+        // the low-frequency owner's partition. No dense row scans occur.
         let d0 = {
             poll(gate)?;
-            let op = FmmC64::new_double(
-                HelmholtzDouble { k: 0.0 },
-                points(),
-                normals(),
-                options.fmm_order,
-                options.leaf_capacity,
-            )?;
+            let op = options.normal_fmm(NormalLayer::Double, 0.0, points(), normals())?;
             op.potentials(&weights)?
         };
         let n0 = {
             poll(gate)?;
-            let op = FmmC64::new_hypersingular(
-                HelmholtzHypersingular { k: 0.0 },
-                points(),
-                normals(),
-                options.fmm_order,
-                options.leaf_capacity,
-            )?;
+            let op = options.normal_fmm(NormalLayer::Mixed, 0.0, points(), normals())?;
             op.potentials(&weights)?
         };
         poll(gate)?;
@@ -389,6 +430,21 @@ impl<'a> IterativeRadiation<'a> {
         ] {
             stamp = (stamp ^ word).wrapping_mul(0x0000_0100_0000_01b3);
         }
+        if let Some(o) = &options.directional {
+            for word in [
+                1,
+                o.tolerance.to_bits(),
+                o.order as u64,
+                o.leaf_capacity as u64,
+                o.low_freq_threshold.to_bits(),
+                o.cone_resolution as u64,
+                o.max_cones_per_level as u64,
+                o.compression_tolerance.to_bits(),
+                o.max_rank as u64,
+            ] {
+                stamp = (stamp ^ word).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
         Ok(Self {
             surface,
             k,
@@ -430,22 +486,26 @@ impl<'a> IterativeRadiation<'a> {
             .map(|(&q, &a)| q.scale(a))
             .collect();
         let kernel = HelmholtzSingle { k: self.k };
-        let single = FmmC64::new(
-            &kernel,
-            self.surface.centroids().to_vec(),
-            self.options.fmm_order,
-            self.options.leaf_capacity,
-        )?
+        let single = match &self.options.directional {
+            Some(o) => FmmC64::new_directional(&kernel, self.surface.centroids(), o.clone())?,
+            None => FmmC64::new(
+                &kernel,
+                self.surface.centroids().to_vec(),
+                self.options.fmm_order,
+                self.options.leaf_capacity,
+            )?,
+        }
         .potentials(&weighted)?;
         poll(gate)?;
-        let adjoint = FmmC64::new_adjoint_double(
-            HelmholtzAdjointDouble { k: self.k },
-            self.surface.centroids().to_vec(),
-            self.surface.normals().to_vec(),
-            self.options.fmm_order,
-            self.options.leaf_capacity,
-        )?
-        .potentials(&weighted)?;
+        let adjoint = self
+            .options
+            .normal_fmm(
+                NormalLayer::Adjoint,
+                self.k,
+                self.surface.centroids().to_vec(),
+                self.surface.normals().to_vec(),
+            )?
+            .potentials(&weighted)?;
         poll(gate)?;
         let rhs_complex: Vec<_> = (0..q.len())
             .map(|i| single[i] + self.alpha * adjoint[i] + self.diagonal_b[i] * q[i])
@@ -645,7 +705,7 @@ impl<'a> IterativeRadiation<'a> {
             peak_rss_bytes: peak_rss(),
             matvecs: state.matvecs,
             iterations: state.gmres.iters,
-            fmm_order: self.options.fmm_order,
+            fmm_order: self.options.effective_order(),
             near_field_bytes: self.near_entries * core::mem::size_of::<C64>()
                 + self
                     .blocks

@@ -21,6 +21,10 @@
 use std::collections::BTreeMap;
 
 mod complex;
+pub use complex::directional::{
+    DirectionalOptions, DirectionalStats, MAX_DIRECTIONAL_CONES, MAX_DIRECTIONAL_DEPTH,
+    MAX_DIRECTIONAL_RANK,
+};
 pub use complex::{
     ComplexKernel, FmmC64, HelmholtzAdjointDouble, HelmholtzDouble, HelmholtzGradient,
     HelmholtzHypersingular, HelmholtzSingle, MAX_BB_HELMHOLTZ_KD, MAX_COMPLEX_COEFFICIENT_SLOTS,
@@ -48,6 +52,15 @@ const MAX_ABS_COORDINATE: f64 = 1.0e100;
 /// Invalid input or an inadmissible v1 work request.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FmmError {
+    /// Explicit directional accuracy request exceeds the implemented order.
+    DirectionalAccuracy {
+        /// Requested dimensionless relative tolerance.
+        tolerance: f64,
+        /// Explicit supplied order, or implemented maximum for a tighter request.
+        order: usize,
+        /// Minimum order from the declared design indicator.
+        required_order: usize,
+    },
     /// A complex-kernel parameter, normal field, or accuracy request is invalid.
     ComplexRequest {
         /// Stable diagnostic category.
@@ -124,8 +137,20 @@ pub enum FmmError {
 impl core::fmt::Display for FmmError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::DirectionalAccuracy {
+                tolerance,
+                order,
+                required_order,
+            } => write!(
+                f,
+                "FMM directional accuracy refused: tolerance {tolerance} needs order >= {required_order}, requested {order}"
+            ),
             Self::ComplexRequest { reason } => write!(f, "FMM complex request: {reason}"),
-            Self::HelmholtzRegime { kd, tolerance, route } => write!(
+            Self::HelmholtzRegime {
+                kd,
+                tolerance,
+                route,
+            } => write!(
                 f,
                 "FMM non-directional Helmholtz regime refused: kD={kd}, tolerance={tolerance:?}; route {route}"
             ),
@@ -191,6 +216,30 @@ pub trait Kernel {
 /// diagonal by convention — self-interaction is the caller's story).
 #[derive(Debug, Clone, Copy)]
 pub struct Laplace3d;
+
+// Directional topology uses the same point-to-leaf rule. Keep this outside
+// the frozen real operation-tree region; W5a and the real path are unchanged.
+fn point_leaves(
+    points: &[[f64; 3]],
+    lo: [f64; 3],
+    child_side: f64,
+    level: u32,
+    n_side: u32,
+) -> BTreeMap<CellKey, Cell> {
+    let mut cells = BTreeMap::new();
+    for (idx, p) in points.iter().enumerate() {
+        let f = |c: usize| (((p[c] - lo[c]) / child_side).floor().max(0.0) as u32).min(n_side - 1);
+        cells
+            .entry((level, f(0), f(1), f(2)))
+            .or_insert_with(|| Cell {
+                points: Vec::new(),
+                leaf: true,
+            })
+            .points
+            .push(idx);
+    }
+    cells
+}
 
 impl Kernel for Laplace3d {
     fn eval(&self, x: [f64; 3], y: [f64; 3]) -> f64 {

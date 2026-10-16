@@ -13,6 +13,11 @@ pub trait ComplexKernel {
     fn wavenumber(&self) -> Option<f64> {
         None
     }
+    /// Whether K(x+a,y+a)=K(x,y), enabling shared translation couplings.
+    /// Custom kernels must opt in; declaring a wavenumber alone is insufficient.
+    fn translation_invariant(&self) -> bool {
+        false
+    }
 }
 
 /// Outgoing single layer G=exp(ikr)/(4 pi r), zero on the diagonal.
@@ -23,6 +28,9 @@ pub struct HelmholtzSingle {
 }
 
 impl ComplexKernel for HelmholtzSingle {
+    fn translation_invariant(&self) -> bool {
+        true
+    }
     fn eval(&self, x: [f64; 3], y: [f64; 3]) -> C64 {
         radial(self.k, x, y).map_or(C64::ZERO, |v| v.g)
     }
@@ -102,6 +110,9 @@ impl HelmholtzGradient {
 }
 
 impl ComplexKernel for HelmholtzGradient {
+    fn translation_invariant(&self) -> bool {
+        true
+    }
     fn eval(&self, x: [f64; 3], y: [f64; 3]) -> C64 {
         radial(self.k, x, y).map_or(C64::ZERO, |v| v.gp.scale(v.unit[self.axis]))
     }

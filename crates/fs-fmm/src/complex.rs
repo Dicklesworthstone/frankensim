@@ -10,6 +10,7 @@ use crate::{
     MAX_INTERPOLATION_ORDER, MAX_TRANSLATION_WORK, MIN_INTERPOLATION_ORDER,
 };
 
+pub mod directional;
 mod kernels;
 pub use kernels::{
     ComplexKernel, HelmholtzAdjointDouble, HelmholtzDouble, HelmholtzGradient,
@@ -111,7 +112,8 @@ impl Operator<'_> {
 }
 
 /// Complex FMM on a shared source/target cloud, with optional per-point unit
-/// normals. Real and complex engines use the same pair partition and tree.
+/// normals. The non-directional real/complex paths share their partition;
+/// directional construction selects a parabolically separated pair tree.
 pub struct FmmC64<'k> {
     geometry: Fmm<'static>,
     operator: Operator<'k>,
@@ -120,6 +122,7 @@ pub struct FmmC64<'k> {
     barycentric: Vec<f64>,
     interactions: Vec<(CellKey, CellKey)>,
     coefficient_slots: usize,
+    directional: Option<directional::DirectionalPlan>,
 }
 
 impl<'k> FmmC64<'k> {
@@ -298,6 +301,7 @@ impl<'k> FmmC64<'k> {
             barycentric,
             interactions,
             coefficient_slots,
+            directional: None,
         })
     }
 
@@ -386,6 +390,9 @@ impl<'k> FmmC64<'k> {
     #[allow(clippy::too_many_lines)] // the four standard passes share one channel layout
     pub fn potentials(&self, charges: &[C64]) -> Result<Vec<C64>, FmmError> {
         self.validate_charges(charges)?;
+        if let Some(plan) = &self.directional {
+            return plan.potentials(self, charges);
+        }
         let (ns, nt) = self.operator.dimensions();
         let np = self.nodes.len().pow(3);
         let mut multipoles: BTreeMap<CellKey, Vec<C64>> = BTreeMap::new();
@@ -562,6 +569,9 @@ impl<'k> FmmC64<'k> {
     /// JSON tree/work statistics; coefficient slots are counted in C64 units.
     #[must_use]
     pub fn stats(&self) -> String {
+        if let Some(plan) = &self.directional {
+            return plan.stats.to_json();
+        }
         format!(
             "{{\"tree\":{},\"m2l_pairs\":{},\"complex_coefficient_slots\":{}}}",
             self.geometry.stats(),
