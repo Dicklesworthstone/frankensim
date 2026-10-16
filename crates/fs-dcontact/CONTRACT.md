@@ -123,6 +123,34 @@ chi*v in {0.01,0.1,0.5} (absolute error <=1e-3). The latter uses the original
 implicit dissipative port, never a lagged explicit force. These are named
 test obligations pending central native execution, not physical validation.
 
+The HC chi*v=0.5 fine rung exposed a numerical two-cycle in the original
+Gonzalez numerator `H(b)-H(a)-gradH(mid).(b-a)`: cancellation of O(H) endpoint
+energies contaminated its much smaller cubic remainder, then the nonlinear
+loss's effort derivative amplified that noise in the residual. ContactStorage
+now supplies `Storage::midpoint_energy_remainder` when its inner storage borrows
+its current exact quadratic matrix or supplies its own complete stable remainder.
+No quadratic is inferred from sampled gradients, a cached classification or an
+inactive contact. The TOTAL unilateral storage remains nonlinear and does not
+acquire the exact-quadratic Newton-floor allowance.
+
+Active power-law remainders use a centered binomial series only where every
+successive term contracts by at most 1/4; through degree 33 its remaining tail is
+below 2^-63 of the leading cubic term. This evaluates the same power-law energy
+remainder to roundoff, including affine-collocation rounding corrections. Entry,
+separation and large increments retain the original unilateral potential.
+Unknown inner storage retains the original endpoint-subtraction path. Both the
+canonical residual and analytic Newton use the same numerator; solver requests,
+floors, update limits, conservative/loss laws and physical gates are unchanged.
+This may change contact trajectories' final rounding bits, not their physical
+parameters; existing music replay/baseline checks remain required centrally.
+
+Focused G0 tests compare Hertz remainders with independent double-double
+sqrt/multiply at three increment scales, check unilateral entry/separation, and
+replay the central failed HC pre-step state under its original 1e-13 relative,
+zero absolute, 50-update request. An opaque-inner mutation retains the old
+refusal; the stable source must converge below that SAME request without a
+raised floor and retain energy closure. Native verification remains pending.
+
 `tests/dcontact.rs` (10): polyline geometry + refusals; bouncing
 restitution/penetration closed form; fret-rattle conservation +
 explicit mutation; one-sidedness mutation (force swept over separated

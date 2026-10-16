@@ -28,6 +28,7 @@
 //! deferred until packs carrying contact-law parameters exist.
 
 mod loss;
+mod remainder;
 mod tangent;
 use fs_math::det;
 use fs_phs::Storage;
@@ -490,12 +491,18 @@ impl ContactStorage {
 }
 
 impl Storage for ContactStorage {
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], midpoint: &[f64]) -> Option<f64> {
+        self.stable_midpoint_remainder(a, b, midpoint)
+    }
+
     fn quadratic_part(&self) -> Option<fs_phs::linear_exact::QuadraticPart> {
         let mut part = self.inner.quadratic_part()?;
         // Contact remains in the original nonlinear Hamiltonian; an inactive
         // trial point never proves that a unilateral potential is absent.
-        part.exact &= self.obstacles.iter().all(|ob| ob.stiffness==0.0
-            || ob.weights.iter().all(|w| *w==0.0));
+        part.exact &= self
+            .obstacles
+            .iter()
+            .all(|ob| ob.stiffness == 0.0 || ob.weights.iter().all(|w| *w == 0.0));
         Some(part)
     }
 

@@ -240,12 +240,164 @@ struct FreeMass {
 }
 
 impl Storage for FreeMass {
+    // The free mass's mathematical midpoint remainder is exactly zero. Supply
+    // it explicitly; no nonlinear contact is classified as quadratic and no
+    // Newton rounding allowance or physical parameter changes.
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        (a.len() == 2 && b.len() == 2 && mid.len() == 2).then_some(0.0)
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         x[1] * x[1] / (2.0 * self.m)
     }
     fn gradient(&self, x: &[f64], out: &mut [f64]) {
         out[0] = 0.0;
         out[1] = x[1] / self.m;
+    }
+}
+
+/// G0: the exact central HC refusal's pre-step state. An opaque wrapper keeps
+/// the old subtractive residual as a live mutation; the physical law is shared.
+#[test]
+fn g0_hunt_crossley_cancellation_converges_under_the_unchanged_request() {
+    struct OpaqueMass(FreeMass);
+    impl Storage for OpaqueMass {
+        fn hamiltonian(&self, x: &[f64]) -> f64 {
+            self.0.hamiltonian(x)
+        }
+        fn gradient(&self, x: &[f64], out: &mut [f64]) {
+            self.0.gradient(x, out);
+        }
+    }
+    let (mass, modulus, radius, incoming) = (0.05, 2e9, 0.02_f64, 0.4);
+    let k = (4.0 / 3.0) * modulus * radius.sqrt();
+    let maximum = fs_math::det::pow(
+        15.0 * mass * incoming * incoming / (16.0 * modulus * radius.sqrt()),
+        0.4,
+    );
+    let dt = 2.943 * maximum / incoming / 256.0;
+    let obstacle = Obstacle::new(
+        vec![1.0],
+        1,
+        1,
+        vec![0.0],
+        vec![1.0],
+        k,
+        1.5,
+        "synthetic HC central-refusal regression; SI free mass".into(),
+    )
+    .unwrap()
+    .with_internal_loss(0.5 / incoming)
+    .unwrap();
+    let storage = |declared| {
+        let inner: Box<dyn Storage> = if declared {
+            Box::new(FreeMass { m: mass })
+        } else {
+            Box::new(OpaqueMass(FreeMass { m: mass }))
+        };
+        ContactStorage::new(inner, 1, vec![obstacle.clone()]).unwrap()
+    };
+    let loss = storage(true);
+    let port = |state: &[f64], effort: &[f64], out: &mut [f64]| {
+        loss.dissipative_flow_into(state, effort, out)
+    };
+    // Recorded at the failing 256-cell trajectory's step120, not an oracle.
+    let initial = [5.258_730_595_626_957e-5, -5.472_353_310_761_396e-5];
+    let budget = fs_phs::SolveBudget {
+        relative: 1e-13,
+        absolute: 0.0,
+        max_iterations: 50,
+    };
+    let scale = initial.iter().copied().map(f64::abs).fold(0.0, f64::max);
+    let request = budget.threshold(scale);
+    for declared in [false, true] {
+        let contact = storage(declared);
+        assert!(contact.exact_quadratic_matrix().is_none());
+        assert!(contact.quadratic_part().is_none_or(|part| !part.exact));
+        let sys = PortHamiltonian::new(
+            2,
+            1,
+            symplectic_j(1),
+            vec![0.0; 4],
+            vec![0.0, 1.0],
+            Box::new(contact),
+        )
+        .unwrap();
+        let mut work = fs_phs::StepWorkspace::new(&sys).unwrap();
+        work.set_solve_budget(budget).unwrap();
+        let (mut next, mut output) = ([123.0; 2], [456.0]);
+        let result = work.step_into_dissipative_controlled(
+            &sys,
+            &initial,
+            &[0.0],
+            dt,
+            &mut next,
+            &mut output,
+            &port,
+            None,
+            None,
+            || false,
+        );
+        if !declared {
+            assert!(matches!(result,Err(fs_phs::PreparedStepError::Solver(
+                fs_phs::PhsError::NewtonRefused {certificate})) if certificate.residual>certificate.requested_budget));
+            assert_eq!(next, [123.0; 2]);
+            assert_eq!(output, [456.0]);
+        } else {
+            let record = result.unwrap();
+            let certificate = record.solver_certificate.unwrap();
+            assert_eq!(certificate.requested_budget.to_bits(), request.to_bits());
+            assert_eq!(certificate.effective_budget.to_bits(), request.to_bits());
+            assert!(!certificate.floor_raised);
+            assert!(record.solver_residual <= request);
+            assert!(record.newton_iters < budget.max_iterations);
+            let energy_scale = sys.hamiltonian(&initial).abs()
+                + sys.hamiltonian(&next).abs()
+                + record.dissipated.abs();
+            assert!(record.balance_residual().abs() <= 128.0 * f64::EPSILON * energy_scale);
+            let hessian = |x: &[f64], d: &[f64], out: &mut [f64]| {
+                loss.hessian_vector_with(x, d, out, |_, direction, value| {
+                    value[0] = 0.0;
+                    value[1] = direction[1] / mass;
+                    true
+                })
+            };
+            let tangent = |x: &[f64], e: &[f64], dx: &[f64], de: &[f64], out: &mut [f64]| {
+                loss.dissipative_flow_tangent_into(x, e, dx, de, out)
+            };
+            let mut analytic = fs_phs::StepWorkspace::new(&sys).unwrap();
+            analytic.set_solve_budget(budget).unwrap();
+            let (mut other, mut other_output) = ([0.0; 2], [0.0]);
+            let other_record = analytic
+                .step_into_dissipative_controlled(
+                    &sys,
+                    &initial,
+                    &[0.0],
+                    dt,
+                    &mut other,
+                    &mut other_output,
+                    &port,
+                    Some(&hessian),
+                    Some(&tangent),
+                    || false,
+                )
+                .unwrap();
+            assert!(other_record.solver_residual <= request);
+            assert_eq!(
+                other_record.solver_certificate.unwrap().effective_budget,
+                request
+            );
+            for (a, b) in next.into_iter().zip(other) {
+                assert!((a - b).abs() <= 32.0 * request);
+            }
+            println!(
+                "{{\"suite\":\"normal-contact\",\"case\":\"hc-cancellation-source-fix\",\"dt_s\":{dt},\"residual\":{},\"requested_budget\":{request},\"effective_budget\":{},\"floor_raised\":false,\"iterations\":{},\"balance_residual_j\":{},\"verdict\":\"pass\"}}",
+                record.solver_residual,
+                certificate.effective_budget,
+                record.newton_iters,
+                record.balance_residual()
+            );
+        }
     }
 }
 

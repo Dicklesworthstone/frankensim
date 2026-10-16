@@ -33,7 +33,9 @@ impl StepWorkspace {
             sys.storage.gradient(&self.x, &mut self.minus);
             norm(&self.minus)?;
             let mid_dot = self.effort.iter().zip(&self.delta).map(|(g,d)| g*d).sum::<f64>();
-            (sys.hamiltonian(&self.x) - sys.hamiltonian(x0) - mid_dot) / length2
+            // Same cancellation-stable numerator as the canonical residual.
+            sys.storage.midpoint_energy_remainder(x0, &self.x, &self.midpoint)
+                .unwrap_or_else(|| sys.hamiltonian(&self.x) - sys.hamiltonian(x0) - mid_dot) / length2
         } else { 0.0 };
         norm(&[length2, alpha])?;
         if dissipation.is_some() {
