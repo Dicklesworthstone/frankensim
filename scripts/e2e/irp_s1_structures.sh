@@ -11,6 +11,19 @@ readonly -a EXPECTED_TESTS=(
   g1_free_free_bar_eigen_ladder
 )
 readonly REDUCE_TEST='reduce::reduce_tests::rl_005_tet10_cantilever_card'
+readonly -a ND_TESTS=(
+  g0_nd_is_a_permutation_and_separators_separate
+  g0_nd_deterministic_repeat_bitwise
+  g0_nd_leaf_size_bounds
+  g0_factor_budget_cap_and_cap_plus_one
+  g1_nd_inertia_matches_analytic_3d_grid
+)
+readonly -a WINDOW_TESTS=(
+  g1_parallel_windows_certified_and_thread_invariant
+  g1_one_symbolic_analysis_serves_all_shifts
+  g0_window_count_cap_and_cap_plus_one
+  g4_cancellation_drains_and_returns_cancelled
+)
 readonly -a HEX_TESTS=(
   g1_roller_block_exact_p_modes_order
   g2_slender_square_bar_free_free_vs_timoshenko
@@ -44,10 +57,18 @@ list() {
   for test in "${SHELL_TESTS[@]}"; do printf 'fs-plate:shell_obstacle_course::%s\n' "$test"; done
   for test in "${OUTLINE_TESTS[@]}"; do printf 'fs-mesh:planar_outline::%s\n' "$test"; done
   for test in "${ARCHING_TESTS[@]}"; do printf 'fs-plate:arched_outline_shell::%s\n' "$test"; done
+  for test in "${ND_TESTS[@]}" g1_nd_fill_beats_amd_on_3d_grids; do printf 'fs-sparse:nested_dissection::%s\n' "$test"; done
+  for test in "${WINDOW_TESTS[@]}" g2_million_dof_window_timing_receipt report_elastic_p1_tet10_fill; do printf 'fs-modal:parallel_windows::%s\n' "$test"; done
 }
 
 check() {
   local test
+  for test in "${ND_TESTS[@]}" g1_nd_fill_beats_amd_on_3d_grids; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-sparse/tests/nested_dissection.rs" || return 1
+  done
+  for test in "${WINDOW_TESTS[@]}" g2_million_dof_window_timing_receipt report_elastic_p1_tet10_fill; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-modal/tests/parallel_windows.rs" || return 1
+  done
   for test in "${EXPECTED_TESTS[@]}"; do
     grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-solid/tests/tet10.rs" || {
       printf 'missing test: %s\n' "$test" >&2; return 1;
@@ -118,6 +139,8 @@ run() {
     printf '%q ' "${outline_command[@]}"; printf '\n'
     printf '%q ' "${arching_command[@]}"; printf '\n'
     printf '%q ' "${hex_command[@]}"; printf '\n'
+    printf '%q ' cargo test --locked -j 12 -p fs-sparse --test nested_dissection -- --exact --test-threads=1 --show-output "${ND_TESTS[@]}"; printf '\n'
+    printf '%q ' cargo test --locked -j 12 -p fs-modal --test parallel_windows -- --exact --test-threads=1 --show-output "${WINDOW_TESTS[@]}"; printf '\n'
   } >"${output_dir}/command.txt"
   export CARGO_BUILD_JOBS=12
   export CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
@@ -141,6 +164,17 @@ run() {
   status=$?
   if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
   set -e
+  set +e
+  (cd "$REPO_ROOT" && cargo test --locked -j 12 -p fs-sparse --test nested_dissection -- --exact --test-threads=1 --show-output "${ND_TESTS[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  (cd "$REPO_ROOT" && cargo test --locked -j 12 -p fs-modal --test parallel_windows -- --exact --test-threads=1 --show-output "${WINDOW_TESTS[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  set -e
+  for test in "${ND_TESTS[@]}" "${WINDOW_TESTS[@]}"; do
+    if ! grep -Fqx "test ${test} ... ok" "${output_dir}/stdout.log" "${output_dir}/stderr.log"; then missing=1; fi
+  done
   for test in "${EXPECTED_TESTS[@]}" "$REDUCE_TEST" "${SHELL_TESTS[@]}" "${OUTLINE_TESTS[@]}" "${ARCHING_TESTS[@]}" "${HEX_TESTS[@]}"; do
     if ! grep -Fqx "test ${test} ... ok" "${output_dir}/stdout.log" "${output_dir}/stderr.log"; then
       printf 'missing or failed: %s\n' "$test" >&2; missing=1
@@ -183,9 +217,37 @@ sys.exit(0 if passed else 1)
 PY
 }
 
+run_eigen_scale() {
+  [[ "$(uname -s)" != Darwin ]] || { echo 'IRP .67 scale belongs to ts1, no Mac builds' >&2; return 2; }
+  cd "$REPO_ROOT"
+  local output_dir
+  output_dir="$(mktemp -d "${IRP_S1_RECEIPT_BASE:-${TMPDIR:-/tmp}}/frankensim-irp-s1-eigen.XXXXXX")"
+  printf 'IRP .67 release receipts: %s\n' "$output_dir"
+  # No ignored tests. Scale functions exist only in release builds.
+  env CARGO_BUILD_JOBS=12 cargo test --release --locked -p fs-sparse --test nested_dissection g1_nd_fill_beats_amd_on_3d_grids -- --exact --nocapture --test-threads=1 2>&1 | tee "$output_dir/nd.log"
+  env CARGO_BUILD_JOBS=12 cargo test --release --locked -p fs-modal --test parallel_windows -- --exact --nocapture --test-threads=1 g2_million_dof_window_timing_receipt report_elastic_p1_tet10_fill 2>&1 | tee "$output_dir/windows.log"
+  python3 -I - "$output_dir" "$REPO_ROOT" <<'PY'
+import json,pathlib,platform,subprocess,sys
+out,root=map(pathlib.Path,sys.argv[1:])
+sha=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()
+rows=[]
+for name in ('nd.log','windows.log'):
+    for line in (out/name).read_text().splitlines():
+        at=line.find('{"suite":"irp-s1"')
+        if at<0:continue
+        row=json.loads(line[at:]);row.update(git_sha=sha,host=platform.node(),command='scripts/e2e/irp_s1_structures.sh --run-eigen-scale',profile='release',native_exit_code=0)
+        rows.append(row)
+assert len([r for r in rows if r.get('test')=='g1_nd_fill_beats_amd_on_3d_grids'])==3
+assert len([r for r in rows if r.get('test')=='g2_million_dof_window_timing_receipt'])==2
+with (out/'events.jsonl').open('x') as f:
+    for row in rows:f.write(json.dumps(row,allow_nan=False)+'\n')
+PY
+}
+
 case "${1:---check}" in
   --list) list ;;
   --check) check ;;
   --run) run ;;
-  *) printf 'usage: %s [--list|--check|--run]\n' "$0" >&2; exit 2 ;;
+  --run-eigen-scale) run_eigen_scale ;;
+  *) printf 'usage: %s [--list|--check|--run|--run-eigen-scale]\n' "$0" >&2; exit 2 ;;
 esac
