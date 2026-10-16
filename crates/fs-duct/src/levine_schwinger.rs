@@ -444,6 +444,10 @@ mod tests {
         }
         let s = levine_schwinger(0.05, LsQuadrature { nodes: 256 }).unwrap();
         assert!(relative(s.r_abs, 0.9987549288169632) < 1e-10);
+        // Bound the leading expansion's measured finite-ka remainder;
+        // it exceeds 1e-3 here even though the exact integral is accurate.
+        let remainder = relative(-det::expm1(s.log_r_abs), 0.5 * 0.05 * 0.05);
+        assert!((0.0039..0.0040).contains(&remainder), "{remainder}");
     }
 
     #[test]
