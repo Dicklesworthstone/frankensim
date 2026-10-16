@@ -48,12 +48,18 @@ impl MaterialContact {
     pub const fn gap_m(&self) -> f64 { self.gap_m }
 
     fn lower(&self, modes: usize) -> Result<Obstacle, ImpactError> {
-        if self.weights.len()!=modes { return Err(invalid("material contact map must cover the complete body basis")); }
-        Obstacle::new(self.weights.clone(),1,modes,vec![self.gap_m],vec![1.0],
-            self.source.stiffness_n_per_m_3_2(),1.5,
-            format!("source-point-contact/{}/{}",self.key,self.source.model().identity()))
-            .and_then(|o|o.with_internal_loss(self.source.dissipation_s_per_m()))
-            .map_err(|e|ImpactError::Owner(e.to_string()))
+        if self.weights.len() != modes {
+            return Err(invalid(
+                "material contact map must cover the complete body basis",
+            ));
+        }
+        crate::unilateral_contact::binding::bound_point_obstacle(
+            &self.source,
+            self.weights.clone(),
+            self.gap_m,
+            &self.key,
+        )
+        .map_err(|e| ImpactError::Owner(e.to_string()))
     }
 
     // For dissipation e is the numerical owner's ACTUAL discrete gradient,

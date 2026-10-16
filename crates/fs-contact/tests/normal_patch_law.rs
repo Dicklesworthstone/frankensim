@@ -2,6 +2,113 @@ use fs_blake3::hash_domain;
 use fs_contact::normal_patch::*;
 use fs_tribo::{InputAuthority, InterfaceMedium, InterfaceSystemRef};
 
+#[path = "source_point/common.rs"]
+mod source_common;
+
+/// G1: actual material/interface binding lowers to the original dcontact
+/// storage with no independently authored K, exponent or loss coefficient.
+#[test]
+fn np_015_bound_card_lowers_to_dcontact_potential() {
+    use fs_phs::Storage;
+    struct UnitMass;
+    impl Storage for UnitMass {
+        fn hamiltonian(&self, x: &[f64]) -> f64 {
+            0.5 * x[1] * x[1]
+        }
+        fn gradient(&self, x: &[f64], out: &mut [f64]) {
+            out[0] = 0.0;
+            out[1] = x[1];
+        }
+    }
+    let source = source_common::source(1e7, Some(0.4));
+    let modulus = source.model().normal_state().elastic().reduced_modulus_pa();
+    let expected_k = (4.0 / 3.0) * modulus * 0.1_f64.sqrt();
+    assert!((source.stiffness_n_per_m_3_2() / expected_k - 1.0).abs() <= 1e-12);
+    let obstacle = fs_dcontact::Obstacle::new(
+        vec![1.0],
+        1,
+        1,
+        vec![0.0],
+        vec![1.0],
+        source.stiffness_n_per_m_3_2(),
+        1.5,
+        format!("source/{}", source.model().identity()),
+    )
+    .unwrap()
+    .with_internal_loss(source.dissipation_s_per_m())
+    .unwrap();
+    let storage = fs_dcontact::ContactStorage::new(Box::new(UnitMass), 1, vec![obstacle]).unwrap();
+    let receipt_identity = source.limiting_response().receipt_id;
+    let owner = NormalLawSource::from(source);
+    assert_eq!(owner.identity(), receipt_identity);
+    for delta in [1e-8_f64, 1e-6, 1e-4] {
+        let (energy, force, tangent) = owner.potential(delta).unwrap();
+        let expected_force = expected_k * delta * delta.sqrt();
+        assert!((force / expected_force - 1.0).abs() <= 1e-12);
+        let mut gradient = [0.0; 2];
+        storage.gradient(&[delta, 0.0], &mut gradient);
+        assert!((gradient[0] / force - 1.0).abs() <= 1e-12);
+        assert!((storage.hamiltonian(&[delta, 0.0]) / energy - 1.0).abs() <= 1e-12);
+        assert!((tangent / (1.5 * expected_k * delta.sqrt()) - 1.0).abs() <= 1e-12);
+    }
+}
+
+/// G0: each maximum is closed, and its immediate binary64 successor refuses.
+#[test]
+fn np_016_applicability_cap_and_cap_plus_one() {
+    let law = NormalPatchLaw::HertzSpherePlane {
+        effective_radius_m: 0.02,
+        reduced_modulus_pa: 2e9,
+    };
+    let baseline = point(request(law).evaluate().unwrap()).unwrap();
+    let ratios = baseline.ratios;
+    for (field, value) in [
+        ("patch_to_radius", ratios.patch_to_radius),
+        ("strain", ratios.strain),
+        ("patch_to_depth", ratios.patch_to_depth),
+        ("patch_to_layer", ratios.patch_to_layer),
+        ("pressure_to_yield", ratios.pressure_to_yield),
+        ("rate_ratio", ratios.rate_ratio),
+    ] {
+        let mut req = request(law);
+        let limit = match field {
+            "patch_to_radius" => &mut req.limits.max_patch_to_radius,
+            "strain" => &mut req.limits.max_strain,
+            "patch_to_depth" => &mut req.limits.max_patch_to_depth,
+            "patch_to_layer" => &mut req.limits.max_patch_to_layer,
+            "pressure_to_yield" => &mut req.limits.max_pressure_to_yield,
+            _ => &mut req.limits.max_rate_ratio,
+        };
+        *limit = value;
+        assert!(req.evaluate().is_ok(), "closed maximum: {field}");
+        // Keep the physical request fixed, and put its measured ratio exactly
+        // one ULP beyond the declared limit. No physical default is adjusted.
+        let limit = match field {
+            "patch_to_radius" => &mut req.limits.max_patch_to_radius,
+            "strain" => &mut req.limits.max_strain,
+            "patch_to_depth" => &mut req.limits.max_patch_to_depth,
+            "patch_to_layer" => &mut req.limits.max_patch_to_layer,
+            "pressure_to_yield" => &mut req.limits.max_pressure_to_yield,
+            _ => &mut req.limits.max_rate_ratio,
+        };
+        *limit = value.next_down();
+        assert!(
+            matches!(req.evaluate(),Err(NormalPatchError::OutsideApplicability {ratio,value:v,limit:l})
+            if ratio==field && v==l.next_up()),
+            "cap+1: {field}"
+        );
+    }
+    let mut req = request(law);
+    req.applicability.temperature_k = req.limits.max_temperature_k;
+    assert!(req.evaluate().is_ok());
+    req.applicability.temperature_k = req.limits.max_temperature_k.next_up();
+    assert!(req.evaluate().is_err());
+    req.applicability.temperature_k = req.limits.min_temperature_k;
+    assert!(req.evaluate().is_ok());
+    req.applicability.temperature_k = req.limits.min_temperature_k.next_down();
+    assert!(req.evaluate().is_err());
+}
+
 fn request(law: NormalPatchLaw) -> NormalPatchRequest {
     let geometry = match law {
         NormalPatchLaw::HertzCylinderPlane { .. } => NormalPatchGeometry::CylinderPlane,

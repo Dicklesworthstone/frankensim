@@ -769,6 +769,20 @@ mod tests {
         let minus = curve.evaluate(approach - epsilon).unwrap();
         let numerical = (plus.reversible_energy_j - minus.reversible_energy_j) / (2.0 * epsilon);
         assert!((numerical / response.normal_force_n - 1.0).abs() < 2.0e-7);
+        // M4.1-W1 lowers the actual BEM-built curve without fitting a power law.
+        let identity = curve.identity;
+        let source = super::super::NormalLawSource::from(curve);
+        assert_eq!(source.identity(), identity);
+        let (energy, force, tangent) = source.potential(approach).unwrap();
+        assert_eq!(energy.to_bits(), response.reversible_energy_j.to_bits());
+        assert_eq!(force.to_bits(), response.normal_force_n.to_bits());
+        assert_eq!(tangent.to_bits(), response.normal_tangent_n_per_m.to_bits());
+        assert!(matches!(
+            source.potential(request.approach_nodes_m.last().unwrap().next_up()),
+            Err(super::super::NormalLawSourceError::FiniteGap(
+                FiniteGapResponseCurveError::ApproachOutsideTable { .. }
+            ))
+        ));
     }
 
     #[test]

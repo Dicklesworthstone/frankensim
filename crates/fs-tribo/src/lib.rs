@@ -519,7 +519,10 @@ impl FrictionLaw {
         })
     }
 
-    fn validate(&self) -> Result<(), TriboError> {
+    /// Admit the declared coefficients without a velocity, load or numerical ramp.
+    /// This preserves constitutive ownership for callers that validate inactive
+    /// contacts before evaluating any force.
+    pub fn validate(&self) -> Result<(), TriboError> {
         let (static_mu, kinetic_mu) = match *self {
             Self::Coulomb {
                 static_mu,

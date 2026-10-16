@@ -3,6 +3,8 @@
 //! `fs-dcontact` owns the power-law potential. A fretboard, a reed
 //! lay, a snare, and a cable against a stay are fillings.
 
+/// Existing card and finite-gap owners lowered to work-conjugate contact storage.
+pub mod binding;
 pub(crate) mod distributed;
 
 use fs_dcontact::{ContactStorage, DContactError, Obstacle, string_collocation};
@@ -11,11 +13,20 @@ use fs_phs::Storage;
 use fs_scenario::{PrestressedString, UnilateralObstacle};
 
 fn validate_span_stations(spec: &UnilateralObstacle) -> Result<(), DContactError> {
-    if spec.stations.len() != spec.gaps_m.len() || spec.stations.is_empty() {
+    if spec.stations.len() != spec.gaps_m.len()
+        || spec.stations.is_empty()
+        || spec.stations.len() != spec.measures_m.len()
+    {
         return Err(DContactError::Shape {
-            what: "obstacle stations vs gaps",
+            what: "obstacle stations vs gaps and physical line measures",
         });
     }
+    if spec.measures_m.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+        return Err(DContactError::Parameter {
+            what: "line quadrature measures must be positive finite metres",
+        });
+    }
+    friction_law(spec)?;
     if spec
         .stations
         .iter()
@@ -51,7 +62,7 @@ pub fn span_obstacle(
         n,
         string.n_modes,
         spec.gaps_m.clone(),
-        vec![1.0 / n as f64; n],
+        spec.measures_m.clone(),
         spec.stiffness,
         spec.alpha,
         spec.provenance.clone(),
@@ -188,6 +199,7 @@ pub fn modal_contact_forces(
     obstacles: &[UnilateralObstacle],
     x: &[f64],
 ) -> Result<Vec<f64>, DContactError> {
+    validate_modal_state(string.n_modes, x)?;
     if obstacles.is_empty() {
         return Ok(vec![0.0; string.n_modes]);
     }
@@ -202,11 +214,11 @@ pub fn modal_contact_forces(
         .iter()
         .map(|o| o.dissipative_modal_forces(string.n_modes, x, &velocities))
     {
-        for (f, e) in forces.iter_mut().zip(extra) {
+        for (f, e) in forces.iter_mut().zip(extra?) {
             *f += e;
         }
     }
-    add_modal_friction_forces(string.n_modes, obstacles, &obs, x, &mut forces);
+    add_modal_friction_forces(string.n_modes, obstacles, &obs, x, &mut forces)?;
     Ok(forces)
 }
 
@@ -242,6 +254,7 @@ pub fn modal_friction_forces(
     obstacles: &[UnilateralObstacle],
     x: &[f64],
 ) -> Result<Vec<f64>, DContactError> {
+    validate_modal_state(string.n_modes, x)?;
     let mut forces = vec![0.0; string.n_modes];
     if obstacles.iter().all(|o| o.mu_kinetic == 0.0) {
         for obstacle in obstacles {
@@ -250,7 +263,7 @@ pub fn modal_friction_forces(
         return Ok(forces);
     }
     let obs: Result<Vec<_>, _> = obstacles.iter().map(|o| span_obstacle(string, o)).collect();
-    add_modal_friction_forces(string.n_modes, obstacles, &obs?, x, &mut forces);
+    add_modal_friction_forces(string.n_modes, obstacles, &obs?, x, &mut forces)?;
     Ok(forces)
 }
 
@@ -260,14 +273,19 @@ fn add_modal_friction_forces(
     obstacles: &[Obstacle],
     x: &[f64],
     forces: &mut [f64],
-) {
+) -> Result<(), DContactError> {
+    if specs.len() != obstacles.len()
+        || forces.len() != n_modes
+        || n_modes.checked_mul(2).is_none_or(|n| x.len() < n)
+        || x.iter().any(|v| !v.is_finite())
+    {
+        return Err(DContactError::Shape {
+            what: "friction state, obstacle and force dimensions",
+        });
+    }
     for (spec, obstacle) in specs.iter().zip(obstacles) {
-        if !(spec.mu_kinetic > 0.0) {
+        let Some((law, regularization)) = friction_law(spec)? else {
             continue;
-        }
-        let law = fs_tribo::FrictionLaw::Coulomb {
-            static_mu: spec.mu_kinetic,
-            kinetic_mu: spec.mu_kinetic,
         };
         for i in 0..obstacle.n_points() {
             let row = &obstacle.collocation()[i * n_modes..(i + 1) * n_modes];
@@ -276,6 +294,11 @@ fn add_modal_friction_forces(
             for (k, &ph) in row.iter().enumerate() {
                 y += x[2 * k] * ph;
                 v += x[2 * k + 1] * ph;
+            }
+            if !y.is_finite() || !v.is_finite() {
+                return Err(DContactError::Parameter {
+                    what: "friction kinematic projection overflow",
+                });
             }
             let gap = obstacle.gaps()[i];
             let pen = (y - gap).max(0.0);
@@ -287,13 +310,61 @@ fn add_modal_friction_forces(
             // The obstacle is stationary; the string's relative velocity is v.
             // fs-tribo already returns the force opposing its velocity argument.
             let ft = law
-                .regularized_traction_1d(v, normal, 1.0e-3)
-                .unwrap_or(0.0);
+                .regularized_traction_1d(v, normal, regularization)
+                .map_err(friction_error)?;
             for (force, &ph) in forces.iter_mut().zip(row) {
                 *force += ft * ph;
             }
         }
     }
+    if forces.iter().any(|f| !f.is_finite()) {
+        return Err(DContactError::Parameter {
+            what: "friction force projection overflow",
+        });
+    }
+    Ok(())
+}
+
+fn friction_error(error: fs_tribo::TriboError) -> DContactError {
+    let field = match error {
+        fs_tribo::TriboError::InvalidInput { field } => field,
+        _ => "tangential constitutive state",
+    };
+    DContactError::Constitutive {
+        owner: "fs-tribo::FrictionLaw",
+        field,
+    }
+}
+
+fn friction_law(
+    spec: &UnilateralObstacle,
+) -> Result<Option<(fs_tribo::FrictionLaw, f64)>, DContactError> {
+    let law = fs_tribo::FrictionLaw::Coulomb {
+        static_mu: spec.mu_static,
+        kinetic_mu: spec.mu_kinetic,
+    };
+    law.validate().map_err(friction_error)?;
+    if spec.mu_kinetic == 0.0 {
+        return Ok(None);
+    }
+    let regularization = spec
+        .friction_regularization_m_s
+        .ok_or(DContactError::Constitutive {
+            owner: "fs-tribo::FrictionLaw",
+            field: "regularization_m_s",
+        })?;
+    law.regularized_traction_1d(0.0, 0.0, regularization)
+        .map_err(friction_error)?;
+    Ok(Some((law, regularization)))
+}
+
+fn validate_modal_state(n_modes: usize, x: &[f64]) -> Result<(), DContactError> {
+    if n_modes.checked_mul(2).is_none_or(|n| x.len() < n) || x.iter().any(|v| !v.is_finite()) {
+        return Err(DContactError::Shape {
+            what: "finite interleaved modal state prefix",
+        });
+    }
+    Ok(())
 }
 
 /// Hunt–Crossley port forces only. Conservative contact lives in
@@ -306,6 +377,7 @@ pub fn modal_hunt_crossley_forces(
     obstacles: &[UnilateralObstacle],
     x: &[f64],
 ) -> Result<Vec<f64>, DContactError> {
+    validate_modal_state(string.n_modes, x)?;
     let mut forces = vec![0.0; string.n_modes];
     if obstacles.iter().all(|o| o.internal_loss == 0.0) {
         for obstacle in obstacles {
@@ -320,7 +392,7 @@ pub fn modal_hunt_crossley_forces(
         .iter()
         .map(|o| o.dissipative_modal_forces(string.n_modes, x, &velocities))
     {
-        for (f, e) in forces.iter_mut().zip(extra) {
+        for (f, e) in forces.iter_mut().zip(extra?) {
             *f += e;
         }
     }
@@ -364,13 +436,51 @@ mod tests {
     fn obstacle(stations: Vec<f64>) -> UnilateralObstacle {
         UnilateralObstacle {
             gaps_m: vec![0.0; stations.len()],
+            measures_m: vec![string().length_m / stations.len() as f64; stations.len()],
             stations,
             stiffness: 1.0e6,
             alpha: 1.0,
             mu_kinetic: 0.0,
+            mu_static: 0.4,
+            friction_regularization_m_s: Some(1.0e-3),
             internal_loss: 0.0,
             provenance: "analytical string contact fixture".into(),
         }
+    }
+
+    #[test]
+    fn g0_obstacle_friction_refusal_propagates() {
+        let mut invalid = obstacle(vec![0.5]);
+        invalid.mu_static = 0.2;
+        invalid.mu_kinetic = 0.4;
+        assert!(matches!(
+            modal_friction_forces(&string(), &[invalid], &[0.001, 0.1]),
+            Err(DContactError::Constitutive {
+                owner: "fs-tribo::FrictionLaw",
+                field: "kinetic_mu > static_mu"
+            })
+        ));
+        let mut missing = obstacle(vec![0.5]);
+        missing.mu_kinetic = 0.4;
+        missing.friction_regularization_m_s = None;
+        assert!(matches!(
+            modal_friction_forces(&string(), &[missing], &[0.001, 0.1]),
+            Err(DContactError::Constitutive {
+                field: "regularization_m_s",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn g0_span_obstacle_retains_physical_measures_without_normalization() {
+        let mut spec = obstacle(vec![0.2, 0.5, 0.8]);
+        spec.measures_m = vec![0.08, 0.24, 0.48];
+        let law = span_obstacle(&string(), &spec).unwrap();
+        assert_eq!(law.weights(), spec.measures_m);
+        let mut bad = spec;
+        bad.measures_m.pop();
+        assert!(span_obstacle(&string(), &bad).is_err());
     }
 
     #[test]
@@ -384,7 +494,7 @@ mod tests {
             // Standard sine is the oracle here, not fs-dcontact collocation.
             let phi = (core::f64::consts::PI * station).sin()
                 / (string.lin_density_kg_m * string.length_m / 2.0).sqrt();
-            let expected = -spec.stiffness * phi * phi * q;
+            let expected = -spec.stiffness * spec.measures_m[0] * phi * phi * q;
             let actual = modal_contact_forces(&string, &[spec], &[q, 0.0]).expect("force")[0];
             // Near pi, argument rounding is amplified by the small sine.
             assert!((contact.collocation()[0] - phi).abs() <= 5.0e-8 * phi.abs());
@@ -461,8 +571,8 @@ mod tests {
                     let initial = step.storage.hamiltonian(&[before, 0.0]);
                     let final_energy = step.storage.hamiltonian(&[after, 0.0]);
                     let work = force * (after - before);
-                    let scale = (initial.abs() + final_energy.abs() + work.abs())
-                        .max(f64::MIN_POSITIVE);
+                    let scale =
+                        (initial.abs() + final_energy.abs() + work.abs()).max(f64::MIN_POSITIVE);
                     assert!((work + final_energy - initial).abs() <= 1e-12 * scale);
                     assert!(force >= 0.0);
                     assert_eq!(damping, 0.0);
@@ -484,8 +594,8 @@ mod tests {
             let (elastic, damping) = step.coefficients(after).unwrap();
             assert_eq!(damping, 5.0 * elastic);
             let force = (elastic - damping * velocity).max(0.0);
-            let released = step.storage.hamiltonian(&[before, 0.0])
-                - step.storage.hamiltonian(&[after, 0.0]);
+            let released =
+                step.storage.hamiltonian(&[before, 0.0]) - step.storage.hamiltonian(&[after, 0.0]);
             let loss = released - force * (after - before);
             assert!(loss >= -1e-12 * released.abs().max(f64::MIN_POSITIVE));
             if velocity > 0.2 {
@@ -502,7 +612,14 @@ mod tests {
             assert!(slit_contact_discrete_coefficients(&lay, 0.0, invalid).is_err());
         }
         let other = Obstacle::new(
-            vec![-2.0], 1, 1, vec![0.0], vec![1.0], 1e8, 2.0, "nonunit".into(),
+            vec![-2.0],
+            1,
+            1,
+            vec![0.0],
+            vec![1.0],
+            1e8,
+            2.0,
+            "nonunit".into(),
         )
         .unwrap();
         assert!(slit_contact_discrete_coefficients(&other, -1e-4, 0.0).is_err());

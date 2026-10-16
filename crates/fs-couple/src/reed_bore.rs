@@ -955,7 +955,7 @@ mod fast_mode_tests {
             .with_internal_loss(5.0)
             .unwrap();
         let (y, v) = (-1e-4, -0.2);
-        let old_loss = lay.dissipative_modal_forces(1, &[y, v], &[v])[0];
+        let old_loss = lay.dissipative_modal_forces(1, &[y, v], &[v]).unwrap()[0];
         for dt in [1e-4, 5e-4] {
             let (pressure, y1, v1) = step_massive_reed(
                 reed,

@@ -411,13 +411,20 @@ pub struct UnilateralObstacle {
     pub stations: Vec<f64>,
     /// Gaps from the rest span to the obstacle [m]. Positive is clearance.
     pub gaps_m: Vec<f64>,
-    /// Contact stiffness `K`.
+    /// Physical line quadrature measures [m], one per station. Never normalized.
+    pub measures_m: Vec<f64>,
+    /// Contact stiffness per unit length [N/m^(alpha+1)].
     pub stiffness: f64,
     /// Power-law exponent `α >= 1`.
     pub alpha: f64,
     /// Kinetic friction coefficient at the contact. Zero is frictionless
     /// (normal-only). Nonzero composes `fs-tribo` on the same stations.
     pub mu_kinetic: f64,
+    /// Static capacity coefficient, at least `mu_kinetic`.
+    pub mu_static: f64,
+    /// Explicit ODE ramp speed [m/s]. Required for nonzero friction; None is
+    /// permitted only for a frictionless obstacle. No numerical scale is guessed.
+    pub friction_regularization_m_s: Option<f64>,
     /// Hunt–Crossley internal-loss coefficient `χ` [s/m]. Zero is the
     /// elastic potential (restitution 1). Nonzero is a dissipative
     /// port force, not a gradient of `H`.

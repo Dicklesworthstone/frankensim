@@ -1162,9 +1162,12 @@ fn g3_prony_memory_composes_with_body_ports_and_contact() {
         scene.obstacles = vec![UnilateralObstacle {
             stations: vec![0.3],
             gaps_m: vec![0.0005],
+            measures_m: vec![scene.string.as_ref().unwrap().length_m],
             stiffness: 5.0e5,
             alpha: 2.0,
             mu_kinetic: if moving_end { 0.0 } else { 0.1 },
+            mu_static: 0.1,
+            friction_regularization_m_s: Some(1.0e-3),
             internal_loss: 0.8,
             provenance: "synthetic Prony contact".into(),
         }];
@@ -4344,9 +4347,12 @@ fn taut_span_obstacle_changes_the_waveform() {
     rattle.obstacles = vec![UnilateralObstacle {
         stations: vec![0.25, 0.5, 0.75],
         gaps_m: vec![0.001, 0.001, 0.001],
+        measures_m: vec![rattle.string.as_ref().unwrap().length_m / 3.0; 3],
         stiffness: 5.0e5,
         alpha: 2.0,
         mu_kinetic: 0.0,
+        mu_static: 0.4,
+        friction_regularization_m_s: Some(1.0e-3),
         internal_loss: 0.0,
         provenance: "fixture/stay".into(),
     }];
@@ -4585,9 +4591,12 @@ fn kc_contact_is_inside_the_hamiltonian() {
     rattle.obstacles = vec![UnilateralObstacle {
         stations: vec![0.25, 0.5, 0.75],
         gaps_m: vec![0.001, 0.001, 0.001],
+        measures_m: vec![rattle.string.as_ref().unwrap().length_m / 3.0; 3],
         stiffness: 5.0e5,
         alpha: 2.0,
         mu_kinetic: 0.0,
+        mu_static: 0.4,
+        friction_regularization_m_s: Some(1.0e-3),
         internal_loss: 0.0,
         provenance: "fixture/stay".into(),
     }];
@@ -4680,9 +4689,12 @@ fn hunt_crossley_changes_rattle() {
     elastic.obstacles = vec![UnilateralObstacle {
         stations: vec![0.25, 0.5, 0.75],
         gaps_m: vec![0.001, 0.001, 0.001],
+        measures_m: vec![elastic.string.as_ref().unwrap().length_m / 3.0; 3],
         stiffness: 5.0e5,
         alpha: 2.0,
         mu_kinetic: 0.0,
+        mu_static: 0.4,
+        friction_regularization_m_s: Some(1.0e-3),
         internal_loss: 0.0,
         provenance: "fixture/stay".into(),
     }];
@@ -4826,9 +4838,12 @@ fn obstacle_on_moving_end_dirac_changes_the_waveform() {
     a.obstacles = vec![UnilateralObstacle {
         stations: vec![0.3],
         gaps_m: vec![0.001],
+        measures_m: vec![a.string.as_ref().unwrap().length_m],
         stiffness: 5.0e5,
         alpha: 2.0,
         mu_kinetic: 0.0,
+        mu_static: 0.4,
+        friction_regularization_m_s: Some(1.0e-3),
         internal_loss: 0.0,
         provenance: "fixture/stay".into(),
     }];

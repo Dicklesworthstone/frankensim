@@ -119,8 +119,8 @@ if [[ "$FIXTURE" == "reed-flanged-baffled" ]]; then
   RUN_COMMAND="$BINARY wind crates/fs-couple/examples/reed-flanged-baffled.performance OUT.wav --acceptance"
 fi
 receipt() {
-  python3 -I -c 'import json,sys; row=json.loads(sys.argv[1]); row.update(git_sha=sys.argv[2],dirty=int(sys.argv[3])!=0,host=sys.argv[4],command=sys.argv[5],profile="supplied-binary"); print(json.dumps(row,separators=(",",":")))' \
-    "$1" "$RUN_HEAD" "$RUN_DIRTY" "$RUN_HOST" "$RUN_COMMAND" | tee -a "$RECEIPTS"
+  python3 -I -c 'import json,sys; row=json.loads(sys.argv[1]); row.update(git_sha=sys.argv[2],dirty=int(sys.argv[3])!=0,host=sys.argv[4],command=sys.argv[5],profile="supplied-binary",elapsed_s=int(sys.argv[6])); row.setdefault("contact_law_source","none/contact-free-string-control" if row.get("lane")=="string" else "not-retained-in-this-receipt"); [row.setdefault(key,None) for key in ("k_per_measure","alpha","chi","weight_measure","card_hash")]; print(json.dumps(row,separators=(",",":")))' \
+    "$1" "$RUN_HEAD" "$RUN_DIRTY" "$RUN_HOST" "$RUN_COMMAND" "$SECONDS" | tee -a "$RECEIPTS"
 }
 
 render() {
@@ -173,7 +173,7 @@ if [[ -f "$BASELINES" ]]; then
     if [[ "$RECORDED" == "$HASH_A" ]]; then BASELINE_VERDICT="matched"; else BASELINE_VERDICT="drifted"; fi
   fi
 fi
-receipt "{\"stage\":\"baseline\",\"lane\":\"$FIXTURE\",\"verdict\":\"$BASELINE_VERDICT\",\"recorded\":\"${RECORDED:-}\",\"observed\":\"$HASH_A\",\"determinism_class\":\"one-host\"}"
+receipt "{\"stage\":\"baseline\",\"lane\":\"$FIXTURE\",\"verdict\":\"$BASELINE_VERDICT\",\"recorded\":\"${RECORDED:-}\",\"observed\":\"$HASH_A\",\"determinism_class\":\"one-host\",\"change_cause\":\"M4.1-W1: physical contact measures and explicit friction parameters; string lane is a contact-free control\"}"
 if [[ $ENFORCE_BASELINE -eq 1 && "$BASELINE_VERDICT" == "drifted" ]]; then
   die "baseline drift under enforcement: recorded ${RECORDED:-} vs observed $HASH_A (golden event: explain and update in the same commit)"
 fi

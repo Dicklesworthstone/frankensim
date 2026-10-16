@@ -13,6 +13,15 @@ those consume adapters; reusable contact protocols live here.
 
 ## Public types and semantics
 
+- `normal_patch::NormalLawSource` presents `(U,F,dF)` from an immutable
+  `SourcePointContact` or a `FiniteGapResponseCurve`. Point stiffness remains
+  derived from the bound bulk/interface model and geometry; finite-gap values
+  remain the original curve's integrated force, segment tangent and energy,
+  with `Estimate` authority and no extrapolation. No power-law fit or new
+  constitutive trait is introduced. Original point/curve errors remain typed.
+  Generic storage composition and point lowering live in
+  `fs-couple::unilateral_contact::binding`, preserving dependency direction.
+
 - `SpacetimeBody` — a finite body-frame support box bound to a
   `fs_motion::CertifiedMotorTube` (body-to-world). Validation refuses
   non-finite/inverted supports.

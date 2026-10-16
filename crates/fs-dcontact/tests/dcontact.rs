@@ -8,6 +8,193 @@
 use fs_dcontact::{ContactStorage, DContactError, Obstacle, polyline_heights, string_collocation};
 use fs_phs::{PortHamiltonian, QuadraticStorage, Storage, step};
 
+/// G0: SI line measures, not probability weights, determine total reaction.
+#[test]
+fn g0_weights_are_physical_measure_refinement_invariant() {
+    let (length, density_k, penetration) = (0.73, 2e8, 1e-4_f64);
+    let expected = length * density_k * penetration * penetration;
+    for cells in [8, 16, 32] {
+        let obstacle = Obstacle::new(
+            vec![1.0; cells],
+            cells,
+            1,
+            vec![0.0; cells],
+            vec![length / cells as f64; cells],
+            density_k,
+            2.0,
+            "synthetic uniform line; K per metre".into(),
+        )
+        .unwrap();
+        let storage =
+            ContactStorage::new(Box::new(FreeMass { m: 1.0 }), 1, vec![obstacle]).unwrap();
+        let mut gradient = [0.0; 2];
+        storage.gradient(&[penetration, 0.0], &mut gradient);
+        assert!((gradient[0] - expected).abs() <= 1e-12 * expected);
+        let energy = length * density_k * penetration.powi(3) / 3.0;
+        assert!((storage.hamiltonian(&[penetration, 0.0]) - energy).abs() <= 1e-12 * energy);
+    }
+}
+
+#[test]
+fn g0_dissipative_forces_refuse_mismatched_velocity_length() {
+    for chi in [0.0, 0.5] {
+        let law = Obstacle::new(
+            vec![1.0],
+            1,
+            1,
+            vec![0.0],
+            vec![1.0],
+            100.0,
+            1.5,
+            "synthetic shape refusal".into(),
+        )
+        .unwrap()
+        .with_internal_loss(chi)
+        .unwrap();
+        for wrong in [vec![], vec![0.0, 0.0]] {
+            assert!(matches!(
+                law.dissipative_modal_forces(1, &[0.01, 0.0], &wrong),
+                Err(DContactError::Shape { .. })
+            ));
+        }
+        assert!(
+            law.dissipative_modal_forces(1, &[0.01, 0.0], &[0.0])
+                .is_ok()
+        );
+    }
+}
+
+// The production potential and production implicit loss port are integrated by
+// the existing Gonzalez owner. No explicit force lag or restitution fit enters.
+fn isolated_impact(mass: f64, k: f64, chi: f64, incoming: f64, dt: f64) -> (f64, f64) {
+    let floor = Obstacle::new(
+        vec![1.0],
+        1,
+        1,
+        vec![0.0],
+        vec![1.0],
+        k,
+        1.5,
+        "synthetic Hertz/HC impact benchmark".into(),
+    )
+    .unwrap()
+    .with_internal_loss(chi)
+    .unwrap();
+    let loss = ContactStorage::new(Box::new(FreeMass { m: mass }), 1, vec![floor.clone()]).unwrap();
+    let storage = ContactStorage::new(Box::new(FreeMass { m: mass }), 1, vec![floor]).unwrap();
+    let sys = PortHamiltonian::new(
+        2,
+        1,
+        symplectic_j(1),
+        vec![0.0; 4],
+        vec![0.0, 1.0],
+        Box::new(storage),
+    )
+    .unwrap();
+    let mut workspace = fs_phs::StepWorkspace::new(&sys).unwrap();
+    let mut x = [0.0, mass * incoming];
+    let mut time = 0.0;
+    let port = |state: &[f64], effort: &[f64], out: &mut [f64]| {
+        loss.dissipative_flow_into(state, effort, out)
+    };
+    for _ in 0..10_000 {
+        let mut next = [0.0; 2];
+        let mut output = [0.0];
+        workspace
+            .step_into_dissipative_controlled(
+                &sys,
+                &x,
+                &[0.0],
+                dt,
+                &mut next,
+                &mut output,
+                &port,
+                None,
+                None,
+                || false,
+            )
+            .unwrap();
+        if x[0] > 0.0 && next[0] <= 0.0 && next[1] < 0.0 {
+            let fraction = x[0] / (x[0] - next[0]);
+            let momentum = (next[1] - x[1]).mul_add(fraction, x[1]);
+            return (time + fraction * dt, -momentum / (mass * incoming));
+        }
+        x = next;
+        time += dt;
+    }
+    panic!("impact never separated within the declared 10,000-step budget");
+}
+
+/// G1: Johnson 1985 section 11.4; the time formula's 2.943 is rounded.
+/// Order is measured from rung differences, so that rounding cannot fake a floor.
+#[test]
+fn g1_hertz_sphere_impact_contact_time_matches_johnson() {
+    let (mass, modulus, radius, incoming) = (0.05, 2e9, 0.02_f64, 0.4);
+    let k = (4.0 / 3.0) * modulus * radius.sqrt();
+    let maximum = fs_math::det::pow(
+        15.0 * mass * incoming * incoming / (16.0 * modulus * radius.sqrt()),
+        0.4,
+    );
+    let reference = 2.943 * maximum / incoming;
+    let mut times = [0.0; 3];
+    for (i, cells) in [32, 64, 128].into_iter().enumerate() {
+        let dt = reference / f64::from(cells);
+        let (time, restitution) = isolated_impact(mass, k, 0.0, incoming, dt);
+        times[i] = time;
+        assert!((restitution - 1.0).abs() < 1e-3);
+        println!(
+            "{{\"suite\":\"normal-contact\",\"case\":\"hertz-impact\",\"dt_s\":{dt},\"contact_time_s\":{time},\"reference_s\":{reference},\"relative_error\":{}}}",
+            (time / reference - 1.0).abs()
+        );
+    }
+    let order = ((times[0] - times[1]).abs() / (times[1] - times[2]).abs()).log2();
+    assert!(
+        order.is_finite() && order >= 1.8,
+        "contact time order {order}: {times:?}"
+    );
+    assert!((times[2] / reference - 1.0).abs() <= 0.005);
+}
+
+#[test]
+fn g1_hunt_crossley_restitution_matches_exact_relation() {
+    let (mass, modulus, radius, incoming) = (0.05, 2e9, 0.02_f64, 0.4);
+    let k = (4.0 / 3.0) * modulus * radius.sqrt();
+    let maximum = fs_math::det::pow(
+        15.0 * mass * incoming * incoming / (16.0 * modulus * radius.sqrt()),
+        0.4,
+    );
+    let time_scale = 2.943 * maximum / incoming;
+    for chi_v in [0.01, 0.1, 0.5] {
+        let left = chi_v - fs_math::det::ln(1.0 + chi_v);
+        let (mut lo, mut hi) = (0.0, 1.0);
+        for _ in 0..80 {
+            let e = f64::midpoint(lo, hi);
+            let right = -chi_v * e - fs_math::det::ln(1.0 - chi_v * e);
+            if right < left {
+                lo = e;
+            } else {
+                hi = e;
+            }
+        }
+        let reference = f64::midpoint(lo, hi);
+        let mut errors = [0.0; 3];
+        for (i, cells) in [64, 128, 256].into_iter().enumerate() {
+            let dt = time_scale / f64::from(cells);
+            let (_, actual) = isolated_impact(mass, k, chi_v / incoming, incoming, dt);
+            errors[i] = (actual - reference).abs();
+            println!(
+                "{{\"suite\":\"normal-contact\",\"case\":\"hunt-crossley\",\"chi_v\":{chi_v},\"dt_s\":{dt},\"restitution\":{actual},\"reference\":{reference},\"absolute_error\":{}}}",
+                errors[i]
+            );
+        }
+        assert!(errors[2] <= 1e-3, "chi*v={chi_v}: {errors:?}");
+        assert!(
+            errors[2] < errors[0],
+            "the HC timestep axis must be live: {errors:?}"
+        );
+    }
+}
+
 /// Free 1-DOF mass (ball): H = p^2/(2 m) — no spring.
 struct FreeMass {
     m: f64,
@@ -180,7 +367,7 @@ fn hunt_crossley_lowers_restitution() {
     let mut in_contact_prev = false;
     for _ in 0..40_000 {
         let v = x[1] / m;
-        let extra = floor.dissipative_modal_forces(1, &x, &[v]);
+        let extra = floor.dissipative_modal_forces(1, &x, &[v]).unwrap();
         let rec = step(&sys, &x, &[m * g + extra[0]], dt).expect("step");
         x = rec.x;
         let pen = (x[0] - 0.5).max(0.0);
@@ -234,7 +421,7 @@ fn hunt_crossley_unloading_saturates_at_nonattractive_reaction() {
     let x = [1.0, -2.0];
     let mut gradient = [0.0; 2];
     storage.gradient(&x, &mut gradient);
-    let port = obstacle.dissipative_modal_forces(1, &x, &[-2.0]);
+    let port = obstacle.dissipative_modal_forces(1, &x, &[-2.0]).unwrap();
     let net_local_reaction = -gradient[0] + port[0];
     assert_eq!(
         net_local_reaction, 0.0,
@@ -260,7 +447,9 @@ fn hunt_crossley_unloading_saturates_at_nonattractive_reaction() {
     let extreme_x = [1.0, -5.0e-201];
     let mut extreme_gradient = [0.0; 2];
     extreme_storage.gradient(&extreme_x, &mut extreme_gradient);
-    let extreme_port = extreme.dissipative_modal_forces(1, &extreme_x, &[-5.0e-201]);
+    let extreme_port = extreme
+        .dissipative_modal_forces(1, &extreme_x, &[-5.0e-201])
+        .unwrap();
     let extreme_net = -extreme_gradient[0] + extreme_port[0];
     assert!(extreme_net.is_finite());
     assert_eq!(extreme_net, -0.5 * extreme_gradient[0]);
@@ -283,8 +472,9 @@ fn hunt_crossley_unloading_saturates_at_nonattractive_reaction() {
     .expect("multimode obstacle")
     .with_internal_loss(1.0)
     .expect("multimode chi");
-    let multimode_port =
-        multimode.dissipative_modal_forces(2, &[1.0, 0.0, 0.0, 0.0], &[-1.25, -0.75]);
+    let multimode_port = multimode
+        .dissipative_modal_forces(2, &[1.0, 0.0, 0.0, 0.0], &[-1.25, -0.75])
+        .unwrap();
     assert_eq!(
         multimode_port,
         [32.0, 0.0],
@@ -292,8 +482,8 @@ fn hunt_crossley_unloading_saturates_at_nonattractive_reaction() {
     );
     let nonfinite_port = obstacle.dissipative_modal_forces(1, &[f64::NAN, 0.0], &[0.0]);
     assert!(
-        nonfinite_port[0].is_nan(),
-        "a non-fallible port must propagate invalid state instead of erasing contact"
+        matches!(nonfinite_port, Err(DContactError::Parameter { .. })),
+        "DEF-07: a fallible port must refuse invalid state instead of erasing contact"
     );
 }
 
@@ -850,6 +1040,12 @@ fn contact_pack_migration_is_provenance_only() {
     // In-validity operating point (the fixture's regime); the
     // out-of-validity refusal falsifier executes in fs-matdb cp-003.
     let receipt = card.lookup(1.0, 1.0).expect("in-validity lookup");
+    let maximum = card.force_validity_n.1;
+    assert!(card.lookup(maximum, 1.0).is_ok());
+    assert!(matches!(
+        card.lookup(maximum.next_up(), 1.0),
+        Err(fs_matdb::ContactPackError::OutsideValidity { .. })
+    ));
     let (length, tension, mu) = (0.65, 70.0, 5.0e-3);
     let n_modes = 12;
     let dt = 2.5e-6;

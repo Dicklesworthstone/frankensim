@@ -14,7 +14,7 @@ LCP, no bespoke scheme).
 ## Public types and semantics
 
 - `Obstacle` — collocation matrix `Phi[i][k]`, per-point gaps and
-  quadrature weights, shared `(K, alpha)` power law with a PROVENANCE
+  physical quadrature measures, shared `(K, alpha)` power law with a PROVENANCE
   string (logged, never invented; receipted construction via
   `Obstacle::from_receipt` from fs-matdb contact packs). Fields are
   PRIVATE so admission is mandatory (accessors + a documented
@@ -24,6 +24,10 @@ LCP, no bespoke scheme).
   C^1 for all `alpha >= 1` (what Gonzalez needs); the force is C^1
   only for `alpha > 1`, and the contact Hessian is unbounded for
   `1 < alpha < 2` and discontinuous at `alpha` in {1, 2}.
+  A point has measure 1; line and area sites use m and m2. `K` is per unit
+  measure, so a line law has units N/m^(alpha+1). Measures are never normalized
+  to a probability distribution. In particular, splitting a uniform physical
+  line into 8/16/32 cells preserves its total force within 1e-12 relative.
 - `ContactStorage` — wraps any fs-phs `Storage` with
   `Phi_c = sum_i w_i K/(alpha+1) [p_i]_+^(alpha+1)`,
   `p_i = (Phi q)_i - c_i`; exact analytic gradient; `probe()` reports
@@ -84,6 +88,12 @@ LCP, no bespoke scheme).
 
 Typed `DContactError` (shape, parameter); solver refusals pass
 through as fs-phs `PhsError`. No silent degradation.
+Both obstacle and storage `dissipative_modal_forces` now return `Result`.
+Velocity/collocation/state mismatches refuse even when chi is zero, and
+nonfinite state or derived forces refuse before a force vector is returned.
+`Constitutive { owner, field }` preserves a higher-level constitutive refusal
+without making this crate depend on its owner. The loss formula and local
+non-attractive unloading saturation are unchanged.
 
 ## Determinism class
 
@@ -104,6 +114,14 @@ scan per gradient evaluation). No `Cx` integration
 None.
 
 ## Conformance tests
+
+M4.1-W1 adds G0 physical-measure refinement and velocity-shape refusal;
+G1 Hertz contact duration against Johnson section 11.4 on three timestep rungs
+(finest relative error <=0.5%, observed order >=1.8); and quantitative
+Hunt--Crossley restitution against its exact logarithmic relation for
+chi*v in {0.01,0.1,0.5} (absolute error <=1e-3). The latter uses the original
+implicit dissipative port, never a lagged explicit force. These are named
+test obligations pending central native execution, not physical validation.
 
 `tests/dcontact.rs` (10): polyline geometry + refusals; bouncing
 restitution/penetration closed form; fret-rattle conservation +

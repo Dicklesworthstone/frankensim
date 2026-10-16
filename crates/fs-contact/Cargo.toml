@@ -25,6 +25,8 @@ fs-query = { path = "../fs-query" }
 fs-tribo = { path = "../fs-tribo" }
 
 [dev-dependencies]
+fs-dcontact = { path = "../fs-dcontact" }
+fs-phs = { path = "../fs-phs" }
 asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
 fs-ga = { path = "../fs-ga" }

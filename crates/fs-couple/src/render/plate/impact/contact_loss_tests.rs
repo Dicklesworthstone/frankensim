@@ -12,7 +12,7 @@ fn contact_loss_port_matches_existing_law_is_passive_and_has_exact_tangent() {
     for e in [[1.0,0.2,2.0,-0.1,3.0],[1.0,-4.0,2.0,1.0,3.0]] {
         let (mut out,mut tangent)=([0.0;5],[0.0;5]);
         assert!(contact.dissipative_flow_into(&x,&e,&mut out));
-        let expected=ob.dissipative_modal_forces(2,&x,&[e[1],e[3]]);
+        let expected=ob.dissipative_modal_forces(2,&x,&[e[1],e[3]]).unwrap();
         assert_eq!(out[1],-expected[0]);assert_eq!(out[3],-expected[1]);
         assert_eq!([out[0],out[2],out[4]],[0.0;3]);
         assert!(out.iter().zip(e).map(|(f,e)|f*e).sum::<f64>()>0.0);

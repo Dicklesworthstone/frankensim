@@ -27,13 +27,15 @@
 //! caller-supplied with a PROVENANCE string — a matdb lookup is
 //! deferred until packs carrying contact-law parameters exist.
 
-mod tangent;
 mod loss;
+mod tangent;
 use fs_math::det;
 use fs_phs::Storage;
 
 /// A distributed obstacle: collocation points with per-point gap,
-/// quadrature weight, and the shared power-law contact law. Fields
+/// physical quadrature measure, and the shared power-law contact law. A point
+/// has measure 1; line and area sites carry metres and square metres. K is
+/// always per unit of that measure; weights are never normalized. Fields
 /// are PRIVATE so admission is mandatory (review finding: pub fields
 /// made every check advisory); mutation batteries use the documented
 /// [`Obstacle::from_raw_parts`] trust escape.
@@ -63,6 +65,13 @@ pub enum DContactError {
         /// Which one.
         what: &'static str,
     },
+    /// A constitutive owner refused an explicitly supplied parameter.
+    Constitutive {
+        /// Crate/law owning the refused evaluation.
+        owner: &'static str,
+        /// Original input field named by the owner.
+        field: &'static str,
+    },
 }
 
 impl core::fmt::Display for DContactError {
@@ -70,6 +79,7 @@ impl core::fmt::Display for DContactError {
         match self {
             DContactError::Shape { what } => write!(f, "shape mismatch: {what}"),
             DContactError::Parameter { what } => write!(f, "bad parameter: {what}"),
+            DContactError::Constitutive { owner, field } => write!(f, "{owner} refused {field}"),
         }
     }
 }
@@ -97,7 +107,7 @@ impl Obstacle {
         alpha: f64,
         provenance: String,
     ) -> Result<Self, DContactError> {
-        if collocation.len() != n_points * n_modes
+        if n_points.checked_mul(n_modes) != Some(collocation.len())
             || gaps.len() != n_points
             || weights.len() != n_points
         {
@@ -202,13 +212,13 @@ impl Obstacle {
         &self.gaps
     }
 
-    /// Per-point quadrature weights.
+    /// Physical site measures (1 for a point, m for a line, m² for an area).
     #[must_use]
     pub fn weights(&self) -> &[f64] {
         &self.weights
     }
 
-    /// Contact stiffness `K`.
+    /// Contact stiffness `K` per unit quadrature measure.
     #[must_use]
     pub fn stiffness(&self) -> f64 {
         self.stiffness
@@ -275,7 +285,9 @@ impl Obstacle {
     /// Penetration `p_i = (Phi q)_i - c_i`, clamped one-sided, for the
     /// interleaved `[q, p]` state.
     fn penetrations(&self, n_modes: usize, x: &[f64]) -> Vec<f64> {
-        (0..self.n_points).map(|i| self.penetration_at(n_modes, x, i)).collect()
+        (0..self.n_points)
+            .map(|i| self.penetration_at(n_modes, x, i))
+            .collect()
     }
 
     // Shared scalar kernel: storage evaluation must not allocate a point vector
@@ -286,29 +298,47 @@ impl Obstacle {
             disp += self.collocation[i * n_modes + k] * x[2 * k];
         }
         let penetration = disp - self.gaps[i];
-        if penetration.is_nan() { penetration } else { penetration.max(0.0) }
+        if penetration.is_nan() {
+            penetration
+        } else {
+            penetration.max(0.0)
+        }
     }
 
     /// Hunt–Crossley modal forces `f_k = −Σ_i w_i χ K [p_i]_+^α ṗ_i Φ_ik`.
     ///
     /// During sufficiently fast unloading, the local loss increment
     /// saturates at the magnitude of the stored penalty reaction. This
-    /// non-fallible port therefore leaves the combined reaction at zero,
+    /// port therefore leaves the combined reaction at zero,
     /// rather than allowing a unilateral contact to become attractive.
     ///
     /// `velocities[k]` is the physical modal velocity (the inner
     /// storage's `∂H/∂p_k`). `χ = 0` returns zeros. This is **not** a
     /// gradient of `H`.
-    #[must_use]
     pub fn dissipative_modal_forces(
         &self,
         n_modes: usize,
         x: &[f64],
         velocities: &[f64],
-    ) -> Vec<f64> {
+    ) -> Result<Vec<f64>, DContactError> {
+        if self.n_points.checked_mul(n_modes) != Some(self.collocation.len())
+            || self.gaps.len() != self.n_points
+            || self.weights.len() != self.n_points
+            || n_modes.checked_mul(2).is_none_or(|prefix| x.len() < prefix)
+            || velocities.len() != n_modes
+        {
+            return Err(DContactError::Shape {
+                what: "contact state/collocation/velocity length",
+            });
+        }
+        if x.iter().chain(velocities).any(|v| !v.is_finite()) {
+            return Err(DContactError::Parameter {
+                what: "non-finite contact state or velocity",
+            });
+        }
         let mut forces = vec![0.0; n_modes];
-        if !(self.internal_loss > 0.0) || velocities.len() != n_modes {
-            return forces;
+        if self.internal_loss == 0.0 {
+            return Ok(forces);
         }
         let pens = self.penetrations(n_modes, x);
         for (i, &p) in pens.iter().enumerate() {
@@ -320,11 +350,21 @@ impl Obstacle {
                 pdot += self.collocation[i * n_modes + k] * v;
             }
             let f = self.loss_force_at(i, p, pdot);
+            if !p.is_finite() || !pdot.is_finite() || !f.is_finite() {
+                return Err(DContactError::Parameter {
+                    what: "contact loss evaluation overflowed",
+                });
+            }
             for (k, slot) in forces.iter_mut().enumerate().take(n_modes) {
                 *slot -= f * self.collocation[i * n_modes + k];
             }
         }
-        forces
+        if forces.iter().any(|f| !f.is_finite()) {
+            return Err(DContactError::Parameter {
+                what: "contact loss projection overflowed",
+            });
+        }
+        Ok(forces)
     }
 }
 
@@ -359,7 +399,7 @@ impl ContactStorage {
         obstacles: Vec<Obstacle>,
     ) -> Result<Self, DContactError> {
         for ob in &obstacles {
-            if ob.collocation.len() != ob.n_points * n_modes {
+            if ob.n_points.checked_mul(n_modes) != Some(ob.collocation.len()) {
                 return Err(DContactError::Shape {
                     what: "obstacle collocation width vs n_modes",
                 });
@@ -424,19 +464,28 @@ impl ContactStorage {
     /// (`p = v`) are both correct. `χ = 0` on every obstacle returns
     /// zeros. Add the result to the mechanical port input; do not
     /// fold it into `H`.
-    #[must_use]
-    pub fn dissipative_modal_forces(&self, x: &[f64]) -> Vec<f64> {
+    pub fn dissipative_modal_forces(&self, x: &[f64]) -> Result<Vec<f64>, DContactError> {
+        if self
+            .n_modes
+            .checked_mul(2)
+            .is_none_or(|prefix| x.len() < prefix)
+            || x.iter().any(|v| !v.is_finite())
+        {
+            return Err(DContactError::Shape {
+                what: "contact storage mechanical state prefix",
+            });
+        }
         let mut g = vec![0.0; 2 * self.n_modes];
         self.inner.gradient(x, &mut g);
         let velocities: Vec<f64> = (0..self.n_modes).map(|k| g[2 * k + 1]).collect();
         let mut forces = vec![0.0; self.n_modes];
         for ob in &self.obstacles {
-            let extra = ob.dissipative_modal_forces(self.n_modes, x, &velocities);
+            let extra = ob.dissipative_modal_forces(self.n_modes, x, &velocities)?;
             for (f, e) in forces.iter_mut().zip(extra) {
                 *f += e;
             }
         }
-        forces
+        Ok(forces)
     }
 }
 
