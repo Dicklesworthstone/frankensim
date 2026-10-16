@@ -1,0 +1,950 @@
+//! Opt-in linear propagation; the reference Gonzalez path is unchanged.
+//!
+//! Exact ZOH retains the full state and all damping/coupling entries. A Jacobi
+//! basis balances the quadratic energy before a dense exponential; it is not
+//! modal truncation. Held-force work and loss are independently integrated by
+//! a Van Loan block exponential, not inferred from the energy difference.
+//!
+//! Frequency matching replaces Q by Q + delta_Q in the Gonzalez Hamiltonian.
+//! In energy coordinates K = sqrt(Q) J sqrt(Q), each eigenvalue omega^2 of
+//! -K^2 gets the factor tan(omega*dt/2)/(omega*dt/2). Thus the lossless linear
+//! Cayley map has exactly the original phase below pi. Nonlinear storage is
+//! retained verbatim. The ledger is for this MODIFIED Hamiltonian; static
+//! compliance and damped rates are not exact in this mode. Use ZOH for held
+//! linear input. Neither mode certifies a nonlinear trajectory or a render.
+
+use crate::{PhsError, PortHamiltonian, StepRecord, Storage, discrete_gradient};
+use fs_la::eigen::{admit_jacobi_eigh, jacobi_eigh};
+use fs_la::factor::lu;
+use fs_math::det;
+
+/// Explicit decomposition H(x) = x^T Q x / 2 + H_remainder(x).
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuadraticPart {
+    /// Symmetric PSD Q, row-major, in the owner's unchanged state order.
+    pub matrix: Vec<f64>,
+    /// True only if the remainder is identically zero, not merely small.
+    pub exact: bool,
+}
+
+/// The caller chooses the linear propagator explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinearPropagator {
+    /// Full coupled exponential, with zero-order-held input and integrated work.
+    ExactZoh,
+    /// Lossless-frequency-matched Gonzalez solve, with modified energy.
+    FrequencyMatched,
+}
+
+/// Dense preparation capacity and the frequency-matching band.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinearSplitBudget {
+    /// Maximum scalar basis coordinates, including zero-energy coordinates.
+    /// A second-order oscillator uses two; no coordinates are discarded.
+    pub max_modes: usize,
+    /// Maximum omega*dt for frequency matching; additionally must remain < pi.
+    pub max_omega_dt: f64,
+}
+
+/// Full-dimensional energy basis and lossless frequencies, bound to J/R/G/Q.
+#[derive(Clone, Debug)]
+pub struct LinearSplit {
+    n: usize,
+    m: usize,
+    j: Vec<f64>,
+    r: Vec<f64>,
+    g: Vec<f64>,
+    quadratic: QuadraticPart,
+    values: Vec<f64>,
+    basis: Vec<f64>,
+    frequencies: Vec<f64>,
+    frequency_basis: Vec<f64>,
+    budget: LinearSplitBudget,
+}
+
+fn refuse(what: &'static str) -> PhsError {
+    PhsError::LinearSplitBudget { what }
+}
+
+fn finite(values: &[f64]) -> bool {
+    values.iter().all(|v| v.is_finite())
+}
+
+fn identity(n: usize) -> Vec<f64> {
+    let mut a = vec![0.0; n * n];
+    for i in 0..n {
+        a[i * n + i] = 1.0;
+    }
+    a
+}
+
+fn product(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
+    let mut out = vec![0.0; n * n];
+    for i in 0..n {
+        for k in 0..n {
+            for j in 0..n {
+                out[i * n + j] += a[i * n + k] * b[k * n + j];
+            }
+        }
+    }
+    out
+}
+
+fn quadratic(a: &[f64], x: &[f64]) -> f64 {
+    let n = x.len();
+    let mut result = 0.0;
+    for i in 0..n {
+        for j in 0..n {
+            result += x[i] * a[i * n + j] * x[j];
+        }
+    }
+    result
+}
+
+// Bounded scaling/squaring with a converged Taylor series at ||A||_inf <= 1/2.
+// Dense work is deliberately capped; no sparse, cancellation-latency or
+// allocation-free claim. These caps apply before forming the block matrix.
+fn exponential(a: &[f64], n: usize) -> Result<Vec<f64>, PhsError> {
+    let mut norm = 0.0_f64;
+    for row in a.chunks_exact(n) {
+        norm = norm.max(row.iter().map(|v| v.abs()).sum());
+    }
+    if !norm.is_finite() {
+        return Err(refuse("nonfinite exponential operator"));
+    }
+    let mut scale = 1.0;
+    let mut squarings = 0;
+    while norm * scale > 0.5 {
+        if squarings == 48 {
+            return Err(refuse("exponential scaling exceeds 48 squarings"));
+        }
+        scale *= 0.5;
+        squarings += 1;
+    }
+    let scaled: Vec<_> = a.iter().map(|x| x * scale).collect();
+    let mut result = identity(n);
+    let mut term = result.clone();
+    let mut converged = false;
+    for order in 1..=32 {
+        term = product(&term, &scaled, n);
+        let mut largest = 0.0_f64;
+        for (sum, value) in result.iter_mut().zip(&mut term) {
+            *value /= f64::from(order);
+            *sum += *value;
+            largest = largest.max(value.abs());
+        }
+        if largest <= 0.25 * f64::EPSILON {
+            converged = true;
+            break;
+        }
+    }
+    if !converged {
+        return Err(refuse("exponential series did not converge"));
+    }
+    for _ in 0..squarings {
+        result = product(&result, &result, n);
+    }
+    if !finite(&result) {
+        return Err(refuse("exponential is unrepresentable"));
+    }
+    Ok(result)
+}
+
+/// Prepare without probing H or dropping any state, damping, or port terms.
+///
+/// # Errors
+/// Refuses absent explicit quadratic data, capacity, malformed raw systems,
+/// nonfinite/negative energy eigenvalues, or an inaccurate eigendecomposition.
+pub fn split_quadratic(
+    sys: &PortHamiltonian,
+    budget: LinearSplitBudget,
+) -> Result<LinearSplit, PhsError> {
+    let (n, m) = (sys.n, sys.m);
+    let extent = n.checked_mul(n).ok_or_else(|| refuse("state extent"))?;
+    let block = n
+        .checked_add(m)
+        .and_then(|x| x.checked_add(1))
+        .and_then(|x| x.checked_mul(2))
+        .ok_or_else(|| refuse("ZOH block extent"))?;
+    if n == 0
+        || n > budget.max_modes
+        || block > 256
+        || !budget.max_omega_dt.is_finite()
+        || budget.max_omega_dt <= 0.0
+    {
+        return Err(refuse(
+            "state capacity, ZOH block <= 256, and positive finite band required",
+        ));
+    }
+    if sys.j.len() != extent
+        || sys.r.len() != extent
+        || sys.g.len() != n.checked_mul(m).ok_or_else(|| refuse("port extent"))?
+        || !finite(&sys.j)
+        || !finite(&sys.r)
+        || !finite(&sys.g)
+    {
+        return Err(refuse("finite J/R/G shapes required"));
+    }
+    crate::require_skew(&sys.j, n, "split J")?;
+    crate::require_symmetric(&sys.r, n, "split R")?;
+    admit_jacobi_eigh(n).map_err(|_| refuse("Jacobi work admission"))?;
+    crate::require_psd(&sys.r, n, "split R")?;
+    let part = sys
+        .storage
+        .quadratic_part()
+        .ok_or_else(|| refuse("storage has no explicit quadratic part"))?;
+    if part.matrix.len() != extent || !finite(&part.matrix) {
+        return Err(refuse("finite quadratic matrix shape required"));
+    }
+    crate::require_symmetric(&part.matrix, n, "split Q")?;
+    let (values, basis) = checked_eigh(&part.matrix, n)?;
+    if values.iter().any(|v| *v < 0.0) {
+        return Err(PhsError::NotPsd { what: "split Q" });
+    }
+    let mut skew = vec![0.0; extent];
+    for i in 0..n {
+        for j in 0..n {
+            for a in 0..n {
+                for b in 0..n {
+                    skew[i * n + j] += basis[a * n + i] * sys.j[a * n + b] * basis[b * n + j];
+                }
+            }
+            skew[i * n + j] *= det::sqrt(values[i]) * det::sqrt(values[j]);
+        }
+    }
+    // K^T K = -K^2; forming the Gram matrix preserves exact symmetry.
+    let mut squared = vec![0.0; extent];
+    for i in 0..n {
+        for j in i..n {
+            let value = (0..n).map(|k| skew[k * n + i] * skew[k * n + j]).sum();
+            squared[i * n + j] = value;
+            squared[j * n + i] = value;
+        }
+    }
+    if !finite(&squared) {
+        return Err(refuse("frequency operator overflow"));
+    }
+    let (omega2, frequency_basis) = checked_eigh(&squared, n)?;
+    if omega2.iter().any(|v| *v < 0.0) {
+        return Err(refuse("negative squared frequency"));
+    }
+    let frequencies = omega2.into_iter().map(det::sqrt).collect();
+    Ok(LinearSplit {
+        n,
+        m,
+        j: sys.j.clone(),
+        r: sys.r.clone(),
+        g: sys.g.clone(),
+        quadratic: part,
+        values,
+        basis,
+        frequencies,
+        frequency_basis,
+        budget,
+    })
+}
+
+fn checked_eigh(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), PhsError> {
+    let (values, vectors) = jacobi_eigh(a, n);
+    let scale = a.iter().fold(f64::MIN_POSITIVE, |s, v| s.max(v.abs()));
+    for k in 0..n {
+        for i in 0..n {
+            let av: f64 = (0..n).map(|j| a[i * n + j] * vectors[j * n + k]).sum();
+            if !av.is_finite()
+                || (av - values[k] * vectors[i * n + k]).abs() > 1e-12 * n as f64 * scale
+            {
+                return Err(PhsError::Eigen);
+            }
+        }
+    }
+    if !finite(&values) || !finite(&vectors) {
+        return Err(PhsError::Eigen);
+    }
+    Ok((values, vectors))
+}
+
+impl LinearSplit {
+    /// Frequencies of all energy-basis coordinates [rad/s], ascending.
+    /// Each oscillatory pair occurs twice; zero modes remain present.
+    #[must_use]
+    pub fn angular_frequencies_rad_s(&self) -> &[f64] {
+        &self.frequencies
+    }
+
+    /// The matched Hamiltonian's quadratic correction in original coordinates.
+    /// Its static compliance change must be disclosed by a consumer.
+    pub fn quadratic_correction(&self, dt: f64) -> Result<Vec<f64>, PhsError> {
+        if !dt.is_finite() || dt < 0.0 {
+            return Err(refuse("finite nonnegative dt required"));
+        }
+        let mut factors = Vec::with_capacity(self.n);
+        for &omega in &self.frequencies {
+            let z = omega * dt;
+            if !z.is_finite() || z >= core::f64::consts::PI || z > self.budget.max_omega_dt {
+                return Err(PhsError::FrequencyMatchUnadmitted { omega_dt: z });
+            }
+            factors.push(if z == 0.0 {
+                0.0
+            } else {
+                det::tan(0.5 * z) / (0.5 * z) - 1.0
+            });
+        }
+        let n = self.n;
+        let mut directions = vec![0.0; n * n];
+        for i in 0..n {
+            for k in 0..n {
+                for j in 0..n {
+                    directions[i * n + k] += self.basis[i * n + j]
+                        * det::sqrt(self.values[j])
+                        * self.frequency_basis[j * n + k];
+                }
+            }
+        }
+        let mut correction = vec![0.0; n * n];
+        for i in 0..n {
+            for j in i..n {
+                let value = (0..n)
+                    .map(|k| directions[i * n + k] * factors[k] * directions[j * n + k])
+                    .sum();
+                correction[i * n + j] = value;
+                correction[j * n + i] = value;
+            }
+        }
+        if !finite(&correction) {
+            return Err(refuse("matched quadratic energy overflow"));
+        }
+        Ok(correction)
+    }
+}
+
+/// Step the complete state. Errors publish no state and never switch propagator.
+///
+/// ZOH is admitted only for explicitly quadratic storage. Frequency matching
+/// keeps the full nonlinear remainder in a strict Gonzalez/Newton solve.
+pub fn step_split(
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    prop: LinearPropagator,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+) -> Result<StepRecord, PhsError> {
+    if sys.n != split.n
+        || sys.m != split.m
+        || sys.j != split.j
+        || sys.r != split.r
+        || sys.g != split.g
+        || sys.storage.quadratic_part().as_ref() != Some(&split.quadratic)
+    {
+        return Err(refuse("split does not match J/R/G/storage"));
+    }
+    if x0.len() != split.n
+        || u.len() != split.m
+        || !finite(x0)
+        || !finite(u)
+        || !dt.is_finite()
+        || dt < 0.0
+    {
+        return Err(refuse("finite state/input and nonnegative dt required"));
+    }
+    match prop {
+        LinearPropagator::ExactZoh => exact_zoh(sys, split, x0, u, dt),
+        LinearPropagator::FrequencyMatched => {
+            let correction = split.quadratic_correction(dt)?;
+            let storage = MatchedStorage {
+                original: sys.storage.as_ref(),
+                correction: &correction,
+            };
+            gonzalez(sys, &storage, x0, u, dt)
+        }
+    }
+}
+
+fn exact_zoh(
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+) -> Result<StepRecord, PhsError> {
+    if !split.quadratic.exact {
+        return Err(refuse("ZOH requires identically quadratic storage"));
+    }
+    if dt == 0.0 {
+        return Ok(StepRecord {
+            x: x0.to_vec(),
+            y: sys.output(x0),
+            delta_h: 0.0,
+            supplied: 0.0,
+            dissipated: 0.0,
+            newton_iters: 0,
+            solver_residual: 0.0,
+        });
+    }
+    let n = split.n;
+    let d = n + 1 + split.m;
+    let weights: Vec<_> = split
+        .values
+        .iter()
+        .map(|&v| if v > 0.0 { det::sqrt(v) } else { 1.0 })
+        .collect();
+    // z = W V^T x, x = V W^-1 z; zero-energy directions retain unit scale.
+    let mut forward = vec![0.0; n * n];
+    let mut inverse = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            forward[i * n + j] = weights[i] * split.basis[j * n + i];
+            inverse[j * n + i] = split.basis[j * n + i] / weights[i];
+        }
+    }
+    let mut flow = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            for k in 0..n {
+                flow[i * n + j] +=
+                    (sys.j[i * n + k] - sys.r[i * n + k]) * split.quadratic.matrix[k * n + j];
+            }
+        }
+    }
+    let balanced = product(&product(&forward, &flow, n), &inverse, n);
+    let effort_map = product(&split.quadratic.matrix, &inverse, n);
+    let mut b = vec![0.0; d * d];
+    let mut initial = vec![0.0; d];
+    initial[n] = 1.0;
+    for i in 0..n {
+        initial[i] = (0..n).map(|j| forward[i * n + j] * x0[j]).sum();
+        for j in 0..n {
+            b[i * d + j] = balanced[i * n + j];
+        }
+        for a in 0..n {
+            for p in 0..split.m {
+                b[i * d + n] += forward[i * n + a] * sys.g[a * split.m + p] * u[p];
+            }
+        }
+    }
+    // Integrators for EVERY port output, independently of the held input.
+    for p in 0..split.m {
+        for j in 0..n {
+            for a in 0..n {
+                b[(n + 1 + p) * d + j] += sys.g[a * split.m + p] * effort_map[a * n + j];
+            }
+        }
+    }
+    let mut loss = vec![0.0; d * d];
+    let r_effort = product(&sys.r, &effort_map, n);
+    for i in 0..n {
+        for j in 0..n {
+            loss[i * d + j] = (0..n)
+                .map(|a| effort_map[a * n + i] * r_effort[a * n + j])
+                .sum();
+        }
+    }
+    // Van Loan: exp([ -B^T C; 0 B ] dt) = [ E^-T X; 0 E ],
+    // W = E^T X = integral exp(B^T t) C exp(B t) dt.
+    let dim = 2 * d;
+    let mut block = vec![0.0; dim * dim];
+    for i in 0..d {
+        for j in 0..d {
+            block[i * dim + j] = -dt * b[j * d + i];
+            block[i * dim + d + j] = dt * loss[i * d + j];
+            block[(d + i) * dim + d + j] = dt * b[i * d + j];
+        }
+    }
+    let exp = exponential(&block, dim)?;
+    let mut end = vec![0.0; d];
+    let mut cross = vec![0.0; d];
+    for i in 0..d {
+        for j in 0..d {
+            end[i] += exp[(d + i) * dim + d + j] * initial[j];
+            cross[i] += exp[i * dim + d + j] * initial[j];
+        }
+    }
+    let dissipated: f64 = end.iter().zip(&cross).map(|(a, b)| a * b).sum();
+    let x: Vec<_> = (0..n)
+        .map(|i| (0..n).map(|j| inverse[i * n + j] * end[j]).sum())
+        .collect();
+    let y: Vec<_> = end[n + 1..].iter().map(|v| v / dt).collect();
+    let supplied = end[n + 1..].iter().zip(u).map(|(a, b)| a * b).sum::<f64>();
+    let delta_h = sys.hamiltonian(&x) - sys.hamiltonian(x0);
+    let energy_scale = sys
+        .hamiltonian(x0)
+        .abs()
+        .max(sys.hamiltonian(&x).abs())
+        .max(dissipated.abs())
+        .max(supplied.abs())
+        .max(f64::MIN_POSITIVE);
+    let defect = delta_h + dissipated - supplied;
+    if !finite(&x)
+        || !finite(&y)
+        || !finite(&[delta_h, dissipated, supplied])
+        || dissipated < -1e-12 * energy_scale
+        || defect.abs() > 1e-12 * energy_scale
+    {
+        return Err(refuse(
+            "independent exponential energy balance exceeds 1e-12 relative",
+        ));
+    }
+    Ok(StepRecord {
+        x,
+        y,
+        delta_h,
+        dissipated,
+        supplied,
+        newton_iters: 0,
+        solver_residual: 0.0,
+    })
+}
+
+struct MatchedStorage<'a> {
+    original: &'a dyn Storage,
+    correction: &'a [f64],
+}
+impl Storage for MatchedStorage<'_> {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        self.original.hamiltonian(x) + 0.5 * quadratic(self.correction, x)
+    }
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        self.original.gradient(x, out);
+        for i in 0..x.len() {
+            for j in 0..x.len() {
+                out[i] += self.correction[i * x.len() + j] * x[j];
+            }
+        }
+    }
+}
+
+fn gonzalez(
+    sys: &PortHamiltonian,
+    storage: &dyn Storage,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+) -> Result<StepRecord, PhsError> {
+    let n = sys.n;
+    let forcing: Vec<f64> = (0..n)
+        .map(|i| (0..sys.m).map(|p| sys.g[i * sys.m + p] * u[p]).sum())
+        .collect();
+    let residual = |x: &[f64]| {
+        let dg = discrete_gradient(storage, x0, x);
+        (0..n)
+            .map(|i| {
+                x[i] - x0[i]
+                    - dt * (forcing[i]
+                        + (0..n)
+                            .map(|j| (sys.j[i * n + j] - sys.r[i * n + j]) * dg[j])
+                            .sum::<f64>())
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut x = x0.to_vec();
+    for iterations in 0..=50 {
+        let res = residual(&x);
+        if !finite(&res) || !finite(&x) {
+            return Err(refuse("nonfinite Gonzalez trial"));
+        }
+        let norm = res.iter().fold(0.0_f64, |s, v| s.max(v.abs()));
+        let scale = x
+            .iter()
+            .chain(x0)
+            .fold(f64::MIN_POSITIVE, |s, v| s.max(v.abs()))
+            .max(forcing.iter().fold(0.0_f64, |s, v| s.max(dt * v.abs())));
+        if norm <= 1e-13 * scale {
+            let dg = discrete_gradient(storage, x0, &x);
+            let dissipated = dt * quadratic(&sys.r, &dg);
+            let y = sys.output_from_effort(&dg);
+            let supplied = dt * u.iter().zip(&y).map(|(a, b)| a * b).sum::<f64>();
+            let delta_h = storage.hamiltonian(&x) - storage.hamiltonian(x0);
+            if !finite(&[delta_h, dissipated, supplied]) {
+                return Err(refuse("nonfinite matched ledger"));
+            }
+            return Ok(StepRecord {
+                x,
+                y,
+                dissipated,
+                supplied,
+                delta_h,
+                newton_iters: iterations,
+                solver_residual: norm,
+            });
+        }
+        if iterations == 50 {
+            return Err(PhsError::NewtonStalled { residual: norm });
+        }
+        let mut jac = vec![0.0; n * n];
+        for j in 0..n {
+            let h = 1e-5 * x[j].abs().max(scale);
+            if h == 0.0 || !h.is_finite() {
+                return Err(refuse("Gonzalez difference increment"));
+            }
+            let mut plus = x.clone();
+            let mut minus = x.clone();
+            plus[j] += h;
+            minus[j] -= h;
+            let rp = residual(&plus);
+            let rm = residual(&minus);
+            for i in 0..n {
+                jac[i * n + j] = (rp[i] - rm[i]) / (2.0 * h);
+            }
+        }
+        if !finite(&jac) {
+            return Err(refuse("nonfinite Gonzalez Jacobian"));
+        }
+        let factor = lu(&jac, n).map_err(|_| PhsError::NewtonStalled { residual: norm })?;
+        let mut delta = res;
+        factor.solve(&mut delta);
+        for i in 0..n {
+            x[i] -= delta[i];
+        }
+    }
+    unreachable!("bounded Newton loop always accepts or refuses")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{QuadraticStorage, ScalarLaw, SeparableStorage, mass_spring_damper};
+
+    fn budget(n: usize) -> LinearSplitBudget {
+        LinearSplitBudget {
+            max_modes: n,
+            max_omega_dt: core::f64::consts::PI,
+        }
+    }
+
+    // G1: independent closed-form underdamped oscillator, mass = 1.
+    fn analytic(omega: f64, zeta: f64, t: f64, force: f64, initial: [f64; 2]) -> [f64; 2] {
+        let a = zeta * omega;
+        let w = omega * det::sqrt(1.0 - zeta * zeta);
+        let equilibrium = force / (omega * omega);
+        let q = initial[0] - equilibrium;
+        let b = (initial[1] + a * q) / w;
+        let (c, s, e) = (det::cos(w * t), det::sin(w * t), det::exp(-a * t));
+        [
+            equilibrium + e * (q * c + b * s),
+            e * ((-a * q + w * b) * c + (-a * b - w * q) * s),
+        ]
+    }
+
+    fn relative(actual: f64, expected: f64, scale: f64, tolerance: f64) {
+        assert!(
+            (actual - expected).abs() <= tolerance * scale,
+            "actual={actual:.17e} expected={expected:.17e} scale={scale:.3e}"
+        );
+    }
+
+    fn phase(map: [[f64; 2]; 2]) -> f64 {
+        let re = 0.5 * (map[0][0] + map[1][1]);
+        let determinant = map[0][0] * map[1][1] - map[0][1] * map[1][0];
+        let im = det::sqrt(determinant - re * re);
+        det::atan2(im, re).abs()
+    }
+
+    fn map(
+        sys: &PortHamiltonian,
+        split: &LinearSplit,
+        prop: LinearPropagator,
+        dt: f64,
+    ) -> [[f64; 2]; 2] {
+        let a = step_split(sys, split, prop, &[1.0, 0.0], &[0.0], dt)
+            .unwrap()
+            .x;
+        let b = step_split(sys, split, prop, &[0.0, 1.0], &[0.0], dt)
+            .unwrap()
+            .x;
+        [[a[0], b[0]], [a[1], b[1]]]
+    }
+
+    #[test]
+    fn exact_zoh_matches_closed_form_damped_oscillator() {
+        let (omega, zeta, dt, force) = (2.0, 0.01, 0.0005, 0.3);
+        let sys = mass_spring_damper(1.0, omega * omega, 2.0 * zeta * omega).unwrap();
+        let split = split_quadratic(&sys, budget(2)).unwrap();
+        let initial = [0.7, -0.2];
+        let mut x = initial.to_vec();
+        for _ in 0..10_000 {
+            x = step_split(&sys, &split, LinearPropagator::ExactZoh, &x, &[force], dt)
+                .unwrap()
+                .x;
+        }
+        let expected = analytic(omega, zeta, 10_000.0 * dt, force, initial);
+        for i in 0..2 {
+            relative(x[i], expected[i], 1.0, 1e-12);
+        }
+    }
+
+    #[test]
+    fn quadratic_storage_steps_without_frequency_warping() {
+        let omega = 17.0;
+        let sys = mass_spring_damper(1.0, omega * omega, 0.0).unwrap();
+        let split = split_quadratic(&sys, budget(2)).unwrap();
+        assert_eq!(split.angular_frequencies_rad_s().len(), 2);
+        for z in [0.1, 1.0, 2.5] {
+            for prop in [
+                LinearPropagator::ExactZoh,
+                LinearPropagator::FrequencyMatched,
+            ] {
+                let observed = phase(map(&sys, &split, prop, z / omega));
+                let cents = 1200.0 * det::ln(observed / z) / core::f64::consts::LN_2;
+                assert!(
+                    cents.abs() <= 0.01,
+                    "{prop:?}: {cents} cents at omega*dt={z}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn damped_mode_decays_at_exact_rate() {
+        let (omega, zeta) = (19.0, 0.13);
+        let sys = mass_spring_damper(1.0, omega * omega, 2.0 * zeta * omega).unwrap();
+        let split = split_quadratic(&sys, budget(2)).unwrap();
+        for z in [0.1, 1.0, 2.5] {
+            let a = map(&sys, &split, LinearPropagator::ExactZoh, z / omega);
+            let radius = det::sqrt(a[0][0] * a[1][1] - a[0][1] * a[1][0]);
+            let expected = det::exp(-zeta * z);
+            relative(radius, expected, expected, 1e-12);
+        }
+    }
+
+    #[test]
+    fn frequency_matched_refuses_at_pi() {
+        let sys = mass_spring_damper(1.0, 1.0, 0.0).unwrap();
+        let split = split_quadratic(&sys, budget(2)).unwrap();
+        let pi = core::f64::consts::PI;
+        // Band admission is separate from representability/Newton admission:
+        // an arbitrarily near-pole step need not have a representable residual.
+        assert!(split.quadratic_correction(pi * (1.0 - 1e-9)).is_ok());
+        assert!(
+            matches!(step_split(&sys,&split,LinearPropagator::FrequencyMatched,&[1.0,0.0],&[0.0],pi),
+            Err(PhsError::FrequencyMatchUnadmitted { omega_dt }) if omega_dt == pi)
+        );
+        let limited = split_quadratic(
+            &sys,
+            LinearSplitBudget {
+                max_modes: 2,
+                max_omega_dt: 1.0,
+            },
+        )
+        .unwrap();
+        assert!(limited.quadratic_correction(1.0).is_ok());
+        assert!(matches!(
+            limited.quadratic_correction(1.0 + 1e-12),
+            Err(PhsError::FrequencyMatchUnadmitted { .. })
+        ));
+    }
+
+    #[test]
+    fn split_step_keeps_discrete_energy_identity() {
+        let sys = mass_spring_damper(1.0, 25.0, 0.4).unwrap();
+        let split = split_quadratic(&sys, budget(2)).unwrap();
+        let (x, u, dt) = ([0.3, -0.7], [0.8], 0.1);
+        for prop in [
+            LinearPropagator::ExactZoh,
+            LinearPropagator::FrequencyMatched,
+        ] {
+            let record = step_split(&sys, &split, prop, &x, &u, dt).unwrap();
+            assert!(record.balance_residual().abs() <= 1e-12 * sys.hamiltonian(&x));
+            assert!(record.dissipated > 0.0);
+            if prop == LinearPropagator::FrequencyMatched {
+                let correction = split.quadratic_correction(dt).unwrap();
+                let storage = MatchedStorage {
+                    original: sys.storage.as_ref(),
+                    correction: &correction,
+                };
+                let dg = discrete_gradient(&storage, &x, &record.x);
+                relative(
+                    record.dissipated,
+                    dt * quadratic(&sys.r, &dg),
+                    record.dissipated,
+                    1e-12,
+                );
+            } else {
+                // For the force port y = velocity: integral y dt = q1-q0.
+                relative(record.supplied, u[0] * (record.x[0] - x[0]), 1.0, 1e-12);
+                let expected = analytic(5.0, 0.04, dt, u[0], x);
+                for i in 0..2 {
+                    relative(record.x[i], expected[i], 1.0, 1e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nonquadratic_remainder_still_uses_gonzalez() {
+        let sys = crate::duffing_oscillator(1.0, 9.0, 7.0, 0.0).unwrap();
+        let split = split_quadratic(&sys, budget(2)).unwrap();
+        assert!(
+            step_split(
+                &sys,
+                &split,
+                LinearPropagator::ExactZoh,
+                &[0.3, 0.2],
+                &[0.0],
+                0.1
+            )
+            .is_err()
+        );
+        let correction = split.quadratic_correction(0.1).unwrap();
+        let storage = MatchedStorage {
+            original: sys.storage.as_ref(),
+            correction: &correction,
+        };
+        let mut x = vec![0.3, 0.2];
+        let h0 = storage.hamiltonian(&x);
+        for _ in 0..100 {
+            let record = step_split(
+                &sys,
+                &split,
+                LinearPropagator::FrequencyMatched,
+                &x,
+                &[0.0],
+                0.1,
+            )
+            .unwrap();
+            assert!(record.balance_residual().abs() <= 1e-12 * h0);
+            x = record.x;
+        }
+        relative(storage.hamiltonian(&x), h0, h0, 1e-12);
+        let linear = mass_spring_damper(1.0, 9.0, 0.0).unwrap();
+        let linear_split = split_quadratic(&linear, budget(2)).unwrap();
+        let linear_step = step_split(
+            &linear,
+            &linear_split,
+            LinearPropagator::FrequencyMatched,
+            &[0.3, 0.2],
+            &[0.0],
+            0.1,
+        )
+        .unwrap();
+        let nonlinear_step = step_split(
+            &sys,
+            &split,
+            LinearPropagator::FrequencyMatched,
+            &[0.3, 0.2],
+            &[0.0],
+            0.1,
+        )
+        .unwrap();
+        assert!(
+            (nonlinear_step.x[1] - linear_step.x[1]).abs() > 1e-3,
+            "quartic force must be live"
+        );
+    }
+
+    #[test]
+    fn split_budget_cap_and_cap_plus_one() {
+        let one = mass_spring_damper(1.0, 1.0, 0.0).unwrap();
+        assert!(split_quadratic(&one, budget(2)).is_ok());
+        assert!(matches!(
+            split_quadratic(&one, budget(1)),
+            Err(PhsError::LinearSplitBudget { .. })
+        ));
+        let three = PortHamiltonian::new(
+            3,
+            0,
+            vec![0.0; 9],
+            vec![0.0; 9],
+            vec![],
+            Box::new(QuadraticStorage::new(identity(3), 3).unwrap()),
+        )
+        .unwrap();
+        assert!(matches!(
+            split_quadratic(&three, budget(2)),
+            Err(PhsError::LinearSplitBudget { .. })
+        ));
+        assert!(split_quadratic(&three, budget(3)).is_ok());
+    }
+
+    #[test]
+    fn exact_zoh_preserves_static_compliance_and_free_mass() {
+        let sys = mass_spring_damper(2.0, 25.0, 0.8).unwrap();
+        let split = split_quadratic(&sys, budget(2)).unwrap();
+        let record = step_split(
+            &sys,
+            &split,
+            LinearPropagator::ExactZoh,
+            &[2.0 / 25.0, 0.0],
+            &[2.0],
+            0.3,
+        )
+        .unwrap();
+        relative(record.x[0], 2.0 / 25.0, 1.0, 1e-12);
+        relative(record.x[1], 0.0, 1.0, 1e-12);
+        let free = mass_spring_damper(2.0, 0.0, 0.0).unwrap();
+        let prepared = split_quadratic(&free, budget(2)).unwrap();
+        let result = step_split(
+            &free,
+            &prepared,
+            LinearPropagator::ExactZoh,
+            &[0.3, 0.4],
+            &[0.7],
+            0.2,
+        )
+        .unwrap();
+        relative(
+            result.x[0],
+            0.3 + 0.4 / 2.0 * 0.2 + 0.5 * 0.7 / 2.0 * 0.2 * 0.2,
+            1.0,
+            1e-12,
+        );
+        relative(result.x[1], 0.4 + 0.7 * 0.2, 1.0, 1e-12);
+    }
+
+    #[test]
+    fn unsupported_storage_stale_split_and_nonfinite_inputs_refuse() {
+        let sys = mass_spring_damper(1.0, 1.0, 0.0).unwrap();
+        let split = split_quadratic(&sys, budget(2)).unwrap();
+        let changed = mass_spring_damper(1.0, 2.0, 0.0).unwrap();
+        assert!(
+            step_split(
+                &changed,
+                &split,
+                LinearPropagator::ExactZoh,
+                &[1.0, 0.0],
+                &[0.0],
+                0.1
+            )
+            .is_err()
+        );
+        for dt in [f64::NAN, f64::INFINITY, -1.0] {
+            assert!(
+                step_split(
+                    &sys,
+                    &split,
+                    LinearPropagator::ExactZoh,
+                    &[1.0, 0.0],
+                    &[0.0],
+                    dt
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            step_split(
+                &sys,
+                &split,
+                LinearPropagator::ExactZoh,
+                &[f64::NAN, 0.0],
+                &[0.0],
+                0.1
+            )
+            .is_err()
+        );
+        let unsupported = PortHamiltonian::new(
+            1,
+            0,
+            vec![0.0],
+            vec![0.0],
+            vec![],
+            Box::new(SeparableStorage::new(vec![ScalarLaw {
+                h: |x| 0.5 * x * x,
+                dh: |x| x,
+            }])),
+        )
+        .unwrap();
+        assert!(matches!(
+            split_quadratic(&unsupported, budget(1)),
+            Err(PhsError::LinearSplitBudget { .. })
+        ));
+    }
+}
