@@ -1,10 +1,12 @@
-//! fs-lbm — lattice Boltzmann cores (D2Q9 and D3Q19). Layer: L3.
+//! fs-lbm — lattice Boltzmann cores (D2Q9, D3Q19 and D3Q27). Layer: L3.
 //!
 //! Lattice Boltzmann is the many-core queen. The crate provides a D2Q9 BGK
 //! stream-and-collide kernel and a tile-major D3Q19 BGK/Guo kernel with
 //! deterministic link-wise wall and regularized open boundaries. These paths
 //! reproduce analytic Poiseuille fixtures from first principles and share the
 //! LATTICE-SCALING ASSISTANT.
+//! [`d3q27`] adds checked full central/cumulant collisions; [`lattice3`]
+//! supplies their explicit acoustic scaling and shared reference tile grid.
 //!
 //! The scaling assistant ([`ScalingPlan`]) automates the `dx`/`dt`/`τ`/`Mach`
 //! bookkeeping that is a chronic source of human LBM error: given a Reynolds
@@ -18,7 +20,9 @@ pub use fs_evidence::Color;
 pub mod conjugate;
 pub mod core2;
 pub mod d3q19;
+pub mod d3q27;
 pub mod freesurface;
+pub mod lattice3;
 pub mod material;
 pub mod perf;
 pub mod refine;

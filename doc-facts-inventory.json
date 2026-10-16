@@ -1117,6 +1117,7 @@
     "crates/fs-lbm/tests/d3q19_coupled.rs",
     "crates/fs-lbm/tests/d3q19_freesurface3.rs",
     "crates/fs-lbm/tests/d3q19_sparse.rs",
+    "crates/fs-lbm/tests/d3q27_battery.rs",
     "crates/fs-lbm/tests/dev_diag.rs",
     "crates/fs-lbm/tests/extensions.rs",
     "crates/fs-lbm/tests/lbm.rs",

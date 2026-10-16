@@ -33,6 +33,8 @@ fs-sparse = { path = "../fs-sparse" }
 fs-solver = { path = "../fs-solver", optional = true }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-ladder = { path = "../fs-ladder" }
 fs-convection = { path = "../fs-convection" }
 fs-fft = { path = "../fs-fft" }
 fs-obs = { path = "../fs-obs" }

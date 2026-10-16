@@ -3,6 +3,25 @@
   "doctrine": "Music-program claims registry (bead frankensim-music-claims-registry-mc31g; program root frankensim-music-v8-root-3ez8g). D19: a claim is a (filling, image, qoi) row, never prose. D21: rows transition gate status (ungated|green|refused) and are never deleted; xtask check-instrument-claims refuses removal against the committed predecessor. D25: live_default=yes requires gate=green AND a budget_row (real-time is a measured claim). Seed state 2026-08-14: every currently-live image enters ungated with empty evidence - nothing is green until a per-track gates bead lands reviewed evidence. Flags are string enums because the in-house JSON parser collapses booleans.",
   "rows": [
     {
+      "filling": "resolved-flow",
+      "image": "d3q27-full-cumulant",
+      "qoi": "rotational-anisotropy-and-collision-dissipation",
+      "owner_crates": ["fs-lbm"],
+      "exactness": ["X-Est"],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {"kind":"test","ref":"crates/fs-lbm/tests/d3q27_battery.rs::rotational_invariance_d3q27_vs_d3q19_control"},
+        {"kind":"test","ref":"crates/fs-lbm/tests/d3q27_battery.rs::collision_dissipation_ladder"},
+        {"kind":"test","ref":"crates/fs-lbm/tests/d3q27_battery.rs::full_cumulants_through_sixth_order_match_independent_partitions"},
+        {"kind":"test","ref":"scripts/e2e/music/lbm_qualification.sh"}
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "IRP M3.2-W1 (.130), native batch pending. Complete D3Q27 central/cumulant reference operators with Geier2015 ten rate groups, cubic-alias correction and fifth/sixth couplings; no ReducedCumulant substitution. Explicit gas-derived acoustic scaling and shared checked tile transport with failure-atomic publication. G1 physical nu/c shear-decay and higher-rate ladders; G2 three-rung axial Gaussian cross-section with a like-polynomial D3Q19 BGK control that must be >=2x worse or the fixture refuses. Not a White-Chong nozzle reproduction, full jet/edge-tone, NSF, multiblock, high-Re performance or instrument qualification. Existing D3Q19 owners/semantic versions are retained; new D3Q27 golden surface only. No new production dependencies, schema migration or duplicate specialized sparse solver. Downstream .131/.133/.45 consumers must use explicit configurations and retain their own qualification."
+    },
+    {
       "filling": "structural-modal",
       "image": "computed-broadband-receiver",
       "qoi": "held-force-off-resonance-pressure",
