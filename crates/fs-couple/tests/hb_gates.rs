@@ -966,15 +966,69 @@ fn diag_hb003_harmonic_convergence_table() {
                     )
                     .ok()
                 }) {
-                    Some(o) => println!(
-                        "law={law} pm={pm} N={n}: f={:.17e} a1={:.17e} dc={:.17e} dc_admittance={:.17e} residual={:.17e} iterations={}",
-                        o.omega / TAU,
-                        o.first_harmonic_amplitude(0),
-                        o.coeffs[0][0].re,
-                        counterfactual.port(C64::ZERO)[0].re,
-                        o.residual,
-                        o.residual_trace.len()
-                    ),
+                    Some(o) => {
+                        println!(
+                            "law={law} pm={pm} N={n}: f={:.17e} a1={:.17e} dc={:.17e} dc_admittance={:.17e} residual={:.17e} iterations={}",
+                            o.omega / TAU,
+                            o.first_harmonic_amplitude(0),
+                            o.coeffs[0][0].re,
+                            counterfactual.port(C64::ZERO)[0].re,
+                            o.residual,
+                            o.residual_trace.len()
+                        );
+                        if pm == 1200.0 && [9, 11].contains(&n) {
+                            // Keep the converged orbit FIXED. Only refine the
+                            // physical nonlinear-flow Fourier quadrature, so
+                            // any residual growth diagnoses AFT aliasing rather
+                            // than a new orbit selected by a different seed.
+                            for samples in [64_usize, 256, 1024, 4096] {
+                                let mut flows = vec![0.0; samples];
+                                for (j, flow) in flows.iter_mut().enumerate() {
+                                    let theta = TAU * j as f64 / samples as f64;
+                                    counterfactual.island(
+                                        theta / o.omega,
+                                        &[o.sample(0, theta)],
+                                        std::slice::from_mut(flow),
+                                    );
+                                }
+                                let mut norm_sq = 0.0;
+                                for harmonic in 0..=n {
+                                    let mut g = C64::ZERO;
+                                    for (j, &flow) in flows.iter().enumerate() {
+                                        let phase =
+                                            harmonic as f64 * TAU * j as f64 / samples as f64;
+                                        g = g + C64::new(
+                                            fs_math::det::cos(phase),
+                                            -fs_math::det::sin(phase),
+                                        )
+                                        .scale(flow / samples as f64);
+                                    }
+                                    let p = counterfactual
+                                        .port(C64::new(0.0, harmonic as f64 * o.omega))[0];
+                                    let r = p * o.coeffs[0][harmonic] - g;
+                                    norm_sq += if harmonic == 0 {
+                                        r.re * r.re
+                                    } else {
+                                        r.norm_sq()
+                                    };
+                                }
+                                let residual = fs_math::det::sqrt(norm_sq);
+                                if samples == 64 {
+                                    let scale = fs_math::det::sqrt(
+                                        o.coeffs[0].iter().map(|z| z.norm_sq()).sum(),
+                                    )
+                                    .max(1.0);
+                                    assert!(
+                                        residual < budget.tolerance * scale,
+                                        "independent discrete balance disagrees: {residual:e}"
+                                    );
+                                }
+                                println!(
+                                    "law={law} pm={pm} N={n} fixed_orbit_samples={samples}: physical_balance_residual={residual:.17e}"
+                                );
+                            }
+                        }
+                    }
                     None => println!("law={law} pm={pm} N={n}: refused"),
                 }
             }
