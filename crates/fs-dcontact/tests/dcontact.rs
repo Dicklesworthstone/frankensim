@@ -115,9 +115,48 @@ fn isolated_impact(mass: f64, k: f64, chi: f64, incoming: f64, dt: f64) -> (f64,
             )
             .unwrap();
         if x[0] > 0.0 && next[0] <= 0.0 && next[1] < 0.0 {
-            let fraction = x[0] / (x[0] - next[0]);
-            let momentum = (next[1] - x[1]).mul_add(fraction, x[1]);
-            return (time + fraction * dt, -momentum / (mass * incoming));
+            // Contact starts exactly at t=0, delta=0, v=incoming. Locate its
+            // END by solving the original implicit evolution from this same
+            // pre-event state, with the trial duration as the root variable.
+            // Interpolating endpoint q/p does not solve that evolution and can
+            // pollute the contact-time order and restitution near separation.
+            let (mut before, mut after) = (0.0, dt);
+            let mut event = next;
+            let mut event_dt = dt;
+            for _ in 0..56 {
+                let trial_dt = f64::midpoint(before, after);
+                if trial_dt == before || trial_dt == after {
+                    break;
+                }
+                let mut trial = [0.0; 2];
+                workspace
+                    .step_into_dissipative_controlled(
+                        &sys,
+                        &x,
+                        &[0.0],
+                        trial_dt,
+                        &mut trial,
+                        &mut output,
+                        &port,
+                        None,
+                        None,
+                        || false,
+                    )
+                    .unwrap();
+                if trial[0].abs() < event[0].abs() {
+                    event = trial;
+                    event_dt = trial_dt;
+                }
+                if trial[0] > 0.0 {
+                    before = trial_dt;
+                } else {
+                    after = trial_dt;
+                }
+            }
+            // One ppm of a step's travel is negligible against the 0.5%/1e-3
+            // physical gates and remains above the Newton roundoff floor.
+            assert!(event[0].abs() <= 1e-6 * incoming * dt);
+            return (time + event_dt, -event[1] / (mass * incoming));
         }
         x = next;
         time += dt;
