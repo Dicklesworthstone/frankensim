@@ -46,6 +46,9 @@
 
 use fs_la::factor::lu;
 
+/// Opt-in exact linear evolution and frequency-matched discrete gradients.
+pub mod linear_exact;
+
 /// Prepared collective lossless exchange of normalized coordinate banks.
 pub mod port_exchange;
 pub use port_exchange::{PortExchangeBudget, PortExchangeRecord, PreparedPortExchange};
@@ -64,6 +67,12 @@ pub trait Storage {
     fn hamiltonian(&self, x: &[f64]) -> f64;
     /// `grad H(x)` into `out` (efforts).
     fn gradient(&self, x: &[f64], out: &mut [f64]);
+
+    /// Explicit quadratic part in the original state order. `None` refuses
+    /// automatic splitting; numerical gradient probes never establish linearity.
+    fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
+        None
+    }
 }
 
 /// Quadratic storage `H = x^T Q x / 2` with `Q` symmetric PSD
@@ -93,6 +102,10 @@ impl QuadraticStorage {
 }
 
 impl Storage for QuadraticStorage {
+    fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
+        Some(linear_exact::QuadraticPart { matrix: self.q.clone(), exact: true })
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         let mut acc = 0.0;
         for i in 0..self.n {
@@ -161,6 +174,24 @@ pub struct SumStorage {
 }
 
 impl Storage for SumStorage {
+    fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
+        let a = self.a.0.quadratic_part()?;
+        let b = self.b.0.quadratic_part()?;
+        let (na, nb) = (self.a.1, self.b.1);
+        let n = na.checked_add(nb)?;
+        if a.matrix.len() != na.checked_mul(na)? || b.matrix.len() != nb.checked_mul(nb)? {
+            return None;
+        }
+        let mut matrix = vec![0.0; n.checked_mul(n)?];
+        for i in 0..na {
+            matrix[i*n..i*n+na].copy_from_slice(&a.matrix[i*na..(i+1)*na]);
+        }
+        for i in 0..nb {
+            matrix[(na+i)*n+na..(na+i+1)*n].copy_from_slice(&b.matrix[i*nb..(i+1)*nb]);
+        }
+        Some(linear_exact::QuadraticPart { matrix, exact: a.exact && b.exact })
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         let na = self.a.1;
         self.a.0.hamiltonian(&x[..na]) + self.b.0.hamiltonian(&x[na..])
@@ -176,6 +207,16 @@ impl Storage for SumStorage {
 /// Typed refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhsError {
+    /// Frequency matching crosses the caller's band or the tangent pole.
+    FrequencyMatchUnadmitted {
+        /// Largest angular frequency times step [rad].
+        omega_dt: f64,
+    },
+    /// Explicit split capacity, storage support, or represented arithmetic failed.
+    LinearSplitBudget {
+        /// Refused work or unsupported storage.
+        what: &'static str,
+    },
     /// A structure matrix is not (skew-)symmetric within tolerance.
     NotSymmetric {
         /// Which matrix.
@@ -207,6 +248,9 @@ pub enum PhsError {
 impl core::fmt::Display for PhsError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            PhsError::FrequencyMatchUnadmitted { omega_dt } => write!(f,
+                "frequency matching refuses omega*dt={omega_dt}; require the declared band and omega*dt < pi"),
+            PhsError::LinearSplitBudget { what } => write!(f, "linear split refused: {what}"),
             PhsError::NotSymmetric { what } => write!(f, "{what} violates its symmetry class"),
             PhsError::NotPsd { what } => write!(f, "{what} is not positive semidefinite"),
             PhsError::Dimension { what } => write!(f, "dimension mismatch: {what}"),
@@ -1000,18 +1044,21 @@ fn discrete_gradient_into_unchecked(
     }
 }
 
-/// One completed discrete-gradient step with its exact energy ledger.
+/// One completed step with its energy ledger.
+///
+/// `linear_exact::step_split(ExactZoh)` reports time-integrated port output
+/// and dissipation; Gonzalez paths report their discrete-gradient counterparts.
 #[derive(Debug, Clone)]
 pub struct StepRecord {
     /// New state.
     pub x: Vec<f64>,
-    /// Port output at the discrete gradient (power-conjugate to the
-    /// held input over the step).
+    /// Step-average power-conjugate output: discrete gradient for Gonzalez,
+    /// time integral divided by dt for exact ZOH.
     pub y: Vec<f64>,
     /// `H(x1) - H(x0)`.
     pub delta_h: f64,
-    /// `dt * dg^T R dg` — energy dissipated this step (>= 0 for an
-    /// admitted `R`).
+    /// Dissipated energy: `dt * dg^T R dg` for Gonzalez, or the independent
+    /// time integral of `grad H^T R grad H` for exact ZOH.
     pub dissipated: f64,
     /// `dt * u^T y` — energy supplied through the ports this step.
     pub supplied: f64,
@@ -1693,23 +1740,22 @@ pub fn compact_radiation_impedance(
     Ok((r_over * z0, x_over * z0))
 }
 
-/// Baffled circular-piston radiation impedance `(R, X)` [Pa s / m³]
-/// from the Rayleigh integral (half-space kernel `2G`).
+/// Exact uniform circular-piston acoustic impedance `p/U` [Pa s / m³].
 ///
-/// This is the all-`ka` flanged mouth: the same face load
-/// `fs_bem::helmholtz::baffled_piston_impedance` and the plate
-/// radiator already use. Low-`ka` it sits on
-/// `Z / Z0 = (ka)²/2 − i 8ka/(3π)`. It is not an unflanged pipe
-/// and not a 3-D jet.
+/// Infinite rigid baffle, homogeneous inviscid half-space, `e^{-iωt}`:
+/// `Z = (ρc/S) [1 - 2J₁(2ka)/(2ka) - i 2H₁(2ka)/(2ka)]`.
+/// Multiply by S for mean `p/v`, or S² for mechanical force/velocity.
+/// This is the sole piston owner; there is no spatial ring discretization.
+/// It does not represent an unbaffled pipe or a nonuniform vibrating face.
 ///
 /// # Errors
-/// [`PhsError::NotPsd`] on non-physical inputs.
+/// [`PhsError::NotPsd`] on non-positive/non-finite parameters or derived
+/// values outside the representable finite positive range.
 pub fn baffled_piston_impedance(
     density: f64,
     sound_speed: f64,
     radius: f64,
     omega: f64,
-    rings: usize,
 ) -> Result<(f64, f64), PhsError> {
     if !(density > 0.0
         && sound_speed > 0.0
@@ -1719,53 +1765,28 @@ pub fn baffled_piston_impedance(
         && sound_speed.is_finite()
         && radius.is_finite()
         && omega.is_finite())
-        || rings == 0
     {
         return Err(PhsError::NotPsd {
             what: "baffled piston radiation parameters",
         });
     }
-    let k = omega / sound_speed;
-    let mut cells: Vec<([f64; 2], f64)> = Vec::new();
-    for m in 0..rings {
-        let r0 = radius * m as f64 / rings as f64;
-        let r1 = radius * (m + 1) as f64 / rings as f64;
-        let rc = f64::midpoint(r0, r1);
-        let sectors = 6 * (m + 1);
-        let band_area = core::f64::consts::PI * (r1 * r1 - r0 * r0);
-        for sct in 0..sectors {
-            let th = core::f64::consts::TAU * (sct as f64 + 0.5) / sectors as f64;
-            cells.push((
-                [rc * det::cos(th), rc * det::sin(th)],
-                band_area / sectors as f64,
-            ));
-        }
+    let ka = omega / sound_speed * radius;
+    let area = core::f64::consts::PI * radius * radius;
+    let z0 = density * sound_speed / area;
+    let x = 2.0 * ka;
+    if ![ka, area, z0, x].iter().all(|v| v.is_finite() && *v > 0.0) {
+        return Err(PhsError::NotPsd {
+            what: "baffled piston derived scale",
+        });
     }
-    let omega_rho = omega * density;
-    let total_area = core::f64::consts::PI * radius * radius;
-    let mut mean_p = C64::ZERO;
-    for (i, &(xi, ai)) in cells.iter().enumerate() {
-        let mut integral = C64::ZERO;
-        for (j, &(yj, aj)) in cells.iter().enumerate() {
-            if i == j {
-                let ac = (ai / core::f64::consts::PI).sqrt();
-                let ka_c = k * ac;
-                let kk = k.max(1.0e-18);
-                let self_term = C64::new(det::sin(ka_c) / kk, (1.0 - det::cos(ka_c)) / kk);
-                integral = integral + self_term.scale(2.0 * core::f64::consts::PI);
-            } else {
-                let dx = xi[0] - yj[0];
-                let dy = xi[1] - yj[1];
-                let r = det::sqrt(dx * dx + dy * dy);
-                let kr = k * r;
-                integral = integral + C64::new(det::cos(kr), det::sin(kr)).scale(aj / r);
-            }
-        }
-        let p_i = integral * C64::new(0.0, -omega_rho / (2.0 * core::f64::consts::PI));
-        mean_p = mean_p + p_i.scale(ai / total_area);
+    let r = z0 * fs_math::special::one_minus_two_j1_over_x(x);
+    let reactance = -z0 * (2.0 * fs_math::special::struve_h1(x) / x);
+    if !(r > 0.0 && r.is_finite() && reactance.is_finite() && reactance < 0.0) {
+        return Err(PhsError::NotPsd {
+            what: "baffled piston unrepresentable impedance",
+        });
     }
-    // Face `p/v` → acoustic `p/U`.
-    Ok((mean_p.re / total_area, mean_p.im / total_area))
+    Ok((r, reactance))
 }
 
 /// Inner matching length of a side hole of radius `b` on a bore of
@@ -1923,7 +1944,7 @@ fn mouth_impedance(
     match compact_radiation_impedance(density, sound_speed, radius, omega, flange) {
         Ok(z) => Ok(z),
         Err(_) if flange == MouthFlange::Flanged => {
-            baffled_piston_impedance(density, sound_speed, radius, omega, 8)
+            baffled_piston_impedance(density, sound_speed, radius, omega)
         }
         Err(e) => Err(e),
     }
@@ -4557,6 +4578,13 @@ struct DuffingStorage {
 }
 
 impl Storage for DuffingStorage {
+    fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
+        Some(linear_exact::QuadraticPart {
+            matrix: vec![self.k, 0.0, 0.0, 1.0/self.m],
+            exact: self.k3 == 0.0,
+        })
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         let (q, p) = (x[0], x[1]);
         p * p / (2.0 * self.m) + 0.5 * self.k * q * q + 0.25 * self.k3 * det::powi(q, 4)
