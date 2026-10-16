@@ -1892,11 +1892,13 @@ dependencies = [
 name = "fs-lbm"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
  "fs-convection",
  "fs-evidence",
  "fs-exec",
  "fs-fft",
+ "fs-ladder",
  "fs-matdb",
  "fs-material",
  "fs-math",
