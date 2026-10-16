@@ -18,6 +18,9 @@ use crate::{Tangent6, Voigt};
 use fs_math::det;
 use std::sync::Arc;
 
+mod reduction;
+pub use reduction::{Complex3, HarmonicPlateSection, PlaneStressModulus};
+
 /// Maximum retained relaxation branches per material.
 pub const MAX_BRANCHES: usize = 256;
 const WEIGHTS: Voigt = [1.0, 1.0, 1.0, core::f64::consts::SQRT_2,
