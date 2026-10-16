@@ -18,6 +18,69 @@ use fs_la::eigen::{admit_jacobi_eigh, jacobi_eigh};
 use fs_la::factor::lu;
 use fs_math::det;
 
+/// Conservative midpoint angular-rate band. For a damped oscillatory pole
+/// with |lambda|*dt <= 0.04, Cayley-map phase error is below one cent even in
+/// the nearly critically damped limit (the lossless error is smaller).
+pub const MIDPOINT_ONE_CENT_ANGULAR_STEP: f64 = 0.04;
+
+/// A non-exact linear block exceeded its declared resolved temporal band.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ResolvedBandError {
+    /// No finite nonnegative rate or positive finite clock was supplied.
+    Invalid { rate_rad_s: f64, dt_s: f64 },
+    /// Raising the clock is necessary; coefficients are never retuned/clamped.
+    Outside {
+        /// Supplied upper bound on the linear pole magnitude [1/s].
+        rate_rad_s: f64,
+        /// Requested timestep [s].
+        dt_s: f64,
+        /// Maximum admitted rate times timestep [rad].
+        maximum_angular_step: f64,
+        /// Largest admitted angular-rate bound divided by 2*pi [Hz].
+        maximum_frequency_hz: f64,
+    },
+}
+
+impl core::fmt::Display for ResolvedBandError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Invalid { rate_rad_s, dt_s } => write!(
+                f,
+                "midpoint phase admission requires a finite nonnegative pole-rate bound and positive dt: rate={rate_rad_s}, dt={dt_s}"
+            ),
+            Self::Outside {
+                rate_rad_s,
+                dt_s,
+                maximum_angular_step,
+                maximum_frequency_hz,
+            } => write!(
+                f,
+                "midpoint phase refuses rate*dt={} above {maximum_angular_step}; this clock resolves rate/(2*pi) <= {maximum_frequency_hz} Hz within one cent",
+                rate_rad_s * dt_s
+            ),
+        }
+    }
+}
+impl std::error::Error for ResolvedBandError {}
+
+/// Admit a midpoint/Cayley linear block against a <=1-cent phase budget.
+/// Supply a bound on ALL its linear pole magnitudes, including damping and
+/// coupled stiffness. A single bare component frequency is not such a bound.
+pub fn admit_midpoint_band(rate_rad_s: f64, dt_s: f64) -> Result<(), ResolvedBandError> {
+    if !rate_rad_s.is_finite() || rate_rad_s < 0.0 || !dt_s.is_finite() || dt_s <= 0.0 {
+        return Err(ResolvedBandError::Invalid { rate_rad_s, dt_s });
+    }
+    if rate_rad_s * dt_s > MIDPOINT_ONE_CENT_ANGULAR_STEP {
+        return Err(ResolvedBandError::Outside {
+            rate_rad_s,
+            dt_s,
+            maximum_angular_step: MIDPOINT_ONE_CENT_ANGULAR_STEP,
+            maximum_frequency_hz: MIDPOINT_ONE_CENT_ANGULAR_STEP / (core::f64::consts::TAU * dt_s),
+        });
+    }
+    Ok(())
+}
+
 /// Explicit decomposition H(x) = x^T Q x / 2 + H_remainder(x).
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuadraticPart {
@@ -622,6 +685,34 @@ mod tests {
         LinearSplitBudget {
             max_modes: n,
             max_omega_dt: core::f64::consts::PI,
+        }
+    }
+
+    #[test]
+    fn midpoint_resolved_band_cap_cap_plus_one_and_damped_poles() {
+        let cap = MIDPOINT_ONE_CENT_ANGULAR_STEP;
+        assert!(admit_midpoint_band(1.0, cap).is_ok());
+        assert!(matches!(
+            admit_midpoint_band(1.0, cap + 1e-12),
+            Err(ResolvedBandError::Outside { .. })
+        ));
+        for (rate, dt) in [
+            (f64::NAN, 1.0),
+            (1.0, 0.0),
+            (-1.0, 1.0),
+            (1.0, f64::INFINITY),
+        ] {
+            assert!(matches!(
+                admit_midpoint_band(rate, dt),
+                Err(ResolvedBandError::Invalid { .. })
+            ));
+        }
+        // Analytic complex Cayley map, including the near-critical limit.
+        for zeta in [0.0, 0.3, 0.9, 0.999_999] {
+            let beta = det::sqrt(1.0 - zeta * zeta);
+            let phase = det::atan2(beta * cap, 1.0 - 0.25 * cap * cap);
+            let cents = 1200.0 * det::ln(phase / (beta * cap)) / core::f64::consts::LN_2;
+            assert!(cents.abs() <= 1.0, "{zeta}: {cents} cents");
         }
     }
 
