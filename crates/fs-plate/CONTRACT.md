@@ -80,6 +80,20 @@ formatting do not establish those numerical results: central native execution,
 the existing CST/DKT and piano/percussion tests, both WASM cones and the
 unchanged string golden remain required before .47/DEF-11 qualification.
 
+For the hemisphere rows, convergence means strictly decreasing absolute
+successive displacement changes over the last three rungs, with a signed
+Richardson/Aitken limit (negative step ratio admits alternating convergence).
+The cut-out limit must agree within the declared band with both MacNeal–Harder
+1985 (0.094) and Ko et al. 2017 Tables 15/16 (0.093); the finest displacement
+uses the latter normalization. The full hemisphere uses Table 17 (0.0924).
+Regular rows retain 2% bands and distorted rows 5%; the distorted cut-out
+retains N=4,8,16,32 and adds N=64 to resolve its non-contracting N=32 step.
+Both regular hemisphere tests reassemble and solve the same ladders with D
+multiplied by 1.05, requiring the extrapolated-limit reference check to reject
+that planted defect. Membrane/shear matrices and geometry stay fixed in this
+falsifier. Roof/cylinder reference-error monotonicity is unchanged. These
+limits are pointwise estimates, not certified continuum-error enclosures.
+
 ## Public types and semantics
 - `PlateSection::{orthotropic, isotropic}` — bending rigidity D from
   engineering constants: `D11 = E1h³/12(1−ν12ν21)` etc., `D33 = G12h³/12`.
