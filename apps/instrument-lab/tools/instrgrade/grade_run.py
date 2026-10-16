@@ -27,6 +27,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from instrgrade import (GRADER_VERSION, SR, cents, describe, distance, find, highpass, hz_of, load, midi_of, nearest_instruments,
                         null_baselines, onset, ref_audio, rulers, write_wav)
+from psycho import (compare_psycho_blocks, detect_candidate_calibration, evaluate_psycho_signal,
+                    evaluate_psycho_wav, psycho_bin_sha256)
 
 import matplotlib
 
@@ -51,10 +53,12 @@ LIBPATH = S / "grade" / os.environ.get("LIBFILE", "library.json")
 LIB = json.loads(LIBPATH.read_text())
 TOOLDIR = Path(__file__).resolve().parent
 TOOL_SHA256 = {name: hashlib.sha256((TOOLDIR / name).read_bytes()).hexdigest()
-               for name in ("instrgrade.py", "descriptors.py", "grade_run.py", "radiate.py", "summarize.py", "buildlib.py", "uiowa-links.json")}
+               for name in ("instrgrade.py", "descriptors.py", "psycho.py", "grade_run.py", "radiate.py", "summarize.py", "buildlib.py", "uiowa-links.json")}
 GIT = subprocess.run(["git", "-C", str(TOOLDIR), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
+PSYCHO_SHA256 = psycho_bin_sha256()
 CONTEXT = dict(grader_version=GRADER_VERSION, library_sha256=hashlib.sha256(LIBPATH.read_bytes()).hexdigest(),
-               tool_sha256=TOOL_SHA256, host=platform.node(), git_sha=GIT.stdout.strip() or None,
+               tool_sha256=TOOL_SHA256, psycho_bin_sha256=PSYCHO_SHA256, host=platform.node(),
+               git_sha=GIT.stdout.strip() or None,
                command=[sys.executable, "-I", *sys.argv], utc=datetime.now(timezone.utc).isoformat())
 RECEIPTS = []
 
@@ -87,6 +91,7 @@ def receipt(candidate, result, started, target=None):
                 release_erb_distance_db=dist.get("release_erb_distance_db"),
                 q3=result.get("q3"),
                 descriptors=result.get("descriptors"),
+                psycho=result.get("psycho"),
                 baselines=result.get("baselines"),
                 rulers=result.get("rulers"), expected_db=expected, tolerance_db=tolerance,
                 conversion_cmd=candidate.get("conversion_cmd", os.environ.get("IRP_CONVERSION_CMD")),
@@ -244,9 +249,59 @@ for c in CANDS:
         ours=do.get("descriptors"),
         real=dr.get("descriptors"),
     )
+    cand_wav_path = Path(c["wav"])
+    cand_pa, cand_cal_src = detect_candidate_calibration(c, cand_wav_path)
+    psycho_field = c.get("field", "free")
+    if "t0" not in c and cand_wav_path.is_file():
+        psycho_ours = evaluate_psycho_wav(
+            cand_wav_path,
+            pa_per_full_scale=cand_pa,
+            calibration_source=cand_cal_src,
+            field=psycho_field,
+        )
+    else:
+        psycho_ours = evaluate_psycho_signal(
+            ours,
+            pa_per_full_scale=cand_pa,
+            calibration_source=cand_cal_src,
+            field=psycho_field,
+            scratch_dir=OUT / "pairs",
+        )
+    psycho_real = evaluate_psycho_signal(
+        real,
+        pa_per_full_scale=1.0,
+        calibration_source="assumed",
+        field=psycho_field,
+        scratch_dir=OUT / "pairs",
+    )
+    psycho_rulers = []
+    if target is not None and PSYCHO_SHA256 is not None:
+        ruler_entries = [
+            e for e in LIB
+            if e.get("inst") == target.get("inst")
+            and e.get("art") == target.get("art")
+            and e is not target
+            and abs(int(e.get("note", -999)) - int(target.get("note", 0))) <= 2
+            and (WAVDIR / e["file"]).is_file()
+        ][:4]
+        for re_entry in ruler_entries:
+            r_sig = ref_audio(re_entry, WAVDIR)
+            psycho_rulers.append(
+                evaluate_psycho_signal(
+                    r_sig,
+                    pa_per_full_scale=1.0,
+                    calibration_source="assumed",
+                    field=psycho_field,
+                    scratch_dir=OUT / "pairs",
+                )
+            )
+    do["psycho"] = psycho_ours
+    dr["psycho"] = psycho_real
+    psycho_summary = compare_psycho_blocks(psycho_ours, psycho_real, ruler_blocks=psycho_rulers)
     res = dict(
         id=c["id"],
         grader_version=GRADER_VERSION,
+        psycho_bin_sha256=PSYCHO_SHA256,
         label=c["label"],
         inst=c["inst"],
         target=(target["file"] + "@" + target["name"] + "." + target["dyn"]) if target else "chord",
@@ -259,6 +314,7 @@ for c in CANDS:
         distance=dist,
         q3=q3_summary,
         descriptors=desc_summary,
+        psycho=psycho_summary,
         baselines=baselines,
         rulers=rl,
         nearest=near[:6],

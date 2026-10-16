@@ -268,6 +268,13 @@ aggregation-exactness (bitwise) + refusal propagation; tonality
 exactness on five fixtures (incl. both multi-tone branches) + typed
 tonality refusals.
 
+`examples/psycho_descriptors.rs` (4 unit tests + IRP M7.5-W1 Python
+bridge `test_psycho_bridge.py`): bitwise equality between parsed
+`fs-psycho-descriptors/1` JSON output and direct Rust calls; refusal
+without `--pa-per-full-scale`; partial per-metric refusal on short
+blocks while preserving valid metrics; RIFF WAV parser rejection of
+multichannel and oversize inputs.
+
 ## No-claim boundaries (the bead's remaining scope — OPEN)
 
 - Fluctuation strength: single-frame API v1 (no 90%-overlap frame
@@ -282,7 +289,9 @@ tonality refusals.
   Sottek psychoacoustic tonality (sharpness-of-hearing model) is a
   different metric and is NOT implemented.
 - Sampling rates other than 48 kHz: refused, not resampled (no
-  claim); wav parsing is the caller's job (inputs are Pa slices).
+  claim); wav parsing is the caller's job in library APIs (inputs are
+  Pa slices; the `psycho_descriptors` CLI example parses mono 48 kHz
+  PCM16/float32 WAVs for grader integration).
 - Per-frame specific loudness is computed internally but not
   returned by `loudness_time_varying` (memory scale); time-varying
   sharpness is a recorded follow-up.
