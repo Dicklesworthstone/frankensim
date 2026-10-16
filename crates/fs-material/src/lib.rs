@@ -57,6 +57,8 @@ pub mod thermochemical_gas;
 /// Bounded temperature-dependent Maxwell history, thermal strain and work balance.
 pub mod thermovisco;
 pub mod visco;
+/// Passive full-tensor Prony memory with work-conjugate stress and heat.
+pub mod visco_tensor;
 
 pub use calibrate::{CalibrationFit, calibrate_bilinear};
 pub use elastic::{IsotropicElastic, OrthotropicElastic};
