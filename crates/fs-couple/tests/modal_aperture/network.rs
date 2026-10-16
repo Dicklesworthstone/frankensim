@@ -10,10 +10,10 @@ use fs_material::gas::{GasSpec, GasState};
 use fs_exec::CancelGate;
 use fs_vfit::waveguide::{PassiveWaveguide, WaveguideSpec};
 
-fn gas() -> GasState {
+pub(super) fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(),293.15,101325.).unwrap()
 }
-fn sides() -> [ApertureDuctSpec;2] {
+pub(super) fn sides() -> [ApertureDuctSpec;2] {
     let g=gas(); let dt=spec().time_step_s;
     let side=|delay:usize,radius:f64,reflection:f64| ApertureDuctSpec {
         graph:TubeNetworkSpec {

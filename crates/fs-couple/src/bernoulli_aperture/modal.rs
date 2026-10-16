@@ -14,6 +14,8 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::unilateral_contact::distributed::ApertureContactStep;
 use fs_dcontact::{ContactStorage, Obstacle};
 use fs_phs::Storage;
+/// Original regional material plates and same-basis spatial ports.
+pub mod material;
 
 /// One fixed-basis mode, in a physical metre-valued coordinate.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,6 +78,8 @@ pub struct ModalAperture {
     obstacle: Obstacle,
     contact_storage: ContactStorage,
     samples: u64,
+    material_plates: Vec<material::MaterialModalPlate>,
+    material_gas: Option<fs_material::gas::GasState>,
 }
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
@@ -127,7 +131,8 @@ impl ModalAperture {
         ApertureContactStep::new(&obstacle, gap).map_err(nonlinear)?;
         let contact_storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![obstacle.clone()])
             .map_err(nonlinear)?;
-        let model = Self { spec, state, obstacle, contact_storage, samples: 0 };
+        let model = Self { spec, state, obstacle, contact_storage, samples: 0,
+            material_plates: Vec::new(), material_gas: None };
         model.validate_state(&model.state)?;
         Ok(model)
     }
@@ -156,6 +161,7 @@ impl ModalAperture {
             || s.velocity_m_s.abs() > l.maximum_abs_velocity_m_s) {
             return Err(invalid("modal aperture state exceeds its physical coordinate bounds"));
         }
+        for plate in &self.material_plates { plate.validate_state(state)?; }
         let energy = self.energy(state);
         if !self.gap(state).is_finite() || !energy.is_finite() || energy < 0.0 || energy > l.maximum_energy_j {
             return Err(invalid("modal aperture gap or stored energy exceeds its physical domain"));

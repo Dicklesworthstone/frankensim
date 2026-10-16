@@ -284,6 +284,7 @@ impl TwoSidedAperture {
         if valve.accepted_steps() != 0 || density.to_bits() != gas.density.to_bits()
             || declared_z.to_bits() != z.to_bits()
             || matches!(&valve, LoadedAperture::Paired(a) if a.gas().is_some_and(|g| *g != gas))
+            || matches!(&valve, LoadedAperture::Modal(a) if a.gas().is_some_and(|g| *g != gas))
         { return Err(invalid("two-sided coupling requires an unadvanced valve with the actual inlet gas and summed load")); }
         let dt = valve.time_step_s();
         let prepare = |source: ApertureDuctSpec, policy: Option<FractionalTubePolicy>| -> Result<DuctSide, AcousticRealizeError> {

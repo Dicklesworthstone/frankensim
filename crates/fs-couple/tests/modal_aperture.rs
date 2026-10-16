@@ -124,3 +124,6 @@ fn failed_modal_steps_publish_no_state_and_missing_ports_are_not_silently_ignore
 
 #[path = "modal_aperture/network.rs"]
 mod network;
+
+#[path = "modal_aperture/material.rs"]
+mod material;
