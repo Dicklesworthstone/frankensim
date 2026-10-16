@@ -17,6 +17,9 @@ fn main() {
     // FS_KIT_TUNE scales a drum's head tensions (tuning experiments)
     let tune: f64 = std::env::var("FS_KIT_TUNE").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let d = |s: kit::DrumSpec| kit::retune(s, tune);
+    // FS_KIT_GRID scales a cymbal's grid spacing (refinement studies; 1 is the kit's own grid)
+    let grid: f64 = std::env::var("FS_KIT_GRID").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    let cy = |s: kit::CymbalSpec| kit::CymbalSpec { grid: s.grid * grid, ..s };
     let (piece, dur): (Result<Piece, String>, f64) = match a[1].as_str() {
         "kick" => (kit::drum(&d(kit::kick()), &[(0.005, v(3.0))]), 1.2),
         "snare" => (kit::drum(&d(kit::snare()), &[(0.005, v(4.5))]), 1.2),
@@ -25,9 +28,9 @@ fn main() {
         "tom-14" => (kit::drum(&d(kit::tom(14.0)), &[(0.005, v(3.5))]), 2.5),
         "hihat-closed" => (kit::hihat(0.0, 80.0, &[(0.005, v(2.5))]), 0.8),
         "hihat-open" => (kit::hihat(0.002, 0.0, &[(0.005, v(2.5))]), 2.5),
-        "splash" => (kit::cymbal(&kit::splash(), &[(0.005, v(2.0), 0.78, 0.005)]), 2.6),
-        "crash" => (kit::cymbal(&kit::crash(), &[(0.005, v(6.0), 0.95, 0.008)]), 5.0),
-        "ride" => (kit::cymbal(&kit::ride(), &[(0.005, v(2.5), 0.6, 0.004)]), 4.0),
+        "splash" => (kit::cymbal(&cy(kit::splash()), &[(0.005, v(2.0), 0.78, 0.005)]), 2.6),
+        "crash" => (kit::cymbal(&cy(kit::crash()), &[(0.005, v(6.0), 0.95, 0.008)]), 5.0),
+        "ride" => (kit::cymbal(&cy(kit::ride()), &[(0.005, v(2.5), 0.6, 0.004)]), 4.0),
         other => {
             eprintln!("unknown piece {other}");
             std::process::exit(2);
