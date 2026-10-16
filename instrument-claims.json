@@ -3,6 +3,29 @@
   "doctrine": "Music-program claims registry (bead frankensim-music-claims-registry-mc31g; program root frankensim-music-v8-root-3ez8g). D19: a claim is a (filling, image, qoi) row, never prose. D21: rows transition gate status (ungated|green|refused) and are never deleted; xtask check-instrument-claims refuses removal against the committed predecessor. D25: live_default=yes requires gate=green AND a budget_row (real-time is a measured claim). Seed state 2026-08-14: every currently-live image enters ungated with empty evidence - nothing is green until a per-track gates bead lands reviewed evidence. Flags are string enums because the in-house JSON parser collapses booleans.",
   "rows": [
     {
+      "filling":"exterior-radiation",
+      "image":"open-p1-jump-and-robin-burton-miller",
+      "qoi":"thin-disc-impedance-scattering-and-impedance-sphere",
+      "owner_crates":["fs-bem"],
+      "exactness":["X-Est"],
+      "gate":"ungated",
+      "live_default":"no",
+      "determinism":"one-host",
+      "evidence":[
+        {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::open_disc_radiation_and_scattering"},
+        {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::open_disc_edge_grading_ladder"},
+        {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::impedance_sphere_series"},
+        {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::impedance_bc_beta_zero_bitwise"},
+        {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::impedance_bc_passivity"},
+        {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::impedance_bc_fictitious_frequency_robust"},
+        {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::open_and_impedance_refusals"},
+        {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::open_and_impedance_bitwise_repeat"}
+      ],
+      "budget_row":null,
+      "corpus_refs":[],
+      "notes":"IRP .111, native batch pending. P1 pressure-jump weak hypersingular open screens reuse reciprocal singular moments, angular quadrature and the real/damped WaveNumber seam; adaptive jump receivers reuse near_field P1 moments. Closed Robin substitutes into both existing BM operators and uses .109 FMM/GMRES over the dense cap, retaining exact zero-beta arithmetic. Strict independent Mellow/Karkkainen disc-series and Robin sphere gates remain 1e-3. Passive sheet admittance acts on the pressure jump; independently coated two faces need an additional trace. Open P1 above 8192 panels/unknowns refuses because closed constant-panel .109 is not that operator. No native pass, full-band bell, nonlocal BL discretization, global nonintersection, instrument fidelity or performance claim. Existing owners are extended, no second factorization/kernel set, no schema migration, dependency or golden change."
+    },
+    {
       "filling":"structural-modal",
       "image":"nested-dissection-parallel-windows",
       "qoi":"large-body-certified-eigenwindows",

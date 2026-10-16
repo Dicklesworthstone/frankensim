@@ -622,3 +622,69 @@ dense route's limit and must not have their tolerances relaxed. Separate 0.25
 declared-tolerance tests exercise software completion, bitwise replay and
 partial-support refusal only; they confer no 1e-3 numerical/physical claim.
 Native execution remains pending. No converged real instrument bake is claimed.
+
+### Open pressure-jump screens and Robin boundaries (IRP M2.5-W7)
+
+`helmholtz::bc` substitutes the normalized admittance `beta=rho*c*Y` into
+**both** existing Burton-Miller rows. For outward normals and `exp(-i omega t)`,
+passive wall flow is `v=v_drive-Y*p`, so `q=i*omega*rho*v_drive-i*k*beta*p` and
+`(A+i*k*B*beta)*p=B*q_drive`. A local coefficient may vary with position and
+frequency; a `BoundaryOperator` applies an explicitly supplied nonlocal law
+(including a qualified tangential BL operator). It is not approximated by a
+diagonal. Its fingerprint binds checkpoints, not scientific authority. The
+caller owns the nonlocal operator's units, discretization and weighted-work
+passivity. Re(beta)<0 refuses unless declared active; active results retain
+that declaration and cannot establish passive acceptance.
+
+The rigid/all-zero-beta path calls the existing dense or iterative owner with
+unchanged pressure/velocity arithmetic. Closed Robin geometry requires retained
+outward, conforming closed triangles; topology admission reuses `near_field`.
+The dense row pair and LU are the existing owner; `.109` supplies FMM/GMRES,
+preconditioning, original-equation residuals, cancellation/checkpoints and work
+receipts. `solve_radiation_bc_auto` selects it above 8192 panels. Preconditioning
+continues to use the rigid near blocks; it does not replace the Robin operator
+or its residual. Plane-wave scattering supplies the incident Robin datum to
+the same equation; wall absorption uses the total incident+scattered pressure,
+while the outgoing field remains the scattered trace. Reported surface work is
+not an independent far-field accuracy certificate. The inherited dense solve
+has no mid-factorization cancellation guarantee.
+
+`reciprocal_radiation::open_screen` admits indexed oriented open two-manifolds,
+with every component having a free edge. It refuses closed components,
+duplicate faces, inconsistent/nonmanifold edges, disconnected vertex links and
+degenerate geometry. This is not a global self-intersection certificate. The
+unknown is the P1 pressure jump `[p]`, zero at free-edge vertices, in the
+surface-curl weak hypersingular formulation. Geometry and graded-edge level are
+supplied as data; the solver never fabricates a closed thin body or silently
+changes the mesh. A quadratic edge-graded disc mesh is test data. The observed
+sqrt-edge convergence order is reported with `fs_mms`, not assumed smooth.
+
+Analytic Laplace triangle moments, Duffy rules and the outgoing angular Gram
+identity share the existing reciprocal owner. The dynamic remainder uses the
+existing real/damped `WaveNumber` seam. Complex-frequency continuation uses the
+full complex weak kernel and makes no real-frequency power claim. Far fields
+use the jump's double-layer potential; receivers use the existing adaptive P1
+near-field integration. Both screen sides are represented without coincident
+opposite faces. A screen's optional sheet law is `v=v_drive-Y*[p]`. Two
+independently coated faces would require an additional derivative-jump trace
+and are outside this single-jump model.
+
+Open P1 assembly has explicit triangle order (4/8), angular refinement (0..2),
+edge-level, unknown, retained-cache and scalar-work ceilings. Its dense panel
+and unknown cap is 8192. **The closed constant-panel `.109` operator does not
+implement an over-cap open P1 hypersingular route**; open requests above this
+cap refuse. Logical cache/work ceilings are not RSS or timing guarantees. The
+open owner polls cancellation through preparation, assembly, LU rows, RHS and
+residuals; arbitrary caller-supplied nonlocal applications remain indivisible.
+There is no repair of negative resistance, clipping or tolerance promotion.
+
+`tests/open_and_impedance.rs` authors strict 1e-3 thin-disc mass/complex
+impedance/scattering and Robin-sphere pulsating/plane-wave gates, plus G0
+passivity/topology/cap tests, G1 edge ladder, G3 fictitious-frequency condition
+checks and G5 rigid-bit/repeat checks. The disc oracle is the independent
+80..140-digit, M=12/18/24/30 evaluation in `tests/disc_reference.py` of
+Mellow & Karkkainen, JASA 118 (2005), 1311–1325,
+doi:10.1121/1.2000828, eqs.47–54, b=a; it conjugates the paper's time convention.
+No recording or plot was fitted. Native execution is pending: these are gates,
+not passing claims. Existing panel-bits goldens are unchanged; there is no
+schema migration, new dependency, instrument qualification or render claim.

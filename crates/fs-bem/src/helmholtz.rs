@@ -86,6 +86,10 @@ pub use iterative::{
     ResourceReceipt, solve_radiation_iterative,
 };
 
+/// Locally/nonlocally reacting boundaries on the same Burton-Miller owner.
+#[path = "helmholtz_bc.rs"]
+pub mod bc;
+
 /// Reciprocal Rayleigh loading of complete planar modal velocity fields.
 #[path = "rayleigh_modal.rs"]
 pub mod rayleigh_modal;
@@ -311,7 +315,7 @@ fn expik(kr: f64) -> C64 {
 }
 
 /// Free-space kernel `G = e^{ikr}/(4 pi r)`.
-fn green<K: WaveNumber>(k: K, r: f64) -> C64 {
+pub(crate) fn green<K: WaveNumber>(k: K, r: f64) -> C64 {
     k.outgoing(r).scale(1.0 / (4.0 * core::f64::consts::PI * r))
 }
 
@@ -323,13 +327,17 @@ fn green_dr<K: WaveNumber>(k: K, r: f64) -> C64 {
 // Real-frequency solves retain their original operation graph. The damped
 // extension supplies only the analytic scalar kernels; matrix geometry, static
 // closures, normal derivatives and LU assembly remain this owner's code.
-trait WaveNumber: Copy {
+pub(crate) trait WaveNumber: Copy {
+    fn value(self) -> C64;
     fn outgoing(self, r: f64) -> C64;
     fn radial_factor(self, r: f64) -> C64;
     fn disc_self(self, area: f64) -> (C64, C64);
     fn cbie_real(self) -> f64;
 }
 impl WaveNumber for f64 {
+    fn value(self) -> C64 {
+        C64::from_re(self)
+    }
     fn outgoing(self, r: f64) -> C64 {
         expik(self * r)
     }
@@ -341,6 +349,28 @@ impl WaveNumber for f64 {
     }
     fn cbie_real(self) -> f64 {
         self
+    }
+}
+
+/// Analytic Laplace-subtracted single layer on the SAME WaveNumber seam.
+/// The finite coincident limit is ik/(4pi); the series avoids subtracting
+/// nearly equal real values on graded edge panels or damped contours.
+pub(crate) fn green_remainder<K: WaveNumber>(wave: K, r: f64) -> C64 {
+    let ik = C64::new(0.0, 1.0) * wave.value();
+    if r == 0.0 {
+        return ik.scale(1.0 / (4.0 * core::f64::consts::PI));
+    }
+    let z = ik.scale(r);
+    if z.abs() < 0.25 {
+        let mut term = ik;
+        let mut sum = term;
+        for n in 2..=24 {
+            term = (term * z).scale(1.0 / f64::from(n));
+            sum = sum + term;
+        }
+        sum.scale(1.0 / (4.0 * core::f64::consts::PI))
+    } else {
+        green(wave, r) - C64::from_re(1.0 / (4.0 * core::f64::consts::PI * r))
     }
 }
 

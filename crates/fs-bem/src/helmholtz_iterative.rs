@@ -223,6 +223,7 @@ struct NearBlock {
 /// triangle PlainCbie quadrature is NOT replaced with centroid FMM kernels.
 pub struct IterativeRadiation<'a> {
     surface: &'a SpherePanels,
+    admittance: Option<super::bc::Admittance<'a>>,
     k: f64,
     medium: Medium,
     alpha: C64,
@@ -274,6 +275,28 @@ fn poll(gate: &CancelGate) -> Result<(), IterativeError> {
 }
 
 impl<'a> IterativeRadiation<'a> {
+    /// Robin extension of this same FMM/GMRES owner. The original A-block
+    /// Jacobi inverse remains a right preconditioner; the recomputed residual
+    /// is always that of A+ik*B*beta, including both BM rows.
+    pub fn prepare_bc(
+        surface: &'a SpherePanels,
+        k: f64,
+        medium: Medium,
+        formulation: Formulation,
+        options: &IterativeOptions,
+        admittance: super::bc::Admittance<'a>,
+        gate: &CancelGate,
+    ) -> Result<Self, IterativeError> {
+        poll(gate)?;
+        admittance.validate(surface.areas().len())?;
+        super::bc::validate_closed(surface)?;
+        let mut out = Self::prepare(surface, k, medium, formulation, options, gate)?;
+        if !admittance.is_zero() {
+            out.stamp = (out.stamp ^ admittance.stamp()).wrapping_mul(0x100000001b3);
+            out.admittance = Some(admittance);
+        }
+        Ok(out)
+    }
     /// Prepare without allocating any N-by-N matrix. Near blocks are explicitly
     /// bounded, and FMM keeps its original coefficient/translation/P2P budgets.
     pub fn prepare(
@@ -447,6 +470,7 @@ impl<'a> IterativeRadiation<'a> {
         }
         Ok(Self {
             surface,
+            admittance: None,
             k,
             medium,
             alpha,
@@ -463,13 +487,12 @@ impl<'a> IterativeRadiation<'a> {
         })
     }
 
-    /// Compute Bq, with q=i*k*c*rho*v, using the original dense B signs.
-    pub fn start(
+    /// The shared Bq image; Robin application reuses this exact RHS owner.
+    fn boundary_rhs(
         &self,
         velocity: &[C64],
         gate: &CancelGate,
-    ) -> Result<IterativeState, IterativeError> {
-        let started = Instant::now();
+    ) -> Result<Vec<C64>, IterativeError> {
         poll(gate)?;
         if velocity.len() != self.surface.areas().len() || velocity.iter().any(|v| !finite(*v)) {
             return Err(IterativeError::Invalid {
@@ -515,7 +538,17 @@ impl<'a> IterativeRadiation<'a> {
                 what: "nonfinite radiation right-hand side",
             });
         }
-        let rhs = stack(&rhs_complex);
+        Ok(rhs_complex)
+    }
+
+    /// Compute Bq, with q=i*k*c*rho*v, using the original dense B signs.
+    pub fn start(
+        &self,
+        velocity: &[C64],
+        gate: &CancelGate,
+    ) -> Result<IterativeState, IterativeError> {
+        let started = Instant::now();
+        let rhs = stack(&self.boundary_rhs(velocity, gate)?);
         let mut gmres = GmresState::new(&rhs, self.options.restart.min(rhs.len()));
         if rhs.iter().all(|&v| v == 0.0) {
             gmres.run(&ZeroOp(rhs.len()), &rhs, self.options.tol, 1, false);
@@ -562,9 +595,20 @@ impl<'a> IterativeRadiation<'a> {
         poll(gate)?;
         let h = self.mixed.potentials(&weighted)?;
         poll(gate)?;
-        let out: Vec<_> = (0..pressure.len())
+        let mut out: Vec<_> = (0..pressure.len())
             .map(|i| d[i] + self.alpha * h[i] + self.diagonal_a[i] * pressure[i])
             .collect();
+        if let Some(admittance) = self.admittance {
+            let velocity: Vec<_> = admittance
+                .image(pressure)?
+                .into_iter()
+                .map(|v| v.scale(1.0 / (self.medium.density * self.medium.sound_speed)))
+                .collect();
+            let b = self.boundary_rhs(&velocity, gate)?;
+            for (a, b) in out.iter_mut().zip(b) {
+                *a = *a + b;
+            }
+        }
         if out.iter().any(|v| !finite(*v)) {
             return Err(IterativeError::Invalid {
                 what: "nonfinite Burton-Miller application",
@@ -670,17 +714,23 @@ impl<'a> IterativeRadiation<'a> {
                 receipt,
             });
         }
+        let velocity = if let Some(admittance) = self.admittance {
+            let absorbed = admittance.image(&pressure)?;
+            state
+                .velocity
+                .iter()
+                .zip(absorbed)
+                .map(|(&v, y)| v - y.scale(1.0 / (self.medium.density * self.medium.sound_speed)))
+                .collect()
+        } else {
+            state.velocity.clone()
+        };
         let (radiated_power, radiated_power_roundoff_interval, power_diagnostics) =
-            evaluate_radiated_power(
-                &pressure,
-                &state.velocity,
-                self.surface.areas(),
-                self.medium,
-            );
+            evaluate_radiated_power(&pressure, &velocity, self.surface.areas(), self.medium);
         Ok((
             RadiationSolution {
                 pressure,
-                velocity: state.velocity.clone(),
+                velocity,
                 k: self.k,
                 medium: self.medium,
                 surface_fingerprint: surface_fingerprint(self.surface),

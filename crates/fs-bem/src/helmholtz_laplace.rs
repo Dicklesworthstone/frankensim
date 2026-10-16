@@ -5,11 +5,14 @@
 use super::*;
 
 #[derive(Clone, Copy)]
-struct DampedWaveNumber {
-    k: C64,
-    phase_origin_m: f64,
+pub(crate) struct DampedWaveNumber {
+    pub(crate) k: C64,
+    pub(crate) phase_origin_m: f64,
 }
 impl WaveNumber for DampedWaveNumber {
+    fn value(self) -> C64 {
+        self.k
+    }
     fn outgoing(self, r: f64) -> C64 {
         let distance = r - self.phase_origin_m;
         expik(self.k.re * distance).scale(det::exp(-self.k.im * distance))
