@@ -12,6 +12,72 @@ same object, and every medium property derives from
 
 ## Public types and semantics
 
+`levine_schwinger::{LsQuadrature,LsSolution,levine_schwinger,
+levine_schwinger_impedance}` adds the original thin-wall unflanged-pipe
+Wiener–Hopf solution (Levine & Schwinger, Phys. Rev. 73, 383–406, p.383 and
+Eq.V.16, DOI:10.1103/PhysRev.73.383). `LsQuadrature { nodes }` explicitly
+selects 16..=1024 fixed Gauss–Legendre nodes. `LsSolution` retains ka, |R|,
+ln|R|, l/a and the realized node count; `reflection()` and
+`normalized_impedance()` use exp(-i omega t), `R=-|R| exp(2 i ka l/a)` and
+`Z/Zc=(1+R)/(1-R)`. The physical impedance is in Pa s/m3, with
+`Zc=rho*c/(pi*a²)`, referred to the geometric mouth plane.
+
+`Termination::UnflangedThinWall { quadrature }` is additive and does not
+change any existing termination/default/golden. `LS_MAX_KA` is a lazy value
+computed and refined with the shared J1 root finder, not a transcribed
+constant. ka at or above it refuses as `FS-DUCT-LS-CUTOFF`; nonfinite/nonpositive
+ka or SI parameters and out-of-budget nodes refuse as `FS-DUCT-BAD-PARAMETER`.
+The model is for an axisymmetrically excited semi-infinite rigid circular pipe
+of zero wall thickness. Finite walls, bells, external obstacles, flow, nonlinear
+edge loss, evanescent feedback from a nearby upstream discontinuity and
+propagating higher modes need their own model.
+
+The WH tail is over **0..infinity**, with denominator `x sqrt(x²+(ka)²)`.
+Its quartic compactification integrates the entire domain; the propagating
+integral uses `x=ka sin(theta)`, with `theta=(pi/2)(3u²-2u³)` smoothing both
+angular endpoints. `atan2(J1,-Y1)` retains the continuous phase
+through the Y1 zero. DLMF 10.8.1/10.31.1 series and 10.32.9 scaled K1 integral
+avoid cancellation/overflow; the auxiliary Gaussian integral's u>12 tail is
+below 1e-60 for x>=1. At x>=32, the 24-term DLMF 10.40.1/2 expansions provide
+scaled I1*K1 without ever forming exp(+x). Quadrature refinement is numerical
+evidence, not an interval certificate; accuracy is not uniform arbitrarily
+close to the higher-mode cutoff.
+
+The original article's numerical low-frequency constant 0.6133 is historical:
+the original integral gives **0.61270103593...**, consistent with Rienstra,
+Fundamentals of Duct Acoustics (2015), section 7.2, delta=0.6127:
+<https://sjoerdr.win.tue.nl/papers/VKI_Rienstra.pdf>.
+Rienstra & Hirschberg, An Introduction to Acoustics, section 7.9 p.214
+(6 Sep 2026), also gives delta=0.6127; V.V. Tupov's 2019 recalculation,
+AIP Conf. Proc.2195,020034, DOI:10.1063/1.5140134, reports the correction
+in its abstract. `ls_historical_fit_retains_its_distinct_end_correction`
+pins the historical load coefficient and its 0.00100654 relative discrepancy
+from the exact l/a at ka=0.01 without changing that load.
+Independent 35-digit mpmath integration gives l/a(0.01)=0.6126826892082684
+and |R|(0.05)=0.9987549288169632. Thus the leading loss `(ka)²/2` at 0.05
+has relative error 0.00394305, and is not a 1e-3 oracle at that finite ka.
+The low-frequency test uses the exact-integral constant and ka=0.01/0.005/0.0025;
+at ka=0.05 it also bounds the leading loss expansion's measured relative
+remainder between 0.0039 and 0.0040, alongside the exact-reflection oracle.
+The old UnflangedOpen fit and its frozen TMM sweep remain unchanged.
+
+Model-form error of the legacy fit `[(ka)²/4 - i*0.6133*ka]` against the WH
+normalized load, from independent mpmath Bessels and 256/512-node quadrature:
+
+| ka | relative complex impedance error |
+| --- | --- |
+| 0.1 | 0.002556512 |
+| 0.25 | 0.009532061 |
+| 0.5 | 0.028737865 |
+| 1.0 | 0.094032364 |
+
+The first 1e-3 crossing is near **ka=0.0113471** (about 0.01135), so the
+legacy validity ceiling of ka=1 does not imply a 1e-3 model-form error band.
+These are independent mathematical reference calculations, not native build
+qualification; `ls_low_ka_fit_model_form_band` recomputes the errors/crossing
+on the production path. The L2 fs-phs MouthFlange retains its disclosed low-ka
+fit and cannot call this L3 owner; no default consumer is migrated here.
+
 - `Segment::{Cylinder, Cone}` — geometry in SI; a cone is a linear
   taper propagated with exact 1D spherical waves. Lossy cones
   cascade spherical substations at each slice's own mid-radius
@@ -203,6 +269,17 @@ None.
   executed duct and the mixture rule agree independently.
 
 ## Conformance tests
+
+`src/levine_schwinger.rs::tests` (IRP M2.1-W1): G2 eight independent
+35-digit WH reference rows at ka=0.01/0.1/0.5/1/2/3/3.5/3.8 (1e-3 relative),
+plus independent fsci-special Bessels and tanh-sinh quadrature (1e-8 relative);
+the corrected static/low-ka limits; G1 32/64/128/256-node refinement, final
+pair below 1e-10 and informative coarse rung; G0 cutoff and node cap/cap+1
+refusals, passivity and negative mass-like reactance; G3 measured legacy-fit
+model-form band; G5 bitwise repeat. `tests/duct_conformance.rs::dt_006_levine_schwinger_thin_wall_termination`
+checks the lossless 0.30 m x 8 mm cylinder against an independent closed-form
+load transfer at 50 frequencies through ka=3.8 (1e-10 relative), with per-check
+JSONL receipts. The existing cross-ISA sweep golden must remain unchanged.
 
 `tests/duct_conformance.rs` (bead 3ez8g.13.2; the reimplementation
 contract through the public surface, independent oracles): dt-001
