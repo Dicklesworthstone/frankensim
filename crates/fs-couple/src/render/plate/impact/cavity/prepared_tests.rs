@@ -131,7 +131,12 @@ fn three_body_air_port_converges_to_independent_coupled_eigen_dynamics() {
             "exact coupled eigen-dynamics: {}",
             error(system.state())
         );
-        error(reference.state())
+        let midpoint_error = error(reference.state());
+        assert!(
+            midpoint_error > 1e-10,
+            "the real midpoint reference must fail the exact coupled trajectory tolerance"
+        );
+        midpoint_error
     };
     // The prepared owner is exact, so its error cannot demonstrate a nonzero
     // h^2 term. Retain the original order gate on the real Gonzalez reference,
@@ -407,7 +412,12 @@ fn resistive_neck_has_physical_helmholtz_decay_and_exact_flow_loss() {
             |v: f64, u: f64| (v - exact_volume).abs() * omega2.sqrt() + (u - exact_flow).abs();
         assert!(error(n.displaced_volume_m3, n.volume_flow_m3_s) <= 1e-12);
         let n = probe.neck_observation(reference.state(), 0).unwrap();
-        error(n.displaced_volume_m3, n.volume_flow_m3_s)
+        let midpoint_error = error(n.displaced_volume_m3, n.volume_flow_m3_s);
+        assert!(
+            midpoint_error > 1e-12,
+            "the real midpoint neck must fail the exact Helmholtz trajectory tolerance"
+        );
+        midpoint_error
     };
     let errors = [40_000, 80_000, 160_000].map(run);
     for pair in errors.windows(2) {

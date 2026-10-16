@@ -16,6 +16,9 @@ pub(super) struct ExactNetwork {
 // islands. A permutation therefore makes the full generator block diagonal;
 // its exponential and each resistance integral are the direct sum of these
 // exact blocks. Contacts still act through the complete original force vector.
+// This API's original modes have identity mass in normalized coordinates;
+// connection storage is k*(column.q-rest)^2/2 with no momentum cross terms.
+// Thus these actual K/C columns exhaust every possible inter-mode coupling.
 // This changes no retained coordinate, physical limit or dense-block capacity.
 impl ExactNetwork {
     pub(super) fn new(
@@ -175,6 +178,62 @@ impl ExactNetwork {
             connection = finite(connection + b)?;
         }
         Ok((component, connection))
+    }
+
+    fn connection_work(
+        &self,
+        x: &[f64],
+        u: &[f64],
+        endpoint: &[f64],
+        dt: f64,
+        columns: &[Vec<f64>],
+        links: &[ConnectionLaw],
+        connection_loss: f64,
+        gate: Option<&CancelGate>,
+    ) -> Result<Vec<crate::port_adoption::PortTransfer>, ModalCouplingError> {
+        let mut work = vec![0.0; links.len()];
+        for (indices, block) in &self.blocks {
+            poll(gate)?;
+            let local_x = Self::local_state(indices, x);
+            let local_endpoint = Self::local_state(indices, endpoint);
+            let local_u: Vec<_> = indices.iter().map(|&i| u[i]).collect();
+            let local_columns: Vec<Vec<_>> = columns
+                .iter()
+                .map(|c| indices.iter().map(|&i| c[i]).collect())
+                .collect();
+            let local_loss = if self.blocks.len() == 1 {
+                connection_loss
+            } else if block.connection_r.iter().all(|v| *v == 0.0) {
+                0.0
+            } else {
+                integrated_resistance_loss(
+                    &block.system,
+                    &block.split,
+                    &local_x,
+                    &local_u,
+                    dt,
+                    &block.connection_r,
+                )
+                .map_err(ModalCouplingError::Propagation)?
+            };
+            let transfers = block.connection_work(
+                &local_x,
+                &local_u,
+                &local_endpoint,
+                dt,
+                &local_columns,
+                links,
+                local_loss,
+                gate,
+            )?;
+            for (sum, transfer) in work.iter_mut().zip(transfers) {
+                *sum = finite(*sum + transfer.energy_j)?;
+            }
+        }
+        Ok(work
+            .into_iter()
+            .map(|value| crate::port_adoption::PortTransfer::work(value, false))
+            .collect())
     }
 }
 
@@ -882,8 +941,14 @@ mod tests {
                 "{a:e} != {b:e}"
             )
         };
+        let roundoff = |a: f64, b: f64| {
+            assert!(
+                (a - b).abs() <= 256.0 * f64::EPSILON * a.abs().max(b.abs()).max(1e-20),
+                "block/monolithic propagation beyond roundoff: {a:e} != {b:e}"
+            )
+        };
         for (&a, &b) in actual.x.iter().zip(&expected.x) {
-            close(a, b);
+            roundoff(a, b);
         }
         close(actual.delta_h, expected.delta_h);
         close(actual.supplied, expected.supplied);
@@ -893,6 +958,33 @@ mod tests {
         assert!(losses.0 > 0.0 && losses.1 > 0.0);
         close(losses.0, full_losses.0);
         close(losses.1, full_losses.1);
+        let work = islands
+            .connection_work(
+                &x,
+                &u,
+                &actual.x,
+                dt,
+                &columns,
+                &links,
+                losses.1,
+                Some(&gate),
+            )
+            .unwrap();
+        let full_work = full
+            .connection_work(
+                &x,
+                &u,
+                &expected.x,
+                dt,
+                &columns,
+                &links,
+                full_losses.1,
+                Some(&gate),
+            )
+            .unwrap();
+        for (a, b) in work.iter().zip(full_work) {
+            close(a.energy_j, b.energy_j);
+        }
         let contact = [1.0, -2.0, 0.3, 0.4];
         for (a, b) in islands
             .response(&contact, dt)
@@ -900,7 +992,53 @@ mod tests {
             .into_iter()
             .zip(full.response(&contact, dt).unwrap())
         {
-            close(a, b);
+            roundoff(a, b);
+        }
+        // Plant one physical cross-link, once as stiffness and once as loss.
+        // Each must merge the two noncontiguous groups and change the motion;
+        // fixture labels or an incorrect K-only graph would miss this.
+        for (stiffness_n_m, damping_n_s_m) in [(4e5, 0.0), (0.0, 500.0)] {
+            let cross_columns = [
+                columns[0].clone(),
+                columns[1].clone(),
+                vec![0.0, 1.0, 1.0, 0.0],
+            ];
+            let cross_links = [
+                ConnectionLaw {
+                    stiffness_n_m: links[0].stiffness_n_m,
+                    damping_n_s_m: links[0].damping_n_s_m,
+                    rest_extension_m: links[0].rest_extension_m,
+                },
+                ConnectionLaw {
+                    stiffness_n_m: links[1].stiffness_n_m,
+                    damping_n_s_m: links[1].damping_n_s_m,
+                    rest_extension_m: links[1].rest_extension_m,
+                },
+                ConnectionLaw {
+                    stiffness_n_m,
+                    damping_n_s_m,
+                    rest_extension_m: 0.0,
+                },
+            ];
+            let merged =
+                ExactNetwork::new(&models, &cross_columns, &cross_links, 4, &gate).unwrap();
+            assert_eq!(merged.blocks.len(), 1);
+            assert_eq!(merged.blocks[0].0, vec![0, 1, 2, 3]);
+            let (changed, _, held) = merged.advance(&models, &external, dt).unwrap();
+            assert!(
+                actual
+                    .x
+                    .iter()
+                    .zip(&changed.x)
+                    .any(|(a, b)| (a - b).abs() > 1e-6 * a.abs().max(b.abs()).max(1e-20)),
+                "one cross-term must change the original-coordinate response"
+            );
+            let monolithic = ExactBlock::new(&modes, &cross_columns, &cross_links, &gate).unwrap();
+            let expected =
+                step_render(&monolithic.system, &monolithic.split, &x, &held, dt).unwrap();
+            for (&a, &b) in changed.x.iter().zip(&expected.x) {
+                roundoff(a, b);
+            }
         }
     }
 }

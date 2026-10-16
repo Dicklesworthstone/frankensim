@@ -432,6 +432,14 @@ mod free_drag_tests {
                                 * (-fs_math::det::expm1(-2.0 * drag * dt)),
                     )
                 };
+                if step == 0 && drag == 100_000.0 {
+                    let planted_midpoint =
+                        ((1.0 - 0.5 * drag * dt) * p + dt * force) / (1.0 + 0.5 * drag * dt);
+                    assert!(
+                        (planted_midpoint - next).abs() > 1e-11,
+                        "midpoint must fail the exact velocity oracle's unchanged tolerance"
+                    );
+                }
                 let previous_energy = 0.5 * p * p;
                 q += displacement;
                 p = next;
@@ -546,7 +554,12 @@ mod free_drag_tests {
                 "exact damped trajectory: {}",
                 error(s.state())
             );
-            error(reference.state())
+            let midpoint_error = error(reference.state());
+            assert!(
+                midpoint_error > 1e-10,
+                "the real midpoint reference must fail the exact trajectory tolerance"
+            );
+            midpoint_error
         };
         let errors = [20_000, 40_000, 80_000].map(run);
         for pair in errors.windows(2) {
