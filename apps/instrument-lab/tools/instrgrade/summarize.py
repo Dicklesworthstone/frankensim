@@ -1,7 +1,9 @@
 import json, sys, math
 S = sys.argv[1]
 for st in sys.argv[2:]:
-    for rr in json.load(open(f'{S}/grade/v5-{st}/results.json')):
+    with open(f'{S}/grade/v5-{st}/results.json', encoding='utf-8') as result_file:
+        results = json.load(result_file)
+    for rr in results:
         if 'error' in rr: print(rr['id'], 'ERROR', rr['error']); continue
         o, re, d, rl = rr['ours'], rr['real'], rr['distance'], rr['rulers']
         f = lambda v: 'nan' if v is None or (isinstance(v, float) and math.isnan(v)) else round(v, 2)
