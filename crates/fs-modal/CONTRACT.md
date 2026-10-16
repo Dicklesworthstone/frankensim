@@ -77,15 +77,49 @@ fallbacks before giving up.
 ## Determinism class
 Bit-deterministic across repeat runs on one host: sequential code, integer
 LCG start vectors (no platform libm feeds solver state), index-ordered
-reorthogonalization, `total_cmp` ordering. Cross-ISA goldens are not yet
-recorded for this crate. Underlying factorization determinism is inherited
+reorthogonalization, `total_cmp` ordering. The pre-existing AMD digest
+`tests/cross_isa_golden.rs::GOLDEN_HASH = 0x11dced94c7f67115` records the
+aarch64/x86-64 debug comparison from 2026-08-23; IRP .67 registers that hash
+without changing it, and requires fresh serial/parallel debug/release proof.
+Underlying factorization determinism is inherited
 from `fs_sparse::direct` (bitwise, tested there).
 
 ## Cancellation behavior
-No `Cx` integration: `slice_window` runs factorizations and Lanczos sweeps
-to completion once called; iteration budgets (`max_lanczos`,
-`max_restarts`) are the only bounds. Bounded-latency cancellation is not
-claimed and joins the executor-integration bead when a consumer needs it.
+`slice_window` retains its context-free API and arithmetic. `slice_windows`
+takes an `fs_exec::Cx`: it polls around factorization/analysis calls, at
+Lanczos restarts, during certification and before returning reports. Native
+windows use the existing executor bridge carrying the original cancellation
+gate into scoped workers; the executor drains before returning. A cancelled
+operation returns no partial multi-window report. Factorization, symbolic
+analysis and an individual Lanczos sweep remain indivisible cancellation
+units, so bounded-time cancellation within these calls is not claimed.
+
+## Parallel windows and resource admission (IRP M1.5-W1)
+`WindowPlan` requires ordered disjoint/adjacent windows, thread count, window
+count cap, numerical-payload byte cap and relative certificate half-width.
+`SliceOptions.ldlt.max_factor_bytes` must be explicit for parallel work.
+Optional borrowed mesh information is owned once in `WindowPlan.coordinates`;
+only ND consumes it. One mass analysis/factor and one shifted-pencil symbolic
+analysis serve every window. Every distinct endpoint is factored once and its
+inertia reused, so adjacent counts telescope exactly. Signed-zero endpoints
+share one count. Endpoints coinciding with an eigenvalue continue to refuse.
+Each window uses the same serial slicing body, seeds and accumulation order;
+results are collected in window order independently of worker scheduling.
+Wasm executes windows sequentially through the same body without spawning.
+
+`MultiSliceReport` returns all slices, symbolic nnz(L), and timing/work/memory
+accounting. `maximum_relative_halfwidth` is enforced against every explicit
+residual; an unresolved or over-wide mode refuses the whole call. The memory
+cap admits retained CSR/symbolic/mass payload, concurrent numeric factor caps,
+Krylov scratch, scales and output vectors. It excludes allocator overhead,
+thread stacks and transient symbolic-construction storage; reported peak is
+an admitted conservative numerical payload, not measured process RSS. No
+no-swap or hard whole-process memory guarantee is claimed.
+The release-only tests contain the full 104544-DOF coupled P1 elastic block
+and 1000000-DOF seven-point grid, not reduced stand-ins. Both must produce
+nonempty counted windows with all relative half-widths <=1e-8 inside their
+declared payload budget. P1/TET10 fill is separately reported. These native
+scale/timing, 1/2/7-worker identity and wasm gates are batch-pending.
 
 ## Unsafe boundary
 None. `#![deny(unsafe_code)]` via workspace lints; no capsules.
@@ -118,7 +152,7 @@ agreement gate).
   approximated. Buckling-style pencils (K, −K_G) are not this API.
 - The matrix-free path certifies nothing: no inertia counts, no intervals
   (it has no factorization and no M-solve). Only the assembled
-  `slice_window` path carries certificates.
+  `slice_window`/`slice_windows` paths carry certificates.
 - The certificate bounds |λ_true − λ̂| for AT LEAST ONE true eigenvalue per
   interval; it does not by itself prove interval-eigenvalue pairing when
   intervals overlap, and it says nothing about eigenVECTOR accuracy

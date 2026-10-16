@@ -3,6 +3,24 @@
   "doctrine": "Music-program claims registry (bead frankensim-music-claims-registry-mc31g; program root frankensim-music-v8-root-3ez8g). D19: a claim is a (filling, image, qoi) row, never prose. D21: rows transition gate status (ungated|green|refused) and are never deleted; xtask check-instrument-claims refuses removal against the committed predecessor. D25: live_default=yes requires gate=green AND a budget_row (real-time is a measured claim). Seed state 2026-08-14: every currently-live image enters ungated with empty evidence - nothing is green until a per-track gates bead lands reviewed evidence. Flags are string enums because the in-house JSON parser collapses booleans.",
   "rows": [
     {
+      "filling":"structural-modal",
+      "image":"nested-dissection-parallel-windows",
+      "qoi":"large-body-certified-eigenwindows",
+      "owner_crates":["fs-sparse","fs-modal"],
+      "exactness":["X-Est"],
+      "gate":"ungated",
+      "live_default":"no",
+      "determinism":"one-host",
+      "evidence":[
+        {"kind":"test","ref":"crates/fs-sparse/tests/nested_dissection.rs::g1_nd_fill_beats_amd_on_3d_grids"},
+        {"kind":"test","ref":"crates/fs-modal/tests/parallel_windows.rs::g1_parallel_windows_certified_and_thread_invariant"},
+        {"kind":"test","ref":"crates/fs-modal/tests/parallel_windows.rs::g2_million_dof_window_timing_receipt"}
+      ],
+      "budget_row":null,
+      "corpus_refs":[],
+      "notes":"IRP .67, central native batch pending. Explicit ND with optional geometric coordinates extends the existing sparse LDLT; AMD remains default. Shared pencil analysis, unique endpoint inertia counts and ordered scoped workers extend the existing serial slice owner. Release-only 30^3/45^3/60^3 fill gates, a coupled 104544-DOF P1 elastic block and a 1000000-DOF grid window test the declared bands. Numeric payload admission is not process RSS or bounded symbolic-construction memory; factor/analysis cancellation waits for the indivisible call. No universal graph-fill advantage, eigenvector accuracy, runtime/performance, nonlinear eigenproblem or instrument qualification is claimed. Existing AMD golden is unchanged. Canonical owners are reused; no new factorization, schema migration or duplicate solver disposition. M1.4-W2/M1.5-W2 must explicitly choose ordering/windows/budgets."
+    },
+    {
       "filling": "resolved-flow",
       "image": "d3q27-full-cumulant",
       "qoi": "rotational-anisotropy-and-collision-dissipation",

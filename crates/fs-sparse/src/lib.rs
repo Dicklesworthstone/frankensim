@@ -25,6 +25,7 @@ pub mod interop;
 #[cfg(feature = "fnp-interop")]
 pub mod interop_fnp;
 pub mod ops;
+pub mod ordering_nd;
 pub mod perf;
 pub mod precond;
 pub mod sell;
@@ -44,6 +45,7 @@ pub use direct::{
 pub use interop::{InteropError, WEIGHT_KEY, csr_to_graph_snapshot, graph_snapshot_to_csr};
 #[cfg(feature = "fnp-interop")]
 pub use interop_fnp::{FnpInteropError, csr_to_dense_array, dense_array_to_csr};
+pub use ordering_nd::{NdOptions, NdOrdering, SeparatorTree, nd_order, nd_order_with_coordinates};
 pub use perf::CsrCompact;
 pub use sell::{Sell, SellError};
 

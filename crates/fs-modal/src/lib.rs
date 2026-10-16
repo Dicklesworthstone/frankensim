@@ -39,8 +39,14 @@ use fs_la::factor::cholesky;
 use fs_math::c64::C64;
 use fs_sparse::{Coo, Csr, DirectOrdering, LdltError, LdltFactor, LdltOptions, SymbolicLdlt};
 
+mod windows;
+pub use windows::{MultiSliceReport, SliceTimingReceipt, WindowPlan, slice_windows};
+
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Arithmetic contract of the certified serial slice, also used by windows.
+/// Existing AMD cross-ISA digest is retained unchanged at version1.
+pub const MODAL_SLICE_BIT_SEMANTICS_VERSION: u32 = 1;
 
 /// Typed refusals. Display strings carry stable `FS-MODAL-*` codes.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +106,23 @@ pub enum ModalError {
         /// Diagnostic from fs-la.
         detail: String,
     },
+    /// No partial multi-window report is returned after cancellation/drain.
+    Cancelled,
+    /// Invalid window plan or resource limit.
+    WindowPlan {
+        field: &'static str,
+    },
+    WindowBudget {
+        requested: usize,
+        cap: usize,
+    },
+    MemoryBudget {
+        estimated_bytes: usize,
+        cap: usize,
+    },
+    Executor {
+        detail: String,
+    },
 }
 
 impl core::fmt::Display for ModalError {
@@ -137,6 +160,23 @@ impl core::fmt::Display for ModalError {
             ModalError::QuadraticEig { detail } => {
                 write!(f, "FS-MODAL-QUADRATIC-EIG: {detail}")
             }
+            ModalError::Cancelled => write!(
+                f,
+                "FS-MODAL-CANCELLED: all windows drained; no partial report"
+            ),
+            ModalError::WindowPlan { field } => write!(f, "FS-MODAL-WINDOW-PLAN: {field}"),
+            ModalError::WindowBudget { requested, cap } => write!(
+                f,
+                "FS-MODAL-WINDOW-BUDGET: {requested} windows exceeds cap {cap}"
+            ),
+            ModalError::MemoryBudget {
+                estimated_bytes,
+                cap,
+            } => write!(
+                f,
+                "FS-MODAL-MEMORY-BUDGET: payload {estimated_bytes} exceeds cap {cap}"
+            ),
+            ModalError::Executor { detail } => write!(f, "FS-MODAL-EXECUTOR: {detail}"),
         }
     }
 }
@@ -434,8 +474,7 @@ fn lanczos_sweep(
         // that floor would reintroduce dependence on the physical units.
         operator_scale = operator_scale.max(alpha.abs()).max(beta);
         let breakdown = beta == 0.0
-            || (operator_scale.is_finite()
-                && beta <= (16.0 * f64::EPSILON) * operator_scale);
+            || (operator_scale.is_finite() && beta <= (16.0 * f64::EPSILON) * operator_scale);
 
         // Ritz extraction on the tridiagonal T_j (small dense; j ≤ budget).
         let jn = basis.len();
@@ -521,230 +560,303 @@ pub fn slice_window(
     window: (f64, f64),
     opts: &SliceOptions,
 ) -> Result<SliceReport, ModalError> {
-    let n = check_shapes(k, m)?;
     let (lo, hi) = window;
     if !(lo.is_finite() && hi.is_finite() && lo < hi) {
         return Err(ModalError::InvalidWindow { low: lo, high: hi });
     }
+    let prepared = PreparedPencil::new(k, m, lo, opts, None, &mut || Ok(()))?;
+    prepared.slice(window, opts, None, &mut || Ok(()))
+}
 
-    // Mass factorization: SPD gate + the M⁻¹ norm used by every certificate.
-    let m_sym = SymbolicLdlt::analyze(m, opts.ordering).map_err(|source| ModalError::Factor {
-        shift: f64::NAN,
-        source,
-    })?;
-    let m_fact = m_sym
-        .factor(m, &opts.ldlt)
-        .map_err(|source| ModalError::Factor {
-            shift: f64::NAN,
-            source,
-        })?;
-    if m_fact.inertia().negative > 0 {
-        return Err(ModalError::MassNotSpd {
-            negative: m_fact.inertia().negative,
-        });
+/// Single owner for mass admission, scaling and the shared shifted pattern.
+/// Single-window and parallel-window calls use the identical numeric body.
+struct PreparedPencil<'a> {
+    k: &'a Csr,
+    m: &'a Csr,
+    m_fact: LdltFactor,
+    scales: Option<Vec<f64>>,
+    scaled: Option<(Csr, Csr)>,
+    p_sym: SymbolicLdlt,
+}
+impl<'a> PreparedPencil<'a> {
+    fn new(
+        k: &'a Csr,
+        m: &'a Csr,
+        lo: f64,
+        opts: &SliceOptions,
+        coordinates: Option<&[[f64; 3]]>,
+        checkpoint: &mut dyn FnMut() -> Result<(), ModalError>,
+    ) -> Result<Self, ModalError> {
+        check_shapes(k, m)?;
+        checkpoint()?;
+
+        // Mass factorization: SPD gate + the M⁻¹ norm used by every certificate.
+        let m_sym = SymbolicLdlt::analyze_with_coordinates(m, opts.ordering, coordinates).map_err(
+            |source| ModalError::Factor {
+                shift: f64::NAN,
+                source,
+            },
+        )?;
+        checkpoint()?;
+        let m_fact = m_sym
+            .factor(m, &opts.ldlt)
+            .map_err(|source| ModalError::Factor {
+                shift: f64::NAN,
+                source,
+            })?;
+        if m_fact.inertia().negative > 0 {
+            return Err(ModalError::MassNotSpd {
+                negative: m_fact.inertia().negative,
+            });
+        }
+
+        let scales = if opts.mass_diagonal_equilibration {
+            Some(mass_coordinate_scales(m)?)
+        } else {
+            None
+        };
+        let scaled = scales
+            .as_ref()
+            .map(|scale| Ok((congruence_scaled(k, scale)?, congruence_scaled(m, scale)?)))
+            .transpose()?;
+        let (work_k, work_m) = scaled.as_ref().map_or((k, m), |(ks, ms)| (ks, ms));
+
+        // One symbolic analysis serves every shift (union pattern).
+        let a_lo = shifted_pencil(work_k, work_m, lo);
+        checkpoint()?;
+        let p_sym = SymbolicLdlt::analyze_with_coordinates(&a_lo, opts.ordering, coordinates)
+            .map_err(|source| ModalError::Factor { shift: lo, source })?;
+        Ok(Self {
+            k,
+            m,
+            m_fact,
+            scales,
+            scaled,
+            p_sym,
+        })
     }
 
-    let scales = if opts.mass_diagonal_equilibration {
-        Some(mass_coordinate_scales(m)?)
-    } else {
-        None
-    };
-    let scaled = scales
-        .as_ref()
-        .map(|scale| Ok((congruence_scaled(k, scale)?, congruence_scaled(m, scale)?)))
-        .transpose()?;
-    let (work_k, work_m) = scaled.as_ref().map_or((k, m), |(ks, ms)| (ks, ms));
+    fn work(&self) -> (&Csr, &Csr) {
+        self.scaled
+            .as_ref()
+            .map_or((self.k, self.m), |(k, m)| (k, m))
+    }
 
-    // One symbolic analysis serves every shift (union pattern).
-    let a_lo = shifted_pencil(work_k, work_m, lo);
-    let p_sym = SymbolicLdlt::analyze(&a_lo, opts.ordering)
-        .map_err(|source| ModalError::Factor { shift: lo, source })?;
-    let mut factorizations = 0usize;
-    let factor_at = |sigma: f64, mat: &Csr, count: &mut usize| -> Result<LdltFactor, ModalError> {
-        *count += 1;
-        p_sym
-            .factor(mat, &opts.ldlt)
-            .map_err(|source| ModalError::Factor {
-                shift: sigma,
-                source,
-            })
-    };
+    fn slice(
+        &self,
+        window: (f64, f64),
+        opts: &SliceOptions,
+        counts: Option<(usize, usize)>,
+        checkpoint: &mut dyn FnMut() -> Result<(), ModalError>,
+    ) -> Result<SliceReport, ModalError> {
+        let (k, m) = (self.k, self.m);
+        let n = k.nrows();
+        let (lo, hi) = window;
+        let (work_k, work_m) = self.work();
+        let (p_sym, m_fact, scales) = (&self.p_sym, &self.m_fact, &self.scales);
+        let mut factorizations = 0usize;
+        let mut factor_at =
+            |sigma: f64, mat: &Csr, count: &mut usize| -> Result<LdltFactor, ModalError> {
+                checkpoint()?;
+                *count += 1;
+                p_sym
+                    .factor(mat, &opts.ldlt)
+                    .map_err(|source| ModalError::Factor {
+                        shift: sigma,
+                        source,
+                    })
+            };
 
-    let f_lo = factor_at(lo, &a_lo, &mut factorizations)?;
-    let a_hi = shifted_pencil(work_k, work_m, hi);
-    let f_hi = factor_at(hi, &a_hi, &mut factorizations)?;
-    let below_low = f_lo.inertia().negative;
-    let below_high = f_hi.inertia().negative;
-    let expected = below_high - below_low;
-    drop(f_lo);
-    drop(f_hi);
+        let (below_low, below_high) = if let Some(counts) = counts {
+            counts
+        } else {
+            let a_lo = shifted_pencil(work_k, work_m, lo);
+            let f_lo = factor_at(lo, &a_lo, &mut factorizations)?;
+            let a_hi = shifted_pencil(work_k, work_m, hi);
+            let f_hi = factor_at(hi, &a_hi, &mut factorizations)?;
+            let below_low = f_lo.inertia().negative;
+            let below_high = f_hi.inertia().negative;
+            drop(f_lo);
+            drop(f_hi);
+            (below_low, below_high)
+        };
+        let expected = below_high - below_low;
 
-    if expected == 0 {
-        return Ok(SliceReport {
+        if expected == 0 {
+            return Ok(SliceReport {
+                window,
+                below_low,
+                below_high,
+                expected: 0,
+                modes: Vec::new(),
+                stats: SliceStats {
+                    shift: f64::NAN,
+                    factorizations,
+                    lanczos_iters: 0,
+                    restarts: 0,
+                    factor_nnz_l: 0,
+                    factor_peak_bytes: 0,
+                    pivots_delayed: 0,
+                },
+            });
+        }
+
+        // Interior shift: midpoint first, deterministic golden-ratio fallbacks
+        // if the factorization refuses (shift grazing an eigenvalue).
+        let fractions: [f64; 4] = [0.5, 0.381_966_011_250_105, 0.618_033_988_749_895, 0.25];
+        let mut chosen: Option<(f64, LdltFactor)> = None;
+        let mut last_err = None;
+        for &fr in &fractions {
+            let sigma = fr.mul_add(hi - lo, lo);
+            let a_mid = shifted_pencil(work_k, work_m, sigma);
+            match factor_at(sigma, &a_mid, &mut factorizations) {
+                Ok(f) => {
+                    chosen = Some((sigma, f));
+                    break;
+                }
+                Err(
+                    e @ ModalError::Factor {
+                        source: LdltError::PivotBreakdown { .. },
+                        ..
+                    },
+                ) => last_err = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        let Some((sigma, f_mid)) = chosen else {
+            return Err(last_err.expect("at least one shift attempt was made"));
+        };
+        let factor_nnz_l = f_mid.stats().nnz_l;
+        let factor_peak_bytes = f_mid.stats().peak_front_bytes;
+        let pivots_delayed = f_mid.stats().pivots_delayed;
+
+        let max_restarts = if opts.max_restarts == 0 {
+            2 + expected
+        } else {
+            opts.max_restarts
+        };
+        // Total budget spans all restarts; each sweep gets its own slice sized
+        // to what it still needs, so an early sweep cannot starve the deflation
+        // restarts that degenerate clusters require.
+        let budget_total = if opts.max_lanczos == 0 {
+            n.min((20 + 6 * expected) * (1 + max_restarts))
+        } else {
+            opts.max_lanczos
+        };
+
+        let mut apply_m = |x: &[f64], y: &mut [f64]| work_m.spmv(x, y);
+        let mut solve_shifted = |b: &[f64], out: &mut [f64]| {
+            let x = f_mid.solve(b);
+            out.copy_from_slice(&x);
+        };
+
+        // Restart-with-deflation until the certified count is met.
+        let mut converged: Vec<(f64, Vec<f64>)> = Vec::new();
+        let mut iters_used = 0usize;
+        let mut restarts = 0usize;
+        while converged.len() < expected {
+            checkpoint()?;
+            if restarts > max_restarts || iters_used >= budget_total {
+                return Err(ModalError::WindowUnresolved {
+                    expected,
+                    converged: converged.len(),
+                    window,
+                });
+            }
+            let need = expected - converged.len();
+            let sweep = lanczos_sweep(
+                n,
+                sigma,
+                Some(window),
+                (20 + 6 * need).min(budget_total - iters_used),
+                need,
+                opts.ritz_tol,
+                0xF5_0DA1 + restarts as u64,
+                &mut apply_m,
+                &mut solve_shifted,
+                &converged,
+            );
+            iters_used += sweep.iters;
+            let found_any = !sweep.accepted.is_empty();
+            for (lambda, phi) in sweep.accepted {
+                if converged.len() < expected {
+                    converged.push((lambda, phi));
+                }
+            }
+            restarts += 1;
+            if !found_any && iters_used >= budget_total {
+                return Err(ModalError::WindowUnresolved {
+                    expected,
+                    converged: converged.len(),
+                    window,
+                });
+            }
+        }
+
+        // Explicit certification: mass-normalize, compute the true pencil
+        // residual, and derive the M⁻¹-norm interval per mode.
+        let mut modes: Vec<ModePair> = Vec::with_capacity(expected);
+        let mut scratch = vec![0.0f64; n];
+        for (lambda, mut phi) in converged {
+            checkpoint()?;
+            if let Some(scales) = scales {
+                for (coordinate, scale) in phi.iter_mut().zip(scales) {
+                    *coordinate *= scale;
+                }
+            }
+            m.spmv(&phi, &mut scratch);
+            let mnorm: f64 = phi
+                .iter()
+                .zip(&scratch)
+                .map(|(a, b)| a * b)
+                .sum::<f64>()
+                .max(f64::MIN_POSITIVE)
+                .sqrt();
+            for slot in &mut phi {
+                *slot /= mnorm;
+            }
+            let mut kphi = vec![0.0f64; n];
+            k.spmv(&phi, &mut kphi);
+            m.spmv(&phi, &mut scratch);
+            let r: Vec<f64> = kphi
+                .iter()
+                .zip(&scratch)
+                .map(|(kk, mm)| lambda.mul_add(-mm, *kk))
+                .collect();
+            let minv_r = m_fact.solve(&r);
+            let bound = r
+                .iter()
+                .zip(&minv_r)
+                .map(|(a, b)| a * b)
+                .sum::<f64>()
+                .max(0.0)
+                .sqrt();
+            modes.push(ModePair {
+                lambda,
+                phi,
+                residual: bound,
+                interval: (lambda - bound, lambda + bound),
+            });
+        }
+        modes.sort_by(|a, b| a.lambda.total_cmp(&b.lambda));
+
+        Ok(SliceReport {
             window,
             below_low,
             below_high,
-            expected: 0,
-            modes: Vec::new(),
+            expected,
+            modes,
             stats: SliceStats {
-                shift: f64::NAN,
+                shift: sigma,
                 factorizations,
-                lanczos_iters: 0,
-                restarts: 0,
-                factor_nnz_l: 0,
-                factor_peak_bytes: 0,
-                pivots_delayed: 0,
+                lanczos_iters: iters_used,
+                restarts: restarts.saturating_sub(1),
+                factor_nnz_l,
+                factor_peak_bytes,
+                pivots_delayed,
             },
-        });
+        })
     }
-
-    // Interior shift: midpoint first, deterministic golden-ratio fallbacks
-    // if the factorization refuses (shift grazing an eigenvalue).
-    let fractions: [f64; 4] = [0.5, 0.381_966_011_250_105, 0.618_033_988_749_895, 0.25];
-    let mut chosen: Option<(f64, LdltFactor)> = None;
-    let mut last_err = None;
-    for &fr in &fractions {
-        let sigma = fr.mul_add(hi - lo, lo);
-        let a_mid = shifted_pencil(work_k, work_m, sigma);
-        match factor_at(sigma, &a_mid, &mut factorizations) {
-            Ok(f) => {
-                chosen = Some((sigma, f));
-                break;
-            }
-            Err(e) => last_err = Some(e),
-        }
-    }
-    let Some((sigma, f_mid)) = chosen else {
-        return Err(last_err.expect("at least one shift attempt was made"));
-    };
-    let factor_nnz_l = f_mid.stats().nnz_l;
-    let factor_peak_bytes = f_mid.stats().peak_front_bytes;
-    let pivots_delayed = f_mid.stats().pivots_delayed;
-
-    let max_restarts = if opts.max_restarts == 0 {
-        2 + expected
-    } else {
-        opts.max_restarts
-    };
-    // Total budget spans all restarts; each sweep gets its own slice sized
-    // to what it still needs, so an early sweep cannot starve the deflation
-    // restarts that degenerate clusters require.
-    let budget_total = if opts.max_lanczos == 0 {
-        n.min((20 + 6 * expected) * (1 + max_restarts))
-    } else {
-        opts.max_lanczos
-    };
-
-    let mut apply_m = |x: &[f64], y: &mut [f64]| work_m.spmv(x, y);
-    let mut solve_shifted = |b: &[f64], out: &mut [f64]| {
-        let x = f_mid.solve(b);
-        out.copy_from_slice(&x);
-    };
-
-    // Restart-with-deflation until the certified count is met.
-    let mut converged: Vec<(f64, Vec<f64>)> = Vec::new();
-    let mut iters_used = 0usize;
-    let mut restarts = 0usize;
-    while converged.len() < expected {
-        if restarts > max_restarts || iters_used >= budget_total {
-            return Err(ModalError::WindowUnresolved {
-                expected,
-                converged: converged.len(),
-                window,
-            });
-        }
-        let need = expected - converged.len();
-        let sweep = lanczos_sweep(
-            n,
-            sigma,
-            Some(window),
-            (20 + 6 * need).min(budget_total - iters_used),
-            need,
-            opts.ritz_tol,
-            0xF5_0DA1 + restarts as u64,
-            &mut apply_m,
-            &mut solve_shifted,
-            &converged,
-        );
-        iters_used += sweep.iters;
-        let found_any = !sweep.accepted.is_empty();
-        for (lambda, phi) in sweep.accepted {
-            if converged.len() < expected {
-                converged.push((lambda, phi));
-            }
-        }
-        restarts += 1;
-        if !found_any && iters_used >= budget_total {
-            return Err(ModalError::WindowUnresolved {
-                expected,
-                converged: converged.len(),
-                window,
-            });
-        }
-    }
-
-    // Explicit certification: mass-normalize, compute the true pencil
-    // residual, and derive the M⁻¹-norm interval per mode.
-    let mut modes: Vec<ModePair> = Vec::with_capacity(expected);
-    let mut scratch = vec![0.0f64; n];
-    for (lambda, mut phi) in converged {
-        if let Some(scales) = &scales {
-            for (coordinate, scale) in phi.iter_mut().zip(scales) {
-                *coordinate *= scale;
-            }
-        }
-        m.spmv(&phi, &mut scratch);
-        let mnorm: f64 = phi
-            .iter()
-            .zip(&scratch)
-            .map(|(a, b)| a * b)
-            .sum::<f64>()
-            .max(f64::MIN_POSITIVE)
-            .sqrt();
-        for slot in &mut phi {
-            *slot /= mnorm;
-        }
-        let mut kphi = vec![0.0f64; n];
-        k.spmv(&phi, &mut kphi);
-        m.spmv(&phi, &mut scratch);
-        let r: Vec<f64> = kphi
-            .iter()
-            .zip(&scratch)
-            .map(|(kk, mm)| lambda.mul_add(-mm, *kk))
-            .collect();
-        let minv_r = m_fact.solve(&r);
-        let bound = r
-            .iter()
-            .zip(&minv_r)
-            .map(|(a, b)| a * b)
-            .sum::<f64>()
-            .max(0.0)
-            .sqrt();
-        modes.push(ModePair {
-            lambda,
-            phi,
-            residual: bound,
-            interval: (lambda - bound, lambda + bound),
-        });
-    }
-    modes.sort_by(|a, b| a.lambda.total_cmp(&b.lambda));
-
-    Ok(SliceReport {
-        window,
-        below_low,
-        below_high,
-        expected,
-        modes,
-        stats: SliceStats {
-            shift: sigma,
-            factorizations,
-            lanczos_iters: iters_used,
-            restarts: restarts.saturating_sub(1),
-            factor_nnz_l,
-            factor_peak_bytes,
-            pivots_delayed,
-        },
-    })
 }
 
 // ---------------------------------------------------------------------------

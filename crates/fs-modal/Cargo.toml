@@ -11,11 +11,14 @@ description = "Generalized vibration eigenproblem facility: K phi = lambda M phi
 layer = "L1"
 
 [dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-exec = { path = "../fs-exec" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
+fs-solid = { path = "../fs-solid" }
 # Constellation reference oracle (test-only, dev-deps are layer-exempt):
 # independent dense symmetric eigensolver for the casebook cross-check.
 fsci-linalg = { path = "../../../frankenscipy/crates/fsci-linalg" }

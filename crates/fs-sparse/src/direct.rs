@@ -47,6 +47,8 @@ pub enum DirectOrdering {
     Natural,
     /// Approximate minimum degree ([`amd_order`]). The default.
     Amd,
+    /// Deterministic multilevel nested dissection; AMD remains the default.
+    NestedDissection(crate::ordering_nd::NdOptions),
 }
 
 /// Options for the numeric factorization stage.
@@ -66,6 +68,10 @@ pub struct LdltOptions {
     /// scale) below `zero_pivot_rel · max|A|` (resp. its square) refuses as
     /// numerically singular. Default `256·ε ≈ 5.7e-14`.
     pub zero_pivot_rel: f64,
+    /// Cap on numeric factor + scratch payload bytes (not process RSS).
+    /// Symbolic estimate is admitted before numeric allocation; delayed
+    /// pivots are checked again before each widened front allocation.
+    pub max_factor_bytes: Option<usize>,
 }
 
 impl Default for LdltOptions {
@@ -74,6 +80,7 @@ impl Default for LdltOptions {
             pivot_threshold: 0.01,
             allow_2x2: true,
             zero_pivot_rel: 256.0 * f64::EPSILON,
+            max_factor_bytes: None,
         }
     }
 }
@@ -118,6 +125,10 @@ pub struct FactorStats {
     /// Largest frontal matrix dimension encountered (delays widen ancestor
     /// fronts, so this can exceed the symbolic prediction).
     pub max_front_dim: usize,
+    /// Conservative peak numeric payload (factor, front, updates, scratch).
+    /// Includes simultaneous front/L/update construction; excludes allocator
+    /// overhead, the caller's CSR and the retained symbolic analysis.
+    pub peak_factor_bytes: usize,
 }
 
 /// Typed refusals of the direct-factorization stages. Display strings carry
@@ -156,6 +167,8 @@ pub enum LdltError {
         /// Name of the offending option field.
         field: &'static str,
     },
+    /// Numeric work was refused before the allocation that would exceed cap.
+    FactorBudget { estimated_bytes: usize, cap: usize },
     /// No acceptable 1×1 or 2×2 pivot exists in a ROOT front's fully-summed
     /// block after delayed-pivot migration: the matrix is numerically
     /// singular (or beyond the threshold's reach). The factorization
@@ -195,6 +208,13 @@ impl core::fmt::Display for LdltError {
             LdltError::InvalidOptions { field } => {
                 write!(f, "FS-SPARSE-DIRECT-INVALID-OPTIONS: {field}")
             }
+            LdltError::FactorBudget {
+                estimated_bytes,
+                cap,
+            } => write!(
+                f,
+                "FS-SPARSE-DIRECT-FACTOR-BUDGET: numeric payload {estimated_bytes} bytes exceeds cap {cap}"
+            ),
             LdltError::PivotBreakdown {
                 orig_col,
                 permuted_col,
@@ -403,6 +423,8 @@ pub struct SymbolicLdlt {
     /// Exact pattern the analysis was computed for (mismatch guard).
     pat_row_ptr: Vec<usize>,
     pat_col_idx: Vec<usize>,
+    /// Cached before any numeric call; budget refusal allocates no fronts.
+    factor_bytes: usize,
 }
 
 impl SymbolicLdlt {
@@ -411,6 +433,16 @@ impl SymbolicLdlt {
     /// tree and its postorder, compute per-column L structures, and certify
     /// fundamental supernodes by EXACT structure comparison.
     pub fn analyze(a: &Csr, ordering: DirectOrdering) -> Result<SymbolicLdlt, LdltError> {
+        Self::analyze_with_coordinates(a, ordering, None)
+    }
+
+    /// Optional geometric coordinates affect ND only; AMD/Natural arithmetic
+    /// and permutation construction are unchanged.
+    pub fn analyze_with_coordinates(
+        a: &Csr,
+        ordering: DirectOrdering,
+        coordinates: Option<&[[f64; 3]]>,
+    ) -> Result<SymbolicLdlt, LdltError> {
         if a.nrows() != a.ncols() {
             return Err(LdltError::NotSquare {
                 nrows: a.nrows(),
@@ -430,6 +462,9 @@ impl SymbolicLdlt {
         let base_perm = match ordering {
             DirectOrdering::Natural => (0..n).collect::<Vec<usize>>(),
             DirectOrdering::Amd => amd_order(a),
+            DirectOrdering::NestedDissection(opts) => {
+                crate::ordering_nd::nd_order_with_coordinates(a, &opts, coordinates)?.permutation
+            }
         };
         let mut base_iperm = vec![0usize; n];
         for (k, &o) in base_perm.iter().enumerate() {
@@ -490,7 +525,7 @@ impl SymbolicLdlt {
         }
         let nnz_l = n + colstruct.iter().map(Vec::len).sum::<usize>();
         let (pat_row_ptr, pat_col_idx) = pattern_of(a);
-        Ok(SymbolicLdlt {
+        let mut symbolic = SymbolicLdlt {
             n,
             perm,
             iperm,
@@ -498,7 +533,10 @@ impl SymbolicLdlt {
             nnz_l,
             pat_row_ptr,
             pat_col_idx,
-        })
+            factor_bytes: 0,
+        };
+        symbolic.factor_bytes = symbolic.compute_factor_bytes();
+        Ok(symbolic)
     }
 
     /// Dimension of the analyzed pattern.
@@ -528,11 +566,98 @@ impl SymbolicLdlt {
         &self.perm
     }
 
+    /// Retained symbolic payload, excluding allocator metadata/capacity slack.
+    pub fn symbolic_bytes(&self) -> usize {
+        let words = self.perm.len()
+            + self.iperm.len()
+            + self.pat_row_ptr.len()
+            + self.pat_col_idx.len()
+            + self
+                .snodes
+                .iter()
+                .map(|s| s.panel.len() + s.children.len())
+                .sum::<usize>();
+        words
+            .saturating_mul(core::mem::size_of::<usize>())
+            .saturating_add(
+                self.snodes
+                    .len()
+                    .saturating_mul(core::mem::size_of::<SnodeSym>()),
+            )
+    }
+
+    fn numeric_base_bytes(&self) -> usize {
+        self.n
+            .saturating_mul(2 * core::mem::size_of::<usize>())
+            .saturating_add(
+                (self.pat_row_ptr.len() + self.pat_col_idx.len())
+                    .saturating_mul(core::mem::size_of::<usize>()),
+            )
+            .saturating_add(self.snodes.len().saturating_mul(
+                core::mem::size_of::<SnodeNum>() + core::mem::size_of::<Option<Update>>(),
+            ))
+    }
+
+    /// No-delay symbolic upper estimate of numeric payload. Pivot delays can
+    /// widen fronts, so factor() additionally admits the actual dimensions.
+    pub fn estimated_factor_bytes(&self) -> usize {
+        self.factor_bytes
+    }
+
+    fn compute_factor_bytes(&self) -> usize {
+        let mut stored = self.numeric_base_bytes();
+        let mut live = 0usize;
+        let mut peak = stored;
+        let mut updates = vec![0usize; self.snodes.len()];
+        for (sid, s) in self.snodes.iter().enumerate() {
+            let m = s.width + s.panel.len();
+            let next = m
+                .saturating_mul(s.width)
+                .saturating_mul(8)
+                .saturating_add(m.saturating_mul(core::mem::size_of::<usize>()))
+                .saturating_add(s.width.saturating_mul(core::mem::size_of::<DBlock>()));
+            let update = s
+                .panel
+                .len()
+                .saturating_mul(s.panel.len())
+                .saturating_mul(8)
+                .saturating_add(s.panel.len().saturating_mul(core::mem::size_of::<usize>()));
+            peak = peak.max(
+                stored
+                    .saturating_add(live)
+                    .saturating_add(m.saturating_mul(m).saturating_mul(16))
+                    .saturating_add(m.saturating_mul(s.width).saturating_mul(8))
+                    .saturating_add(s.width.saturating_mul(core::mem::size_of::<DBlock>()))
+                    .saturating_add(m.saturating_mul(80)),
+            );
+            for &child in &s.children {
+                live = live.saturating_sub(updates[child]);
+            }
+            updates[sid] = update;
+            live = live.saturating_add(update);
+            stored = stored.saturating_add(next);
+        }
+        peak
+    }
+
+    /// No-delay, all-1x1 flop estimate in the numeric owner's counting units.
+    /// This is a structural cost estimate, not measured numeric work.
+    pub fn estimated_flops(&self) -> u64 {
+        self.snodes.iter().fold(0u64, |sum, s| {
+            let m = s.width + s.panel.len();
+            (0..s.width).fold(sum, |sum, k| {
+                sum.saturating_add(((m - k) as u64).saturating_mul((m - k) as u64))
+            })
+        })
+    }
+
     /// Numeric multifrontal factorization of `a` (which must carry exactly
     /// the analyzed pattern) as P·A·Pᵀ = L·D·Lᵀ with unit-lower L and D of
     /// 1×1/2×2 blocks. Refuses (never perturbs) on pivot breakdown.
     #[allow(clippy::too_many_lines)] // one coherent numeric pipeline; splitting obscures the data flow
     pub fn factor(&self, a: &Csr, opts: &LdltOptions) -> Result<LdltFactor, LdltError> {
+        let estimate = self.estimated_factor_bytes();
+        admit_factor_bytes(estimate, opts.max_factor_bytes)?;
         // NaN thresholds fail the finiteness test, so both gates fail closed.
         if !opts.pivot_threshold.is_finite()
             || opts.pivot_threshold <= 0.0
@@ -580,6 +705,7 @@ impl SymbolicLdlt {
             pivots_2x2: 0,
             pivots_delayed: 0,
             max_front_dim: 0,
+            peak_factor_bytes: estimate,
         };
         let mut nnz_l_actual = 0usize;
         let mut inertia = Inertia {
@@ -589,6 +715,8 @@ impl SymbolicLdlt {
         let mut snodes_num: Vec<SnodeNum> = Vec::with_capacity(self.snodes.len());
         let mut updates: Vec<Option<Update>> = vec![None; self.snodes.len()];
         let mut live_update_bytes = 0usize;
+        let mut live_update_payload_bytes = 0usize;
+        let mut retained_factor_bytes = self.numeric_base_bytes();
 
         // Scratch var→local-position map, stamped and reset per supernode so
         // the factorization stays O(front work), not O(n · supernodes).
@@ -615,6 +743,17 @@ impl SymbolicLdlt {
             fs.extend(sym.col_start..sym.col_start + w);
             let wf = fs.len();
             let m = wf + sym.panel.len();
+            // Delays may exceed the symbolic prediction. Bound all numeric
+            // payloads that coexist while this front is harvested, BEFORE
+            // allocating any of them. Saturation refuses finite caps.
+            let required = retained_factor_bytes
+                .saturating_add(live_update_payload_bytes)
+                .saturating_add(m.saturating_mul(m).saturating_mul(16))
+                .saturating_add(m.saturating_mul(wf).saturating_mul(8))
+                .saturating_add(wf.saturating_mul(core::mem::size_of::<DBlock>()))
+                .saturating_add(m.saturating_mul(80));
+            admit_factor_bytes(required, opts.max_factor_bytes)?;
+            stats.peak_factor_bytes = stats.peak_factor_bytes.max(required);
             stats.max_front_dim = stats.max_front_dim.max(m);
             // Local layout: fully-summed columns first, then panel rows.
             let mut front_local: Vec<usize> = fs;
@@ -655,6 +794,8 @@ impl SymbolicLdlt {
             for &ch in &sym.children {
                 let up = updates[ch].take().expect("child update consumed twice");
                 live_update_bytes -= up.data.len() * 8;
+                live_update_payload_bytes -=
+                    up.data.len() * 8 + up.vars.len() * core::mem::size_of::<usize>();
                 let map: Vec<usize> = up
                     .vars
                     .iter()
@@ -820,6 +961,8 @@ impl SymbolicLdlt {
                     }
                 }
                 live_update_bytes += data.len() * 8;
+                live_update_payload_bytes +=
+                    data.len() * 8 + remaining * core::mem::size_of::<usize>();
                 stats.peak_front_bytes = stats.peak_front_bytes.max(live_update_bytes);
                 updates[sid] = Some(Update {
                     vars: local2var[k_elim..].to_vec(),
@@ -832,6 +975,10 @@ impl SymbolicLdlt {
                 l,
                 d: dblocks,
             });
+            retained_factor_bytes = retained_factor_bytes
+                .saturating_add(m.saturating_mul(k_elim).saturating_mul(8))
+                .saturating_add(m.saturating_mul(core::mem::size_of::<usize>()))
+                .saturating_add(k_elim.saturating_mul(core::mem::size_of::<DBlock>()));
         }
 
         stats.nnz_l = nnz_l_actual;
@@ -848,6 +995,18 @@ impl SymbolicLdlt {
             stats,
         })
     }
+}
+
+fn admit_factor_bytes(estimated_bytes: usize, cap: Option<usize>) -> Result<(), LdltError> {
+    if let Some(cap) = cap {
+        if estimated_bytes > cap {
+            return Err(LdltError::FactorBudget {
+                estimated_bytes,
+                cap,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn pattern_of(a: &Csr) -> (Vec<usize>, Vec<usize>) {

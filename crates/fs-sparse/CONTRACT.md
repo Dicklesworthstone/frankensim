@@ -87,6 +87,35 @@ results are machine-specific, not a universal throughput guarantee.
   right-hand sides.
 
 ## Invariants
+IRP M1.5-W1 extends the direct owner with `DirectOrdering::NestedDissection`
+and `ordering_nd::{NdOptions, NdOrdering, SeparatorTree}`. AMD remains the
+default in consumers. `nd_order` performs deterministic heavy-edge matching,
+balanced bisection, locked-move FM passes with best-prefix rollback, and an
+explicit vertex cover of cut edges. Original-index ties are stable; AMD orders
+leaves and separators. `nd_order_with_coordinates` and
+`SymbolicLdlt::analyze_with_coordinates` optionally use finite, supplied xyz
+coordinates for longest-axis geometric bisection instead. No coordinates are
+invented. Separator trees retain original vertex ids; all left/right edges
+must be absent after removing the corresponding separator. Expander/complete
+subproblems without a useful split fall back to AMD, with no separator claim.
+No universal fill superiority over AMD is claimed. George1973,
+doi:10.1137/0710032 is the nested-dissection reference; the three-dimensional
+30^3/45^3/60^3 comparison is an executable fixture gate, pending native proof.
+
+`LdltOptions.max_factor_bytes` is optional numeric-payload admission. The
+existing factor refuses `FactorBudget` from `estimated_factor_bytes()` BEFORE
+numeric allocation. Before each front allocation it checks actual dimensions
+again, so delayed pivots cannot silently exceed the cap. This conservative
+payload bound covers factor, fronts, live updates and numeric scratch; it is
+not an OS RSS/allocator-overhead or symbolic-construction memory guarantee.
+`symbolic_bytes`, `estimated_flops` and `FactorStats.peak_factor_bytes` disclose
+retained symbolic payload, no-delay work estimate and conservative numeric
+peak respectively. Numeric arithmetic, AMD permutation and legacy factor
+statistics remain unchanged. Tests `nested_dissection` cover permutation,
+separator separation/order, repeat identity, leaf/coordinate refusals, exact
+budget cap versus cap+1, five-shift analytic 3-D inertia and release-only fill
+growth. These new gates have not yet run centrally.
+
 1. **Cross-format bitwise SpMV equality**: CSR, BSR, and SELL SpMV produce
    BIT-IDENTICAL outputs. Mechanism: every kernel accumulates each row in
    ascending-global-column order with fused `mul_add` from a +0.0 start; BSR
