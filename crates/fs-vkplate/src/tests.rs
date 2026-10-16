@@ -106,6 +106,43 @@ fn a_new_stroke_retires_the_sticks_earlier_contact() {
     assert!(c[first[1]].active && c[first[1]].peak_force > 0.0, "the second stroke never landed");
 }
 
+/// `image` (the export for the GPU renderer) only reads: exporting before the first step leaves every
+/// output sample unchanged, and the exported Airy solve is symmetric positive definite, as A^-1 must be.
+#[test]
+fn exporting_an_instrument_changes_nothing_and_exports_a_spd_airy_inverse() {
+    let run = |export: bool| {
+        let mut p = live::Live::new("ride", 2.5).unwrap();
+        p.strike(0.6 * p.radius, 0.0, 2.5);
+        if export {
+            let img = p.ins.image();
+            assert_eq!(img.bodies.len(), p.ins.bodies.len());
+            assert!(img.bodies.iter().all(|b| b.cf.len() == b.n && b.lap.ptr.len() == b.n + 1));
+            assert!(img.mics.iter().all(|m| m.ring_len.is_power_of_two() && !m.taps.is_empty()));
+        }
+        let mut blk = vec![0.0f32; 960];
+        p.render(&mut blk, 1.0);
+        (blk.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), p)
+    };
+    let (plain, _) = run(false);
+    let (exported, mut p) = run(true);
+    assert_eq!(plain, exported, "exporting changed the output");
+    let img = p.ins.image();
+    let (bi, nc) = img.bodies.iter().enumerate().find_map(|(i, b)| b.vk.as_ref().map(|v| (i, v.nb.len()))).unwrap();
+    assert!(nc > 10, "no von Karman core found");
+    let shell = &p.ins.bodies[bi];
+    assert!(!shell.airy_solve(&mut vec![0.0; nc + 1]), "a wrong-length solve must refuse");
+    let col = |j: usize| {
+        let mut x = vec![0.0; nc];
+        x[j] = 1.0;
+        assert!(shell.airy_solve(&mut x));
+        x
+    };
+    let (a, b) = (col(3), col(nc / 2));
+    assert!(a[3] > 0.0 && b[nc / 2] > 0.0, "diagonal of A^-1 not positive");
+    let rel = (a[nc / 2] - b[3]).abs() / a[nc / 2].abs().max(b[3].abs());
+    assert!(rel < 1e-9, "A^-1 not symmetric: {rel:e}");
+}
+
 /// The auxiliary variable must keep tracking sqrt(2V): a shallow shell carries its curvature
 /// stiffness in V, so psi / sqrt(2V) scales that stiffness. Without the relaxation this ratio
 /// reached 1.48 and then 0.52 within 2 s on this live-grid ride (and the 8-16 kHz bands grew back).

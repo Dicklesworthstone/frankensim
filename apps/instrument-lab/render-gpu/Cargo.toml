@@ -1,0 +1,32 @@
+[package]
+name = "fs-render-gpu"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Offline drum-kit renders on an NVIDIA GPU when one is present (one persistent CUDA kernel stepping the exported fs-vkplate instrument), on the CPU otherwise. An optional accelerator for the instrument lab, outside the workspace; fs-vkplate's CPU step stays the reference."
+
+# Its own workspace (the engine-kit pattern): fs-vkplate is std only, and nothing in the main workspace
+# builds or links this tool or its GPU bindings.
+[workspace]
+
+[[bin]]
+name = "render-gpu"
+path = "src/main.rs"
+
+[features]
+default = ["cuda"]
+# cudarc loads the CUDA driver and NVRTC at run time (no CUDA toolkit needed to build, none needed to
+# run on the CPU); the kernel is compiled for the GPU found at start-up.
+cuda = ["dep:cudarc"]
+
+[dependencies]
+fs-vkplate = { path = "../../../crates/fs-vkplate" }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-13020"], optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false

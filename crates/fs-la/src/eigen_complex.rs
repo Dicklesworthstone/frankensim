@@ -14,6 +14,9 @@
 
 use fs_math::c64::C64;
 
+mod cancellable;
+pub use cancellable::{LuComplexError, lu_complex_with_cancel};
+
 /// Typed convergence failure: which eigenvalue window stalled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EigFailure {
@@ -221,63 +224,16 @@ pub struct LuComplex {
 /// Factor. # Errors: [`EigFailure`] reused as a typed singularity signal
 /// (`window_hi` = failing elimination step).
 pub fn lu_complex(a: &[C64], n: usize) -> Result<LuComplex, EigFailure> {
-    assert_eq!(a.len(), n * n, "a must be n*n = {}", n * n);
-    let mut m = a.to_vec();
-    let mut perm: Vec<usize> = (0..n).collect();
-    for k in 0..n {
-        let (mut best, mut best_i) = (m[k * n + k].abs(), k);
-        for i in k + 1..n {
-            let v = m[i * n + k].abs();
-            if v > best {
-                best = v;
-                best_i = i;
-            }
-        }
-        if best == 0.0 {
-            return Err(EigFailure { window_hi: k });
-        }
-        if best_i != k {
-            for c in 0..n {
-                m.swap(k * n + c, best_i * n + c);
-            }
-            perm.swap(k, best_i);
-        }
-        let piv = m[k * n + k];
-        for i in k + 1..n {
-            let f = m[i * n + k] / piv;
-            m[i * n + k] = f;
-            for c in k + 1..n {
-                let sub = f * m[k * n + c];
-                m[i * n + c] = m[i * n + c] - sub;
-            }
-        }
-    }
-    Ok(LuComplex { n, data: m, perm })
+    lu_complex_with_cancel(a, n, || false).map_err(|error| match error {
+        LuComplexError::Singular { index } => EigFailure { window_hi: index },
+        LuComplexError::Cancelled => unreachable!("cancellation is disabled"),
+    })
 }
 
 impl LuComplex {
     /// Solve A·x = b in place.
     pub fn solve(&self, b: &mut [C64]) {
-        let n = self.n;
-        assert_eq!(b.len(), n, "b must have length {n}");
-        let pb: Vec<C64> = self.perm.iter().map(|&p| b[p]).collect();
-        b.copy_from_slice(&pb);
-        for i in 0..n {
-            let mut v = b[i];
-            for (k, &bk) in b.iter().enumerate().take(i) {
-                let sub = self.data[i * n + k] * bk;
-                v = v - sub;
-            }
-            b[i] = v;
-        }
-        for i in (0..n).rev() {
-            let mut v = b[i];
-            for (k, &bk) in b.iter().enumerate().take(n).skip(i + 1) {
-                let sub = self.data[i * n + k] * bk;
-                v = v - sub;
-            }
-            b[i] = v / self.data[i * n + i];
-        }
+        self.solve_with_cancel(b, || false).expect("cancellation is disabled");
     }
 }
 
