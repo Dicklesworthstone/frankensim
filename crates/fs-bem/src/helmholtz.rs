@@ -42,7 +42,10 @@
 //! `(N_k - N_0)_ii = (ik - (e^{ika} - 1)/a)/2` plus the static part
 //! recovered from the exact closed-surface identity `N_0[1] = 0` as
 //! minus the discrete off-diagonal static row sum (same quadrature on
-//! both sides, so the point-panel error cancels).
+//! both sides, so the point-panel error cancels). Burton–Miller also closes
+//! `(D_0+I/2)1=0` with its static double-layer self coefficient and uses the
+//! same diagonal for `D'_0`, its area-weighted adjoint. Without this paired
+//! consistency, the `1/k` coupling amplifies a spurious static net flux.
 //! These paths are pinned by analytic/independent quadrature tests and the
 //! whole pipeline is arbitrated by the pulsating-sphere impedance oracle.
 //!
@@ -355,6 +358,9 @@ fn kernels(k: f64, x: [f64; 3], nx: [f64; 3], y: [f64; 3], ny: [f64; 3]) -> (C64
 /// cancels instead of polluting the Burton-Miller row.
 fn self_terms(k: f64, area: f64) -> (C64, C64) {
     let a = (area / core::f64::consts::PI).sqrt();
+    if k == 0.0 {
+        return (C64::new(0.5 * a, 0.0), C64::ZERO);
+    }
     let ik = C64::new(0.0, k);
     let s = (expik(k * a) - C64::ONE) * (ik + ik).recip();
     let n_reg = (ik - (expik(k * a) - C64::ONE).scale(1.0 / a)).scale(0.5);
@@ -1195,13 +1201,13 @@ fn assemble_dense_with_static(
         // so the self entry is minus the off-diagonal static sum under
         // the SAME point-panel quadrature.
         let mut n0_row = C64::ZERO;
+        let mut d0_row = C64::ZERO;
         if alpha != C64::ZERO {
             for j in 0..n {
                 if j != i {
-                    n0_row = n0_row
-                        + kernels(0.0, xi, ni, centroids[j], normals[j])
-                            .3
-                            .scale(areas[j]);
+                    let (_, d0, _, n0) = kernels(0.0, xi, ni, centroids[j], normals[j]);
+                    n0_row = n0_row + n0.scale(areas[j]);
+                    d0_row = d0_row + d0.scale(areas[j]);
                 }
             }
         }
@@ -1217,7 +1223,20 @@ fn assemble_dense_with_static(
                 } else {
                     self_terms(k, areas[i])
                 };
-                (s, C64::ZERO, C64::ZERO, n_reg - n0_row)
+                // The SAME static quadrature must also satisfy (D_0+I/2)1=0.
+                // Otherwise its weighted adjoint D'_0 has a spurious net flux:
+                // A^T(D'_0+I/2) != 0, while A^T N_0 = 0. Multiplication by
+                // alpha=-i/k then amplifies this incompatible RHS at low k,
+                // creating an O(panel-size) real pressure at k -> 0.
+                // This geometric Gauss correction closes the static identity,
+                // just as the N_0 row correction does. It uses no computed
+                // resistance or pressure and preserves the outgoing kernel.
+                let d_self = if alpha == C64::ZERO {
+                    C64::ZERO
+                } else {
+                    -half - d0_row
+                };
+                (s, d_self, d_self, n_reg - n0_row)
             } else if let Some(triangles) = weak_triangles {
                 // Static S/D must use the same triangle geometry everywhere.
                 // Integrate the regular far remainder too: centroid moments
@@ -2169,6 +2188,48 @@ mod tests {
     }
 
     #[test]
+    fn g0_burton_miller_static_rows_and_weighted_flux_are_compatible() {
+        // At k=0 all kernels are real. alpha=i exposes N_0 in Im(A),
+        // D_0-I/2 in Re(A), and D'_0+I/2 in Im(B), independently of S_0.
+        // These are the actual assembled operators, not a repaired solution.
+        let sphere = SpherePanels::icosphere(1.0, 1).unwrap();
+        let triangles = sphere
+            .triangles()
+            .unwrap()
+            .iter()
+            .map(|triangle| triangle.map(|p| [1.7 * p[0], 0.8 * p[1], 0.6 * p[2]]))
+            .collect();
+        let ellipsoid = SpherePanels::from_triangles(triangles).unwrap();
+        for surface in [&sphere, &ellipsoid] {
+            let n = surface.centroids().len();
+            let (a, b) = assemble_dense(surface, 0.0, C64::new(0.0, 1.0));
+            let mut old_defect = 0.0_f64;
+            for i in 0..n {
+                let row = &a[i * n..(i + 1) * n];
+                let d_sum: f64 = row.iter().map(|z| z.re).sum();
+                let n_sum: f64 = row.iter().map(|z| z.im).sum();
+                let n_norm: f64 = row.iter().map(|z| z.im.abs()).sum();
+                assert!((d_sum + 1.0).abs() < 2e-13);
+                assert!(n_sum.abs() < 2e-13 * n_norm);
+                // The omitted old diagonal really violates the static law.
+                old_defect = old_defect.max((row[i].re + 0.5).abs());
+                let mut flux = 0.0;
+                let mut flux_norm = 0.0;
+                for j in 0..n {
+                    let term = surface.areas()[j] * b[j * n + i].im;
+                    flux += term;
+                    flux_norm += term.abs();
+                    let dji = a[i * n + j].re + if i == j { 1.0 } else { 0.0 };
+                    let adjoint = surface.areas()[i] * dji;
+                    assert!((term - adjoint).abs() < 2e-13 * surface.areas()[i]);
+                }
+                assert!(flux.abs() < 2e-13 * flux_norm);
+            }
+            assert!(old_defect > 1e-3, "static-flux falsifier must be live");
+        }
+    }
+
+    #[test]
     fn thin_plate_bending_fields_radiate_positive_power_across_the_band() {
         // G1 physical falsifier: the two skins have opposite normal velocities
         // for the same transverse bending motion. At low frequency their small
@@ -2356,12 +2417,10 @@ mod tests {
         use core::fmt::Write as _;
         // The oracle that arbitrates every sign in the formulation, over
         // ka in [0.05, 5]. Two arms with measured, documented roles:
-        // PlainCbie is the accurate non-resonant arm at every sampled ka
-        // (fictitious frequencies start at ka = pi); BurtonMiller is the
-        // resonance-safe production arm for ka >= 0.5. BM's centroid-
-        // quadrature resistance artifact below ka ~ 0.5 is measured and
-        // recorded in the JSON evidence rather than hidden (the exact-
-        // quadrature follow-up on the bead is its fix trigger).
+        // PlainCbie is the non-resonant arm (fictitious frequencies start
+        // at ka = pi). BurtonMiller must also remain accurate and passive
+        // below ka=0.5, where inconsistent static D/D' self coefficients
+        // previously produced a negative resistance amplified by alpha=-i/k.
         let coarse = SpherePanels::icosphere(1.0, 2).expect("icosphere-2");
         let fine = SpherePanels::icosphere(1.0, 3).expect("icosphere-3");
         let mut rows = String::new();
@@ -2400,15 +2459,10 @@ mod tests {
             run(&coarse, ka, Formulation::PlainCbie, 0.04);
         }
         run(&fine, 5.0, Formulation::PlainCbie, 0.04);
-        for ka in [0.5, 1.0, 2.0] {
+        for ka in [0.05, 0.2, 0.5, 1.0, 2.0] {
             run(&coarse, ka, Formulation::BurtonMiller, 0.08);
         }
         run(&fine, 5.0, Formulation::BurtonMiller, 0.08);
-        // The BM low-ka artifact rows: measured, recorded, NOT asserted
-        // accurate — the documented boundary of the centroid quadrature.
-        for ka in [0.05, 0.2] {
-            run(&coarse, ka, Formulation::BurtonMiller, 0.0);
-        }
         println!(
             "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"pulsating-sphere\",\"rows\":[{rows}],\"verdict\":\"pass\"}}"
         );

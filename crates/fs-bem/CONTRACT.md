@@ -191,9 +191,11 @@ under this time convention. The Wallace paper (JASA 51, 1972, 946-952,
 doi:10.1121/1.1912943) full-text figure/equation digits were not available; the
 independent integral is not claimed as a digitized-paper comparison.
 
-Native execution is pending. Existing Burton-Miller accuracy/low-frequency
-resistance limits below remain in force: the strict sphere tests may expose
-those limits, and their 1e-3 threshold must not be relaxed. Sampled PSD does not
+Central verification found negative resistance at `ka=0.05` on all three
+sphere meshes (2208/3968/6240 panels). The assembly now also enforces the
+static double-layer/weighted-adjoint compatibility described below; native
+verification of that correction is pending. The strict sphere tests retain
+their passivity refusal and 1e-3 threshold. Sampled PSD does not
 provide the M2.5-W3b causal passive MIMO realization, a solid-mesh-to-acoustic
 mortar transfer, or the required source-backed free-aluminium-bar loaded-pole
 comparison. The existing vibroacoustic casebook consumes planar bake rows and
@@ -307,7 +309,16 @@ NASA marks it as U.S. Government work with public use permitted.
    operator needs a different Galerkin-quality rule.
 2. The hypersingular static self entry uses the exact closed-surface
    identity `N_0[1] = 0` as a discrete row sum, so the same point-panel
-   quadrature appears on both sides and its error cancels.
+   quadrature appears on both sides and its error cancels. Burton-Miller also
+   enforces `(D_0+I/2)1=0` by its static self coefficient, shared with `D'_0`
+   to retain the area-weighted adjoint. Consequently `A^T(D'_0+I/2)=0`
+   for the panel-area vector `A`, compatible with `A^T N_0=0`.
+   Leaving the double-layer self zero while closing only `N_0` violates this
+   compatibility and introduces a net static flux amplified by `alpha=-i/k`.
+   No pressure, resistance, spectral clipping or empirical parameter enters
+   the correction. G0 checks the actual assembled static blocks on a sphere
+   and an ellipsoid; the pulsating-sphere test now asserts the same 8%/positive
+   power envelope at `ka=0.05` and `0.2` as at the higher frequencies.
 3. Pulsating-sphere impedance within the authored per-arm envelopes
    above; radiated power positive for mesh-resolved velocity fields;
    area-weighted impedance-matrix reciprocity to 0.5% measured.
@@ -351,11 +362,12 @@ NASA marks it as U.S. Government work with public use permitted.
 - FMM-accelerated 2D wake convection. The shipped path is a direct all-pairs
   screening kernel with an explicit 1,024-vortex / 1,048,576-pair per-step
   admission ceiling.
-- Helmholtz (`helmholtz` module): BurtonMiller's radiation RESISTANCE
-  below ka ~ 0.5 is NOT resolved by centroid quadrature (measured -9.4
-  vs +1.03 Pa s/m at ka = 0.05 on 320 panels; recorded unasserted in
-  the JSON evidence) — use PlainCbie below the first interior resonance;
-  exact singular triangle quadrature is the recorded fix trigger.
+- Helmholtz (`helmholtz` module): the original BurtonMiller centroid scheme
+  produced negative low-frequency resistance (measured -9.4 vs +1.03 Pa s/m
+  at ka = 0.05 on 320 panels). The static compatibility correction above
+  has not yet passed native verification; no expanded low-frequency accuracy
+  claim follows from its algebraic identity. General singular finite-part
+  triangle quadrature and the strict modal sphere ladder remain open gates.
   Passivity is claimed only for mesh-resolved velocity fields: a
   quadrupole's true radiated power at ka = 1 sits below the noise floor
   on the 80-panel fixture (measured, recorded). `condition_lower_bound`
