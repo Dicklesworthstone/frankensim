@@ -3,7 +3,7 @@
 //! Bead: `frankensim-extreal-program-f85xj.6.6`
 //!
 //! Provides automated multi-rung mesh refinement analysis, apparent convergence order
-//! fitting via deterministic log-space regression, monotonicity checks, ASME V&V 20
+//! fitting via deterministic all-rung least squares, monotonicity checks, ASME V&V 20
 //! Grid Convergence Index (GCI) calculation, and conservative evidence-color assignment.
 
 use fs_blake3::{ContentHash, hash_domain};
@@ -329,7 +329,7 @@ pub struct ConvergenceResult {
     pub theoretical_order: f64,
     /// Numerically fitted apparent order of convergence.
     pub observed_order: Option<f64>,
-    /// Absolute difference between observed and theoretical order.
+    /// All-rung RMS fit residual divided by the observed data range.
     pub fit_residual: Option<f64>,
     /// Richardson extrapolated continuum value (h -> 0).
     pub richardson_extrapolated_qoi: Option<f64>,
