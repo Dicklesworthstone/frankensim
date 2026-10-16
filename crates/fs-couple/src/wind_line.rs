@@ -683,16 +683,27 @@ mod wind_articulation_tests {
         }
 
         pub(crate) fn block(&mut self, out: &mut [f64]) {
+            self.block_boundary_counterfactual(out, false);
+        }
+
+        // Test-only counterfactual for the pre-40aa49e66 junction timing.
+        // Ordinary fixtures always take the correct same-sample branch.
+        fn block_boundary_counterfactual(&mut self, out: &mut [f64], lagged: bool) {
             let dt = 1.0 / f64::from(RATE);
             for slot in out.iter_mut() {
                 let p_m = blowing_envelope(reed(), self.t);
-                let boundary = self.bank.boundary_response().expect("wave boundary");
+                let (direct,history) = if lagged {
+                    (0.0,self.bank.incoming())
+                } else {
+                    let boundary=self.bank.boundary_response().expect("wave boundary");
+                    (boundary.direct_reflection,boundary.history_pressure_pa)
+                };
                 let p_plus = solve_reed_wave(
                     reed(),
                     self.rho,
                     self.zc,
-                    boundary.direct_reflection,
-                    boundary.history_pressure_pa,
+                    direct,
+                    history,
                     p_m,
                     self.p_plus_prev,
                     0.0,
@@ -700,7 +711,7 @@ mod wind_articulation_tests {
                 .expect("reed solve");
                 let p_minus = self.bank.push(p_plus).expect("push");
                 self.p_plus_prev = p_plus;
-                *slot = p_plus + p_minus;
+                *slot = p_plus + if lagged {history} else {p_minus};
                 self.t += dt;
             }
         }
@@ -877,6 +888,41 @@ mod wind_articulation_tests {
                  {bad_peak:.1}) — position matters AND the lock follows the authority"
             ),
         );
+    }
+
+    /// G3 diagnostic: isolate boundary timing while keeping the exact-ZK
+    /// owner, current filter/history implementation and all physical data fixed.
+    /// This is not an alternate acceptance image or a claimed restoration.
+    #[test]
+    fn wa_002_register_vent_sample_convention_counterfactual() {
+        let start=std::time::Instant::now();
+        let gas=air20();
+        let table=fingerings(0.70);
+        let mut same_sample_signal:Option<Vec<f64>>=None;
+        for lagged in [false,true] {
+            let mut lp=Loop::new(&table,&gas,false);
+            let len=600_usize;
+            let mut signal=Vec::new();
+            let mut block=vec![0.0;len];
+            for b in 0..56 {
+                if b==24 { lp.bank.switch_fingering(1,96).expect("vent"); }
+                lp.block_boundary_counterfactual(&mut block,lagged);
+                assert!(block.iter().all(|v|v.is_finite()));
+                signal.extend_from_slice(&block);
+            }
+            let before=dominant_hz(&signal[12*len..20*len]);
+            let after=dominant_hz(&signal[44*len..52*len]);
+            if before<=0.0 || after<=0.0 {
+                println!("{{\"case\":\"wa002-boundary-timing-counterfactual\",\"inputs\":\"unchanged vent .70L,1.8mm/6mm chimney, exact ZK and24kHz current FIR/history\",\"lagged\":{lagged},\"observed\":[{before},{after}],\"oracle\":\"same-sample versus previous-sample boundary\",\"tol\":\"diagnostic only; acceptance ratio2.8..3.6 unchanged\",\"verdict\":\"refused\",\"elapsed_us\":{}}}",start.elapsed().as_micros());
+            } else {
+                let ratio=after/before;
+                println!("{{\"case\":\"wa002-boundary-timing-counterfactual\",\"inputs\":\"unchanged vent .70L,1.8mm/6mm chimney, exact ZK and24kHz current FIR/history\",\"lagged\":{lagged},\"observed\":[{before},{after}],\"ratio\":{ratio},\"oracle\":\"same-sample versus previous-sample boundary\",\"tol\":\"diagnostic only; acceptance ratio2.8..3.6 unchanged\",\"verdict\":\"pass\",\"elapsed_us\":{}}}",start.elapsed().as_micros());
+            }
+            if let Some(first)=&same_sample_signal {
+                assert!(first.iter().zip(&signal).any(|(a,b)|a.to_bits()!=b.to_bits()),
+                    "boundary-timing counterfactual is not live");
+            } else { same_sample_signal=Some(signal); }
+        }
     }
 
     #[test]
