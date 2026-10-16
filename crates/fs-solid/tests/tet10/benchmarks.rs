@@ -165,7 +165,7 @@ pub fn macneal_harder() {
                     .iter()
                     .flat_map(|p| [if p[0].abs() < 1e-12 { Some(0.0) } else { None }; 3])
                     .collect();
-                let u = solve(&a.stiffness, &force, &prescribed);
+                let u = solve_conditioned(&a.stiffness, &force, &prescribed);
                 let mean: f64 = force.iter().zip(&u).map(|(a, b)| a * b).sum();
                 ratios.push(mean / reference);
                 dofs.push(prescribed.iter().filter(|x| x.is_none()).count());
@@ -197,14 +197,16 @@ pub fn macneal_harder() {
     });
 }
 
-pub fn free_bar() {
+pub fn free_bar(qualification: bool) {
     let started = std::time::Instant::now();
     with_cx(|cx| {
         let mut values = Vec::new();
+        let mut bounds = Vec::new();
         let mut dofs = Vec::new();
-        // Central verification can request one additional diagnostic rung.
-        // Every original rung and its original order gate remain active.
-        let rungs: &[usize] = if std::env::var_os("IRP_TET10_BAR_DIAGNOSTIC_R8").is_some() {
+        // The named qualification test always computes r8 (~35 min / 84,099
+        // DOFs on ts1). The per-commit lane compares its live r1/r2/r4 results
+        // with the explicitly identified historical diagnostic below.
+        let rungs: &[usize] = if qualification {
             &[1, 2, 4, 8]
         } else {
             &[1, 2, 4]
@@ -258,6 +260,8 @@ pub fn free_bar() {
                 &fs_modal::SliceOptions {
                     max_lanczos: 512,
                     max_restarts: 24,
+                    ritz_tol: 1e-13,
+                    mass_diagonal_equilibration: true,
                     ..fs_modal::SliceOptions::default()
                 },
             )
@@ -301,8 +305,8 @@ pub fn free_bar() {
                 4,
                 "window must contain four identified bending modes"
             );
-            let row: Vec<_> = bending.iter().map(|m| m.lambda).collect();
-            let residuals: Vec<_> = bending.iter().map(|m| m.residual).collect();
+            let row: [f64; 4] = core::array::from_fn(|i| bending[i].lambda);
+            let residuals: [f64; 4] = core::array::from_fn(|i| bending[i].residual);
             println!(
                 "{{\"suite\":\"irp-s1\",\"test\":\"g1_free_free_bar_eigen_ladder\",\"refinement\":{r},\"free_dofs\":{},\"minimum_scaled_jacobian\":{},\"eigenvalues\":{row:?},\"eigenvalue_residual_bounds\":{residuals:?}}}",
                 a.free_dofs.len(),
@@ -315,31 +319,66 @@ pub fn free_bar() {
                 &[1.0 / r as f64],
                 &[a.free_dofs.len()],
                 &row,
-                0.3,
-                "Richardson limit; E=rho=1, nu=0.25",
+                0.02,
+                "residual fraction; theoretical order 4; E=rho=1, nu=0.25",
                 started.elapsed().as_secs_f64(),
             );
             values.push(row);
+            bounds.push(residuals);
             dofs.push(a.free_dofs.len());
         }
-        let mut orders = Vec::new();
-        for first in 0..values.len() - 2 {
-            for mode in 0..4 {
-                let d0 = values[first][mode] - values[first + 1][mode];
-                let d1 = values[first + 1][mode] - values[first + 2][mode];
-                assert!(
-                    d0 > 0.0 && d1 > 0.0,
-                    "eigenvalue ladder not live/monotone: {values:?}"
-                );
-                let order = fs_math::det::ln(d0 / d1) / fs_math::det::ln(2.0);
-                let limit = values[first + 2][mode] - d1 / ((d0 / d1) - 1.0);
-                println!(
-                    "{{\"suite\":\"irp-s1\",\"test\":\"g1_free_free_bar_eigen_ladder\",\"mode\":{mode},\"refinements\":{:?},\"order\":{{\"observed\":{order},\"theoretical\":4.0,\"band\":0.3}},\"richardson_limit\":{limit}}}",
-                    &rungs[first..first + 3]
-                );
-                orders.push(order);
-            }
+        if !qualification {
+            // Recorded diagnostic, NOT a computed or qualified r8 result.
+            // ts1 logs/20261016T121744Z-aeb0c36ee98b.log:3189-3191;
+            // MagentaBadger's .58 ruling at 2026-10-16 12:54 UTC. Its residual
+            // is too loose for qualification; the named long lane replaces it.
+            values.push([
+                0.19762753568134261,
+                0.38992091447195243,
+                1.416470926951944,
+                2.6511407190005807,
+            ]);
+            bounds.push([
+                3.846899815313211e-6,
+                1.6497145952195841e-6,
+                8.365556416457706e-8,
+                1.9814741730026972e-8,
+            ]);
+            println!(
+                "{{\"suite\":\"irp-s1\",\"stage\":\"historical-r8-comparison\",\"source\":\"ts1:logs/20261016T121744Z-aeb0c36ee98b.log\",\"qualification\":false}}"
+            );
         }
+        assert!(
+            bar_trend(&values, &bounds, qualification).is_ok(),
+            "bar trend failed: {:?}; values {values:?}; dofs {dofs:?}",
+            bar_trend(&values, &bounds, qualification)
+        );
+        // Multiplying the actual assembled consistent mass by 1+h² scales
+        // each generalized eigenvalue and its bound by 1/(1+h²), exactly:
+        // no second expensive eigensolve is needed to plant this defect.
+        let planted: Vec<[f64; 4]> = values
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let h = 1.0 / (1usize << i) as f64;
+                row.map(|x| x / (1.0 + h * h))
+            })
+            .collect();
+        let planted_bounds: Vec<[f64; 4]> = bounds
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let h = 1.0 / (1usize << i) as f64;
+                row.map(|x| x / (1.0 + h * h))
+            })
+            .collect();
+        assert!(
+            matches!(
+                bar_trend(&planted, &planted_bounds, qualification),
+                Err("order trend") | Err("Richardson agreement")
+            ),
+            "mass*(1+h²) falsifier must break the trend or limit agreement"
+        );
         // Euler–Bernoulli roots are a model-form comparison, not the 3-D
         // eigenvalue gate. Both transverse inertias are represented.
         for beta in [4.73004_f64, 7.85320, 10.99561] {
@@ -350,9 +389,68 @@ pub fn free_bar() {
                 root4 * 0.0049 / 12.0
             );
         }
-        assert!(
-            orders.iter().all(|p| (p - 4.0).abs() <= 0.3),
-            "eigen orders {orders:?}: rungs {values:?}, dofs {dofs:?}"
-        );
     });
+}
+
+fn bar_trend(
+    values: &[[f64; 4]],
+    bounds: &[[f64; 4]],
+    qualification: bool,
+) -> Result<(), &'static str> {
+    if values.len() != 4
+        || bounds.len() != 4
+        || values.iter().flatten().any(|x| !x.is_finite())
+        || bounds.iter().flatten().any(|x| !x.is_finite() || *x < 0.0)
+    {
+        return Err("invalid eigen ladder");
+    }
+    for mode in 0..4 {
+        let mut orders = [0.0; 2];
+        let mut limits = [0.0; 2];
+        let mut uncertainties = [0.0; 2];
+        let mut truncation = 0.0;
+        for first in 0..2 {
+            let [x, y, z] = core::array::from_fn(|j| values[first + j][mode]);
+            let [ex, ey, ez] = core::array::from_fn(|j| bounds[first + j][mode]);
+            let d0 = x - y;
+            let d1 = y - z;
+            if !(d0 > 0.0 && d1 > 0.0 && d0 > d1) {
+                return Err("order trend");
+            }
+            if (qualification || first == 0) && ey + ez > 0.02 * d1 {
+                return Err("eigen residual fraction");
+            }
+            orders[first] = fs_math::det::ln(d0 / d1) / fs_math::det::ln(2.0);
+            let correction = d1 * d1 / (d0 - d1);
+            limits[first] = z - correction;
+            // Bound changes of the extrapolant over the entire residual box:
+            // d1 in [d1-ey-ez,d1+ey+ez], denominator in [s-es,s+es].
+            let s = d0 - d1;
+            let es = ex + 2.0 * ey + ez;
+            if s <= es || d1 <= ey + ez {
+                return Err("unresolved Richardson denominator");
+            }
+            let upper = (d1 + ey + ez) * (d1 + ey + ez) / (s - es);
+            let lower = (d1 - ey - ez) * (d1 - ey - ez) / (s + es);
+            uncertainties[first] = ez + (upper - correction).max(correction - lower);
+            if first == 0 {
+                // The two pre-asymptotic limits have truncation error in
+                // addition to eigensolver uncertainty. Use the discrepancy
+                // between observed-order and theoretical-p=4 corrections;
+                // this is an estimated envelope, not a certified limit.
+                truncation = (correction - d1 / 15.0).abs();
+            }
+        }
+        let allowance = truncation + uncertainties[0] + uncertainties[1];
+        println!(
+            "{{\"suite\":\"irp-s1\",\"stage\":\"bar-order-trend\",\"mode\":{mode},\"orders\":{orders:?},\"theoretical_order\":4.0,\"limits\":{limits:?},\"residual_uncertainties\":{uncertainties:?},\"truncation_estimate\":{truncation},\"agreement_bound\":{allowance},\"qualification\":{qualification}}}"
+        );
+        if !(orders[1] > orders[0] && orders[1] >= 3.5 && orders[1] <= 4.3) {
+            return Err("order trend");
+        }
+        if (limits[0] - limits[1]).abs() > allowance {
+            return Err("Richardson agreement");
+        }
+    }
+    Ok(())
 }

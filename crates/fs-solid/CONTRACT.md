@@ -79,6 +79,20 @@ closure claim. The Euler-disc structural consumer and Bar-S1 descriptions
 require their own explicit migration; adding this operator alone does not
 establish those consumers' convergence or remove their P1 limitations.
 
+The free-bar per-commit test computes r=1,2,4 and explicitly compares against
+the historical ts1 r=8 diagnostic identified in the .58 bead; it does not
+qualify that historical rung. `g1_free_free_bar_eigen_ladder_r8_qualification`
+computes all four rungs (the first diagnostic cost 2101 s on ts1). Its gates
+require rising observed order toward the theoretical four, finest order at
+least 3.5, and eigen residual uncertainty at most 2% of each finest difference.
+Successive Richardson limits are compared with an explicitly estimated
+pre-asymptotic truncation allowance plus propagated eigen residual uncertainty.
+Mass scaled by `(1+h²)` must fail the same trend/limit gate. MacNeal–Harder
+alone uses `8 eps kappa_1_est ||b||_1` for the ordinary-SpMV residual, with a
+five-step inverse-norm estimate and a local 1e-6 displacement falsifier. This
+is a conditioning estimate, not a verified inverse bound; all other static
+fixtures retain their original relative Euclidean residual limit of 1e-9.
+
 `TetElasticMaterial::try_new_oriented_tensor` admits complete anisotropic
 stiffness data into that same operator. `ElasticTensorBasis` requires explicit
 tensor-shear, engineering-shear or Mandel notation, one of the documented

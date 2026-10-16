@@ -585,5 +585,12 @@ fn g2_macneal_harder_straight_cantilever() {
 }
 #[test]
 fn g1_free_free_bar_eigen_ladder() {
-    benchmarks::free_bar();
+    benchmarks::free_bar(false);
+}
+
+/// Long-running qualification: r=1,2,4,8; the original ts1 diagnostic cost
+/// 2101 seconds and 84,099 free DOFs. Run this exact test on the central host.
+#[test]
+fn g1_free_free_bar_eigen_ladder_r8_qualification() {
+    benchmarks::free_bar(true);
 }
