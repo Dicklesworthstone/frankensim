@@ -20,6 +20,420 @@ mod common_material_acquisition {
     use super::*;
     use fs_matdb::{PropertyClaim, QueryPoint, SelectionPolicy};
 
+    // NIST-JANAF facts: T [K], cp and s [J/(mol K)], h-h298 [kJ/mol].
+    // CO2 and H2O pages have no 250 or 350 K rows. Do not interpolate source
+    // facts or silently replace the source's three-decimal enthalpy column.
+    const JANAF_N2: &[[f64; 4]] = &[
+        [200.0, 29.107, 179.985, -2.857],
+        [250.0, 29.111, 186.481, -1.402],
+        [298.15, 29.124, 191.609, 0.0],
+        [300.0, 29.125, 191.789, 0.054],
+        [350.0, 29.165, 196.281, 1.511],
+        [400.0, 29.249, 200.181, 2.971],
+        [500.0, 29.580, 206.739, 5.911],
+        [600.0, 30.110, 212.176, 8.894],
+        [800.0, 31.433, 221.017, 15.046],
+        [1000.0, 32.697, 228.170, 21.463],
+    ];
+    const JANAF_O2: &[[f64; 4]] = &[
+        [200.0, 29.126, 193.485, -2.868],
+        [250.0, 29.201, 199.990, -1.410],
+        [298.15, 29.376, 205.147, 0.0],
+        [300.0, 29.385, 205.329, 0.054],
+        [350.0, 29.694, 209.880, 1.531],
+        [400.0, 30.106, 213.871, 3.025],
+        [500.0, 31.091, 220.693, 6.084],
+        [600.0, 32.090, 226.451, 9.244],
+        [800.0, 33.733, 235.921, 15.835],
+        [1000.0, 34.870, 243.578, 22.703],
+    ];
+    const JANAF_AR: &[[f64; 4]] = &[
+        [200.0, 20.786, 146.545, -2.040],
+        [250.0, 20.786, 151.183, -1.001],
+        [298.15, 20.786, 154.845, 0.0],
+        [300.0, 20.786, 154.973, 0.038],
+        [350.0, 20.786, 158.177, 1.078],
+        [400.0, 20.786, 160.953, 2.117],
+        [500.0, 20.786, 165.591, 4.196],
+        [600.0, 20.786, 169.381, 6.274],
+        [800.0, 20.786, 175.361, 10.431],
+        [1000.0, 20.786, 179.999, 14.589],
+    ];
+    const JANAF_CO2: &[[f64; 4]] = &[
+        [200.0, 32.359, 199.975, -3.414],
+        [298.15, 37.129, 213.795, 0.0],
+        [300.0, 37.221, 214.025, 0.069],
+        [400.0, 41.325, 225.314, 4.003],
+        [500.0, 44.627, 234.901, 8.305],
+        [600.0, 47.321, 243.283, 12.907],
+        [800.0, 51.434, 257.494, 22.806],
+        [1000.0, 54.308, 269.299, 33.397],
+    ];
+    const JANAF_H2O: &[[f64; 4]] = &[
+        [200.0, 33.349, 175.485, -3.282],
+        [298.15, 33.590, 188.834, 0.0],
+        [300.0, 33.596, 189.042, 0.062],
+        [400.0, 34.262, 198.788, 3.452],
+        [500.0, 35.226, 206.534, 6.925],
+        [600.0, 36.325, 213.052, 10.501],
+        [800.0, 38.721, 223.825, 18.002],
+        [1000.0, 41.268, 232.738, 26.000],
+    ];
+
+    fn compile_thermochemical_species(
+        slug: &str,
+    ) -> (fs_matdb::NormalizedSpeciesPack, NormalizedModelPack) {
+        let directory = fixture_dir();
+        let mut artifacts = Vec::new();
+        for suffix in ["", "-nasa9-mcbride2002"] {
+            let manifest =
+                workspace_path(&format!("data/matdb/seed-v1/{slug}{suffix}/manifest.tsv"));
+            let output = directory.join(format!("{slug}{suffix}.pack"));
+            let run = run_compiler(&manifest, &output);
+            assert!(
+                run.status.success(),
+                "{slug}{suffix}: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            artifacts.push(fs::read(output).unwrap());
+        }
+        let species = fs_matdb::NormalizedSpeciesPack::from_bytes(&artifacts[0]).unwrap();
+        let species = fs_matdb::NormalizedSpeciesPack::from_bytes_verified(
+            species.content_hash(),
+            &artifacts[0],
+        )
+        .unwrap();
+        let models = NormalizedModelPack::from_bytes(&artifacts[1]).unwrap();
+        let models =
+            NormalizedModelPack::from_bytes_verified(models.content_hash(), &artifacts[1]).unwrap();
+        (species, models)
+    }
+
+    /// G2/G3: literal, pointwise source comparison. A source disagreement fails
+    /// the requested gate and is logged; it never changes a coefficient or band.
+    #[test]
+    fn g2_g3_sourced_nasa9_species_match_janaf() {
+        use fs_material::thermochemical_gas::packs::standard_state_from_packs;
+        use fs_qty::Temperature;
+        let start = std::time::Instant::now();
+        let mut disagreements = Vec::new();
+        for (slug, page, rows) in [
+            ("nitrogen", "N-023", JANAF_N2),
+            ("oxygen", "O-029", JANAF_O2),
+            ("argon", "Ar-001", JANAF_AR),
+            ("carbon-dioxide", "C-095", JANAF_CO2),
+            ("water-vapor", "H-064", JANAF_H2O),
+        ] {
+            let (species, pack) = compile_thermochemical_species(slug);
+            let model = standard_state_from_packs(&species, &pack).unwrap();
+            let reference_h = model
+                .evaluate(Temperature::new(298.15))
+                .unwrap()
+                .properties()
+                .h()
+                .value();
+            for &[t, cp, s, delta_h_kj] in rows {
+                let observed = model.evaluate(Temperature::new(t)).unwrap().properties();
+                let cp_error = (observed.cp().value() / cp - 1.0).abs();
+                let s_error = (observed.s().value() / s - 1.0).abs();
+                let delta_h = observed.h().value() - reference_h;
+                let h_error = if delta_h_kj == 0.0 {
+                    delta_h.abs()
+                } else {
+                    (delta_h / (1000.0 * delta_h_kj) - 1.0).abs()
+                };
+                // Orchestrator ruling2776: preserve the relative bands and
+                // account separately for the printed half-unit of each fact.
+                // cp additionally satisfies the original relative-only gate.
+                let cp_quantization_j_mol_k = 0.0005;
+                let s_quantization_j_mol_k = 0.0005;
+                let h_quantization_kj_mol = 0.0005;
+                let h_absolute_error_kj_mol = (delta_h / 1000.0 - delta_h_kj).abs();
+                let h_relative_term_kj_mol = 2e-3 * delta_h_kj.abs();
+                let h_margin_kj_mol = h_relative_term_kj_mol + h_quantization_kj_mol - h_absolute_error_kj_mol;
+                let s_absolute_error_j_mol_k = (observed.s().value() - s).abs();
+                let s_relative_term_j_mol_k = 2e-3 * s.abs();
+                let matched = cp_error <= 1e-3 && h_margin_kj_mol >= 0.0
+                    && s_absolute_error_j_mol_k <= s_relative_term_j_mol_k + s_quantization_j_mol_k;
+                println!("{{\"suite\":\"matdb-pack\",\"bead\":\"M0.1-W1\",\"species\":\"{}\",\"T_K\":{t},\"reference_resolution\":{{\"cp_half_unit_J_mol_K\":{cp_quantization_j_mol_k},\"s_half_unit_J_mol_K\":{s_quantization_j_mol_k},\"h_half_unit_kJ_mol\":{h_quantization_kj_mol}}},\"observed\":{{\"h_absolute_error_kJ_mol\":{h_absolute_error_kj_mol},\"h_relative_gate_term_kJ_mol\":{h_relative_term_kj_mol},\"h_margin_kJ_mol\":{h_margin_kj_mol},\"s_absolute_error_J_mol_K\":{s_absolute_error_j_mol_k},\"s_relative_gate_term_J_mol_K\":{s_relative_term_j_mol_k}}}}", model.species());
+                println!(
+                    "{{\"suite\":\"matdb-pack\",\"bead\":\"M0.1-W1\",\"test\":\"g2_g3_sourced_nasa9_species_match_janaf\",\"inputs\":{{\"species\":\"{}\",\"species_pack\":\"{}\",\"nasa9_pack\":\"{}\"}},\"provenance\":\"https://janaf.nist.gov/tables/{page}.html\",\"rungs\":[{t}],\"observed\":{{\"cp_relative_error\":{cp_error},\"h_delta_relative_error\":{h_error},\"s_relative_error\":{s_error}}},\"tolerance\":{{\"cp\":0.001,\"h_s\":0.002}},\"verdict\":\"{}\",\"elapsed_s\":{}}}",
+                    model.species(),
+                    species.content_hash(),
+                    pack.content_hash(),
+                    if matched {
+                        "matched"
+                    } else {
+                        "source-disagreement"
+                    },
+                    start.elapsed().as_secs_f64()
+                );
+                if !matched {
+                    disagreements.push(format!(
+                        "{} T={t}: cp={cp_error}, h={h_error}, s={s_error}",
+                        model.species()
+                    ));
+                }
+            }
+            for t in [
+                200.0, 250.0, 298.15, 300.0, 350.0, 400.0, 500.0, 600.0, 800.0, 1000.0,
+            ] {
+                if !rows.iter().any(|row| row[0] == t) {
+                    println!(
+                        "{{\"suite\":\"matdb-pack\",\"bead\":\"M0.1-W1\",\"test\":\"g2_g3_sourced_nasa9_species_match_janaf\",\"species\":\"{}\",\"provenance\":\"https://janaf.nist.gov/tables/{page}.html\",\"rungs\":[{t}],\"verdict\":\"absent-in-source\"}}",
+                        model.species()
+                    );
+                }
+            }
+            let regions = model.regions();
+            assert_eq!(regions.len(), 2);
+            let single = |region| {
+                fs_thermochem::Nasa9StandardStateModelV1::new(
+                    model.species().clone(),
+                    model.molar_mass(),
+                    model.convention().clone(),
+                    vec![region],
+                )
+                .unwrap()
+                .evaluate(Temperature::new(1000.0))
+                .unwrap()
+                .properties()
+            };
+            let (low, high) = (single(regions[0].clone()), single(regions[1].clone()));
+            for (a, b) in [
+                (low.cp().value(), high.cp().value()),
+                (low.h().value(), high.h().value()),
+                (low.s().value(), high.s().value()),
+            ] {
+                assert!(
+                    (a / b - 1.0).abs() <= 1e-6,
+                    "{} discontinuity at 1000 K: {a} vs {b}",
+                    model.species()
+                );
+            }
+        }
+        assert!(
+            disagreements.is_empty(),
+            "unchanged JANAF gates refused source disagreement: {disagreements:#?}"
+        );
+    }
+
+    #[test]
+    fn refuses_species_without_nasa9_pack() {
+        use fs_material::thermochemical_gas::packs::{SpeciesPackRef, from_packs};
+        let (species, _) = compile_thermochemical_species("nitrogen");
+        let source = SpeciesPackRef {
+            species: &species,
+            nasa9: None,
+            transport: None,
+        };
+        let composition = fs_qty::semantic::Composition::new(
+            fs_qty::semantic::CompositionBasis::MoleFraction,
+            vec![1.0],
+        )
+        .unwrap();
+        let error = from_packs(&[source], composition, None).unwrap_err();
+        assert!(error.to_string().contains("N2 has no NASA-9 pack"));
+    }
+
+    /// G3: a real N2 NASA-9/transport source join reaches every numerical
+    /// consumer. This bounded pure-N2 fixture does not qualify air or breath.
+    #[test]
+    fn g3_sourced_thermochemical_record_parses_through_shared_gas_reader() {
+        use fs_material::{
+            gas::{GasSpec, GasState},
+            gas_species::input::*,
+            state_point::MaterialPropertySelection,
+            thermochemical_gas::packs::{SpeciesPackRef, from_packs},
+        };
+        use fs_qty::{
+            QuantitySpec,
+            semantic::{Composition, CompositionBasis, QuantityKind, SemanticType, ValueForm},
+        };
+        let start = std::time::Instant::now();
+        let (species, nasa9) = compile_thermochemical_species("nitrogen");
+        let (claims, _) = compile("nitrogen-transport-svehla1995");
+        let transport = fs_matdb::NormalizedMaterialCardPack::new(
+            fs_matdb::MaterialStateId {
+                chemistry: "N2".into(),
+                phase: "dilute gas".into(),
+                process: "NASA TM-4647 Eq2 sampled transport".into(),
+                revision: 0,
+            },
+            claims,
+        )
+        .unwrap();
+        let bytes = transport.to_bytes();
+        let transport = fs_matdb::NormalizedMaterialCardPack::from_bytes_verified(
+            transport.content_hash(),
+            &bytes,
+        )
+        .unwrap();
+        let bindings = [SpeciesPackRef {
+            species: &species,
+            nasa9: Some(&nasa9),
+            transport: Some((&transport, MaterialPropertySelection::SingleClaimOnly)),
+        }];
+        let sources = ThermochemicalSources {
+            species: &bindings,
+            water_species: None,
+            phase: ThermochemicalPhase::FrozenGas,
+        };
+        let model = from_packs(
+            &bindings,
+            Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
+            None,
+        )
+        .unwrap();
+        let mut missing = bindings[0].clone();
+        missing.transport = None;
+        assert!(
+            from_packs(
+                &[missing],
+                Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
+                None
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("N2 has no transport card")
+        );
+        let geometry = fs_scenario::HelmholtzCavity {
+            volume_m3: 0.003,
+            neck_radius_m: 0.0073,
+            neck_length_m: 0.057,
+        };
+        let duct = fs_duct::Duct {
+            segments: vec![fs_duct::Segment::Cylinder {
+                radius: 0.0073,
+                length: 0.57,
+            }],
+        };
+        for t in [293.15, 308.15, 600.0] {
+            let p = 101325.0;
+            let point = QueryPoint::new()
+                .with_quantity(
+                    "temperature",
+                    QuantitySpec::semantic(SemanticType::new(
+                        QuantityKind::AbsoluteTemperature,
+                        ValueForm::Static,
+                    )),
+                    t,
+                )
+                .unwrap()
+                .with_quantity(
+                    "pressure",
+                    QuantitySpec::semantic(SemanticType::new(
+                        QuantityKind::Pressure,
+                        ValueForm::Static,
+                    )),
+                    p,
+                )
+                .unwrap();
+            let resolved = model.evaluate(&point).unwrap();
+            let gas = resolved.state();
+            gas.validate_coherence().unwrap();
+            let text = format!("thermochemical {t} {p} mole 1 N2 1 suffix");
+            let mut words = text.split_ascii_whitespace();
+            let record = read_gas_record(&mut words, Some(90000.0), Some(&sources)).unwrap();
+            assert_eq!(words.collect::<Vec<_>>(), ["suffix"]);
+            assert_eq!(record.state(), gas);
+            let GasRecord::Thermochemical(parsed) = record else {
+                panic!("lost thermochemical authority")
+            };
+            assert_eq!(parsed, resolved);
+            assert_eq!(parsed.source_packs().len(), 1);
+            assert_eq!(parsed.source_packs()[0].nasa9_pack, nasa9.content_hash());
+            assert_eq!(
+                parsed.source_packs()[0].transport_pack,
+                transport.content_hash()
+            );
+            let bem = fs_bem::helmholtz::Medium::from(gas);
+            let rayleigh = fs_couple::baffled_pressure::RayleighMedium::from(gas);
+            for (rho, c) in [
+                (bem.density, bem.sound_speed),
+                (rayleigh.density, rayleigh.sound_speed),
+            ] {
+                assert_eq!(rho.to_bits(), gas.density.to_bits());
+                assert_eq!(c.to_bits(), gas.sound_speed.to_bits());
+            }
+            // Independently assemble the complete plain view, retaining exact
+            // evaluated NASA-9 numbers instead of passing through GasSpec.
+            let view = GasState {
+                temperature: t,
+                pressure: p,
+                density: gas.density,
+                sound_speed: gas.sound_speed,
+                dynamic_viscosity: gas.dynamic_viscosity,
+                thermal_conductivity: gas.thermal_conductivity,
+                gamma: gas.gamma,
+                specific_gas_constant: gas.specific_gas_constant,
+                specific_heat_cp: gas.specific_heat_cp,
+                prandtl: gas.prandtl,
+                characteristic_impedance: gas.characteristic_impedance,
+                water_mole_fraction: 0.0,
+            };
+            for f in [100.0, 300.0, 900.0] {
+                let omega = core::f64::consts::TAU * f;
+                let a = fs_duct::input_impedance(
+                    &duct,
+                    gas,
+                    omega,
+                    fs_duct::LossModel::Bessel,
+                    fs_duct::Termination::IdealOpen,
+                )
+                .unwrap();
+                let b = fs_duct::input_impedance(
+                    &duct,
+                    &view,
+                    omega,
+                    fs_duct::LossModel::Bessel,
+                    fs_duct::Termination::IdealOpen,
+                )
+                .unwrap();
+                assert_eq!(
+                    (a.impedance.re.to_bits(), a.impedance.im.to_bits()),
+                    (b.impedance.re.to_bits(), b.impedance.im.to_bits())
+                );
+            }
+            let legacy = GasState::try_new(&GasSpec::dry_air_ussa1976(), t, p).unwrap();
+            use fs_couple::cavity_modal::{CavityNeckLoss, HelmholtzModalCavity};
+            let cavity =
+                HelmholtzModalCavity::new(geometry, *gas, CavityNeckLoss::Resistance(0.0)).unwrap();
+            let original =
+                HelmholtzModalCavity::new(geometry, legacy, CavityNeckLoss::Resistance(0.0))
+                    .unwrap();
+            assert_eq!(cavity.gas(), gas);
+            assert!(
+                (cavity.isolated_omega_rad_s()
+                    / original.isolated_omega_rad_s()
+                    / (gas.sound_speed / legacy.sound_speed)
+                    - 1.0)
+                    .abs()
+                    <= 1e-12
+            );
+            println!(
+                "{{\"suite\":\"matdb-pack\",\"bead\":\"M0.1-W1\",\"test\":\"g3_sourced_thermochemical_record_parses_through_shared_gas_reader\",\"inputs\":{{\"species\":\"N2\",\"mole_fraction\":1,\"species_pack\":\"{}\",\"nasa9_pack\":\"{}\",\"transport_pack\":\"{}\",\"T_K\":{t},\"p_Pa\":{p}}},\"observed\":{{\"c_m_s\":{},\"gamma\":{}}},\"tolerance\":{{\"consumer_bits\":0,\"cavity_ratio\":1e-12}},\"verdict\":\"matched\",\"scope\":\"pure-N2 only; no air/breath qualification\",\"elapsed_s\":{}}}",
+                species.content_hash(),
+                nasa9.content_hash(),
+                transport.content_hash(),
+                gas.sound_speed,
+                gas.gamma,
+                start.elapsed().as_secs_f64()
+            );
+        }
+        for text in ["293.15 101325 0", "mixture 293.15 101325 mole 1 N2 1"] {
+            let a = read_gas_state(&mut text.split_ascii_whitespace(), None).unwrap();
+            let b =
+                read_gas_record(&mut text.split_ascii_whitespace(), None, Some(&sources)).unwrap();
+            assert_eq!(*b.state(), a);
+        }
+        let text = "thermochemical 293.15 101325 mole 1 N2 1";
+        assert!(matches!(
+            read_gas_record(&mut text.split_ascii_whitespace(), None, None),
+            Err(GasInputError::Input(_))
+        ));
+    }
+
     pub(super) fn compile(slug: &str) -> (NormalizedPack, PathBuf) {
         let manifest = workspace_path(&format!("data/matdb/seed-v1/{slug}/manifest.tsv"));
         let path = fixture_dir().join(format!("{slug}.fsmatpk"));

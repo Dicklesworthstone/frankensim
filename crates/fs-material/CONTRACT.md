@@ -329,6 +329,19 @@ homogenization, the P2 milestone.
 
 ### `gas` — first-principles ambient gas state (zdmm1 slice 1)
 
+`thermochemical_gas::packs::from_packs` joins explicit verified species,
+NASA-9 and pure-transport material-card packs. Names supply no properties.
+The model and each resolved state retain the three pack hashes per canonical
+component, alongside existing thermodynamic/transport receipts. Missing NASA-9
+or transport data refuse. `gas_species::input::read_gas_record` requires an
+already-loaded registry for thermochemical input and returns the full resolved
+state; the legacy two-argument reader preserves its old bits and refuses that
+record without a registry. Phase admission is explicit: frozen gas makes no
+condensation claim; the liquid-water option applies the existing Buck limit
+only inside its stated temperature window. No real-gas or molecular-relaxation
+accuracy is supplied by this adapter. Literal NASA/JANAF disagreements remain
+test failures, including absent rows and rounding-sensitive enthalpy deltas.
+
 The universal ambient-medium primitive of the musical-acoustics
 doctrine: `GasState::try_new(&GasSpec, T, p)` derives the COMPLETE
 tuple (density, sound speed, dynamic viscosity, thermal conductivity,

@@ -940,6 +940,14 @@ or in-band certificate for nonlinear harmonics is supplied.
 
 ### `acoustic_realize` / `pcm_wav`
 
+`realize_assembly_with_gas_and_absorption` accepts a caller-resolved gas and
+an explicit `GasAbsorptionModel`. Its observer always uses the selected law;
+invalid ISO-air conditions refuse without a classical fallback. The original
+entry points preserve legacy absorption arithmetic. `RayleighMedium::from`
+copies density/sound-speed bits without reevaluating an atmosphere. G3 tests
+cover explicit ISO/classical selection, invalid ISO humidity, exact medium
+views and legacy history equality. GasState itself carries no source receipts.
+
 `realize_assembly` turns an `fs_scenario::AcousticAssembly` into observer
 pressure by composing nameless primitives: a prestressed Euler–Bernoulli
 waveguide (`fs-nlmodal::prestressed_beam_omega` / Kirchhoff–Carrier), a
