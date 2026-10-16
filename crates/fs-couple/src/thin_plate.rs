@@ -520,6 +520,7 @@ fn odd_odd_modes(n: usize) -> Vec<fs_nlmodal::SineMode> {
 /// Optional flow-driven Helmholtz volume facing the plate monopoles.
 struct PlateCavity {
     sys: fs_phs::PortHamiltonian,
+    linear: fs_phs::linear_exact::LinearSplit,
     x: Vec<f64>,
 }
 
@@ -558,8 +559,8 @@ impl PlateBank {
     ) -> Result<f64, AcousticRealizeError> {
         let u_vol = self.volume_velocity();
         let p_cav = if let Some(cav) = self.cavity.as_mut() {
-            let rec = fs_phs::step(&cav.sys, &cav.x, &[u_vol], dt)
-                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+            let rec = fs_phs::linear_exact::step_render(&cav.sys, &cav.linear, &cav.x, &[u_vol], dt)
+                .map_err(render_step_error)?;
             cav.x = rec.x;
             cav.sys.output(&cav.x)[0]
         } else {
@@ -622,6 +623,7 @@ impl PlateBank {
         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         self.cavity = Some(PlateCavity {
             x: vec![0.0; sys.state_dim()],
+            linear: prepare_render_linear(&sys)?,
             sys,
         });
         Ok(())
@@ -1845,6 +1847,28 @@ fn map_plate(err: PlateError) -> AcousticRealizeError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plate_bank_cavity_island_is_invariant_under_time_partition() {
+        use super::*;
+        let gas = GasState::try_new(&fs_material::gas::GasSpec::dry_air_ussa1976(),293.15,101_325.0).unwrap();
+        let make = || {
+            let mut bank = PlateBank::default();
+            bank.attach_cavity(fs_scenario::HelmholtzCavity {volume_m3:0.01,
+                neck_radius_m:0.01,neck_length_m:0.02},&gas).unwrap();
+            bank.cavity.as_mut().unwrap().x[0] = 1e-6;
+            bank
+        };
+        for dt in [1e-4,5e-4,1e-3] {
+            let mut whole = make(); let mut half = make();
+            whole.drive_and_radiate(0.0,dt,gas.density,1.0).unwrap();
+            half.drive_and_radiate(0.0,dt/2.0,gas.density,1.0).unwrap();
+            half.drive_and_radiate(0.0,dt/2.0,gas.density,1.0).unwrap();
+            for (a,b) in whole.cavity.as_ref().unwrap().x.iter().zip(&half.cavity.as_ref().unwrap().x) {
+                assert!((a-b).abs()<=1e-12*a.abs().max(b.abs()).max(1e-12),"{a} {b}");
+            }
+        }
+    }
+
     #[test]
     fn vk_render_has_an_exact_linear_map_and_a_typed_nonlinear_band() {
         use fs_nlmodal::{SosModalStorage, StressChannel};
