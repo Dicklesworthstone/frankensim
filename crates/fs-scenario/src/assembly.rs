@@ -13,6 +13,7 @@ use fs_qty::{Dims, QtyAny};
 use std::collections::BTreeSet;
 use std::fmt;
 
+pub mod generators;
 pub(crate) mod wire;
 
 /// Frozen `scenario.assembly` wire version; scenario IR remains v2.
@@ -457,6 +458,8 @@ pub(crate) fn validate(
             GeometrySource::Parametric { generator, params } => {
                 text(generator, "generator", budget)?;
                 parameters(params, budget)?;
+                generators::validate_source(&part.geometry, budget.max_nested_items)
+                    .map_err(|e| invalid("geometry generator", e.to_string()))?;
             }
             GeometrySource::Imported {
                 fingerprint,

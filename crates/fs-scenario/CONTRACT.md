@@ -13,13 +13,57 @@ identity with rebinding receipts [S].
 ## Purpose and layer
 
 Layer **L3** (FLUX support). Runtime deps: `std`, fs-blake3, fs-qty,
-fs-rand, fs-cheb, fs-exec, fs-ga, fs-ivl, fs-motion, fs-math. The Design Ledger stores scenarios
+fs-rand, fs-cheb, fs-exec, fs-ga, fs-ivl, fs-motion, fs-math, fs-rep-nurbs. The Design Ledger stores scenarios
 as canonical IR artifacts; that integration lives ABOVE L3 (fs-ledger is L6) and is
 exercised here through a dev-dependency in conformance tests only.
 Consumers: fs-solid, fs-flux, fs-lbm, fs-uq, fs-regime, the milestone
 flagships.
 
 ## Public types and semantics
+
+- `assembly::generators` (IRP M6.1-W2) admits measured `BoreProfile`,
+  `OutlineWithHoles` and `ArchingSurface` tables. Each observation retains exact
+  SI binary64 values, absolute bounds, row citation and method. Missing rows
+  require a nonempty `test-fixture:` label and an explicit assumed bound;
+  ideal cylinder/cone bores, rectangular outlines and planar surfaces
+  also require fixture labels. `Generator::require_specimen` refuses fixtures;
+  row resolution, authenticity and fidelity admission remain consumers' work.
+  The ordered `BoreProfile.v1`, `OutlineWithHoles.v1`, `ArchingSurface.v1`
+  vocabularies use existing Parametric records: dimensioned value/lower/upper
+  quantities and losslessly hex-encoded metadata in legal parameter tokens.
+  A three-bit metadata mask preserves source signed zeros across the existing
+  assembly quantity codec's zero canonicalization.
+  Recognized tables are reconstructed/revalidated on assembly admission. No
+  wire-layout, schema version or scenario-IR bytes change.
+
+  Bores use degree-one or measured-derivative cubic Hermite NURBS (smooth
+  interpolation orders 2 and 4). Explicit sampling inserts stations without
+  removing observations and returns bounded conical segments. `volume` is an
+  analytic frustum sum only for the piecewise-conical model; cubic geometry
+  requires an explicit sampling rung. Polygon outlines retain real openings,
+  source vertex bits, exact-sign intersection/containment checks and exact
+  binary64-to-rational degree-one `TrimmedPatch` charts. Coordinates outside the
+  i128 rational domain or the 1e12 m predicate envelope refuse; subsequent exact
+  trim operations inherit fs-rep-nurbs's bounded exactness domain. Areas and
+  volumes propagate outward interval bounds without independence assumptions.
+
+  Arching consumes complete measured x/y contour grids, optional independent
+  positive thickness and an explicit reference/load state. Its shared immutable
+  `NurbsSurface` is a tensor degree-one graph: C0 cell seams, formal order 2,
+  no inferred smoothness or unloaded shape. Raw knot queries return original
+  observation bits. Derived fields retain contributing source dimensions;
+  their uncertainty follows material span/cell coordinates, not registration
+  at a fixed unknown physical location. Measurement bounds do not include
+  unmeasured interpolation/model discrepancy. Unknown dimensions have no default.
+  There is no fs-mesh/fs-plate runtime dependency: polygons feed the existing
+  planar mesher, and shared NURBS graphs feed fs-plate's existing arching lift.
+  Metadata construction is synchronous and capped before traversal; bore
+  sampling polls before allocation and per station/segment without publishing
+  partial results. Tests `ag_001`–`ag_012` in `assembly_generators.rs` cover G0
+  bit preservation/refusals/bounds/caps, G1 quantities (1e-12 relative) and
+  3-rung orders (±0.2), and G3 mesher/lift reuse. No acoustic equivalence,
+  calibration authority, global topology certificate or specimen fidelity is
+  implied by these generators.
 
 - `assembly` (IRP M6.1-W1a) is the generic, frozen `scenario.assembly` v1
   sidecar bound to the exact canonical scenario IR hash (route B). Its parts

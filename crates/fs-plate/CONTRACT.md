@@ -6,7 +6,8 @@ Kirchhoff triangle) elements with an orthotropic bending-rigidity matrix
 from `fs_material::OrthotropicElastic`, membrane-prestress geometric
 stiffness, offset stiffener beams, and modal analysis through
 `fs_modal::slice_window` (certified intervals, inertia-certified counts).
-Layer: **L3 FLUX** (deps: fs-material L3, fs-modal L1, fs-sparse L1).
+Layer: **L3 FLUX** (deps include fs-material L3, fs-modal L1, fs-sparse L1,
+fs-rep-nurbs L2).
 Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
 
 `shell` already owns spatial membrane/bending mechanics (the legacy CST/DKT
@@ -111,6 +112,19 @@ WASM graph. The new `arched_outline_shell` target composes outline admission,
 lift, physical graduation, `MeshShell` admission, DKT/MITC modal ladders and a
 Bessel-shape-paired annular-film oracle. These tests require native execution
 before any convergence or instrument-geometry qualification claim.
+
+`ArchingParameters::NurbsHeightMap` (M6.1-W2) shares an existing immutable
+`fs-rep-nurbs::NurbsSurface<f64>` with the same lift and graduation paths.
+Physical x/y graph parameters are required: query positions and the planar
+Jacobian must reproduce x/y and identity (16 eps positional, 1e-12 derivative
+tolerances). General parametric charts refuse rather than silently changing
+coordinates. Derivatives come from the representation owner; this adapter
+does not fit, resample, smooth or duplicate the measured surface. The lift
+charges four control-net visits per query and retains its existing caps and
+cancellation boundaries. Degree-one graphs have C0 cell seams and one-sided
+directors there; the bicubic C1 claim above applies only to the bicubic path.
+`fs-scenario::assembly_generators::ag_011_arching_second_order_and_existing_mesh_lift`
+tests the measured outline → existing mesher → shared NURBS → existing lift.
 
 - `PlateSection::{orthotropic, isotropic}` — bending rigidity D from
   engineering constants: `D11 = E1h³/12(1−ν12ν21)` etc., `D33 = G12h³/12`.

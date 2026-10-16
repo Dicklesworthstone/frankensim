@@ -28,11 +28,14 @@ fs-math = { path = "../fs-math" }
 fs-motion = { path = "../fs-motion" }
 fs-qty = { path = "../fs-qty" }
 fs-rand = { path = "../fs-rand" }
+fs-rep-nurbs = { path = "../fs-rep-nurbs" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
 fs-assimilate = { path = "../fs-assimilate" }
 fs-ledger = { path = "../fs-ledger" }
+fs-mesh = { path = "../fs-mesh" }
+fs-plate = { path = "../fs-plate" }
 
 [lints]
 workspace = true

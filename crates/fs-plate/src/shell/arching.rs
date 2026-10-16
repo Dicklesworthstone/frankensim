@@ -7,6 +7,8 @@
 use super::{ShellMesh, profile::ProfileBudget};
 use crate::{PlateError, PlateMesh};
 use fs_math::det;
+use fs_rep_nurbs::NurbsSurface;
+use std::sync::Arc;
 
 fn bad(what: &'static str) -> PlateError {
     PlateError::BadSection { what }
@@ -192,15 +194,30 @@ pub enum ArchingParameters {
     },
     /// Sampled height, with explicit bicubic interpolation semantics above.
     HeightMap(BicubicGrid),
+    /// An existing NURBS graph with physical x/y as its parameters. This is
+    /// the shared measured-geometry route; it introduces no second fit.
+    NurbsHeightMap(Arc<NurbsSurface<f64>>),
 }
 impl ArchingParameters {
     fn sections_per_query(&self) -> usize {
         match self {
             Self::HeightMap(grid) => grid.y_m.len(),
+            Self::NurbsHeightMap(surface) => surface.admit().map_or(usize::MAX, |s| {
+                s.homogeneous_control_net()
+                    .iter()
+                    .map(Vec::len)
+                    .sum::<usize>()
+                    .saturating_mul(4)
+            }),
             Self::LoftedSections { cross, .. } => cross.len().saturating_add(1),
         }
     }
     fn validate(&self) -> Result<(), PlateError> {
+        if let Self::NurbsHeightMap(surface) = self {
+            surface
+                .admit()
+                .map_err(|_| bad("invalid NURBS height chart"))?;
+        }
         if let Self::LoftedSections { long, cross } = self {
             let stations: Vec<_> = cross.iter().map(|(s, _)| *s).collect();
             if !axis_valid(&stations, 4) {
@@ -221,6 +238,26 @@ impl ArchingParameters {
     fn sample(&self, p: [f64; 2]) -> Result<(f64, [f64; 2]), PlateError> {
         match self {
             Self::HeightMap(grid) => grid.sample(p),
+            Self::NurbsHeightMap(surface) => {
+                let (point, du, dv) = surface
+                    .partials(p[0], p[1])
+                    .map_err(|_| bad("NURBS graph query refused"))?;
+                // A general parametric surface cannot be silently interpreted
+                // as a physical-coordinate graph by the plate lift.
+                if (point[0] - p[0]).abs() > 16.0 * f64::EPSILON * p[0].abs().max(1.0)
+                    || (point[1] - p[1]).abs() > 16.0 * f64::EPSILON * p[1].abs().max(1.0)
+                    || (du[0] - 1.0).abs() > 1e-12
+                    || du[1].abs() > 1e-12
+                    || dv[0].abs() > 1e-12
+                    || (dv[1] - 1.0).abs() > 1e-12
+                    || !point[2].is_finite()
+                    || !du[2].is_finite()
+                    || !dv[2].is_finite()
+                {
+                    return Err(bad("NURBS chart must use physical x/y graph parameters"));
+                }
+                Ok((point[2], [du[2], dv[2]]))
+            }
             Self::LoftedSections { long, cross } => {
                 let stations: Vec<_> = cross.iter().map(|(s, _)| *s).collect();
                 let mut z = Vec::new();
