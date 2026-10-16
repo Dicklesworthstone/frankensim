@@ -81,9 +81,9 @@ fn piston_small_signal_warping_matches_midpoint_on_amplitude_ladder() {
     for z in [0.01, 0.02, 0.03] {
         let expected = 2.0 * det::atan(0.5 * z);
         let mut observed = Vec::new();
-        // q/(V/A) ranges from 1.3e-3 to 3.3e-4: small enough for
+        // q/(V/A) ranges from 1e-3 to 2.5e-4: small enough for
         // linearization, large enough to resolve that axis above material ULPs.
-        for amplitude in [0.1, 0.05, 0.025] {
+        for amplitude in [1e-4, 5e-5, 2.5e-5] {
             let measured = phase(omega, z / omega, amplitude);
             let defect = 1200.0 * det::ln(measured / expected) / core::f64::consts::LN_2;
             observed.push(defect.abs());
