@@ -554,12 +554,15 @@ dependencies = [
 name = "fs-bem"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-casebook",
+ "fs-exec",
  "fs-fmm",
  "fs-geom",
  "fs-la",
  "fs-material",
  "fs-math",
+ "fs-phs",
  "fs-rep-mesh",
  "fs-solver",
 ]
@@ -720,6 +723,9 @@ dependencies = [
 [[package]]
 name = "fs-fmm"
 version = "0.0.1"
+dependencies = [
+ "fs-math",
+]
 
 [[package]]
 name = "fs-ga"
@@ -814,6 +820,7 @@ dependencies = [
  "fs-blake3",
  "fs-casebook",
  "fs-evidence",
+ "fs-la",
  "fs-matdb",
  "fs-math",
  "fs-qty",
@@ -905,8 +912,10 @@ name = "fs-plate"
 version = "0.0.1"
 dependencies = [
  "fs-material",
+ "fs-math",
  "fs-modal",
  "fs-qty",
+ "fs-rep-nurbs",
  "fs-sparse",
 ]
 
@@ -972,6 +981,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-rep-nurbs"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-exec",
+ "fs-geom",
+ "fs-ivl",
+ "fs-math",
+]
+
+[[package]]
 name = "fs-rep-sdf"
 version = "0.0.1"
 dependencies = [
@@ -996,6 +1016,7 @@ dependencies = [
  "fs-motion",
  "fs-qty",
  "fs-rand",
+ "fs-rep-nurbs",
 ]
 
 [[package]]
