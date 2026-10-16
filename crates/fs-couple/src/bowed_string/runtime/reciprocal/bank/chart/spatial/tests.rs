@@ -1,6 +1,7 @@
 //! Manufactured source/mesh regressions, not measured instrument validation.
 use super::*;
 use fs_evidence::ValidityDomain;
+use fs_scenario::gesture::GestureTarget;
 use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
     PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
 use fs_material::gas::GasSpec;
