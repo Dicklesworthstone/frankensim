@@ -340,7 +340,23 @@ record without a registry. Phase admission is explicit: frozen gas makes no
 condensation claim; the liquid-water option applies the existing Buck limit
 only inside its stated temperature window. No real-gas or molecular-relaxation
 accuracy is supplied by this adapter. Literal NASA/JANAF disagreements remain
-test failures, including absent rows and rounding-sensitive enthalpy deltas.
+test failures after accounting separately for each printed half-unit. Relative
+bands are unchanged; cp also satisfies its relative-only gate. Rows absent from
+the source are recorded as absent, never interpolated into alleged facts.
+
+The five-species acoustic fixture binds NASA/TP-2002-211556 Appendix D to
+primary zero-density transport correlations: Lemmon/Jacobsen (N2/O2/Ar),
+Laesecke/Muzny and Huber (CO2), and IAPWS R12-08/R15-11 (H2O). The stored
+linear curves use 256 uniform intervals plus declared query knots; tests
+measure 64/128/256 rungs and require relative representation error <= 1e-4.
+Source uncertainty remains separate, without invented confidence intervals.
+Water's 250 K dilute-vapor continuation has no quantified sub-triple accuracy
+certificate. These curves do not certify finite-density or mixture errors.
+The SRM1720 fixture uses the pack's information values, not certified complete
+air. Cramer1993 remains source-unverified: the 108-state humid grid computes
+NASA-9 sound speeds but emits NO-DATA and fails until the primary comparison
+and its stated uncertainty can be verified. No secondary transcription is
+used to qualify the requested 5e-4 gate.
 
 The universal ambient-medium primitive of the musical-acoustics
 doctrine: `GasState::try_new(&GasSpec, T, p)` derives the COMPLETE

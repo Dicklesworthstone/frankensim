@@ -1001,6 +1001,17 @@ copies density/sound-speed bits without reevaluating an atmosphere. G3 tests
 cover explicit ISO/classical selection, invalid ISO humidity, exact medium
 views and legacy history equality. GasState itself carries no source receipts.
 
+File-driven bowed, reed and plate-valve performances expose
+`from_bytes_with_gas_sources` and retain their authored `GasRecord`s. Ambient,
+regional and exterior declarations use the same L3 reader. The CLI loads
+bounded source artifacts itself: repeated `--gas-component SPECIES NASA9
+TRANSPORT-CLAIMS`, explicit `--gas-water none|ID` and `--gas-phase
+frozen|liquid-water`. A primitive reed render additionally supplies
+`--gas-record FILE`; wind/ensemble gas records live in their performance files.
+No thermochemical route falls back to a preset. Source-aware sidecars retain
+composition, temperature, pressure and all three pack identities per species.
+Omitting the new options preserves legacy numerical and sidecar paths.
+
 `realize_assembly` turns an `fs_scenario::AcousticAssembly` into observer
 pressure by composing nameless primitives: a prestressed Euler–Bernoulli
 waveguide (`fs-nlmodal::prestressed_beam_omega` / Kirchhoff–Carrier), a

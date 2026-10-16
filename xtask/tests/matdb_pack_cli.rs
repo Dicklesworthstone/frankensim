@@ -14,11 +14,24 @@ use fs_matdb::{
 };
 use fs_qty::Dims;
 
+#[path = "matdb_pack_cli/thermochemical.rs"]
+mod thermochemical;
+
 /// Source acquisition checks exercise the real offline compiler and typed
 /// evaluator. They establish source transport, not experimental validation.
 mod common_material_acquisition {
     use super::*;
     use fs_matdb::{PropertyClaim, QueryPoint, SelectionPolicy};
+
+    #[test]
+    fn g1_g3_sourced_nasa9_mixture_reaches_duct_radiation_cavity() {
+        super::thermochemical::mixture_reaches_consumers();
+    }
+
+    #[test]
+    fn g2_sourced_humid_air_sound_speed_vs_cramer() -> Result<(), String> {
+        super::thermochemical::humid_sound_speed_grid()
+    }
 
     // NIST-JANAF facts: T [K], cp and s [J/(mol K)], h-h298 [kJ/mol].
     // CO2 and H2O pages have no 250 or 350 K rows. Do not interpolate source
@@ -80,7 +93,7 @@ mod common_material_acquisition {
         [1000.0, 41.268, 232.738, 26.000],
     ];
 
-    fn compile_thermochemical_species(
+    pub(super) fn compile_thermochemical_species(
         slug: &str,
     ) -> (fs_matdb::NormalizedSpeciesPack, NormalizedModelPack) {
         let directory = fixture_dir();
@@ -135,6 +148,12 @@ mod common_material_acquisition {
             for &[t, cp, s, delta_h_kj] in rows {
                 let observed = model.evaluate(Temperature::new(t)).unwrap().properties();
                 let cp_error = (observed.cp().value() / cp - 1.0).abs();
+                let cp_absolute_error_j_mol_k = (observed.cp().value() - cp).abs();
+                let cp_relative_term_j_mol_k = 1e-3 * cp;
+                println!(
+                    "{{\"suite\":\"matdb-pack\",\"bead\":\"M0.1-W1\",\"species\":\"{}\",\"T_K\":{t},\"cp_JANAF_J_mol_K\":{cp},\"cp_NASA_J_mol_K\":{},\"cp_absolute_error_J_mol_K\":{cp_absolute_error_j_mol_k},\"cp_relative_gate_term_J_mol_K\":{cp_relative_term_j_mol_k},\"cp_printed_half_unit_J_mol_K\":0.0005,\"s_JANAF_J_mol_K\":{s},\"s_NASA_J_mol_K\":{},\"h_delta_JANAF_kJ_mol\":{delta_h_kj}}}",
+                    model.species(), observed.cp().value(), observed.s().value()
+                );
                 let s_error = (observed.s().value() / s - 1.0).abs();
                 let delta_h = observed.h().value() - reference_h;
                 let h_error = if delta_h_kj == 0.0 {
@@ -403,6 +422,41 @@ mod common_material_acquisition {
                 HelmholtzModalCavity::new(geometry, legacy, CavityNeckLoss::Resistance(0.0))
                     .unwrap();
             assert_eq!(cavity.gas(), gas);
+            if t == 293.15 {
+                use fs_couple::{bowed_string::runtime::schedule::file::BowedPerformance,
+                    render::schedule::reed::ReedPerformance,
+                    bernoulli_aperture::performance::file::PlateValvePerformance,
+                    pcm_wav::observation::ObservationPolicy};
+                let declaration = "thermochemical 293.15 101325 mole 1 N2 1";
+                let replace_media = |slug: &str| {
+                    fs::read_to_string(workspace_path(&format!("crates/fs-couple/examples/{slug}.performance")))
+                        .unwrap().lines().map(|line| {
+                            if line.starts_with("ambient ") { format!("ambient {declaration}") }
+                            else if line.starts_with("exterior ") { format!("exterior {declaration}") }
+                            else { line.to_owned() }
+                        }).collect::<Vec<_>>().join("\n") + "\n"
+                };
+                let bowed = replace_media("bowed-string");
+                let bow = BowedPerformance::from_bytes_with_gas_sources(bowed.as_bytes(),37,Some(&sources)).unwrap();
+                assert_eq!(bow.gas_record().state(), gas);
+                assert!(BowedPerformance::from_bytes(bowed.as_bytes(),37).is_err());
+                let reed = replace_media("reed-baffled-exterior").replace(
+                    "gas mixture 293.15 100000 mole 3 N2 0.4 O2 0.2 CO2 0.4", &format!("gas {declaration}"));
+                let reed = ReedPerformance::from_bytes_with_gas_sources(reed.as_bytes(),37,
+                    ObservationPolicy::Diagnostic,Some(&sources)).unwrap();
+                assert_eq!(reed.gas_records().len(),3);
+                assert!(reed.gas_records().iter().all(|record| matches!(record, GasRecord::Thermochemical(_)) && record.state()==gas));
+                assert!(reed.segment_gases().iter().all(|state| state==gas));
+                let valve = replace_media("plate-valve-exterior")
+                    .replace("gas 313.15 0.5", &format!("gas {declaration}"))
+                    .replace("gas 283.15 0", &format!("gas {declaration}"));
+                let valve = PlateValvePerformance::from_bytes_with_gas_sources(valve.as_bytes(),37,
+                    &fs_exec::CancelGate::new(),Some(&sources)).unwrap();
+                assert_eq!(valve.gas_records().len(),4);
+                assert!(valve.gas_records().iter().all(|record| matches!(record, GasRecord::Thermochemical(_)) && record.state()==gas));
+                assert_eq!(valve.ambient_gas(),gas);
+                assert_eq!(valve.exterior_gas(),Some(gas));
+            }
             assert!(
                 (cavity.isolated_omega_rad_s()
                     / original.isolated_omega_rad_s()
@@ -12979,7 +13033,7 @@ fn g3_cli_compiles_first_order_kinetics_into_an_identical_verified_model_pack() 
 }
 
 #[test]
-#[allow(clippy::too_many_lines)] // The end-to-end receipt audit is clearer as one ordered assertion path.
+#[allow(clippy::too_many_lines)]// The end-to-end receipt audit is clearer as one ordered assertion path.
 fn g3_cli_compiles_species_association_into_identical_verified_species_packs() {
     let (directory, manifest) = write_species_fixture(SPECIES_SOURCE);
     let first_path = directory.join("species-first.fsspcpk");
@@ -13919,7 +13973,7 @@ fn tonewood_sound_speed_in_range(el_pa: f64, rho_si: f64) -> bool {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)] // one coherent corpus gate
+#[allow(clippy::too_many_lines)]// one coherent corpus gate
 fn g2_cli_compiles_fpl_gtr282_tonewood_seeds_with_derived_quantity_gates() {
     let mut complete_orthotropic = 0usize;
     let mut speed_gated = 0usize;
@@ -14094,7 +14148,7 @@ const INSTRUMENT_TRANCHE2_PACKS: [&str; 12] = [
 ];
 
 #[test]
-#[allow(clippy::too_many_lines)] // one coherent corpus gate
+#[allow(clippy::too_many_lines)]// one coherent corpus gate
 fn g2_cli_compiles_instrument_loss_and_string_tranche_with_derived_gates() {
     let mut packs = std::collections::BTreeMap::new();
     for slug in INSTRUMENT_TRANCHE2_PACKS {
