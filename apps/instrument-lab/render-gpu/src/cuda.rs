@@ -96,8 +96,10 @@ fn compile(src: &str, arch: &str) -> Result<Ptx, String> {
     }
     let bin = nvrtc_cubin(src, &opts)?;
     if let (Some(d), Some(f)) = (dir, file) {
-        // best effort: a read-only home only costs the next run a compile
-        let _ = std::fs::create_dir_all(&d).and_then(|_| std::fs::write(&f, &bin));
+        // best effort (a read-only home only costs the next run a compile), and atomic: written aside and
+        // renamed, so a second process (`--device all` compiles once per GPU) never loads half a file
+        let tmp = d.join(format!(".{}.{}", f.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()), std::process::id()));
+        let _ = std::fs::create_dir_all(&d).and_then(|_| std::fs::write(&tmp, &bin)).and_then(|_| std::fs::rename(&tmp, &f));
     }
     Ok(Ptx::from_binary(bin))
 }
@@ -325,7 +327,9 @@ pub fn run(
     p.pt_ptr = m.i32(&plan.pt_ptr)?; p.pt_cav = m.i32(&plan.pt_cav)?; p.pt_delay = m.i32(&plan.pt_delay)?;
     p.pt_lo = m.f64(&plan.pt_lo)?; p.pt_hi = m.f64(&plan.pt_hi)?; p.mic_tau = m.f64(&plan.mic_tau)?;
     p.mic_hp = m.f64(&cat(&|s| &s.mic_hp))?;
-    let spl = steps_per_launch.max(1);
+    // a GPU that also drives a display kills kernels that run for seconds: keep each launch short there
+    let watchdog = ctx.attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_KERNEL_EXEC_TIMEOUT).map_err(e)? != 0;
+    let spl = if watchdog { steps_per_launch.clamp(1, 2000) } else { steps_per_launch.max(1) };
     let out = stream.alloc_zeros::<f64>(spl * b * plan.nm.max(1)).map_err(e)?;
     p.out = m.ptr(&out);
     let bar = stream.alloc_zeros::<u32>(64).map_err(e)?;
@@ -349,7 +353,7 @@ pub fn run(
         let mut l = stream.launch_builder(&func);
         l.arg(&p);
         if let Err(err) = unsafe { l.launch_cooperative(cfg) } {
-            return Err(format!("cooperative launch of {blocks} blocks: {err:?} (try RENDER_GPU_BLOCKS_PER_SM=1)"));
+            return Err(format!("cooperative launch of {blocks} blocks ({per_sm} per multiprocessor): {err:?}"));
         }
         stream.memcpy_dtoh(&out, &mut host).map_err(e)?;
         stream.synchronize().map_err(e)?;

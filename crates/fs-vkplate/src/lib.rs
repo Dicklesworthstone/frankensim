@@ -1751,9 +1751,10 @@ impl Instrument {
         self.step_index += 1;
     }
 
-    /// Everything one time step reads, as plain data (microphone taps prepared first): for a stepper
-    /// outside this crate, the CUDA renderer in apps/instrument-lab/render-gpu. Exporting changes
-    /// nothing here, and `step` stays the reference that stepper is checked against.
+    /// Everything one time step reads, as plain data: for a stepper outside this crate, the CUDA renderer
+    /// in apps/instrument-lab/render-gpu. Exporting changes nothing the steps compute, and `step` stays the
+    /// reference that stepper is checked against. It prepares the microphones' taps as the first step would,
+    /// so place microphones and bodies before exporting (a later move would no longer re-prepare them).
     pub fn image(&mut self) -> InstrumentImage {
         if !self.prepared {
             self.prepare();

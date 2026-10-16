@@ -33,9 +33,12 @@ fn piece(name: &str, hits: &[(f64, f64)]) -> Result<Piece, String> {
     }
 }
 
+/// `time_s,speed_m_s` lines (a header and malformed lines are skipped), in time order: the GPU fires strokes
+/// from a cursor, and a stroke list out of order would fire differently there and on the CPU.
 fn read_hits(path: &str) -> Vec<(f64, f64)> {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("{path}: {e}")));
-    text.lines()
+    let mut hits: Vec<(f64, f64)> = text
+        .lines()
         .filter_map(|l| {
             let mut it = l.split(',').map(|s| s.trim().parse::<f64>());
             match (it.next(), it.next()) {
@@ -43,7 +46,9 @@ fn read_hits(path: &str) -> Vec<(f64, f64)> {
                 _ => None,
             }
         })
-        .collect()
+        .collect();
+    hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+    hits
 }
 
 fn die(msg: &str) -> ! {
@@ -110,7 +115,8 @@ fn gpu_raw(pieces: &mut [Piece], total: usize, o: &Opts) -> Vec<Vec<Vec<f64>>> {
     // nodes per work item (one block each): about one item per multiprocessor of a large GPU (128), at
     // most a full block
     let nodes: usize = imgs[0].bodies.iter().map(|b| b.n).sum();
-    let item = (nodes * imgs.len()).div_ceil(128).next_multiple_of(32).clamp(64, 256);
+    let gpus = if o.all_devices { cuda::device_count().max(1) } else { 1 };
+    let item = (nodes * imgs.len().div_ceil(gpus)).div_ceil(128).next_multiple_of(32).clamp(64, 256);
     let pl = plan::Plan::new(&imgs[0], &pieces[0].instrument, threads(), item, o.exact_friction).unwrap_or_else(|e| die(&e));
     let sims: Vec<_> = imgs.iter().map(|i| pl.state(i).unwrap_or_else(|e| die(&e))).collect();
     let nvk = pl.vk_body.len();
@@ -285,24 +291,27 @@ fn render_chunked(name: &str, hits: &[(f64, f64)], secs: f64, o: &Opts) -> Vec<V
     let nm = raw[0].len();
     let len = (secs * sr).round() as usize + 1;
     let mut y = vec![vec![0.0; len]; nm];
-    let nx = (2.0 * XF * sr).round() as usize;
-    let ramp: Vec<f64> = (0..nx).map(|i| 0.5 - 0.5 * (std::f64::consts::PI * i as f64 / nx as f64).cos()).collect();
+    // joins on whole output samples: chunk c owns [join_c - h, join_{c+1} + h), fading in over the first 2h
+    // samples and out over the last 2h; the ramps are sampled at half-sample offsets so the two that meet
+    // at a join sum to exactly one
+    let h = (XF * sr).round() as usize;
+    let join: Vec<usize> = cuts.iter().map(|&c| ((c * sr).round() as usize).min(len)).collect();
+    let ramp: Vec<f64> = (0..2 * h).map(|i| 0.5 - 0.5 * (std::f64::consts::PI * (i as f64 + 0.5) / (2 * h) as f64).cos()).collect();
     for c in 0..n {
-        let a = cuts[c] - if c > 0 { XF } else { 0.0 };
-        let b = cuts[c + 1] + if c + 1 < n { XF } else { 0.0 };
-        let (i0, i1) = ((a * sr).round() as usize, ((b * sr).round() as usize).min(len));
-        let off = ((a - starts[c]) * sr).round() as usize;
+        let i0 = if c > 0 { join[c].saturating_sub(h) } else { 0 };
+        let i1 = if c + 1 < n { (join[c + 1] + h).min(len) } else { len };
+        let start = (starts[c] * sr).round() as usize;
         for m in 0..nm {
             let x = fs_vkplate::decimate(&raw[c][m][skip.min(raw[c][m].len())..], pieces[c].oversample);
-            for (j, yi) in y[m][i0..i1].iter_mut().enumerate() {
+            for (g, yi) in y[m].iter_mut().enumerate().take(i1).skip(i0) {
                 let mut w = 1.0;
-                if c > 0 && j < nx {
-                    w = ramp[j];
+                if c > 0 && g < join[c] + h {
+                    w *= ramp[g + h - join[c]];
                 }
-                if c + 1 < n && i1 - i0 - j <= nx {
-                    w = ramp[i1 - i0 - j - 1];
+                if c + 1 < n && g + h >= join[c + 1] {
+                    w *= ramp[2 * h - 1 - (g + h - join[c + 1])];
                 }
-                *yi += x.get(off + j).copied().unwrap_or(0.0) * w;
+                *yi += g.checked_sub(start).and_then(|i| x.get(i)).copied().unwrap_or(0.0) * w;
             }
         }
     }
