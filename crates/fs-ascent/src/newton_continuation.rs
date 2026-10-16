@@ -129,7 +129,7 @@ impl<'a, 'p> NewtonContinuation<'a, 'p> {
     {
         let invalid = ContinuationError::InvalidInput;
         let first = stages.first().ok_or(invalid("at least one stage is required"))?;
-        let variables = first.oracle.problem().variables();
+        let variables = first.oracle.problem().vars();
         let mut dimension = 0_usize;
         for (i, v) in variables.iter().enumerate() {
             if i % 256 == 0 { poll(0, cx)?; }
@@ -141,7 +141,7 @@ impl<'a, 'p> NewtonContinuation<'a, 'p> {
         }
         for (i, stage) in stages.iter().enumerate() {
             poll(i, cx)?;
-            if stage.oracle.problem().variables() != variables {
+            if stage.oracle.problem().vars() != variables {
                 return Err(invalid("stage variable names, dimensions and layouts must agree"));
             }
             if !stage.tolerance.is_finite() || stage.tolerance <= 0.0 || 0.1 * stage.tolerance == 0.0 {
