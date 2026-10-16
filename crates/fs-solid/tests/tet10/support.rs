@@ -159,16 +159,66 @@ pub fn solve(k: &Csr, rhs: &[f64], prescribed: &[Option<f64>]) -> Vec<f64> {
         let matrix = matrix.assemble();
         let sym = SymbolicLdlt::analyze(&matrix, DirectOrdering::Amd).unwrap();
         let factor = sym.factor(&matrix, &LdltOptions::default()).unwrap();
-        let values = factor.solve(&force);
+        let mut values = factor.solve(&force);
         let mut check = vec![0.0; values.len()];
-        matrix.spmv(&values, &mut check);
         let norm = force.iter().map(|x| x * x).sum::<f64>().sqrt();
-        let residual = check
-            .iter()
-            .zip(&force)
-            .map(|(a, b)| (a - b) * (a - b))
-            .sum::<f64>()
-            .sqrt();
+        let mut residual = f64::INFINITY;
+        let mut initial_residual = 0.0;
+        let mut refinements = 0;
+        // Slender bending fixtures amplify factorization roundoff. Reuse the
+        // same factors for at most three correction solves, rather than relax
+        // the independently evaluated original SpMV residual gate below.
+        for step in 0..=3 {
+            matrix.spmv(&values, &mut check);
+            residual = check
+                .iter()
+                .zip(&force)
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f64>()
+                .sqrt();
+            if step == 0 {
+                initial_residual = residual;
+            }
+            if residual <= 1e-9 * norm.max(1e-20) || step == 3 {
+                break;
+            }
+            // Compensated products and sums keep cancellation in b-Au from
+            // setting the correction accuracy. Final acceptance still uses
+            // the unchanged ordinary SpMV, not this more accurate residual.
+            let correction_rhs: Vec<_> = (0..values.len())
+                .map(|row| {
+                    let (cols, vals) = matrix.row(row);
+                    let mut sum = force[row];
+                    let mut low = 0.0;
+                    for (&col, &a) in cols.iter().zip(vals) {
+                        let product = a * values[col];
+                        let term = -product;
+                        let next = sum + term;
+                        low += if sum.abs() >= term.abs() {
+                            (sum - next) + term
+                        } else {
+                            (term - next) + sum
+                        };
+                        low -= a.mul_add(values[col], -product);
+                        sum = next;
+                    }
+                    sum + low
+                })
+                .collect();
+            let correction = factor.solve(&correction_rhs);
+            for (value, delta) in values.iter_mut().zip(correction) {
+                *value += delta;
+            }
+            refinements += 1;
+        }
+        if refinements > 0 {
+            println!(
+                "{{\"suite\":\"irp-s1\",\"stage\":\"static-iterative-refinement\",\"free_dofs\":{},\"steps\":{refinements},\"initial_relative_residual\":{},\"final_relative_residual\":{},\"tolerance\":1e-9}}",
+                free.len(),
+                initial_residual / norm.max(1e-20),
+                residual / norm.max(1e-20)
+            );
+        }
         assert!(
             residual <= 1e-9 * norm.max(1e-20),
             "linear residual {residual:e}/{norm:e}"

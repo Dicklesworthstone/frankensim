@@ -202,10 +202,55 @@ pub fn free_bar() {
     with_cx(|cx| {
         let mut values = Vec::new();
         let mut dofs = Vec::new();
-        for r in [1, 2, 4] {
+        // Central verification can request one additional diagnostic rung.
+        // Every original rung and its original order gate remain active.
+        let rungs: &[usize] = if std::env::var_os("IRP_TET10_BAR_DIAGNOSTIC_R8").is_some() {
+            &[1, 2, 4, 8]
+        } else {
+            &[1, 2, 4]
+        };
+        for &r in rungs {
             let mesh = block([6 * r, r, r], [1.0, 0.1, 0.07]);
             let (nodes, elements) = promote(&mesh, cx);
             let a = assembly(&nodes, &elements, &material(1.0, 0.25), &[], cx);
+            if r == 1 {
+                // An affine P2 mass needs degree four, already exact for
+                // Q.mass_points_per_dir=4. Compare assembled operators too:
+                // a correct scalar rule alone would not catch using K's rule
+                // accidentally for M inside assembly.
+                let m = material(1.0, 0.25);
+                let higher = fs_solid::linear3::tet10::QuadraticTetProblem {
+                    nodes_m: &nodes,
+                    elements: &elements,
+                    materials: TetMaterialField::Uniform(&m),
+                    fixed_dofs: &[],
+                    budget: TetAssemblyBudget::standard(),
+                    quadrature: fs_solid::linear3::tet10::TetQuadrature {
+                        stiffness_points_per_dir: 5,
+                        mass_points_per_dir: 5,
+                    },
+                }
+                .assemble(cx)
+                .unwrap();
+                for (name, low, high) in [
+                    ("stiffness", &a.stiffness, &higher.stiffness),
+                    ("mass", &a.mass, &higher.mass),
+                ] {
+                    let low = low.to_dense();
+                    let high = high.to_dense();
+                    let scale = high.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+                    let difference = low
+                        .iter()
+                        .zip(&high)
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0_f64, f64::max);
+                    println!(
+                        "{{\"suite\":\"irp-s1\",\"test\":\"g1_free_free_bar_eigen_ladder\",\"quadrature_axis\":\"{name}\",\"base_n\":[3,4],\"higher_n\":[5,5],\"relative_max_entry_difference\":{},\"tolerance\":1e-12}}",
+                        difference / scale
+                    );
+                    assert!(difference <= 1e-12 * scale, "{name} quadrature mismatch");
+                }
+            }
             let report = fs_modal::slice_window(
                 &a.stiffness,
                 &a.mass,
@@ -250,45 +295,50 @@ pub fn free_bar() {
                     (y * y + z * z).sqrt() > 0.2 * rms
                 })
                 .take(4)
-                .map(|m| m.lambda)
                 .collect();
             assert_eq!(
                 bending.len(),
                 4,
                 "window must contain four identified bending modes"
             );
-            values.push(bending);
-            dofs.push(a.free_dofs.len());
-        }
-        for mode in 0..4 {
-            let d0 = values[0][mode] - values[1][mode];
-            let d1 = values[1][mode] - values[2][mode];
-            assert!(
-                d0 > 0.0 && d1 > 0.0,
-                "eigenvalue ladder not live/monotone: {values:?}"
-            );
-            let order = fs_math::det::ln(d0 / d1) / fs_math::det::ln(2.0);
-            let limit = values[2][mode] - d1 / ((d0 / d1) - 1.0);
+            let row: Vec<_> = bending.iter().map(|m| m.lambda).collect();
+            let residuals: Vec<_> = bending.iter().map(|m| m.residual).collect();
             println!(
-                "{{\"suite\":\"irp-s1\",\"test\":\"g1_free_free_bar_eigen_ladder\",\"mode\":{mode},\"order\":{{\"observed\":{order},\"theoretical\":4.0,\"band\":0.3}},\"richardson_limit\":{limit}}}"
+                "{{\"suite\":\"irp-s1\",\"test\":\"g1_free_free_bar_eigen_ladder\",\"refinement\":{r},\"free_dofs\":{},\"minimum_scaled_jacobian\":{},\"eigenvalues\":{row:?},\"eigenvalue_residual_bounds\":{residuals:?}}}",
+                a.free_dofs.len(),
+                a.minimum_scaled_jacobian
             );
-            assert!(
-                (order - 4.0).abs() <= 0.3,
-                "mode {mode} order {order}: {values:?}"
-            );
-        }
-        for (i, row) in values.iter().enumerate() {
             log(
                 "g1_free_free_bar_eigen_ladder",
                 "G1",
                 "free-free-prismatic-bar",
-                &[1.0 / (1usize << i) as f64],
-                &[dofs[i]],
-                row,
+                &[1.0 / r as f64],
+                &[a.free_dofs.len()],
+                &row,
                 0.3,
                 "Richardson limit; E=rho=1, nu=0.25",
                 started.elapsed().as_secs_f64(),
             );
+            values.push(row);
+            dofs.push(a.free_dofs.len());
+        }
+        let mut orders = Vec::new();
+        for first in 0..values.len() - 2 {
+            for mode in 0..4 {
+                let d0 = values[first][mode] - values[first + 1][mode];
+                let d1 = values[first + 1][mode] - values[first + 2][mode];
+                assert!(
+                    d0 > 0.0 && d1 > 0.0,
+                    "eigenvalue ladder not live/monotone: {values:?}"
+                );
+                let order = fs_math::det::ln(d0 / d1) / fs_math::det::ln(2.0);
+                let limit = values[first + 2][mode] - d1 / ((d0 / d1) - 1.0);
+                println!(
+                    "{{\"suite\":\"irp-s1\",\"test\":\"g1_free_free_bar_eigen_ladder\",\"mode\":{mode},\"refinements\":{:?},\"order\":{{\"observed\":{order},\"theoretical\":4.0,\"band\":0.3}},\"richardson_limit\":{limit}}}",
+                    &rungs[first..first + 3]
+                );
+                orders.push(order);
+            }
         }
         // Euler–Bernoulli roots are a model-form comparison, not the 3-D
         // eigenvalue gate. Both transverse inertias are represented.
@@ -300,5 +350,9 @@ pub fn free_bar() {
                 root4 * 0.0049 / 12.0
             );
         }
+        assert!(
+            orders.iter().all(|p| (p - 4.0).abs() <= 0.3),
+            "eigen orders {orders:?}: rungs {values:?}, dofs {dofs:?}"
+        );
     });
 }

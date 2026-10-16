@@ -104,6 +104,50 @@ fn g0_consistent_mass_total_and_first_moments_exact() {
         let (nodes, elements) = promote(&mesh, cx);
         let a = assembly(&nodes, &elements, &material(10.0, 0.25), &[], cx);
         fs_la::factor::cholesky(&a.mass.to_dense(), 3 * nodes.len()).unwrap();
+        // Total mass and first moments alone cannot detect an incorrect P2
+        // mass. Check every entry independently with barycentric moments:
+        // integral prod(lambda_i^p_i) = prod(p_i!)/(3+sum(p_i))! on this tet.
+        let polynomials: Vec<Vec<([usize; 4], f64)>> = (0..10)
+            .map(|i| {
+                if i < 4 {
+                    let mut square = [0; 4];
+                    square[i] = 2;
+                    let mut linear = [0; 4];
+                    linear[i] = 1;
+                    vec![(square, 2.0), (linear, -1.0)]
+                } else {
+                    let [u, v] = TET10_EDGES[i - 4];
+                    let mut product = [0; 4];
+                    product[u] = 1;
+                    product[v] = 1;
+                    vec![(product, 4.0)]
+                }
+            })
+            .collect();
+        for i in 0..10 {
+            for j in 0..10 {
+                let exact: f64 = polynomials[i]
+                    .iter()
+                    .flat_map(|(p, c)| {
+                        polynomials[j].iter().map(move |(q, d)| {
+                            let powers: [usize; 4] = core::array::from_fn(|k| p[k] + q[k]);
+                            c * d * powers.iter().map(|&k| factorial(k)).product::<f64>()
+                                / factorial(3 + powers.iter().sum::<usize>())
+                        })
+                    })
+                    .sum();
+                for component in 0..3 {
+                    let row = 3 * elements[0][i] + component;
+                    let col = 3 * elements[0][j] + component;
+                    let (cols, vals) = a.mass.row(row);
+                    let got = cols.binary_search(&col).map(|k| vals[k]).unwrap_or(0.0);
+                    assert!(
+                        (got - exact).abs() < 1e-14,
+                        "P2 mass entry ({i},{j},{component}): {got:e} != {exact:e}"
+                    );
+                }
+            }
+        }
         for c in 0..3 {
             let one: Vec<_> = (0..3 * nodes.len())
                 .map(|i| if i % 3 == c { 1.0 } else { 0.0 })
