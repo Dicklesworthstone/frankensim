@@ -129,15 +129,15 @@ closure of IRP M5.2-W1; native execution remains the remote verification gate.
   taper; TMM `input_impedance_wall` adds the same
   `Y' = 2π a slant / Z'` to the gas shunt; `None` is
   rigid; not a plate and not mean flow),
-  `ViscothermalPin` (all-regime pin: wide-tube ZK for
-  `r_v ≥ 10`, Poiseuille + isothermal-tending shunt below;
+  `ViscothermalPin` (exact Bessel ZK pin, with series R/inertance and
+  thermal G/compliance evaluated at the same physical frequency;
   zero `μ` is the lossless mutation; `foster_branches`
   collocates Foster networks to Bessel Zwikker–Kosten
   `F(r_v)` at every shear number, and on an open mouth
   to `Re Z_rad(ω)` of the compact / piston load — the
   pin `X` still supplies the radiation mass; tabulated
   `R(ω)` remains the FIR path),
-  `zwikker_kosten_f` (also the fs-duct `LossModel::Bessel` TMM),
+  `zwikker_kosten_f` / `zk_one_minus_f` (also the fs-duct Bessel TMM),
   `foster_sqrt_omega_terms`,
   `foster_match_re`, `slice_linear_taper`,
   `spherical_cone` (1-D wave on `ψ = x p`, physical ports
@@ -218,6 +218,22 @@ closure of IRP M5.2-W1; native execution remains the remote verification gate.
   special case.
 
 ## Invariants
+
+The cylindrical ZK owner uses ζ=rv√(-i) in +iω telegraph bookkeeping:
+Im F<0 and Re(iωL/(1-F))>0. Double-double defining series evaluate both
+F and its cancellation-free deficit below |ζ|=12; the equivalent I1/I0
+Lentz fraction is used above it. The admitted range is [1e-6,1e6]; a
+16392-iteration cap and the delta stop bound work and refuse exhaustion.
+The old 1e-12 stop arithmetic is preserved above the switch to avoid
+gratuitous WideTube-chimney golden changes. G0/G2 `zk_f_certified_all_regimes`
+targets 1e-12 agreement against a dd backward fraction on 400 log points,
+1e-13 switch continuity and 1e-6 two-term wide-limit agreement. The
+48th retained series term is checked below 1e-17 of J0 at the switch.
+`zk_one_minus_f_small_rv_no_cancellation` targets 1e-14; domain/cap tests
+also certify the extended endpoints. `zk_pin_keeps_positive_resistance_and_thermal_compliance`
+checks both series/shunt quadratures and refusals. These new tests await
+central native qualification. PhsError has no domain variant, so named
+NotPsd refusals are retained for this item; the enum label is historical.
 
 1. Admission rejects non-skew `J`, asymmetric or non-PSD `R`, non-PSD
    `Q`, and bad dimensions by name.

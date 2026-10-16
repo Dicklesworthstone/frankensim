@@ -82,9 +82,10 @@ fit and cannot call this L3 owner; no default consumer is migrated here.
   taper propagated with exact 1D spherical waves. Lossy cones
   cascade spherical substations at each slice's own mid-radius
   (lossless stays the one-shot `e^{±ikx}/x` 2-port).
-- `LossModel::{Lossless, WideTube, AllRegime, Bessel}` — lossless,
-  first-order ZK, piecewise wide/Poiseuille, and frequency-by-frequency
-  Bessel Zwikker–Kosten `F(r_v)` (every shear number). A cone still
+- `LossModel::{Lossless, WideTube, Bessel}` — lossless, the retained
+  first-order wide-tube benchmark, and exact frequency-by-frequency
+  Bessel Zwikker–Kosten `F(r_v)`. The interpolated variant is removed;
+  no Bessel refusal falls back to another material model. A cone still
   uses the spherical `e^{\pm ikx}/x` basis.
 - `Termination::{Closed, IdealOpen, UnflangedOpen, FlangedOpen}` —
   ideal limits plus the classic low-`ka` radiation fits (end
@@ -111,7 +112,7 @@ fit and cannot call this L3 owner; no default consumer is migrated here.
   `input_impedance_wall` put the same `WallPin` on that
   chimney cylinder. WideTube on the neck is Bessel so
   a narrow chimney does not raise the bore's `r_v` refusal
-  or jump at the AllRegime `r_v = 10` cliff.
+  or jump at a narrow/wide material-model boundary.
   An OPEN hole is still the T-junction
   `series(Z_s/2)·shunt(Z_h)·series(Z_s/2)` with Nederveen
   `t_s = −0.37 b²/a`. Hole radius must stay below the bore
@@ -325,10 +326,21 @@ divergence-theorem closure/orientation pin on the lathe).
 
 ## No-claim boundaries
 
-- Wide-tube first order refuses `rv < 10`. [`LossModel::AllRegime`]
-  falls to Poiseuille there; [`LossModel::Bessel`] is the
-  frequency-by-frequency Zwikker–Kosten `F(r_v)` at every shear
-  number. Both store Helmholtz `k` (`e^{ikx}`), not telegraph `γ`.
+- Wide-tube first order refuses `rv < 10`. `LossModel::Bessel` uses
+  the shared fs-phs exact law on its admitted shear range [1e-6,1e6],
+  with cancellation-free `1-F` below |ζ|=12. Invalid/out-of-domain data
+  refuse; there is no interpolated narrow branch or silent zero-loss result.
+  Both store Helmholtz `k` (`e^{ikx}`), not telegraph `γ`.
+  G2 `bessel_small_rv_series_matches_poiseuille_limit` checks derived
+  finite-rv R/L/C corrections at 1e-10 relative with explicit omitted-term
+  bounds. The leading Poiseuille/isothermal limits alone differ by more
+  than 1e-10 at rv=.1. `bessel_refuses_instead_of_falling_back` covers
+  bad inputs; `narrow_cone_bessel_no_fallback` requires decreasing
+  12/24/48-slice errors against a 96-slice A coefficient, order 1.5..3
+  and final error <1%. The specified 0.5..2mm cone at 50Hz has rv approximately 2..10
+  in room air, below the wide-tube floor rather than below one.
+  Native qualification, before/after peak shifts and golden replay remain
+  batch-pending. No continuous-profile/3-D convergence claim is made.
 - Straight smooth isothermal walls. A [`fs_phs::WallPin`] on
   `input_impedance_wall` adds the locally reacting shunt
   `Y' = 2π a slant / (r − iωσ + i K/ω)` to the gas `Y'`
