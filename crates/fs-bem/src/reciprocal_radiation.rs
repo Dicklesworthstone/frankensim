@@ -26,7 +26,7 @@
 //! a passive discrete load is not an acoustic-accuracy or real-time certificate.
 use crate::helmholtz::{HelmholtzError,Medium,MIN_PANELS_PER_WAVELENGTH,MAX_RADIATION_FIELDS_PER_BATCH};
 use crate::panel3d::SpherePanels;
-use fs_la::eigen_complex::lu_complex;
+use fs_la::eigen_complex::{LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64,det};
 use core::f64::consts::{PI,TAU};
 mod geometry;
@@ -63,6 +63,12 @@ fn bad(what:&'static str)->HelmholtzError {HelmholtzError::BadParameter{what}}
 fn finite(v:C64)->bool {v.re.is_finite() && v.im.is_finite()}
 fn poll(cancelled:&mut impl FnMut()->bool)->Result<(),HelmholtzError> {
     if cancelled(){Err(HelmholtzError::Cancelled)}else{Ok(())}
+}
+fn lu_error(error:LuComplexError)->HelmholtzError {
+    match error {
+        LuComplexError::Cancelled=>HelmholtzError::Cancelled,
+        LuComplexError::Singular{..}=>HelmholtzError::Singular,
+    }
 }
 fn zeroed<T:Clone>(n:usize,value:T)->Result<Vec<T>,HelmholtzError> {
     let mut v=Vec::new();v.try_reserve_exact(n).map_err(|_|HelmholtzError::AllocationFailed{what:"reciprocal acoustic workspace"})?;
@@ -157,9 +163,12 @@ impl<'s> Prepared<'s> {
     fn assemble(&self,k:f64,cancelled:&mut impl FnMut()->bool)->Result<(Vec<C64>,Vec<Wave>),HelmholtzError> {
         let nf=self.facets.len();let nv=self.vertices;let n=self.unknowns();
         let mut h=zeroed(n*n,C64::ZERO)?;let mut at=0;
-        for i in 0..nf {for a in 0..nv {
-            h[(nv+i)*n+a]=C64::from_re(self.k0[i*nv+a]);h[a*n+nv+i]=h[(nv+i)*n+a];
-        }}
+        for i in 0..nf {
+            poll(cancelled)?;
+            for a in 0..nv {
+                h[(nv+i)*n+a]=C64::from_re(self.k0[i*nv+a]);h[a*n+nv+i]=h[(nv+i)*n+a];
+            }
+        }
         for i in 0..nf {for j in i..nf {
             poll(cancelled)?;
             let a=&self.facets[i];let b=&self.facets[j];
@@ -192,17 +201,26 @@ impl<'s> Prepared<'s> {
         for wave in &waves {
             poll(cancelled)?;
             let scale=k*wave.weight/(8.0*PI*PI); // antipodal pair
-            for i in 0..n {for j in i..n {
-                h[i*n+j].im+=scale*(wave.coefficients[i].conj()*wave.coefficients[j]).re;
-                h[j*n+i]=h[i*n+j];
-            }}
+            for i in 0..n {
+                poll(cancelled)?;
+                for j in i..n {
+                    h[i*n+j].im+=scale*(wave.coefficients[i].conj()*wave.coefficients[j]).re;
+                    h[j*n+i]=h[i*n+j];
+                }
+            }
         }
-        if h.iter().any(|v|!finite(*v)) {return Err(bad("nonfinite reciprocal frequency operator"));}
+        for row in h.chunks_exact(n) {
+            poll(cancelled)?;
+            if row.iter().any(|v|!finite(*v)) {return Err(bad("nonfinite reciprocal frequency operator"));}
+        }
         Ok((h,waves))
     }
 
     /// Solve a whole source batch with one complex symmetric operator/factor.
     /// All sources are validated before work; no partial batch is published.
+    /// Cancellation reaches assembly, each dense LU elimination/substitution
+    /// row, scaling/residual rows and outgoing-wave sums, not just frequencies.
+    /// The immutable geometry remains reusable after any cancelled batch.
     /// # Errors
     /// Input/band/budget errors, cancellation, singular LU, nonfinite output,
     /// or failed backward-residual/physical outgoing-flux balance checks.
@@ -220,12 +238,15 @@ impl<'s> Prepared<'s> {
         let (mut h,waves)=self.assemble(k,&mut cancelled)?;let n=self.unknowns();let nv=self.vertices;
         // Congruence scaling puts auxiliary and pressure equations in comparable
         // units, without changing source work, the physical neck mass or geometry.
-        for i in 0..n {for j in 0..n {
-            let scale=(if i>=nv {1.0/self.length}else{1.0})
-                *(if j>=nv {1.0/self.length}else{1.0});
-            h[i*n+j]=h[i*n+j].scale(scale);
-        }}
-        let lu=lu_complex(&h,n).map_err(|_|HelmholtzError::Singular)?;
+        for i in 0..n {
+            poll(&mut cancelled)?;
+            for j in 0..n {
+                let scale=(if i>=nv {1.0/self.length}else{1.0})
+                    *(if j>=nv {1.0/self.length}else{1.0});
+                h[i*n+j]=h[i*n+j].scale(scale);
+            }
+        }
+        let lu=lu_complex_with_cancel(&h,n,&mut cancelled).map_err(lu_error)?;
         poll(&mut cancelled)?;
         let mut output=Vec::with_capacity(fields.len());
         for &velocity in fields {
@@ -234,10 +255,12 @@ impl<'s> Prepared<'s> {
             for (f,&v) in self.facets.iter().zip(velocity) {
                 for a in f.ids {rhs[a]=rhs[a]+v*C64::new(0.0,omega_rho*f.area/3.0);}
             }
-            let mut x=rhs.clone();lu.solve(&mut x);
+            let mut x=rhs.clone();
+            lu.solve_with_cancel(&mut x,&mut cancelled).map_err(lu_error)?;
             if x.iter().any(|v|!finite(*v)) {return Err(bad("nonfinite reciprocal LU solution"));}
             let mut residual=0.0_f64;let mut denominator=0.0_f64;
             for i in 0..n {
+                poll(&mut cancelled)?;
                 let mut value=C64::ZERO;let mut scale=rhs[i].abs();
                 for j in 0..n {value=value+h[i*n+j]*x[j];scale+=h[i*n+j].abs()*x[j].abs();}
                 residual=residual.max((value-rhs[i]).abs());denominator=denominator.max(scale);
@@ -254,6 +277,7 @@ impl<'s> Prepared<'s> {
             }
             let mut outgoing=0.0;
             for wave in &waves {
+                poll(&mut cancelled)?;
                 let mut forward=C64::ZERO;let mut opposite=C64::ZERO;
                 for (a,c) in wave.coefficients.iter().zip(&x) {
                     forward=forward+*a * *c;opposite=opposite+a.conj() * *c;
@@ -316,3 +340,6 @@ impl Prepared<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cancellation_tests;
