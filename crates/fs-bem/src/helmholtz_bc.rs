@@ -99,7 +99,7 @@ impl Admittance<'_> {
     }
     pub(crate) fn stamp(self) -> u64 {
         let mut hash = 0xcbf29ce484222325u64;
-        let mut word = |v| {
+        let mut word = |v: u64| {
             hash = (hash ^ v).wrapping_mul(0x100000001b3);
         };
         match self {
