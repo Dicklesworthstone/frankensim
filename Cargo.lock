@@ -2026,6 +2026,7 @@ dependencies = [
  "fs-geom",
  "fs-ivl",
  "fs-math",
+ "fs-mms",
  "fs-obs",
  "fs-rep-frep",
  "fs-rep-mesh",
@@ -2219,11 +2220,15 @@ dependencies = [
 name = "fs-plate"
 version = "0.0.1"
 dependencies = [
+ "fs-aeroac",
+ "fs-alloc",
  "fs-blake3",
  "fs-evidence",
+ "fs-exec",
  "fs-matdb",
  "fs-material",
  "fs-math",
+ "fs-mesh",
  "fs-mms",
  "fs-modal",
  "fs-qty",
