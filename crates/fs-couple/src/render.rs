@@ -42,7 +42,6 @@ use schedule::force::coupled::contact::friction::{FrictionDrive, ModalFrictionEr
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bowed_string::runtime::schedule::{BowedScheduleError, ScheduledBowedRenderer};
-use crate::driving_point::characteristic_line;
 use crate::modal_acoustic_time::{
     ModalAcousticTimeError, ModalAcousticTimeModel, ModalAcousticWorkspace,
 };
@@ -124,6 +123,7 @@ mod inlet_geometry_tests {
 /// paths cannot drift.
 pub struct ReedBoreVoice {
     line: fs_vfit::discretize::DelayedFilter,
+    line_realization: crate::driving_point::LineRealization,
     plates: PlateBank,
     reed: BeatingReed,
     lay: Option<Obstacle>,
@@ -169,9 +169,50 @@ impl ReedBoreVoice {
         line_samples: usize,
         wall: Option<&fs_phs::WallPin>,
     ) -> Result<Self, AcousticRealizeError> {
+        Self::new_with_ladder(
+            physics,
+            gas,
+            reed,
+            termination,
+            plates,
+            listener_m,
+            sample_rate_hz,
+            line_samples,
+            wall,
+            None,
+        )
+    }
+
+    /// Build a reed-bore voice with an explicit characteristic-line FFT ladder.
+    ///
+    /// # Errors
+    /// Domain, TMM, ladder-convergence, or solver refusals.
+    #[allow(clippy::too_many_arguments)] // mirrors the realizer signature
+    pub fn new_with_ladder(
+        physics: &Duct,
+        gas: &GasState,
+        reed: BeatingReed,
+        termination: Termination,
+        plates: PlateBank,
+        listener_m: f64,
+        sample_rate_hz: u32,
+        line_samples: usize,
+        wall: Option<&fs_phs::WallPin>,
+        ladder: Option<&crate::driving_point::LineLadder>,
+    ) -> Result<Self, AcousticRealizeError> {
         Self::with_line(physics, gas, reed, plates, listener_m, sample_rate_hz, |zc| {
-            characteristic_line(physics, gas, termination, sample_rate_hz, line_samples, zc, wall)
-                .map_err(crate::acoustic_realize::map_drive)
+            crate::driving_point::characteristic_line_realized_with_ladder(
+                physics,
+                gas,
+                termination,
+                sample_rate_hz,
+                line_samples,
+                zc,
+                wall,
+                None,
+                ladder,
+            )
+            .map_err(crate::acoustic_realize::map_drive)
         })
     }
 
@@ -195,7 +236,7 @@ impl ReedBoreVoice {
         let regional = crate::driving_point::regional::RegionalDuct::new(physics, gases)
             .map_err(|e| crate::acoustic_realize::map_drive(crate::driving_point::DrivingPointError::Duct(e)))?;
         Self::with_line(physics, regional.inlet_gas(), reed, plates, listener_m, sample_rate_hz, |_| {
-            regional.characteristic_line(termination, sample_rate_hz, line_samples, wall, None)
+            regional.characteristic_line_realized(termination, sample_rate_hz, line_samples, wall, None)
                 .map_err(crate::acoustic_realize::map_drive)
         })
     }
@@ -209,7 +250,12 @@ impl ReedBoreVoice {
         plates: PlateBank,
         listener_m: f64,
         sample_rate_hz: u32,
-        build_line: impl FnOnce(f64) -> Result<fs_vfit::discretize::DelayedFilter, AcousticRealizeError>,
+        build_line: impl FnOnce(
+            f64,
+        ) -> Result<
+            (fs_vfit::discretize::DelayedFilter, crate::driving_point::LineRealization),
+            AcousticRealizeError,
+        >,
     ) -> Result<Self, AcousticRealizeError> {
         if !crate::reed_bore::reed_parameters_valid(reed) {
             return Err(AcousticRealizeError::InvalidDescription {
@@ -230,7 +276,7 @@ impl ReedBoreVoice {
             .inlet_radius();
         let area_bore = core::f64::consts::PI * inlet_r * inlet_r;
         let zc = gas.density * gas.sound_speed / area_bore;
-        let mut line = build_line(zc)?;
+        let (mut line, line_realization) = build_line(zc)?;
         let lay = if reed.mass_kg > 0.0 {
             let k_lay = 1.0e7 * reed.width_m;
             let (_k, r_damp) = reed_structural(reed);
@@ -251,6 +297,7 @@ impl ReedBoreVoice {
             })?;
         Ok(Self {
             line,
+            line_realization,
             plates,
             reed,
             lay,
@@ -279,6 +326,13 @@ impl ReedBoreVoice {
     #[must_use]
     pub const fn samples_rendered(&self) -> u64 {
         self.sample_index
+    }
+
+    /// Characteristic-line realization receipt (`n_fft`, rungs tried, tail energy,
+    /// peak shift, and explicit pole states).
+    #[must_use]
+    pub const fn line_realization(&self) -> &crate::driving_point::LineRealization {
+        &self.line_realization
     }
 
     /// Mutable access to the plate bank (the one-shot realizer swaps the
@@ -688,6 +742,15 @@ impl RenderContext {
     pub fn friction_voice(&self, index: usize) -> Option<&FrictionModalVoice> {
         match self.voices.get(index) {
             Some(RenderVoice::FrictionModal(voice)) => Some(voice),
+            _ => None,
+        }
+    }
+
+    /// Inspect a hosted reed-bore voice without bypassing the shared clock.
+    #[must_use]
+    pub fn reed_voice(&self, index: usize) -> Option<&ReedBoreVoice> {
+        match self.voices.get(index) {
+            Some(RenderVoice::ReedBore(voice)) => Some(voice),
             _ => None,
         }
     }

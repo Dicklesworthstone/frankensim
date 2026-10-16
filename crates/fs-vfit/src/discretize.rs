@@ -372,6 +372,30 @@ impl core::fmt::Display for RealizeError {
 impl std::error::Error for RealizeError {}
 
 /// A known bulk delay followed by a causal [`DigitalFilter`].
+/// State of one exact zero-order-hold complex-conjugate resonance pole pair
+/// `s = -sigma ± i * omega` with residue `residue` (`e^{-iωt}` convention).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExactResonanceState {
+    /// Positive modal angular frequency `ω` [rad/s].
+    pub omega: f64,
+    /// Non-negative modal decay rate `σ` [1/s].
+    pub sigma: f64,
+    /// Modal residue `r` under `e^{-iωt}`.
+    pub residue: C64,
+    state: C64,
+    pole_step: C64,
+    free_anchor: C64,
+    free_steps: u64,
+}
+
+impl ExactResonanceState {
+    /// Current complex modal state `z_n`.
+    #[must_use]
+    pub fn state(&self) -> C64 {
+        self.state
+    }
+}
+
 ///
 /// This is the time-domain characteristic port of any 1-D waveguide:
 /// peel `exp(-iωτ)` out of a driving-point reflectance, fit the
@@ -395,6 +419,12 @@ pub struct DelayedFilter {
     disp_x1: Vec<f64>,
     /// Per-section previous output of the allpass cascade.
     disp_y1: Vec<f64>,
+    /// Explicit `ω = 0` compliance integrator gain (`p_comp[n+1] = p_comp[n] + gain * dt * u[n]`).
+    compliance_gain: f64,
+    /// Running state of the explicit `ω = 0` compliance integrator.
+    compliance_state: f64,
+    /// Explicit lightly-damped/lossless modal resonance states stepped by exact ZOH.
+    exact_poles: Vec<ExactResonanceState>,
 }
 
 impl DelayedFilter {
@@ -435,7 +465,92 @@ impl DelayedFilter {
             disp_a: 0.0,
             disp_x1: Vec::new(),
             disp_y1: Vec::new(),
+            compliance_gain: 0.0,
+            compliance_state: 0.0,
+            exact_poles: Vec::new(),
         })
+    }
+
+    /// Attach an explicit `ω = 0` compliance integrator and/or lightly damped
+    /// ZOH resonance pole states `(omega, sigma, residue)` to this line.
+    ///
+    /// # Errors
+    /// Non-finite or negative `compliance_gain`, non-positive `omega`, negative
+    /// `sigma`, or non-finite `residue`.
+    pub fn with_exact_poles(
+        mut self,
+        compliance_gain: f64,
+        resonance_poles: &[(f64, f64, C64)],
+    ) -> Result<Self, DiscretizeError> {
+        if !(compliance_gain.is_finite() && compliance_gain >= 0.0) {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "compliance_gain",
+                index: None,
+            });
+        }
+        let dt = self.filter.t_s;
+        let mut poles = Vec::with_capacity(resonance_poles.len());
+        for (idx, &(omega, sigma, residue)) in resonance_poles.iter().enumerate() {
+            if !(omega > 0.0
+                && omega.is_finite()
+                && sigma >= 0.0
+                && sigma.is_finite()
+                && residue.re.is_finite()
+                && residue.im.is_finite())
+            {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "exact_poles",
+                    index: Some(idx),
+                });
+            }
+            let r = (-sigma * dt).exp();
+            let (sin_w, cos_w) = (omega * dt).sin_cos();
+            poles.push(ExactResonanceState {
+                omega,
+                sigma,
+                residue,
+                state: C64::ZERO,
+                pole_step: C64::new(r * cos_w, r * sin_w),
+                free_anchor: C64::ZERO,
+                free_steps: 0,
+            });
+        }
+        self.compliance_gain = compliance_gain;
+        self.compliance_state = 0.0;
+        self.exact_poles = poles;
+        Ok(self)
+    }
+
+    /// Gain of the explicit `ω = 0` compliance integrator (`0.0` when absent).
+    #[must_use]
+    pub fn compliance_gain(&self) -> f64 {
+        self.compliance_gain
+    }
+
+    /// Current state of the explicit `ω = 0` compliance integrator.
+    #[must_use]
+    pub fn compliance_state(&self) -> f64 {
+        self.compliance_state
+    }
+
+    /// Explicit ZOH modal resonance states attached to this line.
+    #[must_use]
+    pub fn exact_poles(&self) -> &[ExactResonanceState] {
+        &self.exact_poles
+    }
+
+    /// Total modal energy stored across all explicit [`ExactResonanceState`] poles:
+    /// `Σ_m |z_m|² / max(|r_m|, 1e-30)`.
+    #[must_use]
+    pub fn exact_modal_energy(&self) -> f64 {
+        self.exact_poles
+            .iter()
+            .map(|p| {
+                let norm_sq = p.state.re * p.state.re + p.state.im * p.state.im;
+                let w = p.residue.abs().max(1.0e-30);
+                norm_sq / w
+            })
+            .sum()
     }
 
     /// Add a DISPERSION stage (music bead 3ez8g.7.2): a cascade of
@@ -558,6 +673,9 @@ impl DelayedFilter {
             disp_a: 0.0,
             disp_x1: Vec::new(),
             disp_y1: Vec::new(),
+            compliance_gain: 0.0,
+            compliance_state: 0.0,
+            exact_poles: Vec::new(),
         })
     }
 
@@ -663,6 +781,14 @@ impl DelayedFilter {
             {
                 acc += h * b;
             }
+            let dt = self.filter.t_s;
+            if self.compliance_gain > 0.0 {
+                acc += self.compliance_state + 0.5 * self.compliance_gain * dt * outgoing;
+            }
+            for p in &self.exact_poles {
+                let direct = p.state.re + 0.5 * p.residue.re * outgoing;
+                acc += dt * direct;
+            }
             if !acc.is_finite() {
                 return Err(DiscretizeError::NonFiniteRuntimeValue {
                     field: "fir_output",
@@ -670,6 +796,23 @@ impl DelayedFilter {
                 });
             }
             self.validate_dispersion(acc)?;
+            if self.compliance_gain > 0.0 {
+                self.compliance_state += self.compliance_gain * dt * outgoing;
+            }
+            for p in &mut self.exact_poles {
+                if outgoing == 0.0 && p.sigma == 0.0 {
+                    p.free_steps = p.free_steps.wrapping_add(1);
+                    let theta =
+                        (p.omega * dt * (p.free_steps as f64)).rem_euclid(core::f64::consts::TAU);
+                    let (sin_t, cos_t) = theta.sin_cos();
+                    p.state = p.free_anchor * C64::new(cos_t, sin_t);
+                } else {
+                    let driven = p.state + p.residue.scale(outgoing);
+                    p.state = p.pole_step * driven;
+                    p.free_anchor = p.state;
+                    p.free_steps = 0;
+                }
+            }
             self.buf[self.write] = outgoing;
             self.write = (self.write + 1) % n;
             let dispersed = self.commit_dispersion(acc);

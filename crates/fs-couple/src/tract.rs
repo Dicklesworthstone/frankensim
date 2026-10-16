@@ -183,7 +183,7 @@ impl TractChart {
         self.to_duct()
     }
 
-    fn to_duct(&self) -> Duct {
+    pub(crate) fn to_duct(&self) -> Duct {
         Duct {
             segments: self
                 .sections

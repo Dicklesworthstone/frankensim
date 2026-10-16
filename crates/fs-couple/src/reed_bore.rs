@@ -43,7 +43,41 @@ pub fn realize_reed_bore(
     n: usize,
     wall: Option<&fs_phs::WallPin>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
-    let mut voice = crate::render::ReedBoreVoice::new(
+    realize_reed_bore_with_ladder(
+        physics,
+        gas,
+        reed,
+        termination,
+        plates,
+        listener_m,
+        sample_rate_hz,
+        n,
+        wall,
+        None,
+    )
+    .map(|(hist, _)| hist)
+}
+
+/// Realize mouthpiece pressure from a beating reed on a TMM bore with an
+/// explicit [`crate::driving_point::LineLadder`], returning the pressure
+/// history together with the [`crate::driving_point::LineRealization`] receipt.
+///
+/// # Errors
+/// Domain, TMM, ladder-convergence, or solver refusals.
+#[allow(clippy::too_many_arguments)] // one coherent realization record
+pub fn realize_reed_bore_with_ladder(
+    physics: &Duct,
+    gas: &GasState,
+    reed: BeatingReed,
+    termination: Termination,
+    plates: &mut PlateBank,
+    listener_m: f64,
+    sample_rate_hz: u32,
+    n: usize,
+    wall: Option<&fs_phs::WallPin>,
+    ladder: Option<&crate::driving_point::LineLadder>,
+) -> Result<(Vec<f64>, crate::driving_point::LineRealization), AcousticRealizeError> {
+    let mut voice = crate::render::ReedBoreVoice::new_with_ladder(
         physics,
         gas,
         reed,
@@ -53,6 +87,7 @@ pub fn realize_reed_bore(
         sample_rate_hz,
         n,
         wall,
+        ladder,
     )?;
     // Move the caller's bank in only after every fallible admission step
     // has succeeded, and back out unconditionally, so a refusal leaves it
@@ -63,7 +98,7 @@ pub fn realize_reed_bore(
     let result = voice.step_block(&mut p_bore_hist);
     core::mem::swap(voice.plate_bank_mut(), plates);
     result?;
-    Ok(p_bore_hist)
+    Ok((p_bore_hist, voice.line_realization().clone()))
 }
 
 pub(crate) fn blowing_envelope(reed: BeatingReed, t: f64) -> f64 {
