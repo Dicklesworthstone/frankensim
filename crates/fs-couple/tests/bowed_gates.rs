@@ -47,6 +47,7 @@ fn rosin() -> StribeckFriction {
         mu_static: 0.8,
         mu_dynamic: 0.4,
         stiction_m_s: 0.04,
+        regularization_m_s: 0.04,
     }
 }
 
@@ -91,7 +92,7 @@ fn interface_island(law: StribeckFriction, speed_min: f64, speed_max: f64) -> Fr
 fn ordered_interface_drives_bowed_motion_from_its_declared_law() {
     let mut velocities = Vec::new();
     for kinetic in [0.2, 0.4] {
-        let law = StribeckFriction::try_new(0.8, kinetic, 0.04).unwrap();
+        let law = StribeckFriction::try_new(0.8, kinetic, 0.04, 0.04).unwrap();
         let mut cfg = config(
             BowGesture::admit(0.2, 1.0, 0.2).unwrap(),
             interface_island(law, 0.0, 10.0),
