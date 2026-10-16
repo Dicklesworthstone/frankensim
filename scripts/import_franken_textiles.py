@@ -135,7 +135,8 @@ def normalized(value: Any, source_unit: str, target_unit: str) -> float:
 def render(raw: bytes, material_id: str, *, citation: str, license_text: str,
            redistribution_terms: str, allow_estimates: bool = False,
            interpolate_temperature: bool = False, selected: set[str] | None = None,
-           expected_sha256: str | None = None) -> tuple[bytes, bytes, dict[str, Any]]:
+           expected_sha256: str | None = None,
+           nonlinear_membrane: bool = False) -> tuple[bytes, bytes, dict[str, Any]]:
     """Validate and render completely before creating any destination files."""
     if len(raw) > MAX_BYTES:
         fail("catalog exceeds 8 MiB")
@@ -179,10 +180,19 @@ def render(raw: bytes, material_id: str, *, citation: str, license_text: str,
     if selected is not None and not selected <= PROPERTIES.keys():
         fail("--properties names use the supported ORIGINAL FrankenTextiles property vocabulary")
     chosen = {k: v for k, v in props.items() if k in PROPERTIES and (selected is None or k in selected)}
-    mechanical = set(chosen) & {"warp_stiffness", "weft_stiffness", "poisson_warp_weft", "shear_stiffness"}
+    membrane_keys = {"warp_stiffness", "weft_stiffness", "poisson_warp_weft", "shear_stiffness"}
+    if nonlinear_membrane:
+        if selected is not None and selected & membrane_keys:
+            fail("nonlinear membrane replaces scalar membrane properties; do not explicitly request both")
+        if material.get("membrane_relaxation") is not None:
+            fail("a history-dependent membrane cannot become an equilibrium stress curve")
+        if material.get("membrane_response") is None:
+            fail("--nonlinear-membrane requires an explicit membrane_response")
+        chosen = {k:v for k,v in chosen.items() if k not in membrane_keys}
+    mechanical = set(chosen) & membrane_keys
     if mechanical and (material.get("membrane_response") is not None or material.get("membrane_relaxation") is not None):
         fail("nonlinear/history-dependent membrane must not be flattened to equilibrium scalars; select nonmechanical properties explicitly")
-    if material["form"] in ("fiber", "yarn", "fill") and mechanical:
+    if material["form"] in ("fiber", "yarn", "fill") and (mechanical or nonlinear_membrane):
         fail("fiber/yarn/fill cannot be imported as an effective sheet law")
     curvature = [v for k, v in props.items() if k.startswith("preferred_curvature_")]
     if any(number(v.get("value"), "preferred curvature") != 0.0 for v in curvature):
@@ -195,7 +205,8 @@ def render(raw: bytes, material_id: str, *, citation: str, license_text: str,
     encoded = base64.b64encode(raw).decode("ascii")
     lines += ["# original_json_base64 " + encoded[i:i+8192] for i in range(0, len(encoded), 8192)]
     imported: list[str] = []
-    def claim(key: str, quantity: dict[str, Any], value_fields: list[str], validity: list[str]) -> None:
+    def claim(key: str, quantity: dict[str, Any], value_fields: list[str], validity: list[str],
+              native_property: str | None = None) -> None:
         source = source_for(quantity, sources, allow_estimates)
         index = len(imported); obs, cid = f"o{index}", f"c{index}"
         qualifier = {"record_id":material_id,"form":material["form"],"quantity":quantity,"source":source,
@@ -203,7 +214,7 @@ def render(raw: bytes, material_id: str, *, citation: str, license_text: str,
         lines.append("\t".join(["observation",obs,metadata(material_id),metadata(quantity["method"]),metadata(qualifier)]))
         # Published labels/estimates are not promoted to measured observation backing.
         refs = obs if quantity["evidence"] == "measured" else "-"
-        lines.append("\t".join([value_fields[0],cid,refs,PROPERTIES[key][0],*value_fields[1:]]))
+        lines.append("\t".join([value_fields[0],cid,refs,native_property or PROPERTIES[key][0],*value_fields[1:]]))
         lines.append("\t".join(["uncertainty",cid,"unstated","-","-","-","-"]))
         lines.append("\t".join(["validity",cid,"ftx_characterization","0","0","1"]))
         if validity: lines.append("\t".join(["validity",cid,*validity]))
@@ -216,6 +227,51 @@ def render(raw: bytes, material_id: str, *, citation: str, license_text: str,
             if not isinstance(b, list) or len(b) != 2 or not number(b[0], "lower bound") <= number(q["value"], "value") <= number(b[1], "upper bound"):
                 fail(f"{key}: invalid source bounds")
         claim(key,q,["scalar",repr(value),wire_unit(PROPERTIES[key][1]),"constant"],[])
+    if nonlinear_membrane:
+        response = material["membrane_response"]
+        if not isinstance(response, dict) or response.get("model") != "tabulated_green_strain/1":
+            fail("unsupported nonlinear membrane model; require second-Piola resultants versus Green strain")
+        if response.get("interpolation") != "piecewise_linear":
+            fail("only explicitly authored piecewise_linear response is supported; cubic/default interpolation is not silently changed")
+        if set(response) != {"model", "interpolation", "warp", "weft", "shear", "coupling"}:
+            fail("nonlinear membrane has missing or unsupported fields")
+        for direction in ("warp", "weft", "shear"):
+            curve = response[direction]
+            if not isinstance(curve, dict) or set(curve) - {"points", "source", "evidence", "method", "conditions"}:
+                fail("invalid or unsupported stress-curve fields")
+            source_for(curve, sources, allow_estimates)
+            points = curve.get("points")
+            if not isinstance(points, list) or not 3 <= len(points) <= 128:
+                fail("stress curve requires 3..128 signed strain/resultant pairs")
+            knots = []
+            for pair in points:
+                if not isinstance(pair, list) or len(pair) != 2:
+                    fail("stress curve needs [Green strain, second-Piola resultant N/m] pairs")
+                x, y = (number(v, "stress-curve coordinate") for v in pair)
+                if knots and (x <= knots[-1][0] or y <= knots[-1][1]):
+                    fail("stress and strain knots must both strictly increase")
+                if knots:
+                    dx, dy = x-knots[-1][0], y-knots[-1][1]
+                    if not math.isfinite(dx) or not math.isfinite(dy) or not math.isfinite(dy/dx) or dy/dx <= 0:
+                        fail("unrepresentable stress-curve segment")
+                knots.append((x,y))
+            if (0.0,0.0) not in knots or knots[0][0] >= 0 or knots[-1][0] <= 0:
+                fail("stress curve must include a stress-free origin and both strain signs")
+            q = dict(curve, model=response["model"], interpolation="piecewise_linear")
+            wire = ",".join(f"{x!r}:{y!r}" for x,y in knots)
+            claim(f"membrane_response.{direction}",q,
+                  ["curve","sheet_green_strain","1","N/m",wire,"linear"],
+                  ["sheet_green_strain",repr(knots[0][0]),repr(knots[-1][0]),"1"],
+                  f"sheet_second_piola_{direction}")
+        coupling = response["coupling"]
+        if not isinstance(coupling, dict): fail("explicit source-backed cross coupling required")
+        value = normalized(coupling.get("value"), text(coupling.get("unit"),"coupling unit"),"N/m")
+        bounds = coupling.get("bounds")
+        if bounds is not None and (not isinstance(bounds,list) or len(bounds)!=2
+                or not number(bounds[0],"coupling lower") <= number(coupling["value"],"coupling") <= number(bounds[1],"coupling upper")):
+            fail("invalid coupling source bounds")
+        claim("membrane_response.coupling",coupling,["scalar",repr(value),"N/m","constant"],[],
+              "sheet_green_strain_coupling")
     thermal = material.get("thermal_response")
     if thermal is not None:
         if not isinstance(thermal, dict): fail("thermal_response must be an object")
@@ -269,6 +325,9 @@ def render(raw: bytes, material_id: str, *, citation: str, license_text: str,
     report = {"pack_id":pack_id,"source_sha256":digest,"material_id":material_id,"imported":imported,
               "source_only_properties":sorted(set(props)-set(imported)),
               "query": {"ftx_characterization":0},"temperature_interpolation":interpolate_temperature}
+    if nonlinear_membrane:
+        report["nonlinear_membrane"] = "tabulated_green_strain/1:piecewise_linear"
+        report["query"]["sheet_green_strain"] = 0
     return manifest.encode(), ("\n".join(lines)+"\n").encode(), report
 
 
@@ -279,6 +338,7 @@ def main() -> int:
     p.add_argument("--redistribution-terms", required=True)
     p.add_argument("--source-sha256"); p.add_argument("--allow-estimates", action="store_true")
     p.add_argument("--interpolate-temperature", action="store_true")
+    p.add_argument("--nonlinear-membrane", action="store_true", help="retain an explicitly piecewise-linear Green-strain membrane law")
     p.add_argument("--properties", help="comma-separated ORIGINAL FTX property keys; omit for all supported observations")
     args = p.parse_args()
     try:
@@ -286,7 +346,7 @@ def main() -> int:
         chosen = None if args.properties is None else set(args.properties.split(","))
         manifest, source, report = render(raw,args.material_id,citation=args.citation,license_text=args.license,
             redistribution_terms=args.redistribution_terms,allow_estimates=args.allow_estimates,
-            interpolate_temperature=args.interpolate_temperature,selected=chosen,expected_sha256=args.source_sha256)
+            interpolate_temperature=args.interpolate_temperature,selected=chosen,expected_sha256=args.source_sha256,nonlinear_membrane=args.nonlinear_membrane)
         args.output.mkdir(parents=False, exist_ok=False)
         # Manifest is last: an interrupted directory is not a compilable source pack.
         for name, contents in (("original.json",raw),("properties.tsv",source),

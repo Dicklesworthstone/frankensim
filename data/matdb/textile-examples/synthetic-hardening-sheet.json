@@ -1,0 +1,122 @@
+{
+  "id": "synthetic-hardening-sheet",
+  "name": "Synthetic strain-hardening effective sheet",
+  "form": "sheet",
+  "properties": {
+    "areal_density": {
+      "value": 200.0,
+      "unit": "g/m2",
+      "source": "synthetic",
+      "evidence": "estimate",
+      "method": "Authored synthetic numerical fixture; not measured textile",
+      "conditions": {
+        "specimen": "manufactured signed-sheet example"
+      }
+    },
+    "thickness": {
+      "value": 1.0,
+      "unit": "mm",
+      "source": "synthetic",
+      "evidence": "estimate",
+      "method": "Authored synthetic numerical fixture; not measured textile",
+      "conditions": {
+        "specimen": "manufactured signed-sheet example"
+      }
+    }
+  },
+  "sources": {
+    "synthetic": {
+      "reference": "Authored manufactured-solution data; no empirical prediction",
+      "accessed_on": "2026-10-15",
+      "note": "Synthetic integration fixture"
+    }
+  },
+  "membrane_response": {
+    "model": "tabulated_green_strain/1",
+    "interpolation": "piecewise_linear",
+    "warp": {
+      "points": [
+        [
+          -0.2,
+          -1600.0
+        ],
+        [
+          0.0,
+          0.0
+        ],
+        [
+          0.025,
+          200.0
+        ],
+        [
+          0.1,
+          1700.0
+        ]
+      ],
+      "source": "synthetic",
+      "evidence": "estimate",
+      "method": "Authored second-Piola resultants versus engineering Green strain",
+      "conditions": {
+        "specimen": "manufactured signed-sheet example"
+      }
+    },
+    "weft": {
+      "points": [
+        [
+          -0.2,
+          -1600.0
+        ],
+        [
+          0.0,
+          0.0
+        ],
+        [
+          0.025,
+          200.0
+        ],
+        [
+          0.1,
+          1700.0
+        ]
+      ],
+      "source": "synthetic",
+      "evidence": "estimate",
+      "method": "Authored second-Piola resultants versus engineering Green strain",
+      "conditions": {
+        "specimen": "manufactured signed-sheet example"
+      }
+    },
+    "shear": {
+      "points": [
+        [
+          -0.2,
+          -800.0
+        ],
+        [
+          0.0,
+          0.0
+        ],
+        [
+          0.2,
+          800.0
+        ]
+      ],
+      "source": "synthetic",
+      "evidence": "estimate",
+      "method": "Authored second-Piola resultants versus engineering Green strain",
+      "conditions": {
+        "specimen": "manufactured signed-sheet example"
+      }
+    },
+    "coupling": {
+      "value": 0.0,
+      "unit": "N/m",
+      "source": "synthetic",
+      "evidence": "estimate",
+      "method": "Authored synthetic numerical fixture; not measured textile",
+      "conditions": {
+        "specimen": "manufactured signed-sheet example"
+      }
+    }
+  }
+}
