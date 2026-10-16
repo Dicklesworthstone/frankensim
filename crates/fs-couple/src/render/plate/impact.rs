@@ -404,7 +404,11 @@ impl ImpactSystem {
     /// solve. Loss-free reference execution checks cancellation before and after
     /// Newton; the implicit contact-loss path also polls inside its workspace.
     /// All physical state and felt histories remain unchanged on refusal.
-    pub fn step(&mut self,external:&[f64],gate:&CancelGate)->Result<ImpactFrame,ImpactError> {
+    pub fn step(
+        &mut self,
+        external: &[f64],
+        gate: &CancelGate,
+    ) -> Result<ImpactFrame, ImpactError> {
         if gate.is_requested() {return Err(ImpactError::Cancelled);}
         if self.sample>=self.config.max_steps {return Err(ImpactError::Budget);}
         if external.len()!=self.modes || external.iter().any(|v|!v.is_finite() || v.abs()>self.config.maximum_generalized_force) {
@@ -427,7 +431,8 @@ impl ImpactSystem {
         let mut record=fs_phs::step(&self.system,&self.x,external,self.config.dt_s).map_err(|e|ImpactError::Owner(e.to_string()))?;
         if record.x.iter().chain(&record.y).any(|v|!v.is_finite()) {return Err(invalid("impact solve left finite state"));}
         let ledger=fs_phs::PreparedStepRecord {delta_h:record.delta_h,dissipated:record.dissipated,
-            supplied:record.supplied,newton_iters:record.newton_iters,solver_residual:record.solver_residual};
+            supplied:record.supplied,newton_iters:record.newton_iters,solver_residual:record.solver_residual,
+            solver_certificate:record.solver_certificate};
         let mut histories=self.histories.borrow().clone();
         self.accept_step(&mut record.x,&mut histories,before,ledger,gate)
     }

@@ -58,6 +58,8 @@ use fs_tribo::{
 /// Typed realization refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcousticRealizeError {
+    /// A non-exact block exceeded the clock's explicit <=1-cent linear band.
+    TimeResolution(fs_phs::linear_exact::ResolvedBandError),
     /// The execution scope refused work before candidate publication.
     Cancelled,
     /// Description failed a physical domain check.
@@ -84,6 +86,8 @@ pub enum AcousticRealizeError {
     Duct(fs_duct::DuctError),
     /// Kirchhoff–Carrier / pHS refusal.
     Nonlinear(String),
+    /// Algebraic work/flow refusal with the original quantitative certificate.
+    AlgebraicSolve(fs_phs::PhsError),
     /// Reed–bore loop refusal.
     Reed {
         /// Which check failed.
@@ -96,6 +100,7 @@ pub enum AcousticRealizeError {
 impl core::fmt::Display for AcousticRealizeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::TimeResolution(error) => core::fmt::Display::fmt(error,f),
             Self::Cancelled => write!(f, "FS-COUPLE-ASSEMBLY-CANCELLED"),
             Self::InvalidDescription { what } => {
                 write!(f, "FS-COUPLE-ASSEMBLY: {what}")
@@ -113,6 +118,7 @@ impl core::fmt::Display for AcousticRealizeError {
             ),
             Self::Duct(e) => write!(f, "{e}"),
             Self::Nonlinear(e) => write!(f, "FS-COUPLE-ASSEMBLY-NL: {e}"),
+            Self::AlgebraicSolve(e) => write!(f, "FS-COUPLE-ASSEMBLY-BALANCE: {e}"),
             Self::Reed { what } => write!(f, "FS-COUPLE-REED: {what}"),
             Self::Wav(e) => write!(f, "{e}"),
         }
@@ -137,7 +143,7 @@ pub struct RealizedAssembly {
 /// # Errors
 /// Empty assemblies, invalid events, gas/domain refusals, stepper or TMM
 /// refusals.
-#[allow(clippy::too_many_lines)] // one coherent realization dispatcher
+#[allow(clippy::too_many_lines)]// one coherent realization dispatcher
 pub fn realize_assembly(
     assembly: &AcousticAssembly,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
@@ -209,7 +215,7 @@ pub fn realize_assembly_with_plate_chart_and_gas(
     realize_assembly_inner(assembly, Some((chart, options)), Some(*gas))
 }
 
-#[allow(clippy::too_many_lines)] // one coherent realization dispatcher
+#[allow(clippy::too_many_lines)]// one coherent realization dispatcher
 fn realize_assembly_inner(
     assembly: &AcousticAssembly,
     chart: Option<(&fs_plate::PlateChart, &PlateChartRadiation)>,
@@ -382,8 +388,8 @@ fn realize_assembly_inner(
 /// support does no work (`φ(0)=0`) so the members share a clock
 /// but not a force — the chain is driven only by blow/reed.
 /// Shared clock, not FIR.
-#[allow(clippy::too_many_lines)] // one coherent coupled realization
-#[allow(clippy::needless_range_loop)] // the sample index is the time axis
+#[allow(clippy::too_many_lines)]// one coherent coupled realization
+#[allow(clippy::needless_range_loop)]// the sample index is the time axis
 fn realize_coupled_ode(
     assembly: &AcousticAssembly,
     gas: &GasState,
@@ -566,7 +572,7 @@ fn realize_coupled_ode(
     Ok(finish_observer(assembly, gas, out))
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent chain step record
+#[allow(clippy::too_many_arguments)]// one coherent chain step record
 fn step_string_chain(
     body: &fs_phs::PortHamiltonian,
     x: &[f64],
@@ -626,7 +632,7 @@ fn step_chain_inlet(
     step(body, x, &u, dt).map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent chain step record
+#[allow(clippy::too_many_arguments)]// one coherent chain step record
 fn step_plate_chain(
     body: &fs_phs::PortHamiltonian,
     x: &[f64],
@@ -697,8 +703,8 @@ fn plate_chain_radiation(
 /// One shared clock: string, plate, and duct exchange force and flow
 /// every sample via the characteristic FIR. Used when the duct is
 /// not a cylindrical chain.
-#[allow(clippy::too_many_lines)] // one coherent coupled realization
-#[allow(clippy::needless_range_loop)] // the sample index is the time axis
+#[allow(clippy::too_many_lines)]// one coherent coupled realization
+#[allow(clippy::needless_range_loop)]// the sample index is the time axis
 fn realize_coupled(
     assembly: &AcousticAssembly,
     gas: &GasState,
@@ -1434,7 +1440,7 @@ fn secondary_string(string: &PrestressedString, tension_scale: f64) -> Prestress
 /// storage. Hunt–Crossley and Stribeck stay port forces, not terms
 /// in `H`.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)] // one coherent realization
+#[allow(clippy::too_many_lines)]// one coherent realization
 fn realize_dirac_join(
     string: &PrestressedString,
     pluck: Option<Pluck>,
@@ -1716,8 +1722,8 @@ fn moving_end_string_phs(
     with_bending_relaxation(string, base)
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent solver probe
-#[allow(clippy::unnecessary_wraps)] // uniform Result surface with the ODE twin
+#[allow(clippy::too_many_arguments)]// one coherent solver probe
+#[allow(clippy::unnecessary_wraps)]// uniform Result surface with the ODE twin
 fn leftover_u(
     sys: &fs_phs::DescriptorPortHamiltonian,
     x: &[f64],
@@ -1777,8 +1783,8 @@ fn leftover_u(
     Ok(u)
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent solver probe
-#[allow(clippy::unnecessary_wraps)] // uniform Result surface with the DAE twin
+#[allow(clippy::too_many_arguments)]// one coherent solver probe
+#[allow(clippy::unnecessary_wraps)]// uniform Result surface with the DAE twin
 fn leftover_u_ode(
     sys: &fs_phs::PortHamiltonian,
     x: &[f64],
@@ -1942,8 +1948,8 @@ fn helmholtz_flow_cavity(
     .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent realization record
-#[allow(clippy::needless_range_loop)] // modal index spans state and shape arrays
+#[allow(clippy::too_many_arguments)]// one coherent realization record
+#[allow(clippy::needless_range_loop)]// modal index spans state and shape arrays
 fn realize_string(
     string: &PrestressedString,
     pluck: Option<Pluck>,
@@ -4281,7 +4287,7 @@ fn realize_blown_ode(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)] // one coherent realization
+#[allow(clippy::too_many_lines)]// one coherent realization
 fn realize_reed_ode(
     sections: &[AcousticSection],
     mouth: Option<MouthFlange>,
@@ -4366,7 +4372,8 @@ fn realize_reed_ode(
             let contact = slit_contact_force(lay, y)
                 .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
             f += contact;
-            f += lay.dissipative_modal_forces(1, &[y, v], &[v])[0];
+            f += lay.dissipative_modal_forces(1, &[y, v], &[v])
+                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?[0];
             let rec_r = step(reed_phs, &x_reed, &[f], dt)
                 .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
             if !rec_r.x.iter().all(|xi| xi.is_finite()) {
@@ -4488,8 +4495,8 @@ fn realize_blown_duct(
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent realization record
-#[allow(clippy::needless_range_loop)] // the sample index is the time axis
+#[allow(clippy::too_many_arguments)]// one coherent realization record
+#[allow(clippy::needless_range_loop)]// the sample index is the time axis
 fn realize_blown_with_body(
     physics: &Duct,
     blow: VolumeVelocityPulse,

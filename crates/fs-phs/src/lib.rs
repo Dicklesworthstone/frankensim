@@ -55,8 +55,13 @@ pub use port_exchange::{PortExchangeBudget, PortExchangeRecord, PreparedPortExch
 
 mod prepared;
 pub use prepared::{PreparedStepError, PreparedStepRecord, StepWorkspace};
+mod newton;
 use fs_math::c64::C64;
 use fs_math::det;
+pub use newton::{
+    NewtonSite, SolveBudget, SolveCertificate, admit_default_newton_iterate, admit_newton_iterate,
+    arithmetic_rounding_floor,
+};
 
 /// Energy storage: the Hamiltonian and its exact gradient.
 ///
@@ -239,6 +244,16 @@ pub enum PhsError {
         /// Residual norm at exhaustion.
         residual: f64,
     },
+    /// Candidate did not satisfy its declared algebraic ceiling.
+    NewtonRefused {
+        /// Site, observed residual, budgets, floor and iteration counts.
+        certificate: SolveCertificate,
+    },
+    /// An explicit request is tighter than evaluated arithmetic can resolve.
+    BudgetBelowRoundingFloor {
+        /// Both the requested ceiling and computed floor are retained.
+        certificate: SolveCertificate,
+    },
     /// Port pairing indices out of range or duplicated.
     BadPortPairing,
     /// The eigenvalue admission solve failed.
@@ -264,6 +279,13 @@ impl core::fmt::Display for PhsError {
                     "discrete-gradient Newton stalled at residual {residual:.3e}"
                 )
             }
+            PhsError::NewtonRefused { certificate } => write!(f,
+                "Newton {:?} refused residual {:.3e}: requested {:.3e}, effective {:.3e}, rounding floor {:.3e}, iterations {}",
+                certificate.site, certificate.residual, certificate.requested_budget,
+                certificate.effective_budget, certificate.rounding_floor, certificate.iterations),
+            PhsError::BudgetBelowRoundingFloor { certificate } => write!(f,
+                "Newton {:?} requested budget {:.3e} below rounding floor {:.3e}",
+                certificate.site, certificate.requested_budget, certificate.rounding_floor),
             PhsError::BadPortPairing => write!(f, "port pairing indices invalid"),
             PhsError::Eigen => write!(f, "eigenvalue admission solve failed"),
         }
@@ -895,14 +917,10 @@ pub fn step_descriptor(
     let mut iters = 0usize;
     let mut stagnant = 0usize;
     let mut best: Option<(Vec<f64>, f64)> = None;
-    let mut r_init: Option<f64> = None;
     loop {
         let dg = effort(&x1);
         let res = residual(&x1, &dg);
         let rnorm = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
-        if r_init.is_none() {
-            r_init = Some(rnorm);
-        }
         let improved = best.as_ref().is_none_or(|(_, b)| rnorm < *b);
         if improved {
             best = Some((x1.clone(), rnorm));
@@ -917,13 +935,13 @@ pub fn step_descriptor(
         }
         if stagnant >= 3 || iters >= NEWTON_MAX {
             let (bx, brnorm) = best.expect("at least one iterate");
-            let sc_acc = bx.iter().fold(scale, |acc, &v| acc.max(v.abs()));
-            let ref_scale = sc_acc.max(r_init.unwrap_or(sc_acc));
-            if brnorm <= 1.0e-6 * ref_scale {
-                x1 = bx;
-                break;
-            }
-            return Err(PhsError::NewtonStalled { residual: brnorm });
+            let dg = effort(&bx);
+            let floor = newton::residual_rounding_floor(sys.storage.as_ref(), x0, &bx,
+                &dg, &sys.j, &sys.r, &gu, dt, n_d, &[]);
+            admit_default_newton_iterate(SolveBudget::default().certificate(
+                NewtonSite::Descriptor, brnorm, scale, floor, iters, stagnant).with_rounding_allowance())?;
+            x1 = bx;
+            break;
         }
         let jac = {
             let mut jac = vec![0.0; n * n];
@@ -981,6 +999,30 @@ pub fn step_descriptor(
     supplied *= dt;
     let res = residual(&x1, &dg);
     let solver_residual = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+    let floor = newton::residual_rounding_floor(
+        sys.storage.as_ref(),
+        x0,
+        &x1,
+        &dg,
+        &sys.j,
+        &sys.r,
+        &gu,
+        dt,
+        n_d,
+        &[],
+    );
+    let solver_certificate = admit_default_newton_iterate(
+        SolveBudget::default()
+            .certificate(
+                NewtonSite::Descriptor,
+                solver_residual,
+                scale,
+                floor,
+                iters,
+                stagnant,
+            )
+            .with_rounding_allowance(),
+    )?;
     Ok(StepRecord {
         x: x1,
         y,
@@ -989,6 +1031,7 @@ pub fn step_descriptor(
         supplied,
         newton_iters: iters,
         solver_residual,
+        solver_certificate: Some(solver_certificate),
     })
 }
 
@@ -1069,6 +1112,9 @@ pub struct StepRecord {
     /// (the ledger inherits this much slack), so audit thresholds must
     /// scale with it — the crate discloses rather than hides the band.
     pub solver_residual: f64,
+    /// Algebraic admission of Gonzalez steps, including visible default-floor
+    /// allowance. Other propagators explicitly return `None` (no such claim).
+    pub solver_certificate: Option<SolveCertificate>,
 }
 
 impl StepRecord {
@@ -1151,14 +1197,10 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
     let mut stagnant = 0usize;
     let mut previous_norm = f64::INFINITY;
     let mut best: Option<(Vec<f64>, f64)> = None;
-    let mut r_init: Option<f64> = None;
     loop {
         let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
         let res = residual(&x1, &dg);
         let rnorm = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
-        if r_init.is_none() {
-            r_init = Some(rnorm);
-        }
         let improved = best.as_ref().is_none_or(|(_, b)| rnorm < *b);
         if improved {
             best = Some((x1.clone(), rnorm));
@@ -1170,7 +1212,8 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         // global best independently. At first impact the initially free-flight
         // residual can be smaller than several converging contact iterates.
         // Counting those as stagnant aborts a recovering Newton solve. The hard
-        // update budget and both convergence/acceptance tolerances are unchanged.
+        // update budget and strict convergence target are unchanged. The final
+        // algebraic certificate governs every best-iterate fallback.
         if rnorm < previous_norm {
             stagnant = 0;
         } else {
@@ -1179,30 +1222,13 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         previous_norm = rnorm;
         if stagnant >= 3 || iters >= NEWTON_MAX {
             let (bx, brnorm) = best.expect("at least one iterate");
-            // Acceptance scale includes the ITERATE's own magnitude:
-            // the entry scale is built from x0 and the input increment
-            // and can be far below where the solution actually lands
-            // (executed: quasi-static reed, x0 ~ 0, solution ~ 2.5e-4,
-            // FD-Jacobian noise floor ~ 4e-14 — a refusal at a
-            // perfectly converged iterate). The accepted residual is
-            // DISCLOSED in StepRecord::solver_residual either way.
-            // ONE acceptance criterion (replacing a chain of
-            // scale-chasing special cases the executed tests kept
-            // falsifying): the best iterate is accepted iff its
-            // residual sits >= 6 orders below BOTH candidate scales —
-            // the iterate's own magnitude and the initial residual. A
-            // genuinely stuck solve leaves the residual comparable to
-            // one of them; a solve stagnating at the FD-Jacobian noise
-            // floor clears both. The achieved residual is DISCLOSED in
-            // StepRecord::solver_residual for audit scaling either
-            // way.
-            let sc_acc = bx.iter().fold(scale, |acc, &v| acc.max(v.abs()));
-            let ref_scale = sc_acc.max(r_init.unwrap_or(sc_acc));
-            if brnorm <= 1.0e-6 * ref_scale {
-                x1 = bx;
-                break;
-            }
-            return Err(PhsError::NewtonStalled { residual: brnorm });
+            let dg = discrete_gradient(sys.storage.as_ref(), x0, &bx);
+            let floor = newton::residual_rounding_floor(sys.storage.as_ref(), x0, &bx,
+                &dg, &sys.j, &sys.r, &gu, dt, n, &[]);
+            admit_default_newton_iterate(SolveBudget::default().certificate(
+                NewtonSite::Step, brnorm, scale, floor, iters, stagnant).with_rounding_allowance())?;
+            x1 = bx;
+            break;
         }
         let jac = fd_jacobian(sys, x0, &x1, scale, &residual);
         let fact = lu(&jac, n).map_err(|_| PhsError::NewtonStalled { residual: rnorm })?;
@@ -1219,10 +1245,45 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         let res = residual(&x1, &dg);
         res.iter().fold(0.0f64, |a, &v| a.max(v.abs()))
     };
-    Ok(ledger(sys, x0, x1, u, dt, iters, solver_residual))
+    let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
+    let floor = newton::residual_rounding_floor(
+        sys.storage.as_ref(),
+        x0,
+        &x1,
+        &dg,
+        &sys.j,
+        &sys.r,
+        &gu,
+        dt,
+        n,
+        &[],
+    );
+    let solver_certificate = admit_default_newton_iterate(
+        SolveBudget::default()
+            .certificate(
+                NewtonSite::Step,
+                solver_residual,
+                scale,
+                floor,
+                iters,
+                stagnant,
+            )
+            .with_rounding_allowance(),
+    )?;
+    Ok(ledger(
+        sys,
+        x0,
+        x1,
+        u,
+        dt,
+        iters,
+        solver_residual,
+        solver_certificate,
+    ))
 }
 
 /// Assemble the exact per-step energy ledger at the accepted iterate.
+#[allow(clippy::too_many_arguments)] // retain the exact admission with the ledger
 fn ledger(
     sys: &PortHamiltonian,
     x0: &[f64],
@@ -1231,6 +1292,7 @@ fn ledger(
     dt: f64,
     newton_iters: usize,
     solver_residual: f64,
+    solver_certificate: SolveCertificate,
 ) -> StepRecord {
     let n = sys.n;
     let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
@@ -1254,6 +1316,7 @@ fn ledger(
         supplied,
         newton_iters,
         solver_residual,
+        solver_certificate: Some(solver_certificate),
     }
 }
 
@@ -1906,7 +1969,7 @@ fn apply_t_junction_series(q: &mut [f64], n: usize, flux: usize, l_add: f64) {
 /// `rad_foster = Some((off, n_br))` replaces the pin `R` with a
 /// Foster match of `Re Z(ω)` (mass still comes from pin `X`).
 /// Closed ends skip this.
-#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
 fn apply_open_mouth_radiation(
     q: &mut [f64],
     r: &mut [f64],
@@ -2107,10 +2170,15 @@ pub fn kirchhoff_parallel_step(
     let mut ua = 0.5 * u_ext;
     let mut rec_a = step(a, xa, &[ua], dt)?;
     let mut rec_b = step(b, xb, &[u_ext - ua], dt)?;
+    let mut iterations = 0;
     for _ in 0..12 {
         let residual = rec_a.y[0] - rec_b.y[0];
         let scale = 1.0 + rec_a.y[0].abs() + rec_b.y[0].abs();
         if residual.abs() <= 1.0e-8 * scale {
+            admit_default_newton_iterate(SolveBudget { relative: 1.0e-8, absolute: 0.0, max_iterations: 12 }
+                .certificate(NewtonSite::KirchhoffParallel, residual.abs(), scale,
+                    arithmetic_rounding_floor(3, rec_a.y[0].abs()+rec_b.y[0].abs()), iterations, 0)
+                .with_rounding_allowance())?;
             return Ok((rec_a, rec_b));
         }
         let h = 1.0e-6 * (1.0 + ua.abs());
@@ -2123,15 +2191,27 @@ pub fn kirchhoff_parallel_step(
         ua -= residual / deriv;
         rec_a = step(a, xa, &[ua], dt)?;
         rec_b = step(b, xb, &[u_ext - ua], dt)?;
+        iterations += 1;
     }
     let residual = rec_a.y[0] - rec_b.y[0];
     let scale = 1.0 + rec_a.y[0].abs() + rec_b.y[0].abs();
-    if residual.abs() <= 1.0e-6 * scale {
-        return Ok((rec_a, rec_b));
-    }
-    Err(PhsError::NewtonStalled {
-        residual: residual.abs(),
-    })
+    admit_default_newton_iterate(
+        SolveBudget {
+            relative: 1.0e-8,
+            absolute: 0.0,
+            max_iterations: 12,
+        }
+        .certificate(
+            NewtonSite::KirchhoffParallel,
+            residual.abs(),
+            scale,
+            arithmetic_rounding_floor(3, rec_a.y[0].abs() + rec_b.y[0].abs()),
+            iterations,
+            0,
+        )
+        .with_rounding_allowance(),
+    )?;
+    Ok((rec_a, rec_b))
 }
 
 /// Regularized Coulomb traction [N]: `F = −μ N tanh(v / v_reg)`.
@@ -2457,7 +2537,7 @@ impl AcousticSection {
 ///
 /// # Errors
 /// As [`acoustic_cylinder`], plus a bad tap station or neck.
-#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
 pub fn acoustic_waveguide(
     length: f64,
     radius: f64,
@@ -2501,7 +2581,7 @@ pub fn acoustic_waveguide(
 /// # Errors
 /// Non-physical taper, `cells < 2`, `inlets` not in `{1, 2}`,
 /// a bad tap, a bad pin, or a radiation-fit refusal.
-#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
 pub fn spherical_cone(
     inlet_radius: f64,
     outlet_radius: f64,
@@ -2529,8 +2609,8 @@ pub fn spherical_cone(
     )
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
-#[allow(clippy::too_many_lines)] // one coherent physics stage
+#[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
+#[allow(clippy::too_many_lines)]// one coherent physics stage
 fn spherical_cone_wall(
     inlet_radius: f64,
     outlet_radius: f64,
@@ -2853,8 +2933,8 @@ fn section_is_taper(s: AcousticSection) -> bool {
 /// Interface coupling is the transformer `J ∝ x_L / x_R` so
 /// physical `p` and `U` match (`x = 1` on a cylinder). Near-field
 /// shunts live only on cone cells.
-#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
-#[allow(clippy::too_many_lines)] // one coherent physics stage
+#[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
+#[allow(clippy::too_many_lines)]// one coherent physics stage
 fn hybrid_sphere_cylinder_chain(
     sections: &[AcousticSection],
     density: f64,
@@ -3421,8 +3501,8 @@ pub fn acoustic_chain_mouth(
 ///
 /// # Errors
 /// As [`acoustic_chain`], plus a bad wall pin.
-#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
-#[allow(clippy::too_many_lines)] // one coherent physics stage
+#[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
+#[allow(clippy::too_many_lines)]// one coherent physics stage
 pub fn acoustic_chain_mouth_wall(
     sections: &[AcousticSection],
     density: f64,
@@ -3798,7 +3878,7 @@ fn tap_cell(station: f64, length: f64, cell_x0: &[f64]) -> usize {
     cell
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
 fn apply_closed_pad(
     q: &mut [f64],
     r: &mut [f64],
@@ -3899,7 +3979,7 @@ fn wall_state_count(n_cells: usize, wall: Option<&WallPin>) -> Result<usize, Phs
     Ok(2 * n_cells)
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
 fn apply_cell_wall(
     q: &mut [f64],
     j: &mut [f64],
@@ -4023,7 +4103,7 @@ fn tap_open_budget(
 /// drives the first inductor (same hook as a lumped neck); each
 /// later `L` sits between the previous `C` and its own `C`. Last
 /// flux carries the same flanged `(R, X)` as the TMM chimney.
-#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
 fn apply_tap_line(
     q: &mut [f64],
     j: &mut [f64],
@@ -4128,7 +4208,7 @@ fn apply_tap_line(
 
 /// Lumped all-regime neck `R`, or the same Foster series the bore
 /// already uses (`R0` + residual) when `foster_off` is set.
-#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
 fn apply_tap_neck_wall(
     q: &mut [f64],
     r: &mut [f64],
