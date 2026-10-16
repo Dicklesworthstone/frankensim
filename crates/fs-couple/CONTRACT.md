@@ -343,6 +343,35 @@ in `fs-phs` (budget now scales with `|z|`).
 
 ### Aperture-junction solver modes (bead frankensim-2s4i5)
 
+IRP M5.5 adds `render::ladder::RealizedResolution` and
+`ReedBoreVoice::{new_with_fft_length, realized_resolution,
+set_junction_step_tolerance, junction_residual_max, initial_ir_tail_energy}`.
+The constructor shares the existing `with_line` admission/initialization; it
+only passes the explicit request to `characteristic_line_dense`. Actual FIR
+history length exposes the 8192 clamp. Strict mode has **no** pressure-step
+tolerance: it still terminates on an exact zero or adjacent binary64 endpoints.
+The massless FastNewton seam admits an explicit relative tolerance in (0,1],
+keeps 1e-9 as the existing default, and preserves every corner/fallback rule.
+Massive reeds refuse this tolerance seam rather than reporting a tolerance the
+coupled structural solver did not use. The observed volume-flow defect is
+recorded in m3/s, and the initialized periodic FIR's last-quarter tap norm is a
+dimensionless diagnostic. Neither bounds pitch, onset, or partial-level error.
+
+`tests/convergence_ladder.rs` binds the existing M-CL0 fixture to fs-ladder,
+with at least three measured sample-rate, FFT, and Newton-tolerance rungs and
+the joint group at fixed physical IR duration. The legacy observer's backward
+jet-force difference supplies the declared smooth-signal first-order hypothesis;
+this is not a global-order assertion for the oscillator. The fixture measures
+raw pitch/partials and a **finite-horizon onset** (0.25s, 1e-3 Pa RMS, nondecaying
+last-quarter RMS, 8 bisections in the declared 0..4800 Pa bracket). An unbracketed
+onset refuses. This is not an asymptotic bifurcation/extinction measurement.
+G1/G3/G5 report construction is exercised, but Q2 accuracy authority remains
+unavailable where no conditioning map supplies a bound in the acoustic QoI's
+units. Spreads and signed finest-reference joint interactions remain data.
+`scripts/e2e/music_ladder.sh` runs a prebuilt native test executable and retains
+JSONL, a raw-scaled PCM render/provenance sidecar and its fs-blake3-bound report
+in a fresh directory. It performs no build and never overwrites evidence.
+
 Both modes share the closed-slit characteristic constraint
 `(1-r0) p_plus - p_minus_history = Zc Ubody`. The reflection denominator
 is not clamped, and closure is evaluated at the body-loaded bore pressure;

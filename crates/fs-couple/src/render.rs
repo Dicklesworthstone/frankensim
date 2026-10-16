@@ -32,6 +32,8 @@
 pub mod schedule;
 /// Geometry-derived compact plate voices with physical force controls.
 pub mod plate;
+/// Realized resolution and explicit solver-tolerance study seams.
+pub mod ladder;
 pub use plate::{CompactPlateVoice, PlateVoiceConfig};
 use schedule::force::coupled::{ModalCouplingError, render::{CoupledModalVoice, contact::ContactModalVoice}};
 use schedule::force::coupled::render::contact::multiple::MultiContactModalVoice;
@@ -46,7 +48,6 @@ use crate::modal_acoustic_time::{
 };
 use crate::reed_bore::{
     FastSolveStats, ReedSolverMode, blowing_envelope, reed_structural, solve_reed_wave,
-    solve_reed_wave_fast,
 };
 use crate::thin_plate::PlateBank;
 use fs_dcontact::Obstacle;
@@ -143,6 +144,8 @@ pub struct ReedBoreVoice {
     solver_mode: ReedSolverMode,
     /// Fast-mode fallback counters; idle while in Strict mode.
     fast_stats: FastSolveStats,
+    junction_step_tolerance: f64,
+    junction_residual_max: Option<f64>,
 }
 
 impl ReedBoreVoice {
@@ -259,6 +262,8 @@ impl ReedBoreVoice {
             sample_index: 0,
             solver_mode: ReedSolverMode::Strict,
             fast_stats: FastSolveStats::default(),
+            junction_step_tolerance: 1.0e-9,
+            junction_residual_max: None,
         })
     }
 
@@ -344,7 +349,7 @@ impl ReedBoreVoice {
                         self.p_plus_prev,
                         u_body,
                     )?,
-                    ReedSolverMode::FastNewton => solve_reed_wave_fast(
+                    ReedSolverMode::FastNewton => crate::reed_bore::solve_reed_wave_fast_tolerance(
                         self.reed,
                         self.rho,
                         self.zc,
@@ -354,10 +359,17 @@ impl ReedBoreVoice {
                         self.p_plus_prev,
                         u_body,
                         &mut self.fast_stats,
+                        self.junction_step_tolerance,
                     )?,
                 }
             };
             self.p_plus_prev = p_plus;
+            if self.reed.mass_kg == 0.0 {
+                let residual = crate::reed_bore::reed_flow_mismatch(
+                    self.reed, self.rho, self.zc, 0.0, p_minus, p_m, p_plus, u_body,
+                ).abs();
+                self.junction_residual_max = Some(self.junction_residual_max.unwrap_or(0.0).max(residual));
+            }
             let p_minus_now = self
                 .line
                 .push(p_plus)
