@@ -39,6 +39,8 @@ mod recovery;
 mod refine;
 mod remesh;
 mod rounded_cylinder;
+/// Deterministic quadratic boxes and variable-depth mapped profile extrusions.
+pub mod structured_hex;
 mod tet_refinement;
 mod uniform;
 mod volumetric;

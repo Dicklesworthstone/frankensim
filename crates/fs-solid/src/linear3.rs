@@ -48,6 +48,9 @@ use fs_solver::krylov::CgState;
 use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::{Coo, Csr};
 
+/// Fully integrated quadratic hexahedra using the shared quadratic assembler.
+pub mod hex;
+mod isoparametric;
 /// Isoparametric quadratic tetrahedra with consistent mass and explicit quadrature.
 pub mod tet10;
 
@@ -1596,6 +1599,10 @@ impl TetDeformedMesh {
 /// Typed, stable refusal surface for 3-D elastic assembly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TetElasticError {
+    /// Unstabilized reduced integration is not an admitted solid element.
+    UnderIntegrated { points_per_dir: usize },
+    /// Declared hex family and connectivity cardinality disagree.
+    HexConnectivityMismatch { expected: usize, got: usize },
     /// An isoparametric element has a nonfinite or nonpositive Jacobian.
     NonPositiveJacobian {
         /// Element index.
@@ -1774,6 +1781,14 @@ impl core::fmt::Display for TetElasticError {
             } => write!(
                 f,
                 "FS-SOLID-TET10-JACOBIAN: element {element}, point {point}, det {det:e}"
+            ),
+            Self::UnderIntegrated { points_per_dir } => write!(
+                f,
+                "FS-SOLID-HEX-UNDERINTEGRATED: {points_per_dir} points per direction; full integration requires at least 3"
+            ),
+            Self::HexConnectivityMismatch { expected, got } => write!(
+                f,
+                "FS-SOLID-HEX-CONNECTIVITY: expected {expected} nodes, got {got}"
             ),
             Self::MidsideMismatch { element, edge } => {
                 write!(f, "FS-SOLID-TET10-MIDSIDE: element {element}, edge {edge}")

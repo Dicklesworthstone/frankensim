@@ -2,6 +2,22 @@
 
 ## Purpose and layer
 
+`structured_hex` (IRP M1.3-W1b) owns deterministic HEX20/HEX27 mapped-block
+connectivity, canonical local reference-node tables and Gmsh 17/12 permutations.
+`extruded_box_hex` requires explicit SI box lengths, positive cell counts,
+family, node/element budgets and Cx. `profile_extruded_hex` requires every
+increasing x station and positive rectangular width/depth/centre, then retains
+them in a piecewise-linear trilinear extrusion. No undercut depth is inferred.
+Global node IDs follow sorted logical half-grid coordinates; HEX20 omits face
+and body centres rather than returning unused nodes. Adjacent cells share all
+retained face nodes. Counts refuse before mesh allocation; generation polls
+Cx by station/cell/node/output element, and cancellation publishes no mesh.
+The module's `structured_hex_*` G0 tests cover exact node counts, conformity,
+replay, cap/cap+1, profile sample retention and malformed data. Solid-element
+Jacobians, mass and physical convergence are tested downstream in fs-solid;
+these outputs make no unstructured meshing, curved-CAD or global intersection
+claim. No dependency on fs-solid is added at this layer.
+
 `planar` (IRP M1.2-W6) is an additive L2 constrained-triangle owner for explicit
 outer loops and holes. Exact `orient2d`/`incircle` signs control topology;
 deterministic cavity recovery and unconstrained-edge hole flooding retain
