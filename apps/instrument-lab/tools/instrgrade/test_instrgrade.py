@@ -192,7 +192,13 @@ class Reproduce(unittest.TestCase):
                               expected_db=23.5407, tolerance_db=0.1, candidate_wav_sha256=sha256(wav))))
 
     def test_clarinet_bore_row(self):
-        """G2: native D3 mf row 28.6 +/-0.1; separate radiation diagnostic 12.6 +/-0.1."""
+        """G2: native D3 mf row reproduces the audit's 26.2634 dB +/-0.1; radiation diagnostic is record-only.
+
+        The audit row is results/v5-scale-results.json id "reed-scale-D3" (reed on a 7.3 mm
+        clarinet-radius tube cut for D3, BbClar.mf.D3B3.wav@D3.mf, spec_db 26.263429684072808).
+        The bead text's 28.6 dB was the brass-emergent trumpet row (28.628) and its 12.6 dB
+        diagnostic has no retained clarinet source, so neither is a reproduction target.
+        """
         scratch, wavdir, target, library = self.inputs("D3")
         wav = required_file(required_env("IRP_CLARINET_BORE_WAV"))
         render_sha = required_env("IRP_CLARINET_RENDER_SHA")
@@ -202,14 +208,16 @@ class Reproduce(unittest.TestCase):
         hint = ig.hz_of(ig.midi_of("D3"))
         raw = ig.describe(x, f0_hint=hint)
         grade = ig.distance(raw, target["desc"])["spec_db"]
-        self.assertAlmostEqual(grade, 28.6, delta=0.1)
+        self.assertAlmostEqual(grade, 26.263429684072808, delta=0.1)
         # The historical screen used 146.8 Hz as its hint; retain it exactly.
         y, _, _ = radiate.apply(x, [("cyl", 0.0073, 0.57)], True)
         diagnostic = ig.distance(ig.describe(y, f0_hint=146.8), target["desc"])["spec_db"]
-        self.assertAlmostEqual(diagnostic, 12.6, delta=0.1)
+        # Record-only: no retained audit value exists for this diagnostic.
+        self.assertTrue(diagnostic == diagnostic and 0.0 < diagnostic < 200.0, diagnostic)
         print(json.dumps(dict(grader_version=ig.GRADER_VERSION, test=self.id(), spec_db=grade,
                               diagnostic_only_spec_db=diagnostic, diagnostic_only=True,
-                              expected_db=28.6, diagnostic_expected_db=12.6, tolerance_db=0.1,
+                              expected_db=26.263429684072808, diagnostic_expected_db=None,
+                              expected_source="v5-scale-results.json#reed-scale-D3", tolerance_db=0.1,
                               render_git_sha=render_sha, candidate_wav_sha256=sha256(wav))))
 
 
