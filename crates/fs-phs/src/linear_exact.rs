@@ -23,6 +23,10 @@ use fs_math::det;
 /// the nearly critically damped limit (the lossless error is smaller).
 pub const MIDPOINT_ONE_CENT_ANGULAR_STEP: f64 = 0.04;
 
+/// Dense Van Loan block ceiling, checked before matrix allocation by callers
+/// preparing complete coupled render operators. No state truncation is allowed.
+pub const MAX_LINEAR_EXPONENTIAL_BLOCK_DIM: usize = 256;
+
 /// A non-exact linear block exceeded its declared resolved temporal band.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ResolvedBandError {
@@ -232,7 +236,7 @@ pub fn split_quadratic(
         .ok_or_else(|| refuse("ZOH block extent"))?;
     if n == 0
         || n > budget.max_modes
-        || block > 256
+        || block > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
         || !budget.max_omega_dt.is_finite()
         || budget.max_omega_dt <= 0.0
     {
@@ -553,6 +557,55 @@ fn exact_zoh(
     u: &[f64],
     dt: f64,
 ) -> Result<StepRecord, PhsError> {
+    exact_zoh_loss(sys, split, x0, u, dt, &sys.r, true)
+}
+
+/// Integrate one declared PSD resistance channel along the SAME complete
+/// coupled trajectory. This does not replace the dynamics' R by that channel.
+/// Independent channel integrals let coupled owners retain their original
+/// component/connection loss accounts after migrating to a full exponential.
+pub fn integrated_resistance_loss(
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+    resistance: &[f64],
+) -> Result<f64, PhsError> {
+    let n = split.n;
+    if sys.n != n
+        || sys.m != split.m
+        || sys.j != split.j
+        || sys.r != split.r
+        || sys.g != split.g
+        || sys.storage.quadratic_part().as_ref() != Some(&split.quadratic)
+        || x0.len() != n
+        || u.len() != split.m
+        || !finite(x0)
+        || !finite(u)
+        || !dt.is_finite()
+        || dt < 0.0
+        || resistance.len() != n * n
+        || !finite(resistance)
+    {
+        return Err(refuse(
+            "finite matching channel-loss split/state/input/clock required",
+        ));
+    }
+    crate::require_symmetric(resistance, n, "loss channel R")?;
+    crate::require_psd(resistance, n, "loss channel R")?;
+    Ok(exact_zoh_loss(sys, split, x0, u, dt, resistance, false)?.dissipated)
+}
+
+fn exact_zoh_loss(
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+    loss_resistance: &[f64],
+    check_balance: bool,
+) -> Result<StepRecord, PhsError> {
     if !split.quadratic.exact {
         return Err(refuse("ZOH requires identically quadratic storage"));
     }
@@ -618,7 +671,7 @@ fn exact_zoh(
         }
     }
     let mut loss = vec![0.0; d * d];
-    let r_effort = product(&sys.r, &effort_map, n);
+    let r_effort = product(loss_resistance, &effort_map, n);
     for i in 0..n {
         for j in 0..n {
             loss[i * d + j] = (0..n)
@@ -665,7 +718,7 @@ fn exact_zoh(
         || !finite(&y)
         || !finite(&[delta_h, dissipated, supplied])
         || dissipated < -1e-12 * energy_scale
-        || defect.abs() > 1e-12 * energy_scale
+        || (check_balance && defect.abs() > 1e-12 * energy_scale)
     {
         return Err(refuse(
             "independent exponential energy balance exceeds 1e-12 relative",
@@ -826,6 +879,55 @@ mod tests {
             let cents = 1200.0 * det::ln(phase / (beta * cap)) / core::f64::consts::LN_2;
             assert!(cents.abs() <= 1.0, "{zeta}: {cents} cents");
         }
+    }
+
+    #[test]
+    fn independent_resistance_channels_sum_along_the_same_coupled_trajectory() {
+        let q = QuadraticStorage::new(vec![4.0, 0.0, 0.0, 1.0], 2).unwrap();
+        let sys = PortHamiltonian::new(
+            2,
+            1,
+            vec![0.0, 1.0, -1.0, 0.0],
+            vec![0.0, 0.0, 0.0, 0.7],
+            vec![0.0, 1.0],
+            Box::new(q),
+        )
+        .unwrap();
+        let split = split_quadratic(&sys, budget(2)).unwrap();
+        for dt in [0.05, 0.5, 1.25] {
+            let whole = step_render(&sys, &split, &[0.3, 0.4], &[0.2], dt).unwrap();
+            let a = integrated_resistance_loss(
+                &sys,
+                &split,
+                &[0.3, 0.4],
+                &[0.2],
+                dt,
+                &[0.0, 0.0, 0.0, 0.2],
+            )
+            .unwrap();
+            let b = integrated_resistance_loss(
+                &sys,
+                &split,
+                &[0.3, 0.4],
+                &[0.2],
+                dt,
+                &[0.0, 0.0, 0.0, 0.5],
+            )
+            .unwrap();
+            assert!(a > 0.0 && b > 0.0);
+            assert!((a + b - whole.dissipated).abs() <= 1e-12 * whole.dissipated);
+        }
+        assert!(
+            integrated_resistance_loss(
+                &sys,
+                &split,
+                &[0.3, 0.4],
+                &[0.2],
+                0.1,
+                &[0.0, 0.0, 0.0, -0.1]
+            )
+            .is_err()
+        );
     }
 
     #[test]

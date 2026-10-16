@@ -1,26 +1,22 @@
 //! Two-way elastic/viscous connections between retained modal components.
 //!
-//! Component evolution stays in `modal_acoustic_time`'s exact held-force
-//! transition. Only the connection reactions are solved here. For extension
-//! x = B^T q - rest, a connection applies lambda = -k (x0+x1)/2
-//! - c (x1-x0)/dt through the SAME signed shape column B. Its work is
-//! -delta(k*x*x/2) - c*(x1-x0)^2/dt; a receiver is not a one-way audio filter.
-//!
-//! With the component displacement compliance D for this step, h=k/2+c/dt,
-//! lambda=-sqrt(h)*y, the small symmetric system is
-//! (I + sqrt(h) B^T D B sqrt(h)) y = k*x0/sqrt(h) + sqrt(h)*delta_x_free.
-//! Its Cholesky factor is prepared once by fs-la, not rebuilt per sample.
-//! This is a finite-step port coupling, NOT the exact continuous coupled-system
-//! exponential. Time refinement is still necessary. Pressure transfers retain
-//! their original narrow-band, read-only scope; radiation loading is not added.
+//! Every retained mode, bilateral spring and dashpot enters one complete
+//! quadratic generator, advanced by exact held-external-force propagation.
+//! Independent integrated resistance channels retain component and connection
+//! loss accounting. Nonlinear contact/friction wraps this same affine response
+//! with its existing held effort times displacement work. Static preload keeps
+//! the existing small Schur solve. Dense preparation has explicit work/capacity
+//! refusals; no modes are truncated. Pressure transfers retain their original
+//! narrow-band, read-only scope; radiation loading is not added.
 
 use fs_exec::CancelGate;
 use fs_la::factor::{Cholesky, cholesky};
 
 use crate::modal_acoustic_time::{
     ModalAcousticState, ModalAcousticTimeError, ModalAcousticTimeModel,
-    ModalAcousticWorkspace,
 };
+
+mod exact;
 
 /// One attachment in a component's unchanged mass-normalized modal basis.
 #[derive(Clone, Debug, PartialEq)]
@@ -102,6 +98,8 @@ pub struct ModalCouplingConfig {
 /// A refused trial never changes accepted component states or the sample clock.
 #[derive(Debug)]
 pub enum ModalCouplingError {
+    /// Complete coupled linear preparation or propagation refused.
+    Propagation(fs_phs::PhsError),
     /// Invalid shapes, parameters, derived numbers, or work admission.
     Invalid { what: &'static str },
     /// Cancellation observed before publishing a complete coupled step.
@@ -125,6 +123,7 @@ pub enum ModalCouplingError {
 impl core::fmt::Display for ModalCouplingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Propagation(error) => write!(f,"coupled linear propagation: {error}"),
             Self::Invalid { what } => write!(f, "modal coupling: {what}"),
             Self::Cancelled => write!(f, "modal coupling cancelled before publication"),
             Self::Component { component, source } => write!(f, "modal component {component}: {source}"),
@@ -153,43 +152,39 @@ pub struct CoupledModalFrame {
     pub connection_energy_j: f64,
     /// Work of the externally held generalized forces only [J].
     pub external_work_j: f64,
-    /// Sum of the component stepper's work-minus-energy viscous losses [J].
+    /// Independent time integral of all original component viscous losses [J].
     pub component_dissipation_j: f64,
-    /// Nonnegative c*(delta_extension)^2/dt of the connections [J].
+    /// Independent time integral of c*(extension velocity)^2 [J].
     pub connection_dissipation_j: f64,
     /// Combined storage change + dissipation - external work [J].
     pub energy_residual_j: f64,
     /// Actual absolute + relative energy tolerance used by the gate [J].
     pub energy_tolerance_j: f64,
-    /// Independently recomputed connection equation residual.
+    /// Connection-equation residual for legacy accounts. Exact full-pencil
+    /// propagation has no connection solve and records zero here; its actual
+    /// numerical check is the independently integrated energy residual above.
     pub solve_relative_residual: f64,
-    /// Signed scalar force multiplying each connection's signed column [N].
+    /// Endpoint signed reaction multiplying each connection's signed column [N].
     /// For a pair connection this is the force on its LEFT attachment.
     pub connection_forces_n: Vec<f64>,
 }
 
 /// A fixed network with two-way reactions and transactional accepted states.
 /// Models, their individual budgets, damping and pressure transfers are retained.
-/// All state and solve buffers are allocated at construction. This is not a
-/// measured real-time or experimental-validity claim.
+/// Exact dense propagation allocates bounded matrix scratch during stepping.
+/// This is not a measured real-time or experimental-validity claim.
 pub struct CoupledModalSystem {
     models: Vec<ModalAcousticTimeModel>,
     candidates: Vec<ModalAcousticTimeModel>,
-    workspaces: Vec<ModalAcousticWorkspace>,
+    exact: exact::ExactNetwork,
     offsets: Vec<usize>,
     connections: Vec<ConnectionLaw>,
     columns: Vec<Vec<f64>>,
-    roots: Vec<f64>,
-    spring_over_root: Vec<f64>,
-    matrix: Vec<f64>,
-    factor: Cholesky,
     config: ModalCouplingConfig,
     dt: f64,
     old_q: Vec<f64>,
     free_delta: Vec<f64>,
     forces: Vec<f64>,
-    rhs: Vec<f64>,
-    solution: Vec<f64>,
     reactions: Vec<f64>,
     frame: CoupledModalFrame,
     staged_frame: CoupledModalFrame,
@@ -244,8 +239,6 @@ impl CoupledModalSystem {
         let links = connections.len();
         let mut columns = Vec::with_capacity(links);
         let mut laws = Vec::with_capacity(links);
-        let mut roots = Vec::with_capacity(links);
-        let mut spring_over_root = Vec::with_capacity(links);
         for link in connections {
             poll(Some(gate))?;
             if !link.stiffness_n_m.is_finite() || link.stiffness_n_m < 0.0
@@ -256,29 +249,16 @@ impl CoupledModalSystem {
             if link.column.len() != count || link.column.iter().any(|b| !b.is_finite()) {
                 return Err(invalid("connection column must match every original mode with finite signed participation"));
             }
-            let h = finite(0.5 * link.stiffness_n_m + link.damping_n_s_m / dt)?;
-            if h == 0.0 && (link.stiffness_n_m > 0.0 || link.damping_n_s_m > 0.0) {
-                return Err(invalid("positive connection coefficient is not representable"));
-            }
-            let root = h.sqrt();
-            spring_over_root.push(if root == 0.0 { 0.0 } else { finite(link.stiffness_n_m / root)? });
-            roots.push(root);
             columns.push(link.column);
             laws.push(ConnectionLaw { stiffness_n_m: link.stiffness_n_m,
                 damping_n_s_m: link.damping_n_s_m, rest_extension_m: link.rest_extension_m });
         }
         let connections = laws;
-        let mut compliance = Vec::with_capacity(count);
         let mut upper_squared = 0.0_f64;
         for model in &models {
             poll(Some(gate))?;
-            for (mode_index, &mode) in model.modes().iter().enumerate() {
+            for &mode in model.modes() {
                 upper_squared = upper_squared.max(finite(mode.angular_frequency_rad_s * mode.angular_frequency_rad_s)?);
-                let response = model.advance_exact_zoh_step(mode_index, ModalAcousticState::default(), 1.0).displacement_m_sqrt_kg;
-                if !response.is_finite() || response < 0.0 {
-                    return Err(invalid("modal held-force displacement response must be finite nonnegative"));
-                }
-                compliance.push(response);
             }
         }
         // lambda_max(diag(omega^2) + sum k*b*b^T) <= max(omega^2) + sum k*||b||^2.
@@ -290,10 +270,8 @@ impl CoupledModalSystem {
         }
         let guard = core::f64::consts::PI / dt * config.nyquist_guard_fraction;
         if upper_squared.sqrt() > guard { return Err(invalid("coupled stiffness bound exceeds the Nyquist guard")); }
-        let matrix = connection_matrix(&columns, &compliance, &roots, Some(gate))?;
-        let factor = cholesky(&matrix, links).map_err(ModalCouplingError::Factor)?;
+        let exact=exact::ExactNetwork::new(&models,&columns,&connections,count,gate)?;
         let candidates = models.clone();
-        let workspaces = models.iter().map(ModalAcousticWorkspace::new).collect();
         let frame = CoupledModalFrame {
             sample: 0, observer_pressure_pa: 0.0, modal_energy_j: 0.0, connection_energy_j: 0.0,
             external_work_j: 0.0, component_dissipation_j: 0.0, connection_dissipation_j: 0.0,
@@ -301,9 +279,9 @@ impl CoupledModalSystem {
             connection_forces_n: vec![0.0; links],
         };
         let system = Self {
-            models, candidates, workspaces, offsets, connections, columns, roots, spring_over_root,
-            matrix, factor, config, dt, old_q: vec![0.0; count], free_delta: vec![0.0; count],
-            forces: vec![0.0; count], rhs: vec![0.0; links], solution: vec![0.0; links],
+            models, candidates, exact, offsets, connections, columns,
+            config, dt, old_q: vec![0.0; count], free_delta: vec![0.0; count],
+            forces: vec![0.0; count],
             reactions: vec![0.0; links],
             staged_frame: frame.clone(),
             frame,
@@ -367,63 +345,7 @@ impl CoupledModalSystem {
     fn stage_inner(&mut self, external: &[f64], gate: Option<&CancelGate>)
         -> Result<(), ModalCouplingError>
     {
-        poll(gate)?;
-        if external.len() != self.mode_count() || external.iter().any(|x| !x.is_finite()) {
-            return Err(invalid("external forces must be finite and match all component modes"));
-        }
-        let sample = self.frame.sample.checked_add(1).ok_or_else(|| invalid("coupled sample clock overflow"))?;
-        let before = self.total_energy_j()?;
-        let relative = self.prepare_forces(external, gate, true)?;
-        let mut pressure = 0.0;
-        let mut modal_after = 0.0;
-        let mut component_loss = 0.0;
-        let mut work = 0.0;
-        for i in 0..self.models.len() {
-            poll(gate)?;
-            self.candidates[i].copy_states_from(&self.models[i]);
-            let range = self.offsets[i]..self.offsets[i+1];
-            let frame = self.candidates[i].step_into(&self.forces[range.clone()], &mut self.workspaces[i])
-                .map_err(|source| ModalCouplingError::Component { component: i, source })?;
-            pressure = finite(pressure + frame.observer_pressure_pa)?;
-            modal_after = finite(modal_after + frame.total_modal_energy_j)?;
-            component_loss = finite(component_loss + frame.viscous_dissipation_j)?;
-            for (index, state) in range.zip(self.candidates[i].states()) {
-                let delta = finite(state.displacement_m_sqrt_kg - self.old_q[index])?;
-                self.free_delta[index] = delta;
-                work = finite(work + external[index] * delta)?;
-            }
-        }
-        let mut spring_after = 0.0;
-        let mut connection_loss = 0.0;
-        for (column, link) in self.columns.iter().zip(&self.connections) {
-            poll(gate)?;
-            let x = extension(&self.candidates, column, link.rest_extension_m)?;
-            spring_after = finite(spring_after + 0.5 * link.stiffness_n_m * x * x)?;
-            let delta = dot(column, &self.free_delta)?;
-            connection_loss = finite(connection_loss + link.damping_n_s_m * (delta / self.dt) * delta)?;
-        }
-        let after = finite(modal_after + spring_after)?;
-        limit("total energy", after, self.config.maximum_total_energy_j)?;
-        limit("observer pressure", pressure.abs(), self.config.maximum_abs_pressure_pa)?;
-        let residual = finite((after - before) + component_loss + connection_loss - work)?;
-        let scale = before.max(after).max(work.abs()).max(component_loss.abs()).max(connection_loss);
-        let tolerance = finite(self.config.energy_absolute_tolerance_j + self.config.energy_relative_tolerance * scale)?;
-        if residual.abs() > tolerance {
-            return Err(ModalCouplingError::EnergyBalance { residual_j: residual, tolerance_j: tolerance });
-        }
-        poll(gate)?;
-        self.staged_frame.sample = sample;
-        self.staged_frame.observer_pressure_pa = pressure;
-        self.staged_frame.modal_energy_j = modal_after;
-        self.staged_frame.connection_energy_j = spring_after;
-        self.staged_frame.external_work_j = work;
-        self.staged_frame.component_dissipation_j = component_loss;
-        self.staged_frame.connection_dissipation_j = connection_loss;
-        self.staged_frame.energy_residual_j = residual;
-        self.staged_frame.energy_tolerance_j = tolerance;
-        self.staged_frame.solve_relative_residual = relative;
-        self.staged_frame.connection_forces_n.copy_from_slice(&self.reactions);
-        Ok(())
+        exact::stage(self,external,gate)
     }
 
     fn publish_staged(&mut self) {
@@ -431,52 +353,20 @@ impl CoupledModalSystem {
         std::mem::swap(&mut self.frame, &mut self.staged_frame);
     }
 
-    // The single bilateral-reaction owner, shared by accepted samples and the
-    // contact-free affine prediction. Only FINAL reactions face physical caps:
-    // contact can suppress an otherwise over-budget unrestrained prediction.
-    fn prepare_forces(&mut self, external: &[f64], gate: Option<&CancelGate>, enforce_limits: bool)
-        -> Result<f64, ModalCouplingError>
+    // Unrestrained full-network prediction is scratch. Contact/friction may
+    // suppress it before any physical endpoint or force budget is applied.
+    fn prepare_prediction(&mut self, external: &[f64], gate: Option<&CancelGate>)
+        -> Result<(), ModalCouplingError>
     {
         poll(gate)?;
         if external.len() != self.mode_count() || external.iter().any(|x| !x.is_finite()) {
             return Err(invalid("external forces must be finite and match all component modes"));
         }
-        let mut at = 0;
-        for model in &self.models {
-            poll(gate)?;
-            for (mode_index, &state) in model.states().iter().enumerate() {
-                self.old_q[at] = state.displacement_m_sqrt_kg;
-                // Unconstrained prediction is scratch, not an accepted component
-                // step: a stiff connection may suppress a large free prediction.
-                self.free_delta[at] = finite(model.advance_exact_zoh_step(mode_index, state, external[at])
-                    .displacement_m_sqrt_kg - state.displacement_m_sqrt_kg)?;
-                at += 1;
-            }
-        }
-        for (j, (column, link)) in self.columns.iter().zip(&self.connections).enumerate() {
-            poll(gate)?;
-            let x = finite(dot(column, &self.old_q)? - link.rest_extension_m)?;
-            self.rhs[j] = finite(self.spring_over_root[j] * x + self.roots[j] * dot(column, &self.free_delta)?)?;
-        }
-        self.solution.copy_from_slice(&self.rhs);
-        self.factor.solve(&mut self.solution);
-        let relative = check_solve(&self.matrix, &self.solution, &self.rhs, self.config.solve_relative_tolerance)?;
+        let (record,x,_)=self.exact.advance(&self.models,external,self.dt)?;
+        for k in 0..self.mode_count() {self.old_q[k]=x[2*k];self.free_delta[k]=finite(record.x[2*k]-x[2*k])?;}
         self.forces.copy_from_slice(external);
-        for j in 0..self.connections.len() {
-            poll(gate)?;
-            let reaction = finite(-self.roots[j] * self.solution[j])?;
-            if enforce_limits {
-                limit("connection force", reaction.abs(), self.config.maximum_abs_connection_force_n)?;
-            }
-            self.reactions[j] = reaction;
-            // Zero reactions leave the original external force bits alone.
-            if reaction != 0.0 {
-                for (force, &b) in self.forces.iter_mut().zip(&self.columns[j]) {
-                    *force = finite(*force + b * reaction)?;
-                }
-            }
-        }
-        Ok(relative)
+        poll(gate)?;
+        Ok(())
     }
 
 }

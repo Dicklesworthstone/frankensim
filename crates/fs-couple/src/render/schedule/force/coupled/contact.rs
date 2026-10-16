@@ -26,10 +26,10 @@ use fs_exec::CancelGate;
 use fs_phs::Storage;
 
 use super::{
-    CoupledModalSystem, ModalAttachment, ModalCouplingError, check_solve, dot,
+    CoupledModalSystem, ModalAttachment, ModalCouplingError, dot,
     extension, finite, invalid, limit, poll,
 };
-use crate::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeModel};
+use crate::modal_acoustic_time::ModalAcousticTimeModel;
 // Same one-coordinate potential secant, with stable near-equilibrium arithmetic.
 use fs_dcontact::OpeningContactStep as SlitContactStep;
 
@@ -244,19 +244,9 @@ impl ContactModalSystem {
         let before = self.total_energy_j()?;
         // This is a scratch prediction, not a component step. Final physical
         // caps are checked after contact has acted, not on unrestrained motion.
-        self.network.prepare_forces(external, gate, false)?;
+        self.network.prepare_prediction(external, gate)?;
         let x0 = dot(&self.column, &self.network.old_q)?;
-        let mut x_free = 0.0;
-        let mut index = 0;
-        for model in &self.network.models {
-            poll(gate)?;
-            for (mode_index, &state) in model.states().iter().enumerate() {
-                let q = model.advance_exact_zoh_step(mode_index, state, self.network.forces[index])
-                    .displacement_m_sqrt_kg;
-                x_free = finite(x_free + self.column[index]*q)?;
-                index += 1;
-            }
-        }
+        let x_free=finite(x0+dot(&self.column,&self.network.free_delta)?)?;
         let law = SlitContactStep::new(self.contact.law(), -x0).map_err(ModalCouplingError::ContactLaw)?;
         let (reaction, iterations) = solve_contact(&law, x0, x_free, self.compliance_m_per_n,
             self.network.dt, self.config, gate)?;
@@ -374,26 +364,9 @@ fn effective_compliance(network: &CoupledModalSystem, column: &[f64], gate: &Can
 fn network_response(network: &CoupledModalSystem, column: &[f64], gate: &CancelGate)
     -> Result<Vec<f64>, ModalCouplingError>
 {
-    let mut d = Vec::with_capacity(column.len());
-    for model in &network.models {
-        poll(Some(gate))?;
-        for mode_index in 0..model.modes().len() {
-            d.push(finite(model.advance_exact_zoh_step(mode_index, ModalAcousticState::default(), 1.0)
-                .displacement_m_sqrt_kg)?);
-        }
-    }
-    let mut response: Vec<f64> = d.iter().zip(column).map(|(d,b)| finite(d*b)).collect::<Result<_,_>>()?;
-    let mut rhs = Vec::with_capacity(network.columns.len());
-    for (j, b) in network.columns.iter().enumerate() { rhs.push(finite(network.roots[j]*dot(b,&response)?)?); }
-    let mut solution = rhs.clone();
-    network.factor.solve(&mut solution);
-    check_solve(&network.matrix, &solution, &rhs, network.config.solve_relative_tolerance)?;
-    for (j, b) in network.columns.iter().enumerate() {
-        poll(Some(gate))?;
-        for k in 0..response.len() {
-            response[k] = finite(response[k] - d[k]*b[k]*network.roots[j]*solution[j])?;
-        }
-    }
+    poll(Some(gate))?;
+    let response=network.exact.response(column,network.dt)?;
+    poll(Some(gate))?;
     Ok(response)
 }
 

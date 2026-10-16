@@ -135,7 +135,7 @@ const PATHS: &[AuditRow] = &[
     },
     AuditRow {
         path: "render::schedule::force::CoupledModalSystem connections",
-        integrator: Integrator::Trapezoidal,
+        integrator: Integrator::ExactZoh,
         bound: Some(0.9 * core::f64::consts::PI),
         owner: Owner::Coupled,
     },
@@ -554,13 +554,12 @@ fn available_render_linear_owners_are_measured_without_promoting_unmigrated_path
                     omega
                 };
                 let measured = cents(phase(row.owner, omega, rate) * f64::from(rate) / exact_omega);
-                let predicted = if matches!(row.owner, Owner::Exact | Owner::Speaker) {
-                    Some(0.0)
-                } else if matches!(row.owner, Owner::Coupled) {
-                    None
-                } else {
-                    Some(midpoint_cents(z))
-                };
+                let predicted =
+                    if matches!(row.owner, Owner::Exact | Owner::Speaker | Owner::Coupled) {
+                        Some(0.0)
+                    } else {
+                        Some(midpoint_cents(z))
+                    };
                 if let Some(predicted) = predicted {
                     assert!(
                         (measured - predicted).abs() <= 1e-6,
@@ -748,8 +747,8 @@ fn modal_aperture_includes_full_viscosity_in_the_one_cent_band() {
 fn coupled_modal_connection_warping_vs_exact_eigenproblem() {
     // Two equal unit masses: K=[[w²+k,-k],[-k,w²+k]], antisymmetric
     // eigenvalue w²+2k = 1.2w². The fixture excites exactly that eigenspace.
-    // Exact component propagation plus trapezoidal connections is NOT a pure
-    // trapezoid map of K, so the atan formula is not a valid oracle here.
+    // The full pencil exponential includes this eigenvalue; exact component
+    // propagation alone cannot reproduce it.
     let omega = core::f64::consts::TAU * 5_000.0;
     let errors: Vec<_> = [48_000, 96_000, 192_000]
         .into_iter()
@@ -758,13 +757,12 @@ fn coupled_modal_connection_warping_vs_exact_eigenproblem() {
                 .abs()
         })
         .collect();
-    assert!(errors[0] > 0.01, "connection defect must be live");
-    assert!(errors[0] > errors[1] && errors[1] > errors[2]);
-    for pair in errors.windows(2) {
-        let order = det::ln(pair[0] / pair[1]) / core::f64::consts::LN_2;
-        assert!(
-            (order - 2.0).abs() < 0.15,
-            "observed coupled phase order {order}"
-        );
-    }
+    assert!(
+        errors.iter().all(|error| *error <= 0.01),
+        "coupled phase errors {errors:?}"
+    );
+    assert!(
+        (det::sqrt(1.2) - 1.0) > 0.09,
+        "coupled eigenfrequency axis must be live"
+    );
 }

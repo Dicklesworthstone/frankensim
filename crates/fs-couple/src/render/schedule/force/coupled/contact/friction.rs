@@ -212,18 +212,8 @@ impl FrictionModalSystem {
         }
         interface::check_endpoint(self.interface.as_ref(), &self.column, &self.network.models, drive)?;
         let before = self.network.total_energy_j()?;
-        self.network.prepare_forces(external, gate, false)?;
-        let mut free_increment = 0.0;
-        let mut i = 0;
-        for model in &self.network.models {
-            poll(gate)?;
-            for (mode_index, &state) in model.states().iter().enumerate() {
-                let q1 = model.advance_exact_zoh_step(mode_index, state, self.network.forces[i])
-                    .displacement_m_sqrt_kg;
-                free_increment = finite(free_increment + self.column[i]*(q1-self.network.old_q[i]))?;
-                i += 1;
-            }
-        }
+        self.network.prepare_prediction(external, gate)?;
+        let free_increment=dot(&self.column,&self.network.free_delta)?;
         let drive_distance = finite(drive.speed_m_s*self.network.dt)?;
         let free_slip = finite(drive_distance-free_increment)?;
         let (traction, regime, iterations) = scalar::solve(&self.port.law, self.config, self.compliance, self.network.dt, free_slip, drive.normal_force_n, gate)?;

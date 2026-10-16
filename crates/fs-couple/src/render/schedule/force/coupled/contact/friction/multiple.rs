@@ -223,16 +223,8 @@ impl MultiFrictionModalSystem {
                 &self.core.network.models, drives[i])?;
         }
         let before = self.core.total_energy_j()?;
-        self.core.network.prepare_forces(external, gate, false)?;
-        let mut at = 0;
-        for model in &self.core.network.models {
-            poll(gate)?;
-            for (mode_index, &state) in model.states().iter().enumerate() {
-                let q = model.advance_exact_zoh_step(mode_index, state, self.core.network.forces[at])
-                    .displacement_m_sqrt_kg;
-                self.free_delta[at] = finite(q - self.core.network.old_q[at])?; at += 1;
-            }
-        }
+        self.core.network.prepare_prediction(external, gate)?;
+        self.free_delta.copy_from_slice(&self.core.network.free_delta);
         for i in 0..p {
             self.free_slip[i] = finite(finite(drives[i].speed_m_s*self.sample_period_s())?
                 - dot(&self.points[i].column, &self.free_delta)?)?;

@@ -256,15 +256,9 @@ impl MultiContactModalSystem {
     {
         poll(gate)?;
         let before = self.total_energy_j()?;
-        self.network.prepare_forces(external, gate, false)?;
-        let mut at = 0;
-        for model in &self.network.models {
-            poll(gate)?;
-            for (mode_index, &state) in model.states().iter().enumerate() {
-                self.free_q[at] = finite(model.advance_exact_zoh_step(mode_index, state, self.network.forces[at])
-                    .displacement_m_sqrt_kg)?;
-                at += 1;
-            }
+        self.network.prepare_prediction(external, gate)?;
+        for at in 0..self.free_q.len() {
+            self.free_q[at]=finite(self.network.old_q[at]+self.network.free_delta[at])?;
         }
         let p = self.points.len();
         // Reuse trial storage without retaining any speculative reaction.
