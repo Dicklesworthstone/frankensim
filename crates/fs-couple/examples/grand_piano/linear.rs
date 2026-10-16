@@ -190,6 +190,27 @@ fn damp_board(flow: &[f64], from: &[f64], to: &mut [f64]) -> f64 {
     0.5*from.iter().zip(to).map(|(a,b)|a*a-*b * *b).sum::<f64>()
 }
 
+/// `Bank::gpu_image`: the operators of a contact-free step. `transition[k]` is [qq, qv, vq, vv, bq, bv]
+/// of coordinate k (string modes, then board coordinates); `groups` are the string ranges sharing one
+/// bridge row (the first string's); `omega2` is the diagonal stiffness used in the modal-loss ledger.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+pub struct BankImage {
+    pub n: usize,
+    pub r: usize,
+    pub transition: Vec<[f64; 6]>,
+    pub modes: Vec<StringMode>,
+    pub omega2: Vec<f64>,
+    pub strings: Vec<StringPort>,
+    pub groups: Vec<std::ops::Range<usize>>,
+    pub schur_inverse: Vec<f64>,
+    pub board_half_damping: Option<Vec<f64>>,
+    pub string_loss: Option<string_damping::LossImage>,
+    pub contact_strings: Vec<usize>,
+    pub q: Vec<f64>,
+    pub v: Vec<f64>,
+}
+
 pub struct Bank {
     pub strings: Vec<StringPort>,
     pub modes: Vec<StringMode>,
@@ -757,6 +778,37 @@ impl Bank {
         }
         for i in 0..r { for j in 0..r {energy+=0.5*q[n+i]*self.physical_board_k[i*r+j]*q[n+j];} }
         energy
+    }
+
+    /// Everything a contact-free mechanics step of this bank reads, as plain data, for an external
+    /// stepper (the GPU renderer in apps/instrument-lab/render-gpu-piano). Exporting changes nothing; the
+    /// bank's own predict / finish / commit stay the reference. None when an option the external stepper
+    /// does not model (string stretching, hammer footprints, held external forces) is active.
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn gpu_image(&self)->Option<BankImage> {
+        if self.stretching.is_some() || self.footprints.is_some() || self.external_force.is_some() { return None; }
+        Some(BankImage {
+            n: self.modes.len(), r: self.board_count,
+            transition: self.transition.iter().map(|t| [t.qq, t.qv, t.vq, t.vv, t.bq, t.bv]).collect(),
+            modes: self.modes.clone(), omega2: self.diagonal_omega2.clone(),
+            strings: self.strings.clone(), groups: self.groups.clone(),
+            schur_inverse: self.schur_inverse.clone(),
+            board_half_damping: self.board_half_damping.clone(),
+            string_loss: self.string_loss.image(),
+            contact_strings: self.contact_strings.clone(),
+            q: self.q.clone(), v: self.v.clone(),
+        })
+    }
+
+    /// A free-oscillation estimate bounding |contact_position(contact)|: each string mode's and board
+    /// coordinate's amplitude sqrt(q^2+(v/omega)^2), weighted by the contact's shape. A planner's
+    /// estimate only; the coupled, damped motion is not bounded by it exactly.
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn contact_amplitude_bound(&self, contact: usize) -> f64 {
+        let s=&self.strings[self.contact_strings[contact]];let n=self.modes.len();
+        let amplitude=|k:usize| det::sqrt(self.q[k]*self.q[k]+self.v[k]*self.v[k]/self.diagonal_omega2[k]);
+        s.modes.clone().map(|k| self.modes[k].hammer_shape.abs()*amplitude(k)).sum::<f64>()
+            + s.hammer_lift.abs()*s.bridge.iter().enumerate().map(|(j,g)| g.abs()*amplitude(n+j)).sum::<f64>()
     }
 
     pub fn volume_velocity(&self)->f64 {

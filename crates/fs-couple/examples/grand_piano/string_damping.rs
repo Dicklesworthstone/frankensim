@@ -27,6 +27,20 @@ pub struct ModeLoss {
     pub strain_rate: f64,
 }
 
+/// `Prepared::image`: per mode the mass and strain rates, the midpoint inverse and the board cross
+/// response; per string the endpoint drag; the board Schur inverse; the interval.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+pub struct LossImage {
+    pub mass_rate: Vec<f64>,
+    pub strain_rate: Vec<f64>,
+    pub endpoint_drag: Vec<f64>,
+    pub duration_s: f64,
+    pub inverse: Vec<f64>,
+    pub cross_response: Vec<f64>,
+    pub schur_inverse: Vec<f64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Prepared {
     pub modes: Vec<ModeLoss>,
@@ -91,6 +105,19 @@ impl Prepared {
         let schur_inverse=if enabled {inverse_spd(&schur,r)?} else {schur};
         Ok(Self {modes:losses,endpoint_drag,duration_s,enabled,inverse,cross_response,
             schur_inverse,rhs:vec![0.0;r],board_midpoint:vec![0.0;r],board_force:vec![0.0;r]})
+    }
+
+    /// The prepared loss operator as plain data (None when no string loss is configured).
+    pub fn image(&self) -> Option<LossImage> {
+        self.enabled.then(|| LossImage {
+            mass_rate: self.modes.iter().map(|m| m.mass_rate).collect(),
+            strain_rate: self.modes.iter().map(|m| m.strain_rate).collect(),
+            endpoint_drag: self.endpoint_drag.clone(),
+            duration_s: self.duration_s,
+            inverse: self.inverse.clone(),
+            cross_response: self.cross_response.clone(),
+            schur_inverse: self.schur_inverse.clone(),
+        })
     }
 
     /// Continuous physical dissipation [W], also used to audit harmonic loss.

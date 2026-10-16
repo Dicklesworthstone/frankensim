@@ -148,6 +148,39 @@ struct Unit {
     change: Vec<f64>,
 }
 
+/// `Prepared::gpu_image`: the pads (string mode range, bridge row and |row|^2; per station its shape,
+/// lift, norm and factor in station order) with their unit responses per direction (0 forward, 1
+/// reverse; speed and change in pass order), and the bridge Gram matrix.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+pub struct DamperImage {
+    pub board_start: usize,
+    pub gram: Vec<f64>,
+    pub pads: Vec<PadImage>,
+}
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+pub struct PadImage {
+    pub course: usize,
+    pub modes: Range<usize>,
+    pub bridge: Vec<f64>,
+    pub bridge_norm2: f64,
+    pub shape: Vec<Vec<f64>>,
+    pub lift: Vec<f64>,
+    pub norm: Vec<f64>,
+    pub factor: Vec<f64>,
+    pub unit: [UnitImage; 2],
+}
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+pub struct UnitImage {
+    pub w: Vec<f64>,
+    pub alpha: f64,
+    pub loss: f64,
+    pub speed: Vec<f64>,
+    pub change: Vec<f64>,
+}
+
 /// Frozen displacement/force projections in the Bank's loaded coordinates.
 /// Does not contain, duplicate, reset or truncate any resonator state.
 pub struct Prepared {
@@ -356,6 +389,31 @@ impl Prepared {
 
     /// Whether `use_reduced` was selected.
     pub fn is_reduced(&self) -> bool { self.reduced.is_some() }
+
+    /// The superposed pass as plain data for the pedal value and interval of one damper call (selects
+    /// the reduced coordinates if they were not): for an external stepper (render-gpu-piano).
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn gpu_image(&mut self, sustain: f64, dt: f64) -> DamperImage {
+        if self.reduced.is_none() { self.use_reduced(); }
+        let engagement = (1.0-sustain).powi(2);
+        self.refresh(engagement, dt);
+        let red = self.reduced.as_ref().expect("selected above");
+        DamperImage {
+            board_start: self.board_start,
+            gram: red.gram.clone(),
+            pads: self.pads.iter().enumerate().map(|(p, pad)| PadImage {
+                course: pad.course, modes: pad.modes.clone(), bridge: pad.bridge.clone(),
+                bridge_norm2: red.bridge_norm2[p],
+                shape: pad.points.iter().map(|pt| pt.shape.clone()).collect(),
+                lift: pad.points.iter().map(|pt| pt.lift).collect(),
+                norm: red.norm[p].clone(), factor: red.factor[p].clone(),
+                unit: [0, 1].map(|d| {
+                    let u = &red.unit[d][p];
+                    UnitImage { w: u.w.clone(), alpha: u.alpha, loss: u.loss, speed: u.speed.clone(), change: u.change.clone() }
+                }),
+            }).collect(),
+        }
+    }
 
     /// `apply`'s palindrome of exact rank-one flows, carried on fewer coordinates. Every station of a pad
     /// moves the board along that pad's one bridge direction b, scaled by the station's lift, so a pad's

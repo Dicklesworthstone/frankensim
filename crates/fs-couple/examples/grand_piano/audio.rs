@@ -21,9 +21,28 @@ impl std::fmt::Display for BlockError {
 }
 impl std::error::Error for BlockError {}
 
+/// An external stepper for contact-free stretches (render-gpu-piano): it may take up to `frames`
+/// mechanics steps of `instrument` at once, writing each step's board trace (`board_trace_len` values)
+/// into `traces`, and leaves the instrument as CPU steps would have (its hammers stepped, its bank
+/// state loaded back). It returns how many steps it took; 0 hands the next step to the CPU.
+pub trait Accelerator {
+    fn advance(&mut self, instrument: &mut Instrument, frames: usize, traces: &mut [f64]) -> Result<usize, String>;
+}
+
+/// Builds the accelerator for a configured instrument (None: render on the CPU).
+pub type AcceleratorFactory = fn(&mut Instrument) -> Option<Box<dyn Accelerator>>;
+static ACCELERATOR: std::sync::OnceLock<AcceleratorFactory> = std::sync::OnceLock::new();
+
+/// Install the accelerator every stream built afterwards uses (a host such as render-gpu-piano that
+/// compiles these sources). Without one, streams step on the CPU exactly as before.
+#[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+pub fn register_accelerator(factory: AcceleratorFactory) { let _ = ACCELERATOR.set(factory); }
+
 pub struct AudioStream {
     instrument: Instrument, microphone: Option<Microphone>, right_microphone: Option<Microphone>, score: Performance,
     board_trace: Vec<f64>, diagnostic_gain: f64, sample: u64, failed: bool,
+    accelerator: Option<Box<dyn Accelerator>>, traces: Vec<f64>, pending: std::collections::VecDeque<usize>,
+    horizon: Option<u64>,
 }
 impl AudioStream {
     /// A surface selects physical multirate pressure; None selects the existing
@@ -36,7 +55,10 @@ impl AudioStream {
         let microphone=surface.map(|surface|Microphone::new_multirate(surface,&instrument.bank,
             instrument.sample_rate(),position_m,medium)).transpose()?;
         let board_trace=vec![0.0;instrument.board_trace_len()];
-        Ok(Self{instrument,microphone,right_microphone:None,score,board_trace,diagnostic_gain,sample:0,failed:false})
+        let mut instrument=instrument;
+        let accelerator=ACCELERATOR.get().and_then(|f|f(&mut instrument));
+        Ok(Self{instrument,microphone,right_microphone:None,score,board_trace,diagnostic_gain,sample:0,failed:false,
+            accelerator,traces:Vec::new(),pending:std::collections::VecDeque::new(),horizon:None})
     }
     /// Two physical Rayleigh receivers of ONE instrument and ONE control clock.
     /// The complete substep trace is computed once, then observed independently
@@ -53,15 +75,43 @@ impl AudioStream {
         Some([self.microphone.as_ref()?,self.right_microphone.as_ref()?])
     }
     pub fn instrument(&self)->&Instrument {&self.instrument}
+    /// Step every later frame on the CPU (frames an accelerator already computed still play out). An
+    /// accelerator runs the instrument ahead of the output clock by up to one stretch, so a caller that
+    /// observes or changes the instrument between frames needs this before it starts.
+    pub fn disable_accelerator(&mut self) { self.accelerator=None; }
+    /// The last frame this stream will be asked for: an accelerator never steps the instrument past it,
+    /// so the instrument's final state (and its energy report) is that of the last rendered frame.
+    pub fn set_horizon(&mut self, frames: u64) { self.horizon=Some(frames); }
     /// Host gesture updates may be applied between blocks. Scheduled gestures
     /// remain sample-accurate inside blocks and use the same physical controls.
+    /// With an accelerator the instrument can be ahead of the output clock: see `disable_accelerator`.
     pub fn instrument_mut(&mut self)->&mut Instrument {&mut self.instrument}
     pub fn microphone(&self)->Option<&Microphone> {self.microphone.as_ref()}
     pub fn sample_position(&self)->u64 {self.sample}
 
     fn next_frame(&mut self)->Result<[f64;2],String> {
         self.score.dispatch(self.sample,&mut self.instrument)?;
-        let volume=if self.microphone.is_some() {
+        // an accelerator steps contact-free stretches up to the next control event; its traces are
+        // consumed one frame at a time below, exactly where a CPU step's trace would be
+        if self.pending.is_empty() && self.microphone.is_some() {
+            if let Some(accelerator)=&mut self.accelerator {
+                let mut until=self.score.next_event_sample().map_or(4096,|e|e.saturating_sub(self.sample).min(4096));
+                if let Some(h)=self.horizon {until=until.min(h.saturating_sub(self.sample));}
+                let until=until as usize;
+                if until>1 {
+                    let len=self.board_trace.len();
+                    self.traces.resize(until*len,0.0);
+                    let done=accelerator.advance(&mut self.instrument,until,&mut self.traces)?;
+                    self.pending.extend(0..done);
+                }
+            }
+        }
+        let volume=if let Some(k)=self.pending.pop_front() {
+            let len=self.board_trace.len();
+            self.board_trace.copy_from_slice(&self.traces[k*len..(k+1)*len]);
+            if self.pending.is_empty() {self.traces.clear();}
+            Ok(0.0)
+        } else if self.microphone.is_some() {
             self.instrument.step_with_board_trace(&mut self.board_trace)
         } else {self.instrument.step()}.map_err(|e|e.to_string())?;
         let pressure=match &mut self.microphone {

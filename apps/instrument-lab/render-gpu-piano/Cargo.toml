@@ -1,0 +1,51 @@
+[package]
+name = "fs-render-gpu-piano"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "The grand_piano renderer with its contact-free stretches stepped on a GPU (Metal on Apple silicon, CUDA elsewhere) or on CPU cores. It compiles the fs-couple grand_piano example's own sources; their CPU step stays the reference."
+
+# Its own workspace (the render-gpu / engine-piano pattern): nothing in the main workspace builds or links
+# this tool or its GPU bindings.
+[workspace]
+
+[[bin]]
+name = "render-gpu-piano"
+path = "src/main.rs"
+
+[features]
+default = ["gpu"]
+# Metal on macOS; on other systems cudarc loads the CUDA driver and NVRTC at run time (no CUDA toolkit
+# needed to build, none needed to run on the CPU).
+gpu = ["dep:metal", "dep:cudarc"]
+
+# The crates the grand_piano sources name.
+[dependencies]
+fs-bem = { path = "../../../crates/fs-bem" }
+fs-blake3 = { path = "../../../crates/fs-blake3" }
+fs-couple = { path = "../../../crates/fs-couple" }
+fs-evidence = { path = "../../../crates/fs-evidence" }
+fs-io = { path = "../../../crates/fs-io" }
+fs-la = { path = "../../../crates/fs-la" }
+fs-matdb = { path = "../../../crates/fs-matdb" }
+fs-material = { path = "../../../crates/fs-material" }
+fs-math = { path = "../../../crates/fs-math" }
+fs-modal = { path = "../../../crates/fs-modal" }
+fs-nlmodal = { path = "../../../crates/fs-nlmodal" }
+fs-phs = { path = "../../../crates/fs-phs" }
+fs-plate = { path = "../../../crates/fs-plate" }
+fs-qty = { path = "../../../crates/fs-qty" }
+fs-solver = { path = "../../../crates/fs-solver" }
+fs-vfit = { path = "../../../crates/fs-vfit" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = { version = "=0.33.0", optional = true }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-13020"], optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false

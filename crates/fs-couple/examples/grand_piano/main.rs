@@ -2,7 +2,7 @@
 //! `cargo run --release -p fs-couple --example grand_piano -- --preset steinway-d --render piano.wav`
 //! Source-derived geometry is approximate, not a measured specimen digital twin.
 mod geometry;
-mod linear;
+pub(crate) mod linear;
 mod board;
 mod board_geometry;
 mod crowned_board;
@@ -12,10 +12,10 @@ mod stretch_tuning;
 mod performance;
 use performance::midi;
 mod felt;
-mod engine;
+pub(crate) mod engine;
 mod microphone;
 mod pressure_basis;
-mod audio;
+pub(crate) mod audio;
 mod wav_output;
 mod hammer_materials;
 mod string_sections;
@@ -1024,6 +1024,8 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         None=>audio::AudioStream::new(piano,score,surface,left,
             fs_bem::helmholtz::Medium::air(),options.observer_gain)?,
     };
+    // the bridge trace reads the instrument after every frame
+    if bridge_row.is_some() { stream.disable_accelerator(); }
     if let Some(mic) = stream.microphone() {
         println!("Rayleigh pressure microphone at {:?} m; propagation {:?} samples plus {} anti-alias delay samples; {} modal multiplies/output sample.",
             mic.position_m, mic.delay_samples, mic.filter_delay_samples(), mic.multiply_adds_per_sample());
@@ -1044,6 +1046,7 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         Some(vec![0.0; values])
     } else { None };
     let mut trace_frame = 0;
+    stream.set_horizon(u64::from(count));
     let start = std::time::Instant::now();
     for block in pressure.chunks_mut(256*channels) {
         if bridge_velocity.is_some() || modal_pressure.is_some() {
@@ -1137,8 +1140,9 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
     Ok(())
 }
 
-fn run() -> Result<(), String> {
-    let options = Options::parse(&std::env::args().skip(1).collect::<Vec<_>>())?;
+fn run() -> Result<(), String> { run_with(&std::env::args().skip(1).collect::<Vec<_>>()) }
+fn run_with(args: &[String]) -> Result<(), String> {
+    let options = Options::parse(args)?;
     if options.help { println!("{USAGE}"); return Ok(()); }
     let read = |path: &String| std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"));
     let scale_text = options.scale.as_ref().map(read).transpose()?;
@@ -1254,6 +1258,11 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(error) = run() { eprintln!("grand_piano: {error}"); std::process::exit(1); }
 }
+
+/// The command line, for a host that compiles these sources as a module and installs an accelerator
+/// first (apps/instrument-lab/render-gpu-piano).
+#[allow(dead_code)]
+pub(crate) fn cli_main(args: &[String]) -> Result<(), String> { run_with(args) }
 
 #[cfg(test)]
 #[path = "rayleigh_loading_render_tests.rs"]

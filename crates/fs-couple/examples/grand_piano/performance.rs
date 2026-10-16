@@ -129,6 +129,9 @@ impl Performance {
         Ok(key)
     }
 
+    /// The sample of the next control event not yet dispatched (None after the last).
+    pub fn next_event_sample(&self) -> Option<u64> { self.events.get(self.cursor).map(|e| e.sample) }
+
     /// Dispatch BEFORE the sample's mechanical step. Equal-time events retain
     /// file order, including note-off/pedal transitions. A skipped event refuses
     /// rather than applying it at the wrong time or silently discarding it.

@@ -426,6 +426,193 @@ impl Instrument {
         self.felt_dampers=Some(prepared);
         Ok(())
     }
+    /// The bank and damper images an external contact-free stepper needs (render-gpu-piano), or None
+    /// when this instrument uses something it does not model (felt dampers, point-drag dampers,
+    /// exterior radiation, cavity, string stretching, hammer footprints, substeps other than 1).
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn gpu_images(&mut self)->Option<(super::linear::BankImage,Option<dampers::DamperImage>)>{
+        if self.felt_dampers.is_some()||self.radiation.is_some()||self.cavity.is_some()||self.substeps!=1
+            ||(self.spatial_dampers.is_none()&&self.damper_drag_ns_m!=0.0) {return None;}
+        let bank=self.bank.gpu_image()?;
+        Some((bank,self.damper_image()))
+    }
+
+    /// The spatial dampers' superposed pass for the present pedal (`gpu_images`), None without them.
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn damper_image(&mut self)->Option<dampers::DamperImage>{
+        let dt=1.0/f64::from(self.bank.rate);
+        let sustain=self.sustain;
+        self.spatial_dampers.as_mut().map(|d|d.gpu_image(sustain,0.5*dt))
+    }
+
+    /// Mechanics steps the hammers can take with no contact possible, at most `max`: every active
+    /// hammer, flying free, stays more than `clearance_m` below each enabled contact site wherever its
+    /// string is within `margin` times `Bank::contact_amplitude_bound`. A planner for an external
+    /// stepper: it simulates copies and changes nothing. The exact guard is `advance_hammers_external`.
+    /// (`&mut` only for the hammer models' trial scratch, which every `advance` restores.)
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn contact_free_steps(&mut self,max:usize,clearance_m:f64,margin:f64)->usize{
+        if !self.hammers.iter().any(|h|h.active) {return max;}
+        let dt=1.0/f64::from(self.bank.rate);
+        let bounds:Vec<f64>=(0..self.contacts.len()).map(|c|margin*self.bank.contact_amplitude_bound(c)).collect();
+        let mut hammers=self.hammers.clone();
+        for step in 0..max {
+            for (i,h) in hammers.iter_mut().enumerate() {
+                if !h.active {continue;}
+                let p=&mut self.hammer_models[i];
+                let y=p.position(&h.motion);
+                let mut jack=0.0;
+                if y>=-LET_OFF_DISTANCE||h.jack.elapsed_s>=h.jack.duration_s {h.jack.peak_n=0.0;}
+                if h.jack.peak_n>0.0 {
+                    let phase=std::f64::consts::PI*(h.jack.elapsed_s+0.5*dt).min(h.jack.duration_s)/h.jack.duration_s;
+                    jack=h.jack.peak_n*fs_math::det::sin(phase).powi(2);
+                    h.jack.elapsed_s+=dt;
+                }
+                let Ok((free,_))=p.advance(&h.motion,0.0,jack) else {return step};
+                let mut rest=0.0;
+                let mut position=p.position(&free);
+                if h.on_rest {
+                    if position< -CATCH_DISTANCE {rest=(-CATCH_DISTANCE-position)/p.compliance();position=-CATCH_DISTANCE;}
+                    else {h.on_rest=false;}
+                }
+                for c in 0..self.contacts.len() {
+                    if self.bank.strings[self.bank.contact_strings[c]].course!=i || !self.contacts[c].enabled {continue;}
+                    let gap=self.contact_hammer_projection[c]*position+bounds[c]-self.contact_recession_m[c];
+                    if gap> -clearance_m {return step;}
+                }
+                let Ok((motion,_))=p.advance(&h.motion,rest,jack) else {return step};
+                h.motion=motion;
+            }
+        }
+        max
+    }
+
+    /// The controls of the spatial dampers: per course whether a held key or a sostenuto latch lifts
+    /// its dampers, and the sustain pedal (an external stepper rebuilds its damper image on change).
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn damper_controls(&self)->(Vec<bool>,f64){
+        (self.hammers.iter().map(|h|h.held||h.latched).collect(),self.sustain)
+    }
+
+    /// The hammer half of one contact-free mechanics step whose bank an external stepper advanced
+    /// (render-gpu-piano): jack, free flight, rest support, zero contact force, felt memory, overlap
+    /// and catch, from `positions` (each contact's string position after the step, which with zero
+    /// contact force is also its predicted free position). A transcription of `mechanics_step` with
+    /// every contact force zero; keep the two in step. Ok(None), changing nothing, when a contact
+    /// could engage (gap above `-clearance_m`): that step belongs to the CPU. Returns the step's
+    /// (jack work, shank, felt, felt relaxation, catch) energies, also added to the ledger.
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn advance_hammers_external(&mut self,positions:&[f64],clearance_m:f64)->Result<Option<[f64;5]>,Error>{
+        let dt=1.0/f64::from(self.bank.rate);let nc=self.contacts.len();
+        if positions.len()!=nc {return Err(Error::InvalidControl);}
+        let saved=self.hammers.clone();
+        self.jack_force.fill(0.0);self.rest_force.fill(0.0);
+        for i in 0..self.hammers.len() {
+            let h=&mut self.hammers[i];let p=&mut self.hammer_models[i];
+            let y=p.position(&h.motion);self.hammer_free[i]=y;
+            if !h.active {continue;}
+            if y>=-LET_OFF_DISTANCE||h.jack.elapsed_s>=h.jack.duration_s {h.jack.peak_n=0.0;}
+            if h.jack.peak_n>0.0 {
+                let phase=std::f64::consts::PI*(h.jack.elapsed_s+0.5*dt).min(h.jack.duration_s)/h.jack.duration_s;
+                self.jack_force[i]=h.jack.peak_n*fs_math::det::sin(phase).powi(2);
+                h.jack.elapsed_s+=dt;
+            }
+            let (free,_)=p.advance(&h.motion,0.0,self.jack_force[i]).map_err(Error::Contact)?;
+            self.hammer_free[i]=p.position(&free);
+            if h.on_rest {
+                if self.hammer_free[i]< -CATCH_DISTANCE {
+                    self.rest_force[i]=(-CATCH_DISTANCE-self.hammer_free[i])/p.compliance();
+                    self.hammer_free[i]=-CATCH_DISTANCE;
+                } else {h.on_rest=false;}
+            }
+        }
+        for c in 0..nc {
+            let ci=self.bank.strings[self.bank.contact_strings[c]].course;
+            let gap=self.contact_hammer_projection[c]*self.hammer_free[ci]-positions[c]-self.contact_recession_m[c];
+            if self.hammers[ci].active&&self.contacts[c].enabled&&gap> -clearance_m {
+                self.hammers.copy_from_slice(&saved);
+                return Ok(None);
+            }
+        }
+        self.force.fill(0.0);
+        self.hammer_next.copy_from_slice(&self.hammers);
+        let mut shank_loss=0.0;let mut jack_work=0.0;
+        for (i,h) in self.hammer_next.iter_mut().enumerate(){if h.active {
+            let model=&mut self.hammer_models[i];
+            let (motion,loss)=model.advance(&self.hammers[i].motion,self.rest_force[i],self.jack_force[i]).map_err(Error::Contact)?;
+            jack_work+=self.jack_force[i]*(model.jack_position(&motion)-model.jack_position(&self.hammers[i].motion));
+            shank_loss+=loss;h.motion=motion;
+        }}
+        let mut felt_loss=0.0;let mut relaxation_loss=0.0;
+        for i in 0..nc {
+            let ci=self.bank.strings[self.bank.contact_strings[i]].course;let thickness=self.contact_thickness_m[i];
+            let end=self.contact_hammer_projection[i]*self.hammer_models[ci].position(&self.hammer_next[ci].motion)-positions[i]-self.contact_recession_m[i];
+            let material=&self.creep[i];let old=&self.contacts[i];
+            let (memory,viscous)=material.advance(&old.memory,0.0);
+            relaxation_loss+=viscous;felt_loss+=viscous;
+            if old.enabled {
+                let start_elastic=old.overlap-material.deformation(&old.memory);
+                let end_elastic=end-material.deformation(&memory);
+                let state=self.laws[ci].update_state(end_elastic/thickness,&old.state);
+                let volume=self.contact_areas[i]*thickness;
+                let delta=volume*(felt::stored(&self.laws[ci],end_elastic/thickness,&state)
+                    -felt::stored(&self.laws[ci],start_elastic/thickness,&old.state));
+                let contact_loss=-delta;
+                if self.source_rate_n_s_m_p[i]>0.0 {relaxation_loss+=contact_loss;}
+                felt_loss+=contact_loss;
+                self.contacts[i].state=state;
+            }
+            self.contacts[i].memory=memory;
+            self.contacts[i].overlap=end;self.contacts[i].force=0.0;
+        }
+        self.hammers.copy_from_slice(&self.hammer_next);
+        let mut catch_loss=0.0;
+        for i in 0..self.hammers.len(){
+            let h=self.hammers[i];let model=&self.hammer_models[i];
+            let landed=model.position(&h.motion)< -CATCH_DISTANCE-1e-10&&model.velocity(&h.motion)<0.0;
+            if h.active&&(landed||(h.on_rest&&h.jack.peak_n==0.0)) {
+                let clear=(0..nc).filter(|&c|self.bank.strings[self.bank.contact_strings[c]].course==i)
+                    .all(|c|self.contacts[c].overlap<=0.0);
+                if clear {
+                    let rest=model.rest(CATCH_DISTANCE);
+                    catch_loss+=model.energy(&h.motion,CATCH_DISTANCE)-model.energy(&rest,CATCH_DISTANCE);
+                    self.hammers[i].motion=rest;self.hammers[i].on_rest=true;
+                    self.hammers[i].active=h.jack.peak_n>0.0;
+                    let y=self.hammer_models[i].position(&self.hammers[i].motion);
+                    for c in 0..nc {if self.bank.strings[self.bank.contact_strings[c]].course==i {
+                        self.contacts[c].overlap=self.contact_hammer_projection[c]*y-positions[c]-self.contact_recession_m[c];
+                        self.contacts[c].force=0.0;
+                    }}
+                }
+            }
+        }
+        self.accounting.input_work_j+=jack_work;self.accounting.shank_loss_j+=shank_loss;
+        self.accounting.felt_loss_j+=felt_loss;self.accounting.felt_relaxation_loss_j+=relaxation_loss;
+        self.accounting.catch_loss_j+=catch_loss;
+        Ok(Some([jack_work,shank_loss,felt_loss,relaxation_loss,catch_loss]))
+    }
+
+    /// Add the modal and damper losses of steps an external stepper took to the ledger.
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn absorb_external_losses(&mut self,modal_loss:f64,damper_loss:f64){
+        self.accounting.modal_loss_j+=modal_loss;self.accounting.damper_loss_j+=damper_loss;
+    }
+
+    /// The contact-free part of one mechanics step on the CPU, the oracle an external stepper is
+    /// checked against: damp, predict, finish with zero contact forces, commit, damp. Hammers, contacts
+    /// and the energy ledger are not touched. Returns (modal loss, damper loss) of the step.
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn step_linear_reference(&mut self)->Result<(f64,f64),Error>{
+        let dt=1.0/f64::from(self.bank.rate);
+        let mut damper_loss=self.damp(0.5*dt,false)?;
+        self.bank.predict();
+        let zeros=vec![0.0;self.bank.contact_strings.len()];
+        self.bank.finish(&zeros);
+        self.bank.commit();
+        damper_loss+=self.damp(0.5*dt,true)?;
+        Ok((self.bank.last_modal_loss_j,damper_loss))
+    }
+
     /// Carry the spatial dampers' flows on reduced coordinates (`--fast-dampers`; see
     /// `dampers::Prepared::apply_reduced`). False when no spatial dampers are configured.
     pub fn use_reduced_dampers(&mut self)->bool{
