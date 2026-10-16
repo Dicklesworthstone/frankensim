@@ -69,6 +69,8 @@
 //! multimodal structure by ~15 cents.
 
 pub mod modal;
+/// Generic frequency-domain duct graphs, loops and labelled N-port impedances.
+pub mod network;
 /// Exact thin-wall unflanged radiation load below the axisymmetric cutoff.
 pub mod levine_schwinger;
 pub use levine_schwinger::{LsQuadrature, LsSolution, LS_MAX_KA, levine_schwinger_impedance};
