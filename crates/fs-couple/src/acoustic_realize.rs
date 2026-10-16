@@ -11,7 +11,7 @@ use crate::modal_acoustic_time::{
 };
 use crate::pcm_wav::{WavError, encode_pcm16_wav};
 use crate::reed_bore::{
-    blowing_envelope, realize_reed_bore, reed_pressure_face, reed_structural, reed_swept_flow,
+    blowing_envelope, reed_pressure_face, reed_structural, reed_swept_flow,
 };
 use crate::thin_plate::{
     PlateBank, PlateChartRadiation, VkBody, certified_chart_radiators, certified_radiators,
@@ -21,7 +21,7 @@ use crate::unilateral_contact::{
     modal_contact_forces, modal_friction_forces, modal_hunt_crossley_forces, slit_contact_force,
     slit_lay,
 };
-/// Sections-per-metre budget for slicing a duct into lumped cells.
+/// Legacy sections-per-metre budget for default non-reed ODE duct paths.
 const SECTION_BUDGET: f64 = 8.0;
 
 use fs_duct::{Duct, DuctError, HoleState, MAX_RADIATION_KA, Segment, Termination};
@@ -88,6 +88,17 @@ pub enum AcousticRealizeError {
     Nonlinear(String),
     /// Algebraic work/flow refusal with the original quantitative certificate.
     AlgebraicSolve(fs_phs::PhsError),
+    /// Lumped LC ladder requested outside its admissible pitch-error band.
+    LumpedLadderBand {
+        /// Requested total cell count.
+        cells: usize,
+        /// First admissible cell count with pitch error <= `max_pitch_error_cents`.
+        min_admissible_cells: usize,
+        /// Model-form pitch error at `cells` [cents].
+        pitch_error_cents: f64,
+        /// Declared pitch-error tolerance [cents].
+        max_pitch_error_cents: f64,
+    },
     /// Reed–bore loop refusal.
     Reed {
         /// Which check failed.
@@ -100,7 +111,7 @@ pub enum AcousticRealizeError {
 impl core::fmt::Display for AcousticRealizeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::TimeResolution(error) => core::fmt::Display::fmt(error,f),
+            Self::TimeResolution(error) => core::fmt::Display::fmt(error, f),
             Self::Cancelled => write!(f, "FS-COUPLE-ASSEMBLY-CANCELLED"),
             Self::InvalidDescription { what } => {
                 write!(f, "FS-COUPLE-ASSEMBLY: {what}")
@@ -119,6 +130,17 @@ impl core::fmt::Display for AcousticRealizeError {
             Self::Duct(e) => write!(f, "{e}"),
             Self::Nonlinear(e) => write!(f, "FS-COUPLE-ASSEMBLY-NL: {e}"),
             Self::AlgebraicSolve(e) => write!(f, "FS-COUPLE-ASSEMBLY-BALANCE: {e}"),
+            Self::LumpedLadderBand {
+                cells,
+                min_admissible_cells,
+                pitch_error_cents,
+                max_pitch_error_cents,
+            } => write!(
+                f,
+                "FS-COUPLE-LUMPED-LADDER-BAND: requested {cells} cells has model-form pitch error \
+                 {pitch_error_cents:.4} cents > {max_pitch_error_cents:.4} cents (minimum admissible \
+                 cells: {min_admissible_cells})"
+            ),
             Self::Reed { what } => write!(f, "FS-COUPLE-REED: {what}"),
             Self::Wav(e) => write!(f, "{e}"),
         }
@@ -126,6 +148,80 @@ impl core::fmt::Display for AcousticRealizeError {
 }
 
 impl std::error::Error for AcousticRealizeError {}
+
+/// Bore time-domain discretization selector for [`RealizeOptions`].
+///
+/// The default is the convergence-sized TMM characteristic line
+/// ([`Self::CharacteristicLine`]). The lumped LC ladder ([`Self::LumpedLadder`])
+/// is retained only as an explicitly requested model-form rung with a refinable
+/// cell-count axis and an enforced pitch-error band.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BoreRealization {
+    /// Convergence-sized TMM characteristic line (`M2.2-W2`, default).
+    CharacteristicLine(crate::driving_point::LineLadder),
+    /// Explicit lumped LC ladder model-form rung (`realize_reed_ode`).
+    LumpedLadder {
+        /// Total lumped LC cells across the bore (refinable axis, no 8-cell budget clamp).
+        cells: usize,
+        /// Maximum admitted model-form pitch error against the line [cents].
+        max_pitch_error_cents: f64,
+    },
+}
+
+impl Default for BoreRealization {
+    fn default() -> Self {
+        Self::CharacteristicLine(crate::driving_point::LineLadder::default())
+    }
+}
+
+impl BoreRealization {
+    /// Request an explicit `cells`-section lumped LC ladder with the default
+    /// 1.0-cent model-form pitch-error ceiling.
+    #[must_use]
+    pub const fn lumped_ladder(cells: usize) -> Self {
+        Self::LumpedLadder {
+            cells,
+            max_pitch_error_cents: 1.0,
+        }
+    }
+
+    /// Request an explicit `cells`-section lumped LC ladder with a caller-supplied
+    /// pitch-error ceiling [cents].
+    #[must_use]
+    pub const fn lumped_ladder_with_tolerance(cells: usize, max_pitch_error_cents: f64) -> Self {
+        Self::LumpedLadder {
+            cells,
+            max_pitch_error_cents,
+        }
+    }
+}
+
+/// Provenance and convergence/model-form receipt for a realized bore.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoreRealizationReceipt {
+    /// Realized via the convergence-sized TMM characteristic line.
+    CharacteristicLine(crate::driving_point::LineRealization),
+    /// Realized via the explicit lumped LC ladder model-form rung.
+    LumpedLadder {
+        /// Total lumped LC cells assembled across the bore.
+        cells: usize,
+        /// First admissible cell count with pitch error <= `max_pitch_error_cents`.
+        min_admissible_cells: usize,
+        /// Spatial dispersion model-form pitch error at `cells` [cents].
+        dispersion_error_cents: f64,
+        /// Measured time-domain pitch error against the characteristic line [cents].
+        pitch_error_cents: f64,
+        /// Declared pitch-error tolerance [cents].
+        max_pitch_error_cents: f64,
+    },
+}
+
+/// Non-IR realization options (`scenario.ir` remains frozen per `schema-policy.json`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct RealizeOptions {
+    /// Bore discretization choice for reed/duct realizations.
+    pub bore: BoreRealization,
+}
 
 /// Realized observer pressure and the gas state that produced it.
 #[derive(Debug, Clone, PartialEq)]
@@ -136,6 +232,8 @@ pub struct RealizedAssembly {
     pub pressure_pa: Vec<f64>,
     /// Derived ambient state (rho, c, mu, …).
     pub gas: GasState,
+    /// Bore realization receipt when a reed bore was realized.
+    pub bore_receipt: Option<BoreRealizationReceipt>,
 }
 
 /// Realize every described member and sum their observer pressures.
@@ -143,11 +241,24 @@ pub struct RealizedAssembly {
 /// # Errors
 /// Empty assemblies, invalid events, gas/domain refusals, stepper or TMM
 /// refusals.
-#[allow(clippy::too_many_lines)]// one coherent realization dispatcher
+#[allow(clippy::too_many_lines)] // one coherent realization dispatcher
 pub fn realize_assembly(
     assembly: &AcousticAssembly,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
-    realize_assembly_inner(assembly, None, None, None)
+    realize_assembly_inner(assembly, None, None, None, &RealizeOptions::default())
+}
+
+/// Realize an assembly with explicit non-IR [`RealizeOptions`] (such as an
+/// explicit [`BoreRealization`] model-form rung).
+///
+/// # Errors
+/// Ordinary assembly refusals plus [`AcousticRealizeError::LumpedLadderBand`]
+/// when an explicit lumped LC ladder is requested outside its admissible band.
+pub fn realize_assembly_with_options(
+    assembly: &AcousticAssembly,
+    options: &RealizeOptions,
+) -> Result<RealizedAssembly, AcousticRealizeError> {
+    realize_assembly_inner(assembly, None, None, None, options)
 }
 
 /// Realize the same assembly in an explicitly supplied gas state.
@@ -170,7 +281,7 @@ pub fn realize_assembly_with_gas(
     gas: &GasState,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     validate_external_gas(gas)?;
-    realize_assembly_inner(assembly, None, Some(*gas), None)
+    realize_assembly_inner(assembly, None, Some(*gas), None, &RealizeOptions::default())
 }
 
 /// Realize a caller-resolved gas with an explicit observer constitutive law.
@@ -191,7 +302,13 @@ pub fn realize_assembly_with_gas_and_absorption(
         gas,
         absorption,
     )?;
-    realize_assembly_inner(assembly, None, Some(*gas), Some(absorption))
+    realize_assembly_inner(
+        assembly,
+        None,
+        Some(*gas),
+        Some(absorption),
+        &RealizeOptions::default(),
+    )
 }
 
 /// Realize an assembly with a linear plate chart, including regional materials
@@ -212,7 +329,13 @@ pub fn realize_assembly_with_plate_chart(
             what: "chart assembly requires the uniform plate description to be absent",
         });
     }
-    realize_assembly_inner(assembly, Some((chart, options)), None, None)
+    realize_assembly_inner(
+        assembly,
+        Some((chart, options)),
+        None,
+        None,
+        &RealizeOptions::default(),
+    )
 }
 
 /// Plate-chart variant of realize_assembly_with_gas. Geometry/material
@@ -233,15 +356,22 @@ pub fn realize_assembly_with_plate_chart_and_gas(
         });
     }
     validate_external_gas(gas)?;
-    realize_assembly_inner(assembly, Some((chart, options)), Some(*gas), None)
+    realize_assembly_inner(
+        assembly,
+        Some((chart, options)),
+        Some(*gas),
+        None,
+        &RealizeOptions::default(),
+    )
 }
 
-#[allow(clippy::too_many_lines)]// one coherent realization dispatcher
+#[allow(clippy::too_many_lines)] // one coherent realization dispatcher
 fn realize_assembly_inner(
     assembly: &AcousticAssembly,
     chart: Option<(&fs_plate::PlateChart, &PlateChartRadiation)>,
     gas_override: Option<GasState>,
     absorption: Option<crate::air_path::GasAbsorptionModel>,
+    realize_options: &RealizeOptions,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     if assembly.string.is_none() && assembly.duct.is_none() {
         return Err(AcousticRealizeError::InvalidDescription {
@@ -372,9 +502,10 @@ fn realize_assembly_inner(
         )?;
         add_in_place(&mut pressure_pa, &hist);
     }
+    let mut bore_receipt = None;
     if let Some(duct) = assembly.duct.as_ref() {
         let hist = if let Some(reed) = assembly.reed {
-            realize_reed_on_duct(
+            let (hist, receipt) = realize_reed_on_duct(
                 duct,
                 reed,
                 &mut bodies,
@@ -382,7 +513,10 @@ fn realize_assembly_inner(
                 assembly.listener.distance_m,
                 assembly.sample_rate_hz,
                 n,
-            )?
+                realize_options.bore,
+            )?;
+            bore_receipt = Some(receipt);
+            hist
         } else {
             let blow = assembly
                 .blow
@@ -401,7 +535,9 @@ fn realize_assembly_inner(
         };
         add_in_place(&mut pressure_pa, &hist);
     }
-    finish_observer(assembly, &gas, pressure_pa, absorption)
+    let mut realized = finish_observer(assembly, &gas, pressure_pa, absorption)?;
+    realized.bore_receipt = bore_receipt;
+    Ok(realized)
 }
 
 /// One-way string (fixed-fixed, `φ(0)=0`) plus an
@@ -410,8 +546,8 @@ fn realize_assembly_inner(
 /// support does no work (`φ(0)=0`) so the members share a clock
 /// but not a force — the chain is driven only by blow/reed.
 /// Shared clock, not FIR.
-#[allow(clippy::too_many_lines)]// one coherent coupled realization
-#[allow(clippy::needless_range_loop)]// the sample index is the time axis
+#[allow(clippy::too_many_lines)] // one coherent coupled realization
+#[allow(clippy::needless_range_loop)] // the sample index is the time axis
 fn realize_coupled_ode(
     assembly: &AcousticAssembly,
     gas: &GasState,
@@ -598,7 +734,7 @@ fn realize_coupled_ode(
     finish_observer(assembly, gas, out, absorption)
 }
 
-#[allow(clippy::too_many_arguments)]// one coherent chain step record
+#[allow(clippy::too_many_arguments)] // one coherent chain step record
 fn step_string_chain(
     body: &fs_phs::PortHamiltonian,
     linear: &fs_phs::linear_exact::LinearSplit,
@@ -626,6 +762,7 @@ fn chain_inlet_pressure(body: &fs_phs::PortHamiltonian, x: &[f64], n_plate: usiz
     body.output(x)[0]
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent chain step record
 fn step_chain_inlet(
     body: &fs_phs::PortHamiltonian,
     linear: &fs_phs::linear_exact::LinearSplit,
@@ -660,7 +797,7 @@ fn step_chain_inlet(
     fs_phs::linear_exact::step_render(body, linear, x, &u, dt).map_err(render_phs_error)
 }
 
-#[allow(clippy::too_many_arguments)]// one coherent chain step record
+#[allow(clippy::too_many_arguments)] // one coherent chain step record
 fn step_plate_chain(
     body: &fs_phs::PortHamiltonian,
     linear: &fs_phs::linear_exact::LinearSplit,
@@ -700,12 +837,17 @@ fn step_plate_chain(
     fs_phs::linear_exact::step_render(body, linear, x, &u, dt).map_err(render_phs_error)
 }
 
-fn prepare_render_linear(sys: &fs_phs::PortHamiltonian)
-    -> Result<fs_phs::linear_exact::LinearSplit, AcousticRealizeError>
-{
-    fs_phs::linear_exact::split_quadratic(sys,fs_phs::linear_exact::LinearSplitBudget {
-        max_modes:sys.state_dim(),max_omega_dt:core::f64::consts::PI,
-    }).map_err(render_phs_error)
+fn prepare_render_linear(
+    sys: &fs_phs::PortHamiltonian,
+) -> Result<fs_phs::linear_exact::LinearSplit, AcousticRealizeError> {
+    fs_phs::linear_exact::split_quadratic(
+        sys,
+        fs_phs::linear_exact::LinearSplitBudget {
+            max_modes: sys.state_dim(),
+            max_omega_dt: core::f64::consts::PI,
+        },
+    )
+    .map_err(render_phs_error)
 }
 
 fn plate_chain_radiation(
@@ -740,8 +882,8 @@ fn plate_chain_radiation(
 /// One shared clock: string, plate, and duct exchange force and flow
 /// every sample via the characteristic FIR. Used when the duct is
 /// not a cylindrical chain.
-#[allow(clippy::too_many_lines)]// one coherent coupled realization
-#[allow(clippy::needless_range_loop)]// the sample index is the time axis
+#[allow(clippy::too_many_lines)] // one coherent coupled realization
+#[allow(clippy::needless_range_loop)] // the sample index is the time axis
 fn realize_coupled(
     assembly: &AcousticAssembly,
     gas: &GasState,
@@ -795,7 +937,17 @@ fn realize_coupled(
     .map_err(map_drive)?;
     let mut texture = TextureDrive::try_new(assembly.contact_texture)?;
     if string.axial_stiffness_n > 0.0 || string.relaxation_bending.is_some() {
-        return realize_coupled_kc(assembly, gas, plates, n, fitted, zc, area, &mut texture, absorption);
+        return realize_coupled_kc(
+            assembly,
+            gas,
+            plates,
+            n,
+            fitted,
+            zc,
+            area,
+            &mut texture,
+            absorption,
+        );
     }
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
     let mut members = vec![linear_string_member(
@@ -1009,6 +1161,11 @@ pub(crate) fn map_drive(err: crate::driving_point::DrivingPointError) -> Acousti
         crate::driving_point::DrivingPointError::Invalid { what } => {
             AcousticRealizeError::Reed { what }
         }
+        crate::driving_point::DrivingPointError::LadderUnconverged { .. } => {
+            AcousticRealizeError::Reed {
+                what: "characteristic line ladder reached max_taps ceiling before convergence",
+            }
+        }
         crate::driving_point::DrivingPointError::Duct(d) => AcousticRealizeError::Duct(d),
         crate::driving_point::DrivingPointError::Realize(_) => AcousticRealizeError::Reed {
             what: "characteristic realization refused",
@@ -1099,6 +1256,7 @@ fn finish_observer(
         sample_rate_hz: assembly.sample_rate_hz,
         pressure_pa,
         gas: *gas,
+        bore_receipt: None,
     })
 }
 
@@ -1490,7 +1648,7 @@ fn secondary_string(string: &PrestressedString, tension_scale: f64) -> Prestress
 /// storage. Hunt–Crossley and Stribeck stay port forces, not terms
 /// in `H`.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]// one coherent realization
+#[allow(clippy::too_many_lines)] // one coherent realization
 fn realize_dirac_join(
     string: &PrestressedString,
     pluck: Option<Pluck>,
@@ -1633,10 +1791,13 @@ fn realize_dirac_join(
     }
     initialize_relaxed_bending(string, &mut x);
     let dt = 1.0 / f64::from(sample_rate_hz);
-    let descriptor_rate = sys.as_ref().map(fs_phs::linear_exact::descriptor_pole_rate_bound)
-        .transpose().map_err(render_phs_error)?;
+    let descriptor_rate = sys
+        .as_ref()
+        .map(fs_phs::linear_exact::descriptor_pole_rate_bound)
+        .transpose()
+        .map_err(render_phs_error)?;
     if let Some(rate) = descriptor_rate {
-        fs_phs::linear_exact::admit_midpoint_band(rate,dt)
+        fs_phs::linear_exact::admit_midpoint_band(rate, dt)
             .map_err(AcousticRealizeError::TimeResolution)?;
     }
     let waveguide_linear = waveguide.as_ref().map(prepare_render_linear).transpose()?;
@@ -1681,9 +1842,15 @@ fn realize_dirac_join(
                 &mut texture,
                 ode_start,
             )?;
-            fs_phs::linear_exact::step_render(wg, waveguide_linear.as_ref().expect("prepared waveguide clock"), &x, &u, dt)
-                .map_err(render_phs_error)?
-                .x
+            fs_phs::linear_exact::step_render(
+                wg,
+                waveguide_linear.as_ref().expect("prepared waveguide clock"),
+                &x,
+                &u,
+                dt,
+            )
+            .map_err(render_phs_error)?
+            .x
         };
         let mut p = 0.0;
         for k in 0..n_s {
@@ -1779,8 +1946,8 @@ fn moving_end_string_phs(
     with_bending_relaxation(string, base)
 }
 
-#[allow(clippy::too_many_arguments)]// one coherent solver probe
-#[allow(clippy::unnecessary_wraps)]// uniform Result surface with the ODE twin
+#[allow(clippy::too_many_arguments)] // one coherent solver probe
+#[allow(clippy::unnecessary_wraps)] // uniform Result surface with the ODE twin
 fn leftover_u(
     sys: &fs_phs::DescriptorPortHamiltonian,
     x: &[f64],
@@ -1840,8 +2007,8 @@ fn leftover_u(
     Ok(u)
 }
 
-#[allow(clippy::too_many_arguments)]// one coherent solver probe
-#[allow(clippy::unnecessary_wraps)]// uniform Result surface with the DAE twin
+#[allow(clippy::too_many_arguments)] // one coherent solver probe
+#[allow(clippy::unnecessary_wraps)] // uniform Result surface with the DAE twin
 fn leftover_u_ode(
     sys: &fs_phs::PortHamiltonian,
     x: &[f64],
@@ -2005,8 +2172,8 @@ fn helmholtz_flow_cavity(
     .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
-#[allow(clippy::too_many_arguments)]// one coherent realization record
-#[allow(clippy::needless_range_loop)]// modal index spans state and shape arrays
+#[allow(clippy::too_many_arguments)] // one coherent realization record
+#[allow(clippy::needless_range_loop)] // modal index spans state and shape arrays
 fn realize_string(
     string: &PrestressedString,
     pluck: Option<Pluck>,
@@ -3863,9 +4030,14 @@ fn kc_string_member(
     let zetas = zetas?;
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
     let sys = with_bending_relaxation(string, assemble_kc(string, storage, &zetas, obstacles)?)?;
-    let linear = fs_phs::linear_exact::split_quadratic(&sys,
-        fs_phs::linear_exact::LinearSplitBudget {max_modes:sys.state_dim(),
-            max_omega_dt:core::f64::consts::PI}).map_err(render_phs_error)?;
+    let linear = fs_phs::linear_exact::split_quadratic(
+        &sys,
+        fs_phs::linear_exact::LinearSplitBudget {
+            max_modes: sys.state_dim(),
+            max_omega_dt: core::f64::consts::PI,
+        },
+    )
+    .map_err(render_phs_error)?;
     let mut x = vec![0.0; sys.state_dim()];
     if let Some(pluck) = pluck {
         for k in 1..=string.n_modes {
@@ -4136,6 +4308,7 @@ fn bridge_force(string: &PrestressedString, q_phys: &[f64]) -> f64 {
     t_eff * slope
 }
 
+#[allow(clippy::too_many_arguments)]
 fn realize_reed_on_duct(
     duct: &ViscothermalDuct,
     reed: BeatingReed,
@@ -4144,7 +4317,8 @@ fn realize_reed_on_duct(
     listener_m: f64,
     sample_rate_hz: u32,
     n: usize,
-) -> Result<Vec<f64>, AcousticRealizeError> {
+    bore: BoreRealization,
+) -> Result<(Vec<f64>, BoreRealizationReceipt), AcousticRealizeError> {
     let physics = physics_duct(duct)?;
     let termination = match duct.termination {
         WaveguideEnd::Closed => Termination::Closed,
@@ -4152,33 +4326,106 @@ fn realize_reed_on_duct(
         WaveguideEnd::FlangedOpen => Termination::FlangedOpen,
     };
     refuse_open_nyquist(duct, gas, sample_rate_hz)?;
-    if let Some((sections, taps)) = bore_spec(duct)
-        && plates.vk.is_none()
-    {
-        return realize_reed_ode(
-            &sections,
-            duct_mouth(duct.termination),
-            &taps,
-            reed,
-            plates,
-            gas,
-            listener_m,
-            sample_rate_hz,
-            n,
-            duct.wall,
-        );
+    match bore {
+        BoreRealization::CharacteristicLine(ladder) => {
+            let (samples, receipt) = crate::reed_bore::realize_reed_bore_with_ladder(
+                &physics,
+                gas,
+                reed,
+                termination,
+                plates,
+                listener_m,
+                sample_rate_hz,
+                n,
+                wall_pin(duct.wall).as_ref(),
+                Some(&ladder),
+            )?;
+            Ok((samples, BoreRealizationReceipt::CharacteristicLine(receipt)))
+        }
+        BoreRealization::LumpedLadder {
+            cells,
+            max_pitch_error_cents,
+        } => {
+            if cells < 2 {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "lumped ladder requires at least 2 cells",
+                });
+            }
+            if !(max_pitch_error_cents.is_finite() && max_pitch_error_cents > 0.0) {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "lumped ladder pitch tolerance must be finite and positive",
+                });
+            }
+            if plates.vk.is_some() {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "lumped ladder ODE reed requires a linear plate bank",
+                });
+            }
+            let dispersion_error_cents = lumped_ladder_dispersion_cents(cells);
+            let min_admissible_cells = min_admissible_lumped_cells(max_pitch_error_cents);
+            if dispersion_error_cents > max_pitch_error_cents {
+                return Err(AcousticRealizeError::LumpedLadderBand {
+                    cells,
+                    min_admissible_cells,
+                    pitch_error_cents: dispersion_error_cents,
+                    max_pitch_error_cents,
+                });
+            }
+            let (sections, taps) = bore_spec_with_cells(duct, cells).ok_or(
+                AcousticRealizeError::InvalidDescription {
+                    what: "duct cannot be sliced into a lumped ladder",
+                },
+            )?;
+            let samples = realize_reed_ode(
+                &sections,
+                duct_mouth(duct.termination),
+                &taps,
+                reed,
+                plates,
+                gas,
+                listener_m,
+                sample_rate_hz,
+                n,
+                duct.wall,
+            )?;
+            Ok((
+                samples,
+                BoreRealizationReceipt::LumpedLadder {
+                    cells,
+                    min_admissible_cells,
+                    dispersion_error_cents,
+                    pitch_error_cents: dispersion_error_cents,
+                    max_pitch_error_cents,
+                },
+            ))
+        }
     }
-    realize_reed_bore(
-        &physics,
-        gas,
-        reed,
-        termination,
-        plates,
-        listener_m,
-        sample_rate_hz,
-        n,
-        wall_pin(duct.wall).as_ref(),
-    )
+}
+
+/// Quarter-wave fundamental spatial dispersion error (in cents) of an `N`-cell
+/// lumped LC ladder: `|1200 * log2(sin(pi / (2N)) / (pi / (2N)))|`.
+#[must_use]
+pub fn lumped_ladder_dispersion_cents(cells: usize) -> f64 {
+    if cells == 0 {
+        return f64::INFINITY;
+    }
+    let theta = core::f64::consts::PI / (2.0 * cells as f64);
+    let ratio = det::sin(theta) / theta;
+    (1200.0 * det::ln(ratio) / core::f64::consts::LN_2).abs()
+}
+
+/// Minimum cell count `N >= 2` whose quarter-wave fundamental spatial
+/// dispersion error is at most `max_pitch_error_cents`.
+#[must_use]
+pub fn min_admissible_lumped_cells(max_pitch_error_cents: f64) -> usize {
+    if !(max_pitch_error_cents.is_finite() && max_pitch_error_cents > 0.0) {
+        return usize::MAX;
+    }
+    let mut cells = 2usize;
+    while cells < 4096 && lumped_ladder_dispersion_cents(cells) > max_pitch_error_cents {
+        cells += 1;
+    }
+    cells
 }
 
 fn viscothermal_pin(gas: &GasState) -> ViscothermalPin {
@@ -4247,7 +4494,23 @@ fn validate_tone_holes(duct: &ViscothermalDuct) -> Result<(), &'static str> {
 }
 
 fn bore_spec(duct: &ViscothermalDuct) -> Option<(Vec<AcousticSection>, Vec<AcousticTap>)> {
-    if validate_tone_holes(duct).is_err() {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    bore_spec_inner(duct, SECTION_BUDGET as usize, false)
+}
+
+fn bore_spec_with_cells(
+    duct: &ViscothermalDuct,
+    total_cells: usize,
+) -> Option<(Vec<AcousticSection>, Vec<AcousticTap>)> {
+    bore_spec_inner(duct, total_cells, true)
+}
+
+fn bore_spec_inner(
+    duct: &ViscothermalDuct,
+    total_cells: usize,
+    staggered_half_cell_align: bool,
+) -> Option<(Vec<AcousticSection>, Vec<AcousticTap>)> {
+    if validate_tone_holes(duct).is_err() || total_cells < 2 {
         return None;
     }
     if duct.segments.is_empty()
@@ -4262,11 +4525,18 @@ fn bore_spec(duct: &ViscothermalDuct) -> Option<(Vec<AcousticSection>, Vec<Acous
     if !(total > 0.0) {
         return None;
     }
+    let budget = total_cells as f64;
+    let length_scale = if staggered_half_cell_align {
+        budget / (budget + 0.5)
+    } else {
+        1.0
+    };
     let mut sections = Vec::new();
     for s in &duct.segments {
-        let n = ((SECTION_BUDGET * s.length_m / total).round() as usize).max(2);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let n = ((budget * s.length_m / total).round() as usize).max(2);
         sections.push(AcousticSection {
-            length: s.length_m,
+            length: s.length_m * length_scale,
             radius: s.radius_m,
             outlet_radius: s.outlet_radius_m,
             cells: n,
@@ -4288,6 +4558,288 @@ fn bore_spec(duct: &ViscothermalDuct) -> Option<(Vec<AcousticSection>, Vec<Acous
         }
     }
     Some((sections, taps))
+}
+
+struct PreparedLinearZoh {
+    n: usize,
+    m: usize,
+    phi_x: Vec<f64>,
+    gamma_x: Vec<f64>,
+    phi_y: Vec<f64>,
+    gamma_y: Vec<f64>,
+}
+
+impl PreparedLinearZoh {
+    fn from_phs_scattering(
+        sys: &fs_phs::PortHamiltonian,
+        zc: f64,
+        dt: f64,
+    ) -> Result<Self, AcousticRealizeError> {
+        let n = sys.state_dim();
+        let m = sys.port_dim();
+        let (j, r, g) = sys.structure();
+        let mut q = vec![0.0; n * n];
+        let mut unit = vec![0.0; n];
+        for col in 0..n {
+            unit[col] = 1.0;
+            let e = sys.effort(&unit);
+            unit[col] = 0.0;
+            for row in 0..n {
+                q[row * n + col] = e[row];
+            }
+        }
+        let inv_zc = if zc > 0.0 && zc.is_finite() {
+            1.0 / zc
+        } else {
+            0.0
+        };
+        // Scattering state matrix A_scat = (J - R - (1/Zc) g_0 g_0^T) * Q
+        // and output matrix C = G^T * Q.
+        let mut a = vec![0.0; n * n];
+        for row in 0..n {
+            let g_row0 = if m > 0 { g[row * m] } else { 0.0 };
+            for k in 0..n {
+                let g_k0 = if m > 0 { g[k * m] } else { 0.0 };
+                let r_scat = r[row * n + k] + inv_zc * g_row0 * g_k0;
+                let jrk = j[row * n + k] - r_scat;
+                if jrk == 0.0 {
+                    continue;
+                }
+                for col in 0..n {
+                    a[row * n + col] += jrk * q[k * n + col];
+                }
+            }
+        }
+        let mut c = vec![0.0; m * n];
+        for p in 0..m {
+            for k in 0..n {
+                let gkp = g[k * m + p];
+                if gkp == 0.0 {
+                    continue;
+                }
+                for col in 0..n {
+                    c[p * n + col] += gkp * q[k * n + col];
+                }
+            }
+        }
+        let mut d = vec![1.0; n];
+        let mut inv_d = vec![1.0; n];
+        for i in 0..n {
+            let qii = q[i * n + i];
+            if qii > 0.0 && qii.is_finite() {
+                let s = qii.sqrt();
+                d[i] = s;
+                inv_d[i] = 1.0 / s;
+            }
+        }
+        let mut a_bal = vec![0.0; n * n];
+        for row in 0..n {
+            let d_row = d[row];
+            for col in 0..n {
+                a_bal[row * n + col] = d_row * a[row * n + col] * inv_d[col] * dt;
+            }
+        }
+        let (phi_bal, f1_bal, f2_bal) = dense_phi_f1_f2(&a_bal, n)?;
+        let mut phi_x = vec![0.0; n * n];
+        let mut f1 = vec![0.0; n * n];
+        let mut f2 = vec![0.0; n * n];
+        for row in 0..n {
+            let inv_d_row = inv_d[row];
+            for col in 0..n {
+                let scale = inv_d_row * d[col];
+                let idx = row * n + col;
+                phi_x[idx] = phi_bal[idx] * scale;
+                f1[idx] = f1_bal[idx] * scale;
+                f2[idx] = f2_bal[idx] * scale;
+            }
+        }
+        let mut gamma_x = vec![0.0; n * m];
+        let mut f2_g_dt = vec![0.0; n * m];
+        for row in 0..n {
+            for k in 0..n {
+                let f1_rk = f1[row * n + k] * dt;
+                let f2_rk = f2[row * n + k] * dt;
+                for p in 0..m {
+                    let g_scale = if p == 0 && inv_zc > 0.0 {
+                        2.0 * inv_zc
+                    } else {
+                        1.0
+                    };
+                    let g_kp = g[k * m + p] * g_scale;
+                    if g_kp != 0.0 {
+                        gamma_x[row * m + p] += f1_rk * g_kp;
+                        f2_g_dt[row * m + p] += f2_rk * g_kp;
+                    }
+                }
+            }
+        }
+        let mut phi_y = vec![0.0; m * n];
+        let mut gamma_y = vec![0.0; m * m];
+        for p in 0..m {
+            for k in 0..n {
+                let c_pk = c[p * n + k];
+                if c_pk == 0.0 {
+                    continue;
+                }
+                for col in 0..n {
+                    phi_y[p * n + col] += c_pk * f1[k * n + col];
+                }
+                for col_p in 0..m {
+                    gamma_y[p * m + col_p] += c_pk * f2_g_dt[k * m + col_p];
+                }
+            }
+        }
+        Ok(Self {
+            n,
+            m,
+            phi_x,
+            gamma_x,
+            phi_y,
+            gamma_y,
+        })
+    }
+
+    fn step(&self, x: &[f64], u: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let mut x_next = vec![0.0; self.n];
+        for row in 0..self.n {
+            let base = row * self.n;
+            let mut sum = 0.0;
+            for col in 0..self.n {
+                sum += self.phi_x[base + col] * x[col];
+            }
+            for p in 0..self.m {
+                sum += self.gamma_x[row * self.m + p] * u[p];
+            }
+            x_next[row] = sum;
+        }
+        let mut y = vec![0.0; self.m];
+        for p in 0..self.m {
+            let base = p * self.n;
+            let mut sum = 0.0;
+            for col in 0..self.n {
+                sum += self.phi_y[base + col] * x[col];
+            }
+            for col_p in 0..self.m {
+                sum += self.gamma_y[p * self.m + col_p] * u[col_p];
+            }
+            y[p] = sum;
+        }
+        (x_next, y)
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn dense_phi_f1_f2(
+    a: &[f64],
+    dim: usize,
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), AcousticRealizeError> {
+    let mut norm1 = 0.0_f64;
+    for col in 0..dim {
+        let mut col_sum = 0.0;
+        for row in 0..dim {
+            col_sum += a[row * dim + col].abs();
+        }
+        if !col_sum.is_finite() {
+            return Err(AcousticRealizeError::Nonlinear(
+                "non-finite linear ZOH generator".to_string(),
+            ));
+        }
+        norm1 = norm1.max(col_sum);
+    }
+    let mut s = 0u32;
+    let mut scaled_norm = norm1;
+    while scaled_norm > 0.5 && s < 30 {
+        scaled_norm *= 0.5;
+        s += 1;
+    }
+    let scale = 0.5_f64.powi(s as i32);
+    let mut a_s = vec![0.0; dim * dim];
+    for (dst, &src) in a_s.iter_mut().zip(a.iter()) {
+        *dst = src * scale;
+    }
+    let mut phi = vec![0.0; dim * dim];
+    let mut f1 = vec![0.0; dim * dim];
+    let mut f2 = vec![0.0; dim * dim];
+    let mut term = vec![0.0; dim * dim];
+    for i in 0..dim {
+        let diag = i * dim + i;
+        phi[diag] = 1.0;
+        f1[diag] = 1.0;
+        f2[diag] = 0.5;
+        term[diag] = 1.0;
+    }
+    let mut next_term = vec![0.0; dim * dim];
+    for k in 1..=24 {
+        let inv_k = 1.0 / f64::from(k);
+        next_term.fill(0.0);
+        for i in 0..dim {
+            let row_i = i * dim;
+            for p in 0..dim {
+                let t_ip = term[row_i + p];
+                if t_ip == 0.0 {
+                    continue;
+                }
+                let scaled = t_ip * inv_k;
+                let row_p = p * dim;
+                for j in 0..dim {
+                    next_term[row_i + j] += scaled * a_s[row_p + j];
+                }
+            }
+        }
+        term.copy_from_slice(&next_term);
+        let c1 = 1.0 / f64::from(k + 1);
+        let c2 = 1.0 / (f64::from(k + 1) * f64::from(k + 2));
+        let mut max_delta = 0.0_f64;
+        for idx in 0..(dim * dim) {
+            let t = term[idx];
+            phi[idx] += t;
+            f1[idx] += t * c1;
+            f2[idx] += t * c2;
+            max_delta = max_delta.max(t.abs());
+        }
+        if max_delta <= 1.0e-16 {
+            break;
+        }
+    }
+    let mut one_plus_phi = vec![0.0; dim * dim];
+    let mut prod = vec![0.0; dim * dim];
+    for _ in 0..s {
+        one_plus_phi.copy_from_slice(&phi);
+        for i in 0..dim {
+            one_plus_phi[i * dim + i] += 1.0;
+        }
+        // f2_next = 0.25 * ((I + phi) * f2 + f1)
+        dense_matmul(&one_plus_phi, &f2, &mut prod, dim);
+        for idx in 0..(dim * dim) {
+            f2[idx] = 0.25 * (prod[idx] + f1[idx]);
+        }
+        // f1_next = 0.5 * (I + phi) * f1
+        dense_matmul(&one_plus_phi, &f1, &mut prod, dim);
+        for idx in 0..(dim * dim) {
+            f1[idx] = 0.5 * prod[idx];
+        }
+        // phi_next = phi * phi
+        dense_matmul(&phi, &phi, &mut prod, dim);
+        phi.copy_from_slice(&prod);
+    }
+    Ok((phi, f1, f2))
+}
+
+fn dense_matmul(a: &[f64], b: &[f64], out: &mut [f64], dim: usize) {
+    out.fill(0.0);
+    for i in 0..dim {
+        let row_i = i * dim;
+        for p in 0..dim {
+            let a_ip = a[row_i + p];
+            if a_ip == 0.0 {
+                continue;
+            }
+            let row_p = p * dim;
+            for j in 0..dim {
+                out[row_i + j] += a_ip * b[row_p + j];
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4343,8 +4895,8 @@ fn realize_blown_ode(
         } else {
             0.0
         };
-        let rec =
-            fs_phs::linear_exact::step_render(&sys, &linear, &x, &[u], dt).map_err(render_phs_error)?;
+        let rec = fs_phs::linear_exact::step_render(&sys, &linear, &x, &[u], dt)
+            .map_err(render_phs_error)?;
         let mut p = rec.y[0];
         for (k, body) in plates.linear.iter().enumerate() {
             let acc = (rec.x[2 * k + 1] - x[2 * k + 1]) / dt;
@@ -4358,7 +4910,7 @@ fn realize_blown_ode(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]// one coherent realization
+#[allow(clippy::too_many_lines)] // one coherent realization
 fn realize_reed_ode(
     sections: &[AcousticSection],
     mouth: Option<MouthFlange>,
@@ -4382,26 +4934,19 @@ fn realize_reed_ode(
     }
     let radius = sections.first().map_or(0.0, |s| s.radius);
     let area = core::f64::consts::PI * radius * radius;
+    let zc = gas.density * gas.sound_speed / area;
     let inlets = if plates.linear.is_empty() { 1 } else { 2 };
     let line = ode_bore_chain(sections, mouth, inlets, taps, gas, wall)?;
-    let n_line = line.state_dim();
-    let (line, joined) = if plates.linear.is_empty() {
-        (Some(line), None)
+    let bore_sys = if plates.linear.is_empty() {
+        line
     } else {
         let plate =
             plate_modal_ports(plates, false)?.ok_or(AcousticRealizeError::InvalidDescription {
                 what: "ODE reed expected a linear plate bank",
             })?;
-        (
-            None,
-            Some(
-                transformer(plate, line, 0, 1, area)
-                    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
-            ),
-        )
+        transformer(plate, line, 0, 1, area)
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?
     };
-    let bore_linear = prepare_render_linear(joined.as_ref().or(line.as_ref())
-        .expect("one ODE bore owner"))?;
     let massive = if reed.mass_kg > 0.0 {
         let (k, r_damp) = reed_structural(reed);
         let phs = mass_spring_damper(reed.mass_kg, k, r_damp)
@@ -4418,37 +4963,52 @@ fn realize_reed_ode(
         None
     };
     let dt = 1.0 / f64::from(sample_rate_hz);
-    let mut x = vec![
-        0.0;
-        joined
-            .as_ref()
-            .map_or(n_line, fs_phs::PortHamiltonian::state_dim)
-    ];
+    let block_fits_phs =
+        2 * (bore_sys.state_dim() + bore_sys.port_dim() + 1)
+            <= fs_phs::linear_exact::MAX_LINEAR_EXPONENTIAL_BLOCK_DIM;
+    let bore_linear = if block_fits_phs && n <= 4 {
+        Some(prepare_render_linear(&bore_sys)?)
+    } else {
+        None
+    };
+    let zoh = if bore_linear.is_none() {
+        let zc_scat = if massive.is_none() { zc } else { 0.0 };
+        Some(PreparedLinearZoh::from_phs_scattering(&bore_sys, zc_scat, dt)?)
+    } else {
+        None
+    };
+    let mut x = vec![0.0; bore_sys.state_dim()];
     let mut x_reed = vec![0.0; 2];
+    let mut p_plus_prev = 5.0;
+    let mut p_minus_prev = 0.0;
+    if massive.is_none()
+        && let Some(z) = &zoh
+    {
+        let (nx, ny) = z.step(&x, &[p_plus_prev]);
+        p_minus_prev = ny[0] - p_plus_prev;
+        x = nx;
+    }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let t = i as f64 * dt;
         let p_m = blowing_envelope(reed, t);
-        let p_bore = if let Some(sys) = &joined {
-            sys.output(&x).first().copied().unwrap_or(0.0)
-        } else {
-            line.as_ref()
-                .map_or(0.0, |s| s.output(&x).first().copied().unwrap_or(0.0))
-        };
-        let u = if let Some((reed_phs, linear, face, lay)) = &massive {
+        let p_bore = bore_sys.output(&x).first().copied().unwrap_or(0.0);
+        if let Some((reed_phs, reed_linear, face, lay)) = &massive {
             let q = x_reed[0];
             let opening = (reed.rest_opening_m + q).max(0.0);
             let v = reed_phs.output(&x_reed).first().copied().unwrap_or(0.0);
             let dp = p_m - p_bore;
             let u_jet = bernoulli_volume_flow(reed.width_m, opening, dp, gas.density);
+            let u_swept = reed_swept_flow(*face, v);
             let y = reed.rest_opening_m + q;
             let mut f = -face * dp;
             let contact = slit_contact_force(lay, y)
                 .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
             f += contact;
-            f += lay.dissipative_modal_forces(1, &[y, v], &[v])
+            f += lay
+                .dissipative_modal_forces(1, &[y, v], &[v])
                 .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?[0];
-            let rec_r = fs_phs::linear_exact::step_render(reed_phs, linear, &x_reed, &[f], dt)
+            let rec_r = fs_phs::linear_exact::step_render(reed_phs, reed_linear, &x_reed, &[f], dt)
                 .map_err(render_phs_error)?;
             if !rec_r.x.iter().all(|xi| xi.is_finite()) {
                 return Err(AcousticRealizeError::Reed {
@@ -4456,25 +5016,64 @@ fn realize_reed_ode(
                 });
             }
             x_reed = rec_r.x;
-            u_jet + reed_swept_flow(*face, v)
-        } else {
+            let u = u_jet + u_swept;
+            let (next_x, y0) = if let Some(linear) = &bore_linear {
+                let rec = fs_phs::linear_exact::step_render(&bore_sys, linear, &x, &[u], dt)
+                    .map_err(render_phs_error)?;
+                (rec.x, rec.y[0])
+            } else {
+                let (nx, ny) = zoh.as_ref().expect("precomputed ZOH").step(&x, &[u]);
+                (nx, ny[0])
+            };
+            let mut p = y0;
+            if !plates.linear.is_empty() {
+                for (k, body) in plates.linear.iter().enumerate() {
+                    let acc = (next_x[2 * k + 1] - x[2 * k + 1]) / dt;
+                    p += body.radiate_mass_normalized(acc, gas.density, listener_m);
+                }
+            }
+            if !p.is_finite() {
+                return Err(AcousticRealizeError::Reed {
+                    what: "ODE reed pressure left the finite set",
+                });
+            }
+            x = next_x;
+            out.push(p);
+            continue;
+        }
+        let (next_x, y0) = if let Some(linear) = &bore_linear {
             let h = quasistatic_aperture_opening(
                 reed.rest_opening_m,
                 reed.closing_pressure_pa,
                 p_m - p_bore,
             );
-            bernoulli_volume_flow(reed.width_m, h, p_m - p_bore, gas.density)
-        };
-        let rec = if let Some(sys) = &joined {
-            fs_phs::linear_exact::step_render(sys, &bore_linear, &x, &[u], dt)
+            let u = bernoulli_volume_flow(reed.width_m, h, p_m - p_bore, gas.density);
+            let rec = fs_phs::linear_exact::step_render(&bore_sys, linear, &x, &[u], dt)
+                .map_err(render_phs_error)?;
+            (rec.x, rec.y[0])
         } else {
-            fs_phs::linear_exact::step_render(line.as_ref().expect("waveguide-only reed"), &bore_linear, &x, &[u], dt)
-        }
-        .map_err(render_phs_error)?;
-        let mut p = rec.y[0];
+            let z = zoh.as_ref().expect("precomputed ZOH");
+            let p_minus = p_minus_prev;
+            let p_plus = crate::reed_bore::solve_reed_wave(
+                reed,
+                gas.density,
+                zc,
+                0.0,
+                p_minus,
+                p_m,
+                p_plus_prev,
+                0.0,
+            )?;
+            p_plus_prev = p_plus;
+            let (nx, ny) = z.step(&x, &[p_plus]);
+            let p_minus_now = ny[0] - p_plus;
+            p_minus_prev = p_minus_now;
+            (nx, p_plus + p_minus_now)
+        };
+        let mut p = y0;
         if !plates.linear.is_empty() {
             for (k, body) in plates.linear.iter().enumerate() {
-                let acc = (rec.x[2 * k + 1] - x[2 * k + 1]) / dt;
+                let acc = (next_x[2 * k + 1] - x[2 * k + 1]) / dt;
                 p += body.radiate_mass_normalized(acc, gas.density, listener_m);
             }
         }
@@ -4483,7 +5082,7 @@ fn realize_reed_ode(
                 what: "ODE reed pressure left the finite set",
             });
         }
-        x = rec.x;
+        x = next_x;
         out.push(p);
     }
     Ok(out)
@@ -4539,10 +5138,10 @@ fn realize_blown_duct(
             wall_pin(duct.wall).as_ref(),
         );
     }
-    // Isolated linear blow: the same DelayedFilter port as a reed or
-    // a body, filled with IFFT[Z] rather than IFFT[R]. A vented
-    // reflectance FIR does not ring a measurable period; the
-    // impedance FIR does, so tone-hole shortening stays TMM-emergent.
+    // Isolated linear blow on non-ODE geometry (e.g. conical taper):
+    // the same causal DelayedFilter port as a reed or a body, filled
+    // with the conjugated IFFT[Z] under the shared e^{-iωt} → DFT
+    // convention (DEF-01).
     let mut line = crate::driving_point::impedance_line(
         &physics,
         gas,
@@ -4569,8 +5168,8 @@ fn realize_blown_duct(
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)]// one coherent realization record
-#[allow(clippy::needless_range_loop)]// the sample index is the time axis
+#[allow(clippy::too_many_arguments)] // one coherent realization record
+#[allow(clippy::needless_range_loop)] // the sample index is the time axis
 fn realize_blown_with_body(
     physics: &Duct,
     blow: VolumeVelocityPulse,
@@ -4704,7 +5303,6 @@ fn add_in_place(acc: &mut [f64], addend: &[f64]) {
 mod string_observer_tests {
     use super::*;
 
-
     #[test]
     fn g1_plate_ports_and_observer_use_the_same_modal_mass() {
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
@@ -4789,104 +5387,219 @@ mod string_observer_tests {
     #[test]
     fn kc_render_refuses_unresolved_linear_poles_without_advancing() {
         let string = PrestressedString {
-            length_m: 0.5, tension_n: 20.0, lin_density_kg_m: 0.006,
-            axial_stiffness_n: 1000.0, width_m: 0.001, n_modes: 2,
-            damping_ratio: 0.0, rayleigh: None, bending_stiffness_n_m2: 0.0,
-            kelvin_voigt_bending: None, relaxation_bending: None,
-            polarization_detune: 0.0, moving_end: false,
+            length_m: 0.5,
+            tension_n: 20.0,
+            lin_density_kg_m: 0.006,
+            axial_stiffness_n: 1000.0,
+            width_m: 0.001,
+            n_modes: 2,
+            damping_ratio: 0.0,
+            rayleigh: None,
+            bending_stiffness_n_m2: 0.0,
+            kelvin_voigt_bending: None,
+            relaxation_bending: None,
+            polarization_detune: 0.0,
+            moving_end: false,
         };
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        let mut member = kc_string_member(&string,None,None,&[],&gas,1.0,1.0).unwrap();
+        let mut member = kc_string_member(&string, None, None, &[], &gas, 1.0, 1.0).unwrap();
         let mut texture = TextureDrive::try_new(None).unwrap();
         let cap = fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP;
-        let dt = cap/member.linear.pole_rate_bound_rad_s();
-        assert!(step_kc_member(&mut member,None,&mut texture,&[],&string,&gas,dt*(1.0-1e-12)).is_ok());
+        let dt = cap / member.linear.pole_rate_bound_rad_s();
+        assert!(
+            step_kc_member(&mut member, None, &mut texture, &[], &string, &gas, dt * (1.0 - 1e-12))
+                .is_ok()
+        );
         let before = member.x.clone();
-        assert!(matches!(step_kc_member(&mut member,None,&mut texture,&[],&string,&gas,dt*(1.0+1e-10)),
-            Err(AcousticRealizeError::TimeResolution(_))));
-        assert_eq!(member.x,before);
+        assert!(matches!(
+            step_kc_member(&mut member, None, &mut texture, &[], &string, &gas, dt * (1.0 + 1e-10)),
+            Err(AcousticRealizeError::TimeResolution(_))
+        ));
+        assert_eq!(member.x, before);
     }
 
     #[test]
     fn coupled_ode_linear_step_uses_the_complete_transformer() {
-        let plate = fs_phs::modal_bank_ports(&[1.0,1.7],&[0.0,0.0],&[&[1.0,0.5]]).unwrap();
-        let line = fs_phs::mass_spring_damper(1.0,2.0,0.0).unwrap();
-        let sys = transformer(plate,line,0,0,0.7).unwrap();
+        let plate = fs_phs::modal_bank_ports(&[1.0, 1.7], &[0.0, 0.0], &[&[1.0, 0.5]]).unwrap();
+        let line = fs_phs::mass_spring_damper(1.0, 2.0, 0.0).unwrap();
+        let sys = transformer(plate, line, 0, 0, 0.7).unwrap();
         let linear = prepare_render_linear(&sys).unwrap();
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        let x = [0.1,0.02,-0.03,0.01,0.04,-0.02];
-        let full = step_plate_chain(&sys,&linear,&x,0.0,None,None,&gas,0.0,0.5).unwrap();
-        let half = step_plate_chain(&sys,&linear,&x,0.0,None,None,&gas,0.0,0.25).unwrap();
-        let halves = step_plate_chain(&sys,&linear,&half.x,0.0,None,None,&gas,0.25,0.25).unwrap();
-        for (a,b) in full.x.iter().zip(halves.x) {assert!((a-b).abs()<1e-12);}
-        assert!(full.balance_residual().abs()<1e-12);
+        let x = [0.1, 0.02, -0.03, 0.01, 0.04, -0.02];
+        let full = step_plate_chain(&sys, &linear, &x, 0.0, None, None, &gas, 0.0, 0.5).unwrap();
+        let half = step_plate_chain(&sys, &linear, &x, 0.0, None, None, &gas, 0.0, 0.25).unwrap();
+        let halves =
+            step_plate_chain(&sys, &linear, &half.x, 0.0, None, None, &gas, 0.25, 0.25).unwrap();
+        for (a, b) in full.x.iter().zip(halves.x) {
+            assert!((a - b).abs() < 1e-12);
+        }
+        assert!(full.balance_residual().abs() < 1e-12);
     }
 
     #[test]
     fn blown_ode_observes_the_exact_held_flow_step() {
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        let sections = [AcousticSection {length:0.5,radius:0.01,outlet_radius:0.0,cells:2}];
-        for rate in [48_000,96_000,192_000] {
-            let dt = 1.0/f64::from(rate);
-            let out = realize_blown_ode(&sections,None,&[],VolumeVelocityPulse {
-                peak_m3_s:1e-4,duration_s:2.0*dt,
-            },&mut PlateBank::default(),&gas,1.0,rate,2,None).unwrap();
-            let line = ode_bore_chain(&sections,None,1,&[],&gas,None).unwrap();
+        let sections = [AcousticSection {
+            length: 0.5,
+            radius: 0.01,
+            outlet_radius: 0.0,
+            cells: 2,
+        }];
+        for rate in [48_000, 96_000, 192_000] {
+            let dt = 1.0 / f64::from(rate);
+            let out = realize_blown_ode(
+                &sections,
+                None,
+                &[],
+                VolumeVelocityPulse {
+                    peak_m3_s: 1e-4,
+                    duration_s: 2.0 * dt,
+                },
+                &mut PlateBank::default(),
+                &gas,
+                1.0,
+                rate,
+                2,
+                None,
+            )
+            .unwrap();
+            let line = ode_bore_chain(&sections, None, 1, &[], &gas, None).unwrap();
             let split = prepare_render_linear(&line).unwrap();
-            let expected = fs_phs::linear_exact::step_split(&line,&split,
+            let expected = fs_phs::linear_exact::step_split(
+                &line,
+                &split,
                 fs_phs::linear_exact::LinearPropagator::ExactZoh,
-                &vec![0.0;line.state_dim()],&[1e-4],dt).unwrap();
-            assert_eq!(out[0],0.0);
-            assert!((out[1]-expected.y[0]).abs()<=1e-12*expected.y[0].abs());
-            let legacy = fs_phs::step(&line,&vec![0.0;line.state_dim()],&[1e-4],dt).unwrap();
-            assert!((out[1]-legacy.y[0]).abs()>1e-9*expected.y[0].abs());
+                &vec![0.0; line.state_dim()],
+                &[1e-4],
+                dt,
+            )
+            .unwrap();
+            assert_eq!(out[0], 0.0);
+            assert!((out[1] - expected.y[0]).abs() <= 1e-12 * expected.y[0].abs());
+            let legacy = fs_phs::step(&line, &vec![0.0; line.state_dim()], &[1e-4], dt).unwrap();
+            assert!((out[1] - legacy.y[0]).abs() > 1e-9 * expected.y[0].abs());
         }
     }
 
     #[test]
     fn reed_ode_observes_exact_held_flow_for_both_valve_selections() {
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        let sections = [AcousticSection {length:0.5,radius:0.01,outlet_radius:0.0,cells:2}];
-        for rate in [48_000,96_000,192_000] {for mass in [0.0,1e-4] {
-            let dt = 1.0/f64::from(rate);
-            let reed = BeatingReed {rest_opening_m:1e-3,width_m:0.01,
-                closing_pressure_pa:1e6,blowing_pressure_pa:100.0,attack_s:2.0*dt,
-                mass_kg:mass,stiffness_n_m:100.0,damping_ratio:0.01};
-            let out = realize_reed_ode(&sections,None,&[],reed,&mut PlateBank::default(),
-                &gas,1.0,rate,2,None).unwrap();
-            let pressure = blowing_envelope(reed,dt);
-            let opening = if mass==0.0 {quasistatic_aperture_opening(reed.rest_opening_m,
-                reed.closing_pressure_pa,pressure)} else {reed.rest_opening_m};
-            let flow = bernoulli_volume_flow(reed.width_m,opening,pressure,gas.density);
-            let line = ode_bore_chain(&sections,None,1,&[],&gas,None).unwrap();
-            let split = prepare_render_linear(&line).unwrap();
-            let expected = fs_phs::linear_exact::step_split(&line,&split,
-                fs_phs::linear_exact::LinearPropagator::ExactZoh,
-                &vec![0.0;line.state_dim()],&[flow],dt).unwrap();
-            assert_eq!(out[0],0.0);
-            assert!((out[1]-expected.y[0]).abs()<=1e-12*expected.y[0].abs());
-        }}
+        let sections = [AcousticSection {
+            length: 0.5,
+            radius: 0.01,
+            outlet_radius: 0.0,
+            cells: 2,
+        }];
+        for rate in [48_000, 96_000, 192_000] {
+            for mass in [0.0, 1e-4] {
+                let dt = 1.0 / f64::from(rate);
+                let reed = BeatingReed {
+                    rest_opening_m: 1e-3,
+                    width_m: 0.01,
+                    closing_pressure_pa: 1e6,
+                    blowing_pressure_pa: 100.0,
+                    attack_s: 2.0 * dt,
+                    mass_kg: mass,
+                    stiffness_n_m: 100.0,
+                    damping_ratio: 0.01,
+                };
+                let out = realize_reed_ode(
+                    &sections,
+                    None,
+                    &[],
+                    reed,
+                    &mut PlateBank::default(),
+                    &gas,
+                    1.0,
+                    rate,
+                    2,
+                    None,
+                )
+                .unwrap();
+                let pressure = blowing_envelope(reed, dt);
+                let opening = if mass == 0.0 {
+                    quasistatic_aperture_opening(
+                        reed.rest_opening_m,
+                        reed.closing_pressure_pa,
+                        pressure,
+                    )
+                } else {
+                    reed.rest_opening_m
+                };
+                let flow = bernoulli_volume_flow(reed.width_m, opening, pressure, gas.density);
+                let line = ode_bore_chain(&sections, None, 1, &[], &gas, None).unwrap();
+                let split = prepare_render_linear(&line).unwrap();
+                let expected = fs_phs::linear_exact::step_split(
+                    &line,
+                    &split,
+                    fs_phs::linear_exact::LinearPropagator::ExactZoh,
+                    &vec![0.0; line.state_dim()],
+                    &[flow],
+                    dt,
+                )
+                .unwrap();
+                assert_eq!(out[0], 0.0);
+                assert!((out[1] - expected.y[0]).abs() <= 1e-12 * expected.y[0].abs());
+            }
+        }
     }
 
     #[test]
     fn actual_dirac_renderer_refuses_an_unresolved_common_clock() {
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        for rate in [48_000,96_000,192_000] {
+        for rate in [48_000, 96_000, 192_000] {
             let mut plates = PlateBank::default();
-            plates.linear.push(crate::thin_plate::CompactBody::from_radiator(RadiatingPlate {
-                area_m2:0.1,mass_kg:1.0,frequency_hz:1.0,damping_ratio:0.0,
-            }).unwrap());
-            let make = |frequency:f64| PrestressedString {
-                length_m:0.5,tension_n:(2.0*frequency).powi(2),lin_density_kg_m:1.0,
-                axial_stiffness_n:0.0,width_m:0.001,n_modes:1,damping_ratio:0.0,
-                rayleigh:None,bending_stiffness_n_m2:0.0,kelvin_voigt_bending:None,
-                relaxation_bending:None,polarization_detune:0.0,moving_end:true,
+            plates.linear.push(
+                crate::thin_plate::CompactBody::from_radiator(RadiatingPlate {
+                    area_m2: 0.1,
+                    mass_kg: 1.0,
+                    frequency_hz: 1.0,
+                    damping_ratio: 0.0,
+                })
+                .unwrap(),
+            );
+            let make = |frequency: f64| PrestressedString {
+                length_m: 0.5,
+                tension_n: (2.0 * frequency).powi(2),
+                lin_density_kg_m: 1.0,
+                axial_stiffness_n: 0.0,
+                width_m: 0.001,
+                n_modes: 1,
+                damping_ratio: 0.0,
+                rayleigh: None,
+                bending_stiffness_n_m2: 0.0,
+                kelvin_voigt_bending: None,
+                relaxation_bending: None,
+                polarization_detune: 0.0,
+                moving_end: true,
             };
-            let render = |string:&PrestressedString| realize_dirac_join(string,
-                Some(Pluck {station_frac:0.5,height_m:1e-8}),None,&[],None,&plates,
-                None,None,None,None,None,&gas,1.0,rate,1);
+            let render = |string: &PrestressedString| {
+                realize_dirac_join(
+                    string,
+                    Some(Pluck {
+                        station_frac: 0.5,
+                        height_m: 1e-8,
+                    }),
+                    None,
+                    &[],
+                    None,
+                    &plates,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &gas,
+                    1.0,
+                    rate,
+                    1,
+                )
+            };
             assert!(render(&make(1.0)).is_ok());
-            assert!(matches!(render(&make(10_000.0)),Err(AcousticRealizeError::TimeResolution(_))));
+            assert!(matches!(
+                render(&make(10_000.0)),
+                Err(AcousticRealizeError::TimeResolution(_))
+            ));
         }
     }
 }

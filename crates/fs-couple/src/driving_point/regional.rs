@@ -11,7 +11,10 @@ pub mod outlet;
 /// Independent exterior gas at the terminal pressure/volume-flow port.
 pub mod exterior;
 
-use super::{DrivingPointError, characteristic_line_response};
+use super::{
+    DrivingPointError, LineRealization, PoleState, bulk_delay_pole_state,
+    characteristic_line_response_with_poles, sealed_volume_compliance_gain,
+};
 use fs_duct::{Duct, DuctError, DuctResponse, HoleState, LossModel, Segment, Termination,
     input_impedance_load, input_impedance_wall};
 use fs_material::gas::GasState;
@@ -172,18 +175,54 @@ impl RegionalDuct {
     pub fn characteristic_line(&self, termination: Termination, sample_rate_hz: u32,
         n: usize, wall: Option<&WallPin>, n_fft_override: Option<usize>)
         -> Result<DelayedFilter, DrivingPointError> {
+        self.characteristic_line_realized(termination, sample_rate_hz, n, wall, n_fft_override)
+            .map(|(line, _)| line)
+    }
+
+    /// Realize the regional driving-point reflectance and return the [`LineRealization`] receipt.
+    ///
+    /// # Errors
+    /// As [`Self::characteristic_line`].
+    pub fn characteristic_line_realized(&self, termination: Termination, sample_rate_hz: u32,
+        n: usize, wall: Option<&WallPin>, n_fft_override: Option<usize>)
+        -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
         // Delegate the uniform case verbatim, including the order of travel-time
         // arithmetic at the FFT-size thresholds.
         if self.regions.len() == 1 && (self.exterior_gas() == self.outlet_gas()
             || matches!(termination, Termination::Closed | Termination::IdealOpen)) {
             let r = &self.regions[0];
-            return super::characteristic_line_dense(&r.duct, &r.gas, termination,
-                sample_rate_hz, n, self.inlet_impedance(), wall, n_fft_override);
+            let length = super::duct_axial_length(&r.duct);
+            let dt = 1.0 / f64::from(sample_rate_hz);
+            let geo_delay = 2.0 * length / r.gas.sound_speed / dt;
+            let mut pole_states: Vec<PoleState> = Vec::new();
+            if let Some(gain) = sealed_volume_compliance_gain(&r.duct, &r.gas, termination, wall) {
+                pole_states.push(PoleState::Compliance { gain });
+            }
+            pole_states.push(bulk_delay_pole_state(geo_delay));
+            return characteristic_line_response_with_poles(
+                geo_delay,
+                termination,
+                sample_rate_hz,
+                n,
+                self.inlet_impedance(),
+                n_fft_override,
+                pole_states,
+                |omega| input_impedance_wall(&r.duct, &r.gas, omega, LossModel::Bessel, termination, wall),
+            );
         }
         let dt = 1.0 / f64::from(sample_rate_hz);
-        characteristic_line_response(2.0 * self.one_way_time_s / dt, termination,
-            sample_rate_hz, n, self.inlet_impedance(), n_fft_override,
-            |omega| self.response(omega, LossModel::Bessel, termination, wall))
+        let geo_delay = 2.0 * self.one_way_time_s / dt;
+        let pole_states = vec![bulk_delay_pole_state(geo_delay)];
+        characteristic_line_response_with_poles(
+            geo_delay,
+            termination,
+            sample_rate_hz,
+            n,
+            self.inlet_impedance(),
+            n_fft_override,
+            pole_states,
+            |omega| self.response(omega, LossModel::Bessel, termination, wall),
+        )
     }
 
     /// Plane-wave impedance rho*c/S at the original inlet geometry.
