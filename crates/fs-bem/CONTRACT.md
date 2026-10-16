@@ -354,3 +354,53 @@ NASA marks it as U.S. Government work with public use permitted.
   table consumers own interpolation and out-of-support refusal
   (fs-duct `TabulatedLoad`); no rational realization is performed here
   (the fs-vfit certificate-class lane belongs to the runtime consumer).
+
+### Declaration-bound scalar refinement (IRP M2.5-W1)
+
+`radiation_bake::declared::BakeDeclaration` validates and hashes source geometry
+identity, the full requested frequency grid and band endpoints, relative
+operator tolerance, physical reference surface, mode content, SH degree and
+medium before solving. Private fields prevent later mutation under the same
+identity. Source and mesh identities are distinct. A `PanelSource` regenerates
+each `PanelLadder` rung directly from its immutable source geometry; the trait's
+source identity/count/geometry contract is trusted, not independently certified.
+Generated driven panels must lie on the declared mouth plane and face its
+outward normal. Whole-surface body modes explicitly refuse duct-load export.
+
+`bake_declared` calls the unchanged `bake_radiation_load` owner at every
+frequency/rung. Complete requires at least three solved rungs and two successive
+complex impedance and SH-vector relative L2 changes within the declared
+tolerance. This measures the full retained complex SH vector through the
+declared degree; it is not a relative guarantee for every quiet coefficient or
+a bound on omitted SH degrees. It is finite-frequency-grid refinement evidence,
+not a uniform-in-frequency interpolation error enclosure or physical validation.
+Negative resistance beyond the same relative tolerance refuses. No panel
+arithmetic, formulation threshold or legacy bake result changes here.
+
+The exact next source panel count is checked before allocating its surface or
+dense matrix. More than 8192 panels returns `Blocked` with frequency, needed
+panels and route `M2.5-W5`. If three solved rungs are impossible within the
+declared ladder's dense budget, it blocks before wasting earlier solves.
+Exhausted below-cap ladders return `NotConverged` with retained rung diagnostics.
+Neither status exports a full-band load. `partial_band` explicitly exposes only
+the contiguous proven prefix, with a `band_refusal` and the declaration hash;
+an expected-hash mismatch refuses. Consumer tables must keep that exact support
+and their `OutOfTable` behavior. Rung receipts retain source area, estimated
+minimum panels, actual panels/wavelength, changes, status and measured time;
+actual runner host/command are supplied when rendering receipts.
+
+Cancellation is polled before/between existing solves. The inherited dense LU
+still has no mid-call cancellation latency guarantee. Higher azimuthal/radial
+mode requests explicitly name dependency `M2.1-W3c`; no scalar fallback is used.
+Realistic full-band bells remain blocked until a suitable W5 or independently
+qualified axisymmetric route exists.
+
+`tests/bake_band.rs` contains strict 1e-3 pulsating-sphere and finite-wall
+pipe/Levine-Schwinger qualification tests. The pipe has an outer wall, inward
+bore wall, annular lip and backed throat piston, with explicit t/a and panel
+ladders. The exact LS load is transported to that actual driven reference plane
+by the existing lossless fs-duct owner. These strict tests may expose the current
+dense route's limit and must not have their tolerances relaxed. Separate 0.25
+declared-tolerance tests exercise software completion, bitwise replay and
+partial-support refusal only; they confer no 1e-3 numerical/physical claim.
+Native execution remains pending. No converged real instrument bake is claimed.

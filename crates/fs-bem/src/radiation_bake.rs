@@ -26,6 +26,13 @@ use crate::helmholtz::{
 };
 use crate::panel3d::SpherePanels;
 
+/// Declaration-bound refinement over this same radiation-bake owner.
+pub mod declared;
+pub use declared::{
+    BakeDeclaration, BakeError, BakeMesh, BakeStatus, DeclaredBake, ModeContent, PanelLadder,
+    PanelSource, PartialBand, ReferencePlane, bake_declared,
+};
+
 /// One frequency row of a radiation-load bake.
 #[derive(Debug, Clone)]
 pub struct RadiationLoadRow {

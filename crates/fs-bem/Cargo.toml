@@ -11,6 +11,7 @@ description = "Laplace BEM panel methods: 3D exterior potential flow with FMM-ac
 layer = "L3"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-casebook = { path = "../fs-casebook" }
 fs-math = { path = "../fs-math" }
 fs-phs = { path = "../fs-phs" }
@@ -22,6 +23,7 @@ fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-solver = { path = "../fs-solver" }
 
 [dev-dependencies]
+fs-duct = { path = "../fs-duct" }
 fs-mms = { path = "../fs-mms" }
 
 [lints]
