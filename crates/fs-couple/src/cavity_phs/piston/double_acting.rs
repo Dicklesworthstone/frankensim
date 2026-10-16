@@ -20,11 +20,19 @@ use super::{
 /// Only the primary owner holds mass and velocity. The opposing gas has no
 /// fictitious independent inertia or motion coordinate. Different positive face
 /// areas are allowed (e.g. a piston rod); any other load is explicit input.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DoubleActingGasPiston {
     primary: GasPiston,
     opposing: ClosedGasParcel,
     opposing_area_m2: f64,
+    ports: crate::port_adoption::ModulePorts,
+}
+impl PartialEq for DoubleActingGasPiston {
+    fn eq(&self, other: &Self) -> bool {
+        self.primary == other.primary
+            && self.opposing == other.opposing
+            && self.opposing_area_m2 == other.opposing_area_m2
+    }
 }
 
 /// External energy and force over one common physical interval.
@@ -97,7 +105,9 @@ impl DoubleActingGasPiston {
     /// can be supplied. This constructs a new coupling, not an impulse-free
     /// connection of two formerly moving mechanical bodies.
     pub fn new(
-        primary: GasPiston, opposing: ClosedGasParcel, opposing_area_m2: f64,
+        primary: GasPiston,
+        opposing: ClosedGasParcel,
+        opposing_area_m2: f64,
     ) -> Result<Self, PistonError> {
         if !positive(opposing_area_m2)
             || !positive(opposing.volume_m3() / opposing_area_m2)
@@ -105,7 +115,31 @@ impl DoubleActingGasPiston {
         {
             return Err(invalid("opposed gas needs a positive represented face area and cavity length"));
         }
-        Ok(Self { primary, opposing, opposing_area_m2 })
+        use fs_ports::PortKind::{MechanicalForceVelocity as M, ThermalTemperatureEntropy as T};
+        let mut ports = crate::port_adoption::ModulePorts::new(
+            "double-piston",
+            vec![
+                ("face/primary", M),
+                ("face/opposing", M),
+                ("wall", M),
+                ("heat/primary", T),
+                ("heat/opposing", T),
+            ],
+        );
+        // Both face efforts act on the SAME translating wall coordinate.
+        ports.junctions.push(crate::port_adoption::junction(
+            "double-piston",
+            "wall",
+            3,
+            M,
+            true,
+        ));
+        Ok(Self {
+            primary,
+            opposing,
+            opposing_area_m2,
+            ports,
+        })
     }
 
     /// Original primary dynamics owner. Immutable: a caller cannot advance only
@@ -182,7 +216,9 @@ impl DoubleActingGasPiston {
     /// There are no valves, mass/species exchange, contact stops, crank linkages,
     /// combustion, wall heat capacity or acoustic propagation in this component.
     pub fn step(
-        &mut self, input: DoublePistonInput, controls: DoublePistonSolve,
+        &mut self,
+        input: DoublePistonInput,
+        controls: DoublePistonSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DoublePistonStep, PistonError> {
         poll(&mut cancelled)?;
@@ -238,9 +274,50 @@ impl DoubleActingGasPiston {
         poll(&mut cancelled)?;
         self.primary = next_primary;
         self.opposing = next_opposing;
+        let force = [
+            self.primary.area_m2() * report.midpoint[0].state().pressure,
+            -self.opposing_area_m2 * report.midpoint[1].state().pressure,
+        ];
+        let face = [
+            force[0] * report.displacement_m,
+            force[1] * report.displacement_m,
+        ];
+        let wall_work = -(force[0] + force[1]) * report.displacement_m;
+        self.ports.accept(
+            crate::port_adoption::StepAccount {
+                tick: self.ports.next_tick(),
+                duration_s: input.duration_s,
+                storage_change_j: Some(
+                    report.gas[0].stored_energy_change_j
+                        + report.gas[1].stored_energy_change_j
+                        + report.kinetic_energy_change_j,
+                ),
+                loss_j: Some(0.0),
+                included_work_j: report.external_force_work_j,
+                entropy_change_j_k: report.gas[0].entropy_change_j_k
+                    + report.gas[1].entropy_change_j_k,
+                tolerance_j: Some(controls.piston.energy_tolerance_j),
+                unavailable: None,
+            },
+            [
+                crate::port_adoption::PortTransfer::work(face[0], false),
+                crate::port_adoption::PortTransfer::work(face[1], false),
+                crate::port_adoption::PortTransfer::work(wall_work, false),
+                crate::port_adoption::PortTransfer::heat(
+                    input.heat_j[0],
+                    report.midpoint[0].state().temperature,
+                ),
+                crate::port_adoption::PortTransfer::heat(
+                    input.heat_j[1],
+                    report.midpoint[1].state().temperature,
+                ),
+            ],
+        );
         Ok(report)
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+crate::port_adoption::impl_ported_module!(DoubleActingGasPiston, ports);

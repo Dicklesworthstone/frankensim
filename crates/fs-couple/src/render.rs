@@ -146,6 +146,7 @@ pub struct ReedBoreVoice {
     fast_stats: FastSolveStats,
     junction_step_tolerance: f64,
     junction_residual_max: Option<f64>,
+    ports: crate::port_adoption::ModulePorts,
 }
 
 impl ReedBoreVoice {
@@ -202,8 +203,12 @@ impl ReedBoreVoice {
     // One mechanical initial state, lay-contact admission and priming operation
     // for both physical line providers. Neither provider advances the voice.
     fn with_line(
-        physics: &Duct, gas: &GasState, reed: BeatingReed, plates: PlateBank,
-        listener_m: f64, sample_rate_hz: u32,
+        physics: &Duct,
+        gas: &GasState,
+        reed: BeatingReed,
+        plates: PlateBank,
+        listener_m: f64,
+        sample_rate_hz: u32,
         build_line: impl FnOnce(f64) -> Result<fs_vfit::discretize::DelayedFilter, AcousticRealizeError>,
     ) -> Result<Self, AcousticRealizeError> {
         if !crate::reed_bore::reed_parameters_valid(reed) {
@@ -264,6 +269,9 @@ impl ReedBoreVoice {
             fast_stats: FastSolveStats::default(),
             junction_step_tolerance: 1.0e-9,
             junction_residual_max: None,
+            ports: crate::port_adoption::ModulePorts::new("reed-bore-line", vec![
+                ("inlet", fs_ports::PortKind::FluidPressureFlux),
+            ]),
         })
     }
 
@@ -398,10 +406,21 @@ impl ReedBoreVoice {
                 / (4.0 * core::f64::consts::PI * self.listener_m * self.sound_speed);
             *slot = p_obs;
             self.sample_index += 1;
+            // Same incoming characteristic used by the junction solve, before
+            // push changes the line history. This is the actual boundary work,
+            // not an inferred stored-energy or filter-dissipation account.
+            let volume = self.dt*(p_plus-p_minus)/self.zc;
+            self.ports.accept(crate::port_adoption::StepAccount {
+                tick:self.sample_index,duration_s:self.dt,storage_change_j:None,
+                loss_j:None,included_work_j:0.0,entropy_change_j_k:0.0,tolerance_j:None,
+                unavailable:Some("ReedBoreVoice/DelayedFilter has no physical line storage/loss owner or energy tolerance [J]"),
+            },[crate::port_adoption::PortTransfer::work((p_plus+p_minus)*volume,true)]);
         }
         Ok(())
     }
 }
+
+crate::port_adoption::impl_ported_module!(ReedBoreVoice, ports);
 
 /// A modal string voice hosting the exact-ZOH runtime: per-sample free
 /// decay (or a held generalized force) with the model's own observer

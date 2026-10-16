@@ -78,6 +78,7 @@ pub struct ModalApertureFrame {
     pub work_certificate: SolveCertificate,
     /// Observed flow closure and its declared volume-flow budget [m^3/s].
     pub flow_certificate: SolveCertificate,
+    port_transfers: [crate::port_adoption::PortTransfer; 4],
 }
 
 /// A complete modal state; no acoustic network or filter is duplicated here.
@@ -90,6 +91,7 @@ pub struct ModalAperture {
     material_plates: Vec<material::MaterialModalPlate>,
     material_gas: Option<fs_material::gas::GasState>,
     viscosity: Option<viscosity::ApertureViscosity>,
+    ports: crate::port_adoption::ModulePorts,
 }
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
@@ -144,8 +146,17 @@ impl ModalAperture {
         ApertureContactStep::new(&obstacle, gap).map_err(nonlinear)?;
         let contact_storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![obstacle.clone()])
             .map_err(nonlinear)?;
+        let ports = crate::port_adoption::ModulePorts::new(
+            "modal-aperture",
+            vec![
+                ("upstream", fs_ports::PortKind::FluidPressureFlux),
+                ("downstream", fs_ports::PortKind::FluidPressureFlux),
+                ("plate/0", fs_ports::PortKind::MechanicalForceVelocity),
+                ("plate/1", fs_ports::PortKind::MechanicalForceVelocity),
+            ],
+        );
         let model = Self { spec, state, obstacle, contact_storage, samples: 0,
-            material_plates: Vec::new(), material_gas: None, viscosity: None };
+            material_plates: Vec::new(), material_gas: None, viscosity: None, ports };
         model.admit_linear_clock()?;
         model.validate_state(&model.state)?;
         Ok(model)
@@ -210,6 +221,19 @@ impl ModalAperture {
         Ok(frame)
     }
     pub(super) fn accept(&mut self, frame: &ModalApertureFrame) {
+        self.ports.accept(
+            crate::port_adoption::StepAccount {
+                tick: frame.aperture.step,
+                duration_s: self.spec.time_step_s,
+                storage_change_j: Some(frame.aperture.storage_change_j),
+                loss_j: Some(frame.aperture.dissipated_energy_j),
+                included_work_j: 0.0,
+                entropy_change_j_k: 0.0,
+                tolerance_j: Some(frame.work_certificate.effective_budget),
+                unavailable: None,
+            },
+            frame.port_transfers,
+        );
         self.state.copy_from_slice(&frame.modes);
         self.samples = frame.aperture.step;
     }
@@ -311,7 +335,24 @@ impl ModalAperture {
         }
         let (work_certificate, flow_certificate) =
             self.admit_balance(&aperture, scale, flow_scale, trial.evaluations)?;
-        Ok(ModalApertureFrame { aperture, modes: next, pressure_drop_pa: trial.dp,
+        let volume = dt * (wave - drive.body_flow_m3_s);
+        let plate_work = |column: usize| {
+            dt * forces[column]
+                * self
+                    .spec
+                    .modes
+                    .iter()
+                    .zip(&trial.velocity)
+                    .map(|(m, v)| m.force_projection[column] * v)
+                    .sum::<f64>()
+        };
+        let port_transfers = [
+            crate::port_adoption::PortTransfer::work(drive.upstream_pressure_pa * volume, true),
+            crate::port_adoption::PortTransfer::work(-aperture.bore_pressure_pa * volume, true),
+            crate::port_adoption::PortTransfer::work(plate_work(0), true),
+            crate::port_adoption::PortTransfer::work(plate_work(1), true),
+        ];
+        Ok(ModalApertureFrame { aperture, modes: next, pressure_drop_pa: trial.dp, port_transfers,
             contact_force_n: contact.force, momentum_residual_n: momentum,
             work_certificate, flow_certificate })
     }
@@ -356,3 +397,5 @@ impl ModalAperture {
 
 #[cfg(test)]
 mod refusal_tests;
+
+crate::port_adoption::impl_ported_module!(ModalAperture, ports);

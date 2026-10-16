@@ -167,6 +167,64 @@ impl ExactNetwork {
         }
         Ok((component, connection))
     }
+
+    // Work INTO the retained bodies from each signed connection column:
+    // integral[(-k*e-c*e_dot)*e_dot] = -delta(k*e^2/2)-integral[c*e_dot^2].
+    // Endpoint reaction times displacement is not this exact-trajectory work.
+    fn connection_work(
+        &self,
+        x: &[f64],
+        u: &[f64],
+        endpoint: &[f64],
+        dt: f64,
+        columns: &[Vec<f64>],
+        links: &[ConnectionLaw],
+        connection_loss: f64,
+        gate: Option<&CancelGate>,
+    ) -> Result<Vec<crate::port_adoption::PortTransfer>, ModalCouplingError> {
+        let damped = links
+            .iter()
+            .filter(|link| link.damping_n_s_m != 0.0)
+            .count();
+        let n = self.system.state_dim();
+        columns
+            .iter()
+            .zip(links)
+            .map(|(column, link)| {
+                poll(gate)?;
+                let coordinate = |state: &[f64]| -> Result<f64, ModalCouplingError> {
+                    let sum = column
+                        .iter()
+                        .enumerate()
+                        .try_fold(0.0, |s, (i, b)| finite(s + b * state[2 * i]))?;
+                    finite(sum - link.rest_extension_m)
+                };
+                let before = coordinate(x)?;
+                let after = coordinate(endpoint)?;
+                let loss = if link.damping_n_s_m == 0.0 {
+                    0.0
+                } else if damped == 1 {
+                    // The existing independently integrated connection channel is
+                    // already exactly this one damper; do not integrate it twice.
+                    connection_loss
+                } else {
+                    let mut resistance = vec![0.0; n * n];
+                    for (a, left) in column.iter().enumerate() {
+                        poll(gate)?;
+                        for (b, right) in column.iter().enumerate() {
+                            resistance[(2 * a + 1) * n + 2 * b + 1] =
+                                link.damping_n_s_m * left * right;
+                        }
+                    }
+                    integrated_resistance_loss(&self.system, &self.split, x, u, dt, &resistance)
+                        .map_err(ModalCouplingError::Propagation)?
+                };
+                let work =
+                    finite(-0.5 * link.stiffness_n_m * (after - before) * (after + before) - loss)?;
+                Ok(crate::port_adoption::PortTransfer::work(work, false))
+            })
+            .collect()
+    }
 }
 
 fn flatten(models: &[ModalAcousticTimeModel]) -> Vec<f64> {
@@ -345,6 +403,43 @@ pub(super) fn stage(
         solve_relative_residual: 0.0,
         connection_forces_n: network.reactions.clone(),
     };
+    // Independent port observations cannot turn an accepted physical step into
+    // a refusal. Preserve their original diagnostic instead of a zero account.
+    let transfers = match &network.exact {
+        Some(exact) => exact.connection_work(
+            &x,
+            &u,
+            &rec_x,
+            network.dt,
+            &network.columns,
+            &network.connections,
+            connection_loss,
+            gate,
+        ),
+        // None is admitted only when every connection has K=C=0. These
+        // columns exert identically zero force throughout the actual step.
+        None => Ok(vec![
+            crate::port_adoption::PortTransfer::work(0.0, false);
+            network.columns.len()
+        ]),
+    }
+    .map_err(|error| fs_ports::CoupleError::ModuleObservationFailed {
+        owner: "coupled-modal".into(),
+        reason: error.to_string(),
+    });
+    network.staged_ports.accept_result(
+        crate::port_adoption::StepAccount {
+            tick: sample,
+            duration_s: network.dt,
+            storage_change_j: Some(after - before),
+            loss_j: Some(component_loss + connection_loss),
+            included_work_j: work,
+            entropy_change_j_k: 0.0,
+            tolerance_j: Some(tolerance),
+            unavailable: None,
+        },
+        transfers,
+    );
     Ok(())
 }
 
@@ -353,6 +448,7 @@ mod tests {
     use super::*;
     use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget};
     use fs_math::c64::C64;
+    use fs_ports::PortedModule;
 
     fn network(rate: u32, omega: f64) -> CoupledModalSystem {
         let models: Vec<_> = [(omega, 0.01), (1.7 * omega, 0.2)]
@@ -408,6 +504,113 @@ mod tests {
             &CancelGate::new(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn g0_disconnected_port_work_is_zero_on_the_accepted_factorized_step() {
+        let seed = network(48_000, 1000.0);
+        let mut network = CoupledModalSystem::new_with_columns(
+            seed.models,
+            vec![ModalColumnConnection {
+                column: vec![1.0, -1.0],
+                stiffness_n_m: 0.0,
+                damping_n_s_m: 0.0,
+                rest_extension_m: 1e-4,
+            }],
+            seed.config,
+            &CancelGate::new(),
+        )
+        .unwrap();
+        assert!(network.exact.is_none());
+        assert!(network.last_window_transfers().is_none());
+        network.step(&[1e-4, -2e-4]).unwrap();
+        assert_eq!(network.samples_rendered(), 1);
+        assert_eq!(network.last_window_duration_s(), Some(1.0 / 48_000.0));
+        let work = network.last_window_transfers().unwrap();
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].energy_into().value(), 0.0);
+        assert!(network.last_window_transfer_error().is_none());
+        let fs_ports::ModuleWindowAudit::Available(audit) = network.audit_last_window().unwrap()
+        else {
+            panic!("accepted disconnected window missing")
+        };
+        assert!(audit.violations().is_empty());
+    }
+
+    #[test]
+    fn g3_connection_port_work_matches_exact_time_partition_and_body_balance() {
+        let make = |rate| {
+            let mut seed = network(rate, 1000.0);
+            for (model, (q, v)) in seed.models.iter_mut().zip([(0.001, 0.3), (-0.002, -0.2)]) {
+                model
+                    .restore_states(&[ModalAcousticState {
+                        displacement_m_sqrt_kg: q,
+                        velocity_m_sqrt_kg_per_s: v,
+                    }])
+                    .unwrap();
+            }
+            CoupledModalSystem::new_with_columns(
+                seed.models,
+                vec![
+                    ModalColumnConnection {
+                        column: vec![1.0, -1.0],
+                        stiffness_n_m: 2e5,
+                        damping_n_s_m: 70.0,
+                        rest_extension_m: 1e-4,
+                    },
+                    ModalColumnConnection {
+                        column: vec![0.5, 1.0],
+                        stiffness_n_m: 3e5,
+                        damping_n_s_m: 25.0,
+                        rest_extension_m: -2e-4,
+                    },
+                ],
+                ModalCouplingConfig {
+                    max_connections: 2,
+                    max_setup_terms: 128,
+                    ..seed.config
+                },
+                &CancelGate::new(),
+            )
+            .unwrap()
+        };
+        let mut whole = make(48_000);
+        let mut half = make(96_000);
+        let modal_before = component_energy(whole.components()).unwrap();
+        let frame = whole.step(&[10.0, -20.0]).unwrap().clone();
+        let work: Vec<_> = whole
+            .last_window_transfers()
+            .unwrap()
+            .iter()
+            .map(|t| t.energy_into().value())
+            .collect();
+        half.step(&[10.0, -20.0]).unwrap();
+        let first = half.last_window_transfers().unwrap().to_vec();
+        half.step(&[10.0, -20.0]).unwrap();
+        for ((value, first), second) in work
+            .iter()
+            .zip(first)
+            .zip(half.last_window_transfers().unwrap())
+        {
+            let split = first.energy_into().value() + second.energy_into().value();
+            assert!((value - split).abs() <= 1e-9 * value.abs().max(split.abs()).max(1e-20));
+        }
+        let body_balance = frame.modal_energy_j - modal_before + frame.component_dissipation_j
+            - frame.external_work_j;
+        assert!((work.iter().sum::<f64>() - body_balance).abs() <= frame.energy_tolerance_j);
+        let endpoint_product =
+            frame.connection_forces_n[0] * dot(&whole.columns[0], &whole.free_delta).unwrap();
+        assert!((work[0] - endpoint_product).abs() > 1e-8 * work[0].abs());
+        let previous = whole.last_window_transfers().unwrap().to_vec();
+        assert!(whole.step(&[f64::NAN, 0.0]).is_err());
+        assert_eq!(whole.last_window_transfers().unwrap(), previous);
+        let gate = CancelGate::new();
+        gate.request();
+        assert!(matches!(
+            whole.step_under_gate(&[10.0, -20.0], &gate),
+            Err(ModalCouplingError::Cancelled)
+        ));
+        assert_eq!(whole.last_window_transfers().unwrap(), previous);
     }
 
     #[test]

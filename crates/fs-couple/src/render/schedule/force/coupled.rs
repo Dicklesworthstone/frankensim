@@ -188,6 +188,8 @@ pub struct CoupledModalSystem {
     reactions: Vec<f64>,
     frame: CoupledModalFrame,
     staged_frame: CoupledModalFrame,
+    ports: crate::port_adoption::ModulePorts,
+    staged_ports: crate::port_adoption::ModulePorts,
 }
 
 impl CoupledModalSystem {
@@ -291,6 +293,24 @@ impl CoupledModalSystem {
             energy_residual_j: 0.0, energy_tolerance_j: 0.0, solve_relative_residual: 0.0,
             connection_forces_n: vec![0.0; links],
         };
+        let mut ports = crate::port_adoption::ModulePorts::mechanical("coupled-modal", links);
+        // Each signed B_i^T q_i is an explicit metre-valued work chart.
+        // Add the connection-storage endpoint to the participating bodies.
+        for (j, column) in columns.iter().enumerate() {
+            let bodies = offsets
+                .windows(2)
+                .filter(|r| column[r[0]..r[1]].iter().any(|&b| b != 0.0))
+                .count();
+            if bodies != 0 {
+                ports.junctions.push(crate::port_adoption::junction(
+                    "coupled-modal",
+                    &format!("column/{j}"),
+                    bodies + 1,
+                    fs_ports::PortKind::MechanicalForceVelocity,
+                    false,
+                ));
+            }
+        }
         let system = Self {
             models, candidates, exact, offsets, connections, columns,
             config, dt, old_q: vec![0.0; count], free_delta: vec![0.0; count],
@@ -298,6 +318,7 @@ impl CoupledModalSystem {
             reactions: vec![0.0; links],
             staged_frame: frame.clone(),
             frame,
+            staged_ports: ports.clone(), ports,
         };
         limit("total initial energy", system.total_energy_j()?, config.maximum_total_energy_j)?;
         poll(Some(gate))?;
@@ -364,6 +385,7 @@ impl CoupledModalSystem {
     fn publish_staged(&mut self) {
         std::mem::swap(&mut self.models, &mut self.candidates);
         std::mem::swap(&mut self.frame, &mut self.staged_frame);
+        std::mem::swap(&mut self.ports, &mut self.staged_ports);
     }
 
     // Unrestrained full-network prediction is scratch. Contact/friction may
@@ -548,3 +570,5 @@ pub mod render;
 
 /// A bilateral network with one two-body unilateral power-law contact.
 pub mod contact;
+
+crate::port_adoption::impl_ported_module!(CoupledModalSystem, ports);

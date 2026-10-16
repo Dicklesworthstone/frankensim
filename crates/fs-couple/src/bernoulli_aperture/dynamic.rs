@@ -154,6 +154,7 @@ pub struct DynamicAperture {
     relaxation: Option<ApertureRelaxation>,
     state: ApertureState,
     accepted_steps: u64,
+    ports: crate::port_adoption::ModulePorts,
 }
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
@@ -222,7 +223,26 @@ impl DynamicAperture {
             blowing_pressure_pa: 0.0,
             attack_s: 0.0,
         };
-        let model = Self { spec, reed, lay, contact_storage, plate: None, closure: None, relaxation: None, state, accepted_steps: 0 };
+        let ports = crate::port_adoption::ModulePorts::new(
+            "dynamic-aperture",
+            vec![
+                ("upstream", fs_ports::PortKind::FluidPressureFlux),
+                ("downstream", fs_ports::PortKind::FluidPressureFlux),
+                ("plate", fs_ports::PortKind::MechanicalForceVelocity),
+            ],
+        );
+        let model = Self {
+            spec,
+            reed,
+            lay,
+            contact_storage,
+            plate: None,
+            closure: None,
+            relaxation: None,
+            state,
+            accepted_steps: 0,
+            ports,
+        };
         model.admit_linear_clock()?;
         let (stiffness, damping) = reed_structural(reed);
         if !reed_pressure_face(reed).is_finite() || !stiffness.is_finite()
@@ -378,9 +398,11 @@ impl DynamicAperture {
         self.preview_step_with_force(drive, 0.0)
     }
 
-    pub(super) fn preview_step_with_force(&self, drive: ApertureDrive, force_n: f64)
-        -> Result<ApertureTrial, AcousticRealizeError>
-    {
+    pub(super) fn preview_step_with_force(
+        &self,
+        drive: ApertureDrive,
+        force_n: f64,
+    ) -> Result<ApertureTrial, AcousticRealizeError> {
         self.admit_linear_clock()?;
         if !force_n.is_finite() {
             return Err(invalid("aperture mechanical force must be finite newtons"));
@@ -470,11 +492,27 @@ impl DynamicAperture {
         {
             return Err(AcousticRealizeError::Reed { what: "dynamic aperture observation left the finite set" });
         }
-        Ok(ApertureTrial {frame,memory})
+        let volume = dt * (wave - drive.body_flow_m3_s);
+        let transfers = [
+            crate::port_adoption::PortTransfer::work(drive.upstream_pressure_pa * volume, true),
+            crate::port_adoption::PortTransfer::work(-bore * volume, true),
+            crate::port_adoption::PortTransfer::work(frame.mechanical_work_j, true),
+        ];
+        Ok(ApertureTrial {
+            frame,
+            memory,
+            transfers,
+        })
     }
 
     // Only the parent module's coupled runtimes can publish a checked frame.
     pub(super) fn accept_frame(&mut self, trial: ApertureTrial) {
+        self.ports.accept(crate::port_adoption::StepAccount {
+            tick:trial.frame.step,duration_s:self.spec.time_step_s,
+            storage_change_j:Some(trial.frame.storage_change_j),loss_j:Some(trial.frame.dissipated_energy_j),
+            included_work_j:0.0,entropy_change_j_k:0.0,tolerance_j:None,
+            unavailable:Some("DynamicAperture owner reports an energy residual but has no declared energy tolerance [J]"),
+        },trial.transfers);
         if let (Some(memory),Some(next))=(&mut self.relaxation,trial.memory) {memory.accept(next);}
         self.state = trial.frame.state;
         self.accepted_steps = trial.frame.step;
@@ -538,4 +576,7 @@ impl DynamicAperture {
 pub(super) struct ApertureTrial {
     pub(super) frame: ApertureFrame,
     memory: Option<MemoryTrial>,
+    transfers: [crate::port_adoption::PortTransfer; 3],
 }
+
+crate::port_adoption::impl_ported_module!(DynamicAperture, ports);

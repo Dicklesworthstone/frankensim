@@ -24,12 +24,24 @@ use fs_material::thermochemical_gas::energy::parcel::midpoint::{
 /// Closed constant-area cavity with a translating inertial end wall.
 /// Volume is the single position owner: the effective wall coordinate is V/A.
 /// Other rigid-body coordinates, contact stops and crank linkages are not modeled.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct GasPiston {
     gas: ClosedGasParcel,
     mass_kg: f64,
     area_m2: f64,
     velocity_m_s: f64,
+    ports: crate::port_adoption::ModulePorts,
+}
+
+// Equality remains equality of accepted physical state. Observing a stationary
+// step may add an account without changing the gas, geometry or momentum.
+impl PartialEq for GasPiston {
+    fn eq(&self, other: &Self) -> bool {
+        self.gas == other.gas
+            && self.mass_kg == other.mass_kg
+            && self.area_m2 == other.area_m2
+            && self.velocity_m_s == other.velocity_m_s
+    }
 }
 
 /// Explicit external loading during one physical timestep.
@@ -137,14 +149,33 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), PistonError> {
 impl GasPiston {
     /// Couple a resolved gas parcel to explicit inertial mass and constant area.
     /// Positive velocity expands the cavity. No material or atmosphere preset.
-    pub fn new(gas: ClosedGasParcel, mass_kg: f64, area_m2: f64, velocity_m_s: f64)
-        -> Result<Self, PistonError>
-    {
+    pub fn new(
+        gas: ClosedGasParcel,
+        mass_kg: f64,
+        area_m2: f64,
+        velocity_m_s: f64,
+    ) -> Result<Self, PistonError> {
         if !positive(mass_kg) || !positive(area_m2) || !velocity_m_s.is_finite()
             || !positive(gas.volume_m3()/area_m2)
             || !(0.5*mass_kg*velocity_m_s*velocity_m_s).is_finite()
         { return Err(invalid("positive represented mass/area/position and finite velocity/kinetic energy required")); }
-        Ok(Self { gas, mass_kg, area_m2, velocity_m_s })
+        let ports = crate::port_adoption::ModulePorts::new(
+            "gas-piston",
+            vec![
+                ("wall", fs_ports::PortKind::MechanicalForceVelocity),
+                (
+                    "heat/primary",
+                    fs_ports::PortKind::ThermalTemperatureEntropy,
+                ),
+            ],
+        );
+        Ok(Self {
+            gas,
+            mass_kg,
+            area_m2,
+            velocity_m_s,
+            ports,
+        })
     }
     /// Accepted common gas state, geometry and sources; no independent pressure.
     #[must_use]
@@ -191,10 +222,15 @@ impl GasPiston {
         Ok(Trial { gas, displacement, velocity, residual, tangent })
     }
 
-    fn finish(&mut self, trial: Trial, input: PistonInput, controls: PistonSolve,
-        iterations: usize, material_trials: usize, cancelled: &mut impl FnMut() -> bool)
-        -> Result<PistonStep, PistonError>
-    {
+    fn finish(
+        &mut self,
+        trial: Trial,
+        input: PistonInput,
+        controls: PistonSolve,
+        iterations: usize,
+        material_trials: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PistonStep, PistonError> {
         self.admit_linear_clock(trial.gas.midpoint(),
             f64::midpoint(self.gas.volume_m3(),trial.gas.endpoint().volume_m3()),input.duration_s)?;
         self.admit_linear_clock(trial.gas.endpoint().state(),trial.gas.endpoint().volume_m3(),input.duration_s)?;
@@ -217,6 +253,27 @@ impl GasPiston {
             momentum_residual_n_s: trial.residual, mechanical_energy_residual_j: mechanical,
             total_energy_residual_j: total, iterations, material_trials };
         poll(cancelled)?;
+        self.ports.accept(
+            crate::port_adoption::StepAccount {
+                tick: self.ports.next_tick(),
+                duration_s: input.duration_s,
+                storage_change_j: Some(
+                    report.gas.stored_energy_change_j + report.kinetic_energy_change_j,
+                ),
+                loss_j: Some(0.0),
+                included_work_j: 0.0,
+                entropy_change_j_k: report.gas.entropy_change_j_k,
+                tolerance_j: Some(controls.energy_tolerance_j),
+                unavailable: None,
+            },
+            [
+                crate::port_adoption::PortTransfer::work(external - exterior, true),
+                crate::port_adoption::PortTransfer::heat(
+                    input.heat_j,
+                    report.midpoint.state().temperature,
+                ),
+            ],
+        );
         self.gas = gas;
         self.velocity_m_s = trial.velocity;
         Ok(report)
@@ -261,3 +318,5 @@ mod tests;
 
 #[cfg(test)]
 mod warping;
+
+crate::port_adoption::impl_ported_module!(GasPiston, ports);

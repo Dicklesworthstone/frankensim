@@ -30,6 +30,59 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Port-schema adoption contract
+
+`PortedModule` exposes stable local schemas, coordinate charts, internal N-way
+junctions and the last accepted physical-time transfers for CoupledModalSystem,
+SharedCavity, GasPiston, DoubleActingGasPiston, DynamicAperture, ModalAperture and
+the ReedBoreVoice characteristic inlet. All schemas pass PortSchema::try_new.
+Graph embedding must namespace local identities. The chart timestamp names the
+clock origin; each audit binds its own exact accepted interval. Held effort work
+uses the original conjugate displacement increment, never logical ticks as time.
+
+Adapters observe the existing solvers; they do not feed back into their arithmetic
+or acceptance. Typed transfers and window evidence are materialized lazily on
+request. Exact-network connection work is minus the spring-energy change and
+the independently integrated damper loss along the same full trajectory, never
+endpoint reaction times displacement. Multiple damped columns require bounded
+per-column integration scratch; this is not an allocation-free observer.
+Rejected trials preserve the preceding account. An independent observation
+refusal is retained as `ModuleObservationFailed`, and observational overflow as
+a typed transfer error; neither publishes an invented zero record or rewinds
+an already accepted step.
+
+SharedCavity retains its mass-normalized modal chart and signed volume projection.
+The canonical schema is the explicitly transformed reference-coordinate pair:
+F = f_q sqrt(M_ref), v = q_dot/sqrt(M_ref), with M_ref=1 kg, not a specimen modal
+mass or a point-force measurement. Raw owner units remain N/sqrt(kg) and
+m sqrt(kg)/s. Its compression junction uses the original signed volume pullbacks
+to pressure/volume-flow coordinates, including neck and compression storage.
+Each CoupledModalSystem column similarly names its B_i^T q_i work charts and
+one connection-storage endpoint. DoubleActingGasPiston's two gas faces share a
+single common-flow wall junction; internal face work is not an exterior supply.
+
+Available energy windows use the owner's actual storage change, prescribed work,
+loss and existing joule tolerance. No balance is reconstructed as a leftover.
+Piston heat ports use the source-backed discrete gas-midpoint temperature and
+Q/T_midpoint entropy quadrature; gas entropy change remains independently
+measured. This energy projection claims neither gas species/element balances,
+exact isentropy nor external-reservoir thermodynamic validation. Negative
+numerical entropy generation remains a visible WindowAuditReport violation.
+
+MagentaBadger's ruling in Agent Mail 2636 explicitly leaves two audits unavailable:
+DynamicAperture has no owner-declared energy tolerance, and ReedBoreVoice /
+DelayedFilter has no physical line storage/loss owner or joule tolerance. Their
+real transfers remain available, but ModuleWindowAudit::Unavailable names the
+missing inputs. Those gaps keep IRP .162 open; unavailable is never a passing
+window. No stepping or music-lane golden is intentionally changed.
+
+G0/G3 tests in tests/port_schema_adoption.rs cover admitted schemas for all seven
+owners, available/unavailable accounts, sign-flip refusal, two-port parity,
+three-component/shared-cavity N-way descriptors, the common-wall descriptor,
+and accepted-record preservation on refusal. Each module emits a native-run
+JSONL row with residual/tolerance or explicit null/unavailable fields. Native
+verification and reed/string baseline hashes remain central-run requirements.
+
 ### Integrator doctrine and current audit boundary (IRP M5.2-W1)
 
 Render-path linear parts must use exact held-input propagation or explicitly
