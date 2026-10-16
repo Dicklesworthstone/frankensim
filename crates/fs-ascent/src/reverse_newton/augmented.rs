@@ -68,6 +68,8 @@ pub enum AugmentedNewtonStop {
     ObjectiveBudget,
     /// The next complete augmented Hessian action is not funded.
     HessianBudget,
+    /// The next inverse action exceeds its separate absolute allowance.
+    PreconditionerBudget,
     /// A multiplier/penalty retarget is not funded.
     MultiplierBudget,
     /// Further required penalty growth exceeds policy. NOT an infeasibility proof.
@@ -98,6 +100,8 @@ pub struct AugmentedNewtonReport {
     pub multiplier_attempts: usize,
     pub objective_evals: usize,
     pub hessian_products: usize,
+    /// Attempted inverse actions, including failures and discarded searches.
+    pub preconditioner_evals: usize,
 }
 
 /// PHR outer multiplier iterations with the existing Euclidean Newton kernel.
@@ -144,6 +148,8 @@ impl<'a, 'p> AugmentedNewtonStudy<'a, 'p> {
     pub fn multiplier_attempts(&self) -> usize { self.multiplier_attempts }
     /// Completed Newton iterations across merit retargets, also readable after failure.
     pub fn newton_iterations(&self) -> usize { self.newton_iterations }
+    /// Cumulative inverse attempts, also readable after cancellation or failure.
+    pub fn preconditioner_evals(&self) -> usize { self.inner.preconditioner_evals() }
     /// Configure approximate inner Newton steps; does not weaken KKT criteria.
     pub fn set_krylov_options(&mut self, options: KrylovOptions) { self.inner.set_krylov_options(options); }
 
@@ -179,7 +185,8 @@ impl<'a, 'p> AugmentedNewtonStudy<'a, 'p> {
             constraints: self.inner.constraint_values().to_vec(), multipliers, kkt,
             penalty: model.penalty(), newton_iterations: self.newton_iterations,
             multiplier_updates: self.multiplier_updates, multiplier_attempts: self.multiplier_attempts,
-            objective_evals: current.evals, hessian_products: current.hv_evals })
+            objective_evals: current.evals, hessian_products: current.hv_evals,
+            preconditioner_evals: self.preconditioner_evals() })
     }
 
     /// Complete up to `additional_iterations` Newton iterations across outer
@@ -194,6 +201,43 @@ impl<'a, 'p> AugmentedNewtonStudy<'a, 'p> {
     /// attempted-update charge. Inner numerical stalls are returned explicitly.
     pub fn run(&mut self, tolerance: f64, additional_iterations: usize,
         budget: AugmentedNewtonBudget, cx: Option<&Cx<'_>>,
+    ) -> Result<AugmentedNewtonReport, ReverseNewtonError> {
+        self.run_impl(tolerance, additional_iterations, budget, None, usize::MAX, cx)
+    }
+
+    /// Precondition every Newton phase, including after multiplier/penalty
+    /// retargeting, through the existing inverse-action kernel. The callback
+    /// receives `(accepted_point, residual, frozen_merit, constraint_values)`.
+    /// It can therefore account for changed penalty and active inequalities
+    /// without re-evaluating physics or consulting stale external multipliers.
+    /// Constraints are in declaration order at the SAME accepted point.
+    ///
+    /// The inverse must be fixed, linear and SPD during each Krylov solve, but
+    /// may change at the next outer iteration. It acts on the kernel's normalized
+    /// residual; the trust ball and all four KKT tests retain original coordinates.
+    /// Local positive-product checks are not a global SPD certificate.
+    ///
+    /// `max_preconditioner_applications` is cumulative across all runs and merit
+    /// retargets. Exhaustion returns PreconditionerBudget; malformed actions and
+    /// caught callback panics return the existing typed Preconditioner error.
+    /// Accepted state survives, attempted work does not reset. A repaired callback
+    /// or larger allowance may resume. Callback-owned side effects are not undone
+    /// or cloned, and callback-internal memory/time budgets remain caller-owned.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    pub fn run_preconditioned(&mut self,
+        inverse: &mut dyn FnMut(&[f64], &[f64], &AugmentedLagrangian<'_>, &[f64]) -> Vec<f64>,
+        tolerance: f64, additional_iterations: usize, budget: AugmentedNewtonBudget,
+        max_preconditioner_applications: usize, cx: Option<&Cx<'_>>,
+    ) -> Result<AugmentedNewtonReport, ReverseNewtonError> {
+        self.run_impl(tolerance, additional_iterations, budget, Some(inverse),
+            max_preconditioner_applications, cx)
+    }
+
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn run_impl(&mut self, tolerance: f64, additional_iterations: usize,
+        budget: AugmentedNewtonBudget,
+        mut inverse: Option<&mut dyn FnMut(&[f64], &[f64], &AugmentedLagrangian<'_>, &[f64]) -> Vec<f64>>,
+        max_preconditioner_applications: usize, cx: Option<&Cx<'_>>,
     ) -> Result<AugmentedNewtonReport, ReverseNewtonError> {
         let inner_tolerance = 0.1 * tolerance;
         if !tolerance.is_finite() || tolerance <= 0.0 || inner_tolerance == 0.0 {
@@ -234,13 +278,24 @@ impl<'a, 'p> AugmentedNewtonStudy<'a, 'p> {
             let before = self.inner.snapshot().iters;
             let next_iterations = self.newton_iterations.checked_add(1)
                 .ok_or(ReverseNewtonError::CounterOverflow)?;
-            let result = self.inner.run(&rule, 1, budget.hessian_products, cx);
+            let result = match inverse.as_mut() {
+                None => self.inner.run(&rule, 1, budget.hessian_products, cx),
+                Some(inverse) => {
+                    // Freeze only small merit metadata, not a second primal.
+                    // The inner driver executes at most one outer iteration.
+                    let merit = self.inner.augmentation().expect("augmented constructor").clone();
+                    let constraints = self.inner.constraint_values().to_vec();
+                    let mut apply = |x: &[f64], residual: &[f64]| (**inverse)(x, residual, &merit, &constraints);
+                    self.inner.run_preconditioned(&mut apply, &rule, 1,
+                        budget.hessian_products, max_preconditioner_applications, cx)
+                }
+            };
             let made_step = self.inner.snapshot().iters > before;
             if made_step { self.newton_iterations = next_iterations; }
             let progress = result?;
             match progress.stop {
                 ReverseNewtonStop::HessianBudget => return self.report(AugmentedNewtonStop::HessianBudget, cx),
-                ReverseNewtonStop::PreconditionerBudget => unreachable!("outer driver uses unpreconditioned entry point"),
+                ReverseNewtonStop::PreconditionerBudget => return self.report(AugmentedNewtonStop::PreconditionerBudget, cx),
                 ReverseNewtonStop::Stopped(StopReason::Budget) => return self.report(AugmentedNewtonStop::ObjectiveBudget, cx),
                 ReverseNewtonStop::Stopped(StopReason::GradNorm | StopReason::IterationCap) => {
                     if !made_step && self.inner.snapshot().grad_norm > inner_tolerance {

@@ -28,6 +28,8 @@ pub struct ContinuationWork {
     /// Includes one conservative objective reservation per stage-entry attempt.
     pub objective_evals: usize,
     pub hessian_products: usize,
+    /// Inverse attempts across all stages, including failed or discarded work.
+    pub preconditioner_evals: usize,
     pub multiplier_attempts: usize,
     pub newton_iterations: usize,
     pub stage_initializations: usize,
@@ -42,7 +44,7 @@ pub enum ContinuationError {
     CounterOverflow,
 }
 impl std::fmt::Display for ContinuationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidInput(s) => write!(f, "invalid Newton continuation: {s}"),
             Self::Stage { stage, source } => write!(f, "Newton continuation stage {stage}: {source}"),
@@ -118,7 +120,7 @@ fn local_work(study: &AugmentedNewtonStudy<'_, '_>) -> ContinuationWork {
     let current = study.inner().snapshot();
     ContinuationWork { objective_evals: current.evals, hessian_products: current.hv_evals,
         multiplier_attempts: study.multiplier_attempts(), newton_iterations: study.newton_iterations(),
-        stage_initializations: 0 }
+        stage_initializations: 0, preconditioner_evals: study.preconditioner_evals() }
 }
 
 impl<'a, 'p> NewtonContinuation<'a, 'p> {
@@ -170,6 +172,7 @@ impl<'a, 'p> NewtonContinuation<'a, 'p> {
             let live = local_work(active);
             work.objective_evals += live.objective_evals - 1;
             work.hessian_products += live.hessian_products;
+            work.preconditioner_evals += live.preconditioner_evals;
             work.multiplier_attempts += live.multiplier_attempts;
             work.newton_iterations += live.newton_iterations;
         }
@@ -207,6 +210,7 @@ impl<'a, 'p> NewtonContinuation<'a, 'p> {
             let work = local_work(old);
             self.retired.objective_evals += work.objective_evals - 1;
             self.retired.hessian_products += work.hessian_products;
+            self.retired.preconditioner_evals += work.preconditioner_evals;
             self.retired.multiplier_attempts += work.multiplier_attempts;
             self.retired.newton_iterations += work.newton_iterations;
         }
@@ -225,6 +229,40 @@ impl<'a, 'p> NewtonContinuation<'a, 'p> {
     pub fn run(&mut self, additional_iterations: usize, budget: AugmentedNewtonBudget, cx: Option<&Cx<'_>>)
         -> Result<ContinuationReport, ContinuationError>
     {
+        self.run_impl(additional_iterations, budget, None, usize::MAX, cx)
+    }
+
+    /// Precondition the entire constrained continuation schedule. The inverse
+    /// receives `(stage_index, accepted_point, residual, frozen_merit, constraints)`.
+    /// Stage identity distinguishes two different physical models even when they
+    /// happen to share a point; current merit metadata also reflects multiplier
+    /// and penalty updates inside that stage. No primal evaluation is added to
+    /// supply these inputs. Use a fixed linear SPD map during each Krylov solve.
+    ///
+    /// The inverse allowance is one ABSOLUTE lifetime ceiling, not a fresh limit
+    /// per stage. Reported work includes retired stages and a currently failed
+    /// inverse; raising the limit resumes without refund. Entering a new stage
+    /// still uses the independent objective-entry budget, and convergence remains
+    /// the original four KKT tests. A zero-iteration call never invokes the inverse.
+    ///
+    /// The callback and its private caches are not cloned or serialized. For
+    /// repeatable continuation it must reconstruct the same map from these inputs.
+    /// Native physics budgets remain with the providers. Callback failure has the
+    /// same retained-state/side-effect contract as AugmentedNewtonStudy.
+    #[allow(clippy::type_complexity)]
+    pub fn run_preconditioned(&mut self,
+        inverse: &mut dyn FnMut(usize, &[f64], &[f64], &AugmentedLagrangian<'_>, &[f64]) -> Vec<f64>,
+        additional_iterations: usize, budget: AugmentedNewtonBudget,
+        max_preconditioner_applications: usize, cx: Option<&Cx<'_>>,
+    ) -> Result<ContinuationReport, ContinuationError> {
+        self.run_impl(additional_iterations, budget, Some(inverse), max_preconditioner_applications, cx)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn run_impl(&mut self, additional_iterations: usize, budget: AugmentedNewtonBudget,
+        mut inverse: Option<&mut dyn FnMut(usize, &[f64], &[f64], &AugmentedLagrangian<'_>, &[f64]) -> Vec<f64>>,
+        max_preconditioner_applications: usize, cx: Option<&Cx<'_>>,
+    ) -> Result<ContinuationReport, ContinuationError> {
         let target = self.work().newton_iterations.checked_add(additional_iterations)
             .ok_or(ContinuationError::CounterOverflow)?;
         loop {
@@ -254,9 +292,22 @@ impl<'a, 'p> NewtonContinuation<'a, 'p> {
                 self.enter(self.index + 1, Some(current), cx)?;
                 continue;
             }
-            let progress = self.active.as_mut().expect("initialized stage")
-                .run(stage.tolerance, 1, local_budget, cx)
-                .map_err(|source| ContinuationError::Stage { stage: self.index, source })?;
+            // Subtract retired attempts, avoiding local+remaining overflow at
+            // usize::MAX. The active study already owns its own attempted count.
+            let local_inverse_limit = max_preconditioner_applications
+                .saturating_sub(self.retired.preconditioner_evals);
+            let active = self.active.as_mut().expect("initialized stage");
+            let result = match inverse.as_mut() {
+                None => active.run(stage.tolerance, 1, local_budget, cx),
+                Some(inverse) => {
+                    let index = self.index;
+                    let mut apply = |x: &[f64], residual: &[f64], merit: &AugmentedLagrangian<'_>, c: &[f64]|
+                        (**inverse)(index, x, residual, merit, c);
+                    active.run_preconditioned(&mut apply, stage.tolerance, 1,
+                        local_budget, local_inverse_limit, cx)
+                }
+            };
+            let progress = result.map_err(|source| ContinuationError::Stage { stage: self.index, source })?;
             match &progress.stop {
                 AugmentedNewtonStop::Converged | AugmentedNewtonStop::IterationCap => {}
                 stop => return Ok(self.report(ContinuationStop::StageStopped(stop.clone()), Some(progress))),
