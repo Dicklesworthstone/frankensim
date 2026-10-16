@@ -22,6 +22,8 @@
 pub mod geometry;
 #[path = "../../../../crates/fs-couple/examples/grand_piano/steinway_scale.rs"]
 pub mod steinway_scale;
+#[path = "../../../../crates/fs-couple/examples/grand_piano/stretch_tuning.rs"]
+pub mod stretch_tuning;
 #[path = "../../../../crates/fs-couple/examples/grand_piano/linear.rs"]
 pub mod linear;
 #[path = "../../../../crates/fs-couple/examples/grand_piano/board_geometry.rs"]
