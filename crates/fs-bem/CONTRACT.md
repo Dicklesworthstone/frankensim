@@ -1,5 +1,82 @@
 # fs-bem CONTRACT
 
+## Exterior observation FIRs and CQ (IRP M2.5-W6)
+
+`observation_transfers::BemObservation` binds the existing dense Burton–Miller
+owner to every supplied signed boundary-velocity trace and explicit exterior
+receiver. `SourceId` distinguishes structural-coordinate velocity from aperture
+volume flow; the latter integrates to one SI volume flow using the original
+panel areas. Sources above 256 are partitioned into complete batches, without
+truncation. Every source/receiver retains pressure and all three Cartesian
+pressure-gradient components. These are the same centroid Green rows and
+analytic normal derivatives used by the Helmholtz owner; the near-field owner
+supplies exact closed-surface/exterior/clearance admission. This route does not
+claim adaptively integrated near-field quadrature accuracy.
+
+`bake_observation_transfers` uses `fs-fft` on four to eight fixed doubling DFT
+grids (32..65536). Fourier data use exp(-iwt) and are conjugated exactly once
+at the DFT boundary. Propagation has an exact integer prefix; its fractional
+part remains in the taps. The caller explicitly declares sampling rate, a
+pass band, a C4 transition to zero strictly before Nyquist, reconstruction
+latency, source/receiver identities, geometric earliest arrivals, producer
+provenance/uncertainty, and an entry budget. The taper is exactly one in the
+pass band. Output time includes the declared additional filter latency. No
+passivity enforcement, allpass approximation or rational fit is applied.
+
+Every DFT rung records worst-channel tail energy after N/4, wrap-around energy
+in the second half, and the maximum per-channel relative L2 DTFT change on a
+fixed 127-point withheld pass-band grid. Pa and Pa/m are never mixed in a norm.
+Only the first half is retained, after measuring the full untrimmed inverse.
+The final tail must meet the caller's <=1e-10 tolerance, wrap must be <1e-10,
+and inter-rung DTFT change must be strictly below the caller's <=1e-4 tolerance.
+Exhaustion returns `NotConverged`, with no partial bake or clipping repair.
+Zero-frequency pressure/gradient for a static prescribed velocity are exactly
+zero from q=-rho*s*v and the exterior zero-pressure condition at infinity.
+
+`fs-vfit::observation::{FirKernel,ObservationFir}` is the portable data/replay
+owner. Receiver engines can consume the FIRs without depending on fs-bem.
+M2.6-W1 must retain the explicit p/gradient ordering, SI source-coordinate
+units, pass band, geometric delays, latency and uncertainty; no microphone or
+atmosphere defaults are supplied here. Actual M2.6 receiver integration remains
+with that consumer bead.
+
+`helmholtz::laplace` analytically continues the SAME point kernels, self terms,
+static row closures and dense Burton–Miller assembly to k=i*s/c, Re(s)>=0;
+q=-rho*s*v. The real-f64 kernel/self arithmetic is preserved, including the
+iterative owner's inherited kernels. Plain-CBIE triangle integration remains
+real-frequency only. Dense/resolution/batch caps still apply at |k|. A known
+propagation delay may be extracted inside each Green exponential, bounded by
+the actual surface clearance/c, to avoid exp(-s*tau)*exp(s*tau) under/overflow.
+No radiated-power or passivity claim is made at a complex frequency.
+
+`cq_time_response` is a BDF2 reference, with delta(zeta)=3/2-2*zeta+zeta^2/2
+and an explicitly declared damped contour. It evaluates the original
+Laplace-domain operator, not a fit. Its uncorrected second-order claim requires
+smooth onset and zero prehistory. See Lubich, Numer. Math. 52 (1988), and
+Hassell–Sayas, sections 2–3, <https://arxiv.org/abs/1407.0345>. CQ contour error,
+time error, FIR truncation and BEM spatial error remain separate.
+
+All cold operations are deterministic on one ISA. Cancellation is checked
+before/between frequency/contour solves; a dense solve drains before the next
+poll, with no mid-LU latency guarantee. Frequency storage, taps and input
+history have separate 4194304-entry caps; source/output caps are 4096/256.
+Failed FIR replay is transactional and leaves its shared histories unchanged.
+
+`ProducerUncertainty` preserves exact analytic, provenance-bearing relative
+estimate, or explicitly unresolved spatial error. BEM refuses ExactAnalytic.
+An unresolved BEM bake only qualifies realization of that discrete operator;
+it does not establish continuum or instrument accuracy. The strict 1e-6
+sphere realization test uses the independent closed-form operator and time
+response. Sphere/lathed-bell FIR-versus-CQ tests use actual identical BEM
+panels, both source kinds and p/gradient, with four time rungs and fs-mms's
+second-order gate. These do not upgrade the upstream BEM mesh qualification.
+No real-instrument full-band claim is made; central native results are pending.
+
+Focused targets: `tests/observation_transfers.rs` (G0/G1/G2/G3/G5),
+`helmholtz::real_kernel_bits` and `helmholtz::laplace::tests` (G0), plus
+`fs-vfit::observation::tests` (G0). Receipts are emitted by these tests; this
+bead has no render-producing default or separate e2e framework.
+
 ## Purpose and layer
 
 Layer: L3 (FLUX). Laplace BEM panel methods (plan §8.3 [F], bead

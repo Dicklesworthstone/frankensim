@@ -71,6 +71,9 @@ use fs_math::det;
 
 use crate::panel3d::SpherePanels;
 
+#[path = "helmholtz_laplace.rs"]
+pub mod laplace;
+
 #[path = "cbie_geometry.rs"]
 mod cbie_geometry;
 pub use cbie_geometry::PreparedCbieGeometry;
@@ -308,13 +311,37 @@ fn expik(kr: f64) -> C64 {
 }
 
 /// Free-space kernel `G = e^{ikr}/(4 pi r)`.
-fn green(k: f64, r: f64) -> C64 {
-    expik(k * r).scale(1.0 / (4.0 * core::f64::consts::PI * r))
+fn green<K: WaveNumber>(k: K, r: f64) -> C64 {
+    k.outgoing(r).scale(1.0 / (4.0 * core::f64::consts::PI * r))
 }
 
 /// `G'(r) = (ik - 1/r) G`.
-fn green_dr(k: f64, r: f64) -> C64 {
-    green(k, r) * C64::new(-1.0 / r, k)
+fn green_dr<K: WaveNumber>(k: K, r: f64) -> C64 {
+    green(k, r) * k.radial_factor(r)
+}
+
+// Real-frequency solves retain their original operation graph. The damped
+// extension supplies only the analytic scalar kernels; matrix geometry, static
+// closures, normal derivatives and LU assembly remain this owner's code.
+trait WaveNumber: Copy {
+    fn outgoing(self, r: f64) -> C64;
+    fn radial_factor(self, r: f64) -> C64;
+    fn disc_self(self, area: f64) -> (C64, C64);
+    fn cbie_real(self) -> f64;
+}
+impl WaveNumber for f64 {
+    fn outgoing(self, r: f64) -> C64 {
+        expik(self * r)
+    }
+    fn radial_factor(self, r: f64) -> C64 {
+        C64::new(-1.0 / r, self)
+    }
+    fn disc_self(self, area: f64) -> (C64, C64) {
+        real_self_terms(self, area)
+    }
+    fn cbie_real(self) -> f64 {
+        self
+    }
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -351,12 +378,18 @@ fn affine3(origin: [f64; 3], a: [f64; 3], wa: f64, b: [f64; 3], wb: f64) -> [f64
 /// `d2G/dn_x dn_y = -(G''/r^2 - G'/r^3)(n_x . d)(n_y . d) - (G'/r)(n_x . n_y)`
 /// where `G'' = (ik - 1/r) G' + G/r^2`. All four are pinned against
 /// central finite differences of G in the unit tests.
-fn kernels(k: f64, x: [f64; 3], nx: [f64; 3], y: [f64; 3], ny: [f64; 3]) -> (C64, C64, C64, C64) {
+fn kernels<K: WaveNumber>(
+    k: K,
+    x: [f64; 3],
+    nx: [f64; 3],
+    y: [f64; 3],
+    ny: [f64; 3],
+) -> (C64, C64, C64, C64) {
     let d = sub(x, y);
     let r = norm(d);
     let g = green(k, r);
     let gp = green_dr(k, r);
-    let gpp = gp * C64::new(-1.0 / r, k) + g.scale(1.0 / (r * r));
+    let gpp = gp * k.radial_factor(r) + g.scale(1.0 / (r * r));
     let nyd = dot(ny, d);
     let nxd = dot(nx, d);
     let dgdny = gp.scale(-nyd / r);
@@ -377,7 +410,69 @@ fn kernels(k: f64, x: [f64; 3], nx: [f64; 3], y: [f64; 3], ny: [f64; 3]) -> (C64
 /// `N_0`'s self entry as minus the discrete off-diagonal static row sum
 /// — the same quadrature on both sides, so the point-panel error
 /// cancels instead of polluting the Burton-Miller row.
-fn self_terms(k: f64, area: f64) -> (C64, C64) {
+fn self_terms<K: WaveNumber>(k: K, area: f64) -> (C64, C64) {
+    k.disc_self(area)
+}
+
+#[cfg(test)]
+mod real_kernel_bits {
+    use super::*;
+    #[test]
+    fn g0_real_k_point_kernel_bits_match_preextension_arithmetic() {
+        // Verbatim pre-extension scalar expressions. The generic f64 path
+        // must retain these bits: dense and iterative assembly share them.
+        fn original(k: f64, x: [f64; 3], nx: [f64; 3], y: [f64; 3], ny: [f64; 3]) -> [C64; 4] {
+            let d = sub(x, y);
+            let r = norm(d);
+            let g = expik(k * r).scale(1.0 / (4.0 * core::f64::consts::PI * r));
+            let gp = g * C64::new(-1.0 / r, k);
+            let gpp = gp * C64::new(-1.0 / r, k) + g.scale(1.0 / (r * r));
+            let nyd = dot(ny, d);
+            let nxd = dot(nx, d);
+            let radial = gpp.scale(1.0 / (r * r)) - gp.scale(1.0 / (r * r * r));
+            [
+                g,
+                gp.scale(-nyd / r),
+                gp.scale(nxd / r),
+                radial.scale(-nxd * nyd) - gp.scale(dot(nx, ny) / r),
+            ]
+        }
+        for k in [0.0, 0.0001, 0.5, core::f64::consts::PI, 137.0] {
+            for (x, y) in [
+                ([0.2, 0.7, -0.4], [0.0, 0.1, 0.3]),
+                ([2.0, -0.3, 0.7], [-0.2, 0.0, 0.1]),
+            ] {
+                let nx = [0.0, 0.6, 0.8];
+                let ny = [1.0, 0.0, 0.0];
+                let old = original(k, x, nx, y, ny);
+                let new = kernels(k, x, nx, y, ny);
+                for (old, new) in old.into_iter().zip([new.0, new.1, new.2, new.3]) {
+                    assert_eq!(old.re.to_bits(), new.re.to_bits());
+                    assert_eq!(old.im.to_bits(), new.im.to_bits());
+                }
+            }
+            for area in [1e-8, 0.007, 1.0] {
+                let a = self_terms(k, area);
+                let b = real_self_terms(k, area);
+                assert_eq!(
+                    (
+                        a.0.re.to_bits(),
+                        a.0.im.to_bits(),
+                        a.1.re.to_bits(),
+                        a.1.im.to_bits()
+                    ),
+                    (
+                        b.0.re.to_bits(),
+                        b.0.im.to_bits(),
+                        b.1.re.to_bits(),
+                        b.1.im.to_bits()
+                    )
+                );
+            }
+        }
+    }
+}
+fn real_self_terms(k: f64, area: f64) -> (C64, C64) {
     let a = (area / core::f64::consts::PI).sqrt();
     if k == 0.0 {
         return (C64::new(0.5 * a, 0.0), C64::ZERO);
@@ -1192,9 +1287,9 @@ fn assemble_dense(surface: &SpherePanels, k: f64, alpha: C64) -> (Vec<C64>, Vec<
     assemble_dense_with_static(surface, k, alpha, None)
 }
 
-fn assemble_dense_with_static(
+fn assemble_dense_with_static<K: WaveNumber>(
     surface: &SpherePanels,
-    k: f64,
+    k: K,
     alpha: C64,
     static_layers: Option<&[(f64, f64)]>,
 ) -> (Vec<C64>, Vec<C64>) {
@@ -1236,9 +1331,15 @@ fn assemble_dense_with_static(
             let (s_ij, d_ij, dp_ij, n_ij) = if i == j {
                 let (s, n_reg) = if let Some(triangles) = weak_triangles {
                     let single = if let Some(layers) = static_layers {
-                        triangle_self_terms_with_static(k, xi, triangles[i], layers[i * n + i].0).0
+                        triangle_self_terms_with_static(
+                            k.cbie_real(),
+                            xi,
+                            triangles[i],
+                            layers[i * n + i].0,
+                        )
+                        .0
                     } else {
-                        triangle_self_terms(k, xi, triangles[i]).0
+                        triangle_self_terms(k.cbie_real(), xi, triangles[i]).0
                     };
                     (single, C64::ZERO)
                 } else {
@@ -1265,7 +1366,7 @@ fn assemble_dense_with_static(
                 let (s, d) = if triangle_is_near(xi, centroids[j], triangles[j]) {
                     if let Some(layers) = static_layers {
                         triangle_weak_influence_with_static(
-                            k,
+                            k.cbie_real(),
                             xi,
                             triangles[j],
                             normals[j],
@@ -1273,11 +1374,11 @@ fn assemble_dense_with_static(
                             layers[i * n + j],
                         )
                     } else {
-                        triangle_weak_influence(k, xi, triangles[j], normals[j])
+                        triangle_weak_influence(k.cbie_real(), xi, triangles[j], normals[j])
                     }
                 } else if let Some(layers) = static_layers {
                     triangle_weak_influence_with_static(
-                        k,
+                        k.cbie_real(),
                         xi,
                         triangles[j],
                         normals[j],
@@ -1286,7 +1387,7 @@ fn assemble_dense_with_static(
                     )
                 } else {
                     triangle_weak_influence_with_rule(
-                        k,
+                        k.cbie_real(),
                         xi,
                         triangles[j],
                         normals[j],

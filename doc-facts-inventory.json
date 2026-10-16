@@ -482,6 +482,7 @@
     "crates/fs-atmo/tests/ou_battery.rs",
     "crates/fs-atmo/tests/v04a_battery.rs",
     "crates/fs-bem/tests/battery.rs",
+    "crates/fs-bem/tests/observation_transfers.rs",
     "crates/fs-benchmark/tests/benchmark.rs",
     "crates/fs-bisect/tests/bisect.rs",
     "crates/fs-bisect/tests/compound_battery.rs",

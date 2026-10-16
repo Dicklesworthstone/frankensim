@@ -21,6 +21,28 @@
       "notes":"IRP .67, central native batch pending. Explicit ND with optional geometric coordinates extends the existing sparse LDLT; AMD remains default. Shared pencil analysis, unique endpoint inertia counts and ordered scoped workers extend the existing serial slice owner. Release-only 30^3/45^3/60^3 fill gates, a coupled 104544-DOF P1 elastic block and a 1000000-DOF grid window test the declared bands. Numeric payload admission is not process RSS or bounded symbolic-construction memory; factor/analysis cancellation waits for the indivisible call. No universal graph-fill advantage, eigenvector accuracy, runtime/performance, nonlinear eigenproblem or instrument qualification is claimed. Existing AMD golden is unchanged. Canonical owners are reused; no new factorization, schema migration or duplicate solver disposition. M1.4-W2/M1.5-W2 must explicitly choose ordering/windows/budgets."
     },
     {
+      "filling": "exterior-observation",
+      "image": "causal-fir-bdf2-cq",
+      "qoi": "body-velocity-and-aperture-flow-to-pressure-and-gradient",
+      "owner_crates": ["fs-bem", "fs-vfit"],
+      "exactness": ["X-Est"],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {"kind": "test", "ref": "crates/fs-bem/tests/observation_transfers.rs::fir_transfer_causal"},
+        {"kind": "test", "ref": "crates/fs-bem/tests/observation_transfers.rs::fir_pulsating_sphere_exact"},
+        {"kind": "test", "ref": "crates/fs-bem/tests/observation_transfers.rs::fir_matches_convolution_quadrature"},
+        {"kind": "test", "ref": "crates/fs-bem/tests/observation_transfers.rs::fir_length_ladder_converges"},
+        {"kind": "test", "ref": "crates/fs-bem/tests/observation_transfers.rs::cq_order_ladder"},
+        {"kind": "test", "ref": "crates/fs-bem/tests/observation_transfers.rs::fir_transfer_refusals"},
+        {"kind": "test", "ref": "crates/fs-bem/tests/observation_transfers.rs::fir_transfer_bitwise_repeat"}
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "IRP M2.5-W6 (.110), native batch pending. Complete bound BEM velocity/volume-flow source columns and all p/Cartesian-gradient observations feed a band-declared causal FIR with exact integer propagation, explicit C4 reconstruction taper/latency, four-rung tail/wrap/DTFT gates and portable fs-vfit replay. BDF2 CQ evaluates the same damped Burton-Miller point operator. Strict analytic-sphere realization error is separate from BEM spatial error; fixed-panel sphere/lathed-bell CQ comparison does not establish continuum 1e-6 accuracy. Unresolved producer error remains explicit. No passivity repair, in-loop load, real-instrument fidelity, full-band physical qualification or M2.6 consumer integration is claimed."
+    },
+    {
       "filling": "resolved-flow",
       "image": "d3q27-full-cumulant",
       "qoi": "rotational-anisotropy-and-collision-dissipation",

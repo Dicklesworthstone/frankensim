@@ -222,6 +222,8 @@ pub mod helmholtz;
 pub mod modal_loading;
 /// Geometry-admitted, adaptively integrated finite receivers near closed surfaces.
 pub mod near_field;
+/// Causal, band-declared exterior observation FIRs and BDF2 CQ references.
+pub mod observation_transfers;
 pub mod panel2d;
 pub mod panel3d;
 pub mod radiation_bake;

@@ -33,6 +33,8 @@ pub mod discretize;
 pub mod impedance;
 pub mod loewner;
 pub mod model;
+/// One-way, data-only acoustic observation FIRs; no passivity constraint.
+pub mod observation;
 pub mod passivity;
 /// Passive frequency-dependent boundary loss with retained relaxation histories.
 pub mod relaxation;

@@ -188,6 +188,25 @@ reflections). History longer than the new buffer is truncated at the
 OLD end; shorter history zero-pads the old end. IIR-mode lines return
 an empty history (no lift claim).
 
+## One-way observation FIRs (IRP M2.5-W6)
+
+`observation::{FirKernel,ObservationFir}` carries the complete source-to-receiver
+component FIR data from a declared frequency-domain observation bake. Kernels
+have explicit input/output indices and exact integer delay prefixes; fractional
+propagation and reconstruction latency are in the producer's taps/metadata.
+No vector fitting, positive-real test, clipping or passivity enforcement is
+applied. This MIMO convolution is an observation outside the reaction loop;
+the SISO-only limitation below concerns rational identification, not FIR replay.
+
+The cold caps are 4096 inputs, 256 output components, 4194304 coefficients and
+4194304 shared input-history entries, independently admitted before allocation.
+Source/receiver units, provenance, pass band, latency and producer uncertainty
+travel in the upstream artifact; replay supplies no defaults for them. Histories
+start at zero. Traversal and sums are fixed; identical same-ISA replay is bitwise
+deterministic. Invalid input or output overflow leaves all history unchanged.
+`observation::tests` covers delayed two-input summation, error/retry identity,
+empty/index errors and each allocation-free cap/cap+1 admission.
+
 ## No-claim boundaries
 
 - SISO only; matrix-valued (MIMO) vector fitting and pencil

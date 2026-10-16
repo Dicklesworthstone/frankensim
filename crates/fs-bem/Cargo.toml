@@ -14,6 +14,7 @@ layer = "L3"
 fs-blake3 = { path = "../fs-blake3" }
 fs-casebook = { path = "../fs-casebook" }
 fs-exec = { path = "../fs-exec" }
+fs-fft = { path = "../fs-fft" }
 fs-math = { path = "../fs-math" }
 fs-phs = { path = "../fs-phs" }
 fs-fmm = { path = "../fs-fmm" }
@@ -22,6 +23,7 @@ fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-solver = { path = "../fs-solver" }
+fs-vfit = { path = "../fs-vfit" }
 
 [dev-dependencies]
 fs-duct = { path = "../fs-duct" }
