@@ -17,7 +17,7 @@
 //! Sign convention: the lip is OUTWARD-STRIKING — mouth overpressure
 //! `p_blow - p_bore` pushes the lip open (`h = h0 + q`), the classic
 //! brass embouchure family. The lip's supply defect is watched every
-//! sample (the Gonzalez-discrete-gradient island keeps an honest
+//! sample (the exact held-force quadratic island keeps an honest
 //! energy ledger); per-block diagnostics carry the lock estimate, gap
 //! statistics, and the power ledger.
 //!
@@ -28,7 +28,10 @@
 //! loop — only the reduced card's numbers do.
 
 use fs_material::gas::GasState;
-use fs_phs::{PortHamiltonian, mass_spring_damper, step};
+use fs_phs::linear_exact::{
+    LinearPropagator, LinearSplit, LinearSplitBudget, split_quadratic, step_split,
+};
+use fs_phs::{PortHamiltonian, mass_spring_damper};
 
 use crate::mm_line::{CupState, MmLineBank, MmLineConfig, MmLineError, MmLoad, cup_junction};
 use fs_duct::Duct;
@@ -96,6 +99,7 @@ pub struct BrassBlockDiag {
 pub struct BrassVoice {
     bank: MmLineBank,
     lip_sys: PortHamiltonian,
+    lip_linear: LinearSplit,
     lip_state: Vec<f64>,
     lip: LipIsland,
     tension: f64,
@@ -145,10 +149,12 @@ impl BrassVoice {
             .map_err(|_| MmLineError::Invalid {
                 what: "lip island refused admission",
             })?;
+        let lip_linear = prepare_lip(&lip_sys)?;
         let cup_compliance = cup_volume_m3 / (gas.density * gas.sound_speed * gas.sound_speed);
         Ok(BrassVoice {
             bank,
             lip_sys,
+            lip_linear,
             lip_state: vec![0.0, 0.0],
             lip,
             tension: 1.0,
@@ -184,11 +190,10 @@ impl BrassVoice {
                         what: "lip tension must be finite positive",
                     });
                 }
-                self.tension = t;
                 // Stiffness ~ t^2, damping ~ t: rebuild the island with
                 // the SAME state (q, p persist through an embouchure
                 // move — the lip does not teleport).
-                self.lip_sys = mass_spring_damper(
+                let lip_sys = mass_spring_damper(
                     self.lip.mass_kg,
                     self.lip.stiffness_n_m * t * t,
                     self.lip.damping_n_s_m * t,
@@ -196,6 +201,10 @@ impl BrassVoice {
                 .map_err(|_| MmLineError::Invalid {
                     what: "tensioned lip island refused admission",
                 })?;
+                let lip_linear = prepare_lip(&lip_sys)?;
+                self.lip_sys = lip_sys;
+                self.lip_linear = lip_linear;
+                self.tension = t;
             }
             BrassControl::SetValve {
                 combo,
@@ -258,10 +267,16 @@ impl BrassVoice {
             //    mouth overpressure opens the lip).
             let dp_lip = self.blow_pa - self.p_bore_prev;
             let force = dp_lip * self.lip.face_area_m2;
-            let record = step(&self.lip_sys, &self.lip_state, &[force], dt).map_err(|_| {
-                MmLineError::Invalid {
-                    what: "lip island step refused",
-                }
+            let record = step_split(
+                &self.lip_sys,
+                &self.lip_linear,
+                LinearPropagator::ExactZoh,
+                &self.lip_state,
+                &[force],
+                dt,
+            )
+            .map_err(|_| MmLineError::Invalid {
+                what: "lip island step refused",
             })?;
             worst_defect = worst_defect.max(record.supply_defect().abs());
             self.lip_state = record.x;
@@ -335,6 +350,19 @@ impl BrassVoice {
     }
 }
 
+fn prepare_lip(sys: &PortHamiltonian) -> Result<LinearSplit, MmLineError> {
+    split_quadratic(
+        sys,
+        LinearSplitBudget {
+            max_modes: 2,
+            max_omega_dt: core::f64::consts::PI,
+        },
+    )
+    .map_err(|_| MmLineError::Invalid {
+        what: "exact quadratic lip preparation refused",
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod brass_loop_tests {
     use super::*;
@@ -391,6 +419,46 @@ pub(crate) mod brass_loop_tests {
             face_area_m2: 2.0e-5,
             provenance: "AUTHORED probe values (Estimate)".to_string(),
         }
+    }
+
+    #[test]
+    fn exact_lip_step_and_tension_rebuild_match_the_closed_form() {
+        let gas = air(293.15);
+        let cfg = config();
+        let load = MmLoad::Analytic(Termination::FlangedOpen);
+        let lip = authored_lip();
+        let (mass, stiffness, loss) = (lip.mass_kg, lip.stiffness_n_m, lip.damping_n_s_m);
+        let mut voice = BrassVoice::new(
+            &[brass_combo(0.0)],
+            &["analytic fixture"],
+            &gas,
+            &load,
+            &cfg,
+            lip,
+            1.5e-6,
+        )
+        .unwrap();
+        voice.lip_state = vec![1e-5, 0.0];
+        let initial = voice.lip_state.clone();
+        voice.apply(BrassControl::SetLipTension(3.0)).unwrap();
+        assert_eq!(
+            voice.lip_state, initial,
+            "repreparation must not reset momentum or position"
+        );
+        let alpha = 3.0 * loss / (2.0 * mass);
+        let omega2 = 9.0 * stiffness / mass;
+        let damped = fs_math::det::sqrt(omega2 - alpha * alpha);
+        let decay = fs_math::det::exp(-alpha * voice.dt);
+        let sine = fs_math::det::sin(damped * voice.dt);
+        let cosine = fs_math::det::cos(damped * voice.dt);
+        let expected_q = initial[0] * decay * (cosine + alpha / damped * sine);
+        let expected_p = -mass * initial[0] * decay * omega2 / damped * sine;
+        voice.step_block(&mut [0.0]).unwrap();
+        assert!((voice.lip_state[0] - expected_q).abs() <= 1e-12 * initial[0]);
+        assert!(
+            (voice.lip_state[1] - expected_p).abs()
+                <= 1e-12 * (mass * fs_math::det::sqrt(omega2) * initial[0])
+        );
     }
 
     /// Dominant spectral peak of a block [Hz] (parabolic-refined),
