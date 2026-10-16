@@ -63,6 +63,9 @@ pub use newton::{
     arithmetic_rounding_floor,
 };
 
+mod zk;
+pub use zk::{ZK_MAX_SHEAR, ZK_MIN_SHEAR, ZK_SERIES_SWITCH, zk_one_minus_f, zwikker_kosten_f};
+
 /// Energy storage: the Hamiltonian and its exact gradient.
 ///
 /// Implementations supply ANALYTIC gradients; the discrete-gradient
@@ -2431,15 +2434,11 @@ pub struct AcousticTap {
     pub open_fraction: f64,
 }
 
-/// Wide-tube viscothermal pin for an [`acoustic_chain`].
+/// Exact cylindrical viscothermal pin for an [`acoustic_chain`].
 ///
-/// First-order Zwikker–Kosten at one frequency: shear number
-/// `r_v = a √(ω ρ / μ)`, series wall resistance
-/// `R = ω L √2 / r_v`, thermal shunt
-/// `G = ω C (γ−1) √2 / (r_v √Pr)` when `r_v ≥ 10`. Below that
-/// shear number the pin is the same Poiseuille + isothermal-tending
-/// shunt as `fs_duct::LossModel::AllRegime` (series `8 μ / a²` on
-/// `L`, thermal `G` on `C`, inertance `4/3` of the inviscid value).
+/// Zwikker–Kosten Bessel law at one frequency, shear number
+/// `r_v = a √(ω ρ / μ)`. Both series inertia/resistance and thermal
+/// compliance/conductance come from the same exact cylindrical law.
 /// Evaluated at the quarter-wave pin. Zero viscosity is the
 /// lossless mutation. `foster_branches > 0` collocates Foster
 /// networks to Bessel Zwikker–Kosten `F(r_v)` at every shear
@@ -2802,14 +2801,15 @@ fn spherical_cone_wall(
                     r[eta * n + qi] -= g_psi;
                 }
             } else {
-                let (r_series, g_shunt, l_scale) = all_regime_series_and_shunt(
+                let (r_series, g_shunt, l_scale, c_scale) = bessel_series_and_shunt(
                     l_psi / x2.abs().max(1.0e-18),
                     c_psi * x2.abs(),
                     r_phys,
                     density,
                     omega_pin,
                     pin,
-                );
+                )?;
+                q[qi * n + qi] /= c_scale;
                 q[pi * n + pi] = 1.0 / (l_psi * l_scale);
                 r[qi * n + qi] += g_shunt / x2.abs().max(1.0e-18);
                 r[pi * n + pi] += r_series * x2.abs();
@@ -3200,27 +3200,28 @@ fn hybrid_sphere_cylinder_chain(
                         r[eta * n + qi] -= g_psi;
                     }
                 } else {
-                    let (r_series, g_shunt, l_scale) = all_regime_series_and_shunt(
+                    let (r_series, g_shunt, l_scale, c_scale) = bessel_series_and_shunt(
                         inertances[cell] / x2.abs().max(1.0e-18),
                         compliances[cell] * x2.abs(),
                         radii[cell],
                         density,
                         omega_pin,
                         pin,
-                    );
+                    )?;
+                    q[qi * n + qi] /= c_scale;
                     q[pi * n + pi] = 1.0 / (inertances[cell] * l_scale);
                     r[qi * n + qi] += g_shunt / x2.abs().max(1.0e-18);
                     r[pi * n + pi] += r_series * x2.abs();
                 }
             } else {
-                let (r_series, g_shunt, l_scale) = all_regime_series_and_shunt(
+                let (r_series, g_shunt, l_scale, c_scale) = bessel_series_and_shunt(
                     inertances[cell],
                     compliances[cell],
                     radii[cell],
                     density,
                     omega_pin,
                     pin,
-                );
+                )?;
                 if foster {
                     let r0 = 8.0 * pin.dynamic_viscosity / (density * radii[cell] * radii[cell])
                         * inertances[cell];
@@ -3267,6 +3268,7 @@ fn hybrid_sphere_cylinder_chain(
                         r[eta * n + qi] -= gk;
                     }
                 } else {
+                    q[qi * n + qi] /= c_scale;
                     q[pi * n + pi] = 1.0 / (inertances[cell] * l_scale);
                     r[qi * n + qi] += g_shunt;
                     r[pi * n + pi] += r_series;
@@ -3687,14 +3689,14 @@ pub fn acoustic_chain_mouth_wall(
     }
     if let Some(pin) = viscothermal {
         for cell in 0..n_cells {
-            let (r_series, g_shunt, l_scale) = all_regime_series_and_shunt(
+            let (r_series, g_shunt, l_scale, c_scale) = bessel_series_and_shunt(
                 inertances[cell],
                 compliances[cell],
                 radii[cell],
                 density,
                 omega_pin,
                 pin,
-            );
+            )?;
             let (qi, pi) = (2 * cell, 2 * cell + 1);
             if cell_foster[cell] {
                 let r0 = 8.0 * pin.dynamic_viscosity / (density * radii[cell] * radii[cell])
@@ -3735,6 +3737,7 @@ pub fn acoustic_chain_mouth_wall(
                     r[eta * n + qi] -= gk;
                 }
             } else {
+                q[qi * n + qi] /= c_scale;
                 q[pi * n + pi] = 1.0 / (inertances[cell] * l_scale);
                 r[qi * n + qi] += g_shunt;
                 r[pi * n + pi] += r_series;
@@ -3956,7 +3959,8 @@ fn apply_closed_pad(
             apply_foster_series_on_flux(q, r, n, tap_q, &terms, off);
             return Ok(());
         }
-        let (_, g, _) = all_regime_series_and_shunt(0.0, c_h, tap.neck_radius, density, omega, p);
+        let (_, g, _, c_scale) = bessel_series_and_shunt(0.0, c_h, tap.neck_radius, density, omega, p)?;
+        q[tap_q * n + tap_q] = 1.0 / (c0 + c_h * c_scale);
         r[tap_q * n + tap_q] += g;
     }
     Ok(())
@@ -3969,16 +3973,13 @@ fn tap_viscothermal(
     density: f64,
     omega: f64,
     pin: Option<&ViscothermalPin>,
-) -> (f64, f64) {
+) -> Result<(f64, f64), PhsError> {
     let Some(pin) = pin else {
-        return (0.0, l_h);
+        return Ok((0.0, l_h));
     };
-    if !(pin.dynamic_viscosity > 0.0) {
-        return (0.0, l_h);
-    }
-    let (r_series, _, l_scale) =
-        all_regime_series_and_shunt(l_h, 0.0, neck_radius, density, omega, pin);
-    (r_series, l_h * l_scale)
+    let (r_series, _, l_scale, _) =
+        bessel_series_and_shunt(l_h, 0.0, neck_radius, density, omega, pin)?;
+    Ok((r_series, l_h * l_scale))
 }
 
 fn tap_foster_count(n_tap: usize, pin: Option<&ViscothermalPin>) -> usize {
@@ -4218,9 +4219,10 @@ fn apply_tap_line(
                     apply_foster_series_on_flux(q, r, n, pi, &terms_r, off);
                     apply_foster_series_on_flux(q, r, n, qi, &terms_g, off + n_br);
                 }
-            } else if p.dynamic_viscosity > 0.0 {
-                let (r_series, g_shunt, l_scale) =
-                    all_regime_series_and_shunt(l_cell, c_cell, radius, density, omega, p);
+            } else {
+                let (r_series, g_shunt, l_scale, c_scale) =
+                    bessel_series_and_shunt(l_cell, c_cell, radius, density, omega, p)?;
+                q[qi * n + qi] /= c_scale;
                 q[pi * n + pi] = 1.0 / (l_cell * l_scale);
                 r[qi * n + qi] += g_shunt;
                 r[pi * n + pi] += r_series;
@@ -4277,41 +4279,41 @@ fn apply_tap_neck_wall(
         apply_foster_series_on_flux(q, r, n, phi, &terms, off);
         return Ok(());
     }
-    let (r_wall, l_used) = tap_viscothermal(l_h, neck_radius, density, omega, pin);
+    let (r_wall, l_used) = tap_viscothermal(l_h, neck_radius, density, omega, pin)?;
     q[phi * n + phi] = 1.0 / l_used;
     r[phi * n + phi] = r_ac + r_wall;
     Ok(())
 }
 
-/// All-regime wall law at one `ω`: wide-tube ZK for `r_v ≥ 10`,
-/// Poiseuille + isothermal-tending shunt below. Returns
-/// `(R_series, G_shunt, L_scale)`.
-fn all_regime_series_and_shunt(
+/// Exact Bessel wall law at a pin: `(R, G, L/L0, C/C0)`.
+/// The zero-viscosity mutation is explicitly lossless. Invalid pin values
+/// refuse; an unevaluated Bessel response never becomes a zero-loss model.
+fn bessel_series_and_shunt(
     inertance: f64,
     compliance: f64,
     radius: f64,
     density: f64,
     omega: f64,
     pin: &ViscothermalPin,
-) -> (f64, f64, f64) {
-    const WIDE_TUBE_SHEAR: f64 = 10.0;
-    if !(pin.dynamic_viscosity > 0.0 && omega > 0.0 && radius > 0.0 && density > 0.0) {
-        return (0.0, 0.0, 1.0);
+) -> Result<(f64, f64, f64, f64), PhsError> {
+    if ![radius, density, omega, pin.prandtl].iter().all(|v| v.is_finite() && *v > 0.0)
+        || ![inertance, compliance, pin.dynamic_viscosity].iter().all(|v| v.is_finite() && *v >= 0.0)
+        || !(pin.gamma >= 1.0 && pin.gamma.is_finite()) {
+        return Err(PhsError::NotPsd { what: "Bessel viscothermal pin parameters" });
     }
+    if pin.dynamic_viscosity == 0.0 { return Ok((0.0, 0.0, 1.0, 1.0)); }
     let rv = radius * det::sqrt(omega * density / pin.dynamic_viscosity);
-    if !(rv > 0.0 && rv.is_finite()) {
-        return (0.0, 0.0, 1.0);
-    }
-    if rv >= WIDE_TUBE_SHEAR {
-        let eps = core::f64::consts::SQRT_2 / rv;
-        let r_series = omega * inertance * eps;
-        let g_shunt = omega * compliance * (pin.gamma - 1.0) * eps / det::sqrt(pin.prandtl);
-        return (r_series.max(0.0), g_shunt.max(0.0), 1.0);
-    }
-    let r_series = 8.0 * pin.dynamic_viscosity / (density * radius * radius) * inertance;
+    let series = C64::new(0.0, 1.0) / zk_one_minus_f(rv)?;
     let rt = rv * det::sqrt(pin.prandtl);
-    let g_shunt = (pin.gamma - 1.0) * compliance * omega * (rt * rt / 16.0).min(0.5);
-    (r_series.max(0.0), g_shunt.max(0.0), 4.0 / 3.0)
+    let ft = zwikker_kosten_f(rt)?;
+    let result = (omega * inertance * series.re,
+        -omega * compliance * (pin.gamma - 1.0) * ft.im,
+        series.im, 1.0 + (pin.gamma - 1.0) * ft.re);
+    if ![result.0,result.1,result.2,result.3].iter().all(|v| v.is_finite() && *v >= 0.0)
+        || result.2 <= 0.0 || result.3 <= 0.0 {
+        return Err(PhsError::NotPsd { what: "Bessel viscothermal pin response" });
+    }
+    Ok(result)
 }
 
 /// Collocate `gain · √ω` with Foster terms `g s / (s + ω)`.
@@ -4384,109 +4386,13 @@ pub fn foster_match_re(samples: &[(f64, f64)], n: usize) -> Result<Vec<(f64, f64
     Ok(omegas.into_iter().zip(rhs).map(|(w, gk)| (gk, w)).collect())
 }
 
-/// Zwikker–Kosten viscous function `F(r_v) = 2 J₁(ζ)/(ζ J₀(ζ))`
-/// with `ζ = r_v √(-i)`. Valid at every shear number — the
-/// wide-tube `√ω` law and the Poiseuille floor are its limits.
-/// This is not a tabulated FIR.
-///
-/// # Errors
-/// Non-physical `r_v` or a vanishing Bessel denominator.
-pub fn zwikker_kosten_f(rv: f64) -> Result<C64, PhsError> {
-    if !(rv > 0.0 && rv.is_finite()) {
-        return Err(PhsError::NotPsd {
-            what: "Zwikker–Kosten shear number",
-        });
-    }
-    let s = rv / core::f64::consts::SQRT_2;
-    // √i = (1+i)/√2 under the engineering Laplace convention
-    // that makes Re(jω L /(1−F)) > 0.
-    let zeta = C64::new(s, s);
-    let ratio = bessel_j1_over_j0(zeta)?;
-    Ok(ratio.scale(2.0) / zeta)
-}
-
-fn bessel_j1_over_j0(z: C64) -> Result<C64, PhsError> {
-    if z.abs() < 12.0 {
-        let (j0, j1) = bessel_j0_j1_series(z);
-        if j0.abs() < 1.0e-30 {
-            return Err(PhsError::NotPsd {
-                what: "Bessel J0 vanished",
-            });
-        }
-        return Ok(j1 / j0);
-    }
-    lentz_j1_over_j0(z)
-}
-
-fn bessel_j0_j1_series(z: C64) -> (C64, C64) {
-    let half = z.scale(0.5);
-    let half_sq = half * half;
-    let mut term0 = C64::ONE;
-    let mut term1 = half;
-    let mut j0 = term0;
-    let mut j1 = term1;
-    for k in 1..=48 {
-        let kk = f64::from(k);
-        term0 = (term0 * half_sq).scale(-1.0 / (kk * kk));
-        j0 = j0 + term0;
-        term1 = (term1 * half_sq).scale(-1.0 / (kk * (kk + 1.0)));
-        j1 = j1 + term1;
-    }
-    (j0, j1)
-}
-
-/// Continued fraction `J₁/J₀ = 1 / (2/z + 1 / (4/z + 1 / (6/z + …)))`.
-///
-/// The partial denominators are `2n/z`, so the fraction only begins to
-/// converge once `2n` exceeds `|z|` — the iteration budget must scale
-/// with the argument. A fixed 80-term budget silently capped the
-/// Zwikker–Kosten shear number at `r_v ≈ 160` (measured: last converging
-/// `r_v = 160`, first refusal 161), which at a 48 kHz Nyquist refused
-/// every duct bore wider than ~1.6 mm through the characteristic-line
-/// path. The budget now tracks `|z|` with a hard 4096-term ceiling
-/// (`r_v ≈ 8000`, far past any audio-band duct); convergence is still
-/// certified by the delta test and exhaustion still refuses loudly.
-fn lentz_j1_over_j0(z: C64) -> Result<C64, PhsError> {
-    const TINY: f64 = 1.0e-30;
-    const TOL: f64 = 1.0e-12;
-    let max_terms = (z.abs().ceil() as usize).clamp(80, 4096) + 8;
-    let mut f = C64::from_re(TINY);
-    let mut c = f;
-    let mut d = C64::ZERO;
-    for n in 1..=max_terms {
-        let b = C64::from_re(2.0 * n as f64) / z;
-        let a = C64::ONE;
-        d = b + a * d;
-        if d.abs() < TINY {
-            d = C64::from_re(TINY);
-        }
-        c = b + a / c;
-        if c.abs() < TINY {
-            c = C64::from_re(TINY);
-        }
-        d = d.recip();
-        let delta = c * d;
-        f = f * delta;
-        if (delta - C64::ONE).abs() < TOL {
-            return Ok(f);
-        }
-    }
-    Err(PhsError::NotPsd {
-        what: "Bessel J1/J0 continued fraction",
-    })
-}
-
-fn bessel_series_resistance(inertance: f64, radius: f64, density: f64, mu: f64, omega: f64) -> f64 {
+fn bessel_series_resistance(inertance: f64, radius: f64, density: f64, mu: f64, omega: f64) -> Result<f64, PhsError> {
     let rv = radius * det::sqrt(omega * density / mu);
-    let Ok(f) = zwikker_kosten_f(rv) else {
-        return 0.0;
-    };
-    let den = C64::ONE - f;
-    let n2 = den.norm_sq();
-    if !(n2 > 0.0) {
-        return 0.0;
+    let value = (C64::new(0.0, omega * inertance) / zk_one_minus_f(rv)?).re;
+    if !(value >= 0.0 && value.is_finite()) {
+        return Err(PhsError::NotPsd { what: "Bessel series resistance" });
     }
-    (omega * inertance * den.im / n2).max(0.0)
+    Ok(value)
 }
 
 fn bessel_shunt_conductance(
@@ -4495,14 +4401,16 @@ fn bessel_shunt_conductance(
     density: f64,
     pin: &ViscothermalPin,
     omega: f64,
-) -> f64 {
+) -> Result<f64, PhsError> {
     let rv = radius * det::sqrt(omega * density / pin.dynamic_viscosity);
     let rt = rv * det::sqrt(pin.prandtl);
-    let Ok(f) = zwikker_kosten_f(rt) else {
-        return 0.0;
-    };
+    let f = zwikker_kosten_f(rt)?;
     // Y = j ω C (1 + (γ−1) F_t); Re Y = −ω C (γ−1) Im F_t.
-    (omega * compliance * (pin.gamma - 1.0) * f.im.abs()).max(0.0)
+    let value = -omega * compliance * (pin.gamma - 1.0) * f.im;
+    if !(value >= 0.0 && value.is_finite()) {
+        return Err(PhsError::NotPsd { what: "Bessel shunt conductance" });
+    }
+    Ok(value)
 }
 
 fn log_spaced(omega_lo: f64, omega_hi: f64, n: usize) -> Vec<f64> {
@@ -4527,10 +4435,10 @@ fn foster_bessel_series(
     let samples: Vec<(f64, f64)> = omegas
         .iter()
         .map(|&w| {
-            let re = bessel_series_resistance(inertance, radius, density, mu, w);
-            (w, (re - r0).max(1.0e-18))
+            let re = bessel_series_resistance(inertance, radius, density, mu, w)?;
+            Ok((w, (re - r0).max(1.0e-18)))
         })
-        .collect();
+        .collect::<Result<Vec<_>, PhsError>>()?;
     if samples.iter().all(|&(_, r)| r < 1.0e-18) {
         return Ok(omegas.into_iter().map(|w| (1.0e-18, w)).collect());
     }
@@ -4550,12 +4458,12 @@ fn foster_bessel_shunt(
     let samples: Vec<(f64, f64)> = omegas
         .iter()
         .map(|&w| {
-            (
+            Ok((
                 w,
-                bessel_shunt_conductance(compliance, radius, density, pin, w),
-            )
+                bessel_shunt_conductance(compliance, radius, density, pin, w)?,
+            ))
         })
-        .collect();
+        .collect::<Result<Vec<_>, PhsError>>()?;
     if samples.iter().all(|&(_, g)| g < 1.0e-18) {
         return Ok(omegas.into_iter().map(|w| (1.0e-18, w)).collect());
     }

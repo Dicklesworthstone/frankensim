@@ -26,7 +26,7 @@
 //! (1 + (gamma - 1)/sqrt(Pr))` — the classic Kirchhoff wall-loss
 //! attenuation. Validity is a NAMED refusal, not degradation: below
 //! [`MIN_SHEAR_NUMBER`] the wide-tube expansion is invalid (narrow
-//! tubes use [`LossModel::AllRegime`] or [`LossModel::Bessel`],
+//! tubes use [`LossModel::Bessel`],
 //! which store Helmholtz `k` (`e^{ikx}`), not telegraph `γ`).
 //! A locally reacting wall is an optional
 //! [`fs_phs::WallPin`] on [`input_impedance_wall`].
@@ -79,7 +79,7 @@ use fs_math::c64::C64;
 use fs_math::det;
 use fs_phs::{
     WallPin, side_hole_inner_length, side_hole_mutual_length, side_hole_series_length,
-    wall_admittance_per_metre, zwikker_kosten_f,
+    wall_admittance_per_metre, zk_one_minus_f, zwikker_kosten_f,
 };
 
 /// Wide-tube validity floor: below this shear number the first-order
@@ -170,10 +170,6 @@ pub enum LossModel {
     Lossless,
     /// First-order wide-tube Zwikker–Kosten viscothermal losses.
     WideTube,
-    /// All-regime viscothermal law: wide-tube ZK above
-    /// [`MIN_SHEAR_NUMBER`], Poiseuille + isothermal-tending thermal
-    /// shunt below. Never silently drops losses.
-    AllRegime,
     /// Frequency-by-frequency Zwikker–Kosten: `F(r_v) = 2 J₁(ζ)/(ζ J₀(ζ))`
     /// at this `ω`, valid at every shear number. A cone still uses the
     /// spherical `e^{\pm ikx}/x` basis. This is not a Foster fit.
@@ -405,14 +401,6 @@ pub fn segment_wave(
             shear_number: f64::INFINITY,
         }),
         LossModel::WideTube => wide_tube_wave(state, radius, omega, k0, z0, true),
-        LossModel::AllRegime => {
-            let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
-            if rv >= MIN_SHEAR_NUMBER {
-                wide_tube_wave(state, radius, omega, k0, z0, false)
-            } else {
-                poiseuille_wave(state, radius, omega, rv)
-            }
-        }
         LossModel::Bessel => bessel_wave(state, radius, omega),
     }
 }
@@ -527,75 +515,45 @@ fn wide_tube_wave(
     })
 }
 
-/// Narrow-tube (Poiseuille) series impedance plus an isothermal-tending
-/// thermal shunt. Used only below [`MIN_SHEAR_NUMBER`].
-#[allow(clippy::unnecessary_wraps)] // uniform Result surface across the wave constructors
-fn poiseuille_wave(
-    state: &GasState,
-    radius: f64,
-    omega: f64,
-    rv: f64,
-) -> Result<SegmentWave, DuctError> {
-    let area = core::f64::consts::PI * radius * radius;
-    let r_visc = 8.0 * state.dynamic_viscosity / (area * radius * radius);
-    let l_ax = 4.0 * state.density / (3.0 * area);
-    let c_ad = area / (state.density * state.sound_speed * state.sound_speed);
-    let rt = rv * state.prandtl.sqrt();
-    let iso_frac = 1.0 / (1.0 + 0.25 * rt * rt);
-    let c_eff = c_ad * (1.0 + (state.gamma - 1.0) * iso_frac);
-    let g_th = (state.gamma - 1.0) * c_ad * omega * (rt * rt / 16.0).min(0.5);
-    let z_series = C64::new(r_visc, omega * l_ax);
-    let y_shunt = C64::new(g_th.max(0.0), omega * c_eff);
-    let k = helmholtz_from_telegraph((z_series * y_shunt).sqrt());
-    let mut zc = (z_series * y_shunt.recip()).sqrt();
-    if zc.re < 0.0 {
-        zc = zc.scale(-1.0);
-    }
-    Ok(SegmentWave {
-        wavenumber: k,
-        characteristic_impedance: zc,
-        specific_impedance: zc.scale(area),
-        shear_number: rv,
-    })
-}
-
 /// Full Zwikker–Kosten `k` and `Zc` from `F(r_v)` at this frequency.
 fn bessel_wave(state: &GasState, radius: f64, omega: f64) -> Result<SegmentWave, DuctError> {
-    let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
+    let (z_series, y_shunt, rv) = bessel_telegraph_pair(state, radius, omega)?;
+    let k = helmholtz_from_telegraph((z_series * y_shunt).sqrt());
+    let mut zc = (z_series * y_shunt.recip()).sqrt();
+    if zc.re < 0.0 { zc = zc.scale(-1.0); }
+    let area = core::f64::consts::PI * radius * radius;
+    Ok(SegmentWave { wavenumber: k, characteristic_impedance: zc,
+        specific_impedance: zc.scale(area), shear_number: rv })
+}
+
+/// Exact per-length Z' and Y' before the square roots; retaining these
+/// avoids ill-conditioned recovery of the small inertive part from k*Zc.
+fn bessel_telegraph_pair(state: &GasState, radius: f64, omega: f64) -> Result<(C64, C64, f64), DuctError> {
+    if ![radius,omega,state.density,state.sound_speed,state.dynamic_viscosity,state.prandtl]
+        .iter().all(|v|v.is_finite() && *v>0.0)
+        || !(state.gamma>=1.0 && state.gamma.is_finite()) {
+        return Err(DuctError::BadParameter { what: "Bessel physical parameters" });
+    }
+    let rv = radius * det::sqrt(state.density * omega / state.dynamic_viscosity);
     if !(rv > 0.0 && rv.is_finite()) {
         return Err(DuctError::BadParameter {
             what: "Bessel shear number",
         });
     }
-    let f_v = zwikker_kosten_f(rv).map_err(|_| DuctError::BadParameter { what: "Bessel F_v" })?;
-    let rt = rv * state.prandtl.sqrt();
-    let mut f_t =
+    let den = zk_one_minus_f(rv).map_err(|_| DuctError::BadParameter { what: "Bessel 1-F_v" })?;
+    let rt = rv * det::sqrt(state.prandtl);
+    let f_t =
         zwikker_kosten_f(rt).map_err(|_| DuctError::BadParameter { what: "Bessel F_t" })?;
     let area = core::f64::consts::PI * radius * radius;
     let jw = C64::new(0.0, omega);
-    let den = C64::ONE - f_v;
-    if den.abs() < 1.0e-18 {
-        return poiseuille_wave(state, radius, omega, rv);
-    }
     let z_series = jw.scale(state.density / area) / den;
-    let mut y_shunt = jw.scale(area / (state.density * state.sound_speed * state.sound_speed))
+    let y_shunt = jw.scale(area / (state.density * state.sound_speed * state.sound_speed))
         * (C64::ONE + f_t.scale(state.gamma - 1.0));
-    if y_shunt.re < 0.0 {
-        f_t = C64::new(f_t.re, -f_t.im);
-        y_shunt = jw.scale(area / (state.density * state.sound_speed * state.sound_speed))
-            * (C64::ONE + f_t.scale(state.gamma - 1.0));
+    if !(z_series.re >= 0.0 && z_series.im > 0.0 && y_shunt.re >= 0.0 && y_shunt.im > 0.0)
+        || ![z_series.re,z_series.im,y_shunt.re,y_shunt.im].iter().all(|v|v.is_finite()) {
+        return Err(DuctError::BadParameter { what: "Bessel passive series/shunt response" });
     }
-    let k = helmholtz_from_telegraph((z_series * y_shunt).sqrt());
-    let mut zc = (z_series * y_shunt.recip()).sqrt();
-    if zc.re < 0.0 {
-        zc = zc.scale(-1.0);
-    }
-    Ok(SegmentWave {
-        wavenumber: k,
-        characteristic_impedance: zc,
-        specific_impedance: zc.scale(area),
-        shear_number: rv,
-    })
+    Ok((z_series, y_shunt, rv))
 }
 
 fn cis(theta: f64) -> C64 {
@@ -659,7 +617,7 @@ fn basis_pair(segment: &Segment, wave: &SegmentWave, t: f64, forward: bool) -> (
 ///
 /// Returns `(R, L)` under `e^{-iωt}` (`Z = R - i ω L`). A compact
 /// hole is too short for a 2-port wave: this is the same lumped
-/// all-regime / Bessel pin the bore uses, never a WideTube
+/// Bessel pin the bore uses, never a WideTube
 /// refusal (chimneys sit below `r_v = 10`).
 #[allow(dead_code)] // staged physics variant; deletion needs owner permission (repo RULE 1)
 fn chimney_series(
@@ -669,6 +627,10 @@ fn chimney_series(
     omega: f64,
     loss: LossModel,
 ) -> Result<(f64, f64), DuctError> {
+    if ![radius,omega,state.density].iter().all(|v|v.is_finite() && *v>0.0)
+        || !(length>=0.0 && length.is_finite()) {
+        return Err(DuctError::BadParameter { what:"chimney series parameters" });
+    }
     let area = core::f64::consts::PI * radius * radius;
     let l0 = state.density * length / area;
     match loss {
@@ -682,32 +644,11 @@ fn chimney_series(
             };
             Ok((r_s.max(0.0), l0))
         }
-        LossModel::AllRegime => {
-            let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
-            if rv >= MIN_SHEAR_NUMBER {
-                chimney_series(state, radius, length, omega, LossModel::WideTube)
-            } else {
-                let r_s = 8.0 * state.dynamic_viscosity / (area * radius * radius) * length;
-                Ok((r_s.max(0.0), l0 * 4.0 / 3.0))
-            }
-        }
         LossModel::Bessel => {
-            let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
-            if !(rv > 0.0 && rv.is_finite()) {
-                return Ok((0.0, l0));
-            }
-            let f_v =
-                zwikker_kosten_f(rv).map_err(|_| DuctError::BadParameter { what: "Bessel F_v" })?;
-            let den = C64::ONE - f_v;
-            if den.abs() < 1.0e-18 {
-                return chimney_series(state, radius, length, omega, LossModel::AllRegime);
-            }
-            // z' = iω ρ / (S (1-F)) in the +iω bookkeeping of
-            // [`bessel_wave`]; Re is series R per metre, Im/ω is L.
-            let z_prime = C64::new(0.0, omega).scale(state.density / area) / den;
+            let (z_prime, _, _) = bessel_telegraph_pair(state, radius, omega)?;
             Ok((
-                (z_prime.re * length).max(0.0),
-                (z_prime.im / omega * length).abs().max(l0),
+                z_prime.re * length,
+                z_prime.im / omega * length,
             ))
         }
     }
@@ -720,30 +661,19 @@ fn chimney_thermal_g(
     compliance: f64,
     omega: f64,
     loss: LossModel,
-) -> f64 {
-    if matches!(loss, LossModel::Lossless) || !(compliance > 0.0 && omega > 0.0) {
-        return 0.0;
+) -> Result<f64, DuctError> {
+    if ![radius,compliance,omega].iter().all(|v|v.is_finite() && *v>0.0) {
+        return Err(DuctError::BadParameter { what: "chimney thermal parameters" });
     }
-    let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
-    if !(rv > 0.0 && rv.is_finite()) {
-        return 0.0;
+    if matches!(loss, LossModel::Lossless) { return Ok(0.0); }
+    let rv = radius * det::sqrt(state.density * omega / state.dynamic_viscosity);
+    let ft=zwikker_kosten_f(rv*det::sqrt(state.prandtl))
+        .map_err(|_|DuctError::BadParameter { what:"Bessel thermal shear number" })?;
+    let value=-omega*compliance*(state.gamma-1.0)*ft.im;
+    if !(value>=0.0 && value.is_finite()) {
+        return Err(DuctError::BadParameter { what:"Bessel chimney thermal conductance" });
     }
-    if matches!(loss, LossModel::Bessel)
-        && let Ok(mut f_t) = zwikker_kosten_f(rv * state.prandtl.sqrt())
-    {
-        // Y' = iω C (1 + (γ-1) F_t); Re Y is G per metre.
-        // A sign flip of Im F keeps G ≥ 0 (same pin as bessel_wave).
-        if f_t.im > 0.0 {
-            f_t = C64::new(f_t.re, -f_t.im);
-        }
-        return (omega * compliance * (state.gamma - 1.0) * (-f_t.im)).max(0.0);
-    }
-    if rv >= MIN_SHEAR_NUMBER {
-        let eps = core::f64::consts::SQRT_2 / rv;
-        return (omega * compliance * (state.gamma - 1.0) * eps / state.prandtl.sqrt()).max(0.0);
-    }
-    let rt = rv * state.prandtl.sqrt();
-    ((state.gamma - 1.0) * compliance * omega * (rt * rt / 16.0).min(0.5)).max(0.0)
+    Ok(value)
 }
 
 /// Shunt impedance of a tone hole at `omega`.
@@ -756,7 +686,7 @@ fn chimney_thermal_g(
 /// lumped `L` / `C` plus wall law; a long one carries its
 /// own quarter-wave. WideTube on the chimney is Bessel
 /// so a narrow neck does not raise the bore's `r_v` refusal
-/// and does not jump at the AllRegime `r_v = 10` cliff.
+/// without a narrow/wide model switch.
 ///
 /// # Errors
 /// [`DuctError`] from the chimney line or a bad radius.
@@ -847,7 +777,7 @@ pub fn tone_hole_shunt_wall(
 
 /// Input impedance of a one-segment chimney. WideTube is
 /// Bessel so a compact neck never trips the bore floor or
-/// the AllRegime `r_v = 10` model jump.
+/// a narrow/wide model jump.
 fn chimney_line_impedance(
     state: &GasState,
     radius: f64,
@@ -955,13 +885,7 @@ fn cone_lossy_matrix(
         let ra = inlet_radius + (outlet_radius - inlet_radius) * t0;
         let rb = inlet_radius + (outlet_radius - inlet_radius) * t1;
         let r_loc = f64::midpoint(ra, rb);
-        let mut wave = match segment_wave(state, r_loc, omega, loss) {
-            Ok(w) => w,
-            Err(_) if matches!(loss, LossModel::Bessel) => {
-                segment_wave(state, r_loc, omega, LossModel::AllRegime)?
-            }
-            Err(e) => return Err(e),
-        };
+        let mut wave = segment_wave(state, r_loc, omega, loss)?;
         if let Some(w) = wall {
             let slope = (rb - ra) / dx;
             let slant = (1.0 + slope * slope).sqrt();
@@ -1286,7 +1210,7 @@ fn input_impedance_core(
             // refusal — a compact hole is not a 2-port wave).
             if matches!(
                 loss,
-                LossModel::WideTube | LossModel::AllRegime | LossModel::Bessel
+                LossModel::WideTube | LossModel::Bessel
             ) {
                 let rv = hole_radius * (state.density * omega / state.dynamic_viscosity).sqrt();
                 min_rv = min_rv.min(rv);
@@ -1560,16 +1484,16 @@ mod tests {
     }
 
     #[test]
-    fn all_regime_keeps_losses_below_the_wide_tube_floor() {
+    fn bessel_keeps_losses_below_the_wide_tube_floor() {
         let state = air();
         // r = 1 mm, f = 40 Hz → rv ≈ 3.3 < 10.
         let wave = segment_wave(
             &state,
             0.001,
             2.0 * core::f64::consts::PI * 40.0,
-            LossModel::AllRegime,
+            LossModel::Bessel,
         )
-        .expect("all-regime");
+        .expect("exact Bessel");
         assert!(wave.shear_number < MIN_SHEAR_NUMBER);
         assert!(
             wave.wavenumber.im > 0.0 && wave.wavenumber.re > 0.0,
@@ -1619,13 +1543,110 @@ mod tests {
         assert!(bessel_n.shear_number < MIN_SHEAR_NUMBER);
         assert!(bessel_n.wavenumber.im > 0.0);
         assert!(bessel_n.characteristic_impedance.re > 0.0);
-        let poiseuille =
-            segment_wave(&state, 0.001, omega_narrow, LossModel::AllRegime).expect("poiseuille");
+        // Historical interpolation retained ONLY for this unchanged regression
+        // comparison. It is not an analytic oracle or a production model.
+        let area = core::f64::consts::PI * 1e-6;
+        let rv = bessel_n.shear_number;
+        let rt = rv * state.prandtl.sqrt();
+        let z = C64::new(8.0*state.dynamic_viscosity/(area*1e-6),
+            omega_narrow*4.0*state.density/(3.0*area));
+        let cad = area/(state.density*state.sound_speed*state.sound_speed);
+        let y = C64::new((state.gamma-1.0)*cad*omega_narrow*(rt*rt/16.0).min(0.5),
+            omega_narrow*cad*(1.0+(state.gamma-1.0)/(1.0+0.25*rt*rt)));
+        let poiseuille = helmholtz_from_telegraph((z*y).sqrt());
         assert!(
-            (bessel_n.wavenumber.im - poiseuille.wavenumber.im).abs()
-                < 0.5 * poiseuille.wavenumber.im.max(1.0e-8),
+            (bessel_n.wavenumber.im - poiseuille.im).abs()
+                < 0.5 * poiseuille.im.max(1.0e-8),
             "narrow Bessel must sit near the Poiseuille floor"
         );
+    }
+
+    /// G2: finite-rv corrections, derived by dividing the defining J series.
+    /// Put t=i*rv²/4. J0/(J0-2J1/ζ)=H(t)/t, with
+    /// H=2+4t/3-t²/36+t³/270-7t⁴/12960+11t⁵/136080+... .
+    /// The leading limits alone are NOT accurate to 1e-10 at rv=.1.
+    /// Coefficient majorants |H_n|<4 give R/Rp remainder <=rv^12/2048
+    /// and L/L0 remainder <=rv^12/1024 (times 1/(1-rv^4/16)).
+    /// |F_n|<=2^n bounds the thermal tail by rt^12/(64*(1-rt^4/4)).
+    /// These follow from the positive factorial-coefficient majorants of
+    /// J0 and J0-2J1/ζ; all denominator bounds are positive for rv<=.1.
+    #[test]
+    fn bessel_small_rv_series_matches_poiseuille_limit() {
+        let start=std::time::Instant::now();
+        let gas=air();
+        let a=0.001;
+        let area=core::f64::consts::PI*a*a;
+        let rp=8.0*gas.dynamic_viscosity/(area*a*a);
+        let l0=gas.density/area;
+        let cad=area/(gas.density*gas.sound_speed*gas.sound_speed);
+        for rv in [1e-3_f64,1e-2,0.1] {
+            let omega=rv*rv*gas.dynamic_viscosity/(gas.density*a*a);
+            let (z,y,_)=bessel_telegraph_pair(&gas,a,omega).unwrap();
+            let rv4=det::powi(rv,4);
+            let rv8=rv4*rv4;
+            let rt=rv*det::sqrt(gas.prandtl);
+            let rt4=det::powi(rt,4);
+            let r=1.0+rv4/1152.0-7.0*rv8/6635520.0;
+            let l=4.0/3.0-rv4/4320.0+11.0*rv8/34836480.0;
+            let c=gas.gamma+(gas.gamma-1.0)*(-rt4/48.0+19.0*rt4*rt4/30720.0);
+            let er=(z.re/rp-r).abs();
+            let el=(z.im/(omega*l0)-l).abs();
+            let ec=(y.im/(omega*cad)-c).abs();
+            assert!(er/r<1e-10 && el/l<1e-10 && ec/c<1e-10, "rv={rv}, R={er} L={el} C={ec}");
+            let round=5e-14;
+            assert!(er<=det::powi(rv,12)/(2048.0*(1.0-rv4/16.0))+round);
+            assert!(el<=det::powi(rv,12)/(1024.0*(1.0-rv4/16.0))+round);
+            assert!(ec<=(gas.gamma-1.0)*det::powi(rt,12)/(64.0*(1.0-rt4/4.0))+round);
+            assert!(z.re>0.0 && z.im>0.0 && y.re>0.0);
+            println!("{{\"case\":\"bessel_small_rv_series_matches_poiseuille_limit\",\"inputs\":\"analytic cylindrical Bessel series\",\"rung\":{rv:e},\"axis\":\"shear\",\"observed\":[{er:e},{el:e},{ec:e}],\"oracle\":\"derived finite-rv R/L/C series with remainder bounds\",\"tol\":1e-10,\"verdict\":\"pass\",\"elapsed_ms\":{}}}",start.elapsed().as_millis());
+        }
+    }
+
+    /// G0: invalid physical inputs refuse at their named boundary.
+    #[test]
+    fn bessel_refuses_instead_of_falling_back() {
+        let gas=air();
+        for radius in [0.0,f64::NAN] {
+            assert!(matches!(segment_wave(&gas,radius,1.0,LossModel::Bessel),Err(DuctError::BadParameter { .. })));
+        }
+        assert!(matches!(segment_wave(&gas,0.001,0.0,LossModel::Bessel),Err(DuctError::BadParameter { .. })));
+        let mut bad=gas;bad.dynamic_viscosity=f64::NAN;
+        assert!(bessel_wave(&bad,0.001,1.0).is_err());
+        assert!(chimney_series(&bad,0.001,0.01,1.0,LossModel::Bessel).is_err());
+        assert!(chimney_thermal_g(&bad,0.001,1e-9,1.0,LossModel::Bessel).is_err());
+    }
+
+    /// G2/G3: narrow taper uses the exact Bessel pair throughout a slice ladder.
+    /// This is the existing local spherical-wave discretization, not 3-D proof.
+    #[test]
+    fn narrow_cone_bessel_no_fallback() {
+        let start=std::time::Instant::now();
+        let gas=air();
+        let omega=core::f64::consts::TAU*50.0;
+        let mut values=Vec::new();
+        for n in [12,24,48,96] {
+            let mut m=[C64::ONE,C64::ZERO,C64::ZERO,C64::ONE];
+            for i in 0..n {
+                let ra=0.0005+0.0015*f64::from(i)/f64::from(n);
+                let rb=0.0005+0.0015*f64::from(i+1)/f64::from(n);
+                let wave=segment_wave(&gas,f64::midpoint(ra,rb),omega,LossModel::Bessel).unwrap();
+                assert!(wave.shear_number<MIN_SHEAR_NUMBER);
+                let cell=Segment::Cone {inlet_radius:ra,outlet_radius:rb,length:0.1/f64::from(n)};
+                m=mul2(m,segment_matrix(&cell,&wave).unwrap());
+            }
+            values.push(m);
+        }
+        let limit=values[3][0];
+        let errors:Vec<f64>=values[..3].iter().map(|m|(m[0]-limit).abs()/limit.abs()).collect();
+        assert!(errors[2]>0.0 && errors[2]<errors[1] && errors[1]<errors[0]);
+        assert!(errors[2]<0.01);
+        let order=det::ln(errors[0]/errors[2])/det::ln(4.0);
+        assert!((1.5..3.0).contains(&order),"midpoint spherical-slice order {order}, errors {errors:?}");
+        for (n,err) in [12,24,48].into_iter().zip(errors) {
+            println!("{{\"case\":\"narrow_cone_bessel_no_fallback\",\"inputs\":\"analytic 0.5..2mm cone, 50Hz, length 0.1m\",\"axis\":\"slices\",\"rung\":{n},\"observed\":{err:e},\"oracle\":\"96-slice A coefficient\",\"order\":{order},\"tol\":\"decreasing; order 1.5..3; final <1%\",\"verdict\":\"pass\",\"elapsed_ms\":{}}}",start.elapsed().as_millis());
+        }
+        let (production,_)=cone_lossy_matrix(0.0005,0.002,0.1,&gas,omega,LossModel::Bessel,None).unwrap();
+        assert!((production[0]-values[0][0]).abs()/production[0].abs()<1e-13);
     }
 
     #[test]
@@ -2867,10 +2888,10 @@ mod tone_hole_tests {
             1.7e-3,
             HoleState::Open,
             omega,
-            LossModel::AllRegime,
+            LossModel::Bessel,
             2.0e-3,
         )
-        .expect("all-regime");
+        .expect("exact Bessel");
         let bessel = tone_hole_shunt(
             &state,
             1.5e-3,
@@ -2909,10 +2930,10 @@ mod tone_hole_tests {
             1.7e-3,
             HoleState::Closed,
             omega,
-            LossModel::AllRegime,
+            LossModel::Bessel,
             2.0e-3,
         )
-        .expect("closed all-regime");
+        .expect("closed Bessel");
         assert!(
             closed_all.re > 1.0e-6 && closed_inv.re.abs() < 1.0e-12,
             "thermal G on a closed chimney must give Re Z > 0 ({} vs {})",
@@ -2958,7 +2979,7 @@ mod tone_hole_tests {
         .expect("closed line");
         let area = core::f64::consts::PI * b * b;
         let c_h = area * h / (state.density * state.sound_speed * state.sound_speed);
-        let g = chimney_thermal_g(&state, b, c_h, omega, LossModel::Lossless);
+        let g = chimney_thermal_g(&state, b, c_h, omega, LossModel::Lossless).expect("lossless thermal");
         let z_c_lumped = C64::new(g, -omega * c_h).recip();
         assert!(
             (z_closed - z_c_lumped).abs() > 0.5 * z_c_lumped.abs().max(1.0),
