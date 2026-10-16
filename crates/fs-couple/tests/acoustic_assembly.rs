@@ -52,6 +52,9 @@ fn nylon_like(tension_n: f64, lin_density_kg_m: f64) -> PrestressedString {
 
 fn plucked(tension_n: f64, lin_density_kg_m: f64, height_m: f64) -> AcousticAssembly {
     AcousticAssembly {
+        // Resolve nonlinear/modal plate and string blocks without widening
+        // their one-cent midpoint admission. Durations remain physical seconds.
+        sample_rate_hz: 192_000,
         string: Some(nylon_like(tension_n, lin_density_kg_m)),
         pluck: Some(Pluck {
             station_frac: 0.25,
@@ -428,7 +431,7 @@ fn g3_gas_pressure_controls_actual_string_decay_in_both_solver_paths() {
                     ..AmbientGas::sea_level()
                 },
                 duration_s: 0.4,
-                sample_rate_hz: 16_000,
+                sample_rate_hz: 64_000,
                 ..empty_base()
             };
             let output = realize_assembly(&assembly).expect("air-damped string");
@@ -448,9 +451,9 @@ fn g3_gas_pressure_controls_actual_string_decay_in_both_solver_paths() {
                 .windows(3)
                 .enumerate()
                 .filter(|(i, p)| {
-                    (800..5600).contains(i) && p[1] > 0.0 && p[1] > p[0] && p[1] >= p[2]
+                    (3200..22400).contains(i) && p[1] > 0.0 && p[1] > p[0] && p[1] >= p[2]
                 })
-                .map(|(i, p)| ((i + 1) as f64 / 16_000.0, p[1]))
+                .map(|(i, p)| ((i + 1) as f64 / 64_000.0, p[1]))
                 .collect();
             assert!(peaks.len() > 40, "requires live ringing pressure");
             let (t0, p0) = peaks[0];
@@ -1151,7 +1154,7 @@ fn g3_prony_memory_composes_with_body_ports_and_contact() {
             source_properties: None,
         });
         scene.duration_s = 0.04;
-        scene.sample_rate_hz = 16_000;
+        scene.sample_rate_hz = 192_000;
         scene.soundboard = Some(RadiatingPlate {
             area_m2: 0.12,
             mass_kg: 0.18,
@@ -1408,7 +1411,7 @@ fn g1_resolved_thermoelastic_material_reaches_both_assembly_plate_paths() {
             ..plate
         });
         let result = realize_assembly(&assembly).expect("material-driven assembly");
-        assert_eq!(result.pressure_pa.len(), 40);
+        assert_eq!(result.pressure_pa.len(), 960);
         assert!(result.pressure_pa.iter().all(|p| p.is_finite()));
         assert!(peak_abs(&result.pressure_pa) > 0.0);
     }
@@ -2222,7 +2225,7 @@ mod material_plate_tests {
         let reference = thermal_point(300.0);
         let mut input = plucked(20.0, 0.006, 1e-6);
         input.duration_s = 0.06;
-        input.sample_rate_hz = 48_000;
+        input.sample_rate_hz = 192_000;
         input.string.as_mut().unwrap().length_m = 0.502;
         input.string.as_mut().unwrap().n_modes = 1;
         input.string.as_mut().unwrap().damping_ratio = 0.0;
@@ -2302,7 +2305,7 @@ mod material_plate_tests {
                     ((tension * k * k + young * inertia * k.powi(4)) / (0.001 / 0.502)).sqrt()
                         / core::f64::consts::TAU;
                 let pressure = compiled.realize().unwrap().pressure_pa;
-                let measured_hz = 48_000.0 / zero_cross_period(&pressure[480..2400]);
+                let measured_hz = 192_000.0 / zero_cross_period(&pressure[1920..9600]);
                 assert!(
                     (measured_hz / expected_hz - 1.0).abs() < 0.01,
                     "T={temperature}: {measured_hz} vs {expected_hz}"
@@ -3408,8 +3411,8 @@ mod material_plate_tests {
             .unwrap();
         let mut input = plucked(20.0, 0.006, 1e-5);
         input.duration_s = 0.02;
-        // Resolve the highest instantaneous bending mode under the phase admission.
-        input.sample_rate_hz = 48_000;
+        // Resolve the full instantaneous bending/loss operator under phase admission.
+        input.sample_rate_hz = 192_000;
         input.string.as_mut().unwrap().damping_ratio = 0.0;
         let bindings = AcousticMaterialBindings {
             string: Some(StringMaterialBinding {
@@ -4872,6 +4875,7 @@ fn obstacle_on_moving_end_dirac_changes_the_waveform() {
 #[test]
 fn von_karman_duct_dirac_is_not_the_linear_plate_duct() {
     let mut lin = plucked(80.0, 0.006, 0.005);
+    lin.sample_rate_hz = 768_000;
     if let Some(s) = lin.string.as_mut() {
         s.moving_end = true;
         s.n_modes = 2;
@@ -4911,6 +4915,7 @@ fn von_karman_duct_dirac_is_not_the_linear_plate_duct() {
 #[test]
 fn blow_on_moving_end_string_plate_duct_loads_the_join() {
     let mut a = plucked(80.0, 0.006, 0.004);
+    a.sample_rate_hz = 768_000;
     if let Some(s) = a.string.as_mut() {
         s.moving_end = true;
         s.n_modes = 2;
@@ -4948,6 +4953,7 @@ fn blow_on_moving_end_string_plate_duct_loads_the_join() {
 #[test]
 fn reed_on_moving_end_string_plate_duct_speaks() {
     let mut a = plucked(80.0, 0.006, 0.004);
+    a.sample_rate_hz = 768_000;
     if let Some(s) = a.string.as_mut() {
         s.moving_end = true;
         s.n_modes = 2;
@@ -4995,6 +5001,7 @@ fn reed_on_moving_end_string_plate_duct_speaks() {
 #[test]
 fn moving_end_with_duct_is_a_three_phs_clock() {
     let mut a = plucked(80.0, 0.006, 0.004);
+    a.sample_rate_hz = 768_000;
     if let Some(s) = a.string.as_mut() {
         s.moving_end = true;
         s.n_modes = 2;
@@ -5026,6 +5033,7 @@ fn moving_end_with_duct_is_a_three_phs_clock() {
 #[test]
 fn moving_end_string_duct_without_plate_is_an_area_transformer() {
     let mut coupled = plucked(80.0, 0.006, 0.004);
+    coupled.sample_rate_hz = 768_000;
     if let Some(s) = coupled.string.as_mut() {
         s.moving_end = true;
         s.n_modes = 2;
