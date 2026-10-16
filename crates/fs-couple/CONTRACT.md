@@ -14,6 +14,45 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Integrator doctrine and current audit boundary (IRP M5.2-W1)
+
+Render-path linear parts must use exact held-input propagation or explicitly
+frequency-matched energy-consistent propagation. Nonlinear storage retains its
+discrete-gradient owner; generalized-alpha is not admitted on render paths.
+Held effort exchanges use the same displacement work at both ports, rate
+changes require antialias filtering, and phase/contact/solver budgets must be
+admitted explicitly. This doctrine is a target; it does not relabel existing
+midpoint paths as migrated.
+
+`tests/integrator_warping_audit.rs` contains the current path inventory and G1
+one-step-map measurements at 1/5/10 kHz and 48/96/192 kHz. The common fs-phs
+linear owner is measured for its callers; that is not a complete nonlinear or
+connected render. Public ImpactSystem and Dynamic/Paired/ModalAperture seams
+are exercised directly, including the uniform scalar condensation. The exact
+modal owner is the control. Midpoint phase is compared to
+`2*atan(omega*dt/2)/dt` within 1e-6 cents; >1-cent rows remain
+`requires-migration`, not accepted instrument fidelity.
+
+| Current path | Linear owner | Current band / audit boundary |
+| --- | --- | --- |
+| KC, glottis, speaker, nonlinear plate, cavity, ODE chains and lip oscillator | Gonzalez midpoint | No common phase-budget admission; common linear-owner map only |
+| ImpactSystem | Gonzalez midpoint | omega*dt < 0.9*pi; the guard permits more than 600 cents of phase defect |
+| Dynamic/Paired/ModalAperture and uniform condensation | Midpoint response | Material-modal adapter caps its caller's bound at 1; authored constructors have no common angular guard |
+| CoupledModalSystem | Exact component ZOH plus trapezoidal reactions | Coupled algebraic Nyquist bound; measured against the exact two-body eigenproblem |
+| ModalAcousticTimeModel | Exact ZOH | Caller-declared Nyquist guard; no frequency-warping claim for its observer transfer |
+| Source-backed GasPiston | Midpoint gas/momentum | Owner-local small-signal amplitude ladder; no phase-budget admission |
+| Circuit/thermal/network piston | First order in general | Owner-local four-rung temporal audit; no exact-linear claim |
+| Live PianoAudio at 1/2/4x | Exact local blocks plus finite-step coupled solves | Separate piano-workspace audit and migration still pending |
+
+The coupled-mode test uses the exact symmetric stiffness eigenproblem and a
+three-rate phase-error ladder. Exact component steps with trapezoidal reactions
+are not a pure trapezoid map of the coupled stiffness; applying the scalar
+atan oracle to that map would be incorrect. Piston tests reuse the actual
+source-backed thermochemical and thermal/electrical fixtures. All new audit
+tests still require native central verification. This inventory does not close
+M5.2-W1: production migrations, resolved-band refusals, complete descriptor and
+piano measurements, and audible golden qualification remain outstanding.
+
 - `PORT_SCHEMA_VERSION = 2`; `StableId` admits a canonical transport-safe ID.
 - `PortValueShape` distinguishes scalar, non-empty vector/tensor, and field
   values; field shapes carry separate neutral `fs-iface::SpaceType` roles for
@@ -1222,11 +1261,17 @@ clarinet is one filling of those objects.
   G0/G1 tests inspect both assembled damping operators against independent
   Zener arithmetic, vary equal-density specimens and temperature, and cross
   the former density threshold without switching laws. Radiation
-  reaction on linear compact radiators is the Rayleigh-integral
-  baffled-piston face impedance (same half-space kernel as `fs-bem`,
-  written in-tree so couple does not depend on bem) fitted and
-  passivity-repaired by `fs-vfit`. `fs-bem` is not a production
-  dependency of this crate (cycle through `fs-feec`). Linear plates
+  reaction on linear compact radiators uses the sole Bessel–Struve piston
+  owner in `fs-phs`, converting acoustic p/U to face p/v by the physical
+  area, then fitting and passivity-repairing with `fs-vfit`. Evaluation and
+  fitting refusals propagate; there is no silent low-ka fallback or unloaded
+  assembly success. `fs-bem` is not a production dependency of this crate.
+  G0 `thin_plate_refuses_instead_of_low_ka_fallback` exercises this refusal.
+  The existing compact one-branch load keeps ka<=0.5 and dt*fmax<=0.1;
+  its analytic leading resistance and inertance coefficients are tested at
+  1e-14, with a 512-frequency grid targeting <2.2% complex and <4.2%
+  resistance error versus the closed form (native measurement pending).
+  These are sampled discrepancies, not continuum enclosures. Linear plates
   accept in-plane pretension and clamped edges. Von Karman is the
   isotropic SS sine path when `e1 = e2` and edges are free to
   rotate; clamped or orthotropic bending uses DKT-sampled

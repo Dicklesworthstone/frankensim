@@ -11,6 +11,45 @@ stepping, and Galerkin reduction preserves the structure.
 
 ## Public types and semantics
 
+### Opt-in linear evolution (IRP M5.2-W1)
+
+`linear_exact::{split_quadratic, step_split}` requires explicit
+`Storage::quadratic_part` data; gradient sampling cannot prove a storage linear.
+The complete Jacobi energy basis is retained, including zero-energy coordinates.
+`LinearSplitBudget.max_modes` counts scalar basis coordinates (two per ordinary
+second-order oscillator), and the augmented exponential is capped at dimension
+256. No modal truncation is performed. Nonfinite operators, stale splits,
+unsupported storage, capacity exhaustion and unrepresentable work refuse.
+
+`ExactZoh` advances the full coupled `(J-R)Q` operator with held input. Port
+outputs are step averages; dissipation is the independently evaluated integral
+of `grad H^T R grad H`, obtained by a Van Loan block exponential. It is NOT
+`dt*dg^T R dg` for the endpoint Gonzalez gradient. The independent energy
+balance must close to 1e-12 relative or the step refuses. The dense exponential
+uses a converged scaled Taylor series and bounded squaring; this is floating
+point evidence, not an interval certificate, allocation-free kernel or
+cooperative cancellation guarantee. Callers poll at their existing block
+boundary. Purely quadratic storage is mandatory; nonlinear ZOH is refused.
+
+`FrequencyMatched` replaces Q by a per-mode matched quadratic energy while
+retaining every term of the original nonlinear Hamiltonian. For lossless
+energy-coordinate eigenfrequency omega its scale is
+`tan(omega*dt/2)/(omega*dt/2)`. The ordinary Gonzalez discrete-gradient identity
+then applies to the MODIFIED energy. Both the caller's angular-step bound and
+`omega*dt < pi` are mandatory; no clamping at the tangent pole is allowed.
+Static compliance changes, and damped decay rates are not exact in this mode.
+Band admission does not waive finite-representation or Newton admission.
+Newton refuses at its strict residual tolerance rather than accepting a best
+iterate. The original `step` and prepared step remain unchanged.
+
+G1/G0 tests in `linear_exact::tests` cover analytic held-force damped evolution
+over 10,000 steps (1e-12 absolute at unit scale), lossless phase (0.01 cents),
+exact damping radius (1e-12 relative), independent energy balance (1e-12
+relative), a live quartic remainder, cap/cap+1, the tangent-pole refusal,
+static compliance, free inertia, stale splits and unsupported storage.
+These opt-in APIs do not establish migration of any existing render path or
+closure of IRP M5.2-W1; native execution remains the remote verification gate.
+
 - `Storage` trait (`hamiltonian`, analytic `gradient`);
   `QuadraticStorage` (`H = x^T Q x / 2`, `Q` admitted symmetric PSD),
   `SeparableStorage` (per-state scalar laws), `SumStorage` (direct
@@ -115,9 +154,18 @@ stepping, and Galerkin reduction preserves the structure.
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /
   flanged piston `(R, X)` under `e^{-iωt}` (mass-like `X < 0`),
   refused above `ka = 1`. Same numbers as `fs_duct::Termination`.
-- `baffled_piston_impedance` — Rayleigh-integral face load
-  converted to acoustic `p/U`; the all-`ka` flanged mouth.
-  Low-`ka` it sits on `(ka)²/2 − i 8ka/(3π)`.
+- `baffled_piston_impedance` — the sole uniform circular-piston owner,
+  exact Bessel–Struve closed form in an infinite rigid baffle, acoustic
+  `p/U = (rho c/S) [1 - 2J1(2ka)/(2ka) - i 2H1(2ka)/(2ka)]`.
+  Area converts to mean p/v; area squared converts to force/velocity.
+  No rings parameter or numerical surface discretization. Nonpositive,
+  nonfinite or unrepresentable derived scales refuse with NotPsd.
+  G2 `piston_closed_form_certified` targets 1e-13 relative at independent
+  analytic landmarks, resistance's 1e-12 low-ka band and the high-ka limit.
+  At ka=1e-3 the cubic reactance correction is 2.26e-10: the leading-term
+  1e-12 absolute band in .101 is inconsistent with the exact solution;
+  the test retains the cubic term and explicitly detects this difference.
+  Native qualification is batch-pending. No unbaffled-pipe claim.
 - `side_hole_inner_length` / `side_hole_neck_length` — isolated
   disc `8/(3π) b`, or Dalmont–Nederveen–Joly `d = b/a` on a
   finite bore, plus wall-flanged `0.8216 b`. Same `t_eff` as

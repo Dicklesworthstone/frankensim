@@ -286,7 +286,7 @@ divergence-theorem closure/orientation pin on the lathe).
   impedance remains the brass-gates bead's scope.
 - Unflanged radiation is the low-`ka` Levine–Schwinger fit
   (ceiling 1.0, refused by name). A flanged mouth uses that fit
-  below `ka = 1` and the Rayleigh baffled piston
+  below `ka = 1` and the shared closed-form Bessel–Struve baffled piston
   (`fs_phs::baffled_piston_impedance`, same half-space kernel as
   `fs_bem::helmholtz`) above it. A full exterior BEM of an
   unflanged pipe is still the recorded successor.
