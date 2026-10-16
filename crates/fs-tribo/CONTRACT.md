@@ -32,10 +32,26 @@ reactions, and residual embedding.
   zero slip `evaluate` reports static capacity only; it never invents a stick
   reaction. `kinetic_coefficient` exposes `μ(|v|)` for a strictly positive
   speed. `regularized_traction_1d` is the declared ODE embedding: a linear
-  stiction ramp through the origin at scale `v_reg`, then the kinetic rung,
+  ramp through the origin to the kinetic value at scale `v_reg`, then the kinetic rung,
   with force opposing `v_rel`. That map is a solver regularization (the 1-D
   analogue of the fs-contact smooth adapter), not complementarity. A bow, a
   brake pad, and a fault are the same law.
+- `TangentialLaw` is the stateful, solver-independent pHS constitutive seam.
+  `FrictionLaw` and `DryInterfaceSystemCard` implement it with an implicit static
+  reaction followed by deterministic sliding bisection, never an ODE ramp.
+  Input motion is the released driver-minus-body increment and the explicit
+  isotropic body compliance gives `du = du_free - C F`. Returned traction is
+  effort entering the interface, conjugate to the **solved** increment, so
+  `Delta H + D - F dot du = 0`. Dry laws have `H = 0`, export `D >= 0` through
+  `DissipationStep`/`WorkLedger`, and retain accumulated slip plus the optional
+  caller thermal boundary. They do not evolve temperature or a third-body layer.
+  `TangentialSolveConfig` requires explicit force/residual/iteration budgets
+  (1 through 128 bisections); unresolved or unbracketed roots refuse. Candidate
+  state is immutable until the consuming solver publishes it. The card impl
+  requires temperature and pressure without defaults, and checks the solved
+  speed against its closed applicability interval. Anisotropic body response,
+  thermal transport, compliant storage, layer dynamics and pHS network wrappers
+  belong to their respective downstream owners.
 - `HertzSpherePlane` and `HertzCylinderPlane` are G1 elastic closed forms,
   expressed in SI. They use caller-supplied radius/modulus and retain the
   caller ceiling; a mathematical closed form does not validate its inputs.
@@ -226,6 +242,15 @@ phase changes, and malformed statistic/band refusal. Test coefficients are
 explicitly synthetic fixtures.
 The separately owned partial-slip tests cover its scalar return-map admission,
 reversal, checkpoint replay, and receipt-mutation refusals.
+`tests/tangential_law.rs` adds G0 DEF-06 continuity at `v_reg*(1 +/- 1e-12)`
+with a `1e-12*mu_s*N` band for all three rungs; 10,000 Philox-seeded steps
+per rung with non-negative heat and per-step closure within
+`1e-12*max(abs(F dot du), f64::EPSILON J)`; G1 incline acceleration within
+`1e-12 m/s2`; closed-domain next-up refusal; force/iteration-budget refusal;
+and G5 checkpoint replay. The actual modal owner is compared bitwise in
+`fs-couple`'s `friction::scalar::trait_tests`, avoiding an upward dependency.
+These are named verification targets; their execution is required before
+claiming numerical qualification.
 Rolling-loss tests cover zero load/rate/factor, force and moment reversal,
 load scaling and SI dimensions, pure roll/spin/mixed motion, passivity with an
 independent work integral, temperature/frequency refusal, work-key overlap,

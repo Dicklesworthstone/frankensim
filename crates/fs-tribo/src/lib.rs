@@ -11,6 +11,11 @@ pub mod resistive_film;
 pub mod rolling_loss;
 /// Deterministic finite-patch filtering of measured surface-height traces.
 pub mod surface_excitation;
+/// Stateful, work-conjugate tangential constitutive interface.
+pub mod tangential;
+pub use tangential::{
+    DryTangentialState, TangentialLaw, TangentialSolveConfig, TangentialStep, TangentialStepInput,
+};
 
 use core::fmt;
 use std::collections::BTreeSet;
@@ -395,6 +400,15 @@ pub enum TriboError {
         /// Inclusive upper bound of the admitted interval.
         maximum: f64,
     },
+    /// The declared tangential root budget did not resolve the constitutive equation.
+    TangentialSolve {
+        /// Remaining traction residual [N].
+        residual_n: f64,
+        /// Declared absolute plus relative traction tolerance [N].
+        tolerance_n: f64,
+        /// Bisections attempted before refusal.
+        iterations: usize,
+    },
 }
 
 impl fmt::Display for TriboError {
@@ -426,6 +440,9 @@ impl fmt::Display for TriboError {
             } => write!(
                 f,
                 "{field}={value} lies outside declared applicability [{minimum}, {maximum}]"
+            ),
+            Self::TangentialSolve { residual_n, tolerance_n, iterations } => write!(
+                f, "tangential root residual {residual_n} N exceeds {tolerance_n} N after {iterations} iterations"
             ),
         }
     }
@@ -606,8 +623,10 @@ impl FrictionLaw {
     /// [`Self::evaluate`] still returns zero traction at rest: it never
     /// invents a stick reaction. This map is the 1-D analogue of the
     /// fs-contact smooth adapter. A declared scale `regularization_m_s`
-    /// turns the static limit into a linear ramp through the origin,
-    /// then follows [`Self::kinetic_coefficient`]. The force on the
+    /// joins the origin linearly to the kinetic traction at that scale,
+    /// then follows [`Self::kinetic_coefficient`]. Matching the kinetic
+    /// endpoint removes DEF-06's static/kinetic jump; it changes the
+    /// low-speed ODE slope, not the set-valued static capacity. The force on the
     /// body whose relative velocity is `v_rel` opposes that velocity,
     /// so `-F v_rel ≥ 0`.
     ///
@@ -632,7 +651,7 @@ impl FrictionLaw {
             return Ok(0.0);
         }
         let mu = if speed < regularization_m_s {
-            self.static_mu() * speed / regularization_m_s
+            self.kinetic_mu(regularization_m_s)? * (speed / regularization_m_s)
         } else {
             self.kinetic_mu(speed)?
         };
@@ -1987,7 +2006,9 @@ mod tests {
         assert!((f + back).abs() < 1.0e-15);
         assert!(-f * 0.01 >= 0.0);
         let slope = law.regularized_traction_1d(0.01, 1.0, 0.05).expect("slope") / 0.01;
-        assert!((slope + 0.8 / 0.05).abs() < 1.0e-12);
+        // DEF-06: the ramp joins the kinetic endpoint, not the static cap.
+        let endpoint_mu = 0.3 + 0.5 * det::exp(-1.0);
+        assert!((slope + endpoint_mu / 0.05).abs() < 1.0e-12);
         let kinetic = law
             .regularized_traction_1d(10.0, 1.0, 0.05)
             .expect("kinetic");

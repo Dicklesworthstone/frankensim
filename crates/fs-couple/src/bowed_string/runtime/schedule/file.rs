@@ -120,7 +120,12 @@ impl BowedPerformance {
         for _ in 0..card.mode_count { card.zetas.push(row.scalar()?); }
         row.finish()?;
         let mut row = r.row("stribeck")?;
-        let friction = StribeckFriction::try_new(row.scalar()?, row.scalar()?, row.scalar()?)
+        let mu_static = row.scalar()?;
+        let mu_dynamic = row.scalar()?;
+        // This v1 fixture grammar declares one shared speed; the constitutive
+        // adapter keeps the two controls separate for independently authored data.
+        let speed = row.scalar()?;
+        let friction = StribeckFriction::try_new(mu_static, mu_dynamic, speed, speed)
             .map_err(|what| bad(r.line, what))?;
         row.finish()?;
         let mut row = r.row("subsamples")?;

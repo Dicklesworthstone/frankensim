@@ -145,7 +145,12 @@ fn run(options: Options) -> Result<(), String> {
         zetas: (0..16).map(|k| 1.0e-3 * (1.0 + 0.55 * f64::from(k))).collect(),
         sample_rate_hz: SAMPLE_RATE_HZ,
     };
-    let rosin = StribeckFriction { mu_static: 0.8, mu_dynamic: 0.4, stiction_m_s: 0.04 };
+    let rosin = StribeckFriction {
+        mu_static: 0.8,
+        mu_dynamic: 0.4,
+        stiction_m_s: 0.04,
+        regularization_m_s: 0.04,
+    };
     let gesture = BowGesture::admit(0.45, 3.9, 0.11).map_err(|e| format!("gesture: {e:?}"))?;
     let schedule = load_schedule(options.gesture.as_deref(), &options.track, gesture)?;
     let body = CompactBody::from_radiator(RadiatingPlate {

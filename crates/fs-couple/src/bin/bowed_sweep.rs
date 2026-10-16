@@ -107,7 +107,16 @@ fn main() -> std::process::ExitCode {
         mu_static: 0.8,
         mu_dynamic: 0.4,
         stiction_m_s: 0.04,
+        regularization_m_s: 0.04,
     };
+    let endpoint_mu = fs_tribo::FrictionLaw::Stribeck {
+        static_mu: rosin.mu_static,
+        kinetic_mu: rosin.mu_dynamic,
+        characteristic_speed: rosin.stiction_m_s,
+        viscous_per_speed: 0.0,
+    }
+    .kinetic_coefficient(rosin.regularization_m_s)
+    .expect("declared fixture law");
 
     // Coarse-but-honest grid; the artifact is the regime MAP.
     let stations = [0.08_f64, 0.11];
@@ -179,6 +188,8 @@ fn main() -> std::process::ExitCode {
                         r#""station_fraction":{station},"v_bow_m_s":{v_bow},"normal_force_n":{force},"#,
                         r#""class":"{class}","peak_hz":{peak},"fundamental_hz":{f1},"#,
                         r#""slip_fraction":{slip},"intervals_per_period":{intervals},"#,
+                        r#""law_id":"dry-stribeck-regularized-benchmark","regularization_m_s":{regularization},"#,
+                        r#""stribeck_decay_m_s":{decay},"def06_jump_n":{jump},"def06_legacy_jump_n":{legacy_jump},"#,
                         r#""peak_energy_j":{energy},"steps":{steps}{note}}}"#
                     ),
                     SCHEMA = SCHEMA,
@@ -190,6 +201,11 @@ fn main() -> std::process::ExitCode {
                     f1 = jnum(card.fundamental_hz()),
                     slip = jnum(slip),
                     intervals = jnum(intervals),
+                    regularization = rosin.regularization_m_s,
+                    decay = rosin.stiction_m_s,
+                    jump = (rosin.traction(rosin.regularization_m_s, force)
+                        .expect("declared fixture load") - endpoint_mu*force).abs(),
+                    legacy_jump = (rosin.mu_static-endpoint_mu)*force,
                     energy = jnum(energy),
                     steps = args.steps,
                     note = note_field,

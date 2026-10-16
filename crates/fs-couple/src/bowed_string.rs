@@ -263,7 +263,7 @@ impl FrictionIsland {
                     kinetic_mu,
                     characteristic_speed,
                     ..
-                } => StribeckFriction::try_new(static_mu, kinetic_mu, characteristic_speed)
+                } => StribeckFriction::try_new(static_mu, kinetic_mu, characteristic_speed, characteristic_speed)
                     .map(Some)
                     .map_err(BowedRunError::Friction),
                 _ => Err(BowedRunError::Friction(
@@ -284,7 +284,7 @@ impl FrictionIsland {
             // Do not reconstruct the kinetic law from the static/capture
             // parameters: that would discard its velocity-strengthening term.
             card.friction_law()
-                .regularized_traction_1d(-relative_velocity, normal_n, law.stiction_m_s)
+                .regularized_traction_1d(-relative_velocity, normal_n, law.regularization_m_s)
                 .map_err(BowedRunError::Interface)
         } else {
             law.traction(relative_velocity, normal_n)

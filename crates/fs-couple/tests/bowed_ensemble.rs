@@ -26,7 +26,7 @@ fn config(radiation: bool, rate: u32) -> BowedRunConfig {
             zetas: (0..16).map(|k| 1e-3 * (1.0 + 0.55 * f64::from(k))).collect(),
             sample_rate_hz: rate,
         },
-        island: FrictionIsland::Stribeck(StribeckFriction::try_new(0.8, 0.4, 0.04).unwrap()),
+        island: FrictionIsland::Stribeck(StribeckFriction::try_new(0.8, 0.4, 0.04, 0.04).unwrap()),
         gesture: BowGesture::admit(0.45, 3.9, 0.11).unwrap(),
         steps: 1024, subsamples: 16, listener_m: 1.0,
         termination: if radiation {

@@ -18,8 +18,10 @@ pub struct StribeckFriction {
     pub mu_static: f64,
     /// Dynamic coefficient (`<= mu_static`).
     pub mu_dynamic: f64,
-    /// Velocity scale of the stiction ramp and Stribeck decay [m/s].
+    /// Physical Stribeck decay speed [m/s], independent of the ODE ramp.
     pub stiction_m_s: f64,
+    /// Explicit ODE ramp speed [m/s]; never a static capture threshold.
+    pub regularization_m_s: f64,
 }
 
 impl StribeckFriction {
@@ -27,13 +29,14 @@ impl StribeckFriction {
     ///
     /// # Errors
     /// Refuses non-finite or negative coefficients and a non-positive
-    /// stiction scale (fresh-eyes review bead 9svup: the former
+    /// decay or regularization scale (fresh-eyes review bead 9svup: the former
     /// silent-zero fallbacks in [`StribeckFriction::traction`] masked
     /// misconfiguration as physics).
     pub fn try_new(
         mu_static: f64,
         mu_dynamic: f64,
         stiction_m_s: f64,
+        regularization_m_s: f64,
     ) -> Result<Self, &'static str> {
         if !mu_static.is_finite() || mu_static < 0.0 {
             return Err("mu_static must be finite and non-negative");
@@ -42,12 +45,16 @@ impl StribeckFriction {
             return Err("mu_dynamic must be finite, non-negative, and <= mu_static");
         }
         if !stiction_m_s.is_finite() || stiction_m_s <= 0.0 {
-            return Err("stiction scale must be finite and strictly positive");
+            return Err("Stribeck decay scale must be finite and strictly positive");
+        }
+        if !regularization_m_s.is_finite() || regularization_m_s <= 0.0 {
+            return Err("regularization scale must be finite and strictly positive");
         }
         Ok(Self {
             mu_static,
             mu_dynamic,
             stiction_m_s,
+            regularization_m_s,
         })
     }
 
@@ -67,7 +74,7 @@ impl StribeckFriction {
         }
         // fs-tribo takes body-minus-driver velocity. Its opposing traction
         // then acts in the driver's direction, as this coupling port requires.
-        .regularized_traction_1d(-v_rel, normal_n, self.stiction_m_s)
+        .regularized_traction_1d(-v_rel, normal_n, self.regularization_m_s)
         .map_err(|error| match error {
             fs_tribo::TriboError::InvalidInput { field } => field,
             _ => "shared friction evaluation refused",
@@ -208,7 +215,7 @@ mod implicit_contact_tests {
 
     #[test]
     fn implicit_material_law_retains_constitutive_ownership_and_odd_symmetry() {
-        let law = StribeckFriction::try_new(0.8, 0.3, 0.05).unwrap();
+        let law = StribeckFriction::try_new(0.8, 0.3, 0.05, 0.05).unwrap();
         for free in [0.01, 0.2, 2.0] {
             for mobility in [1.0e-5, 0.01, 0.2] {
                 let solve = |sign| solve_implicit_friction(sign * free, mobility,
@@ -257,13 +264,35 @@ mod tests {
 
     #[test]
     fn odd_in_velocity_and_falls_to_kinetic() {
-        let law = StribeckFriction::try_new(0.8, 0.3, 0.05).unwrap();
+        let law = StribeckFriction::try_new(0.8, 0.3, 0.05, 0.05).unwrap();
         let f_p = law.traction(0.01, 2.0).unwrap();
         let f_m = law.traction(-0.01, 2.0).unwrap();
         assert!((f_p + f_m).abs() < 1.0e-15);
         let slope = law.traction(0.01, 1.0).unwrap() / 0.01;
-        assert!((slope - 0.8 / 0.05).abs() < 1.0e-12);
+        let endpoint_mu = 0.3 + 0.5 * fs_math::det::exp(-1.0);
+        assert!((slope - endpoint_mu / 0.05).abs() < 1.0e-12);
         assert!((law.traction(10.0, 1.0).unwrap() - 0.3).abs() < 0.02);
+    }
+
+    #[test]
+    fn decay_speed_and_ode_ramp_are_independent() {
+        let narrow = StribeckFriction::try_new(0.8, 0.3, 0.05, 0.001).unwrap();
+        let wide = StribeckFriction::try_new(0.8, 0.3, 0.05, 0.01).unwrap();
+        // Both are beyond their ramp: the same physical decay law applies.
+        assert_eq!(
+            narrow.traction(0.1, 2.0).unwrap().to_bits(),
+            wide.traction(0.1, 2.0).unwrap().to_bits()
+        );
+        assert_ne!(
+            narrow.traction(0.0005, 2.0).unwrap().to_bits(),
+            wide.traction(0.0005, 2.0).unwrap().to_bits()
+        );
+        for law in [narrow, wide] {
+            let scale = law.regularization_m_s;
+            let left = law.traction(scale * (1.0 - 1e-12), 2.0).unwrap();
+            let right = law.traction(scale * (1.0 + 1e-12), 2.0).unwrap();
+            assert!((left - right).abs() <= 1e-12 * 0.8 * 2.0);
+        }
     }
 
     /// Regression (bead 9svup): non-finite inputs REFUSE instead of
@@ -271,21 +300,22 @@ mod tests {
     /// construction.
     #[test]
     fn nonfinite_inputs_refuse_as_typed_errors() {
-        let law = StribeckFriction::try_new(0.8, 0.3, 0.05).unwrap();
+        let law = StribeckFriction::try_new(0.8, 0.3, 0.05, 0.05).unwrap();
         assert!(law.traction(f64::NAN, 1.0).is_err());
         assert!(law.traction(f64::INFINITY, 1.0).is_err());
         assert!(law.traction(0.01, f64::NAN).is_err());
         assert_eq!(law.traction(0.01, 0.0).unwrap().to_bits(), 0.0f64.to_bits());
-        assert!(StribeckFriction::try_new(0.3, 0.8, 0.05).is_err());
-        assert!(StribeckFriction::try_new(f64::NAN, 0.3, 0.05).is_err());
-        assert!(StribeckFriction::try_new(0.8, 0.3, 0.0).is_err());
+        assert!(StribeckFriction::try_new(0.3, 0.8, 0.05, 0.05).is_err());
+        assert!(StribeckFriction::try_new(f64::NAN, 0.3, 0.05, 0.05).is_err());
+        assert!(StribeckFriction::try_new(0.8, 0.3, 0.0, 0.05).is_err());
+        assert!(StribeckFriction::try_new(0.8, 0.3, 0.05, 0.0).is_err());
     }
 
     /// G1/G3: equal-and-opposite contact forces remove relative kinetic
     /// energy; the independent formula also checks the port's sign and SI load.
     #[test]
     fn shared_friction_matches_reference_and_dissipates_relative_work() {
-        let law = StribeckFriction::try_new(0.8, 0.3, 0.05).unwrap();
+        let law = StribeckFriction::try_new(0.8, 0.3, 0.05, 0.05).unwrap();
         let owner = fs_tribo::FrictionLaw::Stribeck {
             static_mu: 0.8,
             kinetic_mu: 0.3,
@@ -304,7 +334,8 @@ mod tests {
                 );
                 let ratio = velocity.abs() / 0.05;
                 let mu = if ratio < 1.0 {
-                    0.8 * ratio
+                    // DEF-06: continuous kinetic endpoint rather than μ_static.
+                    (0.3 + 0.5 * (-1.0_f64).exp()) * ratio
                 } else {
                     0.3 + 0.5 * (-ratio * ratio).exp()
                 };
@@ -321,7 +352,7 @@ mod tests {
 
     #[test]
     fn shared_friction_refuses_forged_coefficients_negative_load_and_overflow() {
-        let valid = StribeckFriction::try_new(0.8, 0.3, 0.05).unwrap();
+        let valid = StribeckFriction::try_new(0.8, 0.3, 0.05, 0.05).unwrap();
         for invalid in [
             StribeckFriction {
                 mu_static: -0.8,
@@ -339,11 +370,15 @@ mod tests {
                 stiction_m_s: 0.0,
                 ..valid
             },
+            StribeckFriction {
+                regularization_m_s: 0.0,
+                ..valid
+            },
         ] {
             assert!(invalid.traction(0.01, 2.0).is_err());
         }
         assert_eq!(valid.traction(0.01, -1.0), Err("normal_force"));
-        let large = StribeckFriction::try_new(4.0, 4.0, 0.05).unwrap();
+        let large = StribeckFriction::try_new(4.0, 4.0, 0.05, 0.05).unwrap();
         assert_eq!(large.traction(0.1, f64::MAX), Err("regularized_traction"));
     }
 }

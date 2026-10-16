@@ -163,7 +163,7 @@ fn bow_part(horizon: u64, prefix: usize) -> ScheduledRenderer {
             bending_stiffness_n_m2: 0.0, viscous_bending_n_m2_s: 0.0,
             mode_count: 16, zetas: vec![0.01; 16], sample_rate_hz: 48_000,
         },
-        island: FrictionIsland::Stribeck(StribeckFriction::try_new(0.8, 0.4, 0.04).unwrap()),
+        island: FrictionIsland::Stribeck(StribeckFriction::try_new(0.8, 0.4, 0.04, 0.04).unwrap()),
         gesture: BowGesture::admit(0.45, 3.9, 0.11).unwrap(),
         steps: 1024, subsamples: 16, listener_m: 1.0,
         termination: Termination::PlateOnePort {

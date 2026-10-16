@@ -128,3 +128,73 @@ pub(super) fn check(law: &FrictionLaw, config: ModalFrictionConfig, dt: f64,
     };
     Ok((loss, constitutive_residual_n))
 }
+
+#[cfg(test)]
+mod trait_tests {
+    use super::*;
+    use fs_tribo::{TangentialLaw, TangentialSolveConfig, TangentialStepInput};
+
+    /// G1/G5: compare against the actual pre-existing modal branch/root owner,
+    /// including its endpoint convention and bisection stopping iteration.
+    #[test]
+    fn g1_trait_stick_slip_matches_modal_friction_owner_bitwise() {
+        let config = ModalFrictionConfig {
+            max_iterations: 80,
+            maximum_force_n: 100.0,
+            maximum_slip_speed_m_s: 10.0,
+            force_absolute_tolerance_n: 1e-11,
+            force_relative_tolerance: 1e-10,
+            sticking_tolerance_m: 1e-12,
+        };
+        let dt = 1.0 / 48000.0;
+        for law in [
+            FrictionLaw::Coulomb {
+                static_mu: 0.8,
+                kinetic_mu: 0.4,
+            },
+            FrictionLaw::Stribeck {
+                static_mu: 0.8,
+                kinetic_mu: 0.4,
+                characteristic_speed: 0.04,
+                viscous_per_speed: 0.0,
+            },
+        ] {
+            for normal in [0.0, 0.1, 1.0] {
+                for free_slip in [-0.3 * dt, -0.001 * dt, 0.0, 0.001 * dt, 0.3 * dt] {
+                    for compliance in [1e-8, 1e-6, 1e-4] {
+                        let (traction, regime, iterations) =
+                            solve(&law, config, compliance, dt, free_slip, normal, None).unwrap();
+                        let step = law
+                            .advance(
+                                &law.initial_state(),
+                                &TangentialStepInput {
+                                    normal_n: normal,
+                                    slip_increment_m: [free_slip, 0.0],
+                                    dt_s: dt,
+                                    contact_temperature_k: None,
+                                    nominal_pressure_pa: None,
+                                    compliance_m_per_n: compliance,
+                                    solve: TangentialSolveConfig {
+                                        max_iterations: config.max_iterations,
+                                        maximum_force_n: config.maximum_force_n,
+                                        force_absolute_tolerance_n: config
+                                            .force_absolute_tolerance_n,
+                                        force_relative_tolerance: config.force_relative_tolerance,
+                                    },
+                                },
+                            )
+                            .unwrap();
+                        assert_eq!(step.traction_n[0].to_bits(), traction.to_bits());
+                        assert_eq!(step.iterations, iterations);
+                        if normal > 0.0 {
+                            assert_eq!(
+                                step.regime == fs_tribo::FrictionRegime::Sticking,
+                                regime == ModalFrictionRegime::Sticking
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

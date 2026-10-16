@@ -137,7 +137,7 @@ impl RegularizedSet {
                 return Err(invalid("friction requires a positive finite force ceiling and a source label"));
             }
             let law = StribeckFriction::try_new(
-                spec.coefficient, spec.coefficient, spec.regularization_speed_m_s,
+                spec.coefficient, spec.coefficient, spec.regularization_speed_m_s, spec.regularization_speed_m_s,
             ).map_err(invalid)?;
             let mut column = vec![0.0; n];
             let pair = normal.contact.pair()?;

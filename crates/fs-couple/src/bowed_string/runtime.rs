@@ -481,7 +481,7 @@ mod exact_stiction_tests {
                 bending_stiffness_n_m2: bending, viscous_bending_n_m2_s: 0.0,
                 mode_count: 12, zetas: vec![0.12; 12], sample_rate_hz: 48_000,
             },
-            island: FrictionIsland::Stribeck(StribeckFriction::try_new(0.8, 0.3, 0.1).unwrap()),
+            island: FrictionIsland::Stribeck(StribeckFriction::try_new(0.8, 0.3, 0.1, 0.1).unwrap()),
             gesture: BowGesture::admit(0.01, 100.0, 0.13).unwrap(),
             steps: 0, subsamples: 1, termination: Termination::Rigid, listener_m: 1.0,
         }

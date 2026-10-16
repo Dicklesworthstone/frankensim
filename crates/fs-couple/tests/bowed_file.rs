@@ -27,7 +27,7 @@ fn reference(rate: u32, samples: usize, tension: f64) -> (Vec<f64>, f64) {
         card: BowedStringCard { length_m: 0.65, tension_n: tension, linear_density_kg_m: 0.0006,
             bending_stiffness_n_m2: 0.0, viscous_bending_n_m2_s: 0.0, mode_count: 16,
             zetas: vec![0.001; 16], sample_rate_hz: rate },
-        island: FrictionIsland::Stribeck(StribeckFriction::try_new(0.8, 0.4, 0.04).unwrap()),
+        island: FrictionIsland::Stribeck(StribeckFriction::try_new(0.8, 0.4, 0.04, 0.04).unwrap()),
         gesture: BowGesture::admit(0.45, 3.9, 0.11).unwrap(), steps: samples, subsamples: 16,
         termination: Termination::PlateOnePort {
             body: Box::new(CompactBody::from_radiator(RadiatingPlate {
