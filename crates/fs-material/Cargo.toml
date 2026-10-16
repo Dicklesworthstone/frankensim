@@ -15,11 +15,15 @@ fs-ad = { path = "../fs-ad" }
 fs-blake3 = { path = "../fs-blake3" }
 fs-casebook = { path = "../fs-casebook" }
 fs-evidence = { path = "../fs-evidence" }
+fs-la = { path = "../fs-la" }
 fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
 fs-thermal = { path = "../fs-thermal" }
 fs-thermochem = { path = "../fs-thermochem" }
+
+[dev-dependencies]
+fs-rand = { path = "../fs-rand" }
 
 [lints]
 workspace = true
