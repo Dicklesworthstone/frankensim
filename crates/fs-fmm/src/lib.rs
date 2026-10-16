@@ -20,6 +20,13 @@
 
 use std::collections::BTreeMap;
 
+mod complex;
+pub use complex::{
+    ComplexKernel, FmmC64, HelmholtzAdjointDouble, HelmholtzDouble, HelmholtzGradient,
+    HelmholtzHypersingular, HelmholtzSingle, MAX_BB_HELMHOLTZ_KD, MAX_COMPLEX_COEFFICIENT_SLOTS,
+    helmholtz_order_for,
+};
+
 /// Lowest supported Chebyshev interpolation order.
 pub const MIN_INTERPOLATION_ORDER: usize = 2;
 /// Highest admitted interpolation order for this unfused v1 implementation.
@@ -41,6 +48,20 @@ const MAX_ABS_COORDINATE: f64 = 1.0e100;
 /// Invalid input or an inadmissible v1 work request.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FmmError {
+    /// A complex-kernel parameter, normal field, or accuracy request is invalid.
+    ComplexRequest {
+        /// Stable diagnostic category.
+        reason: &'static str,
+    },
+    /// The non-directional Helmholtz interpolation regime has been exceeded.
+    HelmholtzRegime {
+        /// Requested wavenumber times root-box side.
+        kd: f64,
+        /// Requested relative tolerance, if an order was requested.
+        tolerance: Option<f64>,
+        /// Solver route required for this request.
+        route: &'static str,
+    },
     /// A point cloud must contain at least one source/target.
     EmptyPointCloud,
     /// The point-count ceiling was exceeded.
@@ -103,6 +124,11 @@ pub enum FmmError {
 impl core::fmt::Display for FmmError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::ComplexRequest { reason } => write!(f, "FMM complex request: {reason}"),
+            Self::HelmholtzRegime { kd, tolerance, route } => write!(
+                f,
+                "FMM non-directional Helmholtz regime refused: kD={kd}, tolerance={tolerance:?}; route {route}"
+            ),
             Self::EmptyPointCloud => f.write_str("FMM point cloud must not be empty"),
             Self::TooManyPoints { count, max } => {
                 write!(

@@ -95,7 +95,7 @@ ordinary Rust test failure as well as a canonical error event.
 - SIMD-batched near field and precomputed M2L tables (perf lanes).
 - Gradient outputs (consumers run per-component kernels today;
   a fused gradient pass is follow-up).
-- Periodic/boundary-image variants; oscillatory kernels.
+- Periodic/boundary-image variants; high-kD directional oscillatory kernels.
 - Recoverable allocator exhaustion for internal tree/map/pass buffers. Work is
   bounded before those allocations, but allocator failure remains process-level.
 - The `fmm-003/measurement` timing rows are diagnostic observations, not
@@ -105,3 +105,65 @@ ordinary Rust test failure as well as a canonical error event.
   the adaptive kernel-independent (bbFMM) tree that would drive an FMM-accelerated
   vortex particle method is NOT scheduled; the promise is preserved in deferred
   epic frankensim-rc-root-q61wp.43 and un-parks only behind a consumer journey.
+
+## Complex Helmholtz extension (IRP M2.5-W5a)
+
+`ComplexKernel::eval -> fs_math::c64::C64` and `FmmC64` provide complex charges
+and potentials. The existing real `Kernel`, `Laplace3d` and `Fmm` arithmetic is
+unchanged. The complex engine reuses the existing uniform-depth tree builder
+at order 2, which allocates no expansion coefficients, then applies its own
+order-dependent admission and complex passes. It uses the same exactly-once
+near/far pair partition. `direct` remains a separate, bounded quadratic oracle;
+`potentials` never falls back to it.
+
+The outgoing convention is `exp(-i omega t)`, `G=exp(ikr)/(4 pi r)`, matching
+`fs-bem::helmholtz`. Shipped kernels are `HelmholtzSingle`, `HelmholtzDouble`
+(`dG/dn_y`), `HelmholtzAdjointDouble` (`dG/dn_x`), `HelmholtzGradient` (one
+Cartesian `grad_x G` component), and `HelmholtzHypersingular` (the mixed normal
+derivative **away from the diagonal**). Self terms, jumps, finite parts and
+singular/near-panel quadrature remain BEM's responsibility. These point kernels
+alone are not a complete Burton–Miller panel operator.
+
+Double/adjoint/mixed constructors accept one unit normal per point, squared
+norm tolerance `1e-12`. Source normals weight three P2M charge fields; target
+normals contract three L2P fields. Normals are not interpolated or evaluated at
+synthetic grid points. No automatic normalization changes caller geometry.
+All new kernel and interpolation transcendentals use `fs_math::det`; inherited
+tree-depth selection still uses the real builder's platform `ln`. The existing
+real interpolation and Laplace `powi` remain untouched. The claim is repeated
+execution on the same platform/profile, without a new cross-ISA claim.
+
+The requested interpolation-order ladder is `4,6,8,10,12` against the complex
+direct oracle for root-box `kD=1,5,10` (D includes the builder's `1e-9` padding).
+`helmholtz_order_for` conservatively recommends p=12 only within `kD<=10` and
+`1e-6<=tol<1`. Higher kD or tighter requested tolerances return the named
+`FmmError::HelmholtzRegime`, route `M2.5-W5b`. Actual Helmholtz constructors
+also enforce the kD ceiling. Generic custom kernels must report their
+Helmholtz wavenumber through `ComplexKernel::wavenumber` when applicable.
+Explicit lower p values are diagnostic approximations. The order selector is
+an empirically tested domain recommendation, **not** a universal relative-error
+certificate for arbitrary charge cancellation or untested point distributions.
+Consumers needing such a certificate must independently bound their operator
+error; this extension does not mint that authority. The new numeric ladders
+remain pending central native verification until the bead's run receipt exists.
+
+`MAX_COMPLEX_COEFFICIENT_SLOTS=MAX_COEFFICIENT_SLOTS/2` keeps the original byte
+budget. Admission counts source and target channels, every actual tree cell,
+and two extra cells for transient coefficient buffers. M2L work counts actual
+interaction pairs times `p^6` times source/target channel counts, with the
+existing `MAX_TRANSLATION_WORK` ceiling. Tree/cell-pair/point/near-field caps
+remain in force. This avoids the real path's overly conservative M2L estimate
+rejecting p=12 even on a small sparse tree; it does not raise any cap.
+Allocation failure and cancellation boundaries remain as described above.
+
+`tests/battery.rs` includes `battery/helmholtz.rs` in the existing test target.
+It emits fs-obs JSONL rows for the single/double order ladders, adjoint/gradient/
+mixed checks, `1e-12` translation, high-kD refusal (including an unguarded
+test-only p12 failure), coefficient cap/cap+1 and bitwise replay. Unit tests
+independently finite-difference the single-layer kernel to check all derivative
+signs, check analytic outgoing phase, and check pair partition and input errors.
+`laplace_bitwise_unchanged` freezes the original real operation-tree source at
+`ee8e613806eaa9ac3979a8b139af5e1528b699d5`; it is a source guard, not a fabricated
+historical runtime golden. Existing fmm-001..003 stay intact. Native comparison
+against a baseline run is still required to claim historic measurement identity;
+elapsed timing rows are diagnostic and cannot be bitwise reproducibility claims.

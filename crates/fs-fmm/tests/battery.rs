@@ -13,6 +13,9 @@ use fs_fmm::{Fmm, Laplace3d};
 use std::fmt::Write as _;
 use std::time::Instant;
 
+#[path = "battery/helmholtz.rs"]
+mod helmholtz;
+
 const SUITE: &str = "fs-fmm/battery";
 const FMM_001_INPUT_SEED: u64 = 0x1001_2026_0708_0001;
 const FMM_002_INPUT_SEED: u64 = 0x1001_2026_0708_0002;
