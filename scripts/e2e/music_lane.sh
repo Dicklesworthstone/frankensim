@@ -70,7 +70,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$FIXTURE" == "reed" || "$FIXTURE" == "string" || "$FIXTURE" == "reed-flanged-baffled" ]] || die '--fixture must be reed, string or reed-flanged-baffled'
+[[ "$FIXTURE" == "reed" || "$FIXTURE" == "string" || "$FIXTURE" == "reed-flanged-baffled" || "$FIXTURE" == "modal-broadband" ]] || die '--fixture must be reed, string, reed-flanged-baffled or modal-broadband'
 [[ -n "$OUT_DIR" ]] || die '--out-dir is required'
 [[ ! -e "$OUT_DIR" ]] || die "refusing to overwrite existing out dir: $OUT_DIR"
 ON_AXIS_ERROR=""
@@ -100,6 +100,13 @@ if [[ -z "$BINARY" ]]; then
 fi
 [[ -n "$BINARY" && -x "$BINARY" ]] || \
   die 'music_render binary not found; build it (cargo build -p fs-couple --bin music_render) or pass --binary'
+
+if [[ "$FIXTURE" == "modal-broadband" ]]; then
+  [[ "$SECONDS_ARG" == "0.25" && "$ENFORCE_BASELINE" == 0 ]] || die 'modal-broadband has a pinned 0.25 s replay window and uses the required native qualification log as its numerical baseline'
+  args=(--out-dir "$OUT_DIR" --binary "$BINARY" --qualification-log "$QUALIFICATION_LOG")
+  if [[ "$DRY_RUN" == 1 ]]; then args+=(--dry-run); fi
+  exec bash scripts/e2e/music_modal_broadband.sh "${args[@]}"
+fi
 
 if [[ $DRY_RUN -eq 1 ]]; then
   printf '{"suite":"music-e2e","lane":"%s","verdict":"dry-run","binary":"%s","seconds":%s,"out_dir":"%s"}\n' \

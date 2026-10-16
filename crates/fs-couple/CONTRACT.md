@@ -499,6 +499,50 @@ registry.
 
 ### `broadband_radiation`
 
+`broadband_radiation::modal` and `modal_acoustic_time::broadband` add an opt-in
+one-way pressure receiver over complete mass-normalized modal velocity fields.
+Computed training/independent held-out samples use exp(-i omega t), with explicit
+producer identity, SI units, pure delay and producer discretization estimate.
+Continuous vector fits are conjugated for the fs-vfit owner; proper stable
+state-space filters join each original mode in an augmented held-force ZOH
+exponential, reusing fs-phs's checked deterministic exponential. There is no
+Tustin warp or velocity difference. The original modal owner still advances
+mechanical states and work/loss records, preserving those bits exactly. Its
+legacy pressure coefficients are zeroed only in the observer's private clone,
+so the admitted receiver owns the pressure ceiling. A failed step publishes no
+filter/delay/mechanical state. Block render failures poison their stream wrapper.
+
+The pure delay uses exact integer taps or an explicit centered Blackman/sinc
+fractional kernel; all taps must be causal within the physical delay. History
+starts at zero. This approximates a bandlimited sampled pressure history, not
+continuous retiming of all held-force spectral images. Held-out error includes
+the actual kernel and retains EstimateOnly authority; it is not a continuum
+certificate. Producer error remains separate. Constant samples with zero delay
+use the exact legacy equilibrium-relative quadrature operation order.
+
+Caps: all 4096 modal inputs are retained in <=256-input cold batches, each grid
+has <=512 frequencies, <=4194304 transfer cells total, per-mode order<=128,
+iterations<=128, delay-kernel half-length<=4096, delay history<=1048576 samples,
+and total augmented matrices<=4194304 entries. No mode/pole truncation or implicit
+budget enlargement is allowed. Host cancellation is at bounded pressure-block
+boundaries; no hard-real-time, continuum passivity or load-model claim follows.
+
+The v1 modal-file optional `broadband` block reuses its original parser and
+ProjectedForceProgram; v2-v5 coupled/nonlinear trajectories refuse this
+independent-mode receiver. CLI sidecars retain every producer/fit/error/delay
+field, and the legacy path remains the default. The native G0/G1 battery is
+`tests/broadband_modal_transfer.rs`: independent analytic held-input sphere
+endpoint response at five off-resonance drives (1e-6 amplitude/radian bands),
+constant compatibility, bitwise mechanical energy/work/loss, all-mode cap,
+held-out refusals, integer delay, and three-rung delay/pole/grid ladders. The
+pole/grid axes use the independent nonrational Bessel/Struve piston owner:
+the delay-stripped sphere is already first-order rational and cannot establish
+pole-count liveness. Numerical/native qualification is pending. The audible
+replay/refusal sub-lane is `scripts/e2e/music_modal_broadband.sh`, requiring the
+native qualification log and a supplied binary; it makes no instrument-realism
+or general source-mortar/loading claim. M-BAR-Q2/M-GT-Q2/M-VNP-Q2 must supply their
+own computed mode-basis samples explicitly before adopting this observer.
+
 Generic offline bridge from solver-neutral sampled scalar-input radiation transfers to
 real-tesseral SH filters. Radiation solvers supply complex-SH training rows, direct
 held-out fields, source semantics, and diagnostics; `fs-couple` does not depend on them.

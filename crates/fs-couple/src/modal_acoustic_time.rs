@@ -26,6 +26,9 @@ use std::sync::Arc;
 
 use fs_math::{c64::C64, det};
 
+/// Opt-in broadband pressure observation using the original exact modal step.
+pub mod broadband;
+
 /// Maximum number of modes admitted by one runtime model.
 pub const MAX_TIME_DOMAIN_ACOUSTIC_MODES: usize = 4_096;
 
