@@ -105,9 +105,14 @@ fn a_mass_only_data_change_alters_dynamics_without_retuning_elastic_closure() {
     heavier.blades[1].mass_kg *= 4.0;
     let mut a=PairedAperture::new(s,[BladeState::default();2],contact(0.0)).unwrap();
     let mut b=PairedAperture::new(heavier,[BladeState::default();2],contact(0.0)).unwrap();
-    let drive=ApertureDrive {upstream_pressure_pa:1000.0,..ApertureDrive::default()};
-    // Compare at the original physical horizon, now resolved with 64 steps.
-    for _ in 1..64 {
+    let drive = ApertureDrive {
+        upstream_pressure_pa: 1000.0,
+        ..ApertureDrive::default()
+    };
+    // Observe 0.25 ms of actual motion. One original 48 kHz tick is only
+    // 20.8 us: after resolving its pressure feedback the mass-only velocity
+    // separation has not yet reached the unchanged 0.01 m/s observable.
+    for _ in 1..768 {
         a.step(drive).unwrap();
         b.step(drive).unwrap();
     }

@@ -112,10 +112,18 @@ impl PairedPlateClosure {
     #[must_use]
     pub fn shapes(&self) -> &[[f64;2]] { &self.shapes }
     /// Original fs-dcontact potential, counted once, in two displacement coordinates.
-    pub fn stored_energy_j(&self, displacement: [f64;2]) -> Result<f64,AcousticRealizeError> {
-        if displacement.iter().any(|x| !x.is_finite()) { return Err(invalid("paired contact needs finite blade displacements")); }
-        let energy=self.storage.hamiltonian(&[displacement[0],displacement[1],0.0,0.0]);
-        if !energy.is_finite() || energy<0.0 { return Err(invalid("paired contact storage overflowed")); }
+    pub fn stored_energy_j(&self, displacement: [f64; 2]) -> Result<f64, AcousticRealizeError> {
+        if displacement.iter().any(|x| !x.is_finite()) {
+            return Err(invalid("paired contact needs finite blade displacements"));
+        }
+        // ContactStorage observes interleaved [q0,p0,q1,p1]. Both blade
+        // displacements must enter their original contact collocation columns.
+        let energy = self
+            .storage
+            .hamiltonian(&[displacement[0], 0.0, displacement[1], 0.0]);
+        if !energy.is_finite() || energy < 0.0 {
+            return Err(invalid("paired contact storage overflowed"));
+        }
         Ok(energy)
     }
     /// Local physical clearance; displacements are from each blade's rest shape.
@@ -207,7 +215,37 @@ mod tests {
             .with_internal_loss(spec.internal_loss_s_per_m).unwrap();
         let reference=PlateClosure {spec,law,rest_coordinate_m:0.0,shape:vec![1.0,0.5,-0.2],
             edges:vec![([0,1],0.01)],nodes:vec![0,1,2]};
-        PairedPlateClosure::build(reference,vec![[1.0,0.3],[0.5,1.2],[-0.2,0.7]]).unwrap()
+        PairedPlateClosure::build(reference, vec![[1.0, 0.3], [0.5, 1.2], [-0.2, 0.7]]).unwrap()
+    }
+    #[test]
+    fn both_blade_displacements_enter_the_pointwise_contact_energy() {
+        let c = fixture();
+        for q in [
+            [0.0, -0.001],
+            [-0.001, 0.0],
+            [-0.001, 0.0002],
+            [0.002, -0.003],
+        ] {
+            // Independent physical potential: sum w*k*penetration^(alpha+1)/(alpha+1).
+            let expected: f64 = c
+                .reference
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, &node)| {
+                    let gap = c.spec().nodal_rest_gap_m[node]
+                        + c.shapes[node][0] * q[0]
+                        + c.shapes[node][1] * q[1];
+                    c.reference.law.weights()[i]
+                        * c.reference.law.stiffness()
+                        * (-gap).max(0.0).powi(3)
+                        / 3.0
+                })
+                .sum();
+            let actual = c.stored_energy_j(q).unwrap();
+            assert!(expected > 0.0);
+            assert!((actual - expected).abs() < 2e-12 * expected);
+        }
     }
     #[test]
     fn paired_pointwise_contact_balances_each_blades_virtual_work() {

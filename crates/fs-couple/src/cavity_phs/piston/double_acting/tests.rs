@@ -327,13 +327,6 @@ fn source_geometry_and_numerical_refusals_leave_both_owners_unchanged() {
             },
             ..controls()
         },
-        DoublePistonSolve {
-            piston: PistonSolve {
-                maximum_iterations: 1,
-                ..single_controls()
-            },
-            ..controls()
-        },
     ] {
         assert!(
             piston
@@ -342,6 +335,40 @@ fn source_geometry_and_numerical_refusals_leave_both_owners_unchanged() {
         );
         assert_eq!(piston, before);
     }
+    // At the common 50 us tick the 20 J trial converges in one Newton
+    // correction. Resolve the same piston at 200 us (omega*dt < 0.04) and
+    // supply enough heat to require another correction, still inside both
+    // material temperature domains. Prove that this is work exhaustion,
+    // rather than a source, geometry or time-resolution refusal.
+    let nonlinear = DoublePistonInput {
+        duration_s: 0.0002,
+        ..drive_pair([300.0, 0.0])
+    };
+    let omega2: f64 = [piston.primary().gas(), piston.opposing()]
+        .into_iter()
+        .map(|gas| {
+            let medium = gas.state().state();
+            medium.density * medium.sound_speed.powi(2) * 0.01_f64.powi(2)
+                / (gas.volume_m3() * piston.primary().mass_kg())
+        })
+        .sum();
+    assert!(omega2.sqrt() * nonlinear.duration_s < 0.04);
+    let mut resolved = before.clone();
+    let accepted = resolved.step(nonlinear, controls(), || false).unwrap();
+    assert!(accepted.iterations > 1);
+    check(&accepted);
+    let exhausted = DoublePistonSolve {
+        piston: PistonSolve {
+            maximum_iterations: 1,
+            ..single_controls()
+        },
+        ..controls()
+    };
+    assert!(matches!(
+        piston.step(nonlinear, exhausted, || false),
+        Err(PistonError::NotConverged { iterations: 1, .. })
+    ));
+    assert_eq!(piston, before);
     let tiny_bracket = DoublePistonSolve {
         piston: PistonSolve {
             volume_bracket_m3: [0.001 - 1e-10, 0.001 + 1e-10],
