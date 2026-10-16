@@ -50,6 +50,16 @@ measurement side of the simulate-vs-measure calibration loop.
   fs-vfit are the other two); disagreement is a diagnostic.
 - `mac` / `mac_matrix` / `mac_pairing` — modal assurance criterion
   and greedy floor-gated pairing: the calibration diff primitive.
+- `compare_mode_tables` / `ModeCompareOptions` / `ModePair` /
+  `ModeTableComparison` — QP mode-table comparison. Common-channel shapes
+  pair by highest unused MAC, otherwise by nearest unused frequency inside
+  the declared cents band. Reference order and lower candidate index break
+  exact ties deterministically. Every unmatched input index is reported.
+  High-MAC identity pairs retain out-of-band signed cents errors and set
+  `within_tolerance=false`; frequency-only pairs never claim a MAC. Inputs
+  require positive finite frequencies, finite nonnegative damping, uniform
+  shape widths per table and finite nonzero shape norms when present.
+  Shapes are normalized before MAC products to remove arbitrary residue scale.
 - `correct_exponential_window` — `zeta_true = zeta_meas -
   1/(tau*omega_n)`, clamped at zero, delta reported.
 
@@ -107,7 +117,7 @@ None.
 
 ## Conformance tests
 
-`tests/modalid.rs` (11): known-answer noise sweep inside intervals;
+`tests/modalid.rs` (13): known-answer noise sweep inside intervals;
 MAC shape recovery; close-mode pair + RFP cross-check + low-order
 failure demonstration; MAC identity/orthogonality/scale-phase
 invariance; perturbed-plate calibration diff (intact modes pair
@@ -115,6 +125,24 @@ invariance; perturbed-plate calibration diff (intact modes pair
 formula unit test; SNR refusal + coherence-driven estimates; RFP
 Gram-conditioning demonstration; CSV ingest round-trip with typed
 line refusal; Carcagno published-parameter benchmark.
+
+G0/G3 `compare_mode_tables_pairs_by_mac_and_reports_unmatched` checks
+identity, reordered/shifted pairs, dropped and extra modes, orthogonal
+shapes, frequency-only ties, unequal-channel fallback, residue rescaling
+and empty tables. `compare_mode_tables_refuses_bad_options` covers MAC
+floor endpoints/cap+1, nonfinite/negative cents, invalid mode data and
+ragged channels.
+
+First downstream consumer: fs-couple (dev-dependency),
+`tests/modalid_qp.rs`, with explicit `IdentifyOptions` throughout. Its
+authored six-structure/two-cavity model is sampled by the actual
+`VibroacousticModel::frf` on 4096 points. G1 requires all eight coupled
+frequencies within 0.05%, damping within 5% of independently solved
+complex quadratic eigenvalues, and no missing/spurious accepted mode.
+G3 keeps a +20-cent structural defect visible while the other pairs stay
+within one cent and MAC >=0.95. G2 uses Philox test-name-keyed 1% relative
+complex noise, frequency interval-or-three-cent gates, and next-up/next-down
+SNR refusal/acceptance boundaries. Native results are batch-pending.
 
 ## No-claim boundaries
 
@@ -142,3 +170,11 @@ line refusal; Carcagno published-parameter benchmark.
   through intermediate orders but relocated at the top order gets no
   verdict (stated; longest-run-over-all-orders diagrams are a
   follow-up).
+- Table pairing is greedy, not a globally optimal assignment, and does not
+  infer sensor-channel correspondence. Tables with different channel counts
+  fall back to frequency and disclose `mac=None`; inconsistent widths within
+  one table refuse. Confidence intervals are reported by identification,
+  never used to widen the caller's comparison tolerances.
+- The coupled-FRF test qualifies the simulation-to-identification seam,
+  not measured bar/body specimen agreement. X-Bar1 and X-Bw1 remain pending
+  downstream QP consumers; this synthetic fixture does not close those beads.

@@ -605,6 +605,176 @@ pub fn mac_pairing(a: &[Vec<C64>], b: &[Vec<C64>], floor: f64) -> Vec<(usize, Op
     out
 }
 
+/// Declared mode-table identity and frequency-comparison tolerances.
+#[derive(Debug, Clone, Copy)]
+pub struct ModeCompareOptions {
+    /// Minimum MAC for shape-based identity, in `[0, 1]`.
+    pub mac_floor: f64,
+    /// Maximum absolute frequency difference [cents], finite and non-negative.
+    pub max_cents: f64,
+}
+
+/// One identity pair, including frequency differences outside the admitted band.
+#[derive(Debug, Clone)]
+pub struct ModePair {
+    /// Reference natural frequency [Hz].
+    pub reference_hz: f64,
+    /// Candidate natural frequency [Hz].
+    pub candidate_hz: f64,
+    /// Signed difference `1200 log2(candidate/reference)` [cents].
+    pub cents: f64,
+    /// Reference viscous damping ratio.
+    pub zeta_reference: f64,
+    /// Candidate viscous damping ratio.
+    pub zeta_candidate: f64,
+    /// MAC when both tables carry shapes on the same channels.
+    pub mac: Option<f64>,
+    /// Whether this identity pair also meets the declared frequency band.
+    /// A high-MAC pair is retained even when this is false.
+    pub within_tolerance: bool,
+}
+
+/// A one-to-one table comparison; unmatched indices refer to the input tables.
+#[derive(Debug, Clone)]
+pub struct ModeTableComparison {
+    /// Identity pairs in reference-table order.
+    pub pairs: Vec<ModePair>,
+    /// Reference modes without a candidate identity match.
+    pub unmatched_reference: Vec<usize>,
+    /// Candidate modes not used by any reference mode.
+    pub unmatched_candidate: Vec<usize>,
+}
+
+/// Compare natural frequencies, damping ratios and mode-shape identities.
+///
+/// With nonempty shapes on the same channels, each reference mode takes the
+/// highest-MAC unused candidate above the floor. Such pairs retain their signed
+/// cents error even outside `max_cents`, with `within_tolerance=false`: a shifted
+/// physical mode must remain visible. Otherwise the nearest unused frequency
+/// within `max_cents` is paired, without claiming a MAC. Exact ties use the lower
+/// candidate index. Greedy traversal follows reference order; no global optimal
+/// assignment or statistical uncertainty/coverage is claimed.
+///
+/// Each table must use a common shape length (zero means unavailable). Shapes
+/// must have finite nonzero squared norm; frequency and damping are validated.
+/// Confidence-interval fields are not used as matching tolerances.
+///
+/// # Errors
+/// [`ModalIdError::Shape`] for invalid options or malformed mode tables.
+pub fn compare_mode_tables(
+    reference: &[Mode],
+    candidate: &[Mode],
+    opts: &ModeCompareOptions,
+) -> Result<ModeTableComparison, ModalIdError> {
+    if !opts.mac_floor.is_finite()
+        || !(0.0..=1.0).contains(&opts.mac_floor)
+        || !(opts.max_cents.is_finite() && opts.max_cents >= 0.0)
+    {
+        return Err(ModalIdError::Shape {
+            what: "mode comparison needs MAC in [0,1] and finite non-negative cents",
+        });
+    }
+    let channels = |table: &[Mode]| -> Result<usize, ModalIdError> {
+        let width = table.first().map_or(0, |mode| mode.shape.len());
+        for mode in table {
+            if !(mode.frequency_hz > 0.0 && mode.frequency_hz.is_finite())
+                || !(mode.damping_ratio >= 0.0 && mode.damping_ratio.is_finite())
+                || mode.shape.len() != width
+            {
+                return Err(ModalIdError::Shape {
+                    what: "mode table frequency, damping or channel shape",
+                });
+            }
+            if width > 0 {
+                let norm: f64 = mode.shape.iter().map(|v| v.norm_sq()).sum();
+                if !(norm > 0.0 && norm.is_finite()) {
+                    return Err(ModalIdError::Shape {
+                        what: "mode shape needs finite nonzero squared norm",
+                    });
+                }
+            }
+        }
+        Ok(width)
+    };
+    let (reference_channels, candidate_channels) = (channels(reference)?, channels(candidate)?);
+    let use_mac = reference_channels > 0 && reference_channels == candidate_channels;
+    let normalize = |table: &[Mode]| -> Vec<Vec<C64>> {
+        table
+            .iter()
+            .map(|mode| {
+                let norm = fs_math::det::sqrt(mode.shape.iter().map(|v| v.norm_sq()).sum());
+                mode.shape
+                    .iter()
+                    .map(|v| C64::new(v.re / norm, v.im / norm))
+                    .collect()
+            })
+            .collect()
+    };
+    // Residue scales are arbitrary; normalization keeps products of otherwise
+    // finite shape norms from overflowing inside the MAC calculation.
+    let (r_shapes, c_shapes) = if use_mac {
+        (normalize(reference), normalize(candidate))
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let cents = |r: f64, c: f64| {
+        // Difference of logs also handles finite extreme frequencies whose
+        // ratio could overflow or underflow before taking its logarithm.
+        1200.0 * (fs_math::det::ln(c) - fs_math::det::ln(r)) / core::f64::consts::LN_2
+    };
+    let mut used = vec![false; candidate.len()];
+    let mut result = ModeTableComparison {
+        pairs: Vec::new(),
+        unmatched_reference: Vec::new(),
+        unmatched_candidate: Vec::new(),
+    };
+    for (i, r) in reference.iter().enumerate() {
+        let mut best: Option<(usize, f64)> = None;
+        for (j, c) in candidate.iter().enumerate() {
+            if used[j] {
+                continue;
+            }
+            let score = if use_mac {
+                let value = mac(&r_shapes[i], &c_shapes[j]).clamp(0.0, 1.0);
+                if value < opts.mac_floor {
+                    continue;
+                }
+                value
+            } else {
+                if cents(r.frequency_hz, c.frequency_hz).abs() > opts.max_cents {
+                    continue;
+                }
+                -(r.frequency_hz - c.frequency_hz).abs()
+            };
+            if best.is_none_or(|(_, previous)| score > previous) {
+                best = Some((j, score));
+            }
+        }
+        if let Some((j, score)) = best {
+            used[j] = true;
+            let c = &candidate[j];
+            let delta = cents(r.frequency_hz, c.frequency_hz);
+            result.pairs.push(ModePair {
+                reference_hz: r.frequency_hz,
+                candidate_hz: c.frequency_hz,
+                cents: delta,
+                zeta_reference: r.damping_ratio,
+                zeta_candidate: c.damping_ratio,
+                mac: use_mac.then_some(score),
+                within_tolerance: delta.abs() <= opts.max_cents,
+            });
+        } else {
+            result.unmatched_reference.push(i);
+        }
+    }
+    result.unmatched_candidate = used
+        .iter()
+        .enumerate()
+        .filter_map(|(j, &paired)| (!paired).then_some(j))
+        .collect();
+    Ok(result)
+}
+
 /// Exponential-window damping-bias correction: an impact-hammer
 /// window `e^{-t/tau}` ADDS `1/tau` to every modal decay rate, so
 /// `zeta_measured = zeta_true + 1/(tau * omega_n)`. Returns the

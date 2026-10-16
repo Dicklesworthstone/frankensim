@@ -519,12 +519,12 @@
         {
           "crate": "fs-modalid",
           "disposition": "KEEP",
-          "rationale": "KEEP: experimental modal identification (Loewner + RFP with stabilization/MAC gates, bead 1qxdh, closed with tests). Named consumer pending: instrument model calibration against measured mobilities in the owner-doctrine synthesis workflow. New investment, not decay. Disposition added 2026-08-13 by the musical-acoustics program closer (NobleLion) when the usage sweep flagged the post-review landings.",
+          "rationale": "KEEP: modal identification and explicit QP mode-table comparison. First consumer is fs-couple's dev-dependency and tests/modalid_qp.rs: actual structure-cavity FRFs, coupled-pole recovery, a +20-cent defect and seeded-noise/SNR boundary checks with explicit IdentifyOptions (pexfp.13, 2026-10-16; native verification pending). Measured X-Bar1/X-Bw1 QP consumption remains pending; this simulation fixture is not measured-specimen proof.",
           "evidence": {
             "test_files": 1,
             "src_files": 1,
-            "last_commit": "2026-08-09",
-            "dependent_crates": 0
+            "last_commit": "2026-10-16",
+            "dependent_crates": 1
           }
         },
         {
@@ -812,12 +812,12 @@
         {
           "crate": "fs-modalid",
           "disposition": "KEEP",
-          "rationale": "KEEP: experimental modal identification (Loewner + RFP with stabilization/MAC gates, bead 1qxdh, closed with tests). Named consumer pending: instrument model calibration against measured mobilities in the owner-doctrine synthesis workflow. New investment, not decay. Disposition added 2026-08-13 by the musical-acoustics program closer (NobleLion) when the usage sweep flagged the post-review landings.",
+          "rationale": "KEEP: modal identification and explicit QP mode-table comparison. First consumer is fs-couple's dev-dependency and tests/modalid_qp.rs: actual structure-cavity FRFs, coupled-pole recovery, a +20-cent defect and seeded-noise/SNR boundary checks with explicit IdentifyOptions (pexfp.13, 2026-10-16; native verification pending). Measured X-Bar1/X-Bw1 QP consumption remains pending; this simulation fixture is not measured-specimen proof.",
           "evidence": {
             "test_files": 1,
             "src_files": 1,
-            "last_commit": "2026-08-09",
-            "dependent_crates": 0
+            "last_commit": "2026-10-16",
+            "dependent_crates": 1
           }
         },
         {

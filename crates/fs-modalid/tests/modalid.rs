@@ -6,12 +6,170 @@
 
 use fs_math::c64::C64;
 use fs_modalid::{
-    FrfData, IdentifyOptions, ModalIdError, correct_exponential_window, estimate_snr, identify,
-    mac, mac_pairing, rfp_fit,
+    FrfData, IdentifyOptions, ModalIdError, Mode, ModeCompareOptions, compare_mode_tables,
+    correct_exponential_window, estimate_snr, identify, mac, mac_pairing, rfp_fit,
 };
 use fs_vfit::vf::FitOptions;
 
 const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
+
+fn comparison_mode(frequency_hz: f64, shape: &[f64]) -> Mode {
+    Mode {
+        frequency_hz,
+        damping_ratio: 0.005,
+        shape: shape.iter().map(|&v| C64::from_re(v)).collect(),
+        frequency_ci_hz: f64::NAN,
+        damping_ci: f64::NAN,
+    }
+}
+
+/// G0/G3: identity pairing, explicit defects/unmatched modes and stable ties.
+#[test]
+fn compare_mode_tables_pairs_by_mac_and_reports_unmatched() {
+    let opts = ModeCompareOptions {
+        mac_floor: 0.95,
+        max_cents: 1.0,
+    };
+    let reference = vec![
+        comparison_mode(100.0, &[1.0, 0.0]),
+        comparison_mode(200.0, &[0.0, 1.0]),
+    ];
+    let same = compare_mode_tables(&reference, &reference, &opts).unwrap();
+    assert_eq!(same.pairs.len(), 2);
+    assert!(same.unmatched_reference.is_empty() && same.unmatched_candidate.is_empty());
+    assert!(
+        same.pairs
+            .iter()
+            .all(|p| p.cents == 0.0 && p.within_tolerance && p.mac.unwrap() >= 0.95)
+    );
+
+    let mut changed = vec![reference[1].clone(), reference[0].clone()];
+    changed[1].frequency_hz *= fs_math::det::exp(20.0 * core::f64::consts::LN_2 / 1200.0);
+    let diff = compare_mode_tables(&reference, &changed, &opts).unwrap();
+    assert!((diff.pairs[0].cents - 20.0).abs() < 1e-9);
+    assert!(!diff.pairs[0].within_tolerance && diff.pairs[1].within_tolerance);
+    assert_eq!(diff.pairs[0].zeta_reference, diff.pairs[0].zeta_candidate);
+
+    let dropped = compare_mode_tables(&reference, &reference[..1], &opts).unwrap();
+    assert_eq!(dropped.unmatched_reference, vec![1]);
+    let extra = compare_mode_tables(&reference[..1], &reference, &opts).unwrap();
+    assert_eq!(extra.unmatched_candidate, vec![1]);
+    // No frequency fallback may conceal incompatible measured shapes.
+    let orthogonal = compare_mode_tables(&reference[..1], &reference[1..], &opts).unwrap();
+    assert!(orthogonal.pairs.is_empty());
+    assert_eq!(orthogonal.unmatched_reference, vec![0]);
+    assert_eq!(orthogonal.unmatched_candidate, vec![0]);
+
+    let freq_only = vec![comparison_mode(95.0, &[]), comparison_mode(105.0, &[])];
+    let nearest = compare_mode_tables(
+        &[comparison_mode(100.0, &[])],
+        &freq_only,
+        &ModeCompareOptions {
+            mac_floor: 0.95,
+            max_cents: 100.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(nearest.pairs[0].candidate_hz, 95.0); // equal Hz distance: lower index
+    assert!(nearest.pairs[0].mac.is_none());
+    assert_eq!(nearest.unmatched_candidate, vec![1]);
+    let outside = compare_mode_tables(&[comparison_mode(100.0, &[])], &freq_only, &opts).unwrap();
+    assert!(outside.pairs.is_empty());
+    assert_eq!(outside.unmatched_candidate, vec![0, 1]);
+    let different_channels =
+        compare_mode_tables(&reference[..1], &[comparison_mode(100.0, &[1.0])], &opts).unwrap();
+    assert!(
+        different_channels.pairs[0].within_tolerance && different_channels.pairs[0].mac.is_none()
+    );
+    let large = [comparison_mode(100.0, &[1e100, -1e100])];
+    assert!(
+        compare_mode_tables(&large, &large, &opts).unwrap().pairs[0]
+            .mac
+            .unwrap()
+            >= 0.999999999999
+    );
+    let empty = compare_mode_tables(&[], &[], &opts).unwrap();
+    assert!(
+        empty.pairs.is_empty()
+            && empty.unmatched_reference.is_empty()
+            && empty.unmatched_candidate.is_empty()
+    );
+}
+
+/// G0: bad tolerance and malformed table data refuse by name.
+#[test]
+fn compare_mode_tables_refuses_bad_options() {
+    let mode = [comparison_mode(100.0, &[1.0])];
+    for opts in [
+        ModeCompareOptions {
+            mac_floor: -0.01,
+            max_cents: 1.0,
+        },
+        ModeCompareOptions {
+            mac_floor: 1.01,
+            max_cents: 1.0,
+        },
+        ModeCompareOptions {
+            mac_floor: f64::NAN,
+            max_cents: 1.0,
+        },
+        ModeCompareOptions {
+            mac_floor: 0.95,
+            max_cents: f64::INFINITY,
+        },
+        ModeCompareOptions {
+            mac_floor: 0.95,
+            max_cents: f64::NAN,
+        },
+        ModeCompareOptions {
+            mac_floor: 0.95,
+            max_cents: -1.0,
+        },
+    ] {
+        assert!(matches!(
+            compare_mode_tables(&mode, &mode, &opts),
+            Err(ModalIdError::Shape { .. })
+        ));
+    }
+    for mac_floor in [0.0, 1.0] {
+        assert!(
+            compare_mode_tables(
+                &mode,
+                &mode,
+                &ModeCompareOptions {
+                    mac_floor,
+                    max_cents: 0.0
+                }
+            )
+            .unwrap()
+            .pairs[0]
+                .within_tolerance
+        );
+    }
+    let opts = ModeCompareOptions {
+        mac_floor: 0.95,
+        max_cents: 1.0,
+    };
+    for bad in [
+        comparison_mode(0.0, &[1.0]),
+        comparison_mode(f64::NAN, &[1.0]),
+        comparison_mode(100.0, &[0.0]),
+        comparison_mode(100.0, &[f64::INFINITY]),
+    ] {
+        assert!(matches!(
+            compare_mode_tables(&mode, &[bad], &opts),
+            Err(ModalIdError::Shape { .. })
+        ));
+    }
+    let ragged = [
+        comparison_mode(100.0, &[1.0]),
+        comparison_mode(200.0, &[1.0, 0.0]),
+    ];
+    assert!(matches!(
+        compare_mode_tables(&ragged, &mode, &opts),
+        Err(ModalIdError::Shape { .. })
+    ));
+}
 
 /// Synthetic modal truth: 10 modes with shapes over 4 channels.
 struct Truth {
