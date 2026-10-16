@@ -48,7 +48,7 @@ pub(super) fn outlet_provenance(p: &AperturePerformance, radiation: Option<Baffl
             load.maximum_frequency_hz(),term.resistance_pa_s_m3,term.rate_per_s,
             load.max_complex_relative_error(),load.max_resistance_relative_error())
     } else {String::new()};
-    let (c,radius,density,speed)=match (p.observation(),p.system()) {
+    let (c,radius,_density,_speed)=match (p.observation(),p.system()) {
         (ApertureObservation::TubeBaffled(c),CoupledAperture::Tube(t))=>(c,t.spec().radius_m,t.aperture().spec().density_kg_m3,t.spec().sound_speed_m_s),
         (ApertureObservation::NetworkBaffled {node,receiver},CoupledAperture::Network(n))=> {
             let (index,section)=n.spec().sections.iter().enumerate().find(|(_,s)|s.nodes.contains(&node)).expect("admitted physical outlet section");
@@ -59,6 +59,8 @@ pub(super) fn outlet_provenance(p: &AperturePerformance, radiation: Option<Baffl
             format!(",\"observation_scope\":\"internal coupled tube pressure; not an exterior microphone\"{load_json}")
         } else {String::new()},
     };
+    let medium=p.baffled_medium().expect("admitted receiver medium");
+    let (density,speed)=(medium.density,medium.sound_speed);
     let mic=p.baffled_receiver().expect("admitted receiver");
     let scope=if radiation.is_some() {
         "exterior Rayleigh pressure from radiation-loaded terminal flow; compact passive load and uniform circular outlet in infinite rigid baffle"

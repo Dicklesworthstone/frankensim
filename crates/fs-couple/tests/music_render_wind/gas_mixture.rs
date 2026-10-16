@@ -118,3 +118,6 @@ fn mixture_ensemble_uses_the_same_physical_sources_without_per_source_pcm_gain()
         assert!(meta.contains("\"source_pcm_scale_applied\":false"));
     }
 }
+
+#[path = "gas_mixture/exterior.rs"]
+mod exterior;

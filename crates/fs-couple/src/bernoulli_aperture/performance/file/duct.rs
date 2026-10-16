@@ -1,6 +1,7 @@
 //! Geometry-bound graph input. Every node lowers to an existing physical owner;
 //! no branch is replaced with a second independent voice or a fitted reflection.
 use super::*;
+mod exterior;
 use crate::bernoulli_aperture::cavity::HelmholtzLoadSpec;
 use crate::bernoulli_aperture::wall::{WallPatch, WallPin};
 use fs_vfit::impedance::SeriesImpedanceSpec;

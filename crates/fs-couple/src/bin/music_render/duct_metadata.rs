@@ -13,7 +13,9 @@ fn impedance(load:SeriesImpedanceSpec)->String {
 pub(super) fn provenance(p:&PlateValvePerformance)->String {
     // Report the resolved default even on an unsegmented tube. Source identity
     // already binds the exact authored species, basis and fractions.
-    let force_json = format!(",\"ambient_gas\":{}{}", gas_state(p.ambient_gas()), force_provenance(p));
+    let exterior = p.exterior_gas().map_or_else(String::new, |gas|
+        format!(",\"exterior_gas\":{}", gas_state(gas)));
+    let force_json = format!(",\"ambient_gas\":{}{exterior}{}", gas_state(p.ambient_gas()), force_provenance(p));
     let CoupledAperture::Network(n)=p.renderer().system() else {return force_json};
     let i=p.info();
     // Name the node even in a one-section graph: node zero need not be the inlet.

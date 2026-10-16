@@ -136,6 +136,7 @@ pub struct PlateValvePerformance {
     radiation_loads: Vec<(usize, BaffledRadiationLoad)>,
     viscothermal_losses: Vec<ViscothermalSection>,
     ambient_gas: GasState,
+    exterior_gas: Option<GasState>,
 }
 impl PlateValvePerformance {
     /// Parse every record, derive the actual plate and selected blade symmetry,
@@ -159,9 +160,10 @@ impl PlateValvePerformance {
         checkpoint(gate)?;
         let parsed = Parsed::read(bytes,max_block,gate)?;
         let dt=1.0/f64::from(parsed.config.sample_rate_hz);
-        // Derive each declared physical load once, from its actual adjacent
-        // section gas. No receiver changes the network's mechanics.
-        let duct=parsed.duct.prepare(&parsed.air,dt,parsed.observation,gate)?;
+        // One exterior declaration drives radiation; all internal media and
+        // constitutive loads still come from their original regional states.
+        let duct=parsed.duct.prepare_in_exterior(&parsed.air,dt,parsed.observation,
+            parsed.exterior.as_ref(),gate)?;
         let inlet_density=duct.inlet_density(parsed.air.density)?;
         let z=duct.inlet_impedance(inlet_density)?;
         let observation=duct.observation;
@@ -192,8 +194,11 @@ impl PlateValvePerformance {
                 n.represented_sections().iter().map(|s|s.represented_length_m).sum()),
         };
         if !represented.is_finite() {return Err(bad(0,"total represented duct length overflowed"));}
-        let mut renderer=AperturePerformance::new(system,observation,parsed.schedule,parsed.config)
-            .map_err(PlateValveInputError::Gesture)?;
+        let mut renderer=match (parsed.exterior, observation) {
+            (Some(exterior), ApertureObservation::NetworkBaffled { .. }) =>
+                AperturePerformance::new_with_exterior_gas(system,observation,parsed.schedule,parsed.config,exterior),
+            _ => AperturePerformance::new(system,observation,parsed.schedule,parsed.config),
+        }.map_err(PlateValveInputError::Gesture)?;
         if let Some(program) = parsed.forces {
             renderer = renderer.with_plate_forces(program).map_err(PlateValveInputError::Gesture)?;
         }
@@ -206,7 +211,7 @@ impl PlateValvePerformance {
             compiled_controls:renderer.pending_controls().len(),represented_tube_length_m:represented,radiation_load,
             duct_nodes,duct_sections,radiation_terminals:radiation_loads.len(),
         };
-        Ok(Self {info,renderer,radiation_loads,viscothermal_losses,ambient_gas:parsed.air})
+        Ok(Self {info,renderer,radiation_loads,viscothermal_losses,ambient_gas:parsed.air,exterior_gas:parsed.exterior})
     }
     /// Exact source facts, retained separately from the evolving physical state.
     #[must_use]
@@ -215,6 +220,10 @@ impl PlateValvePerformance {
     /// available on the network; this is not an independent exterior medium.
     #[must_use]
     pub const fn ambient_gas(&self) -> &GasState {&self.ambient_gas}
+    /// Explicit exterior used by every declared radiation load, including on
+    /// internal-pressure observations. None preserves local terminal media.
+    #[must_use]
+    pub const fn exterior_gas(&self) -> Option<&GasState> {self.exterior_gas.as_ref()}
     /// Complete finite renderer with immutable access to the physical specimen.
     #[must_use]
     pub const fn renderer(&self) -> &AperturePerformance {&self.renderer}
@@ -233,7 +242,7 @@ impl PlateValvePerformance {
 }
 
 struct Parsed {
-    config:AperturePerformanceConfig,full_scale_pa:f64,air:GasState,duct:DuctInput,
+    config:AperturePerformanceConfig,full_scale_pa:f64,air:GasState,duct:DuctInput,exterior:Option<GasState>,
     observation:ApertureObservation,chart:PlateChart,plate:PlateApertureOptions,
     symmetry:PlateApertureSymmetry,initial:ApertureState,
     closure:PlateClosureSpec,relaxation:Option<(PlateRelaxationSpec,InitialApertureMemory)>,
@@ -256,6 +265,14 @@ impl Parsed {
         }
         let mut row=r.row("ambient")?;
         let air=gas::read(&mut row,None)?;row.finish()?;
+        let exterior=if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("exterior") {
+            let mut row=r.row("exterior")?;
+            let state=gas::read(&mut row,None)?;
+            if state.pressure != air.pressure {
+                return Err(bad(row.line,"exterior and ambient must share static pressure; mean interface flow is not modeled"));
+            }
+            row.finish()?;Some(state)
+        } else {None};
         let duct=DuctInput::read(&mut r,&air,gate)?;
         let mut row=r.row("observation")?;
         let observation=match row.word()? {
@@ -379,7 +396,7 @@ impl Parsed {
         if r.lines.next().is_some() {return Err(bad(r.line+1,"unexpected trailing geometry record"));}
         let config=AperturePerformanceConfig{sample_rate_hz:rate,samples,max_block,max_compile_work,max_controls};
         let schedule=decode_schedule(gestures)?;
-        Ok(Self{config,full_scale_pa,air,duct,observation,chart,plate,symmetry,initial,closure,relaxation,forces,max_angular_step,
+        Ok(Self{config,full_scale_pa,air,duct,exterior,observation,chart,plate,symmetry,initial,closure,relaxation,forces,max_angular_step,
             schedule,nodes:node_count,triangles:triangle_count,sections:section_count})
     }
 }

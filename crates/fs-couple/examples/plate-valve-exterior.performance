@@ -1,8 +1,16 @@
 frankensim-plate-valve-performance-v1
 audio 96000 9602 0.01
 ambient 293.15 101325 0
-tube 0.25 0.007 -0.8 0.002 1048576
-observation baffled-outlet 0 0 0.2 8 32 4000
+exterior mixture 293.15 101325 mole 3 N2 0.4 O2 0.2 CO2 0.4
+network 4 3 1048576
+duct_node inlet
+duct_node junction
+duct_node baffled-low-ka 1000
+duct_node cavity 0.00001 0.0015 0.02 200000
+duct_section 0 1 0.125 0.007 0.002 viscothermal 100 1000 6 8
+duct_section 1 2 0.125 0.007 0.002 gas 313.15 0.5 viscothermal 100 1000 6 8
+duct_section 1 3 0.043 0.002 0.002 gas 283.15 0
+observation network-baffled 2 0 0 0.2 8 32 1000
 plate clamped 0 0 0.2 450 0 0.5
 aperture 0.0002 0.25 0.1
 initial 0.0002 0
