@@ -24,6 +24,11 @@ fn trajectory(steps: u32) -> [f64; 4] {
     let mut thermal = initial(&curves, 0.0);
     let mut circuit = circuit(&binding, &thermal);
     let mut gas = piston();
+    // The current solver requires a strictly positive relative tolerance.
+    // Set this new fixture's budget explicitly; do not inherit the parent
+    // fixture's older zero-relative-tolerance input.
+    let mut controls = solve();
+    controls.network.newton.relative_tolerance = 1e-12;
     for i in 1..=steps {
         let target = 0.02 * f64::from(i) / f64::from(steps);
         let drive = port(target - thermal.time_s());
@@ -35,14 +40,14 @@ fn trajectory(steps: u32) -> [f64; 4] {
                 &circuit,
                 &[],
                 drive,
-                solve(),
+                controls,
                 geometry(),
                 &[0.0; 2],
                 || false,
             )
             .unwrap();
         let (t, c, g, report) = candidate.into_parts();
-        assert!(report.coupled.total_energy_residual_j.abs() <= solve().total_energy_tolerance_j);
+        assert!(report.coupled.total_energy_residual_j.abs() <= controls.total_energy_tolerance_j);
         thermal = t;
         circuit = c;
         gas = g;
