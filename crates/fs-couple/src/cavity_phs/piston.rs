@@ -66,6 +66,8 @@ pub struct PistonSolve {
 /// No error changes accepted gas, geometry or velocity.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PistonError {
+    /// Source-backed gas compressibility is unresolved at this wall clock.
+    TimeResolution(fs_phs::linear_exact::ResolvedBandError),
     /// Invalid physical data, controls or unrepresentable balances.
     Invalid(&'static str),
     /// The shared thermochemical/material owner refused a candidate.
@@ -160,6 +162,16 @@ impl GasPiston {
     #[must_use]
     pub fn position_m(&self) -> f64 { self.gas.volume_m3()/self.area_m2 }
 
+    fn admit_linear_clock(&self, state: &ResolvedThermochemicalGasState, volume_m3: f64,
+        duration_s: f64) -> Result<(),PistonError>
+    {
+        let gas=state.state();
+        let omega=(gas.density*gas.sound_speed*gas.sound_speed*self.area_m2*self.area_m2
+            /(self.mass_kg*volume_m3)).sqrt();
+        fs_phs::linear_exact::admit_midpoint_band(omega,duration_s)
+            .map_err(PistonError::TimeResolution)
+    }
+
     fn trial(&self, volume: f64, input: PistonInput, controls: PistonSolve,
         cancelled: &mut impl FnMut() -> bool) -> Result<Trial, PistonError>
     {
@@ -183,6 +195,9 @@ impl GasPiston {
         iterations: usize, material_trials: usize, cancelled: &mut impl FnMut() -> bool)
         -> Result<PistonStep, PistonError>
     {
+        self.admit_linear_clock(trial.gas.midpoint(),
+            f64::midpoint(self.gas.volume_m3(),trial.gas.endpoint().volume_m3()),input.duration_s)?;
+        self.admit_linear_clock(trial.gas.endpoint().state(),trial.gas.endpoint().volume_m3(),input.duration_s)?;
         let before = self.velocity_m_s;
         let kinetic = (0.5*self.mass_kg*(trial.velocity-before))*(trial.velocity+before);
         let exterior = input.exterior_pressure_pa*(trial.gas.endpoint().volume_m3()-self.gas.volume_m3());
@@ -232,6 +247,7 @@ impl GasPiston {
             || !positive(controls.momentum_tolerance_n_s) || !positive(controls.energy_tolerance_j)
             || !(1..=128).contains(&controls.maximum_iterations)
         { return Err(invalid("invalid piston drive, volume bracket, residual tolerances or iteration cap")); }
+        self.admit_linear_clock(self.gas.state(),self.gas.volume_m3(),input.duration_s)?;
         let solved = impulse::solve(self.gas.volume_m3(), controls, |volume| {
             let trial = self.trial(volume, input, controls, &mut cancelled)?;
             Ok(impulse::Trial { residual: trial.residual, tangent: trial.tangent, value: trial })

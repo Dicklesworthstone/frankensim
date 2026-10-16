@@ -172,6 +172,7 @@ enum Valve {
 /// A glottal island against a live tract characteristic line.
 pub struct GlottalIsland {
     valve: Valve,
+    linear: fs_phs::linear_exact::LinearSplit,
     card: FoldCard,
     line: DelayedFilter,
     zc_flow: f64,
@@ -306,6 +307,10 @@ impl GlottalIsland {
                 x: vec![0.0; 2],
             }
         };
+        let phs = match &valve { Valve::OneDof {phs,..} | Valve::TwoMass {phs,..} => phs };
+        let linear = fs_phs::linear_exact::split_quadratic(phs,
+            fs_phs::linear_exact::LinearSplitBudget {max_modes:phs.state_dim(),
+                max_omega_dt:core::f64::consts::PI})?;
         // Collision: the S-H convention triples the spring at closure.
         // The slit-lay obstacle's stiffness multiplies pen^alpha, so
         // scale it to deliver F = 3 k1 h0 at one rest-gap penetration
@@ -318,6 +323,7 @@ impl GlottalIsland {
         let mucosal_delay = ((card.thickness_m / 1.0) * f64::from(sample_rate_hz)).round() as usize;
         Ok(Self {
             valve,
+            linear,
             card,
             line,
             zc_flow,
@@ -393,7 +399,7 @@ impl GlottalIsland {
                 let h = self.card.rest_gap_m + x[0];
                 let f_col = slit_contact_force(&self.obstacle, h)?;
                 let f = face * dp + f_col;
-                let rec = fs_phs::step(phs, x, &[f], self.dt)?;
+                let rec = fs_phs::linear_exact::step_render(phs, &self.linear, x, &[f], self.dt)?;
                 x.clone_from(&rec.x);
                 rec
             }
@@ -426,7 +432,7 @@ impl GlottalIsland {
                 };
                 let f1 = drive1 + slit_contact_force(&self.obstacle, h1)?;
                 let f2 = slit_contact_force(&self.obstacle, h2)?;
-                let rec = fs_phs::step(phs, x, &[f1, f2], self.dt)?;
+                let rec = fs_phs::linear_exact::step_render(phs, &self.linear, x, &[f1, f2], self.dt)?;
                 x.clone_from(&rec.x);
                 rec
             }
@@ -570,6 +576,28 @@ mod glottis_tests {
     use fs_phs::bernoulli_volume_flow;
 
     const RATE: u32 = 48_000;
+
+    #[test]
+    fn glottal_linear_islands_obey_exact_time_partition() {
+        for two_mass in [false,true] {
+            let mut whole = island(two_mass,1.0);
+            let mut half = island(two_mass,1.0);
+            let seed = |valve: &mut Valve| match valve {
+                Valve::OneDof {x,..} | Valve::TwoMass {x,..} => x[0]=1e-6,
+            };
+            seed(&mut whole.valve);
+            seed(&mut half.valve);
+            half.dt *= 0.5;
+            whole.step(0.0).unwrap();
+            half.step(0.0).unwrap(); half.step(0.0).unwrap();
+            let state = |valve: &Valve| match valve {
+                Valve::OneDof {x,..} | Valve::TwoMass {x,..} => x.clone(),
+            };
+            for (a,b) in state(&whole.valve).iter().zip(state(&half.valve)) {
+                assert!((a-b).abs()<=1e-12*a.abs().max(b.abs()).max(1e-12),"{a} {b}");
+            }
+        }
+    }
 
     fn air() -> GasState {
         GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air")

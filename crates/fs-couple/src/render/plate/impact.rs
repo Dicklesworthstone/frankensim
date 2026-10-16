@@ -157,6 +157,8 @@ pub struct ImpactFrame {
 /// Typed reference-host refusal. No accepted state/history changes on error.
 #[derive(Debug)]
 pub enum ImpactError {
+    /// The complete retained linear block exceeds the clock's one-cent band.
+    TimeResolution(fs_phs::linear_exact::ResolvedBandError),
     /// Admission or physical-limit failure.
     Invalid(&'static str),
     /// Existing owner rejected the solve or constitutive construction.
@@ -270,6 +272,7 @@ impl ImpactSystem {
         damping::validate(&dampers,modes)?;
         let mut x=vec![0.0;2*modes];let mut damping=Vec::with_capacity(modes);let mut potentials=Vec::new();
         let mut offset=0;let mut membranes=Vec::new();let mut strings=Vec::new();let mut supports=Vec::new();
+        let mut stiffness_bound=0.0_f64;
         for (body_index,body) in bodies.into_iter().enumerate() {
             let n=body.potential.count();
             if n==0 || body.initial.len()!=n || body.damping_per_s.len()!=n
@@ -277,6 +280,7 @@ impl ImpactSystem {
                 || body.damping_per_s.iter().any(|d|!d.is_finite() || *d<0.0) {
                 return Err(invalid("body mode/state/damping dimensions or linear Nyquist guard failed"));
             }
+            for &omega in body.potential.omegas() {stiffness_bound=stiffness_bound.max(omega*omega);}
             for (i,s) in body.initial.iter().enumerate() {x[2*(offset+i)]=s.displacement_m_sqrt_kg;x[2*(offset+i)+1]=s.velocity_m_sqrt_kg_per_s;}
             if let BodyPotential::Membrane(film)=&body.potential {
                 film.observe_interleaved(&x,offset)?;
@@ -309,6 +313,11 @@ impl ImpactSystem {
         for v in &volumes {if ![v.bulk_modulus_pa,v.volume_m3].iter().all(|x|x.is_finite() && *x>0.0)
             || !(v.bulk_modulus_pa/v.volume_m3).is_finite() || v.areas.len()!=modes || v.areas.iter().any(|a|!a.is_finite()) {
             return Err(invalid("volume spring requires positive finite fluid/volume and reciprocal modal areas"));}}
+        // PSD dyads from every volume spring add to the original solid pencil.
+        for volume in &volumes {
+            stiffness_bound+=(volume.bulk_modulus_pa/volume.volume_m3)
+                *volume.areas.iter().map(|a|a*a).sum::<f64>();
+        }
         let mut retained=Vec::with_capacity(pads.len());let mut histories=Vec::with_capacity(pads.len());
         for spec in pads {
             spec.validate(modes)?;let start=x.len()-2*modes;x.resize(x.len()+spec.creep.len(),0.0);
@@ -323,6 +332,10 @@ impl ImpactSystem {
         for pad in &retained {for (i,b) in pad.spec.creep.iter().enumerate() {let index=2*modes+pad.creep_start+i;r[index*dim+index]=b.stiffness_n_m/b.viscosity_n_s_m;}}
         damping::add_resistance(&dampers,modes,dim,&mut r)?;
         for (_,offset,support) in &supports {support.add_resistance(*offset,dim,&mut r)?;}
+        let resistance_bound=r.chunks_exact(dim).map(|row|row.iter().map(|x|x.abs()).sum::<f64>())
+            .fold(0.0_f64,f64::max);
+        fs_phs::linear_exact::admit_midpoint_band(stiffness_bound.sqrt()+resistance_bound,config.dt_s)
+            .map_err(ImpactError::TimeResolution)?;
         let histories=Rc::new(RefCell::new(histories));
         let mechanical=Rc::new(MechanicalStorage{bodies:potentials,modes,pads:retained.clone(),volumes,histories:Rc::clone(&histories)});
         mechanical.validate_rigid_motion(&x)?;
@@ -463,3 +476,22 @@ impl MechanicalStorage {
 
 #[cfg(test)]
 mod contact_loss_tests;
+
+#[cfg(test)]
+mod integrator_band_tests {
+    use super::*;
+    #[test]
+    fn full_impact_band_includes_fluid_springs_and_spatial_dampers() {
+        let cap=fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP;
+        let make=|dt| ImpactSystem::new_with_dampers(vec![ImpactBody {
+            potential:BodyPotential::Linear(vec![1.0]),
+            initial:vec![ModalAcousticState::default()],damping_per_s:vec![0.0],
+        }],vec![],vec![],vec![VolumeSpring {bulk_modulus_pa:3.0,volume_m3:1.0,areas:vec![1.0]}],
+        vec![damping::ViscousDamper {weights:vec![1.0],damping_n_s_m:1.0}],ImpactConfig {
+            dt_s:dt,max_steps:1,maximum_energy_j:1e6,energy_absolute_tolerance_j:1e-12,
+            energy_relative_tolerance:1e-10,maximum_generalized_force:1e6,
+        });
+        assert!(make(cap/3.0).is_ok());
+        assert!(matches!(make(cap/3.0+1e-12),Err(ImpactError::TimeResolution(_))));
+    }
+}
