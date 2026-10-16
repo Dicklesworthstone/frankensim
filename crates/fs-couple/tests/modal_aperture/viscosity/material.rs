@@ -1,143 +1,342 @@
 //! Actual material tensor -> DKT modes -> moving aperture -> physical pressure.
 //! Synthetic data checks coupling; it does not identify an instrument material.
+use super::super::network::{gas, sides};
 use super::super::*;
-use super::super::network::{gas,sides};
 use fs_couple::bernoulli_aperture::modal::material::ModalPlateOptions;
-use fs_couple::thin_plate::{ResolvedPlateChart,PlateChartRadiation,PlateRegionMaterial,
-    PlateMaterialModel,PlateThicknessConstraint,compile_plate_material_chart};
-use fs_couple::plate_viscosity::{PlateViscosity,PlateViscosityLimits};
+use fs_couple::plate_viscosity::{PlateViscosity, PlateViscosityLimits};
+use fs_couple::thin_plate::{
+    PlateChartRadiation, PlateMaterialModel, PlateRegionMaterial, PlateThicknessConstraint,
+    ResolvedPlateChart, compile_plate_material_chart,
+};
 use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;
-use fs_matdb::{ClaimSet,InterpolationPolicy,MaterialCard,MaterialStateId,PropertyClaim,
-    PropertyKey,PropertyValue,Provenance,QueryPoint,UncertaintyModel};
-use fs_material::state_point::{MaterialPropertySelection,ResolvedMaterialStatePoint,
-    ScalarAdmissibility,ScalarPropertyRequirement,resolve_material_state_point};
+use fs_matdb::{
+    ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+    PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+};
 use fs_material::plane_stress_viscosity::PLANE_STRESS_VISCOSITY_PROPERTIES as PROPS;
-use fs_qty::{Density,Dims,DynViscosity,Pressure};
-use fs_plate::{AssemblyOptions,EdgeSupport,PlateMesh,PlateRegion};
+use fs_material::state_point::{
+    MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
+    ScalarPropertyRequirement, resolve_material_state_point,
+};
+use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion};
+use fs_qty::{Density, Dims, DynViscosity, Pressure};
 
-type Input=(ResolvedPlateChart,ModalPlateOptions,PlateViscosity,PlateViscosityLimits);
-fn source(rho:f64,scale:f64)->ResolvedMaterialStatePoint {
-    let mut values=vec![("density",rho,Density::DIMS),
-        ("young_modulus",4e9,Pressure::DIMS),("poisson_ratio",0.3,Dims::NONE)];
-    for (name,v) in PROPS.into_iter().zip([2e4,4e4,1.5e4,3e3,2e3,-1e3]) {
-        values.push((name,scale*v,DynViscosity::DIMS));
+type Input = (
+    ResolvedPlateChart,
+    ModalPlateOptions,
+    PlateViscosity,
+    PlateViscosityLimits,
+);
+fn source(rho: f64, scale: f64) -> ResolvedMaterialStatePoint {
+    let mut values = vec![
+        ("density", rho, Density::DIMS),
+        ("young_modulus", 4e9, Pressure::DIMS),
+        ("poisson_ratio", 0.3, Dims::NONE),
+    ];
+    for (name, v) in PROPS.into_iter().zip([2e4, 4e4, 1.5e4, 3e3, 2e3, -1e3]) {
+        values.push((name, scale * v, DynViscosity::DIMS));
     }
-    let mut claims=ClaimSet::new();let mut requirements=Vec::new();
-    for (name,value,dims) in values {
-        claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),
-            value:PropertyValue::Scalar{value,dims},
-            validity:ValidityDomain::unconstrained().with("T",290.,300.).with("omega",0.,100000.),
-            uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::ConstantWithinValidity,
-            provenance:Provenance{source:"synthetic full-viscosity blade".into(),license:"CC0-1.0".into(),artifact:None},
-            observations:vec![],
-        }).unwrap();
-        requirements.push(ScalarPropertyRequirement::try_new(name,dims,ScalarAdmissibility::Finite).unwrap());
+    let mut claims = ClaimSet::new();
+    let mut requirements = Vec::new();
+    for (name, value, dims) in values {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Scalar { value, dims },
+                validity: ValidityDomain::unconstrained()
+                    .with("T", 290., 300.)
+                    .with("omega", 0., 100000.),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                provenance: Provenance {
+                    source: "synthetic full-viscosity blade".into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+                observations: vec![],
+            })
+            .unwrap();
+        requirements.push(
+            ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::Finite).unwrap(),
+        );
     }
-    let card=MaterialCard::assemble(MaterialStateId{chemistry:"synthetic".into(),phase:"solid".into(),
-        process:"test".into(),revision:0},claims,vec![]).unwrap();
-    resolve_material_state_point(&card,&QueryPoint::new().with("T",293.15).unwrap().with("omega",100.).unwrap(),
-        &requirements,MaterialPropertySelection::SingleClaimOnly).unwrap()
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic".into(),
+            phase: "solid".into(),
+            process: "test".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    resolve_material_state_point(
+        &card,
+        &QueryPoint::new()
+            .with("T", 293.15)
+            .unwrap()
+            .with("omega", 100.)
+            .unwrap(),
+        &requirements,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap()
 }
-fn input(scale:f64,rho:f64)->Input {
-    let mesh=PlateMesh::rectangle(0.025,0.01,6,2);
-    let supports=mesh.nodes.iter().enumerate().filter(|(_,p)|p.0==0.).map(|(i,_)|i).collect();
-    let edges:Vec<_>=mesh.boundary_edges().into_iter().filter(|&(a,b)|
-        (mesh.nodes[a].0-0.025).abs()<1e-12&&(mesh.nodes[b].0-0.025).abs()<1e-12).map(|(a,b)|[a,b]).collect();
-    let mut force=vec![0.;mesh.nodes.len()];force[edges[0][0]]=1.;
-    let mut regions=vec![];
+fn input(scale: f64, rho: f64) -> Input {
+    let mesh = PlateMesh::rectangle(0.025, 0.01, 6, 2);
+    let supports = mesh
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.0 == 0.)
+        .map(|(i, _)| i)
+        .collect();
+    let edges: Vec<_> = mesh
+        .boundary_edges()
+        .into_iter()
+        .filter(|&(a, b)| {
+            (mesh.nodes[a].0 - 0.025).abs() < 1e-12 && (mesh.nodes[b].0 - 0.025).abs() < 1e-12
+        })
+        .map(|(a, b)| [a, b])
+        .collect();
+    let mut force = vec![0.; mesh.nodes.len()];
+    force[edges[0][0]] = 1.;
+    let mut regions = vec![];
     for part in 0..2 {
-        let triangles=mesh.tris.iter().enumerate().filter(|(_,t)| {
-            let x=t.iter().map(|&i|mesh.nodes[i].0).sum::<f64>()/3.;
-            (x<0.0125)==(part==0)
-        }).map(|(i,_)|i).collect();
-        regions.push(PlateRegionMaterial {region:PlateRegion{name:format!("part-{part}"),triangle_indices:triangles},
-            material:source(rho,scale*if part==0{1.0}else{4.0}),model:PlateMaterialModel::Isotropic,
-            thickness_constraint:PlateThicknessConstraint::FixedThickness(0.0003),material_angle_rad:0.35*part as f64});
+        let triangles = mesh
+            .tris
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                let x = t.iter().map(|&i| mesh.nodes[i].0).sum::<f64>() / 3.;
+                (x < 0.0125) == (part == 0)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        regions.push(PlateRegionMaterial {
+            region: PlateRegion {
+                name: format!("part-{part}"),
+                triangle_indices: triangles,
+            },
+            material: source(rho, scale * if part == 0 { 1.0 } else { 4.0 }),
+            model: PlateMaterialModel::Isotropic,
+            thickness_constraint: PlateThicknessConstraint::FixedThickness(0.0003),
+            material_angle_rad: 0.35 * part as f64,
+        });
     }
-    let chart=compile_plate_material_chart(mesh,supports,regions).unwrap();
-    let options=ModalPlateOptions {reduction:PlateChartRadiation {
-        assembly:AssemblyOptions{pretension:0.,support:EdgeSupport::Clamped},
-        eigenvalue_window:(1.,(std::f64::consts::TAU*3000.).powi(2)),n_modes:3,
-        damping_ratio:0.,unit_force_weights:force},slit_edges:edges,maximum_trace_slope:0.1,
-        maximum_slit_deviation_m:2e-5,maximum_angular_step:0.25,max_nodes:100,max_triangles:100,max_projection_terms:100000};
-    let law=PlateViscosity::from_chart(&chart,PROPS,&CancelGate::new_clock_free()).unwrap();
-    (chart,options,law,PlateViscosityLimits{max_modes:3,max_projection_terms:100000,
-        reference_resistance_n_s_m:1.0})
+    let chart = compile_plate_material_chart(mesh, supports, regions).unwrap();
+    let options = ModalPlateOptions {
+        reduction: PlateChartRadiation {
+            assembly: AssemblyOptions {
+                pretension: 0.,
+                support: EdgeSupport::Clamped,
+            },
+            eigenvalue_window: (1., (std::f64::consts::TAU * 3000.).powi(2)),
+            n_modes: 3,
+            damping_ratio: 0.,
+            unit_force_weights: force,
+        },
+        slit_edges: edges,
+        maximum_trace_slope: 0.1,
+        maximum_slit_deviation_m: 2e-5,
+        maximum_angular_step: 0.25,
+        max_nodes: 100,
+        max_triangles: 100,
+        max_projection_terms: 100000,
+    };
+    let law = PlateViscosity::from_chart(&chart, PROPS, &CancelGate::new_clock_free()).unwrap();
+    (
+        chart,
+        options,
+        law,
+        PlateViscosityLimits {
+            max_modes: 3,
+            max_projection_terms: 100000,
+            reference_resistance_n_s_m: 1.0,
+        },
+    )
 }
-fn make(plates:Vec<Input>,z:f64)->Result<ModalAperture,fs_couple::acoustic_realize::AcousticRealizeError> {
-    let n=plates.iter().map(|p|p.1.reduction.n_modes).sum();
-    ModalAperture::from_viscous_material_plates(plates,4e-4,gas(),z,1./96000.,4096,
-        limits(),vec![BladeState::default();n],contact(),&CancelGate::new_clock_free())
+fn make(
+    plates: Vec<Input>,
+    z: f64,
+) -> Result<ModalAperture, fs_couple::acoustic_realize::AcousticRealizeError> {
+    let n = plates.iter().map(|p| p.1.reduction.n_modes).sum();
+    ModalAperture::from_viscous_material_plates(
+        plates,
+        4e-4,
+        gas(),
+        z,
+        1. / f64::from(MECHANICS_RATE),
+        4096 * CLOCK_REFINEMENT as u64,
+        limits(),
+        vec![BladeState::default(); n],
+        contact(),
+        &CancelGate::new_clock_free(),
+    )
 }
 #[test]
 fn material_full_matrix_uses_same_eigenbasis_and_work_congruence_as_original_owner() {
-    let original=input(1.,900.);let identity=original.0.specimen_identity();
-    let (image,_)=original.0.certified_viscous_radiators_with_force_ports(&original.1.reduction,
-        &[],0,&original.2,original.3,&CancelGate::new_clock_free()).unwrap();
-    let a=make(vec![original],1e6).unwrap();let c=a.viscosity_matrix_n_s_m().unwrap();
-    let plate=&a.material_plates()[0];
-    assert_eq!(plate.source().specimen_identity(),identity);
-    assert_eq!(plate.viscosity().unwrap().chart_identity(),identity);
-    assert_eq!(plate.viscosity_matrix_n_s_m().unwrap(),c);
-    assert!(a.spec().modes.iter().all(|m|m.damping_n_s_m==0.));
-    let mut cross=0.0_f64;
-    for i in 0..3 {for j in 0..3 {
-        let expected=image.damping().matrix_per_s()[3*i+j]
-            *a.spec().modes[i].mass_kg.sqrt()*a.spec().modes[j].mass_kg.sqrt();
-        let scale=(c[3*i+i]*c[3*j+j]).sqrt().max(1e-30);
-        assert!((c[3*i+j]-expected).abs()<1e-8*scale);
-        if i!=j {cross=cross.max(c[3*i+j].abs()/scale);}
-    }}
-    assert!(cross>1e-4,"heterogeneous anisotropic loss must not become diagonal");
-    let twice=make(vec![input(2.,900.)],1e6).unwrap();
-    for (x,y) in c.iter().zip(twice.viscosity_matrix_n_s_m().unwrap()) {
-        assert!((2.*x-y).abs()<1e-10*c.iter().map(|v|v.abs()).fold(0.0,f64::max));
+    let original = input(1., 900.);
+    let identity = original.0.specimen_identity();
+    let (image, _) = original
+        .0
+        .certified_viscous_radiators_with_force_ports(
+            &original.1.reduction,
+            &[],
+            0,
+            &original.2,
+            original.3,
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    let a = make(vec![original], 1e6).unwrap();
+    let c = a.viscosity_matrix_n_s_m().unwrap();
+    let plate = &a.material_plates()[0];
+    assert_eq!(plate.source().specimen_identity(), identity);
+    assert_eq!(plate.viscosity().unwrap().chart_identity(), identity);
+    assert_eq!(plate.viscosity_matrix_n_s_m().unwrap(), c);
+    assert!(a.spec().modes.iter().all(|m| m.damping_n_s_m == 0.));
+    let mut cross = 0.0_f64;
+    for i in 0..3 {
+        for j in 0..3 {
+            let expected = image.damping().matrix_per_s()[3 * i + j]
+                * a.spec().modes[i].mass_kg.sqrt()
+                * a.spec().modes[j].mass_kg.sqrt();
+            let scale = (c[3 * i + i] * c[3 * j + j]).sqrt().max(1e-30);
+            assert!((c[3 * i + j] - expected).abs() < 1e-8 * scale);
+            if i != j {
+                cross = cross.max(c[3 * i + j].abs() / scale);
+            }
+        }
     }
-    for (x,y) in a.spec().modes.iter().zip(&twice.spec().modes) {
-        assert_eq!(x.mass_kg,y.mass_kg);assert_eq!(x.stiffness_n_m,y.stiffness_n_m);
+    assert!(
+        cross > 1e-4,
+        "heterogeneous anisotropic loss must not become diagonal"
+    );
+    let twice = make(vec![input(2., 900.)], 1e6).unwrap();
+    for (x, y) in c.iter().zip(twice.viscosity_matrix_n_s_m().unwrap()) {
+        assert!((2. * x - y).abs() < 1e-10 * c.iter().map(|v| v.abs()).fold(0.0, f64::max));
+    }
+    for (x, y) in a.spec().modes.iter().zip(&twice.spec().modes) {
+        assert_eq!(x.mass_kg, y.mass_kg);
+        assert_eq!(x.stiffness_n_m, y.stiffness_n_m);
     }
 }
 #[test]
 fn tensor_material_loss_changes_actual_multirate_pressure_without_resetting_modes() {
-    use fs_couple::bernoulli_aperture::two_sided::{TwoSidedAperture,TwoSidedDrive,TwoSidedLimits,LoadedAperture,combined_inlet_state};
     use fs_couple::bernoulli_aperture::two_sided::observer::TwoSidedPressure;
-    use fs_couple::pcm_wav::{baffled::CircularOutletReceiver,observation::PressureRenderer};
-    use fs_couple::pcm_wav::baffled::openings::duct::{DuctOpening,DuctRadiationSpec,DuctReconstruction};
-    let render=|loss,size| {
-        let ducts=sides();let (_,z)=combined_inlet_state(&ducts).unwrap();
-        let valve=make(vec![input(loss,900.),input(0.,1200.)],z).unwrap();
-        let c=valve.viscosity_matrix_n_s_m().unwrap();
-        assert!((3..6).all(|i|(0..6).all(|j|c[6*i+j]==0.&&c[6*j+i]==0.)));
-        let system=TwoSidedAperture::new(valve.into(),ducts,TwoSidedLimits {
-            maximum_energy_j:1.,energy_absolute_tolerance_j:1e-16,energy_relative_tolerance:1e-7,
-            flow_absolute_tolerance_m3_s:1e-16,flow_relative_tolerance:1e-8},&CancelGate::new_clock_free()).unwrap();
-        let mut p=TwoSidedPressure::with_radiation(system,DuctRadiationSpec {
-            openings:vec![DuctOpening{network:1,node:1,center_m:[0.;2]}],exterior:None,
-            receiver:CircularOutletReceiver{position_m:[0.,0.,0.25],radial_rings:4,angular_points:16,maximum_frequency_hz:1000.},
-            reconstruction:DuctReconstruction::Differentiating{mechanics_rate_hz:96000,output_rate_hz:24000}},64).unwrap();
-        p.set_drive(TwoSidedDrive{source_pressure_pa:5.,blade_forces_n:[0.;2]}).unwrap();
-        let mut out=vec![0.;256];for block in out[..128].chunks_mut(size){p.block(block).unwrap();}
-        p.set_drive(TwoSidedDrive::default()).unwrap();
-        for block in out[128..].chunks_mut(size){p.block(block).unwrap();}
-        assert!(out.iter().all(|p|p.is_finite()));assert!(out.iter().any(|p|p.abs()>1e-12));
-        let LoadedAperture::Modal(a)=p.system().valve() else{panic!("modal material source")};
-        assert!(a.material_plates()[0].viscosity().is_some());assert!(a.stored_energy_j()>0.);
-        assert_eq!(a.accepted_steps(),1024);out
+    use fs_couple::bernoulli_aperture::two_sided::{
+        LoadedAperture, TwoSidedAperture, TwoSidedDrive, TwoSidedLimits, combined_inlet_state,
     };
-    let a=render(1.,1);assert_eq!(a,render(1.,37));
-    assert!(a.iter().zip(render(4.,37)).any(|(x,y)|(x-y).abs()>1e-12));
+    use fs_couple::pcm_wav::baffled::openings::duct::{
+        DuctOpening, DuctRadiationSpec, DuctReconstruction,
+    };
+    use fs_couple::pcm_wav::{baffled::CircularOutletReceiver, observation::PressureRenderer};
+    let render = |loss, size| {
+        let ducts = sides();
+        let (_, z) = combined_inlet_state(&ducts).unwrap();
+        let valve = make(vec![input(loss, 900.), input(0., 1200.)], z).unwrap();
+        let c = valve.viscosity_matrix_n_s_m().unwrap();
+        assert!((3..6).all(|i| (0..6).all(|j| c[6 * i + j] == 0. && c[6 * j + i] == 0.)));
+        let system = TwoSidedAperture::new(
+            valve.into(),
+            ducts,
+            TwoSidedLimits {
+                maximum_energy_j: 1.,
+                energy_absolute_tolerance_j: 1e-16,
+                energy_relative_tolerance: 1e-7,
+                flow_absolute_tolerance_m3_s: 1e-16,
+                flow_relative_tolerance: 1e-8,
+            },
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+        let mut p = TwoSidedPressure::with_radiation(
+            system,
+            DuctRadiationSpec {
+                openings: vec![DuctOpening {
+                    network: 1,
+                    node: 1,
+                    center_m: [0.; 2],
+                }],
+                exterior: None,
+                receiver: CircularOutletReceiver {
+                    position_m: [0., 0., 0.25],
+                    radial_rings: 4,
+                    angular_points: 16,
+                    maximum_frequency_hz: 1000.,
+                },
+                reconstruction: DuctReconstruction::Differentiating {
+                    mechanics_rate_hz: MECHANICS_RATE,
+                    output_rate_hz: 96000,
+                },
+            },
+            64,
+        )
+        .unwrap();
+        p.set_drive(TwoSidedDrive {
+            source_pressure_pa: 5.,
+            blade_forces_n: [0.; 2],
+        })
+        .unwrap();
+        let mut out = vec![0.; 1024];
+        for block in out[..512].chunks_mut(size) {
+            p.block(block).unwrap();
+        }
+        p.set_drive(TwoSidedDrive::default()).unwrap();
+        for block in out[512..].chunks_mut(size) {
+            p.block(block).unwrap();
+        }
+        assert!(out.iter().all(|p| p.is_finite()));
+        assert!(out.iter().any(|p| p.abs() > 1e-12));
+        let LoadedAperture::Modal(a) = p.system().valve() else {
+            panic!("modal material source")
+        };
+        assert!(a.material_plates()[0].viscosity().is_some());
+        assert!(a.stored_energy_j() > 0.);
+        assert_eq!(a.accepted_steps(), 1024 * CLOCK_REFINEMENT as u64);
+        out
+    };
+    let a = render(1., 1);
+    assert_eq!(a, render(1., 37));
+    assert!(
+        a.iter()
+            .zip(render(4., 37))
+            .any(|(x, y)| (x - y).abs() > 1e-12)
+    );
 }
 #[test]
 fn explicit_zero_tensor_keeps_original_source_image_and_invalid_bindings_refuse() {
-    let zero=input(0.,900.);
-    let mut original=ModalAperture::from_material_plates(vec![(zero.0.clone(),zero.1.clone())],
-        4e-4,gas(),1e6,1./96000.,4096,limits(),vec![BladeState::default();3],contact(),&CancelGate::new_clock_free()).unwrap();
-    let mut selected=make(vec![zero],1e6).unwrap();
-    for _ in 0..64 {assert_eq!(original.step(drive(5.),[0.;2]).unwrap(),selected.step(drive(5.),[0.;2]).unwrap());}
-    let mut stale=input(1.,1800.);stale.2=input(1.,900.).2;assert!(make(vec![stale],1e6).is_err());
-    let mut duplicate=input(1.,900.);duplicate.1.reduction.damping_ratio=0.1;
-    assert!(make(vec![duplicate],1e6).is_err());
-    let mut exhausted=input(1.,900.);exhausted.3.max_projection_terms=1;
-    assert!(make(vec![exhausted],1e6).is_err());
+    let zero = input(0., 900.);
+    let mut original = ModalAperture::from_material_plates(
+        vec![(zero.0.clone(), zero.1.clone())],
+        4e-4,
+        gas(),
+        1e6,
+        1. / f64::from(MECHANICS_RATE),
+        4096 * CLOCK_REFINEMENT as u64,
+        limits(),
+        vec![BladeState::default(); 3],
+        contact(),
+        &CancelGate::new_clock_free(),
+    )
+    .unwrap();
+    let mut selected = make(vec![zero], 1e6).unwrap();
+    for _ in 0..64 {
+        assert_eq!(
+            original.step(drive(5.), [0.; 2]).unwrap(),
+            selected.step(drive(5.), [0.; 2]).unwrap()
+        );
+    }
+    let mut stale = input(1., 1800.);
+    stale.2 = input(1., 900.).2;
+    assert!(make(vec![stale], 1e6).is_err());
+    let mut duplicate = input(1., 900.);
+    duplicate.1.reduction.damping_ratio = 0.1;
+    assert!(make(vec![duplicate], 1e6).is_err());
+    let mut exhausted = input(1., 900.);
+    exhausted.3.max_projection_terms = 1;
+    assert!(make(vec![exhausted], 1e6).is_err());
 }
