@@ -50,7 +50,15 @@ impl DensityElasticity {
         fixed: &dyn Fn([f64; 3]) -> bool,
     ) -> DensityElasticity {
         let law = IsotropicElastic::new(youngs, poisson, 1.0).expect("valid material");
-        let c = law.tangent(&[0.0; 6], &());
+        let mut c = law.tangent(&[0.0; 6], &());
+        // The material law maps tensor strain [exx,eyy,ezz,exy,eyz,ezx]
+        // to physical stress, whereas B below produces engineering shear
+        // [exx,eyy,ezz,2exy,2eyz,2ezx]. Convert the INPUT columns once.
+        // Then sigma = C_eng B u and u^T K u = integral epsilon:sigma;
+        // passing the tensor tangent straight to B doubles shear stiffness.
+        for row in &mut c {
+            for value in &mut row[3..] { *value *= 0.5; }
+        }
         let geo = fs_feec::element_geometry(complex, positions);
         let mut ke = Vec::with_capacity(complex.tets.len());
         let mut cb = Vec::with_capacity(complex.tets.len());
