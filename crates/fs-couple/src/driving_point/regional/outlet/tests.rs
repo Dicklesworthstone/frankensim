@@ -1,3 +1,4 @@
+use crate::driving_point::C64;
 use super::*;
 use fs_duct::{Duct, Segment};
 use fs_material::gas_species::{GasSpecies, resolve_gas_mixture};
@@ -30,10 +31,10 @@ fn a_matched_delay_becomes_the_exact_delayed_physical_difference_not_a_wrapped_e
     let (kernel, actual_delay) = acceleration_kernel(rate, 256, time, zc, |omega| {
         // Independent matched-line solution: Zin=Zc; Qin=p+/Zc;
         // Qout(t)=Qin(t-tau). No use of the implementation's transfer formula.
-        Ok(DuctResponse { omega, impedance: fs_la::C64::new(zc, 0.0),
+        Ok(DuctResponse { omega, impedance: C64::new(zc, 0.0),
             min_shear_number: f64::INFINITY, mouth_ka: 0.0,
-            u_mouth_over_u_in: fs_la::C64::new((omega*time).cos(), (omega*time).sin()),
-            p_mouth_over_u_in: fs_la::C64::new(0.0, 0.0) })
+            u_mouth_over_u_in: C64::new((omega*time).cos(), (omega*time).sin()),
+            p_mouth_over_u_in: C64::new(0.0, 0.0) })
     }).unwrap();
     assert_eq!(actual_delay, delay);
     assert_eq!(kernel.len(), 256 + delay);

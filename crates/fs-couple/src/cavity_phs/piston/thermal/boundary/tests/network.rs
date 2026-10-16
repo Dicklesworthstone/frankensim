@@ -3,7 +3,7 @@ use super::*;
 use crate::cavity_phs::piston::thermal::boundary::network::*;
 use crate::cavity_phs::piston::thermal::boundary::network::material::*;
 use crate::cavity_phs::piston::thermal::source::ThermalMaterialPoint;
-use crate::circuit_enthalpy::{CircuitEnthalpySolve,ResistorCell};
+use crate::circuit_enthalpy::{CircuitEnthalpyError,CircuitEnthalpySolve,ResistorCell};
 use crate::circuit_enthalpy::material::*;
 use crate::material_circuit::{MaterialCircuit,MaterialCircuitSolve};
 use fs_material::conductor::ELECTRICAL_RESISTIVITY_DIMS;

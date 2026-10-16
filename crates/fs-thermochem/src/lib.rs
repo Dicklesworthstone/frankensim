@@ -640,7 +640,9 @@ impl Nasa9RegionV1 {
 
 const NASA9_COEFFICIENT_NAMES: [&str; 9] = ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8"];
 
-const fn required_nasa9_parameter_dims() -> [(&'static str, Dims); 10] {
+/// Required NASA-9 parameter names and physical dimensions (`a0`..=`a8` and `reference_pressure`).
+#[must_use]
+pub const fn required_nasa9_parameter_dims() -> [(&'static str, Dims); 10] {
     [
         ("a0", Dims([0, 0, 0, 2, 0, 0])),
         ("a1", Dims([0, 0, 0, 1, 0, 0])),

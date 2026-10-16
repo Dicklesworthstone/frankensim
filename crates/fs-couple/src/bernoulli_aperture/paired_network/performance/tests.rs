@@ -1,3 +1,4 @@
+use crate::render::{ControlDelta, schedule::{PressureGestureBinding, compile_pressure_gestures}};
 use super::*;
 use crate::bernoulli_aperture::paired::{ApertureBlade, BladeState, PairedAperture, PairedApertureLimits, PairedApertureSpec};
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};

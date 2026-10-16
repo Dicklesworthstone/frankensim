@@ -229,7 +229,7 @@ fn spatial_sources_survive_schedule_partitioning_and_failed_samples() {
 }
 
 #[test]
-fn_missing_invalid_detached_and_unfunded_footprints_refuse_without_fallback() {
+fn missing_invalid_detached_and_unfunded_footprints_refuse_without_fallback() {
     scoped(|cx, gate| {
         for tensor in [false, true] { for defect in 0..6 {
             let b = body(); let mut ports = footprints();
