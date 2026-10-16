@@ -1176,7 +1176,7 @@ pub(crate) fn map_drive(err: crate::driving_point::DrivingPointError) -> Acousti
     }
 }
 
-fn validate_external_gas(gas: &GasState) -> Result<(), AcousticRealizeError> {
+pub(crate) fn validate_external_gas(gas: &GasState) -> Result<(), AcousticRealizeError> {
     let positive = [
         gas.temperature, gas.pressure, gas.density, gas.sound_speed,
         gas.dynamic_viscosity, gas.thermal_conductivity, gas.gamma,

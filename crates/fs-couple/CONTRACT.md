@@ -2470,3 +2470,65 @@ inferred from that citation. Tests print formants/antiformants and provenance.
 Additional cross-crate tests exercise the explicit typed transfer, missing-load
 and wrong-schema refusals, and unbranched graph/chain equivalence (1e-10).
 All new numerical assertions remain pending central native verification.
+
+## Assembly model-domain admission (IRP M6.1-W1b)
+
+`description::validate(&AssemblyDescription, &ClaimDomain)` is the mandatory
+admission seam for description-render consumers (M5.4-W2). Its private
+`Admission` token borrows the exact immutable description and claim, exposes the
+unchanged requested band, and records each selected registry row, module,
+configuration, evaluated axis, refinement route and resolved material-state
+identity. It does not render or narrow a band. Existing raw component render
+APIs are unchanged; the description renderer must accept Admission directly.
+
+`ClaimDomain` declares gas, dynamics, an existing `selector::RegistrySnapshot`
+and explicit `ModuleDomain` selections by EntityId. This reuses
+`fs_evidence::ValidityDomain`; every required or extra constrained axis must be
+provided. No missing-axis-as-unconstrained rule applies here. A refused or absent
+registry row cannot admit a model. Ungated rows remain visibly ungated in the
+limitations; domain admission is not a gate promotion or Q3/Q4 acceptance.
+
+Primitive parametric geometry vocabulary (all dimensioned SI; a
+`test-fixture:` prefix marks authored fixtures without changing semantics):
+
+- `cylinder.v1`: radius, length, evanescent_relative_error.
+- `tone-hole.v1`: hole_radius, bore_radius, chimney_height, edge_radius.
+- `circular-opening.v1`: radius.
+- `lumped-reed.v1`: rest_opening, width, closing_pressure, attack, mass,
+  stiffness, damping_ratio.
+- `circular-string.v1`: radius.
+
+Construction and every named ConfigurationState are checked. Assignments must
+name actual parameters with matching dimensions. Unsupported imported geometry,
+other part/model combinations, incomplete coverage, duplicate part/module
+selections and mismatched material card/query bindings refuse. Required valve
+and string elasticity/density resolve through MaterialSource and the existing
+state-point owner; explicit Unknown refuses before card resolution. No property
+is defaulted. Geometry-source citations and authored bounds are declarations,
+not a proof of the bound or of real-specimen equivalence.
+
+Domain policies explicitly supply frequency_hz for every module, ka for compact
+radiation, edge_displacement_ratio for compact holes,
+length_over_shock_distance and evanescent_relative_error for ducts,
+mouth_pressure_pa for reeds, bow_force_n/pluck_force_n for strings. These
+policies intersect owner limits. The §1.2 rounded audit cutoffs are
+1.841*c/(2*pi*a) and 3.832*c/(2*pi*a), with no symmetric-only escape. Segment
+geometry, Bessel/wide-tube scope, compact radiation, reed primitives and gas
+coherence reuse their existing owner admission functions. A strict hole/bore
+boundary is recorded with upper_inclusive=false.
+
+Edge displacement uses the declared lowest excited frequency and conservative
+pressure envelope. Inverse shock distance uses beta=(gamma+1)/2; linear string
+drag requires KC=2*pi*displacement/diameter <= 1. A zero pressure gives zero
+inverse shock distance without an infinity sentinel. The numerical policies for
+“much less than” and evanescent error must come from the caller's declared
+evidence; this validator does not invent them. These algebraic evaluations are
+deterministic for identical inputs and perform no stochastic work or hot kernel.
+
+G0/G1 tests `description_validate::dv_001` through `dv_010` cover analytic
+cutoff agreement at 1e-12 relative, exact/next-value boundaries, ka=1 and declared
+ka=0.5 policies, strict hole radius, unknown materials, slit refusal, mandatory
+axes, retained limitations, dynamics-driven edge/shock/KC and configuration
+coverage. Native execution is pending central verification. No audio golden or
+wire schema changes; no specimen-fidelity, resolved anatomy/flow or model-form
+equivalence claim follows from this token.

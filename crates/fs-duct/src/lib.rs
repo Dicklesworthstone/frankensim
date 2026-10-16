@@ -252,7 +252,9 @@ pub enum Segment {
 }
 
 impl Segment {
-    fn validate(&self) -> Result<(), DuctError> {
+    /// Admit primitive geometry without evaluating an acoustic solve.
+    /// Assembly consumers share this same strict hole/bore and positivity law.
+    pub fn validate(&self) -> Result<(), DuctError> {
         let ok = |v: f64| v > 0.0 && v.is_finite();
         let valid = match *self {
             Segment::Profile { steps, .. } => return steps.validate(),
