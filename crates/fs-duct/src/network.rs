@@ -1,0 +1,840 @@
+//! Frequency-domain pressure/volume-flow graphs. Instruments are graph data;
+//! the solver has no tone-hole, nasal, or organ-specific topology.
+//!
+//! Edge convention: [p_from,U_from] = M [p_to,U_to], with U directed from->to.
+//! Both nodal currents point INTO the edge. The time convention is exp(-i wt).
+
+use fs_la::eigen_complex::lu_complex;
+use fs_material::gas::GasState;
+use fs_math::c64::C64;
+use std::collections::BTreeMap;
+
+use crate::{Duct, DuctError, HoleState, LossModel, Segment, TabulatedLoad, Termination};
+
+#[cfg(test)]
+mod tests;
+
+/// Dense graph node cap, checked before nodal allocation.
+pub const MAX_NETWORK_NODES: usize = 128;
+/// Edge cap, including parallel edges and cycles.
+pub const MAX_NETWORK_EDGES: usize = 256;
+/// Maximum labelled external ports.
+pub const MAX_NETWORK_PORTS: usize = 32;
+/// Aggregate segment cap over every edge.
+pub const MAX_NETWORK_SEGMENTS: usize = 4096;
+/// Cap after supplied junction multiports expand their incident-edge pressures.
+pub const MAX_NETWORK_UNKNOWNS: usize = 256;
+/// Maximum infinity-norm condition number for normalized edge and nodal solves.
+pub const MAX_NETWORK_CONDITION: f64 = 1.0e10;
+
+/// Explicit treatment of the chain-local compact tone-hole corrections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JunctionCorrections {
+    /// Preserve the existing chain's inner, series and mutual corrections.
+    ChainLocal,
+    /// Ideal junctions: retain the complete chimney line and mouth load, but
+    /// omit inner/series/mutual compact-junction corrections.
+    Disabled,
+}
+
+/// A passive boundary impedance in Pa s/m³. Radiation resolution is explicit.
+#[derive(Debug, Clone)]
+pub enum NetworkLoad {
+    /// Zero outward flow.
+    Closed,
+    /// Zero acoustic pressure.
+    PressureRelease,
+    /// A finite nonnegative-real impedance at this solve's frequency.
+    Impedance(C64),
+    /// Radiation at a declared mouth radius; includes the exact LS owner.
+    Radiation {
+        /// Geometric mouth radius [m].
+        radius: f64,
+        /// Explicit radiation model and, for exact LS, quadrature resolution.
+        termination: Termination,
+    },
+    /// A measured/baked load; its own support and passivity admission apply.
+    Tabulated(TabulatedLoad),
+}
+
+/// Nodal boundary condition. A bare junction has common pressure and zero net
+/// injected volume flow. Compact junction physics is never added implicitly.
+#[derive(Debug, Clone)]
+pub enum NodeBoundary {
+    /// Ideal massless junction.
+    Junction,
+    /// A supplied frequency-specific plane-wave multiport replacing the ideal
+    /// common-pressure junction. No feature geometry is inferred here.
+    JunctionMultiport(JunctionMultiport),
+    /// A shunt load or pressure-release boundary.
+    Termination(NetworkLoad),
+    /// Labelled external volume-flow port. Other ports are not auto-terminated.
+    Port {
+        /// Unique external port label.
+        label: String,
+    },
+}
+
+/// End of an oriented edge, with current positive into that edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EdgeEnd {
+    /// Chain input plane.
+    From,
+    /// Chain output plane.
+    To,
+}
+
+/// Stable binding of a feature port to an incident edge end.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NetworkTerminal {
+    /// Exact NetworkEdge::id.
+    pub edge_id: String,
+    /// Which edge end touches this junction.
+    pub end: EdgeEnd,
+}
+
+/// Supplied junction admittance p -> U INTO the feature, in m³/(Pa s).
+/// A 3-D/modal feature owner must perform its own valid plane-port projection;
+/// this type neither invents evanescent closures nor certifies that projection.
+#[derive(Debug, Clone)]
+pub struct JunctionMultiport {
+    /// Exact angular frequency of the supplied operator [rad/s].
+    pub omega: f64,
+    /// Terminal order of the row-major matrix, covering every incident end.
+    pub terminals: Vec<NetworkTerminal>,
+    /// Row-major plane-port admittance.
+    pub y: Vec<C64>,
+    /// Explicit feature/source identity.
+    pub source_id: String,
+}
+
+fn admit_multiport(feature: &JunctionMultiport) -> Result<(), DuctError> {
+    let n = feature.terminals.len();
+    if n == 0
+        || n > MAX_NETWORK_UNKNOWNS
+        || feature.y.len() != n * n
+        || feature.source_id.trim().is_empty()
+        || !feature.omega.is_finite()
+        || feature.omega <= 0.0
+        || feature.y.iter().any(|&v| !finite(v))
+    {
+        return Err(bad(
+            "network junction multiport needs finite frequency, source and square terminal matrix",
+        ));
+    }
+    let scale = feature.y.iter().map(|z| z.abs()).fold(0.0, f64::max);
+    let tol = 1.0e-12 * scale;
+    let mut real = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            if (feature.y[i * n + j] - feature.y[j * n + i]).abs() > tol {
+                return Err(bad("network junction multiport is not reciprocal (1e-12)"));
+            }
+            real[i * n + j] = if scale == 0.0 {
+                0.0
+            } else {
+                0.5 * (feature.y[i * n + j].re / scale + feature.y[j * n + i].re / scale)
+            };
+        }
+    }
+    // Diagonal-pivoted LDL of the real Hermitian part. At a zero pivot the
+    // remaining block must also vanish; positive diagonals alone are insufficient.
+    for k in 0..n {
+        let mut p = k;
+        for i in k + 1..n {
+            if real[i * n + i] > real[p * n + p] {
+                p = i;
+            }
+        }
+        if p != k {
+            for j in 0..n {
+                real.swap(k * n + j, p * n + j);
+            }
+            for i in 0..n {
+                real.swap(i * n + k, i * n + p);
+            }
+        }
+        let pivot = real[k * n + k];
+        if !pivot.is_finite() || pivot < -1.0e-12 {
+            return Err(bad("network junction multiport has active Hermitian part"));
+        }
+        if pivot <= 1.0e-12 {
+            for i in k..n {
+                for j in k..n {
+                    if !real[i * n + j].is_finite() || real[i * n + j].abs() > 1.0e-12 {
+                        return Err(bad(
+                            "network junction multiport has indefinite zero-pivot block",
+                        ));
+                    }
+                }
+            }
+            break;
+        }
+        for i in k + 1..n {
+            for j in k + 1..n {
+                let update = real[i * n + k] * real[k * n + j] / pivot;
+                real[i * n + j] -= update;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A stable identity allows node-array reindexing without changing arithmetic.
+#[derive(Debug, Clone)]
+pub struct NetworkNode {
+    /// Unique nonempty identity, independent of the array index.
+    pub id: String,
+    /// Junction, termination or external port.
+    pub boundary: NodeBoundary,
+}
+
+/// An oriented edge carrying the existing duct-chain owner.
+#[derive(Debug, Clone)]
+pub struct NetworkEdge {
+    /// Unique stable identity; fixes summation order even for parallel paths.
+    pub id: String,
+    /// Node index at the chain's input plane.
+    pub from: usize,
+    /// Node index at the chain's output plane.
+    pub to: usize,
+    /// Complete chain geometry, in SI.
+    pub duct: Duct,
+    /// Explicit compact correction policy for holes inside this edge.
+    pub corrections: JunctionCorrections,
+}
+
+/// A connected graph; parallel paths and loops are admitted.
+#[derive(Debug, Clone)]
+pub struct DuctNetwork {
+    /// Node indices are local references, not physical identities.
+    pub nodes: Vec<NetworkNode>,
+    /// Oriented duct chains.
+    pub edges: Vec<NetworkEdge>,
+}
+
+/// A finite chain 2-port, normalized only for condition reporting.
+#[derive(Debug, Clone, Copy)]
+pub struct NetworkTwoPort {
+    /// Physical ABCD matrix, row-major: [p_in,U_in] = M [p_out,U_out].
+    pub abcd: [C64; 4],
+    /// Infinity-norm condition of [A,B/Zref;C*Zref,D].
+    pub condition_estimate: f64,
+    /// Minimum shear number reported by the chain owner.
+    pub min_shear_number: f64,
+}
+
+/// Solved open-circuit N-port impedance; all currents point into the network.
+#[derive(Debug, Clone)]
+pub struct NetworkResponse {
+    gas: GasState,
+    /// Frequency [rad/s].
+    pub omega: f64,
+    /// Port labels in the caller's node-array order.
+    pub ports: Vec<String>,
+    /// Row-major p=Z*U in Pa s/m³; unexcited ports have exactly zero injection.
+    pub z: Vec<C64>,
+    /// Infinity-norm condition of the grounded nodal system.
+    pub condition_estimate: f64,
+    /// Maximum normalized ABCD/admittance condition per edge, in stable id order.
+    pub edge_conditions: Vec<(String, f64)>,
+    /// Minimum shear number over all edges.
+    pub min_shear_number: f64,
+}
+
+/// Port pressures and currents for unit flow injected at one active port.
+#[derive(Debug, Clone)]
+pub struct NetworkDriveResponse {
+    /// Active port's pressure / injected volume flow [Pa s/m³].
+    pub impedance: C64,
+    /// Pressures / unit injected flow, in NetworkResponse::ports order.
+    pub port_pressures: Vec<C64>,
+    /// Currents into the graph / unit injected flow, in the same order.
+    pub port_inflows: Vec<C64>,
+}
+
+/// Explicit termination of one external port; no omitted-port default exists.
+#[derive(Debug, Clone)]
+pub struct PortTermination {
+    /// Label in NetworkResponse::ports.
+    pub label: String,
+    /// Boundary physics, resolved using the same gas and frequency as the graph.
+    pub load: NetworkLoad,
+}
+
+fn bad(what: &'static str) -> DuctError {
+    DuctError::BadParameter { what }
+}
+fn finite(z: C64) -> bool {
+    z.re.is_finite() && z.im.is_finite()
+}
+
+fn validate_segment(segment: &Segment) -> Result<(), DuctError> {
+    segment.validate()?;
+    if let Segment::ToneHole {
+        state: HoleState::Vent(sigma),
+        ..
+    } = *segment
+    {
+        if !sigma.is_finite() || !(0.0..=1.0).contains(&sigma) {
+            return Err(bad("network hole fraction must be finite and in [0,1]"));
+        }
+    }
+    Ok(())
+}
+
+fn finite_impedance(z: C64) -> Result<C64, DuctError> {
+    if !finite(z) || z.re < 0.0 {
+        return Err(bad("network load must be finite and passive (Re Z >= 0)"));
+    }
+    Ok(z)
+}
+
+fn load_impedance(
+    load: &NetworkLoad,
+    gas: &GasState,
+    omega: f64,
+) -> Result<Option<C64>, DuctError> {
+    match load {
+        NetworkLoad::Closed => Ok(None),
+        NetworkLoad::PressureRelease => Ok(Some(C64::ZERO)),
+        NetworkLoad::Impedance(z) => Ok(Some(finite_impedance(*z)?)),
+        NetworkLoad::Radiation {
+            radius,
+            termination,
+        } => {
+            if !radius.is_finite() || *radius <= 0.0 {
+                return Err(bad("network mouth radius must be positive and finite"));
+            }
+            Ok(Some(finite_impedance(crate::compact_radiation_impedance(
+                *termination,
+                gas,
+                *radius,
+                omega,
+            )?)?))
+        }
+        NetworkLoad::Tabulated(table) => Ok(Some(finite_impedance(table.z_at(omega)?)?)),
+    }
+}
+
+fn norm_inf(a: &[C64], n: usize) -> f64 {
+    a.chunks_exact(n)
+        .map(|row| row.iter().map(|z| z.abs()).sum::<f64>())
+        .fold(0.0, f64::max)
+}
+
+// Full inverse columns are already needed for the N-port solve and allow an
+// actual infinity-norm condition computation, rather than a diagonal heuristic.
+fn inverse(a: &[C64], n: usize) -> Result<(Vec<C64>, f64), DuctError> {
+    if n == 0 || a.iter().any(|&z| !finite(z)) {
+        return Err(DuctError::Singular);
+    }
+    let norm = norm_inf(a, n);
+    if !norm.is_finite() || norm == 0.0 {
+        return Err(DuctError::Singular);
+    }
+    let scaled: Vec<C64> = a.iter().map(|z| z.scale(1.0 / norm)).collect();
+    let lu = lu_complex(&scaled, n).map_err(|_| DuctError::Singular)?;
+    let mut inv = vec![C64::ZERO; n * n];
+    for col in 0..n {
+        let mut b = vec![C64::ZERO; n];
+        b[col] = C64::ONE;
+        lu.solve(&mut b);
+        for row in 0..n {
+            inv[row * n + col] = b[row];
+        }
+    }
+    let condition = norm_inf(&scaled, n) * norm_inf(&inv, n);
+    if !condition.is_finite() || condition > MAX_NETWORK_CONDITION {
+        return Err(DuctError::Singular);
+    }
+    for v in &mut inv {
+        *v = v.scale(1.0 / norm);
+    }
+    if inv.iter().any(|&z| !finite(z)) {
+        return Err(DuctError::Singular);
+    }
+    Ok((inv, condition))
+}
+
+// Recover the chain's linear two-port from two independent boundary columns.
+// +/- Zref are algebraic probes, not external active loads in the network.
+// This consumes the existing full chain implementation without duplicating its
+// cone/profile/loss/tone-hole physics or changing its golden operation tree.
+fn chain_owned(
+    duct: &Duct,
+    gas: &GasState,
+    omega: f64,
+    loss: LossModel,
+    zref: f64,
+) -> Result<([C64; 4], f64), DuctError> {
+    let plus = crate::input_impedance_load(duct, gas, omega, loss, C64::from_re(zref), None)?;
+    let minus = crate::input_impedance_load(duct, gas, omega, loss, C64::from_re(-zref), None)?;
+    let fp = plus.u_mouth_over_u_in.recip();
+    let fm = minus.u_mouth_over_u_in.recip();
+    let pp = plus.impedance * fp;
+    let pm = minus.impedance * fm;
+    Ok((
+        [
+            (pp - pm).scale(0.5 / zref),
+            (pp + pm).scale(0.5),
+            (fp - fm).scale(0.5 / zref),
+            (fp + fm).scale(0.5),
+        ],
+        plus.min_shear_number.min(minus.min_shear_number),
+    ))
+}
+
+/// Compute the complete chain's physical ABCD block and reject an unqualified
+/// normalized condition number. Lower-level propagation refusals are preserved.
+pub fn network_chain_two_port(
+    duct: &Duct,
+    gas: &GasState,
+    omega: f64,
+    loss: LossModel,
+    corrections: JunctionCorrections,
+) -> Result<NetworkTwoPort, DuctError> {
+    validate_medium(gas, omega)?;
+    let first = duct.segments.first().ok_or(DuctError::EmptyDuct)?;
+    if duct.segments.len() > MAX_NETWORK_SEGMENTS {
+        return Err(bad("network segment cap exceeded"));
+    }
+    for s in &duct.segments {
+        validate_segment(s)?;
+    }
+    let zref = gas.density * gas.sound_speed
+        / (core::f64::consts::PI * first.inlet_radius() * first.inlet_radius());
+    let (m, shear) = if corrections == JunctionCorrections::ChainLocal
+        || !duct
+            .segments
+            .iter()
+            .any(|s| matches!(s, Segment::ToneHole { .. }))
+    {
+        chain_owned(duct, gas, omega, loss, zref)?
+    } else {
+        let mut m = [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE];
+        let mut shear = f64::INFINITY;
+        for s in &duct.segments {
+            let (block, rv) = if let Segment::ToneHole {
+                hole_radius,
+                chimney_height,
+                state,
+                ..
+            } = *s
+            {
+                let chimney = Duct {
+                    segments: vec![Segment::Cylinder {
+                        radius: hole_radius,
+                        length: chimney_height,
+                    }],
+                };
+                let chimney_loss = if loss == LossModel::WideTube {
+                    LossModel::Bessel
+                } else {
+                    loss
+                };
+                let zi = |termination| {
+                    crate::input_impedance(&chimney, gas, omega, chimney_loss, termination)
+                };
+                let admittance = match state {
+                    HoleState::Open => zi(Termination::FlangedOpen)?.impedance.recip(),
+                    HoleState::Closed => zi(Termination::Closed)?.impedance.recip(),
+                    HoleState::Vent(sigma) if sigma.is_finite() && (0.0..=1.0).contains(&sigma) => {
+                        zi(Termination::FlangedOpen)?.impedance.recip().scale(sigma)
+                            + zi(Termination::Closed)?
+                                .impedance
+                                .recip()
+                                .scale(1.0 - sigma)
+                    }
+                    HoleState::Vent(_) => {
+                        return Err(bad("network hole fraction must be finite and in [0,1]"));
+                    }
+                };
+                let rv = crate::segment_wave(gas, hole_radius, omega, chimney_loss)?.shear_number;
+                ([C64::ONE, C64::ZERO, admittance, C64::ONE], rv)
+            } else {
+                chain_owned(&Duct { segments: vec![*s] }, gas, omega, loss, zref)?
+            };
+            m = crate::mul2(m, block);
+            shear = shear.min(rv);
+        }
+        (m, shear)
+    };
+    let normalized = [m[0], m[1].scale(1.0 / zref), m[2].scale(zref), m[3]];
+    let (_, condition) = inverse(&normalized, 2)?;
+    let det = m[0] * m[3] - m[1] * m[2];
+    if (det - C64::ONE).abs() > 1.0e-10 {
+        return Err(DuctError::Singular);
+    }
+    Ok(NetworkTwoPort {
+        abcd: m,
+        condition_estimate: condition,
+        min_shear_number: shear,
+    })
+}
+
+fn validate_medium(gas: &GasState, omega: f64) -> Result<(), DuctError> {
+    if !omega.is_finite()
+        || omega <= 0.0
+        || !gas.density.is_finite()
+        || gas.density <= 0.0
+        || !gas.sound_speed.is_finite()
+        || gas.sound_speed <= 0.0
+    {
+        return Err(bad(
+            "network needs positive finite angular frequency, gas density and sound speed",
+        ));
+    }
+    Ok(())
+}
+
+impl DuctNetwork {
+    /// Validate topology and all structural caps before dense allocation.
+    pub fn validate(&self) -> Result<(), DuctError> {
+        let n = self.nodes.len();
+        if n == 0 || n > MAX_NETWORK_NODES {
+            return Err(bad("network node count must be in 1..=128"));
+        }
+        if self.edges.len() > MAX_NETWORK_EDGES {
+            return Err(bad("network edge cap exceeded (256)"));
+        }
+        let ports: Vec<&str> = self
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.boundary {
+                NodeBoundary::Port { label } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        if ports.is_empty() || ports.len() > MAX_NETWORK_PORTS {
+            return Err(bad("network port count must be in 1..=32"));
+        }
+        let mut ids: Vec<&str> = self.nodes.iter().map(|node| node.id.as_str()).collect();
+        ids.sort_unstable();
+        let mut labels = ports;
+        labels.sort_unstable();
+        let mut edge_ids: Vec<&str> = self.edges.iter().map(|e| e.id.as_str()).collect();
+        edge_ids.sort_unstable();
+        for names in [&ids, &labels, &edge_ids] {
+            if names.iter().any(|s| s.trim().is_empty() || s.len() > 256)
+                || names.windows(2).any(|s| s[0] == s[1])
+            {
+                return Err(bad(
+                    "network node/edge identities and port labels must be unique, nonempty and <=256 bytes",
+                ));
+            }
+        }
+        let mut segments = 0usize;
+        for e in &self.edges {
+            if e.from >= n || e.to >= n {
+                return Err(bad("network edge node index out of range"));
+            }
+            if e.duct.segments.is_empty() {
+                return Err(DuctError::EmptyDuct);
+            }
+            segments = segments.saturating_add(e.duct.segments.len());
+            if segments > MAX_NETWORK_SEGMENTS {
+                return Err(bad("network aggregate segment cap exceeded (4096)"));
+            }
+            let mut length = 0.0;
+            for s in &e.duct.segments {
+                validate_segment(s)?;
+                length += match *s {
+                    Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => length,
+                    Segment::ToneHole { .. } => 0.0,
+                };
+            }
+            if !length.is_finite() || length <= 0.0 {
+                return Err(bad("network edge needs positive finite axial length"));
+            }
+        }
+        let mut seen = vec![false; n];
+        seen[0] = true;
+        loop {
+            let mut changed = false;
+            for e in &self.edges {
+                if seen[e.from] != seen[e.to] {
+                    seen[e.from] = true;
+                    seen[e.to] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        if seen.iter().any(|&v| !v) {
+            return Err(bad("network graph is disconnected"));
+        }
+        let mut unknowns = 0usize;
+        for (node_index, node) in self.nodes.iter().enumerate() {
+            if let NodeBoundary::JunctionMultiport(feature) = &node.boundary {
+                unknowns = unknowns.saturating_add(feature.terminals.len());
+                if unknowns > MAX_NETWORK_UNKNOWNS {
+                    return Err(bad("network expanded-pressure cap exceeded (256)"));
+                }
+                admit_multiport(feature)?;
+                let mut expected = Vec::new();
+                for e in &self.edges {
+                    if e.from == node_index {
+                        expected.push(NetworkTerminal {
+                            edge_id: e.id.clone(),
+                            end: EdgeEnd::From,
+                        });
+                    }
+                    if e.to == node_index {
+                        expected.push(NetworkTerminal {
+                            edge_id: e.id.clone(),
+                            end: EdgeEnd::To,
+                        });
+                    }
+                }
+                let mut actual = feature.terminals.clone();
+                actual.sort();
+                expected.sort();
+                if actual != expected {
+                    return Err(bad(
+                        "junction multiport terminals must bind each incident edge end exactly once",
+                    ));
+                }
+            } else {
+                unknowns = unknowns.saturating_add(1);
+            }
+            if unknowns > MAX_NETWORK_UNKNOWNS {
+                return Err(bad("network expanded-pressure cap exceeded (256)"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Solve a connected frequency-domain graph. Internal nodes are eliminated by
+/// dense LU; labelled ports retain their full mutual impedance matrix.
+pub fn network_port_impedance(
+    net: &DuctNetwork,
+    gas: &GasState,
+    omega: f64,
+    loss: LossModel,
+) -> Result<NetworkResponse, DuctError> {
+    net.validate()?;
+    validate_medium(gas, omega)?;
+    let mut order: Vec<usize> = (0..net.nodes.len()).collect();
+    order.sort_unstable_by(|&a, &b| net.nodes[a].id.cmp(&net.nodes[b].id));
+    let mut ground = vec![false; net.nodes.len()];
+    let mut loads = vec![None; net.nodes.len()];
+    for &node in &order {
+        if let NodeBoundary::Termination(load) = &net.nodes[node].boundary {
+            loads[node] = load_impedance(load, gas, omega)?;
+            ground[node] = loads[node].is_some_and(|z| z == C64::ZERO);
+        }
+    }
+    let mut slots = vec![None; net.nodes.len()];
+    let mut terminal_slots = BTreeMap::new();
+    let mut n = 0usize;
+    for &node in &order {
+        if let NodeBoundary::JunctionMultiport(feature) = &net.nodes[node].boundary {
+            if feature.omega.to_bits() != omega.to_bits() {
+                return Err(bad(
+                    "junction multiport frequency differs from network query",
+                ));
+            }
+            let mut terminals = feature.terminals.clone();
+            terminals.sort();
+            for terminal in terminals {
+                terminal_slots.insert(terminal, n);
+                n += 1;
+            }
+        } else if !ground[node] {
+            slots[node] = Some(n);
+            n += 1;
+        }
+    }
+    let mut y = vec![C64::ZERO; n * n];
+    for &node in &order {
+        if let (Some(i), Some(z)) = (slots[node], loads[node]) {
+            y[i * n + i] = z.recip();
+        }
+        if let NodeBoundary::JunctionMultiport(feature) = &net.nodes[node].boundary {
+            let d = feature.terminals.len();
+            for (i, ti) in feature.terminals.iter().enumerate() {
+                for (j, tj) in feature.terminals.iter().enumerate() {
+                    let a = terminal_slots[ti];
+                    let b = terminal_slots[tj];
+                    y[a * n + b] = y[a * n + b] + feature.y[i * d + j];
+                }
+            }
+        }
+    }
+    let mut edges: Vec<&NetworkEdge> = net.edges.iter().collect();
+    edges.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+    let mut edge_conditions = Vec::with_capacity(edges.len());
+    let mut shear = f64::INFINITY;
+    for e in edges {
+        let block = network_chain_two_port(&e.duct, gas, omega, loss, e.corrections)?;
+        let [a, b, _, d] = block.abcd;
+        if b.abs() == 0.0 || !finite(b) {
+            return Err(DuctError::Singular);
+        }
+        let binv = b.recip();
+        // Reciprocity is the analytic Wronskian det(M)=1, checked above.
+        // Using that identity avoids independent floating-point off-diagonals.
+        let stamp = [d * binv, -binv, -binv, a * binv];
+        let (_, admittance_condition) = inverse(&stamp, 2)?;
+        let endpoint = |node: usize, end: EdgeEnd| {
+            if matches!(net.nodes[node].boundary, NodeBoundary::JunctionMultiport(_)) {
+                terminal_slots
+                    .get(&NetworkTerminal {
+                        edge_id: e.id.clone(),
+                        end,
+                    })
+                    .copied()
+            } else {
+                slots[node]
+            }
+        };
+        let ends = [endpoint(e.from, EdgeEnd::From), endpoint(e.to, EdgeEnd::To)];
+        for row in 0..2 {
+            for col in 0..2 {
+                if let (Some(i), Some(j)) = (ends[row], ends[col]) {
+                    y[i * n + j] = y[i * n + j] + stamp[2 * row + col];
+                }
+            }
+        }
+        edge_conditions.push((
+            e.id.clone(),
+            block.condition_estimate.max(admittance_condition),
+        ));
+        shear = shear.min(block.min_shear_number);
+    }
+    let (inv, condition) = inverse(&y, n)?;
+    let port_nodes: Vec<usize> = net
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, node)| matches!(node.boundary, NodeBoundary::Port { .. }).then_some(i))
+        .collect();
+    let mut ports = Vec::new();
+    let mut z = Vec::new();
+    for &node in &port_nodes {
+        if let NodeBoundary::Port { label } = &net.nodes[node].boundary {
+            ports.push(label.clone());
+        }
+        let i = slots[node].ok_or(DuctError::Singular)?;
+        for &other in &port_nodes {
+            let j = slots[other].ok_or(DuctError::Singular)?;
+            z.push(inv[i * n + j]);
+        }
+    }
+    Ok(NetworkResponse {
+        gas: *gas,
+        omega,
+        ports,
+        z,
+        condition_estimate: condition,
+        edge_conditions,
+        min_shear_number: shear,
+    })
+}
+
+impl NetworkResponse {
+    /// Terminate EVERY other labelled port explicitly, then return the driving
+    /// point p/U at `active`. Missing/duplicate/unknown terminations refuse.
+    pub fn driving_point(
+        &self,
+        active: &str,
+        loads: &[PortTermination],
+        gas: &GasState,
+    ) -> Result<C64, DuctError> {
+        Ok(self.drive(active, loads, gas)?.impedance)
+    }
+
+    /// Apply explicit loads and return all port pressures and volume flows.
+    pub fn drive(
+        &self,
+        active: &str,
+        loads: &[PortTermination],
+        gas: &GasState,
+    ) -> Result<NetworkDriveResponse, DuctError> {
+        validate_medium(gas, self.omega)?;
+        if *gas != self.gas {
+            return Err(bad("network response and termination gas states differ"));
+        }
+        let n = self.ports.len();
+        let active = self
+            .ports
+            .iter()
+            .position(|s| s == active)
+            .ok_or(bad("unknown network port label"))?;
+        if self.z.len() != n * n
+            || n == 0
+            || n > MAX_NETWORK_PORTS
+            || self.z.iter().any(|&z| !finite(z))
+        {
+            return Err(bad("invalid network response matrix"));
+        }
+        if loads.len() != n - 1 {
+            return Err(bad(
+                "every other network port needs an explicit termination",
+            ));
+        }
+        let mut resolved = vec![None; n];
+        let mut seen = vec![false; n];
+        seen[active] = true;
+        for load in loads {
+            let index = self
+                .ports
+                .iter()
+                .position(|s| s == &load.label)
+                .ok_or(bad("unknown network termination label"))?;
+            if seen[index] {
+                return Err(bad("duplicate or active-port termination"));
+            }
+            seen[index] = true;
+            resolved[index] = load_impedance(&load.load, gas, self.omega)?;
+        }
+        if seen.iter().any(|&v| !v) {
+            return Err(bad("network port termination omitted"));
+        }
+        // A rigid external termination imposes U=0, so it needs no unknown.
+        let mut live: Vec<usize> = (0..n)
+            .filter(|&j| j != active && resolved[j].is_some())
+            .collect();
+        live.sort_unstable_by(|&a, &b| self.ports[a].cmp(&self.ports[b]));
+        let mut currents = vec![C64::ZERO; n];
+        currents[active] = C64::ONE;
+        let m = live.len();
+        let mut a = vec![C64::ZERO; m * m];
+        for (i, &p) in live.iter().enumerate() {
+            for (j, &q) in live.iter().enumerate() {
+                a[i * m + j] = self.z[p * n + q];
+                if i == j {
+                    a[i * m + j] = a[i * m + j] + resolved[p].expect("finite load");
+                }
+            }
+        }
+        if m > 0 {
+            let (inv, _) = inverse(&a, m)?;
+            for (i, &p) in live.iter().enumerate() {
+                for (j, &q) in live.iter().enumerate() {
+                    currents[p] = currents[p] - inv[i * m + j] * self.z[q * n + active];
+                }
+            }
+        }
+        let mut pressures = vec![C64::ZERO; n];
+        let mut canonical: Vec<usize> = (0..n).collect();
+        canonical.sort_unstable_by(|&a, &b| self.ports[a].cmp(&self.ports[b]));
+        for i in 0..n {
+            for &j in &canonical {
+                pressures[i] = pressures[i] + self.z[i * n + j] * currents[j];
+            }
+        }
+        if pressures.iter().chain(&currents).any(|&v| !finite(v)) {
+            return Err(DuctError::Singular);
+        }
+        Ok(NetworkDriveResponse {
+            impedance: pressures[active],
+            port_pressures: pressures,
+            port_inflows: currents,
+        })
+    }
+}
