@@ -979,9 +979,25 @@ mod tests {
         let record = step_render(&reduced, &split, &[0.1, 0.02, 0.3], &[0.5], 0.2).unwrap();
         assert!(record.balance_residual().abs() < 1e-12);
         let nonlinear = crate::duffing_oscillator(1.0, 1.0, 2.0, 0.0).unwrap();
-        let reduced_nonlinear =
-            crate::reduce_galerkin(&nonlinear, &[1.0, 0.0, 0.0, 1.0], 2).unwrap();
-        assert!(!reduced_nonlinear.storage.quadratic_part().unwrap().exact);
+        // The public v1 reducer admits quadratic storage only. A quadratic
+        // metadata hook does not authorize replacing a live quartic remainder.
+        assert!(matches!(
+            crate::reduce_galerkin(&nonlinear, &[1.0, 0.0, 0.0, 1.0], 2),
+            Err(PhsError::Dimension { .. })
+        ));
+        // Exercise the storage transport itself without claiming that the
+        // public quadratic-only reducer accepts this nonlinear system.
+        let reduced_nonlinear = crate::ReducedStorage {
+            v: vec![1.0, 0.0, 0.0, 1.0],
+            n: 2,
+            k: 2,
+            inner: nonlinear.storage,
+        };
+        let nonlinear_part = reduced_nonlinear.quadratic_part().unwrap();
+        assert!(!nonlinear_part.exact);
+        let point = [0.3, 0.2];
+        let quadratic_energy = 0.5 * (point[0] * point[0] + point[1] * point[1]);
+        assert!(reduced_nonlinear.hamiltonian(&point) > quadratic_energy);
     }
 
     #[test]
