@@ -188,6 +188,17 @@ pub struct Medium {
     pub sound_speed: f64,
 }
 
+impl From<&GasState> for Medium {
+    /// Copy the resolved medium's SI values exactly. Source authority remains
+    /// with its producer; this view evaluates no gas law or default atmosphere.
+    fn from(gas: &GasState) -> Self {
+        Self {
+            density: gas.density,
+            sound_speed: gas.sound_speed,
+        }
+    }
+}
+
 impl Medium {
     /// Dry USSA-1976 air at the declared room state of 293.15 K and 101325 Pa.
     /// Parameterized studies should construct their own [`GasState`] for their
@@ -1898,6 +1909,17 @@ fn norm_assoc_legendre(l_max: usize, x: f64) -> Vec<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn g3_resolved_medium_preserves_density_and_sound_speed_bits() {
+        let mut gas =
+            super::GasState::try_new(&super::GasSpec::dry_air_ussa1976(), 308.15, 90000.0).unwrap();
+        gas.density = f64::from_bits(gas.density.to_bits() + 1);
+        gas.sound_speed = f64::from_bits(gas.sound_speed.to_bits() + 1);
+        let medium = super::Medium::from(&gas);
+        assert_eq!(medium.density.to_bits(), gas.density.to_bits());
+        assert_eq!(medium.sound_speed.to_bits(), gas.sound_speed.to_bits());
+    }
+
     use super::*;
 
     fn rho_c() -> f64 {

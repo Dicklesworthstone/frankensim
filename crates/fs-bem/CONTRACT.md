@@ -9,6 +9,11 @@ everywhere: this is screening, not a viscous truth source.
 
 ## Public types and semantics
 
+- `Medium::from(&GasState)` copies the caller's density and sound speed bits
+  directly. It evaluates no default atmosphere and adds no source authority;
+  NASA-9/source receipts remain with the resolved material state. G3 tests pin
+  both copied values, including values distinct from the air convenience.
+
 - `panel3d`: validated `SpherePanels` (centroid/normal/area panelization of
   fs-rep-mesh icospheres, with optional exact oriented triangle vertices);
   `dense_matrix` — the collocation Neumann

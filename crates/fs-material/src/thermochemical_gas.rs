@@ -15,6 +15,8 @@
 
 /// Conservative density/energy reconstruction and closed-volume gas heating.
 pub mod energy;
+/// Explicit binding of verified species, NASA-9 and transport packs.
+pub mod packs;
 
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
@@ -54,6 +56,7 @@ pub struct ThermochemicalGasModel {
     thermodynamics: FrozenIdealGasMixtureModelV1,
     transport: Vec<SpeciesTransportMaterial>,
     water_component: Option<usize>,
+    source_packs: Vec<packs::ThermochemicalPackReceipt>,
 }
 
 fn invalid(what: impl Into<String>) -> MaterialError {
@@ -107,7 +110,7 @@ impl ThermochemicalGasModel {
             components.iter().position(|model| model.species() == species)
                 .ok_or_else(|| invalid("explicit water species is absent from the active mixture"))
         }).transpose()?;
-        Ok(Self { thermodynamics, transport, water_component })
+        Ok(Self { thermodynamics, transport, water_component, source_packs: Vec::new() })
     }
 
     /// Retained NASA-9 species and canonical composition.
@@ -115,7 +118,37 @@ impl ThermochemicalGasModel {
     pub const fn thermodynamics(&self) -> &FrozenIdealGasMixtureModelV1 { &self.thermodynamics }
     /// Source transport assignments in exactly the same canonical species order.
     #[must_use]
-    pub fn transport_materials(&self) -> &[SpeciesTransportMaterial] { &self.transport }
+    pub fn transport_materials(&self) -> &[SpeciesTransportMaterial] {
+        &self.transport
+    }
+    /// Pack bindings retained by a source-backed constructor; empty for models
+    /// assembled directly from cards. Empty does not assert source authority.
+    #[must_use]
+    pub fn source_packs(&self) -> &[packs::ThermochemicalPackReceipt] {
+        &self.source_packs
+    }
+
+    /// Resolve a declared vapor in equilibrium with liquid water. The caller
+    /// chooses this phase condition explicitly; the ordinary frozen-gas
+    /// evaluator makes no condensation claim. Uses the existing Buck owner
+    /// within its stated liquid-water temperature window, without extrapolation.
+    pub fn evaluate_with_liquid_water_limit(
+        &self,
+        point: &QueryPoint,
+    ) -> Result<ResolvedThermochemicalGasState, MaterialError> {
+        let (temperature, pressure) = coordinates(point)?;
+        let water = self
+            .water_component
+            .ok_or_else(|| invalid("liquid-water phase check needs an explicit water species"))?;
+        let fraction = self.thermodynamics.mole_composition().fractions()[water];
+        let saturation = crate::gas::saturation_pressure_water_pa(temperature.value())?;
+        if fraction > saturation / pressure.value() {
+            return Err(invalid(
+                "supersaturated thermochemical gas needs condensation physics",
+            ));
+        }
+        self.evaluate(point)
+    }
 
     /// Resolve ALL physical coefficients at one common typed temperature/pressure.
     /// Other source conditions remain in `point` and are never invented here.
@@ -201,6 +234,7 @@ impl ThermochemicalGasModel {
         Ok(ResolvedThermochemicalGasState {
             state, thermodynamics, eos, viscosity, components: resolved, transport,
             specific_internal_energy_j_kg: internal_energy, specific_enthalpy_j_kg: enthalpy,
+            source_packs: self.source_packs.clone(),
         })
     }
 }
@@ -217,8 +251,15 @@ pub struct ResolvedThermochemicalGasState {
     transport: FluidTransportState,
     specific_internal_energy_j_kg: f64,
     specific_enthalpy_j_kg: f64,
+    source_packs: Vec<packs::ThermochemicalPackReceipt>,
 }
 impl ResolvedThermochemicalGasState {
+    /// Exact species/model/transport pack identities used to construct this
+    /// state. Composition and evaluation receipts remain in `thermodynamics`.
+    #[must_use]
+    pub fn source_packs(&self) -> &[packs::ThermochemicalPackReceipt] {
+        &self.source_packs
+    }
     /// Complete medium consumed by the existing duct, radiation and gas solvers.
     #[must_use]
     pub const fn state(&self) -> &GasState { &self.state }

@@ -56,6 +56,16 @@ pub struct RayleighMedium {
     pub sound_speed: f64,
 }
 
+impl From<&fs_material::gas::GasState> for RayleighMedium {
+    /// Exact view of a caller-resolved medium, without a second gas evaluation.
+    fn from(gas: &fs_material::gas::GasState) -> Self {
+        Self {
+            density: gas.density,
+            sound_speed: gas.sound_speed,
+        }
+    }
+}
+
 const MAX_HISTORY: usize = 32_768;
 /// Largest transposed tap ring (f64 entries, 16 MiB). Larger kernels keep the
 /// direct form; both forms produce bit-identical pressure.
@@ -431,6 +441,17 @@ impl BaffledPressure {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn g3_resolved_rayleigh_medium_preserves_density_and_sound_speed_bits() {
+        use fs_material::gas::{GasSpec, GasState};
+        let mut gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 308.15, 90000.0).unwrap();
+        gas.density = f64::from_bits(gas.density.to_bits() + 1);
+        gas.sound_speed = f64::from_bits(gas.sound_speed.to_bits() + 1);
+        let medium = super::RayleighMedium::from(&gas);
+        assert_eq!(medium.density.to_bits(), gas.density.to_bits());
+        assert_eq!(medium.sound_speed.to_bits(), gas.sound_speed.to_bits());
+    }
+
     use super::*;
     fn medium()->RayleighMedium {RayleighMedium{density:1.2,sound_speed:320.0}}
     fn patch(x:f64,shape:f64)->SurfaceSample {

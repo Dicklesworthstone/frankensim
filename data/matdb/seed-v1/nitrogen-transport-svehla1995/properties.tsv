@@ -1,0 +1,10 @@
+frankensim.matdb-source.v1
+observation	dilute-N2	N2 dilute gas, not dense nitrogen or a measured cylinder	NASA TM-4647 Eq2 and TableIII p24, low 200-1000 K fit; linear interpolation between listed evaluations	ln(mu_micropoise)=0.62526577 ln(T)-31.779652/T-1640.7983/T^2+1.7454992; ln(k_microW_cmK)=0.85372829 ln(T)+105.18665/T-12299.753/T^2+0.48299104. Multiply mu by1e-7 for Pa*s and k by1e-4 for W/(m K). Values are evaluations of that source fit, not measurements. The source supplies no single uncertainty covering this sampled curve; retain Unstated, including interpolation error. T domain is source-declared; p=75000..101325 Pa is an authored dilute-gas application rectangle, not a source-certified accuracy bound. Pressure-independent transport, ideal-gas thermodynamics and absence of dense-gas corrections are explicit. No humid-air or breath transport claim.
+curve	viscosity	dilute-N2	dynamic_viscosity	temperature	K	Pa*s	200:1.2882275539655426e-5,250:1.5516798923275353e-5,273.15:1.6648694672906733e-5,283.15:1.7123444475203051e-5,293.15:1.7590361249687051e-5,298.15:1.782102232564689e-5,300:1.7905909219797727e-5,303.15:1.804988802321462e-5,308.15:1.8277007491059823e-5,323.15:1.8948347731797454e-5,350:2.0115404486540507e-5,400:2.2186138037054813e-5,500:2.6012399487748252e-5,600:2.9523052350328399e-5,800:3.5883755272546038e-5,1000:4.162398568976629e-5	linear
+uncertainty	viscosity	unstated	-	-	-	-
+validity	viscosity	temperature	200	1000	K
+validity	viscosity	pressure	75000	101325	Pa
+curve	conductivity	dilute-N2	thermal_conductivity	temperature	K	W/m/K	200:0.018581543390257783,250:0.022605288576542981,273.15:0.02429025526379423,283.15:0.024993356428155738,293.15:0.025683703795108533,298.15:0.026024490493057734,300:0.026149881267754985,303.15:0.026362542271384428,308.15:0.026697989599385404,323.15:0.027689884927000585,350:0.029418282672912403,400:0.032511110685354401,500:0.038365820799659223,600:0.043938497217291671,800:0.054571569118581818,1000:0.064756815004108376	linear
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	200	1000	K
+validity	conductivity	pressure	75000	101325	Pa

@@ -1,0 +1,21 @@
+frankensim.nasa9-source.v1
+region	CO2	low	200	1000	K	100000	Pa
+coefficient	CO2	low	a0	4.943650540e4	K^2
+coefficient	CO2	low	a1	-6.264116010e2	K
+coefficient	CO2	low	a2	5.301725240	1
+coefficient	CO2	low	a3	2.503813816e-3	K^-1
+coefficient	CO2	low	a4	-2.127308728e-7	K^-2
+coefficient	CO2	low	a5	-7.689988780e-10	K^-3
+coefficient	CO2	low	a6	2.849677801e-13	K^-4
+coefficient	CO2	low	a7	-4.528198460e4	K
+coefficient	CO2	low	a8	-7.048279440	1
+region	CO2	high	1000	6000	K	100000	Pa
+coefficient	CO2	high	a0	1.176962419e5	K^2
+coefficient	CO2	high	a1	-1.788791477e3	K
+coefficient	CO2	high	a2	8.291523190	1
+coefficient	CO2	high	a3	-9.223156780e-5	K^-1
+coefficient	CO2	high	a4	4.863676880e-9	K^-2
+coefficient	CO2	high	a5	-1.891053312e-12	K^-3
+coefficient	CO2	high	a6	6.330036590e-16	K^-4
+coefficient	CO2	high	a7	-3.908350590e4	K
+coefficient	CO2	high	a8	-2.652669281e1	1

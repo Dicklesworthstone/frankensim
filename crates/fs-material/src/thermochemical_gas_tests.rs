@@ -74,6 +74,106 @@ pub(super) fn close(a: f64, b: f64) {
 }
 
 #[test]
+fn g0_gamma_cp_coherence() {
+    let model = model(vec![0.75, 0.25], 0.001);
+    for t in [200.0, 293.15, 308.15, 600.0, 1000.0, 2000.0] {
+        let resolved = model.evaluate(&point(t, 101325.0)).unwrap();
+        let gas = resolved.state();
+        let properties = resolved.thermodynamics().properties();
+        let cp = properties.mass_specific_cp().value();
+        let cv = properties.mass_specific_cv().value();
+        assert!(((cp - cv) / gas.specific_gas_constant - 1.0).abs() <= 1e-14);
+        assert!((gas.gamma / (cp / cv) - 1.0).abs() <= 1e-14);
+        gas.validate_coherence().unwrap();
+    }
+}
+
+#[test]
+fn refuses_missing_transport_card() {
+    let model = model(vec![0.75, 0.25], 0.0);
+    let error = ThermochemicalGasModel::new(
+        model.thermodynamics().clone(),
+        vec![transport("A", 1.7e-5, 0.025)],
+        None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("exactly one transport material"));
+}
+
+#[test]
+fn refuses_temperature_outside_nasa9_region() {
+    let model = model(vec![0.75, 0.25], 0.0);
+    assert!(model.evaluate(&point(200.0, 101325.0)).is_ok());
+    let error = model.evaluate(&point(200.0 - 1e-9, 101325.0)).unwrap_err();
+    assert!(error.to_string().contains("thermodynamics"));
+}
+
+#[test]
+fn refuses_supersaturated_breath() {
+    let t = 308.15;
+    let p = 101325.0;
+    let saturated = crate::gas::saturation_pressure_water_pa(t).unwrap() / p;
+    let water = SpeciesId::new("B").unwrap();
+    let make = |fraction| {
+        let original = model(vec![1.0 - fraction, fraction], 0.001);
+        ThermochemicalGasModel::new(
+            original.thermodynamics().clone(),
+            original.transport_materials().to_vec(),
+            Some(&water),
+        )
+        .unwrap()
+    };
+    // The water identity and the liquid-water phase condition are caller
+    // declarations, independent of this synthetic species' spelling.
+    assert!(
+        make(saturated)
+            .evaluate_with_liquid_water_limit(&point(t, p))
+            .is_ok()
+    );
+    let error = make(saturated * 1.01)
+        .evaluate_with_liquid_water_limit(&point(t, p))
+        .unwrap_err();
+    assert!(error.to_string().contains("supersaturated"));
+}
+
+#[test]
+fn component_cap_and_cap_plus_one() {
+    use fs_thermochem::mixture::{
+        MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1 as CAP, FrozenIdealGasMixtureErrorV1,
+    };
+    assert_eq!(CAP, 128);
+    let make = |count| {
+        let models = (0..count)
+            .map(|i| species(&format!("component-{i:03}"), 0.028, 3.5, 0.0))
+            .collect();
+        FrozenIdealGasMixtureModelV1::new(
+            models,
+            Composition::new(
+                CompositionBasis::MoleFraction,
+                vec![1.0 / count as f64; count],
+            )
+            .unwrap(),
+        )
+    };
+    let thermodynamics = make(CAP).unwrap();
+    let transport = (0..CAP)
+        .map(|i| transport(&format!("component-{i:03}"), 1.7e-5, 0.025))
+        .collect();
+    let model = ThermochemicalGasModel::new(thermodynamics, transport, None).unwrap();
+    model
+        .evaluate(&point(293.15, 101325.0))
+        .unwrap()
+        .state()
+        .validate_coherence()
+        .unwrap();
+    assert!(
+        matches!(make(CAP + 1), Err(FrozenIdealGasMixtureErrorV1::TooManyComponents {
+        offered, limit,
+    }) if offered == CAP + 1 && limit == CAP)
+    );
+}
+
+#[test]
 fn species_thermodynamics_and_mechanical_medium_share_one_gas_constant() {
     let model = model(vec![0.75, 0.25], 0.0);
     let evaluated = model.evaluate(&point(300.0, 100000.0)).unwrap();

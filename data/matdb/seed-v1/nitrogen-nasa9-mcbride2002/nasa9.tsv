@@ -1,0 +1,21 @@
+frankensim.nasa9-source.v1
+region	N2	low	200	1000	K	100000	Pa
+coefficient	N2	low	a0	2.210371497e4	K^2
+coefficient	N2	low	a1	-3.818461820e2	K
+coefficient	N2	low	a2	6.082738360	1
+coefficient	N2	low	a3	-8.530914410e-3	K^-1
+coefficient	N2	low	a4	1.384646189e-5	K^-2
+coefficient	N2	low	a5	-9.625793620e-9	K^-3
+coefficient	N2	low	a6	2.519705809e-12	K^-4
+coefficient	N2	low	a7	7.108460860e2	K
+coefficient	N2	low	a8	-1.076003744e1	1
+region	N2	high	1000	6000	K	100000	Pa
+coefficient	N2	high	a0	5.877124060e5	K^2
+coefficient	N2	high	a1	-2.239249073e3	K
+coefficient	N2	high	a2	6.066949220	1
+coefficient	N2	high	a3	-6.139685500e-4	K^-1
+coefficient	N2	high	a4	1.491806679e-7	K^-2
+coefficient	N2	high	a5	-1.923105485e-11	K^-3
+coefficient	N2	high	a6	1.061954386e-15	K^-4
+coefficient	N2	high	a7	1.283210415e4	K
+coefficient	N2	high	a8	-1.586640027e1	1

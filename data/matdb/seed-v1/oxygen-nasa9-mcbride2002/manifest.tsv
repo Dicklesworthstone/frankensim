@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	O2
+redistribution	permitted	Work of the U.S. Government; public use permitted by the NTRS record; NASA attribution retained
+citation	McBride, Zehe and Gordon (2002), NASA/TP-2002-211556, Appendix D p166 O2 gas, 200-1000 and 1000-6000 K; https://ntrs.nasa.gov/api/citations/20020085330/downloads/20020085330.pdf; a0-a6 are the seven cp/R coefficients, a7 and a8 are the enthalpy and entropy integration constants; reference pressure 1 bar
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	nasa9.tsv	nasa9-v1

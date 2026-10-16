@@ -1,0 +1,21 @@
+frankensim.nasa9-source.v1
+region	H2O	low	200	1000	K	100000	Pa
+coefficient	H2O	low	a0	-3.947960830e4	K^2
+coefficient	H2O	low	a1	5.755731020e2	K
+coefficient	H2O	low	a2	9.317826530e-1	1
+coefficient	H2O	low	a3	7.222712860e-3	K^-1
+coefficient	H2O	low	a4	-7.342557370e-6	K^-2
+coefficient	H2O	low	a5	4.955043490e-9	K^-3
+coefficient	H2O	low	a6	-1.336933246e-12	K^-4
+coefficient	H2O	low	a7	-3.303974310e4	K
+coefficient	H2O	low	a8	1.724205775e1	1
+region	H2O	high	1000	6000	K	100000	Pa
+coefficient	H2O	high	a0	1.034972096e6	K^2
+coefficient	H2O	high	a1	-2.412698562e3	K
+coefficient	H2O	high	a2	4.646110780	1
+coefficient	H2O	high	a3	2.291998307e-3	K^-1
+coefficient	H2O	high	a4	-6.836830480e-7	K^-2
+coefficient	H2O	high	a5	9.426468930e-11	K^-3
+coefficient	H2O	high	a6	-4.822380530e-15	K^-4
+coefficient	H2O	high	a7	-1.384286509e4	K
+coefficient	H2O	high	a8	-7.978148510	1

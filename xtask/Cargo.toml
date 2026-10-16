@@ -19,10 +19,12 @@ fs-tropical = { path = "../crates/fs-tropical" }
 fs-vvreg = { path = "../crates/fs-vvreg" }
 
 [dev-dependencies]
+fs-bem = { path = "../crates/fs-bem" }
 fs-alloc = { path = "../crates/fs-alloc" }
 fs-cli = { path = "../crates/fs-cli" }
 fs-conduction = { path = "../crates/fs-conduction" }
 fs-couple = { path = "../crates/fs-couple" }
+fs-duct = { path = "../crates/fs-duct" }
 fs-exec = { path = "../crates/fs-exec" }
 fs-lbm = { path = "../crates/fs-lbm" }
 fs-matdb-store = { path = "../crates/fs-matdb-store" }
@@ -30,6 +32,7 @@ fs-material = { path = "../crates/fs-material" }
 fs-phs = { path = "../crates/fs-phs" }
 fs-scenario = { path = "../crates/fs-scenario" }
 fs-solid = { path = "../crates/fs-solid" }
+fs-thermochem = { path = "../crates/fs-thermochem" }
 
 [lints]
 workspace = true

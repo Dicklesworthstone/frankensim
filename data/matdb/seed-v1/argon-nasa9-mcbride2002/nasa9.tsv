@@ -1,0 +1,21 @@
+frankensim.nasa9-source.v1
+region	Ar	low	200	1000	K	100000	Pa
+coefficient	Ar	low	a0	0	K^2
+coefficient	Ar	low	a1	0	K
+coefficient	Ar	low	a2	2.500000000	1
+coefficient	Ar	low	a3	0	K^-1
+coefficient	Ar	low	a4	0	K^-2
+coefficient	Ar	low	a5	0	K^-3
+coefficient	Ar	low	a6	0	K^-4
+coefficient	Ar	low	a7	-7.453750000e2	K
+coefficient	Ar	low	a8	4.379674910	1
+region	Ar	high	1000	6000	K	100000	Pa
+coefficient	Ar	high	a0	2.010538475e1	K^2
+coefficient	Ar	high	a1	-5.992661070e-2	K
+coefficient	Ar	high	a2	2.500069401	1
+coefficient	Ar	high	a3	-3.992141160e-8	K^-1
+coefficient	Ar	high	a4	1.205272140e-11	K^-2
+coefficient	Ar	high	a5	-1.819015576e-15	K^-3
+coefficient	Ar	high	a6	1.078576636e-19	K^-4
+coefficient	Ar	high	a7	-7.449939610e2	K
+coefficient	Ar	high	a8	4.379180110	1

@@ -1,0 +1,21 @@
+frankensim.nasa9-source.v1
+region	O2	low	200	1000	K	100000	Pa
+coefficient	O2	low	a0	-3.425563420e4	K^2
+coefficient	O2	low	a1	4.847000970e2	K
+coefficient	O2	low	a2	1.119010961	1
+coefficient	O2	low	a3	4.293889240e-3	K^-1
+coefficient	O2	low	a4	-6.836300520e-7	K^-2
+coefficient	O2	low	a5	-2.023372700e-9	K^-3
+coefficient	O2	low	a6	1.039040018e-12	K^-4
+coefficient	O2	low	a7	-3.391454870e3	K
+coefficient	O2	low	a8	1.849699470e1	1
+region	O2	high	1000	6000	K	100000	Pa
+coefficient	O2	high	a0	-1.037939022e6	K^2
+coefficient	O2	high	a1	2.344830282e3	K
+coefficient	O2	high	a2	1.819732036	1
+coefficient	O2	high	a3	1.267847582e-3	K^-1
+coefficient	O2	high	a4	-2.188067988e-7	K^-2
+coefficient	O2	high	a5	2.053719572e-11	K^-3
+coefficient	O2	high	a6	-8.193467050e-16	K^-4
+coefficient	O2	high	a7	-1.689010929e4	K
+coefficient	O2	high	a8	1.738716506e1	1
