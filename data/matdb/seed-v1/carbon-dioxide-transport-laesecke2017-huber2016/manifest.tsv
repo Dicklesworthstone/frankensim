@@ -1,0 +1,8 @@
+frankensim.matdb-manifest.v1
+pack_id	carbon-dioxide-transport-laesecke2017-huber2016
+redistribution	permitted	Numerical correlation coefficients and computed values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Laesecke and Muzny (2017), JPCRD46:013107, Eq4/Table2, https://www.osti.gov/servlets/purl/1463125; Huber et al (2016), JPCRD45:013102, Eq3/Table3, https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=918291
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure

@@ -1,0 +1,8 @@
+frankensim.matdb-manifest.v1
+pack_id	water-vapor-transport-iapws2008-2011
+redistribution	permitted	Numerical correlation coefficients and computed values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	IAPWS R12-08 viscosity Eq11/Table1, https://iapws.org/technical-guidance/release/viscosity.download; IAPWS R15-11 conductivity Eq16/Table1, https://iapws.org/technical-guidance/release/ThCond.download
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
