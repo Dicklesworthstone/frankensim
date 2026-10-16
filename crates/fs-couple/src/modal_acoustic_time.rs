@@ -611,6 +611,11 @@ impl ModalAcousticTimeModel {
         self.sample_period_s
     }
 
+    /// Original immutable physical/observer budgets, also enforced by coupled
+    /// owners that restore a complete externally propagated candidate state.
+    #[must_use]
+    pub const fn budget(&self) -> ModalAcousticTimeBudget { self.budget }
+
     /// Initialize every mode at the static equilibrium of one held force.
     ///
     /// This is the causal initial condition for a simulation window that
