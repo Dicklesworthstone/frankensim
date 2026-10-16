@@ -139,13 +139,19 @@ everywhere: this is screening, not a viscous truth source.
   3 x 16 n^2 model, not a measured RSS.
 - `baffled_piston_face_impedance` — mean face `p/v` in an infinite baffle,
   converted by area from the sole `fs_phs::baffled_piston_impedance` owner
-  (Bessel–Struve closed form, acoustic `p/U`). Historical ring algebras
-  from bem, phs and thin_plate survive only in a test oracle. G3
-  `ring_quadratures_converge_to_closed_form` requires decreasing errors
-  on 8/16/32/64 rings, final complex relative error < 1%, and reports
-  observed orders and RMS fit residuals via fs-mms (no order gate for the
-  singular self-cell rule). Native orders remain batch-pending, not measured
-  here. No unbaffled-pipe or nonuniform-face equivalence is claimed.
+  (Bessel–Struve closed form, acoustic `p/U`). The former bem, phs and
+  thin_plate ring copies were algebraically one algorithm; one test-only
+  historical rule remains. G3 `historical_ring_and_overlap_integral_match_piston`
+  records its 8/16 coarse-error reversal, requires decreasing errors on
+  16/32/64 rings and final complex relative error < 0.2%, and reports the
+  late observed order via fs-mms. Equivalent-disc singular near-field
+  replacement allows O(h) error and coarse cancellation; the ladder does
+  not establish an error floor or a smooth-quadrature order. An independent
+  disk-overlap reduction of the Rayleigh integral uses smooth composite
+  Simpson integration on 64/128/256/512 intervals, requires fourth order
+  (3.8–4.2) and final relative error < 1e-10. Both acceptance bands reject
+  explicitly planted 1% errors. Revised native results remain batch-pending.
+  No unbaffled-pipe or nonuniform-face equivalence is claimed.
 - `HelmholtzError` — stable `FS-BEM-HELM-*` refusals: bad parameter,
   too-coarse (< 6 panels/wavelength), dense work cap (8192 panels),
   shape mismatch, singular; optional geometry preparation additionally reports
