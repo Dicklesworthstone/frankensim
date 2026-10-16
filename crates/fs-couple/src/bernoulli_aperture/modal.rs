@@ -146,6 +146,7 @@ impl ModalAperture {
             .map_err(nonlinear)?;
         let model = Self { spec, state, obstacle, contact_storage, samples: 0,
             material_plates: Vec::new(), material_gas: None, viscosity: None };
+        model.admit_linear_clock()?;
         model.validate_state(&model.state)?;
         Ok(model)
     }
@@ -217,6 +218,7 @@ impl ModalAperture {
         drive: ApertureDrive,
         forces: [f64; 2],
     ) -> Result<ModalApertureFrame, AcousticRealizeError> {
+        self.admit_linear_clock()?;
         self.validate_forces(forces)?;
         if self.samples >= self.spec.max_steps || ![drive.upstream_pressure_pa,
             drive.incoming_pressure_pa, drive.body_flow_m3_s].iter().all(|x| x.is_finite()) {

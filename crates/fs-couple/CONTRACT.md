@@ -1,5 +1,21 @@
 # CONTRACT: fs-couple
 
+M4.1-W1 extends `unilateral_contact` with explicit physical span measures [m],
+per-length stiffness, static/kinetic coefficients and a declared friction ramp
+speed (mandatory for nonzero kinetic friction). No 1/n normalization or hidden
+1e-3 m/s scale remains in the adapter; constitutive refusals retain owner/field
+in a typed DContactError. Loss-port Results propagate. `binding::bound_point_obstacle`
+lowers SourcePointContact verbatim and is also used by MaterialContact.
+`BoundNormalStorage` composes the existing point or finite-gap potential with
+the pHS Storage contract, preserving original U/F/dF and source errors in its
+fallible API; the infallible Storage view signals invalid trials as nonfinite
+values for the numerical owner's refusal. Whole finite-gap footprints already
+integrate their areas and are not multiplied by another area weight. Sources
+must have an unloaded zero-approach origin. Point Hunt--Crossley loss is a
+separate port evaluated at actual discrete effort and explicit dt; its envelope
+is checked before projection. No time integration, cancellation framework,
+material data, thermal evolution or interpolant authority is invented.
+
 Multiphysics composition through a versioned port-thermodynamic vocabulary: a
 lossless interface relation, explicit storage/dissipation/source primitives,
 a complete stream-flux bundle, and evidence-bound closed-window physical
@@ -1483,6 +1499,20 @@ clarinet is one filling of those objects.
   steps than a stable fixed under-relaxation.
 
 ## Error model
+
+DEF-05 modal apertures now admit relative tolerances strictly below 1/128.
+Work and flow closure use the actual declared relative ceiling, with no 128x
+post-solve allowance. `ModalApertureFrame` records the work and flow
+`SolveCertificate`s (joules and m^3/s), including the observed residual, scale,
+requested/effective budgets, gamma-n arithmetic floor and the actual scalar
+residual-evaluation count. These explicit budgets never auto-raise below their
+floor; a refusal retains `fs_phs::PhsError` through
+`AcousticRealizeError::AlgebraicSolve`. No state or sample clock is published.
+Work's floor uses `gamma_(4*modes+12)` times the absolute energy/work operands;
+flow uses `gamma_(2*modes+8)` times its absolute flow operands. These are
+conditional arithmetic diagnostics, not bounds on material, flow-model or
+time-discretization error. G0/G4 `modal::refusal_tests` tests the 1/128 boundary
+and a 1% unaccounted external-force work defect through the production gate.
 
 Structured `CoupleError`; no panics. In addition to legacy incompatible kinds,
 errors cover invalid IDs/empty shapes, pointwise or field-measure dimension

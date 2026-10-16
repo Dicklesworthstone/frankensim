@@ -456,6 +456,7 @@ fn exact_zoh(
             dissipated: 0.0,
             newton_iters: 0,
             solver_residual: 0.0,
+            solver_certificate: None,
         });
     }
     let n = split.n;
@@ -569,6 +570,7 @@ fn exact_zoh(
         supplied,
         newton_iters: 0,
         solver_residual: 0.0,
+        solver_certificate: None,
     })
 }
 
@@ -642,6 +644,7 @@ fn gonzalez(
                 delta_h,
                 newton_iters: iterations,
                 solver_residual: norm,
+                solver_certificate: None,
             });
         }
         if iterations == 50 {

@@ -73,10 +73,10 @@ closure of IRP M5.2-W1; native execution remains the remote verification gate.
 - `discrete_gradient` — the PINNED Gonzalez midpoint formula (order
   2): satisfies `dg . (b - a) = H(b) - H(a)` identically.
 - `step` — implicit discrete-gradient step (approximate-Newton with
-  central-difference Jacobian, state-relative tolerance; on
-  stagnation the best iterate is accepted iff its residual sits six
-  orders below both the iterate scale and the initial residual, else
-  a typed `NewtonStalled` refusal). Returns `StepRecord` with the
+  central-difference Jacobian and state-relative target 1e-13). On
+  stagnation the best iterate must pass the same quantitative algebraic
+  admission as the final returned state; there is no 1e-6 fallback.
+  Returns `StepRecord` with the
   ledger: `delta_h`, `dissipated = dt dg^T R dg`, `supplied = dt u^T
   y`, and `solver_residual` (the ACHIEVED residual, disclosed).
   `balance_residual()` restates the update equation for an admitted
@@ -238,6 +238,44 @@ closure of IRP M5.2-W1; native execution remains the remote verification gate.
    Hamiltonian test.
 
 ## Error model
+
+DEF-05 algebraic admission is shared by `step`, `step_descriptor`, prepared
+FD/analytic/dense/condensed stepping and the Kirchhoff split. `SolveCertificate`
+records the site, residual, scale, iterations, stagnant iterations,
+`requested_budget`, `rounding_floor`, `effective_budget` and `floor_raised`.
+The strict requested target remains 1e-13 times the existing step scale;
+Kirchhoff uses its existing 1e-8 target, including its final assessment.
+Residuals at the cap accept; next-up residuals refuse as `NewtonRefused`.
+An explicit `SolveBudget` below the evaluated floor refuses as
+`BudgetBelowRoundingFloor`, retaining both numbers. Prepared declarations use
+`set_solve_budget`; `set_iteration_limit` retains its update-cap semantics.
+The default APIs explicitly record an effective ceiling
+`max(requested_budget, rounding_floor)` and the corresponding `floor_raised`.
+This resolves the bead's contradictory below-floor/default-noise clauses under
+MagentaBadger's 2026-10-16 decision; it is never an implicit relaxed tolerance.
+Dropping the floor from a raised certificate makes it internally inconsistent
+and refuses. Returned Gonzalez records carry `Some(certificate)`; the separate
+linear propagators currently carry `None`, with no Gonzalez-admission claim.
+
+The arithmetic model uses `gamma_k = k*EPSILON/(1-k*EPSILON)`, with
+`k = 4*n+8` for each dense residual row. It bounds the sum of the evaluated
+absolute operands: `|x1|+|x0|+|dt|*(sum((|J|+|R|)*|dg|)+|Gu|+|D|)` for a
+differential row; algebraic rows omit the state terms and use factor one.
+When the Gonzalez quotient is active under its existing cancellation guard,
+`gamma_(4*n+8)*(|H0|+|H1|+sum(|dg_i*dx_i|))` is additionally propagated through
+`|dx_i|/sum(dx^2)` and the absolute flow operator. These operands and operation
+counts compute the floor; neither an observed residual nor a fitted noise
+constant defines it. Kirchhoff uses `gamma_3*(|y_a|+|y_b|)` for its subtraction.
+This conditional floating-point envelope assumes conforming, read-only storage
+and dissipation callbacks. It does not bound callback evaluation error,
+constitutive error, finite-difference truncation, conditioning of a trajectory,
+or discretization error, and it mints no physical validation authority.
+
+G0/G4 `tests/newton_refusal.rs` covers all four sites, a consistent staircase
+Hamiltonian, cap/next-up, explicit below-floor, exact update caps, the real reed
+lamella's visible default floor, a dropped-floor mutant, and unchanged caller
+buffers after refusal. The native regression and music-baseline lanes remain
+required before any closure or golden change.
 
 Typed `PhsError` (symmetry class, PSD, dimensions, Newton stall, port
 pairing); no silent degradation.
