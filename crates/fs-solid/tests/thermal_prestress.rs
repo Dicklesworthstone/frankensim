@@ -137,5 +137,50 @@ fn all_fixed_and_cancelled_requests_do_not_publish_a_pencil() {
     });
 }
 
+
+#[test]
+fn thermal_and_dead_nodal_load_share_one_equilibrium_and_stress_identity() {
+    with_cx(|cx| {
+        let mat=material(); let thermal=strain(0.01); let p=problem(&mat,&TETS,&FIXED);
+        let field=TetThermalStrainField::Uniform(&thermal);
+        let forces=[(4usize,0.25)];
+        let u=p.solve_thermal_displacement_with_nodal_forces(
+            field,&forces,TetStaticSolveConfig::default(),cx).unwrap();
+        assert!(u.displacement_m()[1][1] > 0.0);
+        let stress=p.recover_thermal_stress_with_nodal_forces(
+            &u,field,&forces,ContentHash([1;32]),0.1,cx).unwrap();
+        close(stress.nodal_internal_force_n()[1][1],0.25);
+        assert!(matches!(
+            p.recover_thermal_stress_with_nodal_forces(
+                &u,field,&[(4,0.5)],ContentHash([1;32]),0.1,cx),
+            Err(TetElasticError::StressRecoveryInputMismatch)
+        ));
+    });
+}
+
+#[test]
+fn fixed_dof_load_preserves_displacement_and_malformed_loads_refuse() {
+    with_cx(|cx| {
+        let mat=material(); let thermal=strain(0.01); let p=problem(&mat,&TETS,&FIXED);
+        let field=TetThermalStrainField::Uniform(&thermal);
+        let base=p.solve_thermal_displacement(field,TetStaticSolveConfig::default(),cx).unwrap();
+        let loaded=p.solve_thermal_displacement_with_nodal_forces(
+            field,&[(0,0.5)],TetStaticSolveConfig::default(),cx).unwrap();
+        assert_eq!(base.displacement_m(),loaded.displacement_m());
+        for bad in [&[(4usize,1.0),(4,2.0)][..],&[(5usize,1.0),(4,2.0)][..]] {
+            assert!(matches!(
+                p.solve_thermal_displacement_with_nodal_forces(
+                    field,bad,TetStaticSolveConfig::default(),cx),
+                Err(TetElasticError::InvalidNodalForce{..})
+            ));
+        }
+        assert!(matches!(
+            p.solve_thermal_displacement_with_nodal_forces(
+                field,&[(99,f64::NAN)],TetStaticSolveConfig::default(),cx),
+            Err(TetElasticError::InvalidNodalForce{..})
+        ));
+    });
+}
+
 #[path = "thermal_prestress/column.rs"]
 mod column;

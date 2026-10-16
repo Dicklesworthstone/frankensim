@@ -1667,6 +1667,15 @@ pub enum TetElasticError {
         /// Local displacement DOF when force evaluation failed, if applicable.
         local_dof: Option<usize>,
     },
+    /// A caller-supplied dead nodal force was malformed.
+    InvalidNodalForce {
+        /// Full node-major xyz displacement DOF.
+        dof: usize,
+        /// Total full displacement DOFs.
+        full_dofs: usize,
+        /// Failed load invariant.
+        what: &'static str,
+    },
     /// Static solve controls were malformed.
     InvalidStaticSolveConfig {
         /// Failed invariant.
@@ -1779,6 +1788,10 @@ impl core::fmt::Display for TetElasticError {
             Self::StressRecoveryInputMismatch => write!(
                 f,
                 "FS-SOLID-TET-STRESS-INPUT: solution belongs to different physical inputs"
+            ),
+            Self::InvalidNodalForce { dof, full_dofs, what } => write!(
+                f,
+                "FS-SOLID-TET-NODAL-FORCE: dof {dof} of {full_dofs}: {what}"
             ),
             Self::NonFiniteThermalLoad { element, local_dof } => write!(
                 f,
@@ -2044,6 +2057,93 @@ impl TetLinearElasticProblem<'_> {
         config: TetStaticSolveConfig,
         cx: &Cx<'_>,
     ) -> Result<TetThermalDisplacementSolution, TetElasticError> {
+        let load = self.assemble_thermal_load(thermal_strains, cx)?;
+        self.solve_thermal_displacement_from_load(load, config, cx)
+    }
+
+    /// Solve the same thermal equilibrium with additional dead nodal forces.
+    ///
+    /// Forces are full node-major xyz DOFs paired with newtons and must be
+    /// strictly increasing and unique. Fixed-DOF forces remain support loads;
+    /// they do not create artificial displacement. Thermal eigenstrain and
+    /// mechanical loading share one stiffness, one solve and one identity.
+    pub fn solve_thermal_displacement_with_nodal_forces(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        config: TetStaticSolveConfig,
+        cx: &Cx<'_>,
+    ) -> Result<TetThermalDisplacementSolution, TetElasticError> {
+        let load = self.assemble_thermal_load_with_nodal_forces(
+            thermal_strains, nodal_forces_n, cx,
+        )?;
+        self.solve_thermal_displacement_from_load(load, config, cx)
+    }
+
+    /// Assemble thermal eigenstrain and explicit dead nodal force into one
+    /// canonical load. No material, geometry or support state is changed.
+    pub fn assemble_thermal_load_with_nodal_forces(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<TetThermalLoad, TetElasticError> {
+        let mut load = self.assemble_thermal_load(thermal_strains, cx)?;
+        let full_dofs = self.nodes_m.len().checked_mul(3)
+            .ok_or(TetElasticError::SizeOverflow)?;
+        let mut identity = DomainHasher::new(
+            "org.frankensim.fs-solid.tet-thermal-plus-nodal-load.v1",
+        );
+        identity.update(load.identity.as_bytes());
+        let mut previous = None;
+        for (index, &(dof, force_n)) in nodal_forces_n.iter().enumerate() {
+            if index % 256 == 0 {
+                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            }
+            if dof >= full_dofs {
+                return Err(TetElasticError::InvalidNodalForce {
+                    dof, full_dofs, what: "force DOF is outside the mesh",
+                });
+            }
+            if previous.is_some_and(|last| dof <= last) {
+                return Err(TetElasticError::InvalidNodalForce {
+                    dof, full_dofs, what: "force DOFs must be strictly increasing and unique",
+                });
+            }
+            if !force_n.is_finite() {
+                return Err(TetElasticError::InvalidNodalForce {
+                    dof, full_dofs, what: "force must be finite",
+                });
+            }
+            previous = Some(dof);
+            load.full_equivalent_force_n[dof] += force_n;
+            if !load.full_equivalent_force_n[dof].is_finite() {
+                return Err(TetElasticError::InvalidNodalForce {
+                    dof, full_dofs, what: "combined full force is not representable",
+                });
+            }
+            if let Ok(reduced) = load.free_dofs.binary_search(&dof) {
+                load.reduced_force_n[reduced] += force_n;
+                if !load.reduced_force_n[reduced].is_finite() {
+                    return Err(TetElasticError::InvalidNodalForce {
+                        dof, full_dofs, what: "combined reduced force is not representable",
+                    });
+                }
+            }
+            hash_usize(&mut identity, dof)?;
+            identity.update(&force_n.to_bits().to_le_bytes());
+        }
+        load.identity = identity.finalize();
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        Ok(load)
+    }
+
+    fn solve_thermal_displacement_from_load(
+        &self,
+        load: TetThermalLoad,
+        config: TetStaticSolveConfig,
+        cx: &Cx<'_>,
+    ) -> Result<TetThermalDisplacementSolution, TetElasticError> {
         if !(config.relative_residual_tolerance.is_finite()
             && config.relative_residual_tolerance > 0.0
             && config.relative_residual_tolerance < 1.0)
@@ -2057,7 +2157,6 @@ impl TetLinearElasticProblem<'_> {
                 what: "maximum_iterations must be positive",
             });
         }
-        let load = self.assemble_thermal_load(thermal_strains, cx)?;
         let (reduced_displacement, iterations, true_relative_residual) =
             if load.free_dofs.is_empty() {
                 // Every displacement is prescribed zero. The empty reduced system
@@ -2167,6 +2266,42 @@ impl TetLinearElasticProblem<'_> {
         maximum_absolute_mandel_strain: f64,
         cx: &Cx<'_>,
     ) -> Result<TetThermalStressReport, TetElasticError> {
+        let load = self.assemble_thermal_load(thermal_strains, cx)?;
+        self.recover_thermal_stress_from_load(
+            solution, thermal_strains, load, mesh_frame,
+            maximum_absolute_mandel_strain, cx,
+        )
+    }
+
+    /// Recover stress from the same accepted thermal plus nodal-load state.
+    /// Different force bits fail the retained physical input identity check.
+    pub fn recover_thermal_stress_with_nodal_forces(
+        &self,
+        solution: &TetThermalDisplacementSolution,
+        thermal_strains: TetThermalStrainField<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TetThermalStressReport, TetElasticError> {
+        let load = self.assemble_thermal_load_with_nodal_forces(
+            thermal_strains, nodal_forces_n, cx,
+        )?;
+        self.recover_thermal_stress_from_load(
+            solution, thermal_strains, load, mesh_frame,
+            maximum_absolute_mandel_strain, cx,
+        )
+    }
+
+    fn recover_thermal_stress_from_load(
+        &self,
+        solution: &TetThermalDisplacementSolution,
+        thermal_strains: TetThermalStrainField<'_>,
+        load: TetThermalLoad,
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TetThermalStressReport, TetElasticError> {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
         if mesh_frame == ContentHash([0; 32])
             || !(maximum_absolute_mandel_strain.is_finite() && maximum_absolute_mandel_strain > 0.0)
@@ -2175,7 +2310,6 @@ impl TetLinearElasticProblem<'_> {
                 what: "mesh frame must be nonzero and strain ceiling must be finite and positive",
             });
         }
-        let load = self.assemble_thermal_load(thermal_strains, cx)?;
         let inputs = self.thermal_response_input_identity(load.identity, cx)?;
         if inputs != solution.response_input_identity
             || solution.displacement_m.len() != self.nodes_m.len()
