@@ -606,11 +606,15 @@ mod wind_articulation_tests {
     /// G3: before/after hold-sweep peaks. For this uniform cylinder the
     /// old interpolation selected WideTube over the WHOLE declared band,
     /// so that surviving benchmark arm is the exact old-law comparator.
-    /// First native measurement must be retained before freezing the
-    /// requested measured-shift-times-five regression band (central lane).
+    /// First uncaptured native measurement: ts1, aeb0c36ee98b, release,
+    /// 2026-10-16: max |shift|=0.013889075618217473 cents. The declared
+    /// regression bound is five times that measured shift. Receipt retained
+    /// in brightowl-pexfp76/hold-first-native-measurement.log (bead .76).
     #[test]
     fn hold_image_bessel_shift_recorded() {
         use fs_duct::{Segment, impedance_peaks, segment_wave};
+        const FIRST_NATIVE_MAX_CENTS: f64 = 1.3889075618217473e-2;
+        let tolerance = 5.0 * FIRST_NATIVE_MAX_CENTS;
         let start = std::time::Instant::now();
         let gas = air20();
         let duct = Duct {
@@ -651,9 +655,11 @@ mod wind_articulation_tests {
             let cents = 1200.0 * fs_math::det::ln(after / before) / core::f64::consts::LN_2;
             assert!(cents.is_finite());
             max_abs_cents = max_abs_cents.max(cents.abs());
-            println!("{{\"case\":\"hold_image_bessel_shift_recorded\",\"inputs\":\"authored uniform-cylinder hold fixture, old rv>=10 branch=WideTube\",\"rung\":{index},\"axis\":\"peak\",\"observed\":{cents:e},\"old_hz\":{},\"new_hz\":{},\"oracle\":\"historical wide branch\",\"tol\":\"finite measurement; freeze 5x band after first native run\",\"verdict\":\"pass\",\"elapsed_ms\":{}}}", before/core::f64::consts::TAU, after/core::f64::consts::TAU, start.elapsed().as_millis());
+            println!("{{\"case\":\"hold_image_bessel_shift_recorded\",\"inputs\":\"authored uniform-cylinder hold fixture, old rv>=10 branch=WideTube\",\"rung\":{index},\"axis\":\"peak\",\"observed\":{cents:e},\"old_hz\":{},\"new_hz\":{},\"oracle\":\"historical wide branch\",\"tol\":{tolerance:e},\"verdict\":\"pass\",\"elapsed_ms\":{}}}", before/core::f64::consts::TAU, after/core::f64::consts::TAU, start.elapsed().as_millis());
         }
-        println!("{{\"case\":\"hold-image-max-absolute-cents\",\"inputs\":\"authored uniform-cylinder hold fixture\",\"observed\":{max_abs_cents:e},\"oracle\":\"historical wide branch\",\"tol\":\"finite measurement; freeze 5x band after first native run\",\"verdict\":\"pass\",\"elapsed_ms\":{}}}", start.elapsed().as_millis());
+        assert!(max_abs_cents > 0.0 && max_abs_cents < tolerance,
+            "hold sweep shifted {max_abs_cents:e} cents; measured band {tolerance:e}");
+        println!("{{\"case\":\"hold-image-max-absolute-cents\",\"inputs\":\"authored uniform-cylinder hold fixture\",\"observed\":{max_abs_cents:e},\"oracle\":\"historical wide branch\",\"tol\":{tolerance:e},\"verdict\":\"pass\",\"elapsed_ms\":{}}}", start.elapsed().as_millis());
     }
 
     pub(crate) struct Loop {
