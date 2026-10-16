@@ -141,6 +141,14 @@ fn exporting_an_instrument_changes_nothing_and_exports_a_spd_airy_inverse() {
     assert!(a[3] > 0.0 && b[nc / 2] > 0.0, "diagonal of A^-1 not positive");
     let rel = (a[nc / 2] - b[3]).abs() / a[nc / 2].abs().max(b[3].abs());
     assert!(rel < 1e-9, "A^-1 not symmetric: {rel:e}");
+    // positive definite along a few rough vectors too (x' A^-1 x > 0)
+    for seed in 1..4u64 {
+        let x: Vec<f64> = (0..nc as u64).map(|i| (((i + 1) * 2_654_435_761 * seed) % 1000) as f64 / 500.0 - 1.0).collect();
+        let mut y = x.clone();
+        assert!(shell.airy_solve(&mut y));
+        let q: f64 = x.iter().zip(&y).map(|(a, b)| a * b).sum();
+        assert!(q > 0.0, "x' A^-1 x = {q:e} for seed {seed}");
+    }
 }
 
 /// The auxiliary variable must keep tracking sqrt(2V): a shallow shell carries its curvature

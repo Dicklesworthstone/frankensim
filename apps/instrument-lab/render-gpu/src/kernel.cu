@@ -40,7 +40,13 @@ __device__ __forceinline__ void gsync(u32* bar, u32 nb) {
     u32 g = *gen;
     __threadfence();
     if (atomicAdd(bar, 1u) == nb - 1) { atomicExch(bar, 0u); __threadfence(); atomicAdd(bar + 32, 1u); }
-    else { while (*gen == g) { __nanosleep(SPIN_NS); } }
+    else {
+      while (*gen == g) {
+#if __CUDA_ARCH__ >= 700
+        __nanosleep(SPIN_NS);
+#endif
+      }
+    }
     __threadfence();
   }
   __syncthreads();

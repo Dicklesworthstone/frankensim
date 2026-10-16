@@ -611,12 +611,21 @@ impl Plan {
         if img.bodies.len() != self.nb || img.contacts.len() != self.ct_gap.len() || img.mics.len() != self.nm {
             return Err("a batch member is a different instrument (bodies, contacts or microphones differ)".into());
         }
-        // the batch shares the contact geometry: every contact must touch the same nodes with the same gap
+        // the batch shares every operator: the same bodies, and every contact touching the same nodes with the
+        // same weights, gap and law
+        if img.bodies.iter().zip(&self.body_off).enumerate().any(|(b, (bi, &o))| o + bi.n != self.body_off.get(b + 1).copied().unwrap_or(self.nt)) {
+            return Err("a batch member's bodies differ from the first member's".into());
+        }
         let g = |b: usize, i: usize| self.body_off[b] + i;
         for (j, c) in img.contacts.iter().enumerate() {
             let nodes: Vec<i32> = c.a.iter().chain(&c.b).map(|&(b, i, _)| g(b, i) as i32).collect();
+            let weights: Vec<u64> = c.a.iter().chain(&c.b).map(|&(_, _, w)| w.to_bits()).collect();
             let (a0, end) = (self.ct_a0[j] as usize, self.ct_end[j] as usize);
-            if nodes != self.ct_node[a0..end] || c.gap.to_bits() != self.ct_gap[j].to_bits() {
+            let Law::Power { k: kk, alpha, mu } = c.law;
+            if nodes != self.ct_node[a0..end]
+                || weights.iter().ne(self.ct_w[a0..end].iter().map(|w| w.to_bits()).collect::<Vec<_>>().iter())
+                || [c.gap, kk, alpha, mu].map(f64::to_bits) != [self.ct_gap[j], self.ct_kk[j], self.ct_alpha[j], self.ct_mu[j]].map(f64::to_bits)
+            {
                 return Err(format!("a batch member's contact {j} differs from the first member's"));
             }
         }
