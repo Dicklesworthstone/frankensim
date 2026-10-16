@@ -835,17 +835,20 @@ mod wind_articulation_tests {
             let f_after = dominant_hz(&signal[44 * len..52 * len]);
             (f_before, f_after)
         };
-        // MEASURED (not the textbook sketch): with THIS inertive vent
-        // (1.8 mm hole, 6 mm chimney — a shunt inertance, not a
-        // pressure release, so the classic L/3 node rule inverts), the
-        // register flip to the twelfth-class regime happens at 0.70L;
-        // the 0.30L vent leaves the lock in the low regime. Both landed
-        // locks are cross-checked against the TMM authority's peaks of
-        // their own vented geometry — the lock follows the impedance
-        // peaks, emergent.
-        let (f0_good, f1_good) = run(0.70);
+        // MEASURED at d54edeb33 (ts1, release) after the Bessel-Zc and
+        // flanged-mouth fixes. A sweep of this 1.8 mm / 6 mm vent flips to
+        // the twelfth (x3.07..3.31) for stations 0.12..0.24 L. From 0.30 L
+        // on, the lock stays on the vented first peak (x1.61 at 0.30, x1.14
+        // at 0.70). The TMM authority agrees: only near-reed vents pull the
+        // vented first peak (~300 Hz) below the second. That is the classic
+        // register-hole rule near the third mode's pressure node. The old
+        // "inverted rule at 0.70 L" was measured on the unconjugated Zc.
+        // Both landed locks are cross-checked against the TMM authority's
+        // peaks of their own vented geometry: the lock follows the
+        // impedance peaks, emergent.
+        let (f0_good, f1_good) = run(0.18);
         let ratio_good = f1_good / f0_good;
-        let (f0_bad, f1_bad) = run(0.30);
+        let (f0_bad, f1_bad) = run(0.70);
         let ratio_bad = f1_bad / f0_bad;
         let tmm_peak_near = |vent_frac: f64, f: f64| -> f64 {
             use fs_duct::{impedance_peaks, impedance_sweep};
@@ -868,8 +871,8 @@ mod wind_articulation_tests {
                 .expect("peaks")
         };
         let cents = |a: f64, b: f64| (1200.0 * (b / a).log2()).abs();
-        let good_peak = tmm_peak_near(0.70, f1_good);
-        let bad_peak = tmm_peak_near(0.30, f1_bad);
+        let good_peak = tmm_peak_near(0.18, f1_good);
+        let bad_peak = tmm_peak_near(0.70, f1_bad);
         let good_on_peak = cents(good_peak, f1_good);
         let bad_on_peak = cents(bad_peak, f1_bad);
         let pass = ratio_good > 2.8
@@ -881,9 +884,9 @@ mod wind_articulation_tests {
             "wa-002-register-vent",
             pass,
             &format!(
-                "vent at 0.70L: {f0_good:.1} -> {f1_good:.1} Hz (x{ratio_good:.2}, the \
+                "vent at 0.18L: {f0_good:.1} -> {f1_good:.1} Hz (x{ratio_good:.2}, the \
                  twelfth-class flip; {good_on_peak:.0} cents from the TMM peak \
-                 {good_peak:.1}); falsifier at 0.30L: {f0_bad:.1} -> {f1_bad:.1} \
+                 {good_peak:.1}); falsifier at 0.70L: {f0_bad:.1} -> {f1_bad:.1} \
                  (x{ratio_bad:.2}, stays low; {bad_on_peak:.0} cents from its own peak \
                  {bad_peak:.1}) — position matters AND the lock follows the authority"
             ),
