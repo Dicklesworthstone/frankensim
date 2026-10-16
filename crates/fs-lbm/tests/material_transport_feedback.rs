@@ -64,7 +64,7 @@ fn actual_local_temperatures_and_concrete_source_payloads_survive_each_step() {
         }).unwrap();
         for s in &r.applied { assert_eq!(s.temperature_k,old[s.cell]);assert_eq!(s.material.query_k,s.temperature_k);assert_eq!(s.material.condition,17); }
         for s in &r.endpoint { assert_eq!(s.temperature_k,a.temperature_si(a.lattice.gpop[s.cell].iter().sum()).unwrap()); }
-        assert!(r.applied[0].transport.conductivity_w_m_k()>r.applied[11].transport.conductivity_w_m_k());
+        assert!(r.applied[0].transport.thermal_conductivity_w_m_k()>r.applied[11].transport.thermal_conductivity_w_m_k());
         assert_eq!(a.lattice.grid.tau,vec![0.8;16]); // step-local coefficients, retained history
         control.step_with_power_density(&p,&force,limits(16)).unwrap();
     }
