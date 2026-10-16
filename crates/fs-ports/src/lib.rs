@@ -7,6 +7,9 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod adoption;
+pub use adoption::{JunctionLaw, JunctionSchema, MAX_JUNCTION_PORTS, PortedModule};
+
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -5365,6 +5368,11 @@ fn reject_relation_port_alias(id: &StableId, port: &PortSchema) -> Result<(), Co
 /// A structured coupling failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoupleError {
+    /// An N-port relation has an invalid size, sign vector or Dirac matrix.
+    InvalidJunction {
+        /// First malformed field; no tolerance is applied to structural laws.
+        field: &'static str,
+    },
     /// The ports are not power-conjugate (mismatched physical types).
     IncompatiblePorts {
         /// The first port's kind.

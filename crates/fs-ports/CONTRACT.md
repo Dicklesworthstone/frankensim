@@ -14,3 +14,22 @@ The existing fs-couple/tests/couple.rs battery continues to exercise this owner
 through its public reexports. fs-couple/tests/port_identity.rs pins type and
 error identity across both entry points. FEEC's terminal-relative and integral
 batteries consume the direct fs-ports dependency.
+
+## Port-schema adoption contract
+
+`PortedModule` binds a stable port order to the pre-integrated transfers of the
+last accepted step, positive into the module. Rejection preserves the preceding
+record; before the first accepted step it is `None`. Logical ticks never replace
+physical-time integration. Schema admission alone grants no energy closure.
+
+`JunctionSchema` describes 2..=256 conjugate endpoints using common effort,
+common flow, or an exactly skew finite Dirac matrix. Sign pullbacks apply to
+both power factors. Pairwise metadata admission is the existing
+`ConservativeJunction::new` contract, including orientation, clocks and roles.
+The ordinary two-port common-effort instance retains its exact acceptance and
+errors. Mixed domains require explicit power-preserving coordinate charts;
+dimension relabelling is not a chart. No new solver or wire version is added.
+
+G0 unit tests in `adoption::tests` cover N=2/3/64, cap and cap+1, exact two-port
+admission parity, and non-skew/sign/identity refusal. They establish structural
+power cancellation, not whole-system passivity or component audit closure.
