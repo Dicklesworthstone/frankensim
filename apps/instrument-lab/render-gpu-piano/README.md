@@ -37,7 +37,7 @@ The tool is its own cargo workspace. Nothing in the main workspace builds it or 
 - Spatial viscous dampers (`--dampers estimated`, pad files, the preset), including the pedal and lifted keys.
 - One substep per sample.
 
-Felt dampers, point-drag dampers, exterior radiation, the cavity, string stretching and hammer footprints are not modeled; the tool says so and renders on the CPU. Frames whose instrument is observed between steps (`--bridge-trace-csv`) also render on the CPU. With the GPU path the CPU's own steps carry the dampers on reduced coordinates, as `--fast-dampers` does (the same flows; rounding differs at about 1e-16). If the GPU fails during a render, the remaining stretches run on the CPU phase emulator.
+Felt dampers, point-drag dampers, exterior radiation, the cavity, string stretching and hammer footprints are not modeled; the tool says so and renders on the CPU. The CPU also renders without a physical microphone (`--diagnostic-volume`) and when the instrument is observed between steps (`--bridge-trace-csv`). With the GPU path the CPU's own steps carry the dampers on reduced coordinates, as `--fast-dampers` does (the same flows; rounding differs at about 1e-16). If the GPU fails during a render, the remaining stretches run on the CPU phase emulator.
 
 ## How it works
 
@@ -91,3 +91,13 @@ The `cores` figures were taken on a busy host.
 - Step by step (`FS_PIANO_GPU_CHECK=64`, 35,000 steps): state 1.7e-13 relative, board trace 7e-13, contact positions 7e-17 m, losses 2e-11.
 
 The rest of the GPU run's wall time is the CPU's contact steps (about 1.1 ms each), the hammer replay and the microphone.
+
+## Measured (RTX 4090, CUDA, `double`)
+
+The 4 s excerpt on trj's RTX 4090 matches the CPU render made on the M5 Ultra:
+
+- 1.2e-14 relative RMS (max 3.6e-12 Pa at a 3.8 Pa peak) and 0.0000 dB in every octave;
+- the same stored energy to 9 digits; ledger closure 2e-14 J.
+
+Speed was not measurable there. The host ran at load 160, so its CPU work took about ten times longer than usual: damper rebuilds took 49 s instead of under 0.3 s. The GPU stepped at 325 µs per step. Measuring on a quiet host is bead frankensim-y3yoo.
+
