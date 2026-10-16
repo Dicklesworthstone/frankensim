@@ -5,6 +5,9 @@
 //! impulse solver are reused. Each gas keeps its own composition, source cards,
 //! caloric state, transport, pressure and acoustic properties.
 
+/// Reciprocal circuit force/back-emf on the original shared mechanical state.
+pub mod electrical;
+
 use super::{
     ClosedGasParcel, GasEnergySolve, GasHeatVolumeCandidate, GasHeatVolumeStep,
     GasPiston, PistonError, PistonInput, PistonSolve, ResolvedThermochemicalGasState,
