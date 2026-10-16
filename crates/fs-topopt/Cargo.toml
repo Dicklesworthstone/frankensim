@@ -178,3 +178,7 @@ required-features = ["newton-design"]
 [[example]]
 name = "robust_simp"
 required-features = ["newton-design"]
+
+[[test]]
+name = "load_case_newton"
+required-features = ["newton-design"]

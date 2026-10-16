@@ -96,7 +96,7 @@ impl std::fmt::Debug for SimpNewtonModel<'_> {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum Output { Compliance, Volume }
+enum Output { Compliance, Volume, LoadCase(usize) }
 
 /// A named scalar view. Cloning shares, and cannot reset, its owner's state.
 #[derive(Debug, Clone)]
@@ -222,6 +222,17 @@ impl<'a> SimpNewtonModel<'a> {
     pub fn volume(&self, study: impl Into<String>) -> Result<SimpNewtonGoal<'_, 'a>, PhysicsError> {
         self.view(study.into(), Output::Volume)
     }
+    /// Expose one independently solved structural load case as its own scalar
+    /// compliance physics view. The original aggregate weight is not applied.
+    /// All views share this model's primal cache and lifetime work account.
+    pub fn load_case_compliance(&self, index: usize, study: impl Into<String>)
+        -> Result<SimpNewtonGoal<'_, 'a>, PhysicsError>
+    {
+        if index >= self.loads.len() {
+            return Err(PhysicsError::InvalidInput("load-case index out of range"));
+        }
+        self.view(study.into(), Output::LoadCase(index))
+    }
     fn view(&self, study: String, output: Output) -> Result<SimpNewtonGoal<'_, 'a>, PhysicsError> {
         if study.is_empty() { return Err(PhysicsError::InvalidInput("nonempty study name required")); }
         Ok(SimpNewtonGoal { model: self, study, output })
@@ -322,14 +333,18 @@ impl PhysicsModel for SimpNewtonGoal<'_, '_> {
     fn signature(&self) -> PhysicsSignature<'_> {
         PhysicsSignature { study: &self.study, parameter_count: self.model.elasticity.cells(),
             parameter_dims: Dims::NONE, residual_dims: match self.output {
-                Output::Compliance => COMPLIANCE_DIMS, Output::Volume => Dims::NONE,
+                Output::Compliance | Output::LoadCase(_) => COMPLIANCE_DIMS, Output::Volume => Dims::NONE,
             } }
     }
     fn value_gradient(&self, point: &[f64], cx: Option<&Cx<'_>>) -> Result<PhysicsSample, PhysicsError> {
-        self.model.at_point(point, cx, |c| Ok(match self.output {
-            Output::Compliance => PhysicsSample { value: c.goal.value(), gradient: c.goal.gradient().to_vec() },
-            Output::Volume => c.volume.clone(),
-        }))
+        self.model.at_point(point, cx, |c| match self.output {
+            Output::Compliance => Ok(PhysicsSample { value: c.goal.value(), gradient: c.goal.gradient().to_vec() }),
+            Output::Volume => Ok(c.volume.clone()),
+            Output::LoadCase(index) => self.model.controlled(1, cx, |control| {
+                let (value, gradient) = c.goal.load_case_value_gradient(index, control)?;
+                Ok(PhysicsSample { value, gradient })
+            }),
+        })
     }
     fn second_order(&self) -> Option<&dyn PhysicsHessian> { Some(self) }
 }
@@ -356,6 +371,8 @@ impl PhysicsHessian for SimpNewtonGoal<'_, '_> {
                     self.model.controlled(2, cx, |control|
                         c.goal.volume_hessian_vector_product(&self.model.volumes, direction, control))
                 }
+                Output::LoadCase(index) => self.model.controlled(3, cx, |control|
+                    c.goal.load_case_hessian_vector_product(index, direction, control)),
             }
         })
     }

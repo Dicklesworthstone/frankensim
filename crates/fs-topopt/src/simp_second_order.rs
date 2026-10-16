@@ -166,6 +166,55 @@ impl<'a> SimpComplianceGoal<'a> {
     pub fn projected_densities(&self) -> &[f64] { &self.projected }
     /// Projection used by the volume constraint (dilated for a robust goal).
     pub fn volume_projected_densities(&self) -> &[f64] { &self.volume_projected }
+    /// Number of independent structural load cases retained by the native goal.
+    pub fn load_case_count(&self) -> usize { self.physical.load_case_count() }
+
+    /// Raw-density value/gradient for one original load case. This reuses the
+    /// retained primal displacement and spends only the transpose filter needed
+    /// to pull that case's modulus gradient back to raw density coordinates.
+    pub fn load_case_value_gradient(&self, index: usize, control: &mut SolveControl<'_>)
+        -> Result<(f64, Vec<f64>), ComplianceError>
+    {
+        let value = self.physical.load_case_value(index)?;
+        let modulus_gradient = self.physical.load_case_gradient(index, control)?;
+        let mut local = Vec::with_capacity(self.first.len());
+        for (element, (&chain, &gradient)) in self.first.iter().zip(&modulus_gradient).enumerate() {
+            if element % 256 == 0 { control.checkpoint("simp-load-case-gradient")?; }
+            local.push(finite(chain * gradient, "SIMP load-case gradient")?);
+        }
+        Ok((value, self.filter.try_apply_transpose(&local, control)?))
+    }
+
+    /// Complete raw-density Hessian action for one original load case:
+    /// F^T[m' H_case(m' Fv) + m'' Fv g_case]. One nonzero action spends one
+    /// forward filter, one physical tangent solve, and one transpose filter.
+    pub fn load_case_hessian_vector_product(&self, index: usize, direction: &[f64],
+        control: &mut SolveControl<'_>) -> Result<Vec<f64>, ComplianceError>
+    {
+        self.direction(direction, control)?;
+        if direction.iter().all(|&value| value == 0.0) {
+            // Still validate the case index; zero work must not turn a bad API
+            // request into an apparently valid product.
+            self.physical.load_case_value(index)?;
+            return Ok(vec![0.0; direction.len()]);
+        }
+        let filtered = self.filter.try_apply(direction, control)?;
+        let mut tangent = Vec::with_capacity(direction.len());
+        for (element, &value) in filtered.iter().enumerate() {
+            if element % 256 == 0 { control.checkpoint("simp-load-case-tangent")?; }
+            tangent.push(finite(self.first[element] * value, "SIMP load-case modulus tangent")?);
+        }
+        let physical = self.physical.load_case_hessian_vector_product(index, &tangent, control)?;
+        let modulus_gradient = self.physical.load_case_gradient(index, control)?;
+        let mut local = Vec::with_capacity(direction.len());
+        for element in 0..direction.len() {
+            if element % 256 == 0 { control.checkpoint("simp-load-case-hessian-pullback")?; }
+            local.push(finite(self.first[element] * physical[element]
+                + self.second[element] * filtered[element] * modulus_gradient[element],
+                "SIMP load-case Hessian chain")?);
+        }
+        Ok(self.filter.try_apply_transpose(&local, control)?)
+    }
 
     fn direction(&self, direction: &[f64], control: &mut SolveControl<'_>) -> Result<(), ComplianceError> {
         control.checkpoint("simp-direction")?;

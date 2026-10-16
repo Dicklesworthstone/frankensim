@@ -210,6 +210,57 @@ impl<'a> ComplianceGoal<'a> {
     pub fn case_compliances(&self) -> &[f64] { &self.case_compliances }
     pub fn primal_relative_residuals(&self) -> &[f64] { &self.primal_residuals }
 
+    /// Number of independently solved dead-load cases retained at this point.
+    pub fn load_case_count(&self) -> usize { self.displacements.len() }
+
+    /// Unweighted compliance of one original load case. The aggregate load
+    /// weight is deliberately excluded so callers can impose independent
+    /// response limits without introducing cross-load terms.
+    pub fn load_case_value(&self, index: usize) -> Result<f64, ComplianceError> {
+        self.case_compliances.get(index).copied()
+            .ok_or(ComplianceError::InvalidInput("load-case index out of range"))
+    }
+
+    /// Exact modulus-coordinate gradient of one independently solved load case.
+    /// No additional linear solve is required; only element contractions run.
+    pub fn load_case_gradient(&self, index: usize, control: &mut SolveControl<'_>)
+        -> Result<Vec<f64>, ComplianceError>
+    {
+        let u = self.displacements.get(index)
+            .ok_or(ComplianceError::InvalidInput("load-case index out of range"))?;
+        let energy = self.bilinear(u, u, control)?;
+        energy.into_iter().map(|value| finite(-value, "load-case compliance gradient")).collect()
+    }
+
+    /// Exact modulus-coordinate Hessian action for one original load case.
+    /// This spends one tangent solve for a nonzero direction, independent of
+    /// the aggregate objective weight assigned to that case.
+    pub fn load_case_hessian_vector_product(&self, index: usize, direction: &[f64],
+        control: &mut SolveControl<'_>) -> Result<Vec<f64>, ComplianceError>
+    {
+        control.checkpoint("load-case-compliance-hessian")?;
+        if direction.len() != self.moduli.len() {
+            return Err(ComplianceError::InvalidInput("Hessian direction shape mismatch"));
+        }
+        for (element, &value) in direction.iter().enumerate() {
+            if element % 256 == 0 { control.checkpoint("load-case-compliance-hessian")?; }
+            finite(value, "Hessian direction")?;
+        }
+        let u = self.displacements.get(index)
+            .ok_or(ComplianceError::InvalidInput("load-case index out of range"))?;
+        if direction.iter().all(|&value| value == 0.0) {
+            return Ok(vec![0.0; direction.len()]);
+        }
+        let derivative = WeightedOp { elasticity: self.elasticity, weights: direction, identity: false };
+        let mut rhs = vec![0.0; self.elasticity.n];
+        derivative.apply(u, &mut rhs);
+        for value in &mut rhs { *value = -*value; }
+        let (du, _) = self.solve(&rhs, control, "load-case-compliance-tangent")?;
+        self.bilinear(&du, u, control)?.into_iter()
+            .map(|cross| finite(-2.0 * cross, "load-case compliance Hessian action"))
+            .collect()
+    }
+
     fn bilinear(&self, a: &[f64], b: &[f64], control: &mut SolveControl<'_>)
         -> Result<Vec<f64>, ComplianceError>
     {
