@@ -25,7 +25,8 @@ fn declaration(text: &str, inherited: Option<f64>) -> Result<GasState, PlateValv
     Ok(gas)
 }
 fn load(text: &str, block: usize) -> PlateValvePerformance {
-    PlateValvePerformance::from_bytes(text.as_bytes(), block, &CancelGate::new()).unwrap()
+    let resolved = text.replace("audio 96000 9602", "audio 192000 19204");
+    PlateValvePerformance::from_bytes(resolved.as_bytes(), block, &CancelGate::new()).unwrap()
 }
 fn network(renderer: &AperturePerformance) -> &ApertureNetwork {
     let CoupledAperture::Network(n) = renderer.system() else { panic!("expected physical graph") };
@@ -94,7 +95,7 @@ fn regional_mixtures_match_independent_aperture_cavity_loss_radiation_and_receiv
     let gases = vec![make(&[GasSpecies::Nitrogen, GasSpecies::Oxygen], vec![0.7,0.3], 300.0),
         make(&[GasSpecies::Nitrogen, GasSpecies::Oxygen, GasSpecies::Argon], vec![0.6,0.2,0.2], 303.15),
         make(&[GasSpecies::Nitrogen, GasSpecies::CarbonDioxide], vec![0.5,0.5], 293.15)];
-    let dt = 1.0/96000.0;
+    let dt = 1.0 / 192000.0;
     let gate = CancelGate::new();
     let radiation = BaffledRadiationLoad::new(0.007, gases[1].density, gases[1].sound_speed, dt, 1000.0, &gate).unwrap();
     let chamber = HelmholtzLoadSpec { volume_m3: 1e-5, neck_radius_m: 0.0015,
@@ -128,7 +129,7 @@ fn regional_mixtures_match_independent_aperture_cavity_loss_radiation_and_receiv
         graph.inlet_impedance_with_gases(&mapped).unwrap(), dt, a.spec().max_steps, a.state()).unwrap()
         .with_plate_relaxation(a.relaxation().unwrap().spec().clone(), InitialApertureMemory::Relaxed).unwrap();
     let mut direct = ApertureNetwork::with_section_gases(valve, graph, mapped).unwrap();
-    let mut mic = BaffledPressure::circular_outlet(0.007, 96000, CircularOutletReceiver {
+    let mut mic = BaffledPressure::circular_outlet(0.007, 192000, CircularOutletReceiver {
         position_m: [0.0,0.0,0.2], radial_rings: 8, angular_points: 32, maximum_frequency_hz: 1000.0,
     }, RayleighMedium { density: gases[1].density, sound_speed: gases[1].sound_speed }).unwrap();
     let mut actual = loaded.into_renderer();
@@ -136,7 +137,7 @@ fn regional_mixtures_match_independent_aperture_cavity_loss_radiation_and_receiv
     let mut changed_motion = false;
     for n in 0..1024 {
         let before = direct.stored_energy_j();
-        let f = direct.step(TubeDrive { upstream_pressure_pa: seed.renderer().schedule().sample("mouth", n*700/96000).unwrap(), body_flow_m3_s: 0.0 }).unwrap();
+        let f = direct.step(TubeDrive { upstream_pressure_pa: seed.renderer().schedule().sample("mouth", n*700/192000).unwrap(), body_flow_m3_s: 0.0 }).unwrap();
         let scale = before + f.stored_energy_j + f.dissipated_energy_j + f.upstream_work_j.abs();
         assert!(f.balance_residual_j().abs() <= 3e-10*scale.max(1e-30));
         let expected = mic.step(&[direct.node_frame(2).unwrap().net_flow_into_node_m3_s]).unwrap();
@@ -183,7 +184,8 @@ fn composition_and_pressure_change_physical_parameters_and_rendered_sound() {
 #[test]
 fn mixture_pcm_cancel_resume_preserves_loaded_and_observer_history() {
     let text = uniform(ENRICHED);
-    let build = || DecimatedRenderer::new(load(&text, 37).into_renderer(), 96000, 48000, 37).unwrap();
+    let build =
+        || DecimatedRenderer::new(load(&text, 37).into_renderer(), 192000, 48000, 37).unwrap();
     let stream = || Pcm16WavStream::new(Cursor::new(Vec::new()), 48000, 0.01, 37).unwrap();
     let mut direct = build(); let mut expected = stream(); let mut scratch = [0.0;37];
     render_pressure_pcm16(&mut direct, &mut expected, &CancelGate::new(), &mut scratch, 4801).unwrap();

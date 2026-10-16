@@ -5,7 +5,8 @@ use fs_exec::CancelGate;
 const SOURCE: &str = include_str!("../../../examples/plate-valve-exterior.performance");
 
 fn fixture() -> file::PlateValvePerformance {
-    file::PlateValvePerformance::from_bytes(SOURCE.as_bytes(), 113, &CancelGate::new_clock_free())
+    let resolved = SOURCE.replace("audio 96000 9602", "audio 192000 19204");
+    file::PlateValvePerformance::from_bytes(resolved.as_bytes(), 113, &CancelGate::new_clock_free())
         .unwrap()
 }
 

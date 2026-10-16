@@ -16,8 +16,8 @@ use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateSection
 use fs_scenario::gesture::{GestureEvent, GestureTarget, GestureTrack, GestureValue};
 use std::io::Cursor;
 
-const RATE: u32=96000;
-const SAMPLES: u64=768;
+const RATE: u32 = 192000;
+const SAMPLES: u64 = 1536;
 fn plate(e:f64,density:f64)->PlateApertureReduction {
     let mesh=PlateMesh::rectangle(0.025,0.01,6,2);
     let root=mesh.nodes.iter().enumerate().filter(|(_,p)|p.0==0.0).map(|(i,_)|i).collect();
@@ -72,17 +72,17 @@ fn config(block:usize)->AperturePerformanceConfig {
     AperturePerformanceConfig {sample_rate_hz:RATE,samples:SAMPLES,max_block:block,
         max_compile_work:10000,max_controls:64}
 }
-fn program(p:&PlateApertureReduction,sign:f64)->ApertureForceProgram {
+fn program(p: &PlateApertureReduction, sign: f64) -> ApertureForceProgram {
     let tip=p.chart().mesh.nodes.iter().position(|p|(p.0-0.025).abs()<1e-12).unwrap();
     ApertureForceProgram {footprints:vec![PlateForceFootprint::Node(tip),
         PlateForceFootprint::Patch((0..p.chart().mesh.tris.len()).collect())],
         events:vec![
-            ApertureForceEvent {sample:96,port:0,force_n:-1e-4*sign},
+            ApertureForceEvent {sample:192,port:0,force_n:-1e-4*sign},
             ApertureForceEvent {sample:0,port:0,force_n:2e-4*sign},
             ApertureForceEvent {sample:0,port:0,force_n:1e-4*sign},
-            ApertureForceEvent {sample:65,port:1,force_n:-2e-5*sign},
-            ApertureForceEvent {sample:192,port:0,force_n:0.0},
-            ApertureForceEvent {sample:192,port:1,force_n:0.0},
+            ApertureForceEvent {sample:130,port:1,force_n:-2e-5*sign},
+            ApertureForceEvent {sample:384,port:0,force_n:0.0},
+            ApertureForceEvent {sample:384,port:1,force_n:0.0},
         ]}
 }
 fn receiver()->CircularOutletReceiver {
@@ -123,7 +123,7 @@ fn pressure_forces_material_histories_and_outlet_delay_match_direct_physics_acro
                 ApertureObservation::NetworkNode(_)=>node.pressure_pa,_=>exterior,
             });
         }
-        assert!(expected[500..].iter().any(|p|p.abs()>1e-12),"release must not erase ringdown");
+        assert!(expected[1000..].iter().any(|p|p.abs()>1e-12),"release must not erase ringdown");
         for block in [1,37,128] {
             let mut playback=renderer(block,observation,0.003);let mut actual=vec![0.0;SAMPLES as usize];
             for out in actual.chunks_mut(block) {playback.block(out).unwrap();}
@@ -144,12 +144,15 @@ fn pressure_forces_material_histories_and_outlet_delay_match_direct_physics_acro
 #[test]
 fn changing_only_one_blades_relaxation_changes_actual_radiated_pressure() {
     let observation=ApertureObservation::NetworkBaffled {node:2,receiver:receiver()};
-    let mut a=renderer(128,observation,0.001);let mut b=renderer(128,observation,0.02);
+    let mut a = renderer(128, observation, 0.001);
+    let mut b = renderer(128, observation, 0.02);
     assert_eq!(a.system().aperture().spec(),b.system().aperture().spec());
     assert_eq!(a.system().source_gases(),b.system().source_gases());
     let mut difference=0.0;
-    for _ in 0..6 {
-        let (mut x,mut y)=([0.0;128],[0.0;128]);a.block(&mut x).unwrap();b.block(&mut y).unwrap();
+    for _ in 0..12 {
+        let (mut x, mut y) = ([0.0; 128], [0.0; 128]);
+        a.block(&mut x).unwrap();
+        b.block(&mut y).unwrap();
         difference+=x.iter().zip(y).map(|(a,b)|(a-b).abs()).sum::<f64>();
     }
     assert!(difference>1e-12);

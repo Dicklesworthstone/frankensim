@@ -24,7 +24,7 @@ fn model(tolerance: f64) -> Result<ModalAperture, AcousticRealizeError> {
             }],
             density_kg_m3: 1.2,
             impedance_pa_s_m3: 1e6,
-            time_step_s: 1.0 / 96000.0,
+            time_step_s: 1.0 / 384000.0,
             max_steps: 4096,
             limits: PairedApertureLimits {
                 maximum_abs_displacement_m: 0.01,

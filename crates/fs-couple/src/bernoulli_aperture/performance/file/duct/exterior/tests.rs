@@ -8,7 +8,8 @@ fn with_exterior(text: &str, record: &str) -> String {
     text.replacen("\nnetwork ", &format!("\nexterior {record}\nnetwork "), 1)
 }
 fn load(text: &str, block: usize) -> PlateValvePerformance {
-    PlateValvePerformance::from_bytes(text.as_bytes(), block, &CancelGate::new()).unwrap()
+    let resolved = text.replace("audio 96000 9602", "audio 192000 19204");
+    PlateValvePerformance::from_bytes(resolved.as_bytes(), block, &CancelGate::new()).unwrap()
 }
 fn network(p: &PlateValvePerformance) -> &ApertureNetwork {
     let CoupledAperture::Network(n) = p.renderer().system() else { panic!("network source") }; n
@@ -34,7 +35,7 @@ fn exterior_changes_radiation_and_plate_feedback_not_internal_constitutives() {
         if index != 2 { assert_eq!(old, new, "interior node {index}"); }
     }
     let expected = BaffledRadiationLoad::new(0.007, gas.density, gas.sound_speed,
-        1.0/96000.0, 1000.0, &CancelGate::new()).unwrap();
+        1.0/192000.0, 1000.0, &CancelGate::new()).unwrap();
     assert_eq!(b.radiation_loads()[0], (2, expected));
     assert_ne!(a.radiation_loads()[0].1, expected);
     let (original, changed) = (a.renderer().system().aperture().spec(), b.renderer().system().aperture().spec());
@@ -76,7 +77,7 @@ fn every_radiating_endpoint_uses_the_common_exterior_without_averaging_gases() {
     for &(node, load) in p.radiation_loads() {
         let section = network(&p).spec().sections.iter().find(|s| s.nodes.contains(&node)).unwrap();
         assert_eq!(load, BaffledRadiationLoad::new(section.radius_m, gas.density,
-            gas.sound_speed, 1.0/96000.0, 1000.0, &CancelGate::new()).unwrap());
+            gas.sound_speed, 1.0/192000.0, 1000.0, &CancelGate::new()).unwrap());
     }
     assert_ne!(network(&p).section_gases().unwrap()[0], *gas);
 }

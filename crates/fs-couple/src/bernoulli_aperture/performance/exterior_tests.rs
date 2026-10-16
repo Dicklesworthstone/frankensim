@@ -5,8 +5,10 @@ use fs_material::gas_species::input::read_gas_state;
 const SOURCE: &str = include_str!("../../../examples/plate-valve-regional-gas.performance");
 
 fn source() -> AperturePerformance {
-    file::PlateValvePerformance::from_bytes(SOURCE.as_bytes(), 113, &CancelGate::new())
-        .unwrap().into_renderer()
+    let resolved = SOURCE.replace("audio 96000 9602", "audio 192000 19204");
+    file::PlateValvePerformance::from_bytes(resolved.as_bytes(), 113, &CancelGate::new())
+        .unwrap()
+        .into_renderer()
 }
 fn gas(pressure: f64) -> GasState {
     read_gas_state(&mut format!("mixture 293.15 {pressure} mole 3 N2 0.4 O2 0.2 CO2 0.4")

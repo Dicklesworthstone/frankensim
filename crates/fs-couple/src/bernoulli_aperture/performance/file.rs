@@ -465,7 +465,8 @@ mod opposed_performance_tests {
         INPUT.replace(APERTURE, &format!("{APERTURE} {selector}"))
     }
     fn load(text: &str, block: usize) -> PlateValvePerformance {
-        PlateValvePerformance::from_bytes(text.as_bytes(), block, &CancelGate::new()).unwrap()
+        let resolved = text.replace("audio 96000 9602", "audio 192000 19204");
+        PlateValvePerformance::from_bytes(resolved.as_bytes(), block, &CancelGate::new()).unwrap()
     }
     fn render(text: &str, block: usize) -> Vec<f64> {
         let voice = load(text, block);

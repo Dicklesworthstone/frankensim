@@ -9,8 +9,8 @@ use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
 use fs_material::gas::{GasSpec, GasState};
 
-const RATE: u32 = 48_000;
-const SAMPLES: u64 = 513;
+const RATE: u32 = 768_000;
+const SAMPLES: u64 = 513 * 16;
 fn config() -> AperturePerformanceConfig {
     AperturePerformanceConfig { sample_rate_hz: RATE, samples: SAMPLES, max_block: 128,
         max_compile_work: 100_000, max_controls: 128 }
@@ -19,10 +19,28 @@ fn schedule() -> GestureSchedule {
     GestureSchedule::from_canonical_bytes(b"frankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t3\nevent\t0e0\t1e-3\tpressure-pa\t5e0\nevent\t4e-3\t0e0\tpressure-pa\t0e0\nevent\t7e-3\t0e0\tpressure-pa\t2e0\n").unwrap()
 }
 fn forces() -> Vec<BladeForceControl> {
-    vec![BladeForceControl { sample: 3, blade: 0, force_n: 1e-5 },
-        BladeForceControl { sample: 3, blade: 1, force_n: -2e-5 },
-        BladeForceControl { sample: 150, blade: 1, force_n: 0.0 },
-        BladeForceControl { sample: 151, blade: 0, force_n: 0.0 }]
+    vec![
+        BladeForceControl {
+            sample: 3 * 16,
+            blade: 0,
+            force_n: 1e-5,
+        },
+        BladeForceControl {
+            sample: 3 * 16,
+            blade: 1,
+            force_n: -2e-5,
+        },
+        BladeForceControl {
+            sample: 150 * 16,
+            blade: 1,
+            force_n: 0.0,
+        },
+        BladeForceControl {
+            sample: 151 * 16,
+            blade: 0,
+            force_n: 0.0,
+        },
+    ]
 }
 fn network() -> PairedApertureNetwork {
     let gas = |t| GasState::try_new(&GasSpec::dry_air_ussa1976(), t, 101325.0).unwrap();

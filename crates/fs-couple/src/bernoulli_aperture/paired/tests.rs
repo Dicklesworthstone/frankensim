@@ -6,8 +6,8 @@ fn spec() -> PairedApertureSpec {
     PairedApertureSpec { rest_opening_m: 4e-4, width_m: 0.013,
         blades: [ApertureBlade { mass_kg: 1e-5, stiffness_n_m: 350.0,
             damping_n_s_m: 0.03, pressure_area_m2: 1e-4 }; 2],
-        density_kg_m3: 1.2, impedance_pa_s_m3: 2.7e7, time_step_s: 1.0/48000.0,
-        max_steps: 2000, limits: PairedApertureLimits {
+        density_kg_m3: 1.2, impedance_pa_s_m3: 2.7e7, time_step_s: 1.0/3072000.0,
+        max_steps: 2000*64, limits: PairedApertureLimits {
             maximum_abs_displacement_m: 0.1, maximum_abs_velocity_m_s: 100.0,
             maximum_energy_j: 10.0, max_evaluations: 256,
             velocity_tolerance_m_s: 1e-15, relative_tolerance: 1e-13,
@@ -31,10 +31,11 @@ fn equal_blades_match_the_existing_symmetric_midpoint_image() {
         density_kg_m3:s.density_kg_m3,impedance_pa_s_m3:s.impedance_pa_s_m3,
         time_step_s:s.time_step_s,max_steps:s.max_steps,
     }, ApertureState {opening_m:s.rest_opening_m,opening_velocity_m_s:0.0},contact(2e9)).unwrap();
-    for i in 0..240 {
-        let drive=ApertureDrive {upstream_pressure_pa:if i<120 {1200.0} else {-300.0},
+    for i in 0..240 * 64 {
+        let drive=ApertureDrive {upstream_pressure_pa:if i<120*64 {1200.0} else {-300.0},
             incoming_pressure_pa:75.0,body_flow_m3_s:1e-7};
-        let a=pair.step(drive).unwrap();let r=scalar.step(drive).unwrap();
+        let a = pair.step(drive).unwrap();
+        let r = scalar.step(drive).unwrap();
         assert!((a.aperture.state.opening_m-r.state.opening_m).abs()<2e-10);
         assert!((a.aperture.state.opening_velocity_m_s-r.state.opening_velocity_m_s).abs()<2e-6);
         assert!((a.aperture.bore_pressure_pa-r.bore_pressure_pa).abs()<2e-3);
@@ -99,11 +100,19 @@ fn unequal_blades_satisfy_both_momenta_and_the_same_fluid_equation() {
 
 #[test]
 fn a_mass_only_data_change_alters_dynamics_without_retuning_elastic_closure() {
-    let s=spec();let mut heavier=s;heavier.blades[1].mass_kg*=4.0;
+    let s = spec();
+    let mut heavier = s;
+    heavier.blades[1].mass_kg *= 4.0;
     let mut a=PairedAperture::new(s,[BladeState::default();2],contact(0.0)).unwrap();
     let mut b=PairedAperture::new(heavier,[BladeState::default();2],contact(0.0)).unwrap();
     let drive=ApertureDrive {upstream_pressure_pa:1000.0,..ApertureDrive::default()};
-    let fa=a.step(drive).unwrap();let fb=b.step(drive).unwrap();
+    // Compare at the original physical horizon, now resolved with 64 steps.
+    for _ in 1..64 {
+        a.step(drive).unwrap();
+        b.step(drive).unwrap();
+    }
+    let fa = a.step(drive).unwrap();
+    let fb = b.step(drive).unwrap();
     assert!((fa.blades[1].velocity_m_s-fb.blades[1].velocity_m_s).abs()>0.01);
     assert!((fa.aperture.bore_pressure_pa-fb.aperture.bore_pressure_pa).abs()>0.01);
     // The source's static compliance is unchanged; no frequency was prescribed.
