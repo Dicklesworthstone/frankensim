@@ -155,7 +155,8 @@ impl CompactBody {
     }
 
     /// Observe an acceleration in the pHS mass-normalized coordinate.
-    pub(crate) fn radiate_mass_normalized(&self, acc: f64, rho: f64, listener_m: f64) -> f64 {
+    #[must_use]
+    pub fn radiate_mass_normalized(&self, acc: f64, rho: f64, listener_m: f64) -> f64 {
         self.radiate(acc / self.mass_kg.sqrt(), rho, listener_m)
     }
 
