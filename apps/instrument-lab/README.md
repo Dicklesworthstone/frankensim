@@ -42,9 +42,9 @@ checkouts have drifted, build from an export with pinned siblings beside it
 1. Build the examples (release) with the viz patch applied in the export, then render the
    campaign; the exact command of every clip is in its "Run evidence" drawer on the page.
 2. `npm run data -- <campaign-dir> public`
-3. `engine-kit/build-wasm.sh` (it also writes `engine_levels.json`), the engine-piano build (see
-   `engine-piano/`) and, for the older drum section, `engine-drum/build-wasm.sh`; they install into
-   `public/live/`.
+3. `engine-kit/build-wasm.sh` (it also writes `engine_levels.json`), `engine-piano/build-wasm.sh`
+   (run it in the export: it links fs-couple by path) and, for the older drum section,
+   `engine-drum/build-wasm.sh`; they install into `public/live/`.
 4. `npm run build`, then `vercel deploy --prod --yes` (prebuilt `dist/`; see `vercel.json`).
 
 The live files are never bundled, and each Worker loads its glue, wasm and data relative to its own
