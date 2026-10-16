@@ -4668,93 +4668,6 @@ fn add_in_place(acc: &mut [f64], addend: &[f64]) {
 mod string_observer_tests {
     use super::*;
 
-    #[test]
-    fn kc_render_refuses_unresolved_linear_poles_without_advancing() {
-        let string = PrestressedString {
-            length_m: 0.5, tension_n: 20.0, lin_density_kg_m: 0.006,
-            axial_stiffness_n: 1000.0, width_m: 0.001, n_modes: 2,
-            damping_ratio: 0.0, rayleigh: None, bending_stiffness_n_m2: 0.0,
-            kelvin_voigt_bending: None, relaxation_bending: None,
-            polarization_detune: 0.0, moving_end: false,
-        };
-        let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        let mut member = kc_string_member(&string,None,None,&[],&gas,1.0,1.0).unwrap();
-        let mut texture = TextureDrive::try_new(None).unwrap();
-        let cap = fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP;
-        let dt = cap/member.linear.pole_rate_bound_rad_s();
-        assert!(step_kc_member(&mut member,None,&mut texture,&[],&string,&gas,dt*(1.0-1e-12)).is_ok());
-        let before = member.x.clone();
-        assert!(matches!(step_kc_member(&mut member,None,&mut texture,&[],&string,&gas,dt*(1.0+1e-10)),
-            Err(AcousticRealizeError::TimeResolution(_))));
-        assert_eq!(member.x,before);
-    fn coupled_ode_linear_step_uses_the_complete_transformer() {
-        let plate = fs_phs::modal_bank_ports(&[1.0,1.7],&[0.0,0.0],&[&[1.0,0.5]]).unwrap();
-        let line = fs_phs::mass_spring_damper(1.0,2.0,0.0).unwrap();
-        let sys = transformer(plate,line,0,0,0.7).unwrap();
-        let linear = prepare_render_linear(&sys).unwrap();
-        let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        let x = [0.1,0.02,-0.03,0.01,0.04,-0.02];
-        let full = step_plate_chain(&sys,&linear,&x,0.0,None,None,&gas,0.0,0.5).unwrap();
-        let half = step_plate_chain(&sys,&linear,&x,0.0,None,None,&gas,0.0,0.25).unwrap();
-        let halves = step_plate_chain(&sys,&linear,&half.x,0.0,None,None,&gas,0.25,0.25).unwrap();
-        for (a,b) in full.x.iter().zip(halves.x) {assert!((a-b).abs()<1e-12);}
-        assert!(full.balance_residual().abs()<1e-12);
-    fn blown_ode_observes_the_exact_held_flow_step() {
-        let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        let sections = [AcousticSection {length:0.5,radius:0.01,outlet_radius:0.0,cells:2}];
-        for rate in [48_000,96_000,192_000] {
-            let dt = 1.0/f64::from(rate);
-            let out = realize_blown_ode(&sections,None,&[],VolumeVelocityPulse {
-                peak_m3_s:1e-4,duration_s:2.0*dt,
-            },&mut PlateBank::default(),&gas,1.0,rate,2,None).unwrap();
-    fn reed_ode_observes_exact_held_flow_for_both_valve_selections() {
-        let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        let sections = [AcousticSection {length:0.5,radius:0.01,outlet_radius:0.0,cells:2}];
-        for rate in [48_000,96_000,192_000] {for mass in [0.0,1e-4] {
-            let dt = 1.0/f64::from(rate);
-            let reed = BeatingReed {rest_opening_m:1e-3,width_m:0.01,
-                closing_pressure_pa:1e6,blowing_pressure_pa:100.0,attack_s:2.0*dt,
-                mass_kg:mass,stiffness_n_m:100.0,damping_ratio:0.01};
-            let out = realize_reed_ode(&sections,None,&[],reed,&mut PlateBank::default(),
-                &gas,1.0,rate,2,None).unwrap();
-            let pressure = blowing_envelope(reed,dt);
-            let opening = if mass==0.0 {quasistatic_aperture_opening(reed.rest_opening_m,
-                reed.closing_pressure_pa,pressure)} else {reed.rest_opening_m};
-            let flow = bernoulli_volume_flow(reed.width_m,opening,pressure,gas.density);
-            let line = ode_bore_chain(&sections,None,1,&[],&gas,None).unwrap();
-            let split = prepare_render_linear(&line).unwrap();
-            let expected = fs_phs::linear_exact::step_split(&line,&split,
-                fs_phs::linear_exact::LinearPropagator::ExactZoh,
-                &vec![0.0;line.state_dim()],&[1e-4],dt).unwrap();
-            assert_eq!(out[0],0.0);
-            assert!((out[1]-expected.y[0]).abs()<=1e-12*expected.y[0].abs());
-            let legacy = fs_phs::step(&line,&vec![0.0;line.state_dim()],&[1e-4],dt).unwrap();
-            assert!((out[1]-legacy.y[0]).abs()>1e-9*expected.y[0].abs());
-        }
-                &vec![0.0;line.state_dim()],&[flow],dt).unwrap();
-            assert_eq!(out[0],0.0);
-            assert!((out[1]-expected.y[0]).abs()<=1e-12*expected.y[0].abs());
-        }}
-    fn actual_dirac_renderer_refuses_an_unresolved_common_clock() {
-        let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        for rate in [48_000,96_000,192_000] {
-            let mut plates = PlateBank::default();
-            plates.linear.push(crate::thin_plate::CompactBody::from_radiator(RadiatingPlate {
-                area_m2:0.1,mass_kg:1.0,frequency_hz:1.0,damping_ratio:0.0,
-            }).unwrap());
-            let make = |frequency:f64| PrestressedString {
-                length_m:0.5,tension_n:(2.0*frequency).powi(2),lin_density_kg_m:1.0,
-                axial_stiffness_n:0.0,width_m:0.001,n_modes:1,damping_ratio:0.0,
-                rayleigh:None,bending_stiffness_n_m2:0.0,kelvin_voigt_bending:None,
-                relaxation_bending:None,polarization_detune:0.0,moving_end:true,
-            };
-            let render = |string:&PrestressedString| realize_dirac_join(string,
-                Some(Pluck {station_frac:0.5,height_m:1e-8}),None,&[],None,&plates,
-                None,None,None,None,None,&gas,1.0,rate,1);
-            assert!(render(&make(1.0)).is_ok());
-            assert!(matches!(render(&make(10_000.0)),Err(AcousticRealizeError::TimeResolution(_))));
-        }
-    }
 
     #[test]
     fn g1_plate_ports_and_observer_use_the_same_modal_mass() {
@@ -4834,6 +4747,110 @@ mod string_observer_tests {
                 pressure.abs() < 1.0e-12,
                 "stationary loaded string radiated {pressure} Pa"
             );
+        }
+    }
+
+    #[test]
+    fn kc_render_refuses_unresolved_linear_poles_without_advancing() {
+        let string = PrestressedString {
+            length_m: 0.5, tension_n: 20.0, lin_density_kg_m: 0.006,
+            axial_stiffness_n: 1000.0, width_m: 0.001, n_modes: 2,
+            damping_ratio: 0.0, rayleigh: None, bending_stiffness_n_m2: 0.0,
+            kelvin_voigt_bending: None, relaxation_bending: None,
+            polarization_detune: 0.0, moving_end: false,
+        };
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let mut member = kc_string_member(&string,None,None,&[],&gas,1.0,1.0).unwrap();
+        let mut texture = TextureDrive::try_new(None).unwrap();
+        let cap = fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP;
+        let dt = cap/member.linear.pole_rate_bound_rad_s();
+        assert!(step_kc_member(&mut member,None,&mut texture,&[],&string,&gas,dt*(1.0-1e-12)).is_ok());
+        let before = member.x.clone();
+        assert!(matches!(step_kc_member(&mut member,None,&mut texture,&[],&string,&gas,dt*(1.0+1e-10)),
+            Err(AcousticRealizeError::TimeResolution(_))));
+        assert_eq!(member.x,before);
+    }
+
+    #[test]
+    fn coupled_ode_linear_step_uses_the_complete_transformer() {
+        let plate = fs_phs::modal_bank_ports(&[1.0,1.7],&[0.0,0.0],&[&[1.0,0.5]]).unwrap();
+        let line = fs_phs::mass_spring_damper(1.0,2.0,0.0).unwrap();
+        let sys = transformer(plate,line,0,0,0.7).unwrap();
+        let linear = prepare_render_linear(&sys).unwrap();
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let x = [0.1,0.02,-0.03,0.01,0.04,-0.02];
+        let full = step_plate_chain(&sys,&linear,&x,0.0,None,None,&gas,0.0,0.5).unwrap();
+        let half = step_plate_chain(&sys,&linear,&x,0.0,None,None,&gas,0.0,0.25).unwrap();
+        let halves = step_plate_chain(&sys,&linear,&half.x,0.0,None,None,&gas,0.25,0.25).unwrap();
+        for (a,b) in full.x.iter().zip(halves.x) {assert!((a-b).abs()<1e-12);}
+        assert!(full.balance_residual().abs()<1e-12);
+    }
+
+    #[test]
+    fn blown_ode_observes_the_exact_held_flow_step() {
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let sections = [AcousticSection {length:0.5,radius:0.01,outlet_radius:0.0,cells:2}];
+        for rate in [48_000,96_000,192_000] {
+            let dt = 1.0/f64::from(rate);
+            let out = realize_blown_ode(&sections,None,&[],VolumeVelocityPulse {
+                peak_m3_s:1e-4,duration_s:2.0*dt,
+            },&mut PlateBank::default(),&gas,1.0,rate,2,None).unwrap();
+            let line = ode_bore_chain(&sections,None,1,&[],&gas,None).unwrap();
+            let split = prepare_render_linear(&line).unwrap();
+            let expected = fs_phs::linear_exact::step_split(&line,&split,
+                fs_phs::linear_exact::LinearPropagator::ExactZoh,
+                &vec![0.0;line.state_dim()],&[1e-4],dt).unwrap();
+            assert_eq!(out[0],0.0);
+            assert!((out[1]-expected.y[0]).abs()<=1e-12*expected.y[0].abs());
+            let legacy = fs_phs::step(&line,&vec![0.0;line.state_dim()],&[1e-4],dt).unwrap();
+            assert!((out[1]-legacy.y[0]).abs()>1e-9*expected.y[0].abs());
+        }
+    }
+
+    #[test]
+    fn reed_ode_observes_exact_held_flow_for_both_valve_selections() {
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let sections = [AcousticSection {length:0.5,radius:0.01,outlet_radius:0.0,cells:2}];
+        for rate in [48_000,96_000,192_000] {for mass in [0.0,1e-4] {
+            let dt = 1.0/f64::from(rate);
+            let reed = BeatingReed {rest_opening_m:1e-3,width_m:0.01,
+                closing_pressure_pa:1e6,blowing_pressure_pa:100.0,attack_s:2.0*dt,
+                mass_kg:mass,stiffness_n_m:100.0,damping_ratio:0.01};
+            let out = realize_reed_ode(&sections,None,&[],reed,&mut PlateBank::default(),
+                &gas,1.0,rate,2,None).unwrap();
+            let pressure = blowing_envelope(reed,dt);
+            let opening = if mass==0.0 {quasistatic_aperture_opening(reed.rest_opening_m,
+                reed.closing_pressure_pa,pressure)} else {reed.rest_opening_m};
+            let flow = bernoulli_volume_flow(reed.width_m,opening,pressure,gas.density);
+            let line = ode_bore_chain(&sections,None,1,&[],&gas,None).unwrap();
+            let split = prepare_render_linear(&line).unwrap();
+            let expected = fs_phs::linear_exact::step_split(&line,&split,
+                fs_phs::linear_exact::LinearPropagator::ExactZoh,
+                &vec![0.0;line.state_dim()],&[flow],dt).unwrap();
+            assert_eq!(out[0],0.0);
+            assert!((out[1]-expected.y[0]).abs()<=1e-12*expected.y[0].abs());
+        }}
+    }
+
+    #[test]
+    fn actual_dirac_renderer_refuses_an_unresolved_common_clock() {
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        for rate in [48_000,96_000,192_000] {
+            let mut plates = PlateBank::default();
+            plates.linear.push(crate::thin_plate::CompactBody::from_radiator(RadiatingPlate {
+                area_m2:0.1,mass_kg:1.0,frequency_hz:1.0,damping_ratio:0.0,
+            }).unwrap());
+            let make = |frequency:f64| PrestressedString {
+                length_m:0.5,tension_n:(2.0*frequency).powi(2),lin_density_kg_m:1.0,
+                axial_stiffness_n:0.0,width_m:0.001,n_modes:1,damping_ratio:0.0,
+                rayleigh:None,bending_stiffness_n_m2:0.0,kelvin_voigt_bending:None,
+                relaxation_bending:None,polarization_detune:0.0,moving_end:true,
+            };
+            let render = |string:&PrestressedString| realize_dirac_join(string,
+                Some(Pluck {station_frac:0.5,height_m:1e-8}),None,&[],None,&plates,
+                None,None,None,None,None,&gas,1.0,rate,1);
+            assert!(render(&make(1.0)).is_ok());
+            assert!(matches!(render(&make(10_000.0)),Err(AcousticRealizeError::TimeResolution(_))));
         }
     }
 }
