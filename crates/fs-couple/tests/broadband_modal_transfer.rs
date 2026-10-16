@@ -251,15 +251,24 @@ fn order_ladder_converges_and_axis_is_live() {
 
 #[test]
 fn fit_grid_density_converges() {
+    // Hold the model order fixed while refining only the sample grid. The
+    // independent pole ladder resolves this piston to 7.82e-7 at order six.
+    // Order twelve over-resolves it: batch 8 (541935a25, ts1) measured
+    // [1.483e-12, 1.825e-13, 3.739e-12] at [16, 64, 256] points, exposing
+    // the roundoff floor rather than sample-grid convergence. Start at the
+    // fitter's minimum order+2 samples and retain the original finest grid.
+    const ORDER: usize = 6;
     let mut errors = Vec::new();
-    for density in [16, 64, 256] {
-        let s = samples(density, 0.0, piston);
+    for density in [8, 16, 256] {
+        let mut s = samples(density, 0.0, piston);
+        s.source_id = "analytic:baffled-piston:Bessel-Struve:a=.05:rho=1.2:c=343".into();
         let (observer, _) =
-            BroadbandModalObserver::build(&model(1), &s, controls(12, 1, 10.0), RATE).unwrap();
+            BroadbandModalObserver::build(&model(1), &s, controls(ORDER, 1, 10.0), RATE).unwrap();
         let error = maximum_operator_error(&observer, &s);
         errors.push(error);
         println!(
-            "{{\"suite\":\"broadband-modal\",\"axis\":\"fit-grid\",\"points\":{density},\"held_out_max_rel\":{error},\"tolerance\":1e-6}}"
+            "{{\"suite\":\"broadband-modal\",\"axis\":\"fit-grid\",\"points\":{density},\"pole_count\":{ORDER},\"producer_id\":\"{}\",\"held_out_max_rel\":{error},\"tolerance\":1e-6}}",
+            s.source_id
         );
     }
     assert!(errors.windows(2).all(|e| e[1] < e[0]), "{errors:?}");
