@@ -3,17 +3,36 @@
 //! owns the kinetic transformation and reactions; ImpactSystem owns every step.
 //! No string is rebuilt from a pitch, averaged with a neighbor or muted.
 //!
-//! This image carries both endpoints on a common translating rail, not one
-//! moving violin bridge and one fixed nut. Gas drag is the original relative
-//! modal image in a CO-MOVING gas frame, explicitly selected by the constructor.
-//! It does not model translation through stationary gas, fluid added mass,
-//! support rotation, live material changes, winding slip or a bow friction law.
+//! Endpoint motion and gas frame are explicit: the legacy co-moving rail carries
+//! both ends, while stationary-gas construction permits a fixed nut and moving
+//! bridge. Material curvature loss and absolute-velocity gas loss remain distinct.
+//! Gas loss is a passive spectral approximation, not unsteady fluid added mass
+//! or full broadband hydrodynamics. Support rotation, live material changes,
+//! winding slip, torsional gas drag and a bow friction law remain absent.
 use std::ops::Range;
 use super::{NonlinearMaterialString, BodyPotential, ImpactBody, ImpactError, MAX_IMPACT_MODES, invalid};
 use crate::render::plate::impact::{ImpactConfig, ImpactFrame, ImpactSystem, PreparedImpactSystem};
 use crate::render::plate::impact::string::StringStretching;
-use crate::render::plate::impact::supported::{SupportedStrings, TranslatingSupport};
+use crate::render::plate::impact::supported::{SupportedStrings, TranslatingSupport, StringEndMotion};
 use fs_exec::CancelGate;
+
+mod stationary;
+
+/// Explicit physical frame and approximation used for string/gas resistance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SupportGasFrame {
+    /// Original modal resistance relative to a gas translating with both ends.
+    CoMoving,
+    /// Stationary gas: original natural-frequency resistances act on absolute
+    /// sine velocity projections. The orthogonal lift remainder uses the SAME
+    /// cylinder law at this explicit frequency. It has no fictitious zero drag.
+    /// This spectral approximation requires modal/time/frequency refinement;
+    /// it is not an exact causal hydrodynamic impedance for arbitrary motion.
+    StationaryModal {
+        /// Evaluation frequency [Hz] for the unresolved endpoint-lift field.
+        remainder_frequency_hz: f64,
+    },
+}
 
 /// Immutable source geometry/materials and their complete coupled initial image.
 /// Body zero contains every bending coordinate followed by the rail coordinate.
@@ -28,6 +47,7 @@ pub struct SupportedMaterialStrings {
     torsion: Vec<Option<Range<usize>>>,
     mode_count: usize,
     sample_rate_hz: u32,
+    gas_frame: SupportGasFrame,
 }
 fn poll(gate: &CancelGate) -> Result<(), ImpactError> {
     if gate.is_requested() { Err(ImpactError::Cancelled) } else { Ok(()) }
@@ -51,6 +71,42 @@ impl SupportedMaterialStrings {
     pub fn in_comoving_gas(sources: Vec<NonlinearMaterialString>, support: TranslatingSupport,
         gate: &CancelGate) -> Result<Self, ImpactError>
     {
+        Self::build(sources, support, None, SupportGasFrame::CoMoving, gate)
+    }
+
+    /// Source-defined strings with selected moving ends in a stationary gas.
+    /// `Second` fixes the nut at station zero and moves the bridge at station
+    /// one; `First` reverses that assignment. A shared bridge can thus join a
+    /// speaking span and a distinct afterlength without duplicating its mass.
+    /// All spans currently share one transverse bridge coordinate, not a full
+    /// rotating bridge or a carved body. The support input is its effective
+    /// mass/stiffness/loss, independent from all string material definitions.
+    ///
+    /// Material curvature damping retains the original relative sine basis.
+    /// Gas drag is separated using the original cylinder-resistance owner and
+    /// applied to ABSOLUTE velocity projections, including the unresolved lift.
+    /// No total damping is added twice. A numerically unresolved separation
+    /// refuses rather than clipping negative resistance or dropping source loss.
+    /// `remainder_frequency_hz` explicitly samples the gas law for the orthogonal
+    /// lift tail; resolved modes retain their original evaluation frequencies.
+    /// This is frozen spectral gas resistance, not a broadband fluid solution.
+    ///
+    /// # Errors
+    /// Original source/support admission, wrong endpoint count, invalid tail
+    /// frequency, loss separation, mixed gases/clocks or cancellation. Original
+    /// material records, initial modes and torsion remain attached throughout.
+    pub fn in_stationary_gas(sources: Vec<NonlinearMaterialString>, support: TranslatingSupport,
+        motion: Vec<StringEndMotion>, remainder_frequency_hz: f64, gate: &CancelGate)
+        -> Result<Self, ImpactError>
+    {
+        Self::build(sources, support, Some(&motion),
+            SupportGasFrame::StationaryModal { remainder_frequency_hz }, gate)
+    }
+
+    fn build(sources: Vec<NonlinearMaterialString>, support: TranslatingSupport,
+        motion: Option<&[StringEndMotion]>, gas_frame: SupportGasFrame, gate: &CancelGate)
+        -> Result<Self, ImpactError>
+    {
         poll(gate)?;
         support.validate()?;
         if sources.is_empty() || sources.len() > 32 {
@@ -58,16 +114,26 @@ impl SupportedMaterialStrings {
         }
         let sample_rate_hz = sources[0].sample_rate_hz();
         let gas = *sources[0].gas();
+        if motion.is_some_and(|m| m.len()!=sources.len()) {
+            return Err(invalid("material support requires an endpoint declaration for each string"));
+        }
+        if let SupportGasFrame::StationaryModal { remainder_frequency_hz } = gas_frame {
+            if !remainder_frequency_hz.is_finite() || remainder_frequency_hz<=0.0
+                || remainder_frequency_hz>=0.5*f64::from(sample_rate_hz) {
+                return Err(invalid("stationary string gas requires an explicit positive sub-Nyquist remainder frequency"));
+            }
+        }
         let mode_count = sources.iter().try_fold(1usize, |n,s| n.checked_add(s.mode_count()))
             .filter(|&n| n <= MAX_IMPACT_MODES)
             .ok_or_else(|| invalid("material strings plus support exceed the complete mode budget"))?;
         let mut wires = Vec::with_capacity(sources.len());
         let mut laws = Vec::with_capacity(sources.len());
         let mut relative = Vec::with_capacity(mode_count - 1);
+        let mut drag = Vec::with_capacity(sources.len());
         for source in &sources {
             poll(gate)?;
             if source.sample_rate_hz() != sample_rate_hz || *source.gas() != gas {
-                return Err(invalid("supported material strings require the same clock and co-moving gas"));
+                return Err(invalid("supported material strings require the same clock and complete common gas"));
             }
             let [bending, tail @ ..] = source.bodies() else {
                 return Err(invalid("supported source is missing its bending image"));
@@ -78,12 +144,22 @@ impl SupportedMaterialStrings {
             if tail.len() > 1 || bending.initial.len() != source.card().mode_count {
                 return Err(invalid("supported source has an incompatible bending/torsion layout"));
             }
-            wires.push(source.wire_span().clone());
+            match gas_frame {
+                SupportGasFrame::CoMoving => wires.push(source.wire_span().clone()),
+                SupportGasFrame::StationaryModal { remainder_frequency_hz } => {
+                    let (wire, law)=stationary::split_loss(source, remainder_frequency_hz, gate)?;
+                    wires.push(wire);drag.push(law);
+                }
+            }
             laws.push(Some(StringStretching { axial_rigidity_n: source.axial_rigidity_n(),
                 maximum_slope: potential.slope_limit() }));
             relative.extend_from_slice(&bending.initial);
         }
-        let supported = SupportedStrings::with_individual_stretching(&wires, &laws, support)?;
+        let supported = match motion {
+            None => SupportedStrings::with_individual_stretching(&wires, &laws, support)?,
+            Some(ends) => SupportedStrings::with_endpoint_motion(&wires, &laws, ends, support)?
+                .with_absolute_drag(drag)?,
+        };
         let mut bodies = vec![supported.body_with_relative_states(&relative)?];
         let mut torsion = Vec::with_capacity(sources.len());
         let mut at = supported.mode_count();
@@ -96,9 +172,11 @@ impl SupportedMaterialStrings {
         }
         if at != mode_count { return Err(invalid("supported material basis lost source coordinates")); }
         poll(gate)?;
-        Ok(Self { sources, support, supported, bodies, torsion, mode_count, sample_rate_hz })
+        Ok(Self { sources, support, supported, bodies, torsion, mode_count, sample_rate_hz, gas_frame })
     }
 
+    /// Physical gas frame and the explicit unresolved-field approximation.
+    pub const fn gas_frame(&self) -> SupportGasFrame { self.gas_frame }
     /// Original independent cards, complete material receipts and relative states.
     pub fn sources(&self) -> &[NonlinearMaterialString] { &self.sources }
     /// Original rail input, excluding wire mass that the shared owner adds once.
@@ -116,7 +194,7 @@ impl SupportedMaterialStrings {
     pub fn torsion_ranges(&self) -> &[Option<Range<usize>>] { &self.torsion }
 
     /// Absolute physical transverse point map in the complete normalized basis.
-    /// Both endpoints move with the support; transverse force applies no torque.
+    /// Only selected endpoints move; transverse force applies no torque.
     pub fn transverse_shape(&self, string: usize, station: f64) -> Result<Vec<f64>, ImpactError> {
         let mut row = self.supported.absolute_shape(string, station)?;
         row.resize(self.mode_count, 0.0);
