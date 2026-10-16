@@ -310,6 +310,17 @@ fn g0_indefinite_compliance_refuses() {
             quantity: "orthotropic_compliance"
         })
     ));
+    let mut plane = rows();
+    plane.iter_mut().find(|(n, _, _)| n == "nu_lr").unwrap().2 = 8.0;
+    assert!(matches!(
+        resolve(
+            &card(plane),
+            OrthotropicRequirementSet::Plane(MaterialPlane::Axes12)
+        ),
+        Err(MaterialStatePointError::InvalidDerived {
+            quantity: "orthotropic_compliance"
+        })
+    ));
 }
 #[test]
 fn g0_axis_convention_file_matches_adapter() {

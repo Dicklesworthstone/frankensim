@@ -69,7 +69,7 @@ pub struct OrthotropicPlaneElastic {
     pub plane: MaterialPlane,
     /// In-plane Young's moduli [Pa].
     pub e: [f64; 2],
-    /// Transverse strain in the second axis per stress in the first axis.
+    /// Minus the second/first-axis strain ratio under uniaxial first-axis stress.
     pub nu: f64,
     /// In-plane engineering shear modulus [Pa].
     pub g: f64,
