@@ -241,7 +241,7 @@ impl Options {
             format!("spatial viscous, {strings} speaking-string pads / {stations} quadrature stations; loss {} J included in total loss",
                 piano.accounting.damper_loss_j)
         } else { String::from("point viscous") };
-        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} transverse coordinates including duplex; {} contact sites; {} string-direction segments omit in-band partials at the count ceiling. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {} (source: {}); nonlinear string extension: {} (selection: {}); retained longitudinal coordinates: {} with fixed axial endpoints; two transverse directions: {} (geometry/drag: {}); reciprocal cavity: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
+        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} transverse coordinates including duplex; {} contact sites; {} string-direction segments omit in-band partials at the count ceiling. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {} (source: {}); nonlinear string extension: {} (selection: {}); retained longitudinal coordinates: {} (speaking ends drive the bridge axially); two transverse directions: {} (geometry/drag: {}); reciprocal cavity: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
             piano.bank.rate, self.substeps, self.modes, piano.bank.modes.len(),
             piano.bank.contact_strings.len(), piano.bank.capped_string_segments,
             self.hammers.as_deref().unwrap_or("source defaults"),

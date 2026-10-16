@@ -157,8 +157,9 @@ longitudinal-wave (waves) selection for EVERY scale key. All nonlinear rows
 supply axial rigidity EA in N and a moderate-slope bound. A waves row also
 supplies axial band, mode cap, damping ratio and material-strain bound; these
 are not inferred from tension, EI or winding mass. Axial modes share the
-existing string/contact clock and react through the moving transverse bridge.
-Axial endpoints remain fixed. It requires --render; all-linear selection
+existing string/contact clock and react through the moving transverse bridge;
+the speaking end's axial force also drives the bridge through the declared
+downbearing/bridge-cap projection. It requires --render; all-linear selection
 preserves the original image. See STRING_STRETCHING.md for SI rows, explicit
 retention limits and the distinction from a full longitudinal bridge model.
 --dump-geometry/--dump-obj export the board model; export alone skips eigenanalysis.
@@ -1000,7 +1001,7 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
     if let Some(path) = &options.string_stretching {
         let count = (0..piano.bank.strings.len())
             .filter(|&i| piano.bank.string_stretching_observation(i).is_some()).count();
-        println!("String extension: {path}; {count} geometric speaking/duplex channels; {} retained longitudinal coordinates; same-tick contact and reciprocal transverse bridge work. Axial endpoints remain fixed. Zero channels means explicit all-linear selection. EA, wave retention and drag are supplied; slope/strain/iteration limits refuse rather than clamp. No real-time or calibration claim; see STRING_STRETCHING.md.",
+        println!("String extension: {path}; {count} geometric speaking/duplex channels; {} retained longitudinal coordinates; same-tick contact and reciprocal transverse bridge work; the speaking end's axial force drives the bridge through the declared downbearing/bridge-cap projection. Zero channels means explicit all-linear selection. EA, wave retention and drag are supplied; slope/strain/iteration limits refuse rather than clamp. No real-time or calibration claim; see STRING_STRETCHING.md.",
             piano.bank.longitudinal_mode_count());
     }
     if let Some(path)=&options.hammer_footprints {
