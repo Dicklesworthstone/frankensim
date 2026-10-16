@@ -25,6 +25,9 @@
 //! cabinet is charts and cards, never a convolution.
 
 use fs_material::gas::{GasSpec, GasState};
+use fs_phs::linear_exact::{
+    LinearPropagator, LinearSplit, LinearSplitBudget, split_quadratic, step_split,
+};
 use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage, StepRecord};
 
 /// Thiele–Small parameter card (datasheet-class, with provenance).
@@ -126,6 +129,7 @@ impl From<PhsError> for SpeakerError {
 /// The composed driver (+ optional sealed box and panel mode).
 pub struct TsDriver {
     phs: PortHamiltonian,
+    linear: LinearSplit,
     x: Vec<f64>,
     card: TsCard,
     rho: f64,
@@ -247,8 +251,16 @@ impl TsDriver {
         g[0] = 1.0;
         let storage = Box::new(QuadraticStorage::new(q, n)?);
         let phs = PortHamiltonian::new(n, 1, j, r, g, storage)?;
+        let linear = split_quadratic(
+            &phs,
+            LinearSplitBudget {
+                max_modes: n,
+                max_omega_dt: core::f64::consts::PI,
+            },
+        )?;
         Ok(Self {
             phs,
+            linear,
             x: vec![0.0; n],
             card,
             rho: gas.density,
@@ -257,7 +269,11 @@ impl TsDriver {
         })
     }
 
-    /// One step under terminal voltage `u_v`; returns the record and
+    /// Exact full coupled quadratic propagation under held terminal voltage.
+    /// No midpoint phase warping is introduced by the coil/cone/panel owner.
+    /// The record uses independently integrated loss and step-average current.
+    /// This dense reference path is not an allocation-free audio callback.
+    /// Returns the record and
     /// the radiated far-field pressure factor `rho Sd a / (4 pi r)` at
     /// `r = 1 m` (compact-source observer).
     ///
@@ -266,7 +282,14 @@ impl TsDriver {
     /// range; pHS step refusals.
     pub fn step(&mut self, u_v: f64, dt: f64) -> Result<(StepRecord, f64), SpeakerError> {
         let v_before = self.x[2]; // momentum, for acceleration estimate
-        let rec = fs_phs::step(&self.phs, &self.x, &[u_v], dt)?;
+        let rec = step_split(
+            &self.phs,
+            &self.linear,
+            LinearPropagator::ExactZoh,
+            &self.x,
+            &[u_v],
+            dt,
+        )?;
         self.x.clone_from(&rec.x);
         let excursion = self.x[self.ix_cone];
         if excursion.abs() > self.card.x_max_m {
@@ -591,5 +614,45 @@ mod speaker_tests {
             declared_air().density.to_bits(),
             "the public convenience wrapper retains its declared-air provenance"
         );
+    }
+
+    #[test]
+    fn ts_007_exact_held_voltage_is_invariant_under_time_partition() {
+        // G1: the complete coil/cone/cavity/panel state, with noncommuting
+        // damping/coupling, must obey the constant-input exponential semigroup.
+        let panel = PanelMode {
+            frequency_hz: 5_000.0,
+            mass_kg: 0.3,
+            area_m2: 0.05,
+            damping_ratio: 0.02,
+        };
+        for rate in [48_000, 96_000, 192_000] {
+            let dt = 1.0 / f64::from(rate);
+            let mut full = TsDriver::new(card(), Some(0.02), Some(panel)).unwrap();
+            let mut half = TsDriver::new(card(), Some(0.02), Some(panel)).unwrap();
+            let mut supplied_full = 0.0;
+            let mut supplied_half = 0.0;
+            let mut loss_full = 0.0;
+            let mut loss_half = 0.0;
+            for _ in 0..20 {
+                let (a, _) = full.step(0.01, dt).unwrap();
+                supplied_full += a.supplied;
+                loss_full += a.dissipated;
+                for _ in 0..2 {
+                    let (b, _) = half.step(0.01, 0.5 * dt).unwrap();
+                    supplied_half += b.supplied;
+                    loss_half += b.dissipated;
+                }
+            }
+            for (a, b) in full.x.iter().zip(&half.x) {
+                let scale = a.abs().max(b.abs()).max(f64::MIN_POSITIVE);
+                assert!(
+                    (a - b).abs() <= 1e-12 * scale,
+                    "held-voltage state partition differs at {rate} Hz"
+                );
+            }
+            assert!((supplied_full - supplied_half).abs() <= 1e-12 * supplied_full.abs());
+            assert!((loss_full - loss_half).abs() <= 1e-12 * loss_full.abs());
+        }
     }
 }

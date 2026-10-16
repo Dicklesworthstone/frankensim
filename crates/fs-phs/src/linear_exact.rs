@@ -224,11 +224,25 @@ pub fn split_quadratic(
     if !finite(&squared) {
         return Err(refuse("frequency operator overflow"));
     }
-    let (omega2, frequency_basis) = checked_eigh(&squared, n)?;
-    if omega2.iter().any(|v| *v < 0.0) {
-        return Err(refuse("negative squared frequency"));
+    let (_, frequency_basis) = checked_eigh(&squared, n)?;
+    // Evaluate the Gram Rayleigh quotient as ||K v||². An odd-dimensional
+    // skew operator has a zero mode; subtractive Jacobi updates can otherwise
+    // report a tiny negative eigenvalue there. This is a sum of squares, not
+    // a clamp or a dropped low-frequency coordinate.
+    let mut frequencies = Vec::with_capacity(n);
+    for k in 0..n {
+        let mut omega2 = 0.0;
+        for i in 0..n {
+            let component: f64 = (0..n)
+                .map(|j| skew[i * n + j] * frequency_basis[j * n + k])
+                .sum();
+            omega2 += component * component;
+        }
+        if !omega2.is_finite() {
+            return Err(refuse("squared frequency overflow"));
+        }
+        frequencies.push(det::sqrt(omega2));
     }
-    let frequencies = omega2.into_iter().map(det::sqrt).collect();
     Ok(LinearSplit {
         n,
         m,
@@ -980,5 +994,30 @@ mod tests {
             relative(record.x[i], expected, 1.0, 1e-12);
         }
         assert!(record.balance_residual().abs() <= 1e-12 * sys.hamiltonian(&initial));
+    }
+
+    #[test]
+    fn odd_skew_block_keeps_its_zero_frequency_coordinate() {
+        let sys = PortHamiltonian::new(
+            3,
+            0,
+            vec![0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0, -1.0, 0.0],
+            vec![0.0; 9],
+            vec![],
+            Box::new(
+                QuadraticStorage::new(
+                    vec![1.0, 0.0, 0.0, 0.0, 99_999_999.0, 0.0, 0.0, 0.0, 1.0],
+                    3,
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        let split = split_quadratic(&sys, budget(3)).unwrap();
+        assert_eq!(split.angular_frequencies_rad_s().len(), 3);
+        assert!(split.angular_frequencies_rad_s()[0] < 1e-10);
+        let x = [1.0, 1e-8, 0.0]; // Q*x = [1,1,0] up to declared roundoff.
+        let record = step_split(&sys, &split, LinearPropagator::ExactZoh, &x, &[], 1e-5).unwrap();
+        assert!(record.balance_residual().abs() <= 1e-12 * sys.hamiltonian(&x));
     }
 }

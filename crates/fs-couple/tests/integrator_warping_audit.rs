@@ -42,6 +42,7 @@ enum Owner {
     Modal,
     Coupled,
     Exact,
+    Speaker,
     SeparateTest,
 }
 struct AuditRow {
@@ -67,10 +68,10 @@ const PATHS: &[AuditRow] = &[
         owner: Owner::Phs,
     },
     AuditRow {
-        path: "speaker / fs_phs::step",
-        integrator: Integrator::GonzalezMidpoint,
+        path: "speaker::TsDriver / exact full quadratic step",
+        integrator: Integrator::ExactZoh,
         bound: None,
-        owner: Owner::Phs,
+        owner: Owner::Speaker,
     },
     AuditRow {
         path: "thin_plate::VkBody and PlateBank cavity / fs_phs::step",
@@ -437,11 +438,47 @@ fn advance(owner: Owner, omega: f64, rate: u32, z: [f64; 2]) -> [f64; 2] {
                 omega,
             )
         }
-        Owner::SeparateTest => panic!("separate owner-local audit required"),
+        Owner::SeparateTest | Owner::Speaker => panic!("separate observation seam required"),
     }
 }
 
+fn speaker_phase(omega: f64, rate: u32) -> f64 {
+    // For a lossless coil/cone with L=M=Bl=1, the nonzero continuous
+    // eigenfrequency is sqrt(k+1). Positive but negligible losses/radiating
+    // area isolate that pencil without changing the production propagator.
+    let card = fs_couple::speaker::TsCard {
+        re_ohm: 1e-12,
+        le_h: 1.0,
+        bl: 1.0,
+        mms_kg: 1.0,
+        cms_m_per_n: 1.0 / (omega * omega - 1.0),
+        rms_n_s_m: 1e-12,
+        sd_m2: 1e-12,
+        x_max_m: 1.0,
+    };
+    let mut driver = fs_couple::speaker::TsDriver::new(card, None, None).unwrap();
+    let dt = 1.0 / f64::from(rate);
+    driver.step(0.01, dt).unwrap();
+    let mut samples = Vec::new();
+    for _ in 0..64 {
+        let (record, _) = driver.step(0.0, dt).unwrap();
+        samples.push(record.x[1]);
+    }
+    // Differentiate away the constant-flux equilibrium. The remaining real
+    // sequence is a conjugate-pole pair; its recurrence measures cos(theta).
+    let differences: Vec<_> = samples.windows(2).map(|x| x[1] - x[0]).collect();
+    let numerator: f64 = differences.windows(3).map(|x| x[1] * (x[0] + x[2])).sum();
+    let denominator: f64 = differences.windows(3).map(|x| 2.0 * x[1] * x[1]).sum();
+    assert!(denominator > 0.0);
+    let cosine = numerator / denominator;
+    assert!((-1.0..1.0).contains(&cosine));
+    det::acos(cosine)
+}
+
 fn phase(owner: Owner, omega: f64, rate: u32) -> f64 {
+    if matches!(owner, Owner::Speaker) {
+        return speaker_phase(omega, rate);
+    }
     let a = advance(owner, omega, rate, [1.0, 0.0]);
     let b = advance(owner, omega, rate, [0.0, 1.0]);
     let re = 0.5 * (a[0] + b[1]);
@@ -517,7 +554,7 @@ fn available_render_linear_owners_are_measured_without_promoting_unmigrated_path
                     omega
                 };
                 let measured = cents(phase(row.owner, omega, rate) * f64::from(rate) / exact_omega);
-                let predicted = if matches!(row.owner, Owner::Exact) {
+                let predicted = if matches!(row.owner, Owner::Exact | Owner::Speaker) {
                     Some(0.0)
                 } else if matches!(row.owner, Owner::Coupled) {
                     None
@@ -559,7 +596,10 @@ fn impact_guard_cap_and_cap_plus_one() {
     let cap = 0.9 * core::f64::consts::PI;
     assert!(impact(1.0, cap * (1.0 - 1e-12), [0.0; 2]).is_ok());
     assert!(impact(1.0, cap, [0.0; 2]).is_err());
-    assert!(midpoint_cents(cap)<-600.0,"existing guard admits a large disclosed phase defect");
+    assert!(
+        midpoint_cents(cap) < -600.0,
+        "existing guard admits a large disclosed phase defect"
+    );
 }
 
 #[test]
