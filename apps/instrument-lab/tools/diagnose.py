@@ -49,6 +49,31 @@ def real(name, dur=3.0):
     return V.segment(V.highpass(V.load(V.REFS / f"{name}.wav")), dur)
 
 
+def render_cmd(name):
+    """The render's own command line (the cmd: row of its log): cards describe what was simulated."""
+    log = V.CAMPAIGN / "piano" / f"{name}.log"
+    if not log.exists():
+        return ""
+    return next((line for line in log.read_text(errors="replace").splitlines() if line.startswith("cmd:")), "")
+
+
+def has(name):
+    return (V.CAMPAIGN / "piano" / f"{name}.wav").exists()
+
+
+def stretching_row(name, key):
+    """The waves row for one key in the --string-stretching file the render used, or None."""
+    cmd = render_cmd(name).split()
+    if "--string-stretching" not in cmd:
+        return None
+    path = V.CAMPAIGN / "piano" / cmd[cmd.index("--string-stretching") + 1]
+    for line in path.read_text().splitlines():
+        f = line.split(",")
+        if f[0] == "waves" and int(f[1]) == key:
+            return {"ea_n": float(f[2]), "band_hz": float(f[4]), "mode_cap": int(f[5]), "damping_ratio": float(f[6])}
+    return None
+
+
 def level_at(f, s, target, rel=0.012):
     sel = (f > target * (1 - rel)) & (f < target * (1 + rel))
     return s[sel].max()
@@ -205,6 +230,11 @@ def bridge_split():
     return early, lv, lp
 
 
+NEW_AIR = ('Air reaction (--rayleigh-loading) is not yet admitted on the production board. A resolved board mesh fine enough for 2.4 kHz (9,432'
+           ' area samples, 6.3 per wavelength) clears the mesh limit once the offline work ceilings are raised, but the 32-port passive fit of the full '
+           '128-mode radiation impedance then misses its accuracy limits: complex error 19% peak and 15% RMS, power error 13% and 14%, against 5%, 2%, 10% and 5% (two sides, 90 Hz-2.4 kHz).')
+
+
 def main():
     out = {"inputs": {}, "rows": []}
     board = bare_board_modes()
@@ -243,7 +273,7 @@ def main():
                      + strings_txt
                      + f" At A3's bridge it is already {early['bridge_db']:.1f} dB re partial 1; radiation to the microphone adds {early['pressure_db'] - early['bridge_db']:.1f} dB."),
         "suspect": "A coupled mechanical resonance driven too strongly or damped too lightly. The measurements do not identify a single cause: either the dampered bass strings ring with the board, or the board and strings resonate together. Radiation adds only the last few dB.",
-        "test": "Render A3 with the sustain pedal down: if the resonance follows the lifted dampers, it is the bass strings. Air reaction on the board (--rayleigh-loading) cannot be admitted on the production board yet: 128 modes exceed the work ceiling, the mesh is too coarse above 1.1 kHz, and the 1 kHz board's passive fit misses its accuracy limits.",
+        "test": "Render A3 with the sustain pedal down: if the resonance follows the lifted dampers, it is the bass strings. " + NEW_AIR,
         "status": "open",
         "data": {"hz": knock_hz, "bridge_db": early["bridge_db"], "pressure_db": early["pressure_db"], "real_db": r(real_knock, 3),
                  "bare_board_neighbours_hz": [below, above], "loaded_board_lowest_hz": loaded[:4] if loaded else None, "string_partials": strs},
@@ -315,6 +345,33 @@ def main():
         "status": "open",
         "data": {"phantoms_real_ff": ph_real, "phantoms_ours_ff": ph_ours},
     }
+    waves = stretching_row("a3-ff", 57)
+    if waves and has("a3-ff-linear") and has("a3-mf-linear"):
+        # The A3 renders above simulate the stretched string; the same strokes with linear strings are kept for comparison.
+        lin_ff, lin_mf = piano("a3-ff-linear"), piano("a3-mf-linear")
+        ph_lin = phantoms(lin_ff)
+        gain_lin = V.band_ratio(lin_ff) - V.band_ratio(lin_mf)
+        count = lambda rows_: sum(q["present"] for q in rows_)
+        hard = ""
+        if has("a3-fff") and has("a3-fff-linear"):
+            new8, lin8 = piano("a3-fff"), piano("a3-fff-linear")
+            ph8 = phantoms(new8)
+            row["data"]["phantoms_ours_8ms"] = ph8
+            hard = (f" Struck at 8 m/s, close to the real ff's loudness, phantom partials stand at {count(ph8)} of {len(ph8)} positions and 2-8 kHz brightness reaches "
+                    f"{V.band_ratio(new8):.1f} dB, against {V.band_ratio(lin8):.1f} dB with linear strings and {V.band_ratio(real_ff):.1f} dB for the real ff.")
+        row["data"]["phantoms_linear_ff"] = ph_lin
+        row["data"]["string_waves"] = waves
+        row["status"] = "improved"
+        row["suspect"] = ("Two parts. A hard strike stretches the string: its tension rises with the motion, sum tones (phantom partials) appear, and longitudinal waves "
+                          "push on the bridge. That is now simulated (see Fix) and it brings the phantom partials. It does not supply the remaining broadband dullness, "
+                          "which points upstream to the hammer: how much stiffer the felt becomes, and how much shorter its contact, under a hard blow.")
+        row["test"] = ("Compare hammer contact time and 2-8 kHz brightness from mf to ff across felt laws (--rt0425-hammer-stiffness, --hammers) "
+                       "against the recording's brightness gain.")
+        row["fix"] = (f"The A3 renders above include longitudinal string waves (axial rigidity EA = {waves['ea_n'] / 1000:.1f} kN from the scale's own bending stiffness "
+                      f"with steel E = 200 GPa, axial modes to {waves['band_hz'] / 1000:.0f} kHz) whose axial force drives the bridge through a declared 0.06 projection "
+                      "(about 1.8 degrees of downbearing plus a 28 mm bridge-cap lever arm), with the work in the energy ledger. Against the same strokes with linear strings: "
+                      f"phantom partials at ff stand at {count(ph_ours)} of {len(ph_ours)} positions (linear {count(ph_lin)}; real Steinway {count(ph_real)}), and the mf-to-ff "
+                      f"brightness gain is {gain_ours:.1f} dB (linear {gain_lin:.1f} dB; real piano {gain_real:.1f} dB).") + hard
     rows.append(row)
 
     # 6. Cymbal
@@ -337,7 +394,9 @@ def main():
         return pk, r(10 * math.log10(p[f > 1200].sum() / p[f > 40].sum()), 3)
 
     rs = V.segment(V.highpass(V.load(V.REFS / "splash.stick.normal.mf.wav")), 2.5)
-    os_ = V.segment(V.highpass(V.ours_clip("perc", "cym-ff")), 2.5)
+    # The kit solver's splash (fs-vkplate) when the campaign has it; the retired modal splash otherwise.
+    kit_splash = (V.CAMPAIGN / "perc" / "vk-splash.wav").exists()
+    os_ = V.segment(V.highpass(V.ours_clip("perc", "vk-splash" if kit_splash else "cym-ff")), 2.5)
     (pr, er), (po, eo) = band_peaks(rs), band_peaks(os_)
     cym_data = {
         "bands_hz": V.OCT,
@@ -345,11 +404,6 @@ def main():
         "peak_ms_ours": po,
         "above_1200_db_real": er,
         "above_1200_db_ours": eo,
-        "kit_splash": {
-            "peak_ms_ours": [10.7, 10.7, 10.7, 10.7, 60.7, 20.7, 55.7, 15.7, 130.7],
-            "rms_gap_db": 9.705,
-            "octave_decay_db_s": [-18.61, -25.19, -20.92, -14.42, -16.08, -17.81, -24.91, -26.31, -29.19],
-        },
         "modal_63m_low_loss": {
             "above_1200_pct": 98.68,
             "high_band_db": -4.324,
@@ -371,6 +425,42 @@ def main():
                    "(b) replacing the 0.002 omega modal damping with B20 bronze relaxation (--shell-relaxation) and a light felt mount slows 250 Hz-4 kHz decay from 67-108 dB/s to 9.6-16.1 dB/s (real splash: 11.8-29.8 dB/s) and shifts the 1 and 2 kHz envelope peaks from 10.7 ms to 150.7 and 115.7 ms after the strike; "
                    "(c) rendering the 8-inch curved von Karman splash on the full grid without a mode cap (crates/fs-vkplate kit::splash at 2 m/s) brings the octave-band distance to the real Iowa splash from 22.3 dB down to 9.71 dB (inside the <= 13.6 dB real-crash ruler), matches real decay rates within 0.76x-1.24x across 500 Hz-16 kHz (-14.4 to -29.2 dB/s), and produces delayed post-strike shimmer peaks at 60.7 ms (1 kHz), 20.7 ms (2 kHz), 55.7 ms (4 kHz), 15.7 ms (8 kHz) and 130.7 ms (16 kHz)."),
     })
+    if kit_splash:
+        cym = rows[-1]
+        ref_early = V.octave_levels(rs, 0.0, 0.25)
+        gap_vk = V.rms_db(V.octave_levels(os_, 0.0, 0.25), ref_early)
+        crashes = [V.rms_db(V.octave_levels(V.segment(V.highpass(V.load(V.REFS / f"{n}crash.stick.normal.mf.wav")), 2.5), 0.0, 0.25), ref_early)
+                   for n in (13, 17, 18)]
+        pct = lambda db: 100 * 10 ** (db / 10)
+        cym["data"]["kit_splash"] = {"rms_gap_db": r(gap_vk, 3), "real_crash_gaps_db": [r(g, 3) for g in crashes]}
+        modal = ""
+        if (V.CAMPAIGN / "perc" / "cym-ff.wav").exists():
+            old = V.segment(V.highpass(V.ours_clip("perc", "cym-ff")), 2.5)
+            po_old, eo_old = band_peaks(old)
+            gap_old = V.rms_db(V.octave_levels(old, 0.0, 0.25), ref_early)
+            cym["data"]["modal_splash"] = {"peak_ms": po_old, "above_1200_db": eo_old, "rms_gap_db": r(gap_old, 3)}
+            cym["symptom"] = (f"The real splash keeps {pct(er):.0f}% of its energy above 1.2 kHz. The retired modal splash kept {pct(eo_old):.0f}%; "
+                              f"the drum kit's solver keeps {pct(eo):.0f}%.")
+            modal = f" (the retired modal splash: {gap_old:.1f} dB)"
+        ours_early = V.octave_levels(os_, 0.0, 0.25)
+        band = {fc: i for i, fc in enumerate(V.OCT)}
+        # Fixed only when the share above 1.2 kHz is within 3 dB of the real splash's; a matching octave balance alone is not enough.
+        cym["status"] = "fixed" if abs(eo - er) <= 3 else "improved"
+        cym["result"] = cym["result"].split(" (c) ")[0].rstrip("; ") + "."
+        cym["test"] = (f"Find what puts the early energy into the 1 kHz octave ({ours_early[band[1000]]:.1f} dB re total against the real splash's "
+                       f"{ref_early[band[1000]]:.1f} dB) while the 4 kHz octave sits at {ours_early[band[4000]]:.1f} dB against {ref_early[band[4000]]:.1f} dB: "
+                       "the stick's contact, or the splash's size and profile (the Iowa splash's dimensions are not published; the model is an 8-inch splash). "
+                       f"And find why its 4 and 8 kHz bands peak at the strike ({po[6]:.0f} and {po[7]:.0f} ms) while the real splash's keep rising for "
+                       f"{pr[6]:.0f} and {pr[7]:.0f} ms.")
+        others = sorted(((float(q.stem.split("-")[-1][:-2]), V.rms_db(V.octave_levels(V.segment(V.highpass(V.load(q)), 2.5), 0.0, 0.25), ref_early))
+                         for q in (V.CAMPAIGN / "perc").glob("vk-splash-grid-*mm.wav")), reverse=True)
+        cym["data"]["kit_splash"]["grid_mm"] = float(V.kit_grid_mm("vk-splash"))
+        cym["data"]["kit_splash"]["other_grids"] = [{"grid_mm": g, "rms_gap_db": r(d, 3)} for g, d in others]
+        cym["fix"] = ("Every cymbal on this page now comes from the drum kit's solver (fs-vkplate): the splash is a von Kármán shell on a "
+                      f"{V.kit_grid_mm('vk-splash')} mm grid with no mode cap. Its octave-band balance over the first 250 ms is {gap_vk:.1f} dB from the real "
+                      f"splash{modal}; three real crashes struck the same way sit {min(crashes):.1f}-{max(crashes):.1f} dB from it. Its 4 and 8 kHz bands peak "
+                      f"{po[6]:.0f} and {po[7]:.0f} ms after the strike."
+                      + (" The same stroke on other grids: " + ", ".join(f"{d:.1f} dB ({g:g} mm)" for g, d in others) + "." if others else ""))
     # Optional live override when fs-vkplate crash/splash WAVs are passed on the CLI:
     kit_dir, oh_dir = (Path(sys.argv[4]), Path(sys.argv[5])) if len(sys.argv) > 5 else (None, None)
     if kit_dir and (kit_dir / "crash.wav").exists() and (oh_dir / "crash1_OH_FF_6.wav").exists():
@@ -384,7 +474,7 @@ def main():
             os_vk = V.segment(V.highpass(V.load(kit_dir / "splash.wav")), 2.5)
             pk_s, _ = band_peaks(os_vk)
             gap_s = r(V.rms_db(V.octave_levels(os_vk, 0.0, 0.25), V.octave_levels(rs, 0.0, 0.25)), 3)
-            row["data"]["kit_splash"]["peak_ms_ours"] = pk_s
+            row["data"].setdefault("kit_splash", {})["peak_ms_ours"] = pk_s
             row["data"]["kit_splash"]["rms_gap_db"] = gap_s
 
     # Ablations, when their renders exist
@@ -403,6 +493,8 @@ def main():
                                    "low_resonance_db": r(ours_knock, 3), "non_partial_db": np_ours["mf"]}
         abl["receiver"] = res
         base = res["default receiver"]
+        best = min(("bass-side receiver", "treble-side receiver"), key=lambda k: res[k]["pattern_gap_db"])
+        moved = base["pattern_gap_db"] - res[best]["pattern_gap_db"]
         row = next(q for q in rows if q["id"] == "partial-pattern")
         row["status"] = "confirmed" if moved >= 3 else "refuted"
         if moved < 3:
@@ -450,8 +542,20 @@ def main():
                     "(detune 0.8 cents, beat spacing df_n = 4.62e-4 f_n) are struck in phase, modulating the symmetric bridge force by (1 + 2 cos(2 pi df_n t))/3 "
                     "while antisymmetric unison modes decouple from the bridge. For partial 4 (df_4 = 0.408 Hz), exact three-string nulls fall at 0.82 s (-31.2 dB) "
                     "and 1.64 s (-34.1 dB) and constructive re-phasing peaks at 2.45 s (-9.4 dB), producing the steep 0.1-0.8 s fall (-43.4 dB/s) and 1.5-2.9 s "
-                    "recovery (+8.1 dB/s) around a true peak-to-peak decay of -4.53 dB/s (1.41x real -6.4 dB/s). Rendering with --string-polarization across an 88-key "
-                    "28 mm maple bridge arm adds vertical-horizontal polarization exchange.")
+                    "recovery (+8.1 dB/s) around a true peak-to-peak decay of -4.53 dB/s (1.41x real -6.4 dB/s).")
+    if has("a3-mf-polar"):
+        # Both transverse polarizations, rendered from an estimated bridge-frame file.
+        tp = two_stage(piano("a3-mf-polar"))
+        base = two_stage(piano("a3-mf-linear")) if has("a3-mf-linear") else ts_o  # the polarization render has linear strings
+        same = max(abs(a[k] - b[k]) for a, b in zip(tp, base) for k in ("early_db_s", "late_db_s"))
+        p2r, p2p = next(q for q in ts_r if q["n"] == 2), next(q for q in tp if q["n"] == 2)
+        ds["data"]["polarization"] = tp
+        ds["result"] += (" Rendered with both transverse polarizations (--string-polarization; estimated frames: every string along the board's long axis, "
+                         "a 28 mm bridge arm, lateral pad drag equal to the primary), the early and late slopes of partials 1-4 move by at most "
+                         f"{same:.0f} dB/s: partial 2 still falls at {p2p['early_db_s']:.0f} dB/s early against the real piano's {p2r['early_db_s']:.0f} dB/s. "
+                         "Polarization exchange through this bridge rocking is too weak to make the two-stage decay.")
+        ds["test"] = ("Measure the lateral bridge mobility at A3 that couples the second polarization (bridge-cap rocking alone is too weak here), "
+                      "and render the unison with the detuning spread measured on real pianos rather than the uniform 0.8 cents.")
     pedal = V.CAMPAIGN / "piano" / "a3-mf-pedal.wav"
     lr = next(q for q in rows if q["id"] == "low-resonance")
     follows = None
@@ -495,28 +599,18 @@ def main():
         lr["suspect"] = "Mechanical, not acoustic: " + mech + " The measurements do not attribute that remainder to the board alone."
     if follows is not None:
         lr["test"] = ({True: "Render with damper pads strong enough to stop a bass string within about 0.3 s, as a real damper does, and re-measure.",
-                       False: "Raise the board's modal damping near 130 Hz and re-measure. Air reaction (--rayleigh-loading) cannot be admitted on the production board yet: "
-                              "128 modes exceed the work ceiling, the mesh is too coarse above 1.1 kHz, and the 1 kHz board's passive fit misses its accuracy limits."}[follows])
+                       False: "Raise the board's modal damping near 130 Hz and re-measure. " + NEW_AIR}[follows])
     waves = {d: V.CAMPAIGN / "piano" / f"a3-{d}-waves.wav" for d in ("mf", "ff")}
     if all(p.exists() for p in waves.values()):
         def bright(x):
             return V.band_ratio(x)
         lin = {d: piano(f"a3-{d}") for d in ("mf", "ff")}
         wav = {d: piano(f"a3-{d}-waves") for d in ("mf", "ff")}
-        axial_port_phantoms = [
-            {"k": 10, "hz": 2208.4, "re_partial_db": -26.8, "above_floor_db": 42.5, "present": True},
-            {"k": 11, "hz": 2431.0, "re_partial_db": -36.0, "above_floor_db": 14.8, "present": True},
-            {"k": 12, "hz": 2653.5, "re_partial_db": -36.8, "above_floor_db": 40.5, "present": True},
-            {"k": 13, "hz": 2876.9, "re_partial_db": -31.2, "above_floor_db": 27.8, "present": True},
-            {"k": 14, "hz": 3100.4, "re_partial_db": -27.6, "above_floor_db": 32.8, "present": True},
-            {"k": 15, "hz": 3324.9, "re_partial_db": -18.4, "above_floor_db": 50.8, "present": True},
-            {"k": 16, "hz": 3549.4, "re_partial_db": -41.5, "above_floor_db": 31.6, "present": False},
-        ]
         abl["string_waves"] = {
             "brightness_gain_db": {"real": r(bright(real_ff) - bright(real_mf), 3), "linear": r(bright(lin["ff"]) - bright(lin["mf"]), 3),
                                    "waves": r(bright(wav["ff"]) - bright(wav["mf"]), 3)},
             "ff_brightness_db": {"real": r(bright(real_ff), 3), "linear": r(bright(lin["ff"]), 3), "waves": r(bright(wav["ff"]), 3)},
-            "phantoms_ff": {"real": ph_real, "linear": ph_ours, "waves": phantoms(wav["ff"]), "axial_port": axial_port_phantoms},
+            "phantoms_ff": {"real": ph_real, "linear": ph_ours, "waves": phantoms(wav["ff"])},
             "mf_unchanged_db": r(V.rms_db(partial_levels(wav["mf"], 0.0, 0.15), ours_lv), 3),
         }
         sw = abl["string_waves"]
@@ -550,10 +644,6 @@ def main():
                       f"{bd['linear']:.1f} dB with linear strings and {bd['real_ff']:.1f} dB for the real ff: string stretching closes {closed:.1f} of that {gap:.1f} dB gap. "
                       f"Its phantom partials stay {min(short8):.0f}-{max(short8):.0f} dB below the real piano's (at 4.5 m/s: {min(short):.0f}-{max(short):.0f} dB), "
                       + ("so a harder stroke closes most of that shortfall." if max(short8) < 10 else "so a harder stroke does not close that shortfall; the missing axial force path at the bridge remains the lead."))
-        extra += (" Adding the reciprocal axial-to-bridge port (BRIDGE_AXIAL_PROJECTION = 0.06, matching ~1.8 deg downbearing plus a 28 mm bridge-cap lever arm with exact work closure) "
-                  "raises phantom partials at ff from 1 of 7 to 6 of 7 resolvable positions (matching the real Steinway's 6 of 7): relative to the true partial, partials 10-16 move from "
-                  "[-51.4, -54.1, -56.0, -46.0, -38.0, -68.9, -41.2] dB (fixed axial ends) to [-26.8, -36.0, -36.8, -31.2, -27.6, -18.4, -41.5] dB "
-                  "(real Steinway ff: [-25.9, -21.7, -34.6, -16.6, -8.54, -11.5, -27.9] dB), coming within 0.9 dB of the real piano at partial 10 and 6.9 dB at partial 15 (+50.5 dB over fixed ends).")
         row["result"] = (f"A3 rendered with longitudinal string waves (axial stiffness from the scale's own bending stiffness, steel E = 200 GPa): "
                          f"phantom partials are present by that test at {got} of {len(sw['phantoms_ff']['waves'])} positions at ff (linear strings: {sum(q['present'] for q in ph_ours)}). "
                          f"The mf-to-ff brightness gain moves from {sw['brightness_gain_db']['linear']:.1f} dB to {sw['brightness_gain_db']['waves']:.1f} dB (real piano {sw['brightness_gain_db']['real']:.1f} dB), "

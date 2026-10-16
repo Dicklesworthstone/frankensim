@@ -413,6 +413,7 @@ footer.site code { color: var(--ivory-2); }
 .diag.testing { --dc: var(--brass); }
 .diag.confirmed { --dc: var(--verdigris); }
 .diag.refuted { --dc: var(--ivory-3); }
+.diag.improved, .diag.fixed { --dc: var(--air); }
 .diag-head { display: grid; gap: 6px; }
 .diag-status { font: 600 11px/1.4 var(--font-mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--dc); }
 .diag h4 { font: 600 15.5px/1.45 var(--font-body); color: var(--ivory); margin: 0; max-width: 92ch; }

@@ -15,7 +15,7 @@ URL and SHA-256 in the output, not redistributed beyond short level-matched
 excerpts for listening.
 """
 from __future__ import annotations
-import hashlib, json, math, struct, subprocess, sys
+import hashlib, json, math, re, struct, subprocess, sys
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -334,6 +334,19 @@ def ours_clip(kind, cid):
     return load(CAMPAIGN / "perc" / f"{cid}.wav")
 
 
+def piano_label(cid):
+    """What the render simulated, read from its own command line."""
+    log = CAMPAIGN / "piano" / f"{cid}.log"
+    cmd = next((l for l in log.read_text(errors="replace").splitlines() if l.startswith("cmd:")), "") if log.exists() else ""
+    extra = []
+    if "--string-stretching" in cmd:
+        extra.append("longitudinal string waves whose axial force drives the bridge")
+    if "--string-polarization" in cmd:
+        extra.append("both transverse string polarizations")
+    return ("FrankenSim offline render (RT-0425 Model D scale; " + "".join(e + "; " for e in extra)
+            + "one pressure point 1 m above the board, infinite baffle, no room)")
+
+
 def piano_pair(pid, title, ours_id, real_name, f_guess, dur):
     real_raw = highpass(load(REFS / f"{real_name}.wav"))
     ours_raw = highpass(ours_clip("piano", ours_id))
@@ -355,7 +368,7 @@ def piano_pair(pid, title, ours_id, real_name, f_guess, dur):
         "real": {"label": f"Steinway & Sons Model B · {real_name}", "url": IOWA_PIANO + real_name + ".aiff",
                  "sha256_wav48": sha(REFS / f"{real_name}.wav"), "rights": RIGHTS,
                  "recording": "two Neumann KM 84s 8 in above the bass and treble strings (the bass-side channel is used), 16-bit 44.1 kHz, in a normal room"},
-        "ours": {"clip": ours_id, "label": "FrankenSim offline render (RT-0425 Model D scale; one pressure point 1 m above the board, infinite baffle, no room)"},
+        "ours": {"clip": ours_id, "label": piano_label(ours_id)},
         "audio": {"real": encode(real_n * play, f"vs-{pid}-real"), "ours": encode(ours_n * play, f"vs-{pid}-ours"),
                   "level_match": "both scaled to equal RMS over the first 300 ms after onset; absolute levels are not comparable (different instruments, microphones and distances)"},
         "images": images(real_n, ours_n, pid),
@@ -388,6 +401,15 @@ def cymbal_desc(x):
     return {"early": octave_levels(x, 0.0, 0.25), "decay": octave_decay(x)}
 
 
+def kit_grid_mm(cid):
+    """The grid spacing a kit render reports in its own log ("splash 8: N nodes at X mm")."""
+    log = CAMPAIGN / "perc" / f"{cid}.log"
+    m = re.search(r"nodes at ([\d.]+) mm", log.read_text(errors="replace")) if log.exists() else None
+    if not m:
+        raise SystemExit(f"{log}: no grid spacing; render the splash with the kit example and keep its log")
+    return m.group(1)
+
+
 def cymbal_pair(pid, title, ours_id, real_name, dur):
     real_raw = highpass(load(REFS / f"{real_name}.wav"))
     ours_raw = highpass(ours_clip("perc", ours_id))
@@ -402,7 +424,7 @@ def cymbal_pair(pid, title, ours_id, real_name, dur):
         "real": {"label": f"Iowa splash cymbal · {real_name}", "url": IOWA_CYM + real_name + ".aif",
                  "sha256_wav48": sha(REFS / f"{real_name}.wav"), "rights": RIGHTS,
                  "recording": "anechoic chamber, Earthworks QTC40 stereo at 5 ft (first channel used), 24-bit 44.1 kHz"},
-        "ours": {"clip": ours_id, "label": "FrankenSim offline render (8-inch splash, 30 modes to 1.2 kHz, far-field point)"},
+        "ours": {"clip": ours_id, "label": f"FrankenSim offline render (fs-vkplate, the drum kit's solver: an 8-inch splash as a von Kármán shell on a {kit_grid_mm(ours_id)} mm grid; one point about 1 m above it, no room)"},
         "audio": {"real": encode(real_n * play, f"vs-{pid}-real"), "ours": encode(ours_n * play, f"vs-{pid}-ours"),
                   "level_match": "both scaled to equal RMS over the first 300 ms after onset"},
         "images": images(real_n, ours_n, pid),
@@ -457,7 +479,7 @@ def main():
     }
 
     cym = []
-    for dyn, ours_id, speed in [("pp", "cym-ff-soft", "0.6"), ("mf", "cym-ff", "2")]:
+    for dyn, ours_id, speed in [("pp", "vk-splash-soft", "0.6"), ("mf", "vk-splash", "2")]:
         c = cymbal_pair(f"splash-{dyn}", f"Splash {dyn} · {speed} m/s: real Iowa splash vs FrankenSim with a {speed} m/s stick", ours_id, f"splash.stick.normal.{dyn}", 2.5)
         pairs.append(c)
         cym.append(c)
@@ -471,9 +493,14 @@ def main():
                         ("splash.stick.normal.pp", "same real splash, pp")]:
         x = segment(highpass(load(REFS / f"{name}.wav")), 2.5)
         ruler.append({"label": label, "rms_gap_db": r(rms_db(octave_levels(x, 0.0, 0.25), ref_early), 3), "real": True})
-    for cid, label in [("cym-ff", "FrankenSim splash, 2 m/s"), ("cym-ff-soft", "FrankenSim splash, 0.6 m/s"), ("cym-ff-mallet", "FrankenSim splash, felt mallet")]:
+    for cid, label in [("vk-splash", "FrankenSim splash, 2 m/s"), ("vk-splash-soft", "FrankenSim splash, 0.6 m/s")]:
         x = segment(highpass(ours_clip("perc", cid)), 2.5)
         ruler.append({"label": label, "rms_gap_db": r(rms_db(octave_levels(x, 0.0, 0.25), ref_early), 3), "real": False})
+    # The same 2 m/s stroke on other grids (vk-splash-grid-<spacing>mm.wav), when the campaign has them.
+    for path in sorted((CAMPAIGN / "perc").glob("vk-splash-grid-*mm.wav"), key=lambda q: -float(q.stem.split("-")[-1][:-2])):
+        x = segment(highpass(load(path)), 2.5)
+        ruler.append({"label": f"FrankenSim splash, 2 m/s, {path.stem.split('-')[-1][:-2]} mm grid", "grid_mm": float(path.stem.split("-")[-1][:-2]),
+                      "rms_gap_db": r(rms_db(octave_levels(x, 0.0, 0.25), ref_early), 3), "real": False})
 
     for p in pairs:
         for k in [k for k in p if k.startswith("_")]:

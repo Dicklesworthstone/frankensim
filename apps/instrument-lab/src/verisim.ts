@@ -18,7 +18,7 @@ interface Verisim {
   pairs: Pair[];
   piano_ruler: { real_pp_vs_real_mf_db: number; real_mf_vs_real_ff_db: number; note: string };
   piano_dynamics: { real_db: Record<string, number>; ours_db: Record<string, number>; real_high_band_db: Record<string, number>; ours_high_band_db: Record<string, number>; note: string };
-  cymbal_ruler: { reference: string; rows: { label: string; rms_gap_db: number; real: boolean }[]; note: string };
+  cymbal_ruler: { reference: string; rows: { label: string; rms_gap_db: number; real: boolean; grid_mm?: number }[]; note: string };
   sources: { iowa_piano: string; iowa_cymbals: string; rights: string };
 }
 
@@ -194,6 +194,17 @@ function findings(v: Verisim): HTMLElement[] {
     `At mf, partial 4 decays at ${at(dr.ours, 4).toFixed(1)} dB/s in FrankenSim against ${at(dr.real, 4).toFixed(1)} dB/s on the real piano. Partial 2 goes the other way: ${at(dr.ours, 2).toFixed(1)} dB/s against ${at(dr.real, 2).toFixed(1)} dB/s. Decay is set by losses at the bridge and in the string, so this points at the coupling and damping model.`]);
   items.push(["The attack is sharper.",
     `FrankenSim rises in about ${num("a3-mf", "attack_rise_ms", "ours").toFixed(1)} ms, the recording in about ${num("a3-mf", "attack_rise_ms", "real").toFixed(1)} ms. The Iowa microphones sat 8 inches above the strings in a normal room; ours is a single point 1 m above the board with no room, so part of this gap may belong to the recording rather than the piano.`]);
+  const sp = p("splash-mf")?.descriptors["octave_early_db"]?.rms_gap_db as number | null | undefined;
+  const spSoft = p("splash-pp")?.descriptors["octave_early_db"]?.rms_gap_db as number | null | undefined;
+  const crashes = v.cymbal_ruler.rows.filter((row) => row.real && row.label.includes("crash")).map((row) => row.rms_gap_db);
+  // The same stroke on other grids shows how far the graded render's figure has converged.
+  const grids = v.cymbal_ruler.rows.filter((row) => !row.real && typeof row.grid_mm === "number").sort((a, b) => b.grid_mm! - a.grid_mm!);
+  const pairGrid = /on a ([\d.]+) mm grid/.exec(p("splash-mf")?.ours.label ?? "")?.[1];
+  if (typeof sp === "number" && p("splash-mf")?.ours.label.includes("fs-vkplate") && crashes.length) {
+    const lo = Math.min(...crashes), hi = Math.max(...crashes);
+    items.push([sp <= lo ? "The splash's octave balance is closer to the real splash than real crashes are." : sp <= hi ? "The splash's octave balance sits among the real crashes." : "The splash's octave balance sits just beyond the real crashes.",
+      `Struck at 2 m/s${pairGrid ? ` on a ${pairGrid} mm grid` : ""}, the 8-inch splash is ${sp.toFixed(1)} dB from the real splash in octave-band balance over the first 250 ms${typeof spSoft === "number" ? ` (${spSoft.toFixed(1)} dB at 0.6 m/s against the real pp)` : ""}.${grids.length ? ` The same stroke on other grids: ${grids.map((g) => `${g.rms_gap_db.toFixed(1)} dB (${g.grid_mm} mm)`).join(", ")}.` : ""} Three real crashes, struck the same way, sit ${lo.toFixed(1)}–${hi.toFixed(1)} dB from it. Its 2–8 kHz brightness is ${num("splash-mf", "high_band_db", "ours").toFixed(1)} dB against the recording's ${num("splash-mf", "high_band_db", "real").toFixed(1)} dB: its 4 kHz octave is too weak.`]);
+  }
   // A missing number must not reach the page as "NaN dB".
   return items.filter(([, t]) => !t.includes("NaN")).map(([h, t]) => el("li", {}, el("b", {}, h), " ", t));
 }
@@ -206,8 +217,8 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
     const res = await fetch(asset("data/verisim.json"));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     data = (await res.json()) as Verisim;
-    // The retired modal splash is no longer on the page: drums and cymbals are graded in the kit section.
-    data.pairs = data.pairs.filter((p) => p.kind === "piano");
+    // A cymbal pair is shown only when it comes from the kit's own solver; the retired modal splash stays off the page.
+    data.pairs = data.pairs.filter((p) => p.kind === "piano" || p.ours.label.includes("fs-vkplate"));
   } catch (e) {
     root.style.minHeight = "0";
     root.replaceChildren(el("p", { class: "panel small", role: "status" }, `The comparison data could not be loaded (${(e as Error).message}). Reload to try again.`));
@@ -380,7 +391,7 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
   render();
 }
 
-interface DiagRow { id: string; symptom: string; evidence: string; suspect: string; test: string; status: "open" | "testing" | "confirmed" | "refuted"; result?: string }
+interface DiagRow { id: string; symptom: string; evidence: string; suspect: string; test: string; status: "open" | "testing" | "confirmed" | "refuted" | "improved" | "fixed"; result?: string; fix?: string }
 
 /** The differential diagnosis written by tools/diagnose.py: words and numbers come from the same run. */
 async function mountDiagnosis(): Promise<void> {
@@ -395,7 +406,7 @@ async function mountDiagnosis(): Promise<void> {
     root.replaceChildren(el("p", { class: "small", role: "status" }, `The diagnosis could not be loaded (${(e as Error).message}).`));
     return;
   }
-  const word: Record<DiagRow["status"], string> = { open: "Open", testing: "Partly explained", confirmed: "Cause confirmed by experiment", refuted: "First suspect ruled out" };
+  const word: Record<DiagRow["status"], string> = { open: "Open", testing: "Partly explained", confirmed: "Cause confirmed by experiment", refuted: "First suspect ruled out", improved: "Partly fixed in the renders above", fixed: "Fixed in the renders above" };
   root.replaceChildren(...rows.map((r) =>
     el("article", { class: `diag ${r.status}` },
       el("div", { class: "diag-head" }, el("span", { class: "diag-status" }, word[r.status]), el("h4", {}, r.symptom)),
@@ -403,5 +414,6 @@ async function mountDiagnosis(): Promise<void> {
         el("dt", {}, "Evidence"), el("dd", {}, r.evidence),
         el("dt", {}, "Suspected cause"), el("dd", {}, r.suspect),
         ...(r.result ? [el("dt", {}, "Experiment"), el("dd", {}, r.result)] : []),
-        ...(r.status === "confirmed" ? [] : [el("dt", {}, "Next test"), el("dd", {}, r.test)])))));
+        ...(r.fix ? [el("dt", {}, "Fix"), el("dd", {}, r.fix)] : []),
+        ...(r.status === "confirmed" || r.status === "fixed" ? [] : [el("dt", {}, "Next test"), el("dd", {}, r.test)])))));
 }

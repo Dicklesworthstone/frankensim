@@ -64,7 +64,10 @@ changed gets a new URL, so no visitor pairs new code with an hour-old `strandbar
 The "Real vs ours" section compares renders with University of Iowa Musical Instrument Samples
 (<https://theremin.music.uiowa.edu/MIS.html>, free to use without restriction): a Steinway Model B
 (`Piano.{pp,mf,ff}.A3`, `Piano.mf.C6`) and an anechoic splash plus 13/17/18-inch crashes
-(`splash.stick.normal.*`, `*crash.stick.normal.mf`). Convert each to 48 kHz float WAV, then:
+(`splash.stick.normal.*`, `*crash.stick.normal.mf`). Convert each to 48 kHz float WAV. The campaign's
+splash renders come from the kit's solver, `perc/vk-splash.wav` and `perc/vk-splash-soft.wav`
+(`kit splash OUT.wav 2 2.6` and `kit splash OUT.wav 0.6 2.6`, see "The drum kit"); a pair's label
+names what its render simulated. Then:
 
     uv run --with numpy --with pillow python tools/verisim.py <campaign-dir> <wav48-dir> public
 
@@ -87,9 +90,13 @@ switch one mechanism on at a time, whenever they are present in the campaign:
     #   waves,57,166505,0.2,10000,8,0.01,0.01   EA = E*A, E = 200 GPa, A from the scale's own EI
     grand_piano ...a3-{mf,ff} flags... --string-stretching axial-a3.fspx --render a3-{mf,ff}-waves.wav
 
-A card counts as confirmed only when its experiment moves the measured gap. Air loading
-(`--rayleigh-loading`) cannot yet be admitted on the production board; see bead
-frankensim-s59w0.
+A card counts as confirmed only when its experiment moves the measured gap. A mechanism that has
+moved into the graded renders is reported as fixed or partly fixed: the A3 renders
+(`a3-{pp,mf,ff,fff}`) carry `--string-stretching axial-a3.fspx`, whose waves drive the bridge axially,
+and when the campaign also has the same strokes on linear strings (`a3-{mf,ff,fff}-linear`) the card
+compares the two. Air loading (`--rayleigh-loading`) cannot yet be admitted on the production board:
+on a resolved board fine enough for 2.4 kHz the 32-port passive fit of the 128-mode impedance misses
+its accuracy limits (bead frankensim-h0dv2; the 1 kHz board result is on frankensim-s59w0).
 
 ## The drum kit
 
