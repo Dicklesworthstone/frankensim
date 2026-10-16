@@ -203,6 +203,7 @@ impl CompactBody {
 /// with the same sine Airy membrane channel.
 pub struct VkBody {
     sys: fs_phs::PortHamiltonian,
+    linear: fs_phs::linear_exact::LinearSplit,
     x: Vec<f64>,
     /// Modal monopole areas [m²].
     pub areas: Vec<f64>,
@@ -405,8 +406,8 @@ impl VkBody {
         rho: f64,
         listener_m: f64,
     ) -> Result<(f64, f64), AcousticRealizeError> {
-        let rec = fs_phs::step(&self.sys, &self.x, &[force_n], dt)
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let rec = fs_phs::linear_exact::step_render(&self.sys, &self.linear, &self.x, &[force_n], dt)
+            .map_err(render_step_error)?;
         let mut p = 0.0;
         let mut u = 0.0;
         for k in 0..self.n_modes() {
@@ -448,11 +449,28 @@ fn finish_vk(
     let omegas = storage.omegas.clone();
     let sys = fs_nlmodal::assemble_storage(n, &omegas, zetas, m, g, Box::new(storage))
         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let linear = prepare_render_linear(&sys)?;
     Ok(VkBody {
         sys,
+        linear,
         x: vec![0.0; 2 * n],
         areas,
     })
+}
+
+fn prepare_render_linear(sys: &fs_phs::PortHamiltonian)
+    -> Result<fs_phs::linear_exact::LinearSplit, AcousticRealizeError>
+{
+    fs_phs::linear_exact::split_quadratic(sys, fs_phs::linear_exact::LinearSplitBudget {
+        max_modes: sys.state_dim(), max_omega_dt: core::f64::consts::PI,
+    }).map_err(render_step_error)
+}
+
+fn render_step_error(error: fs_phs::PhsError) -> AcousticRealizeError {
+    match error {
+        fs_phs::PhsError::TimeResolution(band) => AcousticRealizeError::TimeResolution(band),
+        other => AcousticRealizeError::Nonlinear(other.to_string()),
+    }
 }
 
 /// Von Karman plate as a 1- or 2-port pHS (bridge, optional face).
@@ -1827,6 +1845,38 @@ fn map_plate(err: PlateError) -> AcousticRealizeError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vk_render_has_an_exact_linear_map_and_a_typed_nonlinear_band() {
+        use fs_nlmodal::{SosModalStorage, StressChannel};
+        use super::*;
+        let make = |nonlinear| finish_vk(SosModalStorage {
+            omegas: vec![1.0],
+            channels: if nonlinear {vec![StressChannel {coefficient:1.0,coupling:vec![1.0]}]}
+                else {vec![]},
+        }, &[0.0], &[1.0], vec![1.0], false).unwrap();
+        for z in [0.1, 1.0, 2.5] {
+            let mut body = make(false);
+            body.x[0] = 1e-4;
+            body.drive_and_radiate(0.0,z,1.2,1.0).unwrap();
+            assert!((body.x[0]/1e-4-det::cos(z)).abs()<1e-12);
+            assert!((body.x[1]/1e-4+det::sin(z)).abs()<1e-12);
+        }
+        let cap = fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP;
+        for z in [cap/4.0,cap/2.0,cap] {
+            let mut body = make(true);
+            body.x[0] = 1e-4;
+            body.drive_and_radiate(0.0,z,1.2,1.0).unwrap();
+            let phase = det::atan2(-body.x[1],body.x[0]);
+            let cents = 1200.0*det::ln(phase/z)/core::f64::consts::LN_2;
+            assert!(cents.abs()<=1.0,"{cents}");
+        }
+        let mut body = make(true);
+        let before = body.x.clone();
+        assert!(matches!(body.drive_and_radiate(0.0,cap+1e-12,1.2,1.0),
+            Err(AcousticRealizeError::TimeResolution(_))));
+        assert_eq!(body.x,before);
+    }
+
     use super::*;
 
     fn compact_zoh_fixture(zeta: f64) -> CompactBody {
