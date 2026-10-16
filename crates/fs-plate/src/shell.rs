@@ -30,6 +30,9 @@ pub mod preload;
 /// Shear-deformable triangular shells with condensed rotation enrichment.
 pub mod mitc;
 
+/// Declared section/height-map arching and independent graduation fields.
+pub mod arching;
+
 /// Relative membrane-spin stabilization; numerical, not a material property.
 pub const DRILLING_ALPHA: f64 = 1e-3;
 

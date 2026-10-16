@@ -95,6 +95,23 @@ falsifier. Roof/cylinder reference-error monotonicity is unchanged. These
 limits are pointwise estimates, not certified continuum-error enclosures.
 
 ## Public types and semantics
+
+`shell::arching` (IRP M1.2-W6) admits explicit cubic-Hermite section curves or
+a sampled bicubic height grid, with a required unloaded/declared-loaded
+reference state. Four-point nodal differentiation plus tensor Hermite
+interpolation gives C1 height/gradient interpolation and reproduces bicubic
+polynomials. Lofted cross sections must meet the long arch at x=0; no missing
+section slopes or geometry parameters are defaulted. Graph lifting preserves
+vertex order, triangles and holes and supplies analytic unit graph directors;
+it does not unload a scan or certify arbitrary self-intersections. Graduation
+is an independent `ThicknessField`; nonpositive samples refuse. Lifts and
+graduation sampling have explicit work caps and node-boundary cancellation.
+Meshing stays in L2 `fs-mesh` and is a dev dependency here, outside the runtime
+WASM graph. The new `arched_outline_shell` target composes outline admission,
+lift, physical graduation, `MeshShell` admission, DKT/MITC modal ladders and a
+Bessel-shape-paired annular-film oracle. These tests require native execution
+before any convergence or instrument-geometry qualification claim.
+
 - `PlateSection::{orthotropic, isotropic}` — bending rigidity D from
   engineering constants: `D11 = E1h³/12(1−ν12ν21)` etc., `D33 = G12h³/12`.
   Material axis 1 is the grain (L) axis — the matdb axis-convention

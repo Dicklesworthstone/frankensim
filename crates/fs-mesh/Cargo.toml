@@ -19,6 +19,7 @@ fs-obs = { path = "../fs-obs" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 
 [dev-dependencies]
+fs-mms = { path = "../fs-mms" }
 asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
 fs-rep-frep = { path = "../fs-rep-frep" }

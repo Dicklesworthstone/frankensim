@@ -11,6 +11,16 @@ readonly -a EXPECTED_TESTS=(
   g1_free_free_bar_eigen_ladder
 )
 readonly REDUCE_TEST='reduce::reduce_tests::rl_005_tet10_cantilever_card'
+readonly -a OUTLINE_TESTS=(
+  g0_cdt_conforms_to_outline_and_holes
+  g0_quality_bound
+  g1_curved_outline_chord_ladder
+)
+readonly -a ARCHING_TESTS=(
+  g0_arching_surface_from_parameters
+  g1_plate_with_hole_modes_converge
+  g1_annular_tensioned_film_matches_bessel_roots
+)
 readonly -a SHELL_TESTS=(
   g2_scordelis_lo_roof
   g2_pinched_cylinder_with_diaphragms
@@ -26,6 +36,8 @@ list() {
   for test in "${EXPECTED_TESTS[@]}"; do printf 'fs-solid:tet10::%s\n' "$test"; done
   printf 'fs-solid:lib::%s\n' "$REDUCE_TEST"
   for test in "${SHELL_TESTS[@]}"; do printf 'fs-plate:shell_obstacle_course::%s\n' "$test"; done
+  for test in "${OUTLINE_TESTS[@]}"; do printf 'fs-mesh:planar_outline::%s\n' "$test"; done
+  for test in "${ARCHING_TESTS[@]}"; do printf 'fs-plate:arched_outline_shell::%s\n' "$test"; done
 }
 
 check() {
@@ -41,7 +53,13 @@ check() {
       printf 'missing shell test: %s\n' "$test" >&2; return 1;
     }
   done
-  printf 'IRP S1: five solid G1/G2 cases, DEF-08 and seven shell cases present\n'
+  for test in "${OUTLINE_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-mesh/tests/planar_outline.rs" || return 1
+  done
+  for test in "${ARCHING_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-plate/tests/arched_outline_shell.rs" || return 1
+  done
+  printf 'IRP S1: solid, shell, outline and arching cases present\n'
 }
 
 run() {
@@ -58,7 +76,7 @@ run() {
   git_head="$(git -C "$REPO_ROOT" rev-parse HEAD)"
   host="$(uname -n)"
   printf 'IRP S1 live receipt: %s\n' "$output_dir"
-  local -a tet_command lib_command shell_command
+  local -a tet_command lib_command shell_command outline_command arching_command
   if [[ -n "${IRP_S1_TET10_BIN:-}" && -n "${IRP_S1_LIB_BIN:-}" && -n "${IRP_S1_SHELL_BIN:-}" ]]; then
     tet_command=("$IRP_S1_TET10_BIN" --exact --test-threads=1 --show-output "${EXPECTED_TESTS[@]}")
     lib_command=("$IRP_S1_LIB_BIN" --exact --test-threads=1 --show-output "$REDUCE_TEST")
@@ -68,11 +86,23 @@ run() {
     lib_command=(cargo test --locked -j 12 -p fs-solid --lib -- --exact --test-threads=1 --show-output "$REDUCE_TEST")
     shell_command=(cargo test --locked -j 12 -p fs-plate --test shell_obstacle_course -- --exact --test-threads=1 --show-output "${SHELL_TESTS[@]}")
   fi
+  if [[ -n "${IRP_S1_OUTLINE_BIN:-}" ]]; then
+    outline_command=("$IRP_S1_OUTLINE_BIN" --exact --test-threads=1 --show-output "${OUTLINE_TESTS[@]}")
+  else
+    outline_command=(cargo test --locked -j 12 -p fs-mesh --test planar_outline -- --exact --test-threads=1 --show-output "${OUTLINE_TESTS[@]}")
+  fi
+  if [[ -n "${IRP_S1_ARCHING_BIN:-}" ]]; then
+    arching_command=("$IRP_S1_ARCHING_BIN" --exact --test-threads=1 --show-output "${ARCHING_TESTS[@]}")
+  else
+    arching_command=(cargo test --locked -j 12 -p fs-plate --test arched_outline_shell -- --exact --test-threads=1 --show-output "${ARCHING_TESTS[@]}")
+  fi
   {
     printf 'host=%s\ngit_head=%s\nstarted_utc=%s\n' "$host" "$git_head" "$started"
     printf '%q ' "${tet_command[@]}"; printf '\n'
     printf '%q ' "${lib_command[@]}"; printf '\n'
     printf '%q ' "${shell_command[@]}"; printf '\n'
+    printf '%q ' "${outline_command[@]}"; printf '\n'
+    printf '%q ' "${arching_command[@]}"; printf '\n'
   } >"${output_dir}/command.txt"
   export CARGO_BUILD_JOBS=12
   export CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
@@ -86,8 +116,14 @@ run() {
   (cd "$REPO_ROOT" && "${shell_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
   status=$?
   if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  (cd "$REPO_ROOT" && "${outline_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  (cd "$REPO_ROOT" && "${arching_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
   set -e
-  for test in "${EXPECTED_TESTS[@]}" "$REDUCE_TEST" "${SHELL_TESTS[@]}"; do
+  for test in "${EXPECTED_TESTS[@]}" "$REDUCE_TEST" "${SHELL_TESTS[@]}" "${OUTLINE_TESTS[@]}" "${ARCHING_TESTS[@]}"; do
     if ! grep -Fqx "test ${test} ... ok" "${output_dir}/stdout.log" "${output_dir}/stderr.log"; then
       printf 'missing or failed: %s\n' "$test" >&2; missing=1
     fi
