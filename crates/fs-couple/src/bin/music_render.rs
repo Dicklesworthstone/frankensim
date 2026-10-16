@@ -83,6 +83,8 @@ mod plate_input;
 mod stream_output;
 #[path = "music_render/ensemble_input.rs"]
 mod ensemble_input;
+#[path = "music_render/thermochemical.rs"]
+mod thermochemical;
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
@@ -338,19 +340,27 @@ fn string_context(block: usize) -> RenderContext {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let (args, gas_options) = thermochemical::Options::extract(&args).unwrap_or_else(|e| fail(&e));
+    let gas_sources = gas_options.load().unwrap_or_else(|e| fail(&e));
+    let gas_bindings = gas_sources.bindings();
+    let gas_registry = gas_sources.registry(&gas_bindings);
     if args.first().is_some_and(|arg| arg == "wind") {
-        wind_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
+        if gas_options.record.is_some() { fail("wind gas records belong in the performance file"); }
+        wind_input::run_with_gas_sources(&args[1..], gas_registry.as_ref()).unwrap_or_else(|e| fail(&e));
         return;
     }
     if args.first().is_some_and(|arg| arg == "ensemble") {
-        ensemble_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
+        if gas_options.record.is_some() { fail("ensemble gas records belong in the source performance files"); }
+        ensemble_input::run_with_gas_sources(&args[1..], gas_registry.as_ref()).unwrap_or_else(|e| fail(&e));
         return;
     }
     if args.first().is_some_and(|arg| arg == "plate") {
+        if gas_registry.is_some() || gas_options.record.is_some() { fail("plate input has no gas consumer"); }
         plate_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
         return;
     }
     if args.first().is_some_and(|arg| arg == "modal") {
+        if gas_registry.is_some() || gas_options.record.is_some() { fail("modal input has no gas consumer"); }
         modal_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
         return;
     }
@@ -441,6 +451,14 @@ fn main() {
             "usage: music_render <reed|string> <out.wav> [--seconds S] [--block N] [--full-scale-pa P] [--schedule FILE] [--temperature-k K] [--ambient-pressure-pa PA] [--relative-humidity RH] [--duct-length-m M] [--duct-radius-m M] [--duct-outlet-radius-m M] (ambient and duct options require reed)",
         );
     };
+    if (gas_registry.is_some() || gas_options.record.is_some()) && fixture != "reed" {
+        fail("source-backed gas input requires reed or a file-driven wind/bowed source");
+    }
+    if gas_options.record.is_some() && ambient_explicit {
+        fail(
+            "--gas-record supplies its own temperature and pressure; legacy ambient flags conflict",
+        );
+    }
     if !(seconds > 0.0 && seconds <= 600.0) {
         fail("--seconds must be in (0, 600]");
     }
@@ -476,9 +494,14 @@ fn main() {
         "reed" => {
             let outlet = duct_outlet_radius_m.unwrap_or(duct_radius_m);
             let duct = axial_duct(duct_length_m, duct_radius_m, outlet).unwrap_or_else(|e| fail(e));
-            let air =
-                GasState::try_new_moist_air(temperature_k, ambient_pressure_pa, relative_humidity)
-                    .unwrap_or_else(|e| fail(&format!("ambient gas state refused: {e:?}")));
+            let gas_record = match gas_options.record.as_ref() {
+                Some(path) => thermochemical::read_record(path, gas_registry.as_ref()).unwrap_or_else(|e| fail(&e)),
+                None if gas_registry.is_some() => fail("source-backed reed medium requires an explicit --gas-record file"),
+                None => fs_material::gas_species::input::GasRecord::Legacy(
+                    GasState::try_new_moist_air(temperature_k, ambient_pressure_pa, relative_humidity)
+                        .unwrap_or_else(|e| fail(&format!("ambient gas state refused: {e:?}")))),
+            };
+            let air = *gas_record.state();
             let gas_spec = if relative_humidity == 0.0 {
                 "dry_air_ussa1976"
             } else {
@@ -496,6 +519,13 @@ fn main() {
             ambient_provenance = format!(
                 ",\"ambient_gas\":{{\"spec\":\"{gas_spec}\",\"temperature_k\":{temperature_k:e},\"pressure_pa\":{ambient_pressure_pa:e},\"relative_humidity\":{relative_humidity:e}}},\"duct\":{geometry}"
             );
+            if gas_options.record.is_some() {
+                // A NASA-9 declaration has its own T,p and composition. Do not
+                // attribute it to the unrelated legacy ambient CLI defaults.
+                ambient_provenance = format!(",\"duct\":{geometry},\"ambient_gas\":{{\"spec\":\"explicit gas record\",\"temperature_k\":{:e},\"pressure_pa\":{:e},\"water_mole_fraction\":{:e}}}{}",
+                    air.temperature,air.pressure,air.water_mole_fraction,
+                    thermochemical::provenance(std::slice::from_ref(&gas_record)));
+            }
             reed_context(samples, block, &air, &duct)
         }
         "string" => string_context(block),

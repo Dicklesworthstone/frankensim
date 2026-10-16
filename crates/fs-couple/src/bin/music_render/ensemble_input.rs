@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use fs_blake3::ContentHash;
 use fs_exec::CancelGate;
+use fs_material::gas_species::input::ThermochemicalSources;
 use fs_couple::bernoulli_aperture::performance::file::{PlateValvePerformance, PLATE_VALVE_PERFORMANCE_SCHEMA};
 use fs_couple::bowed_string::runtime::schedule::file::{BowedPerformance, BOWED_PERFORMANCE_SCHEMA, MAX_BOWED_PERFORMANCE_BYTES};
 use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
@@ -101,6 +102,13 @@ fn boxed(renderer: ScheduledRenderer, mut info: SourceInfo) -> (Box<dyn Pressure
     (Box::new(renderer), info)
 }
 fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, SourceInfo), String> {
+    load_with_gas_sources(input, block, None)
+}
+fn load_with_gas_sources(
+    input: &Input,
+    block: usize,
+    sources: Option<&ThermochemicalSources<'_>>,
+) -> Result<(Box<dyn PressureRenderer>, SourceInfo), String> {
     let file = std::fs::File::open(&input.path).map_err(|e| format!("input {}: {e}", input.path.display()))?;
     let max_bytes = match input.kind {
         Kind::Bow => MAX_BOWED_PERFORMANCE_BYTES, Kind::Reed => MAX_REED_PERFORMANCE_BYTES,
@@ -121,12 +129,13 @@ fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, Sourc
             })
         }
         Kind::Bow => {
-            let p = BowedPerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
+            let p = BowedPerformance::from_bytes_with_gas_sources(&bytes, block, sources).map_err(|e| e.to_string())?;
             let i = p.info();
+            let gas_json=super::thermochemical::provenance(std::slice::from_ref(p.gas_record()));
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: BOWED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                components: 1, modes: i.string_modes + 1, controls: i.compiled_controls, exterior_json: String::new(),
+                components: 1, modes: i.string_modes + 1, controls: i.compiled_controls, exterior_json: gas_json,
             })
         }
         Kind::Plate => {
@@ -139,10 +148,10 @@ fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, Sourc
             })
         }
         Kind::Valve => {
-            let p = PlateValvePerformance::from_bytes(&bytes, block, &CancelGate::new()).map_err(|e|e.to_string())?;
+            let p = PlateValvePerformance::from_bytes_with_gas_sources(&bytes, block, &CancelGate::new(),sources).map_err(|e|e.to_string())?;
             let i = p.info();
-            let exterior_json = format!("{}{}",super::wind_input::outlet_provenance(p.renderer(),i.radiation_load),
-                super::duct_metadata::provenance(&p));
+            let exterior_json = format!("{}{}{}",super::wind_input::outlet_provenance(p.renderer(),i.radiation_load),
+                super::duct_metadata::provenance(&p),super::thermochemical::provenance(p.gas_records()));
             (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: PLATE_VALVE_PERFORMANCE_SCHEMA, hash:i.input_hash,
                 rate:i.sample_rate_hz,samples:i.samples,source_full_scale_pa:i.full_scale_pa,
@@ -150,9 +159,10 @@ fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, Sourc
             })
         }
         Kind::Reed => {
-            let p = ReedPerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
+            let p = ReedPerformance::from_bytes_with_gas_sources(&bytes, block,
+                fs_couple::pcm_wav::observation::ObservationPolicy::Diagnostic,sources).map_err(|e| e.to_string())?;
             let i = p.info();
-            let exterior_json = super::duct_metadata::reed_provenance(&p);
+            let exterior_json = format!("{}{}",super::duct_metadata::reed_provenance(&p),super::thermochemical::provenance(p.gas_records()));
             (Box::new(p) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: REED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
@@ -164,13 +174,19 @@ fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, Sourc
 }
 
 fn prepare(options: &Options) -> Result<(DynamicEnsemble, Vec<SourceInfo>, u64), String> {
+    prepare_with_gas_sources(options, None)
+}
+fn prepare_with_gas_sources(
+    options: &Options,
+    gas_sources: Option<&ThermochemicalSources<'_>>,
+) -> Result<(DynamicEnsemble, Vec<SourceInfo>, u64), String> {
     let mut parts = Vec::new();
     let mut sources = Vec::new();
     let mut horizon = None;
     let mut converted = false;
     let (mut components, mut modes, mut controls) = (0_usize, 0_usize, 0_usize);
     for (index, input) in options.inputs.iter().enumerate() {
-        let (renderer, info) = load(input, options.block)
+        let (renderer, info) = load_with_gas_sources(input, options.block,gas_sources)
             .map_err(|e| format!("ensemble part {index} ({}): {e}", input.kind.label()))?;
         if info.rate != RATE && !options.decimate {
             return Err(format!("ensemble part {index} needs explicit --decimate; mechanics run at {} Hz", info.rate));
@@ -204,13 +220,19 @@ fn prepare(options: &Options) -> Result<(DynamicEnsemble, Vec<SourceInfo>, u64),
 }
 
 pub(super) fn run(args: &[String]) -> Result<(), String> {
+    run_with_gas_sources(args, None)
+}
+pub(super) fn run_with_gas_sources(
+    args: &[String],
+    gas_sources: Option<&ThermochemicalSources<'_>>,
+) -> Result<(), String> {
     let options = options(args)?;
     let output = &options.output;
     let sidecar = output.with_extension("provenance.json");
     if output == &sidecar || output.exists() || sidecar.exists() {
         return Err("output/sidecar paths must be distinct and must not already exist".into());
     }
-    let (mut renderer, sources, samples) = prepare(&options)?;
+    let (mut renderer, sources, samples) = prepare_with_gas_sources(&options, gas_sources)?;
     let sample_count = usize::try_from(samples).map_err(|_| "output sample count exceeds this host".to_string())?;
     // Finish every source admission and reduction before creating either file.
     let (mut audio, mut metadata) = create_outputs(output, &sidecar)?;

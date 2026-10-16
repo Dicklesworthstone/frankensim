@@ -27,6 +27,14 @@ impl ObservationInput {
         Ok(())
     }
     pub(super) fn read(reader: &mut Reader<'_>) -> Result<Self, ReedPerformanceError> {
+        Self::read_with_gas_sources(reader, None, &mut Vec::new())
+    }
+
+    pub(super) fn read_with_gas_sources(
+        reader: &mut Reader<'_>,
+        sources: Option<&ThermochemicalSources<'_>>,
+        records: &mut Vec<GasRecord>,
+    ) -> Result<Self, ReedPerformanceError> {
         let mut row = reader.next()?;
         let mut observation = match row.word()? {
             "listener_m" => Self::Legacy(row.positive()?),
@@ -43,7 +51,7 @@ impl ObservationInput {
             let Self::Baffled { exterior, .. } = &mut observation else {
                 return Err(bad(row.line, "an exterior gas requires the physical baffled_outlet observation"));
             };
-            *exterior = Some(row.gas(None)?);
+            *exterior = Some(row.gas_with_sources(None, sources, records)?);
             row.finish()?;
         }
         Ok(observation)
