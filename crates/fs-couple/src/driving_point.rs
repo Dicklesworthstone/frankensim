@@ -141,7 +141,10 @@ fn characteristic_line_response(
     let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
     buf[0] = match termination {
         Termination::Closed => FftC64::new(1.0, 0.0),
-        Termination::IdealOpen | Termination::UnflangedOpen | Termination::FlangedOpen => {
+        Termination::IdealOpen
+        | Termination::UnflangedOpen
+        | Termination::UnflangedThinWall { .. }
+        | Termination::FlangedOpen => {
             FftC64::new(-1.0, 0.0)
         }
     };
@@ -201,7 +204,10 @@ pub fn impedance_line(
                 .map_err(DrivingPointError::Duct)?;
         let z = match termination {
             Termination::Closed => response.impedance,
-            Termination::IdealOpen | Termination::UnflangedOpen | Termination::FlangedOpen => {
+            Termination::IdealOpen
+            | Termination::UnflangedOpen
+            | Termination::UnflangedThinWall { .. }
+            | Termination::FlangedOpen => {
                 response.p_mouth_over_u_in
             }
         };

@@ -69,6 +69,9 @@
 //! multimodal structure by ~15 cents.
 
 pub mod modal;
+/// Exact thin-wall unflanged radiation load below the axisymmetric cutoff.
+pub mod levine_schwinger;
+pub use levine_schwinger::{LsQuadrature, LsSolution, LS_MAX_KA, levine_schwinger_impedance};
 
 use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::GasState;
@@ -89,6 +92,13 @@ pub const MAX_RADIATION_KA: f64 = 1.0;
 /// Typed refusals with stable `FS-DUCT-*` codes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DuctError {
+    /// The exact LS dominant-mode solution stops at the first axisymmetric cutoff.
+    LevineSchwingerCutoff {
+        /// Requested acoustic radius.
+        ka: f64,
+        /// First positive J1 root, computed by the shared modal owner.
+        cutoff: f64,
+    },
     /// A parameter is non-finite or out of range.
     BadParameter {
         /// Which parameter refused.
@@ -122,6 +132,8 @@ pub enum DuctError {
 impl core::fmt::Display for DuctError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            DuctError::LevineSchwingerCutoff { ka, cutoff } => write!(f,
+                "FS-DUCT-LS-CUTOFF: ka = {ka:.12e} must be below first axisymmetric cutoff {cutoff:.12e}"),
             DuctError::BadParameter { what } => write!(f, "FS-DUCT-BAD-PARAMETER: {what}"),
             DuctError::TooNarrow { shear_number } => write!(
                 f,
@@ -304,6 +316,11 @@ pub enum Termination {
     /// Unflanged-pipe low-`ka` radiation load (Levine–Schwinger fit,
     /// end correction 0.6133 a).
     UnflangedOpen,
+    /// Exact thin-wall Levine-Schwinger WH load; numerical resolution is explicit.
+    UnflangedThinWall {
+        /// Fixed-node quadrature resolution for the original integrals.
+        quadrature: levine_schwinger::LsQuadrature,
+    },
     /// Flanged-pipe low-`ka` radiation load (end correction 0.8216 a).
     FlangedOpen,
 }
@@ -1019,12 +1036,12 @@ fn segment_matrix(segment: &Segment, wave: &SegmentWave) -> Result<[C64; 4], Duc
 
 /// Compact-mouth radiation impedance of an open termination.
 ///
-/// Public name for the same Levine–Schwinger / flanged fit the TMM
-/// already uses. Ideal and closed terminations refuse — they are not
-/// radiation loads.
+/// Public name for the TMM's radiation loads, including exact thin-wall LS
+/// and the legacy low-ka fits. Ideal and closed terminations refuse.
 ///
 /// # Errors
-/// [`DuctError::RadiationKaTooLarge`] or [`DuctError::BadParameter`].
+/// [`DuctError::RadiationKaTooLarge`], [`DuctError::LevineSchwingerCutoff`]
+/// or [`DuctError::BadParameter`].
 pub fn compact_radiation_impedance(
     termination: Termination,
     state: &GasState,
@@ -1032,7 +1049,9 @@ pub fn compact_radiation_impedance(
     omega: f64,
 ) -> Result<C64, DuctError> {
     match termination {
-        Termination::UnflangedOpen | Termination::FlangedOpen => {
+        Termination::UnflangedOpen
+        | Termination::UnflangedThinWall { .. }
+        | Termination::FlangedOpen => {
             termination_impedance(termination, state, radius, omega)?
                 .0
                 .ok_or(DuctError::BadParameter {
@@ -1099,6 +1118,12 @@ fn termination_impedance(
     match termination {
         Termination::Closed => Ok((None, 0.0)),
         Termination::IdealOpen => Ok((Some(C64::ZERO), 0.0)),
+        Termination::UnflangedThinWall { quadrature } => Ok((
+            Some(levine_schwinger::levine_schwinger_impedance(
+                state, radius, omega, quadrature,
+            )?),
+            ka,
+        )),
         Termination::UnflangedOpen => {
             if ka > MAX_RADIATION_KA {
                 return Err(DuctError::RadiationKaTooLarge { ka });
