@@ -285,10 +285,24 @@ fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
     let mut piston = GasPiston::new(gas(0.75, 0.001), 1.0, 0.01, 0.0).unwrap();
     // Keep an actual accepted window, including its lazily expanded transfer
     // cache. GasPiston's physical-state PartialEq deliberately omits ports,
-    // so every refusal below also compares the complete account explicitly.
+    // so every refusal also compares the public schemas, transfers and audit.
+    // This file is included by port_schema_adoption as an integration fixture:
+    // the rollback check must use the public owner seam in both test contexts.
     piston.step(drive(0.0), controls(), || false).unwrap();
     assert!(piston.last_window_transfers().is_some());
     let before = piston.clone();
+    let window = |owner: &GasPiston| {
+        (
+            owner.port_schemas().to_vec(),
+            owner.port_coordinate_charts().to_vec(),
+            owner.junction_schemas().to_vec(),
+            owner.last_window_duration_s(),
+            owner.last_window_transfers().map(<[_]>::to_vec),
+            owner.last_window_transfer_error().cloned(),
+            owner.audit_last_window().unwrap(),
+        )
+    };
+    let before_window = window(&before);
     for input in [
         PistonInput {
             duration_s: 0.0,
@@ -302,7 +316,7 @@ fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
     ] {
         assert!(piston.step(input, controls(), || false).is_err());
         assert_eq!(piston, before);
-        assert_eq!(piston.ports, before.ports);
+        assert_eq!(window(&piston), before_window);
     }
     // The resolved 50 us / 20 J trial now converges in one correction.
     // At 200 us / 300 J the same gas requires another Newton correction,
@@ -322,7 +336,7 @@ fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
     assert!(accepted.iterations > 1);
     assert!(accepted.momentum_residual_n_s.abs() <= controls().momentum_tolerance_n_s);
     assert!(accepted.total_energy_residual_j.abs() <= controls().energy_tolerance_j);
-    assert_ne!(resolved.ports, before.ports);
+    assert_ne!(window(&resolved), before_window);
     assert!(matches!(
         piston.step(
             nonlinear,
@@ -335,7 +349,7 @@ fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
         Err(PistonError::NotConverged { iterations: 1, .. })
     ));
     assert_eq!(piston, before);
-    assert_eq!(piston.ports, before.ports);
+    assert_eq!(window(&piston), before_window);
     assert!(matches!(
         piston.step(
             drive(20.0),
@@ -348,7 +362,7 @@ fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
         Err(PistonError::OutsideBracket { .. })
     ));
     assert_eq!(piston, before);
-    assert_eq!(piston.ports, before.ports);
+    assert_eq!(window(&piston), before_window);
     let mut count = 0;
     let mut probe = piston.clone();
     probe
@@ -366,5 +380,5 @@ fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
         Err(PistonError::Cancelled)
     ));
     assert_eq!(piston, before);
-    assert_eq!(piston.ports, before.ports);
+    assert_eq!(window(&piston), before_window);
 }
