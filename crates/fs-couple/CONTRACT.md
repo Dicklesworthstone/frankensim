@@ -2323,3 +2323,35 @@ against the shared owner and repeat pressure bitwise across callback sizes.
 These are authored infinite-baffle fixtures, not real-instrument fidelity or a
 full-band reaction match. Native qualification remains required; rustfmt alone
 does not establish the numerical claims.
+
+## Frequency-domain branched chart and network port (IRP M2.1-W8)
+
+`tract::network::TractBranch` and `TractChart::network_with_branches` turn a
+chart and explicit branch geometry/source identities into `fs_duct::network`
+data. The resulting ports are glottis, oral and the supplied branch labels.
+All propagation, junction equations and graph elimination stay in fs-duct;
+there is no nasal-specific solver. The former no-nasal-branch documentation is
+lifted for this frequency-domain API. TractVoice's time-domain series image is
+unchanged; dynamic branch-line realization remains M2.2-W3c.
+
+`driving_point::network::NetworkDrivingPoint` is the explicit FD port seam for
+player-airway/bore consumers. Construction requires the graph, active label,
+every other port's load, and a caller-supplied scalar `FluidPressureFlux`
+PortSchema, with owner-outward orientation. Gas, omega and loss remain explicit
+at each evaluation. `harmonic_port` performs the actual complex transfer
+`p=Z U_in`, `U_out=-U_in` with that schema. It does not claim a time-window
+energy audit, glottal dynamics, or a completed M3.1-W7 player-airway realization.
+
+`tract::network::tests::network_branched_tract_nasal` uses Assaneo's licensed
+/a/ chart plus a DECLARED SYNTHETIC 0.13 m x 4 mm-radius branch after section 2.
+The mouths are explicitly ideal pressure release; this is a pole-zero diagnostic,
+not a measured nose or an acceptance voice render. G3 checks the lower first
+formant and added oral-transfer antiformant, with 8/4/2 Hz frequency grids
+(last-pair feature positions within 4 Hz); all sampled N-port matrices must be
+reciprocal and have PSD real Hermitian part to 1e-12 normalized tolerance.
+Qualitative side-cavity context: Dang, Honda & Suzuki, JASA 96,2088 (1994),
+<https://pubmed.ncbi.nlm.nih.gov/7963023/>. No human-specimen frequency oracle is
+inferred from that citation. Tests print formants/antiformants and provenance.
+Additional cross-crate tests exercise the explicit typed transfer, missing-load
+and wrong-schema refusals, and unbranched graph/chain equivalence (1e-10).
+All new numerical assertions remain pending central native verification.

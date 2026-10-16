@@ -5,6 +5,8 @@
 //! bore, a muffler, an HVAC run, and a pulse tube are the same object.
 /// Static regional media composed at the existing TMM pressure/flow ports.
 pub mod regional;
+/// Explicitly terminated generic acoustic-network frequency-domain ports.
+pub mod network;
 
 use fs_duct::{Duct, DuctError, DuctResponse, LossModel, Termination, input_impedance_wall};
 use fs_fft::{C64 as FftC64, Fft};

@@ -385,3 +385,66 @@ divergence-theorem closure/orientation pin on the lathe).
   holes). The Ernoult dataset is the regression floor.
 - The gas state inherits `fs_material::gas` boundaries (ideal gas,
   phase validity unchecked, calorically perfect gamma).
+
+## Generic frequency-domain networks (IRP M2.1-W8)
+
+`network::{DuctNetwork,NetworkNode,NetworkEdge,network_port_impedance}` solves
+connected pressure/volume-flow graphs, including parallel paths and self-loops.
+Every edge owns a complete `Duct` chain, oriented input->output; nodes are ideal
+common-pressure junctions, explicit loads or labelled external ports. Currents
+are positive into the network. `NetworkResponse::z` is row-major `p=Z U`, in
+Pa s/m³ under exp(-i omega t). The port list follows caller node-array order.
+
+Stable node/edge IDs are required. Assembly and LU use canonical integer indices
+sorted by those identities, not a hash-map traversal; reindexing nodes changes
+only the returned port permutation. Each edge consumes the existing chain owner
+at two independent algebraic boundary columns (+/- a local rho*c/S reference).
+This recovers its ABCD block without duplicating propagation/loss physics or
+altering any old chain/default/golden. Negative reference columns are algebraic
+probes, not active boundary loads in the solved network. The reciprocal
+Wronskian det(M)=1 is checked, then used to stamp equal off-diagonals.
+
+`JunctionCorrections::ChainLocal` retains existing compact-hole corrections.
+`Disabled` retains each complete chimney and mouth, but removes its compact
+inner/series/mutual junction corrections. Bare graph junctions are ideal;
+corrections are never added implicitly. `JunctionMultiport` instead supplies
+an explicitly identified, frequency-specific plane-port admittance, with exact
+bindings to every incident edge end. Its terminal pressures remain distinct.
+The supplied matrix must be reciprocal and have PSD real Hermitian part within
+1e-12 normalized numerical admission. This is not evidence that a 3-D/modal
+producer's geometry, discretization or evanescent-to-plane projection is valid.
+No such producer or local junction correction is synthesized by this module.
+
+Caps are 128 graph nodes, 256 edges, 32 labelled ports, 4096 aggregate segments
+and 256 pressure unknowns after feature expansion. Structural admission runs
+before dense allocation. Disconnected graphs, invalid indices, duplicate IDs,
+zero axial-length edges and absent ports refuse. Edge normalized ABCD, edge
+admittance and the grounded nodal solve have full infinity-norm condition
+estimates; values above 1e10 (or nonfinite/singular blocks) return `Singular`.
+The stable scattering successor M2.1-W9 is required outside this envelope.
+Accepted edge estimates and the nodal estimate accompany the response. These
+are floating-point solves, not interval accuracy certificates for every graph.
+
+Loads are explicit closed, pressure-release, passive finite impedances,
+tabulated loads, or an explicit radiation model/radius. Exact thin-wall LS is
+consumed through its existing owner and explicit quadrature; legacy fits keep
+their own refusals. `NetworkResponse::drive` / `driving_point` require exactly
+one assignment for EVERY other external port, and the same `GasState` as the
+network solve. They return pressures and currents as well as input impedance;
+there is no omitted-port load, medium, wall or clock fallback. Uniform gas is
+explicit per solve; axial-field edges and time-domain characteristic networks
+are not claimed. Calls are synchronous and bounded; frequency sweeps can be
+caller-chunked, with the same existing no-Cx boundary.
+
+Unit tests in `src/network/tests.rs`: G2 T-branch parallel admittance, lossless
+and Bessel (1e-12); G2 200-frequency Herschel–Quincke TL (1e-10 dB), independently
+re-derived from Selamet, Dickey & Novak, JASA 96,3177 (1994), Eq.(8)
+<https://mae.osu.edu/sites/default/files/2021-12/J11_0.pdf>. The bead's 1997
+attribution differs from this primary paper. Finite TL notches are included;
+an infinite-TL pole is checked as zero transmission within 1e-10, without a
+finite dB clamp. G3 long-chimney ToneHole equivalence with corrections disabled
+(1e-10), G0 reciprocity/PSD at 100 fs-rand frequencies (1e-12), cap/cap+1 and
+invalid/singular cases, G3 exact node-reindexing and G5 bitwise repeat. Additional
+tests cover self-loops, supplied-junction stamps and actual exact-LS consumption.
+The existing `cross_isa_golden` chain is unchanged and must still pass centrally.
+The new tests emit stderr JSON receipts. Numeric claims await native execution.

@@ -22,8 +22,12 @@
 //! D22: fs-duct's TMM on the SAME chart is the FD oracle
 //! ([`TractChart::tmm_formants`] — |Z_in| peaks from the glottis end);
 //! the characteristic line PLAYS. BOUNDARY: no glottis here (the
-//! sibling island bead composes one), no fricative jet, no nasal
-//! branch (named refusal).
+//! sibling island bead composes one), no fricative jet. Frequency-domain side
+//! branches use the generic duct graph through [`network`]; the playing
+//! characteristic-line image remains a series tract (no time-domain network).
+
+/// Chart-to-graph adapter; branch geometry and termination are explicit data.
+pub mod network;
 
 use crate::driving_point::{DrivingPointError, characteristic_line_dense};
 use fs_duct::{Duct, Segment, Termination};
