@@ -23,6 +23,10 @@
 //! Plasticity, finite strain, phase change, and evolving topology must select a
 //! different constitutive/kinematic rung rather than silently passing through
 //! this operator.
+//!
+//! [`tet10`] provides the distinct quadratic isoparametric path. Its sampled
+//! Jacobian and explicit quadrature contracts do not extend the P1 thermal or
+//! stress-recovery APIs to quadratic meshes.
 
 use std::collections::BTreeSet;
 
@@ -43,6 +47,9 @@ pub use fs_material::tensor::{
 use fs_solver::krylov::CgState;
 use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::{Coo, Csr};
+
+/// Isoparametric quadratic tetrahedra with consistent mass and explicit quadrature.
+pub mod tet10;
 
 /// Bounded assembly request. Limits are checked before matrix allocation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1589,6 +1596,27 @@ impl TetDeformedMesh {
 /// Typed, stable refusal surface for 3-D elastic assembly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TetElasticError {
+    /// An isoparametric element has a nonfinite or nonpositive Jacobian.
+    NonPositiveJacobian {
+        /// Element index.
+        element: usize,
+        /// Quadrature-point index.
+        point: usize,
+        /// Signed Jacobian determinant [m³].
+        det: f64,
+    },
+    /// Adjacent elements disagree on the global node of a shared edge.
+    MidsideMismatch {
+        /// Element index.
+        element: usize,
+        /// Local edge index in `tet10::TET10_EDGES`.
+        edge: usize,
+    },
+    /// Quadrature falls outside the declared exactness or work envelope.
+    QuadratureInadmissible {
+        /// Failed invariant.
+        what: &'static str,
+    },
     /// Empty node or element set.
     EmptyMesh,
     /// A coordinate is NaN or infinite.
@@ -1739,6 +1767,18 @@ pub enum TetElasticError {
 impl core::fmt::Display for TetElasticError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::NonPositiveJacobian {
+                element,
+                point,
+                det,
+            } => write!(
+                f,
+                "FS-SOLID-TET10-JACOBIAN: element {element}, point {point}, det {det:e}"
+            ),
+            Self::MidsideMismatch { element, edge } => {
+                write!(f, "FS-SOLID-TET10-MIDSIDE: element {element}, edge {edge}")
+            }
+            Self::QuadratureInadmissible { what } => write!(f, "FS-SOLID-TET10-QUADRATURE: {what}"),
             Self::EmptyMesh => write!(f, "FS-SOLID-TET-EMPTY-MESH"),
             Self::NonFiniteNode { node } => {
                 write!(f, "FS-SOLID-TET-NONFINITE-NODE: node {node}")
@@ -1789,7 +1829,11 @@ impl core::fmt::Display for TetElasticError {
                 f,
                 "FS-SOLID-TET-STRESS-INPUT: solution belongs to different physical inputs"
             ),
-            Self::InvalidNodalForce { dof, full_dofs, what } => write!(
+            Self::InvalidNodalForce {
+                dof,
+                full_dofs,
+                what,
+            } => write!(
                 f,
                 "FS-SOLID-TET-NODAL-FORCE: dof {dof} of {full_dofs}: {what}"
             ),
@@ -2074,9 +2118,8 @@ impl TetLinearElasticProblem<'_> {
         config: TetStaticSolveConfig,
         cx: &Cx<'_>,
     ) -> Result<TetThermalDisplacementSolution, TetElasticError> {
-        let load = self.assemble_thermal_load_with_nodal_forces(
-            thermal_strains, nodal_forces_n, cx,
-        )?;
+        let load =
+            self.assemble_thermal_load_with_nodal_forces(thermal_strains, nodal_forces_n, cx)?;
         self.solve_thermal_displacement_from_load(load, config, cx)
     }
 
@@ -2089,11 +2132,13 @@ impl TetLinearElasticProblem<'_> {
         cx: &Cx<'_>,
     ) -> Result<TetThermalLoad, TetElasticError> {
         let mut load = self.assemble_thermal_load(thermal_strains, cx)?;
-        let full_dofs = self.nodes_m.len().checked_mul(3)
+        let full_dofs = self
+            .nodes_m
+            .len()
+            .checked_mul(3)
             .ok_or(TetElasticError::SizeOverflow)?;
-        let mut identity = DomainHasher::new(
-            "org.frankensim.fs-solid.tet-thermal-plus-nodal-load.v1",
-        );
+        let mut identity =
+            DomainHasher::new("org.frankensim.fs-solid.tet-thermal-plus-nodal-load.v1");
         identity.update(load.identity.as_bytes());
         let mut previous = None;
         for (index, &(dof, force_n)) in nodal_forces_n.iter().enumerate() {
@@ -2102,31 +2147,41 @@ impl TetLinearElasticProblem<'_> {
             }
             if dof >= full_dofs {
                 return Err(TetElasticError::InvalidNodalForce {
-                    dof, full_dofs, what: "force DOF is outside the mesh",
+                    dof,
+                    full_dofs,
+                    what: "force DOF is outside the mesh",
                 });
             }
             if previous.is_some_and(|last| dof <= last) {
                 return Err(TetElasticError::InvalidNodalForce {
-                    dof, full_dofs, what: "force DOFs must be strictly increasing and unique",
+                    dof,
+                    full_dofs,
+                    what: "force DOFs must be strictly increasing and unique",
                 });
             }
             if !force_n.is_finite() {
                 return Err(TetElasticError::InvalidNodalForce {
-                    dof, full_dofs, what: "force must be finite",
+                    dof,
+                    full_dofs,
+                    what: "force must be finite",
                 });
             }
             previous = Some(dof);
             load.full_equivalent_force_n[dof] += force_n;
             if !load.full_equivalent_force_n[dof].is_finite() {
                 return Err(TetElasticError::InvalidNodalForce {
-                    dof, full_dofs, what: "combined full force is not representable",
+                    dof,
+                    full_dofs,
+                    what: "combined full force is not representable",
                 });
             }
             if let Ok(reduced) = load.free_dofs.binary_search(&dof) {
                 load.reduced_force_n[reduced] += force_n;
                 if !load.reduced_force_n[reduced].is_finite() {
                     return Err(TetElasticError::InvalidNodalForce {
-                        dof, full_dofs, what: "combined reduced force is not representable",
+                        dof,
+                        full_dofs,
+                        what: "combined reduced force is not representable",
                     });
                 }
             }
@@ -2268,8 +2323,12 @@ impl TetLinearElasticProblem<'_> {
     ) -> Result<TetThermalStressReport, TetElasticError> {
         let load = self.assemble_thermal_load(thermal_strains, cx)?;
         self.recover_thermal_stress_from_load(
-            solution, thermal_strains, load, mesh_frame,
-            maximum_absolute_mandel_strain, cx,
+            solution,
+            thermal_strains,
+            load,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
         )
     }
 
@@ -2284,12 +2343,15 @@ impl TetLinearElasticProblem<'_> {
         maximum_absolute_mandel_strain: f64,
         cx: &Cx<'_>,
     ) -> Result<TetThermalStressReport, TetElasticError> {
-        let load = self.assemble_thermal_load_with_nodal_forces(
-            thermal_strains, nodal_forces_n, cx,
-        )?;
+        let load =
+            self.assemble_thermal_load_with_nodal_forces(thermal_strains, nodal_forces_n, cx)?;
         self.recover_thermal_stress_from_load(
-            solution, thermal_strains, load, mesh_frame,
-            maximum_absolute_mandel_strain, cx,
+            solution,
+            thermal_strains,
+            load,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
         )
     }
 

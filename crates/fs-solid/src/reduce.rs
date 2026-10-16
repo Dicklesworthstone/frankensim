@@ -34,6 +34,7 @@ use fs_material::state_point::IsotropicElasticStatePoint;
 use fs_modal::{SliceOptions, slice_window};
 use std::fmt::Write as _;
 
+use crate::linear3::tet10::{QuadraticTetProblem, TetQuadrature};
 use crate::linear3::{
     TetAssemblyBudget, TetElasticMaterial, TetLinearElasticProblem, TetMaterialField,
 };
@@ -46,7 +47,40 @@ pub use pressure_compliance::{PressureCompliance, SingleModeValveAdmission};
 /// Domain-separated identity for valve cards.
 pub const VALVE_CARD_HASH_DOMAIN: &str = "org.frankensim.fs-solid.valve-card.v1";
 /// Card schema version (bumps refuse old bytes, never reinterpret).
-pub const VALVE_CARD_SCHEMA_VERSION: u32 = 1;
+pub const VALVE_CARD_SCHEMA_VERSION: u32 = 2;
+
+/// Required discretization identity, retained by the card and its codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValveDiscretization {
+    /// Existing affine four-node path, with its original assembly arithmetic.
+    Tet4,
+    /// Quadratic isoparametric path, with explicit quadrature.
+    Tet10(TetQuadrature),
+}
+
+/// Required request choice; quadratic connectivity is supplied, never guessed.
+#[derive(Debug, Clone, Copy)]
+pub enum ValveElementOrder<'a> {
+    /// Existing P1 connectivity in `ValveCardRequest::tetrahedra`.
+    Tet4,
+    /// Full connectivity in canonical TET10 order. Its corner sets must agree
+    /// with the request's per-element P1 topology; midsides may be curved.
+    Tet10 {
+        /// Actual quadratic topology, including the pressure/observation nodes.
+        elements: &'a [[usize; 10]],
+        /// Explicit integration choice.
+        quadrature: TetQuadrature,
+    },
+}
+
+impl ValveElementOrder<'_> {
+    fn discretization(self) -> ValveDiscretization {
+        match self {
+            Self::Tet4 => ValveDiscretization::Tet4,
+            Self::Tet10 { quadrature, .. } => ValveDiscretization::Tet10(quadrature),
+        }
+    }
+}
 
 /// Typed refusals from the reduce lab.
 #[derive(Debug)]
@@ -141,6 +175,8 @@ pub struct ValveCardRequest<'a, M = &'a IsotropicElasticStatePoint> {
     pub nodes_m: &'a [[f64; 3]],
     /// Conforming P1 tetrahedra.
     pub tetrahedra: &'a [[usize; 4]],
+    /// Required element order; no default or implicit promotion.
+    pub element_order: ValveElementOrder<'a>,
     /// Strongly fixed DOFs (`3*node + component`) — the clamped root.
     pub fixed_dofs: &'a [usize],
     /// Resolved isotropic state on the compatibility path, or the common
@@ -188,6 +224,8 @@ pub struct ValveCard {
     pub material_identity: ContentHash,
     /// Mesh digest (nodes + tets, bit-exact).
     pub mesh_digest: ContentHash,
+    /// Order and quadrature bound into canonical bytes and card identity.
+    pub discretization: ValveDiscretization,
     /// Reduced modes, ascending frequency (index 0 drives the 1-DOF
     /// island; 0..2 drive the two-mass realization).
     pub modes: Vec<ReducedMode>,
@@ -385,7 +423,11 @@ fn reduce_pressure_loaded_valve_impl<M>(
         });
     }
     let reduced = reduce_valve_impl(
-        request, materials, material_identity, cx, Some(nodal_load_per_pa_m2),
+        request,
+        materials,
+        material_identity,
+        cx,
+        Some(nodal_load_per_pa_m2),
     )?;
     let card = reduced.card;
     let effective_areas_m2 = reduced.effective_areas_m2;
@@ -467,14 +509,43 @@ fn reduce_valve_impl<M>(
     }
 
     // 1. Assemble the (K, M) pencil with the supplied common material field.
-    let problem = TetLinearElasticProblem {
-        nodes_m: request.nodes_m,
-        tetrahedra: request.tetrahedra,
-        materials,
-        fixed_dofs: request.fixed_dofs,
-        budget: TetAssemblyBudget::default(),
+    let assembly = match request.element_order {
+        ValveElementOrder::Tet4 => TetLinearElasticProblem {
+            nodes_m: request.nodes_m,
+            tetrahedra: request.tetrahedra,
+            materials,
+            fixed_dofs: request.fixed_dofs,
+            budget: TetAssemblyBudget::default(),
+        }
+        .assemble(cx)?,
+        ValveElementOrder::Tet10 {
+            elements,
+            quadrature,
+        } => {
+            if elements.len() != request.tetrahedra.len()
+                || elements.iter().zip(request.tetrahedra).any(|(q, p)| {
+                    let mut a = [q[0], q[1], q[2], q[3]];
+                    let mut b = *p;
+                    a.sort_unstable();
+                    b.sort_unstable();
+                    a != b
+                })
+            {
+                return Err(ReduceError::Invalid {
+                    what: "TET10 corners must match the request topology element by element",
+                });
+            }
+            QuadraticTetProblem {
+                nodes_m: request.nodes_m,
+                elements,
+                materials,
+                fixed_dofs: request.fixed_dofs,
+                budget: TetAssemblyBudget::default(),
+                quadrature,
+            }
+            .assemble(cx)?
+        }
     };
-    let assembly = problem.assemble(cx)?;
 
     // 2. Certified low modes.
     let tau = core::f64::consts::TAU;
@@ -530,14 +601,23 @@ fn reduce_valve_impl<M>(
     // denominator (including fixed nodes). The pressure energy compliance is
     // l^T K^-1 l; an opening-compliance gate cannot stand in for this quantity.
     let exact_pressure = pressure_load.map(|load| {
-        let reduced_load: Vec<f64> = assembly.free_dofs.iter()
+        let reduced_load: Vec<f64> = assembly
+            .free_dofs
+            .iter()
             .map(|&full| load[full / 3][full % 3])
             .collect();
         let displacement = factor.solve(&reduced_load);
-        let volume: f64 = reduced_load.iter().zip(&displacement)
-            .map(|(a, b)| a * b).sum();
-        let opening: f64 = reduced_load.iter().zip(&k_inv_r)
-            .map(|(a, b)| a * b).sum::<f64>() / request.orifice.face_nodes.len() as f64;
+        let volume: f64 = reduced_load
+            .iter()
+            .zip(&displacement)
+            .map(|(a, b)| a * b)
+            .sum();
+        let opening: f64 = reduced_load
+            .iter()
+            .zip(&k_inv_r)
+            .map(|(a, b)| a * b)
+            .sum::<f64>()
+            / request.orifice.face_nodes.len() as f64;
         (volume, opening)
     });
 
@@ -635,7 +715,23 @@ fn reduce_valve_impl<M>(
         identity: ContentHash([0u8; 32]),
         source_id: request.source_id.to_string(),
         material_identity,
-        mesh_digest: mesh_digest(request.nodes_m, request.tetrahedra),
+        mesh_digest: {
+            let base = mesh_digest(request.nodes_m, request.tetrahedra);
+            match request.element_order {
+                ValveElementOrder::Tet4 => base,
+                ValveElementOrder::Tet10 { elements, .. } => {
+                    let mut h = DomainHasher::new("org.frankensim.fs-solid.valve-mesh.tet10.v1");
+                    h.update(base.as_bytes());
+                    for tet in elements {
+                        for node in tet {
+                            h.update(&(*node as u64).to_le_bytes());
+                        }
+                    }
+                    h.finalize()
+                }
+            }
+        },
+        discretization: request.element_order.discretization(),
         modes,
         rest_gap_m,
         width_m,
@@ -645,17 +741,23 @@ fn reduce_valve_impl<M>(
         total_mass_kg: assembly.total_mass_kg,
     };
     card.identity = card.recomputed_identity();
-    let pressure_compliance = exact_pressure.map(|(volume, opening)| {
-        let face_count = request.orifice.face_nodes.len() as f64;
-        PressureCompliance::from_modes(
-            &card.modes,
-            &effective_areas_m2,
-            static_compliance / face_count / face_count,
-            volume,
-            opening,
-        )
-    }).transpose()?;
-    Ok(ReducedValve { card, effective_areas_m2, pressure_compliance })
+    let pressure_compliance = exact_pressure
+        .map(|(volume, opening)| {
+            let face_count = request.orifice.face_nodes.len() as f64;
+            PressureCompliance::from_modes(
+                &card.modes,
+                &effective_areas_m2,
+                static_compliance / face_count / face_count,
+                volume,
+                opening,
+            )
+        })
+        .transpose()?;
+    Ok(ReducedValve {
+        card,
+        effective_areas_m2,
+        pressure_compliance,
+    })
 }
 
 impl<M> ValveCardRequest<'_, M> {
@@ -680,6 +782,14 @@ impl ValveCard {
         h.update(&VALVE_CARD_SCHEMA_VERSION.to_le_bytes());
         h.update(self.material_identity.as_bytes());
         h.update(self.mesh_digest.as_bytes());
+        match self.discretization {
+            ValveDiscretization::Tet4 => h.update(&[1]),
+            ValveDiscretization::Tet10(q) => {
+                h.update(&[2]);
+                h.update(&(q.stiffness_points_per_dir as u64).to_le_bytes());
+                h.update(&(q.mass_points_per_dir as u64).to_le_bytes());
+            }
+        }
         h.update(self.source_id.as_bytes());
         h.update(&[0u8]);
         for v in [
@@ -712,10 +822,22 @@ impl ValveCard {
     #[must_use]
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
         let mut s = String::new();
-        s.push_str("frankensim-valve-card-v1\n");
+        s.push_str("frankensim-valve-card-v2\n");
         let _ = writeln!(s, "source_id\t{}", self.source_id);
         let _ = writeln!(s, "material_identity\t{}", self.material_identity.to_hex());
         let _ = writeln!(s, "mesh_digest\t{}", self.mesh_digest.to_hex());
+        match self.discretization {
+            ValveDiscretization::Tet4 => {
+                let _ = writeln!(s, "element_order\ttet4");
+            }
+            ValveDiscretization::Tet10(q) => {
+                let _ = writeln!(
+                    s,
+                    "element_order\ttet10\t{}\t{}",
+                    q.stiffness_points_per_dir, q.mass_points_per_dir
+                );
+            }
+        }
         for (key, v) in [
             ("rest_gap_m", self.rest_gap_m),
             ("width_m", self.width_m),
@@ -782,7 +904,7 @@ impl ValveCard {
         })?;
         let lines: Vec<&str> = text.lines().collect();
         let mut cursor = 0usize;
-        if lines.first().copied() != Some("frankensim-valve-card-v1") {
+        if lines.first().copied() != Some("frankensim-valve-card-v2") {
             return Err(ReduceError::Card {
                 what: "schema line mismatch",
             });
@@ -800,6 +922,30 @@ impl ValveCard {
                 what: "bad mesh digest hex",
             },
         )?;
+        let order = take(&lines, &mut cursor, "element_order")?;
+        let discretization = if order == "tet4" {
+            ValveDiscretization::Tet4
+        } else {
+            let fields: Vec<_> = order.split('\t').collect();
+            if fields.len() != 3 || fields[0] != "tet10" {
+                return Err(ReduceError::Card {
+                    what: "unknown element order or missing quadrature",
+                });
+            }
+            let parse = |s: &str| {
+                s.parse::<usize>().map_err(|_| ReduceError::Card {
+                    what: "bad quadrature count",
+                })
+            };
+            let q = TetQuadrature {
+                stiffness_points_per_dir: parse(fields[1])?,
+                mass_points_per_dir: parse(fields[2])?,
+            };
+            q.validate().map_err(|_| ReduceError::Card {
+                what: "inadmissible quadrature",
+            })?;
+            ValveDiscretization::Tet10(q)
+        };
         let rest_gap_m = take_num(&lines, &mut cursor, "rest_gap_m")?;
         let width_m = take_num(&lines, &mut cursor, "width_m")?;
         let effective_thickness_m = take_num(&lines, &mut cursor, "effective_thickness_m")?;
@@ -861,6 +1007,7 @@ impl ValveCard {
             source_id,
             material_identity,
             mesh_digest,
+            discretization,
             modes,
             rest_gap_m,
             width_m,

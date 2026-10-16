@@ -24,6 +24,61 @@ operator level, but material-card resolution of engineering/crystal constants
 and texture/orientation fields remains a separate evidence-bearing admission
 step; absence of that data is not permission to assume isotropy.
 
+`linear3::tet10` adds a separate isoparametric quadratic displacement/geometry
+operator (IRP M1.3-W1a). `QuadraticTetProblem` consumes ten-node connectivity,
+the existing uniform/per-element material tensor, fixed DOFs and assembly
+budget, and a required `TetQuadrature`. Canonical order is four vertices, then
+edges `(0,1),(1,2),(0,2),(0,3),(1,3),(2,3)`. Shared edges must share exactly one
+midside node; a midside node cannot also be a corner or represent another edge.
+The signed Jacobian must be finite, positive and above the scaled quality floor
+at every stiffness and mass quadrature point. The P1 arithmetic, thermal loads,
+thermal prestress and stress-recovery paths remain unchanged.
+
+Stiffness and mass use the existing `fs-feec` positive-weight collapsed Duffy
+rule. Required counts are respectively 3..=12 and 4..=12 per direction: affine
+stiffness has degree two and consistent mass degree four, while the Duffy map
+adds degree two. Mass is never row-sum lumped. Curved-element stiffness is
+rational and needs an independent quadrature ladder; specifying a count does
+not certify its error. `tet10_shapes` and `tet10_point` expose the same mapping
+for consistent loads and independent norm integration. Assembly is ordered by
+element and quadrature point, stores symmetric local triangles identically,
+and polls the caller's `Cx` before allocation and at each quadrature point.
+Mesh/free-DOF caps refuse before allocating maps or matrix storage; no partial
+matrix is published after an error or cancellation. Replay is same-host
+deterministic; no new cross-ISA claim is made.
+
+`promote_p1_to_p2` gives each sorted global endpoint pair one midpoint ID,
+independent of element order. It canonicalizes element orientation and applies
+an optional caller-supplied source-surface projection only to boundary edges.
+Straight-sided approximation of curved geometry is a separate error axis.
+Positive sampled Jacobians do not prove injectivity between samples; projection
+does not supply source-surface or specimen authority. Finite-strain, mixed
+incompressible formulations, quadratic geometric prestress and thermal stress
+recovery are outside this quadratic operator's current scope.
+
+Valve reduction requires `ValveCardRequest::element_order`: `Tet4` or explicit
+`Tet10 { elements, quadrature }`. Quadratic corner sets must match the original
+per-element topology, and every observation/pressure-load node must refer to
+the supplied complete quadratic mesh. No boundary condition or load is
+implicitly interpolated from P1. `ValveCard` v2 retains the discretization;
+its identity binds order, quadrature and full quadratic connectivity. The v2
+decoder refuses v1 bytes rather than reinterpreting them. This changes card
+identity, not the legacy P1 numerical operator or the rl-001 authored band.
+Reduction remains an explicitly truncated exploratory consumer, not an IRP
+acceptance rendering engine.
+
+The focused `tests/tet10.rs` target specifies G0 shape, quadrature, consistent
+mass, rigid-mode, distorted bending patch, rotated-tensor, refusal and budget
+checks; G1 MMS (L2 order 3 and energy order 2, ±0.2), projected-cylinder geometry
+and free-bar eigenvalue ladders; and the Cook/MacNeal–Harder G2 bands. The
+`reduce::reduce_tests::rl_005_tet10_cantilever_card` regression specifies a
+fivefold static-compliance improvement over P1 at matched DOFs on the rl-001
+slab geometry. `scripts/e2e/irp_s1_structures.sh` retains their structured
+receipts. These new probes require central native execution before any DEF-08
+closure claim. The Euler-disc structural consumer and Bar-S1 descriptions
+require their own explicit migration; adding this operator alone does not
+establish those consumers' convergence or remove their P1 limitations.
+
 `TetElasticMaterial::try_new_oriented_tensor` admits complete anisotropic
 stiffness data into that same operator. `ElasticTensorBasis` requires explicit
 tensor-shear, engineering-shear or Mandel notation, one of the documented

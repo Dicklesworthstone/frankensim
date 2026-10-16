@@ -264,6 +264,7 @@ fn mint_pressure_card(lay: LayChart, e_pa: f64) -> PressureLoadedValve {
     with_cx(|cx| {
         reduce_pressure_loaded_valve(
             &ValveCardRequest {
+                element_order: fs_solid::reduce::ValveElementOrder::Tet4,
                 nodes_m: &nodes,
                 tetrahedra: &tets,
                 fixed_dofs: &fixed,
@@ -594,6 +595,7 @@ fn cr_003_refusals_fire_by_name() {
     let refused = with_cx(|cx| {
         reduce_valve(
             &ValveCardRequest {
+                element_order: fs_solid::reduce::ValveElementOrder::Tet4,
                 nodes_m: &nodes,
                 tetrahedra: &tets,
                 fixed_dofs: &fixed,
