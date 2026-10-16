@@ -75,6 +75,14 @@ use crate::panel3d::SpherePanels;
 mod cbie_geometry;
 pub use cbie_geometry::PreparedCbieGeometry;
 
+/// FMM Burton-Miller operator and restart-resumable, right-preconditioned GMRES.
+#[path = "helmholtz_iterative.rs"]
+pub mod iterative;
+pub use iterative::{
+    IterativeError, IterativeOptions, IterativeRadiation, IterativeState, Preconditioner,
+    ResourceReceipt, solve_radiation_iterative,
+};
+
 /// Reciprocal Rayleigh loading of complete planar modal velocity fields.
 #[path = "rayleigh_modal.rs"]
 pub mod rayleigh_modal;
@@ -284,11 +292,13 @@ pub struct RadiationSolution {
     /// value is a reliable warning (plain CBIE near a fictitious
     /// frequency measurably inflates it); a small value is NOT a
     /// conditioning certificate — the probes can miss the worst
-    /// direction. Rigorous estimation (Hager/Higham with adjoint
+    /// direction. The iterative owner reports the universal lower bound 1
+    /// without dense probes. Rigorous estimation (Hager/Higham with adjoint
     /// solves) is the recorded follow-up.
     pub condition_lower_bound: f64,
     /// Work-cap utilization: panel count over [`MAX_DENSE_PANELS`], in
-    /// (0, 1]. The headroom diagnostic the pilot intel asked to surface
+    /// (0, 1] for dense solves, potentially >1 for iterative solves.
+    /// The headroom diagnostic the pilot intel asked to surface
     /// instead of refusing opaquely at the cap.
     pub dense_cap_utilization: f64,
 }

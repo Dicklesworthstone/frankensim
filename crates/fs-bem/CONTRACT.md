@@ -162,6 +162,67 @@ everywhere: this is screening, not a viscous truth source.
   shape mismatch, singular; optional geometry preparation additionally reports
   cache-byte budget, allocation, and cancellation refusals.
 
+### `helmholtz::iterative` (IRP M2.5-W5c)
+
+`IterativeRadiation::prepare/start/advance/finish` and
+`solve_radiation_iterative` solve the existing constant-panel Burton-Miller
+system through complex fs-fmm double/mixed matvecs and fs-solver `GmresState`.
+The stacked real representation applies the complex operator once per matvec.
+This path retains the surface cap of 81,920 panels and the resolution check,
+without the dense LU cap of 8,192. Dense arithmetic and panel-bit goldens are
+unchanged. Plain CBIE is explicitly refused by this owner.
+
+The actual dense Burton-Miller arm uses centroid off-diagonal kernels and
+equivalent-disc self terms, not the triangle quadrature used by Plain CBIE.
+The iterative path reuses those exact parent self terms and the same point
+kernels in adjacent leaves; it introduces no second singular quadrature.
+Static double/mixed row closures use the same FMM order and traversal as the
+dynamic operator. Accordingly the static constant-density identities close
+under that discrete operator; FMM approximation of the static row sums remains
+part of the operator error, independently tested against dense LU.
+
+`IterativeOptions` explicitly declares GMRES tolerance, restart (1..256),
+iteration cap, FMM order/leaf capacity, and near-field storage budget.
+`Preconditioner::NearFieldBlockJacobi` factors exact point-panel blocks within
+individual direct-interaction leaves, split at 1..128 panels in stable order.
+Its total complex entry count is checked before block allocation. `None`
+provides the unpreconditioned comparison. Right preconditioning preserves the
+true Euclidean residual of the original FMM equation rather than replacing it
+with a left-preconditioned norm. No SPAI, Calderon or transpose-solve claim is
+made. FMM's existing kD<=10, translation, coefficient and near-pair caps remain
+in force, with typed refusals and no dense fallback.
+
+Checkpoints clone the `GmresState` only at completed restart boundaries.
+Cancellation is polled before each matvec and between its two synchronous FMM
+passes. The current FMM pass drains before cancellation returns; no mid-pass
+latency claim is made. A latched error suppresses further operator calls while
+the current Arnoldi cycle unwinds; that cycle is discarded and the preceding
+checkpoint remains resumable. A deterministic matvec-index predicate permits
+race-free cancellation tests. Checkpoints reject a different prepared geometry
+or numerical configuration. An exhausted solve returns `NotConverged` with
+last pressure, full report and receipt; it never publishes an unconverged
+`RadiationSolution`.
+
+`ResourceReceipt` records preparation/RHS/solve wall time, actual matvec and
+iteration counts, FMM order/stats, stored block/indices bytes, and Linux
+process-wide VmHWM (None on unsupported hosts). These measurements are not
+portable speed or memory guarantees. The shared solution's
+`condition_lower_bound=1` is the universal bound, with no dense probe claimed;
+`dense_cap_utilization=N/8192` can exceed one. Radiated power reuses the parent
+reduction and its existing roundoff-only enclosure.
+
+`tests/iterative.rs` provides G3 dense comparisons through s=4 (5,120 panels)
+and an authored lathed bell, including ka=pi; a live FMM-order ladder; G2 s=6
+(81,920 panels), ka<=5, orders 2/3/4 with residual <=1e-6 and finest-order
+analytic mean-pressure error <=1e-3; G1 four-rung fixed-panels/wavelength
+preconditioned/unpreconditioned counts; G0/G5 bitwise restart replay; G4
+cancellation; and storage/input/panel/iteration refusal boundaries. JSONL
+records numerical and process evidence. Coarse order rows report observed
+errors even when they miss the final qualification band. All numerical and
+resource qualifications remain pending central native verification until the
+bead's run receipt exists. In particular a small Krylov residual does not bound
+FMM, panel or model error, and order 4 is not an automatic accuracy certificate.
+
 ## Invariants
 
 ### Solid-mode radiation loading (IRP M2.5-W4a)
