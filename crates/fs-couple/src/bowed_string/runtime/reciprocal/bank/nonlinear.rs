@@ -33,6 +33,7 @@ pub struct NonlinearMaterialString {
     source: MaterialStringSource,
     gas: GasState,
     card: BowedStringCard,
+    wire: WireSpan,
     bodies: Vec<ImpactBody>,
     axial_rigidity_n: f64,
     sample_rate_hz: u32,
@@ -104,7 +105,7 @@ impl MaterialStringSource {
             });
         }
         poll(cx, gate)?;
-        Ok(NonlinearMaterialString { source: self, gas, card, bodies, axial_rigidity_n, sample_rate_hz })
+        Ok(NonlinearMaterialString { source: self, gas, card, wire, bodies, axial_rigidity_n, sample_rate_hz })
     }
 }
 impl NonlinearMaterialString {
@@ -116,6 +117,9 @@ impl NonlinearMaterialString {
     #[must_use] pub const fn sample_rate_hz(&self) -> u32 { self.sample_rate_hz }
     /// Small-amplitude transverse dispersion and material/gas losses, not live tension.
     #[must_use] pub const fn card(&self) -> &BowedStringCard { &self.card }
+    /// Actual span and damping produced by this same material realization.
+    /// Consumers need not reconstruct EI, mass or material/gas loss from a preset.
+    #[must_use] pub const fn wire_span(&self) -> &WireSpan { &self.wire }
     /// EA from the same original bulk/section data as mass and bending rigidity.
     #[must_use] pub const fn axial_rigidity_n(&self) -> f64 { self.axial_rigidity_n }
     /// Bending first, optional torsion second, for the SAME nonlinear time owner.
@@ -149,3 +153,6 @@ impl NonlinearMaterialString {
             .map_err(|e| ImpactError::Owner(e.to_string()))
     }
 }
+
+/// Source-bound strings on the original inertially coupled translating support.
+pub mod supported;
