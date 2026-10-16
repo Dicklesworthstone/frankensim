@@ -1,8 +1,7 @@
-//! G1/G5 analytic disclosure of the current linear owners, not IRP acceptance.
-//! Existing midpoint paths remain unmigrated. This audit must not turn a
-//! measured >1-cent defect into a fidelity claim. The network-piston and piano
-//! rows require their separate owner-local tests; they are explicitly unmeasured
-//! here rather than being represented by a surrogate scalar recurrence.
+//! G1/G5 linear propagation audit. The closure test fails on unmeasured owners
+//! and on undeclared non-exact bands. A measured integration tolerance alone
+//! is not instrument fidelity. Network/piano companions keep their actual
+//! owner-local observables until joined to this inventory.
 
 use fs_couple::bernoulli_aperture::BernoulliAperture;
 use fs_couple::bernoulli_aperture::dynamic::{
@@ -36,11 +35,15 @@ enum Integrator {
 #[derive(Clone, Copy)]
 enum Owner {
     Phs,
+    PhsExact,
+    Descriptor,
+    Piston,
     Impact,
     Dynamic,
     Paired,
     Modal,
     Coupled,
+    Uncoupled,
     Exact,
     Speaker,
     SeparateTest,
@@ -56,16 +59,16 @@ struct AuditRow {
 // `None` is an absent admission guard, never an invented infinite validity band.
 const PATHS: &[AuditRow] = &[
     AuditRow {
-        path: "acoustic_realize::realize_coupled_kc / fs_phs::step",
+        path: "acoustic_realize::realize_coupled_kc / resolved nonlinear step_render",
         integrator: Integrator::GonzalezMidpoint,
-        bound: None,
+        bound: Some(fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP),
         owner: Owner::Phs,
     },
     AuditRow {
-        path: "glottis / fs_phs::step",
-        integrator: Integrator::GonzalezMidpoint,
+        path: "glottis / exact complete fold island",
+        integrator: Integrator::ExactZoh,
         bound: None,
-        owner: Owner::Phs,
+        owner: Owner::PhsExact,
     },
     AuditRow {
         path: "speaker::TsDriver / exact full quadratic step",
@@ -74,39 +77,51 @@ const PATHS: &[AuditRow] = &[
         owner: Owner::Speaker,
     },
     AuditRow {
-        path: "thin_plate::VkBody and PlateBank cavity / fs_phs::step",
+        path: "thin_plate::VkBody / resolved nonlinear step_render",
         integrator: Integrator::GonzalezMidpoint,
-        bound: None,
+        bound: Some(fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP),
         owner: Owner::Phs,
     },
     AuditRow {
-        path: "acoustic_realize::realize_coupled_ode / step_chain_inlet / step_plate_chain",
-        integrator: Integrator::GonzalezMidpoint,
+        path: "thin_plate::PlateBank cavity / exact held-flow island",
+        integrator: Integrator::ExactZoh,
         bound: None,
-        owner: Owner::Phs,
+        owner: Owner::PhsExact,
+    },
+    AuditRow {
+        path: "acoustic_realize::realize_coupled_ode / step_chain_inlet / step_plate_chain",
+        integrator: Integrator::ExactZoh,
+        bound: None,
+        owner: Owner::PhsExact,
     },
     AuditRow {
         path: "acoustic_realize::realize_dirac_join / step_descriptor",
         integrator: Integrator::GonzalezMidpoint,
-        bound: None,
-        owner: Owner::SeparateTest,
+        bound: Some(fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP),
+        owner: Owner::Descriptor,
     },
     AuditRow {
         path: "acoustic_realize::realize_blown_ode and realize_reed_ode",
-        integrator: Integrator::GonzalezMidpoint,
+        integrator: Integrator::ExactZoh,
         bound: None,
-        owner: Owner::Phs,
+        owner: Owner::PhsExact,
     },
     AuditRow {
-        path: "brass_loop::lip and cavity_phs::realize_plate_cavity / fs_phs::step",
-        integrator: Integrator::GonzalezMidpoint,
+        path: "brass_loop::lip / exact held-force island",
+        integrator: Integrator::ExactZoh,
         bound: None,
-        owner: Owner::Phs,
+        owner: Owner::PhsExact,
+    },
+    AuditRow {
+        path: "cavity_phs::realize_plate_cavity / exact complete transformer",
+        integrator: Integrator::ExactZoh,
+        bound: None,
+        owner: Owner::PhsExact,
     },
     AuditRow {
         path: "render::plate::ImpactSystem",
         integrator: Integrator::GonzalezMidpoint,
-        bound: Some(0.9 * core::f64::consts::PI),
+        bound: Some(fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP),
         owner: Owner::Impact,
     },
     AuditRow {
@@ -148,8 +163,8 @@ const PATHS: &[AuditRow] = &[
     AuditRow {
         path: "cavity_phs::piston::GasPiston",
         integrator: Integrator::GonzalezMidpoint,
-        bound: None,
-        owner: Owner::SeparateTest,
+        bound: Some(fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP),
+        owner: Owner::Piston,
     },
     AuditRow {
         path: "cavity_phs::piston::thermal::boundary::network",
@@ -255,10 +270,41 @@ fn advance(owner: Owner, omega: f64, rate: u32, z: [f64; 2]) -> [f64; 2] {
     let (q, v) = (AMPLITUDE * z[0], AMPLITUDE * omega * z[1]);
     match owner {
         Owner::Phs => {
+            // m=1/omega, k=omega gives the same physical pole, with q and
+            // momentum p=m*v on equal scales. This prevents the reference
+            // Newton solve's absolute residual from dominating a microcent
+            // phase measurement through an ill-scaled (q,p) coordinate pair.
+            let model = fs_phs::mass_spring_damper(1.0 / omega, omega, 0.0).unwrap();
+            // Homogeneity permits unit-sized coordinates for this linear
+            // control, so an absolute Newton budget resolves the phase too.
+            let x = fs_phs::step(&model, &z, &[0.0], dt).unwrap().x;
+            [x[0], x[1]]
+        }
+        Owner::PhsExact => {
             let model = fs_phs::mass_spring_damper(1.0, omega * omega, 0.0).unwrap();
-            let x = fs_phs::step(&model, &[q, v], &[0.0], dt).unwrap().x;
+            let split = fs_phs::linear_exact::split_quadratic(
+                &model,
+                fs_phs::linear_exact::LinearSplitBudget {
+                    max_modes: 2,
+                    max_omega_dt: core::f64::consts::PI,
+                },
+            )
+            .unwrap();
+            let x = fs_phs::linear_exact::step_render(&model, &split, &[q, v], &[0.0], dt)
+                .unwrap()
+                .x;
             normalized(&x, omega)
         }
+        Owner::Descriptor => {
+            let a = fs_phs::mass_spring_damper(1.0, omega * omega, 0.0).unwrap();
+            let b = fs_phs::mass_spring_damper(1.0, omega * omega, 0.0).unwrap();
+            let sys = fs_phs::join_port(a, b, 0, 0).unwrap();
+            let rate = fs_phs::linear_exact::descriptor_pole_rate_bound(&sys).unwrap();
+            fs_phs::linear_exact::admit_midpoint_band(rate, dt).unwrap();
+            let record = fs_phs::step_descriptor(&sys, &[q, v, q, v, 0.0], &[], dt).unwrap();
+            normalized(&record.x, omega)
+        }
+        Owner::Piston => piston_map::column(omega, dt, z),
         Owner::Impact => {
             let mut model = impact(omega, dt, z).unwrap();
             model.step(&[0.0], &CancelGate::new()).unwrap();
@@ -395,7 +441,7 @@ fn advance(owner: Owner, omega: f64, rate: u32, z: [f64; 2]) -> [f64; 2] {
                 )
             }
         }
-        Owner::Coupled => {
+        Owner::Coupled | Owner::Uncoupled => {
             let config = ModalCouplingConfig {
                 max_modes: 2,
                 max_connections: 1,
@@ -417,7 +463,11 @@ fn advance(owner: Owner, omega: f64, rate: u32, z: [f64; 2]) -> [f64; 2] {
                     component: 1,
                     shapes: vec![1.0],
                 },
-                stiffness_n_m: 0.1 * omega * omega,
+                stiffness_n_m: if matches!(owner, Owner::Coupled) {
+                    0.1 * omega * omega
+                } else {
+                    0.0
+                },
                 damping_n_s_m: 0.0,
                 rest_extension_m: 0.0,
             };
@@ -554,12 +604,14 @@ fn available_render_linear_owners_are_measured_without_promoting_unmigrated_path
                     omega
                 };
                 let measured = cents(phase(row.owner, omega, rate) * f64::from(rate) / exact_omega);
-                let predicted =
-                    if matches!(row.owner, Owner::Exact | Owner::Speaker | Owner::Coupled) {
-                        Some(0.0)
-                    } else {
-                        Some(midpoint_cents(z))
-                    };
+                let predicted = if matches!(
+                    row.owner,
+                    Owner::Exact | Owner::Speaker | Owner::Coupled | Owner::PhsExact
+                ) {
+                    Some(0.0)
+                } else {
+                    Some(midpoint_cents(z))
+                };
                 if let Some(predicted) = predicted {
                     assert!(
                         (measured - predicted).abs() <= 1e-6,
@@ -592,12 +644,49 @@ fn available_render_linear_owners_are_measured_without_promoting_unmigrated_path
 
 #[test]
 fn impact_guard_cap_and_cap_plus_one() {
-    let cap = 0.9 * core::f64::consts::PI;
-    assert!(impact(1.0, cap * (1.0 - 1e-12), [0.0; 2]).is_ok());
-    assert!(impact(1.0, cap, [0.0; 2]).is_err());
+    let cap = fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP;
+    assert!(impact(1.0, cap, [0.0; 2]).is_ok());
+    assert!(matches!(
+        impact(1.0, cap + 1e-12, [0.0; 2]),
+        Err(fs_couple::render::plate::impact::ImpactError::TimeResolution(_))
+    ));
+    assert!(midpoint_cents(cap).abs() <= 1.0);
+    assert!(matches!(
+        impact(1.0, 0.9 * core::f64::consts::PI * (1.0 - 1e-12), [0.0; 2]),
+        Err(fs_couple::render::plate::impact::ImpactError::TimeResolution(_))
+    ));
+}
+
+#[test]
+fn every_render_path_is_listed_with_integrator_and_measured_warping() {
+    available_render_linear_owners_are_measured_without_promoting_unmigrated_paths();
+    impact_guard_cap_and_cap_plus_one();
+    valve_angular_step_cap_and_cap_plus_one();
+    dynamic_aperture_refuses_beyond_one_cent_resolved_band();
+    paired_aperture_refuses_beyond_one_cent_resolved_band();
+    modal_aperture_includes_full_viscosity_in_the_one_cent_band();
+    let mut names = std::collections::BTreeSet::new();
+    let mut unresolved = Vec::new();
+    for row in PATHS {
+        assert!(
+            !row.path.is_empty() && names.insert(row.path),
+            "render paths must be named once"
+        );
+        let exact = matches!(row.integrator, Integrator::ExactZoh);
+        if matches!(row.owner, Owner::SeparateTest)
+            || (!exact
+                && !row.bound.is_some_and(|z| {
+                    z > 0.0 && z <= fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP
+                }))
+        {
+            unresolved.push(row.path);
+        }
+    }
+    // Disclosure rows cannot silently become acceptance rows merely because
+    // all the already-available propagators pass their numerical controls.
     assert!(
-        midpoint_cents(cap) < -600.0,
-        "existing guard admits a large disclosed phase defect"
+        unresolved.is_empty(),
+        "unmeasured or unresolved render paths: {unresolved:?}"
     );
 }
 
@@ -759,10 +848,242 @@ fn coupled_modal_connection_warping_vs_exact_eigenproblem() {
         .collect();
     assert!(
         errors.iter().all(|error| *error <= 0.01),
-        "coupled phase errors {errors:?}"
+        "coupled phase errors in cents: {errors:?}"
+    );
+    // Run the real network again with the connection stiffness deleted. Its
+    // pole must revert to omega: relative to the coupled oracle, the signed
+    // error is -600*log2(1.2) cents, far beyond 100 times the accepted band.
+    let dropped =
+        cents(phase(Owner::Uncoupled, omega, 48_000) * 48_000.0 / (omega * det::sqrt(1.2)));
+    let missing_connection = cents(1.0 / det::sqrt(1.2));
+    assert!(
+        (dropped - missing_connection).abs() <= 0.01,
+        "component-only phase {dropped} cents vs {missing_connection} cents"
     );
     assert!(
-        (det::sqrt(1.2) - 1.0) > 0.09,
-        "coupled eigenfrequency axis must be live"
+        dropped.abs() > 100.0 * 0.01,
+        "deleting the coupling must fail the 0.01-cent band: {dropped} cents"
     );
+}
+
+mod piston_map {
+    use fs_couple::cavity_phs::piston::{GasPiston, PistonInput, PistonSolve};
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy, LawId,
+        LawParameter, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey, PropertyValue,
+        Provenance, QueryPoint, UncertaintyModel,
+    };
+    use fs_material::state_point::{MaterialPropertySelection, THERMAL_CONDUCTIVITY_DIMS};
+    use fs_material::thermochemical_gas::energy::GasEnergySolve;
+    use fs_material::thermochemical_gas::energy::entropy::GasEntropySolve;
+    use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
+    use fs_material::thermochemical_gas::{SpeciesTransportMaterial, ThermochemicalGasModel};
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    use fs_qty::{DynViscosity, MolarMass, Pressure, QuantitySpec, Temperature};
+    use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
+    use fs_thermochem::{
+        Composition, CompositionBasis, ElementalReferenceIdV1, NASA9_LAW_ID_V1,
+        NASA9_LAW_VERSION_V1, NASA9_STATE_SCHEMA_VERSION_V1, Nasa9RegionV1,
+        Nasa9StandardStateModelV1, ReferenceEquationOfStateV1, SpeciesId,
+        StandardStateConventionV1, StandardStatePhaseV1, required_nasa9_parameter_dims,
+    };
+
+    fn quantity(kind: QuantityKind) -> QuantitySpec {
+        QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+    }
+    fn provenance() -> Provenance {
+        Provenance {
+            source: "authored constant-cp analytic phase fixture".into(),
+            license: "CC0-1.0".into(),
+            artifact: None,
+        }
+    }
+    fn parcel() -> ClosedGasParcel {
+        let mut coefficients = [0.0; 9];
+        coefficients[2] = 3.5;
+        let mut parameters = std::collections::BTreeMap::new();
+        for ((key, dims), value) in required_nasa9_parameter_dims()
+            .into_iter()
+            .take(9)
+            .zip(coefficients)
+        {
+            parameters.insert(key.to_owned(), LawParameter { value, dims });
+        }
+        parameters.insert(
+            "reference_pressure".into(),
+            LawParameter {
+                value: 100_000.0,
+                dims: Pressure::DIMS,
+            },
+        );
+        let card = ConstitutiveModelCard {
+            law: LawId(NASA9_LAW_ID_V1.into()),
+            law_version: NASA9_LAW_VERSION_V1,
+            parameters,
+            state_schema_version: NASA9_STATE_SCHEMA_VERSION_V1,
+            initial_state: InitialStatePolicy::ZeroInternalState,
+            validity: ValidityDomain::unconstrained().with("T", 200.0, 2000.0),
+            sources: vec![],
+            provenance: provenance(),
+        };
+        let species = Nasa9StandardStateModelV1::new(
+            SpeciesId::new("phase-gas").unwrap(),
+            MolarMass::new(0.028),
+            StandardStateConventionV1::new(
+                StandardStatePhaseV1::Gas,
+                ReferenceEquationOfStateV1::IdealGas,
+                Pressure::new(100_000.0),
+                ElementalReferenceIdV1::new("analytic").unwrap(),
+            )
+            .unwrap(),
+            vec![Nasa9RegionV1::from_card(card).unwrap()],
+        )
+        .unwrap();
+        let mut claims = ClaimSet::new();
+        for (key, dims, value) in [
+            ("dynamic_viscosity", DynViscosity::DIMS, 2e-5),
+            ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, 0.03),
+        ] {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::new(key, dims),
+                    value: PropertyValue::Curve {
+                        abscissa: "temperature".into(),
+                        abscissa_dims: Temperature::DIMS,
+                        knots: vec![(200.0, value), (2000.0, value)],
+                        dims,
+                    },
+                    validity: ValidityDomain::unconstrained()
+                        .with_quantity(
+                            "temperature",
+                            quantity(QuantityKind::AbsoluteTemperature),
+                            200.0,
+                            2000.0,
+                        )
+                        .with_quantity("pressure", quantity(QuantityKind::Pressure), 1000.0, 1e7),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::LinearInside,
+                    observations: vec![],
+                    provenance: provenance(),
+                })
+                .unwrap();
+        }
+        let transport = SpeciesTransportMaterial {
+            species: SpeciesId::new("phase-gas").unwrap(),
+            material: MaterialCard::assemble(
+                MaterialStateId {
+                    chemistry: "phase-gas".into(),
+                    phase: "gas".into(),
+                    process: "analytic".into(),
+                    revision: 0,
+                },
+                claims,
+                vec![],
+            )
+            .unwrap(),
+            selection: MaterialPropertySelection::SingleClaimOnly,
+        };
+        let model = ThermochemicalGasModel::new(
+            FrozenIdealGasMixtureModelV1::new(
+                vec![species],
+                Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
+            )
+            .unwrap(),
+            vec![transport],
+            None,
+        )
+        .unwrap();
+        let point = QueryPoint::new()
+            .with_quantity(
+                "temperature",
+                quantity(QuantityKind::AbsoluteTemperature),
+                400.0,
+            )
+            .unwrap()
+            .with_quantity("pressure", quantity(QuantityKind::Pressure), 100_000.0)
+            .unwrap();
+        ClosedGasParcel::new(model, point, 0.001).unwrap()
+    }
+    fn advance(omega: f64, dt: f64, z: [f64; 2], amplitude: f64) -> [f64; 2] {
+        let mut gas = parcel();
+        let volume = gas.volume_m3();
+        let area = 0.01;
+        let medium = gas.state().state();
+        let pressure = medium.pressure;
+        let mass =
+            medium.density * medium.sound_speed.powi(2) * area * area / (volume * omega * omega);
+        if z[0] != 0.0 {
+            gas.set_volume_isentropic(
+                volume + area * amplitude * z[0],
+                GasEntropySolve {
+                    minimum_temperature_k: 200.0,
+                    maximum_temperature_k: 1800.0,
+                    entropy_tolerance_j_kg_k: 1e-11,
+                    maximum_iterations: 128,
+                },
+                || false,
+            )
+            .unwrap();
+        }
+        let mut model = GasPiston::new(gas, mass, area, omega * amplitude * z[1]).unwrap();
+        model
+            .step(
+                PistonInput {
+                    duration_s: dt,
+                    heat_j: 0.0,
+                    exterior_pressure_pa: pressure,
+                    external_force_n: 0.0,
+                },
+                PistonSolve {
+                    volume_bracket_m3: [0.0007, 0.0015],
+                    gas: GasEnergySolve {
+                        minimum_temperature_k: 200.0,
+                        maximum_temperature_k: 1800.0,
+                        energy_tolerance_j_kg: 1e-10,
+                        maximum_iterations: 128,
+                    },
+                    momentum_tolerance_n_s: 1e-14,
+                    energy_tolerance_j: 1e-10,
+                    maximum_iterations: 128,
+                },
+                || false,
+            )
+            .unwrap();
+        [
+            (model.gas().volume_m3() - volume) / area,
+            model.velocity_m_s() / omega,
+        ]
+    }
+    pub(super) fn column(omega: f64, dt: f64, z: [f64; 2]) -> [f64; 2] {
+        // Symmetric perturbations plus Richardson remove the leading A²
+        // source nonlinearity; the production gas/momentum owner still solves
+        // every trajectory. No scalar midpoint surrogate replaces the piston.
+        let maps: Vec<_> = [1e-4, 5e-5, 2.5e-5]
+            .into_iter()
+            .map(|a| {
+                let plus = advance(omega, dt, z, a);
+                let minus = advance(omega, dt, z, -a);
+                [
+                    (plus[0] - minus[0]) / (2.0 * a),
+                    (plus[1] - minus[1]) / (2.0 * a),
+                ]
+            })
+            .collect();
+        let coarse = [
+            (4.0 * maps[1][0] - maps[0][0]) / 3.0,
+            (4.0 * maps[1][1] - maps[0][1]) / 3.0,
+        ];
+        let fine = [
+            (4.0 * maps[2][0] - maps[1][0]) / 3.0,
+            (4.0 * maps[2][1] - maps[1][1]) / 3.0,
+        ];
+        for (a, b) in coarse.iter().zip(fine) {
+            assert!(
+                (a - b).abs() < 1e-8,
+                "piston linearization unresolved: {a} {b}"
+            );
+        }
+        fine
+    }
 }
