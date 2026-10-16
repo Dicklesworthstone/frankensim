@@ -340,6 +340,12 @@ homogenization, the P2 milestone.
   Moduli require Pa, exponents/directions/counts/selectors are dimensionless;
   missing/extra parameters, fractional counts, versions and undeclared
   invariant selectors refuse. FSMODPK v1 remains unchanged.
+  The offline `xtask matdb-pack` `constitutive-v1` profile accepts explicit
+  model/law/state/initialization/validity declarations and dimensioned
+  parameter/validity rows, normalizes through fs-qty, retains each transform
+  receipt, and self-decodes the existing runtime model pack. Its compiler
+  tests transport both laws into the real registry. A generic profile does
+  not certify any law's physical parameters or infer a tissue identity.
   Polyconvexity is parameter-derived: Ogden sufficient exponents are
   alpha>=3/2 (F power perspective) or alpha<=-3 (cof F perspective), with
   positive coefficients and convex bulk. Full-invariant HGO has convex

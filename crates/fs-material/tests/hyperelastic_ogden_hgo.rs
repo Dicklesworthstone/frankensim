@@ -121,9 +121,10 @@ fn equal_laws(a: &Hyperelastic, b: &Hyperelastic, f: &[f64; 9], scale: f64, tol:
     }
 }
 
-fn fd_tangent(law: &Hyperelastic, f: [f64; 9]) {
+fn fd_tangent(law: &Hyperelastic, f: [f64; 9]) -> f64 {
     let a = law.tangent(&f).unwrap();
     let scale = a.iter().flatten().map(|x| x.abs()).fold(0.0, f64::max);
+    let mut worst = 0.0f64;
     for j in 0..9 {
         let (mut up, mut dn) = (f, f);
         up[j] += 1e-6;
@@ -131,9 +132,11 @@ fn fd_tangent(law: &Hyperelastic, f: [f64; 9]) {
         let (p, m) = (law.piola(&up).unwrap(), law.piola(&dn).unwrap());
         for i in 0..9 {
             close(a[i][j], (p[i] - m[i]) / 2e-6, scale, 1e-6);
+            worst = worst.max((a[i][j] - (p[i] - m[i]) / 2e-6).abs() / scale);
             close(a[i][j], a[j][i], scale, 1e-12);
         }
     }
+    worst
 }
 
 #[test]
@@ -212,6 +215,7 @@ fn g0_reference_state_and_coalescent_stretches() {
         .unwrap()
         .stiffness();
     let a = law.tangent(&I).unwrap();
+    let mut max_reference_error = 0.0f64;
     for p in law.piola(&I).unwrap() {
         close(p, 0., MU, 1e-14);
     }
@@ -222,6 +226,7 @@ fn g0_reference_state_and_coalescent_stretches() {
             let expected = lambda * delta(r, s) * delta(u, v)
                 + MU * (delta(r, u) * delta(s, v) + delta(r, v) * delta(s, u));
             close(a[i][j], expected, kappa, 1e-10);
+            max_reference_error = max_reference_error.max((a[i][j] - expected).abs() / kappa);
         }
     }
     let basis = mandel_basis();
@@ -245,13 +250,14 @@ fn g0_reference_state_and_coalescent_stretches() {
             close(rotated[i][j], mandel[i][j], kappa, 1e-10);
         }
     }
+    let mut max_fd_error = 0.0f64;
     for f in [
         I,
         diag([1.4, power(1.4, -0.5), power(1.4, -0.5)]),
         diag([1.4, 1.4, power(1.4, -2.)]),
         diag([1.1; 3]),
     ] {
-        fd_tangent(&law, f);
+        max_fd_error = max_fd_error.max(fd_tangent(&law, f));
     }
     // The HGO energy is C1 at E=0; the declared inactive-side Hessian
     // there is the matrix tangent. FD checks use E strictly away from zero.
@@ -270,7 +276,7 @@ fn g0_reference_state_and_coalescent_stretches() {
     fd_tangent(&fibre, diag([1.2, 1.1, 1.1]));
     fd_tangent(&fibre, diag([0.8, 1.1, 1.1]));
     println!(
-        "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"g0_reference_state_and_coalescent_stretches\",\"tier\":\"G0\",\"inputs\":{{\"parameter_set\":\"ogden1972-treloar\",\"citation\":\"10.1098/rspa.1972.0026\",\"kappa_over_mu\":20}},\"provenance\":{{\"source_ids\":[\"ogden1972\"],\"M8_W1_ledger_row\":null}},\"rungs\":{{\"states\":4}},\"observed\":{{\"finite\":true}},\"tolerance\":{{\"reference\":1e-10,\"fd\":1e-6}},\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+        "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"g0_reference_state_and_coalescent_stretches\",\"tier\":\"G0\",\"inputs\":{{\"parameter_set\":\"ogden1972-treloar\",\"citation\":\"10.1098/rspa.1972.0026\",\"kappa_over_mu\":20}},\"provenance\":{{\"source_ids\":[\"ogden1972\"],\"M8_W1_ledger_row\":null}},\"rungs\":{{\"states\":4}},\"observed\":{{\"max_reference_tangent_relative_error\":{max_reference_error},\"max_fd_relative_error\":{max_fd_error}}},\"tolerance\":{{\"reference\":1e-10,\"fd\":1e-6}},\"verdict\":\"pass\",\"elapsed_s\":{}}}",
         started.elapsed().as_secs_f64()
     );
 }
@@ -584,6 +590,7 @@ fn g1_hgo_two_symmetric_families_match_independent_lateral_root() {
 }
 
 fn log_treloar_points(law: &Hyperelastic) {
+    let started = Instant::now();
     // Bucchi & Hearn (2013), Predictions of aneurysm formation in
     // distensible tubes, Part A, Appendix A, Table A1 (author manuscript):
     // https://researchportal.port.ac.uk/files/202484/Predictions_of_Aneurysm_Formation_in_Distensible_Tubes_PART_A%5B2%5D.pdf
@@ -660,8 +667,9 @@ fn log_treloar_points(law: &Hyperelastic) {
             let p = law.piola(&diag(s)).unwrap();
             let nominal = p[0] - p[4 * k] * s[k] / s[0];
             println!(
-                "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"g2_treloar_ogden1972_reference_curves\",\"tier\":\"G2\",\"mode\":\"{mode:?}\",\"source\":\"Bucchi-Hearn-2013-Appendix-A-Treloar-1944\",\"stretch\":{l},\"observed_nominal_pa\":{observed},\"computed_nominal_pa\":{nominal},\"relative_deviation\":{},\"tolerance\":null,\"verdict\":\"diagnostic-only-unpinned-source-band\"}}",
-                (nominal - observed) / observed
+                "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"g2_treloar_ogden1972_reference_curves\",\"tier\":\"G2\",\"mode\":\"{mode:?}\",\"inputs\":{{\"parameter_set\":\"ogden1972-treloar\",\"citation\":\"10.1098/rspa.1972.0026\",\"kappa_over_mu\":1e4}},\"provenance\":{{\"source_ids\":[\"Bucchi-Hearn-2013-Appendix-A-Treloar-1944\"],\"M8_W1_ledger_row\":null,\"uncertainty\":\"unstated\",\"redistribution_license\":\"unstated\"}},\"rungs\":{{\"stretch\":{l}}},\"observed\":{{\"nominal_pa\":{observed},\"computed_nominal_pa\":{nominal},\"relative_deviation\":{}}},\"tolerance\":null,\"verdict\":\"diagnostic-only-unpinned-source-band\",\"elapsed_s\":{}}}",
+                (nominal - observed) / observed,
+                started.elapsed().as_secs_f64()
             );
         }
     }
@@ -714,6 +722,8 @@ fn ogden_refuses_nonpositive_mu_alpha_product() {
         (1., -2.),
         (f64::INFINITY, 2.),
         (1., f64::NAN),
+        (1e308, 2.),
+        (1e308, 1e-308),
     ] {
         assert!(matches!(
             Hyperelastic::new(
@@ -801,6 +811,47 @@ fn det_f_nonpositive_refused() {
             assert!(matches!(law.tangent(&f), Err(MaterialError::State { .. })));
         }
     }
+}
+
+#[test]
+fn g0_bulk_and_stretch_parameter_domains_refuse() {
+    for law in [ogden(10.), hgo(vec![], 0., FibreInvariants::Full, 10.)] {
+        for limit in [0.0, 0.99, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                Hyperelastic::new(law.model.clone(), limit),
+                Err(MaterialError::Parameters { .. })
+            ));
+        }
+        for kappa in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            for bulk in [
+                Volumetric::Quadratic { kappa },
+                Volumetric::LogSquared { kappa },
+            ] {
+                let mut model = law.model.clone();
+                match &mut model {
+                    HyperelasticModel::Ogden { volumetric, .. }
+                    | HyperelasticModel::HolzapfelGasserOgden { volumetric, .. } => {
+                        *volumetric = bulk
+                    }
+                    _ => unreachable!("new-law fixtures"),
+                }
+                assert!(matches!(
+                    Hyperelastic::new(model, 3.),
+                    Err(MaterialError::Parameters { .. })
+                ));
+            }
+        }
+    }
+    assert!(matches!(
+        Hyperelastic::new(
+            HyperelasticModel::Ogden {
+                terms: vec![],
+                volumetric: Volumetric::Quadratic { kappa: 10. },
+            },
+            3.
+        ),
+        Err(MaterialError::Parameters { .. })
+    ));
 }
 
 #[test]

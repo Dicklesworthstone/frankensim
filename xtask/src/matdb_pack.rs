@@ -9,6 +9,10 @@
 //! with the explicit source-declared thermochemical association that generic
 //! model cards cannot carry. None of these artifacts authenticates chemistry,
 //! supplies an evaluator, or proves a reaction mechanism or conservation law.
+//! `constitutive-v1` transports explicitly identified arbitrary constitutive
+//! laws and dimensioned coefficients into the same FSMODPK v1 artifact; the
+//! runtime law registry owns admissibility and execution. Its bounded row
+//! grammar is documented in `constitutive`.
 //!
 //! The bounded manifest is tab-separated: one pack_id, redistribution,
 //! citation, and license record, followed by source records containing logical
@@ -62,6 +66,8 @@ use fs_qty::parse::{ParseBudget, parse_qty_with_budget};
 use fs_qty::semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec};
 
+mod constitutive;
+
 const COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v1";
 const INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v1";
 const MAPPED_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v2";
@@ -87,7 +93,7 @@ const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 /// Bump this whenever parsing, admission, normalization, or provenance
 /// semantics can change the canonical compiler fixture.
 #[allow(dead_code)] // consumed textually by `xtask check-goldens`
-pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 11;
+pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 12;
 const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
 const MAPPED_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v2";
 const TYPED_AXIS_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v3";
@@ -376,6 +382,7 @@ enum SourceProfile {
     Nasa9,
     Kinetics,
     Species,
+    Constitutive,
 }
 
 impl SourceProfile {
@@ -386,6 +393,7 @@ impl SourceProfile {
             Self::Nasa9 => NASA9_COMPILER_ID,
             Self::Kinetics => KINETICS_COMPILER_ID,
             Self::Species => SPECIES_COMPILER_ID,
+            Self::Constitutive => constitutive::COMPILER_ID,
         }
     }
 }
@@ -1305,11 +1313,12 @@ fn source_profile(manifest: &Manifest) -> Result<SourceProfile, CompileError> {
         NASA9_PROFILE => Ok(SourceProfile::Nasa9),
         KINETICS_PROFILE => Ok(SourceProfile::Kinetics),
         SPECIES_PROFILE => Ok(SourceProfile::Species),
+        constitutive::PROFILE => Ok(SourceProfile::Constitutive),
         _ => Err(CompileError::new(
             "unsupported_source_profile",
             format!("source:{}", first.id),
             format!(
-                "profile {:?} has no runtime-loadable compiler path; supported profiles are {MATERIAL_PROFILE:?}, {INTERFACE_PROFILE:?}, {NASA9_PROFILE:?}, {KINETICS_PROFILE:?}, and {SPECIES_PROFILE:?}",
+                "profile {:?} has no runtime-loadable compiler path; supported profiles are {MATERIAL_PROFILE:?}, {INTERFACE_PROFILE:?}, {NASA9_PROFILE:?}, {KINETICS_PROFILE:?}, {SPECIES_PROFILE:?}, and constitutive-v1",
                 first.profile
             ),
         )),
@@ -2070,7 +2079,10 @@ fn parse_source(
             SourceProfile::Interface => {
                 "bounded interface-tsv-v1 source parsed without inferred system identity"
             }
-            SourceProfile::Nasa9 | SourceProfile::Kinetics | SourceProfile::Species => {
+            SourceProfile::Nasa9
+            | SourceProfile::Kinetics
+            | SourceProfile::Species
+            | SourceProfile::Constitutive => {
                 unreachable!("specialized profiles use dedicated parsers")
             }
         },
@@ -4036,6 +4048,11 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
             return compile_species_manifest(manifest, &sources, source_artifact)
                 .map_err(|error| error.with_compiler_id(compiler_id));
         }
+        SourceProfile::Constitutive => {
+            return constitutive::compile(manifest, &sources, source_artifact).map_err(|error| {
+                error.with_compiler_id(compiler_id).with_input_hash(source_artifact)
+            });
+        }
         SourceProfile::Material | SourceProfile::Interface => {}
     }
     let mut raw = RawDatabase::default();
@@ -4464,7 +4481,10 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
                 })?;
                 CompiledPack::Interface(interface_pack)
             }
-            SourceProfile::Nasa9 | SourceProfile::Kinetics | SourceProfile::Species => {
+            SourceProfile::Nasa9
+            | SourceProfile::Kinetics
+            | SourceProfile::Species
+            | SourceProfile::Constitutive => {
                 unreachable!("specialized profiles return before material claim compilation")
             }
         };
@@ -4489,7 +4509,10 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
             match profile {
                 SourceProfile::Material => "runtime_pack_self_verified",
                 SourceProfile::Interface => "runtime_interface_pack_self_verified",
-                SourceProfile::Nasa9 | SourceProfile::Kinetics | SourceProfile::Species => {
+                SourceProfile::Nasa9
+                | SourceProfile::Kinetics
+                | SourceProfile::Species
+                | SourceProfile::Constitutive => {
                     unreachable!("specialized profiles return before material claim compilation")
                 }
             },
@@ -4500,7 +4523,10 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
                 SourceProfile::Interface => {
                     "canonical FSINTPK bytes decoded under their externally pinned content hash"
                 }
-                SourceProfile::Nasa9 | SourceProfile::Kinetics | SourceProfile::Species => {
+                SourceProfile::Nasa9
+                | SourceProfile::Kinetics
+                | SourceProfile::Species
+                | SourceProfile::Constitutive => {
                     unreachable!("specialized profiles return before material claim compilation")
                 }
             },
@@ -5763,7 +5789,7 @@ mod tests {
         }
     }
 
-    fn manifest(profile: &str, redistribution: bool) -> String {
+    pub(super) fn manifest(profile: &str, redistribution: bool) -> String {
         let redistribution = if redistribution {
             "redistribution\tpermitted\tCC-BY-4.0 redistribution with attribution\n"
         } else {
@@ -5812,7 +5838,7 @@ mod tests {
         )
     }
 
-    fn write_fixture(manifest_text: &str, source_text: &str) -> (PathBuf, PathBuf) {
+    pub(super) fn write_fixture(manifest_text: &str, source_text: &str) -> (PathBuf, PathBuf) {
         let directory = fixture_dir();
         let manifest_path = directory.join("manifest.tsv");
         let source_path = directory.join("source.tsv");
@@ -8576,6 +8602,7 @@ mod tests {
             (SourceProfile::Nasa9, NASA9_COMPILER_ID),
             (SourceProfile::Kinetics, KINETICS_COMPILER_ID),
             (SourceProfile::Species, SPECIES_COMPILER_ID),
+            (SourceProfile::Constitutive, constitutive::COMPILER_ID),
         ] {
             assert_eq!(profile.compiler_id(), expected);
         }
